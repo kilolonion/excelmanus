@@ -14,6 +14,7 @@ import {
   Maximize2,
   Image as ImageIcon,
   Layers,
+  Zap,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useChatStore, type VlmPhaseEntry, type BatchProgress } from "@/stores/chat-store";
@@ -29,13 +30,20 @@ const STAGE_META: Record<string, { label: string; icon: React.ElementType }> = {
   vlm_extract_data: { label: "数据填充", icon: Database },
   vlm_extract_style: { label: "样式提取", icon: Palette },
   vlm_extract_verification: { label: "自校验", icon: ShieldCheck },
+  single_pass: { label: "单轮提取", icon: Zap },
+  single_pass_done: { label: "提取完成", icon: Check },
 };
 
-const ALL_STAGES = [
+const PIPELINE_STAGES = [
   "vlm_extract_structure",
   "vlm_extract_data",
   "vlm_extract_style",
   "vlm_extract_verification",
+];
+
+const SINGLE_PASS_STAGES = [
+  "single_pass",
+  "single_pass_done",
 ];
 
 interface VlmPipelineCardProps {
@@ -72,6 +80,11 @@ export const VlmPipelineCard = React.memo(function VlmPipelineCard({
   const completedStages = new Set(vlmPhases.map((p) => p.stage));
   const currentPipelineStatus = useChatStore((s) => s.pipelineStatus);
   const activeStage = isStreaming ? currentPipelineStatus?.stage : undefined;
+
+  // 动态选择 stage 列表：单轮提取 vs 4 阶段 Pipeline
+  const isSinglePass = vlmPhases.some((p) => p.stage.startsWith("single_pass"));
+  const stageList = isSinglePass ? SINGLE_PASS_STAGES : PIPELINE_STAGES;
+  const displayPhases = isSinglePass ? stageList.length : totalPhases;
 
   return (
     <div className="my-3 rounded-xl border border-border/60 bg-card overflow-hidden">
@@ -121,7 +134,7 @@ export const VlmPipelineCard = React.memo(function VlmPipelineCard({
 
       {/* Timeline */}
       <div className="px-3 py-2.5">
-        {ALL_STAGES.slice(0, totalPhases).map((stageKey, idx) => {
+        {stageList.slice(0, displayPhases).map((stageKey, idx) => {
           const phase = vlmPhases.find((p) => p.stage === stageKey);
           const isDone = completedStages.has(stageKey);
           const isActive = activeStage === stageKey;

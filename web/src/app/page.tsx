@@ -40,6 +40,10 @@ export default function Home() {
     sendMessage(text, files);
   };
 
+  const handleStop = () => {
+    stopGeneration();
+  };
+
   const hasMessages = messages.length > 0;
   // 会话恢复中：activeSessionId 已从 localStorage 恢复但消息尚未加载
   // 不展示 WelcomePage，避免闪烁
@@ -54,7 +58,7 @@ export default function Home() {
             <ExcelFullView />
           </motion.div>
         ) : hasMessages ? (
-          <motion.div key="chat" className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+          <motion.div key="chat" className="relative flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <MessageStream
               messages={messages}
               isStreaming={isStreaming}
@@ -85,7 +89,7 @@ export default function Home() {
             onCommandResult={cmdResult.show}
             disabled={false}
             isStreaming={isStreaming}
-            onStop={stopGeneration}
+            onStop={handleStop}
           />
         </div>
       </div>

@@ -14,6 +14,11 @@ import {
   MessageSquarePlus,
   Pencil,
   Check,
+  Download,
+  Import,
+  FileText,
+  FileCode,
+  FileJson,
   type LucideIcon,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -22,15 +27,19 @@ import {
   DropdownMenuContent,
   DropdownMenuItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubTrigger,
+  DropdownMenuSubContent,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { archiveSession, deleteSession, abortChat, updateSessionTitle } from "@/lib/api";
+import { archiveSession, deleteSession, abortChat, updateSessionTitle, exportSession, importSession, type ExportFormat } from "@/lib/api";
 import { stopGeneration } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
 import { listItemVariants } from "@/lib/sidebar-motion";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 function relativeTime(iso: string | undefined): string {
   if (!iso) return "";
@@ -64,6 +73,7 @@ const filterViews: { key: SessionView; label: string; icon: LucideIcon }[] = [
 ];
 
 export function SessionList() {
+  const isMobile = useIsMobile();
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const addSession = useSessionStore((s) => s.addSession);
@@ -114,6 +124,45 @@ export function SessionList() {
   const handleCancelEdit = useCallback(() => {
     setEditingSessionId(null);
   }, []);
+
+  const handleExport = useCallback(async (sessionId: string, format: ExportFormat) => {
+    try {
+      await exportSession(sessionId, format);
+    } catch (err) {
+      console.error("导出失败:", err);
+    }
+  }, []);
+
+  const importInputRef = useRef<HTMLInputElement>(null);
+
+  const handleImportClick = useCallback(() => {
+    importInputRef.current?.click();
+  }, []);
+
+  const handleImportFile = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      const data = JSON.parse(text);
+      const result = await importSession(data);
+      // 添加导入的会话到列表并切换
+      addSession({
+        id: result.session_id,
+        title: result.title,
+        messageCount: result.message_count,
+        inFlight: false,
+      });
+      setActiveSession(result.session_id);
+      switchSession(result.session_id);
+    } catch (err) {
+      console.error("导入失败:", err);
+      alert(err instanceof Error ? err.message : "导入失败");
+    } finally {
+      // 重置 input 以允许重复导入同一文件
+      if (importInputRef.current) importInputRef.current.value = "";
+    }
+  }, [addSession, setActiveSession, switchSession]);
 
   const activeCount = useMemo(
     () =>
@@ -225,10 +274,10 @@ export function SessionList() {
 
   return (
     <div className="space-y-1.5 py-1">
-      {/* New Chat Button */}
+      {/* New Chat */}
       <div className="px-1">
         <Button
-          className="w-full justify-start gap-2 text-white hover:scale-[1.02] transition-transform duration-150 ease-out"
+          className="w-full justify-center gap-2 text-white hover:scale-[1.01] transition-transform duration-150 ease-out"
           size="sm"
           style={{ backgroundColor: "var(--em-primary)" }}
           onMouseEnter={(e) => (e.currentTarget.style.backgroundColor = "var(--em-primary-light)")}
@@ -240,7 +289,7 @@ export function SessionList() {
         </Button>
       </div>
 
-      {/* Search input */}
+      {/* Search input + import icon */}
       <div className="px-1 relative">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
         <input
@@ -250,12 +299,20 @@ export function SessionList() {
           onChange={(e) => setSearchQuery(e.target.value)}
           className="w-full h-8 pl-8 pr-8 text-[13px] rounded-lg border border-border/60 bg-background/80 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200"
         />
-        {searchQuery && (
+        {searchQuery ? (
           <button
             onClick={() => setSearchQuery("")}
             className="absolute right-2.5 top-1/2 -translate-y-1/2 h-4 w-4 flex items-center justify-center rounded-full bg-muted text-muted-foreground hover:bg-muted-foreground/20 hover:text-foreground transition-colors touch-compact"
           >
             <X className="h-3 w-3" />
+          </button>
+        ) : (
+          <button
+            onClick={handleImportClick}
+            title="导入会话 (.emx)"
+            className="absolute right-2 top-1/2 -translate-y-1/2 h-5 w-5 flex items-center justify-center rounded text-muted-foreground/50 hover:text-foreground transition-colors"
+          >
+            <Import className="h-3.5 w-3.5" />
           </button>
         )}
       </div>
@@ -409,7 +466,7 @@ export function SessionList() {
                               e.stopPropagation();
                               void handleFinishEdit(session.id);
                             }}
-                            className="flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-white transition-colors duration-150 hover:opacity-90"
+                            className="flex-shrink-0 h-7 w-7 flex items-center justify-center rounded-md text-white transition-colors duration-150 hover:opacity-90"
                             style={{ backgroundColor: "var(--em-primary)" }}
                             title="确认"
                           >
@@ -420,7 +477,7 @@ export function SessionList() {
                               e.stopPropagation();
                               handleCancelEdit();
                             }}
-                            className="flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground bg-muted hover:bg-muted-foreground/20 hover:text-foreground transition-colors duration-150"
+                            className="flex-shrink-0 h-7 w-7 flex items-center justify-center rounded-md text-muted-foreground bg-muted hover:bg-muted-foreground/20 hover:text-foreground transition-colors duration-150"
                             title="取消"
                           >
                             <X className="h-3 w-3" />
@@ -484,8 +541,9 @@ export function SessionList() {
                         </button>
                       </DropdownMenuTrigger>
                       <DropdownMenuContent
-                        side="right"
-                        align="start"
+                        side={isMobile ? "bottom" : "right"}
+                        align={isMobile ? "end" : "start"}
+                        collisionPadding={8}
                         className="w-40"
                       >
                         <DropdownMenuItem
@@ -518,6 +576,41 @@ export function SessionList() {
                             </>
                           )}
                         </DropdownMenuItem>
+                        <DropdownMenuSub>
+                          <DropdownMenuSubTrigger>
+                            <Download className="h-4 w-4" />
+                            导出
+                          </DropdownMenuSubTrigger>
+                          <DropdownMenuSubContent>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleExport(session.id, "md");
+                              }}
+                            >
+                              <FileText className="h-4 w-4" />
+                              Markdown (.md)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleExport(session.id, "txt");
+                              }}
+                            >
+                              <FileCode className="h-4 w-4" />
+                              纯文本 (.txt)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleExport(session.id, "emx");
+                              }}
+                            >
+                              <FileJson className="h-4 w-4" />
+                              EMX 归档 (.emx)
+                            </DropdownMenuItem>
+                          </DropdownMenuSubContent>
+                        </DropdownMenuSub>
                         <DropdownMenuSeparator />
                         <DropdownMenuItem
                           variant="destructive"
@@ -538,6 +631,14 @@ export function SessionList() {
           </div>
         </AnimatePresence>
       )}
+      {/* Hidden file input for EMX import */}
+      <input
+        ref={importInputRef}
+        type="file"
+        accept=".emx,.json"
+        className="hidden"
+        onChange={handleImportFile}
+      />
     </div>
   );
 }

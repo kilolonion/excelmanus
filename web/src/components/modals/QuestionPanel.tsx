@@ -1,9 +1,9 @@
 "use client";
 
-import { MessageCircleQuestion, X, Check } from "lucide-react";
+import { MessageCircleQuestion, X, Check, SkipForward } from "lucide-react";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
-import { abortChat } from "@/lib/api";
+import { abortChat, answerQuestion } from "@/lib/api";
 import { motion } from "framer-motion";
 import type { Question } from "@/lib/types";
 
@@ -52,17 +52,33 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
               </p>
             )}
           </div>
-          <button
-            onClick={() => {
-              const sid = useSessionStore.getState().activeSessionId;
-              setPendingQuestion(null);
-              if (sid) abortChat(sid).catch(() => {});
-            }}
-            className="shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors p-1 rounded-lg hover:bg-muted/60"
-            title="取消并终止任务"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
+          <div className="flex items-center gap-0.5 shrink-0">
+            <button
+              onClick={() => {
+                const sid = useSessionStore.getState().activeSessionId;
+                const qid = question.id;
+                setPendingQuestion(null);
+                if (sid && qid) {
+                  answerQuestion(sid, qid, "[用户选择跳过此问题，请自行判断并继续执行]").catch(() => {});
+                }
+              }}
+              className="text-muted-foreground/50 hover:text-foreground transition-colors px-1.5 py-1 rounded-lg hover:bg-muted/60 text-[11px] font-medium"
+              title="跳过此问题"
+            >
+              <SkipForward className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => {
+                const sid = useSessionStore.getState().activeSessionId;
+                setPendingQuestion(null);
+                if (sid) abortChat(sid).catch(() => {});
+              }}
+              className="text-muted-foreground/50 hover:text-foreground transition-colors p-1 rounded-lg hover:bg-muted/60"
+              title="取消并终止任务"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
         </div>
 
         {/* Option chips */}

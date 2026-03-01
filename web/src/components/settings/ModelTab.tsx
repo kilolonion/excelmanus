@@ -22,6 +22,7 @@ import {
   AlertTriangle,
   Download,
   Upload,
+  Import,
   Copy,
   Lock,
   Unlock,
@@ -31,18 +32,23 @@ import {
   XCircle,
   ChevronDown,
   ChevronRight,
+  ArrowRightLeft,
+  ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import { apiGet, apiPut, apiPost, apiDelete, testModelConnection } from "@/lib/api";
+import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels } from "@/lib/api";
+import type { RemoteModelItem } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
+import { Search } from "lucide-react";
 import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { useUIStore } from "@/stores/ui-store";
 
 interface ModelSection {
   api_key?: string;
@@ -59,6 +65,10 @@ interface ProfileEntry {
   base_url: string;
   description: string;
   protocol: string;
+  thinking_mode: string;
+  model_family: string;
+  custom_extra_body: string;
+  custom_extra_headers: string;
 }
 
 interface ModelCapabilities {
@@ -90,13 +100,6 @@ const SECTION_META: {
   desc: string;
 }[] = [
   {
-    key: "main",
-    label: "主模型",
-    icon: <Server className="h-4 w-4" />,
-    fields: ["model", "base_url", "api_key"],
-    desc: "核心对话模型",
-  },
-  {
     key: "aux",
     label: "辅助模型 (Aux)",
     icon: <Bot className="h-4 w-4" />,
@@ -117,6 +120,178 @@ const FIELD_LABELS: Record<string, string> = {
   base_url: "Base URL",
   model: "Model ID",
 };
+
+const PROVIDER_LOGO_SLUG: Record<string, string> = {
+  openai: "openai",
+  anthropic: "anthropic",
+  gemini: "gemini",
+  deepseek: "deepseek",
+  qwen: "qwen",
+  zhipu: "zhipu",
+  siliconflow: "siliconcloud",
+  openrouter: "openrouter",
+  kimi: "moonshot",
+  minimax: "minimax",
+};
+
+function ProviderLogo({ id }: { id: string }) {
+  const slug = PROVIDER_LOGO_SLUG[id];
+  if (!slug) return null;
+  return (
+    <span
+      className="inline-block h-4 w-4 shrink-0"
+      role="img"
+      aria-label={id}
+      style={{
+        backgroundColor: "currentColor",
+        maskImage: `url(/providers/${slug}.svg)`,
+        WebkitMaskImage: `url(/providers/${slug}.svg)`,
+        maskSize: "contain",
+        WebkitMaskSize: "contain",
+        maskRepeat: "no-repeat",
+        WebkitMaskRepeat: "no-repeat",
+        maskPosition: "center",
+        WebkitMaskPosition: "center",
+      }}
+    />
+  );
+}
+
+interface ProviderPreset {
+  id: string;
+  label: string;
+  icon: string;
+  model: string;
+  base_url: string;
+  protocol: string;
+  thinking_mode: string;
+  model_family: string;
+  description: string;
+  purchaseUrl: string;
+}
+
+const PROVIDER_PRESETS: ProviderPreset[] = [
+  {
+    id: "openai",
+    label: "OpenAI",
+    icon: "🟢",
+    model: "gpt-4o",
+    base_url: "https://api.openai.com/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "gpt",
+    description: "GPT-4o 多模态旗舰",
+    purchaseUrl: "https://platform.openai.com/api-keys",
+  },
+  {
+    id: "anthropic",
+    label: "Anthropic",
+    icon: "🟤",
+    model: "claude-sonnet-4-20250514",
+    base_url: "https://api.anthropic.com",
+    protocol: "anthropic",
+    thinking_mode: "claude",
+    model_family: "claude",
+    description: "Claude Sonnet 4",
+    purchaseUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    id: "gemini",
+    label: "Google Gemini",
+    icon: "🔵",
+    model: "gemini-2.5-flash",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "gemini",
+    description: "Gemini 2.5 Flash",
+    purchaseUrl: "https://aistudio.google.com/apikey",
+  },
+  {
+    id: "deepseek",
+    label: "DeepSeek",
+    icon: "🐋",
+    model: "deepseek-chat",
+    base_url: "https://api.deepseek.com/v1",
+    protocol: "openai",
+    thinking_mode: "deepseek",
+    model_family: "deepseek",
+    description: "DeepSeek-V3",
+    purchaseUrl: "https://platform.deepseek.com/api_keys",
+  },
+  {
+    id: "qwen",
+    label: "阿里云百炼",
+    icon: "☁️",
+    model: "qwen-plus",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    protocol: "openai",
+    thinking_mode: "enable_thinking",
+    model_family: "qwen",
+    description: "通义千问 Qwen",
+    purchaseUrl: "https://dashscope.console.aliyun.com/apiKey",
+  },
+  {
+    id: "zhipu",
+    label: "智谱 AI",
+    icon: "🧠",
+    model: "glm-4-plus",
+    base_url: "https://open.bigmodel.cn/api/paas/v4",
+    protocol: "openai",
+    thinking_mode: "glm_thinking",
+    model_family: "glm",
+    description: "GLM-4 Plus",
+    purchaseUrl: "https://open.bigmodel.cn/usercenter/apikeys",
+  },
+  {
+    id: "siliconflow",
+    label: "硅基流动",
+    icon: "⚡",
+    model: "deepseek-ai/DeepSeek-V3",
+    base_url: "https://api.siliconflow.cn/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "",
+    description: "多模型聚合平台",
+    purchaseUrl: "https://cloud.siliconflow.cn/account/ak",
+  },
+  {
+    id: "openrouter",
+    label: "OpenRouter",
+    icon: "🔀",
+    model: "anthropic/claude-sonnet-4",
+    base_url: "https://openrouter.ai/api/v1",
+    protocol: "openai",
+    thinking_mode: "openrouter",
+    model_family: "",
+    description: "全球模型聚合路由",
+    purchaseUrl: "https://openrouter.ai/keys",
+  },
+  {
+    id: "kimi",
+    label: "Kimi (月之暗面)",
+    icon: "🌙",
+    model: "moonshot-v1-128k",
+    base_url: "https://api.moonshot.cn/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "moonshot",
+    description: "Moonshot 长上下文",
+    purchaseUrl: "https://platform.moonshot.cn/console/api-keys",
+  },
+  {
+    id: "minimax",
+    label: "MiniMax",
+    icon: "M",
+    model: "MiniMax-Text-01",
+    base_url: "https://api.minimax.chat/v1",
+    protocol: "openai",
+    thinking_mode: "auto",
+    model_family: "minimax",
+    description: "MiniMax 海螺",
+    purchaseUrl: "https://platform.minimax.chat/",
+  },
+];
 
 function isMaskedApiKey(value: string): boolean {
   if (!value) return false;
@@ -139,16 +314,38 @@ function getHealthError(caps: ModelCapabilities | null | undefined): string {
 }
 
 function normalizeFetchedCapabilities(caps: ModelCapabilities): ModelCapabilities {
-  // 仅在重新进入页面时清除上次探测的健康失败提示，避免红色告警残留
-  if (caps.healthy !== false && !caps.probe_errors?.health) return caps;
-
+  // 重新进入页面时清除上次探测残留的错误提示，避免红色告警持久存在。
+  // 1) health 错误：始终清除（与之前行为一致）
+  // 2) 能力 probe 错误：当结果已确定（true/false）时清除（badge 已表达结果），
+  //    仅保留 value===null（不确定）时的错误以便诊断。
   const nextProbeErrors = { ...(caps.probe_errors || {}) };
-  delete nextProbeErrors.health;
+  let changed = false;
+
+  // 清理 health
+  if (caps.healthy === false || nextProbeErrors.health) {
+    delete nextProbeErrors.health;
+    changed = true;
+  }
+
+  // 清理已确定结果的能力探测错误
+  const capFields: [string, boolean | null][] = [
+    ["tool_calling", caps.supports_tool_calling],
+    ["vision", caps.supports_vision],
+    ["thinking", caps.supports_thinking],
+  ];
+  for (const [key, value] of capFields) {
+    if (value !== null && nextProbeErrors[key]) {
+      delete nextProbeErrors[key];
+      changed = true;
+    }
+  }
+
+  if (!changed) return caps;
 
   return {
     ...caps,
-    healthy: null,
-    health_error: "",
+    healthy: caps.healthy === false ? null : caps.healthy,
+    health_error: caps.healthy === false ? "" : caps.health_error,
     probe_errors: nextProbeErrors,
   };
 }
@@ -241,6 +438,46 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         <p className="text-xs text-muted-foreground mb-3">
           配置您自己的 API Key 后，对话将使用您的 API 额度。留空则使用系统默认配置。
         </p>
+
+        {/* Provider presets for quick fill */}
+        <div className="mb-3">
+          <p className="text-[11px] text-muted-foreground mb-1.5">常见提供方（点击预填）</p>
+          <div className="flex flex-wrap gap-1.5">
+            {PROVIDER_PRESETS.map((preset) => {
+              const isActive = draft.model === preset.model && draft.base_url === preset.base_url;
+              return (
+                <button
+                  key={preset.id}
+                  type="button"
+                  className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] transition-colors ${
+                    isActive
+                      ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/10 text-foreground"
+                      : "border-border hover:border-[var(--em-primary)]/40 text-muted-foreground hover:text-foreground hover:bg-muted/40"
+                  }`}
+                  onClick={() => setDraft((d) => ({ ...d, model: preset.model, base_url: preset.base_url }))}
+                >
+                  <ProviderLogo id={preset.id} />
+                  <span className="font-medium">{preset.label}</span>
+                </button>
+              );
+            })}
+          </div>
+          {(() => {
+            const match = PROVIDER_PRESETS.find((p) => draft.model === p.model && draft.base_url === p.base_url);
+            if (!match) return null;
+            return (
+              <a
+                href={match.purchaseUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-[11px] mt-1.5 hover:underline"
+                style={{ color: "var(--em-primary)" }}
+              >
+                前往 {match.label} 获取 API Key <ExternalLink className="h-3 w-3" />
+              </a>
+            );
+          })()}
+        </div>
 
         <div className="space-y-2">
           <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
@@ -356,6 +593,15 @@ export function ModelTab() {
   const [enabledDrafts, setEnabledDrafts] = useState<Record<string, boolean>>({});
   const [newProfile, setNewProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
+  const [profileError, setProfileError] = useState<string | null>(null);
+  const [highlightProfile, setHighlightProfile] = useState<string | null>(null);
+  const [addingProfile, setAddingProfile] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [remoteModels, setRemoteModels] = useState<RemoteModelItem[]>([]);
+  const [modelDropdownTarget, setModelDropdownTarget] = useState<string | null>(null);
+  const [remoteModelError, setRemoteModelError] = useState<string | null>(null);
+  const modelDropdownRef = useRef<HTMLDivElement>(null);
+  const profileCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [profileDraft, setProfileDraft] = useState<ProfileEntry>({
     name: "",
     model: "",
@@ -363,11 +609,19 @@ export function ModelTab() {
     base_url: "",
     description: "",
     protocol: "auto",
+    thinking_mode: "auto",
+    model_family: "",
+    custom_extra_body: "",
+    custom_extra_headers: "",
   });
   // 按 "model|base_url" 或 profile 名索引的每模型能力
   const [capsMap, setCapsMap] = useState<Record<string, ModelCapabilities>>({});
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
+  // 快速应用 profile 到角色
+  const [applyingProfile, setApplyingProfile] = useState<string | null>(null);
+  const [applyMenuOpen, setApplyMenuOpen] = useState<string | null>(null);
+  const [applyToast, setApplyToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // 折叠/展开状态
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -415,7 +669,7 @@ export function ModelTab() {
       }
     }
     try {
-      const data = await apiGet<{ effort: string; budget: number; effective_budget: number }>("/thinking");
+      const data = await apiGet<{ effort: string; budget: number; effective_budget: number }>("/thinking", { direct: true });
       settingsCache.set("/thinking", data);
       setThinkingEffort(data.effort);
       setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
@@ -435,7 +689,7 @@ export function ModelTab() {
       } else {
         body.budget = 0;
       }
-      const data = await apiPut<{ effort: string; budget: number; effective_budget: number }>("/thinking", body);
+      const data = await apiPut<{ effort: string; budget: number; effective_budget: number }>("/thinking", body, { direct: true });
       settingsCache.set("/thinking", data);
       setThinkingEffort(data.effort);
       setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
@@ -462,7 +716,7 @@ export function ModelTab() {
       }
     }
     try {
-      const data = await apiGet<{ items: { name: string; model: string; base_url: string; capabilities: ModelCapabilities | null }[] }>("/config/models/capabilities/all");
+      const data = await apiGet<{ items: { name: string; model: string; base_url: string; capabilities: ModelCapabilities | null }[] }>("/config/models/capabilities/all", { direct: true });
       const map: Record<string, ModelCapabilities> = {};
       for (const item of data.items) {
         if (item.capabilities) {
@@ -480,7 +734,7 @@ export function ModelTab() {
     setProbingKey(profileName);
     try {
       const body: Record<string, string> = { name: profileName };
-      const data = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", body);
+      const data = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", body, { direct: true });
       setCapsMap((prev) => {
         const next = { ...prev, [profileName]: data.capabilities };
         settingsCache.set("_capsMap", next);
@@ -496,7 +750,7 @@ export function ModelTab() {
   const handleProbeAll = useCallback(async () => {
     setProbingAll(true);
     try {
-      const data = await apiPost<{ results: { name: string; capabilities?: ModelCapabilities }[] }>("/config/models/capabilities/probe-all", {});
+      const data = await apiPost<{ results: { name: string; capabilities?: ModelCapabilities }[] }>("/config/models/capabilities/probe-all", {}, { direct: true });
       setCapsMap((prev) => {
         const next = { ...prev };
         for (const r of data.results) {
@@ -525,13 +779,51 @@ export function ModelTab() {
     }
   }, []);
 
+  const handleFetchRemoteModels = useCallback(async (target: string, baseUrl?: string, apiKey?: string, protocol?: string) => {
+    setFetchingModels(true);
+    setRemoteModelError(null);
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
+    try {
+      const result = await listRemoteModels({
+        base_url: baseUrl || undefined,
+        api_key: apiKey || undefined,
+        protocol: protocol || undefined,
+      });
+      if (result.error) {
+        setRemoteModelError(result.error);
+      } else if (result.models.length === 0) {
+        setRemoteModelError("未检测到可用模型");
+      } else {
+        setRemoteModels(result.models);
+        setModelDropdownTarget(target);
+      }
+    } catch (e) {
+      setRemoteModelError(e instanceof Error ? e.message : "检测失败");
+    } finally {
+      setFetchingModels(false);
+    }
+  }, []);
+
+  // 点击外部关闭模型下拉
+  useEffect(() => {
+    if (!modelDropdownTarget) return;
+    const handler = (e: MouseEvent) => {
+      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
+        setModelDropdownTarget(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [modelDropdownTarget]);
+
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
     try {
       const data = await apiPut<{ capabilities: ModelCapabilities | null }>("/config/models/capabilities", {
         model,
         base_url,
         overrides: { [field]: value },
-      });
+      }, { direct: true });
       if (data.capabilities) {
         setCapsMap((prev) => {
           const next = { ...prev, [profileName]: data.capabilities! };
@@ -567,9 +859,10 @@ export function ModelTab() {
       const cached = settingsCache.get<ModelConfig>("/config/models");
       if (cached) { applyConfigData(cached); return; }
     }
-    setLoading(true);
+    // 仅首次加载时展示 loading 旋转，force 刷新（如保存后）静默更新避免闪屏
+    if (!force) setLoading(true);
     try {
-      const data = await apiGet<ModelConfig>("/config/models");
+      const data = await apiGet<ModelConfig>("/config/models", { direct: true });
       settingsCache.set("/config/models", data);
       applyConfigData(data);
     } catch {
@@ -588,6 +881,68 @@ export function ModelTab() {
     }
   }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig, isAdmin]);
 
+  // 自动消失 applyToast
+  useEffect(() => {
+    if (!applyToast) return;
+    const t = setTimeout(() => setApplyToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [applyToast]);
+
+  const handleApplyProfileToRole = useCallback(async (profile: ProfileEntry, role: "main" | "aux" | "vlm") => {
+    const roleLabel = role === "main" ? "主模型" : role === "aux" ? "辅助模型" : "视觉模型";
+    setApplyingProfile(profile.name);
+    setApplyMenuOpen(null);
+
+    try {
+      // 视觉模型赋值前检查视觉能力
+      if (role === "vlm") {
+        let caps = capsMap[profile.name];
+        // 尚未探测过则先 probe
+        if (!caps || caps.supports_vision === null) {
+          try {
+            const probeData = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", { name: profile.name }, { direct: true });
+            caps = probeData.capabilities;
+            setCapsMap((prev) => {
+              const next = { ...prev, [profile.name]: caps! };
+              settingsCache.set("_capsMap", next);
+              return next;
+            });
+          } catch {
+            // probe 失败不阻塞，继续应用
+          }
+        }
+        if (caps && caps.supports_vision === false) {
+          const ok = window.confirm(
+            `模型 "${profile.model}" 不支持视觉能力。\n仍然要将其设为视觉模型吗？`
+          );
+          if (!ok) {
+            setApplyingProfile(null);
+            return;
+          }
+        }
+      }
+
+      const body: Record<string, unknown> = {
+        model: profile.model,
+        base_url: profile.base_url || undefined,
+        api_key: profile.api_key || undefined,
+        protocol: profile.protocol || "auto",
+      };
+      // aux/vlm 同时确保 enabled
+      if (role === "aux" || role === "vlm") {
+        body.enabled = true;
+      }
+      await apiPut(`/config/models/${role}`, body, { direct: true });
+      setApplyToast({ msg: `已将 "${profile.name}" 应用为${roleLabel}`, type: "success" });
+      fetchConfig(true);
+      fetchAllCapabilities(true);
+    } catch (e) {
+      setApplyToast({ msg: e instanceof Error ? e.message : `应用为${roleLabel}失败`, type: "error" });
+    } finally {
+      setApplyingProfile(null);
+    }
+  }, [capsMap, fetchConfig, fetchAllCapabilities]);
+
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);
     try {
@@ -601,7 +956,7 @@ export function ModelTab() {
       if ((sectionKey === "aux" || sectionKey === "vlm") && enabledDrafts[sectionKey] !== undefined) {
         body.enabled = enabledDrafts[sectionKey];
       }
-      await apiPut(`/config/models/${sectionKey}`, body);
+      await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
       setSaved(sectionKey);
       setTimeout(() => setSaved(null), 2000);
       fetchConfig(true);
@@ -616,7 +971,7 @@ export function ModelTab() {
     setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: checked }));
     // 立即保存开关状态
     try {
-      await apiPut(`/config/models/${sectionKey}`, { enabled: checked });
+      await apiPut(`/config/models/${sectionKey}`, { enabled: checked }, { direct: true });
       fetchConfig(true);
     } catch {
       // 回滚
@@ -625,33 +980,66 @@ export function ModelTab() {
   };
 
   const handleAddProfile = async () => {
+    setProfileError(null);
+    setAddingProfile(true);
+    const newName = profileDraft.name;
     try {
-      await apiPost("/config/models/profiles", profileDraft);
+      await apiPost("/config/models/profiles", profileDraft, { direct: true });
       setNewProfile(false);
-      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto" });
-      fetchConfig(true);
-    } catch {
-      // 忽略
+      setEditingProfile(null);
+      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+      setTestResult((prev) => ({ ...prev, _profile_form: null }));
+      await fetchConfig(true);
+      useUIStore.getState().bumpModelProfiles();
+      // 滚动到新卡片并高亮
+      setHighlightProfile(newName);
+      setTimeout(() => setHighlightProfile(null), 2000);
+      requestAnimationFrame(() => {
+        profileCardRefs.current[newName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : "添加失败，请检查网络或参数");
+    } finally {
+      setAddingProfile(false);
     }
   };
 
   const handleUpdateProfile = async (originalName: string) => {
+    setProfileError(null);
+    const updatedName = profileDraft.name;
     try {
-      await apiPut(`/config/models/profiles/${originalName}`, profileDraft);
+      await apiPut(`/config/models/profiles/${originalName}`, profileDraft, { direct: true });
       setEditingProfile(null);
-      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto" });
-      fetchConfig(true);
-    } catch {
-      // 忽略
+      setNewProfile(false);
+      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+      setTestResult((prev) => ({ ...prev, _profile_form: null }));
+      await fetchConfig(true);
+      useUIStore.getState().bumpModelProfiles();
+      // 滚动到更新后的卡片并高亮
+      setHighlightProfile(updatedName);
+      setTimeout(() => setHighlightProfile(null), 2000);
+      requestAnimationFrame(() => {
+        profileCardRefs.current[updatedName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : "更新失败，请检查网络或参数");
     }
   };
 
   const handleDeleteProfile = async (name: string) => {
+    setProfileError(null);
     try {
-      await apiDelete(`/config/models/profiles/${name}`);
+      await apiDelete(`/config/models/profiles/${name}`, { direct: true });
+      // 如果正在编辑被删除的 profile，关闭表单
+      if (editingProfile === name) {
+        setEditingProfile(null);
+        setNewProfile(false);
+        setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+      }
       fetchConfig(true);
-    } catch {
-      // 忽略
+      useUIStore.getState().bumpModelProfiles();
+    } catch (e) {
+      setProfileError(e instanceof Error ? e.message : "删除失败");
     }
   };
 
@@ -675,8 +1063,25 @@ export function ModelTab() {
   }
 
   return (
-    <div className="space-y-2">
+    <div className="flex flex-col gap-2">
+        {/* ── Apply toast ── */}
+        {applyToast && (
+          <div
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity ${
+              applyToast.type === "success"
+                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                : "bg-destructive/10 text-destructive border border-destructive/20"
+            }`}
+          >
+            {applyToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+            <span className="flex-1">{applyToast.msg}</span>
+            <button className="shrink-0 hover:opacity-70" onClick={() => setApplyToast(null)}>
+              <X className="h-3 w-3" />
+            </button>
+          </div>
+        )}
         {/* ── Collapsible model endpoint cards ── */}
+        <div className="space-y-2 order-2">
         {SECTION_META.map((section) => {
           const sectionCaps = capsMap[section.key];
           const isExpanded = !!expandedSections[section.key];
@@ -689,10 +1094,12 @@ export function ModelTab() {
               : "border-border"
           }`}>
             {/* ── Collapsed summary row (always visible) ── */}
-            <button
-              type="button"
-              className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden"
+            <div
+              role="button"
+              tabIndex={0}
+              className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden cursor-pointer"
               onClick={() => toggleSection(section.key)}
+              onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSection(section.key); } }}
             >
               <span className="text-muted-foreground transition-transform flex-shrink-0" style={{ transform: isExpanded ? "rotate(90deg)" : "rotate(0deg)" }}>
                 <ChevronRight className="h-3.5 w-3.5" />
@@ -723,7 +1130,7 @@ export function ModelTab() {
               {isDisabled && (
                 <span className="text-[10px] text-amber-600 dark:text-amber-400 shrink-0">已禁用</span>
               )}
-            </button>
+            </div>
 
             {/* ── Expanded edit form ── */}
             {isExpanded && (
@@ -746,29 +1153,96 @@ export function ModelTab() {
                         {FIELD_LABELS[field]}
                       </label>
                       <div className="flex-1 relative">
-                        <Input
-                          value={editDrafts[section.key]?.[field] || ""}
-                          onChange={(e) => updateDraft(section.key, field, e.target.value)}
-                          type={field === "api_key" && !showKeys[`${section.key}_${field}`] ? "password" : "text"}
-                          className={`h-8 text-xs font-mono ${field === "api_key" ? "pr-8" : ""}`}
-                          placeholder={`输入 ${FIELD_LABELS[field]}...`}
-                        />
-                        {field === "api_key" && (
-                          <button
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
-                            onClick={() =>
-                              setShowKeys((prev) => ({
-                                ...prev,
-                                [`${section.key}_${field}`]: !prev[`${section.key}_${field}`],
-                              }))
-                            }
-                          >
-                            {showKeys[`${section.key}_${field}`] ? (
-                              <EyeOff className="h-3 w-3" />
-                            ) : (
-                              <Eye className="h-3 w-3" />
+                        {field === "model" ? (
+                          <div ref={modelDropdownTarget === section.key ? modelDropdownRef : undefined}>
+                            <div className="flex gap-1">
+                              <Input
+                                value={editDrafts[section.key]?.[field] || ""}
+                                onChange={(e) => {
+                                  updateDraft(section.key, field, e.target.value);
+                                  if (remoteModels.length > 0 && modelDropdownTarget === section.key) setModelDropdownTarget(section.key);
+                                }}
+                                onFocus={() => { if (remoteModels.length > 0 && modelDropdownTarget === section.key) setModelDropdownTarget(section.key); }}
+                                className="h-8 text-xs font-mono flex-1"
+                                placeholder={`输入 ${FIELD_LABELS[field]}...`}
+                              />
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant="outline"
+                                className="h-8 px-2 shrink-0"
+                                title="从 API 自动检测可用模型"
+                                disabled={fetchingModels}
+                                onClick={() => handleFetchRemoteModels(
+                                  section.key,
+                                  editDrafts[section.key]?.base_url || undefined,
+                                  isMaskedApiKey(editDrafts[section.key]?.api_key || "") ? undefined : editDrafts[section.key]?.api_key || undefined,
+                                  editDrafts[section.key]?.protocol || undefined,
+                                )}
+                              >
+                                {fetchingModels ? (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                ) : (
+                                  <Search className="h-3 w-3" />
+                                )}
+                              </Button>
+                            </div>
+                            {modelDropdownTarget === section.key && remoteModelError && (
+                              <p className="text-[10px] text-destructive mt-0.5">{remoteModelError}</p>
                             )}
-                          </button>
+                            {modelDropdownTarget === section.key && remoteModels.length > 0 && (
+                              <div className="absolute z-50 left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-popover shadow-md">
+                                {remoteModels
+                                  .filter((m) => {
+                                    const cur = editDrafts[section.key]?.[field] || "";
+                                    return !cur || m.id.toLowerCase().includes(cur.toLowerCase());
+                                  })
+                                  .map((m) => (
+                                  <button
+                                    key={m.id}
+                                    type="button"
+                                    className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+                                    onClick={() => {
+                                      updateDraft(section.key, field, m.id);
+                                      setModelDropdownTarget(null);
+                                    }}
+                                  >
+                                    <span className="truncate">{m.id}</span>
+                                    {m.owned_by && (
+                                      <span className="text-[10px] text-muted-foreground shrink-0">{m.owned_by}</span>
+                                    )}
+                                  </button>
+                                ))}
+                              </div>
+                            )}
+                          </div>
+                        ) : (
+                          <>
+                            <Input
+                              value={editDrafts[section.key]?.[field] || ""}
+                              onChange={(e) => updateDraft(section.key, field, e.target.value)}
+                              type={field === "api_key" && !showKeys[`${section.key}_${field}`] ? "password" : "text"}
+                              className={`h-8 text-xs font-mono ${field === "api_key" ? "pr-8" : ""}`}
+                              placeholder={`输入 ${FIELD_LABELS[field]}...`}
+                            />
+                            {field === "api_key" && (
+                              <button
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground !min-h-0 !min-w-0 h-5 w-5 flex items-center justify-center"
+                                onClick={() =>
+                                  setShowKeys((prev) => ({
+                                    ...prev,
+                                    [`${section.key}_${field}`]: !prev[`${section.key}_${field}`],
+                                  }))
+                                }
+                              >
+                                {showKeys[`${section.key}_${field}`] ? (
+                                  <EyeOff className="h-3 w-3" />
+                                ) : (
+                                  <Eye className="h-3 w-3" />
+                                )}
+                              </button>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>
@@ -789,25 +1263,32 @@ export function ModelTab() {
                   </div>
                 </div>
                 {testResult[section.key] && (
-                  <div className={`mt-2 rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
+                  <div className={`mt-2 rounded-md px-3 py-2 text-xs border ${
                     testResult[section.key]!.ok
-                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                      : "bg-destructive/10 text-destructive border border-destructive/20"
+                      ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                      : "bg-destructive/10 text-destructive border-destructive/20"
                   }`}>
-                    {testResult[section.key]!.ok ? (
-                      <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                    ) : (
-                      <XCircle className="h-3.5 w-3.5 shrink-0" />
+                    <div className="flex items-center gap-1.5">
+                      {testResult[section.key]!.ok ? (
+                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                      ) : (
+                        <XCircle className="h-3.5 w-3.5 shrink-0" />
+                      )}
+                      <span className="truncate">
+                        {testResult[section.key]!.ok ? "连通测试成功" : testResult[section.key]!.error || "连通测试失败"}
+                      </span>
+                      <button
+                        className="ml-auto shrink-0 hover:opacity-70"
+                        onClick={() => setTestResult((prev) => ({ ...prev, [section.key]: null }))}
+                      >
+                        <X className="h-3 w-3" />
+                      </button>
+                    </div>
+                    {!testResult[section.key]!.ok && testResult[section.key]!.hint && (
+                      <p className="mt-1.5 pt-1.5 border-t border-destructive/15 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                        💡 {testResult[section.key]!.hint}
+                      </p>
                     )}
-                    <span className="truncate">
-                      {testResult[section.key]!.ok ? "连通测试成功" : testResult[section.key]!.error || "连通测试失败"}
-                    </span>
-                    <button
-                      className="ml-auto shrink-0 hover:opacity-70"
-                      onClick={() => setTestResult((prev) => ({ ...prev, [section.key]: null }))}
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
                   </div>
                 )}
                 <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
@@ -868,19 +1349,22 @@ export function ModelTab() {
           </div>
           );
         })}
+        </div>
 
-        {/* ── Profiles section (collapsible) ── */}
-        <div className="rounded-lg border border-border">
-          <button
-            type="button"
-            className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden"
+        {/* ── 模型配置 ── */}
+        <div className="rounded-lg border border-border order-1" data-coach-id="coach-settings-profiles">
+          <div
+            role="button"
+            tabIndex={0}
+            className="w-full flex items-center gap-2 px-3 py-2.5 text-left hover:bg-muted/30 transition-colors rounded-lg overflow-hidden cursor-pointer"
             onClick={() => toggleSection("profiles")}
+            onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggleSection("profiles"); } }}
           >
             <span className="text-muted-foreground transition-transform flex-shrink-0" style={{ transform: expandedSections.profiles ? "rotate(90deg)" : "rotate(0deg)" }}>
               <ChevronRight className="h-3.5 w-3.5" />
             </span>
             <Dices className="h-4 w-4 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-            <span className="font-semibold text-sm">多模型配置</span>
+            <span className="font-semibold text-sm">模型配置</span>
             {config?.profiles && config.profiles.length > 0 && (
               <Badge variant="secondary" className="text-[10px]">{config.profiles.length} 个档案</Badge>
             )}
@@ -893,17 +1377,80 @@ export function ModelTab() {
                 setExpandedSections((prev) => ({ ...prev, profiles: true }));
                 setNewProfile(true);
                 setEditingProfile(null);
-                setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto" });
+                setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
                 scrollToForm();
               }}
             >
               <Plus className="h-3 w-3" />
               新增
             </Button>
-          </button>
+          </div>
 
           {expandedSections.profiles && (
             <div className="px-4 pb-4 pt-1 border-t border-border/50">
+              {/* Inline error */}
+              {profileError && (
+                <div className="rounded-md border border-destructive/40 bg-destructive/5 px-3 py-2 mb-3 flex items-center gap-2">
+                  <AlertTriangle className="h-3.5 w-3.5 text-destructive shrink-0" />
+                  <p className="text-xs text-destructive flex-1">{profileError}</p>
+                  <button onClick={() => setProfileError(null)} className="text-destructive/60 hover:text-destructive shrink-0">
+                    <X className="h-3 w-3" />
+                  </button>
+                </div>
+              )}
+              {/* Provider presets - quick add */}
+              {!editingProfile && (
+                <div className="mb-3">
+                  <p className="text-xs text-muted-foreground mb-2">常见提供方（点击预填表单，只需补充 API Key）</p>
+                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+                    {PROVIDER_PRESETS.map((preset) => (
+                      <button
+                        key={preset.id}
+                        type="button"
+                        className={`text-left rounded-lg border px-2 sm:px-2.5 py-1.5 sm:py-2 transition-all ${
+                          newProfile && profileDraft.model === preset.model && profileDraft.base_url === preset.base_url
+                            ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/5"
+                            : "border-border hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5"
+                        }`}
+                        onClick={() => {
+                          setNewProfile(true);
+                          setEditingProfile(null);
+                          setProfileDraft({
+                            name: preset.label,
+                            model: preset.model,
+                            api_key: "",
+                            base_url: preset.base_url,
+                            description: preset.description,
+                            protocol: preset.protocol,
+                            thinking_mode: preset.thinking_mode,
+                            model_family: preset.model_family,
+                            custom_extra_body: "",
+                            custom_extra_headers: "",
+                          });
+                          scrollToForm();
+                        }}
+                      >
+                        <div className="flex items-center gap-1 sm:gap-1.5">
+                          <ProviderLogo id={preset.id} />
+                          <span className="text-[11px] sm:text-xs font-medium truncate">{preset.label}</span>
+                        </div>
+                        <p className="text-[10px] font-mono text-muted-foreground truncate mt-0.5 hidden sm:block">{preset.model}</p>
+                        <a
+                          href={preset.purchaseUrl}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="items-center gap-0.5 text-[10px] mt-1 hover:underline hidden sm:inline-flex"
+                          style={{ color: "var(--em-primary)" }}
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          获取 Key <ExternalLink className="h-2.5 w-2.5" />
+                        </a>
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
               {/* New/Edit profile form */}
               {(newProfile || editingProfile) && (
                 <div ref={formRef} className="rounded-lg border border-dashed border-border p-3 mb-3 space-y-2">
@@ -917,14 +1464,69 @@ export function ModelTab() {
                         placeholder="如: gpt4"
                       />
                     </div>
-                    <div>
+                    <div className="relative" ref={modelDropdownRef}>
                       <label className="text-xs text-muted-foreground">Model ID *</label>
-                      <Input
-                        value={profileDraft.model}
-                        onChange={(e) => setProfileDraft((d) => ({ ...d, model: e.target.value }))}
-                        className="h-8 sm:h-7 text-xs font-mono"
-                        placeholder="如: gpt-4o"
-                      />
+                      <div className="flex gap-1">
+                        <Input
+                          value={profileDraft.model}
+                          onChange={(e) => {
+                            setProfileDraft((d) => ({ ...d, model: e.target.value }));
+                            // 输入时过滤已加载的模型列表
+                            if (remoteModels.length > 0) setModelDropdownTarget("_profile");
+                          }}
+                          onFocus={() => { if (remoteModels.length > 0) setModelDropdownTarget("_profile"); }}
+                          className="h-8 sm:h-7 text-xs font-mono flex-1"
+                          placeholder="如: gpt-4o"
+                        />
+                        <Button
+                          type="button"
+                          size="sm"
+                          variant="outline"
+                          className="h-8 sm:h-7 px-2 shrink-0"
+                          title="从 API 自动检测可用模型"
+                          disabled={fetchingModels}
+                          onClick={() => handleFetchRemoteModels(
+                            "_profile",
+                            profileDraft.base_url || undefined,
+                            profileDraft.api_key || undefined,
+                            profileDraft.protocol || undefined,
+                          )}
+                        >
+                          {fetchingModels ? (
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                          ) : (
+                            <Search className="h-3 w-3" />
+                          )}
+                        </Button>
+                      </div>
+                      {remoteModelError && (
+                        <p className="text-[10px] text-destructive mt-0.5">{remoteModelError}</p>
+                      )}
+                      {modelDropdownTarget === "_profile" && remoteModels.length > 0 && (
+                        <div className="absolute z-50 top-full left-0 right-0 mt-1 max-h-48 overflow-y-auto rounded-md border border-border bg-popover shadow-md">
+                          {remoteModels
+                            .filter((m) => !profileDraft.model || m.id.toLowerCase().includes(profileDraft.model.toLowerCase()))
+                            .map((m) => (
+                            <button
+                              key={m.id}
+                              type="button"
+                              className="w-full text-left px-3 py-1.5 text-xs font-mono hover:bg-muted/60 transition-colors flex items-center justify-between gap-2"
+                              onClick={() => {
+                                setProfileDraft((d) => ({ ...d, model: m.id }));
+                                setModelDropdownTarget(null);
+                              }}
+                            >
+                              <span className="truncate">{m.id}</span>
+                              {m.owned_by && (
+                                <span className="text-[10px] text-muted-foreground shrink-0">{m.owned_by}</span>
+                              )}
+                            </button>
+                          ))}
+                          {remoteModels.filter((m) => !profileDraft.model || m.id.toLowerCase().includes(profileDraft.model.toLowerCase())).length === 0 && (
+                            <p className="px-3 py-2 text-[10px] text-muted-foreground">无匹配模型</p>
+                          )}
+                        </div>
+                      )}
                     </div>
                   </div>
                   <div>
@@ -982,26 +1584,110 @@ export function ModelTab() {
                       <option value="gemini">gemini（Gemini 原生）</option>
                     </select>
                   </div>
-                  {testResult["_profile_form"] && (
-                    <div className={`rounded-md px-3 py-2 text-xs flex items-center gap-1.5 ${
-                      testResult["_profile_form"]!.ok
-                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                        : "bg-destructive/10 text-destructive border border-destructive/20"
-                    }`}>
-                      {testResult["_profile_form"]!.ok ? (
-                        <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                      ) : (
-                        <XCircle className="h-3.5 w-3.5 shrink-0" />
+                  {/* ── 高级配置（折叠区） ── */}
+                  <div className="border border-border/50 rounded-md overflow-hidden">
+                    <button
+                      type="button"
+                      className="flex items-center gap-1.5 w-full px-3 py-1.5 text-xs text-muted-foreground hover:bg-muted/50 transition-colors"
+                      onClick={() => setExpandedSections((prev) => ({ ...prev, _profile_advanced: !prev._profile_advanced }))}
+                    >
+                      {expandedSections._profile_advanced ? <ChevronDown className="h-3 w-3" /> : <ChevronRight className="h-3 w-3" />}
+                      <Wrench className="h-3 w-3" />
+                      高级配置
+                      {(profileDraft.thinking_mode !== "auto" || profileDraft.model_family || profileDraft.custom_extra_body || profileDraft.custom_extra_headers) && (
+                        <Badge variant="secondary" className="text-[9px] ml-1 px-1 py-0">已配置</Badge>
                       )}
-                      <span className="truncate">
-                        {testResult["_profile_form"]!.ok ? "连通测试成功" : testResult["_profile_form"]!.error || "连通测试失败"}
-                      </span>
-                      <button
-                        className="ml-auto shrink-0 hover:opacity-70"
-                        onClick={() => setTestResult((prev) => ({ ...prev, _profile_form: null }))}
-                      >
-                        <X className="h-3 w-3" />
-                      </button>
+                    </button>
+                    {expandedSections._profile_advanced && (
+                      <div className="px-3 pb-3 pt-1 border-t border-border/50 space-y-2">
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs text-muted-foreground">思考模式</label>
+                            <select
+                              value={profileDraft.thinking_mode || "auto"}
+                              onChange={(e) => setProfileDraft((d) => ({ ...d, thinking_mode: e.target.value }))}
+                              className="w-full h-8 sm:h-7 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                            >
+                              <option value="auto">auto（自动探测）</option>
+                              <option value="disabled">disabled（禁用思考）</option>
+                              <option value="claude">claude（原生 Extended Thinking）</option>
+                              <option value="claude_compat">claude_compat（OAI 代理透传）</option>
+                              <option value="enable_thinking">enable_thinking（DashScope/硅基流动）</option>
+                              <option value="glm_thinking">glm_thinking（智谱 GLM）</option>
+                              <option value="openai_reasoning">openai_reasoning（OpenAI o系列）</option>
+                              <option value="openrouter">openrouter（OpenRouter）</option>
+                              <option value="deepseek">deepseek（自动输出推理）</option>
+                              <option value="reasoning_content_auto">reasoning_content_auto（自动）</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-muted-foreground">模型族</label>
+                            <select
+                              value={profileDraft.model_family || ""}
+                              onChange={(e) => setProfileDraft((d) => ({ ...d, model_family: e.target.value }))}
+                              className="w-full h-8 sm:h-7 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                            >
+                              <option value="">auto（按模型名推断）</option>
+                              <option value="claude">Claude</option>
+                              <option value="gpt">GPT</option>
+                              <option value="gemini">Gemini</option>
+                              <option value="deepseek">DeepSeek</option>
+                              <option value="qwen">Qwen（通义千问）</option>
+                              <option value="glm">GLM（智谱）</option>
+                              <option value="grok">Grok</option>
+                            </select>
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground">自定义请求体 (JSON)</label>
+                          <textarea
+                            value={profileDraft.custom_extra_body || ""}
+                            onChange={(e) => setProfileDraft((d) => ({ ...d, custom_extra_body: e.target.value }))}
+                            placeholder='{"temperature": 0.7}'
+                            rows={2}
+                            className="w-full text-xs rounded-md border border-input bg-background px-2 py-1.5 font-mono focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[2rem]"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-muted-foreground">自定义请求头 (JSON)</label>
+                          <textarea
+                            value={profileDraft.custom_extra_headers || ""}
+                            onChange={(e) => setProfileDraft((d) => ({ ...d, custom_extra_headers: e.target.value }))}
+                            placeholder='{"x-custom-auth": "xxx"}'
+                            rows={2}
+                            className="w-full text-xs rounded-md border border-input bg-background px-2 py-1.5 font-mono focus:outline-none focus:ring-1 focus:ring-ring resize-y min-h-[2rem]"
+                          />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {testResult["_profile_form"] && (
+                    <div className={`rounded-md px-3 py-2 text-xs border ${
+                      testResult["_profile_form"]!.ok
+                        ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20"
+                        : "bg-destructive/10 text-destructive border-destructive/20"
+                    }`}>
+                      <div className="flex items-center gap-1.5">
+                        {testResult["_profile_form"]!.ok ? (
+                          <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
+                        ) : (
+                          <XCircle className="h-3.5 w-3.5 shrink-0" />
+                        )}
+                        <span className="truncate">
+                          {testResult["_profile_form"]!.ok ? "连通测试成功" : testResult["_profile_form"]!.error || "连通测试失败"}
+                        </span>
+                        <button
+                          className="ml-auto shrink-0 hover:opacity-70"
+                          onClick={() => setTestResult((prev) => ({ ...prev, _profile_form: null }))}
+                        >
+                          <X className="h-3 w-3" />
+                        </button>
+                      </div>
+                      {!testResult["_profile_form"]!.ok && testResult["_profile_form"]!.hint && (
+                        <p className="mt-1.5 pt-1.5 border-t border-destructive/15 text-[11px] leading-relaxed text-amber-700 dark:text-amber-400">
+                          💡 {testResult["_profile_form"]!.hint}
+                        </p>
+                      )}
                     </div>
                   )}
                   <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-1">
@@ -1012,6 +1698,7 @@ export function ModelTab() {
                       onClick={() => {
                         setNewProfile(false);
                         setEditingProfile(null);
+                        setProfileError(null);
                         setTestResult((prev) => ({ ...prev, _profile_form: null }));
                       }}
                     >
@@ -1040,15 +1727,19 @@ export function ModelTab() {
                         size="sm"
                         className="h-8 sm:h-7 text-xs gap-1 text-white flex-1 sm:flex-initial"
                         style={{ backgroundColor: "var(--em-primary)" }}
-                        disabled={!profileDraft.name || !profileDraft.model}
+                        disabled={!profileDraft.name || !profileDraft.model || addingProfile}
                         onClick={() =>
                           editingProfile
                             ? handleUpdateProfile(editingProfile)
                             : handleAddProfile()
                         }
                       >
-                        <Save className="h-3 w-3" />
-                        {editingProfile ? "更新" : "添加"}
+                        {addingProfile ? (
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                        ) : (
+                          <Save className="h-3 w-3" />
+                        )}
+                        {addingProfile ? "添加中..." : editingProfile ? "更新" : "添加"}
                       </Button>
                     </div>
                   </div>
@@ -1059,13 +1750,17 @@ export function ModelTab() {
               <div className="space-y-1.5">
                 {config?.profiles.map((p) => {
                   const pCaps = capsMap[p.name];
+                  const isHighlighted = highlightProfile === p.name;
                   return (
                   <div
                     key={p.name}
-                    className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm transition-colors overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 ${
-                      isModelUnhealthy(pCaps)
-                        ? "border-destructive/40 bg-destructive/5 opacity-70"
-                        : "border-border"
+                    ref={(el) => { profileCardRefs.current[p.name] = el; }}
+                    className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 transition-all duration-500 ${
+                      isHighlighted
+                        ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/30 scale-[1.01]"
+                        : isModelUnhealthy(pCaps)
+                          ? "border-destructive/40 bg-destructive/5 opacity-70"
+                          : "border-border"
                     }`}
                     onClick={() => {
                       setEditingProfile(p.name);
@@ -1077,6 +1772,10 @@ export function ModelTab() {
                         base_url: p.base_url,
                         description: p.description,
                         protocol: p.protocol || "auto",
+                        thinking_mode: p.thinking_mode || "auto",
+                        model_family: p.model_family || "",
+                        custom_extra_body: p.custom_extra_body || "",
+                        custom_extra_headers: p.custom_extra_headers || "",
                       });
                       scrollToForm();
                     }}
@@ -1087,6 +1786,43 @@ export function ModelTab() {
                         {p.model}
                       </Badge>
                       <div className="flex gap-0.5 shrink-0 ml-auto">
+                        <div className="relative">
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="h-6 w-6"
+                            title="快速应用到角色"
+                            onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(applyMenuOpen === p.name ? null : p.name); }}
+                            disabled={applyingProfile === p.name}
+                          >
+                            {applyingProfile === p.name ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <ArrowRightLeft className="h-3 w-3" />
+                            )}
+                          </Button>
+                          {applyMenuOpen === p.name && (
+                            <>
+                              <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(null); }} />
+                              <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-md border border-border bg-popover p-1 shadow-md">
+                                {([
+                                  { role: "main" as const, label: "主模型", icon: <Server className="h-3 w-3" /> },
+                                  { role: "aux" as const, label: "辅助模型", icon: <Bot className="h-3 w-3" /> },
+                                  { role: "vlm" as const, label: "视觉模型", icon: <ScanEye className="h-3 w-3" /> },
+                                ]).map((item) => (
+                                  <button
+                                    key={item.role}
+                                    className="flex items-center gap-2 w-full px-2.5 py-1.5 text-xs rounded-sm hover:bg-muted transition-colors text-left"
+                                    onClick={(e) => { e.stopPropagation(); handleApplyProfileToRole(p, item.role); }}
+                                  >
+                                    {item.icon}
+                                    <span>用作{item.label}</span>
+                                  </button>
+                                ))}
+                              </div>
+                            </>
+                          )}
+                        </div>
                         <Button
                           variant="ghost"
                           size="icon"
@@ -1116,6 +1852,10 @@ export function ModelTab() {
                               base_url: p.base_url,
                               description: p.description,
                               protocol: p.protocol || "auto",
+                              thinking_mode: p.thinking_mode || "auto",
+                              model_family: p.model_family || "",
+                              custom_extra_body: p.custom_extra_body || "",
+                              custom_extra_headers: p.custom_extra_headers || "",
                             });
                             scrollToForm();
                           }}
@@ -1155,7 +1895,7 @@ export function ModelTab() {
                 })}
                 {config?.profiles.length === 0 && !newProfile && (
                   <p className="text-xs text-muted-foreground text-center py-3">
-                    暂无多模型配置，点击"新增"添加
+                    暂无模型配置，点击上方提供方或“新增”来添加
                   </p>
                 )}
               </div>
@@ -1164,6 +1904,7 @@ export function ModelTab() {
         </div>
 
         {/* ── Advanced section with pills ── */}
+        <div className="order-3 w-full">
         <Separator className="my-1" />
         <div>
           {/* Pills navigation */}
@@ -1352,6 +2093,7 @@ export function ModelTab() {
             <ConfigTransferPanel config={config} />
           )}
         </div>
+        </div>
     </div>
   );
 }
@@ -1412,7 +2154,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
         sections,
         mode: exportMode,
         password: exportMode === "password" ? password : null,
-      });
+      }, { direct: true });
       setResultToken(data.token);
     } catch (e) {
       setError(e instanceof Error ? e.message : "导出失败");
@@ -1427,7 +2169,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     setError(null);
     if (!token.trim()) return;
     try {
-      const data = await apiPost<{ needs_password: boolean }>("/config/transfer/detect", { token });
+      const data = await apiPost<{ needs_password: boolean }>("/config/transfer/detect", { token }, { direct: true });
       setNeedsPassword(data.needs_password);
     } catch {
       setNeedsPassword(null);
@@ -1443,7 +2185,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
       const data = await apiPost<{ status: string; imported: Record<string, unknown>; exported_at: string }>("/config/import", {
         token: importToken,
         password: needsPassword ? importPassword : null,
-      });
+      }, { direct: true });
       setImportResult(data);
     } catch (e) {
       setError(e instanceof Error ? e.message : "导入失败");
@@ -1484,7 +2226,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
           )}
           {mode !== "import" && (
             <Button size="sm" variant="outline" className="h-8 sm:h-7 text-xs gap-1" onClick={() => { resetState(); setMode("import"); }}>
-              <Upload className="h-3 w-3" /> 导入
+              <Import className="h-3 w-3" /> 导入
             </Button>
           )}
           {mode !== "idle" && (

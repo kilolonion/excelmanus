@@ -12,6 +12,7 @@ import {
   Folder,
   Eye,
   EyeOff,
+  GripVertical,
 } from "lucide-react";
 import {
   Tooltip,
@@ -89,6 +90,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const refreshWorkspaceFiles = useExcelStore((s) => s.refreshWorkspaceFiles);
   const showSystemFiles = useExcelStore((s) => s.showSystemFiles);
   const toggleShowSystemFiles = useExcelStore((s) => s.toggleShowSystemFiles);
+  const demoFile = useExcelStore((s) => s.demoFile);
 
   // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
   const visibleFiles = useMemo(
@@ -497,6 +499,35 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
       {/* Storage progress bar */}
       {embedded && <StorageBar />}
+
+      {/* Onboarding demo file (injected during coach marks, auto-removed after) */}
+      {embedded && demoFile && (
+        <div
+          data-coach-id="coach-demo-file"
+          className="mb-1 rounded-lg overflow-hidden"
+          style={{ border: "1px dashed var(--em-primary)", backgroundColor: "var(--em-primary-alpha-06)" }}
+        >
+          <div
+            draggable
+            onDragStart={(e) => {
+              e.dataTransfer.setData("text/plain", `@file:${demoFile.filename}`);
+              e.dataTransfer.setData(
+                "application/x-excel-file",
+                JSON.stringify(demoFile),
+              );
+              e.dataTransfer.effectAllowed = "copy";
+            }}
+            onClick={() => openPanel(demoFile.path)}
+            className="flex items-center gap-2.5 pl-5 pr-2 py-2 cursor-pointer transition-colors duration-100 hover:bg-accent/40"
+          >
+            <FileSpreadsheet className="h-4.5 w-4.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+            <span className="flex-1 min-w-0 truncate text-[13px] font-medium" style={{ color: "var(--em-primary)" }}>
+              {demoFile.filename}
+            </span>
+            <GripVertical className="h-3.5 w-3.5 flex-shrink-0 text-muted-foreground/50" />
+          </div>
+        </div>
+      )}
 
       {/* Multi-select action bar */}
       {selectMode && (

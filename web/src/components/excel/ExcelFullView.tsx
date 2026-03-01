@@ -93,7 +93,7 @@ export function ExcelFullView() {
           variant="ghost"
           size="sm"
           onClick={closeFullView}
-          className="h-7 gap-1.5 text-xs"
+          className="h-8 sm:h-7 gap-1.5 text-xs"
         >
           <ArrowLeft className="h-3.5 w-3.5" />
           返回聊天
@@ -161,7 +161,7 @@ export function ExcelFullView() {
             variant="ghost"
             size="sm"
             onClick={toggleSelectionMode}
-            className={`h-8 w-8 p-0 ${
+            className={`h-9 w-9 p-0 ${
               selectionMode
                 ? "text-[var(--em-primary)] bg-[var(--em-primary)]/10"
                 : "text-muted-foreground"
@@ -172,7 +172,7 @@ export function ExcelFullView() {
           </Button>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="sm" className="h-8 w-8 p-0 text-muted-foreground">
+              <Button variant="ghost" size="sm" className="h-9 w-9 p-0 text-muted-foreground">
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -222,7 +222,7 @@ export function ExcelFullView() {
           </span>
           <button
             onClick={handleConfirmRange}
-            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-white transition-colors"
+            className="flex items-center gap-1 px-3 py-1.5 sm:px-2 sm:py-1 rounded text-xs font-medium text-white transition-colors"
             style={{ backgroundColor: "var(--em-primary)" }}
           >
             <Check className="h-3 w-3" />
@@ -230,7 +230,7 @@ export function ExcelFullView() {
           </button>
           <button
             onClick={handleCancelRange}
-            className="flex items-center gap-1 px-2 py-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
+            className="flex items-center gap-1 px-3 py-1.5 sm:px-2 sm:py-1 rounded text-xs font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
           >
             <XCircle className="h-3 w-3" />
             取消

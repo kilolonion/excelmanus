@@ -1,12 +1,13 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { Plus, Trash2, Loader2, ScrollText, ToggleLeft } from "lucide-react";
+import { Plus, Trash2, Loader2, ScrollText, ToggleLeft, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { apiGet, apiPost, apiPatch, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
+import { isSettingsDemoActive, onSettingsDemoChange, DEMO_RULES } from "@/components/onboarding/demo-settings";
 
 interface Rule {
   id: string;
@@ -55,6 +56,32 @@ function RuleRow({
           )}
         </Button>
       </div>
+    </div>
+  );
+}
+
+function DemoRulesBanner() {
+  const [active, setActive] = useState(false);
+  useEffect(() => {
+    setActive(isSettingsDemoActive());
+    return onSettingsDemoChange(() => setActive(isSettingsDemoActive()));
+  }, []);
+  if (!active) return null;
+  return (
+    <div className="space-y-1.5">
+      {DEMO_RULES.map((rule) => (
+        <div
+          key={rule.id}
+          className="flex items-center gap-2 rounded-lg border border-dashed border-[var(--em-primary-alpha-25)] bg-[var(--em-primary-alpha-06)] px-3 py-2.5 sm:py-2 settings-tour-demo-item"
+        >
+          <Sparkles className="h-3 w-3 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+          <div className="flex-1 min-w-0">
+            <p className="text-sm">{rule.content}</p>
+            <p className="text-[10px] text-muted-foreground mt-0.5">示例规则</p>
+          </div>
+          <Switch checked={rule.enabled} disabled className="flex-shrink-0 opacity-60" />
+        </div>
+      ))}
     </div>
   );
 }
@@ -225,27 +252,30 @@ export function RulesTab({ sessionId }: RulesTabProps) {
       {/* Rules list content */}
       <div className="flex-1 flex flex-col gap-6">
         {/* 全局规则 */}
-        <div className="flex-1 flex flex-col gap-3">
+        <div className="flex-1 flex flex-col gap-3" data-coach-id="coach-settings-rules-list">
           <div className="flex items-center gap-2">
             <ScrollText className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
             <span className="text-sm font-medium">全局规则</span>
           </div>
 
+          <DemoRulesBanner />
           <div className="flex-1 flex flex-col gap-2">
-            {globalRules.length === 0 ? (
+            {globalRules.length === 0 && !isSettingsDemoActive() ? (
               <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground border border-dashed rounded-lg">
                 暂无规则
               </div>
             ) : (
-              globalRules.map((rule) => (
-                <RuleRow
-                  key={rule.id}
-                  rule={rule}
-                  onToggle={handleToggleGlobal}
-                  onDelete={handleDeleteGlobal}
-                  updating={updating}
-                />
-              ))
+              <>
+                {globalRules.map((rule) => (
+                  <RuleRow
+                    key={rule.id}
+                    rule={rule}
+                    onToggle={handleToggleGlobal}
+                    onDelete={handleDeleteGlobal}
+                    updating={updating}
+                  />
+                ))}
+              </>
             )}
           </div>
         </div>
@@ -287,6 +317,7 @@ export function RulesTab({ sessionId }: RulesTabProps) {
             onChange={(e) => setGlobalInput(e.target.value)}
             className="h-8 sm:h-7 text-xs flex-1"
             placeholder="输入新规则内容..."
+            data-coach-id="coach-settings-rule-input"
             onKeyDown={(e) => e.key === "Enter" && handleAddGlobalRule()}
           />
           <Button
@@ -295,6 +326,7 @@ export function RulesTab({ sessionId }: RulesTabProps) {
             style={{ backgroundColor: "var(--em-primary)" }}
             disabled={addingGlobal || !globalInput.trim()}
             onClick={handleAddGlobalRule}
+            data-coach-id="coach-settings-rule-add-btn"
           >
             {addingGlobal ? (
               <Loader2 className="h-3 w-3 animate-spin" />

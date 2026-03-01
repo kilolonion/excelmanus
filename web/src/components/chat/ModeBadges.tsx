@@ -36,13 +36,13 @@ export function ModeBadges() {
   }, [activeSessionId, fullAccess, toggling, setFullAccessEnabled]);
 
   return (
-    <div className="flex items-center gap-1.5 ml-2">
+    <div className="flex items-center gap-1 sm:gap-1.5 ml-1.5 sm:ml-2" data-coach-id="coach-mode-badges">
       <button
         type="button"
         onClick={handleToggleFullAccess}
         disabled={!activeSessionId || toggling}
         title={fullAccess ? "点击关闭 Full Access" : "点击开启 Full Access"}
-        className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium transition-all duration-200 cursor-pointer disabled:cursor-default"
+        className="inline-flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-medium transition-all duration-200 cursor-pointer disabled:cursor-default"
         style={{
           backgroundColor: fullAccess
             ? "color-mix(in srgb, var(--em-gold) 15%, transparent)"
@@ -56,7 +56,7 @@ export function ModeBadges() {
       </button>
       {modeBadge && (
         <span
-          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
+          className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
           style={{
             backgroundColor: `color-mix(in srgb, ${modeBadge.color} 15%, transparent)`,
             color: modeBadge.color,

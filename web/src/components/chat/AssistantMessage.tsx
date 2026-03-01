@@ -828,6 +828,49 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <ConfigErrorCard items={block.items} />;
     case "staging_hint":
       return <StagingHintCard pendingCount={block.pendingCount} files={block.files} />;
+    case "llm_retry": {
+      if (block.retryStatus === "retrying") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400 animate-pulse">
+            <Repeat className="h-4 w-4 flex-shrink-0 animate-spin" style={{ animationDuration: "2s" }} />
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium">
+                模型服务暂时不可用，正在第 {block.retryAttempt}/{block.retryMaxAttempts - 1} 次重试...
+              </span>
+              {block.retryErrorMessage && (
+                <span className="text-xs text-amber-600/70 dark:text-amber-500/70 truncate max-w-md">
+                  {block.retryErrorMessage}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
+      if (block.retryStatus === "succeeded") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 text-xs text-emerald-700 dark:text-emerald-400">
+            <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
+            <span>模型服务已恢复，第 {block.retryAttempt} 次尝试成功</span>
+          </div>
+        );
+      }
+      if (block.retryStatus === "exhausted") {
+        return (
+          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/5 text-sm text-red-700 dark:text-red-400">
+            <XCircle className="h-4 w-4 flex-shrink-0" />
+            <div className="flex flex-col gap-0.5">
+              <span className="font-medium">模型服务持续不可用，已重试 {block.retryAttempt} 次</span>
+              {block.retryErrorMessage && (
+                <span className="text-xs text-red-600/70 dark:text-red-500/70 truncate max-w-md">
+                  {block.retryErrorMessage}
+                </span>
+              )}
+            </div>
+          </div>
+        );
+      }
+      return null;
+    }
     default:
       return null;
   }

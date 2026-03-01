@@ -78,6 +78,7 @@ export default function ForgotPasswordPage() {
   const cooldownRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startCooldown = (seconds = 60) => {
+    if (cooldownRef.current) clearInterval(cooldownRef.current);
     setResendCooldown(seconds);
     cooldownRef.current = setInterval(() => {
       setResendCooldown((s) => {

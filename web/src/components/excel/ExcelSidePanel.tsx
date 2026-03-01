@@ -93,7 +93,7 @@ export function ExcelSidePanel() {
     const dy = e.changedTouches[0].clientY - touchRef.current.startY;
     const dt = Date.now() - touchRef.current.startTime;
     touchRef.current = null;
-    if (dy > 80 && dt < 400) {
+    if (dy > 50 && dt < 400) {
       closePanel();
     }
   }, [isMobile, closePanel]);
@@ -158,6 +158,7 @@ export function ExcelSidePanel() {
       {isOpen && (
         <motion.div
           key="excel-side-panel"
+          data-coach-id="coach-excel-panel"
           variants={getAnimationVariants()}
           initial="initial"
           animate="animate"
