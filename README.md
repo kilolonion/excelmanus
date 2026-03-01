@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.6-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.7-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -51,6 +51,9 @@ Staging / Audit / CoW 版本链，`/undo` 精确回滚到任意操作
 ### 🔌 MCP & Subagent
 接入外部 MCP Server 扩展工具集；大文件和复杂任务自动委派子代理
 
+### 📤 会话导出
+支持导出为 Markdown / 纯文本 / EMX (JSON) 三种格式，EMX 格式可重新导入为完整会话
+
 ### 👥 多用户
 独立工作区 / 数据库 / 会话隔离，管理员面板管控权限和用量
 
@@ -67,7 +70,10 @@ Staging / Audit / CoW 版本链，`/undo` 精确回滚到任意操作
 **第一步：克隆项目**
 
 ```bash
-git clone https://github.com/kilolonion/excelmanus.git
+# 国内推荐 Gitee（更快）
+git clone https://gitee.com/kilolonion/excelmanus.git
+# 或使用 GitHub
+# git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
 ```
 
@@ -76,7 +82,7 @@ cd excelmanus
 <details open>
 <summary><b>Windows — 图形化部署工具</b></summary>
 
-**无需提前 clone 仓库**，直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe` 双击运行即可。
+**无需提前 clone 仓库**，直接从 [Gitee Releases](https://gitee.com/kilolonion/excelmanus/releases) 或 [GitHub Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe` 双击运行即可。
 
 工具采用**两步向导式界面**，全程引导完成部署：
 
@@ -136,7 +142,10 @@ chmod +x ./deploy/start.sh  # 首次使用需添加执行权限
 **1. 克隆并安装**
 
 ```bash
-git clone https://github.com/kilolonion/excelmanus.git
+# 国内推荐 Gitee（更快）
+git clone https://gitee.com/kilolonion/excelmanus.git
+# 或使用 GitHub
+# git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
 pip install ".[all]"          # 完整安装（CLI + Web + 全部可选依赖）
 # 或者按需选择：
@@ -194,6 +203,7 @@ cd web && npm install && npm run dev    # 前端开发服务器（http://localho
 | `/compact` | 上下文压缩 |
 | `/config export` | 加密导出配置 |
 | `/config import` | 导入配置 |
+| `/export` | 导出会话（Markdown / 纯文本 / EMX） |
 | `/clear` | 清空对话 |
 
 </details>
@@ -292,7 +302,7 @@ cd web && npm install && npm run dev    # 前端
 
 ### Windows 图形化部署工具
 
-Windows 用户可直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe`，**无需提前 clone 仓库**。
+Windows 用户可直接从 [Gitee Releases](https://gitee.com/kilolonion/excelmanus/releases) 或 [GitHub Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe`，**无需提前 clone 仓库**。
 
 ```text
 ExcelManus.exe    ← 下载后双击即可，放在任意目录
@@ -317,9 +327,9 @@ ExcelManus.exe    ← 下载后双击即可，放在任意目录
 镜像已发布到 Docker Hub，支持 **amd64**（Intel/AMD）和 **arm64**（Apple Silicon / AWS Graviton）双架构，`docker pull` 时自动匹配：
 
 ```bash
-docker pull kilol/excelmanus-api:1.6.6       # 后端 API
-docker pull kilol/excelmanus-sandbox:1.6.6   # 代码沙盒（可选）
-docker pull kilol/excelmanus-web:1.6.6       # 前端 Web
+docker pull kilol/excelmanus-api:1.6.7       # 后端 API
+docker pull kilol/excelmanus-sandbox:1.6.7   # 代码沙盒（可选）
+docker pull kilol/excelmanus-web:1.6.7       # 前端 Web
 ```
 
 #### Docker Compose 一键启动
