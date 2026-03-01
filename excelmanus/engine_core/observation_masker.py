@@ -192,8 +192,9 @@ def _mask_read_excel(content: str) -> str:
 
 def _mask_inspect(content: str) -> str:
     """inspect_excel_files 结果：提取文件列表。"""
-    # 简单计算文件数
-    file_count = content.count(".xlsx") + content.count(".xlsm") + content.count(".xlsb") + content.count(".xls") + content.count(".csv")
+    # 简单计算文件数（注意 .xls 是 .xlsx/.xlsm/.xlsb 的子串，需用 regex 精确匹配）
+    import re as _re
+    file_count = len(_re.findall(r"\.(?:xlsx|xlsm|xlsb|xls|csv)\b", content, _re.IGNORECASE))
     if file_count == 0:
         file_count = 1
     truncated = content[:150]
