@@ -636,7 +636,7 @@ function Ensure-FrontendStandaloneAssets {
     $cmd = @"
 cd '$($Script:CFG.FrontendDir)/web'
 if [ ! -d .next/standalone ]; then
-    echo '[INFO] no standalone output (Turbopack/Next.js 16+ may not generate it), will use next start'
+    echo '[INFO] no standalone output, will use next start'
     exit 0
 fi
 
@@ -828,7 +828,7 @@ else
     echo '[INFO] standalone/server.js missing, will use next start mode'
 fi
 if [ "`$_ok" != true ]; then
-    echo '[FATAL] Build artifact validation failed! Likely incomplete Turbopack build.'
+    echo '[FATAL] Build artifact validation failed! Ensure webpack mode is used (npm run build).'
     echo '[FATAL] Keeping current running version, skipping restart.'
     exit 1
 fi
@@ -1022,7 +1022,7 @@ function Deploy-Frontend {
         # Validate build artifacts (fail = no restart = no 502)
         if (-not (Validate-FrontendBuild)) {
             Write-Err "build artifact validation failed! Keeping current running version."
-            Write-Warn "This is usually caused by incomplete Turbopack builds."
+            Write-Warn "Ensure webpack mode is used for building."
             Write-Warn "Fix: SSH into server and run: cd $($cfg.FrontendDir)/web && npm run build"
             return $false
         }
