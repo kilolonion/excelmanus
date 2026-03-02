@@ -46,6 +46,15 @@ import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
 import { Search } from "lucide-react";
 import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
+import {
+  fetchCodexStatus,
+  codexOAuthStart,
+  codexOAuthExchange,
+  connectCodex,
+  disconnectCodex,
+  refreshCodexToken,
+  type CodexStatus,
+} from "@/lib/auth-api";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
@@ -128,7 +137,7 @@ const PROVIDER_LOGO_SLUG: Record<string, string> = {
   deepseek: "deepseek",
   qwen: "qwen",
   zhipu: "zhipu",
-  siliconflow: "siliconcloud",
+  "openai-codex": "openai",
   openrouter: "openrouter",
   kimi: "moonshot",
   minimax: "minimax",
@@ -244,16 +253,16 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     purchaseUrl: "https://open.bigmodel.cn/usercenter/apikeys",
   },
   {
-    id: "siliconflow",
-    label: "硅基流动",
-    icon: "⚡",
-    model: "deepseek-ai/DeepSeek-V3",
-    base_url: "https://api.siliconflow.cn/v1",
+    id: "openai-codex",
+    label: "OpenAI Codex",
+    icon: "🧩",
+    model: "openai-codex/gpt-5.3-codex-spark",
+    base_url: "https://api.openai.com/v1",
     protocol: "openai",
-    thinking_mode: "auto",
-    model_family: "",
-    description: "多模型聚合平台",
-    purchaseUrl: "https://cloud.siliconflow.cn/account/ak",
+    thinking_mode: "openai_reasoning",
+    model_family: "gpt",
+    description: "订阅登录后可用（无需 API Key）",
+    purchaseUrl: "https://chatgpt.com",
   },
   {
     id: "openrouter",
@@ -359,6 +368,14 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
+  const [codexLoading, setCodexLoading] = useState(true);
+  const [codexBusy, setCodexBusy] = useState(false);
+  const [codexNotice, setCodexNotice] = useState("");
+  const [codexError, setCodexError] = useState("");
+  const [oauthState, setOauthState] = useState("");
+  const [callbackUrl, setCallbackUrl] = useState("");
+  const [tokenInput, setTokenInput] = useState("");
 
   // 加载当前用户的自定义 LLM 配置
   useEffect(() => {
@@ -379,6 +396,164 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
       }
     })();
     return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCodexStatus()
+      .then((data) => {
+        if (!cancelled) setCodexStatus(data);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setCodexStatus({ status: "disconnected", provider: "openai-codex" });
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setCodexLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const applyCodexPreset = useCallback(() => {
+    setDraft((d) => ({
+      ...d,
+      model: "openai-codex/gpt-5.3-codex-spark",
+      base_url: "https://api.openai.com/v1",
+    }));
+  }, []);
+
+  const parseCodexCallback = useCallback((raw: string) => {
+    const text = raw.trim();
+    if (!text) return null;
+    try {
+      const url = text.startsWith("http")
+        ? new URL(text)
+        : new URL(text, window.location.origin);
+      const code = url.searchParams.get("code") || "";
+      const state = url.searchParams.get("state") || oauthState;
+      if (!code || !state) return null;
+      return { code, state };
+    } catch {
+      return null;
+    }
+  }, [oauthState]);
+
+  const handleCodexOAuthStart = useCallback(async () => {
+    setCodexBusy(true);
+    setCodexError("");
+    setCodexNotice("");
+    try {
+      const data = await codexOAuthStart();
+      setOauthState(data.state);
+      applyCodexPreset();
+      window.open(data.authorize_url, "_blank", "noopener,noreferrer");
+      setCodexNotice("已打开授权页。授权后请将回调 URL 粘贴到下方完成连接。");
+    } catch (e) {
+      setCodexError(e instanceof Error ? e.message : "发起 Codex 授权失败");
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [applyCodexPreset]);
+
+  const handleCodexExchange = useCallback(async () => {
+    const parsed = parseCodexCallback(callbackUrl);
+    if (!parsed) {
+      setCodexError("回调 URL 无效，请确认包含 code 和 state 参数");
+      return;
+    }
+    setCodexBusy(true);
+    setCodexError("");
+    setCodexNotice("");
+    try {
+      const result = await codexOAuthExchange(parsed.code, parsed.state);
+      setCodexStatus({
+        status: "connected",
+        provider: "openai-codex",
+        account_id: result.account_id,
+        plan_type: result.plan_type,
+        expires_at: result.expires_at,
+        is_active: true,
+        has_refresh_token: true,
+      });
+      applyCodexPreset();
+      setCallbackUrl("");
+      setCodexNotice("Codex 已连接。点击下方“保存”即可启用该模型。");
+    } catch (e) {
+      setCodexError(e instanceof Error ? e.message : "Codex OAuth 交换失败");
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [applyCodexPreset, callbackUrl, parseCodexCallback]);
+
+  const handleCodexTokenConnect = useCallback(async () => {
+    const raw = tokenInput.trim();
+    if (!raw) {
+      setCodexError("请先粘贴 auth.json 内容");
+      return;
+    }
+    setCodexBusy(true);
+    setCodexError("");
+    setCodexNotice("");
+    try {
+      const parsed = JSON.parse(raw) as Record<string, unknown>;
+      const result = await connectCodex(parsed);
+      setCodexStatus({
+        status: "connected",
+        provider: "openai-codex",
+        account_id: result.account_id,
+        plan_type: result.plan_type,
+        expires_at: result.expires_at,
+        is_active: true,
+        has_refresh_token: true,
+      });
+      applyCodexPreset();
+      setTokenInput("");
+      setCodexNotice("Codex 已连接。点击下方“保存”即可启用该模型。");
+    } catch (e) {
+      if (e instanceof SyntaxError) {
+        setCodexError("JSON 格式无效，请粘贴完整 auth.json 内容");
+      } else {
+        setCodexError(e instanceof Error ? e.message : "连接 Codex 失败");
+      }
+    } finally {
+      setCodexBusy(false);
+    }
+  }, [applyCodexPreset, tokenInput]);
+
+  const handleCodexDisconnect = useCallback(async () => {
+    setCodexBusy(true);
+    setCodexError("");
+    setCodexNotice("");
+    try {
+      await disconnectCodex();
+      setCodexStatus({ status: "disconnected", provider: "openai-codex" });
+      setCodexNotice("已断开 Codex 连接");
+    } catch (e) {
+      setCodexError(e instanceof Error ? e.message : "断开 Codex 失败");
+    } finally {
+      setCodexBusy(false);
+    }
+  }, []);
+
+  const handleCodexRefresh = useCallback(async () => {
+    setCodexBusy(true);
+    setCodexError("");
+    setCodexNotice("");
+    try {
+      const result = await refreshCodexToken();
+      setCodexStatus((prev) => {
+        if (!prev) return prev;
+        return { ...prev, status: "connected", expires_at: result.expires_at };
+      });
+      setCodexNotice("Codex token 已刷新");
+    } catch (e) {
+      setCodexError(e instanceof Error ? e.message : "刷新 Codex token 失败");
+    } finally {
+      setCodexBusy(false);
+    }
   }, []);
 
   const handleSave = async () => {
@@ -438,6 +613,77 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         <p className="text-xs text-muted-foreground mb-3">
           配置您自己的 API Key 后，对话将使用您的 API 额度。留空则使用系统默认配置。
         </p>
+
+        <div className="rounded-md border border-border/70 bg-muted/20 p-3 mb-3 space-y-2">
+          <div className="flex items-center gap-2">
+            <ProviderLogo id="openai-codex" />
+            <p className="text-xs font-semibold">OpenAI Codex 订阅登录</p>
+            <Badge variant="secondary" className="text-[10px] ml-auto">
+              {codexLoading
+                ? "检测中"
+                : codexStatus?.status === "connected"
+                  ? "已连接"
+                  : codexStatus?.status === "expired"
+                    ? "已过期"
+                    : "未连接"}
+            </Badge>
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            使用 ChatGPT Plus/Pro 订阅，无需 API Key。连接后建议将 Model ID 设置为
+            <code className="mx-1 px-1 py-0.5 rounded bg-background font-mono">openai-codex/gpt-5.3-codex-spark</code>
+            并点击保存。
+          </p>
+          <div className="flex flex-wrap gap-1.5">
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexOAuthStart} disabled={codexBusy}>
+              {codexBusy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
+              浏览器授权
+            </Button>
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={applyCodexPreset}>
+              预填 Codex 模型
+            </Button>
+            {codexStatus?.status === "connected" && (
+              <>
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexRefresh} disabled={codexBusy}>
+                  刷新 Token
+                </Button>
+                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexDisconnect} disabled={codexBusy}>
+                  断开连接
+                </Button>
+              </>
+            )}
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[11px] text-muted-foreground">授权后粘贴回调 URL（含 code 与 state）</label>
+            <div className="flex flex-col sm:flex-row gap-1.5">
+              <Input
+                value={callbackUrl}
+                onChange={(e) => setCallbackUrl(e.target.value)}
+                className="h-8 text-xs font-mono"
+                placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+              />
+              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleCodexExchange} disabled={codexBusy}>
+                完成授权
+              </Button>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="text-[11px] text-muted-foreground">或粘贴 ~/.codex/auth.json 内容</label>
+            <textarea
+              value={tokenInput}
+              onChange={(e) => setTokenInput(e.target.value)}
+              className="w-full h-20 rounded-md border border-input bg-background px-2 py-1.5 text-[11px] font-mono"
+              placeholder='{"token":"...","refresh_token":"..."}'
+            />
+            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexTokenConnect} disabled={codexBusy}>
+              粘贴连接
+            </Button>
+          </div>
+
+          {codexNotice ? <p className="text-[11px]" style={{ color: "var(--em-primary)" }}>{codexNotice}</p> : null}
+          {codexError ? <p className="text-[11px] text-destructive">{codexError}</p> : null}
+        </div>
 
         {/* Provider presets for quick fill */}
         <div className="mb-3">

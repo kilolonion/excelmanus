@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings, UserCircle } from "lucide-react";
-import { apiGet, proxyAvatarUrl } from "@/lib/api";
+import { apiGet, resolveAvatarSrc } from "@/lib/api";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
@@ -196,15 +196,7 @@ function Avatar({ src, name, size = 5 }: { src?: string | null; name: string; si
   const px = size * 4;
   const textSize = size <= 5 ? "text-[10px]" : "text-sm";
 
-  const proxiedSrc = (() => {
-    const base = proxyAvatarUrl(src);
-    if (!base || !accessToken) return base;
-    if (base.includes("/avatar-file")) {
-      const sep = base.includes("?") ? "&" : "?";
-      return `${base}${sep}token=${accessToken}`;
-    }
-    return base;
-  })();
+  const proxiedSrc = resolveAvatarSrc(src, accessToken);
 
   if (proxiedSrc && failedSrc !== src) {
     return (

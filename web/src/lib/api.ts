@@ -137,6 +137,35 @@ export function proxyAvatarUrl(url: string | null | undefined): string | null {
   return url;
 }
 
+/**
+ * 解析头像 URL 为可直接用于 <img src> 的完整地址。
+ * - 外部域名（Google/GitHub/QQ）→ 走代理
+ * - 本地 /avatar-file 端点 → 追加 token query param（<img> 无法发送 Authorization header）
+ * - 管理员查看其他用户头像 → 改写为 admin 端点
+ */
+export function resolveAvatarSrc(
+  url: string | null | undefined,
+  accessToken: string | null | undefined,
+  opts?: { userId?: string; isAdmin?: boolean },
+): string | null {
+  if (!url) return null;
+
+  // 管理员查看其他用户的本地头像：改写为 admin 端点
+  if (opts?.isAdmin && opts?.userId && url.includes("/avatar-file")) {
+    const base = `${API_BASE_PATH}/auth/admin/users/${opts.userId}/avatar-file`;
+    return accessToken ? `${base}?token=${accessToken}` : base;
+  }
+
+  const base = proxyAvatarUrl(url);
+  if (!base || !accessToken) return base;
+  // 本地头像端点追加 token
+  if (base.includes("/avatar-file")) {
+    const sep = base.includes("?") ? "&" : "?";
+    return `${base}${sep}token=${accessToken}`;
+  }
+  return base;
+}
+
 /** 判断是否为可重试的暂态错误（网络异常或 502/503/504）。 */
 function _isTransientError(err: unknown, res?: Response | null): boolean {
   if (err instanceof TypeError) return true; // "Failed to fetch" — 网络不可达

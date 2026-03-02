@@ -62,7 +62,9 @@ export function ModelSelector() {
   };
 
   const activeModel = models.find((m) => m.name === currentModel);
-  const displayLabel = (m: ModelInfo) => m.name === "default" ? m.model : m.name;
+  const displayLabel = (m: ModelInfo) =>
+    m.name === "default" ? m.model : (m.display_name || m.name);
+  const resolvedModel = (m: ModelInfo) => m.resolved_model || m.model;
   const displayName = activeModel
     ? displayLabel(activeModel)
     : currentModel || "模型未加载";
@@ -83,9 +85,9 @@ export function ModelSelector() {
             />
             <div className="flex flex-col items-start min-w-0 flex-1">
               <span className="truncate font-medium">{displayName}</span>
-              {activeModel?.model && activeModel.name !== "default" && activeModel.name !== activeModel.model && (
+              {activeModel?.model && activeModel.name !== "default" && activeModel.name !== resolvedModel(activeModel) && (
                 <span className="truncate text-muted-foreground text-[10px]">
-                  {activeModel.model}
+                  {resolvedModel(activeModel)}
                 </span>
               )}
             </div>
@@ -134,7 +136,7 @@ export function ModelSelector() {
                 )}
               </div>
               <span className="text-[10px] text-muted-foreground truncate w-full">
-                {m.model}
+                {resolvedModel(m)}
                 {m.description ? ` · ${m.description}` : ""}
               </span>
             </DropdownMenuItem>
