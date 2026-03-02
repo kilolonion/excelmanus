@@ -29,6 +29,31 @@ function _isImageLike(file: File): boolean {
   return _isImageFile(file.name) || (file.type || "").toLowerCase().startsWith("image/");
 }
 
+/** 在客户端本地构造 failure_guidance block（用于网络级错误，无 SSE 事件可达的场景）。 */
+function _buildClientFailureGuidance(opts: {
+  code: string;
+  title: string;
+  message: string;
+  retryable: boolean;
+}): Extract<AssistantBlock, { type: "failure_guidance" }> {
+  return {
+    type: "failure_guidance",
+    category: "transport",
+    code: opts.code,
+    title: opts.title,
+    message: opts.message,
+    stage: "connecting",
+    retryable: opts.retryable,
+    diagnosticId: crypto.randomUUID?.() || uuid(),
+    actions: opts.retryable
+      ? [
+          { type: "retry", label: "立即重试" },
+          { type: "open_settings", label: "检查模型设置" },
+        ]
+      : [{ type: "open_settings", label: "检查模型设置" }],
+  };
+}
+
 function _fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
@@ -401,36 +426,6 @@ export async function sendMessage(
               });
             }
           }
-        } else if (sseEvent.event === "error") {
-          // sendMessage 有更丰富的错误分类（模型配置检测）
-          const errMsg = (data.error as string) || "发生未知错误";
-          if (data.error_code === "workspace_full") {
-            S().appendBlock(assistantMsgId, { type: "text", content: errMsg });
-          } else {
-            const errLower = errMsg.toLowerCase();
-            const isModelConfigError = [
-              "unauthorized", "401", "403", "forbidden",
-              "invalid api", "authentication", "api key",
-              "model not found", "model_not_found", "does not exist",
-              "invalid model", "no such model",
-              "connection refused", "connect timeout", "name or service not known",
-              "payment_required", "402", "insufficient quota", "quota exceeded",
-              "billing", "balance",
-              "内部错误", "服务内部",
-            ].some((kw) => errLower.includes(kw));
-            if (isModelConfigError) {
-              useUIStore.getState().setConfigError(errMsg);
-              S().appendBlock(assistantMsgId, {
-                type: "text",
-                content: `🚫 **模型配置错误**\n\n${errMsg}\n\n> 请检查模型配置是否正确（API Key、Base URL、Model ID），可在右上角 ⚙️ 设置中修改。`,
-              });
-            } else {
-              S().appendBlock(assistantMsgId, {
-                type: "text",
-                content: `⚠️ ${errMsg}`,
-              });
-            }
-          }
         }
       },
       abortController.signal
@@ -438,32 +433,28 @@ export async function sendMessage(
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
-      S().appendBlock(assistantMsgId, {
-        type: "text",
-        content: `⚠️ 连接错误: ${(err as Error).message}`,
-      });
+      S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
+        code: "network_error",
+        title: "连接错误",
+        message: (err as Error).message || "网络连接失败",
+        retryable: true,
+      }));
     } else if (_connectionTimedOut) {
       sseCtx.hadStreamError = true;
-      S().appendBlock(assistantMsgId, {
-        type: "text",
-        content:
-          "⚠️ **连接超时**\n\n" +
-          "未能在 30 秒内与服务端建立连接，可能的原因：\n" +
-          "- 模型 API 配置错误（API Key、Base URL 或模型名称）\n" +
-          "- 后端服务未启动或网络不可达\n\n" +
-          "> 请检查右上角 ⚙️ 设置中的模型配置，确认后重试。",
-      });
+      S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
+        code: "connect_timeout",
+        title: "连接超时",
+        message: "未能在 30 秒内建立连接，请检查模型配置或网络。",
+        retryable: true,
+      }));
     } else if (_stallTimedOut) {
       sseCtx.hadStreamError = true;
-      S().appendBlock(assistantMsgId, {
-        type: "text",
-        content:
-          "⚠️ **响应停滞**\n\n" +
-          "已连接但超过 90 秒未收到新数据，可能的原因：\n" +
-          "- 模型 API 服务响应缓慢或挂起\n" +
-          "- 后端处理遇到阻塞\n\n" +
-          "> 请稍后重试，或检查模型服务状态。",
-      });
+      S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
+        code: "stream_stalled",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
+        retryable: true,
+      }));
     }
   } finally {
     if (_stallTimer !== null) clearTimeout(_stallTimer);
@@ -641,10 +632,12 @@ export async function sendContinuation(
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
-      S().appendBlock(msgId, {
-        type: "text",
-        content: `⚠️ 连接错误: ${(err as Error).message}`,
-      });
+      S().appendBlock(msgId, _buildClientFailureGuidance({
+        code: "network_error",
+        title: "连接错误",
+        message: (err as Error).message || "网络连接失败",
+        retryable: true,
+      }));
     }
   } finally {
     if (_contStallTimer !== null) clearTimeout(_contStallTimer);
@@ -1004,10 +997,12 @@ export async function subscribeToSession(sessionId: string) {
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
-      S().appendBlock(msgId, {
-        type: "text",
-        content: `⚠️ 重连错误: ${(err as Error).message}`,
-      });
+      S().appendBlock(msgId, _buildClientFailureGuidance({
+        code: "network_error",
+        title: "重连错误",
+        message: (err as Error).message || "重连失败",
+        retryable: true,
+      }));
     }
   } finally {
     _activeSubscribeSessionId = null;

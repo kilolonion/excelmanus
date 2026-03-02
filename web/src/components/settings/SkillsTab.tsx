@@ -295,8 +295,15 @@ export function SkillsTab() {
 
   const handleDelete = async (name: string) => {
     if (!confirm(`确定删除技能 "${name}"？`)) return;
-    try { await apiDelete(`/skills/${encodeURIComponent(name)}`); fetchSkills(true); }
-    catch (err) { alert(err instanceof Error ? err.message : "删除失败"); }
+    const snapshot = skills.find((s) => s.name === name);
+    setSkills((prev) => prev.filter((s) => s.name !== name));
+    settingsCache.delete("/skills");
+    try {
+      await apiDelete(`/skills/${encodeURIComponent(name)}`);
+    } catch (err) {
+      if (snapshot) setSkills((prev) => [...prev, snapshot]);
+      alert(err instanceof Error ? err.message : "删除失败");
+    }
   };
 
   const startEdit = (skill: SkillSummary) => {

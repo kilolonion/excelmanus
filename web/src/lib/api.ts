@@ -945,10 +945,33 @@ export interface AllSheetsSnapshotResponse {
   all_snapshots: ExcelSnapshot[];
 }
 
+// ── Snapshot 缓存（TTL 30s，避免重复请求同一文件） ──
+const _snapshotCache = new Map<string, { data: AllSheetsSnapshotResponse; ts: number }>();
+const _SNAPSHOT_TTL_MS = 30_000;
+
+function _snapshotCacheKey(path: string, opts?: { maxRows?: number; withStyles?: boolean }): string {
+  return `${normalizeExcelPath(path)}|${opts?.maxRows ?? ""}|${opts?.withStyles !== false ? "1" : "0"}`;
+}
+
+/** 使指定文件的 snapshot 缓存失效（文件变更后调用） */
+export function invalidateSnapshotCache(path?: string) {
+  if (!path) { _snapshotCache.clear(); return; }
+  const norm = normalizeExcelPath(path);
+  for (const key of _snapshotCache.keys()) {
+    if (key.startsWith(norm + "|")) _snapshotCache.delete(key);
+  }
+}
+
 export async function fetchAllSheetsSnapshot(
   path: string,
   opts?: { maxRows?: number; sessionId?: string; withStyles?: boolean }
 ): Promise<AllSheetsSnapshotResponse> {
+  const cacheKey = _snapshotCacheKey(path, opts);
+  const cached = _snapshotCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < _SNAPSHOT_TTL_MS) {
+    return cached.data;
+  }
+
   const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
   if (opts?.sessionId) params.set("session_id", opts.sessionId);
@@ -959,7 +982,9 @@ export async function fetchAllSheetsSnapshot(
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Snapshot error: ${res.status}`);
   }
-  return res.json();
+  const result: AllSheetsSnapshotResponse = await res.json();
+  _snapshotCache.set(cacheKey, { data: result, ts: Date.now() });
+  return result;
 }
 
 export async function fetchExcelSnapshot(

@@ -493,10 +493,21 @@ function CodexProviderSection({
     if (!pasteUrl.trim() || !oauthState) return;
     try {
       const url = new URL(pasteUrl.trim());
+      // 检测 OAuth 错误响应（OpenAI 返回 error 而非 code）
+      const oauthError = url.searchParams.get("error");
+      if (oauthError) {
+        const desc = url.searchParams.get("error_description") || oauthError;
+        showToast(`OpenAI 授权失败: ${decodeURIComponent(desc)}`, "error");
+        setOauthBusy(false);
+        setOauthMode(null);
+        setOauthState("");
+        setPasteUrl("");
+        return;
+      }
       const code = url.searchParams.get("code");
       const state = url.searchParams.get("state");
       if (!code || !state) {
-        showToast("URL 中缺少 code 或 state 参数", "error");
+        showToast("URL 中缺少 code 或 state 参数，请确认已在弹窗中完成登录", "error");
         return;
       }
       const result = await codexOAuthExchange(code, state);
@@ -952,6 +963,7 @@ export function ProfilePage() {
 
   // avatar
   const [uploadingAvatar, setUploadingAvatar] = useState(false);
+  const [localAvatarPreview, setLocalAvatarPreview] = useState<string | null>(null);
 
   // email
   const [newEmail, setNewEmail] = useState("");
@@ -992,13 +1004,17 @@ export function ProfilePage() {
   };
 
   const handleAvatarUpload = async (file: File) => {
+    const previewUrl = URL.createObjectURL(file);
+    setLocalAvatarPreview(previewUrl);
     setUploadingAvatar(true);
     try {
       await uploadAvatar(file);
       showToast("头像已更新", "success");
     } catch (e: any) {
+      setLocalAvatarPreview(null);
       showToast(e.message || "上传失败", "error");
     } finally {
+      URL.revokeObjectURL(previewUrl);
       setUploadingAvatar(false);
     }
   };
@@ -1075,7 +1091,7 @@ export function ProfilePage() {
           />
           <div className="relative flex items-center gap-5">
             <ProfileAvatar
-              src={user.avatarUrl}
+              src={localAvatarPreview ?? user.avatarUrl}
               name={user.displayName || user.email}
               onUpload={handleAvatarUpload}
               uploading={uploadingAvatar}

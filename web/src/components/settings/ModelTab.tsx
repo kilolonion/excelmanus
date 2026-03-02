@@ -50,6 +50,8 @@ import {
   fetchCodexStatus,
   codexOAuthStart,
   codexOAuthExchange,
+  codexDeviceCodeStart,
+  codexDeviceCodePoll,
   connectCodex,
   disconnectCodex,
   refreshCodexToken,
@@ -58,6 +60,7 @@ import {
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 
 interface ModelSection {
   api_key?: string;
@@ -133,17 +136,92 @@ const FIELD_LABELS: Record<string, string> = {
 const PROVIDER_LOGO_SLUG: Record<string, string> = {
   openai: "openai",
   anthropic: "anthropic",
+  claude: "anthropic",
   gemini: "gemini",
+  google: "gemini",
   deepseek: "deepseek",
   qwen: "qwen",
+  dashscope: "qwen",
+  aliyuncs: "qwen",
+  aliyun: "alibabacloud",
+  alibaba: "alibabacloud",
+  alibabacloud: "alibabacloud",
   zhipu: "zhipu",
+  glm: "zhipu",
   "openai-codex": "openai",
   openrouter: "openrouter",
   kimi: "moonshot",
+  moonshot: "moonshot",
+  x: "x",
+  xai: "x",
+  grok: "x",
+  mistral: "mistral",
+  mistralai: "mistral",
+  tencent: "qq",
+  hunyuan: "qq",
+  qq: "qq",
+  bytedance: "bytedance",
+  doubao: "bytedance",
+  volcengine: "bytedance",
+  ark: "bytedance",
+  meta: "meta",
+  llama: "meta",
+  perplexity: "perplexity",
+  baidu: "baidu",
+  huawei: "huawei",
+  nvidia: "nvidia",
+  huggingface: "huggingface",
+  hf: "huggingface",
+  siliconflow: "siliconcloud",
+  siliconcloud: "siliconcloud",
   minimax: "minimax",
 };
 
-function ProviderLogo({ id }: { id: string }) {
+const PROVIDER_BRAND_COLOR: Record<string, string> = {
+  openai: "#10a37f",
+  "openai-codex": "#10a37f",
+  anthropic: "#d4a574",
+  claude: "#d4a574",
+  gemini: "#4285f4",
+  google: "#4285f4",
+  deepseek: "#4d6bfe",
+  qwen: "#ff6a00",
+  dashscope: "#ff6a00",
+  aliyuncs: "#ff6a00",
+  aliyun: "#ff6a00",
+  alibaba: "#ff6a00",
+  alibabacloud: "#ff6a00",
+  zhipu: "#2563eb",
+  glm: "#2563eb",
+  openrouter: "#7c3aed",
+  kimi: "#7c3aed",
+  moonshot: "#7c3aed",
+  x: "#f28834",
+  xai: "#f28834",
+  grok: "#f28834",
+  mistral: "#fa520f",
+  mistralai: "#fa520f",
+  tencent: "#1ebafc",
+  hunyuan: "#1ebafc",
+  qq: "#1ebafc",
+  bytedance: "#3c8cff",
+  doubao: "#3c8cff",
+  volcengine: "#3c8cff",
+  ark: "#3c8cff",
+  meta: "#0467df",
+  llama: "#0467df",
+  perplexity: "#1fb8cd",
+  baidu: "#2932e1",
+  huawei: "#ff0000",
+  nvidia: "#76b900",
+  huggingface: "#ffd21e",
+  hf: "#ffd21e",
+  siliconflow: "#06b6d4",
+  siliconcloud: "#06b6d4",
+  minimax: "#ec5f27",
+};
+
+function ProviderLogo({ id, color }: { id: string; color?: string }) {
   const slug = PROVIDER_LOGO_SLUG[id];
   if (!slug) return null;
   return (
@@ -152,6 +230,7 @@ function ProviderLogo({ id }: { id: string }) {
       role="img"
       aria-label={id}
       style={{
+        color: color || undefined,
         backgroundColor: "currentColor",
         maskImage: `url(/providers/${slug}.svg)`,
         WebkitMaskImage: `url(/providers/${slug}.svg)`,
@@ -164,6 +243,87 @@ function ProviderLogo({ id }: { id: string }) {
       }}
     />
   );
+}
+
+function withAlpha(hex: string, alphaHex: string): string {
+  if (/^#[0-9a-fA-F]{6}$/.test(hex)) return `${hex}${alphaHex}`;
+  return hex;
+}
+
+function inferProfileProvider(profile: Pick<ProfileEntry, "model" | "base_url" | "model_family" | "protocol">): string | null {
+  const model = (profile.model || "").toLowerCase();
+  const baseUrl = (profile.base_url || "").toLowerCase();
+  const family = (profile.model_family || "").toLowerCase();
+  const protocol = (profile.protocol || "").toLowerCase();
+  const modelPrefix = model.split("/")[0];
+
+  if (model.startsWith("openai-codex/")) return "openai-codex";
+  if (baseUrl.includes("openrouter.ai") || protocol === "openrouter") return "openrouter";
+  if (model.includes("grok") || baseUrl.includes("x.ai") || baseUrl.includes("xai") || family === "xai") return "xai";
+  if (model.includes("moonshot") || model.includes("kimi") || baseUrl.includes("moonshot") || family === "moonshot") return "moonshot";
+  if (model.includes("deepseek") || baseUrl.includes("deepseek") || family === "deepseek") return "deepseek";
+  if (model.includes("mistral") || model.includes("codestral") || model.includes("pixtral") || baseUrl.includes("mistral") || family === "mistral") return "mistral";
+  if (model.includes("claude") || baseUrl.includes("anthropic") || protocol === "anthropic" || family === "claude") return "anthropic";
+  if (model.includes("gemini") || baseUrl.includes("generativelanguage") || baseUrl.includes("googleapis") || protocol === "gemini" || family === "gemini") return "gemini";
+  if (model.includes("llama") || model.includes("meta-llama") || family === "llama" || family === "meta") return "meta";
+  if (model.includes("qwen") || baseUrl.includes("dashscope") || baseUrl.includes("aliyuncs") || family === "qwen") return "qwen";
+  if (baseUrl.includes("alibabacloud") || baseUrl.includes("aliyun") || family === "alibaba" || family === "aliyun") return "alibabacloud";
+  if (model.includes("glm") || baseUrl.includes("bigmodel") || family === "glm" || family === "zhipu") return "zhipu";
+  if (model.includes("hunyuan") || baseUrl.includes("tencent") || family === "hunyuan" || family === "tencent") return "tencent";
+  if (model.includes("doubao") || baseUrl.includes("volces") || baseUrl.includes("volcengine") || baseUrl.includes("ark.cn-beijing") || family === "doubao") return "bytedance";
+  if (model.includes("ernie") || baseUrl.includes("qianfan") || baseUrl.includes("baidu") || family === "baidu") return "baidu";
+  if (model.includes("pangu") || baseUrl.includes("huawei") || family === "huawei") return "huawei";
+  if (model.includes("pplx") || baseUrl.includes("perplexity") || family === "perplexity") return "perplexity";
+  if (model.includes("nvidia") || baseUrl.includes("nvidia") || family === "nvidia") return "nvidia";
+  if (model.startsWith("hf/") || model.includes("huggingface") || baseUrl.includes("huggingface") || family === "huggingface") return "huggingface";
+  if (baseUrl.includes("siliconflow") || baseUrl.includes("siliconcloud") || family === "siliconflow" || family === "siliconcloud") return "siliconflow";
+  if (model.includes("minimax") || baseUrl.includes("minimax") || family === "minimax") return "minimax";
+  if (baseUrl.includes("openai") || family === "gpt" || model.startsWith("gpt-") || model.startsWith("o1") || model.startsWith("o3") || model.startsWith("o4") || model.includes("chatgpt")) return "openai";
+
+  const prefixMap: Record<string, string> = {
+    openai: "openai",
+    anthropic: "anthropic",
+    claude: "anthropic",
+    google: "gemini",
+    gemini: "gemini",
+    deepseek: "deepseek",
+    qwen: "qwen",
+    zhipu: "zhipu",
+    glm: "zhipu",
+    moonshot: "moonshot",
+    kimi: "moonshot",
+    x: "xai",
+    xai: "xai",
+    grok: "xai",
+    mistral: "mistral",
+    mistralai: "mistral",
+    perplexity: "perplexity",
+    baidu: "baidu",
+    huawei: "huawei",
+    nvidia: "nvidia",
+    meta: "meta",
+    llama: "meta",
+    tencent: "tencent",
+    qq: "tencent",
+    bytedance: "bytedance",
+    doubao: "bytedance",
+    volcengine: "bytedance",
+    ark: "bytedance",
+    hf: "huggingface",
+    huggingface: "huggingface",
+    siliconflow: "siliconflow",
+    siliconcloud: "siliconflow",
+    alibaba: "alibabacloud",
+    aliyun: "alibabacloud",
+    alibabacloud: "alibabacloud",
+    minimax: "minimax",
+  };
+  return prefixMap[modelPrefix] || null;
+}
+
+function getProviderBrandColor(provider: string | null): string {
+  if (!provider) return "#6b7280";
+  return PROVIDER_BRAND_COLOR[provider] || "#6b7280";
 }
 
 interface ProviderPreset {
@@ -253,18 +413,6 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     purchaseUrl: "https://open.bigmodel.cn/usercenter/apikeys",
   },
   {
-    id: "openai-codex",
-    label: "OpenAI Codex",
-    icon: "🧩",
-    model: "openai-codex/gpt-5.3-codex-spark",
-    base_url: "https://api.openai.com/v1",
-    protocol: "openai",
-    thinking_mode: "openai_reasoning",
-    model_family: "gpt",
-    description: "订阅登录后可用（无需 API Key）",
-    purchaseUrl: "https://chatgpt.com",
-  },
-  {
     id: "openrouter",
     label: "OpenRouter",
     icon: "🔀",
@@ -292,15 +440,58 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "minimax",
     label: "MiniMax",
     icon: "M",
-    model: "MiniMax-Text-01",
-    base_url: "https://api.minimax.chat/v1",
+    model: "MiniMax-M2.5",
+    base_url: "https://api.minimax.io/v1",
     protocol: "openai",
     thinking_mode: "auto",
     model_family: "minimax",
     description: "MiniMax 海螺",
-    purchaseUrl: "https://platform.minimax.chat/",
+    purchaseUrl: "https://platform.minimax.io/",
   },
 ];
+
+const CODEX_OAUTH_PRESET: ProviderPreset = {
+  id: "openai-codex",
+  label: "OpenAI Codex",
+  icon: "🧩",
+  model: "openai-codex/gpt-5.3-codex-spark",
+  base_url: "https://api.openai.com/v1",
+  protocol: "openai",
+  thinking_mode: "openai_reasoning",
+  model_family: "gpt",
+  description: "订阅 OAuth 登录，无需 API Key",
+  purchaseUrl: "https://chatgpt.com",
+};
+
+interface CodexModelEntry {
+  modelId: string;
+  publicId: string;
+  profileName: string;
+  displayName: string;
+  proOnly: boolean;
+}
+
+const CODEX_MODELS: CodexModelEntry[] = [
+  { modelId: "gpt-5.3-codex-spark", publicId: "openai-codex/gpt-5.3-codex-spark", profileName: "codex-spark", displayName: "Codex Spark", proOnly: true },
+  { modelId: "gpt-5.3-codex", publicId: "openai-codex/gpt-5.3-codex", profileName: "codex-5.3", displayName: "Codex 5.3", proOnly: false },
+  { modelId: "gpt-5.2-codex", publicId: "openai-codex/gpt-5.2-codex", profileName: "codex-5.2", displayName: "Codex 5.2", proOnly: false },
+  { modelId: "gpt-5.1-codex", publicId: "openai-codex/gpt-5.1-codex", profileName: "codex-5.1", displayName: "Codex 5.1", proOnly: false },
+  { modelId: "gpt-5.1-codex-mini", publicId: "openai-codex/gpt-5.1-codex-mini", profileName: "codex-mini", displayName: "Codex Mini", proOnly: false },
+  { modelId: "gpt-5.1-codex-max", publicId: "openai-codex/gpt-5.1-codex-max", profileName: "codex-max", displayName: "Codex Max", proOnly: false },
+  { modelId: "codex-mini-latest", publicId: "openai-codex/codex-mini-latest", profileName: "codex-mini-latest", displayName: "Codex Mini Latest", proOnly: false },
+  { modelId: "gpt-5.2", publicId: "openai-codex/gpt-5.2", profileName: "codex-gpt-5.2", displayName: "GPT-5.2 (Codex)", proOnly: false },
+  { modelId: "gpt-5.1", publicId: "openai-codex/gpt-5.1", profileName: "codex-gpt-5.1", displayName: "GPT-5.1 (Codex)", proOnly: false },
+];
+
+function getAvailableCodexModels(planType?: string): CodexModelEntry[] {
+  const isPro = planType === "pro";
+  return CODEX_MODELS.filter((m) => !m.proOnly || isPro);
+}
+
+function getDefaultCodexModel(planType?: string): CodexModelEntry {
+  const available = getAvailableCodexModels(planType);
+  return available[0];
+}
 
 function isMaskedApiKey(value: string): boolean {
   if (!value) return false;
@@ -370,12 +561,31 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
   const [clearing, setClearing] = useState(false);
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [codexLoading, setCodexLoading] = useState(true);
-  const [codexBusy, setCodexBusy] = useState(false);
-  const [codexNotice, setCodexNotice] = useState("");
   const [codexError, setCodexError] = useState("");
+
+  // OAuth PKCE Browser Flow state
+  const [oauthBusy, setOauthBusy] = useState(false);
   const [oauthState, setOauthState] = useState("");
-  const [callbackUrl, setCallbackUrl] = useState("");
+  const [pasteUrl, setPasteUrl] = useState("");
+  const [oauthMode, setOauthMode] = useState<"popup" | "paste" | null>(null);
+  const popupRef = useRef<Window | null>(null);
+  const popupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Device Code Flow state
+  const [deviceState, setDeviceState] = useState<string | null>(null);
+  const [userCode, setUserCode] = useState("");
+  const [verificationUrl, setVerificationUrl] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Manual paste / fallback
   const [tokenInput, setTokenInput] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [refreshingToken, setRefreshingToken] = useState(false);
+  const [showFallback, setShowFallback] = useState(false);
+  const [showManualPaste, setShowManualPaste] = useState(false);
+  const [codexSelectedModel, setCodexSelectedModel] = useState("");
 
   // 加载当前用户的自定义 LLM 配置
   useEffect(() => {
@@ -398,77 +608,145 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
     return () => { cancelled = true; };
   }, []);
 
+  // ── Codex 状态加载 ──
   useEffect(() => {
     let cancelled = false;
     fetchCodexStatus()
-      .then((data) => {
-        if (!cancelled) setCodexStatus(data);
-      })
-      .catch(() => {
-        if (!cancelled) {
-          setCodexStatus({ status: "disconnected", provider: "openai-codex" });
-        }
-      })
-      .finally(() => {
-        if (!cancelled) setCodexLoading(false);
-      });
+      .then((data) => { if (!cancelled) setCodexStatus(data); })
+      .catch(() => { if (!cancelled) setCodexStatus({ status: "disconnected", provider: "openai-codex" }); })
+      .finally(() => { if (!cancelled) setCodexLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  // 清理轮询和 popup 监听
+  useEffect(() => {
     return () => {
-      cancelled = true;
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (popupTimerRef.current) clearInterval(popupTimerRef.current);
     };
   }, []);
 
-  const applyCodexPreset = useCallback(() => {
-    setDraft((d) => ({
-      ...d,
-      model: "openai-codex/gpt-5.3-codex-spark",
-      base_url: "https://api.openai.com/v1",
-    }));
+  // 监听 popup postMessage 回调 (Path A - popup 自动模式)
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== "codex-oauth-callback") return;
+      if (popupTimerRef.current) {
+        clearInterval(popupTimerRef.current);
+        popupTimerRef.current = null;
+      }
+      if (event.data.error) {
+        setOauthBusy(false);
+        setOauthMode(null);
+        setCodexError(event.data.error);
+        return;
+      }
+      const { code, state: cbState } = event.data;
+      if (code && cbState) {
+        codexOAuthExchange(code, cbState)
+          .then((result) => {
+            setCodexStatus({
+              status: "connected",
+              provider: "openai-codex",
+              account_id: result.account_id,
+              plan_type: result.plan_type,
+              expires_at: result.expires_at,
+              is_active: true,
+              has_refresh_token: true,
+            });
+          })
+          .catch((e: unknown) => {
+            setCodexError(e instanceof Error ? e.message : "OAuth 交换失败");
+          })
+          .finally(() => {
+            setOauthBusy(false);
+            setOauthMode(null);
+            setOauthState("");
+          });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
   }, []);
 
-  const parseCodexCallback = useCallback((raw: string) => {
-    const text = raw.trim();
-    if (!text) return null;
-    try {
-      const url = text.startsWith("http")
-        ? new URL(text)
-        : new URL(text, window.location.origin);
-      const code = url.searchParams.get("code") || "";
-      const state = url.searchParams.get("state") || oauthState;
-      if (!code || !state) return null;
-      return { code, state };
-    } catch {
-      return null;
+  // 当连接状态变化时，设置默认选中的 Codex 模型
+  useEffect(() => {
+    if (codexStatus?.status === "connected" && !codexSelectedModel) {
+      const def = getDefaultCodexModel(codexStatus.plan_type);
+      setCodexSelectedModel(def.publicId);
     }
-  }, [oauthState]);
+  }, [codexStatus, codexSelectedModel]);
 
-  const handleCodexOAuthStart = useCallback(async () => {
-    setCodexBusy(true);
+  const applyCodexPreset = useCallback(() => {
+    const model = codexSelectedModel || getDefaultCodexModel(codexStatus?.plan_type).publicId;
+    setDraft((d) => ({
+      ...d,
+      model,
+      base_url: "https://api.openai.com/v1",
+    }));
+  }, [codexSelectedModel, codexStatus?.plan_type]);
+
+  // ── OAuth PKCE 浏览器流程 ──
+  const handleOAuthLogin = useCallback(async () => {
+    if (oauthBusy) return;
+    setOauthBusy(true);
+    setPasteUrl("");
     setCodexError("");
-    setCodexNotice("");
     try {
-      const data = await codexOAuthStart();
+      const isCliLocalCallback =
+        ["localhost", "127.0.0.1"].includes(window.location.hostname)
+        && window.location.port === "1455";
+      const redirectUri = isCliLocalCallback
+        ? `${window.location.origin}/auth/callback`
+        : undefined;
+      const data = await codexOAuthStart(redirectUri);
       setOauthState(data.state);
-      applyCodexPreset();
-      window.open(data.authorize_url, "_blank", "noopener,noreferrer");
-      setCodexNotice("已打开授权页。授权后请将回调 URL 粘贴到下方完成连接。");
+      setOauthMode(data.mode);
+      const w = 600, h = 700;
+      const left = window.screenX + (window.outerWidth - w) / 2;
+      const top = window.screenY + (window.outerHeight - h) / 2;
+      const popup = window.open(
+        data.authorize_url,
+        "codex-oauth",
+        `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`,
+      );
+      popupRef.current = popup;
+      if (data.mode === "popup" && popup) {
+        popupTimerRef.current = setInterval(() => {
+          if (popup.closed) {
+            if (popupTimerRef.current) {
+              clearInterval(popupTimerRef.current);
+              popupTimerRef.current = null;
+            }
+            setTimeout(() => {
+              setOauthBusy((busy) => {
+                if (busy) { setOauthMode(null); setOauthState(""); return false; }
+                return busy;
+              });
+            }, 2000);
+          }
+        }, 500);
+      }
+      // paste 模式: popup 重定向到 localhost 后失败，用户手动粘贴 URL
     } catch (e) {
-      setCodexError(e instanceof Error ? e.message : "发起 Codex 授权失败");
-    } finally {
-      setCodexBusy(false);
+      setOauthBusy(false);
+      setOauthMode(null);
+      setCodexError(e instanceof Error ? e.message : "无法发起 OAuth 登录");
     }
-  }, [applyCodexPreset]);
+  }, [oauthBusy]);
 
-  const handleCodexExchange = useCallback(async () => {
-    const parsed = parseCodexCallback(callbackUrl);
-    if (!parsed) {
-      setCodexError("回调 URL 无效，请确认包含 code 和 state 参数");
-      return;
-    }
-    setCodexBusy(true);
+  const handlePasteUrlSubmit = useCallback(async () => {
+    if (!pasteUrl.trim() || !oauthState) return;
     setCodexError("");
-    setCodexNotice("");
     try {
-      const result = await codexOAuthExchange(parsed.code, parsed.state);
+      const url = new URL(pasteUrl.trim());
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      if (!code || !state) {
+        setCodexError("URL 中缺少 code 或 state 参数");
+        return;
+      }
+      const result = await codexOAuthExchange(code, state);
       setCodexStatus({
         status: "connected",
         provider: "openai-codex",
@@ -478,25 +756,77 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         is_active: true,
         has_refresh_token: true,
       });
-      applyCodexPreset();
-      setCallbackUrl("");
-      setCodexNotice("Codex 已连接。点击下方“保存”即可启用该模型。");
     } catch (e) {
-      setCodexError(e instanceof Error ? e.message : "Codex OAuth 交换失败");
+      setCodexError(e instanceof Error ? e.message : "连接失败");
     } finally {
-      setCodexBusy(false);
+      setOauthBusy(false);
+      setOauthMode(null);
+      setOauthState("");
+      setPasteUrl("");
     }
-  }, [applyCodexPreset, callbackUrl, parseCodexCallback]);
+  }, [pasteUrl, oauthState]);
 
+  const cancelOAuth = useCallback(() => {
+    if (popupRef.current && !popupRef.current.closed) popupRef.current.close();
+    if (popupTimerRef.current) { clearInterval(popupTimerRef.current); popupTimerRef.current = null; }
+    setOauthBusy(false);
+    setOauthMode(null);
+    setOauthState("");
+    setPasteUrl("");
+    setCodexError("");
+  }, []);
+
+  // ── Device Code Flow ──
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setAuthorizing(false);
+    setDeviceState(null);
+    setUserCode("");
+    setVerificationUrl("");
+  }, []);
+
+  const handleDeviceCodeAuthorize = useCallback(async () => {
+    if (authorizing) return;
+    setAuthorizing(true);
+    setCodexError("");
+    try {
+      const data = await codexDeviceCodeStart();
+      setUserCode(data.user_code);
+      setVerificationUrl(data.verification_url);
+      setDeviceState(data.state);
+      const interval = Math.max(data.interval, 3) * 1000;
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await codexDeviceCodePoll(data.state);
+          if (result.status === "connected") {
+            stopPolling();
+            // 重新获取状态
+            fetchCodexStatus()
+              .then(setCodexStatus)
+              .catch(() => {});
+          }
+        } catch {
+          // 轮询错误不中断
+        }
+      }, interval);
+      setTimeout(() => {
+        if (pollRef.current) {
+          stopPolling();
+          setCodexError("设备码已过期，请重试");
+        }
+      }, 15 * 60 * 1000);
+    } catch (e) {
+      setAuthorizing(false);
+      setCodexError(e instanceof Error ? e.message : "无法发起设备码登录");
+    }
+  }, [authorizing, stopPolling]);
+
+  // ── Manual Token Paste ──
   const handleCodexTokenConnect = useCallback(async () => {
     const raw = tokenInput.trim();
-    if (!raw) {
-      setCodexError("请先粘贴 auth.json 内容");
-      return;
-    }
-    setCodexBusy(true);
+    if (!raw || connecting) return;
+    setConnecting(true);
     setCodexError("");
-    setCodexNotice("");
     try {
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       const result = await connectCodex(parsed);
@@ -509,9 +839,8 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         is_active: true,
         has_refresh_token: true,
       });
-      applyCodexPreset();
       setTokenInput("");
-      setCodexNotice("Codex 已连接。点击下方“保存”即可启用该模型。");
+      setShowManualPaste(false);
     } catch (e) {
       if (e instanceof SyntaxError) {
         setCodexError("JSON 格式无效，请粘贴完整 auth.json 内容");
@@ -519,42 +848,40 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         setCodexError(e instanceof Error ? e.message : "连接 Codex 失败");
       }
     } finally {
-      setCodexBusy(false);
+      setConnecting(false);
     }
-  }, [applyCodexPreset, tokenInput]);
+  }, [tokenInput, connecting]);
 
   const handleCodexDisconnect = useCallback(async () => {
-    setCodexBusy(true);
+    if (disconnecting) return;
+    setDisconnecting(true);
     setCodexError("");
-    setCodexNotice("");
     try {
       await disconnectCodex();
       setCodexStatus({ status: "disconnected", provider: "openai-codex" });
-      setCodexNotice("已断开 Codex 连接");
     } catch (e) {
       setCodexError(e instanceof Error ? e.message : "断开 Codex 失败");
     } finally {
-      setCodexBusy(false);
+      setDisconnecting(false);
     }
-  }, []);
+  }, [disconnecting]);
 
   const handleCodexRefresh = useCallback(async () => {
-    setCodexBusy(true);
+    if (refreshingToken) return;
+    setRefreshingToken(true);
     setCodexError("");
-    setCodexNotice("");
     try {
       const result = await refreshCodexToken();
       setCodexStatus((prev) => {
         if (!prev) return prev;
         return { ...prev, status: "connected", expires_at: result.expires_at };
       });
-      setCodexNotice("Codex token 已刷新");
     } catch (e) {
       setCodexError(e instanceof Error ? e.message : "刷新 Codex token 失败");
     } finally {
-      setCodexBusy(false);
+      setRefreshingToken(false);
     }
-  }, []);
+  }, [refreshingToken]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -614,7 +941,8 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
           配置您自己的 API Key 后，对话将使用您的 API 额度。留空则使用系统默认配置。
         </p>
 
-        <div className="rounded-md border border-border/70 bg-muted/20 p-3 mb-3 space-y-2">
+        <div className="rounded-md border border-border/70 bg-muted/20 p-3 mb-3 space-y-2.5">
+          {/* Header */}
           <div className="flex items-center gap-2">
             <ProviderLogo id="openai-codex" />
             <p className="text-xs font-semibold">OpenAI Codex 订阅登录</p>
@@ -628,66 +956,261 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
                     : "未连接"}
             </Badge>
           </div>
-          <p className="text-[11px] text-muted-foreground leading-relaxed">
-            使用 ChatGPT Plus/Pro 订阅，无需 API Key。连接后建议将 Model ID 设置为
-            <code className="mx-1 px-1 py-0.5 rounded bg-background font-mono">openai-codex/gpt-5.3-codex-spark</code>
-            并点击保存。
-          </p>
-          <div className="flex flex-wrap gap-1.5">
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexOAuthStart} disabled={codexBusy}>
-              {codexBusy ? <Loader2 className="h-3 w-3 mr-1 animate-spin" /> : null}
-              浏览器授权
-            </Button>
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={applyCodexPreset}>
-              预填 Codex 模型
-            </Button>
-            {codexStatus?.status === "connected" && (
-              <>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexRefresh} disabled={codexBusy}>
-                  刷新 Token
-                </Button>
-                <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexDisconnect} disabled={codexBusy}>
-                  断开连接
-                </Button>
-              </>
-            )}
-          </div>
 
-          <div className="space-y-1.5">
-            <label className="text-[11px] text-muted-foreground">授权后粘贴回调 URL（含 code 与 state）</label>
-            <div className="flex flex-col sm:flex-row gap-1.5">
-              <Input
-                value={callbackUrl}
-                onChange={(e) => setCallbackUrl(e.target.value)}
-                className="h-8 text-xs font-mono"
-                placeholder="http://localhost:1455/auth/callback?code=...&state=..."
-              />
-              <Button size="sm" variant="outline" className="h-8 text-xs" onClick={handleCodexExchange} disabled={codexBusy}>
-                完成授权
-              </Button>
+          {codexLoading && (
+            <div className="flex items-center justify-center py-3">
+              <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
             </div>
-          </div>
+          )}
 
-          <div className="space-y-1.5">
-            <label className="text-[11px] text-muted-foreground">或粘贴 ~/.codex/auth.json 内容</label>
-            <textarea
-              value={tokenInput}
-              onChange={(e) => setTokenInput(e.target.value)}
-              className="w-full h-20 rounded-md border border-input bg-background px-2 py-1.5 text-[11px] font-mono"
-              placeholder='{"token":"...","refresh_token":"..."}'
-            />
-            <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexTokenConnect} disabled={codexBusy}>
-              粘贴连接
-            </Button>
-          </div>
+          {/* ── Connected / Expired state ── */}
+          {!codexLoading && (codexStatus?.status === "connected" || codexStatus?.status === "expired") && (
+            <>
+              <div className="flex items-center gap-2 mb-1">
+                <div className={`h-2 w-2 rounded-full ${codexStatus.status === "expired" ? "bg-amber-500" : "bg-green-500"}`} />
+                <span className="text-xs font-medium">
+                  {codexStatus.status === "expired" ? "Token 已过期" : "已连接"}
+                </span>
+              </div>
+              <div className="grid grid-cols-2 gap-y-1 text-[11px]">
+                {codexStatus.account_id && (
+                  <>
+                    <span className="text-muted-foreground">账户</span>
+                    <span className="font-mono truncate">{codexStatus.account_id}</span>
+                  </>
+                )}
+                {codexStatus.plan_type && (
+                  <>
+                    <span className="text-muted-foreground">订阅</span>
+                    <span className="capitalize">{codexStatus.plan_type}</span>
+                  </>
+                )}
+                {codexStatus.expires_at && (
+                  <>
+                    <span className="text-muted-foreground">有效期至</span>
+                    <span className="text-[11px]">{new Date(codexStatus.expires_at).toLocaleString("zh-CN")}</span>
+                  </>
+                )}
+              </div>
 
-          {codexNotice ? <p className="text-[11px]" style={{ color: "var(--em-primary)" }}>{codexNotice}</p> : null}
+              {/* 模型选择器 + 应用 */}
+              <div className="space-y-1.5">
+                <label className="text-[10px] text-muted-foreground">选择 Codex 模型</label>
+                <select
+                  value={codexSelectedModel}
+                  onChange={(e) => setCodexSelectedModel(e.target.value)}
+                  className="w-full h-7 rounded-md border border-input bg-background px-2 text-[11px] font-mono outline-none focus:ring-1 focus:ring-[var(--em-primary)]"
+                >
+                  {getAvailableCodexModels(codexStatus.plan_type).map((m) => (
+                    <option key={m.publicId} value={m.publicId}>
+                      {m.displayName} ({m.modelId}){m.proOnly ? " ⭐ Pro" : ""}
+                    </option>
+                  ))}
+                </select>
+                {codexStatus.plan_type === "pro" && (
+                  <p className="text-[10px] text-muted-foreground">
+                    <Zap className="inline h-3 w-3 text-amber-500 mr-0.5" />
+                    Pro 订阅：Spark 模型可用
+                  </p>
+                )}
+                <Button
+                  size="sm"
+                  variant="outline"
+                  className="h-7 text-xs w-full gap-1"
+                  onClick={applyCodexPreset}
+                >
+                  应用所选模型
+                </Button>
+              </div>
+
+              <div className="flex gap-1.5 flex-wrap">
+                {codexStatus.has_refresh_token && (
+                  <Button size="sm" variant="outline" className="h-7 text-xs" onClick={handleCodexRefresh} disabled={refreshingToken}>
+                    {refreshingToken ? <Loader2 className="h-3 w-3 animate-spin" /> : "刷新 Token"}
+                  </Button>
+                )}
+                <Button size="sm" variant="outline" className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950" onClick={handleCodexDisconnect} disabled={disconnecting}>
+                  {disconnecting ? <Loader2 className="h-3 w-3 animate-spin" /> : "断开连接"}
+                </Button>
+              </div>
+            </>
+          )}
+
+          {/* ── Not connected state ── */}
+          {!codexLoading && codexStatus?.status !== "connected" && codexStatus?.status !== "expired" && (
+            <>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                使用 ChatGPT Plus/Pro 订阅访问 Codex 模型，无需 API Key。
+              </p>
+
+              {/* OAuth PKCE 浏览器登录（主要方式） */}
+              {!oauthBusy ? (
+                <Button
+                  size="sm"
+                  className="w-full h-8 text-xs text-white gap-1.5 font-medium"
+                  style={{ backgroundColor: "var(--em-primary)" }}
+                  onClick={handleOAuthLogin}
+                  disabled={authorizing}
+                >
+                  <ExternalLink className="h-3 w-3" />
+                  使用 ChatGPT 账号登录
+                </Button>
+              ) : (
+                <div className="space-y-2.5 rounded-md border border-border bg-muted/30 p-3">
+                  {oauthMode === "popup" ? (
+                    <div className="text-center space-y-1.5">
+                      <Loader2 className="h-5 w-5 mx-auto animate-spin text-muted-foreground" />
+                      <p className="text-[11px] text-muted-foreground">请在弹出窗口中完成 OpenAI 登录...</p>
+                      <p className="text-[10px] text-muted-foreground">授权完成后此页面会自动更新</p>
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      <p className="text-[11px] text-muted-foreground leading-relaxed">
+                        在弹出窗口中完成 OpenAI 登录后，请复制地址栏中的完整 URL 粘贴到下方：
+                      </p>
+                      <p className="text-[10px] text-amber-600 dark:text-amber-400">
+                        提示：登录完成后页面可能显示无法访问，这是正常的，请直接复制地址栏 URL
+                      </p>
+                      <Input
+                        value={pasteUrl}
+                        onChange={(e) => setPasteUrl(e.target.value)}
+                        className="h-8 text-xs font-mono"
+                        placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+                        autoFocus
+                      />
+                      <Button
+                        size="sm"
+                        className="w-full h-7 text-xs text-white"
+                        style={{ backgroundColor: "var(--em-primary)" }}
+                        onClick={handlePasteUrlSubmit}
+                        disabled={!pasteUrl.trim()}
+                      >
+                        确认连接
+                      </Button>
+                    </div>
+                  )}
+                  <div className="flex justify-center">
+                    <button
+                      type="button"
+                      className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      onClick={cancelOAuth}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* 备选连接方式（折叠） */}
+              <div className="pt-0.5">
+                <button
+                  type="button"
+                  onClick={() => setShowFallback(!showFallback)}
+                  className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                >
+                  {showFallback ? "▾ 收起备选方式" : "▸ 其他连接方式"}
+                </button>
+                {showFallback && (
+                  <div className="mt-2 space-y-3">
+                    {/* Device Code 流程 */}
+                    <div className="space-y-1.5">
+                      <p className="text-[11px] font-medium text-muted-foreground">设备码登录</p>
+                      {!authorizing ? (
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="w-full h-7 text-xs"
+                          onClick={handleDeviceCodeAuthorize}
+                          disabled={oauthBusy}
+                        >
+                          使用设备码登录
+                        </Button>
+                      ) : (
+                        <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2.5">
+                          <div className="text-center space-y-1.5">
+                            <p className="text-[11px] text-muted-foreground">请在浏览器中打开以下链接并输入验证码：</p>
+                            <a
+                              href={verificationUrl}
+                              target="_blank"
+                              rel="noopener noreferrer"
+                              className="text-[11px] font-medium underline"
+                              style={{ color: "var(--em-primary)" }}
+                            >
+                              {verificationUrl}
+                            </a>
+                            <div className="flex items-center justify-center gap-2 pt-1">
+                              <span
+                                className="font-mono text-lg font-bold tracking-widest select-all px-2.5 py-1 rounded-md border border-border bg-background cursor-pointer"
+                                title="点击复制"
+                                onClick={() => navigator.clipboard.writeText(userCode)}
+                              >
+                                {userCode}
+                              </span>
+                            </div>
+                            <p className="text-[10px] text-muted-foreground">点击验证码可复制</p>
+                          </div>
+                          <div className="flex items-center justify-center gap-2">
+                            <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                            <span className="text-[11px] text-muted-foreground">等待授权中...</span>
+                            <button
+                              type="button"
+                              className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                              onClick={stopPolling}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 手动粘贴 Token */}
+                    <div className="space-y-1.5">
+                      <button
+                        type="button"
+                        onClick={() => setShowManualPaste(!showManualPaste)}
+                        className="text-[11px] text-muted-foreground hover:text-foreground transition-colors"
+                      >
+                        {showManualPaste ? "▾ 收起手动粘贴" : "▸ 手动粘贴 Token"}
+                      </button>
+                      {showManualPaste && (
+                        <div className="mt-1.5 space-y-1.5">
+                          <div className="text-[11px] text-muted-foreground space-y-0.5">
+                            <p>1. 在终端运行 <code className="px-1 py-0.5 rounded bg-background font-mono">codex login</code></p>
+                            <p>2. 复制 <code className="px-1 py-0.5 rounded bg-background font-mono">~/.codex/auth.json</code> 内容</p>
+                            <p>3. 粘贴到下方输入框</p>
+                          </div>
+                          <textarea
+                            value={tokenInput}
+                            onChange={(e) => setTokenInput(e.target.value)}
+                            className="w-full h-16 rounded-md border border-input bg-background px-2 py-1.5 text-[11px] font-mono resize-none"
+                            placeholder='{"token": "eyJ...", "refresh_token": "rt_...", ...}'
+                          />
+                          <Button
+                            size="sm"
+                            variant="outline"
+                            className="h-7 text-xs"
+                            onClick={handleCodexTokenConnect}
+                            disabled={connecting || !tokenInput.trim()}
+                          >
+                            {connecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                            粘贴连接
+                          </Button>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </>
+          )}
+
           {codexError ? <p className="text-[11px] text-destructive">{codexError}</p> : null}
         </div>
 
         {/* Provider presets for quick fill */}
         <div className="mb-3">
-          <p className="text-[11px] text-muted-foreground mb-1.5">常见提供方（点击预填）</p>
+          <p className="text-[11px] text-muted-foreground mb-1.5">常见 API Key 提供方（点击预填）</p>
           <div className="flex flex-wrap gap-1.5">
             {PROVIDER_PRESETS.map((preset) => {
               const isActive = draft.model === preset.model && draft.base_url === preset.base_url;
@@ -825,6 +1348,457 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
   );
 }
 
+// ── 管理员 Codex OAuth 专用卡片 ─────────────────────────────
+
+function CodexOAuthAdminCard({
+  onProfileCreated,
+  existingProfileNames,
+}: {
+  onProfileCreated: () => void;
+  existingProfileNames: string[];
+}) {
+  const [status, setStatus] = useState<CodexStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+
+  // OAuth PKCE
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [oauthState, setOauthState] = useState("");
+  const [pasteUrl, setPasteUrl] = useState("");
+  const [oauthMode, setOauthMode] = useState<"popup" | "paste" | null>(null);
+  const popupRef = useRef<Window | null>(null);
+  const popupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Device Code
+  const [userCode, setUserCode] = useState("");
+  const [verificationUrl, setVerificationUrl] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Manual paste
+  const [tokenInput, setTokenInput] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [showFallback, setShowFallback] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+
+  // Disconnect / Refresh
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Multi-model profile management
+  const [addingModel, setAddingModel] = useState<string | null>(null);
+  const [removingModel, setRemovingModel] = useState<string | null>(null);
+  const [codexModelsExpanded, setCodexModelsExpanded] = useState(false);
+
+  // Build a Set of existing codex profile names for quick lookup
+  const existingCodexProfiles = new Set(
+    existingProfileNames.filter((n) => CODEX_MODELS.some((m) => m.profileName === n)),
+  );
+  // Also check legacy "codex-oauth" name
+  const hasLegacyCodexProfile = existingProfileNames.includes("codex-oauth");
+
+  useEffect(() => {
+    let cancelled = false;
+    fetchCodexStatus()
+      .then((data) => { if (!cancelled) setStatus(data); })
+      .catch(() => { if (!cancelled) setStatus({ status: "disconnected", provider: "openai-codex" }); })
+      .finally(() => { if (!cancelled) setLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (popupTimerRef.current) clearInterval(popupTimerRef.current);
+    };
+  }, []);
+
+  // postMessage listener for popup auto-callback
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== "codex-oauth-callback") return;
+      if (popupTimerRef.current) { clearInterval(popupTimerRef.current); popupTimerRef.current = null; }
+      if (event.data.error) {
+        setOauthBusy(false); setOauthMode(null); setError(event.data.error);
+        return;
+      }
+      const { code, state: cbState } = event.data;
+      if (code && cbState) {
+        codexOAuthExchange(code, cbState)
+          .then((result) => {
+            setStatus({
+              status: "connected", provider: "openai-codex",
+              account_id: result.account_id, plan_type: result.plan_type,
+              expires_at: result.expires_at, is_active: true, has_refresh_token: true,
+            });
+          })
+          .catch((e: unknown) => { setError(e instanceof Error ? e.message : "OAuth 交换失败"); })
+          .finally(() => { setOauthBusy(false); setOauthMode(null); setOauthState(""); });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, []);
+
+  const handleOAuthLogin = useCallback(async () => {
+    if (oauthBusy) return;
+    setOauthBusy(true); setPasteUrl(""); setError("");
+    try {
+      const isLocal = ["localhost", "127.0.0.1"].includes(window.location.hostname) && window.location.port === "1455";
+      const redirectUri = isLocal ? `${window.location.origin}/auth/callback` : undefined;
+      const data = await codexOAuthStart(redirectUri);
+      setOauthState(data.state); setOauthMode(data.mode);
+      const w = 600, h = 700;
+      const left = window.screenX + (window.outerWidth - w) / 2;
+      const top = window.screenY + (window.outerHeight - h) / 2;
+      const popup = window.open(data.authorize_url, "codex-oauth", `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`);
+      popupRef.current = popup;
+      if (data.mode === "popup" && popup) {
+        popupTimerRef.current = setInterval(() => {
+          if (popup.closed) {
+            if (popupTimerRef.current) { clearInterval(popupTimerRef.current); popupTimerRef.current = null; }
+            setTimeout(() => { setOauthBusy((b) => { if (b) { setOauthMode(null); setOauthState(""); return false; } return b; }); }, 2000);
+          }
+        }, 500);
+      }
+    } catch (e) {
+      setOauthBusy(false); setOauthMode(null);
+      setError(e instanceof Error ? e.message : "无法发起 OAuth 登录");
+    }
+  }, [oauthBusy]);
+
+  const handlePasteUrlSubmit = useCallback(async () => {
+    if (!pasteUrl.trim() || !oauthState) return;
+    setError("");
+    try {
+      const url = new URL(pasteUrl.trim());
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      if (!code || !state) { setError("URL 中缺少 code 或 state 参数"); return; }
+      const result = await codexOAuthExchange(code, state);
+      setStatus({ status: "connected", provider: "openai-codex", account_id: result.account_id, plan_type: result.plan_type, expires_at: result.expires_at, is_active: true, has_refresh_token: true });
+    } catch (e) { setError(e instanceof Error ? e.message : "连接失败"); }
+    finally { setOauthBusy(false); setOauthMode(null); setOauthState(""); setPasteUrl(""); }
+  }, [pasteUrl, oauthState]);
+
+  const cancelOAuth = useCallback(() => {
+    if (popupRef.current && !popupRef.current.closed) popupRef.current.close();
+    if (popupTimerRef.current) { clearInterval(popupTimerRef.current); popupTimerRef.current = null; }
+    setOauthBusy(false); setOauthMode(null); setOauthState(""); setPasteUrl(""); setError("");
+  }, []);
+
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    setAuthorizing(false); setUserCode(""); setVerificationUrl("");
+  }, []);
+
+  const handleDeviceCode = useCallback(async () => {
+    if (authorizing) return;
+    setAuthorizing(true); setError("");
+    try {
+      const data = await codexDeviceCodeStart();
+      setUserCode(data.user_code); setVerificationUrl(data.verification_url);
+      const interval = Math.max(data.interval, 3) * 1000;
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await codexDeviceCodePoll(data.state);
+          if (result.status === "connected") {
+            stopPolling();
+            fetchCodexStatus().then(setStatus).catch(() => {});
+          }
+        } catch { /* 轮询错误不中断 */ }
+      }, interval);
+      setTimeout(() => { if (pollRef.current) { stopPolling(); setError("设备码已过期，请重试"); } }, 15 * 60 * 1000);
+    } catch (e) { setAuthorizing(false); setError(e instanceof Error ? e.message : "无法发起设备码登录"); }
+  }, [authorizing, stopPolling]);
+
+  const handleManualConnect = useCallback(async () => {
+    if (!tokenInput.trim() || connecting) return;
+    setConnecting(true); setError("");
+    try {
+      const parsed = JSON.parse(tokenInput.trim());
+      const result = await connectCodex(parsed);
+      setStatus({ status: "connected", provider: "openai-codex", account_id: result.account_id, plan_type: result.plan_type, expires_at: result.expires_at, is_active: true, has_refresh_token: true });
+      setTokenInput(""); setShowManual(false);
+    } catch (e) {
+      setError(e instanceof SyntaxError ? "JSON 格式无效" : (e instanceof Error ? e.message : "连接失败"));
+    } finally { setConnecting(false); }
+  }, [tokenInput, connecting]);
+
+  const handleDisconnect = useCallback(async () => {
+    if (disconnecting) return;
+    setDisconnecting(true); setError("");
+    try { await disconnectCodex(); setStatus({ status: "disconnected", provider: "openai-codex" }); }
+    catch (e) { setError(e instanceof Error ? e.message : "断开失败"); }
+    finally { setDisconnecting(false); }
+  }, [disconnecting]);
+
+  const handleRefresh = useCallback(async () => {
+    if (refreshing) return;
+    setRefreshing(true); setError("");
+    try {
+      const result = await refreshCodexToken();
+      setStatus((prev) => prev ? { ...prev, status: "connected", expires_at: result.expires_at } : prev);
+    } catch (e) { setError(e instanceof Error ? e.message : "刷新失败"); }
+    finally { setRefreshing(false); }
+  }, [refreshing]);
+
+  const handleAddCodexModel = useCallback(async (entry: CodexModelEntry) => {
+    setAddingModel(entry.profileName); setError("");
+    try {
+      await apiPost("/config/models/profiles", {
+        name: entry.profileName,
+        model: entry.publicId,
+        api_key: "",
+        base_url: CODEX_OAUTH_PRESET.base_url,
+        description: `${entry.displayName} — OAuth 登录（无需 API Key）`,
+        protocol: CODEX_OAUTH_PRESET.protocol,
+        thinking_mode: CODEX_OAUTH_PRESET.thinking_mode,
+        model_family: CODEX_OAUTH_PRESET.model_family,
+        custom_extra_body: "",
+        custom_extra_headers: "",
+      }, { direct: true });
+      onProfileCreated();
+    } catch (e) { setError(e instanceof Error ? e.message : "创建档案失败"); }
+    finally { setAddingModel(null); }
+  }, [onProfileCreated]);
+
+  const handleRemoveCodexModel = useCallback(async (profileName: string) => {
+    setRemovingModel(profileName); setError("");
+    try {
+      await apiDelete(`/config/models/profiles/${profileName}`, { direct: true });
+      onProfileCreated();
+    } catch (e) { setError(e instanceof Error ? e.message : "删除档案失败"); }
+    finally { setRemovingModel(null); }
+  }, [onProfileCreated]);
+
+  const isConnected = status?.status === "connected";
+  const isExpired = status?.status === "expired";
+
+  return (
+    <div
+      className={`rounded-lg border px-2.5 py-2.5 space-y-2 ${
+        isConnected
+          ? "border-green-500/40 bg-green-500/5"
+          : "border-[var(--em-primary)]/30 bg-[var(--em-primary)]/5"
+      }`}
+    >
+      {/* Header */}
+      <div className="flex items-center gap-1.5">
+        <ProviderLogo id={CODEX_OAUTH_PRESET.id} />
+        <p className="text-xs font-semibold">GPT Codex 订阅登录</p>
+        <Badge variant="secondary" className="text-[10px] ml-auto">
+          {loading ? "检测中" : isConnected ? "已连接" : isExpired ? "已过期" : "未连接"}
+        </Badge>
+      </div>
+
+      {loading && (
+        <div className="flex items-center justify-center py-2">
+          <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />
+        </div>
+      )}
+
+      {/* ── Connected / Expired ── */}
+      {!loading && (isConnected || isExpired) && (
+        <>
+          <div className="flex items-center gap-2">
+            <div className={`h-2 w-2 rounded-full ${isExpired ? "bg-amber-500" : "bg-green-500"}`} />
+            <span className="text-[11px] font-medium">{isExpired ? "Token 已过期" : "已连接"}</span>
+          </div>
+          <div className="grid grid-cols-2 gap-y-1 text-[11px]">
+            {status?.account_id && (<><span className="text-muted-foreground">账户</span><span className="font-mono truncate">{status.account_id}</span></>)}
+            {status?.plan_type && (<><span className="text-muted-foreground">订阅</span><span className="capitalize">{status.plan_type}</span></>)}
+            {status?.expires_at && (<><span className="text-muted-foreground">有效期至</span><span>{new Date(status.expires_at).toLocaleString("zh-CN")}</span></>)}
+          </div>
+
+          {/* 模型列表 — 多模型添加 */}
+          <div className="space-y-1">
+            <button
+              type="button"
+              className="w-full flex items-center gap-1 text-left rounded-md border border-border/60 px-2 py-1 hover:bg-muted/40 transition-colors"
+              onClick={() => setCodexModelsExpanded((v) => !v)}
+            >
+              {codexModelsExpanded ? (
+                <ChevronDown className="h-3 w-3 text-muted-foreground" />
+              ) : (
+                <ChevronRight className="h-3 w-3 text-muted-foreground" />
+              )}
+              <span className="text-[10px] text-muted-foreground">可用 Codex 模型（点击展开）</span>
+              <Badge variant="secondary" className="text-[9px] ml-auto">
+                {existingCodexProfiles.size}/{CODEX_MODELS.length}
+              </Badge>
+            </button>
+            {codexModelsExpanded && (
+              <>
+                <p className="text-[10px] text-muted-foreground">点击添加/移除</p>
+                <div className="space-y-1">
+                  {CODEX_MODELS.map((m) => {
+                    const isProLocked = m.proOnly && status?.plan_type !== "pro";
+                    const isAdded = existingCodexProfiles.has(m.profileName);
+                    const isBusy = addingModel === m.profileName || removingModel === m.profileName;
+                    return (
+                      <div
+                        key={m.profileName}
+                        className={`flex items-center gap-2 rounded-md border px-2 py-1 text-[11px] transition-colors ${
+                          isProLocked
+                            ? "border-border/50 bg-muted/30 opacity-50"
+                            : isAdded
+                              ? "border-green-500/40 bg-green-500/5"
+                              : "border-border hover:border-[var(--em-primary)]/40"
+                        }`}
+                      >
+                        <span className="font-medium truncate min-w-0 flex-1">{m.displayName}</span>
+                        <code className="text-[9px] font-mono text-muted-foreground hidden sm:inline truncate max-w-[30%]">{m.modelId}</code>
+                        {m.proOnly && <Badge variant="secondary" className="text-[9px] shrink-0">Pro</Badge>}
+                        {isProLocked ? (
+                          <Lock className="h-3 w-3 text-muted-foreground shrink-0" />
+                        ) : isAdded ? (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-5 px-1.5 text-[10px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950 shrink-0"
+                            onClick={() => handleRemoveCodexModel(m.profileName)}
+                            disabled={isBusy}
+                          >
+                            {isBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "移除"}
+                          </Button>
+                        ) : (
+                          <Button
+                            size="sm"
+                            variant="ghost"
+                            className="h-5 px-1.5 text-[10px] shrink-0"
+                            style={{ color: "var(--em-primary)" }}
+                            onClick={() => handleAddCodexModel(m)}
+                            disabled={isBusy}
+                          >
+                            {isBusy ? <Loader2 className="h-3 w-3 animate-spin" /> : "添加"}
+                          </Button>
+                        )}
+                      </div>
+                    );
+                  })}
+                </div>
+                {hasLegacyCodexProfile && (
+                  <p className="text-[10px] text-amber-600 dark:text-amber-400 mt-1">
+                    检测到旧版 codex-oauth 档案，建议删除后使用上方按钮重新添加
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+
+          <div className="flex gap-1.5 flex-wrap">
+            {status?.has_refresh_token && (
+              <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={handleRefresh} disabled={refreshing}>
+                {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : "刷新 Token"}
+              </Button>
+            )}
+            <Button size="sm" variant="outline" className="h-6 text-[10px] text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950" onClick={handleDisconnect} disabled={disconnecting}>
+              {disconnecting ? <Loader2 className="h-3 w-3 animate-spin" /> : "断开连接"}
+            </Button>
+          </div>
+        </>
+      )}
+
+      {/* ── Not connected ── */}
+      {!loading && !isConnected && !isExpired && (
+        <>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            使用 ChatGPT Plus/Pro 订阅，无需 API Key。登录后自动创建模型档案。
+          </p>
+
+          {!oauthBusy ? (
+            <Button
+              size="sm"
+              className="w-full h-8 text-xs text-white font-medium gap-1.5"
+              style={{ backgroundColor: "var(--em-primary)" }}
+              onClick={handleOAuthLogin}
+              disabled={authorizing}
+            >
+              <ExternalLink className="h-3 w-3" />
+              使用 ChatGPT 账号登录
+            </Button>
+          ) : (
+            <div className="space-y-2 rounded-md border border-border bg-muted/30 p-2.5">
+              {oauthMode === "popup" ? (
+                <div className="text-center space-y-1">
+                  <Loader2 className="h-5 w-5 mx-auto animate-spin text-muted-foreground" />
+                  <p className="text-[11px] text-muted-foreground">请在弹出窗口中完成 OpenAI 登录...</p>
+                  <p className="text-[10px] text-muted-foreground">授权完成后自动更新</p>
+                </div>
+              ) : (
+                <div className="space-y-1.5">
+                  <p className="text-[11px] text-muted-foreground">登录完成后，复制地址栏 URL 粘贴到下方：</p>
+                  <p className="text-[10px] text-amber-600 dark:text-amber-400">提示：页面可能显示无法访问，直接复制地址栏 URL 即可</p>
+                  <Input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} className="h-7 text-[11px] font-mono" placeholder="http://localhost:1455/auth/callback?code=...&state=..." autoFocus />
+                  <Button size="sm" className="w-full h-7 text-[11px] text-white" style={{ backgroundColor: "var(--em-primary)" }} onClick={handlePasteUrlSubmit} disabled={!pasteUrl.trim()}>
+                    确认连接
+                  </Button>
+                </div>
+              )}
+              <div className="flex justify-center">
+                <button type="button" className="text-[10px] text-muted-foreground hover:text-foreground transition-colors" onClick={cancelOAuth}>取消</button>
+              </div>
+            </div>
+          )}
+
+          {/* 备选方式 */}
+          <div>
+            <button type="button" onClick={() => setShowFallback(!showFallback)} className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+              {showFallback ? "▾ 收起备选方式" : "▸ 其他连接方式"}
+            </button>
+            {showFallback && (
+              <div className="mt-1.5 space-y-2.5">
+                {/* Device Code */}
+                <div className="space-y-1">
+                  <p className="text-[10px] font-medium text-muted-foreground">设备码登录</p>
+                  {!authorizing ? (
+                    <Button size="sm" variant="outline" className="w-full h-7 text-[11px]" onClick={handleDeviceCode} disabled={oauthBusy}>使用设备码登录</Button>
+                  ) : (
+                    <div className="space-y-1.5 rounded-md border border-border bg-muted/30 p-2">
+                      <p className="text-[10px] text-muted-foreground text-center">打开链接并输入验证码：</p>
+                      <a href={verificationUrl} target="_blank" rel="noopener noreferrer" className="block text-[10px] font-medium underline text-center" style={{ color: "var(--em-primary)" }}>{verificationUrl}</a>
+                      <div className="flex justify-center">
+                        <span className="font-mono text-base font-bold tracking-widest select-all px-2 py-0.5 rounded border border-border bg-background cursor-pointer" onClick={() => navigator.clipboard.writeText(userCode)}>{userCode}</span>
+                      </div>
+                      <div className="flex items-center justify-center gap-2">
+                        <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                        <span className="text-[10px] text-muted-foreground">等待授权...</span>
+                        <button type="button" className="text-[10px] text-muted-foreground hover:text-foreground" onClick={stopPolling}>取消</button>
+                      </div>
+                    </div>
+                  )}
+                </div>
+                {/* Manual paste */}
+                <div>
+                  <button type="button" onClick={() => setShowManual(!showManual)} className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+                    {showManual ? "▾ 收起手动粘贴" : "▸ 手动粘贴 Token"}
+                  </button>
+                  {showManual && (
+                    <div className="mt-1 space-y-1">
+                      <div className="text-[10px] text-muted-foreground space-y-0.5">
+                        <p>1. 运行 <code className="px-0.5 rounded bg-background font-mono">codex login</code></p>
+                        <p>2. 复制 <code className="px-0.5 rounded bg-background font-mono">~/.codex/auth.json</code></p>
+                      </div>
+                      <textarea value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} className="w-full h-14 rounded-md border border-input bg-background px-2 py-1 text-[10px] font-mono resize-none" placeholder='{"token":"...","refresh_token":"..."}' />
+                      <Button size="sm" variant="outline" className="h-6 text-[10px]" onClick={handleManualConnect} disabled={connecting || !tokenInput.trim()}>
+                        {connecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}粘贴连接
+                      </Button>
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        </>
+      )}
+
+      {error ? <p className="text-[10px] text-destructive">{error}</p> : null}
+    </div>
+  );
+}
+
 // ── 管理员模型配置面板 ─────────────────────────────────────
 
 type AuthUser = NonNullable<ReturnType<typeof useAuthStore.getState>["user"]>;
@@ -903,6 +1877,24 @@ export function ModelTab() {
       formRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
     });
   }, [pendingScrollToForm]);
+
+  const applyPresetToProfileDraft = useCallback((preset: ProviderPreset, customName?: string, customDescription?: string) => {
+    setNewProfile(true);
+    setEditingProfile(null);
+    setProfileDraft({
+      name: customName || preset.label,
+      model: preset.model,
+      api_key: "",
+      base_url: preset.base_url,
+      description: customDescription || preset.description,
+      protocol: preset.protocol,
+      thinking_mode: preset.thinking_mode,
+      model_family: preset.model_family,
+      custom_extra_body: "",
+      custom_extra_headers: "",
+    });
+    scrollToForm();
+  }, [scrollToForm]);
 
   const fetchThinkingConfig = useCallback(async (force = false) => {
     if (!force) {
@@ -1274,6 +2266,22 @@ export function ModelTab() {
 
   const handleDeleteProfile = async (name: string) => {
     setProfileError(null);
+    const currentProfiles = config?.profiles || [];
+    const removedIndex = currentProfiles.findIndex((p) => p.name === name);
+    const removedProfile = removedIndex >= 0 ? currentProfiles[removedIndex] : null;
+
+    // 乐观删除：先从前端列表移除，避免等待网络请求。
+    if (removedProfile) {
+      setConfig((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, profiles: prev.profiles.filter((p) => p.name !== name) };
+        settingsCache.set("/config/models", next);
+        return next;
+      });
+      setApplyMenuOpen((prev) => (prev === name ? null : prev));
+      useUIStore.getState().bumpModelProfiles();
+    }
+
     try {
       await apiDelete(`/config/models/profiles/${name}`, { direct: true });
       // 如果正在编辑被删除的 profile，关闭表单
@@ -1282,9 +2290,29 @@ export function ModelTab() {
         setNewProfile(false);
         setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
       }
-      fetchConfig(true);
-      useUIStore.getState().bumpModelProfiles();
+      // 同步清理缓存中的能力结果，避免保留无效项。
+      setCapsMap((prev) => {
+        if (!prev[name]) return prev;
+        const next = { ...prev };
+        delete next[name];
+        settingsCache.set("_capsMap", next);
+        return next;
+      });
     } catch (e) {
+      // 删除失败回滚：恢复被删条目到原位置。
+      if (removedProfile) {
+        setConfig((prev) => {
+          if (!prev) return prev;
+          if (prev.profiles.some((p) => p.name === name)) return prev;
+          const nextProfiles = [...prev.profiles];
+          const insertAt = Math.min(Math.max(removedIndex, 0), nextProfiles.length);
+          nextProfiles.splice(insertAt, 0, removedProfile);
+          const next = { ...prev, profiles: nextProfiles };
+          settingsCache.set("/config/models", next);
+          return next;
+        });
+        useUIStore.getState().bumpModelProfiles();
+      }
       setProfileError(e instanceof Error ? e.message : "删除失败");
     }
   };
@@ -1646,8 +2674,13 @@ export function ModelTab() {
               )}
               {/* Provider presets - quick add */}
               {!editingProfile && (
-                <div className="mb-3">
-                  <p className="text-xs text-muted-foreground mb-2">常见提供方（点击预填表单，只需补充 API Key）</p>
+                <div className="mb-3 space-y-2.5">
+                  <CodexOAuthAdminCard
+                    onProfileCreated={() => { fetchConfig(true); useUIStore.getState().bumpModelProfiles(); }}
+                    existingProfileNames={(config?.profiles || []).map((p) => p.name)}
+                  />
+
+                  <p className="text-xs text-muted-foreground mb-2">常见 API Key 提供方（点击预填表单，只需补充 API Key）</p>
                   <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
                     {PROVIDER_PRESETS.map((preset) => (
                       <button
@@ -1658,23 +2691,7 @@ export function ModelTab() {
                             ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/5"
                             : "border-border hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5"
                         }`}
-                        onClick={() => {
-                          setNewProfile(true);
-                          setEditingProfile(null);
-                          setProfileDraft({
-                            name: preset.label,
-                            model: preset.model,
-                            api_key: "",
-                            base_url: preset.base_url,
-                            description: preset.description,
-                            protocol: preset.protocol,
-                            thinking_mode: preset.thinking_mode,
-                            model_family: preset.model_family,
-                            custom_extra_body: "",
-                            custom_extra_headers: "",
-                          });
-                          scrollToForm();
-                        }}
+                        onClick={() => applyPresetToProfileDraft(preset)}
                       >
                         <div className="flex items-center gap-1 sm:gap-1.5">
                           <ProviderLogo id={preset.id} />
@@ -1993,22 +3010,31 @@ export function ModelTab() {
               )}
 
               {/* Profile list */}
-              <div className="space-y-1.5">
+              <div className="space-y-2">
                 {config?.profiles.map((p) => {
                   const pCaps = capsMap[p.name];
                   const isHighlighted = highlightProfile === p.name;
+                  const isCodexProfile = p.model.startsWith("openai-codex/");
+                  const isUnhealthy = isModelUnhealthy(pCaps);
+                  const initials = p.name.slice(0, 2).toUpperCase();
+                  const providerId = inferProfileProvider(p);
+                  const hasProviderLogo = !!(providerId && PROVIDER_LOGO_SLUG[providerId]);
+                  const providerColor = getProviderBrandColor(providerId);
                   return (
                   <div
                     key={p.name}
                     ref={(el) => { profileCardRefs.current[p.name] = el; }}
-                    className={`rounded-lg border px-3 py-3 sm:py-2.5 text-sm overflow-hidden cursor-pointer hover:bg-muted/40 active:bg-muted/60 transition-all duration-500 ${
-                      isHighlighted
-                        ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/30 scale-[1.01]"
-                        : isModelUnhealthy(pCaps)
-                          ? "border-destructive/40 bg-destructive/5 opacity-70"
-                          : "border-border"
+                    className={`group rounded-xl border text-sm transition-all duration-300 ${
+                      isCodexProfile
+                        ? "border-[var(--em-primary)]/25 bg-gradient-to-r from-[var(--em-primary)]/5 to-transparent"
+                        : isHighlighted
+                          ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/20 scale-[1.005] cursor-pointer shadow-sm"
+                          : isUnhealthy
+                            ? "border-destructive/30 bg-destructive/3 cursor-pointer hover:border-destructive/50 hover:shadow-sm"
+                            : "border-border/60 bg-card cursor-pointer hover:border-border hover:shadow-sm hover:bg-muted/20"
                     }`}
                     onClick={() => {
+                      if (isCodexProfile) return;
                       setEditingProfile(p.name);
                       setNewProfile(false);
                       setProfileDraft({
@@ -2026,123 +3052,194 @@ export function ModelTab() {
                       scrollToForm();
                     }}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium truncate min-w-0">{p.name}</span>
-                      <Badge variant="secondary" className="text-[10px] font-mono min-w-0 max-w-[25%] sm:max-w-[40%] truncate">
-                        {p.model}
-                      </Badge>
-                      <div className="flex gap-0.5 shrink-0 ml-auto">
+                    {/* ── Main row ── */}
+                    <div className="flex items-center gap-3 px-3 py-2.5">
+                      {/* Avatar */}
+                      <div
+                        className={`flex-shrink-0 w-8 h-8 rounded-lg flex items-center justify-center text-[11px] font-bold select-none ${
+                        isCodexProfile
+                          ? "bg-[var(--em-primary)]/15 text-[var(--em-primary)]"
+                          : hasProviderLogo
+                            ? "bg-muted/40"
+                          : isUnhealthy
+                            ? "bg-destructive/10 text-destructive"
+                            : "bg-muted text-muted-foreground group-hover:bg-[var(--em-primary)]/10 group-hover:text-[var(--em-primary)] transition-colors"
+                        }`}
+                        style={hasProviderLogo
+                          ? {
+                            backgroundColor: withAlpha(providerColor, "1A"),
+                            color: providerColor,
+                          }
+                          : undefined}
+                      >
+                        {hasProviderLogo && providerId
+                          ? <ProviderLogo id={providerId} color={providerColor} />
+                          : isCodexProfile
+                            ? <Lock className="h-3.5 w-3.5" />
+                            : initials}
+                      </div>
+
+                      {/* Name + model */}
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span className="font-semibold text-sm truncate">{p.name}</span>
+                          {isCodexProfile && (
+                            <span className="flex-shrink-0 inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold bg-[var(--em-primary)]/15 text-[var(--em-primary)]">
+                              <Lock className="h-2 w-2" />
+                              OAuth
+                            </span>
+                          )}
+                          {isUnhealthy && (
+                            <span className="flex-shrink-0 inline-flex items-center gap-0.5 text-destructive text-[9px] font-medium">
+                              <AlertTriangle className="h-2.5 w-2.5" />
+                              <span className="hidden sm:inline">不可用</span>
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5 mt-0.5 min-w-0">
+                          <span className="text-[10px] font-mono text-muted-foreground truncate max-w-[140px] sm:max-w-[200px]">{formatModelIdForDisplay(p.model)}</span>
+                          {!isUnhealthy && p.description && (
+                            <span className="hidden sm:inline text-[10px] text-muted-foreground/70 truncate">· {p.description}</span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Capability badges — hidden on mobile */}
+                      <div className="hidden sm:block flex-shrink-0">
+                        {isUnhealthy ? null : <CapabilityBadges caps={pCaps ?? null} />}
+                      </div>
+
+                      {/* Action buttons */}
+                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                        {/* Apply role dropdown */}
                         <div className="relative">
-                          <Button
-                            variant="ghost"
-                            size="icon"
-                            className="h-6 w-6"
-                            title="快速应用到角色"
+                          <button
+                            title="应用到角色"
+                            className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40"
                             onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(applyMenuOpen === p.name ? null : p.name); }}
                             disabled={applyingProfile === p.name}
                           >
                             {applyingProfile === p.name ? (
-                              <Loader2 className="h-3 w-3 animate-spin" />
+                              <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             ) : (
-                              <ArrowRightLeft className="h-3 w-3" />
+                              <ArrowRightLeft className="h-3.5 w-3.5" />
                             )}
-                          </Button>
+                          </button>
                           {applyMenuOpen === p.name && (
                             <>
                               <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(null); }} />
-                              <div className="absolute right-0 top-full mt-1 z-50 min-w-[140px] rounded-md border border-border bg-popover p-1 shadow-md">
-                                {([
-                                  { role: "main" as const, label: "主模型", icon: <Server className="h-3 w-3" /> },
-                                  { role: "aux" as const, label: "辅助模型", icon: <Bot className="h-3 w-3" /> },
-                                  { role: "vlm" as const, label: "视觉模型", icon: <ScanEye className="h-3 w-3" /> },
-                                ]).map((item) => (
-                                  <button
-                                    key={item.role}
-                                    className="flex items-center gap-2 w-full px-2.5 py-1.5 text-xs rounded-sm hover:bg-muted transition-colors text-left"
-                                    onClick={(e) => { e.stopPropagation(); handleApplyProfileToRole(p, item.role); }}
-                                  >
-                                    {item.icon}
-                                    <span>用作{item.label}</span>
-                                  </button>
-                                ))}
+                              <div className="absolute right-0 top-full mt-1.5 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden">
+                                <div className="px-2.5 py-1.5 border-b border-border/40">
+                                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">应用到角色</p>
+                                </div>
+                                <div className="p-1">
+                                  {([
+                                    { role: "main" as const, label: "主模型", icon: <Server className="h-3.5 w-3.5" />, color: "text-blue-500" },
+                                    { role: "aux" as const, label: "辅助模型", icon: <Bot className="h-3.5 w-3.5" />, color: "text-violet-500" },
+                                    { role: "vlm" as const, label: "视觉模型", icon: <ScanEye className="h-3.5 w-3.5" />, color: "text-emerald-500" },
+                                  ]).map((item) => (
+                                    <button
+                                      key={item.role}
+                                      className="flex items-center gap-2.5 w-full px-2.5 py-2 text-xs rounded-lg hover:bg-muted/60 active:bg-muted transition-colors text-left"
+                                      onClick={(e) => { e.stopPropagation(); handleApplyProfileToRole(p, item.role); }}
+                                    >
+                                      <span className={item.color}>{item.icon}</span>
+                                      <span className="font-medium">用作{item.label}</span>
+                                    </button>
+                                  ))}
+                                </div>
                               </div>
                             </>
                           )}
                         </div>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6"
+                        {/* Probe */}
+                        <button
                           title="探测能力"
+                          className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40"
                           onClick={(e) => { e.stopPropagation(); handleProbeOne(p.name); }}
                           disabled={probingKey === p.name}
                         >
                           {probingKey === p.name ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
                           ) : (
-                            <Zap className="h-3 w-3" />
+                            <Zap className="h-3.5 w-3.5" />
                           )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setEditingProfile(p.name);
-                            setNewProfile(false);
-                            setProfileDraft({
-                              name: p.name,
-                              model: p.model,
-                              api_key: "",
-                              base_url: p.base_url,
-                              description: p.description,
-                              protocol: p.protocol || "auto",
-                              thinking_mode: p.thinking_mode || "auto",
-                              model_family: p.model_family || "",
-                              custom_extra_body: p.custom_extra_body || "",
-                              custom_extra_headers: p.custom_extra_headers || "",
-                            });
-                            scrollToForm();
-                          }}
-                        >
-                          <Pencil className="h-3 w-3" />
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-6 w-6 text-destructive"
+                        </button>
+                        {/* Edit */}
+                        {!isCodexProfile && (
+                          <button
+                            title="编辑"
+                            className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setEditingProfile(p.name);
+                              setNewProfile(false);
+                              setProfileDraft({
+                                name: p.name,
+                                model: p.model,
+                                api_key: "",
+                                base_url: p.base_url,
+                                description: p.description,
+                                protocol: p.protocol || "auto",
+                                thinking_mode: p.thinking_mode || "auto",
+                                model_family: p.model_family || "",
+                                custom_extra_body: p.custom_extra_body || "",
+                                custom_extra_headers: p.custom_extra_headers || "",
+                              });
+                              scrollToForm();
+                            }}
+                          >
+                            <Pencil className="h-3.5 w-3.5" />
+                          </button>
+                        )}
+                        {/* Delete */}
+                        <button
+                          title="删除"
+                          className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
                           onClick={(e) => { e.stopPropagation(); handleDeleteProfile(p.name); }}
                         >
-                          <Trash2 className="h-3 w-3" />
-                        </Button>
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </button>
                       </div>
                     </div>
-                    <div className="flex items-center gap-1.5 mt-1 flex-wrap">
-                      {isModelUnhealthy(pCaps) ? (
-                        <span className="inline-flex items-center gap-1 text-destructive text-[10px]">
-                          <AlertTriangle className="h-2.5 w-2.5" />
-                          不可用
-                        </span>
-                      ) : (
+
+                    {/* ── Mobile capability + description row ── */}
+                    {(!isUnhealthy || isCodexProfile) && (
+                      <div className="sm:hidden flex items-center gap-2 px-3 pb-2.5 -mt-1">
                         <CapabilityBadges caps={pCaps ?? null} />
-                      )}
-                      {!isModelUnhealthy(pCaps) && p.description && (
-                        <span className="text-[11px] text-muted-foreground truncate">· {p.description}</span>
-                      )}
-                    </div>
-                    {isModelUnhealthy(pCaps) && (
-                      <p className="text-[10px] text-destructive truncate mt-0.5" title={getHealthError(pCaps)}>
-                        {getHealthError(pCaps) || "连接失败"}
-                      </p>
+                        {p.description && !isCodexProfile && (
+                          <span className="text-[10px] text-muted-foreground/70 truncate">· {p.description}</span>
+                        )}
+                        {isCodexProfile && (
+                          <span className="text-[10px] text-muted-foreground/70">通过 Codex 卡片管理</span>
+                        )}
+                      </div>
+                    )}
+
+                    {/* ── Error row ── */}
+                    {isUnhealthy && !isCodexProfile && (
+                      <div className="flex items-center gap-1.5 px-3 pb-2.5 -mt-0.5">
+                        <AlertTriangle className="h-3 w-3 flex-shrink-0 text-destructive" />
+                        <p className="text-[10px] text-destructive truncate" title={getHealthError(pCaps)}>
+                          {getHealthError(pCaps) || "连接失败"}
+                        </p>
+                      </div>
                     )}
                   </div>
                   );
                 })}
                 {config?.profiles.length === 0 && !newProfile && (
-                  <p className="text-xs text-muted-foreground text-center py-3">
-                    暂无模型配置，点击上方提供方或“新增”来添加
-                  </p>
+                  <div className="flex flex-col items-center gap-2 py-8 text-center">
+                    <div className="w-10 h-10 rounded-xl bg-muted/50 flex items-center justify-center">
+                      <Bot className="h-5 w-5 text-muted-foreground/50" />
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      暂无模型配置
+                    </p>
+                    <p className="text-[10px] text-muted-foreground/60">
+                      点击上方提供方预设或「新增」来添加
+                    </p>
+                  </div>
                 )}
               </div>
             </div>

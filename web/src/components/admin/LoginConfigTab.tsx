@@ -10,6 +10,22 @@ import {
   type LoginConfig,
 } from "@/lib/auth-api";
 
+type LoginToggleKey =
+  | "login_github_enabled"
+  | "login_google_enabled"
+  | "login_qq_enabled"
+  | "email_verify_required"
+  | "require_agreement";
+
+function withToggleValue(
+  config: LoginConfig | null,
+  key: LoginToggleKey,
+  value: boolean,
+): LoginConfig | null {
+  if (!config) return config;
+  return { ...config, [key]: value } as LoginConfig;
+}
+
 /* ── Toggle switch ───────────────────────────────── */
 
 interface ToggleProps {
@@ -264,15 +280,18 @@ export default function LoginConfigTab() {
   }, [loadConfig]);
 
   const handleToggle = useCallback(
-    async (key: keyof LoginConfig, value: boolean) => {
+    async (key: LoginToggleKey, value: boolean) => {
       if (!config) return;
+      const previousValue = config[key];
       setToggling(key);
+      setConfig((prev) => withToggleValue(prev, key, value));
       try {
         const updated = await updateLoginConfig({ [key]: value });
         setConfig(updated);
         syncDrafts(updated);
         showToast("已更新", "success");
       } catch (err) {
+        setConfig((prev) => withToggleValue(prev, key, previousValue));
         showToast(err instanceof Error ? err.message : "更新失败", "error");
       } finally {
         setToggling(null);

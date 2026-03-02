@@ -48,6 +48,7 @@ import {
   type AdminSession,
 } from "@/lib/auth-api";
 import { resolveAvatarSrc } from "@/lib/api";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 import LoginConfigTab from "@/components/admin/LoginConfigTab";
 
 function formatBytes(bytes: number): string {
@@ -70,6 +71,10 @@ function formatDate(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function formatTokenCount(value: number): string {
+  return value.toLocaleString("zh-CN");
 }
 
 type SortField = "email" | "created_at" | "role" | "workspace_size" | "workspace_files";
@@ -236,6 +241,13 @@ function UserRow({
   const [sessions, setSessions] = useState<AdminSession[]>([]);
   const [sessionsLoaded, setSessionsLoaded] = useState(false);
   const [showSessions, setShowSessions] = useState(false);
+  const llmUsage = user.llm_usage ?? {
+    total_calls: 0,
+    total_prompt_tokens: 0,
+    total_completion_tokens: 0,
+    total_tokens: 0,
+    providers: [],
+  };
 
   const handleAction = async (action: string, payload?: Record<string, unknown>) => {
     setLoading(action);
@@ -398,6 +410,83 @@ function UserRow({
                     </div>
                   )}
                 </div>
+              </div>
+
+              {/* LLM provider/model usage */}
+              <div className="mt-5 pt-4 border-t border-border/50">
+                <div className="flex items-center justify-between mb-2 gap-2">
+                  <h4 className="text-xs font-semibold text-muted-foreground uppercase tracking-wider">
+                    LLM 用量明细
+                  </h4>
+                  <span className="text-[11px] text-muted-foreground whitespace-nowrap">
+                    {formatTokenCount(llmUsage.total_calls)} 次调用 · {formatTokenCount(llmUsage.total_tokens)} tokens
+                  </span>
+                </div>
+
+                {llmUsage.providers.length === 0 ? (
+                  <p className="text-xs text-muted-foreground">暂无模型调用记录</p>
+                ) : (
+                  <div className="space-y-2">
+                    {llmUsage.providers.map((provider) => (
+                      <div
+                        key={provider.provider}
+                        className="rounded-lg border border-border/70 bg-card/60 p-2.5"
+                      >
+                        <div className="flex items-center justify-between gap-2 mb-2">
+                          <div className="min-w-0">
+                            <p className="text-sm font-medium truncate">{provider.display_name}</p>
+                            <p className="text-[11px] text-muted-foreground truncate">
+                              {provider.provider}
+                            </p>
+                          </div>
+                          <div className="text-right text-[11px] text-muted-foreground whitespace-nowrap">
+                            <p>{formatTokenCount(provider.calls)} 次</p>
+                            <p>{formatTokenCount(provider.total_tokens)} tokens</p>
+                          </div>
+                        </div>
+
+                        <div className="overflow-hidden rounded-md border border-border/60">
+                          <div className="max-h-44 overflow-auto">
+                            <table className="w-full text-xs">
+                              <thead className="sticky top-0 bg-muted/85 backdrop-blur supports-[backdrop-filter]:bg-muted/70">
+                                <tr className="text-muted-foreground">
+                                  <th className="px-2 py-1.5 text-left font-medium">模型</th>
+                                  <th className="px-2 py-1.5 text-right font-medium">调用</th>
+                                  <th className="px-2 py-1.5 text-right font-medium">Prompt</th>
+                                  <th className="px-2 py-1.5 text-right font-medium">Completion</th>
+                                  <th className="px-2 py-1.5 text-right font-medium">总计</th>
+                                  <th className="px-2 py-1.5 text-right font-medium">最近使用</th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {provider.models.map((model, idx) => {
+                                  const displayModel = model.display_name || formatModelIdForDisplay(model.model);
+                                  return (
+                                    <tr
+                                      key={`${provider.provider}-${model.model}-${idx}`}
+                                      className="border-t border-border/40 hover:bg-muted/40 transition-colors"
+                                    >
+                                      <td className="px-2 py-1.5 max-w-[220px] truncate" title={displayModel}>
+                                        {displayModel}
+                                      </td>
+                                      <td className="px-2 py-1.5 text-right">{formatTokenCount(model.calls)}</td>
+                                      <td className="px-2 py-1.5 text-right">{formatTokenCount(model.prompt_tokens)}</td>
+                                      <td className="px-2 py-1.5 text-right">{formatTokenCount(model.completion_tokens)}</td>
+                                      <td className="px-2 py-1.5 text-right font-medium">{formatTokenCount(model.total_tokens)}</td>
+                                      <td className="px-2 py-1.5 text-right text-muted-foreground whitespace-nowrap">
+                                        {model.last_used_at ? formatDate(model.last_used_at) : "—"}
+                                      </td>
+                                    </tr>
+                                  );
+                                })}
+                              </tbody>
+                            </table>
+                          </div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               {/* Quota & limits editing */}
@@ -861,16 +950,23 @@ export default function AdminPage() {
     setTimeout(() => setToasts((prev) => prev.filter((t) => t.id !== id)), 3000);
   }, []);
 
-  const loadUsers = useCallback(async () => {
+  const loadUsers = useCallback(async (opts?: { silent?: boolean }) => {
+    const silent = opts?.silent === true;
     try {
-      setLoading(true);
+      if (!silent) {
+        setLoading(true);
+      }
       const data = await fetchAdminUsers();
       setUsers(data.users);
       setError("");
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载失败");
+      if (!silent) {
+        setError(err instanceof Error ? err.message : "加载失败");
+      }
     } finally {
-      setLoading(false);
+      if (!silent) {
+        setLoading(false);
+      }
     }
   }, []);
 
@@ -887,16 +983,48 @@ export default function AdminPage() {
 
   const handleAction = useCallback(
     async (userId: string, action: string, payload?: Record<string, unknown>) => {
+      const userSnapshot = users.find((u) => u.id === userId);
+      const rollbackUser = (snapshot: AdminUser | undefined) => {
+        if (!snapshot) return;
+        setUsers((prev) => prev.map((u) => (u.id === userId ? snapshot : u)));
+      };
+
       try {
         switch (action) {
-          case "toggle_active":
+          case "toggle_active": {
+            const isActive = payload?.is_active === true;
+            setUsers((prev) =>
+              prev.map((u) =>
+                u.id === userId
+                  ? {
+                      ...u,
+                      is_active: isActive,
+                    }
+                  : u
+              )
+            );
             await adminUpdateUser(userId, { is_active: payload?.is_active });
             addToast("success", payload?.is_active ? "账户已启用" : "账户已禁用");
             break;
-          case "set_role":
+          }
+          case "set_role": {
+            const role = typeof payload?.role === "string" ? payload.role : "";
+            if (role) {
+              setUsers((prev) =>
+                prev.map((u) =>
+                  u.id === userId
+                    ? {
+                        ...u,
+                        role,
+                      }
+                    : u
+                )
+              );
+            }
             await adminUpdateUser(userId, { role: payload?.role });
             addToast("success", `角色已更新为 ${payload?.role}`);
             break;
+          }
           case "enforce_quota": {
             const result = await adminEnforceQuota(userId);
             addToast(
@@ -916,10 +1044,45 @@ export default function AdminPage() {
             await adminUpdateUser(userId, { allowed_models: payload?.allowed_models ?? [] });
             addToast("success", "模型权限已更新");
             break;
-          case "update_quota":
+          case "update_quota": {
+            const maxStorageMb =
+              typeof payload?.max_storage_mb === "number"
+                ? payload.max_storage_mb
+                : userSnapshot?.max_storage_mb ?? 0;
+            const maxFiles =
+              typeof payload?.max_files === "number"
+                ? payload.max_files
+                : userSnapshot?.max_files ?? 0;
+            const dailyTokenLimit =
+              typeof payload?.daily_token_limit === "number"
+                ? payload.daily_token_limit
+                : userSnapshot?.daily_token_limit ?? 0;
+            const monthlyTokenLimit =
+              typeof payload?.monthly_token_limit === "number"
+                ? payload.monthly_token_limit
+                : userSnapshot?.monthly_token_limit ?? 0;
+            setUsers((prev) =>
+              prev.map((u) =>
+                u.id === userId
+                  ? {
+                      ...u,
+                      max_storage_mb: maxStorageMb,
+                      max_files: maxFiles,
+                      daily_token_limit: dailyTokenLimit,
+                      monthly_token_limit: monthlyTokenLimit,
+                      workspace: {
+                        ...u.workspace,
+                        max_size_mb: maxStorageMb,
+                        max_files: maxFiles,
+                      },
+                    }
+                  : u
+              )
+            );
             await adminUpdateUser(userId, payload ?? {});
             addToast("success", "配额已更新");
             break;
+          }
           case "delete_user": {
             const delResult = await adminDeleteUser(userId);
             addToast(
@@ -941,12 +1104,17 @@ export default function AdminPage() {
             break;
           }
         }
-        await loadUsers();
       } catch (err) {
+        if (action === "toggle_active" || action === "set_role" || action === "update_quota") {
+          rollbackUser(userSnapshot);
+        }
         addToast("error", err instanceof Error ? err.message : "操作失败");
+      } finally {
+        // 后台重拉进行最终校准，避免每次操作都阻塞在整表刷新。
+        void loadUsers({ silent: true });
       }
     },
-    [loadUsers, addToast],
+    [users, loadUsers, addToast],
   );
 
   const filtered = users.filter((u) => {
@@ -1017,7 +1185,9 @@ export default function AdminPage() {
               variant="outline"
               size="sm"
               className="gap-1.5 text-xs h-8"
-              onClick={loadUsers}
+              onClick={() => {
+                void loadUsers();
+              }}
               disabled={loading}
             >
               {loading ? (
