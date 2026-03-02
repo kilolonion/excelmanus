@@ -421,6 +421,95 @@ def _get_user_allowed_models(request: Request) -> list[str]:
         return []
 
 
+def _get_credential_store_from_request(request: Request) -> Any:
+    """获取订阅凭证存储实例。"""
+    return getattr(request.app.state, "credential_store", None)
+
+
+def _build_user_codex_models(request: Request, user_id: str | None) -> list[dict[str, Any]]:
+    """构建当前用户可见的 Codex 私有模型目录。"""
+    if not user_id:
+        return []
+    cred_store = _get_credential_store_from_request(request)
+    if cred_store is None:
+        return []
+
+    try:
+        active = cred_store.get_active_profile(user_id, "openai-codex")
+    except Exception:
+        logger.debug("读取 Codex 凭证失败", exc_info=True)
+        return []
+
+    if active is None or not getattr(active, "access_token", ""):
+        return []
+
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    plan = (getattr(active, "plan_type", "") or "Plus/Pro").strip()
+    result: list[dict[str, Any]] = []
+    for item in OpenAICodexProvider.list_supported_model_entries():
+        result.append({
+            "name": item["profile_name"],
+            "model": item["public_model_id"],
+            "resolved_model": item["model"],
+            "display_name": item["display_name"],
+            "description": f"OpenAI Codex 订阅模型（{plan}）",
+            "active": False,
+            "base_url": OpenAICodexProvider.BASE_URL,
+            "user_scoped": True,
+            "provider": "openai-codex",
+        })
+    return result
+
+
+def _resolve_codex_model_for_user(
+    request: Request,
+    user_id: str | None,
+    profile_name: str,
+) -> str | None:
+    """将 Codex profile 名称解析为真实 model ID（仅当用户已连接 Codex）。"""
+    if not user_id:
+        return None
+
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    if not OpenAICodexProvider.is_codex_profile_name(profile_name):
+        return None
+
+    cred_store = _get_credential_store_from_request(request)
+    if cred_store is None:
+        return None
+
+    try:
+        active = cred_store.get_active_profile(user_id, "openai-codex")
+    except Exception:
+        logger.debug("读取 Codex 凭证失败", exc_info=True)
+        return None
+
+    if active is None or not getattr(active, "access_token", ""):
+        return None
+
+    return OpenAICodexProvider.model_from_profile_name(profile_name)
+
+
+def _list_available_model_names_for_user(request: Request, user_id: str | None) -> list[str]:
+    """返回当前用户可切换的模型名称列表（含 default）。"""
+    names: list[str] = ["default"]
+    if _config_store is not None:
+        names.extend((p.get("name") or "") for p in _config_store.list_profiles())
+    names.extend(m.get("name") or "" for m in _build_user_codex_models(request, user_id))
+    # 去重 + 去空
+    dedup: list[str] = []
+    seen: set[str] = set()
+    for n in names:
+        n = n.strip()
+        if not n or n in seen:
+            continue
+        seen.add(n)
+        dedup.append(n)
+    return dedup
+
+
 def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: list[str]) -> tuple[str, list[str], list[str]]:
     """根据安全模式裁剪路由元信息。"""
     if _is_external_safe_mode():
@@ -913,6 +1002,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             # 将 UserStore 注入 SessionManager，使其能读取用户自定义 LLM 配置
             if _session_manager is not None:
                 _session_manager.set_user_store(_user_store)
+            # 初始化 CredentialStore（订阅凭证管理）
+            try:
+                from excelmanus.auth.providers.credential_store import CredentialStore as _CredStore
+                _cred_store = _CredStore(_database.conn)
+                app.state.credential_store = _cred_store
+                if _session_manager is not None:
+                    _session_manager.set_credential_store(_cred_store)
+            except Exception:
+                logger.debug("CredentialStore 初始化失败", exc_info=True)
+                app.state.credential_store = None
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -1328,15 +1427,22 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         await _session_manager.release_for_chat(session_id)
 
     normalized_reply = guard_public_reply(chat_result.reply.strip())
-    # ── 自动标题生成（仅首轮）──
+    # ── 自动标题（仅首轮）：截取用户消息 + 后台 AI 生成 ──
     generated_title: str | None = None
     if engine.session_turn == 1:
-        generated_title = await _generate_session_title_with_timeout(
+        generated_title = _truncate_user_message_as_title(display_text)
+        if generated_title:
+            _ch = _session_manager.chat_history if _session_manager else None
+            if _ch is not None:
+                try:
+                    _ch.update_session(session_id, title=generated_title, title_source="truncated")
+                except Exception:
+                    logger.debug("截取标题写入失败", exc_info=True)
+        asyncio.create_task(_generate_session_title_background(
             session_id=session_id,
             user_message=display_text,
             assistant_reply=normalized_reply,
-            timeout=5.0,
-        )
+        ))
     route = engine.last_route_result
     route_mode, skills_used, tool_scope = _public_route_fields(
         route.route_mode,
@@ -1626,19 +1732,27 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         _user_store.record_token_usage(auth_user_id, chat_result.total_tokens)
                 except Exception:
                     logger.debug("记录用户 token 用量失败", exc_info=True)
-            # ── 自动标题生成（仅首轮，超时 5 秒）──
+            # ── 自动标题（仅首轮）：立即截取用户消息，后台异步 AI 生成 ──
             if engine.session_turn == 1:
-                _generated_title = await _generate_session_title_with_timeout(
+                _instant_title = _truncate_user_message_as_title(display_text)
+                if _instant_title:
+                    yield _sse_format("session_title", {
+                        "session_id": session_id,
+                        "title": _instant_title,
+                    })
+                    # 同步写入 DB，确保 poll 能立即拿到
+                    _ch = _session_manager.chat_history if _session_manager else None
+                    if _ch is not None:
+                        try:
+                            _ch.update_session(session_id, title=_instant_title, title_source="truncated")
+                        except Exception:
+                            logger.debug("截取标题写入失败", exc_info=True)
+                # fire-and-forget：后台 AI 生成更好的标题，前端通过 SessionSync poll 获取
+                asyncio.create_task(_generate_session_title_background(
                     session_id=session_id,
                     user_message=display_text,
                     assistant_reply=normalized_reply,
-                    timeout=5.0,
-                )
-                if _generated_title:
-                    yield _sse_format("session_title", {
-                        "session_id": session_id,
-                        "title": _generated_title,
-                    })
+                ))
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -2211,24 +2325,30 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     if engine is not None:
                         normalized_reply = guard_public_reply((chat_result.reply or "").strip())
                         yield _build_reply_sse(chat_result, engine)
-                        # B2: 首轮标题生成（与 chat_stream 保持一致）
+                        # B2: 首轮标题（与 chat_stream 保持一致：截取 + 后台 AI）
                         if engine.session_turn == 1:
                             _user_msg = ""
                             for _m in engine.raw_messages:
                                 if _m.get("role") == "user":
                                     _user_msg = str(_m.get("content", ""))[:200]
                                     break
-                            _gen_title = await _generate_session_title_with_timeout(
+                            _instant_title = _truncate_user_message_as_title(_user_msg)
+                            if _instant_title:
+                                yield _sse_format("session_title", {
+                                    "session_id": session_id,
+                                    "title": _instant_title,
+                                })
+                                _ch = _session_manager.chat_history if _session_manager else None
+                                if _ch is not None:
+                                    try:
+                                        _ch.update_session(session_id, title=_instant_title, title_source="truncated")
+                                    except Exception:
+                                        pass
+                            asyncio.create_task(_generate_session_title_background(
                                 session_id=session_id,
                                 user_message=_user_msg,
                                 assistant_reply=normalized_reply,
-                                timeout=5.0,
-                            )
-                            if _gen_title:
-                                yield _sse_format("session_title", {
-                                    "session_id": session_id,
-                                    "title": _gen_title,
-                                })
+                            ))
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
@@ -2366,6 +2486,44 @@ async def chat_approve(
     )
     return JSONResponse(status_code=200, content={"status": "resolved"})
 
+
+
+def _truncate_user_message_as_title(user_message: str, max_len: int = 60) -> str | None:
+    """从用户消息截取会话标题（去除文件通知前缀，取前 max_len 字符）。"""
+    if not user_message:
+        return None
+    # 去除 [已上传文件: ...] / [已上传图片: ...] 等前缀
+    import re
+    cleaned = re.sub(r"\[已上传(?:文件|图片): [^\]]*\]\s*", "", user_message).strip()
+    if not cleaned:
+        return None
+    # 截取并添加省略号
+    if len(cleaned) > max_len:
+        return cleaned[:max_len].rstrip() + "…"
+    return cleaned
+
+
+async def _generate_session_title_background(
+    *,
+    session_id: str,
+    user_message: str,
+    assistant_reply: str,
+) -> None:
+    """后台 fire-and-forget：用 AUX 模型生成更好的会话标题并更新 DB。
+
+    前端通过 SessionSync 的 list_sessions 轮询自动获取更新后的标题。
+    """
+    try:
+        title = await _generate_session_title_with_timeout(
+            session_id=session_id,
+            user_message=user_message,
+            assistant_reply=assistant_reply,
+            timeout=8.0,
+        )
+        if title:
+            logger.info("会话 %s 后台 AI 标题已更新: %s", session_id, title)
+    except Exception:
+        logger.debug("会话 %s 后台标题生成失败", session_id, exc_info=True)
 
 
 async def _generate_session_title_with_timeout(
@@ -4704,6 +4862,7 @@ async def list_models(request: Request) -> JSONResponse:
     models: list[dict] = [{
         "name": "default",
         "model": _config.model,
+        "display_name": _config.model,
         "description": "默认模型（主配置）",
         "active": active_name is None,
         "base_url": _config.base_url,
@@ -4713,10 +4872,16 @@ async def list_models(request: Request) -> JSONResponse:
         models.append({
             "name": p["name"],
             "model": p["model"],
+            "display_name": p.get("name", ""),
             "description": p.get("description", ""),
             "active": p["name"] == active_name,
             "base_url": p.get("base_url", ""),
         })
+
+    # 追加用户私有 Codex 模型（不落库，不影响全局 profile）
+    for item in _build_user_codex_models(request, user_id):
+        item["active"] = item["name"] == active_name
+        models.append(item)
 
     # 按用户 allowed_models 过滤（空列表 = 不限制）
     allowed = _get_user_allowed_models(request)
@@ -4741,12 +4906,21 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
     if not name:
         return _error_json_response(400, "请指定模型名称。")
 
+    user_id = _get_isolation_user_id(raw_request)
+    is_codex_profile = False
+
     # 验证目标模型存在
     if name.lower() != "default":
         profile = _config_store.get_profile(name) if _config_store else None
         if profile is None:
-            available = ", ".join(p["name"] for p in (_config_store.list_profiles() if _config_store else []))
-            return _error_json_response(404, f"未找到模型 {name!r}。可用模型：default" + (f", {available}" if available else ""))
+            resolved_codex_model = _resolve_codex_model_for_user(raw_request, user_id, name)
+            if resolved_codex_model is None:
+                available_names = _list_available_model_names_for_user(raw_request, user_id)
+                return _error_json_response(
+                    404,
+                    f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
+                )
+            is_codex_profile = True
 
     # 校验用户模型权限（allowed_models 为空表示不限制）
     allowed = _get_user_allowed_models(raw_request)
@@ -4754,7 +4928,6 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
         return _error_json_response(403, f"您没有使用模型 {name!r} 的权限。")
 
     # 持久化到用户级配置（auth 启用时隔离，匿名时写全局）
-    user_id = _get_isolation_user_id(raw_request)
     if _config_store is not None:
         try:
             from excelmanus.stores.config_store import UserConfigStore
@@ -4773,6 +4946,8 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
         try:
             engine = _session_manager.get_engine(session_info["id"], user_id=user_id)
             if engine is not None:
+                if is_codex_profile:
+                    _session_manager.sync_user_subscription_profiles(engine, user_id)
                 result_msg = engine.switch_model(name)
         except Exception:
             pass
@@ -6650,6 +6825,24 @@ async def execute_command(request: Request) -> JSONResponse:
             return JSONResponse(content={"result": f"当前有 **{count}** 个活跃会话\n\n网页端对话自动保存，无需手动操作", "format": "markdown"})
         except Exception:
             return JSONResponse(content={"result": "会话状态获取失败", "format": "text"})
+
+    # ── 会话级命令：需要 engine 实例 ──
+    # 当前端传入 session_id 时，委托给 command_handler 处理会话级控制命令
+    # （如 /fullaccess on, /subagent off, /compact, /rules, /memory, /playbook 等）
+    session_id = body.get("session_id") or ""
+    if session_id and _session_manager is not None:
+        user_id = _get_isolation_user_id(request)
+        engine = _session_manager.get_engine(session_id, user_id=user_id)
+        if engine is not None:
+            try:
+                result = await engine._command_handler.handle(command)
+                if result is not None:
+                    # 判断是否包含 markdown 格式
+                    fmt = "markdown" if any(c in result for c in ("**", "##", "`", "- ")) else "text"
+                    return JSONResponse(content={"result": result, "format": fmt})
+            except Exception as exc:
+                logger.warning("command_handler 执行 '%s' 异常: %s", command, exc, exc_info=True)
+                return JSONResponse(content={"result": f"命令执行失败: {exc}", "format": "text"})
 
     return JSONResponse(content={"result": f"未知命令: {command}", "format": "text"})
 
