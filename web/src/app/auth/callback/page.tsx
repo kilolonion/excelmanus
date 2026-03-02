@@ -47,6 +47,29 @@ function CallbackHandler() {
     if (processed.current) return;
     processed.current = true;
 
+    // ── Codex OAuth PKCE popup 模式检测 ──────────────────
+    // 当此页面在 popup 中打开（window.opener 存在）且有 code 参数时，
+    // 说明这是 Codex OAuth 回调，通过 postMessage 将 code/state 传回主窗口。
+    const codexCode = searchParams.get("code");
+    const codexState = searchParams.get("state");
+    if (window.opener && codexCode && codexState && !searchParams.get("access_token")) {
+      const errorParam = searchParams.get("error") || searchParams.get("error_description");
+      if (errorParam) {
+        window.opener.postMessage(
+          { type: "codex-oauth-callback", error: errorParam },
+          window.location.origin,
+        );
+      } else {
+        window.opener.postMessage(
+          { type: "codex-oauth-callback", code: codexCode, state: codexState },
+          window.location.origin,
+        );
+      }
+      setState("success");
+      setTimeout(() => window.close(), 1500);
+      return;
+    }
+
     const accessToken = searchParams.get("access_token");
     const refreshToken = searchParams.get("refresh_token");
     const errorParam = searchParams.get("error") || searchParams.get("error_description");
