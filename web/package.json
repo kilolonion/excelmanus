@@ -3,7 +3,7 @@
   "version": "1.6.6",
   "private": true,
   "scripts": {
-    "dev": "next dev --hostname 0.0.0.0",
+    "dev": "next dev --webpack --hostname 0.0.0.0",
     "build": "next build --webpack",
     "build:webpack": "next build --webpack",
     "start": "next start",
