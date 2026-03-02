@@ -314,6 +314,27 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE model_profiles ADD COLUMN custom_extra_body TEXT DEFAULT ''",
         "ALTER TABLE model_profiles ADD COLUMN custom_extra_headers TEXT DEFAULT ''",
     ],
+    18: [
+        """CREATE TABLE IF NOT EXISTS auth_profiles (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            profile_name    TEXT NOT NULL DEFAULT 'default',
+            credential_type TEXT NOT NULL DEFAULT 'oauth',
+            access_token    TEXT,
+            refresh_token   TEXT,
+            expires_at      TEXT,
+            account_id      TEXT,
+            plan_type       TEXT,
+            extra_data      TEXT,
+            is_active       INTEGER DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            UNIQUE(user_id, provider, profile_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -607,6 +628,27 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS model_family TEXT DEFAULT ''",
         "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_body TEXT DEFAULT ''",
         "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_headers TEXT DEFAULT ''",
+    ],
+    18: [
+        """CREATE TABLE IF NOT EXISTS auth_profiles (
+            id              TEXT PRIMARY KEY,
+            user_id         TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            profile_name    TEXT NOT NULL DEFAULT 'default',
+            credential_type TEXT NOT NULL DEFAULT 'oauth',
+            access_token    TEXT,
+            refresh_token   TEXT,
+            expires_at      TEXT,
+            account_id      TEXT,
+            plan_type       TEXT,
+            extra_data      TEXT,
+            is_active       INTEGER DEFAULT 1,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL,
+            UNIQUE(user_id, provider, profile_name)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
     ],
 }
 

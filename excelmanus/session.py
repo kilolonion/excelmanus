@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from excelmanus.config import ExcelManusConfig
+from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import MCPManager
@@ -108,6 +108,7 @@ class SessionManager:
         self._database = database
         self._config_store = config_store
         self._user_store = user_store
+        self._credential_store = None  # CredentialStore，由 lifespan 注入
         self._mcp_initialized: bool = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
@@ -136,6 +137,54 @@ class SessionManager:
     def set_user_store(self, user_store: Any) -> None:
         """注入 UserStore 实例（用于延迟初始化场景）。"""
         self._user_store = user_store
+
+    def set_credential_store(self, credential_store: Any) -> None:
+        """注入 CredentialStore 实例（订阅凭证管理）。"""
+        self._credential_store = credential_store
+
+    def sync_user_subscription_profiles(
+        self,
+        engine: AgentEngine,
+        user_id: str | None,
+    ) -> None:
+        """同步用户私有订阅模型档案（当前支持 OpenAI Codex）。"""
+        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+        existing_profiles = [
+            p for p in engine._config.models
+            if not OpenAICodexProvider.is_codex_profile_name(p.name)
+        ]
+
+        if user_id is None or self._credential_store is None:
+            engine.sync_model_profiles(tuple(existing_profiles))
+            return
+
+        try:
+            active_profile = self._credential_store.get_active_profile(user_id, "openai-codex")
+        except Exception:
+            logger.debug("读取用户 Codex 凭证失败", exc_info=True)
+            engine.sync_model_profiles(tuple(existing_profiles))
+            return
+
+        if active_profile is None or not active_profile.access_token:
+            engine.sync_model_profiles(tuple(existing_profiles))
+            return
+
+        api_key, base_url = OpenAICodexProvider().get_api_credential(active_profile.access_token)
+        codex_profiles: list[ModelProfile] = []
+        for item in OpenAICodexProvider.list_supported_model_entries():
+            codex_profiles.append(ModelProfile(
+                name=item["profile_name"],
+                model=item["model"],
+                api_key=api_key,
+                base_url=base_url,
+                description=item["display_name"],
+                protocol="openai",
+                thinking_mode="openai_reasoning",
+                model_family="gpt",
+            ))
+
+        engine.sync_model_profiles(tuple(existing_profiles + codex_profiles))
 
     def reset_mcp_initialized(self) -> None:
         """MCP 热重载后重置初始化标志。"""
@@ -414,6 +463,24 @@ class SessionManager:
                             overrides.get("model", "<inherited>"),
                             overrides.get("base_url", "<inherited>"),
                         )
+            # 订阅凭证覆盖：检查 auth_profiles 中的 OAuth token
+            if self._credential_store is not None:
+                _target_model = overrides.get("model", self._config.model)
+                try:
+                    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+                    _codex = OpenAICodexProvider()
+                    if _codex.matches_model(_target_model):
+                        _profile = self._credential_store.get_active_profile(user_id, "openai-codex")
+                        if _profile and _profile.access_token:
+                            _api_key, _base_url = _codex.get_api_credential(_profile.access_token)
+                            overrides["api_key"] = _api_key
+                            overrides["base_url"] = _base_url
+                            logger.info(
+                                "用户 %s 使用 Codex 订阅凭证 (account=%s, plan=%s)",
+                                user_id, _profile.account_id, _profile.plan_type,
+                            )
+                except Exception:
+                    logger.debug("订阅凭证解析失败", exc_info=True)
             engine_config = replace(self._config, **overrides)
         persistent_memory, memory_extractor = self._create_memory_components(
             user_id=user_id, scope=scope,
@@ -430,6 +497,7 @@ class SessionManager:
             workspace=isolated_ws,
             user_id=user_id,
         )
+        self.sync_user_subscription_profiles(engine, user_id)
         if history_messages:
             engine.inject_history(history_messages)
             # 恢复 checkpoint（SessionState + TaskStore）

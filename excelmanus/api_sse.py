@@ -35,12 +35,18 @@ class SessionStreamState:
     新客户端通过 /chat/subscribe 重连时，先重放缓冲事件，再接收实时事件。
     """
 
-    __slots__ = ("event_buffer", "subscriber_queue", "_buffer_limit")
+    __slots__ = (
+        "event_buffer",
+        "subscriber_queue",
+        "_buffer_limit",
+        "_overflow_warned",
+    )
 
     def __init__(self, buffer_limit: int = 500) -> None:
         self.event_buffer: list[ToolCallEvent] = []
         self.subscriber_queue: asyncio.Queue[ToolCallEvent | None] | None = None
         self._buffer_limit = buffer_limit
+        self._overflow_warned = False
 
     def deliver(self, event: ToolCallEvent) -> None:
         """投递事件：有订阅者时入队，否则缓冲。"""
@@ -48,18 +54,33 @@ class SessionStreamState:
         if q is not None:
             q.put_nowait(event)
         else:
+            if self._buffer_limit <= 0:
+                if not self._overflow_warned:
+                    logger.warning(
+                        "SSE 事件缓冲区大小为 %d，断连期间事件将被丢弃",
+                        self._buffer_limit,
+                    )
+                    self._overflow_warned = True
+                return
+
             if len(self.event_buffer) < self._buffer_limit:
                 self.event_buffer.append(event)
-            elif len(self.event_buffer) == self._buffer_limit:
-                logger.warning(
-                    "SSE 事件缓冲区已满（%d），后续断连期间事件将被丢弃",
-                    self._buffer_limit,
-                )
+            else:
+                if not self._overflow_warned:
+                    logger.warning(
+                        "SSE 事件缓冲区已满（%d），将覆盖最旧事件以保留最新事件",
+                        self._buffer_limit,
+                    )
+                    self._overflow_warned = True
+                # 保留最新事件，丢弃最旧事件。
+                self.event_buffer.pop(0)
+                self.event_buffer.append(event)
 
     def attach(self) -> asyncio.Queue[ToolCallEvent | None]:
         """创建新订阅者队列并附着。返回新队列。"""
         q: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
         self.subscriber_queue = q
+        self._overflow_warned = False
         return q
 
     def detach(self) -> None:
@@ -70,6 +91,7 @@ class SessionStreamState:
         """取出并清空缓冲区。"""
         buf = self.event_buffer
         self.event_buffer = []
+        self._overflow_warned = False
         return buf
 
 
