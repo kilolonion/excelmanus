@@ -72,6 +72,11 @@ const filterViews: { key: SessionView; label: string; icon: LucideIcon }[] = [
   { key: "archived", label: "归档", icon: Archive },
 ];
 
+function isNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /404|not found|不存在/i.test(msg);
+}
+
 export function SessionList() {
   const isMobile = useIsMobile();
   const sessions = useSessionStore((s) => s.sessions);
@@ -110,12 +115,15 @@ export function SessionList() {
 
   const handleFinishEdit = useCallback(async (sessionId: string) => {
     const trimmed = editValue.trim();
-    if (trimmed && trimmed !== sessions.find(s => s.id === sessionId)?.title) {
+    const currentTitle = sessions.find((s) => s.id === sessionId)?.title;
+    if (trimmed && currentTitle && trimmed !== currentTitle) {
       useSessionStore.getState().updateSessionTitle(sessionId, trimmed);
       try {
         await updateSessionTitle(sessionId, trimmed);
-      } catch {
-        // 静默忽略，本地已更新
+      } catch (err) {
+        if (!isNotFoundError(err)) {
+          useSessionStore.getState().updateSessionTitle(sessionId, currentTitle);
+        }
       }
     }
     setEditingSessionId(null);
@@ -199,6 +207,14 @@ export function SessionList() {
 
     const chatState = useChatStore.getState();
     const isDeletingCurrent = chatState.currentSessionId === sessionId;
+    const sessionStore = useSessionStore.getState();
+    const prevSessions = sessionStore.sessions;
+    const prevActiveSessionId = sessionStore.activeSessionId;
+    const isDeletingActive = sessionId === prevActiveSessionId;
+    const sessionSnapshot = prevSessions.find((s) => s.id === sessionId) ?? null;
+    const nextActive = prevSessions.find(
+      (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
+    );
 
     // 若删除的是当前正在流式输出的会话，则同时中止前端 SSE
     if (isDeletingCurrent && chatState.abortController) {
@@ -208,47 +224,9 @@ export function SessionList() {
       abortChat(sessionId).catch(() => {});
     }
 
-    try {
-      await deleteSession(sessionId);
-    } catch {
-      // 后端 404 可接受，会话可能仅存在于本地
-    }
-    const isDeletingActive = sessionId === activeSessionId;
-    removeSessionCache(sessionId);
+    // 乐观移除
     removeSession(sessionId);
-
-    // 删除当前会话时自动切换到下一个可用会话，与 handleArchiveToggle 行为一致，避免 activeSessionId=null 导致模型配置暂时为空。
     if (isDeletingActive) {
-      const nextActive = sessions.find(
-        (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
-      );
-      if (nextActive) {
-        setActiveSession(nextActive.id);
-        switchSession(nextActive.id);
-      }
-    }
-    setBusySessionId((cur) => (cur === sessionId ? null : cur));
-  };
-
-  const handleArchiveToggle = async (
-    sessionId: string,
-    currentlyArchived: boolean
-  ) => {
-    if (busySessionId) return;
-    setBusySessionId(sessionId);
-    const newArchived = !currentlyArchived;
-    try {
-      await archiveSession(sessionId, newArchived);
-    } catch {
-      // 后端 404 可接受，仍更新本地状态
-    }
-    const newStatus = newArchived ? "archived" : "active";
-    updateSessionStatus(sessionId, newStatus);
-
-    if (newArchived && sessionId === activeSessionId) {
-      const nextActive = sessions.find(
-        (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
-      );
       if (nextActive) {
         setActiveSession(nextActive.id);
         switchSession(nextActive.id);
@@ -257,7 +235,70 @@ export function SessionList() {
         switchSession(null);
       }
     }
-    setBusySessionId((cur) => (cur === sessionId ? null : cur));
+
+    let shouldFinalize = false;
+    try {
+      await deleteSession(sessionId);
+      shouldFinalize = true;
+    } catch (err) {
+      if (isNotFoundError(err)) {
+        shouldFinalize = true;
+      } else {
+        const hasSession = useSessionStore
+          .getState()
+          .sessions.some((s) => s.id === sessionId);
+        if (!hasSession && sessionSnapshot) addSession(sessionSnapshot);
+        if (isDeletingActive) {
+          setActiveSession(prevActiveSessionId);
+          switchSession(prevActiveSessionId);
+        }
+      }
+    } finally {
+      if (shouldFinalize) {
+        // 确认删除完成后清理本地消息缓存
+        removeSessionCache(sessionId);
+      }
+      setBusySessionId((cur) => (cur === sessionId ? null : cur));
+    }
+  };
+
+  const handleArchiveToggle = async (
+    sessionId: string,
+    currentlyArchived: boolean
+  ) => {
+    if (busySessionId) return;
+    setBusySessionId(sessionId);
+    const prevSessions = useSessionStore.getState().sessions;
+    const prevActiveSessionId = useSessionStore.getState().activeSessionId;
+    const newArchived = !currentlyArchived;
+    const newStatus = newArchived ? "archived" : "active";
+    const prevStatus = currentlyArchived ? "archived" : "active";
+
+    // 乐观更新：立即更新本地状态，无需等待网络
+    updateSessionStatus(sessionId, newStatus);
+
+    if (newArchived && sessionId === prevActiveSessionId) {
+      const nextActive = prevSessions.find(
+        (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"
+      );
+      const nextId = nextActive?.id ?? null;
+      setActiveSession(nextId);
+      switchSession(nextId);
+    }
+
+    try {
+      await archiveSession(sessionId, newArchived);
+    } catch (err) {
+      if (!isNotFoundError(err)) {
+        updateSessionStatus(sessionId, prevStatus);
+        if (newArchived && sessionId === prevActiveSessionId) {
+          setActiveSession(prevActiveSessionId);
+          switchSession(prevActiveSessionId);
+        }
+      }
+    } finally {
+      setBusySessionId((cur) => (cur === sessionId ? null : cur));
+    }
   };
 
   if (sessions.length === 0) {

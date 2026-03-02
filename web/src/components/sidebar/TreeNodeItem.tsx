@@ -34,9 +34,21 @@ import {
   workspaceDeleteItem,
   workspaceRenameItem,
 } from "@/lib/api";
+import { isPreviewableWorkspaceFile } from "@/lib/file-preview";
 import type { TreeNode } from "./file-tree-helpers";
-import { countFiles, isSysFolderName } from "./file-tree-helpers";
+import {
+  countFiles,
+  isSysFolderName,
+  removeWorkspaceEntries,
+  renameWorkspaceEntries,
+  upsertWorkspaceEntry,
+} from "./file-tree-helpers";
 import { InlineRenameInput, InlineCreateInput } from "./InlineInputs";
+
+function isNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /404|not found|不存在/i.test(msg);
+}
 
 export interface TreeNodeProps {
   node: TreeNode;
@@ -71,16 +83,28 @@ export function TreeNodeItem(props: TreeNodeProps) {
     const handleRename = async (newName: string) => {
       const parentPath = node.fullPath.includes("/") ? node.fullPath.slice(0, node.fullPath.lastIndexOf("/")) : "";
       const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+      const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+      useExcelStore.setState({
+        workspaceFiles: renameWorkspaceEntries(prevWorkspaceFiles, node.fullPath, newPath),
+        wsFilesLoaded: true,
+      });
+      setRenaming(false);
       try {
         await workspaceRenameItem(node.fullPath, newPath);
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
-      } catch { /* silent */ }
-      setRenaming(false);
+      } catch {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+      }
     };
 
     const handleDelete = async () => {
       if (!window.confirm(`确定删除文件夹 "${node.name}" 及其所有内容？`)) return;
+      const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+      useExcelStore.setState({
+        workspaceFiles: removeWorkspaceEntries(prevWorkspaceFiles, [node.fullPath]),
+        wsFilesLoaded: true,
+      });
       try {
         await workspaceDeleteItem(node.fullPath);
         // W8: 同步清理 recentFiles 中属于该文件夹的条目
@@ -92,21 +116,46 @@ export function TreeNodeItem(props: TreeNodeProps) {
         if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove);
         excelStore.bumpWorkspaceFilesVersion();
         onRefresh();
-      } catch { /* silent */ }
+      } catch (err) {
+        if (!isNotFoundError(err)) {
+          useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+          return;
+        }
+        const excelStore = useExcelStore.getState();
+        const prefix = node.fullPath + "/";
+        const toRemove = excelStore.recentFiles
+          .filter((f) => f.path.includes(prefix) || f.path.endsWith("/" + node.fullPath))
+          .map((f) => f.path);
+        if (toRemove.length > 0) excelStore.removeRecentFiles(toRemove);
+        excelStore.bumpWorkspaceFilesVersion();
+        onRefresh();
+      }
     };
 
     const handleCreate = async (name: string) => {
       const fullPath = node.fullPath ? `${node.fullPath}/${name}` : name;
+      const creatingType = creating;
+      const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+      useExcelStore.setState({
+        workspaceFiles: upsertWorkspaceEntry(prevWorkspaceFiles, {
+          path: fullPath,
+          filename: name,
+          is_dir: creatingType === "folder",
+        }),
+        wsFilesLoaded: true,
+      });
+      setCreating(null);
       try {
-        if (creating === "folder") {
+        if (creatingType === "folder") {
           await workspaceMkdir(fullPath);
         } else {
           await workspaceCreateFile(fullPath);
         }
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
-      } catch { /* silent */ }
-      setCreating(null);
+      } catch {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+      }
     };
 
     const handleFolderDragOver = (e: React.DragEvent) => {
@@ -134,13 +183,20 @@ export function TreeNodeItem(props: TreeNodeProps) {
         : draggingPath;
       const newPath = node.fullPath ? `${node.fullPath}/${filename}` : filename;
       if (newPath === draggingPath) return;
+      const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+      useExcelStore.setState({
+        workspaceFiles: renameWorkspaceEntries(prevWorkspaceFiles, draggingPath, newPath),
+        wsFilesLoaded: true,
+      });
       try {
         await workspaceRenameItem(draggingPath, newPath);
         // Update recentFiles: remove old path
         useExcelStore.getState().removeRecentFile(draggingPath);
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
-      } catch { /* silent */ }
+      } catch {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+      }
       setExpanded(true);
     };
 
@@ -233,6 +289,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
   // ── File node ──
   const file = node.file!;
   const excel = isExcelFile(file.filename);
+  const previewable = isPreviewableWorkspaceFile(file.filename);
   const isFileActive = excel && panelOpen && activeFilePath === file.path;
   const isDragging = draggingPath === file.path;
   const isSelected = selectedPaths.has(file.path);
@@ -249,25 +306,45 @@ export function TreeNodeItem(props: TreeNodeProps) {
   const handleRenameFile = async (newName: string) => {
     const parentPath = node.fullPath.includes("/") ? node.fullPath.slice(0, node.fullPath.lastIndexOf("/")) : "";
     const newPath = parentPath ? `${parentPath}/${newName}` : newName;
+    const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+    useExcelStore.setState({
+      workspaceFiles: renameWorkspaceEntries(prevWorkspaceFiles, node.fullPath, newPath),
+      wsFilesLoaded: true,
+    });
+    setRenaming(false);
     try {
       await workspaceRenameItem(node.fullPath, newPath);
       // W8: 从 recentFiles 移除旧路径（新路径会在下次扫描时加入）
       if (file) useExcelStore.getState().removeRecentFile(file.path);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       onRefresh();
-    } catch { /* silent */ }
-    setRenaming(false);
+    } catch {
+      useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+    }
   };
 
   const handleDeleteFile = async () => {
     if (!window.confirm(`确定删除文件 "${node.name}"？`)) return;
+    const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+    useExcelStore.setState({
+      workspaceFiles: removeWorkspaceEntries(prevWorkspaceFiles, [node.fullPath]),
+      wsFilesLoaded: true,
+    });
     try {
       await workspaceDeleteItem(node.fullPath);
       // W8: 同步从 recentFiles 移除
       if (file) useExcelStore.getState().removeRecentFile(file.path);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       onRefresh();
-    } catch { /* silent */ }
+    } catch (err) {
+      if (!isNotFoundError(err)) {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+        return;
+      }
+      if (file) useExcelStore.getState().removeRecentFile(file.path);
+      useExcelStore.getState().bumpWorkspaceFilesVersion();
+      onRefresh();
+    }
   };
 
   return (
@@ -281,7 +358,15 @@ export function TreeNodeItem(props: TreeNodeProps) {
         isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
       } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
       style={{ paddingLeft: `${indent + 4 + 16}px` }}
-      title={selectMode ? "点击选择" : excel ? `单击: 侧边面板 | 双击: 全屏\n${file.path}` : `单击: 下载\n${file.path}`}
+      title={
+        selectMode
+          ? "点击选择"
+          : excel
+            ? `单击: 侧边面板 | 双击: 全屏\n${file.path}`
+            : previewable
+              ? `单击: 预览 | 菜单: 下载\n${file.path}`
+              : `单击: 下载\n${file.path}`
+      }
     >
       {selectMode ? (
         isSelected ? (

@@ -331,24 +331,55 @@ header .univer-box-border .univer-w-5.univer-cursor-pointer {
   }
 }
 
-/* 在更小的手机屏幕上进一步压缩 */
+/* ── Univer Footer: 扩大工作表标签区域，压缩缩放控件 ── */
+/* Univer 硬编码 sheet tab 容器为 max-w-[calc(100%-112px)]，
+   即右侧缩放区保留 112px。通过覆盖此值让 sheet tabs 获得更多空间。 */
+
+/* 平板/非桌面：缩放区缩小，sheet tab 区域扩大 */
+@media (max-width: 1279px) {
+  /* sheet tab 父容器：扩大可用宽度（从 112px 减到 70px 给缩放） */
+  [data-u-comp="slide-tab-bar"] {
+    padding: 2px 1px !important;
+  }
+
+  /* slide-tab-bar 的直接父 div 的 max-width 覆盖 */
+  footer .univer-max-w-\[calc\(100\%-112px\)\] {
+    max-width: calc(100% - 70px) !important;
+  }
+
+  /* 每个 sheet tab item 紧凑化 */
+  [data-u-comp="slide-tab-item"] {
+    margin: 0 1px !important;
+    font-size: 11px !important;
+  }
+
+  [data-u-comp="slide-tab-item"] > div {
+    padding: 2px 4px !important;
+    gap: 2px !important;
+  }
+}
+
+/* 手机端：进一步压缩 */
 @media (max-width: 767px) {
-  footer section[data-range-selector="true"] {
-    padding: 0 4px !important;
+  /* sheet tab 区域获得更多空间（缩放区仅留 45px） */
+  footer .univer-max-w-\[calc\(100\%-112px\)\] {
+    max-width: calc(100% - 45px) !important;
+  }
+
+  /* sheet tab 字号更小 */
+  [data-u-comp="slide-tab-item"] {
+    margin: 0 0.5px !important;
     font-size: 10px !important;
   }
 
-  footer section[data-range-selector="true"] button,
-  footer section[data-range-selector="true"] [role="button"] {
-    min-height: 20px !important;
-    min-width: 20px !important;
-    height: 20px !important;
+  [data-u-comp="slide-tab-item"] > div {
     padding: 1px 3px !important;
+    gap: 1px !important;
   }
 
-  footer section[data-range-selector="true"] svg {
-    width: 10px !important;
-    height: 10px !important;
+  /* 隐藏"添加工作表"和"工作表列表"按钮（footer 左侧前两个按钮） */
+  footer [data-u-comp="sheet-bar-append-button"] {
+    display: none !important;
   }
 }
 
