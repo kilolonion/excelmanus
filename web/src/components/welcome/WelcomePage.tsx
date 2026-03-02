@@ -76,6 +76,25 @@ function _blobToBase64(blob: Blob): Promise<string> {
   });
 }
 
+async function fetchImageSampleFast(
+  sampleFile: string,
+  sampleFileName: string,
+): Promise<AttachedFile | null> {
+  try {
+    const res = await fetch(sampleFile);
+    if (!res.ok) return null;
+    const blob = await res.blob();
+    const file = new File([blob], sampleFileName, { type: blob.type || "image/jpeg" });
+    const id = `sample-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const cachedBase64 = await _blobToBase64(blob);
+    // 图片卡片走“极速发送”路径：不阻塞等待 uploadFile，
+    // sendMessage 会直接使用 cachedBase64 发起多模态请求。
+    return { id, file, status: "success", cachedBase64 };
+  } catch {
+    return null;
+  }
+}
+
 async function fetchAndUploadSample(
   sampleFile: string,
   sampleFileName: string,
@@ -86,13 +105,8 @@ async function fetchAndUploadSample(
     const blob = await res.blob();
     const file = new File([blob], sampleFileName, { type: blob.type });
     const id = `sample-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    // 图片预编码 base64，sendMessage 可直接复用
-    const isImage = _isImageName(sampleFileName) || blob.type.startsWith("image/");
-    const [result, cachedBase64] = await Promise.all([
-      uploadFile(file),
-      isImage ? _blobToBase64(blob) : Promise.resolve(undefined),
-    ]);
-    return { id, file, status: "success", uploadResult: result, cachedBase64 };
+    const result = await uploadFile(file);
+    return { id, file, status: "success", uploadResult: result };
   } catch {
     return null;
   }
@@ -100,42 +114,53 @@ async function fetchAndUploadSample(
 
 export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
   const [loadingKey, setLoadingKey] = useState<string | null>(null);
-  // hover 预上传缓存：sampleFile → Promise<AttachedFile | null>
+  // sampleFile → Promise<AttachedFile | null>
   const prefetchCache = useRef<Map<string, Promise<AttachedFile | null>>>(new Map());
+  // 防止移动端快速连点导致重复触发（state 更新前的竞态窗口）
+  const clickLockRef = useRef(false);
+
+  const ensureSampleTask = useCallback((sampleFile: string, sampleFileName: string) => {
+    const existing = prefetchCache.current.get(sampleFile);
+    if (existing) return existing;
+    const task = _isImageName(sampleFileName)
+      ? fetchImageSampleFast(sampleFile, sampleFileName)
+      : fetchAndUploadSample(sampleFile, sampleFileName);
+    prefetchCache.current.set(sampleFile, task);
+    return task;
+  }, []);
 
   const prefetchSample = useCallback((suggestion: Suggestion) => {
     const { sampleFile, sampleFileName } = suggestion;
     if (!sampleFile || !sampleFileName) return;
-    if (prefetchCache.current.has(sampleFile)) return;
-    prefetchCache.current.set(
-      sampleFile,
-      fetchAndUploadSample(sampleFile, sampleFileName),
-    );
-  }, []);
+    void ensureSampleTask(sampleFile, sampleFileName);
+  }, [ensureSampleTask]);
 
   const handleClick = useCallback(
     async (suggestion: Suggestion) => {
-      if (loadingKey) return;
-
+      if (clickLockRef.current) return;
+      clickLockRef.current = true;
       setLoadingKey(suggestion.text);
+
       try {
         if (suggestion.sampleFile && suggestion.sampleFileName) {
-          // 优先使用 hover 预上传的缓存结果
-          const cached = prefetchCache.current.get(suggestion.sampleFile);
-          const task = cached ?? fetchAndUploadSample(suggestion.sampleFile, suggestion.sampleFileName);
-          const attached = await Promise.race([
-            task,
-            new Promise<null>((resolve) => setTimeout(() => resolve(null), 5000)),
-          ]);
+          let attached = await ensureSampleTask(suggestion.sampleFile, suggestion.sampleFileName);
+
+          // 预热失败时点击重试一次，避免因缓存了 null 导致一直不带附件。
+          if (!attached) {
+            prefetchCache.current.delete(suggestion.sampleFile);
+            attached = await ensureSampleTask(suggestion.sampleFile, suggestion.sampleFileName);
+          }
+
           onSuggestionClick(suggestion.text, attached ? [attached] : undefined);
         } else {
           onSuggestionClick(suggestion.text);
         }
       } finally {
         setLoadingKey(null);
+        clickLockRef.current = false;
       }
     },
-    [onSuggestionClick, loadingKey],
+    [onSuggestionClick, ensureSampleTask],
   );
 
   return (
@@ -180,6 +205,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
               whileHover={isBusy ? {} : { y: -2, transition: { duration: 0.15 } }}
               whileTap={isBusy ? {} : { scale: 0.97 }}
               onPointerEnter={() => prefetchSample(suggestion)}
+              onPointerDown={() => prefetchSample(suggestion)}
               onClick={() => handleClick(suggestion)}
               disabled={isBusy}
               className={`group flex items-center gap-3 rounded-xl welcome-card-glass p-4 text-left text-sm
