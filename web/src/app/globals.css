@@ -622,16 +622,20 @@ button:active:not(:disabled),
     min-height: 44px;
   }
 
-  /* Exceptions: icon-only buttons that already have explicit sizing */
+  /* Exceptions: buttons with explicit height — trust component-level sizing */
   button.h-5,
   button.h-6,
   button.h-7,
   button.h-8,
+  button.h-9,
   [role="button"].h-5,
   [role="button"].h-6,
   [role="button"].h-7,
-  [role="button"].h-8 {
-    min-height: 36px;
+  [role="button"].h-8,
+  [role="button"].h-9,
+  button[class*="size-"],
+  [role="button"][class*="size-"] {
+    min-height: 0;
   }
 
   /* Exceptions: small compact buttons (chat mode tabs, regenerate buttons, etc.) */
@@ -645,6 +649,13 @@ button:active:not(:disabled),
   /* Exception: compact overlay buttons (e.g. image thumbnail close) */
   button.touch-compact,
   [role="button"].touch-compact {
+    min-height: 0;
+  }
+
+  /* Exception: inline role="button" elements (code, span, etc.) that are not standalone targets */
+  code[role="button"],
+  span[role="button"],
+  div[role="button"].touch-compact {
     min-height: 0;
   }
 
@@ -1229,15 +1240,35 @@ button:active:not(:disabled),
 }
 
 @keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  15% { transform: translateX(-4px); }
-  30% { transform: translateX(4px); }
-  45% { transform: translateX(-3px); }
-  60% { transform: translateX(3px); }
-  75% { transform: translateX(-2px); }
-  90% { transform: translateX(2px); }
+  0% { transform: translateX(0); }
+  10% { transform: translateX(-6px); }
+  20% { transform: translateX(5px); }
+  30% { transform: translateX(-4px); }
+  40% { transform: translateX(3px); }
+  50% { transform: translateX(-2px); }
+  60% { transform: translateX(1.5px); }
+  70% { transform: translateX(-1px); }
+  80% { transform: translateX(0.5px); }
+  100% { transform: translateX(0); }
 }
-.animate-shake { animation: shake 0.5s ease-in-out; }
+.animate-shake { animation: shake 0.5s cubic-bezier(0.36, 0.07, 0.19, 0.97) both; }
+
+/* 输入框轻微抖动（流式输出中按 Enter 时提示） */
+@keyframes shake-subtle {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-2px); }
+  40% { transform: translateX(2px); }
+  60% { transform: translateX(-1.5px); }
+  80% { transform: translateX(1px); }
+}
+.animate-shake-subtle { animation: shake-subtle 0.35s ease-out; }
+
+@keyframes agreement-highlight {
+  0% { background-color: transparent; box-shadow: none; }
+  15% { background-color: hsl(var(--destructive) / 0.08); box-shadow: 0 0 0 1px hsl(var(--destructive) / 0.25); }
+  100% { background-color: transparent; box-shadow: none; }
+}
+.animate-agreement-highlight { animation: agreement-highlight 1.2s ease-out both; }
 
 /* Auth card glassmorphism */
 .auth-card {
