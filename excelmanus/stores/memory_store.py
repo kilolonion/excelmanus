@@ -220,8 +220,9 @@ class MemoryStore:
             (*self._uid_params, cutoff),
         )
         deleted = cur.rowcount
+        # SQLite 在 DELETE 影响 0 行时同样会开启写事务，必须提交以释放写锁。
+        self._conn.commit()
         if deleted > 0:
-            self._conn.commit()
             logger.info("记忆过期清理：移除 %d 条超过 %d 天的旧条目", deleted, max_age_days)
         return deleted
 
