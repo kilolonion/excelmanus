@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from excelmanus.auth.providers.base import ResolvedCredential
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine, ChatResult, DelegateSubagentOutcome, ToolCallResult
 from excelmanus.events import EventType
@@ -811,6 +812,38 @@ class TestSystemMessageMode:
         assert engine._effective_system_mode() == "merge"
         # 清理类状态，避免污染其他测试
         AgentEngine._system_mode_fallback_cache = {}
+
+
+class TestStreamFallbackBehavior:
+    """流式失败回退策略测试。"""
+
+    @pytest.mark.asyncio
+    async def test_auth_error_from_stream_path_skips_non_stream_fallback(self) -> None:
+        """401/403 鉴权错误应直接抛出，不再做非流式重复请求。"""
+
+        class _FakeAuthError(Exception):
+            def __init__(self, message: str) -> None:
+                self.status_code = 401
+                super().__init__(message)
+
+        config = _make_config()
+        engine = AgentEngine(config, _make_registry_with_tools())
+        engine.memory.add_user_message("测试鉴权失败")
+
+        route_result = SkillMatchResult(
+            skills_used=[],
+            route_mode="fallback",
+            system_contexts=[],
+        )
+        auth_exc = _FakeAuthError("Missing scopes: model.request")
+        mocked_call = AsyncMock(side_effect=auth_exc)
+        engine._llm_caller.create_chat_completion_with_system_fallback = mocked_call
+
+        with pytest.raises(_FakeAuthError):
+            await engine._tool_calling_loop(route_result, on_event=None)
+
+        # 未触发非流式兜底，因此仅调用一次
+        assert mocked_call.await_count == 1
 
 
 class TestContextBudgetAndHardCap:
@@ -5327,3 +5360,29 @@ def _make_skill_router(config: ExcelManusConfig | None = None) -> "SkillRouter":
         ),
     }
     return SkillRouter(cfg, loader)
+
+
+@pytest.mark.asyncio
+async def test_refresh_credential_updates_protocol_even_if_token_unchanged() -> None:
+    """OAuth token 不变时，也应同步 protocol/base_url 更新。"""
+    cfg = _make_config(
+        api_key="oauth-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+        model="gpt-5.3-codex",
+        protocol="openai",
+    )
+    engine = AgentEngine(cfg, _make_registry_with_tools(), user_id="user-1")
+
+    resolver = AsyncMock()
+    resolver.resolve.return_value = ResolvedCredential(
+        api_key="oauth-token",
+        base_url="https://chatgpt.com/backend-api/codex",
+        source="oauth",
+        provider="openai-codex",
+        protocol="openai_responses",
+    )
+    engine._credential_resolver = resolver
+
+    await engine._refresh_credential_if_needed()
+
+    assert engine._active_protocol == "openai_responses"

@@ -262,6 +262,72 @@ class CredentialStore:
         )
         self._conn.commit()
 
+    # ── OAuth Pending States（PKCE 流程状态持久化）──────────────
+
+    def _ensure_oauth_states_table(self) -> None:
+        """确保 oauth_pending_states 表存在。"""
+        self._conn.execute(
+            """CREATE TABLE IF NOT EXISTS oauth_pending_states (
+                state TEXT PRIMARY KEY,
+                data TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )"""
+        )
+        self._conn.commit()
+
+    def save_oauth_state(self, state: str, data: dict, ttl: int = 900) -> None:
+        """保存 OAuth pending state（PKCE 流程数据）。"""
+        import json as _json
+        self._ensure_oauth_states_table()
+        self.cleanup_expired_states(ttl)
+        self._conn.execute(
+            "INSERT OR REPLACE INTO oauth_pending_states (state, data, created_at) VALUES (?, ?, ?)",
+            (state, _json.dumps(data, ensure_ascii=False), _now_iso()),
+        )
+        self._conn.commit()
+
+    def pop_oauth_state(self, state: str, ttl: int = 900) -> dict | None:
+        """取出并删除 OAuth pending state。过期返回 None。"""
+        import json as _json
+        self._ensure_oauth_states_table()
+        row = self._conn.execute(
+            "SELECT data, created_at FROM oauth_pending_states WHERE state = ?",
+            (state,),
+        ).fetchone()
+        if not row:
+            return None
+        # 删除（一次性使用）
+        self._conn.execute(
+            "DELETE FROM oauth_pending_states WHERE state = ?", (state,),
+        )
+        self._conn.commit()
+        # 检查 TTL
+        data_str = row["data"] if isinstance(row, dict) else row[0]
+        created_at = row["created_at"] if isinstance(row, dict) else row[1]
+        try:
+            created = datetime.fromisoformat(created_at)
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            age = (datetime.now(tz=timezone.utc) - created).total_seconds()
+            if age > ttl:
+                return None
+        except (ValueError, TypeError):
+            pass
+        try:
+            return _json.loads(data_str)
+        except Exception:
+            return None
+
+    def cleanup_expired_states(self, ttl: int = 900) -> int:
+        """清理过期的 OAuth pending states。返回删除数量。"""
+        self._ensure_oauth_states_table()
+        cutoff = (datetime.now(tz=timezone.utc) - __import__("datetime").timedelta(seconds=ttl)).isoformat()
+        cur = self._conn.execute(
+            "DELETE FROM oauth_pending_states WHERE created_at < ?", (cutoff,),
+        )
+        self._conn.commit()
+        return cur.rowcount if hasattr(cur, "rowcount") else 0
+
     def _row_to_record(self, row: Any) -> AuthProfileRecord:
         d = dict(row) if hasattr(row, "keys") else dict(zip(
             ["id", "user_id", "provider", "profile_name", "credential_type",

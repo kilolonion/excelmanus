@@ -84,6 +84,23 @@ class _ChatCompletion:
 
 
 
+# ── ID 格式转换 ──────────────────────────────────────────────────
+
+
+def _ensure_fc_id(call_id: str) -> str:
+    """确保 function_call id 以 'fc_' 开头（Responses API 要求）。
+
+    Chat Completions 返回 'call_xxx' 格式，Responses API 要求 'fc_xxx'。
+    """
+    if not call_id:
+        return f"fc_{uuid.uuid4().hex[:24]}"
+    if call_id.startswith("fc_"):
+        return call_id
+    if call_id.startswith("call_"):
+        return "fc_" + call_id[5:]
+    return "fc_" + call_id
+
+
 # ── 格式转换：Chat Completions → Responses API ──────────────────
 
 
@@ -154,10 +171,11 @@ def _chat_messages_to_responses_input(
                     name = func.get("name", "")
                     args_raw = func.get("arguments", "{}")
                     tc_id = tc.get("id", "") if isinstance(tc, dict) else ""
+                    fc_id = _ensure_fc_id(tc_id)
                     input_items.append({
                         "type": "function_call",
-                        "id": tc_id or f"call_{uuid.uuid4().hex[:24]}",
-                        "call_id": tc_id or f"call_{uuid.uuid4().hex[:24]}",
+                        "id": fc_id,
+                        "call_id": fc_id,
                         "name": name,
                         "arguments": args_raw if isinstance(args_raw, str) else json.dumps(args_raw, ensure_ascii=False),
                     })
@@ -168,7 +186,7 @@ def _chat_messages_to_responses_input(
             tool_call_id = msg.get("tool_call_id", "")
             input_items.append({
                 "type": "function_call_output",
-                "call_id": tool_call_id,
+                "call_id": _ensure_fc_id(tool_call_id),
                 "output": content or "",
             })
             continue
@@ -244,6 +262,123 @@ def _map_chat_tool_choice_to_responses(tool_choice: Any) -> Any:
     return None
 
 
+def _apply_chat_kwargs_to_responses_body(body: dict[str, Any], kwargs: dict[str, Any]) -> None:
+    """将 Chat Completions kwargs 透传/映射到 Responses API 请求体。"""
+    extra_body = kwargs.get("extra_body")
+    if isinstance(extra_body, dict):
+        body.update(extra_body)
+
+    reasoning_effort = kwargs.get("reasoning_effort")
+    if isinstance(reasoning_effort, str) and reasoning_effort.strip():
+        reasoning_payload = body.get("reasoning")
+        if not isinstance(reasoning_payload, dict):
+            reasoning_payload = {}
+        # 若 extra_body 已显式设置 reasoning.effort，则优先保留用户覆盖值
+        reasoning_payload.setdefault("effort", reasoning_effort.strip().lower())
+        # OpenAI Responses 仅提供思考摘要而非原始 CoT，默认请求 summary 以便前端可展示。
+        reasoning_payload.setdefault("summary", "auto")
+        body["reasoning"] = reasoning_payload
+
+    max_tokens = kwargs.get("max_tokens")
+    if isinstance(max_tokens, int) and max_tokens > 0 and "max_output_tokens" not in body:
+        body["max_output_tokens"] = max_tokens
+
+
+def _collect_reasoning_texts_from_summary(summary: Any) -> list[str]:
+    """从 reasoning.summary 字段提取文本。"""
+    texts: list[str] = []
+    if isinstance(summary, str):
+        if summary.strip():
+            texts.append(summary)
+        return texts
+    if not isinstance(summary, list):
+        return texts
+    for entry in summary:
+        if isinstance(entry, str):
+            if entry.strip():
+                texts.append(entry)
+            continue
+        if not isinstance(entry, dict):
+            continue
+        text = entry.get("text")
+        if isinstance(text, str) and text.strip():
+            texts.append(text)
+            continue
+        summary_text = entry.get("summary_text")
+        if isinstance(summary_text, str) and summary_text.strip():
+            texts.append(summary_text)
+    return texts
+
+
+def _collect_reasoning_texts_from_output_item(item: Any) -> list[str]:
+    """从 Responses output item（reasoning block）提取思考摘要文本。"""
+    if not isinstance(item, dict):
+        return []
+    if item.get("type") != "reasoning":
+        return []
+
+    texts: list[str] = []
+    texts.extend(_collect_reasoning_texts_from_summary(item.get("summary")))
+
+    text = item.get("text")
+    if isinstance(text, str) and text.strip():
+        texts.append(text)
+
+    content = item.get("content")
+    if isinstance(content, str) and content.strip():
+        texts.append(content)
+    elif isinstance(content, list):
+        for part in content:
+            if isinstance(part, str):
+                if part.strip():
+                    texts.append(part)
+                continue
+            if not isinstance(part, dict):
+                continue
+            p_text = part.get("text")
+            if isinstance(p_text, str) and p_text.strip():
+                texts.append(p_text)
+                continue
+            p_summary = part.get("summary_text")
+            if isinstance(p_summary, str) and p_summary.strip():
+                texts.append(p_summary)
+
+    return texts
+
+
+def _extract_reasoning_delta_from_event(event_type: str, event_data: dict[str, Any]) -> str:
+    """从 Responses 流事件中提取 reasoning delta。"""
+    if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}:
+        text = event_data.get("delta") or event_data.get("text") or ""
+        return text if isinstance(text, str) else ""
+
+    if event_type in {"response.reasoning_summary_part.added", "response.reasoning_summary_part.done"}:
+        part = event_data.get("part") or event_data.get("item")
+        if isinstance(part, str):
+            return part
+        if isinstance(part, dict):
+            text = part.get("text") or part.get("summary_text") or ""
+            return text if isinstance(text, str) else ""
+        return ""
+
+    return ""
+
+
+def _join_reasoning_parts(parts: list[str], inline_thinking: str) -> str | None:
+    """合并 reasoning 摘要与内联 thinking，去重并保留顺序。"""
+    ordered: list[str] = []
+    seen: set[str] = set()
+
+    for raw in [*parts, inline_thinking]:
+        text = raw.strip() if isinstance(raw, str) else ""
+        if not text or text in seen:
+            continue
+        seen.add(text)
+        ordered.append(text)
+
+    return "\n".join(ordered) if ordered else None
+
+
 # ── 格式转换：Responses API → Chat Completions ──────────────────
 
 
@@ -267,6 +402,7 @@ def _responses_output_to_openai(
     output_blocks = data.get("output", [])
 
     text_parts: list[str] = []
+    reasoning_parts: list[str] = []
     tool_calls: list[_ToolCall] = []
 
     for block in output_blocks:
@@ -288,11 +424,13 @@ def _responses_output_to_openai(
                     arguments=block.get("arguments", "{}"),
                 ),
             ))
+        elif block_type == "reasoning":
+            reasoning_parts.extend(_collect_reasoning_texts_from_output_item(block))
 
     # 合并 text，然后检测非标准 <thinking> 内联标签
     raw_text = "\n".join(text_parts) if text_parts else ""
     inline_thinking, clean_text = extract_inline_thinking(raw_text)
-    thinking_joined = inline_thinking if inline_thinking else None
+    thinking_joined = _join_reasoning_parts(reasoning_parts, inline_thinking)
 
     message = _Message(
         content=clean_text if clean_text else None,
@@ -362,12 +500,14 @@ class _ResponsesChatCompletions:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
+                extra_kwargs=kwargs,
             )
         return await self._client._generate(
             model=model,
             messages=messages,
             tools=tools,
             tool_choice=kwargs.get("tool_choice"),
+            extra_kwargs=kwargs,
         )
 
 
@@ -405,13 +545,20 @@ class OpenAIResponsesClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        extra_kwargs: dict[str, Any] | None = None,
     ) -> _ChatCompletion:
-        """执行 Responses API 请求。"""
+        """执行 Responses API 请求。
+
+        注意：backend-api 强制要求 stream=true，因此即使调用方请求非流式，
+        内部也走流式请求并收集完整结果后返回。
+        """
         instructions, input_items = _chat_messages_to_responses_input(messages)
 
         body: dict[str, Any] = {
             "model": model,
             "input": input_items,
+            "stream": True,
+            "store": False,
         }
         if instructions:
             body["instructions"] = instructions
@@ -424,6 +571,7 @@ class OpenAIResponsesClient:
         mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
+        _apply_chat_kwargs_to_responses_body(body, extra_kwargs or {})
 
         url = f"{self._base_url}/responses"
         headers = {
@@ -432,32 +580,123 @@ class OpenAIResponsesClient:
         }
 
         logger.debug(
-            "Responses API 请求: model=%s, input=%d项, tools=%d个",
+            "Responses API 请求 (collected stream): model=%s, input=%d项, tools=%d个",
             model,
             len(input_items),
             len(responses_tools) if responses_tools else 0,
         )
 
-        try:
-            resp = await self._http.post(url, json=body, headers=headers)
-        except httpx.HTTPError as exc:
-            logger.error("Responses API HTTP 请求失败: %s", exc)
-            raise RuntimeError(f"Responses API 请求失败: {exc}") from exc
+        # 通过流式请求收集完整响应（backend-api 不支持非流式）
+        text_parts: list[str] = []
+        reasoning_parts: list[str] = []
+        tool_calls: list[_ToolCall] = []
+        current_tools: dict[int, dict] = {}
+        usage = _Usage()
+        finish_reason = "stop"
 
-        if resp.status_code != 200:
-            error_text = resp.text[:500]
-            logger.error("Responses API 返回错误 %d: %s", resp.status_code, error_text)
-            raise RuntimeError(
-                f"Responses API 错误 (HTTP {resp.status_code}): {error_text}"
-            )
+        async with self._http.stream("POST", url, json=body, headers=headers) as resp:
+            if resp.status_code != 200:
+                error_text = await resp.aread()
+                raise RuntimeError(
+                    f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                )
 
-        try:
-            data = resp.json()
-        except (json.JSONDecodeError, ValueError) as exc:
-            logger.error("Responses API 响应 JSON 解析失败: %s", exc)
-            raise RuntimeError(f"Responses API 响应解析失败: {exc}") from exc
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: "):
+                    continue
+                raw = line[6:]
+                if raw.strip() == "[DONE]":
+                    break
+                try:
+                    event_data = json.loads(raw)
+                except json.JSONDecodeError:
+                    continue
 
-        result = _responses_output_to_openai(data, model)
+                event_type = event_data.get("type", "")
+                reasoning_delta = _extract_reasoning_delta_from_event(event_type, event_data)
+                if reasoning_delta:
+                    reasoning_parts.append(reasoning_delta)
+
+                if event_type == "response.output_text.delta":
+                    delta_text = event_data.get("delta", "")
+                    if delta_text:
+                        text_parts.append(delta_text)
+
+                elif event_type == "response.output_item.added":
+                    item = event_data.get("item", {})
+                    output_index = event_data.get("output_index", 0)
+                    if item.get("type") == "function_call":
+                        current_tools[output_index] = {
+                            "id": item.get("call_id", item.get("id", "")),
+                            "name": item.get("name", ""),
+                            "arguments": "",
+                        }
+                    elif item.get("type") == "reasoning":
+                        reasoning_parts.extend(_collect_reasoning_texts_from_output_item(item))
+
+                elif event_type == "response.function_call_arguments.delta":
+                    output_index = event_data.get("output_index", 0)
+                    delta_args = event_data.get("delta", "")
+                    if output_index not in current_tools:
+                        current_tools[output_index] = {
+                            "id": event_data.get("item_id", ""),
+                            "name": "",
+                            "arguments": "",
+                        }
+                    current_tools[output_index]["arguments"] += delta_args
+
+                elif event_type == "response.completed":
+                    response_obj = event_data.get("response", {})
+                    usage_data = response_obj.get("usage", {})
+                    if usage_data:
+                        usage = _Usage(
+                            prompt_tokens=usage_data.get("input_tokens", 0),
+                            completion_tokens=usage_data.get("output_tokens", 0),
+                            total_tokens=usage_data.get("input_tokens", 0)
+                            + usage_data.get("output_tokens", 0),
+                        )
+                        _input_details = usage_data.get("input_tokens_details", {})
+                        if isinstance(_input_details, dict):
+                            _cached = _input_details.get("cached_tokens", 0)
+                            if _cached:
+                                usage.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
+                    output = response_obj.get("output", [])
+                    for item in output:
+                        reasoning_parts.extend(_collect_reasoning_texts_from_output_item(item))
+                    has_tool = any(
+                        item.get("type") == "function_call"
+                        for item in output
+                        if isinstance(item, dict)
+                    )
+                    if has_tool:
+                        finish_reason = "tool_calls"
+
+        # 组装 tool_calls
+        for idx in sorted(current_tools.keys()):
+            tc = current_tools[idx]
+            tool_calls.append(_ToolCall(
+                id=tc["id"],
+                function=_Function(name=tc["name"], arguments=tc["arguments"]),
+            ))
+
+        raw_text = "".join(text_parts)
+        inline_thinking, clean_text = extract_inline_thinking(raw_text)
+        thinking_joined = _join_reasoning_parts(reasoning_parts, inline_thinking)
+
+        message = _Message(
+            content=clean_text if clean_text else None,
+            tool_calls=tool_calls if tool_calls else None,
+            thinking=thinking_joined,
+            reasoning=thinking_joined,
+            reasoning_content=thinking_joined,
+        )
+
+        result = _ChatCompletion(
+            id=f"resp_{uuid.uuid4().hex[:12]}",
+            model=model,
+            choices=[_Choice(message=message, finish_reason=finish_reason)],
+            usage=usage,
+        )
         logger.debug(
             "Responses API 响应: tool_calls=%d, content_len=%d, tokens=%d",
             len(result.choices[0].message.tool_calls or []),
@@ -472,6 +711,7 @@ class OpenAIResponsesClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        extra_kwargs: dict[str, Any] | None = None,
     ) -> Any:
         """流式执行 Responses API 请求，返回异步生成器 yield StreamDelta。"""
         instructions, input_items = _chat_messages_to_responses_input(messages)
@@ -479,6 +719,7 @@ class OpenAIResponsesClient:
             "model": model,
             "input": input_items,
             "stream": True,
+            "store": False,
         }
         if instructions:
             body["instructions"] = instructions
@@ -489,6 +730,7 @@ class OpenAIResponsesClient:
         mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
+        _apply_chat_kwargs_to_responses_body(body, extra_kwargs or {})
 
         url = f"{self._base_url}/responses"
         headers = {
@@ -519,6 +761,9 @@ class OpenAIResponsesClient:
                         continue
 
                     event_type = event_data.get("type", "")
+                    reasoning_delta = _extract_reasoning_delta_from_event(event_type, event_data)
+                    if reasoning_delta:
+                        yield StreamDelta(thinking_delta=reasoning_delta)
 
                     if event_type == "response.output_text.delta":
                         delta_text = event_data.get("delta", "")
@@ -535,6 +780,9 @@ class OpenAIResponsesClient:
                                 "name": item.get("name", ""),
                                 "arguments": "",
                             }
+                        elif item.get("type") == "reasoning":
+                            for text in _collect_reasoning_texts_from_output_item(item):
+                                yield StreamDelta(thinking_delta=text)
 
                     elif event_type == "response.function_call_arguments.delta":
                         output_index = event_data.get("output_index", 0)

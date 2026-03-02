@@ -20,6 +20,30 @@ class _DummyResponse:
         return self._payload
 
 
+class _FakeStreamResponse:
+    def __init__(self, *, status_code: int, lines: list[str]) -> None:
+        self.status_code = status_code
+        self._lines = lines
+
+    async def aiter_lines(self):
+        for line in self._lines:
+            yield line
+
+    async def aread(self) -> bytes:
+        return b"stream error"
+
+
+class _FakeStreamContext:
+    def __init__(self, response: _FakeStreamResponse) -> None:
+        self._response = response
+
+    async def __aenter__(self) -> _FakeStreamResponse:
+        return self._response
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        del exc_type, exc, tb
+
+
 def _sample_chat_tools() -> list[dict[str, Any]]:
     return [
         {
@@ -46,22 +70,20 @@ async def test_openai_responses_provider_maps_forced_tool_choice() -> None:
     client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
     captured_body: dict[str, Any] = {}
 
-    async def _fake_post(url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _DummyResponse:
-        del url, headers
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
         captured_body.clear()
         captured_body.update(json)
-        return _DummyResponse(
+        response = _FakeStreamResponse(
             status_code=200,
-            payload={
-                "id": "resp_1",
-                "model": "gpt-test",
-                "status": "completed",
-                "output": [{"type": "message", "content": [{"type": "output_text", "text": "ok"}]}],
-                "usage": {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2},
-            },
+            lines=[
+                'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}',
+                "data: [DONE]",
+            ],
         )
+        return _FakeStreamContext(response)
 
-    client._http.post = AsyncMock(side_effect=_fake_post)
+    client._http.stream = _fake_stream
     try:
         await client.chat.completions.create(
             model="gpt-test",
@@ -73,6 +95,39 @@ async def test_openai_responses_provider_maps_forced_tool_choice() -> None:
         await client.close()
 
     assert captured_body["tool_choice"] == {"type": "function", "name": "ask_user"}
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_provider_maps_reasoning_effort() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    captured_body: dict[str, Any] = {}
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
+        captured_body.clear()
+        captured_body.update(json)
+        response = _FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}',
+                "data: [DONE]",
+            ],
+        )
+        return _FakeStreamContext(response)
+
+    client._http.stream = _fake_stream
+    try:
+        await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "hi"}],
+            reasoning_effort="low",
+        )
+    finally:
+        await client.close()
+
+    reasoning = captured_body.get("reasoning")
+    assert isinstance(reasoning, dict)
+    assert reasoning.get("effort") == "low"
 
 
 @pytest.mark.asyncio

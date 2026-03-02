@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -211,6 +212,72 @@ class TestAcquireForChat:
 
         assert str(engine._config.workspace_root).endswith("/users/user-abc")
         assert engine._config.workspace_root != config.workspace_root
+
+    @pytest.mark.asyncio
+    async def test_user_prefixed_codex_model_resolves_to_real_model(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """用户配置 openai-codex 前缀模型名时，会话内应解析为真实 model ID。"""
+        user_store = MagicMock()
+        user_store.get_by_id.return_value = SimpleNamespace(
+            llm_api_key=None,
+            llm_base_url=None,
+            llm_model="openai-codex/gpt-5.3-codex-spark",
+        )
+
+        manager = SessionManager(
+            max_sessions=config.max_sessions,
+            ttl_seconds=config.session_ttl_seconds,
+            config=config,
+            registry=registry,
+            user_store=user_store,
+        )
+
+        credential_store = MagicMock()
+        credential_store.get_active_profile.return_value = SimpleNamespace(
+            access_token="eyJcodex",
+            account_id="acc-1",
+            plan_type="plus",
+        )
+        manager.set_credential_store(credential_store)
+
+        sid, engine = await manager.acquire_for_chat(None, user_id="user-abc")
+        await manager.release_for_chat(sid)
+
+        assert engine.current_model == "gpt-5.3-codex-spark"
+        assert any(
+            p.name == "openai-codex/gpt-5.3-codex-spark"
+            for p in engine._config.models
+        )
+
+    def test_sync_user_subscription_profiles_sets_responses_protocol(
+        self, config: ExcelManusConfig, registry: ToolRegistry
+    ) -> None:
+        """同步用户 Codex 私有模型时，应标记为 openai_responses 协议。"""
+        manager = SessionManager(
+            max_sessions=config.max_sessions,
+            ttl_seconds=config.session_ttl_seconds,
+            config=config,
+            registry=registry,
+        )
+
+        credential_store = MagicMock()
+        credential_store.get_active_profile.return_value = SimpleNamespace(
+            access_token="eyJcodex",
+            account_id="acc-1",
+            plan_type="plus",
+        )
+        manager.set_credential_store(credential_store)
+
+        engine = MagicMock()
+        engine._config.models = ()
+
+        manager.sync_user_subscription_profiles(engine, user_id="user-1")
+
+        profiles = engine.sync_model_profiles.call_args.args[0]
+        codex_profiles = [p for p in profiles if p.name.startswith("openai-codex/")]
+        assert codex_profiles
+        assert all(p.protocol == "openai_responses" for p in codex_profiles)
 
 
 class TestSessionDetail:

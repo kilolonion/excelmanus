@@ -115,6 +115,10 @@ class TestModelProbeStrategies:
         from excelmanus.model_probe import _detect_openai_provider
         assert _detect_openai_provider("https://api.openai.com/v1") == "openai"
 
+    def test_openai_codex_backend_api_detected_as_openai(self):
+        from excelmanus.model_probe import _detect_openai_provider
+        assert _detect_openai_provider("https://chatgpt.com/backend-api/codex") == "openai"
+
     def test_openrouter_detected(self):
         from excelmanus.model_probe import _detect_openai_provider
         assert _detect_openai_provider("https://openrouter.ai/api/v1") == "openrouter"

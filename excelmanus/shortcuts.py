@@ -55,7 +55,7 @@ def _find_start_script(project_root: Path) -> Path | None:
         candidates = [
             "deploy/start.bat",
             "deploy/start.ps1",
-            "ExcelManusSetup.exe",
+            "ExcelManus.exe",
         ]
     elif system == "Darwin":
         candidates = [

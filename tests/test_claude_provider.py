@@ -305,3 +305,23 @@ def test_responses_output_to_openai_inline_thinking():
     assert "tricky" in msg.thinking
     assert "<thinking>" not in (msg.content or "")
     assert "7" in msg.content
+
+
+def test_responses_output_to_openai_reasoning_summary_block():
+    """Responses reasoning block summary 应映射到 thinking 字段。"""
+    from excelmanus.providers.openai_responses import _responses_output_to_openai
+
+    data = {
+        "id": "resp_test_reasoning",
+        "model": "gpt-5.3-codex",
+        "output": [
+            {"type": "reasoning", "summary": [{"type": "summary_text", "text": "先比较方案，再执行。"}]},
+            {"type": "message", "content": [{"type": "output_text", "text": "已完成。"}]},
+        ],
+        "usage": {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+    }
+    result = _responses_output_to_openai(data, "gpt-5.3-codex")
+    msg = result.choices[0].message
+    assert msg.thinking is not None
+    assert "比较方案" in msg.thinking
+    assert msg.content == "已完成。"
