@@ -12,7 +12,7 @@ Usage:
     # → produces EmbeddedAssets.cs
 
 Then compile:
-    csc.exe /langversion:5 /target:winexe /out:ExcelManusSetup.exe ExcelManusSetup.cs EmbeddedAssets.cs
+    csc.exe /langversion:5 /target:winexe /out:ExcelManus.exe ExcelManusSetup.cs EmbeddedAssets.cs
 """
 
 import os
