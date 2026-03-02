@@ -127,12 +127,22 @@ export function MemoryTab() {
   const handleDelete = async (e: React.MouseEvent, id: string) => {
     e.stopPropagation();
     if (!confirm("确定删除这条记忆？")) return;
+    const snapshotEntries = entries;
+    const snapshotExpandedId = expandedId;
+    const optimisticEntries = snapshotEntries.filter((ent) => ent.id !== id);
     setDeletingId(id);
+    setEntries(optimisticEntries);
+    settingsCache.set("/memory", optimisticEntries);
+    if (expandedId === id) {
+      setExpandedId(null);
+    }
     try {
       await apiDelete(`/memory/${encodeURIComponent(id)}`);
       settingsCache.invalidatePrefix("/memory");
-      setEntries((prev) => prev.filter((ent) => ent.id !== id));
     } catch (err) {
+      setEntries(snapshotEntries);
+      setExpandedId(snapshotExpandedId);
+      settingsCache.set("/memory", snapshotEntries);
       alert(err instanceof Error ? err.message : "删除失败");
     } finally {
       setDeletingId(null);

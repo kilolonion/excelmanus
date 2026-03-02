@@ -271,10 +271,13 @@ export function MCPTab() {
 
   const handleDelete = async (name: string) => {
     if (!confirm(`确定删除 MCP Server "${name}"？`)) return;
+    const snapshot = servers.find((s) => s.name === name);
+    setServers((prev) => prev.filter((s) => s.name !== name));
+    settingsCache.delete("/mcp/servers");
     try {
       await apiDelete(`/mcp/servers/${encodeURIComponent(name)}`);
-      fetchServers(true);
     } catch (err) {
+      if (snapshot) setServers((prev) => [...prev, snapshot]);
       alert(err instanceof Error ? err.message : "删除失败");
     }
   };

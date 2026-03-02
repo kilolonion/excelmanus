@@ -95,6 +95,9 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   const [sessionInput, setSessionInput] = useState("");
   const [addingGlobal, setAddingGlobal] = useState(false);
   const [addingSession, setAddingSession] = useState(false);
+  const sessionRulesUrl = sessionId
+    ? `/sessions/${encodeURIComponent(sessionId)}/rules`
+    : null;
 
   const fetchGlobalRules = useCallback(async (force = false) => {
     if (!force) {
@@ -112,24 +115,23 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   }, []);
 
   const fetchSessionRules = useCallback(async (force = false) => {
-    if (!sessionId) {
+    if (!sessionRulesUrl) {
       setSessionRules([]);
       return;
     }
-    const url = `/sessions/${encodeURIComponent(sessionId)}/rules`;
     if (!force) {
-      const cached = settingsCache.get<Rule[]>(url);
+      const cached = settingsCache.get<Rule[]>(sessionRulesUrl);
       if (cached) { setSessionRules(cached); return; }
     }
     try {
-      const data = await apiGet<Rule[]>(url);
+      const data = await apiGet<Rule[]>(sessionRulesUrl);
       const rules = Array.isArray(data) ? data : [];
-      settingsCache.set(url, rules);
+      settingsCache.set(sessionRulesUrl, rules);
       setSessionRules(rules);
     } catch {
       setSessionRules([]);
     }
-  }, [sessionId]);
+  }, [sessionRulesUrl]);
 
   useEffect(() => {
     setLoading(true);
@@ -141,13 +143,31 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   const handleAddGlobalRule = async () => {
     const content = globalInput.trim();
     if (!content) return;
+    const snapshot = globalRules;
+    const tempId = `temp-global-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticRule: Rule = {
+      id: tempId,
+      content,
+      enabled: true,
+      created_at: new Date().toISOString(),
+    };
+    const optimisticRules = [...snapshot, optimisticRule];
     setAddingGlobal(true);
+    setGlobalInput("");
+    setGlobalRules(optimisticRules);
+    settingsCache.set("/rules", optimisticRules);
     try {
       const created = await apiPost<Rule>("/rules", { content });
+      setGlobalRules((prev) =>
+        prev.some((r) => r.id === tempId)
+          ? prev.map((r) => (r.id === tempId ? created : r))
+          : [...prev, created]
+      );
       settingsCache.delete("/rules");
-      setGlobalRules((prev) => [...prev, created]);
-      setGlobalInput("");
     } catch (err) {
+      setGlobalRules(snapshot);
+      settingsCache.set("/rules", snapshot);
+      setGlobalInput(content);
       alert(err instanceof Error ? err.message : "添加失败");
     } finally {
       setAddingGlobal(false);
@@ -156,17 +176,32 @@ export function RulesTab({ sessionId }: RulesTabProps) {
 
   const handleAddSessionRule = async () => {
     const content = sessionInput.trim();
-    if (!content || !sessionId) return;
+    if (!content || !sessionRulesUrl) return;
+    const snapshot = sessionRules;
+    const tempId = `temp-session-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+    const optimisticRule: Rule = {
+      id: tempId,
+      content,
+      enabled: true,
+      created_at: new Date().toISOString(),
+    };
+    const optimisticRules = [...snapshot, optimisticRule];
     setAddingSession(true);
+    setSessionInput("");
+    setSessionRules(optimisticRules);
+    settingsCache.set(sessionRulesUrl, optimisticRules);
     try {
-      const created = await apiPost<Rule>(
-        `/sessions/${encodeURIComponent(sessionId)}/rules`,
-        { content }
+      const created = await apiPost<Rule>(sessionRulesUrl, { content });
+      setSessionRules((prev) =>
+        prev.some((r) => r.id === tempId)
+          ? prev.map((r) => (r.id === tempId ? created : r))
+          : [...prev, created]
       );
       settingsCache.invalidatePrefix("/sessions/");
-      setSessionRules((prev) => [...prev, created]);
-      setSessionInput("");
     } catch (err) {
+      setSessionRules(snapshot);
+      settingsCache.set(sessionRulesUrl, snapshot);
+      setSessionInput(content);
       alert(err instanceof Error ? err.message : "添加失败");
     } finally {
       setAddingSession(false);
@@ -174,7 +209,13 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   };
 
   const handleToggleGlobal = async (rule: Rule) => {
+    const snapshot = globalRules;
+    const optimisticRules = snapshot.map((r) =>
+      r.id === rule.id ? { ...r, enabled: !r.enabled } : r
+    );
     setUpdating(rule.id);
+    setGlobalRules(optimisticRules);
+    settingsCache.set("/rules", optimisticRules);
     try {
       const updated = await apiPatch<Rule>(`/rules/${encodeURIComponent(rule.id)}`, {
         enabled: !rule.enabled,
@@ -184,6 +225,8 @@ export function RulesTab({ sessionId }: RulesTabProps) {
         prev.map((r) => (r.id === rule.id ? updated : r))
       );
     } catch (err) {
+      setGlobalRules(snapshot);
+      settingsCache.set("/rules", snapshot);
       alert(err instanceof Error ? err.message : "更新失败");
     } finally {
       setUpdating(null);
@@ -191,8 +234,14 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   };
 
   const handleToggleSession = async (rule: Rule) => {
-    if (!sessionId) return;
+    if (!sessionId || !sessionRulesUrl) return;
+    const snapshot = sessionRules;
+    const optimisticRules = snapshot.map((r) =>
+      r.id === rule.id ? { ...r, enabled: !r.enabled } : r
+    );
     setUpdating(rule.id);
+    setSessionRules(optimisticRules);
+    settingsCache.set(sessionRulesUrl, optimisticRules);
     try {
       const updated = await apiPatch<Rule>(
         `/sessions/${encodeURIComponent(sessionId)}/rules/${encodeURIComponent(rule.id)}`,
@@ -203,6 +252,8 @@ export function RulesTab({ sessionId }: RulesTabProps) {
         prev.map((r) => (r.id === rule.id ? updated : r))
       );
     } catch (err) {
+      setSessionRules(snapshot);
+      settingsCache.set(sessionRulesUrl, snapshot);
       alert(err instanceof Error ? err.message : "更新失败");
     } finally {
       setUpdating(null);
@@ -211,12 +262,17 @@ export function RulesTab({ sessionId }: RulesTabProps) {
 
   const handleDeleteGlobal = async (rule: Rule) => {
     if (!confirm("确定删除该规则？")) return;
+    const snapshot = globalRules;
+    const optimisticRules = snapshot.filter((r) => r.id !== rule.id);
     setUpdating(rule.id);
+    setGlobalRules(optimisticRules);
+    settingsCache.set("/rules", optimisticRules);
     try {
       await apiDelete(`/rules/${encodeURIComponent(rule.id)}`);
       settingsCache.delete("/rules");
-      setGlobalRules((prev) => prev.filter((r) => r.id !== rule.id));
     } catch (err) {
+      setGlobalRules(snapshot);
+      settingsCache.set("/rules", snapshot);
       alert(err instanceof Error ? err.message : "删除失败");
     } finally {
       setUpdating(null);
@@ -224,15 +280,20 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   };
 
   const handleDeleteSession = async (rule: Rule) => {
-    if (!sessionId || !confirm("确定删除该规则？")) return;
+    if (!sessionId || !sessionRulesUrl || !confirm("确定删除该规则？")) return;
+    const snapshot = sessionRules;
+    const optimisticRules = snapshot.filter((r) => r.id !== rule.id);
     setUpdating(rule.id);
+    setSessionRules(optimisticRules);
+    settingsCache.set(sessionRulesUrl, optimisticRules);
     try {
       await apiDelete(
         `/sessions/${encodeURIComponent(sessionId)}/rules/${encodeURIComponent(rule.id)}`
       );
       settingsCache.invalidatePrefix("/sessions/");
-      setSessionRules((prev) => prev.filter((r) => r.id !== rule.id));
     } catch (err) {
+      setSessionRules(snapshot);
+      settingsCache.set(sessionRulesUrl, snapshot);
       alert(err instanceof Error ? err.message : "删除失败");
     } finally {
       setUpdating(null);

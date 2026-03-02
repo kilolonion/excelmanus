@@ -509,6 +509,34 @@ export interface WorkspaceUsage {
   files: { path: string; name: string; size: number; modified_at: number }[];
 }
 
+export interface AdminModelUsage {
+  model: string;
+  display_name: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  last_used_at: string;
+}
+
+export interface AdminProviderUsage {
+  provider: string;
+  display_name: string;
+  calls: number;
+  prompt_tokens: number;
+  completion_tokens: number;
+  total_tokens: number;
+  models: AdminModelUsage[];
+}
+
+export interface AdminLlmUsage {
+  total_calls: number;
+  total_prompt_tokens: number;
+  total_completion_tokens: number;
+  total_tokens: number;
+  providers: AdminProviderUsage[];
+}
+
 export interface AdminUser {
   id: string;
   email: string;
@@ -526,6 +554,7 @@ export interface AdminUser {
   max_storage_mb: number;
   max_files: number;
   workspace: WorkspaceUsage;
+  llm_usage?: AdminLlmUsage;
 }
 
 export interface AdminSession {

@@ -197,31 +197,31 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     ],
   },
   {
-    id: "siliconflow",
-    label: "硅基流动",
-    description: "多模型聚合平台 — 一个 Key 用多种模型",
-    pricing: "注册送额度，按模型计费",
-    purchaseUrl: "https://cloud.siliconflow.cn/account/ak",
-    model: "deepseek-ai/DeepSeek-V3",
-    base_url: "https://api.siliconflow.cn/v1",
+    id: "openai-codex",
+    label: "OpenAI Codex",
+    description: "ChatGPT Plus/Pro 订阅模型（支持 Codex 登录）",
+    pricing: "使用 ChatGPT Plus/Pro 订阅，无需单独 API 充值",
+    purchaseUrl: "https://chatgpt.com",
+    model: "openai-codex/gpt-5.3-codex-spark",
+    base_url: "https://api.openai.com/v1",
     protocol: "openai",
-    thinking_mode: "auto",
-    model_family: "",
+    thinking_mode: "openai_reasoning",
+    model_family: "gpt",
     steps: [
       {
-        title: "1. 注册硅基流动账号",
+        title: "1. 登录 ChatGPT",
         description:
-          "打开 cloud.siliconflow.cn，使用手机号注册。新用户注册赠送免费额度。",
+          "确保你的账号已开通 ChatGPT Plus/Pro（Codex 订阅能力）。",
       },
       {
-        title: "2. 获取 API Key",
+        title: "2. 在模型设置中完成 Codex 授权",
         description:
-          '进入账户管理 → API 密钥页面，点击「新建 API 密钥」即可生成。',
+          "进入「设置 → 模型配置」，使用 OpenAI Codex 区域的「浏览器授权」或粘贴 auth.json 完成连接。",
       },
       {
-        title: "3. 复制并使用",
+        title: "3. 预填并保存模型",
         description:
-          "复制 Key 粘贴到下方。硅基流动聚合了 DeepSeek、Qwen 等多种模型，可按需切换。",
+          "将 Model ID 设置为 openai-codex/gpt-5.3-codex-spark 并保存，即可在模型选择器中使用 Codex Spark。",
       },
     ],
   },
@@ -263,6 +263,6 @@ export const PROVIDER_LOGO_SLUG: Record<string, string> = {
   deepseek: "deepseek",
   qwen: "qwen",
   zhipu: "zhipu",
-  siliconflow: "siliconcloud",
+  "openai-codex": "openai",
   openrouter: "openrouter",
 };
