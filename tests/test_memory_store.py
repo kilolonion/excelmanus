@@ -138,3 +138,27 @@ class TestMemoryStoreUserIsolation:
         assert "only-b" not in user_a.load_core(limit=10)
         assert "only-b" in user_b.load_core(limit=10)
         assert "only-a" not in user_b.load_core(limit=10)
+
+
+class TestMemoryStoreLocking:
+    def test_cleanup_expired_noop_does_not_hold_write_lock(self, tmp_path: Path) -> None:
+        """回归：cleanup_expired 删除 0 行时也应释放事务，避免后续写被锁住。"""
+        db_path = tmp_path / "shared.db"
+        db_a = Database(str(db_path))
+        db_b = Database(str(db_path))
+        try:
+            # 缩短等待时间，确保锁问题快速暴露。
+            db_a.conn.execute("PRAGMA busy_timeout=100")
+            db_b.conn.execute("PRAGMA busy_timeout=100")
+            store_a = MemoryStore(db_a)
+            store_b = MemoryStore(db_b)
+
+            removed = store_a.cleanup_expired(max_age_days=90)
+            assert removed == 0
+
+            # 若 cleanup_expired 未提交事务，此处会抛出 sqlite3.OperationalError: database is locked
+            added = store_b.save_entries([_entry("writer-should-not-block")])
+            assert added == 1
+        finally:
+            db_a.close()
+            db_b.close()
