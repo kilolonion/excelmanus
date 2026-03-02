@@ -170,7 +170,11 @@ export interface Question {
 export interface ModelInfo {
   name: string;
   model: string;
+  display_name?: string;
+  resolved_model?: string;
   description?: string;
   active: boolean;
   base_url?: string;
+  provider?: string;
+  user_scoped?: boolean;
 }

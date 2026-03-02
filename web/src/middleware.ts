@@ -17,6 +17,7 @@ const PUBLIC_PATHS = [
   "/login",
   "/register",
   "/auth/callback",
+  "/auth/codex/callback",
   "/forgot-password",
   "/terms",
   "/privacy",
