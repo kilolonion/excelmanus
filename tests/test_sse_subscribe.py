@@ -100,6 +100,28 @@ class TestSessionStreamState:
             state.deliver(_make_event(EventType.TEXT_DELTA, text_delta=str(i)))
         assert len(state.event_buffer) == 3
 
+    def test_buffer_limit_retains_latest_events(self):
+        """缓冲区满时应保留最新事件，避免断连后回放旧快照。"""
+        state = _SessionStreamState(buffer_limit=3)
+        for i in range(5):
+            state.deliver(_make_event(EventType.TEXT_DELTA, text_delta=str(i)))
+
+        assert [e.text_delta for e in state.event_buffer] == ["2", "3", "4"]
+
+    def test_buffer_overflow_warns_once(self, caplog):
+        """溢出告警应只打印一次，避免日志噪音。"""
+        state = _SessionStreamState(buffer_limit=2)
+        with caplog.at_level("WARNING", logger="excelmanus.api.sse"):
+            for i in range(6):
+                state.deliver(_make_event(EventType.TEXT_DELTA, text_delta=str(i)))
+
+        warnings = [
+            record
+            for record in caplog.records
+            if "SSE 事件缓冲区已满" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
     def test_reconnect_flow(self):
         """模拟完整断连-重连流程：attach → detach → deliver → attach → drain。"""
         state = _SessionStreamState()
