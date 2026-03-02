@@ -182,7 +182,7 @@ export function SessionStatusBar() {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <div
-                    className="flex items-center gap-1 cursor-pointer"
+                    className="touch-compact flex items-center gap-1 cursor-pointer"
                     role="button"
                     tabIndex={0}
                     onClick={(event) => {
@@ -257,7 +257,7 @@ export function SessionStatusBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <span
-                className="flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
+                className="touch-compact flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
                 role="button"
                 tabIndex={0}
                 onClick={() => {

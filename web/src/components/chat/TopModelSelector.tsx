@@ -170,7 +170,9 @@ export function TopModelSelector() {
     }
   };
 
-  const displayLabel = (m: ModelInfo) => m.name === "default" ? m.model : m.name;
+  const displayLabel = (m: ModelInfo) =>
+    m.name === "default" ? m.model : (m.display_name || m.name);
+  const resolvedModel = (m: ModelInfo) => m.resolved_model || m.model;
 
   const filtered = useMemo(() => {
     if (!search.trim()) return models;
@@ -325,14 +327,14 @@ export function TopModelSelector() {
                           )}
                         </div>
                         <div className="flex items-center gap-1 mt-0.5">
-                          {m.name !== "default" && m.name !== m.model && !isUnhealthy && (
+                          {m.name !== "default" && m.name !== resolvedModel(m) && !isUnhealthy && (
                             <span className="text-[10px] text-muted-foreground/50 font-mono truncate">
-                              {m.model}
+                              {resolvedModel(m)}
                             </span>
                           )}
                           {m.description && (
                             <span className="text-[10px] text-muted-foreground/40 truncate">
-                              {m.name !== "default" && m.name !== m.model && !isUnhealthy
+                              {m.name !== "default" && m.name !== resolvedModel(m) && !isUnhealthy
                                 ? `· ${m.description}`
                                 : m.description}
                             </span>

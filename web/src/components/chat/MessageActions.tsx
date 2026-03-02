@@ -104,7 +104,11 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 }
 
 function displayLabel(m: ModelInfo): string {
-  return m.name === "default" ? m.model : m.name;
+  return m.name === "default" ? m.model : (m.display_name || m.name);
+}
+
+function resolvedModel(m: ModelInfo): string {
+  return m.resolved_model || m.model;
 }
 
 export const MessageActions = React.memo(function MessageActions({
@@ -251,9 +255,9 @@ export const MessageActions = React.memo(function MessageActions({
                                 </span>
                               )}
                             </div>
-                            {m.name !== "default" && m.name !== m.model && (
+                            {m.name !== "default" && m.name !== resolvedModel(m) && (
                               <span className="text-[10px] text-muted-foreground/50 font-mono truncate block mt-0.5">
-                                {m.model}
+                                {resolvedModel(m)}
                               </span>
                             )}
                           </div>

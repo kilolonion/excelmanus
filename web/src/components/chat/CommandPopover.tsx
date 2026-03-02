@@ -56,7 +56,7 @@ export function CommandPopover({
         {popover === "at-sub" && (
           <>
             <button
-              className="hover:text-foreground transition-colors"
+              className="touch-compact hover:text-foreground transition-colors"
               onClick={onBackToAt}
             >
               <AtSign className="h-3 w-3" />
@@ -75,7 +75,7 @@ export function CommandPopover({
         {popover === "slash-skills" && (
           <>
             <button
-              className="hover:text-foreground transition-colors"
+              className="touch-compact hover:text-foreground transition-colors"
               onClick={onBackToSlash}
             >
               <Terminal className="h-3 w-3" />
@@ -88,7 +88,7 @@ export function CommandPopover({
         {popover === "slash-model" && (
           <>
             <button
-              className="hover:text-foreground transition-colors"
+              className="touch-compact hover:text-foreground transition-colors"
               onClick={onBackToSlash}
             >
               <Terminal className="h-3 w-3" />

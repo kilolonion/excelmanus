@@ -20,6 +20,10 @@ import {
   Undo2,
   StopCircle,
   FolderOpen,
+  CornerDownLeft,
+  ScrollText,
+  Brain,
+  BookOpen,
 } from "lucide-react";
 
 // 不限制上传文件类型 — 后端仅做大小限制
@@ -49,6 +53,10 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/compact", description: "上下文压缩", icon: React.createElement(RotateCcw, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
   { command: "/plan", description: "计划模式", icon: React.createElement(ClipboardList, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "approve", "reject"] },
   { command: "/registry", description: "文件注册表", icon: React.createElement(FolderOpen, { className: "h-3.5 w-3.5" }), args: ["status", "scan"] },
+  { command: "/rollback", description: "回退对话轮次", icon: React.createElement(CornerDownLeft, { className: "h-3.5 w-3.5" }), args: ["list"] },
+  { command: "/rules", description: "自定义规则管理", icon: React.createElement(ScrollText, { className: "h-3.5 w-3.5" }), args: ["add", "delete", "toggle", "session"] },
+  { command: "/memory", description: "持久记忆管理", icon: React.createElement(Brain, { className: "h-3.5 w-3.5" }), args: ["file_pattern", "user_pref", "error_solution", "general", "delete", "clear"] },
+  { command: "/playbook", description: "历史经验管理", icon: React.createElement(BookOpen, { className: "h-3.5 w-3.5" }), args: ["list", "search", "stats", "delete", "reset"] },
   { command: "/accept", description: "确认操作", icon: React.createElement(CheckCircle2, { className: "h-3.5 w-3.5" }) },
   { command: "/reject", description: "拒绝操作", icon: React.createElement(XCircle, { className: "h-3.5 w-3.5" }) },
   { command: "/undo", description: "回滚操作", icon: React.createElement(Undo2, { className: "h-3.5 w-3.5" }) },
@@ -70,16 +78,24 @@ export const AT_TOP_LEVEL: MentionCategory[] = [
 ];
 
 // 在对话框中展示结果而非作为聊天发送的命令
+// 包含所有通过 /command API 专门处理的命令（无参数 + 带参数形态）
 export const DISPLAY_COMMANDS = new Set([
-  "/help", "/skills", "/mcp", "/history",
+  // 基础展示命令
+  "/help", "/skills", "/mcp", "/history", "/save",
   "/model", "/model list",
   "/config", "/config list", "/config get",
-  "/subagent list", "/subagent status",
-  "/fullaccess status",
-  "/backup list", "/backup status",
-  "/compact status",
-  "/plan status",
-  "/registry status",
+  // 控制命令 — status / list 查询
+  "/subagent", "/subagent list", "/subagent status",
+  "/fullaccess", "/fullaccess status",
+  "/backup", "/backup list", "/backup status",
+  "/compact", "/compact status",
+  "/plan", "/plan status",
+  "/registry", "/registry status",
+  "/rollback", "/rollback list",
+  "/undo", "/undo list",
+  "/rules",
+  "/memory",
+  "/playbook", "/playbook list", "/playbook stats",
 ]);
 
 // 直接执行前端操作的命令（不会发送到聊天）
