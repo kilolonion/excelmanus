@@ -2696,6 +2696,55 @@ class TestAdminGuardForModelConfig:
         app.state.auth_enabled = False
 
     @pytest.mark.asyncio
+    async def test_models_endpoint_includes_codex_user_models_with_friendly_alias(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """连接 Codex 后，/models 应返回用户私有模型（中文友好别名 + 前缀化 ID）。"""
+        app.state.auth_enabled = True
+        mock_store = MagicMock()
+        mock_store.get_by_id.return_value = SimpleNamespace(
+            role="user", is_active=True, allowed_models=None
+        )
+        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1"},
+        )
+
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_active_model.return_value = None
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+
+        mock_cred_store = MagicMock()
+        mock_cred_store.get_active_profile.return_value = SimpleNamespace(
+            access_token="eyJcodex",
+            account_id="acc-1",
+            plan_type="plus",
+        )
+        monkeypatch.setattr(app.state, "credential_store", mock_cred_store, raising=False)
+
+        resp = await client.get(
+            "/api/v1/models",
+            headers={"Authorization": "Bearer fake-token"},
+        )
+
+        assert resp.status_code == 200
+        models = resp.json().get("models", [])
+        spark = next(
+            (m for m in models if m.get("name") == "openai-codex/gpt-5.3-codex-spark"),
+            None,
+        )
+        assert spark is not None
+        assert spark.get("display_name") == "Codex Spark"
+        assert spark.get("model") == "openai-codex/gpt-5.3-codex-spark"
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
     async def test_models_endpoint_requires_admin_when_auth_enabled(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2743,6 +2792,45 @@ class TestAdminGuardForModelConfig:
         )
         # 不再返回 403，而是正常处理（200 或其他非 403 状态码）
         assert resp.status_code != 403
+        app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_switch_model_accepts_codex_prefixed_profile_name(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """切换模型接口应支持 openai-codex 前缀 profile 名称。"""
+        app.state.auth_enabled = True
+        mock_store = MagicMock()
+        mock_store.get_by_id.return_value = SimpleNamespace(
+            role="user", is_active=True, allowed_models=None
+        )
+        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
+        monkeypatch.setattr(
+            "excelmanus.auth.middleware.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
+        )
+        monkeypatch.setattr(
+            "excelmanus.auth.dependencies.decode_token",
+            lambda _token: {"type": "access", "sub": "u-1"},
+        )
+
+        # 不依赖全局 profile，走 Codex 用户私有模型解析路径。
+        monkeypatch.setattr(api_module, "_config_store", None)
+        mock_cred_store = MagicMock()
+        mock_cred_store.get_active_profile.return_value = SimpleNamespace(
+            access_token="eyJcodex",
+            account_id="acc-1",
+            plan_type="plus",
+        )
+        monkeypatch.setattr(app.state, "credential_store", mock_cred_store, raising=False)
+
+        resp = await client.put(
+            "/api/v1/models/active",
+            json={"name": "openai-codex/gpt-5.3-codex-spark"},
+            headers={"Authorization": "Bearer fake-token"},
+        )
+
+        assert resp.status_code == 200
         app.state.auth_enabled = False
 
     @pytest.mark.asyncio
