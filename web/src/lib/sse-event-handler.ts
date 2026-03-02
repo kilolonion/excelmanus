@@ -873,6 +873,23 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       // 如果在 done 事件中提前清除，会导致 SessionSync 的 useEffect 在 finally 之前触发，
       // 引发 refreshSessionMessagesFromBackend 读到后端尚未持久化的旧数据，造成消息闪烁。
       S().setPipelineStatus(null);
+
+      // ── 自动打开 Excel 预览面板 ──
+      // 任务完成后，若本轮对话涉及 Excel 文件变更，自动打开最后一个文件的预览
+      {
+        const EXCEL_RE = /\.(xlsx|xlsm|xls|csv)$/i;
+        const doneMsg = getLastAssistantMessage(S().messages, msgId);
+        const affected = doneMsg?.affectedFiles ?? [];
+        const excelFiles = affected.filter((f) => EXCEL_RE.test(f));
+        if (excelFiles.length > 0) {
+          const lastFile = excelFiles[excelFiles.length - 1];
+          const excelStore = useExcelStore.getState();
+          // 仅在面板未打开时自动打开，避免覆盖用户正在查看的内容
+          if (!excelStore.panelOpen) {
+            excelStore.openPanel(lastFile);
+          }
+        }
+      }
       break;
     }
 
@@ -917,15 +934,78 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    case "error": {
+    case "failure_guidance": {
       ctx.hadStreamError = true;
       S().setPipelineStatus(null);
-      const errMsg = (data.error as string) || "发生未知错误";
-      // sendMessage 有更丰富的错误处理（模型配置检测等），
-      // 由调用方在 error 事件后自行追加。这里仅追加通用错误文本。
-      if (!ctx.isFirstSend) {
-        S().appendBlock(msgId, { type: "text", content: `⚠️ ${errMsg}` });
+      // 同 category 去重：移除同消息内相同 category 的旧 failure_guidance block
+      const fgCategory = (data.category as string) || "unknown";
+      const existingBlocks = (() => {
+        const msgs = S().messages;
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          if (msgs[i].id === msgId && msgs[i].role === "assistant") {
+            return (msgs[i] as { blocks: import("@/lib/types").AssistantBlock[] }).blocks;
+          }
+        }
+        return [];
+      })();
+      const hasSameCategory = existingBlocks.some(
+        (b) => b.type === "failure_guidance" && b.category === fgCategory,
+      );
+      if (hasSameCategory) {
+        // 替换现有同 category 的 block
+        S().setMessages(
+          S().messages.map((m) => {
+            if (m.id !== msgId || m.role !== "assistant") return m;
+            return {
+              ...m,
+              blocks: (m as { blocks: import("@/lib/types").AssistantBlock[] }).blocks.map((b) => {
+                if (b.type === "failure_guidance" && b.category === fgCategory) {
+                  return {
+                    type: "failure_guidance" as const,
+                    category: fgCategory as "model" | "transport" | "config" | "quota" | "unknown",
+                    code: (data.code as string) || "",
+                    title: (data.title as string) || "",
+                    message: (data.message as string) || "",
+                    stage: (data.stage as string) || "",
+                    retryable: !!data.retryable,
+                    diagnosticId: (data.diagnostic_id as string) || "",
+                    actions: (data.actions as { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[]) || [],
+                    provider: (data.provider as string) || undefined,
+                    model: (data.model as string) || undefined,
+                  };
+                }
+                return b;
+              }),
+            };
+          }),
+        );
+      } else {
+        S().appendBlock(msgId, {
+          type: "failure_guidance",
+          category: fgCategory as "model" | "transport" | "config" | "quota" | "unknown",
+          code: (data.code as string) || "",
+          title: (data.title as string) || "",
+          message: (data.message as string) || "",
+          stage: (data.stage as string) || "",
+          retryable: !!data.retryable,
+          diagnosticId: (data.diagnostic_id as string) || "",
+          actions: (data.actions as { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[]) || [],
+          provider: (data.provider as string) || undefined,
+          model: (data.model as string) || undefined,
+        });
       }
+      // 折叠同轮 llm_retry(exhausted) block
+      S().setMessages(
+        S().messages.map((m) => {
+          if (m.id !== msgId || m.role !== "assistant") return m;
+          return {
+            ...m,
+            blocks: (m as { blocks: import("@/lib/types").AssistantBlock[] }).blocks.filter(
+              (b) => !(b.type === "llm_retry" && b.retryStatus === "exhausted"),
+            ),
+          };
+        }),
+      );
       break;
     }
 
