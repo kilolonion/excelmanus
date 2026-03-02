@@ -135,11 +135,18 @@ chmod +x ./deploy/start.sh  # 首次使用需添加执行权限
 
 ---
 
-### 方式二：手动安装（pip）
+### 方式二：手动安装（uv，推荐）
 
-适合已有 Python 环境（≥3.10）、想精确控制依赖的用户。
+适合已有 Python 环境（≥3.10）、想精确控制依赖的用户。使用 [uv](https://docs.astral.sh/uv/) 管理依赖，速度比 pip 快 10-100x。
 
-**1. 克隆并安装**
+**1. 安装 uv（如尚未安装）**
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**2. 克隆并安装**
 
 ```bash
 # 国内推荐 Gitee（更快）
@@ -147,11 +154,13 @@ git clone https://gitee.com/kilolonion/excelmanus.git
 # 或使用 GitHub
 # git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
-pip install ".[all]"          # 完整安装（CLI + Web + 全部可选依赖）
+uv sync --all-extras          # 完整安装（CLI + Web + 全部可选依赖）
 # 或者按需选择：
-# pip install ".[cli]"        # 仅 CLI 模式（轻量，不含 Web UI）
-# pip install ".[web]"        # 仅 Web API 模式（不含 CLI dashboard）
+# uv sync --extra cli          # 仅 CLI 模式（轻量，不含 Web UI）
+# uv sync --extra web          # 仅 Web API 模式（不含 CLI dashboard）
 ```
+
+> 也支持传统 pip：`pip install ".[all]"`
 
 **2. 创建配置文件**
 
@@ -172,8 +181,8 @@ EXCELMANUS_MODEL=gpt-4o                        # 模型名称
 **3. 启动**
 
 ```bash
-excelmanus            # CLI 终端交互模式
-excelmanus-api        # Web API 模式（后端监听 http://localhost:8000）
+uv run excelmanus            # CLI 终端交互模式
+uv run excelmanus-api        # Web API 模式（后端监听 http://localhost:8000）
 ```
 
 如需 Web UI 前端，还需单独启动：
@@ -450,9 +459,9 @@ EXCELMANUS_JWT_SECRET=your-random-secret-key-at-least-64-chars
 内置 Bench 评测，支持多轮用例、自动断言、JSON 日志和 Suite 并发：
 
 ```bash
-python -m excelmanus.bench --all                         # 全部
-python -m excelmanus.bench --suite bench/cases/xxx.json  # 指定 suite
-python -m excelmanus.bench --message "读取前10行"          # 单条
+uv run python -m excelmanus.bench --all                         # 全部
+uv run python -m excelmanus.bench --suite bench/cases/xxx.json  # 指定 suite
+uv run python -m excelmanus.bench --message "读取前10行"          # 单条
 ```
 
 ## 📖 配置参考
@@ -472,8 +481,8 @@ python -m excelmanus.bench --message "读取前10行"          # 单条
 ## 🛠️ 开发
 
 ```bash
-pip install -e ".[all,dev]"   # 完整安装 + 测试依赖
-pytest
+uv sync --all-extras --dev    # 完整安装 + 测试依赖
+uv run pytest
 ```
 
 ## 📄 许可证

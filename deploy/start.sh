@@ -307,12 +307,17 @@ _init_pip_mirror() {
 }
 
 _pip_install() {
-  # Prefer uv for 10-100x speedup
+  # Prefer uv sync for reproducible installs from lockfile
   if _has_uv; then
-    debug "使用 uv 安装 (加速模式)"
+    debug "使用 uv sync (加速模式)"
+    local uv_args=(sync --all-extras)
+    if [[ -n "$PIP_MIRROR_URL" ]]; then
+      uv_args+=(--index-url "$PIP_MIRROR_URL")
+    fi
+    uv "${uv_args[@]}" && return 0
+    warn "uv sync 失败, 尝试 uv pip install..."
     if [[ -n "$PIP_MIRROR_URL" ]]; then
       uv pip install "$@" -i "$PIP_MIRROR_URL" && return 0
-      warn "uv 镜像安装失败, 尝试默认源..."
     fi
     uv pip install "$@" && return 0
     warn "uv 安装失败, 回退到 pip..."
@@ -346,8 +351,8 @@ _check_deps() {
     elif command -v uv &>/dev/null; then
       warn "未找到 .venv 虚拟环境"
       info "检测到 uv，尝试自动创建虚拟环境并安装依赖..."
-      uv venv .venv && _pip_install -e '.[all]' || {
-        error "自动创建虚拟环境失败，请手动运行: uv venv && uv pip install -e '.[all]'"
+      uv sync --all-extras || {
+        error "自动创建虚拟环境失败，请手动运行: uv sync --all-extras"
         ok=false
       }
     elif command -v python3 &>/dev/null; then
@@ -357,9 +362,9 @@ _check_deps() {
         ok=false
       }
     else
-      local py_hint="uv venv && uv pip install -e '.[all]'"
+      local py_hint="uv sync --all-extras"
       if [[ "$OS_TYPE" == "linux" ]]; then
-        py_hint="$(_install_hint python3-venv) && python3 -m venv .venv && .venv/bin/pip install -e '.[all]'"
+        py_hint="curl -LsSf https://astral.sh/uv/install.sh | sh && uv sync --all-extras"
       fi
       error "未找到 .venv 虚拟环境，请先运行: $py_hint"
       ok=false

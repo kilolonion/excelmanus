@@ -938,7 +938,7 @@ function Deploy-Backend {
 
     if (-not $SkipDeps) {
         Write-Info "installing Python deps..."
-        Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q && pip install 'httpx[socks]' -q 2>/dev/null || true" | Out-Null
+        Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && if command -v uv &>/dev/null; then uv sync --all-extras -q && uv pip install 'httpx[socks]' -q 2>/dev/null || true; else source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q && pip install 'httpx[socks]' -q 2>/dev/null || true; fi" | Out-Null
     }
 
     Write-Info "restarting backend..."
@@ -1386,7 +1386,7 @@ function Invoke-CmdRollback {
 
         if (-not $SkipDeps) {
             Write-Info "reinstalling deps..."
-            Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q 2>/dev/null || true" | Out-Null
+            Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && if command -v uv &>/dev/null; then uv sync --all-extras -q 2>/dev/null || true; else source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q 2>/dev/null || true; fi" | Out-Null
         }
 
         Write-Info "restarting backend..."

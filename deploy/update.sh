@@ -296,7 +296,11 @@ if [[ "$SKIP_DEPS" != true ]]; then
     [[ "$USE_MIRROR" == true ]] && mirror_arg="-i https://pypi.tuna.tsinghua.edu.cn/simple"
 
     if _has_uv; then
-      info "使用 uv 安装后端依赖（加速模式）..."
+      info "使用 uv sync 安装后端依赖（加速模式）..."
+      local uv_sync_args=(sync --all-extras --project "${PROJECT_ROOT}")
+      [[ -n "$mirror_arg" ]] && uv_sync_args+=(--index-url "https://pypi.tuna.tsinghua.edu.cn/simple")
+      uv "${uv_sync_args[@]}" --quiet 2>/dev/null && return 0
+      warn "uv sync 失败，回退到 uv pip install..."
       uv pip install -e "${PROJECT_ROOT}" $mirror_arg --quiet 2>/dev/null && return 0
     fi
     "$PY" -m pip install -e "${PROJECT_ROOT}" $mirror_arg --quiet 2>/dev/null && return 0
@@ -341,7 +345,7 @@ if [[ "$SKIP_DEPS" != true ]]; then
     log "后端依赖已更新"
   else
     error "后端依赖安装失败"
-    warn "你可以手动运行: ${PY} -m pip install -e ."
+    warn "你可以手动运行: uv sync --all-extras 或 ${PY} -m pip install -e ."
   fi
 
   if [[ "$(cat "$FE_OK_FILE" 2>/dev/null)" == "1" ]]; then

@@ -925,9 +925,14 @@ _deploy_backend() {
     info "安装 Python 依赖..."
     _remote_backend "
       cd '${BACKEND_DIR}' && \
-      source '${VENV_DIR}/bin/activate' && \
-      pip install -e '.[all]' -q && \
-      pip install 'httpx[socks]' -q 2>/dev/null || true
+      if command -v uv &>/dev/null; then \
+        uv sync --all-extras -q && \
+        uv pip install 'httpx[socks]' -q 2>/dev/null || true; \
+      else \
+        source '${VENV_DIR}/bin/activate' && \
+        pip install -e '.[all]' -q && \
+        pip install 'httpx[socks]' -q 2>/dev/null || true; \
+      fi
     "
   fi
 
@@ -1653,8 +1658,12 @@ _cmd_rollback() {
       info "重新安装依赖..."
       _remote_backend "
         cd '${BACKEND_DIR}' && \
-        source '${VENV_DIR}/bin/activate' && \
-        pip install -e '.[all]' -q 2>/dev/null || true
+        if command -v uv &>/dev/null; then \
+          uv sync --all-extras -q 2>/dev/null || true; \
+        else \
+          source '${VENV_DIR}/bin/activate' && \
+          pip install -e '.[all]' -q 2>/dev/null || true; \
+        fi
       " || true
     fi
 

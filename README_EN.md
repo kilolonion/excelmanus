@@ -141,11 +141,18 @@ Type natural language instructions in the Web UI or CLI:
 
 ---
 
-### Option 2: Manual Install (pip)
+### Option 2: Manual Install (uv, Recommended)
 
-For users with an existing Python environment (≥3.10) who want precise control over dependencies.
+For users with an existing Python environment (≥3.10) who want precise control over dependencies. Uses [uv](https://docs.astral.sh/uv/) for 10-100x faster dependency management.
 
-**1. Clone and install**
+**1. Install uv (if not already installed)**
+
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh   # macOS / Linux
+# Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+**2. Clone and install**
 
 ```bash
 # Recommended for users in China (faster)
@@ -153,11 +160,13 @@ git clone https://gitee.com/kilolonion/excelmanus.git
 # Or use GitHub
 # git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
-pip install ".[all]"          # Full install (CLI + Web + all optional deps)
+uv sync --all-extras          # Full install (CLI + Web + all optional deps)
 # Or pick what you need:
-# pip install ".[cli]"        # CLI only (lightweight, no Web UI)
-# pip install ".[web]"        # Web API only (no CLI dashboard)
+# uv sync --extra cli          # CLI only (lightweight, no Web UI)
+# uv sync --extra web          # Web API only (no CLI dashboard)
 ```
+
+> Also supports traditional pip: `pip install ".[all]"`
 
 **2. Create config file**
 
@@ -178,8 +187,8 @@ EXCELMANUS_MODEL=gpt-4o                        # Model name
 **3. Launch**
 
 ```bash
-excelmanus            # CLI terminal mode
-excelmanus-api        # Web API mode (backend at http://localhost:8000)
+uv run excelmanus            # CLI terminal mode
+uv run excelmanus-api        # Web API mode (backend at http://localhost:8000)
 ```
 
 For the Web UI frontend, start it separately:
@@ -410,9 +419,9 @@ See [Configuration](docs/configuration_en.md) for details.
 Built-in Bench evaluation with multi-turn cases, auto-assertion, JSON logs, and suite-level concurrency:
 
 ```bash
-python -m excelmanus.bench --all                         # All
-python -m excelmanus.bench --suite bench/cases/xxx.json  # Specific suite
-python -m excelmanus.bench --message "Read first 10 rows"  # Single test
+uv run python -m excelmanus.bench --all                         # All
+uv run python -m excelmanus.bench --suite bench/cases/xxx.json  # Specific suite
+uv run python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 ```
 
 ## 📖 Configuration Reference
@@ -432,8 +441,8 @@ Start scripts auto-detect OS and package manager, providing precise install comm
 ## 🛠️ Development
 
 ```bash
-pip install -e ".[all,dev]"   # Full install + test dependencies
-pytest
+uv sync --all-extras --dev    # Full install + test dependencies
+uv run pytest
 ```
 
 ## 📄 License
