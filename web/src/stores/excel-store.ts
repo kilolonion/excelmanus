@@ -118,6 +118,20 @@ export interface ExcelFileRef {
 const MAX_RECENT_FILES = 50;
 const MAX_PERSISTED_DIFFS = 500;
 
+function mergeAppliedFilesByOriginal(
+  base: AppliedFile[],
+  incoming: AppliedFile[]
+): AppliedFile[] {
+  const merged = new Map<string, AppliedFile>();
+  for (const item of base) {
+    merged.set(normalizeExcelPath(item.original), item);
+  }
+  for (const item of incoming) {
+    merged.set(normalizeExcelPath(item.original), item);
+  }
+  return Array.from(merged.values());
+}
+
 interface ExcelState {
   // 侧边面板
   panelOpen: boolean;
@@ -460,71 +474,187 @@ export const useExcelStore = create<ExcelState>()(
   },
 
   applyFile: async (sessionId, filePath) => {
+    const normPath = normalizeExcelPath(filePath);
+    const snapshot = (() => {
+      const state = get();
+      return {
+        pendingBackups: state.pendingBackups,
+        appliedPaths: new Set(state.appliedPaths),
+        undoableApplies: state.undoableApplies,
+        refreshCounter: state.refreshCounter,
+      };
+    })();
+    const pendingItem = snapshot.pendingBackups.find(
+      (b) => normalizeExcelPath(b.original_path) === normPath
+    );
+    const optimisticApplied: AppliedFile = {
+      original: pendingItem?.original_path ?? filePath,
+      backup: pendingItem?.backup_path ?? filePath,
+    };
+
+    set((state) => {
+      const newApplied = new Set(state.appliedPaths);
+      newApplied.add(normPath);
+      return {
+        pendingBackups: state.pendingBackups.filter(
+          (b) => normalizeExcelPath(b.original_path) !== normPath
+        ),
+        appliedPaths: newApplied,
+        refreshCounter: state.refreshCounter + 1,
+        undoableApplies: mergeAppliedFilesByOriginal(state.undoableApplies, [optimisticApplied]),
+      };
+    });
+
     try {
       const result = await applyBackup({ sessionId, files: [filePath] });
-      if (result.count > 0) {
-        const normPath = normalizeExcelPath(filePath);
-        set((state) => {
-          const newApplied = new Set(state.appliedPaths);
-          newApplied.add(normPath);
-          return {
-            pendingBackups: state.pendingBackups.filter(
-              (b) => normalizeExcelPath(b.original_path) !== normPath
-            ),
-            appliedPaths: newApplied,
-            refreshCounter: state.refreshCounter + 1,
-            undoableApplies: [...state.undoableApplies, ...result.applied],
-          };
+      if (result.count <= 0) {
+        set({
+          pendingBackups: snapshot.pendingBackups,
+          appliedPaths: snapshot.appliedPaths,
+          undoableApplies: snapshot.undoableApplies,
+          refreshCounter: snapshot.refreshCounter,
         });
-        return true;
+        return false;
       }
-      return false;
+
+      set((state) => {
+        const newApplied = new Set(state.appliedPaths);
+        for (const item of result.applied) {
+          newApplied.add(normalizeExcelPath(item.original));
+        }
+        const confirmedForPath = result.applied.filter(
+          (item) => normalizeExcelPath(item.original) === normPath
+        );
+        return {
+          appliedPaths: newApplied,
+          undoableApplies: mergeAppliedFilesByOriginal(
+            state.undoableApplies.filter(
+              (item) => normalizeExcelPath(item.original) !== normPath
+            ),
+            confirmedForPath.length > 0 ? confirmedForPath : [optimisticApplied]
+          ),
+        };
+      });
+      return true;
     } catch {
+      set({
+        pendingBackups: snapshot.pendingBackups,
+        appliedPaths: snapshot.appliedPaths,
+        undoableApplies: snapshot.undoableApplies,
+        refreshCounter: snapshot.refreshCounter,
+      });
       return false;
     }
   },
 
   applyAll: async (sessionId) => {
+    const snapshot = (() => {
+      const state = get();
+      return {
+        pendingBackups: state.pendingBackups,
+        appliedPaths: new Set(state.appliedPaths),
+        undoableApplies: state.undoableApplies,
+        refreshCounter: state.refreshCounter,
+      };
+    })();
+    if (snapshot.pendingBackups.length === 0) return 0;
+
+    const optimisticApplied = snapshot.pendingBackups.map<AppliedFile>((b) => ({
+      original: b.original_path,
+      backup: b.backup_path,
+    }));
+    const optimisticPathSet = new Set(
+      snapshot.pendingBackups.map((b) => normalizeExcelPath(b.original_path))
+    );
+
+    set((state) => {
+      const newApplied = new Set(state.appliedPaths);
+      for (const path of optimisticPathSet) {
+        newApplied.add(path);
+      }
+      return {
+        pendingBackups: [],
+        appliedPaths: newApplied,
+        refreshCounter: state.refreshCounter + 1,
+        undoableApplies: mergeAppliedFilesByOriginal(
+          state.undoableApplies.filter(
+            (item) => !optimisticPathSet.has(normalizeExcelPath(item.original))
+          ),
+          optimisticApplied
+        ),
+      };
+    });
+
     try {
       const result = await applyBackup({ sessionId });
+      if (result.count <= 0 && snapshot.pendingBackups.length > 0) {
+        set({
+          pendingBackups: snapshot.pendingBackups,
+          appliedPaths: snapshot.appliedPaths,
+          undoableApplies: snapshot.undoableApplies,
+          refreshCounter: snapshot.refreshCounter,
+        });
+        return 0;
+      }
+
       set((state) => {
         const newApplied = new Set(state.appliedPaths);
         for (const a of result.applied) {
-          newApplied.add(a.original);
+          newApplied.add(normalizeExcelPath(a.original));
         }
+        const confirmed = optimisticApplied.map((item) => {
+          const match = result.applied.find(
+            (applied) =>
+              normalizeExcelPath(applied.original) === normalizeExcelPath(item.original)
+          );
+          return match ?? item;
+        });
         return {
-          pendingBackups: [],
           appliedPaths: newApplied,
-          refreshCounter: state.refreshCounter + 1,
-          undoableApplies: [...state.undoableApplies, ...result.applied],
+          undoableApplies: mergeAppliedFilesByOriginal(
+            state.undoableApplies.filter(
+              (item) => !optimisticPathSet.has(normalizeExcelPath(item.original))
+            ),
+            confirmed
+          ),
         };
       });
       return result.count;
     } catch {
+      set({
+        pendingBackups: snapshot.pendingBackups,
+        appliedPaths: snapshot.appliedPaths,
+        undoableApplies: snapshot.undoableApplies,
+        refreshCounter: snapshot.refreshCounter,
+      });
       return 0;
     }
   },
 
   discardFile: async (sessionId, filePath) => {
+    const snapshot = get().pendingBackups;
+    const normPath = normalizeExcelPath(filePath);
+
+    set((state) => ({
+      pendingBackups: state.pendingBackups.filter(
+        (b) => normalizeExcelPath(b.original_path) !== normPath
+      ),
+    }));
+
     try {
       await discardBackup({ sessionId, files: [filePath] });
-      const normPath = normalizeExcelPath(filePath);
-      set((state) => ({
-        pendingBackups: state.pendingBackups.filter(
-          (b) => normalizeExcelPath(b.original_path) !== normPath
-        ),
-      }));
     } catch {
-      // 忽略
+      set({ pendingBackups: snapshot });
     }
   },
 
   discardAll: async (sessionId) => {
+    const snapshot = get().pendingBackups;
+    set({ pendingBackups: [] });
     try {
       await discardBackup({ sessionId });
-      set({ pendingBackups: [] });
     } catch {
-      // 忽略
+      set({ pendingBackups: snapshot });
     }
   },
 
@@ -534,25 +664,41 @@ export const useExcelStore = create<ExcelState>()(
 
   undoApply: async (sessionId, item) => {
     if (!item.undo_path) return false;
+    const normOriginal = normalizeExcelPath(item.original);
+    const snapshot = (() => {
+      const state = get();
+      return {
+        appliedPaths: new Set(state.appliedPaths),
+        undoableApplies: state.undoableApplies,
+        refreshCounter: state.refreshCounter,
+      };
+    })();
+
+    set((state) => {
+      const newApplied = new Set(state.appliedPaths);
+      newApplied.delete(normOriginal);
+      return {
+        appliedPaths: newApplied,
+        undoableApplies: state.undoableApplies.filter(
+          (a) => normalizeExcelPath(a.original) !== normOriginal
+        ),
+        refreshCounter: state.refreshCounter + 1,
+      };
+    });
+
     try {
       await undoBackup({
         sessionId,
         originalPath: item.original,
         undoPath: item.undo_path,
       });
-      set((state) => {
-        const newApplied = new Set(state.appliedPaths);
-        newApplied.delete(normalizeExcelPath(item.original));
-        return {
-          appliedPaths: newApplied,
-          undoableApplies: state.undoableApplies.filter(
-            (a) => a.undo_path !== item.undo_path
-          ),
-          refreshCounter: state.refreshCounter + 1,
-        };
-      });
       return true;
     } catch {
+      set({
+        appliedPaths: snapshot.appliedPaths,
+        undoableApplies: snapshot.undoableApplies,
+        refreshCounter: snapshot.refreshCounter,
+      });
       return false;
     }
   },
@@ -624,21 +770,38 @@ export const useExcelStore = create<ExcelState>()(
   },
 
   undoOperationById: async (sessionId, approvalId) => {
+    const snapshot = (() => {
+      const state = get();
+      return {
+        operations: state.operations,
+        refreshCounter: state.refreshCounter,
+      };
+    })();
+
+    set((state) => ({
+      operations: state.operations.map((op) =>
+        op.approval_id === approvalId
+          ? { ...op, undoable: false }
+          : op
+      ),
+      refreshCounter: state.refreshCounter + 1,
+    }));
+
     try {
       const result = await apiUndoOperation(sessionId, approvalId);
       if (result.status === "ok") {
-        set((state) => ({
-          operations: state.operations.map((op) =>
-            op.approval_id === approvalId
-              ? { ...op, undoable: false }
-              : op
-          ),
-          refreshCounter: state.refreshCounter + 1,
-        }));
         return true;
       }
+      set({
+        operations: snapshot.operations,
+        refreshCounter: snapshot.refreshCounter,
+      });
       return false;
     } catch {
+      set({
+        operations: snapshot.operations,
+        refreshCounter: snapshot.refreshCounter,
+      });
       return false;
     }
   },

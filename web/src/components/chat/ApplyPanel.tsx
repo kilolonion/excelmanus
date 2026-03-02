@@ -29,7 +29,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildBackupDownloadUrl, type BackupFile, type AppliedFile } from "@/lib/api";
+import {
+  buildBackupDownloadUrl,
+  normalizeExcelPath,
+  type BackupFile,
+  type AppliedFile,
+} from "@/lib/api";
 
 /** 格式化文件大小差异 */
 function formatSizeDelta(bytes: number): string {
@@ -236,7 +241,7 @@ export function ApplyPanel({
               <div className="space-y-2">
                 {pendingBackups.map((backup, idx) => {
                   const isApplying = applyingPaths.has(backup.original_path);
-                  const isApplied = appliedPaths.has(backup.original_path);
+                  const isApplied = appliedPaths.has(normalizeExcelPath(backup.original_path));
                   const modTime = backup.modified_at
                     ? new Date(backup.modified_at * 1000).toLocaleString("zh-CN", {
                         month: "numeric",
