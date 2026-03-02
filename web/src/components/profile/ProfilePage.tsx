@@ -16,7 +16,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { useAuthStore } from "@/stores/auth-store";
-import { proxyAvatarUrl } from "@/lib/api";
+import { resolveAvatarSrc } from "@/lib/api";
 import {
   updateProfile,
   changePassword,
@@ -26,8 +26,17 @@ import {
   fetchOAuthLinks,
   unlinkOAuth,
   getOAuthUrl,
+  fetchCodexStatus,
+  codexOAuthStart,
+  codexOAuthExchange,
+  codexDeviceCodeStart,
+  codexDeviceCodePoll,
+  connectCodex,
+  disconnectCodex,
+  refreshCodexToken,
   type WorkspaceUsage,
   type OAuthLinkInfo,
+  type CodexStatus,
 } from "@/lib/auth-api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 
@@ -94,17 +103,7 @@ function ProfileAvatar({
   const inputRef = useRef<HTMLInputElement>(null);
   const accessToken = useAuthStore((s) => s.accessToken);
 
-  // Append token to avatar URL for <img> tag auth
-  const proxied = (() => {
-    const base = proxyAvatarUrl(src);
-    if (!base || !accessToken) return base;
-    // Only append token for local avatar-file endpoint
-    if (base.includes("/avatar-file")) {
-      const sep = base.includes("?") ? "&" : "?";
-      return `${base}${sep}token=${accessToken}`;
-    }
-    return base;
-  })();
+  const proxied = resolveAvatarSrc(src, accessToken);
 
   const initial = name[0]?.toUpperCase() || "U";
   const showImage = proxied && failedSrc !== src;
@@ -322,6 +321,575 @@ function OAuthLinksSection({
           提示：请先设置密码后再解绑第三方登录，确保账号可登录。
         </p>
       )}
+    </div>
+  );
+}
+
+// ── Codex Provider Section ─────────────────────────────────
+
+function CodexProviderSection({
+  showToast,
+}: {
+  showToast: (msg: string, type: "success" | "error") => void;
+}) {
+  const [status, setStatus] = useState<CodexStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [tokenInput, setTokenInput] = useState("");
+  const [connecting, setConnecting] = useState(false);
+  const [disconnecting, setDisconnecting] = useState(false);
+  const [refreshing, setRefreshing] = useState(false);
+  const [showFallback, setShowFallback] = useState(false);
+  const [showManual, setShowManual] = useState(false);
+
+  // OAuth PKCE Browser Flow state
+  const [oauthBusy, setOauthBusy] = useState(false);
+  const [oauthState, setOauthState] = useState("");
+  const [pasteUrl, setPasteUrl] = useState("");
+  const [oauthMode, setOauthMode] = useState<"popup" | "paste" | null>(null);
+  const popupRef = useRef<Window | null>(null);
+  const popupTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  // Device Code Flow state
+  const [deviceState, setDeviceState] = useState<string | null>(null);
+  const [userCode, setUserCode] = useState("");
+  const [verificationUrl, setVerificationUrl] = useState("");
+  const [authorizing, setAuthorizing] = useState(false);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
+  const refreshStatus = useCallback(() => {
+    fetchCodexStatus()
+      .then(setStatus)
+      .catch(() => setStatus({ status: "disconnected", provider: "openai-codex" }));
+  }, []);
+
+  useEffect(() => {
+    fetchCodexStatus()
+      .then(setStatus)
+      .catch(() => setStatus({ status: "disconnected", provider: "openai-codex" }))
+      .finally(() => setLoading(false));
+  }, []);
+
+  // 清理轮询和 popup 监听
+  useEffect(() => {
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+      if (popupTimerRef.current) clearInterval(popupTimerRef.current);
+    };
+  }, []);
+
+  // 监听 popup postMessage 回调 (Path A)
+  useEffect(() => {
+    const handler = (event: MessageEvent) => {
+      if (event.origin !== window.location.origin) return;
+      if (event.data?.type !== "codex-oauth-callback") return;
+
+      // 清理 popup 监控
+      if (popupTimerRef.current) {
+        clearInterval(popupTimerRef.current);
+        popupTimerRef.current = null;
+      }
+
+      if (event.data.error) {
+        setOauthBusy(false);
+        setOauthMode(null);
+        showToast(event.data.error, "error");
+        return;
+      }
+
+      const { code, state: cbState } = event.data;
+      if (code && cbState) {
+        codexOAuthExchange(code, cbState)
+          .then((result) => {
+            setStatus({
+              status: "connected",
+              provider: "openai-codex",
+              account_id: result.account_id,
+              plan_type: result.plan_type,
+              expires_at: result.expires_at,
+              is_active: true,
+              has_refresh_token: true,
+            });
+            showToast("OpenAI Codex 已连接", "success");
+          })
+          .catch((e: any) => {
+            showToast(e.message || "OAuth 交换失败", "error");
+          })
+          .finally(() => {
+            setOauthBusy(false);
+            setOauthMode(null);
+            setOauthState("");
+          });
+      }
+    };
+    window.addEventListener("message", handler);
+    return () => window.removeEventListener("message", handler);
+  }, [showToast]);
+
+  // ── OAuth PKCE 浏览器流程 ──────────────────────────────
+  const handleOAuthLogin = async () => {
+    if (oauthBusy) return;
+    setOauthBusy(true);
+    setPasteUrl("");
+
+    try {
+      // OpenAI Codex public client常见只接受 localhost:1455/auth/callback。
+      // 因此仅当当前前端本身跑在 1455 端口时才使用 popup 回调自动模式；
+      // 其他场景强制走 paste 模式（不传 redirect_uri）。
+      const isCliLocalCallback =
+        ["localhost", "127.0.0.1"].includes(window.location.hostname)
+        && window.location.port === "1455";
+      const redirectUri = isCliLocalCallback
+        ? `${window.location.origin}/auth/callback`
+        : undefined;
+
+      const data = await codexOAuthStart(redirectUri);
+      setOauthState(data.state);
+      setOauthMode(data.mode);
+
+      // 打开 popup
+      const w = 600, h = 700;
+      const left = window.screenX + (window.outerWidth - w) / 2;
+      const top = window.screenY + (window.outerHeight - h) / 2;
+      const popup = window.open(
+        data.authorize_url,
+        "codex-oauth",
+        `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`,
+      );
+      popupRef.current = popup;
+
+      if (data.mode === "popup" && popup) {
+        // Path A: 监控 popup 关闭（postMessage 会在回调页处理）
+        popupTimerRef.current = setInterval(() => {
+          if (popup.closed) {
+            if (popupTimerRef.current) {
+              clearInterval(popupTimerRef.current);
+              popupTimerRef.current = null;
+            }
+            // 如果 popup 关闭但未收到 postMessage，可能用户手动关闭了
+            setTimeout(() => {
+              setOauthBusy((busy) => {
+                if (busy) {
+                  setOauthMode(null);
+                  setOauthState("");
+                  return false;
+                }
+                return busy;
+              });
+            }, 2000);
+          }
+        }, 500);
+      } else {
+        // Path B: paste 模式 — popup 会重定向到 localhost (失败)
+        // 不自动重置 oauthBusy，等待用户粘贴 URL
+      }
+    } catch (e: any) {
+      setOauthBusy(false);
+      setOauthMode(null);
+      showToast(e.message || "无法发起 OAuth 登录", "error");
+    }
+  };
+
+  const handlePasteUrlSubmit = async () => {
+    if (!pasteUrl.trim() || !oauthState) return;
+    try {
+      const url = new URL(pasteUrl.trim());
+      const code = url.searchParams.get("code");
+      const state = url.searchParams.get("state");
+      if (!code || !state) {
+        showToast("URL 中缺少 code 或 state 参数", "error");
+        return;
+      }
+      const result = await codexOAuthExchange(code, state);
+      setStatus({
+        status: "connected",
+        provider: "openai-codex",
+        account_id: result.account_id,
+        plan_type: result.plan_type,
+        expires_at: result.expires_at,
+        is_active: true,
+        has_refresh_token: true,
+      });
+      showToast("OpenAI Codex 已连接", "success");
+    } catch (e: any) {
+      showToast(e.message || "连接失败", "error");
+    } finally {
+      setOauthBusy(false);
+      setOauthMode(null);
+      setOauthState("");
+      setPasteUrl("");
+    }
+  };
+
+  const cancelOAuth = () => {
+    if (popupRef.current && !popupRef.current.closed) {
+      popupRef.current.close();
+    }
+    if (popupTimerRef.current) {
+      clearInterval(popupTimerRef.current);
+      popupTimerRef.current = null;
+    }
+    setOauthBusy(false);
+    setOauthMode(null);
+    setOauthState("");
+    setPasteUrl("");
+  };
+
+  // ── Device Code Flow ──────────────────────────────
+  const stopPolling = useCallback(() => {
+    if (pollRef.current) {
+      clearInterval(pollRef.current);
+      pollRef.current = null;
+    }
+    setAuthorizing(false);
+    setDeviceState(null);
+    setUserCode("");
+    setVerificationUrl("");
+  }, []);
+
+  const handleDeviceCodeAuthorize = async () => {
+    if (authorizing) return;
+    setAuthorizing(true);
+    try {
+      const data = await codexDeviceCodeStart();
+      setUserCode(data.user_code);
+      setVerificationUrl(data.verification_url);
+      setDeviceState(data.state);
+
+      const interval = Math.max(data.interval, 3) * 1000;
+      pollRef.current = setInterval(async () => {
+        try {
+          const result = await codexDeviceCodePoll(data.state);
+          if (result.status === "connected") {
+            stopPolling();
+            refreshStatus();
+            showToast("OpenAI Codex 已连接", "success");
+          }
+        } catch {
+          // 轮询错误不中断
+        }
+      }, interval);
+
+      setTimeout(() => {
+        if (pollRef.current) {
+          stopPolling();
+          showToast("设备码已过期，请重试", "error");
+        }
+      }, 15 * 60 * 1000);
+    } catch (e: any) {
+      setAuthorizing(false);
+      showToast(e.message || "无法发起设备码登录", "error");
+    }
+  };
+
+  // ── Paste Token ──────────────────────────────
+  const handleConnect = async () => {
+    if (!tokenInput.trim() || connecting) return;
+    setConnecting(true);
+    try {
+      const parsed = JSON.parse(tokenInput.trim());
+      const result = await connectCodex(parsed);
+      setStatus({
+        status: "connected",
+        provider: "openai-codex",
+        account_id: result.account_id,
+        plan_type: result.plan_type,
+        expires_at: result.expires_at,
+        is_active: true,
+        has_refresh_token: true,
+      });
+      setTokenInput("");
+      showToast("OpenAI Codex 已连接", "success");
+    } catch (e: any) {
+      if (e instanceof SyntaxError) {
+        showToast("JSON 格式无效，请粘贴完整的 auth.json 内容", "error");
+      } else {
+        showToast(e.message || "连接失败", "error");
+      }
+    } finally {
+      setConnecting(false);
+    }
+  };
+
+  const handleDisconnect = async () => {
+    if (disconnecting) return;
+    setDisconnecting(true);
+    try {
+      await disconnectCodex();
+      setStatus({ status: "disconnected", provider: "openai-codex" });
+      showToast("已断开 OpenAI Codex", "success");
+    } catch (e: any) {
+      showToast(e.message || "断开失败", "error");
+    } finally {
+      setDisconnecting(false);
+    }
+  };
+
+  const handleRefresh = async () => {
+    if (refreshing) return;
+    setRefreshing(true);
+    try {
+      const result = await refreshCodexToken();
+      setStatus((prev) =>
+        prev ? { ...prev, status: "connected", expires_at: result.expires_at } : prev
+      );
+      showToast("Token 已刷新", "success");
+    } catch (e: any) {
+      showToast(e.message || "刷新失败", "error");
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  // ── Render ──────────────────────────────
+
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-4">
+        <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+      </div>
+    );
+  }
+
+  const isConnected = status?.status === "connected";
+  const isExpired = status?.status === "expired";
+
+  if (isConnected || isExpired) {
+    return (
+      <div className="space-y-3">
+        <div className="flex items-center gap-2">
+          <div
+            className={`h-2 w-2 rounded-full ${isExpired ? "bg-amber-500" : "bg-green-500"}`}
+          />
+          <span className="text-sm font-medium">
+            {isExpired ? "Token 已过期" : "已连接"}
+          </span>
+        </div>
+        <div className="grid grid-cols-2 gap-y-2 text-sm">
+          {status?.account_id && (
+            <>
+              <span className="text-muted-foreground">账户</span>
+              <span className="font-mono text-xs truncate">{status.account_id}</span>
+            </>
+          )}
+          {status?.plan_type && (
+            <>
+              <span className="text-muted-foreground">订阅</span>
+              <span className="capitalize">{status.plan_type}</span>
+            </>
+          )}
+          {status?.expires_at && (
+            <>
+              <span className="text-muted-foreground">有效期至</span>
+              <span className="text-xs">
+                {new Date(status.expires_at).toLocaleString("zh-CN")}
+              </span>
+            </>
+          )}
+        </div>
+        <div className="flex gap-2 pt-1">
+          {status?.has_refresh_token && (
+            <Button
+              variant="outline"
+              size="sm"
+              className="h-7 text-xs"
+              disabled={refreshing}
+              onClick={handleRefresh}
+            >
+              {refreshing ? <Loader2 className="h-3 w-3 animate-spin" /> : "刷新 Token"}
+            </Button>
+          )}
+          <Button
+            variant="outline"
+            size="sm"
+            className="h-7 text-xs text-red-600 hover:text-red-700 hover:bg-red-50 dark:hover:bg-red-950"
+            disabled={disconnecting}
+            onClick={handleDisconnect}
+          >
+            {disconnecting ? <Loader2 className="h-3 w-3 animate-spin" /> : "断开连接"}
+          </Button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        使用 ChatGPT Plus/Pro 订阅访问 Codex 模型，无需 API Key。
+      </p>
+
+      {/* OAuth PKCE 浏览器登录（主要方式） */}
+      {!oauthBusy ? (
+        <Button
+          onClick={handleOAuthLogin}
+          size="sm"
+          className="w-full h-9 text-sm font-medium"
+          style={{ backgroundColor: "var(--em-primary)", color: "#fff" }}
+          disabled={authorizing}
+        >
+          使用 ChatGPT 账号登录
+        </Button>
+      ) : (
+        <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-4">
+          {oauthMode === "popup" ? (
+            <div className="text-center space-y-2">
+              <Loader2 className="h-6 w-6 mx-auto animate-spin text-muted-foreground" />
+              <p className="text-sm text-muted-foreground">
+                请在弹出窗口中完成 OpenAI 登录...
+              </p>
+              <p className="text-xs text-muted-foreground">
+                授权完成后此页面会自动更新
+              </p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              <div className="text-center space-y-2">
+                <p className="text-sm text-muted-foreground">
+                  在弹出窗口中完成 OpenAI 登录后，请复制地址栏中的完整 URL 粘贴到下方：
+                </p>
+                <p className="text-xs text-amber-600 dark:text-amber-400">
+                  提示：登录完成后页面可能显示无法访问，这是正常的，请直接复制地址栏 URL
+                </p>
+              </div>
+              <input
+                type="text"
+                value={pasteUrl}
+                onChange={(e) => setPasteUrl(e.target.value)}
+                className="w-full h-9 px-3 rounded-md border border-input bg-background text-xs font-mono outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent transition-shadow"
+                placeholder="http://localhost:1455/auth/callback?code=...&state=..."
+              />
+              <Button
+                onClick={handlePasteUrlSubmit}
+                disabled={!pasteUrl.trim()}
+                size="sm"
+                className="w-full h-8 text-xs"
+                style={{ backgroundColor: "var(--em-primary)", color: "#fff" }}
+              >
+                确认连接
+              </Button>
+            </div>
+          )}
+          <div className="flex justify-center">
+            <Button
+              variant="ghost"
+              size="sm"
+              className="h-7 text-xs"
+              onClick={cancelOAuth}
+            >
+              取消
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {/* 备选连接方式（折叠） */}
+      <div className="pt-1">
+        <button
+          onClick={() => setShowFallback(!showFallback)}
+          className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {showFallback ? "▾ 收起备选方式" : "▸ 其他连接方式"}
+        </button>
+        {showFallback && (
+          <div className="mt-3 space-y-4">
+            {/* Device Code 流程 */}
+            <div className="space-y-2">
+              <p className="text-xs font-medium text-muted-foreground">设备码登录</p>
+              {!authorizing ? (
+                <Button
+                  onClick={handleDeviceCodeAuthorize}
+                  size="sm"
+                  className="w-full h-8 text-xs"
+                  variant="outline"
+                  disabled={oauthBusy}
+                >
+                  使用设备码登录
+                </Button>
+              ) : (
+                <div className="space-y-3 rounded-lg border border-border bg-muted/30 p-3">
+                  <div className="text-center space-y-2">
+                    <p className="text-xs text-muted-foreground">
+                      请在浏览器中打开以下链接并输入验证码：
+                    </p>
+                    <a
+                      href={verificationUrl}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-xs font-medium underline"
+                      style={{ color: "var(--em-primary)" }}
+                    >
+                      {verificationUrl}
+                    </a>
+                    <div className="flex items-center justify-center gap-2 pt-1">
+                      <span
+                        className="font-mono text-xl font-bold tracking-widest select-all px-3 py-1.5 rounded-md border border-border bg-background cursor-pointer"
+                        title="点击复制"
+                        onClick={() => {
+                          navigator.clipboard.writeText(userCode);
+                          showToast("验证码已复制", "success");
+                        }}
+                      >
+                        {userCode}
+                      </span>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      点击验证码可复制
+                    </p>
+                  </div>
+                  <div className="flex items-center justify-center gap-3">
+                    <Loader2 className="h-3 w-3 animate-spin text-muted-foreground" />
+                    <span className="text-xs text-muted-foreground">等待授权中...</span>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      className="h-6 text-xs"
+                      onClick={stopPolling}
+                    >
+                      取消
+                    </Button>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* 手动粘贴 Token */}
+            <div className="space-y-2">
+              <button
+                onClick={() => setShowManual(!showManual)}
+                className="text-xs text-muted-foreground hover:text-foreground transition-colors"
+              >
+                {showManual ? "▾ 收起手动粘贴" : "▸ 手动粘贴 Token"}
+              </button>
+              {showManual && (
+                <div className="mt-2 space-y-2">
+                  <div className="text-xs text-muted-foreground space-y-1">
+                    <p>1. 在终端运行 <code className="px-1 py-0.5 rounded bg-muted font-mono">codex login</code></p>
+                    <p>2. 复制 <code className="px-1 py-0.5 rounded bg-muted font-mono">~/.codex/auth.json</code> 内容</p>
+                    <p>3. 粘贴到下方输入框</p>
+                  </div>
+                  <textarea
+                    value={tokenInput}
+                    onChange={(e) => setTokenInput(e.target.value)}
+                    rows={4}
+                    className="w-full px-3 py-2 rounded-md border border-input bg-background text-xs font-mono outline-none focus:ring-2 focus:ring-[var(--em-primary)] focus:border-transparent transition-shadow resize-none"
+                    placeholder='{"token": "eyJ...", "refresh_token": "rt_...", ...}'
+                  />
+                  <Button
+                    onClick={handleConnect}
+                    disabled={!tokenInput.trim() || connecting}
+                    size="sm"
+                    className="h-8 px-4 text-xs"
+                    variant="outline"
+                  >
+                    {connecting ? <Loader2 className="h-3 w-3 animate-spin mr-1" /> : null}
+                    粘贴连接
+                  </Button>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+      </div>
     </div>
   );
 }

@@ -1,10 +1,12 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
+import { fetchCodexStatus } from "@/lib/auth-api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
+import { useUIStore } from "@/stores/ui-store";
 import { WelcomeStep } from "./steps/WelcomeStep";
 import { ProviderSelectStep } from "./steps/ProviderSelectStep";
 import { ProviderGuideStep } from "./steps/ProviderGuideStep";
@@ -27,16 +29,51 @@ export function OnboardingWizard() {
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState(1);
   const [selectedProvider, setSelectedProvider] = useState<ProviderGuide | null>(null);
+  const [showOAuthConnectGuide, setShowOAuthConnectGuide] = useState(false);
+  const [checkingOAuthConnectStatus, setCheckingOAuthConnectStatus] = useState(false);
 
   const completeWizard = useOnboardingStore((s) => s.completeWizard);
   const skipWizard = useOnboardingStore((s) => s.skipWizard);
   const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
+  const openProfile = useUIStore((s) => s.openProfile);
   const isAdmin = !authEnabled || !user || user.role === "admin";
 
   // When backend config is missing, skip is not allowed — user must configure to proceed
   const configRequired = backendConfigured === false;
+  const isOAuthLoginUser = Boolean(user?.oauthProviders?.length);
+  const shouldCheckOAuthConnectStatus = isOAuthLoginUser && !isAdmin && !configRequired;
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!shouldCheckOAuthConnectStatus) {
+      setShowOAuthConnectGuide(false);
+      setCheckingOAuthConnectStatus(false);
+      return;
+    }
+
+    setCheckingOAuthConnectStatus(true);
+    fetchCodexStatus()
+      .then((status) => {
+        if (cancelled) return;
+        setShowOAuthConnectGuide(status.status !== "connected");
+      })
+      .catch(() => {
+        if (cancelled) return;
+        // 查询失败时保守展示引导，用户可选择继续手动配置
+        setShowOAuthConnectGuide(true);
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setCheckingOAuthConnectStatus(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [shouldCheckOAuthConnectStatus]);
 
   const goNext = useCallback(() => {
     setDirection(1);
@@ -65,6 +102,11 @@ export function OnboardingWizard() {
     skipWizard();
   }, [skipWizard, configRequired]);
 
+  const handleGoConnectOAuth = useCallback(() => {
+    completeWizard();
+    openProfile();
+  }, [completeWizard, openProfile]);
+
   const skipHandler = configRequired ? undefined : handleSkip;
 
   const steps = [
@@ -73,6 +115,9 @@ export function OnboardingWizard() {
       key="provider-select"
       onSelect={handleSelectProvider}
       onBack={goBack}
+      showOAuthConnectGuide={showOAuthConnectGuide}
+      checkingOAuthConnectStatus={checkingOAuthConnectStatus}
+      onGoConnectOAuth={handleGoConnectOAuth}
     />,
     selectedProvider ? (
       <ProviderGuideStep
