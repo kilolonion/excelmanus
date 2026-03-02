@@ -403,7 +403,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 <Badge
                   key={i}
                   variant="secondary"
-                  className={`text-xs gap-1 pr-1 max-w-[200px] touch-show ${
+                  className={`text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px] touch-show ${
                     excel ? "cursor-pointer hover:bg-secondary/70" : ""
                   }`}
                   onClick={
@@ -426,7 +426,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                   <span className="truncate">{f.filename}</span>
                   <button
                     type="button"
-                    className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
+                    className="touch-compact rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
                     title="下载"
                     onClick={(e) => {
                       e.stopPropagation();
