@@ -47,7 +47,7 @@ import {
   type AdminUser,
   type AdminSession,
 } from "@/lib/auth-api";
-import { proxyAvatarUrl } from "@/lib/api";
+import { resolveAvatarSrc } from "@/lib/api";
 import LoginConfigTab from "@/components/admin/LoginConfigTab";
 
 function formatBytes(bytes: number): string {
@@ -75,9 +75,10 @@ function formatDate(iso: string): string {
 type SortField = "email" | "created_at" | "role" | "workspace_size" | "workspace_files";
 type SortDir = "asc" | "desc";
 
-function AdminAvatar({ url, name }: { url?: string | null; name: string }) {
+function AdminAvatar({ url, name, userId }: { url?: string | null; name: string; userId?: string }) {
   const [failed, setFailed] = useState(false);
-  const proxied = proxyAvatarUrl(url);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const proxied = resolveAvatarSrc(url, accessToken, { userId, isAdmin: true });
   if (proxied && !failed) {
     return (
       <img
@@ -271,7 +272,7 @@ function UserRow({
       <div className="p-4 flex items-start gap-3">
         {/* Avatar */}
         <div className="flex-shrink-0">
-          <AdminAvatar url={user.avatar_url} name={user.display_name || user.email} />
+          <AdminAvatar url={user.avatar_url} name={user.display_name || user.email} userId={user.id} />
         </div>
 
         {/* Info */}

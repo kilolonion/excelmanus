@@ -272,6 +272,7 @@ export default function RegisterPage() {
   const [loading, setLoading] = useState(false);
   const [oauthLoading, setOauthLoading] = useState<string | null>(null);
   const [agreed, setAgreed] = useState(false);
+  const [shakeKey, setShakeKey] = useState(0);
   const [pendingEmail, setPendingEmail] = useState<string | null>(null);
   const loginMethods = useAuthConfigStore((s) => s.loginMethods);
   const authConfigChecked = useAuthConfigStore((s) => s.checked);
@@ -306,10 +307,19 @@ export default function RegisterPage() {
     return () => window.removeEventListener("pageshow", handlePageShow);
   }, []);
 
+  const triggerAgreementShake = useCallback(() => {
+    setShakeKey((k) => k + 1);
+  }, []);
+
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
 
+    if (requireAgreement && !agreed) {
+      setError("请先阅读并同意《服务条款》和《隐私政策》后再注册");
+      triggerAgreementShake();
+      return;
+    }
     if (password.length < 8) { setError("密码至少 8 个字符"); return; }
     if (password !== confirmPassword) { setError("两次输入的密码不一致"); return; }
 
@@ -326,11 +336,12 @@ export default function RegisterPage() {
     } finally {
       setLoading(false);
     }
-  }, [email, password, confirmPassword, displayName, router]);
+  }, [email, password, confirmPassword, displayName, router, requireAgreement, agreed, triggerAgreementShake]);
 
   const handleOAuth = useCallback(async (provider: "github" | "google" | "qq") => {
     if (requireAgreement && !agreed) {
       setError("请先阅读并同意《服务条款》和《隐私政策》后再注册");
+      triggerAgreementShake();
       return;
     }
     setOauthLoading(provider);
@@ -343,7 +354,7 @@ export default function RegisterPage() {
       setError(`${names[provider]} 登录暂不可用`);
       setOauthLoading(null);
     }
-  }, [requireAgreement, agreed]);
+  }, [requireAgreement, agreed, triggerAgreementShake]);
 
   // 验证步骤
   if (pendingEmail) {
@@ -586,11 +597,19 @@ export default function RegisterPage() {
 
           {/* Terms */}
           {requireAgreement && (
-          <label className="flex items-start gap-2.5 cursor-pointer group py-1">
+          <motion.label
+            key={`agree-reg-${shakeKey}`}
+            initial={false}
+            animate={shakeKey > 0 ? { x: [0, -6, 5, -4, 3, -2, 1, 0] } : { x: 0 }}
+            transition={{ duration: 0.5, ease: [0.36, 0.07, 0.19, 0.97] }}
+            className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-[background-color,box-shadow] duration-300 ${
+              shakeKey > 0 ? "animate-agreement-highlight" : ""
+            }`}
+          >
             <input
               type="checkbox"
               checked={agreed}
-              onChange={(e) => setAgreed(e.target.checked)}
+              onChange={(e) => { setAgreed(e.target.checked); if (e.target.checked) setError(""); }}
               className="auth-checkbox mt-0.5"
             />
             <span className="text-xs text-muted-foreground leading-relaxed group-hover:text-foreground transition-colors">
@@ -599,7 +618,7 @@ export default function RegisterPage() {
               和{" "}
               <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
             </span>
-          </label>
+          </motion.label>
           )}
 
           <Button

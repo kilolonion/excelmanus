@@ -8,7 +8,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
 import { login, getOAuthUrl } from "@/lib/auth-api";
-import { proxyAvatarUrl } from "@/lib/api";
+import { resolveAvatarSrc } from "@/lib/api";
 import { useRecentAccountsStore, canAutoLogin, type RecentAccount } from "@/stores/recent-accounts-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { encryptCredential, decryptCredential } from "@/lib/credential-crypto";
@@ -36,7 +36,7 @@ const FEATURES = [
 
 function AccountAvatar({ account }: { account: RecentAccount }) {
   const [failed, setFailed] = useState(false);
-  const proxied = proxyAvatarUrl(account.avatarUrl);
+  const proxied = resolveAvatarSrc(account.avatarUrl, null);
   if (proxied && !failed) {
     return (
       <img
@@ -97,7 +97,7 @@ function LoginForm() {
   }, []);
   const requireAgreement = loginMethods.require_agreement;
   const [agreed, setAgreed] = useState(false);
-  const [agreementShake, setAgreementShake] = useState(false);
+  const [shakeKey, setShakeKey] = useState(0);
 
   useEffect(() => {
     const prefill = searchParams.get("email");
@@ -162,8 +162,7 @@ function LoginForm() {
   const canSubmit = email.trim().length > 0 && password.length > 0 && !loading && (!requireAgreement || agreed);
 
   const triggerAgreementShake = useCallback(() => {
-    setAgreementShake(true);
-    setTimeout(() => setAgreementShake(false), 600);
+    setShakeKey((k) => k + 1);
   }, []);
 
   const handleSubmit = useCallback(async (e: React.FormEvent) => {
@@ -437,9 +436,13 @@ function LoginForm() {
 
           {/* Agreement checkbox — shown alongside quick login cards */}
           {showRecent && !autoLoggingIn && requireAgreement && (
-            <label
-              className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-all ${
-                agreementShake ? "animate-shake bg-destructive/5 ring-1 ring-destructive/30" : ""
+            <motion.label
+              key={`agree-quick-${shakeKey}`}
+              initial={false}
+              animate={shakeKey > 0 ? { x: [0, -6, 5, -4, 3, -2, 1, 0] } : { x: 0 }}
+              transition={{ duration: 0.5, ease: [0.36, 0.07, 0.19, 0.97] }}
+              className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-[background-color,box-shadow] duration-300 ${
+                shakeKey > 0 ? "animate-agreement-highlight" : ""
               }`}
             >
               <input
@@ -454,7 +457,7 @@ function LoginForm() {
                 和{" "}
                 <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
               </span>
-            </label>
+            </motion.label>
           )}
 
           {/* Form - shown when no recent accounts picked or user wants manual entry */}
@@ -544,9 +547,13 @@ function LoginForm() {
 
               {/* Agreement checkbox — inside form, visible for email/password login */}
               {requireAgreement && (
-                <label
-                  className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-all ${
-                    agreementShake ? "animate-shake bg-destructive/5 ring-1 ring-destructive/30" : ""
+                <motion.label
+                  key={`agree-form-${shakeKey}`}
+                  initial={false}
+                  animate={shakeKey > 0 ? { x: [0, -6, 5, -4, 3, -2, 1, 0] } : { x: 0 }}
+                  transition={{ duration: 0.5, ease: [0.36, 0.07, 0.19, 0.97] }}
+                  className={`flex items-start gap-2.5 cursor-pointer group py-1.5 rounded-lg px-2 -mx-2 transition-[background-color,box-shadow] duration-300 ${
+                    shakeKey > 0 ? "animate-agreement-highlight" : ""
                   }`}
                 >
                   <input
@@ -561,7 +568,7 @@ function LoginForm() {
                     和{" "}
                     <Link href="/privacy" target="_blank" className="text-[var(--em-primary)] cursor-pointer hover:underline" onClick={(e) => e.stopPropagation()}>隐私政策</Link>
                   </span>
-                </label>
+                </motion.label>
               )}
 
               <Button
