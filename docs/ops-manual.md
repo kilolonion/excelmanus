@@ -251,8 +251,8 @@ cd /www/wwwroot/excelmanus
 git fetch https://gitee.com/kilolonion/excelmanus main
 # 或 git fetch https://github.com/kilolonion/excelmanus main
 git reset --hard FETCH_HEAD
-source venv/bin/activate
-pip install -e '.[all]' -q
+# 优先使用 uv（如已安装）
+uv sync --all-extras -q 2>/dev/null || { source venv/bin/activate && pip install -e '.[all]' -q; }
 pm2 restart excelmanus-api
 ```
 
@@ -521,11 +521,16 @@ git clone https://gitee.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 # 或 git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 cd /www/wwwroot/excelmanus
 
-# 5. 创建 venv 并安装依赖
-python3.11 -m venv venv
-source venv/bin/activate
-pip install -e '.[all]'
-pip install 'httpx[socks]'
+# 5. 安装依赖（推荐 uv，也可用 pip）
+# 方式 A：uv（推荐，自动创建 venv）
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --all-extras
+uv pip install 'httpx[socks]'
+# 方式 B：传统 pip
+# python3.11 -m venv venv
+# source venv/bin/activate
+# pip install -e '.[all]'
+# pip install 'httpx[socks]'
 
 # 6. 配置 .env（从旧服务器复制并修改）
 # 7. 配置 mcp.json

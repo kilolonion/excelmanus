@@ -17,19 +17,20 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
-        uses: actions/setup-python@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
         with:
-          python-version: "3.12"
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
 
       - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -e ".[dev]"
+        run: uv sync --all-extras --dev
 
       - name: Run session regression tests
         run: |
-          pytest -q \
+          uv run pytest -q \
             tests/test_session.py \
             tests/test_session_mcp_lifecycle.py \
             tests/test_api.py

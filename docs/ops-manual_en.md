@@ -207,8 +207,8 @@ cd /www/wwwroot/excelmanus
 git fetch https://gitee.com/kilolonion/excelmanus main
 # or: git fetch https://github.com/kilolonion/excelmanus main
 git reset --hard FETCH_HEAD
-source venv/bin/activate
-pip install -e '.[all]' -q
+# Prefer uv (if installed)
+uv sync --all-extras -q 2>/dev/null || { source venv/bin/activate && pip install -e '.[all]' -q; }
 pm2 restart excelmanus-api
 ```
 
@@ -477,11 +477,16 @@ git clone https://gitee.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 # or: git clone https://github.com/kilolonion/excelmanus.git /www/wwwroot/excelmanus
 cd /www/wwwroot/excelmanus
 
-# 5. Create venv and install dependencies
-python3.11 -m venv venv
-source venv/bin/activate
-pip install -e '.[all]'
-pip install 'httpx[socks]'
+# 5. Install dependencies (uv recommended, pip also works)
+# Option A: uv (recommended, auto-creates venv)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+uv sync --all-extras
+uv pip install 'httpx[socks]'
+# Option B: traditional pip
+# python3.11 -m venv venv
+# source venv/bin/activate
+# pip install -e '.[all]'
+# pip install 'httpx[socks]'
 
 # 6. Configure .env (copy from old server and modify)
 # 7. Configure mcp.json

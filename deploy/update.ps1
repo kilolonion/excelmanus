@@ -230,19 +230,30 @@ if (-not $SkipDeps) {
     $venvPy = Join-Path $Script:PROJECT_ROOT ".venv" "Scripts" "python.exe"
     if (-not (Test-Path $venvPy)) { $venvPy = "python" }
 
-    $pipArgs = @("-m", "pip", "install", "-e", "$($Script:PROJECT_ROOT)[all]", "--quiet")
-    if ($Mirror) { $pipArgs += @("-i", "https://pypi.tuna.tsinghua.edu.cn/simple") }
-
-    try {
-        & $venvPy $pipArgs 2>$null
-        Write-Log "后端依赖已更新"
-    } catch {
-        Write-Warn "pip 失败，尝试清华镜像..."
+    $hasUv = Get-Command uv -ErrorAction SilentlyContinue
+    $installed = $false
+    if ($hasUv) {
+        Write-Info "使用 uv sync 安装后端依赖..."
+        $uvArgs = @("sync", "--all-extras", "--project", $Script:PROJECT_ROOT, "--quiet")
+        if ($Mirror) { $uvArgs += @("--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple") }
+        & uv @uvArgs 2>$null
+        if ($LASTEXITCODE -eq 0) { $installed = $true; Write-Log "后端依赖已更新" }
+        else { Write-Warn "uv sync 失败，回退到 pip..." }
+    }
+    if (-not $installed) {
+        $pipArgs = @("-m", "pip", "install", "-e", "$($Script:PROJECT_ROOT)[all]", "--quiet")
+        if ($Mirror) { $pipArgs += @("-i", "https://pypi.tuna.tsinghua.edu.cn/simple") }
         try {
-            & $venvPy -m pip install -e "$($Script:PROJECT_ROOT)[all]" -i "https://pypi.tuna.tsinghua.edu.cn/simple" --quiet 2>$null
+            & $venvPy $pipArgs 2>$null
             Write-Log "后端依赖已更新"
         } catch {
-            Write-Err "后端依赖安装失败"
+            Write-Warn "pip 失败，尝试清华镜像..."
+            try {
+                & $venvPy -m pip install -e "$($Script:PROJECT_ROOT)[all]" -i "https://pypi.tuna.tsinghua.edu.cn/simple" --quiet 2>$null
+                Write-Log "后端依赖已更新"
+            } catch {
+                Write-Err "后端依赖安装失败"
+            }
         }
     }
 

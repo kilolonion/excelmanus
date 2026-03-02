@@ -336,15 +336,21 @@ function Get-PipMirror {
 
 function Invoke-PipInstall {
     param([string[]]$PipArgs)
-    # Prefer uv for massive speedup
+    # Prefer uv sync for reproducible installs from lockfile
     $hasUv = Get-Command uv -ErrorAction SilentlyContinue
     if ($hasUv) {
-        Write-Dbg "使用 uv 安装 (加速模式)"
+        Write-Dbg "使用 uv sync (加速模式)"
+        $uvSyncArgs = @("sync", "--all-extras")
+        if ($Script:PipMirror) {
+            $uvSyncArgs += @("--index-url", $Script:PipMirror.Url)
+        }
+        & uv @uvSyncArgs
+        if ($LASTEXITCODE -eq 0) { return }
+        Write-Warn "uv sync 失败, 尝试 uv pip install..."
         if ($Script:PipMirror) {
             $uvArgs = @("pip", "install") + $PipArgs + @("-i", $Script:PipMirror.Url)
             & uv @uvArgs
             if ($LASTEXITCODE -eq 0) { return }
-            Write-Warn "uv 镜像安装失败, 尝试默认源..."
         }
         $uvArgs = @("pip", "install") + $PipArgs
         & uv @uvArgs
@@ -397,16 +403,15 @@ function Test-Dependencies {
                 Write-Info "检测到 uv，尝试自动创建虚拟环境并安装依赖..."
                 try {
                     Push-Location $Script:PROJECT_ROOT
-                    & uv venv .venv
+                    & uv sync --all-extras
                     # 重新检测
                     foreach ($c in $candidates) {
                         if (Test-Path $c) { $venvPython = $c; break }
                     }
                     if ($venvPython) {
                         $Script:PythonBin = $venvPython
-                        Invoke-PipInstall @("-e", ".[all]")
                     } else {
-                        Write-Err "uv venv 创建成功但未找到 python"
+                        Write-Err "uv sync 创建成功但未找到 python"
                         $ok = $false
                     }
                 } catch {
@@ -434,7 +439,7 @@ function Test-Dependencies {
                     Pop-Location
                 }
             } else {
-                Write-Err "未找到 .venv 且无可用 Python，请先安装 Python 3.10+ 并运行: python -m venv .venv && pip install -e '.[all]'"
+                Write-Err "未找到 .venv 且无可用 Python，请先安装 uv 并运行: uv sync --all-extras"
                 $ok = $false
             }
         }
