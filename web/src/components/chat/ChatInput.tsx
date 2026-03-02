@@ -1298,7 +1298,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               <Button
                 variant="ghost"
                 size="icon"
-                className="h-9 w-9 sm:h-8 sm:w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+                className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
                 onClick={() => fileInputRef.current?.click()}
               >
                 <Plus className="h-4 w-4" />
@@ -1385,7 +1385,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 <Button
                   data-coach-id="coach-stop-btn"
                   size="icon"
-                  className="h-9 w-9 sm:h-8 sm:w-8 rounded-full bg-foreground hover:bg-foreground/80"
+                  className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full bg-foreground hover:bg-foreground/80"
                   onClick={onStop}
                 >
                   <Square className="h-3 w-3 fill-background text-background" />
@@ -1402,7 +1402,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                 <Button
                   data-coach-id="coach-send-btn"
                   size="icon"
-                  className="h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
+                  className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
                   disabled={disabled || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}

@@ -42,7 +42,7 @@ export function ModeBadges() {
         onClick={handleToggleFullAccess}
         disabled={!activeSessionId || toggling}
         title={fullAccess ? "点击关闭 Full Access" : "点击开启 Full Access"}
-        className="inline-flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-medium transition-all duration-200 cursor-pointer disabled:cursor-default"
+        className="touch-compact inline-flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-medium transition-all duration-200 cursor-pointer disabled:cursor-default"
         style={{
           backgroundColor: fullAccess
             ? "color-mix(in srgb, var(--em-gold) 15%, transparent)"

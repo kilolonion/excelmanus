@@ -560,7 +560,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
 
   return (
     <motion.div
-      className="flex flex-wrap items-center gap-1.5 mt-3 pt-2 border-t border-border/30"
+      className="flex flex-wrap items-center gap-1 mt-2 pt-1.5 border-t border-border/25"
       initial="hidden"
       animate="show"
       variants={{ hidden: {}, show: { transition: { staggerChildren: 0.05, delayChildren: 0.1 } } }}
@@ -576,7 +576,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
         return (
           <motion.span
             key={filePath}
-            className="inline-flex items-center gap-1 rounded-full text-xs font-medium pl-2.5 pr-1 py-0.5 bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
+            className="inline-flex items-center gap-0.5 rounded-full text-[11px] leading-4 font-medium pl-2 pr-0.5 py-0 bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
             variants={{ hidden: { opacity: 0, scale: 0.8 }, show: { opacity: 1, scale: 1, transition: { duration: 0.2, ease: "easeOut" } } }}
           >
             {previewable ? (
@@ -586,7 +586,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
                 trigger={
                   <button
                     type="button"
-                    className="hover:underline cursor-pointer transition-colors"
+                    className="touch-compact hover:underline cursor-pointer transition-colors leading-4"
                   >
                     {filename}
                   </button>
@@ -596,7 +596,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
               <button
                 type="button"
                 onClick={() => excel ? handleExcelClick(filePath) : downloadFile(filePath, filename, activeSessionId ?? undefined).catch(() => {})}
-                className="hover:underline cursor-pointer transition-colors"
+                className="touch-compact hover:underline cursor-pointer transition-colors leading-4"
               >
                 {filename}
               </button>
@@ -610,7 +610,7 @@ function AffectedFilesBadges({ files }: { files: string[] }) {
                   activeSessionId ?? undefined,
                 ).catch(() => {})
               }
-              className="rounded p-1.5 sm:p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
+              className="touch-compact rounded p-1 sm:p-0.5 hover:bg-[var(--em-primary-alpha-20)] transition-colors cursor-pointer"
               title="下载"
             >
               <Download className="h-3 w-3" />
