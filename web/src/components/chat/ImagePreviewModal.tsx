@@ -16,6 +16,8 @@ interface ImagePreviewModalProps {
   imagePath: string;
   filename: string;
   trigger?: React.ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 /* ─── constants ─── */
@@ -47,8 +49,17 @@ export function ImagePreviewModal({
   imagePath,
   filename,
   trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: ImagePreviewModalProps) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = useCallback((next: boolean) => {
+    if (controlledOpen === undefined) {
+      setInternalOpen(next);
+    }
+    onOpenChange?.(next);
+  }, [controlledOpen, onOpenChange]);
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [imgLoaded, setImgLoaded] = useState(false);
@@ -72,7 +83,7 @@ export function ImagePreviewModal({
       setPan({ x: 0, y: 0 });
       setDragging(false);
     }
-  }, [open]);
+  }, [open, setOpen]);
 
   // ── body scroll lock ──
   useEffect(() => {
@@ -80,7 +91,7 @@ export function ImagePreviewModal({
     const prev = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     return () => { document.body.style.overflow = prev; };
-  }, [open]);
+  }, [open, setOpen]);
 
   // ── ESC to close ──
   useEffect(() => {
@@ -90,7 +101,7 @@ export function ImagePreviewModal({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open]);
+  }, [open, setOpen]);
 
   // ── zoom helpers ──
   const clampZoom = useCallback((z: number) => Math.min(Math.max(z, MIN_ZOOM), MAX_ZOOM), []);
@@ -348,9 +359,11 @@ export function ImagePreviewModal({
 
   return (
     <>
-      <div onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
-        {trigger}
-      </div>
+      {trigger !== undefined && trigger !== null && (
+        <div onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
+          {trigger}
+        </div>
+      )}
       {typeof window !== "undefined" && createPortal(overlay, document.body)}
     </>
   );

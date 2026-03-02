@@ -11,6 +11,7 @@ import {
 import { useUIStore } from "@/stores/ui-store";
 import { useShallow } from "zustand/react/shallow";
 import { apiGet, apiPut } from "@/lib/api";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
 
 interface ModelCapabilitySummary {
@@ -171,8 +172,8 @@ export function TopModelSelector() {
   };
 
   const displayLabel = (m: ModelInfo) =>
-    m.name === "default" ? m.model : (m.display_name || m.name);
-  const resolvedModel = (m: ModelInfo) => m.resolved_model || m.model;
+    m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+  const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return models;

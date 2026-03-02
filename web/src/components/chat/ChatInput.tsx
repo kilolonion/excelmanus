@@ -6,6 +6,7 @@ import {
   Plus,
   ArrowUp,
   Square,
+  Loader2,
   FileSpreadsheet,
   Wrench,
   Sparkles,
@@ -31,6 +32,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { buildApiUrl, apiGet, apiPut, uploadFile, uploadFileFromUrl, getAuthHeaders } from "@/lib/api";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 import { UndoPanel } from "@/components/modals/UndoPanel";
 import type { ModelInfo, AttachedFile } from "@/lib/types";
 import {
@@ -49,7 +51,7 @@ import {
 import { ChatModeTabs } from "./ChatModeTabs";
 import { ThinkingLevelSelector } from "./ThinkingLevelSelector";
 import { FileAttachmentChips } from "./FileAttachmentChips";
-import { CommandPopover, type PopoverItem } from "./CommandPopover";
+import { CommandPopover } from "./CommandPopover";
 import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
 import { answerQuestion } from "@/lib/api";
 
@@ -99,6 +101,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const [text, setText] = useState("");
   const [files, setFiles] = useState<AttachedFile[]>([]);
   const [isAnswerSubmitting, setIsAnswerSubmitting] = useState(false);
+  const [answerSubmitError, setAnswerSubmitError] = useState<string | null>(null);
+  const [inputHint, setInputHint] = useState<string | null>(null);
   const [popover, setPopover] = useState<PopoverMode>(null);
   const [popoverFilter, setPopoverFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -126,6 +130,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   // Reset selection when question changes
   useEffect(() => {
     setQuestionSelected(new Set());
+    setAnswerSubmitError(null);
   }, [pendingQuestion?.id]);
 
   // Onboarding coach mark: clear input when entering a step that expects specific input
@@ -160,9 +165,30 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const fileInputRef = useRef<HTMLInputElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
   const backdropRef = useRef<HTMLDivElement>(null);
+  const inputHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   const [excelDragOver, setExcelDragOver] = useState(false);
   const excelDragCounter = useRef(0);
+
+  const showInputHint = useCallback((message: string) => {
+    setInputHint(message);
+    if (inputHintTimerRef.current) {
+      clearTimeout(inputHintTimerRef.current);
+    }
+    inputHintTimerRef.current = setTimeout(() => {
+      setInputHint(null);
+      inputHintTimerRef.current = null;
+    }, 2600);
+  }, []);
+
+  const nudgeInput = useCallback((hint?: string) => {
+    const el = textareaRef.current?.parentElement?.parentElement;
+    if (el) {
+      el.classList.add("animate-shake-subtle");
+      setTimeout(() => el.classList.remove("animate-shake-subtle"), 400);
+    }
+    if (hint) showInputHint(hint);
+  }, [showInputHint]);
 
   // 图片缩略图的稳定预览 URL — 避免每次重渲染都创建新的
   // blob URL，防止移动浏览器在用户编辑时回收预览。
@@ -192,6 +218,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   useEffect(() => {
     const cache = previewUrlCache.current;
     return () => {
+      if (inputHintTimerRef.current) {
+        clearTimeout(inputHintTimerRef.current);
+      }
       cache.forEach((url) => URL.revokeObjectURL(url));
       cache.clear();
     };
@@ -587,11 +616,12 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       const filter = popoverFilter.toLowerCase();
       const items: { command: string; description: string; icon: React.ReactNode; isActive?: boolean }[] = [];
       for (const m of modelList) {
-        const label = m.name !== m.model ? `${m.name} → ${m.model}` : m.name;
+        const displayModel = formatModelIdForDisplay(m.model);
+        const label = m.name !== displayModel ? `${m.name} → ${displayModel}` : m.name;
         if (!filter || label.toLowerCase().includes(filter) || (m.description || "").toLowerCase().includes(filter)) {
           items.push({
             command: m.name,
-            description: m.description || m.model,
+            description: m.description || displayModel,
             icon: m.name === currentModel
               ? <Check className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
               : <Cpu className="h-3.5 w-3.5" />,
@@ -932,11 +962,28 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   };
 
   const configBlocked = configReady !== true || !!configError;
+  const hasUploadingFiles = files.some((af) => af.status === "uploading");
+
+  const getConfigBlockedHint = useCallback(() => {
+    if (configError) return "模型服务异常，请先在设置中修复后再发送";
+    if (configReady === null) return "正在检查模型配置，请稍候再发送";
+    if (configReady === false) return "模型未配置，请先完成配置后再发送";
+    return "当前无法发送，请检查模型配置后重试";
+  }, [configError, configReady]);
 
   const handleSend = async () => {
-    if (configBlocked) return;
-    if (files.some((af) => af.status === "uploading")) return;
-    if (isAnswerSubmitting) return;
+    if (configBlocked) {
+      nudgeInput(getConfigBlockedHint());
+      return;
+    }
+    if (hasUploadingFiles) {
+      nudgeInput("文件仍在上传，请等待上传完成后再发送");
+      return;
+    }
+    if (isAnswerSubmitting) {
+      nudgeInput("正在提交回答，请稍候");
+      return;
+    }
     const trimmed = text.trim();
     if (!trimmed && files.length === 0 && questionSelected.size === 0) return;
     closePopover();
@@ -1039,7 +1086,15 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (!answer.trim()) return;
       const questionId = pendingQuestion.id;
       const sessionId = useSessionStore.getState().activeSessionId;
-      if (!sessionId || !questionId) return;
+      if (!sessionId || !questionId) {
+        const errorMessage = !sessionId
+          ? "当前会话不可用，无法提交回答，请刷新后重试"
+          : "问题信息缺失，无法提交回答，请让助手重新提问";
+        setAnswerSubmitError(errorMessage);
+        nudgeInput(errorMessage);
+        return;
+      }
+      setAnswerSubmitError(null);
       setIsAnswerSubmitting(true);
       try {
         await answerQuestion(sessionId, questionId, answer);
@@ -1049,6 +1104,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         requestAnimationFrame(autoResize);
       } catch (err) {
         console.error("[ChatInput] answerQuestion failed:", err);
+        const errorMessage = "回答提交失败，请稍后重试";
+        setAnswerSubmitError(errorMessage);
+        nudgeInput(errorMessage);
       } finally {
         setIsAnswerSubmitting(false);
       }
@@ -1100,13 +1158,12 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (isStreaming || isAnswerSubmitting) {
-        // 流式输出中按 Enter：轻微抖动提示用户当前无法发送
-        const el = textareaRef.current?.parentElement?.parentElement;
-        if (el) {
-          el.classList.add("animate-shake-subtle");
-          setTimeout(() => el.classList.remove("animate-shake-subtle"), 400);
-        }
+      if (isStreaming) {
+        nudgeInput("助手正在回复，请稍候");
+        return;
+      }
+      if (isAnswerSubmitting) {
+        nudgeInput("正在提交回答，请稍候");
         return;
       }
       handleSend();
@@ -1127,7 +1184,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           return;
         }
         // 让 dropzone 处理原生文件拖放
-        getRootProps().onDrop?.(e as any);
+        getRootProps().onDrop?.(e);
       }}
       onDragEnter={(e) => {
         if (e.dataTransfer.types.includes("application/x-excel-file")) {
@@ -1312,6 +1369,34 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         removeFile={removeFile}
       />
 
+      <AnimatePresence initial={false}>
+        {(isAnswerSubmitting || answerSubmitError || inputHint) && (
+          <motion.div
+            initial={{ opacity: 0, y: -4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.16, ease: "easeOut" }}
+            className="px-3 pb-0.5"
+          >
+            {isAnswerSubmitting ? (
+              <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground">
+                <Loader2 className="h-3 w-3 animate-spin" />
+                正在提交回答...
+              </div>
+            ) : answerSubmitError ? (
+              <div className="inline-flex items-center gap-1.5 rounded-md border border-red-200/80 bg-red-50/80 px-2 py-1 text-[11px] text-red-600 dark:border-red-900/50 dark:bg-red-950/30 dark:text-red-400">
+                <AlertTriangle className="h-3 w-3" />
+                {answerSubmitError}
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 rounded-md bg-muted/60 px-2 py-1 text-[11px] text-muted-foreground">
+                {inputHint}
+              </div>
+            )}
+          </motion.div>
+        )}
+      </AnimatePresence>
+
       {/* Main input row: [+] textarea [send] */}
       <div className="flex items-end gap-1 px-1.5 py-1.5">
         {/* Attach button (left) */}
@@ -1428,9 +1513,13 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
-                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}
+                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || hasUploadingFiles}
                 >
-                  <ArrowUp className="h-3.5 w-3.5" />
+                  {isAnswerSubmitting ? (
+                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                  ) : (
+                    <ArrowUp className="h-3.5 w-3.5" />
+                  )}
                 </Button>
               </motion.div>
             )}

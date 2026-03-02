@@ -18,6 +18,8 @@ interface CodePreviewModalProps {
   filePath: string;
   filename: string;
   trigger?: React.ReactNode;
+  open?: boolean;
+  onOpenChange?: (open: boolean) => void;
 }
 
 const CODE_EXTENSIONS = new Set([
@@ -104,8 +106,17 @@ export function CodePreviewModal({
   filePath,
   filename,
   trigger,
+  open: controlledOpen,
+  onOpenChange,
 }: CodePreviewModalProps) {
-  const [open, setOpen] = useState(false);
+  const [internalOpen, setInternalOpen] = useState(false);
+  const open = controlledOpen ?? internalOpen;
+  const setOpen = useCallback((next: boolean) => {
+    if (controlledOpen === undefined) {
+      setInternalOpen(next);
+    }
+    onOpenChange?.(next);
+  }, [controlledOpen, onOpenChange]);
   const [activeFile, setActiveFile] = useState<TabItem>({ filePath, filename });
   const [content, setContent] = useState<string>("");
   const [loading, setLoading] = useState(false);
@@ -190,18 +201,16 @@ export function CodePreviewModal({
 
   // ── Open → register tab + fetch + reset state ──
   useEffect(() => {
-    if (open) {
-      addPreviewTab({ filePath, filename });
-      setActiveFile({ filePath, filename });
-      fetchFile(filePath);
-      setActiveLine(-1);
-      setMdPreview(false);
-      setSearchOpen(false);
-      setSearchQuery("");
-      setSearchMatches([]);
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+    if (!open) return;
+    addPreviewTab({ filePath, filename });
+    setActiveFile({ filePath, filename });
+    fetchFile(filePath);
+    setActiveLine(-1);
+    setMdPreview(false);
+    setSearchOpen(false);
+    setSearchQuery("");
+    setSearchMatches([]);
+  }, [open, filePath, filename, addPreviewTab, fetchFile]);
 
   // ── Body scroll lock ──
   useEffect(() => {
@@ -227,7 +236,7 @@ export function CodePreviewModal({
     };
     window.addEventListener("keydown", handler);
     return () => window.removeEventListener("keydown", handler);
-  }, [open, searchOpen]);
+  }, [open, searchOpen, setOpen]);
 
   // ── Search logic ──
   useEffect(() => {
@@ -279,7 +288,7 @@ export function CodePreviewModal({
         setOpen(false);
       }
     }
-  }, [activeFile.filePath, removePreviewTab, fetchFile]);
+  }, [activeFile.filePath, removePreviewTab, fetchFile, setOpen]);
 
   // ── Toolbar actions ──
   const handleCopy = useCallback(async () => {
@@ -585,9 +594,11 @@ export function CodePreviewModal({
 
   return (
     <>
-      <span className="inline" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
-        {trigger}
-      </span>
+      {trigger !== undefined && trigger !== null && (
+        <span className="inline" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
+          {trigger}
+        </span>
+      )}
       {typeof window !== "undefined" && createPortal(overlay, document.body)}
     </>
   );

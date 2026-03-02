@@ -9,6 +9,12 @@ export interface TreeNode {
   file?: { path: string; filename: string };
 }
 
+export interface WorkspaceFileEntry {
+  path: string;
+  filename: string;
+  is_dir?: boolean;
+}
+
 export function normalizePath(p: string): string {
   const n = normalizeExcelPath(p);
   return n.startsWith("./") ? n.slice(2) : n;
@@ -135,6 +141,79 @@ export function filterWorkspaceFiles(
 ): { path: string; filename: string; is_dir?: boolean }[] {
   if (showSystem) return files;
   return files.filter((f) => !isSystemFile(f));
+}
+
+function _basename(path: string): string {
+  const normalized = normalizePath(path);
+  const parts = normalized.split("/").filter(Boolean);
+  return parts[parts.length - 1] || normalized;
+}
+
+/**
+ * Add or replace a workspace item by path (path compare is normalized).
+ */
+export function upsertWorkspaceEntry(
+  files: WorkspaceFileEntry[],
+  entry: WorkspaceFileEntry,
+): WorkspaceFileEntry[] {
+  const key = normalizePath(entry.path);
+  const next = files.filter((f) => normalizePath(f.path) !== key);
+  const normalizedPath = normalizePath(entry.path);
+  return [
+    ...next,
+    {
+      ...entry,
+      path: normalizedPath,
+      filename: entry.filename || _basename(normalizedPath),
+    },
+  ];
+}
+
+/**
+ * Remove one or more workspace items. If a path is a folder, all descendants are removed too.
+ */
+export function removeWorkspaceEntries(
+  files: WorkspaceFileEntry[],
+  paths: string[],
+): WorkspaceFileEntry[] {
+  const targets = paths
+    .map((p) => normalizePath(p))
+    .filter((p) => p.length > 0);
+  if (targets.length === 0) return files;
+
+  return files.filter((f) => {
+    const current = normalizePath(f.path);
+    for (const t of targets) {
+      if (current === t || current.startsWith(`${t}/`)) return false;
+    }
+    return true;
+  });
+}
+
+/**
+ * Rename/move an item in workspace list. For folders, descendants are renamed by prefix.
+ */
+export function renameWorkspaceEntries(
+  files: WorkspaceFileEntry[],
+  oldPath: string,
+  newPath: string,
+): WorkspaceFileEntry[] {
+  const oldNorm = normalizePath(oldPath);
+  const newNorm = normalizePath(newPath);
+  if (!oldNorm || !newNorm || oldNorm === newNorm) return files;
+
+  return files.map((f) => {
+    const current = normalizePath(f.path);
+    if (current !== oldNorm && !current.startsWith(`${oldNorm}/`)) return f;
+
+    const suffix = current === oldNorm ? "" : current.slice(oldNorm.length + 1);
+    const replaced = suffix ? `${newNorm}/${suffix}` : newNorm;
+    return {
+      ...f,
+      path: replaced,
+      filename: _basename(replaced),
+    };
+  });
 }
 
 /** Check if a folder name indicates it's a backup/origin folder */

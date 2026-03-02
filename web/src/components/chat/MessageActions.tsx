@@ -8,6 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiGet } from "@/lib/api";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
 
@@ -104,11 +105,11 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 }
 
 function displayLabel(m: ModelInfo): string {
-  return m.name === "default" ? m.model : (m.display_name || m.name);
+  return m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
 }
 
 function resolvedModel(m: ModelInfo): string {
-  return m.resolved_model || m.model;
+  return formatModelIdForDisplay(m.resolved_model || m.model);
 }
 
 export const MessageActions = React.memo(function MessageActions({

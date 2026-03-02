@@ -19,6 +19,7 @@ import {
 import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import { downloadFile, normalizeExcelPath } from "@/lib/api";
+import { isPreviewableWorkspaceFile } from "@/lib/file-preview";
 import { normalizePath } from "./file-tree-helpers";
 
 export interface FlatFileListViewProps {
@@ -64,6 +65,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
     <div className="space-y-0.5">
       {flatFiles.map((file) => {
         const excel = isExcelFile(file.filename);
+        const previewable = isPreviewableWorkspaceFile(file.filename);
         const isFileActive = excel && panelOpen && activeFilePath === file.path;
         const isDragging = draggingPath === file.path;
         const isSelected = selectedPaths.has(file.path);
@@ -81,7 +83,15 @@ export function FlatFileListView(props: FlatFileListViewProps) {
             className={`group relative flex items-center gap-2.5 pl-5 pr-2 py-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
               isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
             } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
-            title={selectMode ? "点击选择" : excel ? `单击: 侧边面板 | 双击: 全屏\n${file.path}` : `单击: 下载\n${file.path}`}
+            title={
+              selectMode
+                ? "点击选择"
+                : excel
+                  ? `单击: 侧边面板 | 双击: 全屏\n${file.path}`
+                  : previewable
+                    ? `单击: 预览 | 菜单: 下载\n${file.path}`
+                    : `单击: 下载\n${file.path}`
+            }
           >
             {selectMode ? (
               isSelected ? (

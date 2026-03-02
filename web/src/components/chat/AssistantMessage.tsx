@@ -36,6 +36,7 @@ import { MessageActions } from "./MessageActions";
 import { VlmPipelineCard } from "./VlmPipelineCard";
 import VerificationCard from "./VerificationCard";
 import { ConfigErrorCard } from "./ConfigErrorCard";
+import { FailureGuidanceCard } from "./FailureGuidanceCard";
 import { useChatStore } from "@/stores/chat-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -474,6 +475,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
                   onCollapse={() => setCollapsed(true)}
                   verificationReport={verificationMap.get(origIndex)}
                   skipRender={skipIndices.has(origIndex)}
+                  onRetry={onRetry}
+                  onRetryWithModel={onRetryWithModel}
                 />
               ))}
             </motion.div>
@@ -493,6 +496,8 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
             defaultExpanded={block.type === "text"}
             verificationReport={verificationMap.get(origIndex)}
             skipRender={skipIndices.has(origIndex)}
+            onRetry={onRetry}
+            onRetryWithModel={onRetryWithModel}
           />
         ))}
 
@@ -658,6 +663,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   defaultExpanded,
   verificationReport,
   skipRender,
+  onRetry,
+  onRetryWithModel,
 }: { 
   block: AssistantBlock; 
   blockIndex: number; 
@@ -669,6 +676,8 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   defaultExpanded?: boolean;
   verificationReport?: { verdict: "pass" | "fail" | "unknown"; confidence: "high" | "medium" | "low"; checks: string[]; issues: string[]; mode: "advisory" | "blocking" };
   skipRender?: boolean;
+  onRetry?: () => void;
+  onRetryWithModel?: (modelName: string) => void;
 }) {
   if (skipRender) return null;
   switch (block.type) {
@@ -828,6 +837,23 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <ConfigErrorCard items={block.items} />;
     case "staging_hint":
       return <StagingHintCard pendingCount={block.pendingCount} files={block.files} />;
+    case "failure_guidance":
+      return (
+        <FailureGuidanceCard
+          category={block.category}
+          code={block.code}
+          title={block.title}
+          message={block.message}
+          stage={block.stage}
+          retryable={block.retryable}
+          diagnosticId={block.diagnosticId}
+          actions={block.actions}
+          provider={block.provider}
+          model={block.model}
+          onRetry={onRetry}
+          onRetryWithModel={onRetryWithModel}
+        />
+      );
     case "llm_retry": {
       if (block.retryStatus === "retrying") {
         return (

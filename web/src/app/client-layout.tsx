@@ -13,11 +13,11 @@ import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { ProfilePanel } from "@/components/profile/ProfilePanel";
 import { AdminPanel } from "@/components/admin/AdminPanel";
 import { useOnboardingStore } from "@/stores/onboarding-store";
+import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
+import { prefetchUniverModules } from "@/components/excel/UniverSheet";
 
-const ExcelSidePanel = dynamic(
-  () => import("@/components/excel/ExcelSidePanel").then((m) => ({ default: m.ExcelSidePanel })),
-  { ssr: false }
-);
+// 应用启动时后台预加载 Univer 库，避免首次打开面板时等待
+prefetchUniverModules();
 
 const ApprovalModal = dynamic(
   () => import("@/components/modals/ApprovalModal").then((m) => ({ default: m.ApprovalModal })),

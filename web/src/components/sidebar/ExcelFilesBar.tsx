@@ -33,7 +33,15 @@ import {
   workspaceDeleteItem,
 } from "@/lib/api";
 import { isExcelFile } from "@/components/ui/file-type-icon";
-import { buildTree, filterWorkspaceFiles } from "./file-tree-helpers";
+import { isImageFile, isTextPreviewableFile } from "@/lib/file-preview";
+import { CodePreviewModal } from "@/components/chat/CodePreviewModal";
+import { ImagePreviewModal } from "@/components/chat/ImagePreviewModal";
+import {
+  buildTree,
+  filterWorkspaceFiles,
+  removeWorkspaceEntries,
+  upsertWorkspaceEntry,
+} from "./file-tree-helpers";
 import { InlineCreateInput } from "./InlineInputs";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
@@ -41,6 +49,11 @@ import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import { StorageBar } from "./StorageBar";
 
 const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
+
+function isNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /404|not found|不存在/i.test(msg);
+}
 
 /** Hook: long-press detection for touch devices (opens context menu) */
 function useLongPress(onLongPress: () => void, delay = 500) {
@@ -104,6 +117,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [textPreviewTarget, setTextPreviewTarget] = useState<{ path: string; filename: string } | null>(null);
+  const [textPreviewOpen, setTextPreviewOpen] = useState(false);
+  const [imagePreviewTarget, setImagePreviewTarget] = useState<{ path: string; filename: string } | null>(null);
+  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
 
   // recentFiles 仅用于排序权重（最近使用文件排前面）
   const recentTimestamps = useMemo(() => {
@@ -168,12 +185,32 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   }, [mergeRecentFiles, currentUserId]);
 
   const handleCreateRootFolder = useCallback(async (name: string) => {
+    const folderName = name.trim();
+    if (!folderName) {
+      setCreatingRootFolder(false);
+      return;
+    }
+
+    const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+    useExcelStore.setState({
+      workspaceFiles: upsertWorkspaceEntry(prevWorkspaceFiles, {
+        path: folderName,
+        filename: folderName,
+        is_dir: true,
+      }),
+      wsFilesLoaded: true,
+    });
+    setCreatingRootFolder(false);
+
     try {
-      await workspaceMkdir(name);
+      await workspaceMkdir(folderName);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
       refreshWorkspaceFiles();
-    } catch { /* silent */ }
-    setCreatingRootFolder(false);
+    } catch (err) {
+      if (!isNotFoundError(err)) {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+      }
+    }
   }, [refreshWorkspaceFiles]);
 
   useEffect(() => {
@@ -215,13 +252,27 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         toggleSelect(path);
         return;
       }
-      // Excel 文件打开侧边面板，其他文件下载
+      // Excel 文件打开侧边面板；文本/图片单击预览；其他文件下载。
       const filename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
       if (isExcelFile(filename)) {
+        setTextPreviewOpen(false);
+        setImagePreviewOpen(false);
         openPanel(path);
-      } else {
-        downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
+        return;
       }
+      if (isImageFile(filename)) {
+        setTextPreviewOpen(false);
+        setImagePreviewTarget({ path, filename });
+        setImagePreviewOpen(true);
+        return;
+      }
+      if (isTextPreviewableFile(filename)) {
+        setImagePreviewOpen(false);
+        setTextPreviewTarget({ path, filename });
+        setTextPreviewOpen(true);
+        return;
+      }
+      downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
     },
     [openPanel, selectMode, toggleSelect, activeSessionId]
   );
@@ -232,9 +283,11 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       const filename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
       if (isExcelFile(filename)) {
         openFullView(path);
-      } else {
-        downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
+        return;
       }
+      // 文本/图片维持单击预览，双击不触发下载。
+      if (isImageFile(filename) || isTextPreviewableFile(filename)) return;
+      downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
     },
     [openFullView, selectMode, activeSessionId]
   );
@@ -248,17 +301,32 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   const confirmRemove = useCallback(async () => {
     setDeleting(true);
+    const prevWorkspaceFiles = useExcelStore.getState().workspaceFiles;
+    useExcelStore.setState({
+      workspaceFiles: removeWorkspaceEntries(prevWorkspaceFiles, pendingRemovePaths),
+      wsFilesLoaded: true,
+    });
+
+    let hasFailure = false;
     try {
       for (const p of pendingRemovePaths) {
-        try { await workspaceDeleteItem(p); } catch { /* silent */ }
+        try {
+          await workspaceDeleteItem(p);
+        } catch (err) {
+          if (!isNotFoundError(err)) hasFailure = true;
+        }
       }
-      // 同步清理 recentFiles 中对应条目
-      if (pendingRemovePaths.length === 1) {
-        removeRecentFile(pendingRemovePaths[0]);
-      } else if (pendingRemovePaths.length > 0) {
-        removeRecentFiles(pendingRemovePaths);
+      if (hasFailure) {
+        useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
+      } else {
+        // 同步清理 recentFiles 中对应条目
+        if (pendingRemovePaths.length === 1) {
+          removeRecentFile(pendingRemovePaths[0]);
+        } else if (pendingRemovePaths.length > 0) {
+          removeRecentFiles(pendingRemovePaths);
+        }
+        useExcelStore.getState().bumpWorkspaceFilesVersion();
       }
-      useExcelStore.getState().bumpWorkspaceFilesVersion();
       refreshWorkspaceFiles();
     } finally {
       setDeleting(false);
@@ -627,6 +695,23 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           onClickFile={handleClick}
           onDoubleClickFile={handleDoubleClick}
           onRemoveFile={(path) => requestRemove([path])}
+        />
+      )}
+
+      {textPreviewTarget && (
+        <CodePreviewModal
+          filePath={textPreviewTarget.path}
+          filename={textPreviewTarget.filename}
+          open={textPreviewOpen}
+          onOpenChange={setTextPreviewOpen}
+        />
+      )}
+      {imagePreviewTarget && (
+        <ImagePreviewModal
+          imagePath={imagePreviewTarget.path}
+          filename={imagePreviewTarget.filename}
+          open={imagePreviewOpen}
+          onOpenChange={setImagePreviewOpen}
         />
       )}
 
