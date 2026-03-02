@@ -170,6 +170,45 @@ export async function sendMessage(
   // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
   _deferredTokenStats = null;
 
+  // ── 乐观 UI：在任何 await 之前立即展示用户消息气泡 + 助手加载状态 ──
+
+  // 同步收集文件上传结果（仅读取 ChatInput 预上传的结果，无需 await）
+  const fileUploadResults: { filename: string; path: string; size: number }[] = [];
+  if (files && files.length > 0) {
+    for (const af of files) {
+      if (af.status === "success" && af.uploadResult) {
+        fileUploadResults.push(af.uploadResult);
+      } else {
+        fileUploadResults.push({ filename: af.file.name, path: "", size: af.file.size });
+      }
+    }
+  }
+
+  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
+
+  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
+  //（在下次渲染后触发）看到 currentSessionId === activeSessionId，
+  // 从而跳过会清空我们即将添加的消息的 switchSession() 调用。
+  if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
+    if (store.currentSessionId && store.messages.length > 0) {
+      store.saveCurrentSession();
+    }
+    useChatStore.setState({ currentSessionId: effectiveSessionId });
+  }
+
+  // 立即添加用户消息和助手占位消息 — 用户瞬间看到自己的消息气泡 + "正在连接" 加载状态
+  const userMsgId = uuid();
+  store.addUserMessage(
+    userMsgId,
+    text,
+    fileUploadResults.length > 0 ? fileUploadResults : undefined
+  );
+
+  const assistantMsgId = uuid();
+  store.addAssistantMessage(assistantMsgId);
+
+  // ── 以下为异步操作，消息气泡已可见 ──
+
   // 工作区配额前置检查：超限时直接在聊天中显示提示，避免 SSE 往返
   try {
     const wsStorage = await fetchWorkspaceStorage();
@@ -177,10 +216,6 @@ export async function sendMessage(
       const parts: string[] = [];
       if (wsStorage.over_files) parts.push(`文件数 ${wsStorage.file_count}/${wsStorage.max_files}`);
       if (wsStorage.over_size) parts.push(`存储 ${wsStorage.size_mb.toFixed(1)} MB/${wsStorage.max_size_mb.toFixed(1)} MB`);
-      const userMsgId = uuid();
-      store.addUserMessage(userMsgId, text);
-      const assistantMsgId = uuid();
-      store.addAssistantMessage(assistantMsgId);
       store.appendBlock(assistantMsgId, {
         type: "text",
         content:
@@ -199,13 +234,10 @@ export async function sendMessage(
     // 配额检查失败不阻断发送，交由后端兜底
   }
 
-  // 文件已由 ChatInput 预先上传。这里只需：
-  // 1. 收集上传成功的路径用于 agent 通知
-  // 2. 将图片编码为 base64 用于 SSE 多模态载荷
+  // 文件已由 ChatInput 预先上传。这里收集路径和 base64 数据用于 SSE 载荷。
   const uploadedDocPaths: string[] = [];
   const uploadedImagePaths: string[] = [];
   const imageAttachments: { data: string; media_type: string }[] = [];
-  const fileUploadResults: { filename: string; path: string; size: number }[] = [];
   if (files && files.length > 0) {
     for (const af of files) {
       const isImage = _isImageLike(af.file);
@@ -226,17 +258,13 @@ export async function sendMessage(
         }
       }
 
-      // 使用预上传的结果
+      // 收集上传成功的路径用于 agent 通知
       if (af.status === "success" && af.uploadResult) {
-        fileUploadResults.push(af.uploadResult);
         if (isImage) {
           uploadedImagePaths.push(af.uploadResult.path);
         } else {
           uploadedDocPaths.push(af.uploadResult.path);
         }
-      } else {
-        // 上传失败或仍在进行中 — 记录但不含路径
-        fileUploadResults.push({ filename: af.file.name, path: "", size: af.file.size });
       }
     }
   }
@@ -253,28 +281,6 @@ export async function sendMessage(
   if (notices.length > 0) {
     messageContent = `${notices.join("\n")}\n\n${text}`;
   }
-
-  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
-
-  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
-  //（在下次渲染后触发）看到 currentSessionId === activeSessionId，
-  // 从而跳过会清空我们即将添加的消息的 switchSession() 调用。
-  if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
-    if (store.currentSessionId && store.messages.length > 0) {
-      store.saveCurrentSession();
-    }
-    useChatStore.setState({ currentSessionId: effectiveSessionId });
-  }
-
-  const userMsgId = uuid();
-  store.addUserMessage(
-    userMsgId,
-    text,
-    fileUploadResults.length > 0 ? fileUploadResults : undefined
-  );
-
-  const assistantMsgId = uuid();
-  store.addAssistantMessage(assistantMsgId);
 
   // 辅助函数：获取最新的 store 状态
   const S = () => useChatStore.getState();
@@ -320,6 +326,7 @@ export async function sendMessage(
   // 流停滞检测：初始连接 30 秒超时，之后每次收到事件重置为 90 秒。
   // 如果中途 LLM 或后端处理挂起超过 90 秒无任何事件，自动中止。
   let _connectionTimedOut = false;
+  let _stallTimedOut = false;
   const _INITIAL_TIMEOUT_MS = 30_000;
   const _STALL_TIMEOUT_MS = 90_000;
   let _stallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
@@ -329,7 +336,7 @@ export async function sendMessage(
   const _resetStallTimer = () => {
     if (_stallTimer !== null) clearTimeout(_stallTimer);
     _stallTimer = setTimeout(() => {
-      _connectionTimedOut = true;
+      _stallTimedOut = true;
       abortController.abort();
     }, _STALL_TIMEOUT_MS);
   };
@@ -445,6 +452,17 @@ export async function sendMessage(
           "- 模型 API 配置错误（API Key、Base URL 或模型名称）\n" +
           "- 后端服务未启动或网络不可达\n\n" +
           "> 请检查右上角 ⚙️ 设置中的模型配置，确认后重试。",
+      });
+    } else if (_stallTimedOut) {
+      sseCtx.hadStreamError = true;
+      S().appendBlock(assistantMsgId, {
+        type: "text",
+        content:
+          "⚠️ **响应停滞**\n\n" +
+          "已连接但超过 90 秒未收到新数据，可能的原因：\n" +
+          "- 模型 API 服务响应缓慢或挂起\n" +
+          "- 后端处理遇到阻塞\n\n" +
+          "> 请稍后重试，或检查模型服务状态。",
       });
     }
   } finally {

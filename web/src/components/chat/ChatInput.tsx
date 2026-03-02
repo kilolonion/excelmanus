@@ -98,6 +98,7 @@ interface ChatInputProps {
 export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onStop }: ChatInputProps) {
   const [text, setText] = useState("");
   const [files, setFiles] = useState<AttachedFile[]>([]);
+  const [isAnswerSubmitting, setIsAnswerSubmitting] = useState(false);
   const [popover, setPopover] = useState<PopoverMode>(null);
   const [popoverFilter, setPopoverFilter] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
@@ -908,22 +909,25 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (onCommandResult) onCommandResult("/clear", "对话历史已清除", "text");
       return;
     }
-    // 展示命令 → 在对话框中显示
-    if (onCommandResult && DISPLAY_COMMANDS.has(trimmed)) {
+    // 所有斜杠命令 → 通过 /command API 专门处理（带 session_id 支持会话级命令）
+    if (onCommandResult && trimmed.startsWith("/")) {
+      const sessionId = useSessionStore.getState().activeSessionId;
       try {
         const res = await fetch(buildApiUrl("/command"), {
           method: "POST",
           headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-          body: JSON.stringify({ command: trimmed }),
+          body: JSON.stringify({ command: trimmed, session_id: sessionId || "" }),
         });
         if (res.ok) {
           const data = await res.json();
-          onCommandResult(trimmed, data.result, data.format || "text");
-          return;
+          if (!data.result?.startsWith("未知命令")) {
+            onCommandResult(trimmed, data.result, data.format || "text");
+            return;
+          }
         }
-      } catch { /* 继续向下执行 */ }
+      } catch { /* 回退到作为聊天发送 */ }
     }
-    // 其他全部 → 作为聊天发送
+    // 回退 → 作为聊天发送
     onSend(trimmed);
   };
 
@@ -931,6 +935,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
   const handleSend = async () => {
     if (configBlocked) return;
+    if (files.some((af) => af.status === "uploading")) return;
+    if (isAnswerSubmitting) return;
     const trimmed = text.trim();
     if (!trimmed && files.length === 0 && questionSelected.size === 0) return;
     closePopover();
@@ -994,19 +1000,23 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         }
       }
 
-      // 3) 展示类命令 → 在对话框中显示（仅精确匹配）
-      if (onCommandResult && DISPLAY_COMMANDS.has(trimmed)) {
+      // 3) 所有斜杠命令 → 通过 /command API 专门处理（带 session_id 支持会话级命令）
+      if (onCommandResult) {
+        const sessionId = useSessionStore.getState().activeSessionId;
         try {
           const res = await fetch(buildApiUrl("/command"), {
             method: "POST",
             headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-            body: JSON.stringify({ command: trimmed }),
+            body: JSON.stringify({ command: trimmed, session_id: sessionId || "" }),
           });
           if (res.ok) {
             const data = await res.json();
-            onCommandResult(trimmed, data.result, data.format || "text");
-            setText("");
-            return;
+            if (!data.result?.startsWith("未知命令")) {
+              onCommandResult(trimmed, data.result, data.format || "text");
+              setText("");
+              requestAnimationFrame(autoResize);
+              return;
+            }
           }
         } catch {
           // 回退到作为聊天发送
@@ -1029,14 +1039,18 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (!answer.trim()) return;
       const questionId = pendingQuestion.id;
       const sessionId = useSessionStore.getState().activeSessionId;
-      setPendingQuestion(null);
-      setQuestionSelected(new Set());
-      setText("");
-      requestAnimationFrame(autoResize);
-      if (sessionId && questionId) {
-        answerQuestion(sessionId, questionId, answer).catch((err) =>
-          console.error("[ChatInput] answerQuestion failed:", err),
-        );
+      if (!sessionId || !questionId) return;
+      setIsAnswerSubmitting(true);
+      try {
+        await answerQuestion(sessionId, questionId, answer);
+        setPendingQuestion(null);
+        setQuestionSelected(new Set());
+        setText("");
+        requestAnimationFrame(autoResize);
+      } catch (err) {
+        console.error("[ChatInput] answerQuestion failed:", err);
+      } finally {
+        setIsAnswerSubmitting(false);
       }
       return;
     }
@@ -1086,6 +1100,15 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
+      if (isStreaming || isAnswerSubmitting) {
+        // 流式输出中按 Enter：轻微抖动提示用户当前无法发送
+        const el = textareaRef.current?.parentElement?.parentElement;
+        if (el) {
+          el.classList.add("animate-shake-subtle");
+          setTimeout(() => el.classList.remove("animate-shake-subtle"), 400);
+        }
+        return;
+      }
       handleSend();
     }
   };
@@ -1353,7 +1376,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
             placeholder={pendingQuestion ? "输入自定义回答，或选择上方选项后发送" : "有问题，尽管问"}
-            disabled={disabled}
+            disabled={disabled || isAnswerSubmitting}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0
               selection:bg-[var(--em-primary)]/20 relative z-10"
@@ -1405,7 +1428,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
-                  disabled={disabled || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}
+                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || files.some((af) => af.status === "uploading")}
                 >
                   <ArrowUp className="h-3.5 w-3.5" />
                 </Button>

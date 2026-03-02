@@ -5,11 +5,40 @@ import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen,
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
+import { useAuthStore } from "@/stores/auth-store";
 import { MentionHighlighter } from "./MentionHighlighter";
-import { downloadFile, buildApiUrl } from "@/lib/api";
+import { downloadFile, buildApiUrl, resolveAvatarSrc } from "@/lib/api";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import type { FileAttachment } from "@/lib/types";
+
+function UserAvatar() {
+  const [failed, setFailed] = useState(false);
+  const user = useAuthStore((s) => s.user);
+  const accessToken = useAuthStore((s) => s.accessToken);
+  const src = resolveAvatarSrc(user?.avatarUrl, accessToken);
+  const initial = (user?.displayName || user?.email || "U")[0]?.toUpperCase() || "U";
+
+  if (src && !failed) {
+    return (
+      <img
+        src={src}
+        alt=""
+        className="flex-shrink-0 h-6 w-6 rounded-full object-cover"
+        referrerPolicy="no-referrer"
+        onError={() => setFailed(true)}
+      />
+    );
+  }
+  return (
+    <span
+      className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px] font-medium"
+      style={{ backgroundColor: "var(--em-primary)" }}
+    >
+      {initial}
+    </span>
+  );
+}
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
 
@@ -194,12 +223,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   return (
     <div className="group flex gap-2.5 py-2.5">
-      <div
-        className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px]"
-        style={{ backgroundColor: "var(--em-primary)" }}
-      >
-        <User className="h-3.5 w-3.5" />
-      </div>
+      <UserAvatar />
       <div className="flex-1 min-w-0">
         {editing ? (
           <div className="space-y-2">
