@@ -1,7 +1,7 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowLeft, Crown } from "lucide-react";
+import { ArrowLeft, Crown, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { PROVIDER_GUIDES, PROVIDER_LOGO_SLUG } from "../provider-guides";
 import type { ProviderGuide } from "../provider-guides";
@@ -49,11 +49,17 @@ function ProviderLogo({ id }: { id: string }) {
 interface ProviderSelectStepProps {
   onSelect: (provider: ProviderGuide) => void;
   onBack: () => void;
+  showOAuthConnectGuide?: boolean;
+  checkingOAuthConnectStatus?: boolean;
+  onGoConnectOAuth?: () => void;
 }
 
 export function ProviderSelectStep({
   onSelect,
   onBack,
+  showOAuthConnectGuide = false,
+  checkingOAuthConnectStatus = false,
+  onGoConnectOAuth,
 }: ProviderSelectStepProps) {
   return (
     <div className="flex flex-col items-center min-h-full px-4 sm:px-6 py-6 sm:py-8">
@@ -75,6 +81,39 @@ export function ProviderSelectStep({
         <p className="text-sm text-muted-foreground">
           选择一个供应商获取 API Key，之后随时可以在设置中修改或添加更多模型
         </p>
+
+        {checkingOAuthConnectStatus && (
+          <div className="mt-4 rounded-xl border border-border/60 bg-muted/30 p-3.5 flex items-center gap-2 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            正在检查 OAuth 连接状态...
+          </div>
+        )}
+
+        {!checkingOAuthConnectStatus && showOAuthConnectGuide && onGoConnectOAuth && (
+          <div className="mt-4 rounded-xl border border-[var(--em-primary)]/35 bg-[var(--em-primary-alpha-06)] p-4 sm:p-4.5 space-y-3">
+            <div className="flex items-start gap-2.5">
+              <div
+                className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg"
+                style={{ backgroundColor: "var(--em-primary-alpha-15)" }}
+              >
+                <Sparkles className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+              </div>
+              <div className="min-w-0">
+                <p className="text-sm font-semibold">检测到你正在使用 OAuth 登录</p>
+                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
+                  先连接 OpenAI Codex 订阅，可自动添加可用模型，无需手动填 API Key。
+                </p>
+              </div>
+            </div>
+            <Button
+              onClick={onGoConnectOAuth}
+              className="h-9 text-sm text-white"
+              style={{ backgroundColor: "var(--em-primary)" }}
+            >
+              去连接并自动添加模型
+            </Button>
+          </div>
+        )}
       </div>
 
       {/* Provider cards grid */}
