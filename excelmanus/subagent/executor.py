@@ -140,13 +140,23 @@ class SubagentExecutor:
         total_prompt_tokens = 0
         total_completion_tokens = 0
 
-        _sub_protocol = getattr(config, 'protocol', '') or self._parent_config.protocol
+        model = config.model or self._parent_config.aux_model or self._parent_config.model
+        # 当子代理使用 AUX 模型时，优先使用 AUX 凭证（避免 Codex OAuth token
+        # 被错误地发送到非 Codex 端点，或非 Codex 模型被发送到 Codex 端点）
+        _using_aux = (not config.model and self._parent_config.aux_model)
+        if _using_aux:
+            _sub_api_key = config.api_key or self._parent_config.aux_api_key or self._parent_config.api_key
+            _sub_base_url = config.base_url or self._parent_config.aux_base_url or self._parent_config.base_url
+            _sub_protocol = getattr(config, 'protocol', '') or self._parent_config.aux_protocol or self._parent_config.protocol
+        else:
+            _sub_api_key = config.api_key or self._parent_config.api_key
+            _sub_base_url = config.base_url or self._parent_config.base_url
+            _sub_protocol = getattr(config, 'protocol', '') or self._parent_config.protocol
         client = create_client(
-            api_key=config.api_key or self._parent_config.api_key,
-            base_url=config.base_url or self._parent_config.base_url,
+            api_key=_sub_api_key,
+            base_url=_sub_base_url,
             protocol=_sub_protocol,
         )
-        model = config.model or self._parent_config.aux_model or self._parent_config.model
 
         try:
             while iterations < config.max_iterations:
@@ -1127,10 +1137,18 @@ class SubagentExecutor:
             auto_load_lines=self._parent_config.memory_auto_load_lines,
         )
         model = config.model or self._parent_config.aux_model or self._parent_config.model
-        _sub_mem_protocol = getattr(config, 'protocol', '') or self._parent_config.protocol
+        _using_aux_mem = (not config.model and self._parent_config.aux_model)
+        if _using_aux_mem:
+            _sub_mem_api_key = config.api_key or self._parent_config.aux_api_key or self._parent_config.api_key
+            _sub_mem_base_url = config.base_url or self._parent_config.aux_base_url or self._parent_config.base_url
+            _sub_mem_protocol = getattr(config, 'protocol', '') or self._parent_config.aux_protocol or self._parent_config.protocol
+        else:
+            _sub_mem_api_key = config.api_key or self._parent_config.api_key
+            _sub_mem_base_url = config.base_url or self._parent_config.base_url
+            _sub_mem_protocol = getattr(config, 'protocol', '') or self._parent_config.protocol
         client = create_client(
-            api_key=config.api_key or self._parent_config.api_key,
-            base_url=config.base_url or self._parent_config.base_url,
+            api_key=_sub_mem_api_key,
+            base_url=_sub_mem_base_url,
             protocol=_sub_mem_protocol,
         )
         memory_extractor = MemoryExtractor(client=client, model=model)

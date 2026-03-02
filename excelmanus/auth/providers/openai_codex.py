@@ -54,7 +54,8 @@ class OpenAICodexProvider(AuthProvider):
     TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
     CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
     SCOPE = "openid profile email offline_access"
-    BASE_URL = "https://api.openai.com/v1"
+    BASE_URL = "https://chatgpt.com/backend-api/codex"
+    PROTOCOL = "openai_responses"
     REFRESH_MARGIN_SECONDS = 300
     MODEL_NAME_PREFIX = "openai-codex/"
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
@@ -83,7 +84,7 @@ class OpenAICodexProvider(AuthProvider):
         async with httpx.AsyncClient(timeout=30.0) as client:
             resp = await client.post(
                 cls.DEVICE_USERCODE_URL,
-                json={"client_id": cls.CLIENT_ID},
+                json={"client_id": cls.CLIENT_ID, "scope": cls.SCOPE},
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
@@ -210,11 +211,20 @@ class OpenAICodexProvider(AuthProvider):
         access_token = data.get("access_token", "")
         refresh_token = data.get("refresh_token")
         id_token = data.get("id_token", "")
+        # 诊断日志：记录 token 响应中的 scope 字段
+        _resp_scope = data.get("scope", "")
+        logger.info("Codex token exchange response: scope=%r, token_type=%r, has_refresh=%s",
+                     _resp_scope, data.get("token_type", ""), bool(refresh_token))
 
         if not access_token:
             raise RuntimeError("Token 交换响应中缺少 access_token")
 
         claims = _parse_jwt_claims(access_token)
+        # 诊断日志：记录 JWT claims 中的 scope
+        if claims:
+            _jwt_scope = claims.get("scope", claims.get("scp", ""))
+            logger.info("Codex JWT claims: scope=%r, aud=%r, iss=%r",
+                         _jwt_scope, claims.get("aud", ""), claims.get("iss", ""))
         account_id, plan_type = _extract_account_info(claims)
         # 也尝试从 id_token 提取（某些情况下 access_token 中没有）
         if not account_id and id_token:

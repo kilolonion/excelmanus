@@ -533,7 +533,7 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("siliconflow", re.compile(r"siliconflow", re.IGNORECASE)),
     ("openrouter", re.compile(r"openrouter\.ai", re.IGNORECASE)),
     ("xai", re.compile(r"api\.x\.ai", re.IGNORECASE)),
-    ("openai", re.compile(r"api\.openai\.com", re.IGNORECASE)),
+    ("openai", re.compile(r"api\.openai\.com|chatgpt\.com/backend-api/codex", re.IGNORECASE)),
     ("together", re.compile(r"together", re.IGNORECASE)),
     ("groq", re.compile(r"groq\.com", re.IGNORECASE)),
 ]

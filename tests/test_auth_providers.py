@@ -87,7 +87,7 @@ class TestOpenAICodexProvider:
     def test_get_api_credential(self):
         api_key, base_url = self.provider.get_api_credential("eyJtest")
         assert api_key == "eyJtest"
-        assert base_url == "https://api.openai.com/v1"
+        assert base_url == "https://chatgpt.com/backend-api/codex"
 
     def test_supported_model_entries_have_friendly_alias_and_prefixed_public_id(self):
         entries = self.provider.list_supported_model_entries()
@@ -316,7 +316,7 @@ class TestCredentialResolver:
         assert result is not None
         assert result.source == "oauth"
         assert result.provider == "openai-codex"
-        assert result.base_url == "https://api.openai.com/v1"
+        assert result.base_url == "https://chatgpt.com/backend-api/codex"
 
     @pytest.mark.asyncio
     async def test_model_match_provider(self):

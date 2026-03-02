@@ -52,7 +52,12 @@ from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
 from excelmanus.engine_core.session_state import SessionState
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
-from excelmanus.engine_core.llm_caller import LLMCaller, is_retryable_llm_error, compute_retry_delay
+from excelmanus.engine_core.llm_caller import (
+    LLMCaller,
+    compute_retry_delay,
+    is_nonretryable_auth_error,
+    is_retryable_llm_error,
+)
 from excelmanus.engine_core.interaction_handler import InteractionHandler
 from excelmanus.engine_core.meta_tools import MetaToolBuilder
 from excelmanus.engine_core.skill_resolver import SkillResolver
@@ -290,6 +295,7 @@ class AgentEngine:
         # _last_success_count, _last_failure_count, _current_write_hint,
         # _has_write_tool_call, _turn_diagnostics, _session_diagnostics,
         # _execution_guard_fired, _vba_exempt
+        self._credential_resolver: Any = None  # CredentialResolver，由 SessionManager 注入
         self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root, database=database)
@@ -3235,6 +3241,8 @@ class AgentEngine:
                 ),
             )
 
+            # ── OAuth token 预检刷新（每轮迭代前检查，避免长会话 token 过期）──
+            await self._refresh_credential_if_needed(on_event=on_event)
 
             # ── 后台 LLM 分类已内化到 router 同步流程，无需收割 ──
 
@@ -3349,8 +3357,14 @@ class AgentEngine:
             tools = self._meta_tool_builder.build_v5_tools(write_hint=write_hint, task_tags=_task_tags)
             tool_scope = None
 
+            # 安全网：确保发送到 API 的 model 是实际模型 ID，不含 provider 前缀
+            _api_model = self._active_model
+            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+            if OpenAICodexProvider.is_codex_profile_name(_api_model):
+                _api_model = OpenAICodexProvider.model_from_profile_name(_api_model) or _api_model
+
             kwargs: dict[str, Any] = {
-                "model": self._active_model,
+                "model": _api_model,
                 "messages": messages,
             }
             if tools:
@@ -3460,6 +3474,7 @@ class AgentEngine:
             _retry_max = self._config.llm_retry_max_attempts
             _retry_base = self._config.llm_retry_base_delay_seconds
             _retry_cap = self._config.llm_retry_max_delay_seconds
+            _auth_refresh_attempted = False  # 401 时仅尝试一次凭证刷新重试
             for _retry_attempt in range(1, _retry_max + 1):
                 try:
                     try:
@@ -3476,6 +3491,9 @@ class AgentEngine:
                     except Exception as stream_exc:
                         # 可重试的瞬时错误 → 跳过非流式回退，直接进入重试
                         if is_retryable_llm_error(stream_exc):
+                            raise
+                        # 认证/权限错误回退无意义：同样会在非流式再次失败
+                        if is_nonretryable_auth_error(stream_exc):
                             raise
                         # 流式调用失败时回退到非流式
                         logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
@@ -3496,6 +3514,45 @@ class AgentEngine:
                     break  # 成功，退出重试循环
 
                 except Exception as _retry_exc:
+                    # ── 401/403 认证错误：尝试刷新凭证后重试一次 ──
+                    if is_nonretryable_auth_error(_retry_exc) and not _auth_refresh_attempted:
+                        _auth_refresh_attempted = True
+                        # 诊断日志：记录当前使用的凭证信息
+                        _key_preview = (self._active_api_key or "")[:20]
+                        logger.warning(
+                            "401 诊断: model=%s, base_url=%s, api_key_prefix=%s..., "
+                            "has_resolver=%s, user_id=%s",
+                            self._active_model, self._active_base_url,
+                            _key_preview, self._credential_resolver is not None,
+                            self._user_id,
+                        )
+                        _old_key = self._active_api_key
+                        try:
+                            await self._refresh_credential_if_needed(on_event=on_event)
+                        except Exception:
+                            logger.debug("401 后凭证刷新失败", exc_info=True)
+                        if self._active_api_key != _old_key:
+                            logger.info(
+                                "401 后凭证已刷新，重试 LLM 调用 (attempt=%d)",
+                                _retry_attempt,
+                            )
+                            self._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.PIPELINE_PROGRESS,
+                                    pipeline_stage="credential_refreshed_retrying",
+                                    pipeline_message="认证失败，已自动刷新凭证，正在重试...",
+                                ),
+                            )
+                            # 用新凭证重建请求参数中的客户端引用
+                            continue
+                        # 凭证未变化，无法恢复
+                        logger.warning(
+                            "401 后凭证刷新未产生新 token，无法恢复: %s",
+                            str(_retry_exc)[:200],
+                        )
+                        raise
+
                     if _retry_attempt < _retry_max and is_retryable_llm_error(_retry_exc):
                         _delay = compute_retry_delay(
                             _retry_attempt, _retry_base, _retry_cap, _retry_exc,
@@ -4809,6 +4866,77 @@ class AgentEngine:
         names.extend(p.name for p in self._config.models)
         return names
 
+    async def _refresh_credential_if_needed(self, on_event: "EventCallback | None" = None) -> None:
+        """LLM 调用前检查 OAuth token 是否需要刷新（借鉴 OpenClaw resolveApiKeyForProfile）。
+
+        如果 CredentialResolver 返回了不同于当前 api_key 的凭证，说明 token 已被刷新，
+        此时热更新 _client 和相关字段，确保后续 LLM 调用使用新凭证。
+        同时通过 SSE 通知前端 token 状态变化。
+        """
+        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-5.3-codex），
+        # 先剥离为实际模型 ID（gpt-5.3-codex），避免发送无效 model 到 API。
+        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+        if OpenAICodexProvider.is_codex_profile_name(self._active_model):
+            _real_model = OpenAICodexProvider.model_from_profile_name(self._active_model)
+            if _real_model:
+                logger.info(
+                    "修正 _active_model 前缀: %s -> %s",
+                    self._active_model, _real_model,
+                )
+                self._active_model = _real_model
+
+        resolver = self._credential_resolver
+        if resolver is None or not self._user_id:
+            return
+        try:
+            resolved = await resolver.resolve(self._user_id, self._active_model)
+        except Exception:
+            logger.debug("OAuth 凭证刷新检查失败", exc_info=True)
+            # 刷新失败，通知前端
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.CREDENTIAL_EXPIRED,
+                    pipeline_stage="credential_expired",
+                    pipeline_message="OAuth token 已过期且刷新失败，请重新连接",
+                ),
+            )
+            return
+        if resolved is None or resolved.source != "oauth":
+            return
+
+        next_api_key = resolved.api_key or self._active_api_key
+        next_base_url = resolved.base_url or self._active_base_url
+        next_protocol = resolved.protocol or self._active_protocol
+
+        if (
+            next_api_key == self._active_api_key
+            and next_base_url == self._active_base_url
+            and next_protocol == self._active_protocol
+        ):
+            return  # 运行时凭证与路由协议均未变化
+
+        # 凭证已刷新，热更新客户端
+        logger.info("OAuth token 已刷新，热更新 LLM 客户端 (provider=%s)", resolved.provider)
+        self._active_api_key = next_api_key
+        self._active_base_url = next_base_url
+        self._active_protocol = next_protocol
+        self._client = create_client(
+            api_key=self._active_api_key,
+            base_url=self._active_base_url,
+            protocol=self._active_protocol,
+        )
+        self._sync_router_model_runtime()
+        # 通知前端 token 已刷新
+        self._emit(
+            on_event,
+            ToolCallEvent(
+                event_type=EventType.CREDENTIAL_REFRESHED,
+                pipeline_stage="credential_refreshed",
+                pipeline_message=f"OAuth token 已自动刷新 (provider={resolved.provider})",
+            ),
+        )
+
     def switch_model(self, name: str) -> str:
         """切换到指定模型档案。返回切换结果描述。
 
@@ -5115,4 +5243,3 @@ class AgentEngine:
             "请改为可用的 API 端点（通常以 `/v1` 结尾），然后重试。\n"
             f"响应片段: {preview}"
         )
-

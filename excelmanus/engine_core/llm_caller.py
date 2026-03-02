@@ -181,6 +181,39 @@ def is_retryable_llm_error(exc: Exception) -> bool:
     return is_transient_window_advisor_exception(exc)
 
 
+def is_nonretryable_auth_error(exc: Exception) -> bool:
+    """判断是否为鉴权/权限错误（401/403），用于跳过无意义的回退重试。"""
+    auth_keywords = (
+        "missing scopes",
+        "insufficient permissions",
+        "permission denied",
+        "authentication",
+        "unauthorized",
+        "forbidden",
+        "invalid api key",
+    )
+    for candidate in iter_exception_chain(exc):
+        status_code = getattr(candidate, "status_code", None)
+        if isinstance(status_code, int) and status_code in {401, 403}:
+            return True
+
+        response = getattr(candidate, "response", None)
+        if response is not None:
+            resp_status = getattr(response, "status_code", None)
+            if isinstance(resp_status, int) and resp_status in {401, 403}:
+                return True
+
+        name = candidate.__class__.__name__.lower()
+        if any(token in name for token in ("authentication", "unauthorized", "forbidden", "permission")):
+            return True
+
+        text = f"{candidate} {candidate!r}".lower()
+        if any(keyword in text for keyword in auth_keywords):
+            return True
+
+    return False
+
+
 def compute_retry_delay(
     attempt: int,
     base_delay: float,

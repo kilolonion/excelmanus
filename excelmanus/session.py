@@ -109,6 +109,7 @@ class SessionManager:
         self._config_store = config_store
         self._user_store = user_store
         self._credential_store = None  # CredentialStore，由 lifespan 注入
+        self._credential_resolver = None  # CredentialResolver，由 lifespan 注入
         self._mcp_initialized: bool = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
@@ -142,6 +143,10 @@ class SessionManager:
         """注入 CredentialStore 实例（订阅凭证管理）。"""
         self._credential_store = credential_store
 
+    def set_credential_resolver(self, resolver: Any) -> None:
+        """注入 CredentialResolver 实例（运行时凭证解析）。"""
+        self._credential_resolver = resolver
+
     def sync_user_subscription_profiles(
         self,
         engine: AgentEngine,
@@ -171,15 +176,21 @@ class SessionManager:
             return
 
         api_key, base_url = OpenAICodexProvider().get_api_credential(active_profile.access_token)
+        plan = (getattr(active_profile, "plan_type", "") or "").strip().lower()
+        is_pro = plan == "pro"
+        _PRO_ONLY_MODELS = {"gpt-5.3-codex-spark"}
+
         codex_profiles: list[ModelProfile] = []
         for item in OpenAICodexProvider.list_supported_model_entries():
+            if item["model"] in _PRO_ONLY_MODELS and not is_pro:
+                continue
             codex_profiles.append(ModelProfile(
                 name=item["profile_name"],
                 model=item["model"],
                 api_key=api_key,
                 base_url=base_url,
                 description=item["display_name"],
-                protocol="openai",
+                protocol=OpenAICodexProvider.PROTOCOL,
                 thinking_mode="openai_reasoning",
                 model_family="gpt",
             ))
@@ -463,22 +474,27 @@ class SessionManager:
                             overrides.get("model", "<inherited>"),
                             overrides.get("base_url", "<inherited>"),
                         )
-            # 订阅凭证覆盖：检查 auth_profiles 中的 OAuth token
-            if self._credential_store is not None:
+            # 订阅凭证覆盖：通过 CredentialResolver 通用框架解析 OAuth token
+            if self._credential_resolver is not None:
                 _target_model = overrides.get("model", self._config.model)
                 try:
                     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-                    _codex = OpenAICodexProvider()
-                    if _codex.matches_model(_target_model):
-                        _profile = self._credential_store.get_active_profile(user_id, "openai-codex")
-                        if _profile and _profile.access_token:
-                            _api_key, _base_url = _codex.get_api_credential(_profile.access_token)
-                            overrides["api_key"] = _api_key
-                            overrides["base_url"] = _base_url
-                            logger.info(
-                                "用户 %s 使用 Codex 订阅凭证 (account=%s, plan=%s)",
-                                user_id, _profile.account_id, _profile.plan_type,
-                            )
+                    if isinstance(_target_model, str) and OpenAICodexProvider.is_codex_profile_name(_target_model):
+                        _resolved_model = OpenAICodexProvider.model_from_profile_name(_target_model)
+                        if _resolved_model:
+                            _target_model = _resolved_model
+                            overrides["model"] = _resolved_model
+                    _resolved_cred = self._credential_resolver.resolve_sync(user_id, _target_model)
+                    if _resolved_cred:
+                        overrides["api_key"] = _resolved_cred.api_key
+                        if _resolved_cred.base_url:
+                            overrides["base_url"] = _resolved_cred.base_url
+                        if _resolved_cred.protocol and _resolved_cred.protocol != "openai":
+                            overrides["protocol"] = _resolved_cred.protocol
+                        logger.info(
+                            "用户 %s 使用 %s 订阅凭证 (source=%s)",
+                            user_id, _resolved_cred.provider or "unknown", _resolved_cred.source,
+                        )
                 except Exception:
                     logger.debug("订阅凭证解析失败", exc_info=True)
             engine_config = replace(self._config, **overrides)
@@ -498,6 +514,9 @@ class SessionManager:
             user_id=user_id,
         )
         self.sync_user_subscription_profiles(engine, user_id)
+        # 注入 CredentialResolver 到引擎，支持 LLM 调用前自动刷新 OAuth token
+        if self._credential_resolver is not None:
+            engine._credential_resolver = self._credential_resolver
         if history_messages:
             engine.inject_history(history_messages)
             # 恢复 checkpoint（SessionState + TaskStore）

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
@@ -53,6 +54,16 @@ class CredentialResolver:
         self._store = credential_store
         self._user_store = user_store
         self._config = config
+        self._refresh_locks: dict[str, asyncio.Lock] = {}
+
+    def _get_refresh_lock(self, user_id: str, provider_name: str) -> asyncio.Lock:
+        """获取 (user_id, provider) 对应的 asyncio.Lock（懒创建）。"""
+        key = f"{user_id}:{provider_name}"
+        lock = self._refresh_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._refresh_locks[key] = lock
+        return lock
 
     async def resolve(
         self, user_id: str | None, model: str
@@ -82,10 +93,35 @@ class CredentialResolver:
         # 3. 回退到系统默认（返回 None，让调用方使用自己的默认配置）
         return None
 
+    def resolve_sync(
+        self, user_id: str | None, model: str
+    ) -> ResolvedCredential | None:
+        """同步版本 resolve —— 用于引擎创建时（不触发自动刷新，仅读已有凭证）。"""
+        if not user_id or not self._store:
+            return None
+        provider_name = self._match_provider(model)
+        if not provider_name:
+            return None
+        profile = self._store.get_active_profile(user_id, provider_name)
+        if not profile or not profile.access_token:
+            return None
+        provider = _PROVIDERS.get(provider_name)
+        if not provider:
+            return None
+        api_key, base_url = provider.get_api_credential(profile.access_token)
+        _protocol = getattr(provider, "PROTOCOL", "openai")
+        return ResolvedCredential(
+            api_key=api_key,
+            base_url=base_url,
+            source="oauth",
+            provider=provider_name,
+            protocol=_protocol,
+        )
+
     async def _try_oauth_profile(
         self, user_id: str, provider_name: str
     ) -> ResolvedCredential | None:
-        """尝试使用 OAuth profile，必要时自动刷新。"""
+        """尝试使用 OAuth profile，必要时自动刷新（带锁 + double-check）。"""
         if not self._store:
             return None
 
@@ -97,8 +133,29 @@ class CredentialResolver:
         if not provider:
             return None
 
-        # 检查是否需要刷新
-        if _is_expiring_soon(profile.expires_at):
+        _protocol = getattr(provider, "PROTOCOL", "openai")
+
+        if not _is_expiring_soon(profile.expires_at):
+            api_key, base_url = provider.get_api_credential(profile.access_token)
+            return ResolvedCredential(
+                api_key=api_key, base_url=base_url, source="oauth",
+                provider=provider_name, protocol=_protocol,
+            )
+
+        # Token 即将过期 —— 获取锁后 double-check 再刷新
+        lock = self._get_refresh_lock(user_id, provider_name)
+        async with lock:
+            # Double-check: 重新从 DB 读取，可能已被其他协程刷新
+            profile = self._store.get_active_profile(user_id, provider_name)
+            if not profile or not profile.access_token:
+                return None
+            if not _is_expiring_soon(profile.expires_at):
+                api_key, base_url = provider.get_api_credential(profile.access_token)
+                return ResolvedCredential(
+                    api_key=api_key, base_url=base_url, source="oauth",
+                    provider=provider_name, protocol=_protocol,
+                )
+            # 确实需要刷新
             refreshed = await self._refresh_profile(profile, provider)
             if not refreshed:
                 return None
@@ -106,11 +163,8 @@ class CredentialResolver:
 
         api_key, base_url = provider.get_api_credential(profile.access_token)
         return ResolvedCredential(
-            api_key=api_key,
-            base_url=base_url,
-            source="oauth",
-            provider=provider_name,
-            protocol="openai",
+            api_key=api_key, base_url=base_url, source="oauth",
+            provider=provider_name, protocol=_protocol,
         )
 
     async def _refresh_profile(
@@ -118,7 +172,7 @@ class CredentialResolver:
         profile: AuthProfileRecord,
         provider: Any,
     ) -> AuthProfileRecord | None:
-        """刷新 OAuth token 并更新数据库。"""
+        """刷新 OAuth token 并更新数据库（调用方需持有锁）。"""
         if not profile.refresh_token:
             logger.warning(
                 "Provider %s 的 profile %s 无 refresh token，标记为不活跃",
@@ -146,7 +200,6 @@ class CredentialResolver:
                 refreshed.expires_at,
             )
 
-        # 返回更新后的 profile
         return AuthProfileRecord(
             id=profile.id,
             user_id=profile.user_id,

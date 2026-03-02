@@ -132,3 +132,62 @@ async def test_generate_stream_emits_content_delta(case: _ProviderCase) -> None:
             await stream.aclose()
     finally:
         await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_emits_reasoning_delta() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.reasoning_summary_text.delta","delta":"思考片段"}',
+            'data: {"type":"response.output_text.delta","delta":"最终答案"}',
+            "data: [DONE]",
+        ],
+    )
+    client._http.stream = lambda *args, **kwargs: _FakeStreamContext(response)
+
+    try:
+        stream = await client._generate_stream(
+            model="gpt-5",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+        first_chunk = await anext(stream)
+        assert isinstance(first_chunk, StreamDelta)
+        assert first_chunk.thinking_delta == "思考片段"
+    finally:
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_forwards_reasoning_effort() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://api.openai.com/v1")
+    captured_body: dict[str, Any] = {}
+    response = _FakeStreamResponse(
+        status_code=200,
+        lines=[
+            'data: {"type":"response.output_text.delta","delta":"ok"}',
+            "data: [DONE]",
+        ],
+    )
+
+    def _fake_stream(*args, **kwargs):
+        captured_body.clear()
+        captured_body.update(kwargs.get("json", {}))
+        return _FakeStreamContext(response)
+
+    client._http.stream = _fake_stream
+
+    try:
+        stream = await client.chat.completions.create(
+            model="gpt-5.3-codex",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=True,
+            reasoning_effort="high",
+        )
+        await anext(stream)
+    finally:
+        await client.close()
+
+    assert captured_body.get("reasoning", {}).get("effort") == "high"
+    assert captured_body.get("reasoning", {}).get("summary") == "auto"
