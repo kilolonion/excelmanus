@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.7-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.8-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -30,34 +30,37 @@ ExcelManus is an LLM-powered Excel Agent framework. Tell it what you want — it
 <td width="50%">
 
 ### 📊 Read & Write Excel
-Cells · Formulas · VLOOKUP · Batch fill · Multi-sheet operations
+Cells · Formulas · VLOOKUP · Batch fill · Multi-sheet operations; auto-converts `.xlsx` / `.xls` / `.xlsb` / `.csv`
 
 ### 📈 Data Analysis & Charts
 Filter, sort, aggregate, pivot tables; complex logic auto-generates Python scripts. Bar, line, pie charts embedded in Excel or exported as images.
 
-### 🖼️ Image Recognition
-Table screenshot → structured data via 4-stage progressive pipeline extracting data + styles + formulas
+### 🖼️ Vision Extraction
+Table screenshot → structured data; 4-stage progressive pipeline (skeleton→data→style→formula), supports single-pass extraction and large-table chunking
 
-### 🔄 Version Management
-Staging / Audit / CoW version chain, `/undo` precise rollback to any operation
+### 🔄 Version Management & Diff
+Staging / Audit / CoW version chain, `/undo` precise rollback; Excel write diff visualization; text file precision editing + unified diff display
 
 </td>
 <td width="50%">
 
-### 🧠 Persistent Memory
-Cross-session memory for preferences and patterns, auto-adapts behavior
+### 🧠 Persistent Memory & Playbook
+Cross-session memory for preferences; Playbook automatically distills task experience, reuses lessons in future tasks
 
-### 🧩 Skillpack
-One Markdown = one skill. Auto-discovery, on-demand activation, supports Hooks and command dispatch
+### 🧩 Skillpack & ClawHub Market
+One Markdown = one skill. Auto-discovery, on-demand activation; built-in [ClawHub](https://clawhub.ai) market for one-click search/install/update
 
 ### 🔌 MCP & Subagent
-Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents
+Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents; supports OpenAI Codex subscription
 
-### � Session Export
-Export to Markdown / Plain Text / EMX (JSON) — EMX format can be re-imported as a full session
+### ✅ Verification Gate
+Structured verification conditions (row count / sheet exists / formula / value match), auto-validates before task completion, blocks tasks with failing conditions
 
-### �👥 Multi-User
-Independent workspace / database / session isolation, admin panel for permissions and usage control
+### 📤 Session Export & History
+Export to Markdown / Plain Text / EMX (JSON); session history persisted (SQLite + IndexedDB 3-tier cache), survives refresh/restart
+
+### 👥 Multi-User & Admin
+Independent workspace / database / session isolation; admin panel with per-user/model LLM usage visualization; OAuth credential management
 
 </td>
 </tr>
@@ -236,12 +239,17 @@ excelmanus-api                          # Backend
 cd web && npm install && npm run dev    # Frontend
 ```
 
-- **SSE Streaming** — Real-time display of thinking process, tool calls, sub-agent execution
-- **Excel Side Panel** — Embedded viewer, live preview/edit, range selection support
-- **Write Diff** — Before/after comparison on every modification
-- **Multi-Session** — Persistent history, seamless switching
-- **File Interaction** — Drag & drop upload, `@` reference files and skills
-- **Approval Flow** — Confirmation dialog for high-risk operations
+- **SSE Streaming** — Real-time display of thinking process, tool calls, sub-agent execution; auto-reconnect with message recovery
+- **Excel Side Panel** — Embedded Univer viewer, live preview/edit, range selection; quick file bar in sidebar with full-screen double-click mode
+- **Excel & Text Diff** — Before/after comparison on every write; text files show unified diff with line numbers
+- **Multi-Session** — Persistent history (SQLite + IndexedDB 3-tier cache), survives refresh/restart, seamless switching
+- **File Interaction** — Drag & drop upload, `@` reference files and skills; `.xls` / `.xlsb` auto-converted
+- **Approval Flow** — Confirmation dialog for high-risk operations, changes auto-snapshot
+- **Optimistic UI** — Messages appear immediately, write operations optimistic update + rollback on failure
+- **Error Guidance** — Actionable suggestion cards on failure (retry / check settings / copy diagnostic ID)
+- **ClawHub Market** — Inline skill market panel in sidebar for search/install/update
+- **Admin Dashboard** — User management + per-provider/model LLM usage visualization
+- **Plan Mode** — Complex tasks auto-planned, interactive confirmation before execution
 
 <p align="center">
   <img src="docs/images/webui-mobile.png" width="300" alt="Mobile" />
@@ -250,7 +258,7 @@ cd web && npm install && npm run dev    # Frontend
 
 ### REST API
 
-Available once `excelmanus-api` starts. SSE pushes 25+ event types.
+Available once `excelmanus-api` starts. SSE pushes 30+ event types (including `excel_diff` / `text_diff` / `failure_guidance`).
 
 <details>
 <summary>📋 Main Endpoints</summary>
@@ -260,10 +268,19 @@ Available once `excelmanus-api` starts. SSE pushes 25+ event types.
 | `POST /api/v1/chat/stream` | SSE streaming chat |
 | `POST /api/v1/chat` | JSON chat |
 | `POST /api/v1/chat/abort` | Abort task |
-| `GET /api/v1/files/excel` | Excel file stream |
-| `GET /api/v1/files/excel/snapshot` | Excel JSON snapshot |
+| `POST /api/v1/chat/subscribe` | Reconnect and restore session stream |
+| `POST /api/v1/chat/rollback` | Rollback session to a specific turn |
+| `GET /api/v1/sessions` | Session list (with archive filter) |
+| `GET /api/v1/sessions/{id}/messages` | Paginated message history |
+| `GET /api/v1/files/excel` | Excel file stream (Univer load) |
+| `GET /api/v1/files/excel/snapshot` | Excel JSON snapshot (inline preview) |
+| `POST /api/v1/files/excel/write` | Side panel write-back |
 | `POST /api/v1/backup/apply` | Apply backup |
 | `GET /api/v1/skills` | Skill list |
+| `GET /api/v1/clawhub/search` | ClawHub market search |
+| `POST /api/v1/clawhub/install` | Install market skill |
+| `GET /api/v1/clawhub/updates` | Check for updates |
+| `GET /api/v1/auth/codex/status` | Codex connection status |
 | `POST /api/v1/config/export` | Export config |
 | `GET /api/v1/health` | Health check |
 
@@ -273,12 +290,24 @@ Available once `excelmanus-api` starts. SSE pushes 25+ event types.
 
 | Provider | Description |
 | --- | --- |
-| **OpenAI Compatible** | Default protocol, works with any compatible API |
+| **OpenAI Compatible** | Default protocol, works with any compatible API (local Ollama / vLLM etc.) |
 | **Claude (Anthropic)** | Auto-switches when URL contains `anthropic`, supports extended thinking |
 | **Gemini (Google)** | Auto-switches when URL contains `googleapis` / `generativelanguage` |
-| **OpenAI Responses API** | Enable with `EXCELMANUS_USE_RESPONSES_API=1` |
+| **OpenAI Responses API** | Next-gen inference API, enable with `EXCELMANUS_USE_RESPONSES_API=1` |
+| **OpenAI Codex Subscription** | Connect via Device Code Flow, private models auto-discovered, no manual API Key |
+| **MiniMax** | Auto-detects base_url, built-in recommended model list (M2.5 / M2.1 / M2) |
 
-Configure an **auxiliary model (AUX)** for routing, sub-agents, and window management. Main and auxiliary models switch independently.
+### Auxiliary Model (AUX)
+
+Configure an independent auxiliary model for **intent routing, sub-agents, and window perception advisor**:
+
+```dotenv
+EXCELMANUS_AUX_API_KEY=sk-xxxx
+EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
+EXCELMANUS_AUX_MODEL=gpt-4o-mini
+```
+
+The auxiliary model can be lighter than the main model, significantly reducing cost without affecting task quality.
 
 ## 🔒 Security
 
@@ -292,9 +321,19 @@ Configure an **auxiliary model (AUX)** for routing, sub-agents, and window manag
 | **MCP Whitelist** | External tools require per-item confirmation by default |
 | **User Isolation** | Physical workspace and database isolation per user in multi-user mode |
 
-## 🧩 Skillpack
+## 🧩 Skillpack & ClawHub
 
 One directory + one `SKILL.md` (with `name` and `description`) to create a skill. Auto-discovery, on-demand activation, supports Hooks, command dispatch, and MCP dependency declarations.
+
+### ClawHub Skill Market
+
+Built-in [ClawHub](https://clawhub.ai) integration — search, install, and update community skill packs directly from the UI sidebar or CLI:
+
+```bash
+/clawhub search financial reports   # Search market
+/clawhub install <slug>             # Install
+/clawhub update                     # Update all installed
+```
 
 <details>
 <summary>📦 Built-in Skills</summary>
@@ -312,6 +351,27 @@ One directory + one `SKILL.md` (with `name` and `description`) to create a skill
 </details>
 
 Protocol details in [`docs/skillpack_protocol.md`](docs/skillpack_protocol.md).
+
+## 🎯 Verification Gate
+
+Add **structured verification conditions** to task subtasks — auto-validates before task completion:
+
+```
+> Import sales data into Sheet1, require: row count matches source, column B has SUM formula, C1 value is "Total"
+```
+
+Supported check types: `row_count` / `sheet_exists` / `formula_exists` / `value_match` / `custom`
+
+Tasks with failing verification conditions **block finish_task**, forcing the agent to fix them first.
+
+## 🧠 Playbook — Task Experience Learning
+
+Playbook automatically analyzes success/failure patterns from each task and distills reusable operational knowledge:
+
+- **Auto-learn**: Generates PlaybookDelta after task completion, stored in SQLite
+- **Semantic dedup**: Similar entries merged, stale entries retired
+- **Auto-inject**: Matching Playbook entries injected before related future tasks, reducing repeated mistakes
+- **Management**: `/playbook list` to view, `/playbook clear` to reset
 
 ## 🏗️ Deployment
 
@@ -410,13 +470,30 @@ EXCELMANUS_JWT_SECRET=your-random-secret-key-at-least-64-chars
 
 Supports **email/password**, **GitHub OAuth**, **Google OAuth**, and **QQ OAuth** login. Each user gets an independent workspace and database. First registered user becomes admin.
 
-> **Split-server note**: Google/GitHub OAuth callbacks are optimized to use frontend page + browser-direct-to-backend token exchange, avoiding cross-server proxy chain timeouts. Set the redirect URI to `https://your-domain/auth/callback` in the OAuth provider console.
+### OpenAI Codex Subscription
+
+Users can bind their OpenAI Codex subscription via **Device Code Flow** from the profile page:
+
+1. Click "Connect Codex" → page displays a 6-digit verification code
+2. Enter the code at [auth.openai.com/codex/device](https://auth.openai.com/codex/device)
+3. On success, private Codex models are auto-discovered — no manual API Key needed
+
+> Requires enabling "Enable device code authentication for Codex" in ChatGPT Settings → Security.
+
+### Admin Dashboard
+
+Admins can access `/admin` to:
+- View all users' LLM usage (grouped by provider/model: calls / tokens / last used)
+- Manage login method toggles (email registration / OAuth providers)
+- Set model allowlists and system-level configuration
+
+> **Split-server note**: Google/GitHub OAuth callbacks optimized to frontend page + browser-direct-to-backend token exchange, avoiding cross-server proxy chain timeouts. Set redirect URI to `https://your-domain/auth/callback` in the OAuth provider console.
 
 See [Configuration](docs/configuration_en.md) for details.
 
 ## 🧪 Evaluation Framework
 
-Built-in Bench evaluation with multi-turn cases, auto-assertion, JSON logs, and suite-level concurrency:
+Built-in Bench evaluation with multi-turn cases, auto-assertion, JSON logs, and suite-level concurrency. Bench Reporter now includes **reasoning quality metrics** (silent call rate, reasoning character stats):
 
 ```bash
 uv run python -m excelmanus.bench --all                         # All
@@ -426,7 +503,31 @@ uv run python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 
 ## 📖 Configuration Reference
 
-Quick start needs only 3 environment variables. Full configuration (window perception, security policies, Subagent, MCP, VLM, Embedding, etc.) in [Configuration](docs/configuration_en.md).
+Quick start needs only 3 environment variables. Common configuration categories:
+
+| Category | Key Config |
+| --- | --- |
+| **Basic** | `EXCELMANUS_API_KEY` / `BASE_URL` / `MODEL` |
+| **Auxiliary Model** | `EXCELMANUS_AUX_API_KEY` / `AUX_BASE_URL` / `AUX_MODEL` |
+| **VLM (Vision)** | `EXCELMANUS_VLM_MODEL` / `VLM_EXTRACTION_TIER` |
+| **Multi-User** | `EXCELMANUS_AUTH_ENABLED` / `JWT_SECRET` |
+| **Security** | `EXCELMANUS_DOCKER_SANDBOX` / `GUARD_MODE` |
+| **Performance** | `EXCELMANUS_WINDOW_PERCEPTION_*` / `IMAGE_KEEP_ROUNDS` |
+| **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
+| **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
+
+Full configuration reference in [Configuration](docs/configuration_en.md).
+
+## ⚡ Performance Highlights
+
+| Optimization | Impact |
+| --- | --- |
+| **SACR Sparse Compression** | Strips null keys from tool results, up to **74% token savings** on sparse data |
+| **Single-Pass Extraction** | Strong VLM models (Gemini 2.5 Pro etc.) complete all 4 extraction phases in one call |
+| **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns, avoids redundant transmission |
+| **Auxiliary Model Separation** | Routing/sub-agents use lightweight AUX model, main model focuses on reasoning |
+| **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler eliminates 3 copies of duplicated code |
+| **Database WAL Mode** | Chat history SQLite with WAL, concurrent reads/writes non-blocking |
 
 ## 🖥️ Platform Support
 
@@ -442,7 +543,10 @@ Start scripts auto-detect OS and package manager, providing precise install comm
 
 ```bash
 uv sync --all-extras --dev    # Full install + test dependencies
-uv run pytest
+uv run pytest                 # Run all tests (3900+ cases)
+
+# Run targeted tests only (faster)
+uv run pytest tests/test_engine.py tests/test_api.py
 ```
 
 ## 📄 License
