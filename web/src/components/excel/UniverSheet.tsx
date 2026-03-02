@@ -5,6 +5,42 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
 
+// ── Univer 模块预加载缓存（全局单例，只加载一次） ──
+let _univerModuleCache: Promise<{
+  createUniver: any;
+  LocaleType: any;
+  UniverSheetsCorePreset: any;
+  sheetsCoreZhCN: any;
+}> | null = null;
+
+function getUniverModules() {
+  if (!_univerModuleCache) {
+    _univerModuleCache = Promise.all([
+      import("@univerjs/presets"),
+      import("@univerjs/preset-sheets-core"),
+      import("@univerjs/preset-sheets-core/locales/zh-CN"),
+      import("@univerjs/preset-sheets-core/lib/index.css"),
+    ]).then(([presetsMod, sheetCoreMod, zhCNMod]) => ({
+      createUniver: presetsMod.createUniver,
+      LocaleType: presetsMod.LocaleType,
+      UniverSheetsCorePreset: sheetCoreMod.UniverSheetsCorePreset,
+      sheetsCoreZhCN: zhCNMod.default,
+    }));
+  }
+  return _univerModuleCache;
+}
+
+/**
+ * 预加载 Univer 库。在应用启动后调用，让后续打开面板时无需等待模块下载。
+ */
+export function prefetchUniverModules() {
+  if (typeof window !== "undefined") {
+    // 使用 requestIdleCallback（或 setTimeout 兜底）在空闲时加载
+    const schedule = (window as any).requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 2000));
+    schedule(() => { getUniverModules(); });
+  }
+}
+
 interface UniverSheetProps {
   fileUrl: string;
   highlightCells?: string[];
@@ -433,24 +469,25 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
             ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
             : Promise.resolve(null);
 
-        const [{ createUniver, LocaleType }, { UniverSheetsCorePreset }, sheetsCoreZhCNMod] =
-          await Promise.all([
-            import("@univerjs/presets"),
-            import("@univerjs/preset-sheets-core"),
-            import("@univerjs/preset-sheets-core/locales/zh-CN"),
-          ]);
-        await import("@univerjs/preset-sheets-core/lib/index.css");
+        const { createUniver, LocaleType, UniverSheetsCorePreset, sheetsCoreZhCN } =
+          await getUniverModules();
 
         if (disposed) return;
 
         const { univerAPI } = createUniver({
           locale: LocaleType.ZH_CN,
           locales: {
-            [LocaleType.ZH_CN]: sheetsCoreZhCNMod.default,
+            [LocaleType.ZH_CN]: sheetsCoreZhCN,
           },
           presets: [
             UniverSheetsCorePreset({
               container: containerRef.current!,
+              footer: {
+                sheetBar: true,
+                statisticBar: false,
+                menus: false,
+                zoomSlider: false,
+              },
             }),
           ],
         });

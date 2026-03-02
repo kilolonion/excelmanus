@@ -1,8 +1,8 @@
 "use client";
 
-import { useCallback, useMemo, useState, useRef } from "react";
+import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
-import { motion, AnimatePresence } from "framer-motion";
+import { motion } from "framer-motion";
 import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download, Paintbrush, MoreHorizontal, History, FileSpreadsheet } from "lucide-react";
 import { OperationTimeline } from "./OperationTimeline";
 import {
@@ -17,7 +17,7 @@ import { useShallow } from "zustand/react/shallow";
 import { useIsMobile, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile, normalizeExcelPath, invalidateSnapshotCache } from "@/lib/api";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -33,6 +33,7 @@ export function ExcelSidePanel() {
     panelOpen, activeFilePath, activeSheet, diffs, closePanel,
     openFullView, selectionMode, enterSelectionMode,
     exitSelectionMode, confirmSelection, pendingBackups, applyFile,
+    recentFiles, openPanel, removeRecentFile,
   } = useExcelStore(useShallow((s) => ({
     panelOpen: s.panelOpen,
     activeFilePath: s.activeFilePath,
@@ -46,6 +47,9 @@ export function ExcelSidePanel() {
     confirmSelection: s.confirmSelection,
     pendingBackups: s.pendingBackups,
     applyFile: s.applyFile,
+    recentFiles: s.recentFiles,
+    openPanel: s.openPanel,
+    removeRecentFile: s.removeRecentFile,
   })));
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
@@ -76,6 +80,47 @@ export function ExcelSidePanel() {
     setApplyingSidePanel(false);
     if (ok) setAppliedSidePanel(true);
   }, [activeSessionId, activeFilePath, applyFile]);
+
+  // ── Tab 栏鼠标拖拽横向滚动（适配无触摸板的电脑端 + 移动端触摸） ──
+  const tabBarRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    const el = tabBarRef.current;
+    if (!el) return;
+    let isDragging = false;
+    let startX = 0;
+    let scrollLeft = 0;
+
+    const onMouseDown = (e: MouseEvent) => {
+      // 忽略关闭按钮等交互元素的点击
+      if ((e.target as HTMLElement).closest("button")) return;
+      isDragging = true;
+      startX = e.pageX - el.offsetLeft;
+      scrollLeft = el.scrollLeft;
+      el.style.cursor = "grabbing";
+      el.style.userSelect = "none";
+    };
+    const onMouseMove = (e: MouseEvent) => {
+      if (!isDragging) return;
+      e.preventDefault();
+      const x = e.pageX - el.offsetLeft;
+      el.scrollLeft = scrollLeft - (x - startX);
+    };
+    const onMouseUp = () => {
+      if (!isDragging) return;
+      isDragging = false;
+      el.style.cursor = "";
+      el.style.userSelect = "";
+    };
+
+    el.addEventListener("mousedown", onMouseDown);
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      el.removeEventListener("mousedown", onMouseDown);
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, []);
 
   // 来自 Univer 选区的待确认范围（尚未确认）
   const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
@@ -140,11 +185,18 @@ export function ExcelSidePanel() {
   );
 
   const handleRefresh = useCallback(() => {
-    // 通过递增计数器强制刷新
+    // 清除 snapshot 缓存后递增计数器强制刷新
+    if (activeFilePath) invalidateSnapshotCache(activeFilePath);
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
-  }, []);
+  }, [activeFilePath]);
 
   const isOpen = panelOpen && !!activeFilePath;
+
+  // 面板首次打开后保持挂载，关闭时用 CSS 隐藏，避免 Univer 实例被销毁重建
+  const [hasEverMounted, setHasEverMounted] = useState(false);
+  useEffect(() => {
+    if (isOpen && !hasEverMounted) setHasEverMounted(true);
+  }, [isOpen, hasEverMounted]);
 
   // 根据屏幕尺寸选择合适的动画变体
   const getAnimationVariants = () => {
@@ -153,33 +205,82 @@ export function ExcelSidePanel() {
     return panelSlideVariants;
   };
 
+  // 面板从未打开过则不渲染任何内容
+  if (!hasEverMounted && !isOpen) return null;
+
   return (
-    <AnimatePresence>
-      {isOpen && (
-        <motion.div
-          key="excel-side-panel"
-          data-coach-id="coach-excel-panel"
-          variants={getAnimationVariants()}
-          initial="initial"
-          animate="animate"
-          exit="exit"
-          className={
-            useFloatingMode
-              ? isMobile
-                ? "fixed inset-0 z-50 flex flex-col bg-background"
-                : "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-xl"
-              : "flex flex-col h-full border-l border-border bg-background"
-          }
-          style={useFloatingMode ? (isMobile ? undefined : { width: panelWidth }) : { width: panelWidth }}
-          onTouchStart={handlePanelTouchStart}
-          onTouchEnd={handlePanelTouchEnd}
-        >
+    <motion.div
+      key="excel-side-panel"
+      data-coach-id="coach-excel-panel"
+      variants={getAnimationVariants()}
+      initial="initial"
+      animate={isOpen ? "animate" : "exit"}
+      className={
+        useFloatingMode
+          ? isMobile
+            ? "fixed inset-0 z-50 flex flex-col bg-background"
+            : "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-xl"
+          : "flex flex-col h-full border-l border-border bg-background"
+      }
+      style={{
+        ...(useFloatingMode ? (isMobile ? {} : { width: panelWidth }) : { width: panelWidth }),
+        // 关闭时隐藏但保持挂载
+        ...(!isOpen ? { display: "none" } : {}),
+      }}
+      onTouchStart={handlePanelTouchStart}
+      onTouchEnd={handlePanelTouchEnd}
+    >
           {/* 移动端与中等屏幕的滑动指示条 */}
           {useFloatingMode && (
             <div className="flex justify-center py-1.5 flex-shrink-0">
               <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
             </div>
           )}
+
+          {/* 多文件 Tab 栏 */}
+          {recentFiles.length > 1 && (
+            <div ref={tabBarRef} className="flex items-center bg-muted/20 border-b border-border min-h-[32px] select-none overflow-x-auto scrollbar-none flex-shrink-0">
+              {recentFiles.slice(0, 10).map((file) => {
+                const isActive = file.path === activeFilePath;
+                return (
+                  <div
+                    key={file.path}
+                    onClick={() => openPanel(file.path)}
+                    className={`group relative flex items-center gap-1.5 px-2.5 h-[32px] text-[11px] cursor-pointer shrink-0 border-r border-border/40 transition-colors ${
+                      isActive
+                        ? "bg-background text-foreground"
+                        : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+                    }`}
+                  >
+                    {isActive && (
+                      <div className="absolute top-0 left-0 right-0 h-[2px]" style={{ backgroundColor: "var(--em-primary)" }} />
+                    )}
+                    <FileSpreadsheet className="h-3 w-3 shrink-0 text-emerald-600 dark:text-emerald-400" />
+                    <span className="truncate max-w-[100px]">{file.filename}</span>
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        removeRecentFile(file.path);
+                        if (isActive) {
+                          const remaining = recentFiles.filter((f) => f.path !== file.path);
+                          if (remaining.length > 0) {
+                            openPanel(remaining[0].path);
+                          } else {
+                            closePanel();
+                          }
+                        }
+                      }}
+                      className="ml-0.5 p-0.5 rounded opacity-0 group-hover:opacity-60 hover:!opacity-100 hover:bg-muted transition-all"
+                      title="关闭"
+                    >
+                      <X className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+
           {/* 头部 */}
           <div className={`flex items-center justify-between px-3 border-b border-border bg-muted/30 ${isMobile ? "py-1" : "py-2"}`}>
             <div className="flex items-center gap-2 min-w-0 flex-1">
@@ -415,8 +516,6 @@ export function ExcelSidePanel() {
               })}
             </div>
           )}
-        </motion.div>
-      )}
-    </AnimatePresence>
+    </motion.div>
   );
 }

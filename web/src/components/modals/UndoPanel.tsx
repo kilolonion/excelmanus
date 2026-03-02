@@ -17,6 +17,7 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
   const [records, setRecords] = useState<ApprovalRecord[]>([]);
   const [loading, setLoading] = useState(false);
   const [undoing, setUndoing] = useState<string | null>(null);
+  const [optimisticUndoneIds, setOptimisticUndoneIds] = useState<Set<string>>(new Set());
   const [undoResults, setUndoResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
   const loadRecords = async () => {
@@ -41,23 +42,46 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
   }, [open, activeSessionId]);
 
   const handleUndo = async (id: string) => {
+    if (!activeSessionId) {
+      setUndoResults((prev) => ({
+        ...prev,
+        [id]: { ok: false, msg: "缺少会话上下文，无法撤销。" },
+      }));
+      return;
+    }
+
     setUndoing(id);
+    setOptimisticUndoneIds((prev) => {
+      const next = new Set(prev);
+      next.add(id);
+      return next;
+    });
+    setUndoResults((prev) => {
+      const next = { ...prev };
+      delete next[id];
+      return next;
+    });
+
     try {
-      if (!activeSessionId) {
-        setUndoResults((prev) => ({
-          ...prev,
-          [id]: { ok: false, msg: "缺少会话上下文，无法撤销。" },
-        }));
-        return;
-      }
       const res = await undoApproval(id, activeSessionId);
       const ok = res.status === "ok";
       setUndoResults((prev) => ({ ...prev, [id]: { ok, msg: res.message } }));
       if (ok) {
-        // 刷新列表
-        await loadRecords();
+        // 后台刷新列表做最终校准
+        void loadRecords();
+      } else {
+        setOptimisticUndoneIds((prev) => {
+          const next = new Set(prev);
+          next.delete(id);
+          return next;
+        });
       }
     } catch (err) {
+      setOptimisticUndoneIds((prev) => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       setUndoResults((prev) => ({
         ...prev,
         [id]: { ok: false, msg: (err as Error).message },
@@ -121,6 +145,8 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
                 {records.map((rec) => {
                   const result = undoResults[rec.id];
                   const isUndoing = undoing === rec.id;
+                  const isOptimisticallyUndone = optimisticUndoneIds.has(rec.id);
+                  const isUndone = isOptimisticallyUndone || result?.ok === true;
                   return (
                     <div
                       key={rec.id}
@@ -157,7 +183,7 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
                           </p>
                         )}
                       </div>
-                      {rec.undoable && rec.execution_status === "success" && !result?.ok && (
+                      {rec.undoable && rec.execution_status === "success" && !isUndone && (
                         <Button
                           size="sm"
                           variant="outline"
@@ -173,10 +199,10 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
                           撤销
                         </Button>
                       )}
-                      {result?.ok && (
+                      {isUndone && (
                         <span className="text-xs text-muted-foreground flex items-center gap-1 flex-shrink-0">
                           <Undo2 className="h-3 w-3" />
-                          已撤销
+                          {isUndoing ? "撤销中..." : "已撤销"}
                         </span>
                       )}
                     </div>
