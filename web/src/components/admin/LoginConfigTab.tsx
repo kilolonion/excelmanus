@@ -42,7 +42,7 @@ function Toggle({ icon, title, description, checked, loading, onChange }: Toggle
         aria-checked={checked}
         disabled={loading}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-6 w-11 min-w-[2.75rem] min-h-[1.5rem] flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
+        className={`touch-compact relative inline-flex h-6 w-11 min-w-[2.75rem] min-h-[1.5rem] flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none focus:ring-2 focus:ring-offset-2 disabled:opacity-50 disabled:cursor-not-allowed ${
           checked ? "bg-[var(--em-primary)]" : "bg-muted-foreground/30"
         }`}
         style={checked ? { backgroundColor: "var(--em-primary)" } : undefined}
@@ -94,7 +94,7 @@ function SecretInput({
         <button
           type="button"
           onClick={() => setVisible(!visible)}
-          className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground"
+          className="touch-compact absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:text-foreground"
           tabIndex={-1}
         >
           {visible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
@@ -163,7 +163,7 @@ function CredentialSection({ icon, title, description, children, dirty, saving, 
         <div className="flex justify-end pt-1">
           <Button
             size="sm"
-            className="h-7 text-xs gap-1.5 text-white"
+            className="touch-compact h-7 text-xs gap-1.5 px-2.5 text-white"
             style={{ backgroundColor: "var(--em-primary)" }}
             disabled={!dirty || saving}
             onClick={onSave}
@@ -193,7 +193,12 @@ function Toast({ message, type, onClose }: { message: string; type: "success" | 
     >
       {type === "success" ? <CheckCircle className="h-3.5 w-3.5" /> : <AlertCircle className="h-3.5 w-3.5" />}
       <span className="flex-1">{message}</span>
-      <button onClick={onClose} className="opacity-60 hover:opacity-100">×</button>
+      <button
+        onClick={onClose}
+        className="touch-compact flex h-5 w-5 items-center justify-center rounded opacity-60 hover:opacity-100"
+      >
+        ×
+      </button>
     </motion.div>
   );
 }
