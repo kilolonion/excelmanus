@@ -1,9 +1,0 @@
-# Dependencies for ExcelManus Setup Tool (setup_app.py)
-# Install: pip install -r requirements-setup.txt
-# Build:   python -m nuitka ... setup_app.py (see build_setup.bat)
-
-pystray>=0.19.5
-Pillow>=10.0.0
-nuitka>=2.6
-ordered-set>=4.1.0
-zstandard>=0.23.0

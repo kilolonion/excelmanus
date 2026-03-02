@@ -2,8 +2,8 @@
  * ExcelManus - Web UI (Project-Style Light Theme)
  * C# exe with embedded HTTP server + browser-rendered HTML/CSS UI
  * Zero external dependencies - uses built-in .NET Framework
- * Compile: csc.exe /langversion:5 /target:winexe /out:ExcelManusSetup.exe ExcelManusSetup.cs EmbeddedAssets.cs
- * Fallback (no Vite UI): csc.exe /langversion:5 /target:winexe /out:ExcelManusSetup.exe ExcelManusSetup.cs
+ * Compile: csc.exe /langversion:5 /target:winexe /out:ExcelManus.exe ExcelManusSetup.cs EmbeddedAssets.cs
+ * Fallback (no Vite UI): csc.exe /langversion:5 /target:winexe /out:ExcelManus.exe ExcelManusSetup.cs
  */
 using System;
 using System.Collections.Generic;
