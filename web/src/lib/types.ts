@@ -138,6 +138,19 @@ export type AssistantBlock =
       retryDelaySeconds: number;
       retryErrorMessage: string;
       retryStatus: "retrying" | "succeeded" | "exhausted";
+    }
+  | {
+      type: "failure_guidance";
+      category: "model" | "transport" | "config" | "quota" | "unknown";
+      code: string;
+      title: string;
+      message: string;
+      stage: string;
+      retryable: boolean;
+      diagnosticId: string;
+      actions: { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[];
+      provider?: string;
+      model?: string;
     };
 
 export interface TaskItem {

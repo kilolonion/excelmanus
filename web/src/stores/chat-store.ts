@@ -50,8 +50,12 @@ const _MAX_DIFFS_IN_STORE = 500;
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
-  "llm_retry",
+  "llm_retry", "failure_guidance",
 ]);
+
+// failure_guidance 与其他 SSE-only 块不同：后端会将其持久化为 text block（_failure_guidance_text）。
+// 合并时需消费对应的后端 text block，避免重复。
+const _SSE_ONLY_HAS_BACKEND_COUNTERPART = new Set(["failure_guidance"]);
 
 /**
  * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
@@ -136,6 +140,10 @@ function _preserveSseOnlyBlocks(
     for (const ob of oldBlocks) {
       if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
         merged.push(ob);
+        // failure_guidance 有后端持久化对应的 text block，消费它以避免重复
+        if (_SSE_ONLY_HAS_BACKEND_COUNTERPART.has(ob.type) && ni < newBackendBlocks.length) {
+          ni++;
+        }
       } else {
         if (ni < newBackendBlocks.length) {
           merged.push(newBackendBlocks[ni++]);

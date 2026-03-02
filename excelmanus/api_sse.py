@@ -161,6 +161,7 @@ def sse_event_to_sse(
         EventType.CHAT_SUMMARY: "chat_summary",
         EventType.PLAN_CREATED: "plan_created",
         EventType.LLM_RETRY: "llm_retry",
+        EventType.FAILURE_GUIDANCE: "failure_guidance",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -502,6 +503,19 @@ def sse_event_to_sse(
                 event.retry_error_message, max_len=300,
             ),
             "retry_status": event.retry_status,
+        }
+    elif event.event_type == EventType.FAILURE_GUIDANCE:
+        data = {
+            "category": event.fg_category,
+            "code": event.fg_code,
+            "title": sanitize_external_text(event.fg_title, max_len=60),
+            "message": sanitize_external_text(event.fg_message, max_len=300),
+            "stage": event.fg_stage,
+            "retryable": event.fg_retryable,
+            "diagnostic_id": event.fg_diagnostic_id,
+            "actions": event.fg_actions[:3],
+            "provider": event.fg_provider,
+            "model": event.fg_model,
         }
     else:
         data = event.to_dict()

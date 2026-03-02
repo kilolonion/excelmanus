@@ -14,6 +14,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+import httpx
 from httpx import ASGITransport, AsyncClient
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -2502,6 +2503,63 @@ class TestImageAttachment:
         assert "event: error" not in body
 
     @pytest.mark.asyncio
+    async def test_chat_stream_emits_failure_guidance_and_persists_assistant_error(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """chat_stream 异常时应投递 failure_guidance，并保留 assistant 友好错误消息。"""
+
+        async def failing_chat(_: str, **kwargs) -> ChatResult:
+            raise RuntimeError("invalid model ID")
+
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            side_effect=failing_chat,
+        ):
+            resp = await client.post(
+                "/api/v1/chat/stream",
+                json={"message": "触发模型错误"},
+            )
+
+        assert resp.status_code == 200
+        body = resp.text
+        assert "event: failure_guidance" in body
+        assert "event: done" in body
+
+        session_id: str | None = None
+        for chunk in body.split("\n\n"):
+            if "event: session_init" not in chunk:
+                continue
+            data_line = next(
+                (line for line in chunk.splitlines() if line.startswith("data:")),
+                "",
+            )
+            if not data_line:
+                continue
+            payload = json.loads(data_line.split("data:", 1)[1].strip())
+            session_id = payload.get("session_id")
+            if session_id:
+                break
+        assert session_id is not None
+
+        msg_resp = await client.get(
+            f"/api/v1/sessions/{session_id}/messages",
+            params={"limit": 50, "offset": 0},
+        )
+        assert msg_resp.status_code == 200
+        messages = msg_resp.json()["messages"]
+        assistant_messages = [
+            m for m in messages if m.get("role") == "assistant"
+        ]
+        assert len(assistant_messages) >= 1
+        assert any(
+            "模型" in str(m.get("content", ""))
+            or "invalid model" in str(m.get("content", "")).lower()
+            for m in assistant_messages
+        )
+
+    @pytest.mark.asyncio
     async def test_chat_stream_disconnect_does_not_cancel_background_chat(
         self,
     ) -> None:
@@ -2663,6 +2721,76 @@ class TestSessionIsolationGuards:
 
 class TestAdminGuardForModelConfig:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "base_url, expected_model_id, hint_keyword",
+        [
+            (
+                "https://api.minimax.chat/v1",
+                "MiniMax-M2.5",
+                "MiniMax",
+            ),
+            (
+                "https://api.minimax.io/v1",
+                "MiniMax-M2.5",
+                "MiniMax",
+            ),
+            (
+                "https://generativelanguage.googleapis.com/v1beta/openai",
+                "gemini-2.5-flash",
+                "Gemini",
+            ),
+            (
+                "https://open.bigmodel.cn/api/paas/v4",
+                "glm-4-plus",
+                "GLM",
+            ),
+            (
+                "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "qwen-max",
+                "DashScope",
+            ),
+            (
+                "https://api.moonshot.cn/v1",
+                "kimi-k2",
+                "Moonshot",
+            ),
+            (
+                "https://api.deepseek.com/v1",
+                "deepseek-chat",
+                "DeepSeek",
+            ),
+        ],
+    )
+    async def test_list_remote_models_404_returns_provider_fallback(
+        self,
+        client: AsyncClient,
+        base_url: str,
+        expected_model_id: str,
+        hint_keyword: str,
+    ) -> None:
+        """各 Provider /models 返回 404 时，接口应回退为内置推荐模型列表。"""
+        mock_request = httpx.Request("GET", base_url + "/models")
+        mock_response = httpx.Response(404, request=mock_request, text="Not Found")
+        error = httpx.HTTPStatusError("404 Not Found", request=mock_request, response=mock_response)
+
+        with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=error)):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={"base_url": base_url, "api_key": "test-key", "protocol": "openai"},
+            )
+
+        assert resp.status_code == 200
+        data = resp.json()
+        models = data.get("models", [])
+        assert any(m.get("id") == expected_model_id for m in models), (
+            f"Expected model '{expected_model_id}' not found in {[m.get('id') for m in models]}"
+        )
+        assert hint_keyword in (data.get("hint") or ""), (
+            f"Expected hint keyword '{hint_keyword}' in: {data.get('hint')}"
+        )
+        assert not data.get("error")
+
+    @pytest.mark.asyncio
     async def test_models_endpoint_with_real_auth_dependency_returns_403_for_non_admin(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2694,6 +2822,51 @@ class TestAdminGuardForModelConfig:
 
         assert resp.status_code == 200
         app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_probe_capabilities_codex_profile_uses_runtime_resolver_and_real_probe(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Codex 前缀模型探测应走 resolver + run_full_probe，而非静态短路返回。"""
+        app.state.auth_enabled = False
+        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "u-1")
+
+        resolver = MagicMock()
+        resolver.resolve_sync.return_value = SimpleNamespace(
+            api_key="oauth-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            protocol="openai_responses",
+        )
+        monkeypatch.setattr(app.state, "credential_resolver", resolver, raising=False)
+
+        create_client_mock = MagicMock(return_value=object())
+        monkeypatch.setattr("excelmanus.providers.create_client", create_client_mock)
+
+        fake_caps = SimpleNamespace(
+            to_dict=lambda: {
+                "supports_thinking": True,
+                "thinking_type": "openai_reasoning",
+            },
+        )
+        run_probe_mock = AsyncMock(return_value=fake_caps)
+        monkeypatch.setattr("excelmanus.model_probe.run_full_probe", run_probe_mock)
+
+        resp = await client.post(
+            "/api/v1/config/models/capabilities/probe",
+            json={"model": "openai-codex/gpt-5.3-codex"},
+        )
+
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body.get("model") == "gpt-5.3-codex"
+        assert body.get("capabilities", {}).get("thinking_type") == "openai_reasoning"
+        resolver.resolve_sync.assert_called_once_with("u-1", "gpt-5.3-codex")
+        create_client_mock.assert_called_once_with(
+            api_key="oauth-key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            protocol="openai_responses",
+        )
+        run_probe_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_models_endpoint_includes_codex_user_models_with_friendly_alias(
@@ -2735,13 +2908,20 @@ class TestAdminGuardForModelConfig:
 
         assert resp.status_code == 200
         models = resp.json().get("models", [])
+        # Spark 模型仅 Pro 订阅可用，Plus 用户不应出现
         spark = next(
             (m for m in models if m.get("name") == "openai-codex/gpt-5.3-codex-spark"),
             None,
         )
-        assert spark is not None
-        assert spark.get("display_name") == "Codex Spark"
-        assert spark.get("model") == "openai-codex/gpt-5.3-codex-spark"
+        assert spark is None, "Spark 模型应仅对 Pro 订阅可见"
+        # 检查非 Pro-only 模型正常出现
+        codex53 = next(
+            (m for m in models if m.get("name") == "openai-codex/gpt-5.3-codex"),
+            None,
+        )
+        assert codex53 is not None
+        assert codex53.get("display_name") == "Codex 5.3"
+        assert codex53.get("model") == "openai-codex/gpt-5.3-codex"
         app.state.auth_enabled = False
 
     @pytest.mark.asyncio

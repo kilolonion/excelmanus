@@ -47,6 +47,9 @@ class EventType(Enum):
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
     STAGING_UPDATED = "staging_updated"  # staging 文件列表变化（apply/discard/新增）
     LLM_RETRY = "llm_retry"  # LLM 调用重试通知
+    FAILURE_GUIDANCE = "failure_guidance"  # 结构化失败引导卡片
+    CREDENTIAL_REFRESHED = "credential_refreshed"  # OAuth token 自动刷新成功
+    CREDENTIAL_EXPIRED = "credential_expired"  # OAuth token 过期且刷新失败
 
 
 @dataclass
@@ -191,6 +194,17 @@ class ToolCallEvent:
     retry_delay_seconds: float = 0.0     # 本次等待延迟（秒）
     retry_error_message: str = ""        # 触发重试的错误信息
     retry_status: str = ""               # "retrying" | "succeeded" | "exhausted"
+    # failure_guidance 事件字段
+    fg_category: str = ""                # "model" | "transport" | "config" | "quota" | "unknown"
+    fg_code: str = ""                    # 机器可读错误码
+    fg_title: str = ""                   # 一句话标题
+    fg_message: str = ""                 # 用户可见描述
+    fg_stage: str = ""                   # 失败阶段
+    fg_retryable: bool = False
+    fg_diagnostic_id: str = ""           # UUID
+    fg_actions: List[Dict[str, str]] = field(default_factory=list)
+    fg_provider: str = ""                # provider 标识
+    fg_model: str = ""                   # 模型名
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

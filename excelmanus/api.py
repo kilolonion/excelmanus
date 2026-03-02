@@ -102,6 +102,7 @@ from excelmanus.api_sse import (
     sse_event_to_sse as _sse_event_to_sse_impl,
     sse_format as _sse_format,
 )
+from excelmanus.error_guidance import FailureGuidance, classify_failure, classify_workspace_full
 
 logger = get_logger("api")
 
@@ -445,15 +446,36 @@ def _build_user_codex_models(request: Request, user_id: str | None) -> list[dict
 
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
 
-    plan = (getattr(active, "plan_type", "") or "Plus/Pro").strip()
+    plan = (getattr(active, "plan_type", "") or "").strip().lower()
+    plan_display = plan or "Plus/Pro"
+    is_pro = plan == "pro"
+    # Spark 模型仅 Pro 订阅可用
+    _PRO_ONLY_MODELS = {"gpt-5.3-codex-spark"}
+
+    # 已在全局 model_profiles 中的 model ID — 避免重复展示
+    persisted_model_ids: set[str] = set()
+    if _config_store is not None:
+        try:
+            for p in _config_store.list_profiles():
+                mid = p.get("model", "")
+                if mid:
+                    persisted_model_ids.add(mid)
+        except Exception:
+            pass
+
     result: list[dict[str, Any]] = []
     for item in OpenAICodexProvider.list_supported_model_entries():
+        if item["model"] in _PRO_ONLY_MODELS and not is_pro:
+            continue
+        # 若该 Codex 模型已被持久化到全局 profiles，则跳过动态注入，避免重复
+        if item["model"] in persisted_model_ids:
+            continue
         result.append({
             "name": item["profile_name"],
             "model": item["public_model_id"],
             "resolved_model": item["model"],
             "display_name": item["display_name"],
-            "description": f"OpenAI Codex 订阅模型（{plan}）",
+            "description": f"OpenAI Codex 订阅模型（{plan_display}）",
             "active": False,
             "base_url": OpenAICodexProvider.BASE_URL,
             "user_scoped": True,
@@ -497,7 +519,6 @@ def _list_available_model_names_for_user(request: Request, user_id: str | None) 
     names: list[str] = ["default"]
     if _config_store is not None:
         names.extend((p.get("name") or "") for p in _config_store.list_profiles())
-    names.extend(m.get("name") or "" for m in _build_user_codex_models(request, user_id))
     # 去重 + 去空
     dedup: list[str] = []
     seen: set[str] = set()
@@ -1009,9 +1030,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 app.state.credential_store = _cred_store
                 if _session_manager is not None:
                     _session_manager.set_credential_store(_cred_store)
+                # 初始化 CredentialResolver（运行时凭证解析 + 自动刷新）
+                try:
+                    from excelmanus.auth.providers.resolver import CredentialResolver as _CredResolver
+                    _cred_resolver = _CredResolver(
+                        credential_store=_cred_store,
+                        user_store=_user_store,
+                    )
+                    app.state.credential_resolver = _cred_resolver
+                    if _session_manager is not None:
+                        _session_manager.set_credential_resolver(_cred_resolver)
+                    logger.info("CredentialResolver 已初始化")
+                except Exception:
+                    logger.debug("CredentialResolver 初始化失败", exc_info=True)
+                    app.state.credential_resolver = None
             except Exception:
                 logger.debug("CredentialStore 初始化失败", exc_info=True)
                 app.state.credential_store = None
+                app.state.credential_resolver = None
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -1141,6 +1177,62 @@ def _get_friendly_error_message(
 
     # 无法映射时返回通用友好消息
     return "服务处理出现异常，请稍后重试。如问题持续，请联系管理员。"
+
+
+def _extract_provider_from_base_url(base_url: str | None) -> str:
+    """从 base_url 提取 provider 名（如 openai/deepseek/anthropic）。"""
+    if not base_url:
+        return ""
+    try:
+        from urllib.parse import urlparse
+        hostname = urlparse(base_url).hostname or ""
+        parts = hostname.split(".")
+        if len(parts) >= 2:
+            return parts[-2]
+        return parts[0] if parts else ""
+    except Exception:
+        return ""
+
+
+def _failure_guidance_sse(guidance: FailureGuidance) -> str:
+    """将 FailureGuidance 格式化为单个 failure_guidance SSE 文本。"""
+    return _sse_format("failure_guidance", guidance.to_dict())
+
+
+def _failure_guidance_text(guidance: FailureGuidance) -> str:
+    """将结构化失败引导转换为可持久化的 assistant 文本。"""
+    lines: list[str] = []
+    if guidance.title:
+        lines.append(f"⚠️ {guidance.title}")
+    if guidance.message:
+        lines.append(guidance.message)
+    if guidance.diagnostic_id:
+        lines.append(f"诊断 ID: {guidance.diagnostic_id}")
+    return "\n".join(lines).strip() or "服务处理出现异常，请稍后重试。"
+
+
+def _persist_failure_guidance_message(
+    *,
+    session_id: str | None,
+    engine: Any | None,
+    guidance: FailureGuidance,
+) -> None:
+    """将失败引导以 assistant 消息持久化，防止前端刷新后只剩用户消息。"""
+    if not session_id or engine is None or _session_manager is None:
+        return
+    try:
+        raw_messages = getattr(engine, "raw_messages", None)
+        if (
+            isinstance(raw_messages, list)
+            and raw_messages
+            and isinstance(raw_messages[-1], dict)
+            and raw_messages[-1].get("role") == "assistant"
+        ):
+            return
+        engine.memory.add_assistant_message(_failure_guidance_text(guidance))
+        _session_manager.flush_messages_sync(session_id)
+    except Exception:
+        logger.debug("会话 %s 失败引导消息持久化失败", session_id, exc_info=True)
 
 
 async def _handle_session_not_found(
@@ -1516,6 +1608,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             except asyncio.CancelledError:
                 pass
 
+        _last_pipeline_stage = "initializing"
+
         try:
             # ── 立即推送进度，让前端在任何阻塞操作前就有视觉反馈 ──
             yield _sse_format("pipeline_progress", {
@@ -1531,16 +1625,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 acquired = True
             except Exception as exc:
                 _sid = request.session_id or "unknown"
-                error_id = str(uuid.uuid4())
                 logger.error(
-                    "会话获取失败 [session=%s, error_id=%s]: %s",
-                    _sid, error_id, exc, exc_info=True,
+                    "会话获取失败 [session=%s]: %s",
+                    _sid, exc, exc_info=True,
                 )
-                friendly_enabled = _config.friendly_error_messages if _config else False
-                yield _sse_format("error", {
-                    "error": _get_friendly_error_message(exc, friendly_enabled),
-                    "error_id": error_id,
-                })
+                _guidance = classify_failure(exc, stage="initializing")
+                yield _failure_guidance_sse(_guidance)
                 yield _sse_format("done", {})
                 return
 
@@ -1560,15 +1650,10 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         if _usage.over_size:
                             _parts.append(f"存储 {_usage.size_mb} MB/{_usage.max_size_mb} MB")
                         _detail = "、".join(_parts)
-                        yield _sse_format("error", {
-                            "error": (
-                                f"⚠️ **工作区已满**（{_detail}），无法继续对话。\n\n"
-                                "请先清理工作区文件后再试：\n"
-                                "- 在左侧文件列表中删除不需要的文件\n"
-                                "- 或联系管理员调整配额"
-                            ),
-                            "error_code": "workspace_full",
-                        })
+                        _wf_guidance = classify_workspace_full(
+                            stage="initializing", detail=_detail,
+                        )
+                        yield _failure_guidance_sse(_wf_guidance)
                         yield _sse_format("done", {})
                         return
                 except Exception:
@@ -1592,13 +1677,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         "total_tokens": 0,
                     })
                 except Exception as exc:
-                    error_id = str(uuid.uuid4())
-                    logger.error("SSE /save 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True)
-                    friendly_enabled = _config.friendly_error_messages if _config else False
-                    yield _sse_format("error", {
-                        "error": _get_friendly_error_message(exc, friendly_enabled),
-                        "error_id": error_id,
-                    })
+                    logger.error("SSE /save 流异常: %s", exc, exc_info=True)
+                    _save_guidance = classify_failure(exc, stage="save_command")
+                    yield _failure_guidance_sse(_save_guidance)
                 else:
                     yield _sse_format("done", {})
                 return
@@ -1699,6 +1780,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 if queue_get_task in done:
                     event = queue_get_task.result()
                     if event is not None:
+                        if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
+                            _last_pipeline_stage = event.pipeline_stage
                         sse = _sse_event_to_sse(event, safe_mode=safe_mode)
                         if sse is not None:
                             yield sse
@@ -1715,6 +1798,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         except asyncio.QueueEmpty:
                             break
                         if event is not None:
+                            if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
+                                _last_pipeline_stage = event.pipeline_stage
                             sse = _sse_event_to_sse(event, safe_mode=safe_mode)
                             if sse is not None:
                                 yield sse
@@ -1762,16 +1847,26 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             if session_id is not None:
                 logger.info("会话 %s 的流式连接已断开，后台任务继续执行", session_id)
         except Exception as exc:
-            error_id = str(uuid.uuid4())
             logger.error(
-                "SSE 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True
+                "SSE 流异常: %s", exc, exc_info=True
             )
-            friendly_enabled = _config.friendly_error_messages if _config else False
-            error_msg = _get_friendly_error_message(exc, friendly_enabled)
-            yield _sse_format("error", {
-                "error": error_msg,
-                "error_id": error_id,
-            })
+            _provider = _extract_provider_from_base_url(
+                getattr(_config, "base_url", None) if _config else None
+            )
+            _model_name = getattr(_config, "model", "") if _config else ""
+            _top_guidance = classify_failure(
+                exc,
+                stage=_last_pipeline_stage,
+                provider=_provider,
+                model=_model_name,
+            )
+            _persist_failure_guidance_message(
+                session_id=session_id,
+                engine=engine,
+                guidance=_top_guidance,
+            )
+            yield _failure_guidance_sse(_top_guidance)
+            yield _sse_format("done", {})
             # 确保 chat 任务被取消
             if chat_task is not None and not chat_task.done():
                 chat_task.cancel()
@@ -2352,32 +2447,24 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
-                    error_id = str(uuid.uuid4())
                     logger.warning(
-                        "subscribe 获取 chat 结果失败 [error_id=%s]: %s",
-                        error_id, exc, exc_info=True,
+                        "subscribe 获取 chat 结果失败: %s",
+                        exc, exc_info=True,
                     )
-                    friendly_enabled = _config.friendly_error_messages if _config else False
-                    yield _sse_format("error", {
-                        "error": _get_friendly_error_message(exc, friendly_enabled),
-                        "error_id": error_id,
-                    })
+                    _sub_guidance = classify_failure(exc, stage="subscribe_resume")
+                    yield _failure_guidance_sse(_sub_guidance)
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
             stream_state.detach()
             logger.info("会话 %s 的重连流式连接再次断开", session_id)
         except Exception as exc:
-            error_id = str(uuid.uuid4())
             logger.error(
-                "SSE subscribe 流异常 [error_id=%s]: %s", error_id, exc, exc_info=True
+                "SSE subscribe 流异常: %s", exc, exc_info=True
             )
-            friendly_enabled = _config.friendly_error_messages if _config else False
-            error_msg = _get_friendly_error_message(exc, friendly_enabled)
-            yield _sse_format("error", {
-                "error": error_msg,
-                "error_id": error_id,
-            })
+            _sub_top_guidance = classify_failure(exc, stage="subscribe_resume")
+            yield _failure_guidance_sse(_sub_top_guidance)
+            yield _sse_format("done", {})
         finally:
             stream_state.detach()
             if chat_task.done():
@@ -4878,11 +4965,6 @@ async def list_models(request: Request) -> JSONResponse:
             "base_url": p.get("base_url", ""),
         })
 
-    # 追加用户私有 Codex 模型（不落库，不影响全局 profile）
-    for item in _build_user_codex_models(request, user_id):
-        item["active"] = item["name"] == active_name
-        models.append(item)
-
     # 按用户 allowed_models 过滤（空列表 = 不限制）
     allowed = _get_user_allowed_models(request)
     if allowed:
@@ -5675,6 +5757,19 @@ def _resolve_model_info(
 
     # 2) 按 profile name 精确查找
     lookup_name = req_name or req_model
+
+    # 2-1) 订阅模型前缀名（如 openai-codex/gpt-5.3-codex-spark）
+    if lookup_name:
+        try:
+            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+            if OpenAICodexProvider.is_codex_profile_name(lookup_name):
+                resolved = OpenAICodexProvider.model_from_profile_name(lookup_name)
+                if resolved:
+                    return resolved, OpenAICodexProvider.BASE_URL, _config.api_key, OpenAICodexProvider.PROTOCOL
+        except Exception:
+            logger.debug("解析 Codex 前缀模型失败", exc_info=True)
+
     if _config_store is not None and lookup_name:
         profile = _config_store.get_profile(lookup_name)
         if profile is not None:
@@ -5794,7 +5889,25 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
+
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
+
+    # 优先尝试当前用户的运行时凭据（如 Codex OAuth access token），
+    # 以便能通过 backend-api 执行真实探测并写入缓存。
+    _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+    _user_id = _get_isolation_user_id(request)
+    if _resolver is not None and _user_id:
+        try:
+            _resolved_cred = _resolver.resolve_sync(_user_id, model)
+            if _resolved_cred:
+                api_key = _resolved_cred.api_key or api_key
+                if _resolved_cred.base_url:
+                    base_url = _resolved_cred.base_url
+                if _resolved_cred.protocol:
+                    resolved_protocol = _resolved_cred.protocol
+        except Exception:
+            logger.debug("能力探测解析运行时凭证失败", exc_info=True)
+
     if body.get("api_key"):
         api_key = body["api_key"]
 
@@ -5860,6 +5973,9 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
 
     profiles = _config_store.list_profiles() if _config_store else []
     for p in profiles:
+        # Codex OAuth 档案使用用户订阅凭据，不走通用 API Key 探测
+        if p.get("model", "").startswith("openai-codex/"):
+            continue
         p_base_url = p.get("base_url") or _config.base_url
         p_api_key = p.get("api_key") or _config.api_key
         p_protocol = p.get("protocol") or _config.protocol
@@ -5972,6 +6088,20 @@ async def test_model_connection(request: Request) -> JSONResponse:
     req_name = body.get("name")
     req_model = body.get("model")
     req_base_url = body.get("base_url")
+
+    # Codex OAuth 档案使用用户订阅凭据，无法用通用 API Key 测试
+    _test_model_id = req_model or ""
+    if not _test_model_id and req_name and _config_store:
+        _tp = _config_store.get_profile(req_name)
+        if _tp:
+            _test_model_id = _tp.get("model", "")
+    if _test_model_id.startswith("openai-codex/"):
+        return JSONResponse(content={
+            "ok": True,
+            "model": _test_model_id,
+            "note": "Codex OAuth 模型使用用户订阅凭据，无需通用 API Key 测试",
+        })
+
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
     if body.get("api_key"):
         api_key = body["api_key"]
@@ -6033,6 +6163,100 @@ async def test_model_connection(request: Request) -> JSONResponse:
     return JSONResponse(content=result)
 
 
+# Provider fallback model lists used when /models endpoint returns 404.
+# Each entry: (base_url keyword, model list, user hint)
+_PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
+    (
+        "minimax",
+        [
+            {"id": "MiniMax-M2.5"},
+            {"id": "MiniMax-M2.5-highspeed"},
+            {"id": "MiniMax-M2.1"},
+            {"id": "MiniMax-M2.1-highspeed"},
+            {"id": "MiniMax-M2.1-lightning"},
+            {"id": "MiniMax-M2"},
+            {"id": "M2-her"},
+        ],
+        "MiniMax \u901a\u5e38\u4e0d\u652f\u6301 /models \u679a\u4e3e\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002"
+        "\u82e5\u4ecd\u5f02\u5e38\uff0c\u8bf7\u786e\u8ba4 Base URL\uff08\u5efa\u8bae https://api.minimax.io/v1\uff09\u548c API Key\u3002",
+    ),
+    (
+        "generativelanguage.googleapis.com",
+        [
+            {"id": "gemini-2.5-pro"},
+            {"id": "gemini-2.5-flash"},
+            {"id": "gemini-2.5-flash-lite"},
+            {"id": "gemini-2.0-flash"},
+            {"id": "gemini-2.0-flash-lite"},
+            {"id": "gemini-1.5-pro"},
+            {"id": "gemini-1.5-flash"},
+        ],
+        "Gemini OpenAI \u517c\u5bb9\u7aef\u70b9\u4e0d\u652f\u6301\u6807\u51c6 /models \u679a\u4e3e\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+    (
+        "bigmodel.cn",
+        [
+            {"id": "glm-4-plus"},
+            {"id": "glm-4"},
+            {"id": "glm-4-long"},
+            {"id": "glm-4-flash"},
+            {"id": "glm-z1"},
+            {"id": "glm-z1-flash"},
+            {"id": "glm-z1-air"},
+            {"id": "glm-4v-plus"},
+            {"id": "glm-4v"},
+        ],
+        "\u667a\u8c31 GLM /models \u7aef\u70b9\u8def\u5f84\u4e0e\u6807\u51c6 OpenAI \u4e0d\u540c\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+    (
+        "dashscope.aliyuncs.com",
+        [
+            {"id": "qwen-max"},
+            {"id": "qwen-plus"},
+            {"id": "qwen-turbo"},
+            {"id": "qwen-long"},
+            {"id": "qwen-flash"},
+            {"id": "qwq-plus"},
+            {"id": "qwen3-235b"},
+            {"id": "qwen3-30b"},
+            {"id": "qwen3-32b"},
+            {"id": "qwen-coder-plus"},
+            {"id": "qwen3-coder-plus"},
+        ],
+        "\u963f\u91cc\u4e91\u767e\u70bc DashScope /models \u679a\u4e3e\u901a\u5e38\u9700\u8981\u7279\u5b9a\u6743\u9650\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+    (
+        "moonshot.cn",
+        [
+            {"id": "kimi-k2"},
+            {"id": "kimi-k2-thinking"},
+            {"id": "kimi-k2.5"},
+            {"id": "moonshot-v1-128k"},
+            {"id": "moonshot-v1-32k"},
+            {"id": "moonshot-v1-8k"},
+        ],
+        "Kimi (Moonshot) /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+    (
+        "deepseek.com",
+        [
+            {"id": "deepseek-chat"},
+            {"id": "deepseek-reasoner"},
+        ],
+        "DeepSeek /models \u7aef\u70b9\u4e0d\u53ef\u7528\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
+    ),
+]
+
+
+def _get_provider_fallback(base_url: str) -> tuple[list[dict], str] | None:
+    """Return curated model list for a known provider when /models returns 404."""
+    url_lower = base_url.lower()
+    for pattern, models, hint in _PROVIDER_FALLBACK_MODELS:
+        if pattern in url_lower:
+            return models, hint
+    return None
+
+
 @_router.post("/api/v1/config/models/list-remote")
 async def list_remote_models(request: Request) -> JSONResponse:
     """调用远程 API 端点列出可用模型（用于添加模型时自动检测）。"""
@@ -6053,19 +6277,20 @@ async def list_remote_models(request: Request) -> JSONResponse:
     protocol = (body.get("protocol") or "auto").strip().lower()
 
     if not base_url:
-        return JSONResponse(content={"models": [], "error": "Base URL 为空"})
+        return JSONResponse(content={"models": [], "error": "Base URL \u4e3a\u7a7a"})
     if not api_key:
-        return JSONResponse(content={"models": [], "error": "API Key 为空"})
+        return JSONResponse(content={"models": [], "error": "API Key \u4e3a\u7a7a"})
 
     import httpx
 
-    # 构造 /models 端点
+    # Always append /models directly to base_url.
+    # Never insert an extra /v1 segment — the caller already provides the versioned prefix.
     url = base_url.rstrip("/")
     if not url.endswith("/models"):
-        url = url + "/models" if url.endswith("/v1") else url + "/v1/models"
+        url = url + "/models"
 
     headers: dict[str, str] = {"Authorization": f"Bearer {api_key}"}
-    # Anthropic 原生 API 使用 x-api-key
+    # Anthropic native API uses x-api-key header
     if protocol == "anthropic" or "anthropic" in base_url.lower():
         headers = {"x-api-key": api_key, "anthropic-version": "2023-06-01"}
         url = base_url.rstrip("/").rstrip("/v1").rstrip("/") + "/v1/models"
@@ -6076,8 +6301,13 @@ async def list_remote_models(request: Request) -> JSONResponse:
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException:
-        return JSONResponse(content={"models": [], "error": "请求超时，请检查 Base URL 是否可访问"})
+        return JSONResponse(content={"models": [], "error": "\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5 Base URL \u662f\u5426\u53ef\u8bbf\u95ee"})
     except httpx.HTTPStatusError as exc:
+        if exc.response.status_code == 404:
+            fallback = _get_provider_fallback(base_url)
+            if fallback is not None:
+                models, hint = fallback
+                return JSONResponse(content={"models": models, "hint": hint})
         hint = _diagnose_connection_error(str(exc)[:200], base_url, "")
         return JSONResponse(content={"models": [], "error": f"HTTP {exc.response.status_code}: {str(exc)[:150]}", "hint": hint})
     except Exception as exc:
