@@ -43,10 +43,12 @@ from excelmanus.auth.oauth import (
 from excelmanus.auth.email import is_email_configured, send_verification_email
 from excelmanus.auth.security import (
     create_merge_token,
+    create_oauth_state,
     create_token_pair,
     decode_merge_token,
     decode_token,
     hash_password,
+    verify_oauth_state,
     verify_password,
 )
 from excelmanus.auth.store import UserStore
@@ -111,6 +113,20 @@ def _is_verify_required(request: Request | None = None) -> bool:
 
 def _get_rate_limiter(request: Request):
     return getattr(request.app.state, "rate_limiter", None)
+
+
+def _get_allowed_oauth_origins() -> list[str]:
+    """获取 OAuth 回调允许的域名白名单。
+    
+    从环境变量 EXCELMANUS_ALLOWED_OAUTH_ORIGINS 读取，逗号分隔。
+    默认：kilon.top,excelmanus.com
+    """
+    import os
+    raw = os.environ.get("EXCELMANUS_ALLOWED_OAUTH_ORIGINS", "").strip()
+    if not raw:
+        # 默认白名单
+        return ["kilon.top", "excelmanus.com"]
+    return [origin.strip() for origin in raw.split(",") if origin.strip()]
 
 
 # ── 注册与登录 ──────────────────────────────────
@@ -374,8 +390,30 @@ async def get_my_workspace_usage(
 
 
 @router.get("/oauth/github")
-async def oauth_github_redirect(request: Request) -> Any:
-    state = f"github:{secrets.token_urlsafe(32)}"
+async def oauth_github_redirect(request: Request, origin: str | None = None) -> Any:
+    """发起 GitHub OAuth 登录。
+    
+    Args:
+        origin: 发起登录的域名（如 excelmanus.com），用于回调后重定向回原域名
+    """
+    # 从 Referer 或 origin 参数提取域名
+    origin_domain = origin or request.headers.get("referer", "")
+    if origin_domain:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin_domain)
+        origin_domain = parsed.netloc or parsed.path.split("/")[0]
+    
+    # 如果没有提供或提取失败，默认使用 kilon.top
+    if not origin_domain:
+        origin_domain = "kilon.top"
+    
+    # 验证域名在白名单内
+    allowed = _get_allowed_oauth_origins()
+    if origin_domain not in allowed:
+        origin_domain = "kilon.top"  # 回退到默认域名
+    
+    # 创建带签名的 state
+    state = create_oauth_state("github", origin_domain)
     url = github_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
@@ -386,21 +424,57 @@ async def oauth_github_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    want_json = _wants_json(request)
+    """GitHub OAuth 回调，验证 state 并重定向到原域名。"""
+    # 验证 state 签名并提取 origin_domain
+    allowed = _get_allowed_oauth_origins()
+    verified = verify_oauth_state(state or "", allowed) if state else None
+    
+    if verified is None:
+        logger.warning("GitHub OAuth state 验证失败: state=%s", state)
+        return _oauth_error_response("无效的 state 参数", origin_domain="kilon.top")
+    
+    provider, origin_domain = verified
+    if provider != "github":
+        logger.warning("GitHub OAuth state provider 不匹配: expected=github got=%s", provider)
+        return _oauth_error_response("state provider 不匹配", origin_domain=origin_domain)
+    
+    # 交换授权码
     info = await github_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_response("GitHub 认证失败", want_json)
-
+        return _oauth_error_response("GitHub 认证失败", origin_domain=origin_domain)
+    
     store = _get_store(request)
-    return _oauth_success_response(store, info, want_json)
+    return _oauth_success_response(store, info, origin_domain=origin_domain)
 
 
 # ── OAuth: Google ─────────────────────────────────────────
 
 
 @router.get("/oauth/google")
-async def oauth_google_redirect(request: Request) -> Any:
-    state = f"google:{secrets.token_urlsafe(32)}"
+async def oauth_google_redirect(request: Request, origin: str | None = None) -> Any:
+    """发起 Google OAuth 登录。
+    
+    Args:
+        origin: 发起登录的域名（如 excelmanus.com），用于回调后重定向回原域名
+    """
+    # 从 Referer 或 origin 参数提取域名
+    origin_domain = origin or request.headers.get("referer", "")
+    if origin_domain:
+        from urllib.parse import urlparse
+        parsed = urlparse(origin_domain)
+        origin_domain = parsed.netloc or parsed.path.split("/")[0]
+    
+    # 如果没有提供或提取失败，默认使用 kilon.top
+    if not origin_domain:
+        origin_domain = "kilon.top"
+    
+    # 验证域名在白名单内
+    allowed = _get_allowed_oauth_origins()
+    if origin_domain not in allowed:
+        origin_domain = "kilon.top"  # 回退到默认域名
+    
+    # 创建带签名的 state
+    state = create_oauth_state("google", origin_domain)
     url = google_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
@@ -411,13 +485,27 @@ async def oauth_google_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    want_json = _wants_json(request)
+    """Google OAuth 回调，验证 state 并重定向到原域名。"""
+    # 验证 state 签名并提取 origin_domain
+    allowed = _get_allowed_oauth_origins()
+    verified = verify_oauth_state(state or "", allowed) if state else None
+    
+    if verified is None:
+        logger.warning("Google OAuth state 验证失败: state=%s", state)
+        return _oauth_error_response("无效的 state 参数", origin_domain="kilon.top")
+    
+    provider, origin_domain = verified
+    if provider != "google":
+        logger.warning("Google OAuth state provider 不匹配: expected=google got=%s", provider)
+        return _oauth_error_response("state provider 不匹配", origin_domain=origin_domain)
+    
+    # 交换授权码
     info = await google_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_response("Google 认证失败", want_json)
-
+        return _oauth_error_response("Google 认证失败", origin_domain=origin_domain)
+    
     store = _get_store(request)
-    return _oauth_success_response(store, info, want_json)
+    return _oauth_success_response(store, info, origin_domain=origin_domain)
 
 
 # ── OAuth: QQ ─────────────────────────────────────────────
@@ -451,28 +539,34 @@ def _wants_json(request: Request) -> bool:
     return "application/json" in accept
 
 
-def _oauth_error_response(message: str, want_json: bool = False):
-    """OAuth 失败：JSON 或重定向。"""
-    if want_json:
-        raise HTTPException(status_code=401, detail=message)
+def _oauth_error_response(message: str, origin_domain: str = "kilon.top"):
+    """OAuth 失败：重定向到指定域名的 /auth/callback。
+    
+    Args:
+        message: 错误消息
+        origin_domain: 目标域名（kilon.top 或 excelmanus.com）
+    """
     from urllib.parse import quote
-    return RedirectResponse(f"/auth/callback?error={quote(message)}")
+    return RedirectResponse(f"https://{origin_domain}/auth/callback?error={quote(message)}")
 
 
-def _oauth_success_response(store: UserStore, info: Any, want_json: bool = False):
-    """将 OAuth 信息换取 JWT 令牌，返回 JSON 或重定向到前端。
+def _oauth_success_response(store: UserStore, info: Any, origin_domain: str = "kilon.top"):
+    """将 OAuth 信息换取 JWT 令牌，重定向到指定域名的前端。
 
     如果检测到需要合并（同邮箱已有账号），返回 merge_required 响应。
+    
+    Args:
+        store: 用户存储
+        info: OAuth 用户信息
+        origin_domain: 目标域名（kilon.top 或 excelmanus.com）
     """
     try:
         result = _handle_oauth_user(store, info)
     except HTTPException as exc:
-        return _oauth_error_response(exc.detail or "认证失败", want_json)
+        return _oauth_error_response(exc.detail or "认证失败", origin_domain=origin_domain)
 
     # 合并场景：返回 MergeRequiredResponse
     if isinstance(result, MergeRequiredResponse):
-        if want_json:
-            return JSONResponse(result.model_dump())
         from urllib.parse import urlencode
         params = urlencode({
             "merge_required": "1",
@@ -484,26 +578,17 @@ def _oauth_success_response(store: UserStore, info: Any, want_json: bool = False
             "new_provider": result.new_provider,
             "new_provider_display_name": result.new_provider_display_name,
         })
-        return RedirectResponse(f"/auth/callback?{params}")
+        return RedirectResponse(f"https://{origin_domain}/auth/callback?{params}")
 
     # 正常登录
     token_resp = result
-    if want_json:
-        return JSONResponse({
-            "access_token": token_resp.access_token,
-            "refresh_token": token_resp.refresh_token,
-            "token_type": "bearer",
-            "expires_in": token_resp.expires_in,
-            "user": token_resp.user.model_dump(),
-        })
-
     from urllib.parse import urlencode
     params = urlencode({
         "access_token": token_resp.access_token,
         "refresh_token": token_resp.refresh_token,
         "provider": info.provider,
     })
-    return RedirectResponse(f"/auth/callback?{params}")
+    return RedirectResponse(f"https://{origin_domain}/auth/callback?{params}")
 
 
 def _handle_oauth_user(

@@ -126,3 +126,68 @@ def decode_merge_token(token: str) -> dict[str, Any] | None:
     if payload is None or payload.get("type") != "merge":
         return None
     return payload
+
+
+# ── OAuth State 签名（防篡改 + 动态回跳） ──────────
+
+def create_oauth_state(provider: str, origin_domain: str) -> str:
+    """创建带签名的 OAuth state，格式：provider:random:origin_domain:signature
+    
+    Args:
+        provider: OAuth 提供商（github/google/qq）
+        origin_domain: 发起登录的域名（kilon.top/excelmanus.com）
+    
+    Returns:
+        签名后的 state 字符串
+    """
+    import hmac
+    import hashlib
+    
+    random_token = secrets.token_urlsafe(16)
+    # 格式：provider:random:origin_domain
+    unsigned = f"{provider}:{random_token}:{origin_domain}"
+    # 用 JWT_SECRET 做 HMAC-SHA256 签名
+    signature = hmac.new(
+        _get_jwt_secret().encode(),
+        unsigned.encode(),
+        hashlib.sha256
+    ).hexdigest()[:16]  # 取前 16 位，缩短 URL
+    
+    return f"{unsigned}:{signature}"
+
+
+def verify_oauth_state(state: str, allowed_origins: list[str]) -> tuple[str, str] | None:
+    """验证 OAuth state 签名并提取 origin_domain
+    
+    Args:
+        state: OAuth 回调中的 state 参数
+        allowed_origins: 允许的域名白名单
+    
+    Returns:
+        (provider, origin_domain) 或 None（验证失败）
+    """
+    import hmac
+    import hashlib
+    
+    parts = state.split(":")
+    if len(parts) != 4:
+        return None
+    
+    provider, random_token, origin_domain, signature = parts
+    
+    # 1. 验证签名
+    unsigned = f"{provider}:{random_token}:{origin_domain}"
+    expected_sig = hmac.new(
+        _get_jwt_secret().encode(),
+        unsigned.encode(),
+        hashlib.sha256
+    ).hexdigest()[:16]
+    
+    if not hmac.compare_digest(signature, expected_sig):
+        return None
+    
+    # 2. 验证 origin_domain 在白名单内
+    if origin_domain not in allowed_origins:
+        return None
+    
+    return provider, origin_domain
