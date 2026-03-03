@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import threading
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -261,6 +262,9 @@ class ToolDispatcher:
         # B 通道最后一次 VLM 描述缓存（供 Pipeline 结构阶段复用）
         self._last_vlm_description: str | None = None
         self._last_vlm_description_image_hash: str | None = None
+        # 每会话 sleep 取消事件（abort 时中断正在执行的 sleep 工具）
+        self._sleep_cancel_event = threading.Event()
+
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
         if db is not None:
@@ -852,6 +856,10 @@ class ToolDispatcher:
                 return {}, f"JSON 解析失败: {exc}"
         return {}, f"参数类型无效: {type(raw_args).__name__}"
 
+    def cancel_active_sleep(self) -> None:
+        """中断当前会话正在执行的 sleep 工具调用。"""
+        self._sleep_cancel_event.set()
+
     async def call_registry_tool(
         self,
         *,
@@ -861,9 +869,15 @@ class ToolDispatcher:
     ) -> str:
         """在线程池中调用工具，返回截断后的结果字符串。"""
         from excelmanus.tools import memory_tools
+        from excelmanus.tools.sleep_tools import set_cancel_event, reset_cancel_event
 
         registry = self._registry
         persistent_memory = self._persistent_memory
+        sleep_cancel_event = self._sleep_cancel_event
+
+        # 将每会话的 sleep 取消事件注入 contextvar，
+        # asyncio.to_thread 会自动拷贝到工作线程。
+        _sleep_token = set_cancel_event(sleep_cancel_event)
 
         def _call() -> Any:
             with memory_tools.bind_memory_context(persistent_memory):
@@ -873,7 +887,10 @@ class ToolDispatcher:
                     tool_scope=tool_scope,
                 )
 
-        result_value = await asyncio.to_thread(_call)
+        try:
+            result_value = await asyncio.to_thread(_call)
+        finally:
+            reset_cancel_event(_sleep_token)
         result_str = str(result_value)
 
         # 先处理图片注入（移除 base64 载荷），再做截断，
@@ -1429,6 +1446,44 @@ class ToolDispatcher:
             ),
         )
 
+        # 工具执行失败时发出结构化失败引导（仅限基础设施级错误）
+        if not success and error:
+            _err_lower = str(error).lower()
+            _emit_tool_guidance = any(kw in _err_lower for kw in (
+                "permission denied", "errno 13",
+                "no space left", "disk full", "errno 28",
+                "codec can't decode", "codec can't encode",
+                "unicodedecodeerror", "unicodeencodeerror",
+                "invalid start byte", "invalid continuation byte",
+            ))
+            if _emit_tool_guidance:
+                try:
+                    from excelmanus.error_guidance import classify_failure as _clf
+                    _tool_guidance = _clf(
+                        RuntimeError(str(error)),
+                        stage="tool_execution",
+                        provider="",
+                        model="",
+                    )
+                    e.emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.FAILURE_GUIDANCE,
+                            fg_category=_tool_guidance.category,
+                            fg_code=_tool_guidance.code,
+                            fg_title=_tool_guidance.title,
+                            fg_message=_tool_guidance.message,
+                            fg_stage=_tool_guidance.stage,
+                            fg_retryable=_tool_guidance.retryable,
+                            fg_diagnostic_id=_tool_guidance.diagnostic_id,
+                            fg_actions=_tool_guidance.actions,
+                            fg_provider=_tool_guidance.provider,
+                            fg_model=_tool_guidance.model,
+                        ),
+                    )
+                except Exception:
+                    pass
+
         # 工具调用审计日志
         if self._tool_call_store is not None:
             try:
@@ -1543,6 +1598,29 @@ class ToolDispatcher:
                         tool_name=tool_name,
                         file_path=_first_path,
                     )
+
+        # ── ErrorSolutionStore：记录错误/解决方案 + 检索历史方案 ──
+        # 配对策略：用 tool_name 作为 pending key（而非 tool_call_id），
+        # 因为同一工具的下一次成功调用自然对应上一次失败的解决方案。
+        _error_store = getattr(e, "_error_solution_store", None)
+        if _error_store is not None:
+            try:
+                if not success and error:
+                    # 记录工具执行错误（等待后续同名工具成功时配对）
+                    await _error_store.record_error(tool_name, tool_name, error)
+                    # 语义检索历史类似错误的解决方案，追加到错误结果中
+                    _guidance = await _error_store.get_guidance_text(error)
+                    if _guidance:
+                        result_str = result_str + "\n\n" + _guidance
+                elif success and tool_name:
+                    # 工具成功 → 尝试配对之前同名工具的错误，记录解决方案
+                    _solution_text = self._extract_write_summary(tool_name, arguments, result_str)
+                    if _solution_text:
+                        await _error_store.record_solution(
+                            tool_name, tool_name, _solution_text, success=True,
+                        )
+            except Exception:
+                logger.debug("ErrorSolutionStore 操作失败", exc_info=True)
 
         # 写后事件记录到 FileRegistry
         if success:
@@ -2364,3 +2442,4 @@ class ToolDispatcher:
                 changed_files=sorted(affected),
             ),
         )
+

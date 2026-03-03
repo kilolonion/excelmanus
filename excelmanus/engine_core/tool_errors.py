@@ -71,6 +71,19 @@ _RETRYABLE_PATTERNS: list[re.Pattern[str]] = [
         r"server\s+error",
         r"internal\s+server\s+error",
         r"resource\s+temporarily\s+unavailable",
+        r"ssl",
+        r"certificate\s+verify\s+failed",
+        r"handshake\s+(failure|error)",
+        r"proxy\s*(error|refused|timeout)",
+        r"tunnel\s+connection\s+failed",
+        r"incomplete\s*chunked",
+        r"incompleteread",
+        r"remote(\s+end)?\s*(closed|disconnected)",
+        r"stream\s*(ended|interrupted)",
+        r"premature\s+end",
+        r"json\s*decode",
+        r"expecting\s+value",
+        r"invalid\s+json",
     ]
 ]
 
@@ -84,6 +97,28 @@ _NEEDS_HUMAN_PATTERNS: list[re.Pattern[str]] = [
         r"请.*选择",
         r"multiple\s+matches",
         r"需要.*用户",
+    ]
+]
+
+# 永久性错误的关键词/模式（权限、磁盘空间、编码等）
+_PERMANENT_PATTERNS: list[re.Pattern[str]] = [
+    re.compile(p, re.IGNORECASE) for p in [
+        r"permission\s*denied",
+        r"access\s*denied",
+        r"operation\s+not\s+permitted",
+        r"errno\s+13",
+        r"no\s+space\s+left",
+        r"disk\s*(full|quota)",
+        r"not\s+enough\s+space",
+        r"磁盘空间不足",
+        r"errno\s+28",
+        r"errno\s+122",
+        r"unicode(decode|encode)error",
+        r"codec\s+can.t\s+(decode|encode)",
+        r"invalid\s+start\s+byte",
+        r"invalid\s+continuation\s+byte",
+        r"charmap",
+        r"文件编码",
     ]
 ]
 
@@ -124,7 +159,34 @@ _RETRYABLE_EXCEPTION_TYPES: frozenset[str] = frozenset({
     "anthropic.RateLimitError",
     "anthropic.APIConnectionError",
     "anthropic.InternalServerError",
+    "SSLError",
+    "ssl.SSLError",
+    "ssl.SSLCertVerificationError",
+    "ProxyError",
+    "urllib3.exceptions.ProxyError",
+    "http.client.IncompleteRead",
+    "http.client.RemoteDisconnected",
+    "json.JSONDecodeError",
 })
+
+# 永久性错误的异常类型名
+_PERMANENT_EXCEPTION_TYPES: frozenset[str] = frozenset({
+    "PermissionError",
+    "UnicodeDecodeError",
+    "UnicodeEncodeError",
+    "FileNotFoundError",
+})
+
+
+def _permanent_suggestion(exc_type: str) -> str:
+    """根据异常类型返回针对性的永久错误建议。"""
+    if "Permission" in exc_type:
+        return "文件权限不足，请检查工作区目录权限设置。"
+    if "Unicode" in exc_type:
+        return "文件编码异常，请检查输入文件的字符编码。"
+    if "FileNotFound" in exc_type:
+        return "文件不存在，请确认文件路径是否正确。"
+    return "请检查参数是否正确，或尝试其他方法。"
 
 
 def classify_tool_error(
@@ -146,6 +208,13 @@ def classify_tool_error(
                 kind=ToolErrorKind.RETRYABLE,
                 summary=f"{exc_type}: {_truncate(error_str, 200)}",
                 suggestion="这是一个临时性错误，系统将自动重试。",
+                original_error=_truncate(error_str, 500),
+            )
+        if exc_type in _PERMANENT_EXCEPTION_TYPES or full_type in _PERMANENT_EXCEPTION_TYPES:
+            return ToolError(
+                kind=ToolErrorKind.PERMANENT,
+                summary=f"{exc_type}: {_truncate(error_str, 200)}",
+                suggestion=_permanent_suggestion(exc_type),
                 original_error=_truncate(error_str, 500),
             )
     else:
@@ -172,7 +241,17 @@ def classify_tool_error(
                 original_error=_truncate(error_str, 500),
             )
 
-    # 3. 需要人工
+    # 3. 永久性错误（精确模式）
+    for pat in _PERMANENT_PATTERNS:
+        if pat.search(error_str):
+            return ToolError(
+                kind=ToolErrorKind.PERMANENT,
+                summary=_truncate(error_str, 200),
+                suggestion="请检查文件权限、磁盘空间或文件编码后重试。",
+                original_error=_truncate(error_str, 500),
+            )
+
+    # 4. 需要人工
     for pat in _NEEDS_HUMAN_PATTERNS:
         if pat.search(error_str):
             return ToolError(
@@ -182,7 +261,7 @@ def classify_tool_error(
                 original_error=_truncate(error_str, 500),
             )
 
-    # 4. 兜底：永久错误
+    # 5. 兜底：永久错误
     return ToolError(
         kind=ToolErrorKind.PERMANENT,
         summary=_truncate(error_str, 200),

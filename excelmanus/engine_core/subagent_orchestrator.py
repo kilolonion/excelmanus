@@ -186,6 +186,11 @@ class SubagentOrchestrator:
             if depth in _DEPTH_LABELS:
                 prompt += f"\n\n建议探索深度：{_DEPTH_LABELS[depth]}"
 
+            # R9: 增量探索——注入已有缓存摘要，避免重复扫描
+            cache_hint = self._build_explorer_cache_hint()
+            if cache_hint:
+                prompt += f"\n\n{cache_hint}"
+
         timeout = engine._config.subagent_timeout_seconds
         try:
             result = await asyncio.wait_for(
@@ -550,6 +555,54 @@ class SubagentOrchestrator:
         except (json.JSONDecodeError, ValueError):
             logger.debug("explorer 报告 JSON 解析失败: %s", raw_json[:200])
         return None
+
+    # ── R9: 增量探索——已有缓存摘要构建 ──────────────────────────
+
+    def _build_explorer_cache_hint(self) -> str:
+        """从 session_state.explorer_reports 构建已扫描文件摘要，注入 explorer prompt。
+
+        让 explorer 知道哪些文件已扫描过，避免重复 scan_excel_snapshot。
+        """
+        engine = self._engine
+        state = getattr(engine, "_state", None)
+        if state is None:
+            return ""
+        reports: list[dict[str, Any]] = getattr(state, "explorer_reports", [])
+        if not reports:
+            return ""
+
+        # 收集已扫描文件及其 sheet 概况
+        scanned_files: list[str] = []
+        seen_paths: set[str] = set()
+        for report in reports:
+            if len(scanned_files) >= 8:
+                break
+            for f in report.get("files", []):
+                path = f.get("path", "")
+                if not path or path in seen_paths:
+                    continue
+                seen_paths.add(path)
+                sheets = f.get("sheets", [])
+                if sheets:
+                    sheet_descs = [
+                        f"{s.get('name', '?')}({s.get('rows', '?')}行)"
+                        for s in sheets[:6]
+                    ]
+                    scanned_files.append(f"- `{path}`: {', '.join(sheet_descs)}")
+                else:
+                    scanned_files.append(f"- `{path}`")
+                if len(scanned_files) >= 8:
+                    break
+
+        if not scanned_files:
+            return ""
+
+        return (
+            "## 已有探索缓存（无需重复扫描）\n"
+            "以下文件已由之前的探索扫描过，schema 和统计信息已在上下文中：\n"
+            + "\n".join(scanned_files)
+            + "\n\n请直接复用已有信息，仅对未覆盖的文件或需要更深入分析的维度发起新探索。"
+        )
 
     # ── R5: 探索深度估算 ──────────────────────────────────────
 
