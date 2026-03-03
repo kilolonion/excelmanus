@@ -8,17 +8,23 @@ import {
   Trash2,
   Download,
   AtSign,
+  Combine,
+  ArrowLeftRight,
+  Layers,
 } from "lucide-react";
 import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
-import { downloadFile, normalizeExcelPath } from "@/lib/api";
+import { downloadFile, normalizeExcelPath, fetchFileRegistry, updateFileGroupMembers } from "@/lib/api";
 import { isPreviewableWorkspaceFile } from "@/lib/file-preview";
 import { normalizePath } from "./file-tree-helpers";
 
@@ -75,10 +81,10 @@ export function FlatFileListView(props: FlatFileListViewProps) {
         return (
           <div
             key={file.path}
-            draggable={!selectMode}
+            draggable={!selectMode || isSelected}
             onDragStart={(e) => onDragStart(e, file)}
             onDragEnd={onDragEnd}
-            onClick={() => { if (selectMode) return; onClick(file.path); }}
+            onClick={() => onClick(file.path)}
             onDoubleClick={() => { if (selectMode) return; onDoubleClick(file.path); }}
             className={`group relative flex items-center gap-2.5 pl-5 pr-2 py-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
               isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
@@ -151,6 +157,93 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       <Download className="h-4 w-4" />
                       下载
                     </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={(e) => {
+                      e.stopPropagation();
+                      useExcelStore.getState().setPendingTemplateMessage(
+                        `请将 @file:${file.filename} 与 进行合并`
+                      );
+                    }}>
+                      <Combine className="h-4 w-4" />
+                      与其他文件合并
+                    </DropdownMenuItem>
+                    {(() => {
+                      const otherExcels = flatFiles.filter(
+                        (f) => f.path !== file.path && isExcelFile(f.filename),
+                      );
+                      if (otherExcels.length > 0) {
+                        return (
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <ArrowLeftRight className="h-4 w-4" />
+                              与其他文件对比
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="w-44">
+                              {otherExcels.slice(0, 10).map((other) => (
+                                <DropdownMenuItem
+                                  key={other.path}
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    useExcelStore.getState().openCompare(file.path, other.path);
+                                  }}
+                                >
+                                  {other.filename}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        );
+                      }
+                      return (
+                        <DropdownMenuItem onClick={(e) => {
+                          e.stopPropagation();
+                          useExcelStore.getState().setPendingTemplateMessage(
+                            `请对比 @file:${file.filename} 和 的差异`
+                          );
+                        }}>
+                          <ArrowLeftRight className="h-4 w-4" />
+                          与其他文件对比
+                        </DropdownMenuItem>
+                      );
+                    })()}
+                    {(() => {
+                      const groups = useExcelStore.getState().fileGroups;
+                      if (groups.length > 0) {
+                        return (
+                          <DropdownMenuSub>
+                            <DropdownMenuSubTrigger>
+                              <Layers className="h-4 w-4" />
+                              加入文件组
+                            </DropdownMenuSubTrigger>
+                            <DropdownMenuSubContent className="w-36">
+                              {groups.map((g) => (
+                                <DropdownMenuItem
+                                  key={g.id}
+                                  onClick={async (e) => {
+                                    e.stopPropagation();
+                                    try {
+                                      const regData = await fetchFileRegistry();
+                                      if ("files" in regData) {
+                                        const entry = regData.files.find(
+                                          (f) => f.canonical_path === file.path || f.canonical_path === `./${file.path}`,
+                                        );
+                                        if (entry) {
+                                          await updateFileGroupMembers(g.id, { add: [{ file_id: entry.id }] });
+                                          useExcelStore.getState().loadFileGroups();
+                                        }
+                                      }
+                                    } catch { /* silent */ }
+                                  }}
+                                >
+                                  {g.name}
+                                </DropdownMenuItem>
+                              ))}
+                            </DropdownMenuSubContent>
+                          </DropdownMenuSub>
+                        );
+                      }
+                      return null;
+                    })()}
                     <DropdownMenuSeparator />
                     <DropdownMenuItem variant="destructive" onClick={(e) => { e.stopPropagation(); onRemove(file.path); }}>
                       <Trash2 className="h-4 w-4" />

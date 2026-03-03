@@ -51,12 +51,25 @@ dev = [
     "httpx>=0.24.0",
     "hypothesis>=6.0.0",
 ]
+telegram = [
+    "python-telegram-bot>=20.0",
+    "httpx>=0.24.0",
+]
+qq = [
+    "qq-botpy>=1.0.0",
+    "httpx>=0.24.0",
+]
+feishu = [
+    "lark-oapi>=1.0.0",
+    "httpx>=0.24.0",
+]
 vba = [
     "oletools>=0.60.0",
 ]
 all = [
     "excelmanus[cli]",
     "excelmanus[web]",
+    "excelmanus[telegram]",
 ]
 
 [project.scripts]

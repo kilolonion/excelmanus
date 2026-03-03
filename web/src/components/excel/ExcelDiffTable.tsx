@@ -492,38 +492,70 @@ function useContainerWidth(ref: React.RefObject<HTMLDivElement | null>): number 
 }
 
 // ── 跨文件对比摘要头 ────────────────────────────────────
-function CrossFileDiffSummary({ summary }: { summary: ExcelDiffSummary }) {
+function CrossFileDiffSummary({ summary, filePathA, filePathB }: { summary: ExcelDiffSummary; filePathA?: string; filePathB?: string }) {
+  const totalRows = summary.rowsAdded + summary.rowsDeleted + summary.rowsModified;
+  const showBar = totalRows > 0;
+
   return (
-    <div className="px-3 py-1.5 bg-blue-50/50 dark:bg-blue-950/20 border-b border-blue-100/60 dark:border-blue-900/30 text-[10px] flex flex-wrap items-center gap-x-3 gap-y-0.5">
-      <span className="text-muted-foreground/60 tabular-nums">
-        共对比 <span className="font-semibold text-foreground">{summary.totalCellsCompared.toLocaleString()}</span> 个单元格
-      </span>
-      {summary.cellsDifferent > 0 && (
-        <span className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
-          <span className="text-amber-600 dark:text-amber-400 font-medium">{summary.cellsDifferent} 差异</span>
+    <div className="px-3 py-1.5 bg-blue-50/50 dark:bg-blue-950/20 border-b border-blue-100/60 dark:border-blue-900/30 text-[10px]">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        <span className="text-muted-foreground/60 tabular-nums">
+          共对比 <span className="font-semibold text-foreground">{summary.totalCellsCompared.toLocaleString()}</span> 个单元格
         </span>
-      )}
-      {summary.rowsAdded > 0 && (
-        <span className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
-          <span className="text-green-600 dark:text-green-400">+{summary.rowsAdded} 行</span>
-        </span>
-      )}
-      {summary.rowsDeleted > 0 && (
-        <span className="flex items-center gap-1">
-          <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
-          <span className="text-red-500 dark:text-red-400">−{summary.rowsDeleted} 行</span>
-        </span>
-      )}
-      {summary.rowsModified > 0 && (
-        <span className="text-muted-foreground/70">{summary.rowsModified} 行修改</span>
-      )}
-      {summary.columnsAdded.length > 0 && (
-        <span className="text-green-600 dark:text-green-400">新增列: {summary.columnsAdded.join(", ")}</span>
-      )}
-      {summary.columnsDeleted.length > 0 && (
-        <span className="text-red-500 dark:text-red-400">删除列: {summary.columnsDeleted.join(", ")}</span>
+        {summary.cellsDifferent > 0 && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-400" />
+            <span className="text-amber-600 dark:text-amber-400 font-medium">{summary.cellsDifferent} 差异</span>
+          </span>
+        )}
+        {summary.rowsAdded > 0 && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+            <span className="text-green-600 dark:text-green-400">+{summary.rowsAdded} 行</span>
+          </span>
+        )}
+        {summary.rowsDeleted > 0 && (
+          <span className="flex items-center gap-1">
+            <span className="w-1.5 h-1.5 rounded-full bg-red-500" />
+            <span className="text-red-500 dark:text-red-400">−{summary.rowsDeleted} 行</span>
+          </span>
+        )}
+        {summary.rowsModified > 0 && (
+          <span className="text-muted-foreground/70">{summary.rowsModified} 行修改</span>
+        )}
+        {summary.columnsAdded.length > 0 && (
+          <span className="text-green-600 dark:text-green-400">新增列: {summary.columnsAdded.join(", ")}</span>
+        )}
+        {summary.columnsDeleted.length > 0 && (
+          <span className="text-red-500 dark:text-red-400">删除列: {summary.columnsDeleted.join(", ")}</span>
+        )}
+        {/* 打开对比视图按钮 */}
+        {filePathA && filePathB && (
+          <button
+            onClick={() => useExcelStore.getState().openCompare(filePathA, filePathB)}
+            className="ml-auto text-[9px] px-2 py-0.5 rounded-full font-medium transition-colors hover:opacity-80"
+            style={{ backgroundColor: "var(--em-primary-alpha-10)", color: "var(--em-primary)" }}
+          >
+            打开对比视图
+          </button>
+        )}
+      </div>
+      {/* 行变更进度条 */}
+      {showBar && (
+        <div className="flex items-center gap-1.5 mt-1">
+          <div className="flex-1 h-1.5 rounded-full bg-muted/60 overflow-hidden flex">
+            {summary.rowsAdded > 0 && (
+              <div className="h-full bg-green-500" style={{ width: `${(summary.rowsAdded / totalRows) * 100}%` }} />
+            )}
+            {summary.rowsModified > 0 && (
+              <div className="h-full bg-amber-400" style={{ width: `${(summary.rowsModified / totalRows) * 100}%` }} />
+            )}
+            {summary.rowsDeleted > 0 && (
+              <div className="h-full bg-red-400" style={{ width: `${(summary.rowsDeleted / totalRows) * 100}%` }} />
+            )}
+          </div>
+          <span className="text-[9px] text-muted-foreground/50 tabular-nums">{totalRows} 行变更</span>
+        </div>
       )}
     </div>
   );
@@ -656,7 +688,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
 
       {/* 跨文件对比摘要 */}
       {isCrossFile && data.diffSummary && (
-        <CrossFileDiffSummary summary={data.diffSummary} />
+        <CrossFileDiffSummary summary={data.diffSummary} filePathA={data.filePath} filePathB={data.filePathB} />
       )}
 
       {/* Diff 内容区 */}

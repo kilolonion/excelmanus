@@ -567,6 +567,7 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [clearing, setClearing] = useState(false);
+  const [userSaveToast, setUserSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [codexStatus, setCodexStatus] = useState<CodexStatus | null>(null);
   const [codexLoading, setCodexLoading] = useState(true);
   const [codexError, setCodexError] = useState("");
@@ -902,8 +903,9 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
       await updateProfile(body);
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // 忽略
+      setUserSaveToast({ msg: "API 配置已保存", type: "success" });
+    } catch (e) {
+      setUserSaveToast({ msg: e instanceof Error ? e.message : "API 配置保存失败", type: "error" });
     } finally {
       setSaving(false);
     }
@@ -917,12 +919,20 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
       setDraft({ api_key: "", base_url: "", model: "" });
       setSaved(true);
       setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // 忽略
+      setUserSaveToast({ msg: "API 配置已清除", type: "success" });
+    } catch (e) {
+      setUserSaveToast({ msg: e instanceof Error ? e.message : "清除配置失败", type: "error" });
     } finally {
       setClearing(false);
     }
   };
+
+  // 自动消失 userSaveToast
+  useEffect(() => {
+    if (!userSaveToast) return;
+    const t = setTimeout(() => setUserSaveToast(null), 3000);
+    return () => clearTimeout(t);
+  }, [userSaveToast]);
 
   const hasCustomConfig = !!(draft.api_key || draft.base_url || draft.model);
 
@@ -936,6 +946,22 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
 
   return (
     <div className="space-y-4">
+      {/* ── Save toast ── */}
+      {userSaveToast && (
+        <div
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity ${
+            userSaveToast.type === "success"
+              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+              : "bg-destructive/10 text-destructive border border-destructive/20"
+          }`}
+        >
+          {userSaveToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+          <span className="flex-1">{userSaveToast.msg}</span>
+          <button className="shrink-0 hover:opacity-70" onClick={() => setUserSaveToast(null)}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
       {/* 用户自定义 API 配置 */}
       <div className="rounded-lg border border-border p-4">
         <div className="flex items-center gap-2 mb-1">
@@ -1867,7 +1893,7 @@ export function ModelTab() {
   // 快速应用 profile 到角色
   const [applyingProfile, setApplyingProfile] = useState<string | null>(null);
   const [applyMenuOpen, setApplyMenuOpen] = useState<string | null>(null);
-  const [applyToast, setApplyToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [saveToast, setSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // 折叠/展开状态
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -1960,8 +1986,9 @@ export function ModelTab() {
       setThinkingEffectiveBudget(data.effective_budget);
       setThinkingSaved(true);
       setTimeout(() => setThinkingSaved(false), 2000);
-    } catch {
-      // 忽略
+      setSaveToast({ msg: "推理深度已更新", type: "success" });
+    } catch (e) {
+      setSaveToast({ msg: e instanceof Error ? e.message : "推理深度保存失败", type: "error" });
     } finally {
       setThinkingSaving(false);
     }
@@ -2146,12 +2173,12 @@ export function ModelTab() {
     }
   }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig, isAdmin]);
 
-  // 自动消失 applyToast
+  // 自动消失 saveToast
   useEffect(() => {
-    if (!applyToast) return;
-    const t = setTimeout(() => setApplyToast(null), 3000);
+    if (!saveToast) return;
+    const t = setTimeout(() => setSaveToast(null), 3000);
     return () => clearTimeout(t);
-  }, [applyToast]);
+  }, [saveToast]);
 
   const handleApplyProfileToRole = useCallback(async (profile: ProfileEntry, role: "main" | "aux" | "vlm") => {
     const roleLabel = role === "main" ? "主模型" : role === "aux" ? "辅助模型" : "视觉模型";
@@ -2198,11 +2225,11 @@ export function ModelTab() {
         body.enabled = true;
       }
       await apiPut(`/config/models/${role}`, body, { direct: true });
-      setApplyToast({ msg: `已将 "${profile.name}" 应用为${roleLabel}`, type: "success" });
+      setSaveToast({ msg: `已将 "${profile.name}" 应用为${roleLabel}`, type: "success" });
       fetchConfig(true);
       fetchAllCapabilities(true);
     } catch (e) {
-      setApplyToast({ msg: e instanceof Error ? e.message : `应用为${roleLabel}失败`, type: "error" });
+      setSaveToast({ msg: e instanceof Error ? e.message : `应用为${roleLabel}失败`, type: "error" });
     } finally {
       setApplyingProfile(null);
     }
@@ -2210,6 +2237,7 @@ export function ModelTab() {
 
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);
+    const sectionLabel = SECTION_META.find((s) => s.key === sectionKey)?.label || sectionKey;
     try {
       const draft = editDrafts[sectionKey];
       const body: Record<string, unknown> = {};
@@ -2225,9 +2253,10 @@ export function ModelTab() {
       await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
       setSaved(sectionKey);
       setTimeout(() => setSaved(null), 2000);
+      setSaveToast({ msg: `${sectionLabel} 配置已保存`, type: "success" });
       fetchConfig(true);
-    } catch {
-      // 忽略
+    } catch (e) {
+      setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 保存失败`, type: "error" });
     } finally {
       setSaving(null);
     }
@@ -2235,13 +2264,16 @@ export function ModelTab() {
 
   const handleToggleEnabled = async (sectionKey: string, checked: boolean) => {
     setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: checked }));
+    const sectionLabel = SECTION_META.find((s) => s.key === sectionKey)?.label || sectionKey;
     // 立即保存开关状态
     try {
       await apiPut(`/config/models/${sectionKey}`, { enabled: checked }, { direct: true });
+      setSaveToast({ msg: `${sectionLabel} 已${checked ? "启用" : "禁用"}`, type: "success" });
       fetchConfig(true);
-    } catch {
+    } catch (e) {
       // 回滚
       setEnabledDrafts((prev) => ({ ...prev, [sectionKey]: !checked }));
+      setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 切换失败`, type: "error" });
     }
   };
 
@@ -2257,6 +2289,7 @@ export function ModelTab() {
       setTestResult((prev) => ({ ...prev, _profile_form: null }));
       await fetchConfig(true);
       useUIStore.getState().bumpModelProfiles();
+      setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
       // 滚动到新卡片并高亮
       setHighlightProfile(newName);
       setTimeout(() => setHighlightProfile(null), 2000);
@@ -2281,6 +2314,7 @@ export function ModelTab() {
       setTestResult((prev) => ({ ...prev, _profile_form: null }));
       await fetchConfig(true);
       useUIStore.getState().bumpModelProfiles();
+      setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
       // 滚动到更新后的卡片并高亮
       setHighlightProfile(updatedName);
       setTimeout(() => setHighlightProfile(null), 2000);
@@ -2312,6 +2346,7 @@ export function ModelTab() {
 
     try {
       await apiDelete(`/config/models/profiles/${name}`, { direct: true });
+      setSaveToast({ msg: `模型档案「${name}」已删除`, type: "success" });
       // 如果正在编辑被删除的 profile，关闭表单
       if (editingProfile === name) {
         setEditingProfile(null);
@@ -2366,18 +2401,18 @@ export function ModelTab() {
 
   return (
     <div className="flex flex-col gap-2">
-        {/* ── Apply toast ── */}
-        {applyToast && (
+        {/* ── Save toast ── */}
+        {saveToast && (
           <div
             className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity ${
-              applyToast.type === "success"
+              saveToast.type === "success"
                 ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
                 : "bg-destructive/10 text-destructive border border-destructive/20"
             }`}
           >
-            {applyToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
-            <span className="flex-1">{applyToast.msg}</span>
-            <button className="shrink-0 hover:opacity-70" onClick={() => setApplyToast(null)}>
+            {saveToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
+            <span className="flex-1">{saveToast.msg}</span>
+            <button className="shrink-0 hover:opacity-70" onClick={() => setSaveToast(null)}>
               <X className="h-3 w-3" />
             </button>
           </div>
@@ -3056,7 +3091,7 @@ export function ModelTab() {
                   <div
                     key={p.name}
                     ref={(el) => { profileCardRefs.current[p.name] = el; }}
-                    className={`group rounded-xl border text-sm transition-all duration-300 ${
+                    className={`group rounded-xl border text-sm transition-[border-color,background-color,box-shadow,transform] duration-200 ${
                       isCodexProfile
                         ? "border-[var(--em-primary)]/25 bg-gradient-to-r from-[var(--em-primary)]/5 to-transparent"
                         : isHighlighted
@@ -3142,7 +3177,7 @@ export function ModelTab() {
                       </div>
 
                       {/* Action buttons */}
-                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity touch-show">
                         {/* Apply role dropdown */}
                         <div className="relative">
                           <button

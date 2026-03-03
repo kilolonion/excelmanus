@@ -432,6 +432,29 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         }
         return b;
       });
+      // 从 run_code 等工具结果中提取合并摘要 → store
+      if (data.success) {
+        const toolName = (data.tool_name as string) || "";
+        const resultStr = (data.result as string) || "";
+        if (["run_code", "discover_file_relationships", "compare_excel"].includes(toolName) && resultStr.trimStart().startsWith("{")) {
+          try {
+            const parsed = JSON.parse(resultStr.trim());
+            if (parsed && typeof parsed === "object" && (typeof parsed.rows_matched === "number" || typeof parsed.matched_count === "number" || typeof parsed.output_file === "string")) {
+              const src = parsed.merge_result ?? parsed;
+              useExcelStore.getState().setMergeResult({
+                sourceFiles: Array.isArray(src.source_files) ? src.source_files : [],
+                outputFile: src.output_file ?? src.output ?? "",
+                rowsMatched: src.rows_matched ?? src.matched_count ?? 0,
+                rowsAdded: src.rows_added ?? src.added_count ?? 0,
+                rowsUnmatched: src.rows_unmatched ?? src.unmatched_count ?? 0,
+                keyColumns: Array.isArray(src.key_columns) ? src.key_columns : [],
+                joinType: src.join_type ?? src.how ?? "",
+                toolCallId: toolCallId ?? "",
+              });
+            }
+          } catch { /* not JSON or no merge fields */ }
+        }
+      }
       break;
     }
 
@@ -691,6 +714,13 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         const fn = edFilePath.split("/").pop() || edFilePath;
         useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
         S().addAffectedFiles(msgId, [edFilePath]);
+      }
+      // 跨文件对比自动打开对比视图
+      if (edDiffMode === "cross_file" && edEntry.filePathB && edEntry.diffSummary) {
+        const es = useExcelStore.getState();
+        if (!es.compareMode && !es.panelOpen) {
+          es.openCompare(edFilePath, edEntry.filePathB);
+        }
       }
       break;
     }

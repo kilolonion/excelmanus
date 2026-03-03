@@ -9,10 +9,14 @@ import {
   normalizeExcelPath,
   fetchOperations,
   undoOperation as apiUndoOperation,
+  fetchFileGroups,
+  createFileGroup as apiCreateFileGroup,
+  deleteFileGroup as apiDeleteFileGroup,
   type BackupFile,
   type AppliedFile,
   type ExcelFileListItem,
   type OperationRecord,
+  type FileGroup,
 } from "@/lib/api";
 
 /** Univer 兼容的单元格样式（轻量子集） */
@@ -115,6 +119,37 @@ export interface ExcelFileRef {
   lastUsedAt: number;
 }
 
+export interface SharedColumn {
+  col_a: string;
+  col_b: string;
+  match_type: "exact" | "normalized" | "value_overlap";
+  overlap_ratio: number;
+}
+
+export interface FileRelationship {
+  fileA: string;
+  fileB: string;
+  sharedColumns: SharedColumn[];
+}
+
+export interface RelationshipDiscovery {
+  files_analyzed: number;
+  file_pairs: { file_a: string; file_b: string; shared_columns: SharedColumn[] }[];
+  summary: string;
+  merge_hints?: { file_a: string; file_b: string; key_column_a: string; key_column_b: string; suggested_join: string }[];
+}
+
+export interface MergeResultInfo {
+  sourceFiles: string[];
+  outputFile: string;
+  rowsMatched: number;
+  rowsAdded: number;
+  rowsUnmatched: number;
+  keyColumns: string[];
+  joinType: string;
+  toolCallId: string;
+}
+
 const MAX_RECENT_FILES = 50;
 const MAX_PERSISTED_DIFFS = 500;
 
@@ -167,6 +202,15 @@ interface ExcelState {
   // 快速添加文件提及到聊天输入（由侧栏设置，ChatInput 消费）
   pendingFileMention: { path: string; filename: string } | null;
 
+  // 批量添加文件提及到聊天输入（多选引用，ChatInput 消费）
+  pendingFileMentions: { path: string; filename: string }[] | null;
+
+  // 模板消息注入（右键“合并/对比”操作预填到聊天输入框）
+  pendingTemplateMessage: string | null;
+
+  // 拖拽中的文件数量（用于 ChatInput 拖拽覆盖层显示计数）
+  draggingFileCount: number;
+
   // 用户明确关闭的路径，在重挂载间保留，以便自动发现（工作区扫描/会话恢复）不会再次加入。
   dismissedPaths: Set<string>;
 
@@ -203,6 +247,27 @@ interface ExcelState {
   operationsLoading: boolean;
   operationsLoaded: boolean;
 
+  // 文件组
+  fileGroups: FileGroup[];
+  fileGroupsLoaded: boolean;
+  activeGroupId: string | null;
+  groupViewMode: boolean;
+
+  // 跨文件对比模式
+  compareMode: boolean;
+  compareFileA: string | null;
+  compareFileB: string | null;
+  compareSheetA: string | null;
+  compareSheetB: string | null;
+  compareRelationship: FileRelationship | null;
+
+  // 工作区文件关系缓存
+  workspaceRelationships: RelationshipDiscovery | null;
+  workspaceRelationshipsLoading: boolean;
+
+  // 合并结果（最近一次）
+  lastMergeResult: MergeResultInfo | null;
+
   // 操作
   openPanel: (filePath: string, sheet?: string) => void;
   closePanel: () => void;
@@ -230,6 +295,12 @@ interface ExcelState {
   /** Insert @file:filename into chat input from sidebar click. */
   mentionFileToInput: (file: { path: string; filename: string }) => void;
   clearPendingFileMention: () => void;
+  /** Batch insert multiple @file:filename into chat input (multi-select reference). */
+  mentionFilesToInput: (files: { path: string; filename: string }[]) => void;
+  clearPendingFileMentions: () => void;
+  /** Set a template message to inject into chat input (e.g. merge/compare prompt). */
+  setPendingTemplateMessage: (msg: string) => void;
+  clearPendingTemplateMessage: () => void;
   fetchBackups: (sessionId: string) => Promise<void>;
   applyFile: (sessionId: string, filePath: string) => Promise<boolean>;
   applyAll: (sessionId: string) => Promise<number>;
@@ -246,6 +317,21 @@ interface ExcelState {
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
+  loadFileGroups: () => Promise<void>;
+  createGroupFromSelected: (name: string, fileIds: string[]) => Promise<string | null>;
+  deleteGroup: (groupId: string) => Promise<void>;
+  setActiveGroup: (groupId: string | null) => void;
+  toggleGroupViewMode: () => void;
+  /** 打开跨文件对比视图 */
+  openCompare: (fileA: string, fileB: string, relationship?: FileRelationship) => void;
+  closeCompare: () => void;
+  setCompareSheetA: (sheet: string) => void;
+  setCompareSheetB: (sheet: string) => void;
+  setCompareRelationship: (rel: FileRelationship | null) => void;
+  /** 加载工作区文件关系 */
+  fetchWorkspaceRelationships: () => Promise<void>;
+  /** 设置合并结果摘要 */
+  setMergeResult: (result: MergeResultInfo | null) => void;
   injectDemoFile: () => void;
   clearDemoFile: () => void;
   clearSession: () => void;
@@ -268,6 +354,9 @@ export const useExcelStore = create<ExcelState>()(
   selectionMode: false,
   pendingSelection: null,
   pendingFileMention: null,
+  pendingFileMentions: null,
+  pendingTemplateMessage: null,
+  draggingFileCount: 0,
   dismissedPaths: new Set<string>(),
   showSystemFiles: false,
   workspaceFilesVersion: 0,
@@ -285,6 +374,23 @@ export const useExcelStore = create<ExcelState>()(
   operations: [],
   operationsLoading: false,
   operationsLoaded: false,
+
+  fileGroups: [],
+  fileGroupsLoaded: false,
+  activeGroupId: null,
+  groupViewMode: false,
+
+  compareMode: false,
+  compareFileA: null,
+  compareFileB: null,
+  compareSheetA: null,
+  compareSheetB: null,
+  compareRelationship: null,
+
+  workspaceRelationships: null,
+  workspaceRelationshipsLoading: false,
+
+  lastMergeResult: null,
 
   openPanel: (filePath, sheet) =>
     set({
@@ -457,6 +563,14 @@ export const useExcelStore = create<ExcelState>()(
   mentionFileToInput: (file) => set({ pendingFileMention: file }),
 
   clearPendingFileMention: () => set({ pendingFileMention: null }),
+
+  mentionFilesToInput: (files) => set({ pendingFileMentions: files.length > 0 ? files : null }),
+
+  clearPendingFileMentions: () => set({ pendingFileMentions: null }),
+
+  setPendingTemplateMessage: (msg) => set({ pendingTemplateMessage: msg }),
+
+  clearPendingTemplateMessage: () => set({ pendingTemplateMessage: null }),
 
   fetchBackups: async (sessionId) => {
     set({ backupLoading: true });
@@ -813,6 +927,90 @@ export const useExcelStore = create<ExcelState>()(
       return { operations: [op, ...state.operations] };
     }),
 
+  loadFileGroups: async () => {
+    try {
+      const data = await fetchFileGroups();
+      set({ fileGroups: data.groups, fileGroupsLoaded: true });
+    } catch {
+      set({ fileGroupsLoaded: true });
+    }
+  },
+
+  createGroupFromSelected: async (name, fileIds) => {
+    try {
+      const group = await apiCreateFileGroup({
+        name,
+        file_ids: fileIds.map((id) => ({ id })),
+      });
+      set((state) => ({
+        fileGroups: [...state.fileGroups, group],
+      }));
+      return group.id;
+    } catch {
+      return null;
+    }
+  },
+
+  deleteGroup: async (groupId) => {
+    const snapshot = get().fileGroups;
+    set((state) => ({
+      fileGroups: state.fileGroups.filter((g) => g.id !== groupId),
+      activeGroupId: state.activeGroupId === groupId ? null : state.activeGroupId,
+    }));
+    try {
+      await apiDeleteFileGroup(groupId);
+    } catch {
+      set({ fileGroups: snapshot });
+    }
+  },
+
+  setActiveGroup: (groupId) => set({ activeGroupId: groupId }),
+
+  toggleGroupViewMode: () =>
+    set((state) => ({ groupViewMode: !state.groupViewMode })),
+
+  openCompare: (fileA, fileB, relationship) =>
+    set({
+      compareMode: true,
+      compareFileA: fileA,
+      compareFileB: fileB,
+      compareSheetA: null,
+      compareSheetB: null,
+      compareRelationship: relationship ?? null,
+      fullViewPath: null,
+      fullViewSheet: null,
+      panelOpen: false,
+    }),
+
+  closeCompare: () =>
+    set({
+      compareMode: false,
+      compareFileA: null,
+      compareFileB: null,
+      compareSheetA: null,
+      compareSheetB: null,
+      compareRelationship: null,
+    }),
+
+  setCompareSheetA: (sheet) => set({ compareSheetA: sheet }),
+
+  setCompareSheetB: (sheet) => set({ compareSheetB: sheet }),
+
+  setCompareRelationship: (rel) => set({ compareRelationship: rel }),
+
+  fetchWorkspaceRelationships: async () => {
+    set({ workspaceRelationshipsLoading: true });
+    try {
+      const { fetchFileRelationships } = await import("@/lib/api");
+      const data = await fetchFileRelationships();
+      set({ workspaceRelationships: data, workspaceRelationshipsLoading: false });
+    } catch {
+      set({ workspaceRelationshipsLoading: false });
+    }
+  },
+
+  setMergeResult: (result) => set({ lastMergeResult: result }),
+
   injectDemoFile: () => {
     const demo = { path: "__demo__/示例销售数据.xlsx", filename: "示例销售数据.xlsx" };
     set({ demoFile: demo });
@@ -833,6 +1031,8 @@ export const useExcelStore = create<ExcelState>()(
       fullViewSheet: null,
       selectionMode: false,
       pendingSelection: null,
+      pendingFileMentions: null,
+      pendingTemplateMessage: null,
       pendingBackups: [],
       backupEnabled: false,
       backupLoading: false,
@@ -842,6 +1042,18 @@ export const useExcelStore = create<ExcelState>()(
       operations: [],
       operationsLoading: false,
       operationsLoaded: false,
+      fileGroups: [],
+      fileGroupsLoaded: false,
+      activeGroupId: null,
+      compareMode: false,
+      compareFileA: null,
+      compareFileB: null,
+      compareSheetA: null,
+      compareSheetB: null,
+      compareRelationship: null,
+      workspaceRelationships: null,
+      workspaceRelationshipsLoading: false,
+      lastMergeResult: null,
     }),
     }),
     {
@@ -850,6 +1062,7 @@ export const useExcelStore = create<ExcelState>()(
         recentFiles: state.recentFiles,
         dismissedPaths: Array.from(state.dismissedPaths),
         showSystemFiles: state.showSystemFiles,
+        groupViewMode: state.groupViewMode,
       }),
       merge: (persisted, current) => {
         const p = persisted as Record<string, unknown> | undefined;

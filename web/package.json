@@ -1,8 +1,11 @@
 {
   "name": "web",
-  "version": "1.6.8",
+  "version": "1.6.9",
   "private": true,
   "scripts": {
+    "sync-version": "node -e \"const fs=require('fs');const t=fs.readFileSync('../pyproject.toml','utf8');const m=t.match(/^version\\s*=\\s*\\\"([^\\\"]+)\\\"/m);if(m){const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(p.version!==m[1]){p.version=m[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log('synced version to '+m[1])}}\"",
+    "predev": "npm run sync-version",
+    "prebuild": "npm run sync-version",
     "dev": "next dev --webpack --hostname 0.0.0.0",
     "build": "next build --webpack",
     "build:webpack": "next build --webpack",
