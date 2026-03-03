@@ -182,7 +182,16 @@ Performs static analysis on code executed by `run_code`, automatically routing a
 
 ## Embedding Semantic Search Configuration
 
-Provides semantic search capabilities for persistent memory and file manifests. Requires independent embedding API configuration; automatically enabled once configured.
+Provides semantic search capabilities for persistent memory, file manifests, skill routing, and error solutions. Requires independent embedding API configuration; automatically enabled once configured.
+
+When enabled, the following deep integration points are automatically activated:
+- **SemanticRegistry** — Semantic file summary injection
+- **SemanticSkillRouter** — Semantic skill routing, auto-matches optimal Skillpack
+- **ErrorSolutionStore** — Error→solution vector index, persisted to `.excelmanus/error_solutions/`
+- **Memory Semantic Dedup** — New memories compared against existing entries via cosine similarity, filtering duplicates
+- **Smart Context Compaction** — Relevance-scored differential truncation during compaction (high-relevance messages retain more)
+
+All integration points share a single `_embedding_client`, with `asyncio.gather` parallel retrieval at zero extra latency. When `embedding_enabled=false`, all features degrade to no-ops.
 
 | Environment Variable | Description | Default |
 |---|---|---|
@@ -210,7 +219,18 @@ Provides semantic search capabilities for persistent memory and file manifests. 
 Topic files: `file_patterns.md`, `user_prefs.md`, `error_solutions.md`, `general.md`.
 The core file `MEMORY.md` is synced to topic files on save, used for automatic loading at session startup.
 
-When Embedding is enabled, memory retrieval automatically switches to semantic matching mode.
+When Embedding is enabled, memory retrieval automatically switches to semantic matching mode, and newly extracted memories are deduplicated against existing entries via cosine similarity (threshold 0.88), automatically filtering redundancies.
+
+## Playbook (Self-Evolving Tactical Handbook)
+
+Playbook automatically distills successful patterns and failure lessons from completed tasks, then semantically retrieves and injects relevant tactical hints when encountering similar tasks. Requires Embedding to be enabled.
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
+| `EXCELMANUS_PLAYBOOK_DB_PATH` | Playbook database path (empty uses default path) | empty |
+| `EXCELMANUS_PLAYBOOK_MAX_BULLETS` | Maximum Playbook entries | `500` |
+| `EXCELMANUS_PLAYBOOK_INJECT_TOP_K` | Top-K most relevant tactics injected per turn | `5` |
 
 ## MCP Configuration
 
@@ -293,6 +313,25 @@ Performs JSON Schema-level validation on tool call parameters returned by the LL
 | Environment Variable | Description | Default |
 |---|---|---|
 | `EXCELMANUS_USE_RESPONSES_API` | Set to `1` to enable Responses API (`/responses` endpoint), only effective for non-Gemini/Claude OpenAI-compatible URLs | `0` |
+
+## Encryption Configuration
+
+Encrypted storage for sensitive fields (model API Keys, OAuth Access Tokens, etc.). Requires the `cryptography` dependency.
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed (auto-generates at `~/.excelmanus/data/.secret_key` if empty) | Auto-generated |
+
+Key derivation priority:
+1. `EXCELMANUS_SECRET_KEY` environment variable (SHA-256 derived)
+2. `~/.excelmanus/data/.secret_key` auto-generated (created on first launch, file permissions 600)
+3. When neither is available, encryption is disabled (development only)
+
+## Verification Gate
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_VERIFIER_ENABLED` | Enable structured verification condition auto-validation before task completion | `false` |
 
 ## Authentication & Multi-User
 
