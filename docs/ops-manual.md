@@ -65,7 +65,7 @@ ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>  # 后端
 | Node.js | v22.22.0 | `/www/server/nodejs/v22.22.0/bin` |
 | PM2 | 6.x | 同上 |
 | Nginx | 系统自带 | 配置: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL 证书 | 宝塔面板管理 | `/www/server/panel/vhost/cert/<YOUR_DOMAIN>/` |
+| SSL 证书 | 自行管理（certbot / ACME / 手动上传） | `/etc/ssl/certs/<YOUR_DOMAIN>/` |
 
 **注意**: 该服务器的 PM2 需要手动加 PATH：
 
@@ -316,8 +316,8 @@ server {
     listen 443 ssl http2;
     server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
 
-    ssl_certificate     /www/server/panel/vhost/cert/<YOUR_DOMAIN>/fullchain.pem;
-    ssl_certificate_key /www/server/panel/vhost/cert/<YOUR_DOMAIN>/privkey.pem;
+    ssl_certificate     /etc/ssl/certs/<YOUR_DOMAIN>/fullchain.pem;
+    ssl_certificate_key /etc/ssl/certs/<YOUR_DOMAIN>/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
@@ -390,16 +390,19 @@ systemctl restart nginx  # 完全重启
 
 | 变量 | 用途 | 备注 |
 |------|------|------|
-| `EXCELMANUS_API_KEY` | 主模型 API Key | |
-| `EXCELMANUS_BASE_URL` | 主模型端点 | |
-| `EXCELMANUS_MODEL` | 主模型名称 | |
-| `EXCELMANUS_AUX_*` | 辅助小模型（路由/子代理） | |
-| `EXCELMANUS_VLM_*` | 视觉模型（图片提取） | |
+| `EXCELMANUS_API_KEY` | 主模型 API Key | 必填 |
+| `EXCELMANUS_BASE_URL` | 主模型端点 | 必填 |
+| `EXCELMANUS_MODEL` | 主模型名称 | 必填 |
+| `EXCELMANUS_PROTOCOL` | 主模型协议类型 | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`/`docker`） | `auto` |
+| `EXCELMANUS_AUX_*` | 辅助小模型（路由/子代理/窗口顾问） | |
+| `EXCELMANUS_VLM_*` | 视觉模型（图片提取/增强描述） | |
 | `EXCELMANUS_EMBEDDING_*` | Embedding 模型（语义检索/技能路由/错误方案） | |
 | `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 留空自动生成 |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
 | `EXCELMANUS_VERIFIER_ENABLED` | 启用验证门控 | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 必须包含前端域名 |
+| `EXCELMANUS_DATABASE_URL` | PostgreSQL 连接 URL（设置后优先使用 PG） | 空（用 SQLite） |
 | `EXCELMANUS_AUTH_ENABLED` | 是否启用认证 | `true` |
 | `EXCELMANUS_JWT_SECRET` | JWT 签名密钥 | 生产环境必须固定 |
 | `EXCELMANUS_GITHUB_*` | GitHub OAuth | |
@@ -412,7 +415,7 @@ systemctl restart nginx  # 完全重启
 
 ### 前端服务器
 
-SSL 证书由宝塔面板管理，通过面板界面续期。
+SSL 证书需自行管理续期，推荐使用 certbot 或 ACME 客户端自动续期。
 
 ### 后端服务器
 
@@ -576,12 +579,16 @@ firewall-cmd --reload
 │   ├── nginx.conf         # Nginx 反向代理配置
 │   └── certs/             # TLS 证书
 ├── excelmanus/
-│   ├── context_budget.py  # 上下文预算管理器
-│   ├── model_probe.py     # 模型元数据探测（上下文窗口自动校正）
+│   ├── config.py           # 环境变量与配置加载
+│   ├── context_budget.py   # 上下文预算管理器
+│   ├── model_probe.py      # 模型元数据探测（上下文窗口自动校正）
 │   ├── security/
-│   │   └── cipher.py      # Fernet 对称加密（API Key / Token 加密存储）
+│   │   └── cipher.py       # Fernet 对称加密（API Key / Token 加密存储）
 │   └── embedding/
-│       ├── semantic_skill_router.py  # 语义技能路由
+│       ├── client.py               # Embedding API 客户端
+│       ├── semantic_memory.py      # 语义记忆检索
+│       ├── semantic_registry.py    # 语义文件注册
+│       ├── semantic_skill_router.py # 语义技能路由
 │       └── error_solution_store.py  # 错误→解决方案向量索引
 ├── .env                   # 本地开发环境变量
 ├── mcp.json               # MCP 服务器配置

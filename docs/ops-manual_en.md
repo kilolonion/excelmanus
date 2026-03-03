@@ -65,7 +65,7 @@ ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>  # Backend
 | Node.js | v22.22.0 | `/www/server/nodejs/v22.22.0/bin` |
 | PM2 | 6.x | Same as above |
 | Nginx | System built-in | Config: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL Certificate | Managed by BT Panel | `/www/server/panel/vhost/cert/<YOUR_DOMAIN>/` |
+| SSL Certificate | Self-managed (certbot / ACME / manual upload) | `/etc/ssl/certs/<YOUR_DOMAIN>/` |
 
 **Note**: PM2 on this server requires manually adding to PATH:
 
@@ -272,8 +272,8 @@ server {
     listen 443 ssl http2;
     server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
 
-    ssl_certificate     /www/server/panel/vhost/cert/<YOUR_DOMAIN>/fullchain.pem;
-    ssl_certificate_key /www/server/panel/vhost/cert/<YOUR_DOMAIN>/privkey.pem;
+    ssl_certificate     /etc/ssl/certs/<YOUR_DOMAIN>/fullchain.pem;
+    ssl_certificate_key /etc/ssl/certs/<YOUR_DOMAIN>/privkey.pem;
     ssl_protocols       TLSv1.2 TLSv1.3;
     ssl_ciphers         HIGH:!aNULL:!MD5;
 
@@ -346,16 +346,19 @@ The backend `.env` is located at `/www/wwwroot/excelmanus/.env`. Key configurati
 
 | Variable | Purpose | Notes |
 |----------|---------|-------|
-| `EXCELMANUS_API_KEY` | Primary model API Key | |
-| `EXCELMANUS_BASE_URL` | Primary model endpoint | |
-| `EXCELMANUS_MODEL` | Primary model name | |
-| `EXCELMANUS_AUX_*` | Auxiliary small model (routing/subagent) | |
-| `EXCELMANUS_VLM_*` | Vision model (image extraction) | |
+| `EXCELMANUS_API_KEY` | Primary model API Key | Required |
+| `EXCELMANUS_BASE_URL` | Primary model endpoint | Required |
+| `EXCELMANUS_MODEL` | Primary model name | Required |
+| `EXCELMANUS_PROTOCOL` | Primary model protocol type | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`/`docker`) | `auto` |
+| `EXCELMANUS_AUX_*` | Auxiliary small model (routing/subagent/window advisor) | |
+| `EXCELMANUS_VLM_*` | Vision model (image extraction/enhanced description) | |
 | `EXCELMANUS_EMBEDDING_*` | Embedding model (semantic search/skill routing/error solutions) | |
 | `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Auto-generated if empty |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
 | `EXCELMANUS_VERIFIER_ENABLED` | Enable verification gate | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Must include frontend domain |
+| `EXCELMANUS_DATABASE_URL` | PostgreSQL connection URL (takes priority over SQLite) | Empty (uses SQLite) |
 | `EXCELMANUS_AUTH_ENABLED` | Whether to enable authentication | `true` |
 | `EXCELMANUS_JWT_SECRET` | JWT signing secret | Must be fixed in production |
 | `EXCELMANUS_GITHUB_*` | GitHub OAuth | |
@@ -368,7 +371,7 @@ The backend `.env` is located at `/www/wwwroot/excelmanus/.env`. Key configurati
 
 ### Frontend Server
 
-SSL certificate is managed by BT Panel; renew through the panel interface.
+SSL certificate must be managed manually. Recommend using certbot or an ACME client for automatic renewal.
 
 ### Backend Server
 
@@ -530,12 +533,16 @@ Project Root/
 │   ├── nginx.conf         # Nginx reverse proxy config
 │   └── certs/             # TLS certificates
 ├── excelmanus/
-│   ├── context_budget.py  # Context budget manager
-│   ├── model_probe.py     # Model metadata probing (context window auto-correction)
+│   ├── config.py           # Environment variables & config loading
+│   ├── context_budget.py   # Context budget manager
+│   ├── model_probe.py      # Model metadata probing (context window auto-correction)
 │   ├── security/
-│   │   └── cipher.py      # Fernet symmetric encryption (API Key / Token encrypted storage)
+│   │   └── cipher.py       # Fernet symmetric encryption (API Key / Token encrypted storage)
 │   └── embedding/
-│       ├── semantic_skill_router.py  # Semantic skill routing
+│       ├── client.py               # Embedding API client
+│       ├── semantic_memory.py      # Semantic memory retrieval
+│       ├── semantic_registry.py    # Semantic file registry
+│       ├── semantic_skill_router.py # Semantic skill routing
 │       └── error_solution_store.py  # Error→solution vector index
 ├── .env                   # Local development environment variables
 ├── mcp.json               # MCP server configuration

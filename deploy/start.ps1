@@ -87,6 +87,9 @@ if ($Update) {
     & "$($Script:SCRIPT_DIR)\update.ps1" -Yes
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[--] 更新完成，继续启动..." -ForegroundColor Cyan
+    } else {
+        Write-Host "[XX] 更新失败（退出码 $LASTEXITCODE），已停止启动。" -ForegroundColor Red
+        exit $LASTEXITCODE
     }
 }
 

@@ -9,11 +9,14 @@
 | `EXCELMANUS_API_KEY` | LLM API Key（必填） | — |
 | `EXCELMANUS_BASE_URL` | LLM API 地址（必填） | — |
 | `EXCELMANUS_MODEL` | 模型名称（必填；Gemini 可从 BASE_URL 自动提取） | — |
+| `EXCELMANUS_PROTOCOL` | 主模型协议类型（`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`） | `auto` |
 | `EXCELMANUS_MAX_ITERATIONS` | Agent 最大迭代轮数 | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API 会话空闲超时（秒） | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | API 最大并发会话数 | `1000` |
 | `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `.` |
+| `EXCELMANUS_DATA_ROOT` | 集中数据目录 | `~/.excelmanus/data` |
+| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`/`docker`），`auto` 自动推断 | `auto` |
 | `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EXCELMANUS_EXTERNAL_SAFE_MODE` | 对外安全模式（隐藏思考/工具细节与路由元信息） | `true` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔） | `http://localhost:3000, http://localhost:5173` |
@@ -38,6 +41,10 @@
 | `EXCELMANUS_AUX_API_KEY` | AUX API Key（路由 + 子代理默认模型 + 窗口顾问） | — |
 | `EXCELMANUS_AUX_BASE_URL` | AUX Base URL（未设置时回退主配置） | — |
 | `EXCELMANUS_AUX_MODEL` | AUX 模型名称（未设置时回退主模型） | — |
+| `EXCELMANUS_AUX_PROTOCOL` | AUX 模型协议类型 | `auto` |
+| `EXCELMANUS_CLAWHUB_ENABLED` | 是否启用 ClawHub 技能市场 | `true` |
+| `EXCELMANUS_CLAWHUB_REGISTRY_URL` | ClawHub 注册中心 URL | `https://clawhub.ai` |
+| `EXCELMANUS_CLAWHUB_PREFER_CLI` | ClawHub 优先使用 CLI 安装 | `true` |
 | `EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS` | 工具结果全局硬截断长度（0 表示不限制） | `12000` |
 
 ## Subagent 配置
@@ -145,9 +152,11 @@
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
+| `EXCELMANUS_VLM_ENABLED` | VLM 总开关（`false` 时即使配置了 VLM 也回退主模型） | `true` |
 | `EXCELMANUS_VLM_API_KEY` | VLM API Key（可选） | — |
 | `EXCELMANUS_VLM_BASE_URL` | VLM Base URL（可选） | — |
 | `EXCELMANUS_VLM_MODEL` | VLM 模型名称（可选） | — |
+| `EXCELMANUS_VLM_PROTOCOL` | VLM 模型协议类型 | `auto` |
 | `EXCELMANUS_VLM_TIMEOUT_SECONDS` | VLM 请求超时（秒） | `300` |
 | `EXCELMANUS_VLM_MAX_RETRIES` | VLM 最大重试次数 | `1` |
 | `EXCELMANUS_VLM_RETRY_BASE_DELAY_SECONDS` | VLM 重试基础延迟（秒） | `5.0` |

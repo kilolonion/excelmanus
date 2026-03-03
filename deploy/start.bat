@@ -28,6 +28,12 @@ REM =======================================================================
 
 setlocal enabledelayedexpansion
 
+REM -- Fast path for help so it does not trigger clone/.env interactive setup --
+for %%A in (%*) do (
+    if /i "%%~A"=="--help" goto :show_help
+    if /i "%%~A"=="-h" goto :show_help
+)
+
 REM -- Locate project root --
 set "SCRIPT_DIR=%~dp0"
 pushd "%SCRIPT_DIR%.."
@@ -110,6 +116,8 @@ set "BACKEND_ONLY=0"
 set "FRONTEND_ONLY=0"
 set "BACKEND_PORT=8000"
 set "FRONTEND_PORT=3000"
+set "BACKEND_PORT_FROM_ARG=0"
+set "FRONTEND_PORT_FROM_ARG=0"
 set "SKIP_DEPS=0"
 set "AUTO_OPEN=1"
 set "BACKEND_PID="
@@ -122,13 +130,37 @@ if /i "%~1"=="--prod"           ( set "PRODUCTION=1"    & shift & goto :parse_ar
 if /i "%~1"=="--production"     ( set "PRODUCTION=1"    & shift & goto :parse_args )
 if /i "%~1"=="--backend-only"   ( set "BACKEND_ONLY=1"  & shift & goto :parse_args )
 if /i "%~1"=="--frontend-only"  ( set "FRONTEND_ONLY=1" & shift & goto :parse_args )
-if /i "%~1"=="--backend-port"   ( set "BACKEND_PORT=%~2" & shift & shift & goto :parse_args )
-if /i "%~1"=="--frontend-port"  ( set "FRONTEND_PORT=%~2" & shift & shift & goto :parse_args )
+if /i "%~1"=="--backend-port"   goto :arg_backend_port
+if /i "%~1"=="--frontend-port"  goto :arg_frontend_port
 if /i "%~1"=="--skip-deps"      ( set "SKIP_DEPS=1"    & shift & goto :parse_args )
 if /i "%~1"=="--no-open"        ( set "AUTO_OPEN=0"    & shift & goto :parse_args )
 if /i "%~1"=="--help"           ( goto :show_help )
 if /i "%~1"=="-h"               ( goto :show_help )
 echo [XX] 未知参数: %~1 [使用 --help 查看帮助]
+goto :exit_with_pause
+
+:arg_backend_port
+if "%~2"=="" goto :arg_backend_port_missing
+set "BACKEND_PORT=%~2"
+set "BACKEND_PORT_FROM_ARG=1"
+shift
+shift
+goto :parse_args
+
+:arg_frontend_port
+if "%~2"=="" goto :arg_frontend_port_missing
+set "FRONTEND_PORT=%~2"
+set "FRONTEND_PORT_FROM_ARG=1"
+shift
+shift
+goto :parse_args
+
+:arg_backend_port_missing
+echo [XX] --backend-port 缺少端口值
+goto :exit_with_pause
+
+:arg_frontend_port_missing
+echo [XX] --frontend-port 缺少端口值
 goto :exit_with_pause
 
 :args_done
@@ -166,8 +198,8 @@ if exist "%PROJECT_ROOT%\.env.local" (
 )
 
 REM -- Env vars override ports --
-if defined EXCELMANUS_BACKEND_PORT  set "BACKEND_PORT=%EXCELMANUS_BACKEND_PORT%"
-if defined EXCELMANUS_FRONTEND_PORT set "FRONTEND_PORT=%EXCELMANUS_FRONTEND_PORT%"
+if "%BACKEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_BACKEND_PORT  set "BACKEND_PORT=%EXCELMANUS_BACKEND_PORT%"
+if "%FRONTEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_FRONTEND_PORT set "FRONTEND_PORT=%EXCELMANUS_FRONTEND_PORT%"
 
 REM -- Find Python interpreter --
 set "PYTHON_BIN="
@@ -274,6 +306,16 @@ if "%PRODUCTION%"=="1" (
 )
 
 :deps_done
+
+REM -- Python fallback when deps are skipped and .venv is absent --
+if "%FRONTEND_ONLY%"=="0" if "%PYTHON_BIN%"=="" (
+    where python >nul 2>&1
+    if errorlevel 1 (
+        echo [XX] 未找到 Python，请先安装: https://www.python.org/
+        goto :exit_with_pause
+    )
+    set "PYTHON_BIN=python"
+)
 
 REM -- Kill leftover ports --
 if "%FRONTEND_ONLY%"=="0" call :kill_port %BACKEND_PORT%
