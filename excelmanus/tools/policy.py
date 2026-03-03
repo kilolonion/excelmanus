@@ -226,25 +226,6 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# ── 视觉工具集合 ──────────────────────────────────────────────
-
-_VISION_TOOLS: frozenset[str] = frozenset({
-    "read_image",
-    "rebuild_excel_from_spec",
-    "verify_excel_replica",
-    "extract_table_spec",
-})
-
-# ── 基于 task_tags 的工具排除映射（旧版黑名单，保留供兼容引用） ──
-
-TAG_EXCLUDED_TOOLS: dict[str, frozenset[str]] = {
-    "simple_read": _VISION_TOOLS | frozenset({"create_excel_chart"}),
-    "formatting": _VISION_TOOLS | frozenset({"create_excel_chart"}),
-    "chart": _VISION_TOOLS,
-    "data_fill": _VISION_TOOLS | frozenset({"create_excel_chart"}),
-}
-
-
 # ── 基于 LLM 路由标签的工具域白名单映射 ────────────────────────
 # route_tag → 该路由下允许暴露的域工具白名单。
 # 不在白名单中的域工具将被隐藏（元工具不受影响）。

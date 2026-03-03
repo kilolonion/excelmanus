@@ -458,7 +458,7 @@ class MetaToolBuilder:
                 if s.get("function", {}).get("name", "") not in _meta_blocked
             ]
 
-        # 基于 LLM 路由标签的域工具白名单过滤（替代 TAG_EXCLUDED_TOOLS 黑名单）
+        # 基于 LLM 路由标签的域工具白名单过滤（ROUTE_TOOL_SCOPE）
         if route_tool_tags:
             allowed: set[str] = set()
             _has_all = False

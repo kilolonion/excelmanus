@@ -498,6 +498,39 @@ class TestSessionManagerExportImport:
         assert (ws_dir / "report.xlsx").read_bytes() == file_content
 
     @pytest.mark.asyncio
+    async def test_import_v2_with_excel_previews(self, tmp_path: Path):
+        """导入 v2 EMX 格式，恢复 excel_previews。"""
+        mgr, db, ch = self._make_manager(tmp_path)
+        previews = [
+            {
+                "tool_call_id": "tc_preview_1",
+                "file_path": "sales.xlsx",
+                "sheet": "Sheet1",
+                "columns": ["A", "B", "C"],
+                "rows": [["1", "Alice", "100"], ["2", "Bob", "200"]],
+                "total_rows": 2,
+                "truncated": False,
+            },
+        ]
+        parsed = parse_emx({
+            "format": EMX_FORMAT_ID,
+            "version": "2.0.0",
+            "session": {"id": "v2p", "title": "预览会话"},
+            "messages": [{"role": "user", "content": "show data"}],
+            "excel_previews": previews,
+        })
+        result = await mgr.import_full_session(parsed)
+        assert result["message_count"] == 1
+
+        # 验证 preview 已写入
+        loaded_previews = ch.load_excel_previews(result["session_id"])
+        assert len(loaded_previews) == 1
+        assert loaded_previews[0]["tool_call_id"] == "tc_preview_1"
+        assert loaded_previews[0]["file_path"] == "sales.xlsx"
+        assert loaded_previews[0]["columns"] == ["A", "B", "C"]
+        assert len(loaded_previews[0]["rows"]) == 2
+
+    @pytest.mark.asyncio
     async def test_import_no_chat_history_raises(self, tmp_path: Path):
         """聊天记录存储未启用时抛异常。"""
         from excelmanus.session import SessionManager
