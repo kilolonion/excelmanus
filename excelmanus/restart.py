@@ -91,11 +91,20 @@ def _build_helper_script(port: int, entry: str) -> str:
     """)
 
 
-def _do_restart(port: int, entry: str) -> None:
-    """核心重启逻辑：生成临时脚本 → Popen 启动 → os._exit(0)。
+def _do_restart(port: int, entry: str, *, deploy_mode: str = "standalone") -> None:
+    """核心重启逻辑。
+
+    - standalone: 生成临时脚本 → Popen 启动新进程 → os._exit(0)
+    - server/docker: 直接 os._exit(0)，依赖 systemd/supervisor/Docker restart 策略
 
     此函数应在独立线程中调用，因为它会调用 os._exit(0)。
     """
+    # 服务器/Docker 模式：直接退出，让进程管理器负责重启
+    if deploy_mode in ("server", "docker"):
+        logger.info("部署模式=%s，直接退出进程（依赖进程管理器重启）...", deploy_mode)
+        time.sleep(1)
+        os._exit(0)
+        return  # unreachable, for clarity
     script_path = os.path.join(tempfile.gettempdir(), _HELPER_SCRIPT_NAME)
     script_content = _build_helper_script(port, entry)
 
@@ -136,6 +145,20 @@ def _do_restart(port: int, entry: str) -> None:
     os._exit(0)
 
 
+def _get_deploy_mode() -> str:
+    """从已加载的配置中获取 deploy_mode，回退到环境变量。"""
+    try:
+        from excelmanus.api import _config
+        if _config is not None:
+            return _config.deploy_mode
+    except Exception:
+        pass
+    raw = os.environ.get("EXCELMANUS_DEPLOY_MODE", "").strip().lower()
+    if raw in ("standalone", "server", "docker"):
+        return raw
+    return "standalone"
+
+
 async def schedule_restart(
     port: int = 8000,
     entry: str = "from excelmanus.api import main; main()",
@@ -149,7 +172,8 @@ async def schedule_restart(
         delay: 触发重启前的等待秒数（确保 HTTP 响应已发送完毕）。
     """
     await asyncio.sleep(delay)
-    t = threading.Thread(target=_do_restart, args=(port, entry), daemon=False)
+    mode = _get_deploy_mode()
+    t = threading.Thread(target=_do_restart, args=(port, entry), kwargs={"deploy_mode": mode}, daemon=False)
     t.start()
 
 
@@ -165,4 +189,4 @@ def schedule_restart_sync(
         port: 服务监听端口。
         entry: 新进程的 Python 入口代码。
     """
-    _do_restart(port, entry)
+    _do_restart(port, entry, deploy_mode=_get_deploy_mode())

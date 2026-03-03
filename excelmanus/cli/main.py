@@ -194,6 +194,26 @@ async def _async_main() -> None:
         )
     render_welcome(console, config, version=__version__, skill_count=skill_count, mcp_count=mcp_count)
 
+    # ── 后台静默检查更新（非阻塞线程） ──────────────────
+    def _bg_update_check() -> None:
+        try:
+            from excelmanus.updater import check_for_updates
+            from pathlib import Path
+            root = Path(__file__).resolve().parent.parent.parent
+            info = check_for_updates(root)
+            if info.has_update:
+                console.print(
+                    f"\n  [{THEME.GOLD}]⬆ 发现新版本 v{info.latest}"
+                    f"（当前 v{info.current}，{info.commits_behind} 个新提交）"
+                    f"\n    使用 Web 设置页「版本管理」或手动执行 git pull 更新[/{THEME.GOLD}]",
+                    highlight=False,
+                )
+        except Exception:
+            pass  # 静默失败，不干扰用户
+
+    import threading
+    threading.Thread(target=_bg_update_check, daemon=True).start()
+
     # ── REPL 期间抑制 INFO/DEBUG 日志输出到终端，避免噪音 ──
     _excelmanus_logger = logging.getLogger("excelmanus")
     _prev_handler_levels: list[tuple[logging.Handler, int]] = []

@@ -7,11 +7,14 @@
 
 from __future__ import annotations
 
+import asyncio
+import json as _json
 import shutil
+import subprocess
 from pathlib import Path
 
 from fastapi import APIRouter, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from excelmanus.logger import get_logger
@@ -19,6 +22,9 @@ from excelmanus.logger import get_logger
 logger = get_logger("api.version")
 
 router = APIRouter()
+
+# 递增此常量以表示 API schema 不兼容变更（仅在破坏性变更时递增）
+_API_SCHEMA_VERSION = 1
 
 
 # ── 辅助函数 ──────────────────────────────────────────
@@ -43,20 +49,104 @@ def _is_admin_or_noauth(request: Request) -> bool:
     return False
 
 
+def _get_git_commit(root: Path) -> str | None:
+    """读取当前 git short commit hash，失败返回 None。"""
+    try:
+        r = subprocess.run(
+            ["git", "rev-parse", "--short", "HEAD"],
+            cwd=str(root), capture_output=True, text=True, timeout=5,
+        )
+        return r.stdout.strip() or None if r.returncode == 0 else None
+    except Exception:
+        return None
+
+
+def _get_frontend_build_id(root: Path) -> str | None:
+    """读取 Next.js BUILD_ID 文件，不存在返回 None。"""
+    build_id_file = root / "web" / ".next" / "BUILD_ID"
+    try:
+        if build_id_file.is_file():
+            return build_id_file.read_text(encoding="utf-8").strip() or None
+    except Exception:
+        pass
+    return None
+
+
+def _get_deploy_meta(root: Path) -> dict:
+    """读取 .deploy_meta.json，不存在或解析失败返回空 dict。"""
+    meta_file = root / ".deploy_meta.json"
+    try:
+        if meta_file.is_file():
+            return _json.loads(meta_file.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+    return {}
+
+
+def _check_db_migration_needed(root: Path) -> bool:
+    """检查数据库是否需要 schema 迁移。"""
+    try:
+        from excelmanus.updater import verify_database_migration
+        ok, msg = verify_database_migration(root)
+        return ok and "待迁移" in msg
+    except Exception:
+        return False
+
+
+def get_manifest_data() -> dict:
+    """构建并返回发布清单数据（供 manifest 端点和 health 端点共用）。"""
+    import excelmanus
+
+    root = _get_project_root()
+    meta = _get_deploy_meta(root)
+    git_commit = _get_git_commit(root)
+    build_id = _get_frontend_build_id(root)
+
+    return {
+        "release_id": meta.get("release_id") or git_commit or "unknown",
+        "backend_version": excelmanus.__version__,
+        "api_schema_version": _API_SCHEMA_VERSION,
+        "frontend_build_id": build_id,
+        "git_commit": git_commit,
+        "deployed_at": meta.get("deployed_at"),
+        "deploy_mode": meta.get("deploy_mode"),
+        "topology": meta.get("topology"),
+        "requires_db_migration": _check_db_migration_needed(root),
+    }
+
+
+# ── 发布清单（Manifest） ─────────────────────────────
+
+
+@router.get("/api/v1/version/manifest")
+async def version_manifest(request: Request) -> JSONResponse:
+    """返回当前实例的发布元数据清单，供前端版本兼容校验使用。"""
+    return JSONResponse(content=get_manifest_data())
+
+
 # ── 版本检查 ──────────────────────────────────────────
 
 
 @router.get("/api/v1/version/check")
 async def version_check(request: Request) -> JSONResponse:
-    """检查当前版本与可用更新。"""
+    """检查当前版本与可用更新。
+
+    Query params:
+        force: 设为 1 跳过 TTL 缓存强制刷新（用户手动点击"检查更新"时使用）。
+    """
     import asyncio
+    from functools import partial
+
     from excelmanus.updater import check_for_updates, get_current_version
 
     root = _get_project_root()
     current = get_current_version(root)
+    force = request.query_params.get("force", "") == "1"
     try:
         loop = asyncio.get_running_loop()
-        info = await loop.run_in_executor(None, check_for_updates, root)
+        info = await loop.run_in_executor(
+            None, partial(check_for_updates, root, force=force),
+        )
         return JSONResponse(content={
             "current": current,
             "latest": info.latest,
@@ -64,6 +154,7 @@ async def version_check(request: Request) -> JSONResponse:
             "commits_behind": info.commits_behind,
             "release_notes": info.release_notes,
             "check_method": info.check_method,
+            "check_failed": info.check_failed,
         })
     except Exception as e:
         logger.warning("版本检查失败: %s", e)
@@ -74,6 +165,7 @@ async def version_check(request: Request) -> JSONResponse:
             "commits_behind": 0,
             "release_notes": "",
             "check_method": "error",
+            "check_failed": True,
             "error": str(e),
         })
 
@@ -190,6 +282,15 @@ async def version_update_apply(body: UpdateApplyRequest, request: Request) -> JS
     if not _is_admin_or_noauth(request):
         return _error(403, "需要管理员权限")
 
+    # 部署模式校验
+    from excelmanus.api import _config
+    if _config is not None:
+        if _config.is_docker:
+            return _error(
+                400,
+                "容器化部署无法执行本地更新，请重新拉取镜像并重建容器。",
+            )
+
     import asyncio
     from excelmanus.updater import perform_update
 
@@ -217,6 +318,87 @@ async def version_update_apply(body: UpdateApplyRequest, request: Request) -> JS
             "steps_completed": result.steps_completed,
             "error": result.error,
             "needs_restart": result.needs_restart,
+        },
+    )
+
+
+@router.post("/api/v1/version/update/stream")
+async def version_update_stream(body: UpdateApplyRequest, request: Request) -> StreamingResponse:
+    """以 SSE 流式推送更新进度，最终发送 done 或 error 事件。
+
+    事件格式：
+        event: progress
+        data: {"message": "...", "percent": 50}
+
+        event: done
+        data: {"success": true, "old_version": "...", "new_version": "...", ...}
+
+        event: error
+        data: {"error": "..."}
+    """
+    if not _is_admin_or_noauth(request):
+        async def _forbidden():
+            yield f"event: error\ndata: {_json.dumps({'error': '需要管理员权限'})}\n\n"
+        return StreamingResponse(_forbidden(), media_type="text/event-stream", status_code=403)
+
+    from excelmanus.updater import perform_update
+
+    root = _get_project_root()
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _progress_cb(msg: str, pct: int) -> None:
+        """在 executor 线程中调用，安全地投递到 asyncio Queue。"""
+        asyncio.run_coroutine_threadsafe(
+            queue.put({"event": "progress", "message": msg, "percent": pct}),
+            loop,
+        )
+
+    async def _run_update() -> None:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: perform_update(
+                    root,
+                    skip_backup=body.skip_backup,
+                    skip_deps=body.skip_deps,
+                    use_mirror=body.use_mirror,
+                    progress_cb=_progress_cb,
+                ),
+            )
+            await queue.put({
+                "event": "done",
+                "success": result.success,
+                "old_version": result.old_version,
+                "new_version": result.new_version,
+                "backup_dir": result.backup_dir,
+                "steps_completed": result.steps_completed,
+                "error": result.error,
+                "needs_restart": result.needs_restart,
+            })
+        except Exception as exc:
+            logger.error("流式更新异常: %s", exc, exc_info=True)
+            await queue.put({"event": "error", "error": str(exc)})
+        finally:
+            await queue.put(None)  # sentinel
+
+    asyncio.create_task(_run_update())
+
+    async def _event_generator():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            event_type = item.pop("event", "progress")
+            yield f"event: {event_type}\ndata: {_json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
         },
     )
 
@@ -289,3 +471,235 @@ async def version_migrate_data(request: Request) -> JSONResponse:
     loop = asyncio.get_running_loop()
     stats = await loop.run_in_executor(None, migrate_data_from_project, source)
     return JSONResponse(content={"status": "ok", "migrated": stats})
+
+
+# ── 远程部署 ──────────────────────────────────────────
+
+
+@router.get("/api/v1/deploy/status")
+async def deploy_status(request: Request) -> JSONResponse:
+    """获取部署环境状态（服务器配置、制品列表、部署历史）。"""
+    import asyncio
+    from excelmanus.updater import get_deploy_status
+
+    loop = asyncio.get_running_loop()
+    status = await loop.run_in_executor(None, get_deploy_status, _get_project_root())
+    return JSONResponse(content=status)
+
+
+@router.post("/api/v1/deploy/build")
+async def deploy_build_artifact(request: Request) -> JSONResponse:
+    """本地构建前端制品（npm ci + npm run build + tar.gz 打包）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.updater import build_frontend_artifact
+
+    root = _get_project_root()
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, build_frontend_artifact, root)
+
+    return JSONResponse(
+        status_code=200 if result.success else 500,
+        content={
+            "success": result.success,
+            "version": result.version,
+            "artifact_path": result.artifact_path,
+            "steps_completed": result.steps_completed,
+            "error": result.error,
+        },
+    )
+
+
+class DeployExecuteRequest(BaseModel):
+    target: str = Field(default="full", description="部署目标: full | backend | frontend")
+    skip_build: bool = Field(default=False, description="跳过前端构建（使用已有制品）")
+    artifact_path: str = Field(default="", description="已有制品路径（skip_build=True 时需要）")
+    from_local: bool = Field(default=True, description="从本地 rsync 同步代码")
+    skip_deps: bool = Field(default=False, description="跳过远端依赖安装")
+
+
+@router.post("/api/v1/deploy/execute")
+async def deploy_execute(body: DeployExecuteRequest, request: Request) -> JSONResponse:
+    """执行远程部署（构建 + 推送，仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.updater import DeployConfig, perform_remote_deploy
+
+    root = _get_project_root()
+    config = DeployConfig(
+        target=body.target,
+        skip_build=body.skip_build,
+        artifact_path=body.artifact_path,
+        from_local=body.from_local,
+        skip_deps=body.skip_deps,
+    )
+
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None, lambda: perform_remote_deploy(root, config=config),
+    )
+
+    return JSONResponse(
+        status_code=200 if result.success else 500,
+        content={
+            "success": result.success,
+            "version": result.version,
+            "artifact_path": result.artifact_path,
+            "steps_completed": result.steps_completed,
+            "deploy_output": result.deploy_output,
+            "error": result.error,
+        },
+    )
+
+
+# ── 结构化部署历史 ────────────────────────────────────
+
+
+@router.get("/api/v1/deploy/history")
+async def deploy_history(request: Request) -> JSONResponse:
+    """返回结构化部署历史（供回滚面板使用）。"""
+    from excelmanus.updater import get_deploy_history_structured
+
+    history = get_deploy_history_structured(_get_project_root())
+    return JSONResponse(content={"history": history})
+
+
+# ── 远程回滚 ──────────────────────────────────────────
+
+
+class RollbackRequest(BaseModel):
+    target: str = Field(default="full", description="回滚目标: full | backend | frontend")
+    release_id: str = Field(default="", description="目标 release_id（与 commit 二选一）")
+    commit: str = Field(default="", description="目标 git commit hash（与 release_id 二选一）")
+    skip_deps: bool = Field(default=False, description="跳过依赖重装")
+
+
+@router.post("/api/v1/deploy/rollback")
+async def deploy_rollback(body: RollbackRequest, request: Request) -> JSONResponse:
+    """执行远程回滚（仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    import asyncio
+    from excelmanus.updater import perform_remote_rollback
+
+    root = _get_project_root()
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: perform_remote_rollback(
+            root,
+            target=body.target,
+            release_id=body.release_id,
+            commit=body.commit,
+            skip_deps=body.skip_deps,
+        ),
+    )
+
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@router.post("/api/v1/deploy/rollback/stream")
+async def deploy_rollback_stream(body: RollbackRequest, request: Request) -> StreamingResponse:
+    """以 SSE 流式推送回滚进度。"""
+    if not _is_admin_or_noauth(request):
+        async def _forbidden():
+            yield f"event: error\ndata: {_json.dumps({'error': '需要管理员权限'})}\n\n"
+        return StreamingResponse(_forbidden(), media_type="text/event-stream", status_code=403)
+
+    import asyncio
+    from excelmanus.updater import perform_remote_rollback
+
+    root = _get_project_root()
+    queue: asyncio.Queue[dict | None] = asyncio.Queue()
+    loop = asyncio.get_running_loop()
+
+    def _progress_cb(msg: str, pct: int) -> None:
+        asyncio.run_coroutine_threadsafe(
+            queue.put({"event": "progress", "message": msg, "percent": pct}),
+            loop,
+        )
+
+    async def _run_rollback() -> None:
+        try:
+            result = await loop.run_in_executor(
+                None,
+                lambda: perform_remote_rollback(
+                    root,
+                    target=body.target,
+                    release_id=body.release_id,
+                    commit=body.commit,
+                    skip_deps=body.skip_deps,
+                    progress_cb=_progress_cb,
+                ),
+            )
+            result["event"] = "done"
+            await queue.put(result)
+        except Exception as exc:
+            logger.error("流式回滚异常: %s", exc, exc_info=True)
+            await queue.put({"event": "error", "error": str(exc)})
+        finally:
+            await queue.put(None)
+
+    asyncio.create_task(_run_rollback())
+
+    async def _event_generator():
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            event_type = item.pop("event", "progress")
+            yield f"event: {event_type}\ndata: {_json.dumps(item, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        _event_generator(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+# ── 灰度（Canary）管理 ───────────────────────────────
+
+
+@router.get("/api/v1/deploy/canary/status")
+async def canary_status(request: Request) -> JSONResponse:
+    """获取当前灰度部署状态。"""
+    from excelmanus.updater import get_canary_status
+
+    status = get_canary_status(_get_project_root())
+    return JSONResponse(content=status)
+
+
+@router.post("/api/v1/deploy/canary/promote")
+async def canary_promote(request: Request) -> JSONResponse:
+    """手动提升灰度权重到下一阶梯。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    from excelmanus.updater import canary_promote as _canary_promote
+
+    result = _canary_promote(_get_project_root())
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(status_code=status_code, content=result)
+
+
+@router.post("/api/v1/deploy/canary/abort")
+async def canary_abort(request: Request) -> JSONResponse:
+    """中止灰度，回退到 0%。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    from excelmanus.updater import canary_abort as _canary_abort
+
+    result = _canary_abort(_get_project_root())
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(status_code=status_code, content=result)
