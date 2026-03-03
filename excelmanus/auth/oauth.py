@@ -163,45 +163,49 @@ async def google_exchange_code(code: str, config_store=None) -> OAuthUserInfo | 
         return None
 
     proxy = _get_oauth_proxy()
-    async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
-        resp = await client.post(
-            GOOGLE_TOKEN_URL,
-            data={
-                "client_id": client_id,
-                "client_secret": client_secret,
-                "code": code,
-                "redirect_uri": redirect_uri,
-                "grant_type": "authorization_code",
-            },
-        )
-        if resp.status_code != 200:
-            logger.warning("Google token exchange failed: %s", resp.text)
-            return None
+    try:
+        async with httpx.AsyncClient(timeout=15, proxy=proxy) as client:
+            resp = await client.post(
+                GOOGLE_TOKEN_URL,
+                data={
+                    "client_id": client_id,
+                    "client_secret": client_secret,
+                    "code": code,
+                    "redirect_uri": redirect_uri,
+                    "grant_type": "authorization_code",
+                },
+            )
+            if resp.status_code != 200:
+                logger.warning("Google token exchange failed: %s", resp.text)
+                return None
 
-        token_data = resp.json()
-        access_token = token_data.get("access_token")
-        if not access_token:
-            return None
+            token_data = resp.json()
+            access_token = token_data.get("access_token")
+            if not access_token:
+                return None
 
-        user_resp = await client.get(
-            GOOGLE_USERINFO_URL,
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
-        if user_resp.status_code != 200:
-            return None
+            user_resp = await client.get(
+                GOOGLE_USERINFO_URL,
+                headers={"Authorization": f"Bearer {access_token}"},
+            )
+            if user_resp.status_code != 200:
+                return None
 
-        info = user_resp.json()
-        email = info.get("email")
-        if not email:
-            return None
+            info = user_resp.json()
+            email = info.get("email")
+            if not email:
+                return None
 
-        return OAuthUserInfo(
-            provider="google",
-            oauth_id=info.get("sub", ""),
-            email=email,
-            display_name=info.get("name", ""),
-            avatar_url=info.get("picture"),
-        )
+            return OAuthUserInfo(
+                provider="google",
+                oauth_id=info.get("sub", ""),
+                email=email,
+                display_name=info.get("name", ""),
+                avatar_url=info.get("picture"),
+            )
+    except (httpx.ConnectError, httpx.TimeoutException, httpx.RequestError) as exc:
+        logger.warning("Google OAuth network error (proxy=%s): %s", proxy, exc)
+        return None
 
 
 # ── QQ OAuth （QQ 互联） ─────────────────────────────────
@@ -267,7 +271,7 @@ async def qq_exchange_code(code: str, config_store=None) -> OAuthUserInfo | None
         token_data = resp.json()
         access_token = token_data.get("access_token")
         if not access_token:
-            logger.warning("QQ token missing: %s", token_data)
+            logger.warning("QQ token missing from response (keys: %s)", list(token_data.keys()))
             return None
 
         # 2) 获取 openid

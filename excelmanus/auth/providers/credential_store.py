@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import logging
-import os
 import uuid
 from datetime import datetime, timezone
-from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.auth.providers.base import (
@@ -14,77 +12,13 @@ from excelmanus.auth.providers.base import (
     AuthProfileSummary,
     ValidatedCredential,
 )
+from excelmanus.security.cipher import TokenCipher as _TokenCipher
+from excelmanus.security.cipher import derive_fernet_key as _derive_fernet_key
 
 if TYPE_CHECKING:
     from excelmanus.db_adapter import ConnectionAdapter
 
 logger = logging.getLogger(__name__)
-
-# ── Fernet 加密 ──────────────────────────────────────────────
-
-
-def _derive_fernet_key() -> bytes | None:
-    """派生 Fernet 加密密钥。优先级：
-
-    1. EXCELMANUS_SECRET_KEY 环境变量
-    2. ~/.excelmanus/data/.secret_key 自动生成
-    3. None（不加密，仅开发环境）
-    """
-    secret = os.environ.get("EXCELMANUS_SECRET_KEY")
-    if secret:
-        import hashlib
-        raw = hashlib.sha256(secret.encode()).digest()
-        import base64
-        return base64.urlsafe_b64encode(raw)
-
-    key_dir = Path.home() / ".excelmanus" / "data"
-    key_file = key_dir / ".secret_key"
-    if key_file.exists():
-        return key_file.read_bytes().strip()
-
-    try:
-        from cryptography.fernet import Fernet
-        key = Fernet.generate_key()
-        key_dir.mkdir(parents=True, exist_ok=True)
-        key_file.write_bytes(key)
-        key_file.chmod(0o600)
-        logger.info("已生成加密密钥: %s", key_file)
-        return key
-    except Exception:
-        logger.warning("无法生成加密密钥，token 将以明文存储", exc_info=True)
-        return None
-
-
-class _TokenCipher:
-    """Token 加解密封装。无密钥时退化为明文。"""
-
-    def __init__(self) -> None:
-        self._fernet = None
-        key = _derive_fernet_key()
-        if key:
-            try:
-                from cryptography.fernet import Fernet
-                self._fernet = Fernet(key)
-            except Exception:
-                logger.warning("Fernet 初始化失败", exc_info=True)
-
-    def encrypt(self, plaintext: str | None) -> str | None:
-        if not plaintext:
-            return plaintext
-        if self._fernet:
-            return self._fernet.encrypt(plaintext.encode()).decode()
-        return plaintext
-
-    def decrypt(self, ciphertext: str | None) -> str | None:
-        if not ciphertext:
-            return ciphertext
-        if self._fernet:
-            try:
-                return self._fernet.decrypt(ciphertext.encode()).decode()
-            except Exception:
-                logger.warning("Token 解密失败，可能密钥已变更")
-                return None
-        return ciphertext
 
 
 # ── CredentialStore ──────────────────────────────────────────
