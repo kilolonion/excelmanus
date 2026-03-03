@@ -533,7 +533,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
   );
 });
 
-const MAX_FILE_PATH_LENGTH = 260;
+const MAX_FILE_PATH_LENGTH = 4096;
 
 function isPlausibleFilePath(p: string): boolean {
   if (!p || p.length > MAX_FILE_PATH_LENGTH) return false;
@@ -920,6 +920,25 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       }
       return null;
     }
+    case "tool_notice":
+      return (
+        <div className="flex items-center gap-2 my-1 px-3 py-1.5 rounded-md border border-blue-500/20 bg-blue-500/5 text-xs font-mono text-blue-700 dark:text-blue-400">
+          <Wrench className="h-3.5 w-3.5 flex-shrink-0 text-blue-500/70" />
+          <span className="truncate" title={block.argsSummary}>{block.argsSummary}</span>
+        </div>
+      );
+    case "reasoning_notice":
+      return (
+        <details className="my-1 rounded-md border border-purple-500/20 bg-purple-500/5 text-xs text-purple-700 dark:text-purple-400" open>
+          <summary className="flex items-center gap-2 px-3 py-1.5 cursor-pointer select-none">
+            <Brain className="h-3.5 w-3.5 flex-shrink-0 text-purple-500/70" />
+            <span className="font-medium">推理过程</span>
+          </summary>
+          <div className="px-3 pb-2 whitespace-pre-wrap break-words max-h-60 overflow-y-auto text-purple-600/80 dark:text-purple-400/80">
+            {block.content}
+          </div>
+        </details>
+      );
     default:
       return null;
   }

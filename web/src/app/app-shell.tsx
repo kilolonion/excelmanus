@@ -8,6 +8,7 @@ import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { useVersionPoll } from "@/hooks/use-version-poll";
 import { VersionUpdateToast } from "@/components/VersionUpdateToast";
+import { GlobalRestartOverlay } from "@/components/GlobalRestartOverlay";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 const STANDALONE_PATHS = ["/admin"];
@@ -49,7 +50,12 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   // bypass 路径（login/register/callback）立即渲染，不等 /health
   if (isBypass) {
-    return <>{children}</>;
+    return (
+      <>
+        {children}
+        <GlobalRestartOverlay />
+      </>
+    );
   }
 
   if (!ready) {
@@ -79,6 +85,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
       <AuthProvider authEnabled={checked && authEnabled === true}>
         {children}
         {versionToast}
+        <GlobalRestartOverlay />
       </AuthProvider>
     );
   }
@@ -87,6 +94,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     <AuthProvider authEnabled={checked && authEnabled === true}>
       <ClientLayout>{children}</ClientLayout>
       {versionToast}
+      <GlobalRestartOverlay />
     </AuthProvider>
   );
 }

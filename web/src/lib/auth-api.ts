@@ -957,3 +957,101 @@ export async function refreshCodexToken(): Promise<{
   }
   return res.json();
 }
+
+// ── Channel Binding API ───────────────────────────────────
+
+export interface ChannelLinkInfo {
+  id: string;
+  user_id: string;
+  channel: string;
+  platform_id: string;
+  display_name: string | null;
+  linked_at: string;
+}
+
+export interface BindCodeInfo {
+  code: string;
+  channel: string;
+  platform_id: string;
+  platform_display_name: string;
+}
+
+/**
+ * 获取当前用户已绑定的渠道列表。
+ */
+export async function fetchChannelLinks(): Promise<{ links: ChannelLinkInfo[] }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/channel/links"), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `获取渠道绑定失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 查询绑定码信息（用户输入绑定码后预览）。
+ */
+export async function fetchBindCodeInfo(code: string): Promise<BindCodeInfo | null> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/channel/bind/info?code=${encodeURIComponent(code)}`), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    if (res.status === 404) return null;
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `查询绑定码失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 确认渠道绑定（输入绑定码后确认）。
+ */
+export async function confirmChannelBind(code: string): Promise<{
+  ok: boolean;
+  channel?: string;
+  platform_id?: string;
+  error?: string;
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/channel/bind/confirm"), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ code }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `绑定失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+/**
+ * 解除指定渠道的绑定。有密码用户需提供密码。
+ */
+export async function unlinkChannel(channel: string, password?: string): Promise<void> {
+  const { accessToken } = useAuthStore.getState();
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${accessToken}`,
+  };
+  let body: string | undefined;
+  if (password) {
+    headers["Content-Type"] = "application/json";
+    body = JSON.stringify({ password });
+  }
+  const res = await fetch(buildApiUrl(`/auth/channel/links/${encodeURIComponent(channel)}`), {
+    method: "DELETE",
+    headers,
+    body,
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `解绑失败: ${res.status}`);
+  }
+}

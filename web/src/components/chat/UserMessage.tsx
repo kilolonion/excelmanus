@@ -7,7 +7,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
 import { MentionHighlighter } from "./MentionHighlighter";
-import { downloadFile, buildApiUrl, resolveAvatarSrc } from "@/lib/api";
+import { downloadFile, buildApiUrl, resolveAvatarSrc, getAuthHeaders } from "@/lib/api";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import type { FileAttachment } from "@/lib/types";
@@ -154,7 +154,9 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   const fetchWorkspaceFiles = useCallback(async () => {
     try {
-      const res = await fetch(buildApiUrl("/mentions"));
+      const res = await fetch(buildApiUrl("/mentions"), {
+        headers: { ...getAuthHeaders() },
+      });
       if (res.ok) {
         const data = await res.json();
         setWsFiles((data.files as string[]) || []);

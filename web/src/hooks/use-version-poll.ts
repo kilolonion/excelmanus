@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useCallback, useState } from "react";
-import { getRuntimeConfig } from "@/lib/runtime-config";
+import { buildDirectHealthUrl } from "@/lib/backend-origin";
 
 /**
  * 版本轮询 hook — 定时检查后端 /api/v1/health 中的版本标识，
@@ -59,28 +59,10 @@ export function useVersionPoll() {
     let timer: ReturnType<typeof setInterval> | null = null;
     let aborted = false;
 
-    const resolveHealthUrl = (): string => {
-      const configured = getRuntimeConfig(
-        "backendOrigin",
-        process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim(),
-      );
-      let origin = "";
-      if (configured) {
-        if (configured.toLowerCase() === "same-origin") {
-          origin = "";
-        } else {
-          origin = configured.replace(/\/+$/, "");
-        }
-      } else {
-        origin = `http://${window.location.hostname}:8000`;
-      }
-      return `${origin}/api/v1/health`;
-    };
-
     const poll = async () => {
       if (aborted || document.hidden) return;
       try {
-        const resp = await fetch(resolveHealthUrl(), {
+        const resp = await fetch(buildDirectHealthUrl(), {
           method: "GET",
           signal: AbortSignal.timeout(10_000),
         });

@@ -1,6 +1,6 @@
 import type { SessionDetail } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
-import { getRuntimeConfig } from "@/lib/runtime-config";
+import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 
 const API_BASE_PATH = "/api/v1";
 
@@ -25,67 +25,6 @@ function _withTimeout(timeoutMs: number, existingSignal?: AbortSignal | null): A
 export function getAuthHeaders(): Record<string, string> {
   const token = useAuthStore.getState().accessToken;
   return token ? { Authorization: `Bearer ${token}` } : {};
-}
-
-function trimTrailingSlash(value: string): string {
-  return value.replace(/\/+$/, "");
-}
-
-/**
- * 判断主机名是否为 loopback 地址（localhost / 127.x.x.x / ::1）。
- */
-function isLoopback(hostname: string): boolean {
-  const h = hostname.toLowerCase();
-  return h === "localhost" || h === "127.0.0.1" || h.startsWith("127.") || h === "::1";
-}
-
-/**
- * 解析后端直连地址（用于 SSE 流等必须绕过 Next.js 代理的场景）。
- *
- * 优先级：
- * 1. EXCELMANUS_RUNTIME_BACKEND_ORIGIN（运行时注入，支持同一 Docker 镜像多域名部署）
- * 2. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联，向后兼容）
- * 3. 未配置时回退 → http://{当前主机名}:8000（开发/默认 docker-compose 场景）
- *
- * 值说明：
- *   - 设为具体地址（如 http://backend:8000）→ 直连该地址
- *   - 设为 "same-origin" → 走同源（适用于 Nginx 已配置 proxy_buffering off）
- *
- * 特殊处理：如果配置值指向 loopback（localhost/127.0.0.1），但浏览器实际从
- * 非本机访问（局域网 IP），则自动回退到 window.location.hostname + 同端口，
- * 避免局域网设备的 SSE 请求发往自己本机的 loopback 地址导致 "fail to fetch"。
- *
- * 生产环境如果 Nginx 已配置 /api/ 反向代理且关闭了 buffering，
- * 设置 EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin（或 NEXT_PUBLIC_BACKEND_ORIGIN=same-origin）
- * 即可，所有请求走同源，无 CORS 问题。
- */
-function resolveDirectBackendOrigin(): string {
-  // 运行时配置优先 → 构建时环境变量回退
-  const configured = getRuntimeConfig("backendOrigin", process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim());
-  if (configured) {
-    // "same-origin" 显式表示走同源（Nginx 场景），返回空字符串
-    if (configured.toLowerCase() === "same-origin") return "";
-
-    // 配置值指向 loopback，但用户从非本机访问 → 回退到实际访问地址 + 同端口
-    if (typeof window !== "undefined") {
-      try {
-        const cfgUrl = new URL(configured);
-        if (isLoopback(cfgUrl.hostname) && !isLoopback(window.location.hostname)) {
-          const port = cfgUrl.port || "8000";
-          return `${cfgUrl.protocol}//${window.location.hostname}:${port}`;
-        }
-      } catch {
-        // URL 解析失败，按原值使用
-      }
-    }
-
-    return trimTrailingSlash(configured);
-  }
-  // 未配置时回退到同主机 :8000 — 避免 SSE 流走 Next.js rewrite 被缓冲
-  if (typeof window !== "undefined") {
-    return `http://${window.location.hostname}:8000`;
-  }
-  return "";
 }
 
 /**
@@ -470,7 +409,7 @@ export async function fetchSessionMessages(
   offset = 0
 ): Promise<unknown[]> {
   const res: { messages?: unknown[] } = await apiGet(
-    `/sessions/${sessionId}/messages?limit=${limit}&offset=${offset}`
+    `/sessions/${encodeURIComponent(sessionId)}/messages?limit=${limit}&offset=${offset}`
   );
   return res.messages ?? [];
 }
@@ -505,7 +444,7 @@ export async function fetchSessionExcelEvents(
 ): Promise<SessionExcelEventsResponse> {
   try {
     return await apiGet<SessionExcelEventsResponse>(
-      `/sessions/${sessionId}/excel-events`
+      `/sessions/${encodeURIComponent(sessionId)}/excel-events`
     );
   } catch {
     return { diffs: [], previews: [], affected_files: [] };
@@ -522,9 +461,14 @@ export type ExportFormat = "md" | "txt" | "emx";
 export async function exportSession(
   sessionId: string,
   format: ExportFormat = "md",
+  opts?: { includeWorkspace?: boolean },
 ): Promise<void> {
+  const params = new URLSearchParams({ format });
+  if (format === "emx" && opts?.includeWorkspace === false) {
+    params.set("include_workspace", "false");
+  }
   const url = buildApiUrl(
-    `/sessions/${encodeURIComponent(sessionId)}/export?format=${format}`,
+    `/sessions/${encodeURIComponent(sessionId)}/export?${params.toString()}`,
   );
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_UPLOAD_TIMEOUT_MS) });
   if (!res.ok) {
@@ -548,11 +492,19 @@ export async function exportSession(
 }
 
 /**
- * 从 EMX JSON 导入会话。
+ * 从 EMX JSON 导入会话（v2.0 完整恢复）。
  */
 export async function importSession(
   emxData: unknown,
-): Promise<{ status: string; session_id: string; title: string; message_count: number }> {
+): Promise<{
+  status: string;
+  session_id: string;
+  title: string;
+  message_count: number;
+  files_restored?: number;
+  memories_restored?: number;
+  state_restored?: boolean;
+}> {
   const url = buildApiUrl("/sessions/import");
   const res = await fetch(url, {
     method: "POST",
@@ -1216,17 +1168,18 @@ export async function writeExcelCells(opts: {
   return res.json();
 }
 
-// 下载冷却时间配置（毫秒）
+// 下载冷却时间配置（毫秒）—— 按路径独立冷却，不阻塞不同附件的并发下载
 const DOWNLOAD_COOLDOWN_MS = 1000;
-let lastDownloadTime = 0;
+const _downloadCooldowns = new Map<string, number>();
 
 export async function downloadFile(path: string, filename?: string, sessionId?: string): Promise<void> {
   const now = Date.now();
-  if (now - lastDownloadTime < DOWNLOAD_COOLDOWN_MS) {
-    // 冷却中，忽略本次请求
+  const lastTime = _downloadCooldowns.get(path) ?? 0;
+  if (now - lastTime < DOWNLOAD_COOLDOWN_MS) {
+    // 同一文件冷却中，忽略本次请求
     return;
   }
-  lastDownloadTime = now;
+  _downloadCooldowns.set(path, now);
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (sessionId) params.set("session_id", sessionId);
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
@@ -2075,4 +2028,108 @@ export async function abortCanary(): Promise<{
   error?: string;
 }> {
   return apiPost("/deploy/canary/abort", {});
+}
+
+// ── Channel Status API ───────────────────────────────────
+
+export interface ChannelFieldDef {
+  key: string;
+  label: string;
+  hint: string;
+  required: boolean;
+  secret: boolean;
+  type?: string;
+}
+
+export interface ChannelDetail {
+  name: string;
+  status: "running" | "stopped" | "error";
+  supported: boolean;
+  enabled: boolean;
+  credentials: Record<string, string>;
+  has_required: boolean;
+  missing_fields: string[];
+  fields: ChannelFieldDef[];
+  updated_at?: string;
+  dep_installed: boolean;
+  install_hint?: string;
+}
+
+export interface RateLimitConfig {
+  chat_per_minute: number;
+  chat_per_hour: number;
+  command_per_minute: number;
+  command_per_hour: number;
+  upload_per_minute: number;
+  upload_per_hour: number;
+  global_per_minute: number;
+  global_per_hour: number;
+  reject_cooldown_seconds: number;
+  auto_ban_threshold: number;
+  auto_ban_duration_seconds: number;
+}
+
+export interface ChannelStatusInfo {
+  enabled: boolean;
+  channels: string[];
+  details: ChannelDetail[];
+  require_bind: boolean;
+  require_bind_source: "env" | "config" | "default";
+  rate_limit: RateLimitConfig;
+  rate_limit_env_overrides: Record<string, string>;
+}
+
+export async function fetchServerPublicIp(): Promise<{ ip: string | null }> {
+  try {
+    return await apiGet<{ ip: string | null }>("/server/public-ip");
+  } catch {
+    return { ip: null };
+  }
+}
+
+export async function fetchChannelsStatus(): Promise<ChannelStatusInfo> {
+  return apiGet<ChannelStatusInfo>("/channels");
+}
+
+export async function updateChannelSettings(
+  settings: { require_bind?: boolean },
+): Promise<{ status: string }> {
+  return apiPut("/channels/settings", settings);
+}
+
+export async function saveChannelConfig(
+  channelName: string,
+  credentials: Record<string, string>,
+  enabled: boolean,
+): Promise<{ status: string; channel: string; enabled: boolean; has_required: boolean; missing_fields: string[] }> {
+  return apiPut(`/channels/${channelName}/config`, { credentials, enabled });
+}
+
+export async function deleteChannelConfig(channelName: string): Promise<void> {
+  return apiDelete(`/channels/${channelName}/config`);
+}
+
+export async function startChannel(
+  channelName: string,
+): Promise<{ status: string; message: string }> {
+  return apiPost(`/channels/${channelName}/start`, {});
+}
+
+export async function stopChannel(
+  channelName: string,
+): Promise<{ status: string; message: string }> {
+  return apiPost(`/channels/${channelName}/stop`, {});
+}
+
+export async function testChannelConfig(
+  channelName: string,
+  credentials?: Record<string, string>,
+): Promise<{ status: string; message: string; bot_info?: { username?: string; name?: string } }> {
+  return apiPost(`/channels/${channelName}/test`, credentials ? { credentials } : {});
+}
+
+export async function updateRateLimitSettings(
+  settings: Partial<RateLimitConfig>,
+): Promise<{ status: string; updated_fields: string[]; locked_fields?: string[]; message?: string }> {
+  return apiPut("/channels/rate-limit", settings);
 }

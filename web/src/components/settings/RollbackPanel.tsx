@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useServerRestart } from "@/hooks/use-server-restart";
-import { ServerRestartOverlay } from "@/components/ServerRestartOverlay";
+import { useConnectionStore } from "@/stores/connection-store";
 import {
   Loader2,
   RotateCcw,
@@ -76,7 +75,7 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
   const [promotingCanary, setPromotingCanary] = useState(false);
   const [abortingCanary, setAbortingCanary] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
-  const { restarting, restartTimeout, triggerRestart } = useServerRestart();
+  const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
   const showMsg = (type: "ok" | "err", text: string) => {
     setActionMsg({ type, text });
@@ -136,7 +135,7 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
           setRollingBack(false);
           if (result.success) {
             showMsg("ok", "回滚成功，正在重启服务…");
-            triggerRestart();
+            triggerRestart("回滚已完成，正在重启服务");
             fetchData();
           } else {
             showMsg("err", `回滚失败: ${result.error || "未知错误"}`);
@@ -188,16 +187,6 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
       setAbortingCanary(false);
     }
   };
-
-  if (restarting) {
-    return (
-      <ServerRestartOverlay
-        restarting={restarting}
-        restartTimeout={restartTimeout}
-        reason="回滚已完成，正在等待后端重启就绪，请勿关闭页面"
-      />
-    );
-  }
 
   if (loading) {
     return (

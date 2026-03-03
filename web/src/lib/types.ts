@@ -151,6 +151,17 @@ export type AssistantBlock =
       actions: { type: "retry" | "open_settings" | "copy_diagnostic"; label: string }[];
       provider?: string;
       model?: string;
+    }
+  | {
+      type: "tool_notice";
+      toolName: string;
+      argsSummary: string;
+      iteration?: number;
+    }
+  | {
+      type: "reasoning_notice";
+      content: string;
+      iteration?: number;
     };
 
 export interface TaskItem {
