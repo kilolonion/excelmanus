@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 import openai
 import tiktoken
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 
 if TYPE_CHECKING:
@@ -112,6 +113,7 @@ class MemoryExtractor:
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=extraction_messages,
+                extra_body=_AUX_NO_THINKING_EXTRA_BODY,
             )
         except Exception:
             logger.error("LLM 记忆提取调用失败", exc_info=True)

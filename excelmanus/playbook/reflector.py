@@ -11,6 +11,8 @@ import logging
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
+
 if TYPE_CHECKING:
     from excelmanus.config import ExcelManusConfig
 
@@ -191,6 +193,7 @@ class TaskReflector:
                 ],
                 max_tokens=_MAX_OUTPUT_TOKENS,
                 temperature=0.3,
+                extra_body=_AUX_NO_THINKING_EXTRA_BODY,
             )
             raw_text = (response.choices[0].message.content or "").strip()
             return parse_reflector_output(raw_text)
