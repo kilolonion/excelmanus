@@ -395,7 +395,10 @@ systemctl restart nginx  # 完全重启
 | `EXCELMANUS_MODEL` | 主模型名称 | |
 | `EXCELMANUS_AUX_*` | 辅助小模型（路由/子代理） | |
 | `EXCELMANUS_VLM_*` | 视觉模型（图片提取） | |
-| `EXCELMANUS_EMBEDDING_*` | Embedding 模型 | |
+| `EXCELMANUS_EMBEDDING_*` | Embedding 模型（语义检索/技能路由/错误方案） | |
+| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 留空自动生成 |
+| `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
+| `EXCELMANUS_VERIFIER_ENABLED` | 启用验证门控 | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 必须包含前端域名 |
 | `EXCELMANUS_AUTH_ENABLED` | 是否启用认证 | `true` |
 | `EXCELMANUS_JWT_SECRET` | JWT 签名密钥 | 生产环境必须固定 |
@@ -572,6 +575,14 @@ firewall-cmd --reload
 │   ├── docker-compose.yml # Docker Compose 编排
 │   ├── nginx.conf         # Nginx 反向代理配置
 │   └── certs/             # TLS 证书
+├── excelmanus/
+│   ├── context_budget.py  # 上下文预算管理器
+│   ├── model_probe.py     # 模型元数据探测（上下文窗口自动校正）
+│   ├── security/
+│   │   └── cipher.py      # Fernet 对称加密（API Key / Token 加密存储）
+│   └── embedding/
+│       ├── semantic_skill_router.py  # 语义技能路由
+│       └── error_solution_store.py  # 错误→解决方案向量索引
 ├── .env                   # 本地开发环境变量
 ├── mcp.json               # MCP 服务器配置
 └── docs/

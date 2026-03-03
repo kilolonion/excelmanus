@@ -351,7 +351,10 @@ The backend `.env` is located at `/www/wwwroot/excelmanus/.env`. Key configurati
 | `EXCELMANUS_MODEL` | Primary model name | |
 | `EXCELMANUS_AUX_*` | Auxiliary small model (routing/subagent) | |
 | `EXCELMANUS_VLM_*` | Vision model (image extraction) | |
-| `EXCELMANUS_EMBEDDING_*` | Embedding model | |
+| `EXCELMANUS_EMBEDDING_*` | Embedding model (semantic search/skill routing/error solutions) | |
+| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Auto-generated if empty |
+| `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
+| `EXCELMANUS_VERIFIER_ENABLED` | Enable verification gate | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Must include frontend domain |
 | `EXCELMANUS_AUTH_ENABLED` | Whether to enable authentication | `true` |
 | `EXCELMANUS_JWT_SECRET` | JWT signing secret | Must be fixed in production |
@@ -526,6 +529,14 @@ Project Root/
 │   ├── docker-compose.yml # Docker Compose orchestration
 │   ├── nginx.conf         # Nginx reverse proxy config
 │   └── certs/             # TLS certificates
+├── excelmanus/
+│   ├── context_budget.py  # Context budget manager
+│   ├── model_probe.py     # Model metadata probing (context window auto-correction)
+│   ├── security/
+│   │   └── cipher.py      # Fernet symmetric encryption (API Key / Token encrypted storage)
+│   └── embedding/
+│       ├── semantic_skill_router.py  # Semantic skill routing
+│       └── error_solution_store.py  # Error→solution vector index
 ├── .env                   # Local development environment variables
 ├── mcp.json               # MCP server configuration
 └── docs/

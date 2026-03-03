@@ -182,7 +182,16 @@
 
 ## Embedding 语义检索配置
 
-为持久记忆和文件清单提供语义检索能力。需独立配置 embedding API，配置后自动启用。
+为持久记忆、文件清单、技能路由和错误解决方案提供语义检索能力。需独立配置 embedding API，配置后自动启用。
+
+启用后自动激活以下深度集成点：
+- **SemanticRegistry** — 语义相关文件摘要注入
+- **SemanticSkillRouter** — 语义技能路由，自动匹配最优 Skillpack
+- **ErrorSolutionStore** — 错误→解决方案向量索引，持久化到 `.excelmanus/error_solutions/`
+- **记忆语义去重** — 新提取记忆与已有条目 cosine 比对，过滤重复
+- **智能上下文压缩** — 压缩时按语义相关性评分差异化截断（高相关消息保留更多）
+
+所有集成点通过共享 `_embedding_client` 统一初始化，`asyncio.gather` 并行检索，零额外延迟。`embedding_enabled=false` 时全部降级为无操作。
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
@@ -210,7 +219,18 @@
 主题文件：`file_patterns.md`、`user_prefs.md`、`error_solutions.md`、`general.md`。
 核心文件 `MEMORY.md` 保存时会与主题文件同步写入，用于会话启动自动加载。
 
-启用 Embedding 后，记忆检索自动切换为语义匹配模式。
+启用 Embedding 后，记忆检索自动切换为语义匹配模式，新提取的记忆会与已有条目做 cosine 语义去重（阈值 0.88），自动过滤冗余。
+
+## Playbook（自进化战术手册）
+
+Playbook 自动从已完成任务中归纳成功经验与失败教训，后续遇到相似任务时语义检索并注入相关战术提示。需启用 Embedding。
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
+| `EXCELMANUS_PLAYBOOK_DB_PATH` | Playbook 数据库路径（空则使用默认路径） | 空 |
+| `EXCELMANUS_PLAYBOOK_MAX_BULLETS` | Playbook 最大条目数 | `500` |
+| `EXCELMANUS_PLAYBOOK_INJECT_TOP_K` | 每轮注入最相关的 Top-K 条战术 | `5` |
 
 ## MCP 配置
 
@@ -293,6 +313,25 @@ MCP 安全扫描：
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_USE_RESPONSES_API` | 设为 `1` 启用 Responses API（`/responses` 端点），仅对非 Gemini/Claude 的 OpenAI 兼容 URL 生效 | `0` |
+
+## 加密配置
+
+敏感字段（模型 API Key、OAuth Access Token 等）的加密存储。需安装 `cryptography` 依赖。
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子（留空则自动在 `~/.excelmanus/data/.secret_key` 生成） | 自动生成 |
+
+密钥派生优先级：
+1. `EXCELMANUS_SECRET_KEY` 环境变量（SHA-256 派生）
+2. `~/.excelmanus/data/.secret_key` 自动生成（首次启动时创建，文件权限 600）
+3. 均不可用时，加密组件不启用（仅限开发环境）
+
+## 验证门控
+
+| 环境变量 | 说明 | 默认值 |
+|---|---|---|
+| `EXCELMANUS_VERIFIER_ENABLED` | 启用任务完成前的结构化验证条件自动校验 | `false` |
 
 ## 认证与多用户
 
