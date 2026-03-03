@@ -302,6 +302,8 @@ _apply_defaults() {
   REPO_BRANCH="${REPO_BRANCH:-main}"
   VERIFY_TIMEOUT="${VERIFY_TIMEOUT:-30}"
   SERVICE_MANAGER="${SERVICE_MANAGER:-pm2}"
+  EXCELMANUS_CHANNELS="${EXCELMANUS_CHANNELS:-qq}"
+  export EXCELMANUS_CHANNELS
 
   # 自动检测拓扑
   if [[ "$TOPOLOGY" == "auto" ]]; then
@@ -1410,6 +1412,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${BACKEND_DIR}
+EnvironmentFile=-${BACKEND_DIR}/.env
 ExecStart=${BACKEND_DIR}/${VENV_DIR}/bin/python -c 'import uvicorn; uvicorn.run("excelmanus.api:app", host="0.0.0.0", port=${BACKEND_PORT}, log_level="info")'
 Restart=on-failure
 RestartSec=5
@@ -2015,6 +2018,13 @@ _push_env_to_backend() {
     else
       sed -i.bak "s|^# EXCELMANUS_ALLOWED_OAUTH_ORIGINS=.*|EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${_all_sites}|" "$tmp_env"
     fi
+  fi
+
+  # 追加渠道配置（如果模板中未包含）
+  if ! grep -q 'EXCELMANUS_CHANNELS' "$tmp_env"; then
+    echo "" >> "$tmp_env"
+    echo "# 默认启用的渠道 Bot（逗号分隔，留空禁用）" >> "$tmp_env"
+    echo "EXCELMANUS_CHANNELS=${EXCELMANUS_CHANNELS}" >> "$tmp_env"
   fi
 
   if [[ "$TOPOLOGY" == "local" ]]; then

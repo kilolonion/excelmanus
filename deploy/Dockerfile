@@ -17,4 +17,6 @@ USER appuser
 
 EXPOSE 8000
 
+ENV EXCELMANUS_CHANNELS=telegram
+
 CMD ["excelmanus-api"]

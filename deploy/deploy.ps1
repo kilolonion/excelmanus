@@ -430,6 +430,11 @@ function Apply-Defaults {
     if ($Script:CFG.VerifyTimeout -eq 0) { $Script:CFG.VerifyTimeout  = 30 }
     if ($Script:CFG.KeepFrontendReleases -eq 0) { $Script:CFG.KeepFrontendReleases = 3 }
 
+    # 默认启用 QQ 渠道 Bot（可通过 .env 或环境变量覆盖）
+    if (-not [System.Environment]::GetEnvironmentVariable("EXCELMANUS_CHANNELS")) {
+        [System.Environment]::SetEnvironmentVariable("EXCELMANUS_CHANNELS", "qq", "Process")
+    }
+
     # 每服务器独立密钥（未设置时回退到全局 SshKeyPath）
     if (-not $Script:CFG.BackendSshKeyPath)  { $Script:CFG.BackendSshKeyPath  = $Script:CFG.SshKeyPath }
     if (-not $Script:CFG.FrontendSshKeyPath) { $Script:CFG.FrontendSshKeyPath = $Script:CFG.SshKeyPath }
@@ -1647,6 +1652,14 @@ function Push-EnvToBackend {
     # Auto-fill CORS if SITE_URL known
     if ($Script:SITE_URL) {
         (Get-Content $tmpEnv) -replace '^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*', "EXCELMANUS_CORS_ALLOW_ORIGINS=$($Script:SITE_URL),http://localhost:3000" | Set-Content $tmpEnv
+    }
+
+    # Append channel config if not already present
+    $envContent = Get-Content $tmpEnv -Raw
+    if ($envContent -notmatch 'EXCELMANUS_CHANNELS') {
+        $channelsVal = [System.Environment]::GetEnvironmentVariable("EXCELMANUS_CHANNELS")
+        if (-not $channelsVal) { $channelsVal = "qq" }
+        Add-Content -Path $tmpEnv -Value "`n# 默认启用的渠道 Bot（逗号分隔，留空禁用）`nEXCELMANUS_CHANNELS=$channelsVal"
     }
 
     $sshOpts = (Get-SshOpts -KeyOverride $cfg.BackendSshKeyPath) -join " "
