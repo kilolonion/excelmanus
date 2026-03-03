@@ -47,7 +47,7 @@ ALLOWED_COMMANDS: frozenset[str] = frozenset({
     "awk", "sed", "tr", "diff", "comm",
     # 环境与信息
     "python", "python3", "pip", "pip3", "which", "echo",
-    "env", "printenv", "uname", "date", "whoami", "pwd",
+    "uname", "date", "whoami", "pwd",
     # 数据工具
     "jq", "csvtool", "xsv",
 })
@@ -65,6 +65,23 @@ BLOCKED_COMMANDS: frozenset[str] = frozenset({
     "pip install", "pip3 install",
     "export", "unset", "source",
     "bash", "sh", "zsh", "fish", "csh", "tcsh", "dash",
+})
+
+# 可能接受文件路径参数的命令（需检查敏感路径）
+_FILE_ARG_COMMANDS: frozenset[str] = frozenset({
+    "cat", "head", "tail", "wc", "file", "du", "stat",
+    "find", "grep", "egrep", "fgrep", "diff", "comm",
+    "sort", "uniq", "cut", "awk", "sed", "tr", "ls",
+})
+
+# 敏感目录名（相对于 HOME）
+_SENSITIVE_HOME_DIRS: tuple[str, ...] = (
+    ".excelmanus",
+)
+
+# 工作区外禁止访问的文件名
+_SENSITIVE_FILENAMES: frozenset[str] = frozenset({
+    ".env", "config.env", ".secret_key",
 })
 
 # 危险 shell 元字符模式（防注入）
@@ -306,6 +323,60 @@ def _validate_command(command: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def _check_sensitive_paths(
+    command: str, workdir: Path, workspace_root: Path,
+) -> tuple[bool, str]:
+    """检查命令参数是否引用了敏感路径（~/.excelmanus/ 等）。
+
+    对可能接受文件路径参数的命令，解析其非 flag 参数并校验。
+    """
+    import os
+
+    home = os.path.expanduser("~")
+    sensitive_dirs = [
+        os.path.realpath(os.path.join(home, d))
+        for d in _SENSITIVE_HOME_DIRS
+    ]
+    ws_prefix = os.path.realpath(str(workspace_root))
+
+    chain_segments = _split_chain_simple(command.strip())
+    for seg_text, _op in chain_segments:
+        seg_stripped = seg_text.strip()
+        if not seg_stripped:
+            continue
+        pipe_segments = _split_pipeline(seg_stripped)
+        for pipe_seg in pipe_segments:
+            try:
+                tokens = shlex.split(pipe_seg.strip())
+            except ValueError:
+                continue
+            if not tokens:
+                continue
+            cmd_name = Path(tokens[0]).name
+            if cmd_name not in _FILE_ARG_COMMANDS:
+                continue
+            for token in tokens[1:]:
+                if token.startswith("-"):
+                    continue
+                expanded = os.path.expanduser(token)
+                if not os.path.isabs(expanded):
+                    expanded = str(workdir / expanded)
+                resolved = os.path.realpath(expanded)
+                # 检查敏感目录
+                for sd in sensitive_dirs:
+                    sd_prefix = sd + os.sep
+                    if resolved.startswith(sd_prefix) or resolved == sd:
+                        return False, f"安全策略禁止访问敏感目录: {token}"
+                # 检查工作区外的敏感文件名
+                basename = os.path.basename(resolved)
+                if basename in _SENSITIVE_FILENAMES:
+                    if not (resolved.startswith(ws_prefix + os.sep)
+                            or resolved == ws_prefix):
+                        return False, f"安全策略禁止访问工作区外的敏感文件: {token}"
+
+    return True, "ok"
+
+
 def run_shell(
     command: str,
     workdir: str = ".",
@@ -334,6 +405,17 @@ def run_shell(
     if not valid:
         return json.dumps(
             {"status": "blocked", "reason": reason, "command": command},
+            ensure_ascii=False,
+            indent=2,
+        )
+
+    # 敏感路径校验
+    path_ok, path_reason = _check_sensitive_paths(
+        command, workdir_safe, guard.workspace_root,
+    )
+    if not path_ok:
+        return json.dumps(
+            {"status": "blocked", "reason": path_reason, "command": command},
             ensure_ascii=False,
             indent=2,
         )

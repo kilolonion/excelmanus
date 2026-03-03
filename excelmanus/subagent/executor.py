@@ -23,7 +23,7 @@ from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.message_serialization import assistant_message_to_dict
-from excelmanus.memory import ConversationMemory
+from excelmanus.memory import ConversationMemory, _sanitize_messages_for_api
 from excelmanus.subagent.models import SubagentConfig, SubagentFileChange, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
@@ -172,7 +172,9 @@ class SubagentExecutor:
                         iteration=iterations,
                     ),
                 )
-                messages = memory.get_messages(system_prompts=[system_prompt])
+                messages = _sanitize_messages_for_api(
+                    memory.get_messages(system_prompts=[system_prompt])
+                )
                 _create_kwargs: dict[str, Any] = dict(
                     model=model,
                     messages=messages,
@@ -821,7 +823,7 @@ class SubagentExecutor:
             "- 完成后输出结果摘要与关键证据。\n"
             "- 不要输出冗长无关内容。"
         )
-        # 优先从 PromptComposer 加载子代理提示词
+        # 优先从 PromptComposer 加载子代理提示词（含策略继承）
         composer_prompt: str | None = None
         try:
             from excelmanus.prompt_composer import PromptComposer
@@ -829,7 +831,17 @@ class SubagentExecutor:
             prompts_dir = Path(__file__).resolve().parent.parent / "prompts"
             if prompts_dir.is_dir():
                 composer = PromptComposer(prompts_dir)
-                composer_prompt = composer.compose_for_subagent(config.name)
+                composer.load_all()
+                _vars = {
+                    "workspace_root": str(
+                        Path(self._parent_config.workspace_root).resolve()
+                    ),
+                }
+                composer_prompt = composer.compose_for_subagent(
+                    config.name,
+                    inherit_strategies=config.inherit_strategies or None,
+                    variables=_vars,
+                )
         except Exception:
             pass
         parts = [composer_prompt or config.system_prompt.strip() or default_prompt]

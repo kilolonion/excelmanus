@@ -31,7 +31,8 @@ from excelmanus.providers.stream_types import (
 logger = get_logger("claude_provider")
 
 # 默认 max_tokens（Claude 要求必传）
-_DEFAULT_MAX_TOKENS = 8192
+# Claude 4 系列支持 64k+ 输出 token，提升默认值以避免长输出截断。
+_DEFAULT_MAX_TOKENS = 16384
 
 
 # ── 响应数据结构（复用与 Gemini 适配器相同的模式） ─────────────────
@@ -458,12 +459,16 @@ class _ClaudeChatCompletions:
     ) -> _ChatCompletion | Any:
         thinking_enabled = kwargs.pop("_thinking_enabled", False)
         thinking_budget = kwargs.pop("_thinking_budget", 0)
+        extra_body = kwargs.pop("extra_body", None)
+        extra_headers = kwargs.pop("extra_headers", None)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
                 thinking_enabled=thinking_enabled,
                 thinking_budget=thinking_budget,
+                extra_body=extra_body,
+                extra_headers=extra_headers,
             )
         return await self._client._generate(
             model=model,
@@ -472,6 +477,8 @@ class _ClaudeChatCompletions:
             tool_choice=kwargs.get("tool_choice"),
             thinking_enabled=thinking_enabled,
             thinking_budget=thinking_budget,
+            extra_body=extra_body,
+            extra_headers=extra_headers,
         )
 
 
@@ -508,6 +515,8 @@ class ClaudeClient:
         tool_choice: Any = None,
         thinking_enabled: bool = False,
         thinking_budget: int = 0,
+        extra_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> _ChatCompletion:
         """执行 Claude Messages API 请求。"""
         system, claude_messages = _openai_messages_to_claude(messages)
@@ -532,13 +541,19 @@ class ClaudeClient:
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
 
+        # 透传 extra_body：将用户自定义参数合并到请求体
+        if extra_body and isinstance(extra_body, dict):
+            body.update(extra_body)
+
         url = f"{self._base_url}/v1/messages"
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self._api_key,
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": "prompt-caching-2024-07-31",
         }
+        # 透传 extra_headers
+        if extra_headers and isinstance(extra_headers, dict):
+            headers.update(extra_headers)
 
         logger.debug(
             "Claude 请求: model=%s, messages=%d条, tools=%d个",
@@ -583,6 +598,8 @@ class ClaudeClient:
         tool_choice: Any = None,
         thinking_enabled: bool = False,
         thinking_budget: int = 0,
+        extra_body: dict[str, Any] | None = None,
+        extra_headers: dict[str, str] | None = None,
     ) -> Any:
         """流式执行 Claude Messages API 请求，返回异步生成器 yield StreamDelta。"""
         system, claude_messages = _openai_messages_to_claude(messages)
@@ -604,14 +621,19 @@ class ClaudeClient:
         mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
+        # 透传 extra_body
+        if extra_body and isinstance(extra_body, dict):
+            body.update(extra_body)
 
         url = f"{self._base_url}/v1/messages"
         headers = {
             "Content-Type": "application/json",
             "x-api-key": self._api_key,
             "anthropic-version": "2023-06-01",
-            "anthropic-beta": "prompt-caching-2024-07-31",
         }
+        # 透传 extra_headers
+        if extra_headers and isinstance(extra_headers, dict):
+            headers.update(extra_headers)
 
         async def _stream_generator():
             async with self._http.stream("POST", url, json=body, headers=headers) as resp:

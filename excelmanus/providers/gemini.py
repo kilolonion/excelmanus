@@ -491,18 +491,23 @@ class _GeminiChatCompletions:
         """将 OpenAI chat.completions.create 调用转发到 Gemini API。"""
         thinking_budget = kwargs.pop("_thinking_budget", 0)
         thinking_level = kwargs.pop("_thinking_level", "")
+        extra_body = kwargs.pop("extra_body", None)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
                 tool_choice=kwargs.get("tool_choice"),
                 thinking_budget=thinking_budget,
                 thinking_level=thinking_level,
+                extra_body=extra_body,
             )
         return await self._client._generate(
             model=model,
             messages=messages,
             tools=tools,
             tool_choice=kwargs.get("tool_choice"),
+            thinking_budget=thinking_budget,
+            thinking_level=thinking_level,
+            extra_body=extra_body,
         )
 
 
@@ -539,6 +544,9 @@ class GeminiClient:
         messages: list[dict[str, Any]],
         tools: Any = None,
         tool_choice: Any = None,
+        thinking_budget: int = 0,
+        thinking_level: str = "",
+        extra_body: dict[str, Any] | None = None,
     ) -> _ChatCompletion:
         """执行 Gemini generateContent 请求。"""
         # 如果 URL 中包含模型名，优先使用（允许用户只填完整 URL 不配 MODEL）
@@ -559,6 +567,22 @@ class GeminiClient:
         mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
         if mapped_tool_config is not None:
             body["toolConfig"] = mapped_tool_config
+
+        # 注入 thinking 配置（与 _generate_stream 保持一致）
+        if thinking_level:
+            gen_config = body.get("generationConfig", {})
+            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+            body["generationConfig"] = gen_config
+        elif thinking_budget > 0:
+            gen_config = body.get("generationConfig", {})
+            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+            body["generationConfig"] = gen_config
+
+        # 透传 extra_body：将 OpenAI 风格的 extra_body 合并到 Gemini generationConfig
+        if extra_body and isinstance(extra_body, dict):
+            gen_config = body.get("generationConfig", {})
+            gen_config.update(extra_body)
+            body["generationConfig"] = gen_config
 
         # 构建请求 URL
         url = f"{self._base_url}/models/{effective_model}:generateContent"
@@ -626,6 +650,7 @@ class GeminiClient:
         tool_choice: Any = None,
         thinking_budget: int = 0,
         thinking_level: str = "",
+        extra_body: dict[str, Any] | None = None,
     ) -> Any:
         """流式执行 Gemini generateContent 请求，返回异步生成器 yield StreamDelta。"""
         effective_model = self._default_model or model
@@ -647,6 +672,11 @@ class GeminiClient:
         elif thinking_budget > 0:
             gen_config = body.get("generationConfig", {})
             gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
+            body["generationConfig"] = gen_config
+        # 透传 extra_body 到 generationConfig
+        if extra_body and isinstance(extra_body, dict):
+            gen_config = body.get("generationConfig", {})
+            gen_config.update(extra_body)
             body["generationConfig"] = gen_config
 
         url = f"{self._base_url}/models/{effective_model}:streamGenerateContent?alt=sse"

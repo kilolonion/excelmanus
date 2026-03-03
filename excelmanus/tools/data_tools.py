@@ -3491,13 +3491,14 @@ def _scan_csv_snapshot(
 
 
 def search_excel_values(
-    file_path: str,
-    query: str,
+    file_path: str = "",
+    query: str = "",
     match_mode: str = "contains",
     sheets: list[str] | None = None,
     columns: list[str] | None = None,
     max_results: int = 50,
     case_sensitive: bool = False,
+    file_paths: list[str] | None = None,
 ) -> str:
     """跨 Sheet 搜索 Excel 单元格值，类似 ripgrep。
 
@@ -3509,10 +3510,58 @@ def search_excel_values(
         columns: 限定搜索的列名列表（默认全部）。
         max_results: 最大返回匹配数（默认 50）。
         case_sensitive: 是否区分大小写（默认 False）。
+        file_paths: 多文件搜索路径列表（与 file_path 互补，传入此参数时跨文件搜索）。
 
     Returns:
         JSON 格式的搜索结果。
     """
+    # 跨文件搜索：当 file_paths 包含多个文件时，逐文件搜索并合并结果
+    if file_paths and len(file_paths) > 1:
+        all_matches: list[dict[str, Any]] = []
+        all_summary: list[dict[str, Any]] = []
+        total = 0
+        files_searched = 0
+        per_file_max = max(10, max_results // len(file_paths))
+        for fp in file_paths[:10]:  # 最多搜索 10 个文件
+            sub_result_str = search_excel_values(
+                file_path=fp, query=query, match_mode=match_mode,
+                sheets=sheets, columns=columns, max_results=per_file_max,
+                case_sensitive=case_sensitive,
+            )
+            try:
+                sub = json.loads(sub_result_str)
+                if "error" in sub:
+                    continue
+                files_searched += 1
+                sub_total = sub.get("total_matches", 0)
+                total += sub_total
+                for m in sub.get("matches", []):
+                    m["file"] = fp
+                    all_matches.append(m)
+                for s in sub.get("summary_by_sheet", []):
+                    s["file"] = fp
+                    all_summary.append(s)
+            except (json.JSONDecodeError, ValueError):
+                continue
+        # 按文件+sheet排序，截断到 max_results
+        all_matches = all_matches[:max_results]
+        return json.dumps({
+            "query": query, "match_mode": match_mode,
+            "total_matches": total, "returned": len(all_matches),
+            "truncated": total > len(all_matches),
+            "files_searched": files_searched,
+            "matches": all_matches,
+            "summary_by_sheet": all_summary,
+        }, ensure_ascii=False, separators=(",", ":"), default=str)
+
+    # 单文件搜索：兼容 file_paths=[单个文件] 的情况
+    if not file_path and file_paths:
+        file_path = file_paths[0]
+    if not file_path:
+        return json.dumps(
+            {"error": "必须提供 file_path 或 file_paths 参数"},
+            ensure_ascii=False,
+        )
     import re as _re
 
     guard = _get_guard()
@@ -4085,9 +4134,10 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="search_excel_values",
             description=(
-                "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀/模糊匹配。"
+                "跨 Sheet/跨文件搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀/模糊匹配。"
                 "返回匹配的 sheet/行/列/值/单元格引用及同行上下文。"
-                "适用场景：在整个文件中查找特定值或模式、定位数据出现位置。"
+                "适用场景：在单个或多个文件中查找特定值或模式、定位数据出现位置。"
+                "跨文件搜索：传入 file_paths 列表即可一次搜索多个文件。"
                 "模糊匹配（fuzzy）：自动拆分关键词并逐个子串匹配，适合用户口语与实际数据不完全一致的场景"
                 "（如搜索'电子一班'可匹配'24级电子信息科学与技术1班'）。"
                 "不适用：条件筛选和排序（改用 filter_data）。"
@@ -4097,7 +4147,12 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "Excel 文件路径（相对于工作目录）",
+                        "description": "Excel 文件路径（相对于工作目录），单文件搜索时使用",
+                    },
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "多文件搜索路径列表（跨文件搜索时使用，最多 10 个文件），与 file_path 二选一",
                     },
                     "query": {
                         "type": "string",
@@ -4131,7 +4186,7 @@ def get_tools() -> list[ToolDef]:
                         "default": False,
                     },
                 },
-                "required": ["file_path", "query"],
+                "required": ["query"],
                 "additionalProperties": False,
             },
             func=search_excel_values,
