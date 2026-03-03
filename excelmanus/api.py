@@ -5049,6 +5049,7 @@ _MODEL_ENV_KEYS = {
     "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL", "protocol": "EXCELMANUS_PROTOCOL"},
     "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "enabled": "EXCELMANUS_AUX_ENABLED", "protocol": "EXCELMANUS_AUX_PROTOCOL"},
     "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL", "enabled": "EXCELMANUS_VLM_ENABLED", "protocol": "EXCELMANUS_VLM_PROTOCOL"},
+    "embedding": {"api_key": "EXCELMANUS_EMBEDDING_API_KEY", "base_url": "EXCELMANUS_EMBEDDING_BASE_URL", "model": "EXCELMANUS_EMBEDDING_MODEL", "enabled": "EXCELMANUS_EMBEDDING_ENABLED"},
 }
 
 
@@ -5148,6 +5149,12 @@ async def get_model_config(request: Request) -> JSONResponse:
             "model": _config.vlm_model or "",
             "enabled": _config.vlm_enabled,
             "protocol": _config.vlm_protocol,
+        },
+        "embedding": {
+            "api_key": _mask_key(_config.embedding_api_key or ""),
+            "base_url": _config.embedding_base_url or "",
+            "model": _config.embedding_model or "",
+            "enabled": _config.embedding_enabled,
         },
         "profiles": [
             {
@@ -5250,6 +5257,7 @@ async def update_model_config(
             "main": {"api_key": "api_key", "base_url": "base_url", "model": "model", "protocol": "protocol"},
             "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "enabled": "aux_enabled", "protocol": "aux_protocol"},
             "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model", "enabled": "vlm_enabled", "protocol": "vlm_protocol"},
+            "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
         }
         field_map = _SECTION_CONFIG_FIELDS.get(section, {})
         for req_field, config_attr in field_map.items():
@@ -5401,6 +5409,13 @@ def _collect_raw_sections(section_names: list[str]) -> dict[str, Any]:
             "model": _config.vlm_model or "",
             "protocol": _config.vlm_protocol,
         }
+    if "embedding" in section_names:
+        result["embedding"] = {
+            "api_key": _config.embedding_api_key or "",
+            "base_url": _config.embedding_base_url or "",
+            "model": _config.embedding_model or "",
+            "enabled": _config.embedding_enabled,
+        }
     if "profiles" in section_names and _config_store is not None:
         result["profiles"] = _config_store.list_profiles()
     return result
@@ -5467,7 +5482,7 @@ async def export_model_config(
         return _error_json_response(503, "服务未初始化")
 
     if is_admin_scope:
-        valid_sections = {"main", "aux", "vlm", "profiles"}
+        valid_sections = {"main", "aux", "vlm", "embedding", "profiles"}
         invalid = set(request.sections) - valid_sections
         if invalid:
             return _error_json_response(400, f"无效的配置区块: {', '.join(invalid)}")
@@ -5521,7 +5536,7 @@ async def import_model_config(
         lines = _read_env_file(env_path)
         env_dirty = False
 
-        for section_key in ("main", "aux", "vlm"):
+        for section_key in ("main", "aux", "vlm", "embedding"):
             section_data = sections.get(section_key)
             if not isinstance(section_data, dict):
                 continue
@@ -5545,16 +5560,27 @@ async def import_model_config(
                 updated_fields.append(field_name)
                 env_dirty = True
 
+            # enabled 字段为 bool，单独处理
+            if "enabled" in section_data and isinstance(section_data["enabled"], bool):
+                env_key = key_map.get("enabled")
+                if env_key:
+                    env_val = "true" if section_data["enabled"] else "false"
+                    lines = _update_env_var(lines, env_key, env_val)
+                    os.environ[env_key] = env_val
+                    updated_fields.append("enabled")
+                    env_dirty = True
+
             if _config is not None and updated_fields:
                 field_map = {
                     "main": {"api_key": "api_key", "base_url": "base_url", "model": "model", "protocol": "protocol"},
                     "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "protocol": "aux_protocol"},
                     "vlm": {"api_key": "vlm_api_key", "base_url": "vlm_base_url", "model": "vlm_model", "protocol": "vlm_protocol"},
+                    "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
                 }.get(section_key, {})
                 for f in updated_fields:
                     config_attr = field_map.get(f)
                     if config_attr:
-                        object.__setattr__(_config, config_attr, section_data.get(f) or None)
+                        object.__setattr__(_config, config_attr, section_data.get(f) if f == "enabled" else (section_data.get(f) or None))
 
             if updated_fields:
                 imported[section_key] = updated_fields
