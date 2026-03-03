@@ -28,7 +28,7 @@ Strict protocol notes:
 - Slash commands: `/<skill_name> args...` directly invokes the skill (`slash_direct`).
 - Non-slash messages: enter `fallback`, where all tools are always visible (core with full schema, extended with summary schema).
 - The LLM injects domain knowledge via `activate_skill` and expands extended tools in a specified category via `expand_tools` to obtain full parameters.
-- **Semantic Skill Routing** (v1.6.9): When Embedding is enabled, `SemanticSkillRouter` builds a vector index from Skillpack descriptions, performs parallel retrieval during `chat()` to auto-match the optimal skill, and injects matching hints into the system prompt. Degrades to no-op when Embedding is disabled.
+- **Semantic Skill Routing**: When Embedding is enabled, `SemanticSkillRouter` builds a vector index from Skillpack descriptions, performs parallel retrieval during `chat()` to auto-match the optimal skill, and injects matching hints into the system prompt. Degrades to no-op when Embedding is disabled.
 
 ## 5. Built-in system Skillpacks (Authoritative List)
 - `data_basic`

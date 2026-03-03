@@ -1,6 +1,6 @@
 {
   "name": "web",
-  "version": "1.6.9",
+  "version": "1.7.0",
   "private": true,
   "scripts": {
     "sync-version": "node -e \"const fs=require('fs');const t=fs.readFileSync('../pyproject.toml','utf8');const m=t.match(/^version\\s*=\\s*\\\"([^\\\"]+)\\\"/m);if(m){const p=JSON.parse(fs.readFileSync('package.json','utf8'));if(p.version!==m[1]){p.version=m[1];fs.writeFileSync('package.json',JSON.stringify(p,null,2)+'\\n');console.log('synced version to '+m[1])}}\"",
