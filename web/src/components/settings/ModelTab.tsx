@@ -101,6 +101,7 @@ interface ModelConfig {
   main: ModelSection;
   aux: ModelSection & { enabled?: boolean };
   vlm: ModelSection & { enabled?: boolean };
+  embedding: ModelSection & { enabled?: boolean };
   profiles: ProfileEntry[];
 }
 
@@ -124,6 +125,13 @@ const SECTION_META: {
     icon: <ScanEye className="h-4 w-4" />,
     fields: ["model", "base_url", "api_key"],
     desc: "图片表格提取",
+  },
+  {
+    key: "embedding",
+    label: "Embedding 词嵌入",
+    icon: <Brain className="h-4 w-4" />,
+    fields: ["model", "base_url", "api_key"],
+    desc: "语义检索 / 记忆 / 技能路由",
   },
 ];
 
@@ -2107,6 +2115,7 @@ export function ModelTab() {
     setEnabledDrafts({
       aux: data.aux?.enabled !== false,
       vlm: data.vlm?.enabled !== false,
+      embedding: data.embedding?.enabled === true,
     });
   }, []);
 
@@ -2206,10 +2215,11 @@ export function ModelTab() {
       const body: Record<string, unknown> = {};
       for (const [field, value] of Object.entries(draft)) {
         if (field === "api_key" && isMaskedApiKey(value)) continue;
+        if (field === "protocol" && sectionKey === "embedding") continue;
         body[field] = value;
       }
-      // aux/vlm 保存时一并提交 enabled 开关
-      if ((sectionKey === "aux" || sectionKey === "vlm") && enabledDrafts[sectionKey] !== undefined) {
+      // aux/vlm/embedding 保存时一并提交 enabled 开关
+      if ((sectionKey === "aux" || sectionKey === "vlm" || sectionKey === "embedding") && enabledDrafts[sectionKey] !== undefined) {
         body.enabled = enabledDrafts[sectionKey];
       }
       await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
@@ -2378,7 +2388,7 @@ export function ModelTab() {
           const sectionCaps = capsMap[section.key];
           const isExpanded = !!expandedSections[section.key];
           const modelId = editDrafts[section.key]?.model || (config?.[section.key as keyof ModelConfig] as ModelSection)?.model || "";
-          const isDisabled = (section.key === "aux" || section.key === "vlm") && enabledDrafts[section.key] === false;
+          const isDisabled = (section.key === "aux" || section.key === "vlm" || section.key === "embedding") && enabledDrafts[section.key] === false;
           return (
           <div key={section.key} className={`rounded-lg border transition-colors ${
             isModelUnhealthy(sectionCaps)
@@ -2398,9 +2408,9 @@ export function ModelTab() {
               </span>
               <span className="flex-shrink-0" style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
               <span className="font-semibold text-sm whitespace-nowrap">{section.label}</span>
-              {(section.key === "aux" || section.key === "vlm") && (
+              {(section.key === "aux" || section.key === "vlm" || section.key === "embedding") && (
                 <Switch
-                  checked={enabledDrafts[section.key] !== false}
+                  checked={section.key === "embedding" ? enabledDrafts[section.key] === true : enabledDrafts[section.key] !== false}
                   onCheckedChange={(checked) => { handleToggleEnabled(section.key, checked); }}
                   onClick={(e) => e.stopPropagation()}
                   className="ml-0.5 scale-75 origin-left"
@@ -2436,7 +2446,7 @@ export function ModelTab() {
                   </div>
                 )}
                 {isDisabled && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">已禁用，将回退到主模型</p>
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">{section.key === "embedding" ? "已禁用，语义检索功能关闭" : "已禁用，将回退到主模型"}</p>
                 )}
                 <div className={`space-y-2 transition-opacity ${isDisabled ? "opacity-40 pointer-events-none" : ""}`}>
                   {section.fields.map((field) => (
@@ -2539,6 +2549,7 @@ export function ModelTab() {
                       </div>
                     </div>
                   ))}
+                  {section.key !== "embedding" && (
                   <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
                     <label className="text-xs text-muted-foreground sm:w-16 shrink-0">协议</label>
                     <select
@@ -2553,6 +2564,7 @@ export function ModelTab() {
                       <option value="gemini">gemini（Gemini 原生）</option>
                     </select>
                   </div>
+                  )}
                 </div>
                 {testResult[section.key] && (
                   <div className={`mt-2 rounded-md px-3 py-2 text-xs border ${
@@ -2584,6 +2596,7 @@ export function ModelTab() {
                   </div>
                 )}
                 <div className="flex flex-col sm:flex-row justify-end gap-2 mt-3">
+                  {section.key !== "embedding" && (
                   <Button
                     size="sm"
                     variant="outline"
@@ -2603,6 +2616,7 @@ export function ModelTab() {
                     )}
                     {testingKey === section.key ? "测试中..." : "连通测试"}
                   </Button>
+                  )}
                   {section.key === "main" && (
                     <Button
                       size="sm"
@@ -3470,6 +3484,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     main: true,
     aux: true,
     vlm: true,
+    embedding: true,
     profiles: true,
     user: true,
   });
@@ -3508,7 +3523,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
     try {
       const sections = isAdminScope
         ? Object.entries(exportSections)
-            .filter(([k, v]) => ["main", "aux", "vlm", "profiles"].includes(k) && v)
+            .filter(([k, v]) => ["main", "aux", "vlm", "embedding", "profiles"].includes(k) && v)
             .map(([k]) => k)
         : ["user"];
       const data = await apiPost<{ token: string }>("/config/export", {
@@ -3562,7 +3577,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
   };
 
   const sectionLabels: Record<string, string> = isAdminScope
-    ? { main: "主模型", aux: "辅助模型", vlm: "VLM 视觉模型", profiles: "多模型配置" }
+    ? { main: "主模型", aux: "辅助模型", vlm: "VLM 视觉模型", embedding: "Embedding 词嵌入", profiles: "多模型配置" }
     : { user: "个人 LLM 配置" };
 
   return (
@@ -3678,7 +3693,7 @@ function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
               className="h-7 text-xs gap-1 text-white"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleExport}
-              disabled={exporting || (isAdminScope && !Object.entries(exportSections).some(([k, v]) => ["main","aux","vlm","profiles"].includes(k) && v))}
+              disabled={exporting || (isAdminScope && !Object.entries(exportSections).some(([k, v]) => ["main","aux","vlm","embedding","profiles"].includes(k) && v))}
             >
               {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
               {exporting ? "加密中..." : "生成令牌"}
