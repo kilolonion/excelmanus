@@ -93,12 +93,103 @@ _KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, str, bool]] = [
         "模型不存在", "请求的模型标识无效，请在设置中确认 Model ID 是否正确。",
         False,
     ),
+    # context length exceeded
+    (
+        (
+            "context_length_exceeded", "context length", "maximum context",
+            "token limit", "too many tokens", "max_tokens",
+            "reduce the length", "reduce your prompt",
+            "request too large", "payload too large",
+        ),
+        "model", "context_length_exceeded",
+        "上下文超长", "对话历史超出模型上下文窗口限制，请尝试 /compact 压缩上下文或开始新会话。",
+        False,
+    ),
+    # invalid request body (400)
+    (
+        (
+            "invalid request", "invalid_request_error", "bad request",
+            "invalid message", "invalid value", "invalid type",
+            "expected an object", "expected a string",
+            "unrecognized request argument", "extra inputs are not permitted",
+        ),
+        "model", "invalid_request",
+        "请求格式错误", "发送给模型的请求格式有误，请检查模型配置或尝试 /compact 压缩上下文。",
+        False,
+    ),
+    # proxy (must be before network_error to avoid "connection refused" matching first)
+    (
+        (
+            "proxy error", "proxy connection",
+            "proxy authentication", "http_proxy", "https_proxy",
+            "tunnel connection failed",
+        ),
+        "transport", "proxy_error",
+        "代理连接失败", "通过代理连接模型服务失败，请检查代理配置。",
+        True,
+    ),
+    # disk / filesystem (must be before quota to avoid "disk quota" matching "quota")
+    (
+        (
+            "no space left", "disk full", "disk quota",
+            "not enough space", "磁盘空间不足",
+            "errno 28", "errno 122",
+        ),
+        "config", "disk_full",
+        "磁盘空间不足", "服务器磁盘空间不足，请清理文件后重试。",
+        False,
+    ),
+    # permission denied (filesystem, must be before auth to avoid "access denied" matching auth)
+    (
+        (
+            "permission denied", "operation not permitted",
+            "errno 13",
+        ),
+        "config", "permission_denied",
+        "权限不足", "文件系统操作权限不足，请检查工作区目录权限设置。",
+        False,
+    ),
+    # content filter / safety (must be before auth to avoid "flagged" false positives)
+    (
+        (
+            "content_filter", "content filter", "content_policy",
+            "content policy violation", "content_management_policy",
+            "responsible_ai_policy", "flagged", "blocked by",
+            "safety system", "harm_category",
+        ),
+        "model", "content_filtered",
+        "内容审查拦截", "请求或回复触发了模型的内容安全策略，请调整输入内容后重试。",
+        False,
+    ),
+    # encoding (must be before generic errors)
+    (
+        (
+            "unicodedecodeerror", "unicodeencodeerror",
+            "codec can't decode", "codec can't encode",
+            "charmap", "invalid start byte", "invalid continuation byte",
+        ),
+        "config", "encoding_error",
+        "编码错误", "数据编码异常，可能是文件编码不兼容，请检查输入文件。",
+        False,
+    ),
     # overloaded
     (
         ("overloaded", "capacity", "service unavailable", "temporarily unavailable"),
         "model", "model_overloaded",
         "模型服务过载", "模型服务暂时不可用，请稍后重试。",
         True,
+    ),
+    # SSL / TLS
+    (
+        (
+            "ssl error", "ssl:", "sslerror", "[ssl]",
+            "certificate verify failed", "certificate_verify_failed",
+            "sslcertverificationerror", "ssl handshake", "tlsv1",
+            "ssl_error", "ssl_cert", "ssl certificate",
+        ),
+        "transport", "ssl_error",
+        "SSL/TLS 错误", "与模型服务的安全连接失败，请检查 Base URL 或证书配置。",
+        False,
     ),
     # network / transport
     (
@@ -117,6 +208,29 @@ _KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, str, bool]] = [
         ("timed out", "timeout", "deadline exceeded"),
         "transport", "connect_timeout",
         "连接超时", "模型服务响应超时，请稍后重试或检查网络。",
+        True,
+    ),
+    # JSON decode / response parse
+    (
+        (
+            "json decode", "jsondecodeerror", "expecting value",
+            "unterminated string", "invalid json",
+            "not valid json", "json parse error",
+        ),
+        "transport", "response_parse_error",
+        "响应解析失败", "模型服务返回了无法解析的数据，请稍后重试。",
+        True,
+    ),
+    # stream interruption
+    (
+        (
+            "incomplete chunked", "incompleteread",
+            "stream ended", "stream interrupted",
+            "premature end", "response ended prematurely",
+            "remotedisconnected", "remote end closed",
+        ),
+        "transport", "stream_interrupted",
+        "流式传输中断", "模型服务的响应传输中断，请重试。",
         True,
     ),
 ]
@@ -201,6 +315,48 @@ def classify_failure(
             model=model,
         )
 
+    if status_code == 408:
+        return FailureGuidance(
+            category="transport",
+            code="request_timeout",
+            title="请求超时",
+            message="模型服务处理请求超时，请稍后重试或缩短输入内容。",
+            stage=stage,
+            retryable=True,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(True),
+            provider=provider,
+            model=model,
+        )
+
+    if status_code == 413:
+        return FailureGuidance(
+            category="model",
+            code="payload_too_large",
+            title="请求体过大",
+            message="请求数据超出模型服务限制，请减少输入内容或使用 /compact 压缩上下文。",
+            stage=stage,
+            retryable=False,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(False),
+            provider=provider,
+            model=model,
+        )
+
+    if status_code == 422:
+        return FailureGuidance(
+            category="model",
+            code="invalid_request",
+            title="请求参数无效",
+            message="模型服务无法处理当前请求参数，请检查模型配置。",
+            stage=stage,
+            retryable=False,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(False),
+            provider=provider,
+            model=model,
+        )
+
     if status_code is not None and 500 <= status_code < 600:
         return FailureGuidance(
             category="model",
@@ -216,6 +372,49 @@ def classify_failure(
         )
 
     # ── 2. 异常类名精确匹配 ──
+
+    # 会话相关错误（SSE 流内部捕获时全局 exception_handler 不生效）
+    if "sessionbusyerror" in exc_class_name:
+        return FailureGuidance(
+            category="transport",
+            code="session_busy",
+            title="会话忙碌",
+            message="当前会话正在处理另一个请求，请等待完成后再试。",
+            stage=stage,
+            retryable=True,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(True),
+            provider=provider,
+            model=model,
+        )
+
+    if "sessionlimitexceedederror" in exc_class_name:
+        return FailureGuidance(
+            category="quota",
+            code="session_limit",
+            title="会话数量超限",
+            message="系统会话数量已达上限，请关闭不需要的会话或稍后再试。",
+            stage=stage,
+            retryable=True,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(True),
+            provider=provider,
+            model=model,
+        )
+
+    if "sessionnotfounderror" in exc_class_name:
+        return FailureGuidance(
+            category="config",
+            code="session_not_found",
+            title="会话不存在",
+            message="会话已过期或被清理，请刷新页面开始新对话。",
+            stage=stage,
+            retryable=False,
+            diagnostic_id=diagnostic_id,
+            actions=[_ACTION_COPY_DIAGNOSTIC],
+            provider=provider,
+            model=model,
+        )
 
     if "authenticationerror" in exc_class_name:
         return FailureGuidance(
@@ -284,6 +483,54 @@ def classify_failure(
             code="network_error",
             title="网络连接失败",
             message="无法连接到模型服务，请检查网络或 Base URL 配置。",
+            stage=stage,
+            retryable=True,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(True),
+            provider=provider,
+            model=model,
+        )
+
+    if any(kw in exc_class_name for kw in (
+        "sslerror", "sslcertverificationerror", "certificateerror",
+    )):
+        return FailureGuidance(
+            category="transport",
+            code="ssl_error",
+            title="SSL/TLS 错误",
+            message="与模型服务的安全连接失败，请检查 Base URL 或网络代理证书配置。",
+            stage=stage,
+            retryable=False,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(False),
+            provider=provider,
+            model=model,
+        )
+
+    if any(kw in exc_class_name for kw in (
+        "proxyerror", "proxytimeout",
+    )):
+        return FailureGuidance(
+            category="transport",
+            code="proxy_error",
+            title="代理连接失败",
+            message="通过代理连接模型服务失败，请检查代理配置。",
+            stage=stage,
+            retryable=True,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(True),
+            provider=provider,
+            model=model,
+        )
+
+    if any(kw in exc_class_name for kw in (
+        "jsondecode", "jsondecodeerror",
+    )):
+        return FailureGuidance(
+            category="transport",
+            code="response_parse_error",
+            title="响应解析失败",
+            message="模型服务返回了无法解析的数据，可能是服务暂时异常，请稍后重试。",
             stage=stage,
             retryable=True,
             diagnostic_id=diagnostic_id,

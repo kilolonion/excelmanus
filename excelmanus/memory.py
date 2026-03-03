@@ -16,6 +16,41 @@ logger = logging.getLogger(__name__)
 IMAGE_TOKEN_ESTIMATE = 1500  # 图片 token 估算值（用于 memory 截断）
 
 # ---------------------------------------------------------------------------
+# 消息清洗：发送到 LLM API 前剥离非标准字段
+# ---------------------------------------------------------------------------
+
+# 各角色允许的标准字段（OpenAI Chat Completions API 规范）
+_ASSISTANT_ALLOWED_KEYS = frozenset({"role", "content", "tool_calls", "name", "refusal"})
+_TOOL_ALLOWED_KEYS = frozenset({"role", "content", "tool_call_id", "name"})
+_GENERAL_ALLOWED_KEYS = frozenset({"role", "content", "name"})
+
+
+def _sanitize_messages_for_api(messages: list[dict]) -> list[dict]:
+    """剥离消息中的非标准字段，防止不同 LLM 提供商因未知字段拒绝请求。
+
+    provider 特有字段（thinking / reasoning / reasoning_content）在此处剥离；
+    需要这些字段的 provider（如 DeepSeek thinking mode）由
+    ``llm_caller._patch_reasoning_content`` 在调用失败后按需补回。
+    """
+    result: list[dict] = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role == "assistant":
+            clean = {k: v for k, v in msg.items() if k in _ASSISTANT_ALLOWED_KEYS}
+            # tool_calls 为 None 或空列表时移除该键，避免某些 provider 拒绝 null
+            tc = clean.get("tool_calls")
+            if tc is None or (isinstance(tc, list) and len(tc) == 0):
+                clean.pop("tool_calls", None)
+            result.append(clean)
+        elif role == "tool":
+            result.append({k: v for k, v in msg.items() if k in _TOOL_ALLOWED_KEYS})
+        else:
+            # system / user — 保留 content 原始结构（可能为多模态 list）
+            result.append({k: v for k, v in msg.items() if k in _GENERAL_ALLOWED_KEYS})
+    return result
+
+
+# ---------------------------------------------------------------------------
 # 图片生命周期管理
 # ---------------------------------------------------------------------------
 
@@ -248,6 +283,11 @@ class ConversationMemory:
         )
         self._current_round: int = 0  # 当前对话轮次
 
+    def update_context_window(self, max_context_tokens: int) -> None:
+        """切换模型后更新上下文窗口大小和截断阈值。"""
+        self._max_context_tokens = max(1, max_context_tokens)
+        self._truncation_threshold = int(self._max_context_tokens * 0.9)
+
     @property
     def messages(self) -> list[dict]:
         """内部消息列表引用（只读语义，调用方不应直接修改）。"""
@@ -458,6 +498,9 @@ class ConversationMemory:
         threshold = max(1, int(max_context_tokens * (1 - ratio)))
         system_msgs = self.build_system_messages(system_prompts)
         self._truncate_history_to_threshold(threshold, system_msgs=system_msgs)
+        # 截断后修复消息序列：确保首条消息为 user 角色，
+        # 避免部分 provider（Claude / GLM 等）因 assistant-first 拒绝请求。
+        self._ensure_starts_with_user()
         # 过滤内部标记字段，与 get_messages 保持一致
         output: list[dict] = []
         for msg in self._messages:
@@ -469,6 +512,9 @@ class ConversationMemory:
         # 对旧轮次的工具返回值做结构化遮蔽，节约上下文空间
         from excelmanus.engine_core.observation_masker import mask_messages
         output = mask_messages(output)
+        # 剥离非标准字段（thinking/reasoning/reasoning_content 等），
+        # 防止不同 LLM provider 因未知字段返回 400 错误
+        output = _sanitize_messages_for_api(output)
         return system_msgs + output
 
     def repair_dangling_tool_calls(self) -> int:
@@ -789,6 +835,43 @@ class ConversationMemory:
                 head_call_id = self._messages[0].get("tool_call_id")
                 if head_call_id in valid_call_ids:
                     # 对应的 tool_call 仍存在，不是孤立消息，停止清理
+                    break
+                self._messages.pop(0)
+
+    def _ensure_starts_with_user(self) -> None:
+        """确保 _messages 首条消息为 user 角色。
+
+        截断可能导致首条消息为 assistant（带或不带 tool_calls），
+        部分 provider（Claude / GLM）要求首条非 system 消息必须是 user。
+        此方法移除前导的非 user 消息及其关联的 tool result，直到
+        遇到 user 消息或列表为空。
+        """
+        while self._messages and self._messages[0].get("role") != "user":
+            removed = self._messages.pop(0)
+            # 移除被删 assistant 的关联 tool results
+            if removed.get("tool_calls"):
+                call_ids = {
+                    tc["id"] for tc in removed["tool_calls"]
+                    if isinstance(tc, dict) and "id" in tc
+                }
+                if call_ids:
+                    self._messages = [
+                        m for m in self._messages
+                        if not (
+                            m.get("role") == "tool"
+                            and m.get("tool_call_id") in call_ids
+                        )
+                    ]
+            # 清理可能暴露在头部的孤立 tool results
+            while self._messages and self._messages[0].get("role") == "tool":
+                valid_call_ids: set[str] = {
+                    tc["id"]
+                    for m in self._messages
+                    if m.get("tool_calls")
+                    for tc in m["tool_calls"]
+                    if isinstance(tc, dict) and "id" in tc
+                }
+                if self._messages[0].get("tool_call_id") in valid_call_ids:
                     break
                 self._messages.pop(0)
 

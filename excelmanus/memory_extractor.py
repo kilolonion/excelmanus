@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import openai
 import tiktoken
 
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
+
+if TYPE_CHECKING:
+    from excelmanus.embedding.client import EmbeddingClient
+    from excelmanus.embedding.semantic_memory import SemanticMemory
 
 logger = logging.getLogger(__name__)
 
@@ -62,12 +66,24 @@ _MIN_USER_MESSAGES = 3  # 少于此数的对话不值得提取记忆
 _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
+# 语义去重阈值：cosine similarity 超过此值视为重复记忆
+MEMORY_DEDUP_SIMILARITY_THRESHOLD = 0.88
+
+
 class MemoryExtractor:
     """记忆提取器：调用 LLM 从对话历史中提取有价值的信息。"""
 
-    def __init__(self, client: openai.AsyncOpenAI, model: str) -> None:
+    def __init__(
+        self,
+        client: openai.AsyncOpenAI,
+        model: str,
+        embedding_client: "EmbeddingClient | None" = None,
+        semantic_memory: "SemanticMemory | None" = None,
+    ) -> None:
         self._client = client
         self._model = model
+        self._embedding_client = embedding_client
+        self._semantic_memory = semantic_memory
 
     async def extract(self, messages: list[dict]) -> list[MemoryEntry]:
         """分析对话历史，返回值得记住的 MemoryEntry 列表。
@@ -103,10 +119,64 @@ class MemoryExtractor:
 
         try:
             raw_content = response.choices[0].message.content
-            return self._parse_response(raw_content)
+            entries = self._parse_response(raw_content)
         except Exception:
             logger.error("解析 LLM 记忆提取结果失败", exc_info=True)
             return []
+
+        # 语义去重：过滤与已有记忆过于相似的新条目
+        if entries and self._embedding_client is not None and self._semantic_memory is not None:
+            entries = await self._dedup_against_existing(entries)
+
+        return entries
+
+    async def _dedup_against_existing(
+        self, entries: list[MemoryEntry],
+    ) -> list[MemoryEntry]:
+        """用 embedding 对新提取的记忆条目与已有记忆做语义去重。
+
+        cosine similarity > MEMORY_DEDUP_SIMILARITY_THRESHOLD 的条目视为重复，被过滤掉。
+        """
+        assert self._embedding_client is not None
+        assert self._semantic_memory is not None
+
+        new_texts = [e.content for e in entries]
+        try:
+            new_vecs = await self._embedding_client.embed(new_texts)
+        except Exception:
+            logger.debug("记忆去重向量化失败，跳过去重", exc_info=True)
+            return entries
+
+        # 确保 semantic_memory 索引已同步
+        store = self._semantic_memory.store
+        if store.size == 0:
+            return entries  # 无已有记忆，无需去重
+
+        existing_matrix = store.matrix
+        from excelmanus.embedding.search import cosine_top_k
+
+        kept: list[MemoryEntry] = []
+        for i, entry in enumerate(entries):
+            query_vec = new_vecs[i]
+            results = cosine_top_k(
+                query_vec, existing_matrix,
+                k=1, threshold=MEMORY_DEDUP_SIMILARITY_THRESHOLD,
+            )
+            if results:
+                # 找到高度相似的已有记忆，跳过
+                logger.debug(
+                    "记忆去重：跳过与已有记忆相似的条目 (score=%.3f): %s",
+                    results[0].score, entry.content[:60],
+                )
+            else:
+                kept.append(entry)
+
+        if len(kept) < len(entries):
+            logger.info(
+                "记忆语义去重：%d → %d 条（过滤 %d 条重复）",
+                len(entries), len(kept), len(entries) - len(kept),
+            )
+        return kept
 
     @staticmethod
     def _normalize_content(content: Any) -> str:
