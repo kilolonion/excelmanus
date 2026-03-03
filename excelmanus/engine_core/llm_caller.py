@@ -667,21 +667,32 @@ class LLMCaller:
         kwargs: dict[str, Any],
     ) -> Any:
         e = self._engine
+        # 过滤 SDK 不兼容参数：_thinking_* / prompt_cache_key / stream_options
+        # 这些参数在旧版 openai SDK 中会直接触发 TypeError，
+        # 必须在首次调用前移除，而非依赖 retry 路径。
+        _strip_keys = {k for k in kwargs if k.startswith("_thinking")}
+        _strip_keys |= {"prompt_cache_key", "stream_options"} & set(kwargs)
+        if _strip_keys:
+            kwargs = {k: v for k, v in kwargs.items() if k not in _strip_keys}
         try:
             return await e._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            # prompt_cache_key / stream_options 兼容性：
-            # 非 OpenAI 官方 provider 可能不支持这些参数
-            _unsupported_keys = {"prompt_cache_key", "stream_options"}
-            _present_keys = _unsupported_keys & set(kwargs)
-            if _present_keys and is_unsupported_param_error(exc):
-                logger.debug("Provider 不支持 %s，移除后重试", _present_keys)
-                retry_kwargs = {k: v for k, v in kwargs.items() if k not in _unsupported_keys}
-                try:
-                    return await e._client.chat.completions.create(**retry_kwargs)
-                except Exception as retry_exc:
-                    logger.debug("移除 %s 重试仍失败: %s", _present_keys, retry_exc)
-                    exc = retry_exc  # 用重试异常替换原始异常，避免误导
+
+            # 404 路由错误诊断：最常见原因是 base_url 路径不正确
+            _exc_text_lower = str(exc).lower()
+            _status = getattr(exc, "status_code", None)
+            if _status == 404 or (
+                "notfounderror" in type(exc).__name__.lower()
+                and any(kw in _exc_text_lower for kw in ("route", "completions not found", "endpoint"))
+            ):
+                _client_base = getattr(getattr(e, "_client", None), "base_url", None)
+                logger.error(
+                    "404 诊断: 模型服务返回路由不存在。"
+                    "当前 base_url=%s, model=%s。"
+                    "OpenAI 兼容 API 的 Base URL 通常应以 /v1 结尾，"
+                    "请检查 EXCELMANUS_BASE_URL 配置。",
+                    _client_base, e._config.model,
+                )
 
             # DeepSeek thinking mode: assistant 消息必须包含 reasoning_content 字段
             if "reasoning_content" in str(exc).lower():

@@ -56,6 +56,7 @@ class PlaybookCurator:
         self,
         deltas: list[PlaybookDelta],
         session_id: str = "",
+        task_tags: tuple[str, ...] = (),
     ) -> CuratorReport:
         """将 PlaybookDelta 列表整合到 store。
 
@@ -86,7 +87,7 @@ class PlaybookCurator:
                 if merged:
                     report.merged_count += 1
                 else:
-                    self._add_new(delta, emb, session_id)
+                    self._add_new(delta, emb, session_id, task_tags=task_tags)
                     report.new_count += 1
             except Exception as exc:
                 errors.append(f"delta[{i}] 整合失败: {exc}")
@@ -132,13 +133,14 @@ class PlaybookCurator:
         delta: PlaybookDelta,
         embedding: np.ndarray | None,
         session_id: str,
+        task_tags: tuple[str, ...] = (),
     ) -> str:
         """新增条目到 store。"""
         bullet = PlaybookBullet(
             id=uuid.uuid4().hex[:16],
             category=delta.category,
             content=delta.content[:500],
-            source_task_tags=[],
+            source_task_tags=list(task_tags),
             helpful_count=1,
             harmful_count=0,
             embedding=embedding,

@@ -199,17 +199,123 @@ Categories=Office;
         return None
 
 
+# ── 浏览器书签快捷方式（server/docker 模式）────────────────
+
+
+def _create_windows_web_shortcut(
+    url: str, desktop: Path, name: str = _APP_NAME,
+) -> Path | None:
+    """创建 Windows .url 浏览器快捷方式。"""
+    url_path = desktop / f"{name}.url"
+    content = f"[InternetShortcut]\nURL={url}\n"
+    try:
+        url_path.write_text(content, encoding="utf-8")
+        logger.info("浏览器快捷方式已创建: %s", url_path)
+        return url_path
+    except Exception as e:
+        logger.warning("创建 Windows 浏览器快捷方式失败: %s", e)
+        return None
+
+
+def _create_macos_web_shortcut(
+    url: str, desktop: Path, name: str = _APP_NAME,
+) -> Path | None:
+    """创建 macOS .webloc 浏览器快捷方式。"""
+    webloc_path = desktop / f"{name}.webloc"
+    content = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"'
+        ' "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+        '<plist version="1.0">\n'
+        '<dict>\n'
+        '\t<key>URL</key>\n'
+        f'\t<string>{url}</string>\n'
+        '</dict>\n'
+        '</plist>\n'
+    )
+    try:
+        webloc_path.write_text(content, encoding="utf-8")
+        logger.info("浏览器快捷方式已创建: %s", webloc_path)
+        return webloc_path
+    except Exception as e:
+        logger.warning("创建 macOS 浏览器快捷方式失败: %s", e)
+        return None
+
+
+def _create_linux_web_shortcut(
+    url: str, desktop: Path, name: str = _APP_NAME,
+) -> Path | None:
+    """创建 Linux .desktop 浏览器快捷方式（Type=Link）。"""
+    desktop_file = desktop / f"{name}.desktop"
+    content = f"""[Desktop Entry]
+Version=1.0
+Type=Link
+Name={name}
+Comment=打开 {name} 网页版
+URL={url}
+Icon=text-html
+"""
+    try:
+        desktop_file.write_text(content, encoding="utf-8")
+        desktop_file.chmod(desktop_file.stat().st_mode | stat.S_IXUSR)
+        logger.info("浏览器快捷方式已创建: %s", desktop_file)
+        return desktop_file
+    except Exception as e:
+        logger.warning("创建 Linux 浏览器快捷方式失败: %s", e)
+        return None
+
+
+def create_web_shortcut(
+    url: str,
+    name: str = _APP_NAME,
+) -> str | None:
+    """创建浏览器书签快捷方式（自动检测平台）。
+
+    适用于前后端分离部署，快捷方式打开浏览器访问指定 URL。
+    返回创建的快捷方式路径字符串，失败返回 None。
+    """
+    desktop = _get_desktop_path()
+    if desktop is None:
+        logger.warning("未找到桌面目录，无法创建浏览器快捷方式")
+        return None
+
+    system = platform.system()
+    result: Path | None = None
+    if system == "Windows":
+        result = _create_windows_web_shortcut(url, desktop, name)
+    elif system == "Darwin":
+        result = _create_macos_web_shortcut(url, desktop, name)
+    else:
+        result = _create_linux_web_shortcut(url, desktop, name)
+
+    return str(result) if result is not None else None
+
+
 # ── 公共 API ─────────────────────────────────────────────
 
 
 def create_desktop_shortcut(
     project_root: str | Path,
     name: str = _APP_NAME,
+    *,
+    deploy_mode: str = "standalone",
+    site_url: str = "",
 ) -> str | None:
     """创建桌面快捷方式（自动检测平台）。
 
+    - standalone 模式：创建启动脚本快捷方式（.lnk / .command / .desktop）
+    - server/docker 模式：创建浏览器书签（.url / .webloc / Type=Link）
+
     返回创建的快捷方式路径字符串，失败返回 None。
     """
+    # 服务器模式：创建浏览器书签
+    if deploy_mode in ("server", "docker"):
+        if not site_url:
+            logger.warning("服务器模式需要 site_url 参数才能创建浏览器快捷方式")
+            return None
+        return create_web_shortcut(site_url, name)
+
+    # 单机模式：创建启动脚本快捷方式
     project_root = Path(project_root).expanduser().resolve()
     desktop = _get_desktop_path()
     if desktop is None:
@@ -255,16 +361,17 @@ def update_desktop_shortcut(
 
 
 def remove_desktop_shortcut(name: str = _APP_NAME) -> bool:
-    """删除桌面上的 ExcelManus 快捷方式。"""
+    """删除桌面上的 ExcelManus 快捷方式（同时检查启动脚本和浏览器书签两种类型）。"""
     desktop = _get_desktop_path()
     if desktop is None:
         return False
 
     system = platform.system()
+    candidates: list[Path] = []
     if system == "Windows":
-        candidates = [desktop / f"{name}.lnk"]
+        candidates = [desktop / f"{name}.lnk", desktop / f"{name}.url"]
     elif system == "Darwin":
-        candidates = [desktop / f"{name}.command"]
+        candidates = [desktop / f"{name}.command", desktop / f"{name}.webloc"]
     else:
         candidates = [desktop / f"{name}.desktop"]
 
@@ -281,22 +388,53 @@ def remove_desktop_shortcut(name: str = _APP_NAME) -> bool:
 
 
 def get_shortcut_info() -> dict[str, Any]:
-    """返回当前桌面快捷方式状态信息。"""
+    """返回当前桌面快捷方式状态信息（同时检测启动脚本和浏览器书签两种类型）。"""
     desktop = _get_desktop_path()
     if desktop is None:
-        return {"exists": False, "desktop_path": None, "shortcut_path": None}
+        return {"exists": False, "desktop_path": None, "shortcut_path": None, "shortcut_type": None}
 
     system = platform.system()
+
+    # 检查启动脚本快捷方式（standalone）
     if system == "Windows":
-        path = desktop / f"{_APP_NAME}.lnk"
+        app_path = desktop / f"{_APP_NAME}.lnk"
     elif system == "Darwin":
-        path = desktop / f"{_APP_NAME}.command"
+        app_path = desktop / f"{_APP_NAME}.command"
     else:
-        path = desktop / f"{_APP_NAME}.desktop"
+        app_path = desktop / f"{_APP_NAME}.desktop"
+
+    if app_path.is_file():
+        return {
+            "exists": True,
+            "desktop_path": str(desktop),
+            "shortcut_path": str(app_path),
+            "shortcut_type": "app",
+            "platform": system,
+        }
+
+    # 检查浏览器书签快捷方式（server/docker）
+    if system == "Windows":
+        web_path = desktop / f"{_APP_NAME}.url"
+    elif system == "Darwin":
+        web_path = desktop / f"{_APP_NAME}.webloc"
+    else:
+        web_path = desktop / f"{_APP_NAME}.desktop"  # 同后缀，已检查过
+        # Linux 的 .desktop 文件可能是 Type=Link，上面已返回
+        web_path = None  # type: ignore[assignment]
+
+    if web_path and web_path.is_file():
+        return {
+            "exists": True,
+            "desktop_path": str(desktop),
+            "shortcut_path": str(web_path),
+            "shortcut_type": "web",
+            "platform": system,
+        }
 
     return {
-        "exists": path.is_file(),
+        "exists": False,
         "desktop_path": str(desktop),
-        "shortcut_path": str(path) if path.is_file() else None,
+        "shortcut_path": None,
+        "shortcut_type": None,
         "platform": system,
     }

@@ -198,6 +198,39 @@ class ScanResult:
     scan_duration_ms: int = 0
 
 
+@dataclass
+class FileGroup:
+    """文件组记录。"""
+
+    id: str
+    workspace: str
+    name: str
+    description: str = ""
+    created_at: str = ""
+    updated_at: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "id": self.id,
+            "workspace": self.workspace,
+            "name": self.name,
+            "description": self.description,
+            "created_at": self.created_at,
+            "updated_at": self.updated_at,
+        }
+
+    @classmethod
+    def from_dict(cls, d: dict[str, Any]) -> FileGroup:
+        return cls(
+            id=d["id"],
+            workspace=d["workspace"],
+            name=d["name"],
+            description=d.get("description", ""),
+            created_at=d.get("created_at", ""),
+            updated_at=d.get("updated_at", ""),
+        )
+
+
 # ── FileRegistry 核心类 ──────────────────────────────────────
 
 
@@ -670,6 +703,86 @@ class FileRegistry:
         self._store.add_alias(alias_id, file_id, alias_type, alias_value)
         self._alias_cache[alias_value] = file_id
 
+    # ── 文件组管理 ─────────────────────────────────────────────
+
+    def create_group(
+        self,
+        name: str,
+        file_ids: list[str] | None = None,
+        description: str = "",
+    ) -> FileGroup:
+        """创建文件组，可选同时添加初始成员。"""
+        now = _now_iso()
+        group = FileGroup(
+            id=_new_id(),
+            workspace=self._workspace_key,
+            name=name,
+            description=description,
+            created_at=now,
+            updated_at=now,
+        )
+        self._store.create_group(group.to_dict())
+        if file_ids:
+            for fid in file_ids:
+                self._store.add_group_member(group.id, fid)
+        return group
+
+    def update_group(
+        self,
+        group_id: str,
+        *,
+        name: str | None = None,
+        description: str | None = None,
+    ) -> FileGroup | None:
+        """更新文件组名称/描述。"""
+        updates: dict[str, Any] = {}
+        if name is not None:
+            updates["name"] = name
+        if description is not None:
+            updates["description"] = description
+        if not updates:
+            row = self._store.get_group(group_id)
+            return FileGroup.from_dict(row) if row else None
+        self._store.update_group(group_id, updates)
+        row = self._store.get_group(group_id)
+        return FileGroup.from_dict(row) if row else None
+
+    def delete_group(self, group_id: str) -> bool:
+        """删除文件组（CASCADE 自动删成员）。"""
+        return self._store.delete_group(group_id)
+
+    def list_groups(self) -> list[FileGroup]:
+        """列出当前工作区所有文件组。"""
+        rows = self._store.list_groups(self._workspace_key)
+        return [FileGroup.from_dict(r) for r in rows]
+
+    def get_group(self, group_id: str) -> FileGroup | None:
+        """按 ID 查询文件组。"""
+        row = self._store.get_group(group_id)
+        return FileGroup.from_dict(row) if row else None
+
+    def add_to_group(
+        self,
+        group_id: str,
+        file_id: str,
+        role: str = "member",
+    ) -> None:
+        """将文件添加到组。"""
+        self._store.add_group_member(group_id, file_id, role)
+
+    def remove_from_group(self, group_id: str, file_id: str) -> bool:
+        """从组中移除文件。"""
+        return self._store.remove_group_member(group_id, file_id)
+
+    def get_group_files(self, group_id: str) -> list[dict[str, Any]]:
+        """获取组内所有文件成员（含文件信息和角色）。"""
+        return self._store.list_group_members(group_id)
+
+    def get_file_groups(self, file_id: str) -> list[FileGroup]:
+        """查询文件所属的所有组。"""
+        rows = self._store.get_file_groups(file_id)
+        return [FileGroup.from_dict(r) for r in rows]
+
     # ── System Prompt 构建 ───────────────────────────────────
 
     def build_panorama(self, max_tokens: int = 1500) -> str:
@@ -708,6 +821,27 @@ class FileRegistry:
             self._panorama_compact(lines, user_files, backups, agent_outputs)
         else:
             self._panorama_summary(lines, user_files, backups, agent_outputs)
+
+        # 文件组信息
+        try:
+            groups = self.list_groups()
+            if groups:
+                lines.append("")
+                lines.append(f"### 文件组 ({len(groups)})")
+                lines.append("用户已将以下文件归为逻辑组，跨文件操作时优先在同组内匹配：")
+                for g in groups:
+                    members = self.get_group_files(g.id)
+                    if members:
+                        member_strs = [
+                            f"`{m['canonical_path']}`({m['role']})"
+                            for m in members
+                        ]
+                        desc = f" — {g.description}" if g.description else ""
+                        lines.append(f"- **{g.name}**{desc}: {', '.join(member_strs)}")
+                    else:
+                        lines.append(f"- **{g.name}**: (空)")
+        except Exception:
+            pass  # 组表可能尚未创建（旧 DB 版本）
 
         lines.append("")
         lines.append("⚠️ 路径规则：读写操作使用「位置」列路径。向用户展示使用「文件」列名称。")

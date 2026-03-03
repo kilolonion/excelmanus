@@ -19,7 +19,7 @@ _VALID_TASK_TYPES = {
     "GENERAL_BROWSE",
 }
 _VALID_TIERS: set[str] = {"active", "background", "suspended", "terminated"}
-_RELAX_LIFECYCLE_TAGS: frozenset[str] = frozenset({"cross_sheet", "large_data"})
+_RELAX_LIFECYCLE_TAGS: frozenset[str] = frozenset({"cross_sheet", "large_data", "multi_file"})
 _RELAXED_THRESHOLDS: tuple[int, int, int] = (4, 7, 11)
 
 

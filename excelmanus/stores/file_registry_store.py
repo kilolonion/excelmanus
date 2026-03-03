@@ -368,6 +368,129 @@ class FileRegistryStore:
         ).fetchall()
         return [self._event_row_to_dict(r) for r in rows]
 
+    # ── file_groups CRUD ───────────────────────────────────────
+
+    def create_group(self, record: dict[str, Any]) -> None:
+        """创建文件组。"""
+        self._conn.execute(
+            "INSERT INTO file_groups (id, workspace, name, description, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                record["id"],
+                record["workspace"],
+                record["name"],
+                record.get("description", ""),
+                record["created_at"],
+                record["updated_at"],
+            ),
+        )
+        self._conn.commit()
+
+    def update_group(self, group_id: str, updates: dict[str, Any]) -> bool:
+        """更新文件组名称/描述。"""
+        now = _now_iso()
+        sets: list[str] = []
+        params: list[Any] = []
+        if "name" in updates:
+            sets.append("name = ?")
+            params.append(updates["name"])
+        if "description" in updates:
+            sets.append("description = ?")
+            params.append(updates["description"])
+        if not sets:
+            return False
+        sets.append("updated_at = ?")
+        params.append(now)
+        params.append(group_id)
+        cur = self._conn.execute(
+            f"UPDATE file_groups SET {', '.join(sets)} WHERE id = ?",
+            tuple(params),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def delete_group(self, group_id: str) -> bool:
+        """删除文件组（CASCADE 自动删成员）。"""
+        cur = self._conn.execute(
+            "DELETE FROM file_groups WHERE id = ?", (group_id,)
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_groups(self, workspace: str) -> list[dict[str, Any]]:
+        """列出工作区的所有文件组。"""
+        rows = self._conn.execute(
+            "SELECT * FROM file_groups WHERE workspace = ? ORDER BY created_at",
+            (workspace,),
+        ).fetchall()
+        return [self._group_row_to_dict(r) for r in rows]
+
+    def get_group(self, group_id: str) -> dict[str, Any] | None:
+        """按 ID 查询文件组。"""
+        row = self._conn.execute(
+            "SELECT * FROM file_groups WHERE id = ?", (group_id,)
+        ).fetchone()
+        return self._group_row_to_dict(row) if row else None
+
+    # ── file_group_members CRUD ──────────────────────────────
+
+    def add_group_member(
+        self, group_id: str, file_id: str, role: str = "member",
+    ) -> None:
+        """添加文件到组。"""
+        now = _now_iso()
+        self._conn.execute(
+            "INSERT INTO file_group_members (group_id, file_id, role, added_at)"
+            " VALUES (?, ?, ?, ?)"
+            " ON CONFLICT(group_id, file_id) DO UPDATE SET role=excluded.role, added_at=excluded.added_at",
+            (group_id, file_id, role, now),
+        )
+        self._conn.commit()
+
+    def remove_group_member(self, group_id: str, file_id: str) -> bool:
+        """从组中移除文件。"""
+        cur = self._conn.execute(
+            "DELETE FROM file_group_members WHERE group_id = ? AND file_id = ?",
+            (group_id, file_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
+    def list_group_members(self, group_id: str) -> list[dict[str, Any]]:
+        """列出组内所有文件成员（JOIN file_registry 获取文件信息）。"""
+        rows = self._conn.execute(
+            "SELECT fgm.group_id, fgm.file_id, fgm.role, fgm.added_at,"
+            " fr.canonical_path, fr.original_name, fr.file_type"
+            " FROM file_group_members fgm"
+            " JOIN file_registry fr ON fgm.file_id = fr.id"
+            " WHERE fgm.group_id = ?"
+            " ORDER BY fgm.added_at",
+            (group_id,),
+        ).fetchall()
+        return [
+            {
+                "group_id": r["group_id"],
+                "file_id": r["file_id"],
+                "role": r["role"],
+                "added_at": r["added_at"],
+                "canonical_path": r["canonical_path"],
+                "original_name": r["original_name"],
+                "file_type": r["file_type"],
+            }
+            for r in rows
+        ]
+
+    def get_file_groups(self, file_id: str) -> list[dict[str, Any]]:
+        """查询某文件所属的所有组。"""
+        rows = self._conn.execute(
+            "SELECT fg.* FROM file_groups fg"
+            " JOIN file_group_members fgm ON fg.id = fgm.group_id"
+            " WHERE fgm.file_id = ?"
+            " ORDER BY fg.created_at",
+            (file_id,),
+        ).fetchall()
+        return [self._group_row_to_dict(r) for r in rows]
+
     # ── 内部工具 ─────────────────────────────────────────────
 
     @staticmethod
@@ -403,4 +526,12 @@ class FileRegistryStore:
             d["details"] = json.loads(raw) if raw else {}
         except (json.JSONDecodeError, TypeError):
             d["details"] = {}
+        return d
+
+    @staticmethod
+    def _group_row_to_dict(row: object) -> dict[str, Any]:
+        """file_groups 行 → dict。"""
+        d: dict[str, Any] = {}
+        for key in ("id", "workspace", "name", "description", "created_at", "updated_at"):
+            d[key] = row[key]  # type: ignore[index]
         return d

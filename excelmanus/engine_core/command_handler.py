@@ -205,7 +205,7 @@ class CommandHandler:
             return self._handle_memory_command(parts)
 
         if command == "/playbook":
-            return self._handle_playbook_command(parts)
+            return await self._handle_playbook_command(parts)
 
         return self._handle_undo_command(parts)
 
@@ -840,7 +840,7 @@ class CommandHandler:
 
     # ── /playbook 命令处理 ──────────────────────────────────
 
-    def _handle_playbook_command(self, parts: list[str]) -> str:
+    async def _handle_playbook_command(self, parts: list[str]) -> str:
         """处理 /playbook 命令。
 
         用法：
@@ -889,11 +889,21 @@ class CommandHandler:
             query = " ".join(parts[2:]).strip()
             if not query:
                 return "用法：/playbook search <关键词>"
-            # 简单文本搜索（无 embedding 时降级为 content 包含匹配）
-            bullets = store.list_all(limit=100)
-            matched = [b for b in bullets if query.lower() in b.content.lower()]
+            # 优先尝试 embedding 语义搜索
+            matched = []
+            _emb_client = getattr(e, "_embedding_client", None)
+            if _emb_client is not None:
+                try:
+                    _emb = await _emb_client.embed([query])
+                    matched = store.search(_emb[0], top_k=10)
+                except Exception:
+                    matched = []
+            # 降级：子串匹配
             if not matched:
-                return f"未找到包含「{query}」的条目。"
+                bullets = store.list_all(limit=100)
+                matched = [b for b in bullets if query.lower() in b.content.lower()]
+            if not matched:
+                return f"未找到与「{query}」相关的条目。"
             lines = [f"**搜索结果** ({len(matched)} 条)"]
             for b in matched[:10]:
                 lines.append(f"  `{b.id}` **[{b.category}]** {b.content[:80]}")

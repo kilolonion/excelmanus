@@ -335,6 +335,7 @@ class ExcelManusConfig:
     max_sessions: int = 1000
     workspace_root: str = "."
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
+    deploy_mode: str = "standalone"  # standalone|server|docker — 部署模式
     log_level: str = "INFO"
     skills_system_dir: str = "excelmanus/skillpacks/system"
     skills_user_dir: str = "~/.excelmanus/skillpacks"
@@ -508,6 +509,21 @@ class ExcelManusConfig:
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
 
+    @property
+    def is_standalone(self) -> bool:
+        """单机桌面部署模式。"""
+        return self.deploy_mode == "standalone"
+
+    @property
+    def is_server(self) -> bool:
+        """前后端分离的服务器部署（含 Docker）。"""
+        return self.deploy_mode in ("server", "docker")
+
+    @property
+    def is_docker(self) -> bool:
+        """Docker 容器化部署。"""
+        return self.deploy_mode == "docker"
+
 
 @dataclass(frozen=True)
 class _ContextOptimizationConfig:
@@ -596,6 +612,70 @@ def _validate_base_url(url: str) -> None:
         raise ConfigError(
             f"EXCELMANUS_BASE_URL 必须为合法的 HTTP/HTTPS URL，当前值: {url!r}"
         )
+
+
+# OpenAI 兼容 API 的常见路径后缀（用于自动修正）
+_OPENAI_COMPAT_V1_SUFFIX = "/v1"
+# Gemini / Anthropic 原生 API 的 URL 特征（这些不需要 /v1）
+_NATIVE_API_INDICATORS = (
+    "generativelanguage.googleapis.com",
+    ":generateContent",
+    ":streamGenerateContent",
+    "api.anthropic.com",
+)
+
+
+def _normalize_base_url(url: str, *, protocol: str = "auto", env_name: str = "EXCELMANUS_BASE_URL") -> str:
+    """规范化 Base URL：去尾斜杠、检测并自动修正缺失 /v1。
+
+    对于 OpenAI 兼容协议（openai / openai_responses / auto 且非 Gemini/Anthropic 原生），
+    如果 URL 路径不以 /v1 结尾且看起来像是第三方代理，
+    自动补全 /v1 并记录警告日志。
+
+    Returns:
+        规范化后的 URL。
+    """
+    # 去除尾部斜杠
+    normalized = url.rstrip("/")
+
+    # 判断是否为原生 API（不需要 /v1）
+    is_native = any(indicator in normalized.lower() for indicator in _NATIVE_API_INDICATORS)
+    p = (protocol or "auto").strip().lower()
+    is_openai_compat = p in ("openai", "openai_responses", "auto") and not is_native
+    if p in ("gemini", "anthropic"):
+        is_openai_compat = False
+
+    if not is_openai_compat:
+        return normalized
+
+    # 对 OpenAI 兼容协议，检查路径是否以 /v1 结尾
+    from urllib.parse import urlparse
+    parsed = urlparse(normalized)
+    path = parsed.path.rstrip("/")
+
+    # 已经以 /v1 结尾 — 正常
+    if path.endswith("/v1") or path == "/v1":
+        return normalized
+
+    # 路径以 /v1/ 开头后面还有子路径（如 /v1/chat）→ 过度指定，警告
+    if "/v1/" in path:
+        logger.warning(
+            "%s 的路径 %r 包含 /v1/ 后的额外子路径，"
+            "OpenAI SDK 会自动拼接 /chat/completions，请确认路径是否正确。"
+            "建议将路径截断到 /v1，例如: %s",
+            env_name, path,
+            normalized[:normalized.index("/v1/") + 3],
+        )
+        return normalized
+
+    # 路径不包含 /v1 — 很可能缺失，自动补全
+    corrected = normalized + _OPENAI_COMPAT_V1_SUFFIX
+    logger.warning(
+        "%s=%r 未以 /v1 结尾。OpenAI 兼容 API 通常需要 /v1 路径前缀，"
+        "已自动修正为 %r。如果这不正确，请显式设置完整的 Base URL。",
+        env_name, url, corrected,
+    )
+    return corrected
 
 
 def _parse_bool(value: str | None, name: str, default: bool) -> bool:
@@ -836,6 +916,34 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
     return tuple(profiles)
 
 
+def _detect_deploy_mode() -> str:
+    """自动推断部署模式：docker > server > standalone。
+
+    检测优先级：
+    1. Docker 容器（/.dockerenv 或 /proc/1/cgroup 含 docker/containerd）
+    2. 服务器模式（auth 已启用 — 通常意味着多用户远程访问）
+    3. 默认单机模式
+    """
+    # Docker 容器检测
+    try:
+        if Path("/.dockerenv").exists():
+            return "docker"
+        cgroup = Path("/proc/1/cgroup")
+        if cgroup.is_file():
+            content = cgroup.read_text(encoding="utf-8", errors="ignore")
+            if "docker" in content or "containerd" in content or "kubepods" in content:
+                return "docker"
+    except Exception:
+        pass
+
+    # 服务器模式推断：auth 已启用通常意味着面向多用户的远程服务
+    auth_env = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower()
+    if auth_env in ("1", "true", "yes"):
+        return "server"
+
+    return "standalone"
+
+
 def _parse_cors_allow_origins() -> tuple[str, ...]:
     """从已加载的环境变量中解析 CORS 允许来源列表（不触发 .env 加载）。"""
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
@@ -949,6 +1057,15 @@ def load_config() -> ExcelManusConfig:
             "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
         )
     _validate_base_url(base_url)
+
+    # 主模型协议类型（提前解析，供 _normalize_base_url 使用）
+    protocol = _parse_protocol(
+        os.environ.get("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL"
+    )
+
+    # 规范化 base_url：去尾斜杠、检测缺失 /v1 并自动修正
+    base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL")
+
     if not model:
         # 尝试从 Gemini 完整 URL 中提取模型名
         from excelmanus.providers.gemini import _extract_model_from_url
@@ -961,11 +1078,6 @@ def load_config() -> ExcelManusConfig:
             "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
             "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-2.5-flash:generateContent）"
         )
-
-    # 主模型协议类型
-    protocol = _parse_protocol(
-        os.environ.get("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL"
-    )
 
     max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
@@ -986,6 +1098,14 @@ def load_config() -> ExcelManusConfig:
 
     workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
     data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "")
+
+    # 部署模式推断
+    deploy_mode_raw = os.environ.get("EXCELMANUS_DEPLOY_MODE", "auto").strip().lower()
+    if deploy_mode_raw in ("standalone", "server", "docker"):
+        deploy_mode = deploy_mode_raw
+    else:
+        # auto 推断
+        deploy_mode = _detect_deploy_mode()
     log_level = _parse_log_level(os.environ.get("EXCELMANUS_LOG_LEVEL"))
     default_system_skill_dir = (
         Path(__file__).resolve().parent / "skillpacks" / "system"
@@ -1080,6 +1200,8 @@ def load_config() -> ExcelManusConfig:
     aux_protocol = _parse_protocol(
         os.environ.get("EXCELMANUS_AUX_PROTOCOL"), "EXCELMANUS_AUX_PROTOCOL"
     )
+    if aux_base_url:
+        aux_base_url = _normalize_base_url(aux_base_url, protocol=aux_protocol, env_name="EXCELMANUS_AUX_BASE_URL")
 
     # subagent 执行配置
     subagent_enabled = _parse_bool(
@@ -1294,6 +1416,8 @@ def load_config() -> ExcelManusConfig:
     vlm_protocol = _parse_protocol(
         os.environ.get("EXCELMANUS_VLM_PROTOCOL"), "EXCELMANUS_VLM_PROTOCOL"
     )
+    if vlm_base_url:
+        vlm_base_url = _normalize_base_url(vlm_base_url, protocol=vlm_protocol, env_name="EXCELMANUS_VLM_BASE_URL")
     vlm_max_tokens = _parse_int(
         os.environ.get("EXCELMANUS_VLM_MAX_TOKENS"),
         "EXCELMANUS_VLM_MAX_TOKENS",
@@ -1491,6 +1615,7 @@ def load_config() -> ExcelManusConfig:
         max_sessions=max_sessions,
         workspace_root=workspace_root,
         data_root=data_root,
+        deploy_mode=deploy_mode,
         log_level=log_level,
         skills_system_dir=skills_system_dir,
         skills_user_dir=skills_user_dir,

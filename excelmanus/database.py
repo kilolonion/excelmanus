@@ -335,6 +335,27 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
     ],
+    19: [
+        """CREATE TABLE IF NOT EXISTS file_groups (
+            id          TEXT PRIMARY KEY,
+            workspace   TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_fg_workspace ON file_groups(workspace)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_fg_workspace_name ON file_groups(workspace, name)",
+        """CREATE TABLE IF NOT EXISTS file_group_members (
+            group_id TEXT NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
+            file_id  TEXT NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
+            role     TEXT DEFAULT 'member',
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (group_id, file_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -649,6 +670,27 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
+    ],
+    19: [
+        """CREATE TABLE IF NOT EXISTS file_groups (
+            id          TEXT PRIMARY KEY,
+            workspace   TEXT NOT NULL,
+            name        TEXT NOT NULL,
+            description TEXT DEFAULT '',
+            created_at  TEXT NOT NULL,
+            updated_at  TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_fg_workspace ON file_groups(workspace)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_fg_workspace_name ON file_groups(workspace, name)",
+        """CREATE TABLE IF NOT EXISTS file_group_members (
+            group_id TEXT NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
+            file_id  TEXT NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
+            role     TEXT DEFAULT 'member',
+            added_at TEXT NOT NULL,
+            PRIMARY KEY (group_id, file_id)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
+        "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
     ],
 }
 
