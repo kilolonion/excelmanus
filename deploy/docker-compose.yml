@@ -39,6 +39,7 @@ services:
       - EXCELMANUS_DB_PATH=/data/excelmanus.db
       - EXCELMANUS_CORS_ALLOW_ORIGINS=${EXCELMANUS_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost,https://kilon.top,https://excelmanus.com}
       - EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${EXCELMANUS_ALLOWED_OAUTH_ORIGINS:-https://kilon.top,https://excelmanus.com,http://localhost:3000}
+      - EXCELMANUS_CHANNELS=${EXCELMANUS_CHANNELS:-qq}
     volumes:
       - workspace_data:/workspace
       - db_data:/data

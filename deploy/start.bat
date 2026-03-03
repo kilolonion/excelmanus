@@ -201,6 +201,9 @@ REM -- Env vars override ports --
 if "%BACKEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_BACKEND_PORT  set "BACKEND_PORT=%EXCELMANUS_BACKEND_PORT%"
 if "%FRONTEND_PORT_FROM_ARG%"=="0" if defined EXCELMANUS_FRONTEND_PORT set "FRONTEND_PORT=%EXCELMANUS_FRONTEND_PORT%"
 
+REM -- Default: enable QQ bot channel (override via .env or env var) --
+if not defined EXCELMANUS_CHANNELS set "EXCELMANUS_CHANNELS=qq"
+
 REM -- Find Python interpreter --
 set "PYTHON_BIN="
 if exist "%PROJECT_ROOT%\.venv\Scripts\python.exe" (

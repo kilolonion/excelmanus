@@ -244,6 +244,10 @@ _load_env "${PROJECT_ROOT}/.env.local"
 BACKEND_PORT="${EXCELMANUS_BACKEND_PORT:-$BACKEND_PORT}"
 FRONTEND_PORT="${EXCELMANUS_FRONTEND_PORT:-$FRONTEND_PORT}"
 
+# 默认启用 QQ 渠道 Bot（可通过 .env 或环境变量覆盖）
+EXCELMANUS_CHANNELS="${EXCELMANUS_CHANNELS:-qq}"
+export EXCELMANUS_CHANNELS
+
 # ── 初始化日志文件 ──
 if [[ -n "$LOG_DIR" ]]; then
   mkdir -p "$LOG_DIR"
