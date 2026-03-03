@@ -5,6 +5,7 @@ import ast
 import enum
 from dataclasses import dataclass, field
 
+from excelmanus.excel_extensions import EXCEL_EXTENSIONS as _EXCEL_EXTENSIONS_BASE
 from excelmanus.security.module_manifest import MODULE_ROOT_ALIASES, NETWORK_MODULES
 
 
@@ -202,7 +203,7 @@ class ExcelTarget:
 
 # ── Excel 目标提取 ──────────────────────────────────────
 
-_EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"})
+_EXCEL_EXTENSIONS = _EXCEL_EXTENSIONS_BASE | frozenset({".csv"})
 
 
 def _is_excel_literal(value: str) -> bool:

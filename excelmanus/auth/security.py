@@ -30,26 +30,58 @@ REFRESH_TOKEN_EXPIRE_MINUTES = 60 * 24 * 30  # 30 days
 
 
 def _get_jwt_secret() -> str:
-    """延迟加载 JWT 密钥；未设置时生成随机密钥。
+    """延迟加载 JWT 密钥。
 
-    警告：如果未设置 EXCELMANUS_JWT_SECRET，将生成随机密钥。
-    这意味着每次服务重启后所有令牌都会失效，
-    且多 worker 部署时跨 worker 的令牌验证会失败。
-    生产环境请务必设置 EXCELMANUS_JWT_SECRET。
+    优先级：
+    1. EXCELMANUS_JWT_SECRET 环境变量
+    2. ~/.excelmanus/data/.jwt_secret 持久化文件
+    3. 自动生成并持久化到上述文件
+
+    多 worker 部署时请务必设置 EXCELMANUS_JWT_SECRET 环境变量，
+    以确保所有 worker 使用相同的密钥。
     """
     global _JWT_SECRET_KEY
-    if _JWT_SECRET_KEY is None:
-        env_secret = os.environ.get("EXCELMANUS_JWT_SECRET", "").strip()
-        if env_secret:
-            _JWT_SECRET_KEY = env_secret
-        else:
-            import logging
-            logging.getLogger(__name__).warning(
-                "EXCELMANUS_JWT_SECRET 未设置，使用随机密钥。"
-                "服务重启后所有已登录用户的 token 将失效。"
-                "请在生产环境中设置 EXCELMANUS_JWT_SECRET 环境变量。"
-            )
-            _JWT_SECRET_KEY = secrets.token_urlsafe(64)
+    if _JWT_SECRET_KEY is not None:
+        return _JWT_SECRET_KEY
+
+    env_secret = os.environ.get("EXCELMANUS_JWT_SECRET", "").strip()
+    if env_secret:
+        _JWT_SECRET_KEY = env_secret
+        return _JWT_SECRET_KEY
+
+    # 尝试从持久化文件读取
+    from pathlib import Path
+    key_dir = Path.home() / ".excelmanus" / "data"
+    key_file = key_dir / ".jwt_secret"
+    if key_file.exists():
+        try:
+            stored = key_file.read_text(encoding="utf-8").strip()
+            if stored:
+                _JWT_SECRET_KEY = stored
+                return _JWT_SECRET_KEY
+        except OSError:
+            pass
+
+    # 生成新密钥并持久化
+    import logging
+    _logger = logging.getLogger(__name__)
+    new_secret = secrets.token_urlsafe(64)
+    try:
+        key_dir.mkdir(parents=True, exist_ok=True)
+        key_file.write_text(new_secret, encoding="utf-8")
+        from excelmanus.security.cipher import _restrict_file_permissions
+        _restrict_file_permissions(key_file)
+        _logger.info(
+            "JWT 密钥已自动生成并持久化到 %s。"
+            "多 worker 部署请改用 EXCELMANUS_JWT_SECRET 环境变量。",
+            key_file,
+        )
+    except OSError:
+        _logger.warning(
+            "JWT 密钥已生成但无法持久化，服务重启后 token 将失效。"
+            "请设置 EXCELMANUS_JWT_SECRET 环境变量。"
+        )
+    _JWT_SECRET_KEY = new_secret
     return _JWT_SECRET_KEY
 
 
@@ -130,22 +162,25 @@ def decode_merge_token(token: str) -> dict[str, Any] | None:
 
 # ── OAuth State 签名（防篡改 + 动态回跳） ──────────
 
-def create_oauth_state(provider: str, origin_domain: str) -> str:
-    """创建带签名的 OAuth state，格式：provider:random:origin_domain:signature
+def create_oauth_state(provider: str, origin: str) -> str:
+    """创建带签名的 OAuth state，格式：provider:random:origin_b64:signature
     
     Args:
         provider: OAuth 提供商（github/google/qq）
-        origin_domain: 发起登录的域名（kilon.top/excelmanus.com）
+        origin: 发起登录的完整来源（如 https://kilon.top 或 http://localhost:3000）
     
     Returns:
         签名后的 state 字符串
     """
+    import base64
     import hmac
     import hashlib
     
     random_token = secrets.token_urlsafe(16)
-    # 格式：provider:random:origin_domain
-    unsigned = f"{provider}:{random_token}:{origin_domain}"
+    # base64url 编码 origin，避免 URL 中的 ":" 与 state 分隔符冲突
+    origin_b64 = base64.urlsafe_b64encode(origin.encode()).decode().rstrip("=")
+    # 格式：provider:random:origin_b64
+    unsigned = f"{provider}:{random_token}:{origin_b64}"
     # 用 JWT_SECRET 做 HMAC-SHA256 签名
     signature = hmac.new(
         _get_jwt_secret().encode(),
@@ -157,15 +192,16 @@ def create_oauth_state(provider: str, origin_domain: str) -> str:
 
 
 def verify_oauth_state(state: str, allowed_origins: list[str]) -> tuple[str, str] | None:
-    """验证 OAuth state 签名并提取 origin_domain
+    """验证 OAuth state 签名并提取 origin
     
     Args:
         state: OAuth 回调中的 state 参数
-        allowed_origins: 允许的域名白名单
+        allowed_origins: 允许的完整来源白名单（如 https://kilon.top）
     
     Returns:
-        (provider, origin_domain) 或 None（验证失败）
+        (provider, origin) 或 None（验证失败）
     """
+    import base64
     import hmac
     import hashlib
     
@@ -173,10 +209,10 @@ def verify_oauth_state(state: str, allowed_origins: list[str]) -> tuple[str, str
     if len(parts) != 4:
         return None
     
-    provider, random_token, origin_domain, signature = parts
+    provider, random_token, origin_b64, signature = parts
     
     # 1. 验证签名
-    unsigned = f"{provider}:{random_token}:{origin_domain}"
+    unsigned = f"{provider}:{random_token}:{origin_b64}"
     expected_sig = hmac.new(
         _get_jwt_secret().encode(),
         unsigned.encode(),
@@ -186,8 +222,17 @@ def verify_oauth_state(state: str, allowed_origins: list[str]) -> tuple[str, str
     if not hmac.compare_digest(signature, expected_sig):
         return None
     
-    # 2. 验证 origin_domain 在白名单内
-    if origin_domain not in allowed_origins:
+    # 2. 解码 origin
+    try:
+        padding = 4 - len(origin_b64) % 4
+        if padding != 4:
+            origin_b64 += "=" * padding
+        origin = base64.urlsafe_b64decode(origin_b64).decode()
+    except Exception:
         return None
     
-    return provider, origin_domain
+    # 3. 验证 origin 在白名单内
+    if origin not in allowed_origins:
+        return None
+    
+    return provider, origin

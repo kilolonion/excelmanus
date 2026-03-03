@@ -48,12 +48,10 @@ def generate_wrapper_script(
     Args:
         tier: 代码风险等级 (GREEN/YELLOW/RED)
         workspace_root: 工作区根目录绝对路径
-        docker_mode: 是否在 Docker 容器内运行。Docker RED tier
-            也注入最小 filesystem guard（bench 保护 + staging 重定向）。
+        docker_mode: 保留参数，向后兼容。RED tier 现在无论 Docker 与否
+            都注入文件系统守卫（含敏感目录读取保护）。
     """
-    if tier == "RED" and not docker_mode:
-        return _RED_WRAPPER_TEMPLATE
-    if tier == "RED" and docker_mode:
+    if tier == "RED":
         return _RED_FS_GUARD_TEMPLATE.format(
             workspace_root=repr(workspace_root),
         )
@@ -75,22 +73,12 @@ def generate_wrapper_script(
     )
 
 
-_RED_WRAPPER_TEMPLATE = '''\
-import sys
-if len(sys.argv) < 2:
-    print("Usage: wrapper.py <script.py> [args...]", file=sys.stderr)
-    sys.exit(1)
-_script = sys.argv[1]
-sys.argv = sys.argv[1:]
-exec(compile(open(_script, encoding="utf-8").read(), _script, "exec"),
-     {"__name__": "__main__", "__file__": _script, "__builtins__": __builtins__})
-'''
-
 _RED_FS_GUARD_TEMPLATE = '''\
-"""ExcelManus RED 文件系统守卫包装（Docker 模式，自动生成）。
+"""ExcelManus RED 文件系统守卫包装（自动生成）。
 
 RED 层级无 import/exec/socket 限制，仅保留：
 - Filesystem Guard（工作区范围 + bench CoW + staging 重定向）
+- 敏感目录读取保护（~/.excelmanus/ 等）
 - openpyxl atomic save 保护
 """
 import sys
@@ -114,6 +102,12 @@ except (ValueError, TypeError):
 _STAGING_LOOKUP = {{os.path.realpath(k): os.path.realpath(v) for k, v in _STAGING_MAP.items()}}
 
 _original_open = builtins.open
+
+# ── 敏感目录读取保护 ──
+_HOME_DIR = os.path.expanduser("~")
+_SENSITIVE_DIRS = [
+    os.path.realpath(os.path.join(_HOME_DIR, ".excelmanus")),
+]
 
 # ── 文件系统守卫 ──
 _BENCH_PROTECTED_DIRS_RAW = os.environ.get("EXCELMANUS_BENCH_PROTECTED_DIRS", "bench/external")
@@ -159,6 +153,20 @@ def _guarded_open(file, mode="r", *args, **kwargs):
     if resolved in _STAGING_LOOKUP:
         resolved = _STAGING_LOOKUP[resolved]
         file = resolved
+    # ── 敏感路径读取保护 ──
+    for _sd in _SENSITIVE_DIRS:
+        _sd_prefix = _sd + os.sep
+        if resolved.startswith(_sd_prefix) or resolved == _sd:
+            raise PermissionError(
+                f"文件访问被安全策略禁止：路径位于敏感目录内 [等级: {{_TIER}}]"
+            )
+    _basename = os.path.basename(resolved)
+    if _basename == ".env":
+        _ws = _WORKSPACE_ROOT + os.sep
+        if not (resolved.startswith(_ws) or resolved == _WORKSPACE_ROOT):
+            raise PermissionError(
+                f"文件访问被安全策略禁止：禁止访问工作区外的 .env 文件 [等级: {{_TIER}}]"
+            )
     if any(c in str(mode) for c in "wax+"):
         ws = _WORKSPACE_ROOT + os.sep
         _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT

@@ -115,18 +115,87 @@ def _get_rate_limiter(request: Request):
     return getattr(request.app.state, "rate_limiter", None)
 
 
+def _parse_origin_list(raw: str) -> list[str]:
+    """解析逗号分隔的 origin 列表，裸域名自动补全 https://。"""
+    origins: list[str] = []
+    for o in raw.split(","):
+        o = o.strip()
+        if not o:
+            continue
+        # 裸域名自动补全 https://，已有 scheme 的保持不变
+        if not o.startswith("http://") and not o.startswith("https://"):
+            o = f"https://{o}"
+        origins.append(o.rstrip("/"))
+    return origins
+
+
 def _get_allowed_oauth_origins() -> list[str]:
-    """获取 OAuth 回调允许的域名白名单。
+    """获取 OAuth 回调允许的完整来源白名单。
     
-    从环境变量 EXCELMANUS_ALLOWED_OAUTH_ORIGINS 读取，逗号分隔。
-    默认：kilon.top,excelmanus.com
+    优先级：
+    1. EXCELMANUS_ALLOWED_OAUTH_ORIGINS（显式 OAuth 白名单）
+    2. EXCELMANUS_CORS_ALLOW_ORIGINS（自动从 CORS 配置派生，减少重复配置）
+    3. 硬编码默认值
+    
+    支持完整 URL（如 https://kilon.top）或裸域名（自动补全 https://）。
     """
     import os
+    # 1) 优先使用显式 OAuth 白名单
     raw = os.environ.get("EXCELMANUS_ALLOWED_OAUTH_ORIGINS", "").strip()
+    if raw:
+        return _parse_origin_list(raw)
+    # 2) 自动从 CORS origins 派生（过滤掉 * 通配符和纯 IP LAN 地址）
+    cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS", "").strip()
+    if cors_raw:
+        all_origins = _parse_origin_list(cors_raw)
+        # 过滤掉 localhost / 127.x / 纯 IP 地址（它们通常是开发环境，不应做 OAuth 回跳）
+        import re
+        _ip_pattern = re.compile(r"https?://(\d{1,3}\.){3}\d{1,3}(:\d+)?$")
+        filtered = [
+            o for o in all_origins
+            if not _ip_pattern.match(o) and "localhost" not in o
+        ]
+        if filtered:
+            return filtered
+    # 3) 硬编码默认值
+    return ["https://kilon.top", "https://excelmanus.com"]
+
+
+def _default_oauth_origin() -> str:
+    """获取默认的 OAuth 回跳来源（白名单第一项）。"""
+    allowed = _get_allowed_oauth_origins()
+    return allowed[0] if allowed else "https://kilon.top"
+
+
+def _resolve_oauth_origin(origin_param: str | None, request: Request) -> str:
+    """从请求中解析 OAuth 回跳来源 URL。
+    
+    优先级：origin 查询参数 > Referer 头 > 默认值。
+    结果必须在白名单内，否则回退到默认值。
+    """
+    from urllib.parse import urlparse
+
+    raw = (origin_param or "").strip()
     if not raw:
-        # 默认白名单
-        return ["kilon.top", "excelmanus.com"]
-    return [origin.strip() for origin in raw.split(",") if origin.strip()]
+        raw = request.headers.get("referer", "").strip()
+    
+    if raw:
+        parsed = urlparse(raw)
+        if parsed.scheme and parsed.netloc:
+            # 提取 scheme://host[:port]（去掉路径部分）
+            candidate = f"{parsed.scheme}://{parsed.netloc}".rstrip("/")
+        elif not parsed.scheme and parsed.path:
+            # 裸域名，补全 https://
+            candidate = f"https://{parsed.path.split('/')[0]}"
+        else:
+            candidate = ""
+    else:
+        candidate = ""
+    
+    allowed = _get_allowed_oauth_origins()
+    if candidate and candidate in allowed:
+        return candidate
+    return _default_oauth_origin()
 
 
 # ── 注册与登录 ──────────────────────────────────
@@ -394,26 +463,10 @@ async def oauth_github_redirect(request: Request, origin: str | None = None) -> 
     """发起 GitHub OAuth 登录。
     
     Args:
-        origin: 发起登录的域名（如 excelmanus.com），用于回调后重定向回原域名
+        origin: 发起登录的来源（如 https://excelmanus.com），用于回调后重定向回原来源
     """
-    # 从 Referer 或 origin 参数提取域名
-    origin_domain = origin or request.headers.get("referer", "")
-    if origin_domain:
-        from urllib.parse import urlparse
-        parsed = urlparse(origin_domain)
-        origin_domain = parsed.netloc or parsed.path.split("/")[0]
-    
-    # 如果没有提供或提取失败，默认使用 kilon.top
-    if not origin_domain:
-        origin_domain = "kilon.top"
-    
-    # 验证域名在白名单内
-    allowed = _get_allowed_oauth_origins()
-    if origin_domain not in allowed:
-        origin_domain = "kilon.top"  # 回退到默认域名
-    
-    # 创建带签名的 state
-    state = create_oauth_state("github", origin_domain)
+    origin_url = _resolve_oauth_origin(origin, request)
+    state = create_oauth_state("github", origin_url)
     url = github_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
@@ -424,27 +477,40 @@ async def oauth_github_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    """GitHub OAuth 回调，验证 state 并重定向到原域名。"""
-    # 验证 state 签名并提取 origin_domain
+    """​GitHub OAuth 回调，验证 state 并重定向到原来源。
+    
+    支持两种模式：
+    - 浏览器重定向（默认）：返回 302 重定向到前端 /auth/callback
+    - JSON API 调用（Accept: application/json）：直接返回 JSON 响应
+    """
+    json_mode = _wants_json(request)
+    fallback = _default_oauth_origin()
     allowed = _get_allowed_oauth_origins()
     verified = verify_oauth_state(state or "", allowed) if state else None
     
     if verified is None:
         logger.warning("GitHub OAuth state 验证失败: state=%s", state)
-        return _oauth_error_response("无效的 state 参数", origin_domain="kilon.top")
+        if json_mode:
+            raise HTTPException(400, "无效的 state 参数")
+        return _oauth_error_response("无效的 state 参数", origin=fallback)
     
-    provider, origin_domain = verified
+    provider, origin = verified
     if provider != "github":
         logger.warning("GitHub OAuth state provider 不匹配: expected=github got=%s", provider)
-        return _oauth_error_response("state provider 不匹配", origin_domain=origin_domain)
+        if json_mode:
+            raise HTTPException(400, "state provider 不匹配")
+        return _oauth_error_response("state provider 不匹配", origin=origin)
     
-    # 交换授权码
     info = await github_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_response("GitHub 认证失败", origin_domain=origin_domain)
+        if json_mode:
+            raise HTTPException(400, "GitHub 认证失败")
+        return _oauth_error_response("GitHub 认证失败", origin=origin)
     
     store = _get_store(request)
-    return _oauth_success_response(store, info, origin_domain=origin_domain)
+    if json_mode:
+        return _oauth_json_response(store, info)
+    return _oauth_success_response(store, info, origin=origin)
 
 
 # ── OAuth: Google ─────────────────────────────────────────
@@ -455,26 +521,10 @@ async def oauth_google_redirect(request: Request, origin: str | None = None) -> 
     """发起 Google OAuth 登录。
     
     Args:
-        origin: 发起登录的域名（如 excelmanus.com），用于回调后重定向回原域名
+        origin: 发起登录的来源（如 https://excelmanus.com），用于回调后重定向回原来源
     """
-    # 从 Referer 或 origin 参数提取域名
-    origin_domain = origin or request.headers.get("referer", "")
-    if origin_domain:
-        from urllib.parse import urlparse
-        parsed = urlparse(origin_domain)
-        origin_domain = parsed.netloc or parsed.path.split("/")[0]
-    
-    # 如果没有提供或提取失败，默认使用 kilon.top
-    if not origin_domain:
-        origin_domain = "kilon.top"
-    
-    # 验证域名在白名单内
-    allowed = _get_allowed_oauth_origins()
-    if origin_domain not in allowed:
-        origin_domain = "kilon.top"  # 回退到默认域名
-    
-    # 创建带签名的 state
-    state = create_oauth_state("google", origin_domain)
+    origin_url = _resolve_oauth_origin(origin, request)
+    state = create_oauth_state("google", origin_url)
     url = google_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
@@ -485,35 +535,54 @@ async def oauth_google_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    """Google OAuth 回调，验证 state 并重定向到原域名。"""
-    # 验证 state 签名并提取 origin_domain
+    """Google OAuth 回调，验证 state 并重定向到原来源。
+    
+    支持两种模式：
+    - 浏览器重定向（默认）：返回 302 重定向到前端 /auth/callback
+    - JSON API 调用（Accept: application/json）：直接返回 JSON 响应
+    """
+    json_mode = _wants_json(request)
+    fallback = _default_oauth_origin()
     allowed = _get_allowed_oauth_origins()
     verified = verify_oauth_state(state or "", allowed) if state else None
     
     if verified is None:
         logger.warning("Google OAuth state 验证失败: state=%s", state)
-        return _oauth_error_response("无效的 state 参数", origin_domain="kilon.top")
+        if json_mode:
+            raise HTTPException(400, "无效的 state 参数")
+        return _oauth_error_response("无效的 state 参数", origin=fallback)
     
-    provider, origin_domain = verified
+    provider, origin = verified
     if provider != "google":
         logger.warning("Google OAuth state provider 不匹配: expected=google got=%s", provider)
-        return _oauth_error_response("state provider 不匹配", origin_domain=origin_domain)
+        if json_mode:
+            raise HTTPException(400, "state provider 不匹配")
+        return _oauth_error_response("state provider 不匹配", origin=origin)
     
-    # 交换授权码
     info = await google_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_response("Google 认证失败", origin_domain=origin_domain)
+        if json_mode:
+            raise HTTPException(400, "Google 认证失败")
+        return _oauth_error_response("Google 认证失败", origin=origin)
     
     store = _get_store(request)
-    return _oauth_success_response(store, info, origin_domain=origin_domain)
+    if json_mode:
+        return _oauth_json_response(store, info)
+    return _oauth_success_response(store, info, origin=origin)
 
 
 # ── OAuth: QQ ─────────────────────────────────────────────
 
 
 @router.get("/oauth/qq")
-async def oauth_qq_redirect(request: Request) -> Any:
-    state = f"qq:{secrets.token_urlsafe(32)}"
+async def oauth_qq_redirect(request: Request, origin: str | None = None) -> Any:
+    """发起 QQ OAuth 登录。
+    
+    Args:
+        origin: 发起登录的来源（如 https://excelmanus.com），用于回调后重定向回原来源
+    """
+    origin_url = _resolve_oauth_origin(origin, request)
+    state = create_oauth_state("qq", origin_url)
     url = qq_authorize_url(state=state, config_store=_get_config_store(request))
     return JSONResponse({"authorize_url": url, "state": state})
 
@@ -524,13 +593,40 @@ async def oauth_qq_callback(
     state: str | None = None,
     request: Request = ...,  # type: ignore[assignment]
 ) -> Any:
-    want_json = _wants_json(request)
+    """QQ OAuth 回调，验证 state 并重定向到原来源。
+    
+    支持两种模式：
+    - 浏览器重定向（默认）：返回 302 重定向到前端 /auth/callback
+    - JSON API 调用（Accept: application/json）：直接返回 JSON 响应
+    """
+    json_mode = _wants_json(request)
+    fallback = _default_oauth_origin()
+    allowed = _get_allowed_oauth_origins()
+    verified = verify_oauth_state(state or "", allowed) if state else None
+    
+    if verified is None:
+        logger.warning("QQ OAuth state 验证失败: state=%s", state)
+        if json_mode:
+            raise HTTPException(400, "无效的 state 参数")
+        return _oauth_error_response("无效的 state 参数", origin=fallback)
+    
+    provider, origin = verified
+    if provider != "qq":
+        logger.warning("QQ OAuth state provider 不匹配: expected=qq got=%s", provider)
+        if json_mode:
+            raise HTTPException(400, "state provider 不匹配")
+        return _oauth_error_response("state provider 不匹配", origin=origin)
+    
     info = await qq_exchange_code(code, config_store=_get_config_store(request))
     if info is None:
-        return _oauth_error_response("QQ 认证失败", want_json)
-
+        if json_mode:
+            raise HTTPException(400, "QQ 认证失败")
+        return _oauth_error_response("QQ 认证失败", origin=origin)
+    
     store = _get_store(request)
-    return _oauth_success_response(store, info, want_json)
+    if json_mode:
+        return _oauth_json_response(store, info)
+    return _oauth_success_response(store, info, origin=origin)
 
 
 def _wants_json(request: Request) -> bool:
@@ -539,33 +635,52 @@ def _wants_json(request: Request) -> bool:
     return "application/json" in accept
 
 
-def _oauth_error_response(message: str, origin_domain: str = "kilon.top"):
-    """OAuth 失败：重定向到指定域名的 /auth/callback。
+def _oauth_json_response(store: UserStore, info: Any) -> Any:
+    """OAuth 回调 JSON 模式：前端通过 fetch() 直接调用时，返回 JSON 而非重定向。
+
+    避免 fetch() 跟随 RedirectResponse 到不同 origin 导致 CORS "Failed to fetch" 错误。
+    """
+    try:
+        result = _handle_oauth_user(store, info)
+    except HTTPException:
+        raise
+
+    if isinstance(result, MergeRequiredResponse):
+        return JSONResponse(result.model_dump())
+
+    # TokenResponse — 直接返回 JSON
+    return JSONResponse(result.model_dump())
+
+
+def _oauth_error_response(message: str, origin: str = "https://kilon.top"):
+    """OAuth 失败：重定向到指定来源的 /auth/callback。
     
     Args:
         message: 错误消息
-        origin_domain: 目标域名（kilon.top 或 excelmanus.com）
+        origin: 目标来源（如 https://kilon.top 或 http://localhost:3000）
     """
     from urllib.parse import quote
-    return RedirectResponse(f"https://{origin_domain}/auth/callback?error={quote(message)}")
+    return RedirectResponse(f"{origin.rstrip('/')}/auth/callback?error={quote(message)}")
 
 
-def _oauth_success_response(store: UserStore, info: Any, origin_domain: str = "kilon.top"):
-    """将 OAuth 信息换取 JWT 令牌，重定向到指定域名的前端。
+def _oauth_success_response(store: UserStore, info: Any, origin: str = "https://kilon.top"):
+    """将 OAuth 信息换取 JWT 令牌，重定向到指定来源的前端。
 
     如果检测到需要合并（同邮箱已有账号），返回 merge_required 响应。
     
     Args:
         store: 用户存储
         info: OAuth 用户信息
-        origin_domain: 目标域名（kilon.top 或 excelmanus.com）
+        origin: 目标来源（如 https://kilon.top 或 http://localhost:3000）
     """
+    base = origin.rstrip("/")
     try:
         result = _handle_oauth_user(store, info)
     except HTTPException as exc:
-        return _oauth_error_response(exc.detail or "认证失败", origin_domain=origin_domain)
+        return _oauth_error_response(exc.detail or "认证失败", origin=origin)
 
     # 合并场景：返回 MergeRequiredResponse
+    # 使用 hash fragment (#) 传递敏感令牌，避免浏览器历史/Referer/日志泄漏
     if isinstance(result, MergeRequiredResponse):
         from urllib.parse import urlencode
         params = urlencode({
@@ -578,9 +693,9 @@ def _oauth_success_response(store: UserStore, info: Any, origin_domain: str = "k
             "new_provider": result.new_provider,
             "new_provider_display_name": result.new_provider_display_name,
         })
-        return RedirectResponse(f"https://{origin_domain}/auth/callback?{params}")
+        return RedirectResponse(f"{base}/auth/callback#{params}")
 
-    # 正常登录
+    # 正常登录 — token 放入 hash fragment（# 后的内容不会发送给服务器）
     token_resp = result
     from urllib.parse import urlencode
     params = urlencode({
@@ -588,7 +703,7 @@ def _oauth_success_response(store: UserStore, info: Any, origin_domain: str = "k
         "refresh_token": token_resp.refresh_token,
         "provider": info.provider,
     })
-    return RedirectResponse(f"https://{origin_domain}/auth/callback?{params}")
+    return RedirectResponse(f"{base}/auth/callback#{params}")
 
 
 def _handle_oauth_user(
@@ -1672,9 +1787,12 @@ def _get_credential_store(request: Request):
     return store
 
 
-_CODEX_DEFAULT_MODEL = "gpt-5.3-codex"
-_CODEX_DEFAULT_PROFILE_NAME = "Codex 5.3"
+_CODEX_DEFAULT_MODEL = "openai-codex/gpt-5.3-codex"
+_CODEX_DEFAULT_PROFILE_NAME = "openai-codex/gpt-5.3-codex"
 _CODEX_DEFAULT_BASE_URL = "https://api.openai.com/v1"
+# 旧版自动创建的名称/模型，用于兼容去重（防止与旧数据重复）
+_CODEX_LEGACY_NAMES = {"Codex 5.3", "codex-5.3", "codex-oauth"}
+_CODEX_LEGACY_MODELS = {"gpt-5.3-codex"}
 
 
 def _auto_add_codex_default_model(request: Request) -> None:
@@ -1687,19 +1805,23 @@ def _auto_add_codex_default_model(request: Request) -> None:
         return
     try:
         existing = config_store.list_profiles()
-        # 检查是否已有同名 profile 或同 model 的 codex 条目
+        # 检查是否已有同名 profile 或同 model 的 codex 条目（兼容新旧命名）
+        _all_names = {_CODEX_DEFAULT_PROFILE_NAME} | _CODEX_LEGACY_NAMES
+        _all_models = {_CODEX_DEFAULT_MODEL} | _CODEX_LEGACY_MODELS
         for p in existing:
-            if p.get("name") == _CODEX_DEFAULT_PROFILE_NAME:
+            if p.get("name", "") in _all_names:
                 return
-            if p.get("model") == _CODEX_DEFAULT_MODEL:
+            if p.get("model", "") in _all_models:
                 return
         config_store.add_profile(
             name=_CODEX_DEFAULT_PROFILE_NAME,
             model=_CODEX_DEFAULT_MODEL,
             api_key="",
             base_url=_CODEX_DEFAULT_BASE_URL,
-            description="OpenAI Codex 订阅模型（通过 ChatGPT 订阅授权）",
-            protocol="auto",
+            description="Codex 5.3 — OAuth 登录（无需 API Key）",
+            protocol="openai",
+            thinking_mode="openai_reasoning",
+            model_family="gpt",
         )
         # 同步到内存 config
         from excelmanus.api import _sync_config_profiles_from_db
