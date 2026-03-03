@@ -222,15 +222,31 @@ class ContextBuilder:
                 "⚠️ 此前已触发执行守卫。请通过工具执行操作，不要仅给出文本建议。"
             )
 
-        # 条件 4（优先级最低）：沉默调用
+        # 条件 4：推理质量不足（含完全沉默和级别偏低两种情况）
         silent = state.silent_call_count
         reasoned = state.reasoned_call_count
         if len(parts) < _MAX_WARNINGS and silent > 0 and silent >= reasoned:
+            # 4a：完全沉默——工具调用未附带任何推理文本
             parts.append(
                 f"⚠️ 本轮已有 {silent} 次工具调用未附带推理文本。"
                 "请遵循 Think-Act 协议：工具调用前至少用 1 句话说明意图。"
                 "（thinking 模型：推理可在 thinking 块中完成。）"
             )
+            state.reasoning_upgrade_nudge_count += 1
+        elif len(parts) < _MAX_WARNINGS and state.reasoning_level_mismatch_count >= 2:
+            # 4b：有推理但深度不足——推荐 standard/complete 但实际偏轻量
+            _rec = state.recommended_reasoning_level
+            _hint_map = {
+                "standard": "多步操作建议在工具调用前后各附 1-2 句观察与决策",
+                "complete": "关键决策点建议说明观察到什么、分析了什么、为什么选择这个行动",
+            }
+            _hint = _hint_map.get(_rec, "")
+            if _hint:
+                parts.append(
+                    f"⚠️ 当前任务推荐 {_rec} 级推理深度，但近期推理偏简略。"
+                    f"{_hint}。"
+                )
+                state.reasoning_upgrade_nudge_count += 1
 
         if not parts:
             return ""
@@ -279,6 +295,18 @@ class ContextBuilder:
             lines.append(f"- **[{b.category}]** {b.content}")
         return "\n".join(lines)
 
+    def _build_skill_hints_notice(self) -> str:
+        """构建语义技能匹配提示文本。
+
+        当 engine 使用 SemanticSkillRouter 时，从缓存的匹配结果中读取；
+        无匹配时返回空。
+        """
+        e = self._engine
+        text = getattr(e, "_relevant_skill_hints", "")
+        if not text or not text.strip():
+            return ""
+        return text.strip()
+
     def _build_verification_fix_notice(self) -> str:
         """读取验证门控的待注入修复提示。正常情况零开销。"""
         e = self._engine
@@ -301,43 +329,66 @@ class ContextBuilder:
         if not reports:
             return ""
 
-        # 只取最近一份报告（最相关）
-        report = reports[-1]
+        # 合并最近 3 份报告（去重文件路径），覆盖多文件上下文
+        recent_reports = reports[-3:]
         parts: list[str] = ["## 数据探索概况"]
 
-        summary = report.get("summary", "")
-        if summary:
-            parts.append(summary)
+        # 收集所有摘要（去重）
+        seen_summaries: set[str] = set()
+        for report in recent_reports:
+            summary = report.get("summary", "")
+            if summary and summary not in seen_summaries:
+                parts.append(summary)
+                seen_summaries.add(summary)
 
-        # 文件/Sheet 概览
-        files = report.get("files", [])
-        if files:
-            file_lines: list[str] = []
-            for f in files[:5]:  # 最多展示 5 个文件
+        # 合并文件/Sheet 概览（按路径去重）
+        seen_paths: set[str] = set()
+        file_lines: list[str] = []
+        for report in recent_reports:
+            if len(file_lines) >= 8:
+                break
+            files = report.get("files", [])
+            for f in files:
                 path = f.get("path", "?")
+                if path in seen_paths:
+                    continue
+                seen_paths.add(path)
                 sheets = f.get("sheets", [])
                 if sheets:
                     sheet_descs = [
                         f"{s.get('name', '?')}({s.get('rows', '?')}×{s.get('cols', '?')})"
-                        for s in sheets[:8]  # 最多 8 个 sheet
+                        for s in sheets[:8]
                     ]
                     file_lines.append(f"- `{path}`: {', '.join(sheet_descs)}")
                 else:
                     file_lines.append(f"- `{path}`")
+                if len(file_lines) >= 8:
+                    break
+        if file_lines:
             parts.append("文件概览：\n" + "\n".join(file_lines))
 
-        # 关键发现（仅 high/medium severity）
-        findings = report.get("findings", [])
-        important = [
-            f for f in findings
-            if f.get("severity") in ("high", "medium")
-        ]
-        if important:
-            finding_lines = [f"- [{f.get('type', '?')}] {f.get('detail', '')}" for f in important[:5]]
+        # 合并关键发现（仅 high/medium severity，跨报告去重）
+        seen_details: set[str] = set()
+        finding_lines: list[str] = []
+        for report in recent_reports:
+            if len(finding_lines) >= 8:
+                break
+            findings = report.get("findings", [])
+            for f in findings:
+                if f.get("severity") not in ("high", "medium"):
+                    continue
+                detail = f.get("detail", "")
+                if detail in seen_details:
+                    continue
+                seen_details.add(detail)
+                finding_lines.append(f"- [{f.get('type', '?')}] {detail}")
+                if len(finding_lines) >= 8:
+                    break
+        if finding_lines:
             parts.append("关键发现：\n" + "\n".join(finding_lines))
 
-        # 建议
-        rec = report.get("recommendation", "")
+        # 建议（取最新报告的建议）
+        rec = recent_reports[-1].get("recommendation", "")
         if rec:
             parts.append(f"建议：{rec}")
 
@@ -451,8 +502,8 @@ class ContextBuilder:
             return ""
         state._explore_in_progress = True  # type: ignore[attr-defined]
 
-        # 尝试自动预扫描（最多扫描前 3 个文件，每个最多 500ms）
-        auto_scanned = self._try_auto_prescan(excel_paths[:3], state)
+        # 尝试自动预扫描（最多扫描前 5 个文件，每个最多 500ms）
+        auto_scanned = self._try_auto_prescan(excel_paths[:5], state)
         if auto_scanned:
             # 扫描成功 → 结果已注入 explorer_reports，_build_explorer_report_notice 会接管
             # 返回空字符串，不需要额外提示
@@ -528,9 +579,23 @@ class ContextBuilder:
             pass
         return results
 
+    # 推理级别数值映射，用于比较和升降级
+    _REASONING_LEVEL_ORDER: dict[str, int] = {
+        "lightweight": 0,
+        "standard": 1,
+        "complete": 2,
+    }
+
+    # 推理字符数阈值（每个工具调用的平均字符数）：低于此值视为偏简略
+    _REASONING_CHARS_THRESHOLDS: dict[str, int] = {
+        "lightweight": 5,
+        "standard": 30,
+        "complete": 60,
+    }
+
     @staticmethod
     def _compute_reasoning_level_static(route_result: Any) -> str:
-        """根据任务上下文计算推荐推理级别。"""
+        """根据任务上下文计算推荐推理级别（静态版本，兼容外部调用）。"""
         if route_result is None:
             return "standard"
         wh = getattr(route_result, "write_hint", "unknown") or "unknown"
@@ -542,6 +607,48 @@ class ContextBuilder:
         if wh == "may_write":
             return "standard"
         return "lightweight"
+
+    def _compute_reasoning_level(self, route_result: Any) -> str:
+        """根据任务上下文 + 运行时状态动态计算推荐推理级别。
+
+        在静态路由信号基础上，叠加运行时上下文进行升级：
+        - 失败后需要更深入分析 → 升级
+        - 任务接近尾声需要决策 → 升级
+        - 多技能激活暗示复杂度 → 升级
+        结果写入 state.recommended_reasoning_level 供闭环检测使用。
+        """
+        base = self._compute_reasoning_level_static(route_result)
+        level = self._REASONING_LEVEL_ORDER.get(base, 1)
+
+        e = self._engine
+        state = e.state
+
+        # 升级信号 1：上一迭代有失败 → 至少 standard（需要分析原因）
+        if state.last_failure_count > 0 and level < 1:
+            level = 1
+
+        # 升级信号 2：连续失败 ≥ 2 → complete（需要深度分析和策略调整）
+        if state.last_failure_count >= 2 and state.last_success_count == 0:
+            level = 2
+
+        # 升级信号 3：多技能激活暗示复杂任务 → 至少 standard
+        if len(e._active_skills) >= 2 and level < 1:
+            level = 1
+
+        # 升级信号 4：接近迭代上限（≥50%）→ 至少 standard（需要收敛决策）
+        max_iter = e.config.max_iterations
+        iteration = state.last_iteration_count
+        if max_iter > 0 and iteration >= max_iter * 0.5 and level < 1:
+            level = 1
+
+        # 降级信号：不做降级——静态基线是下限，运行时只升不降
+
+        level_names = ["lightweight", "standard", "complete"]
+        result = level_names[min(level, 2)]
+
+        # 写入 state 供闭环检测使用
+        state.recommended_reasoning_level = result
+        return result
 
     def _build_runtime_metadata_line(self) -> str:
         """生成紧凑的运行时元数据行，让 agent 感知自身状态。
@@ -568,7 +675,8 @@ class ContextBuilder:
             except Exception:
                 pass
         _route = getattr(e, '_last_route_result', None)
-        parts.append(f"reasoning={self._compute_reasoning_level_static(_route)}")
+        _reasoning_level = self._compute_reasoning_level(_route)
+        parts.append(f"reasoning={_reasoning_level}")
         return "Runtime: " + " | ".join(parts)
 
     def _prepare_system_prompts_for_request(
@@ -640,7 +748,9 @@ class ContextBuilder:
                     task_tags=list(route_result.task_tags),
                     full_access=e.full_access_enabled,
                 )
-                _strategy_text = e._prompt_composer.compose_strategies_text(_p_ctx)
+                _strategy_text = e._prompt_composer.compose_strategies_text(
+                    _p_ctx, variables=getattr(e, "_runtime_vars", None),
+                )
                 if _strategy_text:
                     base_prompt = base_prompt + "\n\n" + _strategy_text
                     _strategy_text_captured = _strategy_text
@@ -656,6 +766,11 @@ class ContextBuilder:
         playbook_notice = self._build_playbook_notice()
         if playbook_notice:
             base_prompt = base_prompt + "\n\n" + playbook_notice
+
+        # D3: 语义技能匹配提示（embedding 检索相关 skillpack，帮助 agent 推荐技能）
+        skill_hints = self._build_skill_hints_notice()
+        if skill_hints:
+            base_prompt = base_prompt + "\n\n" + skill_hints
 
         # ── 动态内容（放在最末尾，Provider cache 前缀到此为止） ──
 
@@ -792,7 +907,7 @@ class ContextBuilder:
                 prompts.extend(current_skill_contexts)
             return prompts
 
-        threshold = max(1, int(e.config.max_context_tokens * 0.9))
+        threshold = max(1, int(e.max_context_tokens * 0.9))
         prompts = _compose_prompts()
 
         # O3+O4: 基于内容指纹的 token 计数缓存
@@ -1174,13 +1289,19 @@ class ContextBuilder:
         return "\n".join(lines)
 
     def _build_file_registry_notice(self) -> str:
-        """统一文件全景 + CoW 路径映射注入。
+        """统一文件全景 + 语义相关文件摘要 + CoW 路径映射注入。
 
         使用 FileRegistry.build_panorama() 作为唯一数据源。
         panorama 部分使用脏标记缓存（写入时标脏），CoW 映射始终实时追加。
+        当 SemanticRegistry 可用时，额外注入与用户查询语义相关的文件摘要。
         """
         e = self._engine
         parts: list[str] = []
+
+        # ── 语义相关文件摘要（embedding 检索结果，优先注入）──
+        _relevant_summary = getattr(e, "_relevant_file_summary", "")
+        if _relevant_summary and _relevant_summary.strip():
+            parts.append(_relevant_summary.strip())
 
         # ── 文件全景：FileRegistry（turn 内缓存，写入时标脏重建）──
         _turn = e._session_turn

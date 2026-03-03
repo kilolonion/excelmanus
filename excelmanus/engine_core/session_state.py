@@ -92,6 +92,10 @@ class SessionState:
         self.silent_call_count: int = 0
         self.reasoned_call_count: int = 0
         self.reasoning_chars_total: int = 0
+        # 推理级别闭环追踪
+        self.recommended_reasoning_level: str = "standard"
+        self.reasoning_level_mismatch_count: int = 0
+        self.reasoning_upgrade_nudge_count: int = 0
 
     def increment_turn(self) -> None:
         """递增会话轮次。"""
@@ -116,6 +120,9 @@ class SessionState:
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
+        self.recommended_reasoning_level = "standard"
+        self.reasoning_level_mismatch_count = 0
+        self.reasoning_upgrade_nudge_count = 0
 
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
@@ -143,6 +150,9 @@ class SessionState:
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
+        self.recommended_reasoning_level = "standard"
+        self.reasoning_level_mismatch_count = 0
+        self.reasoning_upgrade_nudge_count = 0
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""

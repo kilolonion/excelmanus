@@ -284,13 +284,13 @@ class CommandHandler:
             return f"压缩未执行: {result.error}"
 
         pct_before = (
-            result.tokens_before / e.config.max_context_tokens * 100
-            if e.config.max_context_tokens > 0
+            result.tokens_before / e.max_context_tokens * 100
+            if e.max_context_tokens > 0
             else 0
         )
         pct_after = (
-            result.tokens_after / e.config.max_context_tokens * 100
-            if e.config.max_context_tokens > 0
+            result.tokens_after / e.max_context_tokens * 100
+            if e.max_context_tokens > 0
             else 0
         )
         return (

@@ -91,11 +91,22 @@ def is_transient_window_advisor_exception(exc: Exception) -> bool:
         "connecterror",
         "temporary failure in name resolution",
         "name or service not known",
+        "incomplete chunked",
+        "incompleteread",
+        "remotedisconnected",
+        "remote end closed",
+        "stream ended",
+        "stream interrupted",
+        "premature end",
+        "response ended prematurely",
+        "json decode",
+        "jsondecodeerror",
+        "expecting value",
     )
     for candidate in iter_exception_chain(exc):
         status_code = getattr(candidate, "status_code", None)
         if isinstance(status_code, int) and (
-            status_code == 429 or 500 <= status_code < 600
+            status_code == 429 or status_code == 408 or 500 <= status_code < 600
         ):
             return True
 
@@ -108,6 +119,9 @@ def is_transient_window_advisor_exception(exc: Exception) -> bool:
             "proxyerror",
             "networkerror",
             "transporterror",
+            "incompleteread",
+            "remotedisconnected",
+            "jsondecodeerror",
         }:
             return True
 
@@ -269,7 +283,7 @@ def merge_leading_system_messages(messages: Sequence[dict[str, Any]]) -> list[di
 
 
 def is_unsupported_param_error(exc: Exception) -> bool:
-    """检测是否为 provider 不支持某参数的错误（如 prompt_cache_key）。"""
+    """检测是否为 provider 不支持某参数的错误（如 prompt_cache_key、stream_options）。"""
     text = str(exc).lower()
     keywords = [
         "unexpected keyword",
@@ -277,9 +291,52 @@ def is_unsupported_param_error(exc: Exception) -> bool:
         "unknown parameter",
         "invalid parameter",
         "prompt_cache_key",
+        "stream_options",
         "extra inputs are not permitted",
     ]
     return any(keyword in text for keyword in keywords)
+
+
+def _is_context_length_error(exc: Exception) -> bool:
+    """检测是否为上下文长度超限错误（400 context_length_exceeded 等）。"""
+    keywords = (
+        "context_length_exceeded",
+        "context length",
+        "maximum context",
+        "token limit",
+        "too many tokens",
+        "max_tokens",
+        "reduce the length",
+        "reduce your prompt",
+        "request too large",
+        "payload too large",
+    )
+    for candidate in iter_exception_chain(exc):
+        text = f"{candidate} {candidate!r}".lower()
+        if any(kw in text for kw in keywords):
+            return True
+    return False
+
+
+def is_content_filter_error(exc: Exception) -> bool:
+    """检测是否为内容安全策略拦截错误。"""
+    filter_keywords = (
+        "content_filter",
+        "content filter",
+        "content_policy",
+        "content policy violation",
+        "content_management_policy",
+        "responsible_ai_policy",
+        "flagged",
+        "blocked by",
+        "safety system",
+        "harm_category",
+    )
+    for candidate in iter_exception_chain(exc):
+        text = f"{candidate} {candidate!r}".lower()
+        if any(kw in text for kw in filter_keywords):
+            return True
+    return False
 
 
 def is_system_compatibility_error(exc: Exception) -> bool:
@@ -405,40 +462,108 @@ class LLMCaller:
         _first_token_received = False
         _ttft_ms: float = 0.0
 
+        _consecutive_chunk_errors = 0
+        _max_chunk_errors = 3
         async for chunk in stream:
-            # ── TTFT 计时：记录首个有效内容 token 的到达时间 ──
-            if not _first_token_received and _llm_start_ts is not None:
-                _has_content = False
-                if hasattr(chunk, "content_delta"):
-                    _has_content = bool(chunk.content_delta or chunk.thinking_delta)
-                else:
-                    _choices = getattr(chunk, "choices", None)
-                    if _choices:
-                        _d = getattr(_choices[0], "delta", None)
-                        if _d and (getattr(_d, "content", None) or getattr(_d, "thinking", None)):
-                            _has_content = True
-                if _has_content:
-                    _first_token_received = True
-                    _ttft_ms = (time.monotonic() - _llm_start_ts) * 1000
+            try:
+                # ── TTFT 计时：记录首个有效内容 token 的到达时间 ──
+                if not _first_token_received and _llm_start_ts is not None:
+                    _has_content = False
+                    if hasattr(chunk, "content_delta"):
+                        _has_content = bool(chunk.content_delta or chunk.thinking_delta)
+                    else:
+                        _choices = getattr(chunk, "choices", None)
+                        if _choices:
+                            _d = getattr(_choices[0], "delta", None)
+                            if _d and (getattr(_d, "content", None) or getattr(_d, "thinking", None)):
+                                _has_content = True
+                    if _has_content:
+                        _first_token_received = True
+                        _ttft_ms = (time.monotonic() - _llm_start_ts) * 1000
 
-            # ── 自定义 provider 的 _StreamDelta ──
-            if hasattr(chunk, "content_delta"):
-                if chunk.content_delta:
-                    content_parts.append(chunk.content_delta)
-                    e._emit(on_event, ToolCallEvent(
-                        event_type=EventType.TEXT_DELTA,
-                        text_delta=chunk.content_delta,
-                        iteration=iteration,
-                    ))
-                if chunk.thinking_delta:
-                    thinking_parts.append(chunk.thinking_delta)
-                    _thinking_streamed = True
-                    e._emit(on_event, ToolCallEvent(
-                        event_type=EventType.THINKING_DELTA,
-                        thinking_delta=chunk.thinking_delta,
-                        iteration=iteration,
-                    ))
-                if chunk.tool_calls_delta:
+                # ── 自定义 provider 的 _StreamDelta ──
+                if hasattr(chunk, "content_delta"):
+                    if chunk.content_delta:
+                        content_parts.append(chunk.content_delta)
+                        e._emit(on_event, ToolCallEvent(
+                            event_type=EventType.TEXT_DELTA,
+                            text_delta=chunk.content_delta,
+                            iteration=iteration,
+                        ))
+                    if chunk.thinking_delta:
+                        thinking_parts.append(chunk.thinking_delta)
+                        _thinking_streamed = True
+                        e._emit(on_event, ToolCallEvent(
+                            event_type=EventType.THINKING_DELTA,
+                            thinking_delta=chunk.thinking_delta,
+                            iteration=iteration,
+                        ))
+                    if chunk.tool_calls_delta:
+                        if not _tool_call_notified:
+                            _tool_call_notified = True
+                            e._emit(on_event, ToolCallEvent(
+                                event_type=EventType.PIPELINE_PROGRESS,
+                                pipeline_stage="generating_tool_call",
+                                pipeline_message="正在生成工具调用...",
+                            ))
+                        for tc in chunk.tool_calls_delta:
+                            idx = tc.get("index", 0)
+                            tool_calls_accumulated[idx] = tc
+                    if chunk.finish_reason:
+                        finish_reason = chunk.finish_reason
+                    if chunk.usage:
+                        usage = chunk.usage
+                    _consecutive_chunk_errors = 0
+                    continue
+
+                # ── openai.AsyncOpenAI 的 ChatCompletionChunk ──
+                choices = getattr(chunk, "choices", None)
+                if not choices:
+                    chunk_usage = getattr(chunk, "usage", None)
+                    if chunk_usage:
+                        usage = chunk_usage
+                    _consecutive_chunk_errors = 0
+                    continue
+
+                delta = getattr(choices[0], "delta", None)
+                if delta is None:
+                    _consecutive_chunk_errors = 0
+                    continue
+
+                delta_content = getattr(delta, "content", None)
+                if delta_content:
+                    # 通过状态机检测内联 <thinking> 标签
+                    for _sd in _inline_sm.feed(delta_content):
+                        if _sd.thinking_delta:
+                            thinking_parts.append(_sd.thinking_delta)
+                            _thinking_streamed = True
+                            e._emit(on_event, ToolCallEvent(
+                                event_type=EventType.THINKING_DELTA,
+                                thinking_delta=_sd.thinking_delta,
+                                iteration=iteration,
+                            ))
+                        if _sd.content_delta:
+                            content_parts.append(_sd.content_delta)
+                            e._emit(on_event, ToolCallEvent(
+                                event_type=EventType.TEXT_DELTA,
+                                text_delta=_sd.content_delta,
+                                iteration=iteration,
+                            ))
+
+                for thinking_key in ("thinking", "reasoning", "reasoning_content"):
+                    thinking_val = getattr(delta, thinking_key, None)
+                    if thinking_val:
+                        thinking_parts.append(str(thinking_val))
+                        _thinking_streamed = True
+                        e._emit(on_event, ToolCallEvent(
+                            event_type=EventType.THINKING_DELTA,
+                            thinking_delta=str(thinking_val),
+                            iteration=iteration,
+                        ))
+                        break
+
+                delta_tool_calls = getattr(delta, "tool_calls", None)
+                if delta_tool_calls:
                     if not _tool_call_notified:
                         _tool_call_notified = True
                         e._emit(on_event, ToolCallEvent(
@@ -446,106 +571,56 @@ class LLMCaller:
                             pipeline_stage="generating_tool_call",
                             pipeline_message="正在生成工具调用...",
                         ))
-                    for tc in chunk.tool_calls_delta:
-                        idx = tc.get("index", 0)
-                        tool_calls_accumulated[idx] = tc
-                if chunk.finish_reason:
-                    finish_reason = chunk.finish_reason
-                if chunk.usage:
-                    usage = chunk.usage
-                continue
+                    _TEXT_STREAMING_TOOLS = {"write_text_file", "edit_text_file", "write_plan"}
+                    for tc_delta in delta_tool_calls:
+                        idx = getattr(tc_delta, "index", 0)
+                        if idx not in tool_calls_accumulated:
+                            tool_calls_accumulated[idx] = {
+                                "id": getattr(tc_delta, "id", None) or "",
+                                "name": "",
+                                "arguments": "",
+                            }
+                        fn = getattr(tc_delta, "function", None)
+                        if fn:
+                            name = getattr(fn, "name", None)
+                            if name:
+                                tool_calls_accumulated[idx]["name"] = name
+                            args = getattr(fn, "arguments", None)
+                            if args:
+                                tool_calls_accumulated[idx]["arguments"] += args
+                                # 为文本写入工具发射流式参数 delta 事件
+                                _tc_name = tool_calls_accumulated[idx]["name"]
+                                if _tc_name in _TEXT_STREAMING_TOOLS:
+                                    e._emit(on_event, ToolCallEvent(
+                                        event_type=EventType.TOOL_CALL_ARGS_DELTA,
+                                        tool_call_id=tool_calls_accumulated[idx]["id"],
+                                        tool_name=_tc_name,
+                                        args_delta=args,
+                                        iteration=iteration,
+                                    ))
+                        tc_id = getattr(tc_delta, "id", None)
+                        if tc_id:
+                            tool_calls_accumulated[idx]["id"] = tc_id
 
-            # ── openai.AsyncOpenAI 的 ChatCompletionChunk ──
-            choices = getattr(chunk, "choices", None)
-            if not choices:
+                chunk_finish = getattr(choices[0], "finish_reason", None)
+                if chunk_finish:
+                    finish_reason = chunk_finish
+
                 chunk_usage = getattr(chunk, "usage", None)
                 if chunk_usage:
                     usage = chunk_usage
-                continue
 
-            delta = getattr(choices[0], "delta", None)
-            if delta is None:
-                continue
-
-            delta_content = getattr(delta, "content", None)
-            if delta_content:
-                # 通过状态机检测内联 <thinking> 标签
-                for _sd in _inline_sm.feed(delta_content):
-                    if _sd.thinking_delta:
-                        thinking_parts.append(_sd.thinking_delta)
-                        _thinking_streamed = True
-                        e._emit(on_event, ToolCallEvent(
-                            event_type=EventType.THINKING_DELTA,
-                            thinking_delta=_sd.thinking_delta,
-                            iteration=iteration,
-                        ))
-                    if _sd.content_delta:
-                        content_parts.append(_sd.content_delta)
-                        e._emit(on_event, ToolCallEvent(
-                            event_type=EventType.TEXT_DELTA,
-                            text_delta=_sd.content_delta,
-                            iteration=iteration,
-                        ))
-
-            for thinking_key in ("thinking", "reasoning", "reasoning_content"):
-                thinking_val = getattr(delta, thinking_key, None)
-                if thinking_val:
-                    thinking_parts.append(str(thinking_val))
-                    _thinking_streamed = True
-                    e._emit(on_event, ToolCallEvent(
-                        event_type=EventType.THINKING_DELTA,
-                        thinking_delta=str(thinking_val),
-                        iteration=iteration,
-                    ))
+                _consecutive_chunk_errors = 0
+            except Exception as _chunk_exc:
+                _consecutive_chunk_errors += 1
+                if _consecutive_chunk_errors >= _max_chunk_errors:
+                    logger.warning(
+                        "流式消费连续 %d 个 chunk 解析失败，中止: %s",
+                        _consecutive_chunk_errors, _chunk_exc,
+                    )
                     break
-
-            delta_tool_calls = getattr(delta, "tool_calls", None)
-            if delta_tool_calls:
-                if not _tool_call_notified:
-                    _tool_call_notified = True
-                    e._emit(on_event, ToolCallEvent(
-                        event_type=EventType.PIPELINE_PROGRESS,
-                        pipeline_stage="generating_tool_call",
-                        pipeline_message="正在生成工具调用...",
-                    ))
-                _TEXT_STREAMING_TOOLS = {"write_text_file", "edit_text_file", "write_plan"}
-                for tc_delta in delta_tool_calls:
-                    idx = getattr(tc_delta, "index", 0)
-                    if idx not in tool_calls_accumulated:
-                        tool_calls_accumulated[idx] = {
-                            "id": getattr(tc_delta, "id", None) or "",
-                            "name": "",
-                            "arguments": "",
-                        }
-                    fn = getattr(tc_delta, "function", None)
-                    if fn:
-                        name = getattr(fn, "name", None)
-                        if name:
-                            tool_calls_accumulated[idx]["name"] = name
-                        args = getattr(fn, "arguments", None)
-                        if args:
-                            tool_calls_accumulated[idx]["arguments"] += args
-                            # 为文本写入工具发射流式参数 delta 事件
-                            _tc_name = tool_calls_accumulated[idx]["name"]
-                            if _tc_name in _TEXT_STREAMING_TOOLS:
-                                e._emit(on_event, ToolCallEvent(
-                                    event_type=EventType.TOOL_CALL_ARGS_DELTA,
-                                    tool_call_id=tool_calls_accumulated[idx]["id"],
-                                    tool_name=_tc_name,
-                                    args_delta=args,
-                                    iteration=iteration,
-                                ))
-                    tc_id = getattr(tc_delta, "id", None)
-                    if tc_id:
-                        tool_calls_accumulated[idx]["id"] = tc_id
-
-            chunk_finish = getattr(choices[0], "finish_reason", None)
-            if chunk_finish:
-                finish_reason = chunk_finish
-
-            chunk_usage = getattr(chunk, "usage", None)
-            if chunk_usage:
-                usage = chunk_usage
+                logger.debug("流式 chunk 解析异常（已跳过）: %s", _chunk_exc)
+                continue
 
         # 组装为与非流式路径兼容的 message 对象
         content = "".join(content_parts)
@@ -571,6 +646,7 @@ class LLMCaller:
             reasoning=thinking if thinking else None,
             reasoning_content=thinking if thinking else None,
             _thinking_streamed=_thinking_streamed,
+            _stream_truncated=_consecutive_chunk_errors >= _max_chunk_errors,
         )
 
         # 附加 TTFT 和 cache 统计到 usage（供 TurnDiagnostic 提取）
@@ -594,14 +670,17 @@ class LLMCaller:
         try:
             return await e._client.chat.completions.create(**kwargs)
         except Exception as exc:
-            # prompt_cache_key 兼容性：非 OpenAI provider 可能不支持该参数
-            if "prompt_cache_key" in kwargs and is_unsupported_param_error(exc):
-                logger.debug("Provider 不支持 prompt_cache_key，移除后重试")
-                retry_kwargs = {k: v for k, v in kwargs.items() if k != "prompt_cache_key"}
+            # prompt_cache_key / stream_options 兼容性：
+            # 非 OpenAI 官方 provider 可能不支持这些参数
+            _unsupported_keys = {"prompt_cache_key", "stream_options"}
+            _present_keys = _unsupported_keys & set(kwargs)
+            if _present_keys and is_unsupported_param_error(exc):
+                logger.debug("Provider 不支持 %s，移除后重试", _present_keys)
+                retry_kwargs = {k: v for k, v in kwargs.items() if k not in _unsupported_keys}
                 try:
                     return await e._client.chat.completions.create(**retry_kwargs)
                 except Exception as retry_exc:
-                    logger.debug("移除 prompt_cache_key 重试仍失败: %s", retry_exc)
+                    logger.debug("移除 %s 重试仍失败: %s", _present_keys, retry_exc)
                     exc = retry_exc  # 用重试异常替换原始异常，避免误导
 
             # DeepSeek thinking mode: assistant 消息必须包含 reasoning_content 字段
@@ -612,6 +691,41 @@ class LLMCaller:
                     patched = _patch_reasoning_content(source_messages)
                     retry_kwargs = dict(kwargs)
                     retry_kwargs["messages"] = patched
+                    retry_kwargs.pop("prompt_cache_key", None)
+                    return await e._client.chat.completions.create(**retry_kwargs)
+
+            # 上下文超长自动恢复：自适应缩减预算 + 紧急截断对话历史后重试一次
+            if _is_context_length_error(exc):
+                # 自适应缩减：当前预算可能偏大，缩减 20% 防止后续轮次再次超限
+                _ctx_budget = getattr(e, "_context_budget", None)
+                if _ctx_budget is not None and not _ctx_budget.is_user_overridden:
+                    _old_budget = _ctx_budget.max_tokens
+                    _new_budget = max(4096, int(_old_budget * 0.8))
+                    _ctx_budget.set_override(_new_budget)
+                    logger.warning(
+                        "上下文超限，自动缩减预算 %d → %d tokens（-20%%）",
+                        _old_budget, _new_budget,
+                    )
+                    # 同步更新 memory 和 compaction 的阈值
+                    if hasattr(e, "_memory"):
+                        e._memory.update_context_window(_new_budget)
+                    _cm = getattr(e, "_compaction_manager", None)
+                    if _cm is not None:
+                        _cm.max_context_tokens = _new_budget
+
+                source_messages = kwargs.get("messages")
+                if isinstance(source_messages, list) and len(source_messages) > 3:
+                    logger.warning(
+                        "检测到上下文超长错误（%d 条消息），紧急截断后重试",
+                        len(source_messages),
+                    )
+                    # 保留 system 消息 + 最后 ~1/3 的非 system 消息
+                    sys_msgs = [m for m in source_messages if m.get("role") == "system"]
+                    non_sys = [m for m in source_messages if m.get("role") != "system"]
+                    keep = max(2, len(non_sys) // 3)
+                    trimmed = sys_msgs + non_sys[-keep:]
+                    retry_kwargs = dict(kwargs)
+                    retry_kwargs["messages"] = trimmed
                     retry_kwargs.pop("prompt_cache_key", None)
                     return await e._client.chat.completions.create(**retry_kwargs)
 

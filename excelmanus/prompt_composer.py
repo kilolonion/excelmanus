@@ -180,13 +180,27 @@ class PromptComposer:
         """
         segments = self.compose(ctx, token_budget)
         text = "\n\n".join(seg.content for seg in segments)
-        if variables:
-            for key, value in variables.items():
-                text = text.replace(f"{{{key}}}", value)
+        return self._substitute(text, variables)
+
+    @staticmethod
+    def _substitute(text: str, variables: dict[str, str] | None) -> str:
+        """统一占位符替换：将文本中的 ``{key}`` 替换为 *variables* 中的对应值。"""
+        if not variables or not text:
+            return text
+        for key, value in variables.items():
+            text = text.replace(f"{{{key}}}", value)
         return text
 
-    def compose_strategies_text(self, ctx: PromptContext) -> str:
-        """仅返回匹配的策略段文本（不含 core），用于动态注入。"""
+    def compose_strategies_text(
+        self,
+        ctx: PromptContext,
+        variables: dict[str, str] | None = None,
+    ) -> str:
+        """仅返回匹配的策略段文本（不含 core），用于动态注入。
+
+        Args:
+            variables: 运行时变量字典，键值对会替换文本中的 ``{key}`` 占位符。
+        """
         matched = [
             strat
             for strat in self.strategy_segments
@@ -195,10 +209,16 @@ class PromptComposer:
         if not matched:
             return ""
         matched.sort(key=lambda s: s.priority)
-        return "\n\n".join(seg.content for seg in matched)
+        text = "\n\n".join(seg.content for seg in matched)
+        return self._substitute(text, variables)
 
-    def compose_for_subagent(self, subagent_name: str) -> str | None:
-        """组装子代理提示词 = _base.md 正文 + {name}.md 正文。
+    def compose_for_subagent(
+        self,
+        subagent_name: str,
+        inherit_strategies: list[str] | None = None,
+        variables: dict[str, str] | None = None,
+    ) -> str | None:
+        """组装子代理提示词 = _base.md 正文 + {name}.md 正文 + 继承的策略段。
 
         若 {name}.md frontmatter 中包含 ``base_sections`` 列表，
         则仅从 _base.md 中提取对应段落（由 ``<!-- section: xxx -->``
@@ -206,6 +226,11 @@ class PromptComposer:
 
         Args:
             subagent_name: 子代理名称（如 "explorer"、"planner"）。
+            inherit_strategies: 要继承的策略名称列表。特殊值：
+                ``"__universal__"`` — 所有无条件策略（conditions 为空）；
+                ``"__all__"`` — 所有策略。
+                也可指定具体名称如 ``["error_recovery", "sandbox_awareness"]``。
+            variables: 运行时变量字典，键值对会替换文本中的 ``{key}`` 占位符。
 
         Returns:
             拼接后的提示词文本，若对应文件不存在则返回 None。
@@ -251,7 +276,42 @@ class PromptComposer:
         if specific_seg.content.strip():
             parts.append(specific_seg.content)
 
-        return "\n\n".join(parts) if parts else None
+        # ── 继承主代理策略段 ──
+        if inherit_strategies:
+            strategy_text = self._resolve_inherited_strategies(inherit_strategies)
+            if strategy_text:
+                parts.append("## 继承策略（来自主代理策略层）\n\n" + strategy_text)
+
+        result = "\n\n".join(parts) if parts else None
+        return self._substitute(result, variables) if result else None
+
+    def _resolve_inherited_strategies(
+        self, inherit_strategies: list[str]
+    ) -> str:
+        """根据 inherit_strategies 列表解析并拼接策略段。"""
+        if not self.strategy_segments:
+            return ""
+
+        want_universal = "__universal__" in inherit_strategies
+        want_all = "__all__" in inherit_strategies
+        explicit_names = {
+            s for s in inherit_strategies
+            if s not in ("__universal__", "__all__")
+        }
+
+        selected: list[PromptSegment] = []
+        for strat in self.strategy_segments:
+            if want_all:
+                selected.append(strat)
+            elif want_universal and not strat.conditions:
+                selected.append(strat)
+            elif strat.name in explicit_names:
+                selected.append(strat)
+
+        if not selected:
+            return ""
+        selected.sort(key=lambda s: s.priority)
+        return "\n\n".join(seg.content for seg in selected)
 
     @staticmethod
     def _filter_base_sections(
