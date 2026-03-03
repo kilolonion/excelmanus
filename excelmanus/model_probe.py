@@ -696,3 +696,135 @@ async def _try_thinking_stream(
         return found, ""
     except Exception as exc:
         return False, str(exc)[:200]
+
+
+# ── 模型元数据查询（上下文窗口自动校正） ─────────────────────────
+
+
+async def query_model_context_window(
+    client: Any,
+    model: str,
+    base_url: str = "",
+    timeout: float = 10.0,
+) -> int | None:
+    """尝试从 provider API 查询模型的上下文窗口大小。
+
+    支持的 provider：
+      - OpenAI: GET /v1/models/{model} → context_window 字段
+      - Mistral: GET /v1/models/{model} → max_context_length 字段
+      - 其他 provider: 通常不支持，返回 None
+
+    返回 token 数，不支持时返回 None（不抛异常）。
+    """
+    # 仅对标准 openai.AsyncOpenAI 客户端尝试（自定义适配器无此 API）
+    if isinstance(client, (GeminiClient, ClaudeClient, OpenAIResponsesClient)):
+        return None
+
+    # 判断 provider 是否可能支持 /models API
+    provider = _detect_openai_provider(base_url)
+    if provider not in ("openai", "mistral", "together", "groq", "generic"):
+        return None
+
+    try:
+        # openai SDK 提供 client.models.retrieve(model) 便捷方法
+        resp = await asyncio.wait_for(
+            client.models.retrieve(model),
+            timeout=timeout,
+        )
+        # OpenAI 返回 context_window（int）
+        ctx = getattr(resp, "context_window", None)
+        if isinstance(ctx, int) and ctx > 0:
+            logger.info("从 API 查询到模型 %s 上下文窗口: %d tokens", model, ctx)
+            return ctx
+        # Mistral 返回 max_context_length
+        ctx = getattr(resp, "max_context_length", None)
+        if isinstance(ctx, int) and ctx > 0:
+            logger.info("从 API 查询到模型 %s 上下文窗口: %d tokens", model, ctx)
+            return ctx
+        # 兜底：尝试从 dict 形式获取
+        if hasattr(resp, "model_dump"):
+            data = resp.model_dump()
+        elif hasattr(resp, "to_dict"):
+            data = resp.to_dict()
+        else:
+            data = {}
+        for key in ("context_window", "max_context_length", "context_length"):
+            val = data.get(key)
+            if isinstance(val, int) and val > 0:
+                logger.info("从 API 查询到模型 %s 上下文窗口: %d tokens", model, val)
+                return val
+        return None
+    except Exception:
+        logger.debug("模型元数据查询失败（provider=%s, model=%s），跳过", provider, model)
+        return None
+
+
+async def probe_context_window(
+    client: Any,
+    model: str,
+    base_url: str = "",
+    timeout: float = 30.0,
+) -> int | None:
+    """探测模型实际上下文窗口大小（二分法，耗时较长）。
+
+    策略：发送渐增长度的 padding 消息，找到被拒绝的边界。
+    仅作为手动 /probe context 命令使用，不在启动时自动执行。
+
+    返回探测到的 token 上限（近似值），失败返回 None。
+    """
+    # 第一步：先尝试 API 查询（零成本）
+    api_result = await query_model_context_window(client, model, base_url, timeout)
+    if api_result is not None:
+        return api_result
+
+    # 第二步：二分法探测
+    # 起始范围：4k ~ 2M tokens
+    lo, hi = 4_000, 2_000_000
+    last_ok: int | None = None
+
+    # 构造 padding 消息（每个 "a " ≈ 1 token）
+    def _make_messages(token_count: int) -> list[dict]:
+        padding = "a " * token_count
+        return [{"role": "user", "content": padding}]
+
+    for _ in range(12):  # 最多 12 轮二分（精度 ~0.02%）
+        if hi - lo < 2000:
+            break
+        mid = (lo + hi) // 2
+        messages = _make_messages(mid)
+        try:
+            if isinstance(client, (GeminiClient, ClaudeClient)):
+                await asyncio.wait_for(
+                    client.chat.completions.create(model=model, messages=messages),
+                    timeout=timeout,
+                )
+            else:
+                await asyncio.wait_for(
+                    client.chat.completions.create(
+                        model=model, messages=messages, max_tokens=1,
+                    ),
+                    timeout=timeout,
+                )
+            # 成功 → 当前长度在窗口内
+            last_ok = mid
+            lo = mid
+        except Exception as exc:
+            err_str = str(exc).lower()
+            # 上下文超限 → 当前长度超出窗口
+            ctx_keywords = (
+                "context_length", "too many tokens", "max_tokens",
+                "token limit", "request too large", "payload too large",
+                "reduce the length", "reduce your prompt", "maximum context",
+            )
+            if any(kw in err_str for kw in ctx_keywords):
+                hi = mid
+            else:
+                # 非上下文错误（网络、鉴权等），中止探测
+                logger.debug("上下文窗口探测遇到非预期错误，中止: %s", exc)
+                break
+
+    if last_ok is not None:
+        # 实际窗口略大于 last_ok（还需留空给输出），返回 last_ok 作为保守估计
+        logger.info("二分法探测模型 %s 上下文窗口: ~%d tokens", model, last_ok)
+        return last_ok
+    return None

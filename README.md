@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.8-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.9-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -43,13 +43,13 @@ Staging / Audit / CoW 版本链，`/undo` 精确回滚；Excel 修改前后 Diff
 <td width="50%">
 
 ### 🧠 持久记忆 & Playbook
-跨会话记忆偏好与操作模式；Playbook 自动归纳任务经验，失败教训复用到后续任务
+跨会话记忆偏好与操作模式；Playbook 自动归纳任务经验，失败教训复用到后续任务。语义去重避免冗余记忆，智能上下文压缩按相关性差异化截断
 
 ### 🧩 Skillpack & ClawHub 市场
 一个 Markdown = 一个技能。自动发现、按需激活；内置 [ClawHub](https://clawhub.ai) 技能市场，一键搜索/安装/更新社区技能
 
 ### 🔌 MCP & Subagent
-接入外部 MCP Server 扩展工具集；大文件和复杂任务自动委派子代理；支持 OpenAI Codex 订阅私有工具
+接入外部 MCP Server 扩展工具集；大文件和复杂任务自动委派子代理；支持 OpenAI Codex 订阅私有工具。语义技能路由自动匹配最优 Skillpack
 
 ### ✅ 验证门控
 结构化验证条件（行数/Sheet 存在/公式/值匹配），任务完成前自动校验，阻断带未通过验证条件的任务
@@ -404,9 +404,9 @@ ExcelManus.exe    ← 下载后双击即可，放在任意目录
 镜像已发布到 Docker Hub，支持 **amd64**（Intel/AMD）和 **arm64**（Apple Silicon / AWS Graviton）双架构，`docker pull` 时自动匹配：
 
 ```bash
-docker pull kilol/excelmanus-api:1.6.8       # 后端 API
-docker pull kilol/excelmanus-sandbox:1.6.8   # 代码沙盒（可选）
-docker pull kilol/excelmanus-web:1.6.8       # 前端 Web
+docker pull kilol/excelmanus-api:1.6.9       # 后端 API
+docker pull kilol/excelmanus-sandbox:1.6.9   # 代码沙盒（可选）
+docker pull kilol/excelmanus-web:1.6.9       # 前端 Web
 ```
 
 #### Docker Compose 一键启动
@@ -574,6 +574,8 @@ uv run python -m excelmanus.bench --message "读取前10行"          # 单条
 | **单轮合并提取** | 视觉提取强模型（Gemini 2.5 Pro 等）单次调用完成 4 阶段提取 |
 | **图片生命周期管理** | 自动管理多轮对话中的图片保留/降级，避免重复传输 |
 | **辅助模型分离** | 路由/子代理走轻量 AUX 模型，主模型专注推理 |
+| **上下文预算管理** | 动态分配上下文预算，语义相关性评分驱动差异化截断 |
+| **语义并行检索** | chat() 中 asyncio.gather 并行执行记忆/文件/技能语义检索，零额外延迟 |
 | **SSE 事件去重** | 前端统一 `dispatchSSEEvent` 处理器，消除 3 份重复代码 |
 | **数据库 WAL 模式** | 聊天历史 SQLite 启用 WAL，并发读写不阻塞 |
 
