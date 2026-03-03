@@ -126,6 +126,123 @@ def create_token_pair(user_id: str, role: str) -> tuple[str, str, int]:
     return access, refresh, ACCESS_TOKEN_EXPIRE_MINUTES * 60
 
 
+SERVICE_TOKEN_EXPIRE_DAYS = 365  # 服务令牌有效期 1 年
+SERVICE_TOKEN_RENEW_DAYS = 30   # 剩余不足此天数时自动续签
+
+
+def create_service_token(
+    service_name: str = "channel-bot",
+    expires_delta: timedelta | None = None,
+) -> str:
+    """创建长期服务令牌（供 Bot 进程调用 API 使用）。
+
+    服务令牌携带 ``type=service``，不代表任何具体用户。
+    Bot 通过 ``X-On-Behalf-Of`` header 指定代理用户。
+    """
+    expire = datetime.now(tz=timezone.utc) + (
+        expires_delta or timedelta(days=SERVICE_TOKEN_EXPIRE_DAYS)
+    )
+    payload = {
+        "type": "service",
+        "sub": service_name,
+        "role": "service",
+        "exp": expire,
+    }
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def decode_service_token(token: str) -> dict[str, Any] | None:
+    """解码并验证服务令牌。返回 claims 字典或 None。"""
+    payload = decode_token(token)
+    if payload is None or payload.get("type") != "service":
+        return None
+    return payload
+
+
+def get_or_create_service_token() -> str:
+    """获取或创建服务令牌（持久化到文件）。
+
+    优先级：
+    1. EXCELMANUS_SERVICE_TOKEN 环境变量
+    2. ~/.excelmanus/data/.service_token 持久化文件
+    3. 自动生成并持久化到上述文件
+    """
+    import logging
+    from pathlib import Path
+
+    _logger = logging.getLogger(__name__)
+
+    env_token = os.environ.get("EXCELMANUS_SERVICE_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    key_dir = Path.home() / ".excelmanus" / "data"
+    token_file = key_dir / ".service_token"
+
+    # 尝试从持久化文件读取并验证
+    if token_file.exists():
+        try:
+            stored = token_file.read_text(encoding="utf-8").strip()
+            payload = decode_service_token(stored) if stored else None
+            if payload is not None:
+                exp = payload.get("exp", 0)
+                remaining = exp - datetime.now(tz=timezone.utc).timestamp()
+                if remaining > SERVICE_TOKEN_RENEW_DAYS * 86400:
+                    return stored
+                _logger.info(
+                    "服务令牌剩余 %d 天，不足 %d 天阈值，自动续签",
+                    int(remaining / 86400), SERVICE_TOKEN_RENEW_DAYS,
+                )
+        except OSError:
+            pass
+        else:
+            if payload is None:
+                _logger.info("已有服务令牌无效或过期，重新生成")
+
+    # 生成新令牌并持久化
+    token = create_service_token()
+    try:
+        key_dir.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token, encoding="utf-8")
+        from excelmanus.security.cipher import _restrict_file_permissions
+        _restrict_file_permissions(token_file)
+        _logger.info("服务令牌已自动生成并持久化到 %s", token_file)
+    except OSError:
+        _logger.warning("服务令牌已生成但无法持久化")
+
+    return token
+
+
+def rotate_service_token() -> str:
+    """强制轮换服务令牌：生成新 token 并覆盖持久化文件。
+
+    返回新 token。环境变量指定的 token 无法轮换（返回原值并警告）。
+    """
+    import logging
+    from pathlib import Path
+
+    _logger = logging.getLogger(__name__)
+
+    env_token = os.environ.get("EXCELMANUS_SERVICE_TOKEN", "").strip()
+    if env_token:
+        _logger.warning("服务令牌由环境变量指定，无法自动轮换")
+        return env_token
+
+    token = create_service_token()
+    key_dir = Path.home() / ".excelmanus" / "data"
+    token_file = key_dir / ".service_token"
+    try:
+        key_dir.mkdir(parents=True, exist_ok=True)
+        token_file.write_text(token, encoding="utf-8")
+        from excelmanus.security.cipher import _restrict_file_permissions
+        _restrict_file_permissions(token_file)
+        _logger.info("服务令牌已轮换并持久化到 %s", token_file)
+    except OSError:
+        _logger.warning("服务令牌已轮换但无法持久化")
+
+    return token
+
+
 MERGE_TOKEN_EXPIRE_MINUTES = 5  # 合并令牌有效期 5 分钟
 
 

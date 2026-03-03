@@ -73,6 +73,17 @@ _SQLITE_USERS_DDL = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_uol_user ON user_oauth_links(user_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_uol_provider_oid ON user_oauth_links(provider, oauth_id)",
+    """CREATE TABLE IF NOT EXISTS channel_user_links (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        channel     TEXT NOT NULL,
+        platform_id TEXT NOT NULL,
+        display_name TEXT,
+        linked_at   TEXT NOT NULL,
+        UNIQUE(channel, platform_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_cul_user ON channel_user_links(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cul_channel_pid ON channel_user_links(channel, platform_id)",
 ]
 
 _PG_USERS_DDL = [
@@ -129,6 +140,17 @@ _PG_USERS_DDL = [
     )""",
     "CREATE INDEX IF NOT EXISTS idx_uol_user ON user_oauth_links(user_id)",
     "CREATE UNIQUE INDEX IF NOT EXISTS idx_uol_provider_oid ON user_oauth_links(provider, oauth_id)",
+    """CREATE TABLE IF NOT EXISTS channel_user_links (
+        id          TEXT PRIMARY KEY,
+        user_id     TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        channel     TEXT NOT NULL,
+        platform_id TEXT NOT NULL,
+        display_name TEXT,
+        linked_at   TEXT NOT NULL,
+        UNIQUE(channel, platform_id)
+    )""",
+    "CREATE INDEX IF NOT EXISTS idx_cul_user ON channel_user_links(user_id)",
+    "CREATE UNIQUE INDEX IF NOT EXISTS idx_cul_channel_pid ON channel_user_links(channel, platform_id)",
 ]
 
 
@@ -467,6 +489,85 @@ class UserStore:
             (user_id,),
         ).fetchone()
         return row["c"] if row else 0  # type: ignore[index]
+
+    # ── Channel User Links ────────────────────────────────────
+
+    def link_channel_user(
+        self,
+        user_id: str,
+        channel: str,
+        platform_id: str,
+        display_name: str | None = None,
+    ) -> str:
+        """将渠道平台用户绑定到后端用户。返回 link id。"""
+        link_id = str(uuid.uuid4())
+        now = datetime.now(tz=timezone.utc).isoformat()
+        self._conn.execute(
+            """INSERT INTO channel_user_links
+               (id, user_id, channel, platform_id, display_name, linked_at)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (link_id, user_id, channel, platform_id, display_name, now),
+        )
+        self._conn.commit()
+        logger.info(
+            "渠道绑定创建: user=%s channel=%s platform_id=%s",
+            user_id, channel, platform_id,
+        )
+        return link_id
+
+    def get_user_by_channel(
+        self, channel: str, platform_id: str,
+    ) -> UserRecord | None:
+        """通过渠道+平台 ID 查找已绑定的后端用户。"""
+        row = self._conn.execute(
+            """SELECT u.* FROM users u
+               JOIN channel_user_links l ON u.id = l.user_id
+               WHERE l.channel = ? AND l.platform_id = ?""",
+            (channel, platform_id),
+        ).fetchone()
+        return self._row_to_record(row) if row else None
+
+    def get_channel_link(
+        self, channel: str, platform_id: str,
+    ) -> dict | None:
+        """获取渠道绑定记录。"""
+        row = self._conn.execute(
+            "SELECT * FROM channel_user_links WHERE channel = ? AND platform_id = ?",
+            (channel, platform_id),
+        ).fetchone()
+        return dict(row) if row else None  # type: ignore[arg-type]
+
+    def get_channel_links_for_user(self, user_id: str) -> list[dict]:
+        """获取用户的所有渠道绑定。"""
+        rows = self._conn.execute(
+            "SELECT * FROM channel_user_links WHERE user_id = ? ORDER BY linked_at",
+            (user_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]  # type: ignore[arg-type]
+
+    def unlink_channel_user(
+        self, user_id: str, channel: str,
+    ) -> bool:
+        """解除用户的某个渠道绑定。"""
+        cur = self._conn.execute(
+            "DELETE FROM channel_user_links WHERE user_id = ? AND channel = ?",
+            (user_id, channel),
+        )
+        self._conn.commit()
+        if cur.rowcount > 0:
+            logger.info("渠道绑定删除: user=%s channel=%s", user_id, channel)
+        return cur.rowcount > 0
+
+    def unlink_channel_by_platform(
+        self, channel: str, platform_id: str,
+    ) -> bool:
+        """通过渠道+平台 ID 解除绑定。"""
+        cur = self._conn.execute(
+            "DELETE FROM channel_user_links WHERE channel = ? AND platform_id = ?",
+            (channel, platform_id),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
 
     # ── 辅助方法 ────────────────────────────────────────────
 

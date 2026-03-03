@@ -1,5 +1,5 @@
-"""QQ Bot 渠道适配器（占位）。"""
+"""QQ Bot 渠道适配器。"""
 
-from excelmanus.channels.qq.adapter import QQBotAdapter
+from excelmanus.channels.qq.adapter import QQBotAdapter, parse_chat_id
 
-__all__ = ["QQBotAdapter"]
+__all__ = ["QQBotAdapter", "parse_chat_id"]

@@ -26,6 +26,7 @@ from excelmanus.auth.models import (
     ResetPasswordRequest,
     SetPasswordRequest,
     TokenResponse,
+    UnlinkChannelRequest,
     UserPublic,
     UserRecord,
     UserRole,
@@ -1776,6 +1777,23 @@ async def admin_update_login_config(
     return {"status": "ok", **get_login_config(request)}
 
 
+@router.post("/admin/rotate-service-token")
+async def admin_rotate_service_token(
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """强制轮换 Service Token。环境变量指定的 token 无法轮换。"""
+    from excelmanus.auth.security import rotate_service_token, decode_service_token
+
+    new_token = rotate_service_token()
+    payload = decode_service_token(new_token)
+    expires_at = payload.get("exp") if payload else None
+    logger.info("管理员轮换服务令牌: admin=%s", _admin.email)
+    return {
+        "status": "rotated",
+        "expires_at": expires_at,
+    }
+
+
 # ── 订阅提供商管理 ─────────────────────────────────────────────
 
 
@@ -2326,4 +2344,119 @@ async def codex_oauth_exchange(
         "account_id": credential.account_id,
         "plan_type": credential.plan_type,
         "expires_at": credential.expires_at,
+    }
+
+
+# ── 渠道绑定 ──────────────────────────────────────────
+
+
+def _get_bind_manager(request: Request):
+    """从 app.state 获取 ChannelBindManager 实例。"""
+    mgr = getattr(request.app.state, "bind_manager", None)
+    if mgr is None:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="渠道绑定服务未启用",
+        )
+    return mgr
+
+
+@router.post("/channel/bind/confirm")
+async def confirm_channel_bind(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+):
+    """Web 前端确认绑定码，将渠道账号绑定到当前登录用户。"""
+    body = await request.json()
+    code = body.get("code", "").strip()
+    if not code:
+        raise HTTPException(400, "缺少绑定码")
+
+    mgr = _get_bind_manager(request)
+    result = mgr.confirm_bind(code, user.id)
+    if not result.get("ok"):
+        err = result.get("error", "绑定失败")
+        logger.warning("渠道绑定失败: user=%s code=%s error=%s", user.id, code, err)
+        raise HTTPException(400, err)
+
+    # 绑定成功后，通过渠道 Bot 主动通知用户
+    channel = result.get("channel", "")
+    platform_id = result.get("platform_id", "")
+    launcher = getattr(request.app.state, "channel_launcher", None)
+    if launcher is not None and channel and platform_id:
+        display = user.display_name or user.email or "用户"
+        notify_text = (
+            f"✅ <b>绑定成功</b>\n\n"
+            f"已绑定到 ExcelManus 账号: <b>{display}</b>\n"
+            f"现在可以直接在此对话中使用 ExcelManus 啦！"
+        )
+        try:
+            await launcher.send_notification(channel, platform_id, notify_text)
+        except Exception:
+            logger.debug("绑定成功通知发送失败", exc_info=True)
+
+    return {
+        "ok": True,
+        "status": "bound",
+        "channel": result.get("channel"),
+        "platform_id": result.get("platform_id"),
+        "message": result.get("message", "绑定成功"),
+    }
+
+
+@router.get("/channel/links")
+async def list_channel_links(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+):
+    """列出当前用户的所有渠道绑定。"""
+    store = _get_store(request)
+    links = store.get_channel_links_for_user(user.id)
+    return {"links": links}
+
+
+@router.delete("/channel/links/{channel}")
+async def unlink_channel(
+    channel: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+    body: UnlinkChannelRequest | None = None,
+):
+    """解除指定渠道的绑定。有密码用户需提供密码，纯 OAuth 用户凭身份即可。"""
+    if user.password_hash:
+        password = body.password if body else None
+        if not password:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="需要提供密码以确认解绑操作",
+            )
+        if not verify_password(password, user.password_hash):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="密码错误",
+            )
+
+    store = _get_store(request)
+    ok = store.unlink_channel_user(user.id, channel)
+    if not ok:
+        raise HTTPException(404, f"未找到 {channel} 渠道的绑定")
+    logger.info("渠道解绑: user=%s channel=%s", user.email, channel)
+    return {"status": "unlinked", "channel": channel}
+
+
+@router.get("/channel/bind/info")
+async def get_bind_code_info(
+    code: str,
+    request: Request,
+    _user: UserRecord = Depends(get_current_user),
+):
+    """查询绑定码信息（前端在用户输入码后预览）。"""
+    mgr = _get_bind_manager(request)
+    entry = mgr.get_bind_info(code)
+    if entry is None:
+        raise HTTPException(404, "绑定码无效或已过期")
+    return {
+        "channel": entry.channel,
+        "platform_id": entry.platform_id,
+        "platform_display_name": entry.platform_display_name,
     }

@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
-from excelmanus.channels.base import ChannelAdapter
+from excelmanus.channels.base import ChannelAdapter, ChannelCapabilities
+from excelmanus.channels.chunking import smart_chunk
 
-logger = logging.getLogger("channels.telegram")
+logger = logging.getLogger("excelmanus.channels.telegram")
 
 # Telegram 消息长度上限
 TG_MAX_MESSAGE_LEN = 4096
@@ -22,6 +23,14 @@ class TelegramAdapter(ChannelAdapter):
     """
 
     name = "telegram"
+    capabilities = ChannelCapabilities(
+        supports_edit=True,
+        supports_reply_chain=True,
+        supports_typing=True,
+        max_message_length=TG_MAX_MESSAGE_LEN,
+        max_edits_per_minute=20,
+        preferred_format="html",
+    )
 
     def __init__(self, token: str = "", **kwargs) -> None:
         self.token = token or os.environ.get("EXCELMANUS_TG_TOKEN", "")
@@ -45,45 +54,53 @@ class TelegramAdapter(ChannelAdapter):
     # ── 发送能力 ──
 
     async def send_text(self, chat_id: str, text: str) -> None:
-        """发送纯文本消息，自动拆分长消息。"""
+        """发送纯文本消息，使用语义分块拆分长消息。"""
         if self._app is None:
+            logger.warning("send_text 失败: _app 未初始化 (chat_id=%s)", chat_id)
             return
         bot = self._app.bot
-        for part in self.split_message(text, TG_MAX_MESSAGE_LEN):
-            await bot.send_message(chat_id=int(chat_id), text=part)
+        for part in smart_chunk(text, TG_MAX_MESSAGE_LEN, "plain"):
+            try:
+                await bot.send_message(chat_id=int(chat_id), text=part)
+            except Exception:
+                logger.error("send_message 失败 (chat_id=%s, text_len=%d)", chat_id, len(part), exc_info=True)
+                raise
 
     async def send_markdown(self, chat_id: str, text: str) -> None:
-        """发送 Markdown 消息，失败时降级纯文本。"""
+        """发送 Markdown 消息，优先尝试 HTML，失败时降级纯文本。"""
         if self._app is None:
             return
         from telegram.constants import ParseMode
 
         bot = self._app.bot
-        for part in self.split_message(text, TG_MAX_MESSAGE_LEN):
+        for part in smart_chunk(text, TG_MAX_MESSAGE_LEN, "html"):
             try:
                 await bot.send_message(
                     chat_id=int(chat_id),
                     text=part,
-                    parse_mode=ParseMode.MARKDOWN,
+                    parse_mode=ParseMode.HTML,
                 )
             except Exception:
-                await bot.send_message(chat_id=int(chat_id), text=part)
+                # HTML 解析失败 → 尝试 Markdown
+                try:
+                    plain_part = smart_chunk(part, TG_MAX_MESSAGE_LEN, "plain")[0]
+                    await bot.send_message(chat_id=int(chat_id), text=plain_part)
+                except Exception:
+                    await bot.send_message(chat_id=int(chat_id), text=part)
 
-    async def send_file(self, chat_id: str, file_path: str, filename: str) -> None:
-        """发送文件给用户。"""
+    async def send_file(self, chat_id: str, data: bytes, filename: str) -> None:
+        """发送文件给用户。data 为文件内容字节。"""
         if self._app is None:
             return
+        import io
         bot = self._app.bot
-        path = Path(file_path)
-        if not path.exists():
-            await self.send_text(chat_id, f"⚠️ 文件不存在: {filename}")
-            return
-        with open(path, "rb") as f:
-            await bot.send_document(
-                chat_id=int(chat_id),
-                document=f,
-                filename=filename,
-            )
+        buf = io.BytesIO(data)
+        buf.name = filename
+        await bot.send_document(
+            chat_id=int(chat_id),
+            document=buf,
+            filename=filename,
+        )
 
     async def send_approval_card(
         self,
@@ -183,6 +200,83 @@ class TelegramAdapter(ChannelAdapter):
             action=ChatAction.TYPING,
         )
 
+    async def send_text_return_id(
+        self, chat_id: str, text: str, reply_to: str | None = None,
+    ) -> str:
+        """发送文本并返回消息 ID。"""
+        if self._app is None:
+            return ""
+        bot = self._app.bot
+        kwargs: dict = {"chat_id": int(chat_id), "text": text}
+        if reply_to:
+            kwargs["reply_to_message_id"] = int(reply_to)
+        msg = await bot.send_message(**kwargs)
+        return str(msg.message_id)
+
+    async def send_markdown_return_id(
+        self, chat_id: str, text: str, reply_to: str | None = None,
+    ) -> str:
+        """发送 HTML 格式消息并返回消息 ID，失败降级纯文本。"""
+        if self._app is None:
+            return ""
+        from telegram.constants import ParseMode
+
+        bot = self._app.bot
+        kwargs: dict = {"chat_id": int(chat_id), "text": text}
+        if reply_to:
+            kwargs["reply_to_message_id"] = int(reply_to)
+        try:
+            msg = await bot.send_message(parse_mode=ParseMode.HTML, **kwargs)
+        except Exception:
+            msg = await bot.send_message(**kwargs)
+        return str(msg.message_id)
+
+    async def edit_text(
+        self, chat_id: str, message_id: str, text: str,
+    ) -> bool:
+        """编辑已发送的纯文本消息。"""
+        if self._app is None:
+            return False
+        try:
+            await self._app.bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                text=text,
+            )
+            return True
+        except Exception:
+            logger.debug("edit_text failed chat=%s msg=%s", chat_id, message_id, exc_info=True)
+            return False
+
+    async def edit_markdown(
+        self, chat_id: str, message_id: str, text: str,
+    ) -> bool:
+        """编辑已发送的 HTML 格式消息，失败降级为纯文本编辑。"""
+        if self._app is None:
+            return False
+        from telegram.constants import ParseMode
+
+        try:
+            await self._app.bot.edit_message_text(
+                chat_id=int(chat_id),
+                message_id=int(message_id),
+                text=text,
+                parse_mode=ParseMode.HTML,
+            )
+            return True
+        except Exception:
+            # HTML 解析失败 → 纯文本降级
+            try:
+                await self._app.bot.edit_message_text(
+                    chat_id=int(chat_id),
+                    message_id=int(message_id),
+                    text=text,
+                )
+                return True
+            except Exception:
+                logger.debug("edit_markdown failed chat=%s msg=%s", chat_id, message_id, exc_info=True)
+                return False
+
     async def send_progress(self, chat_id: str, stage: str, message: str) -> None:
         """发送进度提示。"""
         await self.send_text(chat_id, f"⏳ [{stage}] {message}")
@@ -216,3 +310,72 @@ class TelegramAdapter(ChannelAdapter):
             )
         except Exception:
             pass
+
+    async def send_staged_card(
+        self,
+        chat_id: str,
+        files: list[dict],
+        pending_count: int,
+        session_id: str,
+    ) -> None:
+        """发送 staged 文件摘要卡片，带 InlineKeyboard 按钮。"""
+        if self._app is None:
+            return
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+
+        lines = [f"📦 {pending_count} 个文件待确认:\n"]
+        for i, f in enumerate(files[:10], 1):
+            name = PurePosixPath(f.get("original_path", "?")).name
+            summary = f.get("summary")
+            detail = ""
+            if summary:
+                parts = []
+                if summary.get("cells_changed"):
+                    parts.append(f"~{summary['cells_changed']}")
+                if summary.get("cells_added"):
+                    parts.append(f"+{summary['cells_added']}")
+                if summary.get("cells_removed"):
+                    parts.append(f"-{summary['cells_removed']}")
+                if summary.get("sheets_added"):
+                    parts.append(f"+{len(summary['sheets_added'])} sheet")
+                delta = summary.get("size_delta_bytes", 0)
+                if delta and not parts:
+                    parts.append(f"Δ{delta:+d}B")
+                if parts:
+                    detail = f"  ({', '.join(parts)})"
+            lines.append(f"  {i}. {name}{detail}")
+        text = "\n".join(lines)
+
+        # 构建按钮
+        keyboard_rows = []
+        if pending_count <= 3:
+            for i in range(min(pending_count, len(files))):
+                name = PurePosixPath(files[i].get("original_path", "?")).name
+                short_name = name[:20] if len(name) > 20 else name
+                keyboard_rows.append([
+                    InlineKeyboardButton(
+                        f"✅ {short_name}",
+                        callback_data=f"apply_staged:{session_id}:{i}",
+                    ),
+                    InlineKeyboardButton(
+                        f"❌ {short_name}",
+                        callback_data=f"discard_staged:{session_id}:{i}",
+                    ),
+                ])
+        # 全量按钮（始终显示）
+        keyboard_rows.append([
+            InlineKeyboardButton(
+                "✅ 全部应用",
+                callback_data=f"apply_staged:{session_id}:all",
+            ),
+            InlineKeyboardButton(
+                "❌ 全部丢弃",
+                callback_data=f"discard_staged:{session_id}:all",
+            ),
+        ])
+
+        await self._app.bot.send_message(
+            chat_id=int(chat_id),
+            text=text,
+            reply_markup=InlineKeyboardMarkup(keyboard_rows),
+        )
