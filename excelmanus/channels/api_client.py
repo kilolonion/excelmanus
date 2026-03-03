@@ -781,8 +781,8 @@ class ExcelManusAPIClient:
     def get_workspace_path(self) -> str:
         """获取工作区路径。"""
         return os.environ.get(
-            "EXCELMANUS_WORKSPACE",
-            "/root/.openclaw/workspace/excelmanus/workspace",
+            "EXCELMANUS_WORKSPACE_ROOT",
+            os.environ.get("EXCELMANUS_WORKSPACE", "."),
         )
 
     async def upload_to_workspace(
@@ -798,7 +798,7 @@ class ExcelManusAPIClient:
                 headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
             resp = await self._request(
                 "POST",
-                f"{self.api_url}/api/v1/files/upload",
+                f"{self.api_url}/api/v1/upload",
                 files={"file": (filename, io.BytesIO(data))},
                 headers=headers or None,
             )
@@ -809,9 +809,12 @@ class ExcelManusAPIClient:
             logger.debug("HTTP 上传不可用，回退到本地写入", exc_info=True)
 
         # 回退：本地写入（仅限 Bot 与 API 同机部署）
+        import uuid as _uuid
         workspace = self.get_workspace_path()
-        os.makedirs(workspace, exist_ok=True)
-        dest = os.path.join(workspace, filename)
+        upload_dir = os.path.join(workspace, "uploads")
+        os.makedirs(upload_dir, exist_ok=True)
+        safe_name = f"{_uuid.uuid4().hex[:8]}_{filename}"
+        dest = os.path.join(upload_dir, safe_name)
         with open(dest, "wb") as f:
             f.write(data)
-        return dest
+        return f"./uploads/{safe_name}"

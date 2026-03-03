@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -200,7 +201,6 @@ class SessionSummaryStore:
             return []
         effective_uid = user_id if user_id is not None else self._user_id
         # 提取文件名（不含路径前缀）用于模糊匹配
-        import os
         basenames = {os.path.basename(p).lower() for p in file_paths if p}
         if not basenames:
             return []

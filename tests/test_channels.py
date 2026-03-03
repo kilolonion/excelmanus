@@ -1337,7 +1337,7 @@ class TestPendingFileBuffer:
 
         api.upload_to_workspace.assert_called_once()
         assert len(mock_fn.calls) == 1
-        assert "@file:test.xlsx" in mock_fn.calls[0]["message"]
+        assert "@file:/workspace/test.xlsx" in mock_fn.calls[0]["message"]
         assert "帮我分析这个表" in mock_fn.calls[0]["message"]
         # 缓冲应已消费
         assert "100:1" not in handler._pending_files
@@ -1367,7 +1367,7 @@ class TestPendingFileBuffer:
         )
         await handler.handle_message(msg2)
         assert len(mock_fn.calls) == 1
-        assert "@file:data.csv" in mock_fn.calls[0]["message"]
+        assert "@file:/workspace/data.csv" in mock_fn.calls[0]["message"]
         assert "统计每列的均值" in mock_fn.calls[0]["message"]
         # 缓冲应已消费
         assert "100:1" not in handler._pending_files
@@ -1376,7 +1376,9 @@ class TestPendingFileBuffer:
     async def test_multiple_files_accumulate(self, mock_handler):
         """连续发送多个文件 → 全部累积在缓冲中。"""
         handler, adapter, api, store = mock_handler
-        api.upload_to_workspace = AsyncMock()
+        api.upload_to_workspace = AsyncMock(side_effect=[
+            "/workspace/a.xlsx", "/workspace/b.csv",
+        ])
         mock_fn = _make_stream_mock(ChatResult(reply="ok", session_id="s1"))
         api.stream_chat_events = mock_fn
 
@@ -1398,8 +1400,8 @@ class TestPendingFileBuffer:
         )
         await handler.handle_message(msg_text)
         assert len(mock_fn.calls) == 1
-        assert "@file:a.xlsx" in mock_fn.calls[0]["message"]
-        assert "@file:b.csv" in mock_fn.calls[0]["message"]
+        assert "@file:/workspace/a.xlsx" in mock_fn.calls[0]["message"]
+        assert "@file:/workspace/b.csv" in mock_fn.calls[0]["message"]
 
     @pytest.mark.asyncio
     async def test_image_then_text_two_step(self, mock_handler):

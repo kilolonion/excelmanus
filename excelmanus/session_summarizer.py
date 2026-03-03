@@ -174,8 +174,8 @@ class SessionSummarizer:
     def _format_conversation(messages: list[tuple[str, str]]) -> str:
         parts: list[str] = []
         for role, content in messages:
-            # 截断过长的单条消息
-            text = content if len(content) <= 500 else content[:500] + "...[截断]"
+            # 截断过长的单条消息（保留开头，确保文件路径/列名等关键信息不丢失）
+            text = content if len(content) <= 800 else content[:400] + "\n...[中间省略]...\n" + content[-300:]
             parts.append(f"[{role}]: {text}")
         return "\n".join(parts)
 

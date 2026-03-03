@@ -75,11 +75,13 @@ class PendingFile:
         is_image: bool = False,
         mime_type: str = "",
         image_data: bytes | None = None,
+        workspace_path: str = "",
     ) -> None:
         self.filename = filename
         self.is_image = is_image
         self.mime_type = mime_type
         self.image_data = image_data  # 图片原始数据，用于 vision API
+        self.workspace_path = workspace_path  # 上传后在工作区的实际路径
         self.created_at: float = time.monotonic()
 
 
@@ -1222,7 +1224,7 @@ class MessageHandler:
 
             await self.adapter.show_typing(msg.chat_id)
             obo = self._resolve_on_behalf_of(user_id)
-            await self.api.upload_to_workspace(file_att.filename, file_att.data, on_behalf_of=obo)
+            ws_path = await self.api.upload_to_workspace(file_att.filename, file_att.data, on_behalf_of=obo)
 
             is_image = file_att.mime_type.startswith(self._IMAGE_MIME_PREFIX)
             pending = PendingFile(
@@ -1230,6 +1232,7 @@ class MessageHandler:
                 is_image=is_image,
                 mime_type=file_att.mime_type,
                 image_data=file_att.data if is_image else None,
+                workspace_path=ws_path,
             )
             self._pending_files.setdefault(pk, []).append(pending)
             uploaded_names.append(file_att.filename)
@@ -1265,7 +1268,10 @@ class MessageHandler:
         # 构建消息：@file:引用 + 用户文本
         file_refs = [f for f in files if f.filename != "photo"]
         if file_refs:
-            refs_str = " ".join(f"@file:{f.filename}" for f in file_refs)
+            refs_str = " ".join(
+                f"@file:{f.workspace_path}" if f.workspace_path else f"@file:{f.filename}"
+                for f in file_refs
+            )
             chat_msg = f"{refs_str} {text}"
         else:
             chat_msg = text
