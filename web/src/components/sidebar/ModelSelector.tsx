@@ -64,7 +64,7 @@ export function ModelSelector() {
 
   const activeModel = models.find((m) => m.name === currentModel);
   const displayLabel = (m: ModelInfo) =>
-    m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+    m.name === "default" ? formatModelIdForDisplay(m.model) : formatModelIdForDisplay(m.display_name || m.name);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
   const displayName = activeModel
     ? displayLabel(activeModel)

@@ -34,6 +34,17 @@ function ProviderIcon({ provider, className }: { provider: string; className?: s
   return <Link2 className={className} />;
 }
 
+/**
+ * 解析 URL hash fragment 为 URLSearchParams。
+ * hash fragment (#key=val&key2=val2) 不会发送给服务器，比 query params 更安全。
+ */
+function parseHashParams(): URLSearchParams {
+  if (typeof window === "undefined") return new URLSearchParams();
+  const hash = window.location.hash;
+  if (!hash || hash.length <= 1) return new URLSearchParams();
+  return new URLSearchParams(hash.slice(1));
+}
+
 function CallbackHandler() {
   const router = useRouter();
   const searchParams = useSearchParams();
@@ -47,12 +58,16 @@ function CallbackHandler() {
     if (processed.current) return;
     processed.current = true;
 
+    // 优先从 hash fragment 读取（安全），回退到 query params（兼容旧版）
+    const hashParams = parseHashParams();
+    const getParam = (key: string) => hashParams.get(key) || searchParams.get(key);
+
     // ── Codex OAuth PKCE popup 模式检测 ──────────────────
     // 当此页面在 popup 中打开（window.opener 存在）且有 code 参数时，
     // 说明这是 Codex OAuth 回调，通过 postMessage 将 code/state 传回主窗口。
     const codexCode = searchParams.get("code");
     const codexState = searchParams.get("state");
-    if (window.opener && codexCode && codexState && !searchParams.get("access_token")) {
+    if (window.opener && codexCode && codexState && !getParam("access_token")) {
       const errorParam = searchParams.get("error") || searchParams.get("error_description");
       if (errorParam) {
         window.opener.postMessage(
@@ -70,25 +85,28 @@ function CallbackHandler() {
       return;
     }
 
-    const accessToken = searchParams.get("access_token");
-    const refreshToken = searchParams.get("refresh_token");
+    const accessToken = getParam("access_token");
+    const refreshToken = getParam("refresh_token");
+    // 错误信息保持从 query params 读取（后端通过 ? 传递错误）
     const errorParam = searchParams.get("error") || searchParams.get("error_description");
 
-    // 从重定向 URL 参数检测合并场景
-    if (searchParams.get("merge_required") === "1") {
+    // 从重定向 URL 参数检测合并场景（hash fragment 或 query params）
+    if (getParam("merge_required") === "1") {
       const info: MergeRequiredInfo = {
         merge_required: true,
-        merge_token: searchParams.get("merge_token") || "",
-        existing_email: searchParams.get("existing_email") || "",
-        existing_display_name: searchParams.get("existing_display_name") || "",
-        existing_has_password: searchParams.get("existing_has_password") === "1",
-        existing_providers: (searchParams.get("existing_providers") || "").split(",").filter(Boolean),
-        new_provider: searchParams.get("new_provider") || "",
-        new_provider_display_name: searchParams.get("new_provider_display_name") || "",
+        merge_token: getParam("merge_token") || "",
+        existing_email: getParam("existing_email") || "",
+        existing_display_name: getParam("existing_display_name") || "",
+        existing_has_password: getParam("existing_has_password") === "1",
+        existing_providers: (getParam("existing_providers") || "").split(",").filter(Boolean),
+        new_provider: getParam("new_provider") || "",
+        new_provider_display_name: getParam("new_provider_display_name") || "",
         new_provider_avatar_url: null,
       };
       setMergeInfo(info);
       setState("merge_confirm");
+      // 安全：读取后清除 hash 中的敏感令牌
+      if (window.location.hash) history.replaceState(null, "", window.location.pathname + window.location.search);
       return;
     }
 
@@ -99,6 +117,8 @@ function CallbackHandler() {
     }
 
     if (accessToken && refreshToken) {
+      // 安全：读取后立即清除 hash 中的敏感令牌
+      if (window.location.hash) history.replaceState(null, "", window.location.pathname + window.location.search);
       const { setTokens } = useAuthStore.getState();
       setTokens(accessToken, refreshToken);
       fetchCurrentUser()
@@ -121,7 +141,7 @@ function CallbackHandler() {
     }
 
     const stateVal = searchParams.get("state") || "";
-    const providerHint = searchParams.get("provider") || stateVal.split(":")[0];
+    const providerHint = getParam("provider") || stateVal.split(":")[0];
     let provider: "github" | "google" | "qq" = "github";
     if (providerHint === "google") provider = "google";
     else if (providerHint === "qq") provider = "qq";

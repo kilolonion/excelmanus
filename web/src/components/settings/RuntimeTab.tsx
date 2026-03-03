@@ -19,6 +19,9 @@ import {
   Clock,
   Users,
   AlertCircle,
+  Container,
+  Hammer,
+  RefreshCw,
   Brain,
   BookOpen,
   Layers,
@@ -40,7 +43,8 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { apiGet, apiPut } from "@/lib/api";
+import { apiGet, apiPut, fetchDockerSandboxStatus, setDockerSandbox, buildDockerSandboxImage, fetchSessionIsolationStatus } from "@/lib/api";
+import type { DockerSandboxStatus, SessionIsolationStatus } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
@@ -1153,6 +1157,263 @@ const GUIDE_SECTIONS: GuideSection[] = [
   },
 ];
 
+function StatusDot({ ok }: { ok: boolean }) {
+  return (
+    <span
+      className={`inline-block h-2 w-2 rounded-full flex-shrink-0 ${ok ? "bg-green-500" : "bg-red-400"}`}
+    />
+  );
+}
+
+function DockerSandboxSection() {
+  const [status, setStatus] = useState<DockerSandboxStatus | null>(null);
+  const [isolation, setIsolation] = useState<SessionIsolationStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [toggling, setToggling] = useState(false);
+  const [building, setBuilding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [buildMsg, setBuildMsg] = useState<string | null>(null);
+
+  const refresh = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const [ds, si] = await Promise.all([
+        fetchDockerSandboxStatus(),
+        fetchSessionIsolationStatus(),
+      ]);
+      setStatus(ds);
+      setIsolation(si);
+    } catch {
+      setError("无法获取沙盒状态");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { refresh(); }, [refresh]);
+
+  const handleToggle = async (enabled: boolean) => {
+    setToggling(true);
+    setError(null);
+    setBuildMsg(null);
+    try {
+      const res = await setDockerSandbox(enabled);
+      setStatus((prev) => prev ? { ...prev, docker_sandbox_enabled: res.docker_sandbox_enabled } : prev);
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "操作失败");
+    } finally {
+      setToggling(false);
+    }
+  };
+
+  const handleBuild = async (force: boolean) => {
+    setBuilding(true);
+    setError(null);
+    setBuildMsg(null);
+    try {
+      const res = await buildDockerSandboxImage(force);
+      setBuildMsg(res.message || "镜像构建完成");
+      await refresh();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "构建失败");
+    } finally {
+      setBuilding(false);
+    }
+  };
+
+  if (loading && !status) {
+    return (
+      <div className="rounded-lg border border-border p-4">
+        <div className="flex items-center gap-2 text-muted-foreground text-sm">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          加载沙盒状态…
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-lg border border-border overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2.5 p-4 pb-3">
+        <span
+          className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center"
+          style={{ backgroundColor: "var(--em-primary-alpha-10)", color: "var(--em-primary)" }}
+        >
+          <Container className="h-3.5 w-3.5" />
+        </span>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium">Docker 沙盒</div>
+          <div className="text-[11px] sm:text-xs text-muted-foreground">
+            在隔离容器中执行代码，防止文件系统被意外修改
+          </div>
+        </div>
+        <Button
+          variant="ghost"
+          size="icon"
+          className="h-8 w-8 sm:h-7 sm:w-7 flex-shrink-0"
+          onClick={refresh}
+          disabled={loading}
+        >
+          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+        </Button>
+      </div>
+
+      {status && (
+        <div className="px-4 pb-4 space-y-3">
+          {/* Status indicators */}
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+              <StatusDot ok={status.docker_available} />
+              <span className="text-xs">
+                Docker Daemon {status.docker_available ? "可用" : "不可用"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+              <StatusDot ok={status.sandbox_image_ready} />
+              <span className="text-xs">
+                沙盒镜像 {status.sandbox_image_ready ? "就绪" : "未就绪"}
+              </span>
+            </div>
+            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
+              <StatusDot ok={status.docker_sandbox_enabled} />
+              <span className="text-xs">
+                沙盒 {status.docker_sandbox_enabled ? "已启用" : "已关闭"}
+              </span>
+            </div>
+          </div>
+
+          {/* Toggle */}
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-start gap-2.5 flex-1 min-w-0">
+              <span className="mt-0.5 text-muted-foreground flex-shrink-0">
+                <Shield className="h-4 w-4" />
+              </span>
+              <div className="min-w-0">
+                <div className="text-sm font-medium">启用 Docker 沙盒</div>
+                <div className="text-[11px] sm:text-xs text-muted-foreground">
+                  启用时，代码在隔离容器中执行；启用时若镜像未就绪会自动构建
+                </div>
+              </div>
+            </div>
+            <Switch
+              checked={status.docker_sandbox_enabled}
+              onCheckedChange={handleToggle}
+              disabled={toggling || !status.docker_available}
+              className="flex-shrink-0"
+            />
+          </div>
+
+          {/* Build image button */}
+          <div className="space-y-2 sm:space-y-0">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                <span className="mt-0.5 text-muted-foreground flex-shrink-0">
+                  <Hammer className="h-4 w-4" />
+                </span>
+                <div className="min-w-0">
+                  <div className="text-sm font-medium">沙盒镜像管理</div>
+                  <div className="text-[11px] sm:text-xs text-muted-foreground">
+                    构建或重建 Docker 沙盒镜像
+                  </div>
+                </div>
+              </div>
+              <div className="hidden sm:flex gap-1.5 flex-shrink-0">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs gap-1.5 h-7"
+                  disabled={building || !status.docker_available}
+                  onClick={() => handleBuild(false)}
+                >
+                  {building ? <Loader2 className="h-3 w-3 animate-spin" /> : <Hammer className="h-3 w-3" />}
+                  构建
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="text-xs gap-1.5 h-7"
+                  disabled={building || !status.docker_available}
+                  onClick={() => handleBuild(true)}
+                >
+                  {building ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
+                  强制重建
+                </Button>
+              </div>
+            </div>
+            {/* Mobile: full-width build buttons */}
+            <div className="flex sm:hidden gap-2 pl-6.5">
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs gap-1.5 h-9 flex-1"
+                disabled={building || !status.docker_available}
+                onClick={() => handleBuild(false)}
+              >
+                {building ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Hammer className="h-3.5 w-3.5" />}
+                构建镜像
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                className="text-xs gap-1.5 h-9 flex-1"
+                disabled={building || !status.docker_available}
+                onClick={() => handleBuild(true)}
+              >
+                {building ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
+                强制重建
+              </Button>
+            </div>
+          </div>
+
+          {/* Session isolation (read-only info) */}
+          {isolation && (
+            <>
+              <Separator />
+              <div className="flex items-center justify-between gap-3">
+                <div className="flex items-start gap-2.5 flex-1 min-w-0">
+                  <span className="mt-0.5 text-muted-foreground flex-shrink-0">
+                    <Users className="h-4 w-4" />
+                  </span>
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">会话用户隔离</div>
+                    <div className="text-[11px] sm:text-xs text-muted-foreground">
+                      启用多用户认证时自动激活，无需手动配置
+                    </div>
+                  </div>
+                </div>
+                <span className={`text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 ${
+                  isolation.session_isolation_enabled
+                    ? "bg-green-500/10 text-green-600 dark:text-green-400"
+                    : "bg-muted text-muted-foreground"
+                }`}>
+                  {isolation.session_isolation_enabled ? "已启用" : "未启用"}
+                </span>
+              </div>
+            </>
+          )}
+
+          {/* Error / success messages */}
+          {error && (
+            <div className="flex items-start gap-2 rounded-md bg-red-500/5 border border-red-500/10 px-3 py-2">
+              <AlertCircle className="h-3.5 w-3.5 text-red-500 flex-shrink-0 mt-0.5" />
+              <span className="text-[11px] text-red-600 dark:text-red-400">{error}</span>
+            </div>
+          )}
+          {buildMsg && !error && (
+            <div className="flex items-start gap-2 rounded-md bg-green-500/5 border border-green-500/10 px-3 py-2">
+              <CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0 mt-0.5" />
+              <span className="text-[11px] text-green-600 dark:text-green-400">{buildMsg}</span>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OnboardingReplayCard() {
   const { wizardCompleted, coachMarksCompleted, resetToPhase } =
     useOnboardingStore();
@@ -1451,6 +1712,7 @@ export function RuntimeTab() {
   return (
     <div className="space-y-5">
       <OnboardingReplayCard />
+      <DockerSandboxSection />
       <Separator />
       {renderGroups(BASIC_GROUPS)}
 

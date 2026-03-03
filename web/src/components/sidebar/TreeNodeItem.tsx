@@ -16,6 +16,7 @@ import {
   Download,
   Pencil,
   AtSign,
+  Info,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -44,6 +45,7 @@ import {
   upsertWorkspaceEntry,
 } from "./file-tree-helpers";
 import { InlineRenameInput, InlineCreateInput } from "./InlineInputs";
+import { FileInfoDialog } from "./FileInfoDialog";
 
 function isNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -75,6 +77,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
   const [renaming, setRenaming] = useState(false);
   const [creating, setCreating] = useState<"file" | "folder" | null>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [fileInfoPath, setFileInfoPath] = useState<string | null>(null);
   const isFolder = !node.file;
   const indent = depth * 12;
 
@@ -432,9 +435,21 @@ export function TreeNodeItem(props: TreeNodeProps) {
                 <Trash2 className="h-4 w-4" />
                 删除
               </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setFileInfoPath(file.path); }}>
+                <Info className="h-4 w-4" />
+                文件信息
+              </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
         </>
+      )}
+      {fileInfoPath && (
+        <FileInfoDialog
+          open
+          onOpenChange={(v) => { if (!v) setFileInfoPath(null); }}
+          filePath={fileInfoPath}
+        />
       )}
     </div>
   );

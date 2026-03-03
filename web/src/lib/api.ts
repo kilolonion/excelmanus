@@ -1,5 +1,6 @@
 import type { SessionDetail } from "@/lib/types";
 import { useAuthStore } from "@/stores/auth-store";
+import { getRuntimeConfig } from "@/lib/runtime-config";
 
 const API_BASE_PATH = "/api/v1";
 
@@ -42,20 +43,25 @@ function isLoopback(hostname: string): boolean {
  * 解析后端直连地址（用于 SSE 流等必须绕过 Next.js 代理的场景）。
  *
  * 优先级：
- * 1. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联）
- *    - 设为具体地址（如 http://backend:8000）→ 直连该地址
- *    - 设为 "same-origin" → 走同源（适用于 Nginx 已配置 proxy_buffering off）
- * 2. 未配置时回退 → http://{当前主机名}:8000（开发/默认 docker-compose 场景）
+ * 1. EXCELMANUS_RUNTIME_BACKEND_ORIGIN（运行时注入，支持同一 Docker 镜像多域名部署）
+ * 2. NEXT_PUBLIC_BACKEND_ORIGIN 环境变量（构建时内联，向后兼容）
+ * 3. 未配置时回退 → http://{当前主机名}:8000（开发/默认 docker-compose 场景）
+ *
+ * 值说明：
+ *   - 设为具体地址（如 http://backend:8000）→ 直连该地址
+ *   - 设为 "same-origin" → 走同源（适用于 Nginx 已配置 proxy_buffering off）
  *
  * 特殊处理：如果配置值指向 loopback（localhost/127.0.0.1），但浏览器实际从
  * 非本机访问（局域网 IP），则自动回退到 window.location.hostname + 同端口，
  * 避免局域网设备的 SSE 请求发往自己本机的 loopback 地址导致 "fail to fetch"。
  *
  * 生产环境如果 Nginx 已配置 /api/ 反向代理且关闭了 buffering，
- * 设置 NEXT_PUBLIC_BACKEND_ORIGIN=same-origin 即可，所有请求走同源，无 CORS 问题。
+ * 设置 EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin（或 NEXT_PUBLIC_BACKEND_ORIGIN=same-origin）
+ * 即可，所有请求走同源，无 CORS 问题。
  */
 function resolveDirectBackendOrigin(): string {
-  const configured = process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim();
+  // 运行时配置优先 → 构建时环境变量回退
+  const configured = getRuntimeConfig("backendOrigin", process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim());
   if (configured) {
     // "same-origin" 显式表示走同源（Nginx 场景），返回空字符串
     if (configured.toLowerCase() === "same-origin") return "";
@@ -166,6 +172,33 @@ export function resolveAvatarSrc(
   return base;
 }
 
+/**
+ * 判断请求 URL 是否为跨域（与当前页面不同 origin）。
+ * 跨域请求需要携带 credentials: "include" 以匹配后端 allow_credentials=True。
+ */
+function _isCrossOrigin(url: RequestInfo | URL): boolean {
+  if (typeof window === "undefined") return false;
+  try {
+    const target = typeof url === "string" ? url : url instanceof URL ? url.href : (url as Request).url;
+    if (!target || target.startsWith("/")) return false; // 相对路径 = 同源
+    const u = new URL(target, window.location.origin);
+    return u.origin !== window.location.origin;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 为跨域 URL 自动追加 credentials: "include" 到 RequestInit。
+ * 同源 URL 不做任何修改，保持浏览器默认行为（same-origin）。
+ */
+function _withCredentials(url: string, init: RequestInit): RequestInit {
+  if (_isCrossOrigin(url)) {
+    return { ...init, credentials: init.credentials ?? "include" };
+  }
+  return init;
+}
+
 /** 判断是否为可重试的暂态错误（网络异常或 502/503/504）。 */
 function _isTransientError(err: unknown, res?: Response | null): boolean {
   if (err instanceof TypeError) return true; // "Failed to fetch" — 网络不可达
@@ -190,7 +223,9 @@ export async function directFetch(
     }
     // 如果调用方未提供 signal，注入默认超时；SSE 调用方自带 AbortController 的 signal 不受影响
     const signal = init?.signal ?? _withTimeout(_DEFAULT_TIMEOUT_MS);
-    return fetch(input, { ...init, headers, signal });
+    // 跨域请求自动携带 credentials，确保 cookie 随请求发送（匹配后端 allow_credentials=True）
+    const credentials: RequestCredentials | undefined = _isCrossOrigin(input) ? "include" : undefined;
+    return fetch(input, { ...init, headers, signal, credentials: init?.credentials ?? credentials });
   };
 
   let res: Response;
@@ -578,12 +613,12 @@ export async function answerQuestion(
   answer: string,
 ): Promise<{ status: string }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/answer`, { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ question_id: questionId, answer }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Answer error: ${res.status}`);
@@ -597,12 +632,12 @@ export async function submitApproval(
   decision: "accept" | "reject" | "fullaccess",
 ): Promise<{ status: string }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/approve`, { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ approval_id: approvalId, decision }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Approve error: ${res.status}`);
@@ -615,12 +650,12 @@ export async function toggleFullAccess(
   enabled: boolean,
 ): Promise<{ session_id: string; full_access_enabled: boolean }> {
   const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/full-access`, { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ enabled }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || data.detail || `Toggle full-access error: ${res.status}`);
@@ -630,12 +665,12 @@ export async function toggleFullAccess(
 
 export async function abortChat(sessionId: string): Promise<{ status: string }> {
   const url = buildApiUrl("/chat/abort", { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || data.detail || `Abort error: ${res.status}`);
@@ -655,7 +690,8 @@ export async function rollbackChat(opts: {
   file_rollback_results: string[];
   turn_index: number;
 }> {
-  const res = await fetch(buildApiUrl("/chat/rollback", { direct: true }), {
+  const rollbackUrl = buildApiUrl("/chat/rollback", { direct: true });
+  const res = await fetch(rollbackUrl, _withCredentials(rollbackUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
@@ -666,7 +702,7 @@ export async function rollbackChat(opts: {
       resend_mode: opts.resendMode ?? false,
     }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
@@ -693,12 +729,13 @@ export async function rollbackPreview(
   sessionId: string,
   turnIndex: number,
 ): Promise<RollbackPreviewResult> {
-  const res = await fetch(buildApiUrl("/chat/rollback/preview", { direct: true }), {
+  const previewUrl = buildApiUrl("/chat/rollback/preview", { direct: true });
+  const res = await fetch(previewUrl, _withCredentials(previewUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ session_id: sessionId, turn_index: turnIndex }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
@@ -1056,10 +1093,10 @@ export async function downloadFile(path: string, filename?: string, sessionId?: 
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (sessionId) params.set("session_id", sessionId);
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
-  const res = await fetch(url, {
+  const res = await fetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Download error: ${res.status}`);
@@ -1430,4 +1467,156 @@ export async function clawhubListInstalled(): Promise<{
   installed: ClawHubInstalled[];
 }> {
   return apiGet("/clawhub/installed");
+}
+
+// ── Docker Sandbox / Session Isolation API ───────────────
+
+export interface DockerSandboxStatus {
+  docker_sandbox_enabled: boolean;
+  docker_available: boolean;
+  sandbox_image_ready: boolean;
+}
+
+export async function fetchDockerSandboxStatus(): Promise<DockerSandboxStatus> {
+  return apiGet<DockerSandboxStatus>("/settings/docker-sandbox");
+}
+
+export async function setDockerSandbox(enabled: boolean): Promise<{
+  status: string;
+  docker_sandbox_enabled: boolean;
+}> {
+  return apiPut("/settings/docker-sandbox", { enabled });
+}
+
+export async function buildDockerSandboxImage(force = false): Promise<{
+  status: string;
+  message: string;
+}> {
+  return apiPost("/settings/docker-sandbox/build", { force });
+}
+
+export interface SessionIsolationStatus {
+  session_isolation_enabled: boolean;
+}
+
+export async function fetchSessionIsolationStatus(): Promise<SessionIsolationStatus> {
+  return apiGet<SessionIsolationStatus>("/settings/session-isolation");
+}
+
+// ── Chat Turns API ───────────────────────────────────────
+
+export interface ChatTurn {
+  index: number;
+  content_preview: string;
+  msg_index: number;
+}
+
+export async function fetchChatTurns(
+  sessionId: string,
+): Promise<ChatTurn[]> {
+  const res: { turns?: ChatTurn[] } = await apiGet(
+    `/chat/turns?session_id=${encodeURIComponent(sessionId)}`,
+  );
+  return res.turns ?? [];
+}
+
+// ── Checkpoint API ───────────────────────────────────────
+
+export interface CheckpointItem {
+  turn_number: number;
+  created_at: string;
+  files_modified: string[];
+  tool_names: string[];
+  version_count: number;
+}
+
+export interface CheckpointListResponse {
+  checkpoints: CheckpointItem[];
+  checkpoint_enabled: boolean;
+  error?: string;
+}
+
+export async function fetchCheckpoints(
+  sessionId: string,
+): Promise<CheckpointListResponse> {
+  try {
+    return await apiGet<CheckpointListResponse>(
+      `/checkpoint/list?session_id=${encodeURIComponent(sessionId)}`,
+    );
+  } catch {
+    return { checkpoints: [], checkpoint_enabled: false };
+  }
+}
+
+export async function checkpointRollback(
+  sessionId: string,
+  turnNumber: number,
+): Promise<{ status: string; turn_number: number; restored_files: string[]; count: number }> {
+  return apiPost(`/checkpoint/rollback`, {
+    session_id: sessionId,
+    turn_number: turnNumber,
+  });
+}
+
+// ── Desktop Shortcut API ─────────────────────────────────
+
+export interface ShortcutInfo {
+  exists: boolean;
+  desktop_path: string | null;
+  shortcut_path: string | null;
+  platform: string;
+}
+
+export async function fetchShortcutInfo(): Promise<ShortcutInfo> {
+  return apiGet<ShortcutInfo>("/shortcut/info");
+}
+
+export async function createDesktopShortcut(): Promise<{ status: string; path: string }> {
+  return apiPost<{ status: string; path: string }>("/shortcut/create", {});
+}
+
+export async function removeDesktopShortcut(): Promise<{ status: string }> {
+  return apiPost<{ status: string }>("/shortcut/remove", {});
+}
+
+// ── Version Advanced Operations ─────────────────────────
+
+export async function cleanupVersionBackups(
+  maxKeep = 2,
+): Promise<{ status: string; removed_count: number; removed: string[] }> {
+  return apiPost("/version/backups/cleanup", { max_keep: maxKeep });
+}
+
+export interface UpdateApplyResult {
+  success: boolean;
+  old_version: string;
+  new_version: string;
+  backup_dir: string;
+  steps_completed: string[];
+  error: string | null;
+  needs_restart: boolean;
+}
+
+export async function applyVersionUpdate(opts?: {
+  skipBackup?: boolean;
+  skipDeps?: boolean;
+  useMirror?: boolean;
+}): Promise<UpdateApplyResult> {
+  return apiPost("/version/update/apply", {
+    skip_backup: opts?.skipBackup ?? false,
+    skip_deps: opts?.skipDeps ?? false,
+    use_mirror: opts?.useMirror ?? false,
+  });
+}
+
+export async function restoreVersionBackup(
+  backupName: string,
+): Promise<{ status: string; message: string }> {
+  return apiPost("/version/backups/restore", { backup_name: backupName });
+}
+
+export async function migrateVersionData(
+  source?: string,
+): Promise<{ status: string; migrated: Record<string, unknown> }> {
+  return apiPost("/version/data/migrate", { source: source ?? "" });
 }

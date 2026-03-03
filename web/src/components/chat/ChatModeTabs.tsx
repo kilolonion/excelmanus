@@ -44,7 +44,7 @@ export function ChatModeTabs() {
               transition={{ type: "spring", stiffness: 400, damping: 30 }}
             />
           )}
-          <Icon className="sm:h-3 sm:w-3 h-2.5 w-2.5 relative z-10" />
+          <Icon className="h-3 w-3 relative z-10" />
           <span className="relative z-10">{label}</span>
         </button>
       ))}

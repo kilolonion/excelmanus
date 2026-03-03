@@ -588,7 +588,7 @@ function LoginForm() {
                 <div className="w-full auth-divider-line" />
               </div>
               <div className="relative flex justify-center text-xs">
-                <span className="bg-transparent px-3 text-muted-foreground backdrop-blur-sm">
+                <span className="px-3 text-muted-foreground bg-background">
                   或使用第三方账号
                 </span>
               </div>

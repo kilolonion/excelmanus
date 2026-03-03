@@ -134,7 +134,7 @@ export function injectMockStreaming() {
     store.appendBlock(assistantMsgId, {
       type: "status" as const,
       label: "智能路由",
-      detail: "read_excel,write_cells",
+      detail: "read_excel,run_code",
       variant: "route",
     });
 
@@ -203,7 +203,7 @@ export function injectMockStreaming() {
   }, 900);
 }
 
-/** Phase 4: Inject write_cells tool call with diff data + token stats. */
+/** Phase 4: Inject run_code tool call with diff data + token stats. */
 function _injectWritePhase(assistantMsgId: string, writeToolCallId: string) {
   const store = useChatStore.getState();
   if (store.abortController?.signal.aborted) return;
@@ -212,15 +212,12 @@ function _injectWritePhase(assistantMsgId: string, writeToolCallId: string) {
   store.appendBlock(assistantMsgId, {
     type: "tool_call" as const,
     toolCallId: writeToolCallId,
-    name: "write_cells",
+    name: "run_code",
     args: {
-      file_path: "销售数据.xlsx",
-      sheet: "Sheet1",
-      range: "E1:E7",
-      values: [["环比增长"], ["—"], ["+5.7%"], ["+4.8%"], ["+10.1%"], ["+7.3%"], ["+23.4%"]],
+      code: "import openpyxl\nwb = openpyxl.load_workbook('销售数据.xlsx')\nws = wb['Sheet1']\nws['E1'] = '环比增长'\nws['E2'] = '—'\nratios = ['+5.7%', '+4.8%', '+10.1%', '+7.3%', '+23.4%']\nfor i, r in enumerate(ratios, 3):\n    ws[f'E{i}'] = r\nwb.save('销售数据.xlsx')\nprint('已写入 E1:E7（7 个单元格）')",
     },
     status: "success" as const,
-    result: "成功写入 E1:E7（7 个单元格）",
+    result: "已写入 E1:E7（7 个单元格）",
   });
 
   excelStore.addDiff({

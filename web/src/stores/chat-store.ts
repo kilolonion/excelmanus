@@ -81,7 +81,7 @@ function _preserveSseOnlyBlocks(
 
   let aIdx = 0;
   let uIdx = 0;
-  return newMessages.map((msg) => {
+  const result = newMessages.map((msg) => {
     if (msg.role === "user") {
       const oldFiles = oldUserFiles[uIdx++];
       // 若旧消息有文件而新消息没有或更少，优先保留旧的
@@ -157,6 +157,34 @@ function _preserveSseOnlyBlocks(
 
     return { ...msg, blocks: merged };
   });
+
+  // ── 追加后端尚未持久化的尾部旧消息 ──
+  // 当后端返回的消息少于本地（如错误发生后助手消息未被持久化），
+  // 额外的本地消息（含 failure_guidance 等 SSE-only 块）会被上面的 map 丢弃。
+  // 此处将这些未匹配的尾部旧消息追加回结果，避免错误提示被刷新掉。
+  if (aIdx < oldAssistant.length) {
+    let consumedA = 0;
+    let consumedU = 0;
+    for (let i = 0; i < oldMessages.length; i++) {
+      const m = oldMessages[i];
+      if (m.role === "assistant") {
+        if (consumedA < aIdx) { consumedA++; continue; }
+      } else if (m.role === "user") {
+        if (consumedU < uIdx) { consumedU++; continue; }
+      }
+      // 从第一条未消费的消息开始，检查是否有值得保留的 SSE-only 块
+      const trailing = oldMessages.slice(i);
+      const hasPreservable = trailing.some(
+        (tm) => tm.role === "assistant" && tm.blocks.some((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type)),
+      );
+      if (hasPreservable) {
+        result.push(...trailing);
+      }
+      break;
+    }
+  }
+
+  return result;
 }
 
 interface BackendConversionResult {
@@ -1140,6 +1168,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         if (cached && cached.length > 0) {
           // F5: 检查版本号 — 若已被更新的 switchSession 调用取代则放弃
           if (_switchSessionVersion !== myVersion) return;
+          // 若 sendMessage 已在此期间启动流式输出，不要覆盖其乐观添加的消息
+          if (get().abortController) return;
           _sessionMessages.set(sessionId, cached);
           set({
             currentSessionId: sessionId,
@@ -1159,6 +1189,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
       // F5: 再次检查版本号
       if (_switchSessionVersion !== myVersion) return;
+      // 同上：若流式输出已启动则放弃覆盖
+      if (get().abortController) return;
 
       // IndexedDB 没有缓存，现在才清空并异步加载
       set({
