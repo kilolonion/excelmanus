@@ -536,6 +536,12 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("openai", re.compile(r"api\.openai\.com|chatgpt\.com/backend-api/codex", re.IGNORECASE)),
     ("together", re.compile(r"together", re.IGNORECASE)),
     ("groq", re.compile(r"groq\.com", re.IGNORECASE)),
+    ("mistral", re.compile(r"api\.mistral\.ai|mistral\.ai/v1", re.IGNORECASE)),
+    ("cohere", re.compile(r"api\.cohere\.", re.IGNORECASE)),
+    ("ai21", re.compile(r"api\.ai21\.", re.IGNORECASE)),
+    ("minimax", re.compile(r"api\.minimax", re.IGNORECASE)),
+    ("moonshot", re.compile(r"api\.moonshot\.cn|kimi", re.IGNORECASE)),
+    ("bedrock", re.compile(r"bedrock.*\.amazonaws\.com", re.IGNORECASE)),
 ]
 
 

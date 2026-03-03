@@ -802,11 +802,15 @@ def _execute_script_docker(
     if status == "failed":
         stderr_text = stderr or ""
         hints: list[str] = []
-        if sandbox_tier in ("GREEN", "YELLOW") and "安全策略禁止" in stderr_text:
+        if "安全策略禁止" in stderr_text:
             if "路径不在工作区内" in stderr_text:
                 hints.append(
                     "库内部临时文件写入被拦截。"
                     "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
+                )
+            if "敏感目录" in stderr_text or "禁止访问工作区外的 .env" in stderr_text:
+                hints.append(
+                    "安全沙盒拦截：禁止访问系统敏感目录或配置文件。请仅操作工作区内的文件。"
                 )
         if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
             if any(
@@ -891,18 +895,15 @@ def _execute_script(
         if _staging_json and _staging_json != "{}":
             sandbox_env["EXCELMANUS_STAGING_MAP"] = _staging_json
 
-    # ── 沙盒 wrapper 注入（GREEN/YELLOW 模式） ──
+    # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
-    if sandbox_tier in ("GREEN", "YELLOW"):
-        from excelmanus.security.sandbox_hook import generate_wrapper_script
-        wrapper_src = generate_wrapper_script(sandbox_tier, str(guard.workspace_root))
-        temp_dir = guard.workspace_root / "scripts" / "temp"
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
-        temp_wrapper.write_text(wrapper_src, encoding="utf-8")
-        command = [*sandbox_python_cmd, str(temp_wrapper), str(script_safe), *safe_args]
-    else:
-        command = [*sandbox_python_cmd, str(script_safe), *safe_args]
+    from excelmanus.security.sandbox_hook import generate_wrapper_script
+    wrapper_src = generate_wrapper_script(sandbox_tier, str(guard.workspace_root))
+    temp_dir = guard.workspace_root / "scripts" / "temp"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    temp_wrapper = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
+    temp_wrapper.write_text(wrapper_src, encoding="utf-8")
+    command = [*sandbox_python_cmd, str(temp_wrapper), str(script_safe), *safe_args]
 
     started = time.time()
     timed_out = False
@@ -1013,11 +1014,15 @@ def _execute_script(
     if status == "failed":
         stderr_text = stderr or ""
         hints: list[str] = []
-        if sandbox_tier in ("GREEN", "YELLOW") and "安全策略禁止" in stderr_text:
+        if "安全策略禁止" in stderr_text:
             if "路径不在工作区内" in stderr_text:
                 hints.append(
                     "库内部临时文件写入被拦截。"
                     "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
+                )
+            if "敏感目录" in stderr_text or "禁止访问工作区外的 .env" in stderr_text:
+                hints.append(
+                    "安全沙盒拦截：禁止访问系统敏感目录或配置文件。请仅操作工作区内的文件。"
                 )
         
         if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:

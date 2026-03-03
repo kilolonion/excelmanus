@@ -53,6 +53,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         max_consecutive_failures=3,
         capability_mode="full",
         source="builtin",
+        inherit_strategies=["__all__"],
     ),
     "explorer": SubagentConfig(
         name="explorer",
@@ -68,7 +69,8 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         max_consecutive_failures=3,
         capability_mode="restricted",
         source="builtin",
-        max_tokens=4096,
+        max_tokens=8192,
+        inherit_strategies=["error_recovery", "sandbox_awareness"],
         system_prompt=(
             "你是只读探索子代理 `explorer`。\n"
             "职责：分析文件结构、预览数据、统计概况、定位目标内容。\n\n"
@@ -97,6 +99,7 @@ BUILTIN_SUBAGENTS: dict[str, SubagentConfig] = {
         capability_mode="restricted",
         source="builtin",
         max_tokens=1024,
+        inherit_strategies=["error_recovery", "sandbox_awareness"],
         # system_prompt 作为 PromptComposer 回退（优先加载 prompts/subagent/verifier.md）
         system_prompt=(
             "你是验证子代理 `verifier`。\n"

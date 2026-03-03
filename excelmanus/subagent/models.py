@@ -41,6 +41,12 @@ class SubagentConfig:
     capability_mode: SubagentCapabilityMode = "restricted"
     system_prompt: str = ""
     max_tokens: int | None = None  # LLM 生成上限（None=模型默认）
+    inherit_strategies: list[str] = field(default_factory=list)
+    # 从主代理策略层继承的策略名称列表。
+    # 特殊值：
+    #   "__universal__" — 继承所有无条件策略（conditions 为空）
+    #   "__all__"       — 继承所有策略（忽略条件匹配）
+    # 也可指定具体策略名称如 ["error_recovery", "sandbox_awareness"]
 
 
 @dataclass

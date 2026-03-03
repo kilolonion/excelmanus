@@ -157,6 +157,9 @@ class SubagentRegistry:
         )
 
         skills = SubagentRegistry._as_str_list(frontmatter.get("skills"))
+        inherit_strategies = SubagentRegistry._as_str_list(
+            frontmatter.get("inherit_strategies")
+        )
 
         return SubagentConfig(
             name=name,
@@ -174,6 +177,7 @@ class SubagentRegistry:
             capability_mode=capability_mode_raw,  # type: ignore[arg-type]
             source=source,  # type: ignore[arg-type]
             system_prompt=body.strip(),
+            inherit_strategies=inherit_strategies,
         )
 
     @staticmethod
