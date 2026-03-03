@@ -1,8 +1,10 @@
 ---
 name: subagent
-version: "1.0.0"
+version: "1.1.0"
 priority: 10
 layer: subagent
+inherit_strategies:
+  - "__all__"
 ---
 你是 ExcelManus 通用全能力子代理。
 

@@ -13,8 +13,8 @@ version: "1.0.0"
 - 对需要操作的工作表，用 `read_excel(sheet_name=...)` 确认数据内容。
 
 2. 执行阶段
-- 单表管理：使用 create_sheet / copy_sheet / rename_sheet / delete_sheet。
-- 跨表数据传输：使用 `copy_range_between_sheets`，支持同文件或跨文件。
+- 单表管理：使用 `run_code` 调用 openpyxl API（`wb.create_sheet()` / `wb.copy_worksheet()` / `ws.title = ...` / `del wb[sheet_name]`）。
+- 跨表数据传输：使用 `run_code` 通过 openpyxl 读取源范围并写入目标表，支持同文件或跨文件。
 - 写入数据到指定表：使用 `write_excel(sheet_name=...)`，已有文件会保留其他表。
 
 3. 验证阶段

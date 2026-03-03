@@ -309,7 +309,7 @@
 遇到格式化/美化任务时，按以下顺序决策：
 
 ```
-1. 感知现有样式（read_excel + read_cell_styles）
+1. 感知现有样式（read_excel(include=["styles"])）
    ↓
 2. 用户有明确风格要求？ → 遵循用户要求
    ↓ 无

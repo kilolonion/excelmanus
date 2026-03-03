@@ -33,8 +33,8 @@ conditions:
 
 ### 3. 列宽与收尾
 
-- 数据写入完成后 **always** 调用 `adjust_column_width(auto_fit=True)` 自动适配列宽
-- 随后调用 `adjust_row_height(auto_fit=True)` 自动适配行高
+- 数据写入完成后 **always** 用 `run_code` + openpyxl 自动适配列宽（遍历列取 `max(len(str(cell.value)))` 设置 `column_dimensions[col].width`）
+- 随后用 `run_code` + openpyxl 自动适配行高（对含 CJK / 换行的行适当增大 `row_dimensions[row].height`）
 - 标题列 / ID 列最小宽度 ≥ 12
 - 同类数字列保持统一宽度（取最大值）
 
