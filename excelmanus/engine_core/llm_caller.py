@@ -701,7 +701,7 @@ class LLMCaller:
                 if _ctx_budget is not None and not _ctx_budget.is_user_overridden:
                     _old_budget = _ctx_budget.max_tokens
                     _new_budget = max(4096, int(_old_budget * 0.8))
-                    _ctx_budget.set_override(_new_budget)
+                    _ctx_budget.set_override(_new_budget, adaptive=True)
                     logger.warning(
                         "上下文超限，自动缩减预算 %d → %d tokens（-20%%）",
                         _old_budget, _new_budget,

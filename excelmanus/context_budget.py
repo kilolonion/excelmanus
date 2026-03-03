@@ -18,7 +18,7 @@ class ContextBudget:
     优先级：override > base(用户环境变量) > model(推断) > 128k 默认。
     """
 
-    __slots__ = ("_base_tokens", "_model_tokens", "_override_tokens")
+    __slots__ = ("_base_tokens", "_model_tokens", "_override_tokens", "_override_is_adaptive")
 
     _DEFAULT_TOKENS = 128_000
 
@@ -28,6 +28,7 @@ class ContextBudget:
             _infer_context_tokens_for_model(model) if model else 0
         )
         self._override_tokens = 0
+        self._override_is_adaptive = False
 
     @property
     def max_tokens(self) -> int:
@@ -94,12 +95,14 @@ class ContextBudget:
             )
         return new
 
-    def set_override(self, tokens: int) -> None:
-        """运行时临时覆盖（如 /context 命令）。0 表示清除覆盖。"""
+    def set_override(self, tokens: int, *, adaptive: bool = False) -> None:
+        """运行时临时覆盖。adaptive=True 表示系统自适应缩减（非用户显式锁定）。"""
         self._override_tokens = max(0, tokens)
+        self._override_is_adaptive = adaptive
 
     def clear_override(self) -> None:
         self._override_tokens = 0
+        self._override_is_adaptive = False
 
     @property
     def model_tokens(self) -> int:
@@ -108,5 +111,12 @@ class ContextBudget:
 
     @property
     def is_user_overridden(self) -> bool:
-        """用户是否通过环境变量或 override 显式指定了上下文大小。"""
-        return self._base_tokens > 0 or self._override_tokens > 0
+        """用户是否显式锁定了上下文大小（环境变量或手动 /context 命令）。
+
+        系统自适应缩减（adaptive override）不算用户锁定。
+        """
+        if self._base_tokens > 0:
+            return True
+        if self._override_tokens > 0 and not self._override_is_adaptive:
+            return True
+        return False
