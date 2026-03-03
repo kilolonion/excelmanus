@@ -7,7 +7,7 @@
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.8-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.6.9-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
 </p>
 
@@ -45,13 +45,13 @@ Staging / Audit / CoW version chain, `/undo` precise rollback; Excel write diff 
 <td width="50%">
 
 ### 🧠 Persistent Memory & Playbook
-Cross-session memory for preferences; Playbook automatically distills task experience, reuses lessons in future tasks
+Cross-session memory for preferences; Playbook automatically distills task experience, reuses lessons in future tasks. Semantic dedup eliminates redundant memories; smart context compaction with relevance-based differential truncation
 
 ### 🧩 Skillpack & ClawHub Market
 One Markdown = one skill. Auto-discovery, on-demand activation; built-in [ClawHub](https://clawhub.ai) market for one-click search/install/update
 
 ### 🔌 MCP & Subagent
-Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents; supports OpenAI Codex subscription
+Connect external MCP Servers to extend toolset; large files and complex tasks auto-delegated to sub-agents; supports OpenAI Codex subscription. Semantic skill routing auto-matches optimal Skillpack
 
 ### ✅ Verification Gate
 Structured verification conditions (row count / sheet exists / formula / value match), auto-validates before task completion, blocks tasks with failing conditions
@@ -526,6 +526,8 @@ Full configuration reference in [Configuration](docs/configuration_en.md).
 | **Single-Pass Extraction** | Strong VLM models (Gemini 2.5 Pro etc.) complete all 4 extraction phases in one call |
 | **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns, avoids redundant transmission |
 | **Auxiliary Model Separation** | Routing/sub-agents use lightweight AUX model, main model focuses on reasoning |
+| **Context Budget Management** | Dynamic context budget allocation with relevance-scored differential truncation |
+| **Parallel Semantic Retrieval** | asyncio.gather in chat() runs memory/file/skill semantic retrieval in parallel, zero extra latency |
 | **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler eliminates 3 copies of duplicated code |
 | **Database WAL Mode** | Chat history SQLite with WAL, concurrent reads/writes non-blocking |
 

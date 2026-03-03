@@ -41,14 +41,56 @@ class ContextBudget:
         return self._DEFAULT_TOKENS
 
     def update_for_model(self, model: str) -> int:
-        """切换模型时调用，更新推断值并返回新的 max_tokens。"""
+        """切换模型时调用（同步），更新推断值并返回新的 max_tokens。"""
         old = self.max_tokens
         self._model_tokens = _infer_context_tokens_for_model(model)
+        # 自适应缩减过的 override 在模型切换时应清除（新模型可能有不同的窗口）
+        if self._override_tokens > 0:
+            logger.info("模型切换，清除之前的自适应 override（%d tokens）", self._override_tokens)
+            self._override_tokens = 0
         new = self.max_tokens
         if new != old:
             logger.info(
                 "上下文窗口已更新: %d → %d tokens (model=%s)",
                 old, new, model,
+            )
+        return new
+
+    async def update_for_model_async(
+        self, model: str, client: object = None, base_url: str = "",
+    ) -> int:
+        """切换模型时调用（异步），先尝试 API 查询再回退到静态推断。
+
+        比 update_for_model 更精确：若 provider 支持 /models API，
+        可获取真实的 context_window 值而非依赖硬编码映射表。
+        """
+        old = self.max_tokens
+        # 清除之前的自适应 override
+        if self._override_tokens > 0:
+            logger.info("模型切换，清除之前的自适应 override（%d tokens）", self._override_tokens)
+            self._override_tokens = 0
+
+        api_tokens: int | None = None
+        if client is not None:
+            try:
+                from excelmanus.model_probe import query_model_context_window
+                api_tokens = await query_model_context_window(
+                    client, model, base_url, timeout=8.0,
+                )
+            except Exception:
+                logger.debug("API 元数据查询异常，回退到静态推断", exc_info=True)
+
+        if api_tokens is not None and api_tokens > 0:
+            self._model_tokens = api_tokens
+        else:
+            self._model_tokens = _infer_context_tokens_for_model(model)
+
+        new = self.max_tokens
+        if new != old:
+            logger.info(
+                "上下文窗口已更新: %d → %d tokens (model=%s%s)",
+                old, new, model,
+                ", 来源=API" if api_tokens else ", 来源=推断",
             )
         return new
 
