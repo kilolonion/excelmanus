@@ -472,15 +472,15 @@ interface CodexModelEntry {
 }
 
 const CODEX_MODELS: CodexModelEntry[] = [
-  { modelId: "gpt-5.3-codex-spark", publicId: "openai-codex/gpt-5.3-codex-spark", profileName: "codex-spark", displayName: "Codex Spark", proOnly: true },
-  { modelId: "gpt-5.3-codex", publicId: "openai-codex/gpt-5.3-codex", profileName: "codex-5.3", displayName: "Codex 5.3", proOnly: false },
-  { modelId: "gpt-5.2-codex", publicId: "openai-codex/gpt-5.2-codex", profileName: "codex-5.2", displayName: "Codex 5.2", proOnly: false },
-  { modelId: "gpt-5.1-codex", publicId: "openai-codex/gpt-5.1-codex", profileName: "codex-5.1", displayName: "Codex 5.1", proOnly: false },
-  { modelId: "gpt-5.1-codex-mini", publicId: "openai-codex/gpt-5.1-codex-mini", profileName: "codex-mini", displayName: "Codex Mini", proOnly: false },
-  { modelId: "gpt-5.1-codex-max", publicId: "openai-codex/gpt-5.1-codex-max", profileName: "codex-max", displayName: "Codex Max", proOnly: false },
-  { modelId: "codex-mini-latest", publicId: "openai-codex/codex-mini-latest", profileName: "codex-mini-latest", displayName: "Codex Mini Latest", proOnly: false },
-  { modelId: "gpt-5.2", publicId: "openai-codex/gpt-5.2", profileName: "codex-gpt-5.2", displayName: "GPT-5.2 (Codex)", proOnly: false },
-  { modelId: "gpt-5.1", publicId: "openai-codex/gpt-5.1", profileName: "codex-gpt-5.1", displayName: "GPT-5.1 (Codex)", proOnly: false },
+  { modelId: "gpt-5.3-codex-spark", publicId: "openai-codex/gpt-5.3-codex-spark", profileName: "openai-codex/gpt-5.3-codex-spark", displayName: "Codex Spark", proOnly: true },
+  { modelId: "gpt-5.3-codex", publicId: "openai-codex/gpt-5.3-codex", profileName: "openai-codex/gpt-5.3-codex", displayName: "Codex 5.3", proOnly: false },
+  { modelId: "gpt-5.2-codex", publicId: "openai-codex/gpt-5.2-codex", profileName: "openai-codex/gpt-5.2-codex", displayName: "Codex 5.2", proOnly: false },
+  { modelId: "gpt-5.1-codex", publicId: "openai-codex/gpt-5.1-codex", profileName: "openai-codex/gpt-5.1-codex", displayName: "Codex 5.1", proOnly: false },
+  { modelId: "gpt-5.1-codex-mini", publicId: "openai-codex/gpt-5.1-codex-mini", profileName: "openai-codex/gpt-5.1-codex-mini", displayName: "Codex Mini", proOnly: false },
+  { modelId: "gpt-5.1-codex-max", publicId: "openai-codex/gpt-5.1-codex-max", profileName: "openai-codex/gpt-5.1-codex-max", displayName: "Codex Max", proOnly: false },
+  { modelId: "codex-mini-latest", publicId: "openai-codex/codex-mini-latest", profileName: "openai-codex/codex-mini-latest", displayName: "Codex Mini Latest", proOnly: false },
+  { modelId: "gpt-5.2", publicId: "openai-codex/gpt-5.2", profileName: "openai-codex/gpt-5.2", displayName: "GPT-5.2 (Codex)", proOnly: false },
+  { modelId: "gpt-5.1", publicId: "openai-codex/gpt-5.1", profileName: "openai-codex/gpt-5.1", displayName: "GPT-5.1 (Codex)", proOnly: false },
 ];
 
 function getAvailableCodexModels(planType?: string): CodexModelEntry[] {
@@ -1390,12 +1390,30 @@ function CodexOAuthAdminCard({
   const [removingModel, setRemovingModel] = useState<string | null>(null);
   const [codexModelsExpanded, setCodexModelsExpanded] = useState(false);
 
-  // Build a Set of existing codex profile names for quick lookup
-  const existingCodexProfiles = new Set(
-    existingProfileNames.filter((n) => CODEX_MODELS.some((m) => m.profileName === n)),
-  );
-  // Also check legacy "codex-oauth" name
-  const hasLegacyCodexProfile = existingProfileNames.includes("codex-oauth");
+  // Build a Set of existing codex profile names for quick lookup.
+  // Map legacy short names (e.g. "codex-5.3", "Codex 5.3") to current full openai-codex/xxx format.
+  const _LEGACY_NAME_MAP: Record<string, string> = {
+    "Codex 5.3": "openai-codex/gpt-5.3-codex",
+    "codex-oauth": "openai-codex/gpt-5.3-codex",
+    "codex-spark": "openai-codex/gpt-5.3-codex-spark",
+    "codex-5.3": "openai-codex/gpt-5.3-codex",
+    "codex-5.2": "openai-codex/gpt-5.2-codex",
+    "codex-5.1": "openai-codex/gpt-5.1-codex",
+    "codex-mini": "openai-codex/gpt-5.1-codex-mini",
+    "codex-max": "openai-codex/gpt-5.1-codex-max",
+    "codex-mini-latest": "openai-codex/codex-mini-latest",
+    "codex-gpt-5.2": "openai-codex/gpt-5.2",
+    "codex-gpt-5.1": "openai-codex/gpt-5.1",
+  };
+  const existingCodexProfiles = new Set<string>();
+  for (const n of existingProfileNames) {
+    const cm = CODEX_MODELS.find((m) => m.profileName === n);
+    if (cm) existingCodexProfiles.add(cm.profileName);
+    const mapped = _LEGACY_NAME_MAP[n];
+    if (mapped) existingCodexProfiles.add(mapped);
+  }
+  // Check legacy short names that should be cleaned up
+  const hasLegacyCodexProfile = existingProfileNames.some((n) => n in _LEGACY_NAME_MAP && !n.startsWith("openai-codex/"));
 
   useEffect(() => {
     let cancelled = false;
@@ -2389,7 +2407,7 @@ export function ModelTab() {
                 />
               )}
               {modelId && (
-                <Badge variant="secondary" className="text-[10px] font-mono max-w-[20%] sm:max-w-[30%] truncate">
+                <Badge variant="secondary" className="text-[10px] font-mono max-w-[30%] sm:max-w-[40%] truncate">
                   {modelId}
                 </Badge>
               )}
@@ -2526,7 +2544,7 @@ export function ModelTab() {
                     <select
                       value={editDrafts[section.key]?.protocol || "auto"}
                       onChange={(e) => updateDraft(section.key, "protocol", e.target.value)}
-                      className="h-8 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
+                      className="w-full h-8 text-xs rounded-md border border-input bg-background px-2 py-1 font-mono focus:outline-none focus:ring-1 focus:ring-ring"
                     >
                       <option value="auto">auto（自动检测）</option>
                       <option value="openai">openai（Chat Completions）</option>
@@ -2681,7 +2699,7 @@ export function ModelTab() {
                   />
 
                   <p className="text-xs text-muted-foreground mb-2">常见 API Key 提供方（点击预填表单，只需补充 API Key）</p>
-                  <div className="grid grid-cols-3 sm:grid-cols-5 gap-1.5">
+                  <div className="grid grid-cols-2 min-[360px]:grid-cols-3 sm:grid-cols-5 gap-1.5">
                     {PROVIDER_PRESETS.map((preset) => (
                       <button
                         key={preset.id}
@@ -2863,7 +2881,7 @@ export function ModelTab() {
                     </button>
                     {expandedSections._profile_advanced && (
                       <div className="px-3 pb-3 pt-1 border-t border-border/50 space-y-2">
-                        <div className="grid grid-cols-2 gap-2">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
                           <div>
                             <label className="text-xs text-muted-foreground">思考模式</label>
                             <select
@@ -3110,7 +3128,7 @@ export function ModelTab() {
                       </div>
 
                       {/* Action buttons */}
-                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-60 group-hover:opacity-100 transition-opacity">
+                      <div className="flex items-center gap-0.5 flex-shrink-0 opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity">
                         {/* Apply role dropdown */}
                         <div className="relative">
                           <button
@@ -3128,7 +3146,7 @@ export function ModelTab() {
                           {applyMenuOpen === p.name && (
                             <>
                               <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(null); }} />
-                              <div className="absolute right-0 top-full mt-1.5 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden">
+                              <div className="absolute right-0 bottom-full mb-1.5 sm:bottom-auto sm:top-full sm:mb-0 sm:mt-1.5 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden">
                                 <div className="px-2.5 py-1.5 border-b border-border/40">
                                   <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">应用到角色</p>
                                 </div>

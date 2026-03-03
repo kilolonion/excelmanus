@@ -240,7 +240,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 {retainedFiles.map((f, i) => {
                   const image = isImageFile(f.filename);
                   return (
-                    <Badge key={`retained-${i}`} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
+                    <Badge key={`retained-${i}`} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
                       {image && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
                       <span className="truncate">{f.filename}</span>
                       <button
@@ -255,7 +255,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                   );
                 })}
                 {editFiles.map((f, i) => (
-                  <Badge key={`new-${i}`} variant="secondary" className="text-xs gap-1 pr-1 max-w-[200px]">
+                  <Badge key={`new-${i}`} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
                     {isImageFile(f.name) && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
                     <span className="truncate">{f.name}</span>
                     <button

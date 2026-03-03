@@ -12,7 +12,9 @@ const SESSION_COOKIE_MAX_AGE = 60 * 60 * 24 * 30; // 30 天
 
 function _setSessionCookie() {
   if (typeof document === "undefined") return;
-  document.cookie = `${SESSION_COOKIE}=1; path=/; max-age=${SESSION_COOKIE_MAX_AGE}; samesite=lax`;
+  // HTTPS 环境下追加 Secure 标志，防止 cookie 通过明文 HTTP 泄漏
+  const secure = window.location.protocol === "https:" ? "; secure" : "";
+  document.cookie = `${SESSION_COOKIE}=1; path=/; max-age=${SESSION_COOKIE_MAX_AGE}; samesite=lax${secure}`;
 }
 
 function _clearSessionCookie() {
@@ -320,7 +322,13 @@ export async function updateProfile(updates: {
 // ── OAuth helpers ─────────────────────────────────────────
 
 export async function getOAuthUrl(provider: "github" | "google" | "qq"): Promise<string> {
-  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}`));
+  // 显式传递当前前端 origin，确保 OAuth 回调后能重定向回正确的前端域名
+  const params = new URLSearchParams();
+  if (typeof window !== "undefined") {
+    params.set("origin", window.location.origin);
+  }
+  const qs = params.toString();
+  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}${qs ? `?${qs}` : ""}`));
   if (!res.ok) throw new Error(`OAuth redirect failed: ${res.status}`);
   const data = await res.json();
   return data.authorize_url;
@@ -334,8 +342,11 @@ export async function handleOAuthCallback(
   const params = new URLSearchParams({ code });
   if (state) params.set("state", state);
   // 直连后端交换 token，绕过 CDN→Nginx→Next.js rewrite 代理链
-  const res = await fetch(buildApiUrl(`/auth/oauth/${provider}/callback?${params}`, { direct: true }), {
+  const oauthCallbackUrl = buildApiUrl(`/auth/oauth/${provider}/callback?${params}`, { direct: true });
+  const res = await fetch(oauthCallbackUrl, {
     headers: { "Accept": "application/json" },
+    // 跨域直连后端时携带 credentials，匹配后端 allow_credentials=True
+    credentials: oauthCallbackUrl.startsWith("/") ? undefined : "include",
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
@@ -354,10 +365,12 @@ export async function handleOAuthCallback(
  * 确认 OAuth 账号合并：将新的 OAuth 登录绑定到已有账号。
  */
 export async function confirmAccountMerge(mergeToken: string): Promise<void> {
-  const res = await fetch(buildApiUrl("/auth/oauth/confirm-merge", { direct: true }), {
+  const mergeUrl = buildApiUrl("/auth/oauth/confirm-merge", { direct: true });
+  const res = await fetch(mergeUrl, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ merge_token: mergeToken }),
+    credentials: mergeUrl.startsWith("/") ? undefined : "include",
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));

@@ -172,7 +172,7 @@ export function TopModelSelector() {
   };
 
   const displayLabel = (m: ModelInfo) =>
-    m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+    m.name === "default" ? formatModelIdForDisplay(m.model) : formatModelIdForDisplay(m.display_name || m.name);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
 
   const filtered = useMemo(() => {
@@ -258,7 +258,7 @@ export function TopModelSelector() {
         )}
 
         {/* ── Model list ── */}
-        <div className="max-h-[50vh] overflow-y-auto py-1 model-selector-scroll">
+        <div className="max-h-[50dvh] overflow-y-auto py-1 model-selector-scroll">
           {groups.map((group, gi) => {
             const color = getProviderColor(group.provider);
             return (

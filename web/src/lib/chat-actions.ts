@@ -1,4 +1,4 @@
-import { consumeSSE } from "./sse";
+import { consumeSSE, SSEError } from "./sse";
 import { buildApiUrl, fetchWorkspaceStorage } from "./api";
 import { uuid } from "@/lib/utils";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
@@ -31,18 +31,21 @@ function _isImageLike(file: File): boolean {
 
 /** 在客户端本地构造 failure_guidance block（用于网络级错误，无 SSE 事件可达的场景）。 */
 function _buildClientFailureGuidance(opts: {
+  category?: "model" | "transport" | "config" | "quota" | "unknown";
   code: string;
   title: string;
   message: string;
   retryable: boolean;
+  stage?: string;
 }): Extract<AssistantBlock, { type: "failure_guidance" }> {
+  const category = opts.category || "transport";
   return {
     type: "failure_guidance",
-    category: "transport",
+    category,
     code: opts.code,
     title: opts.title,
     message: opts.message,
-    stage: "connecting",
+    stage: opts.stage || "connecting",
     retryable: opts.retryable,
     diagnosticId: crypto.randomUUID?.() || uuid(),
     actions: opts.retryable
@@ -52,6 +55,82 @@ function _buildClientFailureGuidance(opts: {
         ]
       : [{ type: "open_settings", label: "检查模型设置" }],
   };
+}
+
+/** 根据 SSEError 的 HTTP 状态码生成对应的 failure_guidance block。 */
+function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "failure_guidance" }> {
+  const status = err.statusCode;
+  if (status === 401 || status === 403) {
+    return _buildClientFailureGuidance({
+      category: "model",
+      code: "model_auth_failed",
+      title: "认证失败",
+      message: status === 401
+        ? "API Key 无效或已过期，请在设置中检查模型配置。"
+        : "无权访问该模型服务，请检查 API Key 权限。",
+      retryable: false,
+    });
+  }
+  if (status === 402) {
+    return _buildClientFailureGuidance({
+      category: "quota",
+      code: "quota_exceeded",
+      title: "额度不足",
+      message: "模型 API 额度已用完，请充值后重试。",
+      retryable: false,
+    });
+  }
+  if (status === 404) {
+    return _buildClientFailureGuidance({
+      category: "model",
+      code: "model_not_found",
+      title: "模型不存在",
+      message: "请求的模型不存在或已下线，请在设置中选择其他模型。",
+      retryable: false,
+    });
+  }
+  if (status === 409) {
+    return _buildClientFailureGuidance({
+      category: "transport",
+      code: "session_busy",
+      title: "会话忙碌",
+      message: "当前会话正在处理另一个请求，请等待完成后再试。",
+      retryable: true,
+    });
+  }
+  if (status === 429) {
+    return _buildClientFailureGuidance({
+      category: "quota",
+      code: "rate_limited",
+      title: "请求频率受限",
+      message: "API 调用频率超限，请稍后重试。",
+      retryable: true,
+    });
+  }
+  if (status >= 500) {
+    return _buildClientFailureGuidance({
+      category: "model",
+      code: "provider_internal_error",
+      title: "模型服务异常",
+      message: `模型服务返回 ${status} 错误，请稍后重试。`,
+      retryable: true,
+    });
+  }
+  if (status === 0) {
+    return _buildClientFailureGuidance({
+      category: "transport",
+      code: "stream_interrupted",
+      title: "传输中断",
+      message: err.message || "与服务端的连接意外断开",
+      retryable: true,
+    });
+  }
+  return _buildClientFailureGuidance({
+    code: "http_error",
+    title: "请求错误",
+    message: err.message || `HTTP ${status}`,
+    retryable: status >= 500,
+  });
 }
 
 function _fileToBase64(file: File): Promise<string> {
@@ -164,6 +243,11 @@ export async function sendMessage(
   const uiState = useUIStore.getState();
 
   if (store.isStreaming) return;
+
+  // 空消息前置校验：无文本且无附件时直接拦截
+  if (!text.trim() && (!files || files.length === 0)) {
+    return;
+  }
 
   if (uiState.configReady === false || uiState.configReady === null) {
     const userMsgId = uuid();
@@ -433,12 +517,16 @@ export async function sendMessage(
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
-      S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
-        code: "network_error",
-        title: "连接错误",
-        message: (err as Error).message || "网络连接失败",
-        retryable: true,
-      }));
+      if (err instanceof SSEError) {
+        S().appendBlock(assistantMsgId, _classifySSEError(err));
+      } else {
+        S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
+          code: "network_error",
+          title: "连接错误",
+          message: (err as Error).message || "网络连接失败",
+          retryable: true,
+        }));
+      }
     } else if (_connectionTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
@@ -459,9 +547,9 @@ export async function sendMessage(
   } finally {
     if (_stallTimer !== null) clearTimeout(_stallTimer);
     _stallTimer = null;
-    batcher.dispose();
+    try { batcher.dispose(); } catch (e) { console.error("[sendMessage] batcher dispose error:", e); }
     S().setPipelineStatus(null);
-    S().saveCurrentSession();
+    try { S().saveCurrentSession(); } catch (e) { console.error("[sendMessage] save session error:", e); }
     S().setStreaming(false);
     S().setAbortController(null);
 
@@ -551,12 +639,16 @@ export async function sendContinuation(
   };
 
   // 流停滞检测（与 sendMessage 一致）
+  let _contConnectionTimedOut = false;
+  let _contStallTimedOut = false;
   let _contStallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    _contConnectionTimedOut = true;
     abortController.abort();
   }, 30_000);
   const _resetContStall = () => {
     if (_contStallTimer !== null) clearTimeout(_contStallTimer);
     _contStallTimer = setTimeout(() => {
+      _contStallTimedOut = true;
       abortController.abort();
     }, 90_000);
   };
@@ -632,19 +724,39 @@ export async function sendContinuation(
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
       sseCtx.hadStreamError = true;
+      if (err instanceof SSEError) {
+        S().appendBlock(msgId, _classifySSEError(err));
+      } else {
+        S().appendBlock(msgId, _buildClientFailureGuidance({
+          code: "network_error",
+          title: "连接错误",
+          message: (err as Error).message || "网络连接失败",
+          retryable: true,
+        }));
+      }
+    } else if (_contConnectionTimedOut) {
+      sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
-        code: "network_error",
-        title: "连接错误",
-        message: (err as Error).message || "网络连接失败",
+        code: "connect_timeout",
+        title: "连接超时",
+        message: "未能在 30 秒内建立连接，请检查模型配置或网络。",
+        retryable: true,
+      }));
+    } else if (_contStallTimedOut) {
+      sseCtx.hadStreamError = true;
+      S().appendBlock(msgId, _buildClientFailureGuidance({
+        code: "stream_stalled",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
         retryable: true,
       }));
     }
   } finally {
     if (_contStallTimer !== null) clearTimeout(_contStallTimer);
     _contStallTimer = null;
-    batcher.dispose();
+    try { batcher.dispose(); } catch (e) { console.error("[sendContinuation] batcher dispose error:", e); }
     S().setPipelineStatus(null);
-    S().saveCurrentSession();
+    try { S().saveCurrentSession(); } catch (e) { console.error("[sendContinuation] save session error:", e); }
     S().setStreaming(false);
     S().setAbortController(null);
 
@@ -710,6 +822,16 @@ export async function rollbackAndResend(
     });
   } catch (err) {
     console.warn("Rollback failed, attempting to resync session:", err);
+    // 向用户展示错误，而非静默失败
+    const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
+    if (lastAssistant && lastAssistant.role === "assistant") {
+      store.appendBlock(lastAssistant.id, _buildClientFailureGuidance({
+        code: "network_error",
+        title: "编辑重发失败",
+        message: "回退对话时出错，请稍后重试或刷新页面。",
+        retryable: true,
+      }));
+    }
     // 后端会话可能已过期/重建，尝试刷新前端消息以重新同步
     try {
       const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
@@ -967,11 +1089,29 @@ export async function subscribeToSession(sessionId: string) {
     hadStreamError: false,
   };
 
+  // 流停滞检测（与 sendMessage 一致）
+  let _subConnectionTimedOut = false;
+  let _subStallTimedOut = false;
+  let _subStallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+    _subConnectionTimedOut = true;
+    abortController.abort();
+  }, 30_000);
+  const _resetSubStall = () => {
+    if (_subStallTimer !== null) clearTimeout(_subStallTimer);
+    _subStallTimer = setTimeout(() => {
+      _subStallTimedOut = true;
+      abortController.abort();
+    }, 90_000);
+  };
+
   try {
     await consumeSSE(
       buildApiUrl("/chat/subscribe", { direct: true }),
       { session_id: sessionId, skip_replay: true },
       (event) => {
+        // 收到事件，重置停滞检测计时器
+        _resetSubStall();
+
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
@@ -997,21 +1137,45 @@ export async function subscribeToSession(sessionId: string) {
     );
   } catch (err) {
     if ((err as Error).name !== "AbortError") {
+      sseCtx.hadStreamError = true;
+      if (err instanceof SSEError) {
+        S().appendBlock(msgId, _classifySSEError(err));
+      } else {
+        S().appendBlock(msgId, _buildClientFailureGuidance({
+          code: "network_error",
+          title: "重连错误",
+          message: (err as Error).message || "重连失败",
+          retryable: true,
+        }));
+      }
+    } else if (_subConnectionTimedOut) {
+      sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
-        code: "network_error",
-        title: "重连错误",
-        message: (err as Error).message || "重连失败",
+        code: "connect_timeout",
+        title: "重连超时",
+        message: "未能在 30 秒内重新连接，请检查网络或刷新页面。",
+        retryable: true,
+      }));
+    } else if (_subStallTimedOut) {
+      sseCtx.hadStreamError = true;
+      S().appendBlock(msgId, _buildClientFailureGuidance({
+        code: "stream_stalled",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
         retryable: true,
       }));
     }
   } finally {
+    if (_subStallTimer !== null) clearTimeout(_subStallTimer);
+    _subStallTimer = null;
     _activeSubscribeSessionId = null;
-    batcher.dispose();
+    try { batcher.dispose(); } catch (e) { console.error("[subscribeToSession] batcher dispose error:", e); }
     S().setPipelineStatus(null);
     S().saveCurrentSession();
     S().setStreaming(false);
     S().setAbortController(null);
 
+    // subscribe 始终需要从后端刷新：可能连接中途丢失事件或缓冲区溢出
     const sid = sessionId;
     setTimeout(async () => {
       try {

@@ -11,9 +11,21 @@ import {
   Wifi,
   CreditCard,
   HelpCircle,
+  HardDrive,
+  ArrowRightLeft,
+  Loader2,
+  RefreshCw,
 } from "lucide-react";
 import { motion } from "framer-motion";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { apiGet } from "@/lib/api";
+import { formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
+import type { ModelInfo } from "@/lib/types";
 
 const STAGE_LABELS: Record<string, string> = {
   initializing: "初始化",
@@ -25,6 +37,41 @@ const STAGE_LABELS: Record<string, string> = {
   save_command: "保存命令",
   subscribe_resume: "重连恢复",
   llm_retrying: "模型重试",
+  tool_execution: "工具执行",
+  context_building: "上下文构建",
+  session_init: "会话初始化",
+  quota_check: "配额检查",
+  file_processing: "文件处理",
+  sandbox_exec: "沙箱执行",
+  mcp_call: "MCP 调用",
+};
+
+/** 根据错误 code 生成用户友好的简短描述 */
+const CODE_HINTS: Record<string, string> = {
+  model_auth_failed: "API Key 无效或过期",
+  model_not_found: "模型不存在或已下线",
+  quota_exceeded: "API 额度耗尽",
+  rate_limited: "请求频率超限",
+  context_length_exceeded: "上下文超长",
+  provider_internal_error: "服务内部错误",
+  network_error: "网络连接异常",
+  connect_timeout: "连接超时",
+  stream_stalled: "流式响应停滞",
+  ssl_error: "SSL/TLS 证书错误",
+  proxy_error: "代理连接失败",
+  content_filtered: "内容安全策略拦截",
+  response_parse_error: "响应解析失败",
+  stream_interrupted: "流式传输中断",
+  encoding_error: "文件编码异常",
+  disk_full: "磁盘空间不足",
+  permission_denied: "权限不足",
+  payload_too_large: "请求体过大",
+  invalid_request: "请求参数无效",
+  request_timeout: "请求超时",
+  session_busy: "会话正在处理中",
+  session_limit: "会话数量达到上限",
+  session_not_found: "会话已过期",
+  empty_message: "消息内容为空",
 };
 
 const CATEGORY_CONFIG: Record<
@@ -71,7 +118,7 @@ const CATEGORY_CONFIG: Record<
     descColor: "text-orange-700/70 dark:text-orange-400/60",
   },
   config: {
-    icon: Settings,
+    icon: HardDrive,
     borderColor: "border-amber-500/25",
     bgFrom: "from-amber-50/80",
     bgTo: "to-orange-50/40",
@@ -109,6 +156,7 @@ interface FailureGuidanceCardProps {
 
 export function FailureGuidanceCard({
   category,
+  code,
   title,
   message,
   stage,
@@ -118,13 +166,26 @@ export function FailureGuidanceCard({
   provider,
   model,
   onRetry,
+  onRetryWithModel,
 }: FailureGuidanceCardProps) {
   const openSettings = useUIStore((s) => s.openSettings);
+  const currentModel = useUIStore((s) => s.currentModel);
   const [copied, setCopied] = useState(false);
+  const [models, setModels] = useState<ModelInfo[]>([]);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+
+  const fetchModelsOnce = useCallback(() => {
+    if (modelsLoaded) return;
+    setModelsLoaded(true);
+    apiGet<{ models: ModelInfo[] }>("/models")
+      .then((data) => setModels(data.models))
+      .catch(() => {});
+  }, [modelsLoaded]);
 
   const config = CATEGORY_CONFIG[category] || CATEGORY_CONFIG.unknown;
   const Icon = config.icon;
   const stageLabel = STAGE_LABELS[stage] || stage;
+  const codeHint = CODE_HINTS[code] || "";
 
   const handleAction = useCallback(
     (actionType: string) => {
@@ -135,17 +196,28 @@ export function FailureGuidanceCard({
         case "open_settings":
           openSettings("model");
           break;
-        case "copy_diagnostic":
-          if (diagnosticId) {
-            navigator.clipboard.writeText(diagnosticId).then(() => {
-              setCopied(true);
-              setTimeout(() => setCopied(false), 2000);
-            }).catch(() => {});
-          }
+        case "copy_diagnostic": {
+          const diagPayload = JSON.stringify({
+            diagnostic_id: diagnosticId,
+            category,
+            code,
+            title,
+            message,
+            stage,
+            retryable,
+            provider: provider || undefined,
+            model: model || undefined,
+            timestamp: new Date().toISOString(),
+          }, null, 2);
+          navigator.clipboard.writeText(diagPayload).then(() => {
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          }).catch(() => {});
           break;
+        }
       }
     },
-    [onRetry, openSettings, diagnosticId],
+    [onRetry, openSettings, diagnosticId, category, code, title, message, stage, retryable, provider, model],
   );
 
   const actionIcon = (type: string) => {
@@ -190,11 +262,17 @@ export function FailureGuidanceCard({
       </div>
 
       {/* 元数据行 */}
-      <div className="px-4 pb-2 flex items-center gap-3 text-[11px] text-muted-foreground/60">
+      <div className="px-4 pb-2 flex items-center gap-3 flex-wrap text-[11px] text-muted-foreground/60">
         {stageLabel && (
           <span>
             阶段: <span className="font-medium text-muted-foreground/80">{stageLabel}</span>
           </span>
+        )}
+        {codeHint && (
+          <>
+            <span className="opacity-30">·</span>
+            <span className="font-medium text-muted-foreground/80">{codeHint}</span>
+          </>
         )}
         {provider && (
           <>
@@ -214,7 +292,7 @@ export function FailureGuidanceCard({
 
       {/* 操作按钮栏 */}
       {actions.length > 0 && (
-        <div className="px-4 pb-3.5 flex items-center gap-2">
+        <div className="px-4 pb-3.5 flex items-center gap-2 flex-wrap">
           {actions.map((action, i) => {
             const isPrimary = i === 0;
             return (
@@ -233,6 +311,57 @@ export function FailureGuidanceCard({
               </button>
             );
           })}
+          {/* 换模型重试下拉 */}
+          {onRetryWithModel && retryable && (
+            <DropdownMenu onOpenChange={(open) => { if (open) fetchModelsOnce(); }}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="group/btn flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer bg-muted/50 hover:bg-muted text-foreground/70 hover:text-foreground"
+                >
+                  <ArrowRightLeft className="h-3.5 w-3.5" />
+                  换模型重试
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="start" className="w-64 max-w-[calc(100vw-2rem)] p-0 overflow-hidden">
+                <div className="px-3 pt-2.5 pb-2 border-b border-border/50">
+                  <div className="flex items-center gap-2">
+                    <RefreshCw className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
+                    <span className="text-xs font-medium text-foreground/70">选择模型重试</span>
+                  </div>
+                </div>
+                <div className="max-h-[30vh] overflow-y-auto py-1">
+                  {models.map((m) => {
+                    const isCurrent = m.name === currentModel;
+                    const label = m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+                    return (
+                      <button
+                        key={m.name}
+                        onClick={() => onRetryWithModel(m.name)}
+                        className={[
+                          "w-full text-left px-3 py-2 flex items-center gap-2",
+                          "transition-all duration-150 ease-out cursor-pointer",
+                          "hover:bg-accent/50",
+                          isCurrent ? "bg-[var(--em-primary-alpha-06)]" : "",
+                        ].join(" ")}
+                      >
+                        <span className="text-xs font-medium truncate flex-1">{label}</span>
+                        {isCurrent && (
+                          <span className="text-[9px] px-1.5 py-px rounded-full font-medium" style={{ backgroundColor: "var(--em-primary-alpha-10)", color: "var(--em-primary)" }}>当前</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                  {models.length === 0 && (
+                    <div className="px-3 py-4 text-center">
+                      <Loader2 className="h-4 w-4 text-muted-foreground/25 mx-auto mb-1 animate-spin" />
+                      <p className="text-xs text-muted-foreground/40">加载模型列表...</p>
+                    </div>
+                  )}
+                </div>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       )}
     </motion.div>
