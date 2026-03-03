@@ -129,8 +129,29 @@ wb.save("file.xlsx")
 ## auto_fit 收尾（写入/格式化后必做）
 
 ```python
-# 写入或格式化完成后，调用 adjust_column_width 和 adjust_row_height 自动适配
-# 这两个工具会智能估算 CJK 宽度、number_format 显示文本、wrap_text 多行等
-adjust_column_width(file_path="file.xlsx", auto_fit=True, sheet_name="Sheet1")
-adjust_row_height(file_path="file.xlsx", auto_fit=True, sheet_name="Sheet1")
+# 写入或格式化完成后，在 run_code 中用 openpyxl 自动适配列宽和行高
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+
+wb = load_workbook("file.xlsx")
+ws = wb["Sheet1"]
+
+# 自动适配列宽（遍历每列取最大内容宽度）
+for col_idx in range(1, ws.max_column + 1):
+    max_len = 0
+    col_letter = get_column_letter(col_idx)
+    for row_idx in range(1, ws.max_row + 1):
+        cell = ws.cell(row=row_idx, column=col_idx)
+        if cell.value is not None:
+            # CJK 字符按 2 倍宽度估算
+            text = str(cell.value)
+            length = sum(2 if ord(c) > 0x7F else 1 for c in text)
+            max_len = max(max_len, length)
+    ws.column_dimensions[col_letter].width = min(max_len + 2, 60)
+
+# 自动适配行高（默认行高 * 1.2）
+for row_idx in range(1, ws.max_row + 1):
+    ws.row_dimensions[row_idx].height = 15 * 1.2
+
+wb.save("file.xlsx")
 ```

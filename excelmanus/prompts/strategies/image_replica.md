@@ -37,7 +37,7 @@ conditions:
 
 1. 图片已在视觉上下文中（用户上传时模型自动可见），直接分析表格的行列结构、数据内容和大致样式
 2. 用 `run_code` + openpyxl **一次性**构建 Excel：数据写入 + 基础样式（字体/边框/对齐/列宽）合并在同一段代码中
-3. 执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 收尾
+3. 用 `run_code` + openpyxl 自动适配列宽与行高收尾
 4. 用 `finish_task` 交付，说明已按快速模式生成，如需精修可再次要求
 
 > **注意**：快速模式直接使用 `run_code` + openpyxl 一次性生成，优先速度而非像素级还原。
@@ -48,7 +48,7 @@ conditions:
 2. **编译 Excel**：调用 `rebuild_excel_from_spec`，从 spec 确定性编译为 Excel 文件
 3. **验证一致性**：调用 `verify_excel_replica`，对比 spec 与 Excel 生成差异报告（含值/合并/对齐/列宽/行高）
 4. **精修差异**：按下方精修清单逐项修正
-5. **收尾适配**：调用 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)`
+5. **收尾适配**：用 `run_code` + openpyxl 自动适配列宽与行高
 6. **交付**：将构建结果和已知差异汇总到最终回复中
 
 ### 降级条件

@@ -11,8 +11,8 @@ version: "3.0.0"
 格式化任务标准流程：
 
 1. 感知优先
-- 修改样式前**必须**先调用 `read_cell_styles` 了解目标范围的现有样式。
-- 如果用户提到"把红色改为蓝色"等基于现有样式的需求，先用 `read_cell_styles` 定位哪些单元格有该样式。
+- 修改样式前**必须**先调用 `read_excel(include=["styles"])` 了解目标范围的现有样式。
+- 如果用户提到"把红色改为蓝色"等基于现有样式的需求，先用 `read_excel(include=["styles"])` 定位哪些单元格有该样式。
 - 对整表样式概览，可使用 `read_excel(include=["styles"])` 快速获取压缩样式类；也可按需附加 charts/images/freeze_panes 等维度。
 - **列数感知**：格式化整行时，优先使用行引用（如 `1:1`）而非具体列范围（如 `A1:J1`），避免因视口限制遗漏列。如需精确列范围，从感知块的 `range: NNNr x NNc` 读取总列数。
 
@@ -33,7 +33,7 @@ version: "3.0.0"
 - 合并单元格前确认范围内只有左上角有数据，避免数据丢失。
 - 行高/列宽调整支持手动指定和自动适配两种模式。
 - **对齐约定**：数字/金额/百分比列右对齐，文本列左对齐，表头居中，合并单元格居中。
-- **收尾动作**：数据和样式写入完成后，**always** 执行 `adjust_column_width(auto_fit=True)` + `adjust_row_height(auto_fit=True)` 做最终适配。
+- **收尾动作**：数据和样式写入完成后，**always** 在 `run_code` 中通过 openpyxl 自动适配列宽和行高（遍历单元格计算最大内容宽度并设置 `column_dimensions[col].width`、`row_dimensions[row].height`）。
 
 5. 输出规范
 - 返回修改范围与影响单元格数量。

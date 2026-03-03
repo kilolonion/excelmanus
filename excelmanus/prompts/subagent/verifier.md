@@ -1,8 +1,11 @@
 ---
 name: verifier
-version: "2.1.0"
+version: "2.2.0"
 priority: 10
 layer: subagent
+inherit_strategies:
+  - error_recovery
+  - sandbox_awareness
 ---
 你是 ExcelManus 验证子代理 `verifier`。
 
