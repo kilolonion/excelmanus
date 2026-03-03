@@ -688,6 +688,14 @@ class SessionManager:
                 new_id,
                 exc_info=True,
             )
+        # ── Phase 5: 异步预热 prompt cache（fire-and-forget） ──
+        # 仅对 Anthropic ClaudeClient 生效：预热稳定 system prompt 前缀，
+        # 使首条用户消息即可命中 cache，大幅降低首次 TTFT。
+        try:
+            asyncio.create_task(engine.warmup_prompt_cache())
+        except Exception:
+            logger.debug("prompt cache 预热任务创建失败，跳过", exc_info=True)
+
         return new_id, engine
 
     async def release_for_chat(self, session_id: str) -> None:
@@ -1429,3 +1437,273 @@ class SessionManager:
                 return []
             return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
         return []
+
+    # ── 完整会话导出 / 导入 ───────────────────────────────────
+
+    async def export_full_session(
+        self,
+        session_id: str,
+        *,
+        user_id: str | None = None,
+        include_workspace: bool = True,
+    ) -> dict:
+        """完整导出会话为 EMX v2.0 格式（消息 + 状态 + 记忆 + 工作区文件）。
+
+        Args:
+            session_id: 要导出的会话 ID。
+            user_id: 当前用户 ID，用于归属校验。
+            include_workspace: 是否包含工作区文件。
+
+        Returns:
+            EMX v2.0 格式的 dict。
+
+        Raises:
+            SessionNotFoundError: 会话不存在或无权访问。
+        """
+        from excelmanus.session_export import (
+            collect_workspace_files,
+            export_emx,
+        )
+
+        # ── 获取消息 ──
+        messages = await self.get_session_messages(
+            session_id, limit=100000, user_id=user_id,
+        )
+        if not messages and not self.session_exists(session_id):
+            raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
+
+        # ── 会话元数据 ──
+        session_meta: dict = {"id": session_id}
+        ch = self._chat_history
+        if ch is not None:
+            meta = ch.get_session_meta(session_id)
+            if meta:
+                session_meta.update(meta)
+
+        # ── Excel 事件数据 ──
+        excel_diffs: list[dict] = []
+        excel_previews: list[dict] = []
+        affected_files: list[str] = []
+        if ch is not None:
+            excel_diffs = ch.load_excel_diffs(session_id)
+            excel_previews = ch.load_excel_previews(session_id)
+            affected_files = ch.load_affected_files(session_id)
+
+        # ── 引擎状态（内存中有活跃会话时） ──
+        session_state: dict | None = None
+        task_list: dict | None = None
+        config_snapshot: dict | None = None
+        workspace_root: str = ""
+
+        engine = self.get_engine(session_id, user_id=user_id)
+        if engine is not None:
+            # 引擎活跃：直接采集运行时状态
+            session_state = engine._state.to_dict()
+            task_list = engine._task_store.to_dict()
+            config_snapshot = {
+                "model": engine.current_model,
+                "chat_mode": getattr(engine, "_current_chat_mode", "write"),
+                "full_access_enabled": engine.full_access_enabled,
+            }
+            workspace_root = str(engine.workspace.root_dir)
+        else:
+            # 引擎不在内存：尝试从 checkpoint 恢复状态
+            if self._database is not None:
+                try:
+                    from excelmanus.stores.session_state_store import SessionStateStore
+                    store = SessionStateStore(self._database)
+                    cp = store.load_latest_checkpoint(session_id)
+                    if cp is not None:
+                        session_state = cp.get("state_dict")
+                        task_list = cp.get("task_list_dict")
+                except Exception:
+                    logger.debug("导出时加载 checkpoint 失败", exc_info=True)
+            # 解析工作区路径
+            try:
+                ws = IsolatedWorkspace.resolve(
+                    self._config.workspace_root,
+                    user_id=user_id,
+                    auth_enabled=user_id is not None,
+                    data_root=self._config.data_root,
+                )
+                workspace_root = str(ws.root_dir)
+            except Exception:
+                workspace_root = self._config.workspace_root
+
+        # ── 持久记忆 ──
+        memories_list: list[dict] | None = None
+        if self._database is not None:
+            try:
+                from excelmanus.stores.memory_store import MemoryStore
+                mem_store = MemoryStore(self._database, user_id=user_id)
+                entries = mem_store.load_all()
+                if entries:
+                    memories_list = [
+                        {
+                            "category": e.category.value,
+                            "content": e.content,
+                            "source": e.source or "",
+                            "created_at": e.timestamp.isoformat() if e.timestamp else "",
+                        }
+                        for e in entries
+                    ]
+            except Exception:
+                logger.debug("导出时加载记忆失败", exc_info=True)
+
+        # ── 工作区文件 ──
+        workspace_files: list[dict] | None = None
+        if include_workspace and workspace_root:
+            try:
+                workspace_files = collect_workspace_files(
+                    workspace_root,
+                    affected_only=affected_files or None,
+                )
+            except Exception:
+                logger.debug("导出时收集工作区文件失败", exc_info=True)
+
+        return export_emx(
+            session_meta,
+            messages,
+            excel_diffs,
+            excel_previews,
+            affected_files,
+            session_state=session_state,
+            task_list=task_list,
+            memories=memories_list,
+            config_snapshot=config_snapshot,
+            workspace_files=workspace_files,
+        )
+
+    async def import_full_session(
+        self,
+        parsed: dict,
+        *,
+        user_id: str | None = None,
+    ) -> dict:
+        """从 EMX 解析结果导入完整会话（消息 + 状态 + 记忆 + 工作区文件）。
+
+        Args:
+            parsed: parse_emx() 的返回值。
+            user_id: 当前用户 ID。
+
+        Returns:
+            {"session_id", "title", "message_count", "files_restored",
+             "memories_restored", "state_restored"}
+        """
+        ch = self._chat_history
+        if ch is None:
+            raise RuntimeError("聊天记录存储未启用，无法导入")
+
+        new_session_id = str(uuid.uuid4())
+        meta = parsed["session_meta"]
+        title = meta.get("title") or "导入的会话"
+        messages = parsed["messages"]
+
+        # ── 1. 创建会话 + 写入消息 ──
+        ch.create_session(new_session_id, title, user_id=user_id)
+        if messages:
+            ch.save_turn_messages(new_session_id, messages, turn_number=0)
+
+        # ── 2. 恢复 Excel 事件数据 ──
+        for diff in parsed.get("excel_diffs") or []:
+            try:
+                ch.save_excel_diff(
+                    new_session_id,
+                    diff.get("tool_call_id", ""),
+                    diff.get("file_path", ""),
+                    diff.get("sheet", ""),
+                    diff.get("affected_range", ""),
+                    diff.get("changes", []),
+                )
+            except Exception:
+                pass
+        for fp in parsed.get("affected_files") or []:
+            try:
+                ch.save_affected_file(new_session_id, fp)
+            except Exception:
+                pass
+
+        # ── 3. 恢复 SessionState + TaskList checkpoint ──
+        state_restored = False
+        session_state = parsed.get("session_state")
+        task_list = parsed.get("task_list")
+        if (session_state or task_list) and self._database is not None:
+            try:
+                from excelmanus.stores.session_state_store import SessionStateStore
+                store = SessionStateStore(self._database)
+                store.save_checkpoint(
+                    session_id=new_session_id,
+                    state_dict=session_state or {},
+                    task_list_dict=task_list or {},
+                    turn_number=session_state.get("session_turn", 0) if session_state else 0,
+                    checkpoint_type="import",
+                )
+                state_restored = True
+            except Exception:
+                logger.debug("导入时保存 checkpoint 失败", exc_info=True)
+
+        # ── 4. 恢复持久记忆 ──
+        memories_restored = 0
+        memories = parsed.get("memories")
+        if memories and self._database is not None:
+            try:
+                from excelmanus.memory_models import MemoryCategory, MemoryEntry
+                from excelmanus.stores.memory_store import MemoryStore
+
+                mem_store = MemoryStore(self._database, user_id=user_id)
+                entries: list[MemoryEntry] = []
+                for m in memories:
+                    try:
+                        cat = MemoryCategory(m.get("category", "general"))
+                    except ValueError:
+                        cat = MemoryCategory.GENERAL
+                    ts_str = m.get("created_at", "")
+                    try:
+                        ts = datetime.fromisoformat(ts_str) if ts_str else datetime.now(timezone.utc)
+                    except (ValueError, TypeError):
+                        ts = datetime.now(timezone.utc)
+                    entries.append(MemoryEntry(
+                        content=m.get("content", ""),
+                        category=cat,
+                        timestamp=ts,
+                        source=m.get("source", "emx_import"),
+                    ))
+                memories_restored = mem_store.save_entries(entries)
+            except Exception:
+                logger.debug("导入时恢复记忆失败", exc_info=True)
+
+        # ── 5. 恢复工作区文件 ──
+        files_restored = 0
+        workspace_files = parsed.get("workspace_files")
+        if workspace_files:
+            from excelmanus.session_export import restore_workspace_files
+
+            try:
+                ws = IsolatedWorkspace.resolve(
+                    self._config.workspace_root,
+                    user_id=user_id,
+                    auth_enabled=user_id is not None,
+                    data_root=self._config.data_root,
+                )
+                ws_root = str(ws.root_dir)
+            except Exception:
+                ws_root = self._config.workspace_root
+
+            try:
+                files_restored, _ = restore_workspace_files(ws_root, workspace_files)
+            except Exception:
+                logger.debug("导入时恢复工作区文件失败", exc_info=True)
+
+        logger.info(
+            "完整会话导入成功: session=%s messages=%d files=%d memories=%d state=%s",
+            new_session_id, len(messages), files_restored, memories_restored, state_restored,
+        )
+
+        return {
+            "session_id": new_session_id,
+            "title": title,
+            "message_count": len(messages),
+            "files_restored": files_restored,
+            "memories_restored": memories_restored,
+            "state_restored": state_restored,
+        }

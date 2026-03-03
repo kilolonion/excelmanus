@@ -95,6 +95,36 @@ class SessionStreamState:
         return buf
 
 
+def _summarize_tool_args(tool_name: str, arguments: dict[str, Any]) -> str:
+    """将工具参数格式化为简洁摘要字符串。
+
+    规则：
+    - 跳过 None 或空字符串的参数
+    - code 类参数显示行数（如 code=<12行>）
+    - 每个参数值截断至 60 字符
+    - 总摘要截断至 200 字符
+    - 格式: tool_name(key1="val1", key2="val2")
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return f"{tool_name}()"
+    parts: list[str] = []
+    for k, v in arguments.items():
+        if v is None or v == "":
+            continue
+        if k == "code" and isinstance(v, str):
+            line_count = v.count("\n") + 1
+            parts.append(f"code=<{line_count}行>")
+            continue
+        sv = str(v)
+        if len(sv) > 60:
+            sv = sv[:57] + "..."
+        parts.append(f'{k}="{sv}"')
+    summary = f"{tool_name}({', '.join(parts)})"
+    if len(summary) > 200:
+        summary = summary[:197] + "..."
+    return summary
+
+
 def sse_event_to_sse(
     event: ToolCallEvent,
     *,
@@ -162,6 +192,8 @@ def sse_event_to_sse(
         EventType.PLAN_CREATED: "plan_created",
         EventType.LLM_RETRY: "llm_retry",
         EventType.FAILURE_GUIDANCE: "failure_guidance",
+        EventType.TOOL_CALL_NOTICE: "tool_call_notice",
+        EventType.REASONING_NOTICE: "reasoning_notice",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -516,6 +548,17 @@ def sse_event_to_sse(
             "actions": event.fg_actions[:3],
             "provider": event.fg_provider,
             "model": event.fg_model,
+        }
+    elif event.event_type == EventType.TOOL_CALL_NOTICE:
+        data = {
+            "tool_name": event.tool_name,
+            "args_summary": _summarize_tool_args(event.tool_name, event.arguments),
+            "iteration": event.iteration,
+        }
+    elif event.event_type == EventType.REASONING_NOTICE:
+        data = {
+            "content": sanitize_external_text(event.thinking, max_len=4000),
+            "iteration": event.iteration,
         }
     else:
         data = event.to_dict()

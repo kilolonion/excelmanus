@@ -111,6 +111,16 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         help_label="/playbook [list|search|stats|delete|reset]",
         arguments=("list", "search", "stats", "delete", "reset"),
     ),
+    ControlCommandSpec(
+        command="/tools",
+        description="工具调用详情展示",
+        arguments=("on", "off", "status"),
+    ),
+    ControlCommandSpec(
+        command="/reasoning",
+        description="模型推理过程展示",
+        arguments=("on", "off", "status"),
+    ),
 )
 
 

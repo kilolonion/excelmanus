@@ -30,6 +30,8 @@ dependencies = [
     "seaborn>=0.13.0",
     "plotly>=5.18.0",
     "scipy>=1.11.0",
+    "python-telegram-bot>=20.0",
+    "qq-botpy>=1.0.0",
 ]
 
 [project.optional-dependencies]
@@ -52,12 +54,12 @@ dev = [
     "hypothesis>=6.0.0",
 ]
 telegram = [
+    # included in main deps by default
     "python-telegram-bot>=20.0",
-    "httpx>=0.24.0",
 ]
 qq = [
+    # included in main deps by default
     "qq-botpy>=1.0.0",
-    "httpx>=0.24.0",
 ]
 feishu = [
     "lark-oapi>=1.0.0",
@@ -87,6 +89,7 @@ dev-dependencies = [
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+timeout = 60
 
 [tool.setuptools.packages.find]
 include = ["excelmanus*"]

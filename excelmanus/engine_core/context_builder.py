@@ -183,6 +183,25 @@ class ContextBuilder:
             logger.debug("规则注入失败", exc_info=True)
             return ""
 
+    def _build_channel_notice(self) -> str:
+        """构建渠道适配提示词。Bot 渠道注入格式/交互指南，Web 返回空。"""
+        e = self._engine
+        channel = getattr(e, "_channel_context", None)
+        if not channel or channel == "web":
+            return ""
+        try:
+            from excelmanus.channels.channel_profile import build_channel_notice
+            return build_channel_notice(channel)
+        except Exception:
+            logger.debug("渠道提示词注入失败", exc_info=True)
+            return ""
+
+    @property
+    def _channel_cache_key(self) -> str:
+        """返回含渠道标识的缓存 key，防止不同渠道间缓存污染。"""
+        channel = getattr(self._engine, "_channel_context", None) or "web"
+        return f"channel:{channel}"
+
     def _build_meta_cognition_notice(self) -> str:
         """条件性注入进展反思提示，帮助 agent 在困境中调整策略。
 
@@ -764,6 +783,7 @@ class ContextBuilder:
             f"subagent={'on' if e._subagent_enabled else 'off'}",
             f"vision={'on' if e._is_vision_capable else 'off'}",
             f"chat_mode={getattr(e, '_current_chat_mode', 'write')}",
+            f"channel={getattr(e, '_channel_context', None) or 'web'}",
             f"skills={len(e._active_skills)}",
         ]
         _reg = e.file_registry
@@ -777,6 +797,51 @@ class ContextBuilder:
         parts.append(f"reasoning={_reasoning_level}")
         return "Runtime: " + " | ".join(parts)
 
+    def _build_stable_system_prompt(self) -> str:
+        """构建仅含稳定前缀的 system prompt（用于 cache 预热等场景）。
+
+        包含: identity + rules + channel + access + backup + mcp_context。
+        这些内容在 session 生命周期内不变，适合作为 Anthropic prompt cache 前缀。
+        """
+        e = self._engine
+        prompt = e.memory.system_prompt
+
+        _turn = e._session_turn
+        if _turn != self._turn_notice_cache_key:
+            self._turn_notice_cache.clear()
+            self._turn_notice_cache_key = _turn
+        _nc = self._turn_notice_cache
+
+        def _cached_notice(key: str, builder: Any) -> str:
+            val = _nc.get(key)
+            if val is not None:
+                return val
+            val = builder()
+            _nc[key] = val
+            return val
+
+        rules_notice = _cached_notice("rules", self._build_rules_notice)
+        if rules_notice:
+            prompt = prompt + "\n\n" + rules_notice
+
+        channel_notice = _cached_notice(self._channel_cache_key, self._build_channel_notice)
+        if channel_notice:
+            prompt = prompt + "\n\n" + channel_notice
+
+        access_notice = _cached_notice("access", self._build_access_notice)
+        if access_notice:
+            prompt = prompt + "\n\n" + access_notice
+
+        backup_notice = _cached_notice("backup", self._build_backup_notice)
+        if backup_notice:
+            prompt = prompt + "\n\n" + backup_notice
+
+        mcp_context = _cached_notice("mcp", self._build_mcp_context_notice)
+        if mcp_context:
+            prompt = prompt + "\n\n" + mcp_context
+
+        return prompt
+
     def _prepare_system_prompts_for_request(
         self,
         skill_contexts: list[str],
@@ -785,12 +850,14 @@ class ContextBuilder:
     ) -> tuple[list[str], str | None]:
         """构建用于本轮请求的 system prompts，并在必要时压缩上下文。
 
-        Prompt Cache 优化：静态内容（identity prompt、规则、权限等）放在前面，
-        动态内容（runtime_metadata、meta_cognition 等）放在末尾，
-        确保 Anthropic prompt caching 的前缀稳定性。
+        Prompt Cache 分层优化：
+        - 稳定前缀（identity + rules + channel + access + backup + mcp）作为
+          独立 system 消息，由 Provider 设置 cache_control breakpoint，session
+          内保持不变以最大化 Anthropic prompt cache 命中率。
+        - 动态内容（strategies + runtime + task_plan 等）作为第二个 system 消息，
+          每请求/迭代可自由变化而不影响前缀 cache。
         """
         e = self._engine
-        base_prompt = e.memory.system_prompt
 
         # ── C2: 轮次级静态 notice 缓存失效检测 ──
         _turn = e._session_turn
@@ -807,31 +874,41 @@ class ContextBuilder:
             _nc[key] = val
             return val
 
-        # ── 静态/半静态内容（前缀区域，最大化 cache 命中） ──
+        # ── 稳定前缀（session 生命周期内不变，Anthropic cache breakpoint 区域） ──
+        stable_prompt = self._build_stable_system_prompt()
 
-        rules_notice = _cached_notice("rules", self._build_rules_notice)
-        if rules_notice:
-            base_prompt = base_prompt + "\n\n" + rules_notice
+        # 从缓存中提取各 notice 用于快照采集（已在 _build_stable_system_prompt 中填充）
+        rules_notice = _nc.get("rules", "")
+        channel_notice = _nc.get(self._channel_cache_key, "")
+        access_notice = _nc.get("access", "")
+        backup_notice = _nc.get("backup", "")
+        mcp_context = _nc.get("mcp", "")
 
-        access_notice = _cached_notice("access", self._build_access_notice)
-        if access_notice:
-            base_prompt = base_prompt + "\n\n" + access_notice
+        # ── 分层路由：chitchat 快速通道 ──
+        # 仅保留 identity + rules + channel，跳过 access/backup/mcp 等不相关段，
+        # 节省 ~5-10K tokens 的系统提示开销。
+        _route_mode = getattr(route_result, "route_mode", "") if route_result else ""
+        if _route_mode == "chitchat":
+            # 构建真正精简的 chitchat prompt（identity + rules + channel）
+            # 不使用 stable_prompt 因为它还包含 access/backup/mcp
+            _chitchat_prompt = e.memory.system_prompt
+            if rules_notice:
+                _chitchat_prompt = _chitchat_prompt + "\n\n" + rules_notice
+            if channel_notice:
+                _chitchat_prompt = _chitchat_prompt + "\n\n" + channel_notice
+            logger.debug(
+                "chitchat 快速通道: 仅注入 identity+rules+channel (%.0f chars, 省 %.0f chars)",
+                len(_chitchat_prompt), len(stable_prompt) - len(_chitchat_prompt),
+            )
+            return [_chitchat_prompt], None
 
-        backup_notice = _cached_notice("backup", self._build_backup_notice)
-        if backup_notice:
-            base_prompt = base_prompt + "\n\n" + backup_notice
-
-        mcp_context = _cached_notice("mcp", self._build_mcp_context_notice)
-        if mcp_context:
-            base_prompt = base_prompt + "\n\n" + mcp_context
+        # ── 动态内容（每请求/每迭代可能变化，作为独立 system 消息） ──
+        dynamic_prompt = ""
 
         # 统一文件全景 + CoW 路径映射（turn 内缓存，写入时标脏重建）
         file_registry_notice = self._build_file_registry_notice()
         if file_registry_notice:
-            base_prompt = base_prompt + "\n\n" + file_registry_notice
-
-
-        # ── 半静态内容（轮次级稳定，最大化 Provider prompt cache 前缀） ──
+            dynamic_prompt = dynamic_prompt + file_registry_notice
 
         # 注入任务策略（PromptComposer strategies，同一轮次内不变）
         _strategy_text_captured = ""
@@ -850,7 +927,7 @@ class ContextBuilder:
                     _p_ctx, variables=getattr(e, "_runtime_vars", None),
                 )
                 if _strategy_text:
-                    base_prompt = base_prompt + "\n\n" + _strategy_text
+                    dynamic_prompt = dynamic_prompt + "\n\n" + _strategy_text if dynamic_prompt else _strategy_text
                     _strategy_text_captured = _strategy_text
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
@@ -858,51 +935,50 @@ class ContextBuilder:
         # D2: 语义记忆动态注入（替代 system_prompt 中的全量静态注入）
         memory_notice = self._build_memory_notice()
         if memory_notice:
-            base_prompt = base_prompt + "\n\n" + memory_notice
+            dynamic_prompt = dynamic_prompt + "\n\n" + memory_notice if dynamic_prompt else memory_notice
 
         # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
         playbook_notice = self._build_playbook_notice()
         if playbook_notice:
-            base_prompt = base_prompt + "\n\n" + playbook_notice
+            dynamic_prompt = dynamic_prompt + "\n\n" + playbook_notice if dynamic_prompt else playbook_notice
 
         # D3: 语义技能匹配提示（embedding 检索相关 skillpack，帮助 agent 推荐技能）
         skill_hints = self._build_skill_hints_notice()
         if skill_hints:
-            base_prompt = base_prompt + "\n\n" + skill_hints
-
-        # ── 动态内容（放在最末尾，Provider cache 前缀到此为止） ──
+            dynamic_prompt = dynamic_prompt + "\n\n" + skill_hints if dynamic_prompt else skill_hints
 
         _hook_context_captured = ""
         if e._transient_hook_contexts:
             hook_context = "\n".join(e._transient_hook_contexts).strip()
             e._transient_hook_contexts.clear()
             if hook_context:
-                base_prompt = base_prompt + "\n\n## Hook 上下文\n" + hook_context
+                _hc = "## Hook 上下文\n" + hook_context
+                dynamic_prompt = dynamic_prompt + "\n\n" + _hc if dynamic_prompt else _hc
                 _hook_context_captured = hook_context
 
-        # 注入运行时元数据（每轮/每迭代变化，放在所有静态内容之后）
+        # 注入运行时元数据（每轮/每迭代变化）
         runtime_line = self._build_runtime_metadata_line()
-        base_prompt = base_prompt + "\n\n" + runtime_line
+        dynamic_prompt = dynamic_prompt + "\n\n" + runtime_line if dynamic_prompt else runtime_line
 
         # 注入任务清单状态 + 计划文档引用（每迭代重建，不缓存）
         task_plan_notice = self._build_task_plan_notice()
         if task_plan_notice:
-            base_prompt = base_prompt + "\n\n" + task_plan_notice
+            dynamic_prompt = dynamic_prompt + "\n\n" + task_plan_notice
 
         # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
         meta_cognition = self._build_meta_cognition_notice()
         if meta_cognition:
-            base_prompt = base_prompt + "\n\n" + meta_cognition
+            dynamic_prompt = dynamic_prompt + "\n\n" + meta_cognition
 
         # 验证门控修复提示（验证失败时注入，正常情况零开销）
         verification_fix_notice = self._build_verification_fix_notice()
         if verification_fix_notice:
-            base_prompt = base_prompt + "\n\n" + verification_fix_notice
+            dynamic_prompt = dynamic_prompt + "\n\n" + verification_fix_notice
 
         # R8: 写入后即时验证提示（借鉴 Windsurf post_write hooks）
         post_write_hint = self._build_post_write_verification_hint()
         if post_write_hint:
-            base_prompt = base_prompt + "\n\n" + post_write_hint
+            dynamic_prompt = dynamic_prompt + "\n\n" + post_write_hint
 
         # R7: 自动预扫描（必须在 R6 之前，以便注入缓存后被 R6 读取）
         scan_hint = self._build_scan_tool_hint()
@@ -910,11 +986,11 @@ class ContextBuilder:
         # R6: 注入已缓存的 explorer 结构化报告摘要
         explorer_notice = self._build_explorer_report_notice()
         if explorer_notice:
-            base_prompt = base_prompt + "\n\n" + explorer_notice
+            dynamic_prompt = dynamic_prompt + "\n\n" + explorer_notice
 
         # R7 降级提示：自动扫描失败时的文本提示
         if scan_hint:
-            base_prompt = base_prompt + "\n\n" + scan_hint
+            dynamic_prompt = dynamic_prompt + "\n\n" + scan_hint
 
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
@@ -926,6 +1002,8 @@ class ContextBuilder:
         _snapshot_components: dict[str, str] = {}
         if rules_notice:
             _snapshot_components["user_rules"] = rules_notice
+        if channel_notice:
+            _snapshot_components["channel_notice"] = channel_notice
         if access_notice:
             _snapshot_components["access_notice"] = access_notice
         if backup_notice:
@@ -985,16 +1063,23 @@ class ContextBuilder:
         def _compose_prompts() -> list[str]:
             mode = e._effective_system_mode()
             if mode == "merge":
-                merged_parts = [base_prompt]
-                merged_parts.extend(current_skill_contexts)
+                # merge 模式下仍然保持 stable 和 dynamic 分离以支持 cache
+                merged_dynamic_parts = [dynamic_prompt] if dynamic_prompt else []
+                merged_dynamic_parts.extend(current_skill_contexts)
                 if window_perception_context:
                     if window_at_tail:
-                        merged_parts.append(window_perception_context)
+                        merged_dynamic_parts.append(window_perception_context)
                     else:
-                        merged_parts.insert(1, window_perception_context)
-                return ["\n\n".join(merged_parts)]
+                        merged_dynamic_parts.insert(0, window_perception_context)
+                result = [stable_prompt]
+                if merged_dynamic_parts:
+                    result.append("\n\n".join(merged_dynamic_parts))
+                return result
 
-            prompts = [base_prompt]
+            # multi 模式：stable 前缀 + dynamic + skill_contexts + window
+            prompts = [stable_prompt]
+            if dynamic_prompt:
+                prompts.append(dynamic_prompt)
             if window_at_tail:
                 prompts.extend(current_skill_contexts)
                 if window_perception_context:

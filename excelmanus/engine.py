@@ -642,6 +642,15 @@ class AgentEngine:
             budget_tokens=config.thinking_budget,
         )
 
+        # ── Guide 消息队列（渠道 guide 模式注入追加指令） ──
+        self._guide_messages: list[str] = []
+        # ── 渠道上下文（Bot 渠道提示词注入） ──
+        self._channel_context: str | None = None
+
+        # ── /tools 与 /reasoning 展示开关（仅会话级，不持久化） ──
+        self._show_tool_calls: bool = False
+        self._show_reasoning: bool = False
+
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
@@ -1387,6 +1396,32 @@ class AgentEngine:
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
 
+    async def warmup_prompt_cache(self) -> None:
+        """异步预热 Anthropic prompt cache（fire-and-forget）。
+
+        仅对 ClaudeClient 实例生效。发送一个只含稳定 system prompt 前缀
+        + 最小 user 消息的请求（max_tokens=1），使稳定前缀进入 cache。
+        后续真实请求即可 cache HIT，大幅降低首次 TTFT。
+        """
+        from excelmanus.providers.claude import ClaudeClient
+        if not isinstance(self._client, ClaudeClient):
+            return
+        stable_prompt = self._context_builder._build_stable_system_prompt()
+        if not stable_prompt or len(stable_prompt) < 100:
+            return
+        messages = [
+            {"role": "system", "content": stable_prompt},
+            {"role": "user", "content": "hi"},
+        ]
+        try:
+            await self._client.chat.completions.create(
+                model=self._active_model,
+                messages=messages,
+            )
+            logger.info("prompt cache 预热完成: stable_prefix=%d chars", len(stable_prompt))
+        except Exception:
+            logger.debug("prompt cache 预热失败，跳过", exc_info=True)
+
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
         await self._cancel_registry_scan()
@@ -1447,6 +1482,19 @@ class AgentEngine:
     def inject_history(self, messages: list[dict]) -> None:
         """注入历史消息（用于会话恢复），不触发截断。"""
         self._memory.inject_messages(messages)
+
+    def push_guide_message(self, message: str) -> None:
+        """外部注入引导消息，将在下次 LLM 迭代时被 agent 看到。
+
+        用于渠道 guide 并发模式：用户在 agent 执行中追加指令，
+        不打断工具执行，下次迭代自动注入为 system context。
+        """
+        self._guide_messages.append(message)
+
+    def drain_guide_messages(self) -> list[str]:
+        """取出并清空引导消息队列。"""
+        msgs, self._guide_messages = self._guide_messages, []
+        return msgs
 
     @property
     def message_snapshot_index(self) -> int:
@@ -1986,9 +2034,11 @@ class AgentEngine:
         approval_resolver: ApprovalResolver | None = None,
         question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
+        channel: str | None = None,
     ) -> ChatResult:
         """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
         self._question_resolver = question_resolver
+        self._channel_context = channel
         normalized_images: list[dict[str, str]] = []
         for item in images or []:
             if not isinstance(item, dict):
@@ -2219,6 +2269,43 @@ class AgentEngine:
             raw_args=effective_raw_args,
         )
 
+        # ── 分层路由安全降级：chitchat 在多轮任务上下文中保守回退 ──
+        # 宁可多花 token 也不误判任务续接消息为闲聊
+        _chitchat_downgrade_reason = ""
+        if route_result.route_mode == "chitchat":
+            if self._active_skills:
+                _chitchat_downgrade_reason = "active_skills"
+            elif self._question_flow.has_pending():
+                _chitchat_downgrade_reason = "pending_question"
+            elif self._approval.has_pending():
+                _chitchat_downgrade_reason = "pending_approval"
+            elif any(
+                m.get("role") == "tool"
+                for m in self._memory.messages[-6:]
+                if isinstance(m, dict)
+            ):
+                _chitchat_downgrade_reason = "recent_tool_calls"
+
+            if _chitchat_downgrade_reason:
+                logger.info(
+                    "chitchat 安全降级 → all_tools (原因: %s)", _chitchat_downgrade_reason,
+                )
+                route_result = SkillMatchResult(
+                    skills_used=route_result.skills_used,
+                    route_mode="all_tools",
+                    system_contexts=route_result.system_contexts,
+                    parameterized=route_result.parameterized,
+                    write_hint="unknown",
+                    task_tags=route_result.task_tags,
+                    route_tool_tags=route_result.route_tool_tags,
+                )
+            else:
+                # 确认走 chitchat 快速通道：取消不必要的语义检索
+                for _, _t in _semantic_tasks:
+                    _t.cancel()
+                _semantic_tasks.clear()
+                logger.debug("chitchat 快速通道确认，已取消语义检索")
+
         # 合并已激活 skill 的 system_contexts
         # 使用 instructions_only 渲染：完整 resource_contents 已在
         # activate_skill 的 tool result 中返回给 LLM，后续迭代仅需
@@ -2246,6 +2333,7 @@ class AgentEngine:
             sheet_count=getattr(route_result, "sheet_count", 0),
             max_total_rows=getattr(route_result, "max_total_rows", 0),
             task_tags=tuple(getattr(route_result, "task_tags", ()) or ()),
+            route_tool_tags=tuple(getattr(route_result, "route_tool_tags", ()) or ()),
         )
         self._last_route_result = route_result
 
@@ -2520,12 +2608,13 @@ class AgentEngine:
             _latest = self._state.prompt_injection_snapshots[-1]
             if _latest.get("session_turn") == self._session_turn:
                 _injection_summary_for_diag = _latest.get("summary", [])
-        self._session_diagnostics.append({
+        _session_diag: dict[str, Any] = {
             "session_turn": self._session_turn,
             "write_hint": self._current_write_hint,
             "route_mode": route_result.route_mode,
             "skills_used": list(route_result.skills_used),
             "task_tags": list(route_result.task_tags),
+            "route_tool_tags": list(route_result.route_tool_tags),
             "iterations": chat_result.iterations,
             "prompt_tokens": chat_result.prompt_tokens,
             "completion_tokens": chat_result.completion_tokens,
@@ -2533,7 +2622,12 @@ class AgentEngine:
             "write_guard_triggered": chat_result.write_guard_triggered,
             "turn_diagnostics": [d.to_dict() for d in self._turn_diagnostics],
             "prompt_injection_summary": _injection_summary_for_diag,
-        })
+        }
+        if _chitchat_downgrade_reason:
+            _session_diag["chitchat_downgrade_reason"] = _chitchat_downgrade_reason
+        elif route_result.route_mode == "chitchat":
+            _session_diag["chitchat_fast_path"] = True
+        self._session_diagnostics.append(_session_diag)
 
         # 周期性后台记忆提取：每 N 轮静默提取一次
         _extract_interval = self._config.memory_auto_extract_interval
@@ -3506,6 +3600,9 @@ class AgentEngine:
             )
 
         max_iter = self._config.max_iterations
+        # chitchat 快速通道：最多 1 轮迭代，无需工具循环
+        if route_result.route_mode == "chitchat":
+            max_iter = 1
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
         all_tool_results: list[ToolCallResult] = []
@@ -3536,13 +3633,18 @@ class AgentEngine:
             )
 
             # ── OAuth token 预检刷新 + FileRegistry 扫描（首轮并行化） ──
+            # chitchat 快速通道：跳过 FileRegistry 扫描，仅做凭证刷新
+            _is_chitchat_route = current_route_result.route_mode == "chitchat"
             if iteration == start_iteration:
                 _reg_start = time.monotonic()
                 await asyncio.sleep(0)
-                await asyncio.gather(
-                    self._refresh_credential_if_needed(on_event=on_event),
-                    self.await_registry_scan(timeout=0.5),
-                )
+                if _is_chitchat_route:
+                    await self._refresh_credential_if_needed(on_event=on_event)
+                else:
+                    await asyncio.gather(
+                        self._refresh_credential_if_needed(on_event=on_event),
+                        self.await_registry_scan(timeout=0.5),
+                    )
                 logger.debug("perf.loop: cred+registry %.0fms", (time.monotonic() - _reg_start) * 1000)
             else:
                 await self._refresh_credential_if_needed(on_event=on_event)
@@ -3645,14 +3747,34 @@ class AgentEngine:
                         if len(self._memory.messages) != _msgs_before_sum:
                             self._history_snapshot_index = 0
 
+            # Guide 消息注入：排空外部追加指令队列，注入为 system context
+            _guide_msgs = self.drain_guide_messages()
+            if _guide_msgs:
+                _guide_block = "\n".join(
+                    f"[用户追加指令 #{i+1}] {m}" for i, m in enumerate(_guide_msgs)
+                )
+                system_prompts.append(
+                    f"<user_guidance>\n{_guide_block}\n"
+                    "请在继续当前任务时考虑以上用户追加指令。\n"
+                    "</user_guidance>"
+                )
+                logger.info("注入 %d 条 guide 消息到本轮迭代", len(_guide_msgs))
+
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
                 max_context_tokens=self.max_context_tokens,
             )
 
             # 分层 schema（core=完整, extended=摘要/已展开=完整）
-            _task_tags = tuple(getattr(current_route_result, "task_tags", ()) or ())
-            tools = self._meta_tool_builder.build_v5_tools(write_hint=write_hint, task_tags=_task_tags)
+            # chitchat 快速通道：不传 tools 参数，节省 ~3K-8K schema tokens
+            if _is_chitchat_route:
+                tools = []
+            else:
+                _route_tool_tags = tuple(getattr(current_route_result, "route_tool_tags", ()) or ())
+                tools = self._meta_tool_builder.build_v5_tools(
+                    write_hint=write_hint,
+                    route_tool_tags=_route_tool_tags,
+                )
             tool_scope = None
 
             # 安全网：确保发送到 API 的 model 是实际模型 ID，不含 provider 前缀
@@ -3977,6 +4099,17 @@ class AgentEngine:
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.THINKING,
+                        thinking=thinking_content,
+                        iteration=iteration,
+                    ),
+                )
+
+            # /reasoning 开启时额外发射推理内容通知
+            if thinking_content and self._show_reasoning:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.REASONING_NOTICE,
                         thinking=thinking_content,
                         iteration=iteration,
                     ),
@@ -4592,16 +4725,30 @@ class AgentEngine:
             args, _ = self._tool_dispatcher.parse_arguments(
                 getattr(func, "arguments", None),
             )
+            tc_id = getattr(tc, "id", "")
+            tc_name = getattr(func, "name", "")
             self._emit(
                 on_event,
                 ToolCallEvent(
                     event_type=EventType.TOOL_CALL_START,
-                    tool_call_id=getattr(tc, "id", ""),
-                    tool_name=getattr(func, "name", ""),
+                    tool_call_id=tc_id,
+                    tool_name=tc_name,
                     arguments=args,
                     iteration=iteration,
                 ),
             )
+            # /tools 开启时额外发射简要工具调用通知
+            if self._show_tool_calls:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.TOOL_CALL_NOTICE,
+                        tool_call_id=tc_id,
+                        tool_name=tc_name,
+                        arguments=args,
+                        iteration=iteration,
+                    ),
+                )
 
         # 并发执行
         async def _run_one(tc: Any) -> tuple[Any, ToolCallResult]:
@@ -5274,6 +5421,7 @@ class AgentEngine:
             api_key=self._active_api_key,
             base_url=self._active_base_url,
             protocol=self._active_protocol,
+            model=self._active_model,
         )
         self._sync_router_model_runtime()
         # 通知前端 token 已刷新
@@ -5307,6 +5455,7 @@ class AgentEngine:
                 api_key=self._active_api_key,
                 base_url=self._active_base_url,
                 protocol=self._active_protocol,
+                model=self._active_model,
             )
             self._sync_router_model_runtime()
             self._model_capabilities = None
@@ -5349,6 +5498,7 @@ class AgentEngine:
             api_key=self._active_api_key,
             base_url=self._active_base_url,
             protocol=self._active_protocol,
+            model=self._active_model,
         )
         self._sync_router_model_runtime()
         self._model_capabilities = None
@@ -5415,6 +5565,7 @@ class AgentEngine:
             system_contexts=fallback_contexts,
             parameterized=fallback.parameterized,
             write_hint=fallback.write_hint,
+            route_tool_tags=tuple(getattr(fallback, "route_tool_tags", ()) or ()),
         )
         logger.info(
             "斜杠技能 %s 为 guidance-only，已回落到任务路由: %s",

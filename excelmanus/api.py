@@ -130,6 +130,7 @@ class ChatRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
+    channel: str | None = None
     images: list[ImageAttachment] = Field(default_factory=list)
 
 
@@ -279,6 +280,7 @@ _config: ExcelManusConfig | None = None
 _config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
 _draining: bool = False  # True during graceful shutdown, health returns "draining"
+_restart_reason: str = ""  # 重启原因，draining 期间通过 health 传递给前端
 _channel_launcher: Any = None  # 类型：ChannelLauncher | None（渠道协同启动器）
 
 
@@ -1031,16 +1033,79 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     asyncio.create_task(_background_update_check())
 
+    # ── 渠道绑定管理器 + 服务令牌 ──────────────────────────
+    _bind_manager = None
+    _service_token: str | None = None
+    if auth_enabled and _user_store is not None:
+        try:
+            from excelmanus.auth.channel_bind import ChannelBindManager
+            _bind_manager = ChannelBindManager(user_store=_user_store)
+            app.state.bind_manager = _bind_manager
+            logger.info("渠道绑定管理器已初始化")
+        except Exception:
+            logger.debug("渠道绑定管理器初始化失败", exc_info=True)
+        try:
+            from excelmanus.auth.security import get_or_create_service_token
+            _service_token = get_or_create_service_token()
+            logger.info("服务令牌已就绪")
+        except Exception:
+            logger.debug("服务令牌获取失败", exc_info=True)
+    app.state.service_token = _service_token
+
+    # ── EventBridge（跨渠道实时事件推送） ──────────────────
+    _event_bridge = None
+    try:
+        from excelmanus.channels.event_bridge import EventBridge
+        _event_bridge = EventBridge()
+        app.state.event_bridge = _event_bridge
+        logger.info("EventBridge 已初始化")
+    except Exception:
+        logger.debug("EventBridge 初始化失败", exc_info=True)
+
     # ── 渠道协同启动（可选） ──────────────────────────────
     _channels_config: list[str] = getattr(app.state, "channels", None) or []
     if not _channels_config:
         from excelmanus.channels.launcher import parse_channels_config
         _channels_config = parse_channels_config()
-    if _channels_config:
-        from excelmanus.channels.launcher import ChannelLauncher
-        api_port = int(os.environ.get("EXCELMANUS_API_PORT", "8000"))
-        _channel_launcher = ChannelLauncher(_channels_config, api_port=api_port)
-        await _channel_launcher.start()
+
+    # 始终创建 launcher（即使环境变量未配置渠道），以支持前端热启动
+    from excelmanus.channels.launcher import ChannelLauncher
+    api_port = int(os.environ.get("EXCELMANUS_API_PORT", "8000"))
+    _channel_launcher = ChannelLauncher(
+        _channels_config,
+        api_port=api_port,
+        bind_manager=_bind_manager,
+        service_token=_service_token,
+        event_bridge=_event_bridge,
+        config_store=_config_store,
+    )
+    app.state.channel_launcher = _channel_launcher
+    # 合并环境变量/CLI + 持久化配置，统一启动渠道（避免无凭证先失败再重试）
+    _channels_to_start: dict[str, dict[str, str] | None] = {}
+    for _ch_name in _channels_config:
+        _channels_to_start[_ch_name] = None
+
+    if _config_store is not None:
+        try:
+            from excelmanus.channels.config_store import ChannelConfigStore
+            _ccs = ChannelConfigStore(_config_store)
+            for _ch_name, _ch_cfg in _ccs.load_all().items():
+                if _ch_cfg.enabled and _ch_cfg.has_required_credentials():
+                    _channels_to_start[_ch_name] = _ch_cfg.credentials
+        except Exception:
+            logger.debug("加载持久化渠道配置失败", exc_info=True)
+
+    for _ch_name, _ch_creds in _channels_to_start.items():
+        ok, msg = await _channel_launcher.start_channel(
+            _ch_name, credentials=_ch_creds,
+        )
+        if ok:
+            if _ch_creds is not None:
+                logger.info("从持久化配置自动启动渠道: %s", _ch_name)
+            else:
+                logger.info("渠道 %s 已启动", _ch_name)
+        else:
+            logger.warning("渠道 %s 启动失败: %s", _ch_name, msg)
 
     yield
 
@@ -1269,7 +1334,7 @@ def create_app(
 
     Args:
         config: 预构建的配置对象；为 None 时自动从环境加载。
-        channels: 要协同启动的渠道列表（如 ["telegram"]）；
+        channels: 要协同启动的渠道列表（如 ["qq"]）；
                   为 None 时从 EXCELMANUS_CHANNELS 环境变量读取。
     """
     bootstrap_error: ConfigError | None = None
@@ -1503,6 +1568,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
                 chat_mode=request.chat_mode,
+                channel=request.channel,
             )
         )
     finally:
@@ -1569,6 +1635,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     from excelmanus.auth.dependencies import extract_user_id
     auth_user_id = extract_user_id(raw_request)
     isolation_user_id = _get_isolation_user_id(raw_request)
+    _is_service = getattr(raw_request.state, "is_service_token", False)
+    _bridge = getattr(raw_request.app.state, "event_bridge", None)
 
     rate_limiter = getattr(raw_request.app.state, "rate_limiter", None)
     if rate_limiter is not None and auth_user_id:
@@ -1723,6 +1791,41 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     and _session_manager is not None
                 ):
                     _session_manager.flush_messages_sync(session_id)
+                # EventBridge: Web→Bot 推送审批/问答事件
+                if (
+                    not _is_service
+                    and _bridge is not None
+                    and isolation_user_id
+                    and event.event_type in (EventType.PENDING_APPROVAL, EventType.USER_QUESTION)
+                ):
+                    _bridge_data: dict[str, Any] = {}
+                    _bridge_evt = ""
+                    if event.event_type == EventType.PENDING_APPROVAL:
+                        _bridge_evt = "approval"
+                        _bridge_data = {
+                            "approval_id": event.approval_id,
+                            "approval_tool_name": event.approval_tool_name,
+                            "risk_level": event.approval_risk_level,
+                            "args_summary": event.approval_args_summary or {},
+                            "session_id": session_id,
+                        }
+                    elif event.event_type == EventType.USER_QUESTION:
+                        _bridge_evt = "question"
+                        _bridge_data = {
+                            "id": event.question_id,
+                            "header": event.question_header,
+                            "text": event.question_text,
+                            "options": event.question_options or [],
+                            "session_id": session_id,
+                        }
+                    if _bridge_evt:
+                        try:
+                            loop = asyncio.get_running_loop()
+                            loop.create_task(
+                                _bridge.notify(isolation_user_id, _bridge_evt, _bridge_data)
+                            )
+                        except RuntimeError:
+                            pass  # no running loop
 
             async def _run_chat_inner() -> ChatResult:
                 """后台执行 engine.chat，完成后释放会话锁。"""
@@ -1733,6 +1836,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         mention_contexts=mention_contexts,
                         images=_serialize_images(request.images),
                         chat_mode=request.chat_mode,
+                        channel=request.channel,
                     )
                     return _normalize_chat_result(result)
                 finally:
@@ -1903,6 +2007,16 @@ class AbortRequest(BaseModel):
 
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
+    ]
+
+
+class GuideRequest(BaseModel):
+    """引导消息请求体：向运行中的会话注入追加指令。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    message: Annotated[
+        str, StringConstraints(strip_whitespace=True, min_length=1, max_length=4096)
     ]
 
 
@@ -2503,6 +2617,38 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
     return JSONResponse(
         status_code=200,
         content={"status": "cancelled"},
+    )
+
+
+@_router.post("/api/v1/chat/{session_id}/guide", responses=_error_responses)
+async def chat_guide(
+    session_id: str,
+    request: GuideRequest,
+    raw_request: Request,
+) -> JSONResponse:
+    """向运行中的会话注入引导消息（不启动新 chat）。
+
+    消息存入 engine 内部队列，agent 在下次 LLM 迭代时自动看到。
+    即使当前没有 in-flight 任务也可投递，下次 chat() 时生效。
+    """
+    if _session_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    if not await _has_session_access(session_id, raw_request):
+        return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
+
+    engine = _session_manager.get_engine(session_id)
+    if engine is None:
+        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载")
+
+    engine.push_guide_message(request.message)
+    in_flight = session_id in _active_chat_tasks and not _active_chat_tasks[session_id].done()
+    logger.info(
+        "Guide 消息已投递: session=%s, in_flight=%s, len=%d",
+        session_id[:8], in_flight, len(request.message),
+    )
+    return JSONResponse(
+        status_code=200,
+        content={"status": "delivered", "in_flight": in_flight},
     )
 
 
@@ -4213,16 +4359,81 @@ async def get_excel_compare(request: Request) -> JSONResponse:
     import asyncio
 
     def _load_snapshot(resolved: str) -> dict[str, Any]:
-        """自包含的 snapshot 加载（不依赖 get_excel_snapshot 内部函数）。"""
+        """自包含的 snapshot 加载（支持 xlsx/xls/xlsb/csv）。"""
+        basename = os.path.basename(resolved)
+        ext = os.path.splitext(resolved)[1].lower()
+
+        # ── CSV 快捷路径 ──
+        if ext == ".csv":
+            try:
+                import csv as _csv
+                _enc = "utf-8"
+                for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
+                    try:
+                        with open(resolved, "r", encoding=_try_enc) as _f:
+                            _f.read(4096)
+                        _enc = _try_enc
+                        break
+                    except (UnicodeDecodeError, LookupError):
+                        continue
+                with open(resolved, "r", encoding=_enc, newline="") as _f:
+                    reader = _csv.reader(_f)
+                    all_rows_raw: list[list[str]] = []
+                    for row in reader:
+                        all_rows_raw.append(row)
+                        if len(all_rows_raw) > max_rows + 1:
+                            break
+                total = len(all_rows_raw)
+                total_cols = max((len(r) for r in all_rows_raw), default=0)
+                headers = all_rows_raw[0] if all_rows_raw else []
+                col_letters = [chr(65 + i) if i < 26 else f"A{chr(65 + i - 26)}" for i in range(min(total_cols, 100))]
+                data_rows = all_rows_raw[1: min(max_rows + 1, total)]
+                converted: list[list[Any]] = []
+                for dr in data_rows:
+                    conv: list[Any] = []
+                    for v in dr:
+                        if v == "":
+                            conv.append(None)
+                        else:
+                            try:
+                                conv.append(int(v))
+                            except ValueError:
+                                try:
+                                    conv.append(float(v))
+                                except ValueError:
+                                    conv.append(v)
+                    converted.append(conv)
+                snap_csv = {
+                    "file": basename, "sheet": "Sheet1", "sheets": ["Sheet1"],
+                    "shape": {"rows": total, "columns": total_cols},
+                    "column_letters": col_letters, "headers": headers,
+                    "rows": converted, "total_rows": total,
+                    "truncated": total > max_rows + 1,
+                }
+                return {"file": basename, "sheets": ["Sheet1"], "all_snapshots": [snap_csv]}
+            except Exception as exc:
+                logger.error("Compare CSV snapshot 失败: %s — %s", resolved, exc)
+                return {"file": basename, "sheets": [], "all_snapshots": [], "error": str(exc)}
+
+        # ── xls/xlsb 格式转换 ──
+        _actual_path = resolved
+        if ext in (".xls", ".xlsb"):
+            try:
+                from excelmanus.tools._helpers import ensure_openpyxl_compatible
+                _actual_path = str(ensure_openpyxl_compatible(resolved))
+            except Exception:
+                logger.warning("Compare 格式转换失败，尝试直接打开: %s", resolved)
+
+        # ── xlsx/xlsm 主路径 ──
         from openpyxl import load_workbook as _lwb
 
         def _read_ws(ws_obj: Any, _max_rows: int = max_rows) -> dict[str, Any]:
+            from openpyxl.utils import get_column_letter as _gcl
             s_total_rows = ws_obj.max_row or 0
             s_total_cols = ws_obj.max_column or 0
             s_headers: list[str] = []
             s_col_letters: list[str] = []
             for c in range(1, min(s_total_cols + 1, 101)):
-                from openpyxl.utils import get_column_letter as _gcl
                 s_col_letters.append(_gcl(c))
                 cell_val = ws_obj.cell(row=1, column=c).value
                 s_headers.append(str(cell_val) if cell_val is not None else "")
@@ -4252,29 +4463,20 @@ async def get_excel_compare(request: Request) -> JSONResponse:
             }
 
         try:
-            wb = _lwb(resolved, data_only=True, read_only=True)
+            wb = _lwb(_actual_path, data_only=True, read_only=True)
             sheet_names = wb.sheetnames
             snapshots = []
             for sn in sheet_names:
                 ws_obj = wb[sn]
                 snap = _read_ws(ws_obj)
-                snap["file"] = os.path.basename(resolved)
+                snap["file"] = basename
                 snap["sheets"] = sheet_names
                 snapshots.append(snap)
             wb.close()
-            return {
-                "file": os.path.basename(resolved),
-                "sheets": sheet_names,
-                "all_snapshots": snapshots,
-            }
+            return {"file": basename, "sheets": sheet_names, "all_snapshots": snapshots}
         except Exception as exc:
             logger.error("Compare snapshot 失败: %s — %s", resolved, exc)
-            return {
-                "file": os.path.basename(resolved),
-                "sheets": [],
-                "all_snapshots": [],
-                "error": str(exc),
-            }
+            return {"file": basename, "sheets": [], "all_snapshots": [], "error": str(exc)}
 
     snap_a, snap_b = await asyncio.gather(
         asyncio.to_thread(_load_snapshot, resolved_a),
@@ -4891,6 +5093,7 @@ async def export_session(session_id: str, request: Request) -> Response:
 
     Query params:
         format: md | txt | emx (默认 md)
+        include_workspace: true | false (默认 true，仅 emx 有效)
     """
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
@@ -4899,16 +5102,39 @@ async def export_session(session_id: str, request: Request) -> Response:
     if fmt not in ("md", "txt", "emx"):
         return JSONResponse(status_code=400, content={"detail": f"不支持的格式: {fmt}，可选: md, txt, emx"})
 
-    from excelmanus.session_export import export_markdown, export_text, export_emx
+    from excelmanus.session_export import export_markdown, export_text
 
-    # 获取消息
+    # ── EMX: 完整导出（v2.0），委托 SessionManager ──
+    if fmt == "emx":
+        include_ws = (request.query_params.get("include_workspace") or "true").lower() != "false"
+        try:
+            data = await _session_manager.export_full_session(
+                session_id, user_id=user_id, include_workspace=include_ws,
+            )
+        except Exception as exc:
+            if "不存在" in str(exc):
+                return _error_json_response(404, str(exc))
+            logger.warning("EMX 导出失败", exc_info=True)
+            return _error_json_response(500, "导出失败")
+
+        raw_title = data.get("session", {}).get("title", "session") or "session"
+        from urllib.parse import quote
+        ascii_title = "".join(c for c in raw_title if c.isascii() and (c.isalnum() or c in " _-")).strip()[:50] or "session"
+        utf8_title = "".join(c for c in raw_title if c.isalnum() or c in " _-").strip()[:50] or "session"
+        cd = f"attachment; filename=\"{ascii_title}.emx\"; filename*=UTF-8''{quote(utf8_title)}.emx"
+        return Response(
+            content=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+            media_type="application/json; charset=utf-8",
+            headers={"Content-Disposition": cd},
+        )
+
+    # ── MD / TXT: 轻量导出（与 v1 行为一致）──
     messages = await _session_manager.get_session_messages(
         session_id, limit=100000, offset=0, user_id=user_id,
     )
     if not messages:
         return _error_json_response(404, f"会话 '{session_id}' 不存在或无消息")
 
-    # 获取元数据
     ch = _session_manager.chat_history
     session_meta: dict[str, Any] = {"id": session_id, "title": "未命名会话", "created_at": "", "updated_at": ""}
     if ch is not None:
@@ -4916,19 +5142,16 @@ async def export_session(session_id: str, request: Request) -> Response:
         if meta:
             session_meta.update(meta)
 
-    # Excel 事件数据（md 和 emx 需要）
     excel_diffs: list[dict] = []
     excel_previews: list[dict] = []
     affected_files: list[str] = []
-    if ch is not None and fmt in ("md", "emx"):
+    if ch is not None and fmt == "md":
         excel_diffs = ch.load_excel_diffs(session_id)
         excel_previews = ch.load_excel_previews(session_id)
         affected_files = ch.load_affected_files(session_id)
 
     raw_title = session_meta.get("title", "session") or "session"
-    # ASCII fallback 文件名
     ascii_title = "".join(c for c in raw_title if c.isascii() and (c.isalnum() or c in " _-")).strip()[:50] or "session"
-    # RFC 5987 编码支持中文
     from urllib.parse import quote
     utf8_title = "".join(c for c in raw_title if c.isalnum() or c in " _-").strip()[:50] or "session"
 
@@ -4945,27 +5168,21 @@ async def export_session(session_id: str, request: Request) -> Response:
             media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": _cd("md")},
         )
-    elif fmt == "txt":
+    else:  # txt
         content = export_text(session_meta, messages)
         return Response(
             content=content.encode("utf-8"),
             media_type="text/plain; charset=utf-8",
             headers={"Content-Disposition": _cd("txt")},
         )
-    else:  # emx
-        data = export_emx(session_meta, messages, excel_diffs, excel_previews, affected_files)
-        return Response(
-            content=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-            media_type="application/json; charset=utf-8",
-            headers={"Content-Disposition": _cd("emx")},
-        )
 
 
 @_router.post("/api/v1/sessions/import")
 async def import_session(request: Request) -> JSONResponse:
-    """从 EMX (.emx) 文件导入会话。
+    """从 EMX (.emx) 文件导入会话（v2.0 完整恢复）。
 
-    接收 JSON body（EMX 格式），创建新会话并写入消息。
+    接收 JSON body（EMX 格式），创建新会话并恢复所有状态：
+    消息、SessionState checkpoint、持久记忆、工作区文件。
     """
     if _session_manager is None:
         return _error_json_response(503, "服务未初始化")
@@ -4984,49 +5201,15 @@ async def import_session(request: Request) -> JSONResponse:
     except EMXImportError as exc:
         return JSONResponse(status_code=400, content={"detail": str(exc)})
 
-    ch = _session_manager.chat_history
-    if ch is None:
-        return _error_json_response(503, "聊天记录存储未启用，无法导入")
-
-    import uuid as _uuid
-    new_session_id = str(_uuid.uuid4())
-    meta = parsed["session_meta"]
-    title = meta.get("title") or "导入的会话"
-
-    # 创建会话并写入消息 + Excel 事件数据
     try:
-        ch.create_session(new_session_id, title, user_id=user_id)
-        messages = parsed["messages"]
-        if messages:
-            ch.save_turn_messages(new_session_id, messages, turn_number=0)
-        # 恢复 Excel 事件数据
-        for diff in parsed.get("excel_diffs") or []:
-            try:
-                ch.save_excel_diff(
-                    new_session_id,
-                    diff.get("tool_call_id", ""),
-                    diff.get("file_path", ""),
-                    diff.get("sheet", ""),
-                    diff.get("affected_range", ""),
-                    diff.get("changes", []),
-                )
-            except Exception:
-                pass  # 非关键，静默跳过
-        for fp in parsed.get("affected_files") or []:
-            try:
-                ch.save_affected_file(new_session_id, fp)
-            except Exception:
-                pass
+        result = await _session_manager.import_full_session(parsed, user_id=user_id)
+    except RuntimeError as exc:
+        return _error_json_response(503, str(exc))
     except Exception:
         logger.warning("导入会话失败", exc_info=True)
         return _error_json_response(500, "导入失败")
 
-    return JSONResponse(content={
-        "status": "ok",
-        "session_id": new_session_id,
-        "title": title,
-        "message_count": len(parsed["messages"]),
-    })
+    return JSONResponse(content={"status": "ok", **result})
 
 
 @_router.get("/api/v1/sessions/{session_id}/status")
@@ -7170,15 +7353,38 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
         if hasattr(_config, field):
             object.__setattr__(_config, field, value)
 
-    # auth_enabled 变更需要重启服务才能生效
-    need_restart = "auth_enabled" in payload
+    # 需要重启才能生效的配置项集合
+    _RESTART_REQUIRED_KEYS = {
+        "auth_enabled",
+        "embedding_enabled",
+        "deploy_mode",
+        "mcp_shared_manager",
+    }
+    # 人类可读的重启原因映射
+    _RESTART_REASON_MAP: dict[str, str] = {
+        "auth_enabled": "认证配置已更新",
+        "embedding_enabled": "语义检索配置已更新",
+        "deploy_mode": "部署模式已更改",
+        "mcp_shared_manager": "MCP 管理器配置已更改",
+    }
+    restart_keys = payload.keys() & _RESTART_REQUIRED_KEYS
+    need_restart = len(restart_keys) > 0
+
+    # 构建重启原因描述
+    restart_reason = ""
+    if need_restart:
+        reasons = [_RESTART_REASON_MAP.get(k, k) for k in restart_keys]
+        restart_reason = "、".join(reasons)
 
     resp = JSONResponse(content={
         "status": "ok",
         "updated": list(payload.keys()),
         "restarting": need_restart,
+        "restart_reason": restart_reason,
     })
     if need_restart:
+        global _restart_reason
+        _restart_reason = restart_reason
         from starlette.background import BackgroundTask
         from excelmanus.restart import schedule_restart
         resp.background = BackgroundTask(schedule_restart)
@@ -7412,6 +7618,7 @@ async def health(request: Request) -> dict:
         return {
             "status": "draining",
             "version": excelmanus.__version__,
+            "restart_reason": _restart_reason,
         }
 
     if _is_external_safe_mode():
@@ -7481,15 +7688,563 @@ async def health(request: Request) -> dict:
     }
 
 
+@_router.get("/api/v1/server/public-ip")
+async def server_public_ip() -> JSONResponse:
+    """检测服务器的公网 IP 地址。"""
+    import httpx
+
+    _IP_SERVICES = [
+        "https://api.ipify.org",
+        "https://icanhazip.com",
+        "https://checkip.amazonaws.com",
+    ]
+    async with httpx.AsyncClient(timeout=5) as client:
+        for url in _IP_SERVICES:
+            try:
+                resp = await client.get(url)
+                if resp.status_code == 200:
+                    ip = resp.text.strip()
+                    if ip:
+                        return JSONResponse({"ip": ip})
+            except Exception:
+                continue
+    return JSONResponse({"ip": None, "error": "无法检测公网 IP"}, status_code=503)
+
+
 @_router.get("/api/v1/channels")
 async def channels_status() -> dict:
-    """查询渠道协同启动状态。"""
-    if _channel_launcher is None:
-        return {"enabled": False, "channels": []}
+    """查询渠道协同启动状态（含每个渠道的详细状态和配置信息）。"""
+    from excelmanus.channels.config_store import CHANNEL_CREDENTIAL_FIELDS
+    from excelmanus.channels.launcher import ChannelLauncher, _CHANNEL_BUILDERS
+
+    statuses: dict[str, str] = {}
+    if _channel_launcher is not None:
+        statuses = _channel_launcher.all_channel_status()
+
+    # 加载持久化配置
+    saved_configs: dict = {}
+    if _config_store is not None:
+        try:
+            from excelmanus.channels.config_store import ChannelConfigStore
+            ccs = ChannelConfigStore(_config_store)
+            for name, cfg in ccs.load_all().items():
+                # 脱敏：secret 字段仅返回是否已填
+                masked_creds: dict[str, str] = {}
+                fields = CHANNEL_CREDENTIAL_FIELDS.get(name, [])
+                secret_keys = {f["key"] for f in fields if f.get("secret")}
+                for k, v in cfg.credentials.items():
+                    if k in secret_keys and v:
+                        masked_creds[k] = (v[:4] + "••••••••" + v[-4:]) if len(v) > 12 else "••••••••"
+                    else:
+                        masked_creds[k] = v
+                saved_configs[name] = {
+                    "enabled": cfg.enabled,
+                    "credentials": masked_creds,
+                    "has_required": cfg.has_required_credentials(),
+                    "missing_fields": cfg.get_missing_fields(),
+                    "updated_at": cfg.updated_at,
+                }
+        except Exception:
+            logger.debug("加载渠道配置失败", exc_info=True)
+
+    # 构建每个渠道的完整信息
+    all_channels = sorted(set(list(_CHANNEL_BUILDERS.keys()) + list(saved_configs.keys())))
+    channel_details = []
+    for ch in all_channels:
+        dep_ok, dep_hint = ChannelLauncher.check_dependency(ch)
+        detail: dict = {
+            "name": ch,
+            "status": statuses.get(ch, "stopped"),
+            "supported": ch in _CHANNEL_BUILDERS,
+            "fields": CHANNEL_CREDENTIAL_FIELDS.get(ch, []),
+            "dep_installed": dep_ok,
+            "install_hint": dep_hint,
+        }
+        if ch in saved_configs:
+            detail.update(saved_configs[ch])
+        else:
+            detail["enabled"] = False
+            detail["credentials"] = {}
+            detail["has_required"] = False
+            detail["missing_fields"] = [
+                f["key"] for f in CHANNEL_CREDENTIAL_FIELDS.get(ch, []) if f.get("required")
+            ]
+        channel_details.append(detail)
+
+    # 读取 require_bind 状态（env var > config_kv > false）
+    env_rb = os.environ.get("EXCELMANUS_CHANNEL_REQUIRE_BIND", "").strip().lower()
+    if env_rb:
+        require_bind = env_rb in ("1", "true", "yes")
+        require_bind_source = "env"
+    elif _config_store is not None:
+        db_rb = _config_store.get("channel_require_bind", "")
+        require_bind = db_rb.strip().lower() in ("1", "true", "yes") if db_rb else False
+        require_bind_source = "config"
+    else:
+        require_bind = False
+        require_bind_source = "default"
+
+    # 读取速率限制配置（env > DB > defaults）
+    from excelmanus.channels.rate_limit import RateLimitConfig
+    rl_cfg = RateLimitConfig.from_store(_config_store)
+    rl_env_overrides = RateLimitConfig.env_overrides()
+
     return {
-        "enabled": True,
-        "channels": _channel_launcher.active_channels,
+        "enabled": _channel_launcher is not None,
+        "channels": _channel_launcher.active_channels if _channel_launcher is not None else [],
+        "details": channel_details,
+        "require_bind": require_bind,
+        "require_bind_source": require_bind_source,
+        "rate_limit": rl_cfg.to_dict(),
+        "rate_limit_env_overrides": rl_env_overrides,
     }
+
+
+@_router.put("/api/v1/channels/settings")
+async def update_channel_settings(request: Request) -> JSONResponse:
+    """更新渠道全局设置（管理员）。
+
+    请求体: {"require_bind": true}
+    """
+    if _config_store is None:
+        return _error_json_response(503, "数据库未初始化。")
+
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    body = await request.json()
+
+    if "require_bind" in body:
+        val = "true" if body["require_bind"] else "false"
+        _config_store.set("channel_require_bind", val)
+        logger.info("渠道强制绑定设置已更新: %s", val)
+
+    return JSONResponse({"status": "ok"})
+
+
+@_router.put("/api/v1/channels/rate-limit")
+async def update_rate_limit_settings(request: Request) -> JSONResponse:
+    """更新渠道速率限制配置（管理员）。
+
+    请求体: {"chat_per_minute": 5, "chat_per_hour": 30, ...}
+    仅传入需要修改的字段，未传入的保持不变。
+    环境变量锁定的字段不可通过此接口修改。
+    """
+    if _config_store is None:
+        return _error_json_response(503, "数据库未初始化。")
+
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    from excelmanus.channels.rate_limit import RateLimitConfig
+
+    body = await request.json()
+
+    # 加载当前持久化配置作为 base
+    current = RateLimitConfig.from_store(_config_store)
+    current_dict = current.to_dict()
+
+    # 环境变量锁定的字段不允许修改
+    env_overrides = RateLimitConfig.env_overrides()
+    locked_fields = [k for k in body if k in env_overrides]
+
+    # 合并：仅更新传入的非锁定字段
+    valid_fields = set(current_dict.keys())
+    updated_fields: list[str] = []
+    for key, value in body.items():
+        if key not in valid_fields:
+            continue
+        if key in env_overrides:
+            continue  # 被环境变量锁定，跳过
+        try:
+            if key in ("reject_cooldown_seconds", "auto_ban_duration_seconds"):
+                current_dict[key] = float(value)
+            else:
+                current_dict[key] = int(value)
+            updated_fields.append(key)
+        except (ValueError, TypeError):
+            return _error_json_response(400, f"字段 {key} 的值无效: {value}")
+
+    # 保存到 DB
+    new_cfg = RateLimitConfig.from_dict(current_dict)
+    RateLimitConfig.save_to_store(new_cfg, _config_store)
+    logger.info("速率限制配置已更新: %s", updated_fields)
+
+    # 动态更新运行中的渠道 Bot 的限流器
+    if _channel_launcher is not None:
+        _propagate_rate_limit_config(new_cfg)
+
+    result: dict = {"status": "ok", "updated_fields": updated_fields}
+    if locked_fields:
+        result["locked_fields"] = locked_fields
+        result["message"] = f"以下字段被环境变量锁定，未修改: {', '.join(locked_fields)}"
+    return JSONResponse(content=result)
+
+
+def _propagate_rate_limit_config(cfg: "RateLimitConfig") -> None:
+    """将新的速率限制配置传播到所有运行中的渠道 Bot。"""
+    if _channel_launcher is None:
+        return
+    for name, handler in _channel_launcher._handlers.items():
+        try:
+            if hasattr(handler, "_rate_limiter"):
+                handler._rate_limiter.config = cfg
+                logger.debug("渠道 %s 速率限制配置已热更新", name)
+        except Exception:
+            logger.debug("渠道 %s 速率限制配置热更新失败", name, exc_info=True)
+
+
+@_router.put("/api/v1/channels/{channel_name}/config")
+async def save_channel_config(channel_name: str, request: Request) -> JSONResponse:
+    """保存单个渠道的配置（凭证 + 启用状态）。
+
+    请求体: {"credentials": {"token": "xxx", ...}, "enabled": true}
+    """
+    if _config_store is None:
+        return _error_json_response(503, "数据库未初始化，无法保存渠道配置。")
+
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    from excelmanus.channels.config_store import (
+        CHANNEL_CREDENTIAL_FIELDS,
+        ChannelConfig,
+        ChannelConfigStore,
+    )
+
+    if channel_name not in CHANNEL_CREDENTIAL_FIELDS:
+        return _error_json_response(400, f"不支持的渠道: {channel_name}")
+
+    body = await request.json()
+    credentials = body.get("credentials", {})
+    enabled = body.get("enabled", False)
+
+    # 合并：如果前端传来 "••••••••" 占位符，保留原值
+    ccs = ChannelConfigStore(_config_store)
+    existing = ccs.get(channel_name)
+    if existing:
+        fields = CHANNEL_CREDENTIAL_FIELDS.get(channel_name, [])
+        secret_keys = {f["key"] for f in fields if f.get("secret")}
+        for k in secret_keys:
+            if "••••••••" in (credentials.get(k) or "") and existing.credentials.get(k):
+                credentials[k] = existing.credentials[k]
+
+    cfg = ChannelConfig(
+        name=channel_name,
+        enabled=bool(enabled),
+        credentials=credentials,
+    )
+    ccs.save(cfg)
+
+    logger.info("渠道 %s 配置已保存 (enabled=%s)", channel_name, enabled)
+    return JSONResponse(content={
+        "status": "ok",
+        "channel": channel_name,
+        "enabled": enabled,
+        "has_required": cfg.has_required_credentials(),
+        "missing_fields": cfg.get_missing_fields(),
+    })
+
+
+@_router.delete("/api/v1/channels/{channel_name}/config")
+async def delete_channel_config(channel_name: str, request: Request) -> JSONResponse:
+    """删除单个渠道的持久化配置。"""
+    if _config_store is None:
+        return _error_json_response(503, "数据库未初始化。")
+
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    from excelmanus.channels.config_store import ChannelConfigStore
+    ccs = ChannelConfigStore(_config_store)
+    deleted = ccs.delete(channel_name)
+    if not deleted:
+        return _error_json_response(404, f"渠道 {channel_name} 无保存的配置。")
+
+    logger.info("渠道 %s 配置已删除", channel_name)
+    return JSONResponse(content={"status": "ok", "channel": channel_name})
+
+
+@_router.post("/api/v1/channels/{channel_name}/start")
+async def start_channel(channel_name: str, request: Request) -> JSONResponse:
+    """热启动单个渠道 Bot。
+
+    使用已保存的持久化配置凭证启动，环境变量作为 fallback。
+    """
+    global _channel_launcher
+
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    # 确保 launcher 存在
+    if _channel_launcher is None:
+        from excelmanus.channels.launcher import ChannelLauncher
+        api_port = int(os.environ.get("EXCELMANUS_API_PORT", "8000"))
+        _bind_mgr = getattr(request.app.state, "bind_manager", None)
+        _svc_token = getattr(request.app.state, "service_token", None)
+        _evt_bridge = getattr(request.app.state, "event_bridge", None)
+        _channel_launcher = ChannelLauncher(
+            [],
+            api_port=api_port,
+            bind_manager=_bind_mgr,
+            service_token=_svc_token,
+            event_bridge=_evt_bridge,
+        )
+
+    # 从持久化配置加载凭证
+    credentials: dict[str, str] | None = None
+    if _config_store is not None:
+        try:
+            from excelmanus.channels.config_store import ChannelConfigStore
+            ccs = ChannelConfigStore(_config_store)
+            cfg = ccs.get(channel_name)
+            if cfg and cfg.credentials:
+                credentials = cfg.credentials
+                logger.debug(
+                    "渠道 %s 加载到持久化凭证，字段: %s",
+                    channel_name, list(credentials.keys()),
+                )
+            else:
+                logger.warning(
+                    "渠道 %s 无持久化凭证（cfg=%s），将依赖环境变量",
+                    channel_name, cfg is not None,
+                )
+        except Exception:
+            logger.debug("加载渠道 %s 持久化凭证失败", channel_name, exc_info=True)
+    else:
+        logger.warning("config_store 未初始化，渠道 %s 将仅使用环境变量凭证", channel_name)
+
+    ok, msg = await _channel_launcher.start_channel(channel_name, credentials=credentials)
+    if ok:
+        return JSONResponse(content={"status": "ok", "message": msg})
+    return _error_json_response(400, msg)
+
+
+@_router.post("/api/v1/channels/{channel_name}/stop")
+async def stop_channel(channel_name: str, request: Request) -> JSONResponse:
+    """热停止单个渠道 Bot。"""
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    if _channel_launcher is None:
+        return _error_json_response(400, f"渠道 {channel_name} 未启动")
+
+    ok, msg = await _channel_launcher.stop_channel(channel_name)
+    if ok:
+        return JSONResponse(content={"status": "ok", "message": msg})
+    return _error_json_response(400, msg)
+
+
+@_router.post("/api/v1/channels/{channel_name}/test")
+async def test_channel_config(channel_name: str, request: Request) -> JSONResponse:
+    """测试渠道凭证是否有效（不启动 Bot）。
+
+    请求体（可选）: {"credentials": {"token": "xxx"}}
+    如不传则使用已保存的配置。
+    """
+    if getattr(request.app.state, "auth_enabled", False):
+        from excelmanus.auth.dependencies import get_current_user_from_request
+        user = await get_current_user_from_request(request)
+        if user.role != "admin":
+            return _error_json_response(403, "需要管理员权限。")
+
+    from excelmanus.channels.config_store import CHANNEL_CREDENTIAL_FIELDS
+
+    if channel_name not in CHANNEL_CREDENTIAL_FIELDS:
+        return _error_json_response(400, f"不支持的渠道: {channel_name}")
+
+    # 获取凭证（请求体 > 持久化配置 > 环境变量）
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    credentials = body.get("credentials", {})
+
+    # 如果请求未传凭证，从持久化配置加载
+    if not credentials and _config_store is not None:
+        try:
+            from excelmanus.channels.config_store import ChannelConfigStore
+            ccs = ChannelConfigStore(_config_store)
+            cfg = ccs.get(channel_name)
+            if cfg:
+                credentials = cfg.credentials
+        except Exception:
+            pass
+
+    # 合并：如果前端传来 "••••••••" 占位符，从持久化配置还原原值
+    if credentials and _config_store is not None:
+        try:
+            from excelmanus.channels.config_store import ChannelConfigStore
+            ccs = ChannelConfigStore(_config_store)
+            existing = ccs.get(channel_name)
+            if existing:
+                fields = CHANNEL_CREDENTIAL_FIELDS.get(channel_name, [])
+                secret_keys = {f["key"] for f in fields if f.get("secret")}
+                for k in secret_keys:
+                    if "••••••••" in (credentials.get(k) or "") and existing.credentials.get(k):
+                        credentials[k] = existing.credentials[k]
+        except Exception:
+            pass
+
+    # 执行平台特定的凭证验证
+    if channel_name == "telegram":
+        token = credentials.get("token") or os.environ.get("EXCELMANUS_TG_TOKEN", "")
+        if not token or "••••••••" in token:
+            return _error_json_response(400, "未提供 Telegram Bot Token。")
+        try:
+            import httpx
+            async with httpx.AsyncClient(timeout=10, trust_env=True) as client:
+                resp = await client.get(f"https://api.telegram.org/bot{token}/getMe")
+                data = resp.json()
+                if data.get("ok"):
+                    bot_info = data.get("result", {})
+                    return JSONResponse(content={
+                        "status": "ok",
+                        "message": f"Token 有效！Bot: @{bot_info.get('username', '?')} ({bot_info.get('first_name', '')})",
+                        "bot_info": {
+                            "username": bot_info.get("username"),
+                            "name": bot_info.get("first_name"),
+                        },
+                    })
+                return _error_json_response(400, f"Token 无效: {data.get('description', '未知错误')}")
+        except Exception as e:
+            hint = "（提示：如需代理访问 Telegram，请设置 HTTPS_PROXY 环境变量）"
+            return _error_json_response(502, f"连接 Telegram API 失败: {e} {hint}")
+
+    elif channel_name == "qq":
+        app_id = credentials.get("app_id") or os.environ.get("EXCELMANUS_QQ_APPID", "")
+        secret = credentials.get("secret") or os.environ.get("EXCELMANUS_QQ_SECRET", "")
+        if not app_id or not secret or "••••••••" in secret:
+            return _error_json_response(400, "未提供 QQ Bot AppID 或 AppSecret。")
+        # QQ Bot 的鉴权较复杂（WebSocket），这里只做基础格式验证
+        try:
+            int(app_id)
+        except ValueError:
+            return _error_json_response(400, "AppID 格式无效（应为数字）。")
+        return JSONResponse(content={
+            "status": "ok",
+            "message": f"凭证格式验证通过 (AppID: {app_id})。完整验证需启动 Bot。",
+        })
+
+    elif channel_name == "feishu":
+        app_id = credentials.get("app_id") or os.environ.get("EXCELMANUS_FEISHU_APP_ID", "")
+        app_secret = credentials.get("app_secret") or os.environ.get("EXCELMANUS_FEISHU_APP_SECRET", "")
+        if not app_id or not app_secret or "••••••••" in (app_secret or ""):
+            return _error_json_response(400, "未提供飞书 App ID 或 App Secret。")
+        try:
+            import httpx
+            # 使用飞书 API 获取 tenant_access_token 验证凭证
+            async with httpx.AsyncClient(timeout=10) as client:
+                resp = await client.post(
+                    "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+                    json={"app_id": app_id, "app_secret": app_secret},
+                )
+                data = resp.json()
+                if data.get("code") == 0:
+                    return JSONResponse(content={
+                        "status": "ok",
+                        "message": f"凭证有效！已获取 tenant_access_token (AppID: {app_id})",
+                        "bot_info": {"app_id": app_id},
+                    })
+                return _error_json_response(
+                    400,
+                    f"凭证无效: {data.get('msg', '未知错误')} (code={data.get('code')})",
+                )
+        except Exception as e:
+            return _error_json_response(502, f"连接飞书 API 失败: {e}")
+
+    else:
+        return JSONResponse(content={
+            "status": "ok",
+            "message": f"渠道 {channel_name} 的凭证验证尚未实现，请直接启动测试。",
+        })
+
+
+# ── 飞书 Webhook 回调 ─────────────────────────────────────
+
+@_router.post("/api/v1/channels/feishu/webhook")
+async def feishu_webhook(request: Request) -> JSONResponse:
+    """飞书事件订阅回调端点。
+
+    支持：
+    1. URL 验证（challenge-response）
+    2. im.message.receive_v1 消息事件
+    3. 卡片按钮回调（card.action.trigger）
+    """
+    try:
+        body = await request.json()
+    except Exception:
+        return _error_json_response(400, "无效的请求体")
+
+    # 1) URL 验证（飞书事件订阅配置时的 challenge 验证）
+    if body.get("type") == "url_verification":
+        challenge = body.get("challenge", "")
+        return JSONResponse(content={"challenge": challenge})
+
+    # 2) 获取 launcher 中的飞书 adapter 和 handler
+    launcher = getattr(request.app.state, "channel_launcher", None)
+    if launcher is None:
+        return _error_json_response(503, "渠道启动器未初始化")
+
+    feishu_adapter = launcher._apps.get("feishu")
+    feishu_handler = launcher._handlers.get("feishu")
+    if feishu_adapter is None or feishu_handler is None:
+        return _error_json_response(503, "飞书渠道未启动，请先在设置中启动飞书渠道")
+
+    # 3) 处理事件（v2.0 事件格式）
+    header = body.get("header", {})
+    event_type = header.get("event_type", "")
+    event = body.get("event", {})
+
+    if event_type == "im.message.receive_v1":
+        from excelmanus.channels.feishu.handlers import handle_feishu_event
+        # 异步处理，不阻塞 webhook 响应
+        asyncio.create_task(
+            handle_feishu_event(feishu_adapter, feishu_handler, event),
+        )
+        return JSONResponse(content={"code": 0, "msg": "ok"})
+
+    # 4) 卡片按钮回调
+    if event_type == "card.action.trigger":
+        from excelmanus.channels.feishu.handlers import handle_feishu_card_action
+        asyncio.create_task(
+            handle_feishu_card_action(feishu_adapter, feishu_handler, event),
+        )
+        return JSONResponse(content={"code": 0, "msg": "ok"})
+
+    # 5) v1.0 事件格式兼容（部分老版本飞书使用）
+    if body.get("event") and not header:
+        v1_event = body.get("event", {})
+        v1_type = v1_event.get("type", "")
+        if v1_type == "message":
+            from excelmanus.channels.feishu.handlers import handle_feishu_event
+            asyncio.create_task(
+                handle_feishu_event(feishu_adapter, feishu_handler, v1_event),
+            )
+            return JSONResponse(content={"code": 0, "msg": "ok"})
+
+    logger.debug("飞书未处理的事件类型: %s", event_type or body.get("type", "unknown"))
+    return JSONResponse(content={"code": 0, "msg": "ok"})
 
 
 @_router.get("/api/v1/settings/session-isolation")
@@ -7660,14 +8415,14 @@ def main() -> None:
 
     支持 --channels 参数或 EXCELMANUS_CHANNELS 环境变量来协同启动渠道 Bot::
 
-        # 启动 API + Telegram Bot
-        python -m excelmanus.api --channels telegram
+        # 启动 API + QQ Bot
+        python -m excelmanus.api --channels qq
 
         # 多渠道
-        python -m excelmanus.api --channels telegram,qq
+        python -m excelmanus.api --channels qq,telegram
 
         # 通过环境变量（适合 Docker / systemd）
-        EXCELMANUS_CHANNELS=telegram python -m excelmanus.api
+        EXCELMANUS_CHANNELS=qq python -m excelmanus.api
     """
     import argparse
 
@@ -7679,7 +8434,7 @@ def main() -> None:
         "--channels",
         type=str,
         default="",
-        help="要协同启动的渠道 Bot，逗号分隔（如 telegram,qq）",
+        help="要协同启动的渠道 Bot，逗号分隔（如 qq,telegram）",
     )
     parser.add_argument("--host", type=str, default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)

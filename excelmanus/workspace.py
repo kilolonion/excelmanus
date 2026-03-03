@@ -526,7 +526,16 @@ class IsolatedWorkspace:
         路径会指向集中数据目录（``~/.excelmanus/data``）。
         """
         if auth_enabled and user_id:
-            if data_root:
+            # 渠道匿名用户 → channel_anonymous/<channel>/<platform_id>/
+            if user_id.startswith("channel_anon:"):
+                parts = user_id.split(":", 2)  # ["channel_anon", channel, pid]
+                if len(parts) == 3:
+                    anon_dir = os.path.join("channel_anonymous", parts[1], parts[2])
+                else:
+                    anon_dir = os.path.join("channel_anonymous", "_unknown")
+                base = data_root if data_root else global_workspace_root
+                root = os.path.join(base, anon_dir)
+            elif data_root:
                 root = os.path.join(data_root, "users", user_id)
             else:
                 root = os.path.join(global_workspace_root, "users", user_id)

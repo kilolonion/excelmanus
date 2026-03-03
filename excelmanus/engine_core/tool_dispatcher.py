@@ -981,6 +981,19 @@ class ToolDispatcher:
                 ),
             )
 
+        # /tools 开启时额外发射简要工具调用通知
+        if getattr(e, "_show_tool_calls", False):
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.TOOL_CALL_NOTICE,
+                    tool_call_id=tool_call_id,
+                    tool_name=tool_name,
+                    arguments=arguments,
+                    iteration=iteration,
+                ),
+            )
+
         pending_approval = False
         approval_id: str | None = None
         audit_record = None
@@ -1584,13 +1597,15 @@ class ToolDispatcher:
                     except Exception:
                         pass
                 elif e.get_tool_write_effect(tool_name) == "workspace_write":
-                    for _pk in ("file_path", "output_path", "path", "target_path"):
+                    for _pk in ("file_path", "output_path", "path", "target_path",
+                                "source", "destination"):
                         _pv = (arguments.get(_pk) or "").strip()
                         if _pv:
                             _state.record_affected_file(_pv)
                     # 通用写入工具日志
                     _first_path = next(
-                        ((arguments.get(k) or "").strip() for k in ("file_path", "output_path", "path", "target_path")
+                        ((arguments.get(k) or "").strip() for k in ("file_path", "output_path", "path", "target_path",
+                                                                     "source", "destination")
                          if (arguments.get(k) or "").strip()),
                         "",
                     )
@@ -1627,13 +1642,25 @@ class ToolDispatcher:
             _freg = e.file_registry
             if _freg is not None:
                 try:
+                    # rename_file 特殊处理：原子迁移路径，保留 file_id / provenance
+                    if tool_name == "rename_file":
+                        _src = (arguments.get("source") or "").strip()
+                        _dst = (arguments.get("destination") or "").strip()
+                        if _src and _dst:
+                            _freg.rename_entry(
+                                _src, _dst,
+                                session_id=getattr(e, "session_id", None),
+                                turn=e.state.session_turn,
+                            )
+
                     _write_paths: list[str] = []
                     if tool_name in self._EXCEL_WRITE_TOOLS:
                         _wp = (arguments.get("file_path") or "").strip()
                         if _wp:
                             _write_paths.append(_wp)
                     elif e.get_tool_write_effect(tool_name) == "workspace_write":
-                        for _pk2 in ("file_path", "output_path", "path", "target_path"):
+                        for _pk2 in ("file_path", "output_path", "path", "target_path",
+                                     "source", "destination"):
                             _pv2 = (arguments.get(_pk2) or "").strip()
                             if _pv2:
                                 _write_paths.append(_pv2)

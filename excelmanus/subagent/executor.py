@@ -19,6 +19,7 @@ from excelmanus.engine_core.workspace_probe import (
     diff_workspace_mtime_paths,
     has_workspace_mtime_changes,
 )
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.providers import create_client
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
@@ -184,6 +185,7 @@ class SubagentExecutor:
                 )
                 if config.max_tokens is not None:
                     _create_kwargs["max_tokens"] = config.max_tokens
+                _create_kwargs["extra_body"] = _AUX_NO_THINKING_EXTRA_BODY
                 response = await client.chat.completions.create(**_create_kwargs)
                 _usage = getattr(response, "usage", None)
                 if _usage is not None:

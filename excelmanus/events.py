@@ -50,6 +50,8 @@ class EventType(Enum):
     FAILURE_GUIDANCE = "failure_guidance"  # 结构化失败引导卡片
     CREDENTIAL_REFRESHED = "credential_refreshed"  # OAuth token 自动刷新成功
     CREDENTIAL_EXPIRED = "credential_expired"  # OAuth token 过期且刷新失败
+    TOOL_CALL_NOTICE = "tool_call_notice"  # /tools 开启时的简要工具调用通知
+    REASONING_NOTICE = "reasoning_notice"  # /reasoning 开启时的推理内容通知
 
 
 @dataclass

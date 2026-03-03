@@ -1228,3 +1228,144 @@ class TestToolDispatcherWriteEvent:
             mock_record.assert_called_once_with(
                 entry.id, "tool_write", tool_name="write_excel", turn=1,
             )
+
+
+# ── rename_path / rename_entry 测试 ──────────────────────
+
+
+class TestFileRegistryStoreRenamePath:
+    """FileRegistryStore.rename_path 原子更新 canonical_path。"""
+
+    def test_rename_path_basic(self, store: FileRegistryStore):
+        store.upsert_file({
+            "id": "fr1",
+            "workspace": "/ws",
+            "canonical_path": "old/data.xlsx",
+            "original_name": "data.xlsx",
+            "origin": "uploaded",
+        })
+        assert store.rename_path("/ws", "old/data.xlsx", "new/data.xlsx") is True
+
+        # 旧路径查不到
+        assert store.get_by_path("/ws", "old/data.xlsx") is None
+        # 新路径能查到，且 ID 不变
+        got = store.get_by_path("/ws", "new/data.xlsx")
+        assert got is not None
+        assert got["id"] == "fr1"
+        assert got["original_name"] == "data.xlsx"
+
+    def test_rename_path_nonexistent(self, store: FileRegistryStore):
+        assert store.rename_path("/ws", "no/such.xlsx", "dst.xlsx") is False
+
+    def test_rename_path_deleted_entry_skipped(self, store: FileRegistryStore):
+        store.upsert_file({
+            "id": "frd",
+            "workspace": "/ws",
+            "canonical_path": "del.xlsx",
+            "original_name": "del.xlsx",
+            "origin": "scan",
+        })
+        store.soft_delete("/ws", "del.xlsx")
+        assert store.rename_path("/ws", "del.xlsx", "new.xlsx") is False
+
+
+class TestFileRegistryRenameEntry:
+    """FileRegistry.rename_entry 保留 file_id / provenance。"""
+
+    def test_rename_preserves_id(self, registry: FileRegistry, workspace: Path):
+        (workspace / "src.txt").write_text("hello", encoding="utf-8")
+        entry = registry.register_upload(
+            canonical_path="src.txt",
+            original_name="src.txt",
+            size_bytes=5,
+        )
+        original_id = entry.id
+
+        # 物理移动
+        (workspace / "subdir").mkdir(exist_ok=True)
+        (workspace / "src.txt").rename(workspace / "subdir" / "src.txt")
+
+        ok = registry.rename_entry("src.txt", "subdir/src.txt", session_id="s1", turn=2)
+        assert ok is True
+
+        # 新路径查到同一 ID
+        found = registry.get_by_path("subdir/src.txt")
+        assert found is not None
+        assert found.id == original_id
+
+        # 旧路径查不到
+        assert registry.get_by_path("src.txt") is None
+
+    def test_rename_old_path_alias(self, registry: FileRegistry, workspace: Path):
+        """旧路径变为 previous_path 别名，仍可通过 resolve_for_tool 解析。"""
+        (workspace / "a.csv").write_text("x", encoding="utf-8")
+        entry = registry.register_from_scan(
+            canonical_path="a.csv", original_name="a.csv",
+        )
+        (workspace / "b.csv").write_text("x", encoding="utf-8")
+        (workspace / "a.csv").unlink()
+
+        registry.rename_entry("a.csv", "b.csv")
+
+        # 旧路径通过别名解析到新路径
+        resolved = registry.resolve_for_tool("a.csv")
+        assert resolved == "b.csv"
+
+    def test_rename_records_event(self, registry: FileRegistry, workspace: Path):
+        (workspace / "ev.txt").write_text("data", encoding="utf-8")
+        entry = registry.register_upload(
+            canonical_path="ev.txt", original_name="ev.txt",
+        )
+        (workspace / "ev2.txt").write_text("data", encoding="utf-8")
+        (workspace / "ev.txt").unlink()
+
+        registry.rename_entry("ev.txt", "ev2.txt", session_id="s1", turn=3)
+
+        events = registry.get_events(entry.id)
+        rename_events = [e for e in events if e.event_type == "renamed"]
+        assert len(rename_events) == 1
+        assert rename_events[0].details["old_path"] == "ev.txt"
+        assert rename_events[0].details["new_path"] == "ev2.txt"
+
+    def test_rename_nonexistent_returns_false(self, registry: FileRegistry):
+        assert registry.rename_entry("no_such.txt", "dst.txt") is False
+
+    def test_rename_updates_file_type(self, registry: FileRegistry, workspace: Path):
+        """文件扩展名变化时更新 file_type。"""
+        (workspace / "data.txt").write_text("a,b\n1,2", encoding="utf-8")
+        registry.register_from_scan(
+            canonical_path="data.txt", original_name="data.txt",
+        )
+        (workspace / "data.csv").write_text("a,b\n1,2", encoding="utf-8")
+        (workspace / "data.txt").unlink()
+
+        registry.rename_entry("data.txt", "data.csv")
+        found = registry.get_by_path("data.csv")
+        assert found is not None
+        assert found.file_type == "csv"
+
+    def test_scan_after_rename_no_duplicate(self, registry: FileRegistry, workspace: Path):
+        """rename_entry 后 scan_workspace 不会产生重复条目。"""
+        (workspace / "orig.txt").write_text("content", encoding="utf-8")
+        entry = registry.register_from_scan(
+            canonical_path="orig.txt", original_name="orig.txt",
+            size_bytes=7, mtime_ns=(workspace / "orig.txt").stat().st_mtime_ns,
+        )
+        original_id = entry.id
+
+        # 物理移动
+        (workspace / "moved.txt").write_text("content", encoding="utf-8")
+        (workspace / "orig.txt").unlink()
+
+        registry.rename_entry("orig.txt", "moved.txt")
+
+        # 全量扫描
+        result = registry.scan_workspace()
+        # moved.txt 应命中缓存或更新，不应新增
+        all_entries = registry.list_all()
+        paths = [e.canonical_path for e in all_entries]
+        assert paths.count("moved.txt") == 1
+        # ID 仍为原始 ID
+        moved = registry.get_by_path("moved.txt")
+        assert moved is not None
+        assert moved.id == original_id

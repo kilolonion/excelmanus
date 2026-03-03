@@ -234,6 +234,22 @@ class FileRegistryStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def rename_path(
+        self,
+        workspace: str,
+        old_path: str,
+        new_path: str,
+    ) -> bool:
+        """原子更新文件的 canonical_path，保留 file_id 和所有溯源信息。"""
+        now = _now_iso()
+        cur = self._conn.execute(
+            "UPDATE file_registry SET canonical_path = ?, original_name = ?, updated_at = ?"
+            " WHERE workspace = ? AND canonical_path = ? AND deleted_at IS NULL",
+            (new_path, new_path.rsplit("/", 1)[-1] if "/" in new_path else new_path, now, workspace, old_path),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     # ── file_registry_aliases CRUD ───────────────────────────
 
     def add_alias(

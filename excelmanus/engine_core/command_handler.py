@@ -207,6 +207,12 @@ class CommandHandler:
         if command == "/playbook":
             return await self._handle_playbook_command(parts)
 
+        if command == "/tools":
+            return self._handle_tools_command(parts, on_event=on_event)
+
+        if command == "/reasoning":
+            return self._handle_reasoning_command(parts, on_event=on_event)
+
         return self._handle_undo_command(parts)
 
     async def _handle_compact_command(self, parts: list[str]) -> str:
@@ -928,3 +934,89 @@ class CommandHandler:
             "  /playbook delete <id> — 删除\n"
             "  /playbook reset       — 清空"
         )
+
+    # ── /tools 命令处理 ──────────────────────────────────
+
+    def _handle_tools_command(
+        self,
+        parts: list[str],
+        *,
+        on_event: "EventCallback | None" = None,
+    ) -> str:
+        """处理 /tools 命令：控制工具调用详情展示。
+
+        用法：
+        - /tools          — 切换（toggle）
+        - /tools on       — 开启
+        - /tools off      — 关闭
+        - /tools status   — 查看状态
+        """
+        e = self._engine
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
+        too_many_args = len(parts) > 2
+
+        if too_many_args:
+            return "无效参数。用法：/tools [on|off|status]。"
+
+        if action == "status":
+            status = "开启" if e._show_tool_calls else "关闭"
+            return f"工具调用详情展示：{status}。"
+
+        if action == "on":
+            e._show_tool_calls = True
+            self._emit_mode_changed(on_event, "show_tool_calls", True)
+            return "已开启工具调用详情展示。每次工具调用将显示名称和参数摘要。"
+
+        if action == "off":
+            e._show_tool_calls = False
+            self._emit_mode_changed(on_event, "show_tool_calls", False)
+            return "已关闭工具调用详情展示。"
+
+        # 默认 toggle
+        e._show_tool_calls = not e._show_tool_calls
+        self._emit_mode_changed(on_event, "show_tool_calls", e._show_tool_calls)
+        status = "开启" if e._show_tool_calls else "关闭"
+        return f"工具调用详情展示已{status}。"
+
+    # ── /reasoning 命令处理 ──────────────────────────────────
+
+    def _handle_reasoning_command(
+        self,
+        parts: list[str],
+        *,
+        on_event: "EventCallback | None" = None,
+    ) -> str:
+        """处理 /reasoning 命令：控制模型推理过程展示。
+
+        用法：
+        - /reasoning          — 切换（toggle）
+        - /reasoning on       — 开启
+        - /reasoning off      — 关闭
+        - /reasoning status   — 查看状态
+        """
+        e = self._engine
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
+        too_many_args = len(parts) > 2
+
+        if too_many_args:
+            return "无效参数。用法：/reasoning [on|off|status]。"
+
+        if action == "status":
+            status = "开启" if e._show_reasoning else "关闭"
+            return f"模型推理过程展示：{status}。"
+
+        if action == "on":
+            e._show_reasoning = True
+            self._emit_mode_changed(on_event, "show_reasoning", True)
+            return "已开启模型推理过程展示。每次模型思考将显示推理内容。"
+
+        if action == "off":
+            e._show_reasoning = False
+            self._emit_mode_changed(on_event, "show_reasoning", False)
+            return "已关闭模型推理过程展示。"
+
+        # 默认 toggle
+        e._show_reasoning = not e._show_reasoning
+        self._emit_mode_changed(on_event, "show_reasoning", e._show_reasoning)
+        status = "开启" if e._show_reasoning else "关闭"
+        return f"模型推理过程展示已{status}。"

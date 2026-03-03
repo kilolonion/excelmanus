@@ -340,6 +340,141 @@ class TestRunCodeValidation:
         assert "recovery_hint" not in result
 
 
+class TestDetectTruncatedCode:
+    """_detect_truncated_code 截断检测测试。"""
+
+    def test_clean_code_no_warnings(self) -> None:
+        warnings = code_tools._detect_truncated_code("print('hello')\nx = 1 + 2\n")
+        assert warnings == []
+
+    def test_ellipsis_in_function_stub_is_ok(self) -> None:
+        code = "def foo():\n    ...\n\nprint('ok')\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert warnings == []
+
+    def test_ellipsis_in_class_stub_is_ok(self) -> None:
+        code = "class Foo:\n    ...\n\nprint('ok')\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert warnings == []
+
+    def test_ellipsis_in_async_def_stub_is_ok(self) -> None:
+        code = "async def bar():\n    ...\n\nprint('ok')\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert warnings == []
+
+    def test_suspicious_ellipsis_in_try_block(self) -> None:
+        code = "try:\n    import pandas\n    ...\nexcept:\n    ...\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert len(warnings) >= 1
+        assert "Ellipsis" in warnings[0]
+
+    def test_suspicious_ellipsis_standalone(self) -> None:
+        code = "x = 1\n...\nprint('hi')\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert len(warnings) >= 1
+        assert "占位符" in warnings[0]
+
+    def test_code_ending_with_open_paren(self) -> None:
+        code = "print(\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert any("截断" in w for w in warnings)
+
+    def test_code_ending_with_comma(self) -> None:
+        code = "x = [1, 2,\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert any("截断" in w for w in warnings)
+
+    def test_code_ending_with_backslash(self) -> None:
+        code = "x = 1 + \\\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert any("截断" in w for w in warnings)
+
+    def test_normal_ending_no_warning(self) -> None:
+        code = "print('done')\n"
+        warnings = code_tools._detect_truncated_code(code)
+        assert not any("截断" in w for w in warnings)
+
+
+class TestTruncationWarningInRunCode:
+    """run_code 中截断警告注入测试。"""
+
+    def test_ellipsis_code_gets_truncation_warning(self, workspace: Path) -> None:
+        code = "x = 1\n...\n"
+        result = json.loads(
+            code_tools.run_code(
+                code=code,
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert "truncation_warning" in result
+        assert "Ellipsis" in result["truncation_warning"]
+
+    def test_clean_code_no_truncation_warning(self, workspace: Path) -> None:
+        result = json.loads(
+            code_tools.run_code(
+                code="print('ok')",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert "truncation_warning" not in result
+
+
+class TestEmptyOutputDiagnostic:
+    """空输出诊断测试。"""
+
+    def test_success_with_output_no_diagnostic(self, workspace: Path) -> None:
+        result = json.loads(
+            code_tools.run_code(
+                code="print('ok')",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert "empty_output_diagnostic" not in result
+
+    def test_success_no_output_gets_diagnostic(self, workspace: Path) -> None:
+        # Code that succeeds but produces no output
+        result = json.loads(
+            code_tools.run_code(
+                code="x = 1 + 2",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert "empty_output_diagnostic" in result
+        assert "exit 0" in result["empty_output_diagnostic"]
+
+    def test_failed_no_output_gets_diagnostic(self, workspace: Path) -> None:
+        # Code that fails silently (try/except swallows error, no output)
+        code = "import sys\ntry:\n    raise ValueError('x')\nexcept:\n    sys.exit(1)\n"
+        result = json.loads(
+            code_tools.run_code(
+                code=code,
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "failed"
+        assert "empty_output_diagnostic" in result
+        assert "失败" in result["empty_output_diagnostic"]
+
+    def test_failed_with_stderr_no_diagnostic(self, workspace: Path) -> None:
+        # Code that fails with visible error output
+        result = json.loads(
+            code_tools.run_code(
+                code="raise ValueError('visible error')",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "failed"
+        assert "empty_output_diagnostic" not in result
+
+
 class TestGetTools:
     def test_tool_names(self) -> None:
         names = {tool.name for tool in code_tools.get_tools()}
