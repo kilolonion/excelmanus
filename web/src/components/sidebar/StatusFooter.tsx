@@ -11,6 +11,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
+import { useConnectionStore } from "@/stores/connection-store";
 import { logout, fetchMyWorkspaceUsage, type WorkspaceUsage } from "@/lib/auth-api";
 import {
   Tooltip,
@@ -36,6 +37,8 @@ interface HealthData {
   tools: string[];
   skillpacks: string[];
   active_sessions: number;
+  channels?: string[];
+  restart_reason?: string;
 }
 
 export function StatusFooter() {
@@ -61,15 +64,32 @@ export function StatusFooter() {
     return () => document.removeEventListener("pointerdown", handler);
   }, [isMobile, openTooltipId]);
 
+  const failCountRef = useRef(0);
+  const connectionStore = useConnectionStore;
+
   const poll = useCallback(async () => {
     try {
       const data = await apiGet<HealthData>("/health");
       setHealth(data);
       setConnected(true);
+      failCountRef.current = 0;
+
+      // 检测 draining 状态 → 触发全局重启等待
+      if (data.status === "draining") {
+        connectionStore.getState().triggerRestart(data.restart_reason || "服务正在重启");
+      } else if (connectionStore.getState().status === "disconnected") {
+        // 后端恢复在线 → 更新全局状态
+        connectionStore.getState().setConnected();
+      }
     } catch {
       setConnected(false);
+      failCountRef.current += 1;
+      // 连续 2 次失败且当前非 restarting → 触发全局断连
+      if (failCountRef.current >= 2 && connectionStore.getState().status === "connected") {
+        connectionStore.getState().setDisconnected();
+      }
     }
-  }, []);
+  }, [connectionStore]);
 
   useEffect(() => {
     poll();
@@ -154,6 +174,9 @@ export function StatusFooter() {
                 {health && (
                   <span className="text-muted-foreground/50 hidden sm:inline">
                     · {health.tools.length}T · {health.skillpacks.length}S
+                    {health.channels && health.channels.length > 0 && (
+                      <> · {health.channels.length}Ch</>
+                    )}
                   </span>
                 )}
               </span>
@@ -164,6 +187,9 @@ export function StatusFooter() {
                 <>
                   <br />模型: {health.model}
                   <br />工具: {health.tools.length} · 技能包: {health.skillpacks.length} · 会话: {health.active_sessions}
+                  {health.channels && health.channels.length > 0 && (
+                    <><br />渠道: {health.channels.join(", ")}</>
+                  )}
                 </>
               )}
             </TooltipContent>

@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useServerRestart } from "@/hooks/use-server-restart";
-import { ServerRestartOverlay } from "@/components/ServerRestartOverlay";
+import { useConnectionStore } from "@/stores/connection-store";
 import {
   Loader2,
   RefreshCw,
@@ -117,7 +116,7 @@ export function VersionTab() {
   const [deployOutput, setDeployOutput] = useState<string | null>(null);
   const [currentGitCommit, setCurrentGitCommit] = useState<string | null>(null);
   const [actionMsg, setActionMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
-  const { restarting, restartTimeout, triggerRestart } = useServerRestart();
+  const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
   const showMsg = (type: "ok" | "err", text: string) => {
     setActionMsg({ type, text });
@@ -236,7 +235,7 @@ export function VersionTab() {
             if (result.needs_restart) {
               showMsg("ok", `更新成功: ${result.old_version} → ${result.new_version}，正在重启服务…`);
               setUpdating(false);
-              triggerRestart();
+              triggerRestart("版本更新已完成，正在重启服务");
               return;
             }
             showMsg("ok", `更新成功: ${result.old_version} → ${result.new_version}`);
@@ -342,16 +341,6 @@ export function VersionTab() {
       setDeploying(false);
     }
   };
-
-  if (restarting) {
-    return (
-      <ServerRestartOverlay
-        restarting={restarting}
-        restartTimeout={restartTimeout}
-        reason="版本更新已完成，正在等待后端重启就绪，请勿关闭页面"
-      />
-    );
-  }
 
   if (loading) {
     return (

@@ -38,6 +38,7 @@ import { uuid } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
+import { useExcelStore } from "@/stores/excel-store";
 import { listItemVariants } from "@/lib/sidebar-motion";
 import { useIsMobile } from "@/hooks/use-mobile";
 
@@ -97,6 +98,7 @@ export function SessionList() {
   const [sessionView, setSessionView] = useState<SessionView>("all");
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  const [importToast, setImportToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -133,9 +135,9 @@ export function SessionList() {
     setEditingSessionId(null);
   }, []);
 
-  const handleExport = useCallback(async (sessionId: string, format: ExportFormat) => {
+  const handleExport = useCallback(async (sessionId: string, format: ExportFormat, opts?: { includeWorkspace?: boolean }) => {
     try {
-      await exportSession(sessionId, format);
+      await exportSession(sessionId, format, opts);
     } catch (err) {
       console.error("导出失败:", err);
     }
@@ -163,14 +165,35 @@ export function SessionList() {
       });
       setActiveSession(result.session_id);
       switchSession(result.session_id);
+
+      // 刷新工作区文件列表（恢复的文件需要显示在文件面板）
+      if (result.files_restored && result.files_restored > 0) {
+        useExcelStore.getState().refreshWorkspaceFiles();
+      }
+
+      // 构建恢复详情 toast
+      const parts: string[] = [`${result.message_count} 条消息`];
+      if (result.state_restored) parts.push("会话状态");
+      if (result.memories_restored && result.memories_restored > 0)
+        parts.push(`${result.memories_restored} 条记忆`);
+      if (result.files_restored && result.files_restored > 0)
+        parts.push(`${result.files_restored} 个文件`);
+      setImportToast({ msg: `会话已导入：${parts.join("、")}`, type: "success" });
     } catch (err) {
       console.error("导入失败:", err);
-      alert(err instanceof Error ? err.message : "导入失败");
+      setImportToast({ msg: err instanceof Error ? err.message : "导入失败", type: "error" });
     } finally {
       // 重置 input 以允许重复导入同一文件
       if (importInputRef.current) importInputRef.current.value = "";
     }
   }, [addSession, setActiveSession, switchSession]);
+
+  // 自动消失 importToast
+  useEffect(() => {
+    if (!importToast) return;
+    const t = setTimeout(() => setImportToast(null), 5000);
+    return () => clearTimeout(t);
+  }, [importToast]);
 
   const activeCount = useMemo(
     () =>
@@ -329,6 +352,22 @@ export function SessionList() {
           新建对话
         </Button>
       </div>
+
+      {/* Import toast */}
+      {importToast && (
+        <div
+          className={`mx-1 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-300 ${
+            importToast.type === "success"
+              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+              : "bg-destructive/10 text-destructive border border-destructive/20"
+          }`}
+        >
+          <span className="flex-1 min-w-0 truncate">{importToast.msg}</span>
+          <button className="shrink-0 hover:opacity-70" onClick={() => setImportToast(null)}>
+            <X className="h-3 w-3" />
+          </button>
+        </div>
+      )}
 
       {/* Search input + import icon */}
       <div className="px-1 relative">
@@ -648,7 +687,16 @@ export function SessionList() {
                               }}
                             >
                               <FileJson className="h-4 w-4" />
-                              EMX 归档 (.emx)
+                              EMX 完整归档 (.emx)
+                            </DropdownMenuItem>
+                            <DropdownMenuItem
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                void handleExport(session.id, "emx", { includeWorkspace: false });
+                              }}
+                            >
+                              <FileJson className="h-4 w-4" />
+                              EMX 轻量 (.emx)
                             </DropdownMenuItem>
                           </DropdownMenuSubContent>
                         </DropdownMenuSub>

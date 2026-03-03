@@ -18,6 +18,8 @@ interface OnboardingState {
   isGuideLocked: boolean;
   /** Runtime-only: incremented by resetToPhase so CoachMarks can detect external resets. */
   _resetGeneration: number;
+  /** Runtime-only: true once the store has re-hydrated with the correct per-user key. */
+  _userSynced: boolean;
 
   completeWizard: () => void;
   completeCoachMarks: () => void;
@@ -64,6 +66,7 @@ export const useOnboardingStore = create<OnboardingState>()(
       backendConfigured: null,
       isGuideLocked: false,
       _resetGeneration: 0,
+      _userSynced: false,
 
       completeWizard: () => set({ wizardCompleted: true }),
       completeCoachMarks: () =>
@@ -155,19 +158,51 @@ export const useOnboardingStore = create<OnboardingState>()(
       storage: _perUserStorage,
       partialize: (state) => {
         // Exclude runtime-only fields from localStorage persistence
-        const { backendConfigured: _, isGuideLocked: _2, _resetGeneration: _3, ...persisted } = state;
+        const { backendConfigured: _, isGuideLocked: _2, _resetGeneration: _3, _userSynced: _4, ...persisted } = state;
         return persisted;
       },
     }
   )
 );
 
-// Re-hydrate when user identity changes (login / logout / switch account)
+// ── Auth-aware rehydration ──
+// On first load the store may hydrate with the "anonymous" key before auth
+// resolves. Once the real user id is known we re-hydrate from the correct
+// per-user key and flip _userSynced so the UI can safely render.
 let _prevUserId: string | undefined;
-useAuthStore.subscribe((state) => {
-  const uid = state.user?.id ?? "anonymous";
-  if (_prevUserId !== undefined && _prevUserId !== uid) {
-    useOnboardingStore.persist.rehydrate();
-  }
+let _initialSyncDone = false;
+
+function _onAuthResolved(): void {
+  if (_initialSyncDone) return;
+  _initialSyncDone = true;
+  const uid = useAuthStore.getState().user?.id ?? "anonymous";
   _prevUserId = uid;
-});
+  if (uid !== "anonymous") {
+    // Store may have hydrated with the "anonymous" key — re-hydrate with the
+    // real user key so we read the correct persisted state.
+    Promise.resolve(useOnboardingStore.persist.rehydrate()).then(() => {
+      useOnboardingStore.setState({ _userSynced: true });
+    });
+  } else {
+    useOnboardingStore.setState({ _userSynced: true });
+  }
+}
+
+// Trigger initial sync once auth store finishes hydrating.
+// Guard: persist APIs are unavailable during SSR (no localStorage).
+if (typeof window !== "undefined") {
+  if (useAuthStore.persist.hasHydrated()) {
+    _onAuthResolved();
+  } else {
+    useAuthStore.persist.onFinishHydration(() => _onAuthResolved());
+  }
+
+  // Re-hydrate when user identity changes at runtime (login / logout / switch).
+  useAuthStore.subscribe((state) => {
+    const uid = state.user?.id ?? "anonymous";
+    if (_prevUserId !== undefined && _prevUserId !== uid) {
+      _prevUserId = uid;
+      useOnboardingStore.persist.rehydrate();
+    }
+  });
+}

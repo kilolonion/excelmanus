@@ -1059,6 +1059,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
   const configBlocked = configReady !== true || !!configError;
   const hasUploadingFiles = files.some((af) => af.status === "uploading");
+  const hasFailedFiles = files.some((af) => af.status === "failed");
 
   const getConfigBlockedHint = useCallback(() => {
     if (configError) return "模型服务异常，请先在设置中修复后再发送";
@@ -1074,6 +1075,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     }
     if (hasUploadingFiles) {
       nudgeInput("文件仍在上传，请等待上传完成后再发送");
+      return;
+    }
+    if (hasFailedFiles) {
+      nudgeInput("有文件上传失败，请重试或移除后再发送");
       return;
     }
     if (isAnswerSubmitting) {
@@ -1215,7 +1220,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         finalText = finalText.replaceAll(display, full);
       }
     });
-    onSend(finalText, files.length > 0 ? files : undefined);
+    const validFiles = files.filter((af) => af.status === "success");
+    onSend(finalText, validFiles.length > 0 ? validFiles : undefined);
     setText("");
     setFiles([]);
     setConfirmedTokens(new Set());
@@ -1249,6 +1255,46 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         e.preventDefault();
         closePopover();
         return;
+      }
+    }
+
+    // Backspace / Delete: 整体删除已确认的 @提及 token
+    if (e.key === "Backspace" || e.key === "Delete") {
+      const textarea = textareaRef.current;
+      if (!textarea) return;
+      const { selectionStart, selectionEnd } = textarea;
+      // 仅在无选区（光标）时执行整体删除
+      if (selectionStart !== selectionEnd) return;
+      const cursor = selectionStart;
+      for (const token of confirmedTokens) {
+        const idx = text.indexOf(token);
+        if (idx < 0) continue;
+        const tokenEnd = idx + token.length;
+        const hit =
+          e.key === "Backspace"
+            ? cursor > idx && cursor <= tokenEnd
+            : cursor >= idx && cursor < tokenEnd;
+        if (hit) {
+          e.preventDefault();
+          // 如果 token 后紧跟一个空格，连同空格一起删除
+          const trailSpace = text[tokenEnd] === " " ? 1 : 0;
+          const newText = text.slice(0, idx) + text.slice(tokenEnd + trailSpace);
+          setText(newText);
+          // 从已确认集合中移除
+          setConfirmedTokens((prev) => {
+            const next = new Set(prev);
+            next.delete(token);
+            return next;
+          });
+          tokenMapRef.current.delete(token);
+          const newCursor = idx;
+          requestAnimationFrame(() => {
+            textarea.focus();
+            textarea.setSelectionRange(newCursor, newCursor);
+            autoResize();
+          });
+          return;
+        }
       }
     }
 
@@ -1613,7 +1659,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                   className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full text-white transition-opacity send-btn-glow"
                   style={{ backgroundColor: "var(--em-primary)" }}
                   onClick={handleSend}
-                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || hasUploadingFiles}
+                  disabled={disabled || isAnswerSubmitting || configBlocked || (!text.trim() && files.length === 0 && questionSelected.size === 0) || hasUploadingFiles || hasFailedFiles}
                 >
                   {isAnswerSubmitting ? (
                     <Loader2 className="h-3.5 w-3.5 animate-spin" />

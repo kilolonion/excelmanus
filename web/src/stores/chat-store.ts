@@ -51,6 +51,7 @@ const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
   "llm_retry", "failure_guidance",
+  "tool_notice", "reasoning_notice",
 ]);
 
 // failure_guidance 与其他 SSE-only 块不同：后端会将其持久化为 text block（_failure_guidance_text）。
@@ -358,7 +359,7 @@ function _extractFileAttachmentsFromContent(
     .replace(/\[已上传(?:文件|图片):\s*[^\]]+\]\n?/g, "")
     .replace(/^\n+/, "")
     .trim();
-  return { content: cleaned || rawContent.trim(), files };
+  return { content: cleaned || (files.length > 0 ? "" : rawContent.trim()), files };
 }
 
 function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
@@ -490,6 +491,24 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
         }
         result.push(newMsg);
       }
+    }
+  }
+  // 后端消息不携带时间戳，为恢复的消息合成近似时间，使时间分隔线能正常显示。
+  // 每个对话轮次（user→assistant）间隔 6 分钟（> TIMESTAMP_GAP_MS 5 分钟），
+  // 同一轮次内共享时间戳。
+  if (result.length > 0) {
+    const TURN_GAP = 6 * 60 * 1000;
+    // 统计轮次数（每个 user 消息开始一个新轮次）
+    let turnCount = 0;
+    for (const m of result) {
+      if (m.role === "user") turnCount++;
+    }
+    const now = Date.now();
+    const baseTime = now - Math.max(turnCount - 1, 0) * TURN_GAP;
+    let currentTurn = -1;
+    for (const m of result) {
+      if (m.role === "user") currentTurn++;
+      m.timestamp = baseTime + currentTurn * TURN_GAP;
     }
   }
   return {

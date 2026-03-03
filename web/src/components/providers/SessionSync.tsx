@@ -132,7 +132,17 @@ export function SessionSync() {
           {
             const hasActiveStream = useChatStore.getState().abortController !== null;
             if (!hasActiveStream) {
-              setActiveSession(null);
+              // 保护本地新建但尚未发送首条消息的会话：检查 session-store 中是否
+              // 存在该会话且 messageCount === 0 且创建不超过 60 秒。
+              const localSession = useSessionStore.getState().sessions.find((s) => s.id === currentActive);
+              const GRACE_MS = 60_000;
+              const isLocalUnsent = localSession
+                && localSession.messageCount === 0
+                && localSession.createdAt
+                && (Date.now() - localSession.createdAt) < GRACE_MS;
+              if (!isLocalUnsent) {
+                setActiveSession(null);
+              }
             }
           }
         }
@@ -206,7 +216,16 @@ export function SessionSync() {
           notFoundCount++;
           const hasActiveStream = useChatStore.getState().abortController !== null;
           if (notFoundCount >= NOT_FOUND_THRESHOLD && !hasActiveStream) {
-            setActiveSession(null);
+            // 保护本地新建但尚未发送首条消息的会话，避免轮询误清。
+            const localSession = useSessionStore.getState().sessions.find((s) => s.id === activeSessionId);
+            const GRACE_MS = 60_000;
+            const isLocalUnsent = localSession
+              && localSession.messageCount === 0
+              && localSession.createdAt
+              && (Date.now() - localSession.createdAt) < GRACE_MS;
+            if (!isLocalUnsent) {
+              setActiveSession(null);
+            }
           }
           return;
         }

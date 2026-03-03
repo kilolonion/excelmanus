@@ -75,6 +75,11 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
   const currentSessionId = useChatStore((s) => s.currentSessionId);
 
+  // 会话切换时清空动画去重集合，防止长期只增不减导致内存泄漏
+  useEffect(() => {
+    renderedIdsRef.current = new Set<string>();
+  }, [currentSessionId]);
+
   const [rollbackDialog, setRollbackDialog] = useState<{
     open: boolean;
     mode: "edit" | "retry";

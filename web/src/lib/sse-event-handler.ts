@@ -1039,6 +1039,34 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
+    // ── 工具调用通知（/tools 开启时） ────────────
+    case "tool_call_notice": {
+      const tnToolName = (data.tool_name as string) || "";
+      const tnArgsSummary = (data.args_summary as string) || "";
+      const tnIteration = (data.iteration as number) || 0;
+      S().appendBlock(msgId, {
+        type: "tool_notice",
+        toolName: tnToolName,
+        argsSummary: tnArgsSummary,
+        iteration: tnIteration,
+      });
+      break;
+    }
+
+    // ── 推理过程通知（/reasoning 开启时） ────────────
+    case "reasoning_notice": {
+      const rnContent = (data.content as string) || "";
+      const rnIteration = (data.iteration as number) || 0;
+      if (rnContent) {
+        S().appendBlock(msgId, {
+          type: "reasoning_notice",
+          content: rnContent,
+          iteration: rnIteration,
+        });
+      }
+      break;
+    }
+
     default:
       break;
   }

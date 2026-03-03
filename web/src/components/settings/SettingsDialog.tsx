@@ -2,7 +2,7 @@
 
 import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle } from "lucide-react";
+import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle, Radio } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,6 +19,7 @@ const MCPTab = lazy(() => import("./MCPTab").then(m => ({ default: m.MCPTab })))
 const MemoryTab = lazy(() => import("./MemoryTab").then(m => ({ default: m.MemoryTab })));
 const RuntimeTab = lazy(() => import("./RuntimeTab").then(m => ({ default: m.RuntimeTab })));
 const VersionTab = lazy(() => import("./VersionTab").then(m => ({ default: m.VersionTab })));
+const ChannelsTab = lazy(() => import("./ChannelsTab").then(m => ({ default: m.ChannelsTab })));
 
 function TabSpinner() {
   return (
@@ -41,6 +42,7 @@ const TAB_META = [
   { value: "skills", label: "技能", icon: <Package className="size-4" /> },
   { value: "mcp", label: "MCP", icon: <Plug className="size-4" /> },
   { value: "memory", label: "记忆", icon: <Brain className="size-4" /> },
+  { value: "channels", label: "渠道", icon: <Radio className="size-4" /> },
   { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
   { value: "version", label: "版本", icon: <ArrowUpCircle className="size-4" /> },
 ];
@@ -101,9 +103,10 @@ export function SettingsDialog() {
           onValueChange={(v) => openSettings(v)}
           className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
         >
-          {/* ── Tab navigation ── */}
+          {/* ── Tab navigation (mobile: 2×4 grid, desktop: horizontal strip) ── */}
           <nav className="relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
-            <div className="flex px-1 sm:px-4 overflow-x-auto scrollbar-none">
+            {/* Desktop: horizontal strip */}
+            <div className="hidden sm:flex px-4">
               {TAB_META.map((tab) => {
                 const isActive = settingsTab === tab.value;
                 return (
@@ -116,10 +119,9 @@ export function SettingsDialog() {
                     onClick={() => openSettings(tab.value)}
                     className={`
                       relative flex-1 min-w-[44px] flex items-center justify-center
-                      gap-0.5 sm:gap-2 py-2 sm:py-3
+                      gap-2 py-3
                       outline-none select-none whitespace-nowrap
                       transition-colors duration-200
-                      flex-col sm:flex-row
                       ${isActive
                         ? "text-foreground"
                         : "text-muted-foreground hover:text-foreground/70"}
@@ -131,13 +133,13 @@ export function SettingsDialog() {
                     >
                       {tab.icon}
                     </span>
-                    <span className="text-[11px] sm:text-[13px] font-medium leading-tight">
+                    <span className="text-[13px] font-medium leading-tight">
                       {tab.label}
                     </span>
                     {isActive && (
                       <motion.div
                         layoutId="settings-tab-underline"
-                        className="absolute bottom-0 inset-x-1.5 sm:inset-x-2 h-[2px] rounded-full"
+                        className="absolute bottom-0 inset-x-2 h-[2px] rounded-full"
                         style={{ backgroundColor: "var(--em-primary)" }}
                         transition={{ type: "spring", stiffness: 400, damping: 30 }}
                       />
@@ -145,6 +147,47 @@ export function SettingsDialog() {
                   </button>
                 );
               })}
+            </div>
+            {/* Mobile: scrollable frosted-glass capsules with fade masks */}
+            <div className="relative sm:hidden">
+              {/* Left fade mask */}
+              <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 z-10 bg-linear-to-r from-background to-transparent" />
+              {/* Right fade mask */}
+              <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 z-10 bg-linear-to-l from-background to-transparent" />
+              <div className="flex gap-2 px-5 py-2 overflow-x-auto scrollbar-none">
+                {TAB_META.map((tab) => {
+                  const isActive = settingsTab === tab.value;
+                  return (
+                    <button
+                      key={tab.value}
+                      type="button"
+                      role="tab"
+                      aria-selected={isActive}
+                      data-coach-id={`coach-settings-tab-${tab.value}`}
+                      onClick={() => openSettings(tab.value)}
+                      className={`
+                        flex items-center gap-1.5 px-3 py-1.5
+                        rounded-full shrink-0
+                        outline-none select-none whitespace-nowrap
+                        text-[12px] font-medium
+                        transition-all duration-200
+                        backdrop-blur-md
+                        ${isActive
+                          ? "bg-primary/15 text-foreground shadow-sm ring-1 ring-primary/20"
+                          : "bg-muted/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground/80"}
+                      `}
+                    >
+                      <span
+                        className="transition-colors duration-200"
+                        style={{ color: isActive ? "var(--em-primary)" : undefined }}
+                      >
+                        {tab.icon}
+                      </span>
+                      {tab.label}
+                    </button>
+                  );
+                })}
+              </div>
             </div>
             <div className="border-b border-border" />
           </nav>
@@ -174,6 +217,9 @@ export function SettingsDialog() {
                 </TabsContent>
                 <TabsContent value="memory" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "memory" ? true : undefined} data-coach-id="coach-settings-content-memory">
                   {settingsTab === "memory" && <MemoryTab />}
+                </TabsContent>
+                <TabsContent value="channels" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "channels" ? true : undefined}>
+                  {settingsTab === "channels" && <ChannelsTab />}
                 </TabsContent>
                 <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
                   {settingsTab === "runtime" && <RuntimeTab />}

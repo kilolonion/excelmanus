@@ -1,8 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { useServerRestart } from "@/hooks/use-server-restart";
-import { ServerRestartOverlay } from "@/components/ServerRestartOverlay";
+import { useConnectionStore } from "@/stores/connection-store";
 import {
   Loader2,
   Save,
@@ -1513,7 +1512,7 @@ export function RuntimeTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const { restarting, restartTimeout, triggerRestart } = useServerRestart();
+  const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
@@ -1553,10 +1552,10 @@ export function RuntimeTab() {
     if (!hasChanges || !isAdmin) return;
     setSaving(true);
     try {
-      const res = await apiPut<{ restarting?: boolean }>("/config/runtime", draft);
+      const res = await apiPut<{ restarting?: boolean; restart_reason?: string }>("/config/runtime", draft);
       if (res?.restarting) {
         setSaving(false);
-        triggerRestart();
+        triggerRestart(res.restart_reason || "配置已更新");
         return;
       }
       setSaved(true);
@@ -1568,16 +1567,6 @@ export function RuntimeTab() {
       setSaving(false);
     }
   };
-
-  if (restarting) {
-    return (
-      <ServerRestartOverlay
-        restarting={restarting}
-        restartTimeout={restartTimeout}
-        reason="认证配置已更新，正在等待后端就绪，请勿关闭页面"
-      />
-    );
-  }
 
   if (!isAdmin) {
     return (

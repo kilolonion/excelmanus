@@ -287,9 +287,8 @@ export async function sendMessage(
     for (const af of files) {
       if (af.status === "success" && af.uploadResult) {
         fileUploadResults.push(af.uploadResult);
-      } else {
-        fileUploadResults.push({ filename: af.file.name, path: "", size: af.file.size });
       }
+      // 跳过上传失败的文件，避免空路径进入消息
     }
   }
 
@@ -351,10 +350,10 @@ export async function sendMessage(
     for (const af of files) {
       const isImage = _isImageLike(af.file);
 
-      // 将图片编码为 base64 用于 LLM 多模态载荷。
-      // 即使文件上传失败，也能确保 agent 可以"看到"图片。
+      // 将上传成功的图片编码为 base64 用于 LLM 多模态载荷。
+      // 仅在上传成功时发送 base64，避免模型"看到图"但附件状态不一致。
       // 跳过空 File 对象（保留附件使用 new File([], name) 创建，无实际内容）
-      if (isImage && af.file.size > 0) {
+      if (isImage && af.file.size > 0 && af.status === "success") {
         try {
           // 优先使用预编码的 base64（示例卡片预上传时已生成）
           const b64 = af.cachedBase64 ?? await _fileToBase64(af.file);

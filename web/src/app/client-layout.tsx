@@ -42,8 +42,10 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
   const advancedGuideCompleted = useOnboardingStore((s) => s.advancedGuideCompleted);
   const settingsGuideCompleted = useOnboardingStore((s) => s.settingsGuideCompleted);
   const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
-  const showCoachMarks = wizardCompleted && backendConfigured !== false && (!coachMarksCompleted || !advancedGuideCompleted || !settingsGuideCompleted);
-  const showWizard = !wizardCompleted || backendConfigured === false;
+  const userSynced = useOnboardingStore((s) => s._userSynced);
+  // Block onboarding UI until the store has re-hydrated with the correct per-user key
+  const showWizard = userSynced && (!wizardCompleted || backendConfigured === false);
+  const showCoachMarks = userSynced && wizardCompleted && backendConfigured !== false && (!coachMarksCompleted || !advancedGuideCompleted || !settingsGuideCompleted);
 
   return (
     <>

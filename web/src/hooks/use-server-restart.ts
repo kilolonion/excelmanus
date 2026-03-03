@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useCallback } from "react";
-import { getRuntimeConfig } from "@/lib/runtime-config";
+import { buildDirectHealthUrl } from "@/lib/backend-origin";
 
 /**
  * 后端重启健康探测 hook。
@@ -20,14 +20,7 @@ export function useServerRestart() {
     setRestartTimeout(false);
 
     // 直连后端健康检查 URL（绕过 Next.js 代理和 auth 拦截）
-    // 运行时配置优先 → 构建时环境变量回退
-    const configured = getRuntimeConfig("backendOrigin", process.env.NEXT_PUBLIC_BACKEND_ORIGIN?.trim());
-    const backendOrigin = configured
-      ? configured.toLowerCase() === "same-origin"
-        ? ""
-        : configured.replace(/\/+$/, "")
-      : `http://${window.location.hostname}:8000`;
-    const healthUrl = `${backendOrigin}/api/v1/health`;
+    const healthUrl = buildDirectHealthUrl();
 
     const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
     const probe = async (): Promise<boolean> => {

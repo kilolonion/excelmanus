@@ -52,6 +52,7 @@ import { FlatFileListView } from "./FlatFileListView";
 import { FileGroupListView } from "./FileGroupListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import { StorageBar } from "./StorageBar";
+import { FileRelationshipGraph } from "./FileRelationshipGraph";
 
 const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
 
@@ -779,6 +780,17 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             </div>
           )}
         </div>
+      )}
+
+      {/* 文件关系图（非文件组视图 + 工作区有 ≥2 个 Excel 文件时） */}
+      {!groupViewMode && wsFilesLoaded && visibleFiles.filter((f) => !f.is_dir && isExcelFile(f.filename)).length >= 2 && (
+        <details className="border-b border-border/40 text-[11px]">
+          <summary className="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer text-muted-foreground hover:text-foreground select-none">
+            <ArrowLeftRight className="h-3 w-3" />
+            <span className="font-medium">文件关系</span>
+          </summary>
+          <FileRelationshipGraph onClickFile={handleClick} />
+        </details>
       )}
 
       {groupViewMode ? (
