@@ -49,6 +49,7 @@ class LLMClientManager:
             api_key=config.api_key,
             base_url=config.base_url,
             protocol=config.protocol,
+            model=config.model,
         )
         self._main_model = config.model
         self._main_api_key = config.api_key
@@ -178,6 +179,7 @@ class LLMClientManager:
             api_key=api_key,
             base_url=base_url,
             protocol=protocol,
+            model=model,
         )
         self._main_model = model
         self._main_api_key = api_key
@@ -202,6 +204,7 @@ class LLMClientManager:
                     api_key=api_key,
                     base_url=base_url,
                     protocol=protocol,
+                    model=model,
                 ),
                 model=model,
                 follow_active_model=True,
@@ -237,6 +240,7 @@ class LLMClientManager:
                     api_key=_aux_api_key,
                     base_url=_aux_base_url,
                     protocol=_aux_protocol,
+                    model=_aux_model or active_model,
                 ),
                 model=_aux_model or active_model,
                 follow_active_model=False,
@@ -258,6 +262,7 @@ class LLMClientManager:
                 api_key=_adv_api_key,
                 base_url=_adv_base_url,
                 protocol=_adv_protocol,
+                model=_adv_model,
             ),
             model=_adv_model,
             follow_active_model=not _aux_effective,
@@ -282,6 +287,7 @@ class LLMClientManager:
                 api_key=_vlm_api_key,
                 base_url=_vlm_base_url,
                 protocol=_vlm_protocol,
+                model=_vlm_model,
             )
         else:
             client = main_client

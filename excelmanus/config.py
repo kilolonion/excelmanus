@@ -483,6 +483,11 @@ class ExcelManusConfig:
     memory_semantic_top_k: int = 10
     memory_semantic_threshold: float = 0.3
     memory_semantic_fallback_recent: int = 5
+    # 历史会话感知（Session Summary）配置
+    session_summary_enabled: bool = True  # 会话结束时自动生成摘要
+    session_summary_min_turns: int = 3  # 最少轮次才生成摘要
+    session_summary_inject_top_k: int = 3  # 新会话注入的历史摘要条数
+    session_summary_max_tokens: int = 800  # 注入的历史摘要总 token 预算
     # Playbook（自进化战术手册）配置
     playbook_enabled: bool = False  # 默认关闭，渐进开启
     playbook_db_path: str = ""  # 空 = 使用 db_path 同目录下 playbook.db
@@ -624,13 +629,67 @@ _NATIVE_API_INDICATORS = (
     "api.anthropic.com",
 )
 
+# 模型名称前缀 → 协议类型映射（用于 auto 模式下的多信号推断）
+_MODEL_PREFIX_TO_PROTOCOL: tuple[tuple[str, str], ...] = (
+    ("claude-", "anthropic"),
+    ("claude3", "anthropic"),
+    ("claude4", "anthropic"),
+    ("claude_", "anthropic"),
+    ("gemini-", "gemini"),
+    ("gemini2", "gemini"),
+    ("gemini1", "gemini"),
+    ("gemini_", "gemini"),
+)
 
-def _normalize_base_url(url: str, *, protocol: str = "auto", env_name: str = "EXCELMANUS_BASE_URL") -> str:
+
+def _infer_protocol_from_model(model: str) -> str | None:
+    """根据模型名称前缀推断协议类型。
+
+    仅用于 protocol=auto 时的辅助推断，不覆盖用户显式设置。
+    返回 None 表示无法从模型名推断。
+    """
+    if not model:
+        return None
+    lower = model.strip().lower()
+    for prefix, proto in _MODEL_PREFIX_TO_PROTOCOL:
+        if lower.startswith(prefix):
+            return proto
+    return None
+
+
+def _infer_protocol_from_api_key(api_key: str) -> str | None:
+    """根据 API Key 前缀推断协议类型。
+
+    已知前缀：
+      - sk-ant-  → Anthropic
+
+    返回 None 表示无法从 API Key 推断。
+    """
+    if not api_key:
+        return None
+    if api_key.startswith("sk-ant-"):
+        return "anthropic"
+    return None
+
+
+def _normalize_base_url(
+    url: str,
+    *,
+    protocol: str = "auto",
+    env_name: str = "EXCELMANUS_BASE_URL",
+    model: str = "",
+    api_key: str = "",
+) -> str:
     """规范化 Base URL：去尾斜杠、检测并自动修正缺失 /v1。
 
     对于 OpenAI 兼容协议（openai / openai_responses / auto 且非 Gemini/Anthropic 原生），
     如果 URL 路径不以 /v1 结尾且看起来像是第三方代理，
     自动补全 /v1 并记录警告日志。
+
+    多信号推断（仅 protocol=auto 时生效，按优先级）：
+      1. URL 特征匹配（_NATIVE_API_INDICATORS）
+      2. 模型名称前缀推断（claude-* → anthropic, gemini-* → gemini）
+      3. API Key 前缀推断（sk-ant-* → anthropic）
 
     Returns:
         规范化后的 URL。
@@ -644,6 +703,17 @@ def _normalize_base_url(url: str, *, protocol: str = "auto", env_name: str = "EX
     is_openai_compat = p in ("openai", "openai_responses", "auto") and not is_native
     if p in ("gemini", "anthropic"):
         is_openai_compat = False
+
+    # auto 模式下，URL 未匹配原生特征时，尝试从模型名/API Key 推断
+    if is_openai_compat and p == "auto":
+        inferred = _infer_protocol_from_model(model) or _infer_protocol_from_api_key(api_key)
+        if inferred in ("gemini", "anthropic"):
+            logger.info(
+                "%s: protocol=auto 但从模型名/API Key 推断出 %s 协议，跳过 /v1 自动补全。"
+                "如需强制 OpenAI 兼容模式，请显式设置 protocol=openai。",
+                env_name, inferred,
+            )
+            is_openai_compat = False
 
     if not is_openai_compat:
         return normalized
@@ -1064,7 +1134,7 @@ def load_config() -> ExcelManusConfig:
     )
 
     # 规范化 base_url：去尾斜杠、检测缺失 /v1 并自动修正
-    base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL")
+    base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL", model=model, api_key=api_key)
 
     if not model:
         # 尝试从 Gemini 完整 URL 中提取模型名
@@ -1201,7 +1271,7 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_AUX_PROTOCOL"), "EXCELMANUS_AUX_PROTOCOL"
     )
     if aux_base_url:
-        aux_base_url = _normalize_base_url(aux_base_url, protocol=aux_protocol, env_name="EXCELMANUS_AUX_BASE_URL")
+        aux_base_url = _normalize_base_url(aux_base_url, protocol=aux_protocol, env_name="EXCELMANUS_AUX_BASE_URL", model=aux_model or "", api_key=aux_api_key or "")
 
     # subagent 执行配置
     subagent_enabled = _parse_bool(
@@ -1417,7 +1487,7 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_VLM_PROTOCOL"), "EXCELMANUS_VLM_PROTOCOL"
     )
     if vlm_base_url:
-        vlm_base_url = _normalize_base_url(vlm_base_url, protocol=vlm_protocol, env_name="EXCELMANUS_VLM_BASE_URL")
+        vlm_base_url = _normalize_base_url(vlm_base_url, protocol=vlm_protocol, env_name="EXCELMANUS_VLM_BASE_URL", model=vlm_model or "", api_key=vlm_api_key or "")
     vlm_max_tokens = _parse_int(
         os.environ.get("EXCELMANUS_VLM_MAX_TOKENS"),
         "EXCELMANUS_VLM_MAX_TOKENS",
@@ -1530,6 +1600,27 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT"),
         "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
         5,
+    )
+    # 历史会话感知（Session Summary）配置
+    session_summary_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_SESSION_SUMMARY_ENABLED"),
+        "EXCELMANUS_SESSION_SUMMARY_ENABLED",
+        True,
+    )
+    session_summary_min_turns = _parse_int(
+        os.environ.get("EXCELMANUS_SESSION_SUMMARY_MIN_TURNS"),
+        "EXCELMANUS_SESSION_SUMMARY_MIN_TURNS",
+        3,
+    )
+    session_summary_inject_top_k = _parse_int(
+        os.environ.get("EXCELMANUS_SESSION_SUMMARY_INJECT_TOP_K"),
+        "EXCELMANUS_SESSION_SUMMARY_INJECT_TOP_K",
+        3,
+    )
+    session_summary_max_tokens = _parse_int(
+        os.environ.get("EXCELMANUS_SESSION_SUMMARY_MAX_TOKENS"),
+        "EXCELMANUS_SESSION_SUMMARY_MAX_TOKENS",
+        800,
     )
     # Playbook（自进化战术手册）配置
     playbook_enabled = _parse_bool(
@@ -1718,6 +1809,10 @@ def load_config() -> ExcelManusConfig:
         memory_semantic_top_k=memory_semantic_top_k,
         memory_semantic_threshold=memory_semantic_threshold,
         memory_semantic_fallback_recent=memory_semantic_fallback_recent,
+        session_summary_enabled=session_summary_enabled,
+        session_summary_min_turns=session_summary_min_turns,
+        session_summary_inject_top_k=session_summary_inject_top_k,
+        session_summary_max_tokens=session_summary_max_tokens,
         playbook_enabled=playbook_enabled,
         playbook_db_path=playbook_db_path,
         playbook_max_bullets=playbook_max_bullets,

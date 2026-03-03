@@ -690,6 +690,68 @@ class FileRegistry:
         self._store.soft_delete(self._workspace_key, canonical_path)
         # 不从缓存移除，保留 provenance
 
+    # ── 重命名/移动 ──────────────────────────────────────────
+
+    def rename_entry(
+        self,
+        old_path: str,
+        new_path: str,
+        *,
+        session_id: str | None = None,
+        turn: int | None = None,
+    ) -> bool:
+        """原子重命名文件路径，保留 file_id / provenance / events / 别名。
+
+        同时同步 staging 条目和别名缓存，并记录 renamed 事件。
+        返回 True 表示成功迁移，False 表示旧路径不存在于注册表。
+        """
+        entry = self._path_cache.get(old_path)
+        if entry is None:
+            return False
+
+        # 1. DB 层原子更新 canonical_path
+        ok = self._store.rename_path(self._workspace_key, old_path, new_path)
+        if not ok:
+            return False
+
+        # 2. 更新内存缓存：删除旧路径，以新路径重建索引
+        self._path_cache.pop(old_path, None)
+        entry.canonical_path = new_path
+        entry.original_name = Path(new_path).name
+        entry.file_type = _detect_file_type(new_path)
+        # 刷新 mtime / size
+        try:
+            resolved = self._resolve(new_path)
+            if resolved.exists():
+                stat = resolved.stat()
+                entry.size_bytes = stat.st_size
+                entry.mtime_ns = stat.st_mtime_ns
+        except (ValueError, OSError):
+            pass
+        entry.updated_at = _now_iso()
+        self._cache_entry(entry)
+
+        # 3. 添加旧路径为 previous_path 别名，保证旧路径仍可被解析
+        self.add_alias(entry.id, "previous_path", old_path)
+
+        # 4. 同步 staging 条目（如果有）
+        if self._fvm is not None:
+            try:
+                self._fvm.rename_staging_path(old_path, new_path)
+            except Exception:
+                logger.debug("rename_entry: staging 路径同步失败", exc_info=True)
+
+        # 5. 记录 renamed 事件
+        self.record_event(
+            entry.id, "renamed",
+            session_id=session_id, turn=turn,
+            tool_name="rename_file",
+            details={"old_path": old_path, "new_path": new_path},
+        )
+
+        logger.info("FileRegistry rename_entry: %s → %s (id=%s)", old_path, new_path, entry.id)
+        return True
+
     # ── 添加别名 ─────────────────────────────────────────────
 
     def add_alias(

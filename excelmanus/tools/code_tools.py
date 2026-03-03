@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -103,6 +104,60 @@ def _shorten(text: str, limit: int = 240) -> str:
     return text[:limit] + "...(truncated)"
 
 
+# ── 截断代码检测 ─────────────────────────────────────────
+
+# 匹配独立行上的 Ellipsis（`...`），排除字符串内和注释
+_ELLIPSIS_LINE_RE = re.compile(r"^\s*\.\.\.\s*$")
+
+
+def _detect_truncated_code(code: str) -> list[str]:
+    """检测 LLM 生成的代码是否包含截断/占位符模式。
+
+    返回警告消息列表（空列表表示未检测到问题）。
+    """
+    warnings: list[str] = []
+    lines = code.splitlines()
+    if not lines:
+        return warnings
+
+    ellipsis_positions: list[int] = []
+    for i, line in enumerate(lines, 1):
+        if _ELLIPSIS_LINE_RE.match(line):
+            ellipsis_positions.append(i)
+
+    if ellipsis_positions:
+        # 过滤掉在 class/function 定义体中作为 pass 替代的合法用法
+        # 合法：`def foo(): ...` 或 `class Foo: ...`（单行）
+        # 可疑：独立行 `...` 出现在较长的代码块中
+        suspicious = []
+        for pos in ellipsis_positions:
+            idx = pos - 1
+            # 检查上一行是否是 def/class 声明（合法 stub 用法）
+            if idx > 0:
+                prev = lines[idx - 1].strip()
+                if prev.endswith(":") and (prev.startswith("def ") or prev.startswith("class ") or prev.startswith("async def ")):
+                    continue
+            suspicious.append(pos)
+
+        if suspicious:
+            positions_str = ", ".join(str(p) for p in suspicious[:5])
+            warnings.append(
+                f"⚠️ 代码中检测到可疑的 Ellipsis (`...`) 占位符（第 {positions_str} 行）。"
+                "这通常表示代码未完整生成。`...` 在 Python 中是合法的 no-op 表达式，"
+                "会导致代码'成功'执行但跳过实际逻辑。请确保生成完整代码，不要用 `...` 省略。"
+            )
+
+    # 检测代码是否以不完整的语句结尾
+    stripped_last = lines[-1].rstrip()
+    if stripped_last.endswith((",", "(", "[", "{", "+", "\\")):
+        warnings.append(
+            f"⚠️ 代码最后一行以不完整的语句结尾（'{stripped_last[-20:]}'）。"
+            "代码可能在生成过程中被截断，请重新生成完整代码。"
+        )
+
+    return warnings
+
+
 def _command_to_text(command: list[str]) -> str:
     return " ".join(command)
 
@@ -172,6 +227,8 @@ def _probe_environment(
             probe_command,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=8,
             check=False,
         )
@@ -586,7 +643,10 @@ def run_code(
     # ── 确定脚本路径 ──
     inline_mode = code is not None
     temp_script: Path | None = None
+    truncation_warnings: list[str] = []
     if inline_mode:
+        assert code is not None
+        truncation_warnings = _detect_truncated_code(code)
         temp_dir = guard.workspace_root / "scripts" / "temp"
         temp_dir.mkdir(parents=True, exist_ok=True)
         temp_name = f"_rc_{uuid.uuid4().hex[:12]}.py"
@@ -622,6 +682,16 @@ def run_code(
                 temp_script.unlink()
             except OSError:
                 pass
+
+    # ── 注入截断警告和空输出诊断 ──
+    if truncation_warnings:
+        try:
+            result_dict = json.loads(result_json)
+            result_dict["truncation_warning"] = " ".join(truncation_warnings)
+            result_json = json.dumps(result_dict, ensure_ascii=False, indent=2)
+        except (json.JSONDecodeError, TypeError):
+            pass
+
     return result_json
 
 
@@ -827,6 +897,31 @@ def _execute_script_docker(
         if hints:
             result["recovery_hint"] = " ".join(hints)
 
+    # ── 空输出诊断（Docker 路径） ──
+    if not stdout.strip() and not stderr.strip():
+        diag_parts: list[str] = []
+        if status == "success":
+            diag_parts.append(
+                "代码返回成功(exit 0)但无任何输出。"
+                "可能原因：(1) 代码中的 print 语句被 try/except 吞掉或未执行；"
+                "(2) 代码包含 `...`(Ellipsis) 占位符导致实际逻辑被跳过；"
+                "(3) 所有输出逻辑在异常后的代码路径中。"
+            )
+        elif status == "failed":
+            diag_parts.append(
+                f"代码执行失败(exit {return_code})且无错误输出。"
+                "可能原因：(1) 依赖未安装(如 sklearn)导致 ImportError 被 try/except 静默捕获；"
+                "(2) 容器环境缺少必要依赖；"
+                "(3) 代码语法不完整(被截断)导致 SyntaxError。"
+            )
+        if diag_parts:
+            diag_parts.append(
+                "建议：确保代码顶层有 print 输出验证，"
+                "except 块中使用 traceback.print_exc() 而非 pass，"
+                "并检查所有依赖是否已安装。"
+            )
+            result["empty_output_diagnostic"] = " ".join(diag_parts)
+
     return json.dumps(result, ensure_ascii=False, indent=2)
 
 
@@ -916,6 +1011,8 @@ def _execute_script(
             "cwd": workdir_safe,
             "capture_output": True,
             "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
             "timeout": timeout_seconds,
             "check": False,
             "env": sandbox_env,
@@ -1033,6 +1130,31 @@ def _execute_script(
 
         if hints:
             result["recovery_hint"] = " ".join(hints)
+
+    # ── 空输出诊断：stdout+stderr 均为空时追加排错提示 ──
+    if not stdout.strip() and not stderr.strip():
+        diag_parts: list[str] = []
+        if status == "success":
+            diag_parts.append(
+                "代码返回成功(exit 0)但无任何输出。"
+                "可能原因：(1) 代码中的 print 语句被 try/except 吞掉或未执行；"
+                "(2) 代码包含 `...`(Ellipsis) 占位符导致实际逻辑被跳过；"
+                "(3) 所有输出逻辑在异常后的代码路径中。"
+            )
+        elif status == "failed":
+            diag_parts.append(
+                f"代码执行失败(exit {return_code})且无错误输出。"
+                "可能原因：(1) 依赖未安装(如 sklearn)导致 ImportError 被 try/except 静默捕获；"
+                "(2) 沙盒环境变量不完整导致解释器初始化异常；"
+                "(3) 代码语法不完整(被截断)导致 SyntaxError。"
+            )
+        if diag_parts:
+            diag_parts.append(
+                "建议：确保代码顶层有 print 输出验证，"
+                "except 块中使用 traceback.print_exc() 而非 pass，"
+                "并检查所有依赖是否已安装。"
+            )
+            result["empty_output_diagnostic"] = " ".join(diag_parts)
 
     # 清理临时 wrapper
     if temp_wrapper is not None and temp_wrapper.exists():

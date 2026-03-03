@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_utils import (
+    _AUX_NO_THINKING_EXTRA_BODY,
     _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS,
     _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
     _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
@@ -390,6 +391,7 @@ class LLMCaller:
                 e._advisor_client.chat.completions.create(
                     model=e._advisor_model,
                     messages=messages,
+                    extra_body=_AUX_NO_THINKING_EXTRA_BODY,
                 ),
                 timeout=timeout,
             )

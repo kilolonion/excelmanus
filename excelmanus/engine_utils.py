@@ -30,6 +30,15 @@ _SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
 _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
 _SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
 
+# ── AUX 模型 "禁用思考" 通用 extra_body ─────────────────────
+# 覆盖所有已知 provider 的思考模式关闭参数，
+# 各自定义 provider 会过滤掉不属于自身的字段。
+_AUX_NO_THINKING_EXTRA_BODY: dict[str, Any] = {
+    "enable_thinking": False,                   # dashscope / siliconflow / deepseek / volcengine
+    "thinking": {"type": "disabled"},           # claude_compat (OpenAI 代理) / GLM
+    "reasoning": {"effort": "none"},            # openrouter
+}
+
 _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
 _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
 _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5

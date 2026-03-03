@@ -81,6 +81,15 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     # 由 handler 级过滤器确保传播前已完成脱敏。
     logger.propagate = True
 
+    # 为关键第三方库配置日志（WARNING+），确保错误可见
+    _handler = logger.handlers[0] if logger.handlers else None
+    if _handler is not None:
+        for lib_name in ("telegram", "httpx", "httpcore"):
+            lib_logger = logging.getLogger(lib_name)
+            if not lib_logger.handlers:
+                lib_logger.setLevel(logging.WARNING)
+                lib_logger.addHandler(_handler)
+
     return logger
 
 

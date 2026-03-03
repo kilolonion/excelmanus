@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 import numpy as np
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.logger import get_logger
 from excelmanus.memory import ConversationMemory, TokenCounter
 
@@ -376,6 +377,7 @@ class CompactionManager:
                 ],
                 max_tokens=max_summary_tokens,
                 temperature=0.0,
+                extra_body=_AUX_NO_THINKING_EXTRA_BODY,
             )
             summary_text = (response.choices[0].message.content or "").strip()
         except Exception as exc:
