@@ -7,18 +7,44 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
+import os
 import time
 from pathlib import Path
 
-from excelmanus.channels.api_client import ChatResult, ExcelManusAPIClient, ProgressCallback
+from typing import Any
+
+from excelmanus.channels.api_client import ExcelManusAPIClient
 from excelmanus.channels.base import ChannelAdapter, ChannelMessage
+from excelmanus.channels.output_manager import ChunkedOutputManager
+from excelmanus.channels.rate_limit import ChannelRateLimiter, RateLimitConfig
 from excelmanus.channels.session_store import SessionStore
 
-logger = logging.getLogger("channels.handler")
+logger = logging.getLogger("excelmanus.channels.handler")
 
 # 支持上传的文件扩展名
 ALLOWED_UPLOAD_EXTENSIONS = {".xlsx", ".xls", ".csv", ".png", ".jpg", ".jpeg"}
+
+# chat_mode 元信息：(图标, 中文名, 说明)
+MODE_INFO: dict[str, tuple[str, str, str]] = {
+    "write": ("✏️", "写入", "可读写 Excel、执行操作"),
+    "read":  ("🔍", "读取", "只读分析，不修改文件"),
+    "plan":  ("📋", "计划", "规划步骤，不立即执行"),
+}
+VALID_MODES = set(MODE_INFO.keys())
+
+# 并发模式元信息：(图标, 中文名, 说明)
+CONCURRENCY_INFO: dict[str, tuple[str, str, str]] = {
+    "queue": ("⏳", "排队", "新消息排队等待，FIFO 串行执行"),
+    "steer": ("🔄", "转向", "中断旧任务，立即处理新消息"),
+    "guide": ("📨", "引导", "消息注入到运行中的 agent，不打断工具执行"),
+}
+VALID_CONCURRENCY = set(CONCURRENCY_INFO.keys())
+
+
+# 待处理交互的 TTL（秒），超时自动过期
+PENDING_TTL_SECONDS = 1800.0  # 30 分钟
 
 
 class PendingInteraction:
@@ -37,18 +63,41 @@ class PendingInteraction:
         self.session_id = session_id
         self.chat_id = chat_id
         self.message_id = message_id
+        self.created_at: float = time.monotonic()
+
+
+class PendingFile:
+    """缓冲等待用户指令的已上传文件。"""
+
+    def __init__(
+        self,
+        filename: str,
+        is_image: bool = False,
+        mime_type: str = "",
+        image_data: bytes | None = None,
+    ) -> None:
+        self.filename = filename
+        self.is_image = is_image
+        self.mime_type = mime_type
+        self.image_data = image_data  # 图片原始数据，用于 vision API
+        self.created_at: float = time.monotonic()
 
 
 class MessageHandler:
     """渠道无关的消息处理器。
 
     职责：
-    - 命令路由 (/start, /help, /new, /model, /addmodel, /delmodel, /abort)
+    - 命令路由 (/start, /help, /new, /mode, /model, /addmodel, /delmodel, /abort)
     - 文本消息 → 调用 API → 回送结果
     - 文件上传 → 写入工作区 → 调用 API
     - 审批/问答回调处理
     - 用户权限检查
     """
+
+    # 速率限制豁免命令（即使被限流也允许执行）
+    _EXEMPT_COMMANDS: frozenset[str] = frozenset({"abort", "new", "start", "help"})
+    # 未绑定用户仍可执行的命令（绑定流程必需）
+    _BIND_EXEMPT_COMMANDS: frozenset[str] = frozenset({"bind", "bindstatus", "help", "start"})
 
     def __init__(
         self,
@@ -56,19 +105,82 @@ class MessageHandler:
         api_client: ExcelManusAPIClient,
         session_store: SessionStore,
         allowed_users: set[str] | None = None,
+        rate_limit_config: RateLimitConfig | None = None,
+        bind_manager: Any | None = None,
+        event_bridge: Any | None = None,
+        config_store: Any | None = None,
     ) -> None:
         self.adapter = adapter
         self.api = api_client
         self.sessions = session_store
         self.allowed_users = allowed_users or set()
+        self._rate_limiter = ChannelRateLimiter(rate_limit_config)
+        self._bind_manager = bind_manager  # ChannelBindManager 实例
+        self._event_bridge = event_bridge  # EventBridge 实例
+        self._config_store = config_store  # GlobalConfigStore 实例（动态读取设置）
         # (chat_id:user_id) → PendingInteraction
         self._pending: dict[str, PendingInteraction] = {}
         # per-user async locks: 防止同一用户并发 stream_chat 导致 session 覆盖/竞争
         self._user_locks: dict[str, asyncio.Lock] = {}
+        # staged 文件索引缓存: pending_key → [{original_path, ...}, ...]
+        self._staged_cache: dict[str, list[dict]] = {}
+        # 最近 apply 结果缓存: pending_key → [{original_path, undo_path}, ...]
+        self._last_apply: dict[str, list[dict]] = {}
+        # 并发模式: "queue" | "steer" | "guide"，per (chat_id:user_id) 覆盖
+        self._default_concurrency: str = "queue"
+        self._user_concurrency: dict[str, str] = {}
+        # steer/guide 模式：跟踪每个用户的 in-flight task
+        self._user_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
+        # 渠道用户 → auth user_id 缓存（避免每条消息都查 DB）
+        self._auth_user_cache: dict[str, str | None] = {}
+        # EventBridge: 记录每个 chat/user 当前绑定到哪个 auth_user_id（用于解绑/重绑后的订阅切换）
+        self._bridge_registered: dict[str, str] = {}
+        # 待处理文件缓冲：用户发送附件后等待进一步指令
+        self._pending_files: dict[str, list[PendingFile]] = {}
+
+    @property
+    def _require_bind(self) -> bool:
+        """是否强制要求渠道用户绑定前端账号。
+
+        优先级: 环境变量 > config_kv 数据库配置 > 默认 False
+        """
+        env_val = os.environ.get("EXCELMANUS_CHANNEL_REQUIRE_BIND", "").strip().lower()
+        if env_val:
+            return env_val in ("1", "true", "yes")
+        if self._config_store is not None:
+            try:
+                db_val = self._config_store.get("channel_require_bind", "")
+                if db_val:
+                    return db_val.strip().lower() in ("1", "true", "yes")
+            except Exception:
+                pass
+        return False
 
     @staticmethod
     def _pending_key(chat_id: str, user_id: str) -> str:
         return f"{chat_id}:{user_id}"
+
+    def _cleanup_expired_pending(self) -> None:
+        """移除超过 TTL 的待处理交互和待处理文件缓冲。"""
+        now = time.monotonic()
+        expired = [
+            k for k, v in self._pending.items()
+            if (now - v.created_at) > PENDING_TTL_SECONDS
+        ]
+        for k in expired:
+            self._pending.pop(k, None)
+        if expired:
+            logger.debug("清理 %d 个过期的待处理交互", len(expired))
+
+        # 清理过期的待处理文件缓冲
+        expired_files = [
+            k for k, flist in self._pending_files.items()
+            if flist and (now - flist[0].created_at) > PENDING_TTL_SECONDS
+        ]
+        for k in expired_files:
+            self._pending_files.pop(k, None)
+        if expired_files:
+            logger.debug("清理 %d 个过期的待处理文件缓冲", len(expired_files))
 
     def check_user(self, user_id: str) -> bool:
         """检查用户是否有权使用。空集合 = 不限制。"""
@@ -99,20 +211,231 @@ class MessageHandler:
         async with lock:
             await coro_func(msg, *args)
 
+    def _get_user_concurrency(self, chat_id: str, user_id: str) -> str:
+        """获取用户当前并发模式。"""
+        key = self._pending_key(chat_id, user_id)
+        return self._user_concurrency.get(key, self._default_concurrency)
+
+    async def _dispatch_by_concurrency(
+        self, msg: ChannelMessage, coro_func, *args,
+    ) -> None:
+        """根据用户并发模式分发：queue / steer / guide。"""
+        mode = self._get_user_concurrency(msg.chat_id, msg.user.user_id)
+        if mode == "steer":
+            await self._with_steer(msg, coro_func, *args)
+        elif mode == "guide":
+            await self._with_guide(msg, coro_func, *args)
+        else:
+            await self._with_user_lock(msg, coro_func, *args)
+
+    async def _with_steer(
+        self, msg: ChannelMessage, coro_func, *args,
+    ) -> None:
+        """Steer 模式：中断旧任务，立即处理新消息。"""
+        key = self._pending_key(msg.chat_id, msg.user.user_id)
+
+        # 1) 如果存在 in-flight task → 中断
+        old_task = self._user_tasks.get(key)
+        if old_task and not old_task.done():
+            session_id = self.sessions.get(
+                self.adapter.name, msg.chat_id, msg.user.user_id,
+            )
+            if session_id:
+                obo = self._resolve_on_behalf_of(msg.user.user_id)
+                asyncio.create_task(self._safe_abort(session_id, on_behalf_of=obo))
+            old_task.cancel()
+            try:
+                await old_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            self._pending.pop(key, None)
+            await self.adapter.send_text(
+                msg.chat_id, "🔄 已中断上一任务，处理新请求…",
+            )
+
+        # 2) 在可追踪的 Task 中执行新请求
+        task = asyncio.create_task(coro_func(msg, *args))
+        self._user_tasks[key] = task
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass  # 被更新的消息取消，正常退出
+
+    async def _with_guide(
+        self, msg: ChannelMessage, coro_func, *args,
+    ) -> None:
+        """Guide 模式：agent 执行中注入追加指令，无 in-flight 时正常处理。"""
+        lock = self._get_user_lock(msg.chat_id, msg.user.user_id)
+
+        if lock.locked():
+            # agent 正在执行 → 注入引导消息，不启动新 stream_chat
+            session_id = self.sessions.get(
+                self.adapter.name, msg.chat_id, msg.user.user_id,
+            )
+            if session_id:
+                guide_text = msg.text.strip()
+                if not guide_text:
+                    guide_text = "(用户发送了非文本内容)"
+                obo = self._resolve_on_behalf_of(msg.user.user_id)
+                try:
+                    await self.api.guide_message(session_id, guide_text, on_behalf_of=obo)
+                    await self.adapter.send_text(
+                        msg.chat_id,
+                        "📨 消息已送达 agent，将在下次迭代时处理",
+                    )
+                except Exception as e:
+                    logger.warning("Guide 消息投递失败: %s", e)
+                    await self.adapter.send_text(
+                        msg.chat_id, f"❌ 引导消息投递失败: {e}",
+                    )
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id, "⚠️ 无活跃会话，消息未送达",
+                )
+            return
+
+        # 无 in-flight → 正常处理（加锁防并发）
+        async with lock:
+            await coro_func(msg, *args)
+
+    async def _safe_abort(self, session_id: str, on_behalf_of: str | None = None) -> None:
+        """安全终止后端任务，吞异常。"""
+        try:
+            await self.api.abort(session_id, on_behalf_of=on_behalf_of)
+        except Exception:
+            logger.debug("Steer abort 失败（已忽略）", exc_info=True)
+
+    @staticmethod
+    def _classify_action(msg: ChannelMessage) -> str:
+        """将入站消息分类为限流桶类型。"""
+        if msg.is_command or msg.callback_data:
+            return "command"
+        if msg.files:
+            return "upload"
+        # 图片或普通文本 → chat（触发 LLM）
+        return "chat"
+
+    def _is_exempt(self, msg: ChannelMessage) -> bool:
+        """检查消息是否豁免速率限制。"""
+        # 豁免命令始终放行
+        if msg.is_command and msg.command.lower() in self._EXEMPT_COMMANDS:
+            return True
+        # 有匹配的待处理审批/问答回调时放行（用户在完成已发起的交互）
+        if msg.callback_data:
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            if pk in self._pending:
+                return True
+        # 有待回答问题时，自由文本回复也放行
+        if msg.text.strip() and not msg.is_command and not msg.files and not msg.images:
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            pending = self._pending.get(pk)
+            if pending and pending.type == "question":
+                return True
+        return False
+
+    def _ensure_bridge_subscription(self, chat_id: str, user_id: str) -> None:
+        """为已绑定用户在 EventBridge 上注册回调（懒注册，每 chat 仅一次）。"""
+        if self._event_bridge is None:
+            return
+        auth_uid = self._resolve_auth_user_id(user_id)
+        if auth_uid is None or auth_uid.startswith("channel_anon:"):
+            return
+        reg_key = f"{self.adapter.name}:{chat_id}:{user_id}"
+        prev_uid = self._bridge_registered.get(reg_key)
+        if prev_uid == auth_uid:
+            return
+        # 绑定用户发生变化（如解绑后重绑）时，先移除旧订阅，避免串号推送
+        if prev_uid:
+            self._event_bridge.unsubscribe(prev_uid, self.adapter.name, chat_id)
+
+        _chat_id = chat_id
+        _user_id = user_id
+
+        async def _on_bridge_event(event_type: str, data: dict) -> None:
+            """EventBridge 回调：处理从 Web 推送来的审批/问答事件。"""
+            try:
+                if event_type == "approval":
+                    await self.adapter.send_approval_card(
+                        _chat_id,
+                        data.get("approval_id", ""),
+                        data.get("approval_tool_name", "unknown"),
+                        data.get("risk_level", "yellow"),
+                        data.get("args_summary", {}),
+                    )
+                    pk = self._pending_key(_chat_id, _user_id)
+                    self._pending[pk] = PendingInteraction(
+                        interaction_type="approval",
+                        interaction_id=data.get("approval_id", ""),
+                        session_id=data.get("session_id", ""),
+                        chat_id=_chat_id,
+                    )
+                elif event_type == "question":
+                    await self.adapter.send_question_card(
+                        _chat_id,
+                        data.get("id", ""),
+                        data.get("header", ""),
+                        data.get("text", ""),
+                        data.get("options", []),
+                    )
+                    pk = self._pending_key(_chat_id, _user_id)
+                    self._pending[pk] = PendingInteraction(
+                        interaction_type="question",
+                        interaction_id=data.get("id", ""),
+                        session_id=data.get("session_id", ""),
+                        chat_id=_chat_id,
+                    )
+            except Exception:
+                logger.warning("EventBridge callback error", exc_info=True)
+
+        self._event_bridge.subscribe(auth_uid, self.adapter.name, _chat_id, _on_bridge_event)
+        self._bridge_registered[reg_key] = auth_uid
+
     async def handle_message(self, msg: ChannelMessage) -> None:
         """处理入站消息的统一入口。"""
+        self._cleanup_expired_pending()
+        self._ensure_bridge_subscription(msg.chat_id, msg.user.user_id)
         if not self.check_user(msg.user.user_id):
-            await self.adapter.send_text(msg.chat_id, "⛔ 无权限使用此 Bot")
+            if self._rate_limiter.check_reject_cooldown(msg.user.user_id):
+                await self.adapter.send_text(msg.chat_id, "⛔ 无权限使用此 Bot")
             return
+
+        # 强制绑定检查：未绑定用户只允许执行绑定相关命令
+        if self._require_bind and self._bind_manager is not None:
+            is_bind_exempt = (
+                msg.is_command
+                and msg.command.lower() in self._BIND_EXEMPT_COMMANDS
+            )
+            if not is_bind_exempt:
+                auth_uid = self._resolve_auth_user_id(msg.user.user_id)
+                if auth_uid is None:
+                    await self.adapter.send_text(
+                        msg.chat_id,
+                        "🔒 此 Bot 要求绑定 ExcelManus 账号后才能使用。\n\n"
+                        "请先使用 /bind 获取绑定码，在 Web 端完成绑定。",
+                    )
+                    return
+
+        # 速率限制（豁免消息跳过检查）
+        if not self._is_exempt(msg):
+            action_type = self._classify_action(msg)
+            result = self._rate_limiter.check(msg.user.user_id, action_type)
+            if not result.allowed:
+                await self.adapter.send_text(msg.chat_id, result.message)
+                return
 
         # 回调数据（按钮点击）— 需要锁保护以防与进行中的 chat 竞争
         if msg.callback_data:
             await self._with_user_lock(msg, self._handle_callback)
             return
 
-        # 文件上传 — 需要锁保护
+        # 文件上传 — 按并发模式分发（优先于 images，因为图片文件同时有 files + images）
         if msg.files:
-            await self._with_user_lock(msg, self._handle_file_upload)
+            await self._dispatch_by_concurrency(msg, self._handle_file_upload)
+            return
+
+        # 纯图片消息（无文件附件，如 Telegram 压缩照片）— 按并发模式分发
+        if msg.images:
+            await self._dispatch_by_concurrency(msg, self._handle_image_message)
             return
 
         # 命令 — 不加锁，确保 /abort /new 等在处理中仍可执行
@@ -120,9 +443,9 @@ class MessageHandler:
             await self._handle_command(msg)
             return
 
-        # 普通文本 — 需要锁保护
+        # 普通文本 — 按并发模式分发
         if msg.text.strip():
-            await self._with_user_lock(msg, self._handle_text)
+            await self._dispatch_by_concurrency(msg, self._handle_text)
 
     # ── 命令路由 ──
 
@@ -133,10 +456,24 @@ class MessageHandler:
             "start": self._cmd_start,
             "help": self._cmd_help,
             "new": self._cmd_new,
+            "mode": self._cmd_mode,
             "model": self._cmd_model,
             "addmodel": self._cmd_addmodel,
             "delmodel": self._cmd_delmodel,
             "abort": self._cmd_abort,
+            "sessions": self._cmd_sessions,
+            "history": self._cmd_history,
+            "rollback": self._cmd_rollback,
+            "undo": self._cmd_undo,
+            "quota": self._cmd_quota,
+            "concurrency": self._cmd_concurrency,
+            "staged": self._cmd_staged,
+            "apply": self._cmd_apply,
+            "discard": self._cmd_discard,
+            "undoapply": self._cmd_undoapply,
+            "bind": self._cmd_bind,
+            "bindstatus": self._cmd_bindstatus,
+            "unbind": self._cmd_unbind,
         }
         handler = handlers.get(cmd)
         if handler:
@@ -166,38 +503,136 @@ class MessageHandler:
             "  /model — 查看模型列表\n"
             "  /model <名称> — 切换模型\n"
             "  /addmodel — 添加新模型（查看格式）\n"
-            "  /delmodel <名称> — 删除模型\n\n"
+            "  /delmodel <名称> — 删除模型\n"
+            "  /quota — 查看 token 用量和配额\n\n"
+            "⚙️ 模式切换\n"
+            "  /mode — 查看当前模式\n"
+            "  /mode <write|read|plan> — 切换对话模式\n\n"
+            "📂 会话管理\n"
+            "  /sessions — 列出历史会话\n"
+            "  /sessions <编号> — 切换到指定会话\n"
+            "  /history — 查看当前会话轮次\n"
+            "  /rollback [轮次号] — 回退到指定轮次\n"
+            "  /undo — 撤销最近操作\n\n"
+            "⚡ 并发控制\n"
+            "  /concurrency — 查看当前并发模式\n"
+            "  /concurrency <queue|steer|guide> — 切换并发模式\n\n"
+            "📦 文件管理\n"
+            "  /staged — 查看待确认文件\n"
+            "  /apply [编号|all] — 确认应用文件变更\n"
+            "  /discard [编号|all] — 丢弃文件变更\n"
+            "  /undoapply — 撤销最近一次 apply\n\n"
+            "🔗 渠道绑定\n"
+            "  /bind — 获取绑定码（关联 Web 账号）\n"
+            "  /bindstatus — 查看绑定状态\n"
+            "  /unbind — 解除绑定\n\n"
             "📎 支持的文件\n"
             "  Excel: .xlsx .xls .csv\n"
             "  图片: .png .jpg .jpeg",
         )
 
     async def _cmd_new(self, msg: ChannelMessage) -> None:
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
         self.sessions.remove(self.adapter.name, msg.chat_id, msg.user.user_id)
-        self._pending.pop(self._pending_key(msg.chat_id, msg.user.user_id), None)
+        self._pending.pop(pk, None)
+        self._pending_files.pop(pk, None)
         await self.adapter.send_text(msg.chat_id, "🆕 已新建对话，历史已清除。")
+
+    async def _cmd_mode(self, msg: ChannelMessage) -> None:
+        args = msg.command_args
+        user_id = msg.user.user_id
+        current = self.sessions.get_mode(self.adapter.name, msg.chat_id, user_id)
+
+        if not args:
+            icon, label, desc = MODE_INFO.get(current, ("", current, ""))
+            lines = [f"当前模式: {icon} {label} — {desc}\n"]
+            lines.append("可选模式：")
+            for key, (mi, ml, md) in MODE_INFO.items():
+                marker = " ✅" if key == current else ""
+                lines.append(f"  {mi} {key} — {ml}: {md}{marker}")
+            lines.append(f"\n切换: /mode <write|read|plan>")
+            await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+            return
+
+        target = args[0].lower()
+        if target not in VALID_MODES:
+            await self.adapter.send_text(
+                msg.chat_id,
+                f"❌ 无效模式: {target}\n可选: write / read / plan",
+            )
+            return
+
+        if target == current:
+            icon, label, _ = MODE_INFO[target]
+            await self.adapter.send_text(msg.chat_id, f"{icon} 当前已是{label}模式")
+            return
+
+        self.sessions.set_mode(self.adapter.name, msg.chat_id, user_id, target)
+        icon, label, desc = MODE_INFO[target]
+        await self.adapter.send_text(
+            msg.chat_id, f"{icon} 已切换到{label}模式 — {desc}",
+        )
+
+    async def _cmd_concurrency(self, msg: ChannelMessage) -> None:
+        """查看/切换并发模式: queue / steer / guide。"""
+        args = msg.command_args
+        user_id = msg.user.user_id
+        key = self._pending_key(msg.chat_id, user_id)
+        current = self._user_concurrency.get(key, self._default_concurrency)
+
+        if not args:
+            icon, label, desc = CONCURRENCY_INFO.get(current, ("", current, ""))
+            lines = [f"当前并发模式: {icon} {label} — {desc}\n"]
+            lines.append("可选模式：")
+            for k, (ci, cl, cd) in CONCURRENCY_INFO.items():
+                marker = " ✅" if k == current else ""
+                lines.append(f"  {ci} {k} — {cl}: {cd}{marker}")
+            lines.append("\n切换: /concurrency <queue|steer|guide>")
+            await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+            return
+
+        target = args[0].lower()
+        if target not in VALID_CONCURRENCY:
+            await self.adapter.send_text(
+                msg.chat_id,
+                f"❌ 无效并发模式: {target}\n可选: queue / steer / guide",
+            )
+            return
+
+        if target == current:
+            icon, label, _ = CONCURRENCY_INFO[target]
+            await self.adapter.send_text(msg.chat_id, f"{icon} 当前已是{label}模式")
+            return
+
+        self._user_concurrency[key] = target
+        icon, label, desc = CONCURRENCY_INFO[target]
+        await self.adapter.send_text(
+            msg.chat_id, f"{icon} 已切换到{label}并发模式 — {desc}",
+        )
 
     async def _cmd_abort(self, msg: ChannelMessage) -> None:
         session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
         if not session_id:
             await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
             return
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
         try:
-            await self.api.abort(session_id)
+            await self.api.abort(session_id, on_behalf_of=obo)
             await self.adapter.send_text(msg.chat_id, "🛑 已终止当前任务")
         except Exception as e:
             await self.adapter.send_text(msg.chat_id, f"❌ 终止失败: {e}")
 
     async def _cmd_model(self, msg: ChannelMessage) -> None:
         args = msg.command_args
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
         try:
             if args:
                 target = " ".join(args)
-                await self.api.switch_model(target)
+                await self.api.switch_model(target, on_behalf_of=obo)
                 await self.adapter.send_text(msg.chat_id, f"✅ 已切换到模型: {target}")
                 return
 
-            models = await self.api.list_models()
+            models = await self.api.list_models(on_behalf_of=obo)
             if not models:
                 await self.adapter.send_text(msg.chat_id, "暂无可用模型")
                 return
@@ -237,27 +672,452 @@ class MessageHandler:
         name, model_id, base_url, api_key = args[0], args[1], args[2], args[3]
         description = " ".join(args[4:]) if len(args) > 4 else ""
 
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
         try:
-            await self.api.add_model(name, model_id, base_url, api_key, description)
+            await self.api.add_model(name, model_id, base_url, api_key, description, on_behalf_of=obo)
             await self.adapter.send_text(
                 msg.chat_id,
                 f"✅ 已添加: {name}\n   {model_id}\n\n切换: /model {name}",
             )
         except Exception as e:
-            await self.adapter.send_text(msg.chat_id, f"❌ 添加失败: {e}")
+            err_msg = str(e)
+            if "403" in err_msg:
+                await self.adapter.send_text(msg.chat_id, "⛔ 添加模型需要管理员权限")
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 添加失败: {e}")
 
     async def _cmd_delmodel(self, msg: ChannelMessage) -> None:
         args = msg.command_args
         if not args:
             await self.adapter.send_text(msg.chat_id, "用法: /delmodel <模型名称>")
             return
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
         try:
-            await self.api.delete_model(args[0])
+            await self.api.delete_model(args[0], on_behalf_of=obo)
             await self.adapter.send_text(msg.chat_id, f"🗑 已删除: {args[0]}")
         except Exception as e:
-            await self.adapter.send_text(msg.chat_id, f"❌ 删除失败: {e}")
+            err_msg = str(e)
+            if "403" in err_msg:
+                await self.adapter.send_text(msg.chat_id, "⛔ 删除模型需要管理员权限")
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 删除失败: {e}")
+
+    async def _cmd_quota(self, msg: ChannelMessage) -> None:
+        """查看当前用户的 token 用量和配额。"""
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            usage = await self.api.get_usage(on_behalf_of=obo)
+        except Exception as e:
+            err_msg = str(e)
+            if "401" in err_msg or "403" in err_msg:
+                await self.adapter.send_text(
+                    msg.chat_id, "⚠️ 配额查询需要绑定账号，请先 /bind",
+                )
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 获取配额失败: {e}")
+            return
+
+        daily_tokens = usage.get("daily_tokens", 0)
+        monthly_tokens = usage.get("monthly_tokens", 0)
+        daily_limit = usage.get("daily_limit", 0)
+        monthly_limit = usage.get("monthly_limit", 0)
+        daily_remaining = usage.get("daily_remaining", -1)
+        monthly_remaining = usage.get("monthly_remaining", -1)
+
+        lines = ["📊 Token 用量\n"]
+        # 日用量
+        if daily_limit > 0:
+            lines.append(f"  今日: {daily_tokens:,} / {daily_limit:,}")
+            if daily_remaining >= 0:
+                lines.append(f"  剩余: {daily_remaining:,}")
+        else:
+            lines.append(f"  今日: {daily_tokens:,}（无上限）")
+        # 月用量
+        if monthly_limit > 0:
+            lines.append(f"  本月: {monthly_tokens:,} / {monthly_limit:,}")
+            if monthly_remaining >= 0:
+                lines.append(f"  剩余: {monthly_remaining:,}")
+        else:
+            lines.append(f"  本月: {monthly_tokens:,}（无上限）")
+
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _cmd_sessions(self, msg: ChannelMessage) -> None:
+        """列出历史会话 / 切换会话。"""
+        args = msg.command_args
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            sessions = await self.api.list_sessions(on_behalf_of=obo)
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 获取会话列表失败: {e}")
+            return
+
+        if not sessions:
+            await self.adapter.send_text(msg.chat_id, "暂无历史会话")
+            return
+
+        # 带参数 → 切换会话
+        if args:
+            try:
+                idx = int(args[0]) - 1
+            except ValueError:
+                await self.adapter.send_text(msg.chat_id, "⚠️ 请输入会话编号（数字）")
+                return
+            if idx < 0 or idx >= len(sessions):
+                await self.adapter.send_text(
+                    msg.chat_id, f"⚠️ 编号超出范围，有效范围: 1-{len(sessions)}",
+                )
+                return
+            target = sessions[idx]
+            sid = target.get("session_id", "")
+            self.sessions.set(self.adapter.name, msg.chat_id, msg.user.user_id, sid)
+            title = target.get("title", sid[:8])
+            await self.adapter.send_text(msg.chat_id, f"✅ 已切换到会话: {title}")
+            return
+
+        # 无参数 → 列出
+        current_sid = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        lines = ["📂 历史会话：\n"]
+        for i, s in enumerate(sessions[:20], 1):
+            sid = s.get("session_id", "")
+            title = s.get("title") or sid[:8]
+            msg_count = s.get("message_count", 0)
+            marker = " ← 当前" if sid == current_sid else ""
+            lines.append(f"  {i}. {title}  ({msg_count}条){marker}")
+        lines.append(f"\n切换: /sessions <编号>")
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _cmd_history(self, msg: ChannelMessage) -> None:
+        """查看当前会话轮次摘要。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            turns = await self.api.list_turns(session_id, on_behalf_of=obo)
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 获取轮次失败: {e}")
+            return
+        if not turns:
+            await self.adapter.send_text(msg.chat_id, "当前会话暂无对话轮次")
+            return
+
+        lines = ["📜 对话轮次：\n"]
+        for t in turns:
+            idx = t.get("turn_index", "?")
+            user_msg = t.get("user_message", "")[:60]
+            tool_names = t.get("tool_names", [])
+            tools_str = f"  🔧 {', '.join(tool_names)}" if tool_names else ""
+            lines.append(f"  [{idx}] {user_msg}{tools_str}")
+        lines.append(f"\n回退: /rollback <轮次号>")
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _cmd_rollback(self, msg: ChannelMessage) -> None:
+        """回退到指定用户轮次。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        args = msg.command_args
+        if not args:
+            # 无参数 → 先展示轮次列表
+            await self._cmd_history(msg)
+            return
+
+        try:
+            turn_index = int(args[0])
+        except ValueError:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 请输入轮次号（数字）")
+            return
+
+        try:
+            obo = self._resolve_on_behalf_of(msg.user.user_id)
+            result = await self.api.rollback(session_id, turn_index, on_behalf_of=obo)
+            removed = result.get("removed_messages", 0)
+            file_results = result.get("file_rollback_results", [])
+            file_count = len(file_results) if isinstance(file_results, list) else 0
+            parts = [f"⏪ 已回退到轮次 {turn_index}"]
+            if removed:
+                parts.append(f"移除 {removed} 条消息")
+            if file_count:
+                parts.append(f"回滚 {file_count} 个文件")
+            await self.adapter.send_text(msg.chat_id, "，".join(parts))
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 回退失败: {e}")
+
+    async def _cmd_undo(self, msg: ChannelMessage) -> None:
+        """撤销最近一次可撤销操作。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            operations = await self.api.list_operations(session_id, limit=20, on_behalf_of=obo)
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 获取操作历史失败: {e}")
+            return
+
+        # 找最近一条 undoable 操作（后端返回最近在前）
+        target = None
+        for op in operations:
+            if op.get("undoable"):
+                target = op
+                break
+
+        if target is None:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 没有可撤销的操作")
+            return
+
+        approval_id = target.get("approval_id", "")
+        tool_name = target.get("tool_name", "unknown")
+        try:
+            result = await self.api.undo_operation(session_id, approval_id, on_behalf_of=obo)
+            status = result.get("status", "")
+            result_msg = result.get("message", "")
+            if status == "ok":
+                await self.adapter.send_text(
+                    msg.chat_id, f"↩️ 已撤销操作: {tool_name}\n{result_msg}",
+                )
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id, f"⚠️ 撤销失败: {result_msg}",
+                )
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 撤销失败: {e}")
+
+    # ── Staged 文件管理命令 ──
+
+    async def _cmd_staged(self, msg: ChannelMessage) -> None:
+        """查看待确认的 staged 文件列表。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            data = await self.api.list_staged(session_id, on_behalf_of=obo)
+        except Exception as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ 获取 staged 文件失败: {e}")
+            return
+
+        if not data.get("backup_enabled"):
+            await self.adapter.send_text(msg.chat_id, "ℹ️ 当前会话未启用备份模式")
+            return
+
+        files = data.get("files", [])
+        if not files:
+            await self.adapter.send_text(msg.chat_id, "📂 暂无待确认文件")
+            return
+
+        # 缓存文件列表供 /apply /discard 按索引引用
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        self._staged_cache[pk] = files
+
+        await self.adapter.send_staged_card(
+            msg.chat_id, files, len(files), session_id,
+        )
+
+    def _resolve_staged_files(
+        self, msg: ChannelMessage, args: list[str],
+    ) -> list[str] | None:
+        """根据命令参数解析要操作的 staged 文件路径列表。
+
+        返回 None 表示操作全部，返回空列表表示参数无效。
+        """
+        if not args or args[0].lower() == "all":
+            return None  # 操作全部
+
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        cached = self._staged_cache.get(pk, [])
+
+        try:
+            idx = int(args[0]) - 1
+        except ValueError:
+            return []  # 无效参数
+
+        if idx < 0 or idx >= len(cached):
+            return []  # 超出范围
+
+        original_path = cached[idx].get("original_path", "")
+        return [original_path] if original_path else []
+
+    async def _cmd_apply(self, msg: ChannelMessage) -> None:
+        """确认应用 staged 文件变更。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        files = self._resolve_staged_files(msg, msg.command_args)
+        if files is not None and not files:
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            cached = self._staged_cache.get(pk, [])
+            if not cached:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    "⚠️ 请先使用 /staged 查看文件列表，再按编号操作",
+                )
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    f"⚠️ 无效编号，有效范围: 1-{len(cached)}",
+                )
+            return
+
+        try:
+            obo = self._resolve_on_behalf_of(msg.user.user_id)
+            result = await self.api.apply_staged(session_id, files, on_behalf_of=obo)
+        except Exception as e:
+            err_msg = str(e)
+            if "409" in err_msg:
+                await self.adapter.send_text(
+                    msg.chat_id, "⏳ 会话正在处理中，请等待完成后再应用",
+                )
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 应用失败: {e}")
+            return
+
+        if result.get("status") != "ok":
+            await self.adapter.send_text(
+                msg.chat_id, f"⚠️ 应用失败: {result.get('message', '未知错误')}",
+            )
+            return
+
+        count = result.get("count", 0)
+        pending = result.get("pending_count", 0)
+        applied = result.get("applied", [])
+
+        # 缓存 undo 信息
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        self._save_apply_undo(pk, applied)
+        await self._send_apply_result(msg.chat_id, count, pending, bool(self._last_apply.get(pk)))
+        self._staged_cache.pop(pk, None)
+
+    async def _cmd_discard(self, msg: ChannelMessage) -> None:
+        """丢弃 staged 文件变更。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        files = self._resolve_staged_files(msg, msg.command_args)
+        if files is not None and not files:
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            cached = self._staged_cache.get(pk, [])
+            if not cached:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    "⚠️ 请先使用 /staged 查看文件列表，再按编号操作",
+                )
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    f"⚠️ 无效编号，有效范围: 1-{len(cached)}",
+                )
+            return
+
+        try:
+            obo = self._resolve_on_behalf_of(msg.user.user_id)
+            result = await self.api.discard_staged(session_id, files, on_behalf_of=obo)
+        except Exception as e:
+            err_msg = str(e)
+            if "409" in err_msg:
+                await self.adapter.send_text(
+                    msg.chat_id, "⏳ 会话正在处理中，请等待完成后再丢弃",
+                )
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 丢弃失败: {e}")
+            return
+
+        discarded = result.get("discarded", 0)
+        pending = result.get("pending_count", 0)
+        await self._send_discard_result(msg.chat_id, discarded, pending)
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        self._staged_cache.pop(pk, None)
+
+    # ── Staged 共享辅助方法 ──
+
+    def _save_apply_undo(self, pk: str, applied: list[dict]) -> None:
+        """从 apply 响应中提取 undo 信息并缓存。"""
+        undo_items = [
+            {"original_path": a.get("original", ""), "undo_path": a.get("undo_path", "")}
+            for a in applied if a.get("undo_path")
+        ]
+        if undo_items:
+            self._last_apply[pk] = undo_items
+
+    async def _send_apply_result(
+        self, chat_id: str, count: int, pending: int, has_undo: bool,
+    ) -> None:
+        """发送 apply 操作结果消息。"""
+        parts = [f"✅ 已应用 {count} 个文件"]
+        if pending > 0:
+            parts.append(f"剩余 {pending} 个待确认")
+        if has_undo:
+            parts.append("如需撤销，请发送 /undoapply")
+        await self.adapter.send_text(chat_id, "\n".join(parts))
+
+    async def _send_discard_result(
+        self, chat_id: str, discarded: int | str, pending: int,
+    ) -> None:
+        """发送 discard 操作结果消息。"""
+        parts = [f"🗑 已丢弃{'全部' if discarded == 'all' else f' {discarded} 个'}文件"]
+        if pending > 0:
+            parts.append(f"剩余 {pending} 个待确认")
+        await self.adapter.send_text(chat_id, "\n".join(parts))
+
+    async def _cmd_undoapply(self, msg: ChannelMessage) -> None:
+        """撤销最近一次 apply 操作。"""
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, msg.user.user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        undo_items = self._last_apply.pop(pk, [])
+        if not undo_items:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 没有可撤销的 apply 操作")
+            return
+
+        restored = 0
+        failed: list[str] = []
+        for item in undo_items:
+            try:
+                obo = self._resolve_on_behalf_of(msg.user.user_id)
+                result = await self.api.undo_backup(
+                    session_id,
+                    item["original_path"],
+                    item["undo_path"],
+                    on_behalf_of=obo,
+                )
+                if result.get("status") == "ok":
+                    restored += 1
+                else:
+                    failed.append(item["original_path"])
+            except Exception:
+                failed.append(item["original_path"])
+
+        parts: list[str] = []
+        if restored:
+            parts.append(f"↩️ 已撤销 {restored} 个文件的 apply")
+        if failed:
+            parts.append(f"⚠️ {len(failed)} 个文件撤销失败: {', '.join(failed)}")
+        await self.adapter.send_text(msg.chat_id, "\n".join(parts) or "⚠️ 撤销失败")
 
     # ── 文本消息 ──
+
+    # P4b: 根据 chat_mode 分化的处理提示
+    _PROCESSING_HINTS: dict[str, str] = {
+        "write": "✏️ 收到！正在处理写入请求...",
+        "read":  "🔍 收到！正在分析中...",
+        "plan":  "📋 收到！正在制定计划...",
+    }
+    _PROCESSING_HINT_DEFAULT = "✨ ExcelManus 正在处理中，请稍等..."
+    _PROCESSING_HINT_FILE = "📎 文件已收到，正在处理..."
 
     async def _handle_text(self, msg: ChannelMessage) -> None:
         """处理普通文本消息 → 调用聊天 API。"""
@@ -278,28 +1138,79 @@ class MessageHandler:
                 )
 
             try:
-                await self.api.answer_question(session_id, question_id, msg.text)
+                obo = self._resolve_on_behalf_of(user_id)
+                await self.api.answer_question(session_id, question_id, msg.text, on_behalf_of=obo)
             except Exception as e:
                 logger.exception("Free-text answer error for user %s", user_id)
                 await self.adapter.send_text(msg.chat_id, f"❌ 处理回答失败: {e}")
             return
 
+        # 拦截：若有缓冲的待处理文件，将文本作为用户指令，合并处理
+        if pk in self._pending_files:
+            await self._process_pending_files(msg.chat_id, user_id, msg.text)
+            return
+
+        chat_mode = self.sessions.get_mode(self.adapter.name, msg.chat_id, user_id)
+        # P4b: 动态处理提示
+        hint = self._PROCESSING_HINTS.get(chat_mode, self._PROCESSING_HINT_DEFAULT)
+        await self.adapter.send_text(msg.chat_id, hint)
         session_id = self.sessions.get(self.adapter.name, msg.chat_id, user_id)
-        progress_cb = self._make_progress_callback(msg.chat_id)
         try:
-            result = await self.api.stream_chat(msg.text, session_id, on_progress=progress_cb)
-            self.sessions.set(self.adapter.name, msg.chat_id, user_id, result.session_id)
-            await self._send_chat_result(msg.chat_id, user_id, result)
+            result = await self._stream_chat_chunked(
+                msg.chat_id, user_id, msg.text, session_id, chat_mode=chat_mode,
+            )
+            await self._dispatch_non_text_results(msg.chat_id, user_id, result)
         except Exception as e:
             logger.exception("Chat error for user %s", user_id)
             await self.adapter.send_text(msg.chat_id, f"❌ 出错了: {type(e).__name__}: {e}")
 
+    # ── 图片消息 ──
+
+    async def _handle_image_message(self, msg: ChannelMessage) -> None:
+        """处理纯图片消息 → 缓冲等待用户指令或立即处理。
+
+        若消息携带文本（如 Telegram 照片 caption），立即处理。
+        否则缓冲图片数据，等待用户下一条文本指令。
+        """
+        user_id = msg.user.user_id
+        pk = self._pending_key(msg.chat_id, user_id)
+
+        for img in msg.images:
+            pending = PendingFile(
+                filename="photo",
+                is_image=True,
+                mime_type=img.media_type,
+                image_data=img.data,
+            )
+            self._pending_files.setdefault(pk, []).append(pending)
+
+        # 有文本 → 立即处理
+        if msg.text.strip():
+            await self._process_pending_files(msg.chat_id, user_id, msg.text)
+            return
+
+        # 无文本 → 等待用户指令
+        count = len(msg.images)
+        if count == 1:
+            prompt = "📷 已收到图片，请问你想让我怎么处理？"
+        else:
+            prompt = f"📷 已收到 {count} 张图片，请问你想让我怎么处理？"
+        await self.adapter.send_text(msg.chat_id, prompt)
+
     # ── 文件上传 ──
 
-    async def _handle_file_upload(self, msg: ChannelMessage) -> None:
-        """处理文件上传 → 写入工作区 → 调用聊天 API。"""
-        user_id = msg.user.user_id
+    _IMAGE_MIME_PREFIX = "image/"
 
+    async def _handle_file_upload(self, msg: ChannelMessage) -> None:
+        """处理文件上传 → 写入工作区 → 缓冲等待用户指令。
+
+        文件先上传到工作区，然后缓冲文件元信息等待用户下一条文本指令。
+        若消息本身携带文本（如 Telegram 文件 caption），则视为已有指令，立即处理。
+        """
+        user_id = msg.user.user_id
+        pk = self._pending_key(msg.chat_id, user_id)
+
+        uploaded_names: list[str] = []
         for file_att in msg.files:
             ext = Path(file_att.filename).suffix.lower()
             if ext not in ALLOWED_UPLOAD_EXTENSIONS:
@@ -310,20 +1221,77 @@ class MessageHandler:
                 continue
 
             await self.adapter.show_typing(msg.chat_id)
-            await self.api.upload_to_workspace(file_att.filename, file_att.data)
+            obo = self._resolve_on_behalf_of(user_id)
+            await self.api.upload_to_workspace(file_att.filename, file_att.data, on_behalf_of=obo)
 
-            caption = msg.text or f"帮我分析 {file_att.filename}"
-            chat_msg = f"@file:{file_att.filename} {caption}"
+            is_image = file_att.mime_type.startswith(self._IMAGE_MIME_PREFIX)
+            pending = PendingFile(
+                filename=file_att.filename,
+                is_image=is_image,
+                mime_type=file_att.mime_type,
+                image_data=file_att.data if is_image else None,
+            )
+            self._pending_files.setdefault(pk, []).append(pending)
+            uploaded_names.append(file_att.filename)
 
-            session_id = self.sessions.get(self.adapter.name, msg.chat_id, user_id)
-            progress_cb = self._make_progress_callback(msg.chat_id)
-            try:
-                result = await self.api.stream_chat(chat_msg, session_id, on_progress=progress_cb)
-                self.sessions.set(self.adapter.name, msg.chat_id, user_id, result.session_id)
-                await self._send_chat_result(msg.chat_id, user_id, result)
-            except Exception as e:
-                logger.exception("Document chat error for user %s", user_id)
-                await self.adapter.send_text(msg.chat_id, f"❌ 出错了: {e}")
+        if not uploaded_names:
+            return
+
+        # 消息本身有文本 → 视为用户已给出指令，立即处理
+        if msg.text.strip():
+            await self._process_pending_files(msg.chat_id, user_id, msg.text)
+            return
+
+        # 无文本 → 告知用户已收到文件，等待进一步指令
+        if len(uploaded_names) == 1:
+            prompt = f"📎 已收到文件 {uploaded_names[0]}，请问你想让我怎么处理？"
+        else:
+            names = "、".join(uploaded_names)
+            prompt = f"📎 已收到 {len(uploaded_names)} 个文件（{names}），请问你想让我怎么处理？"
+        await self.adapter.send_text(msg.chat_id, prompt)
+
+    async def _process_pending_files(
+        self, chat_id: str, user_id: str, text: str,
+    ) -> None:
+        """消费缓冲的待处理文件，结合用户文本指令一起发送给 AI。"""
+        pk = self._pending_key(chat_id, user_id)
+        files = self._pending_files.pop(pk, [])
+        if not files:
+            return
+
+        await self.adapter.show_typing(chat_id)
+        await self.adapter.send_text(chat_id, self._PROCESSING_HINT_FILE)
+
+        # 构建消息：@file:引用 + 用户文本
+        file_refs = [f for f in files if f.filename != "photo"]
+        if file_refs:
+            refs_str = " ".join(f"@file:{f.filename}" for f in file_refs)
+            chat_msg = f"{refs_str} {text}"
+        else:
+            chat_msg = text
+
+        # 收集 vision 图片（文件中的图片 + 纯图片）
+        api_images: list[dict[str, str]] = []
+        for f in files:
+            if f.is_image and f.image_data:
+                b64 = base64.b64encode(f.image_data).decode("ascii")
+                api_images.append({
+                    "data": b64,
+                    "media_type": f.mime_type,
+                    "detail": "auto",
+                })
+
+        session_id = self.sessions.get(self.adapter.name, chat_id, user_id)
+        chat_mode = self.sessions.get_mode(self.adapter.name, chat_id, user_id)
+        try:
+            result = await self._stream_chat_chunked(
+                chat_id, user_id, chat_msg, session_id,
+                chat_mode=chat_mode, images=api_images or None,
+            )
+            await self._dispatch_non_text_results(chat_id, user_id, result)
+        except Exception as e:
+            logger.exception("Pending file chat error for user %s", user_id)
+            await self.adapter.send_text(chat_id, f"❌ 出错了: {e}")
 
     # ── 回调处理 ──
 
@@ -341,6 +1309,10 @@ class MessageHandler:
 
         if data.startswith("answer:"):
             await self._handle_answer_callback(msg, data)
+            return
+
+        if data.startswith("apply_staged:") or data.startswith("discard_staged:"):
+            await self._handle_staged_callback(msg, data)
             return
 
     async def _handle_approval_callback(self, msg: ChannelMessage, data: str) -> None:
@@ -366,7 +1338,8 @@ class MessageHandler:
 
         try:
             await self.adapter.show_typing(msg.chat_id)
-            await self.api.approve(session_id, approval_id, decision)
+            obo = self._resolve_on_behalf_of(user_id)
+            await self.api.approve(session_id, approval_id, decision, on_behalf_of=obo)
             await self.adapter.send_text(msg.chat_id, result_text)
         except Exception as e:
             logger.exception("Approval callback error")
@@ -396,66 +1369,147 @@ class MessageHandler:
 
         try:
             await self.adapter.show_typing(msg.chat_id)
-            await self.api.answer_question(session_id, question_id, answer)
+            obo = self._resolve_on_behalf_of(msg.user.user_id)
+            await self.api.answer_question(session_id, question_id, answer, on_behalf_of=obo)
         except Exception as e:
             logger.exception("Question callback error")
             await self.adapter.send_text(msg.chat_id, f"❌ 处理回答失败: {e}")
 
-    # ── 进度回调 ──
+    async def _handle_staged_callback(self, msg: ChannelMessage, data: str) -> None:
+        """处理 staged 文件 apply/discard 按钮回调。"""
+        parts = data.split(":")
+        if len(parts) < 3:
+            return
+        action = parts[0]  # "apply_staged" | "discard_staged"
+        session_id = parts[1]
+        file_index_str = parts[2]
 
-    def _make_progress_callback(
-        self, chat_id: str, min_interval: float = 5.0,
-    ) -> ProgressCallback:
-        """创建节流进度回调，避免高频消息轰炸渠道。
-
-        Args:
-            chat_id: 目标聊天 ID。
-            min_interval: 两次进度消息之间的最小间隔（秒）。
-        """
-        last_ts: list[float] = [0.0]  # mutable container for closure
-        last_stage: list[str] = [""]
-
-        async def _on_progress(stage: str, message: str) -> None:
-            now = time.monotonic()
-            # 同一阶段的更新需要间隔 min_interval 秒；阶段切换立即推送
-            if stage == last_stage[0] and (now - last_ts[0]) < min_interval:
-                return
-            last_ts[0] = now
-            last_stage[0] = stage
+        if file_index_str == "all":
+            files_param = None
+        else:
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            cached = self._staged_cache.get(pk, [])
             try:
-                await self.adapter.send_progress(chat_id, stage, message)
-            except Exception:
-                logger.debug("send_progress failed for chat %s", chat_id, exc_info=True)
+                idx = int(file_index_str)
+            except ValueError:
+                return
+            if idx < 0 or idx >= len(cached):
+                await self.adapter.send_text(msg.chat_id, "⚠️ 文件索引已过期，请重新 /staged")
+                return
+            original_path = cached[idx].get("original_path", "")
+            if not original_path:
+                return
+            files_param = [original_path]
 
-        return _on_progress
+        pk = self._pending_key(msg.chat_id, msg.user.user_id)
+        obo = self._resolve_on_behalf_of(msg.user.user_id)
+        try:
+            if action == "apply_staged":
+                result = await self.api.apply_staged(session_id, files_param, on_behalf_of=obo)
+                count = result.get("count", 0)
+                pending = result.get("pending_count", 0)
+                applied = result.get("applied", [])
+                self._save_apply_undo(pk, applied)
+                self._staged_cache.pop(pk, None)
+                await self._send_apply_result(
+                    msg.chat_id, count, pending, bool(self._last_apply.get(pk)),
+                )
+            else:
+                result = await self.api.discard_staged(session_id, files_param, on_behalf_of=obo)
+                discarded = result.get("discarded", 0)
+                pending = result.get("pending_count", 0)
+                self._staged_cache.pop(pk, None)
+                await self._send_discard_result(msg.chat_id, discarded, pending)
+        except Exception as e:
+            err_msg = str(e)
+            if "409" in err_msg:
+                await self.adapter.send_text(
+                    msg.chat_id, "⏳ 会话正在处理中，请等待完成后操作",
+                )
+            else:
+                await self.adapter.send_text(msg.chat_id, f"❌ 操作失败: {e}")
+
+    # ── 流式分块输出 ──
+
+    async def _stream_chat_chunked(
+        self,
+        chat_id: str,
+        user_id: str,
+        message: str,
+        session_id: str | None,
+        *,
+        chat_mode: str = "write",
+        images: list[dict[str, str]] | None = None,
+    ) -> dict:
+        """通过 ChunkedOutputManager 流式处理聊天并实时推送到渠道。
+
+        替代原来的 stream_chat() + _send_chat_result() 流程，
+        文本回复已由 ChunkedOutputManager 实时推送，
+        返回的 dict 仅含非文本结果（审批/问答/文件等）。
+        """
+        # 解析 on_behalf_of：已绑定→真实 user_id；未绑定→匿名隔离 ID
+        auth_uid = self._resolve_on_behalf_of(user_id)
+
+        manager = ChunkedOutputManager(self.adapter, chat_id)
+        manager.start_heartbeat()
+        async for event_type, data in self.api.stream_chat_events(
+            message, session_id, chat_mode=chat_mode, images=images,
+            on_behalf_of=auth_uid, channel=self.adapter.name,
+        ):
+            await manager.feed(event_type, data)
+        result = await manager.finalize()
+
+        # 更新 session_id
+        new_session_id = result.get("session_id", "")
+        if new_session_id:
+            self.sessions.set(self.adapter.name, chat_id, user_id, new_session_id)
+
+        return result
 
     # ── 结果分发 ──
 
-    async def _send_chat_result(
-        self, chat_id: str, user_id: str, result: ChatResult,
+    async def _dispatch_non_text_results(
+        self, chat_id: str, user_id: str, result: dict,
     ) -> None:
-        """将 ChatResult 分发到渠道：文本回复、审批卡片、问答卡片、文件下载。"""
+        """分发非文本结果：文件下载、审批、问答、staging。
 
-        # 文本回复
-        if result.reply:
-            await self.adapter.send_markdown(chat_id, result.reply)
+        文本回复已由 ChunkedOutputManager 处理，此方法处理其余结构化结果。
+        """
+        file_downloads = result.get("file_downloads", [])
+        approval = result.get("approval")
+        question = result.get("question")
+        staging_event = result.get("staging_event")
+        reply = result.get("reply", "")
+        error = result.get("error")
 
-        # 文件下载
-        for dl in result.file_downloads:
+        # 流式输出中途出错：已有部分文本输出但后端报错，补充通知用户
+        if error and reply:
+            await self.adapter.send_text(chat_id, f"⚠️ 处理未完成: {error}")
+        # P5b: 错误后操作引导
+        if error and not approval and not question:
+            await self.adapter.send_text(
+                chat_id,
+                "💡 可尝试: /abort 终止 → /undo 撤销 → 重新发送请求",
+            )
+
+        # 文件下载（通过 API 获取字节，支持 Bot 与 API 不同机部署）
+        for dl in file_downloads:
             file_path = dl.get("file_path", "")
             filename = dl.get("filename", "") or Path(file_path).name
             if file_path:
                 try:
-                    await self.adapter.send_file(chat_id, file_path, filename)
+                    obo = self._resolve_on_behalf_of(user_id)
+                    file_bytes, _ = await self.api.download_file(file_path, on_behalf_of=obo)
+                    await self.adapter.send_file(chat_id, file_bytes, filename)
                 except Exception:
                     logger.warning("发送文件失败: %s", file_path, exc_info=True)
 
         # 审批请求
-        if result.approval:
-            approval_id = result.approval.get("approval_id", "")
-            tool_name = result.approval.get("approval_tool_name", "unknown")
-            risk_level = result.approval.get("risk_level", "yellow")
-            args_summary = result.approval.get("args_summary", {})
+        if approval:
+            approval_id = approval.get("approval_id", "")
+            tool_name = approval.get("approval_tool_name", "unknown")
+            risk_level = approval.get("risk_level", "yellow")
+            args_summary = approval.get("args_summary", {})
 
             await self.adapter.send_approval_card(
                 chat_id, approval_id, tool_name, risk_level, args_summary,
@@ -471,11 +1525,11 @@ class MessageHandler:
             )
 
         # 问答请求
-        if result.question:
-            question_id = result.question.get("id", "")
-            header = result.question.get("header", "")
-            text = result.question.get("text", "")
-            options = result.question.get("options", [])
+        if question:
+            question_id = question.get("id", "")
+            header = question.get("header", "")
+            text = question.get("text", "")
+            options = question.get("options", [])
 
             await self.adapter.send_question_card(
                 chat_id, question_id, header, text, options,
@@ -490,11 +1544,183 @@ class MessageHandler:
                 chat_id=chat_id,
             )
 
-        # 无任何内容
+        # staging 自动通知
+        if staging_event:
+            evt = staging_event
+            action = evt.get("action", "")
+            staging_files = evt.get("files", [])
+            pending_count = evt.get("pending_count", 0)
+            if action in ("new", "finish_hint") and staging_files and pending_count > 0:
+                session_id = self.sessions.get(self.adapter.name, chat_id, user_id) or ""
+                # 缓存文件列表
+                pk = self._pending_key(chat_id, user_id)
+                try:
+                    obo = self._resolve_on_behalf_of(user_id)
+                    data = await self.api.list_staged(session_id, on_behalf_of=obo)
+                    full_files = data.get("files", [])
+                    if full_files:
+                        self._staged_cache[pk] = full_files
+                        await self.adapter.send_staged_card(
+                            chat_id, full_files, len(full_files), session_id,
+                        )
+                except Exception:
+                    # 降级：简要文本通知
+                    from pathlib import PurePosixPath
+                    names = [PurePosixPath(f.get("path", "?")).name for f in staging_files[:5]]
+                    lines = [f"📦 {pending_count} 个文件待确认:"]
+                    for n in names:
+                        lines.append(f"  • {n}")
+                    lines.append("输入 /staged 查看详情，/apply 确认应用")
+                    await self.adapter.send_text(chat_id, "\n".join(lines))
+
+        # P5c: 无任何内容 — 语义化提示
         if (
-            not result.reply
-            and not result.approval
-            and not result.question
-            and not result.file_downloads
+            not reply
+            and not approval
+            and not question
+            and not file_downloads
+            and not staging_event
         ):
-            await self.adapter.send_text(chat_id, "（无回复内容）")
+            tool_calls = result.get("tool_calls", [])
+            if tool_calls:
+                await self.adapter.send_text(chat_id, "✅ 操作已完成")
+            else:
+                await self.adapter.send_text(chat_id, "（未获得回复内容，请重试或 /abort 后再试）")
+
+    # ── 身份桥接 ──
+
+    # 匿名用户 ID 前缀（用于未绑定渠道用户的工作区隔离）
+    _ANON_PREFIX = "channel_anon:"
+
+    def _resolve_auth_user_id(self, platform_user_id: str) -> str | None:
+        """解析渠道用户对应的 auth user_id。
+
+        优先查缓存，未命中则查 ChannelBindManager。
+        未绑定用户返回 None（后端按匿名处理）。
+        """
+        cache_key = f"{self.adapter.name}:{platform_user_id}"
+        cached_uid = self._auth_user_cache.get(cache_key)
+
+        auth_uid: str | None = cached_uid
+        if self._bind_manager is not None:
+            # 始终回源检查，确保 Web 端解绑/换绑能在 Bot 侧即时生效。
+            auth_uid = self._bind_manager.check_bind_status(
+                self.adapter.name, platform_user_id,
+            )
+
+        # 清理失效缓存（例如 Web 端解绑）
+        if auth_uid is None:
+            self._auth_user_cache.pop(cache_key, None)
+            return None
+
+        # 仅在映射变化时写缓存并回填，避免重复 IO
+        if cached_uid != auth_uid:
+            self._auth_user_cache[cache_key] = auth_uid
+            self.sessions.backfill_auth_user_id(
+                self.adapter.name, platform_user_id, auth_uid,
+            )
+        return auth_uid
+
+    def _resolve_on_behalf_of(self, platform_user_id: str) -> str | None:
+        """解析 on_behalf_of header 值。
+
+        已绑定用户 → 真实 auth user_id
+        未绑定用户 → 合成匿名 ID ``channel_anon:<channel>:<platform_id>``
+                      使后端为其分配隔离工作区
+        """
+        auth_uid = self._resolve_auth_user_id(platform_user_id)
+        if auth_uid is not None:
+            return auth_uid
+        # 未绑定 → 合成匿名 ID，确保工作区隔离
+        return f"{self._ANON_PREFIX}{self.adapter.name}:{platform_user_id}"
+
+    def invalidate_auth_cache(self, platform_user_id: str) -> None:
+        """绑定/解绑后清除缓存。"""
+        cache_key = f"{self.adapter.name}:{platform_user_id}"
+        self._auth_user_cache.pop(cache_key, None)
+
+    # ── 绑定命令 ──
+
+    async def _cmd_bind(self, msg: ChannelMessage) -> None:
+        """生成绑定码，用户在 Web 前端输入后完成渠道绑定。"""
+        if self._bind_manager is None:
+            await self.adapter.send_text(
+                msg.chat_id, "⚠️ 绑定功能未启用（认证未开启）",
+            )
+            return
+
+        # 已绑定检查
+        existing = self._resolve_auth_user_id(msg.user.user_id)
+        if existing:
+            await self.adapter.send_text(
+                msg.chat_id,
+                "✅ 当前渠道账号已绑定 ExcelManus 用户。\n"
+                "如需解绑，请使用 /unbind",
+            )
+            return
+
+        try:
+            code = self._bind_manager.create_bind_code(
+                channel=self.adapter.name,
+                platform_id=msg.user.user_id,
+                platform_display_name=msg.user.display_name or msg.user.username,
+            )
+        except RuntimeError as e:
+            await self.adapter.send_text(msg.chat_id, f"❌ {e}")
+            return
+
+        await self.adapter.send_markdown(
+            msg.chat_id,
+            f"🔗 绑定码: <b>{code}</b>\n\n"
+            f"请在 ExcelManus Web 端「个人中心 → 渠道绑定」中输入此码。\n"
+            f"有效期 5 分钟，过期后请重新 /bind",
+        )
+
+    async def _cmd_bindstatus(self, msg: ChannelMessage) -> None:
+        """查询当前渠道账号的绑定状态。"""
+        if self._bind_manager is None:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 绑定功能未启用")
+            return
+
+        auth_uid = self._resolve_auth_user_id(msg.user.user_id)
+        if auth_uid:
+            await self.adapter.send_text(
+                msg.chat_id,
+                f"✅ 已绑定 ExcelManus 用户\n"
+                f"用户 ID: {auth_uid[:8]}…\n\n"
+                f"解绑: /unbind",
+            )
+        else:
+            await self.adapter.send_text(
+                msg.chat_id,
+                "❌ 当前渠道账号未绑定 ExcelManus 用户。\n"
+                "使用 /bind 获取绑定码",
+            )
+
+    async def _cmd_unbind(self, msg: ChannelMessage) -> None:
+        """解除当前渠道账号的绑定。"""
+        if self._bind_manager is None:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 绑定功能未启用")
+            return
+
+        auth_uid = self._resolve_auth_user_id(msg.user.user_id)
+        if not auth_uid:
+            await self.adapter.send_text(
+                msg.chat_id, "❌ 当前渠道账号未绑定，无需解绑",
+            )
+            return
+
+        ok = self._bind_manager.unbind_channel(
+            self.adapter.name, msg.user.user_id,
+        )
+        self.invalidate_auth_cache(msg.user.user_id)
+        if ok:
+            if self._event_bridge is not None:
+                self._event_bridge.unsubscribe(auth_uid, self.adapter.name, msg.chat_id)
+            reg_key = f"{self.adapter.name}:{msg.chat_id}:{msg.user.user_id}"
+            self._bridge_registered.pop(reg_key, None)
+            await self.adapter.send_text(
+                msg.chat_id, "✅ 已解绑。后续消息将以匿名身份处理。\n重新绑定: /bind",
+            )
+        else:
+            await self.adapter.send_text(msg.chat_id, "❌ 解绑失败，请稍后重试")

@@ -77,7 +77,47 @@ class SessionStore:
     def set(self, channel: str, chat_id: str, user_id: str, session_id: str) -> None:
         """存储 session_id。"""
         key = self._key(channel, chat_id, user_id)
-        self._data[key] = {"session_id": session_id, "ts": time.time()}
+        existing = self._data.get(key, {})
+        existing.update({"session_id": session_id, "ts": time.time()})
+        self._data[key] = existing
+        self._save()
+
+    def get_auth_user_id(self, channel: str, chat_id: str, user_id: str) -> str | None:
+        """获取关联的 auth user_id。"""
+        key = self._key(channel, chat_id, user_id)
+        entry = self._data.get(key)
+        if entry is None:
+            return None
+        return entry.get("auth_user_id")
+
+    def set_auth_user_id(
+        self, channel: str, chat_id: str, user_id: str, auth_user_id: str,
+    ) -> None:
+        """存储关联的 auth user_id。"""
+        key = self._key(channel, chat_id, user_id)
+        entry = self._data.get(key)
+        if entry is None:
+            entry = {"session_id": "", "ts": time.time()}
+            self._data[key] = entry
+        entry["auth_user_id"] = auth_user_id
+        self._save()
+
+    def get_mode(self, channel: str, chat_id: str, user_id: str) -> str:
+        """获取用户当前 chat_mode，缺失时返回 "write"。"""
+        key = self._key(channel, chat_id, user_id)
+        entry = self._data.get(key)
+        if entry is None:
+            return "write"
+        return entry.get("chat_mode", "write")
+
+    def set_mode(self, channel: str, chat_id: str, user_id: str, mode: str) -> None:
+        """设置用户 chat_mode。若条目不存在则创建占位条目。"""
+        key = self._key(channel, chat_id, user_id)
+        entry = self._data.get(key)
+        if entry is None:
+            entry = {"session_id": "", "ts": time.time()}
+            self._data[key] = entry
+        entry["chat_mode"] = mode
         self._save()
 
     def remove(self, channel: str, chat_id: str, user_id: str) -> None:
@@ -85,6 +125,33 @@ class SessionStore:
         key = self._key(channel, chat_id, user_id)
         if self._data.pop(key, None) is not None:
             self._save()
+
+    def backfill_auth_user_id(
+        self, channel: str, platform_user_id: str, auth_user_id: str,
+    ) -> int:
+        """绑定成功后，回填该渠道用户所有已有条目的 auth_user_id。
+
+        遍历所有 key 形如 ``<channel>:<chat_id>:<platform_user_id>`` 的条目，
+        将 auth_user_id 写入（若尚未设置或值不同）。
+
+        Returns:
+            更新的条目数。
+        """
+        prefix = f"{channel}:"
+        suffix = f":{platform_user_id}"
+        updated = 0
+        for key, entry in self._data.items():
+            if key.startswith(prefix) and key.endswith(suffix):
+                if entry.get("auth_user_id") != auth_user_id:
+                    entry["auth_user_id"] = auth_user_id
+                    updated += 1
+        if updated:
+            self._save()
+            logger.info(
+                "回填 auth_user_id: channel=%s platform=%s → %d 条",
+                channel, platform_user_id, updated,
+            )
+        return updated
 
     def cleanup_expired(self) -> int:
         """清理所有过期条目。"""

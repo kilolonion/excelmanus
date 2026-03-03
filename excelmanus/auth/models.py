@@ -262,6 +262,12 @@ class ConfirmMergeRequest(BaseModel):
     merge_token: str
 
 
+class UnlinkChannelRequest(BaseModel):
+    """解绑渠道时的请求体（有密码用户需提供密码）。"""
+    model_config = ConfigDict(extra="forbid")
+    password: Optional[str] = None
+
+
 class OAuthLinkInfo(BaseModel):
     """单个 OAuth 绑定信息。"""
     provider: str

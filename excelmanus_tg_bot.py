@@ -28,6 +28,26 @@ def main() -> None:
     _raw = os.environ.get("EXCELMANUS_TG_USERS", "")
     if _raw.strip():
         allowed_users = {uid.strip() for uid in _raw.split(",") if uid.strip()}
+    service_token = os.environ.get("EXCELMANUS_SERVICE_TOKEN", "").strip() or None
+
+    auth_enabled = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in (
+        "1", "true", "yes",
+    )
+    if auth_enabled and service_token is None:
+        try:
+            from excelmanus.auth.security import get_or_create_service_token
+            service_token = get_or_create_service_token()
+        except Exception:
+            logging.warning(
+                "Auth is enabled but no service token is available; "
+                "Bot requests may be rejected with 401/403.",
+                exc_info=True,
+            )
+    if auth_enabled:
+        logging.info(
+            "Standalone Telegram mode is using service-token auth. "
+            "Account bind/unbind commands require integrated channel mode.",
+        )
 
     from excelmanus.channels.telegram.handlers import run_telegram_bot
 
@@ -35,6 +55,7 @@ def main() -> None:
         token=token,
         api_url=api_url,
         allowed_users=allowed_users,
+        service_token=service_token,
     )
 
 
