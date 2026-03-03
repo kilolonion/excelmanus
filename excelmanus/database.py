@@ -356,6 +356,24 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
         "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
     ],
+    20: [
+        """CREATE TABLE IF NOT EXISTS session_summaries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL UNIQUE,
+            user_id         TEXT,
+            summary_text    TEXT NOT NULL,
+            task_goal       TEXT DEFAULT '',
+            files_involved  TEXT DEFAULT '[]',
+            outcome         TEXT DEFAULT '',
+            unfinished      TEXT DEFAULT '',
+            embedding       BLOB,
+            token_count     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -691,6 +709,24 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
         "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
+    ],
+    20: [
+        """CREATE TABLE IF NOT EXISTS session_summaries (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL UNIQUE,
+            user_id         TEXT,
+            summary_text    TEXT NOT NULL,
+            task_goal       TEXT DEFAULT '',
+            files_involved  TEXT DEFAULT '[]',
+            outcome         TEXT DEFAULT '',
+            unfinished      TEXT DEFAULT '',
+            embedding       BLOB,
+            token_count     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL,
+            updated_at      TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
     ],
 }
 
