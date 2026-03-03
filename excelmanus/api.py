@@ -422,98 +422,6 @@ def _get_user_allowed_models(request: Request) -> list[str]:
         return []
 
 
-def _get_credential_store_from_request(request: Request) -> Any:
-    """获取订阅凭证存储实例。"""
-    return getattr(request.app.state, "credential_store", None)
-
-
-def _build_user_codex_models(request: Request, user_id: str | None) -> list[dict[str, Any]]:
-    """构建当前用户可见的 Codex 私有模型目录。"""
-    if not user_id:
-        return []
-    cred_store = _get_credential_store_from_request(request)
-    if cred_store is None:
-        return []
-
-    try:
-        active = cred_store.get_active_profile(user_id, "openai-codex")
-    except Exception:
-        logger.debug("读取 Codex 凭证失败", exc_info=True)
-        return []
-
-    if active is None or not getattr(active, "access_token", ""):
-        return []
-
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-
-    plan = (getattr(active, "plan_type", "") or "").strip().lower()
-    plan_display = plan or "Plus/Pro"
-    is_pro = plan == "pro"
-    # Spark 模型仅 Pro 订阅可用
-    _PRO_ONLY_MODELS = {"gpt-5.3-codex-spark"}
-
-    # 已在全局 model_profiles 中的 model ID — 避免重复展示
-    persisted_model_ids: set[str] = set()
-    if _config_store is not None:
-        try:
-            for p in _config_store.list_profiles():
-                mid = p.get("model", "")
-                if mid:
-                    persisted_model_ids.add(mid)
-        except Exception:
-            pass
-
-    result: list[dict[str, Any]] = []
-    for item in OpenAICodexProvider.list_supported_model_entries():
-        if item["model"] in _PRO_ONLY_MODELS and not is_pro:
-            continue
-        # 若该 Codex 模型已被持久化到全局 profiles，则跳过动态注入，避免重复
-        if item["model"] in persisted_model_ids:
-            continue
-        result.append({
-            "name": item["profile_name"],
-            "model": item["public_model_id"],
-            "resolved_model": item["model"],
-            "display_name": item["display_name"],
-            "description": f"OpenAI Codex 订阅模型（{plan_display}）",
-            "active": False,
-            "base_url": OpenAICodexProvider.BASE_URL,
-            "user_scoped": True,
-            "provider": "openai-codex",
-        })
-    return result
-
-
-def _resolve_codex_model_for_user(
-    request: Request,
-    user_id: str | None,
-    profile_name: str,
-) -> str | None:
-    """将 Codex profile 名称解析为真实 model ID（仅当用户已连接 Codex）。"""
-    if not user_id:
-        return None
-
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-
-    if not OpenAICodexProvider.is_codex_profile_name(profile_name):
-        return None
-
-    cred_store = _get_credential_store_from_request(request)
-    if cred_store is None:
-        return None
-
-    try:
-        active = cred_store.get_active_profile(user_id, "openai-codex")
-    except Exception:
-        logger.debug("读取 Codex 凭证失败", exc_info=True)
-        return None
-
-    if active is None or not getattr(active, "access_token", ""):
-        return None
-
-    return OpenAICodexProvider.model_from_profile_name(profile_name)
-
-
 def _list_available_model_names_for_user(request: Request, user_id: str | None) -> list[str]:
     """返回当前用户可切换的模型名称列表（含 default）。"""
     names: list[str] = ["default"]
@@ -1332,17 +1240,26 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
             lan_ips.add(ip)
     except Exception:
         pass
-    # 从环境变量读取前端端口，支持自定义端口部署（默认 3000）
-    _frontend_port = os.environ.get("EXCELMANUS_FRONTEND_PORT", "3000").strip()
+    # 从环境变量读取前端端口，支持多端口（逗号分隔）和自定义端口部署（默认 3000）
+    _frontend_ports_raw = os.environ.get("EXCELMANUS_FRONTEND_PORT", "3000").strip()
+    _frontend_ports = [p.strip() for p in _frontend_ports_raw.split(",") if p.strip()]
     for ip in lan_ips:
-        cors_origins.add(f"http://{ip}:{_frontend_port}")
+        for _fp in _frontend_ports:
+            cors_origins.add(f"http://{ip}:{_fp}")
 
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
         allow_credentials=True,
         allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization"],
+        allow_headers=[
+            "Content-Type",
+            "Authorization",
+            "Accept",
+            "X-Requested-With",
+            "Cache-Control",
+        ],
+        expose_headers=["X-Request-Id"],
     )
 
     # 认证中间件（在 CORS 之后运行，确保预检 OPTIONS 请求正常通过）
@@ -1572,6 +1489,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             503,
             "模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
         )
+    if not (request.message or "").strip() and not request.images:
+        return _error_json_response(400, "消息内容不能为空。")
 
     # ── 仅保留纯内存操作在流外部（微秒级） ──
     from excelmanus.auth.dependencies import extract_user_id
@@ -1678,7 +1597,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     })
                 except Exception as exc:
                     logger.error("SSE /save 流异常: %s", exc, exc_info=True)
-                    _save_guidance = classify_failure(exc, stage="save_command")
+                    _save_provider = _extract_provider_from_base_url(
+                        getattr(engine, "active_base_url", None) or (getattr(_config, "base_url", None) if _config else None)
+                    )
+                    _save_model = getattr(engine, "current_model", None) or (getattr(_config, "model", "") if _config else "")
+                    _save_guidance = classify_failure(exc, stage="save_command", provider=_save_provider, model=_save_model)
                     yield _failure_guidance_sse(_save_guidance)
                 else:
                     yield _sse_format("done", {})
@@ -1851,9 +1774,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 "SSE 流异常: %s", exc, exc_info=True
             )
             _provider = _extract_provider_from_base_url(
-                getattr(_config, "base_url", None) if _config else None
+                getattr(engine, "active_base_url", None) or (getattr(_config, "base_url", None) if _config else None)
             )
-            _model_name = getattr(_config, "model", "") if _config else ""
+            _model_name = getattr(engine, "current_model", None) or (getattr(_config, "model", "") if _config else "")
             _top_guidance = classify_failure(
                 exc,
                 stage=_last_pipeline_stage,
@@ -2496,6 +2419,12 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
             status_code=200,
             content={"status": "no_active_task"},
         )
+    # 中断当前会话正在执行的 sleep 工具（会话隔离，不影响其他会话）
+    if _session_manager is not None:
+        engine = _session_manager.get_engine(request.session_id)
+        if engine is not None and engine._tool_dispatcher is not None:
+            engine._tool_dispatcher.cancel_active_sleep()
+
     task.cancel()
     logger.info("通过 abort 端点取消会话 %s 的聊天任务", request.session_id)
     return JSONResponse(
@@ -4989,20 +4918,16 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
         return _error_json_response(400, "请指定模型名称。")
 
     user_id = _get_isolation_user_id(raw_request)
-    is_codex_profile = False
 
-    # 验证目标模型存在
+    # 验证目标模型存在（统一走 DB profile 查找）
     if name.lower() != "default":
         profile = _config_store.get_profile(name) if _config_store else None
         if profile is None:
-            resolved_codex_model = _resolve_codex_model_for_user(raw_request, user_id, name)
-            if resolved_codex_model is None:
-                available_names = _list_available_model_names_for_user(raw_request, user_id)
-                return _error_json_response(
-                    404,
-                    f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
-                )
-            is_codex_profile = True
+            available_names = _list_available_model_names_for_user(raw_request, user_id)
+            return _error_json_response(
+                404,
+                f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
+            )
 
     # 校验用户模型权限（allowed_models 为空表示不限制）
     allowed = _get_user_allowed_models(raw_request)
@@ -5028,8 +4953,6 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
         try:
             engine = _session_manager.get_engine(session_info["id"], user_id=user_id)
             if engine is not None:
-                if is_codex_profile:
-                    _session_manager.sync_user_subscription_profiles(engine, user_id)
                 result_msg = engine.switch_model(name)
         except Exception:
             pass
@@ -5383,7 +5306,7 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
     return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
 
 
-@_router.delete("/api/v1/config/models/profiles/{name}")
+@_router.delete("/api/v1/config/models/profiles/{name:path}")
 async def delete_model_profile(name: str, request: Request) -> JSONResponse:
     """删除多模型条目。"""
     guard_error = await _require_admin_if_auth_enabled(request)
@@ -5401,7 +5324,7 @@ async def delete_model_profile(name: str, request: Request) -> JSONResponse:
     return JSONResponse(content={"status": "deleted", "name": name})
 
 
-@_router.put("/api/v1/config/models/profiles/{name}")
+@_router.put("/api/v1/config/models/profiles/{name:path}")
 async def update_model_profile(
     name: str,
     request: ModelProfileCreate,
@@ -5758,18 +5681,7 @@ def _resolve_model_info(
     # 2) 按 profile name 精确查找
     lookup_name = req_name or req_model
 
-    # 2-1) 订阅模型前缀名（如 openai-codex/gpt-5.3-codex-spark）
-    if lookup_name:
-        try:
-            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-
-            if OpenAICodexProvider.is_codex_profile_name(lookup_name):
-                resolved = OpenAICodexProvider.model_from_profile_name(lookup_name)
-                if resolved:
-                    return resolved, OpenAICodexProvider.BASE_URL, _config.api_key, OpenAICodexProvider.PROTOCOL
-        except Exception:
-            logger.debug("解析 Codex 前缀模型失败", exc_info=True)
-
+    # 2-1) DB profile 查找
     if _config_store is not None and lookup_name:
         profile = _config_store.get_profile(lookup_name)
         if profile is not None:

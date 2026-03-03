@@ -254,6 +254,9 @@ VERIFY_TIMEOUT=""
 PRE_DEPLOY_HOOK=""
 POST_DEPLOY_HOOK=""
 
+# 多站点支持（由 _apply_defaults 解析）
+_SITE_URLS=()  # 数组，从 SITE_URL / SITE_URLS 解析
+
 # 内部状态
 LOCK_FILE=""
 DEPLOY_START_TIME=""
@@ -324,10 +327,28 @@ _apply_defaults() {
   BACKEND_SSH_KEY_PATH="${BACKEND_SSH_KEY_PATH:-$SSH_KEY_PATH}"
   FRONTEND_SSH_KEY_PATH="${FRONTEND_SSH_KEY_PATH:-$SSH_KEY_PATH}"
 
-  # 健康检查 URL
+  # 解析多站点 URL：支持 SITE_URLS（多值）和 SITE_URL（单值，向后兼容）
+  _SITE_URLS=()
+  local _raw_urls="${SITE_URLS:-${SITE_URL:-}}"
+  if [[ -n "$_raw_urls" ]]; then
+    IFS=',' read -ra _SITE_URLS <<< "$_raw_urls"
+    # 去除空白
+    local _cleaned=()
+    for _u in "${_SITE_URLS[@]}"; do
+      _u="$(echo "$_u" | tr -d '[:space:]')"
+      [[ -n "$_u" ]] && _cleaned+=("$_u")
+    done
+    _SITE_URLS=("${_cleaned[@]}")
+    # 向后兼容：确保 SITE_URL 设为第一个值
+    if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
+      SITE_URL="${_SITE_URLS[0]}"
+    fi
+  fi
+
+  # 健康检查 URL（使用第一个站点 URL）
   if [[ -z "$HEALTH_URL" ]]; then
-    if [[ -n "${SITE_URL:-}" ]]; then
-      HEALTH_URL="${SITE_URL}/api/v1/health"
+    if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
+      HEALTH_URL="${_SITE_URLS[0]}/api/v1/health"
     elif [[ "$TOPOLOGY" == "local" ]]; then
       HEALTH_URL="http://localhost:${BACKEND_PORT}/api/v1/health"
     elif [[ -n "$BACKEND_HOST" ]]; then
@@ -640,7 +661,7 @@ _auto_fix_frontend_backend_origin() {
   if echo "$current_val" | grep -qE '(192\.168\.|10\.|172\.(1[6-9]|2[0-9]|3[01])\.)'; then
     # 计算正确值
     local correct_val
-    if [[ -n "${SITE_URL:-}" ]]; then
+    if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
       correct_val="same-origin"
     elif [[ -n "$BACKEND_HOST" ]]; then
       correct_val="http://${BACKEND_HOST}:${BACKEND_PORT}"
@@ -1107,7 +1128,9 @@ _verify() {
 
     if [[ "$status" == "ok" ]]; then
       log "部署验证通过！服务正常运行"
-      [[ -n "${SITE_URL:-}" ]] && info "访问地址: ${SITE_URL}" || true
+      if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
+        for _su in "${_SITE_URLS[@]}"; do info "访问地址: ${_su}"; done
+      fi
       return
     fi
 
@@ -1323,22 +1346,46 @@ _check_cross_connectivity() {
   fi
 
   # 3) 检查后端 CORS 配置是否包含前端域名（加超时防挂起）
-  if [[ -n "$BACKEND_HOST" && -n "${SITE_URL:-}" ]]; then
+  if [[ -n "$BACKEND_HOST" && ${#_SITE_URLS[@]} -gt 0 ]]; then
     info "检查后端 CORS 配置..."
     local cors_check
     cors_check=$(_remote_backend "timeout 5 grep -i CORS_ALLOW_ORIGINS ${BACKEND_DIR}/.env 2>/dev/null || echo __NO_CORS__" 2>&1 || echo "__NO_CORS__")
     if echo "$cors_check" | grep -q '__NO_CORS__'; then
       warn "后端 .env 中未找到 EXCELMANUS_CORS_ALLOW_ORIGINS 配置"
       warn "  如果前端通过浏览器直连后端，需要配置 CORS 允许前端域名"
-    elif echo "$cors_check" | grep -qi "${SITE_URL}"; then
-      log "CORS 配置包含 ${SITE_URL}"
     else
-      warn "CORS 配置可能未包含前端域名 ${SITE_URL}"
-      warn "  当前配置: $(echo "$cors_check" | head -1)"
+      for _su in "${_SITE_URLS[@]}"; do
+        if echo "$cors_check" | grep -qi "$_su"; then
+          log "CORS 配置包含 ${_su}"
+        else
+          warn "CORS 配置可能未包含前端域名 ${_su}"
+          warn "  当前配置: $(echo "$cors_check" | head -1)"
+        fi
+      done
     fi
   fi
 
-  # 4) 检查前端 BACKEND_ORIGIN 配置（加超时防挂起）
+  # 4) 检查 OAuth 回调白名单配置
+  if [[ -n "$BACKEND_HOST" && ${#_SITE_URLS[@]} -gt 0 ]]; then
+    info "检查 OAuth 回调白名单..."
+    local oauth_check
+    oauth_check=$(_remote_backend "timeout 5 grep -i ALLOWED_OAUTH_ORIGINS ${BACKEND_DIR}/.env 2>/dev/null || echo __NO_OAUTH__" 2>&1 || echo "__NO_OAUTH__")
+    if echo "$oauth_check" | grep -q '__NO_OAUTH__'; then
+      info "未设置 EXCELMANUS_ALLOWED_OAUTH_ORIGINS（将自动从 CORS origins 派生）"
+    else
+      for _su in "${_SITE_URLS[@]}"; do
+        if echo "$oauth_check" | grep -qi "$_su"; then
+          log "OAuth 白名单包含 ${_su}"
+        else
+          warn "OAuth 白名单可能未包含前端域名 ${_su}"
+          warn "  当前配置: $(echo "$oauth_check" | head -1)"
+          warn "  OAuth 登录可能无法正确跳转回 ${_su}"
+        fi
+      done
+    fi
+  fi
+
+  # 5) 检查前端 BACKEND_ORIGIN 配置（加超时防挂起）
   if [[ -n "$FRONTEND_HOST" ]]; then
     info "检查前端 BACKEND_ORIGIN 配置..."
     local fe_backend_origin
@@ -1425,9 +1472,21 @@ _push_env_to_backend() {
   tmp_env=$(mktemp)
   cp "$env_template" "$tmp_env"
 
-  # 自动填充已知的部署配置
-  if [[ -n "${SITE_URL:-}" ]]; then
-    sed -i.bak "s|^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*|EXCELMANUS_CORS_ALLOW_ORIGINS=${SITE_URL},http://localhost:3000|" "$tmp_env"
+  # 自动填充已知的部署配置（支持多站点 URL）
+  if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
+    # 将所有站点 URL 拼接为逗号分隔字符串
+    local _all_sites
+    _all_sites=$(IFS=','; echo "${_SITE_URLS[*]}")
+    local _cors_origins="${_all_sites},http://localhost:3000"
+    sed -i.bak "s|^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*|EXCELMANUS_CORS_ALLOW_ORIGINS=${_cors_origins}|" "$tmp_env"
+    # OAuth 回调白名单（未显式设置时后端会自动从 CORS origins 派生，此处显式设置更清晰）
+    if ! grep -q 'EXCELMANUS_ALLOWED_OAUTH_ORIGINS' "$tmp_env"; then
+      echo "" >> "$tmp_env"
+      echo "# OAuth 回调允许跳转的前端来源（逗号分隔，支持完整 URL 或裸域名）" >> "$tmp_env"
+      echo "EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${_all_sites}" >> "$tmp_env"
+    else
+      sed -i.bak "s|^# EXCELMANUS_ALLOWED_OAUTH_ORIGINS=.*|EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${_all_sites}|" "$tmp_env"
+    fi
   fi
 
   if [[ "$TOPOLOGY" == "local" ]]; then
@@ -1447,7 +1506,7 @@ _push_env_to_frontend() {
   tmp_env=$(mktemp)
 
   local backend_origin
-  if [[ -n "${SITE_URL:-}" ]]; then
+  if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
     backend_origin="same-origin"
   elif [[ -n "$BACKEND_HOST" ]]; then
     backend_origin="http://${BACKEND_HOST}:${BACKEND_PORT}"

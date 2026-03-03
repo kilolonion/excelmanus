@@ -77,8 +77,8 @@ class TestBenchProtectedDirWrite:
         assert result.returncode == 0
         assert target.read_text(encoding="utf-8") == "original"
 
-    def test_bench_protection_red_mode_no_restriction(self, workspace: Path) -> None:
-        """RED 模式不受 bench 保护限制。"""
+    def test_bench_protection_red_mode_has_cow(self, workspace: Path) -> None:
+        """RED 模式现在也触发 Auto-CoW（安全增强）。"""
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True)
         target = bench_dir / "source.txt"
@@ -86,7 +86,7 @@ class TestBenchProtectedDirWrite:
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')\nprint('done')"
         result = _run_in_sandbox(workspace, code, "RED")
         assert result.returncode == 0
-        assert target.read_text(encoding="utf-8") == "overwritten"
+        assert target.read_text(encoding="utf-8") == "original"
 
 
 class TestOpenpyxlAtomicSave:
@@ -332,8 +332,9 @@ class TestWrapperTemplateContent:
         assert "_atomic_save" in wrapper
         assert "os.replace" in wrapper
 
-    def test_red_wrapper_no_protection(self) -> None:
-        """RED wrapper 不包含保护代码。"""
+    def test_red_wrapper_has_fs_guard(self) -> None:
+        """RED wrapper 包含文件系统守卫和敏感目录保护。"""
         wrapper = generate_wrapper_script("RED", "/tmp/ws")
-        assert "_BENCH_PROTECTED_DIRS" not in wrapper
-        assert "_patch_openpyxl_save" not in wrapper
+        assert "_BENCH_PROTECTED_DIRS" in wrapper
+        assert "_patch_openpyxl_save" in wrapper
+        assert "_SENSITIVE_DIRS" in wrapper

@@ -99,6 +99,24 @@ class TestClassifyByStatusCode:
         assert g.code == "provider_internal_error"
         assert g.retryable is True
 
+    def test_408_request_timeout(self):
+        g = classify_failure(_FakeHTTPError(408, "Request Timeout"))
+        assert g.category == "transport"
+        assert g.code == "request_timeout"
+        assert g.retryable is True
+
+    def test_413_payload_too_large(self):
+        g = classify_failure(_FakeHTTPError(413, "Payload Too Large"))
+        assert g.category == "model"
+        assert g.code == "payload_too_large"
+        assert g.retryable is False
+
+    def test_422_unprocessable(self):
+        g = classify_failure(_FakeHTTPError(422, "Unprocessable Entity"))
+        assert g.category == "model"
+        assert g.code == "invalid_request"
+        assert g.retryable is False
+
 
 # ── 异常类名分类 ─────────────────────────────────────────────
 
@@ -135,6 +153,44 @@ class TestClassifyByExceptionClassName:
         g = classify_failure(exc)
         assert g.category == "transport"
         assert g.code == "network_error"
+        assert g.retryable is True
+
+
+class _FakeSSLError(Exception):
+    """模拟 ssl.SSLError。"""
+    pass
+
+
+class _FakeProxyError(Exception):
+    """模拟 urllib3.exceptions.ProxyError。"""
+    pass
+
+
+class _FakeJSONDecodeError(Exception):
+    """模拟 json.JSONDecodeError。"""
+    pass
+
+
+class TestClassifyByExceptionClassNameExtended:
+    def test_ssl_error(self):
+        exc = _FakeSSLError("certificate verify failed")
+        g = classify_failure(exc)
+        assert g.category == "transport"
+        assert g.code == "ssl_error"
+        assert g.retryable is False
+
+    def test_proxy_error(self):
+        exc = _FakeProxyError("proxy connection refused")
+        g = classify_failure(exc)
+        assert g.category == "transport"
+        assert g.code == "proxy_error"
+        assert g.retryable is True
+
+    def test_json_decode_error(self):
+        exc = _FakeJSONDecodeError("Expecting value: line 1")
+        g = classify_failure(exc)
+        assert g.category == "transport"
+        assert g.code == "response_parse_error"
         assert g.retryable is True
 
 
@@ -177,6 +233,106 @@ class TestClassifyByKeyword:
         assert g.category == "model"
         assert g.code == "model_overloaded"
         assert g.retryable is True
+
+
+# ── 新增关键词分类（SSL/代理/内容过滤/流中断/编码/磁盘/权限） ──
+
+
+class TestClassifyByKeywordExtended:
+    @pytest.mark.parametrize("msg,expected_code", [
+        ("SSL: certificate verify failed", "ssl_error"),
+        ("ssl handshake failure", "ssl_error"),
+        ("SSLCertVerificationError occurred", "ssl_error"),
+        ("[SSL] connection failed", "ssl_error"),
+        ("ssl error during connect", "ssl_error"),
+        ("ssl_cert verification failed", "ssl_error"),
+    ])
+    def test_ssl_keywords(self, msg, expected_code):
+        g = classify_failure(Exception(msg))
+        assert g.category == "transport"
+        assert g.code == expected_code
+
+    @pytest.mark.parametrize("msg", [
+        "proxy error: connection refused",
+        "tunnel connection failed",
+        "proxy connection timeout",
+    ])
+    def test_proxy_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "transport"
+        assert g.code == "proxy_error"
+        assert g.retryable is True
+
+    @pytest.mark.parametrize("msg", [
+        "content_filter triggered",
+        "content policy violation detected",
+        "blocked by safety system",
+        "responsible_ai_policy violation",
+        "The response was flagged",
+    ])
+    def test_content_filter_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "model"
+        assert g.code == "content_filtered"
+        assert g.retryable is False
+
+    @pytest.mark.parametrize("msg", [
+        "json decode error at position 0",
+        "Expecting value: line 1 column 1",
+        "invalid json response from server",
+    ])
+    def test_json_decode_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "transport"
+        assert g.code == "response_parse_error"
+        assert g.retryable is True
+
+    @pytest.mark.parametrize("msg", [
+        "incomplete chunked encoding",
+        "IncompleteRead: 0 bytes read",
+        "stream ended unexpectedly",
+        "RemoteDisconnected: Remote end closed connection",
+        "premature end of response",
+    ])
+    def test_stream_interrupted_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "transport"
+        assert g.code == "stream_interrupted"
+        assert g.retryable is True
+
+    @pytest.mark.parametrize("msg", [
+        "UnicodeDecodeError: 'utf-8' codec can't decode",
+        "invalid start byte at position 42",
+        "charmap codec can't encode character",
+    ])
+    def test_encoding_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "config"
+        assert g.code == "encoding_error"
+        assert g.retryable is False
+
+    @pytest.mark.parametrize("msg", [
+        "OSError: [Errno 28] No space left on device",
+        "disk full",
+        "disk quota used up",
+        "磁盘空间不足",
+    ])
+    def test_disk_full_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "config"
+        assert g.code == "disk_full"
+        assert g.retryable is False
+
+    @pytest.mark.parametrize("msg", [
+        "PermissionError: [Errno 13] Permission denied",
+        "operation not permitted",
+        "[Errno 13] permission denied: '/workspace/data.xlsx'",
+    ])
+    def test_permission_denied_keywords(self, msg):
+        g = classify_failure(Exception(msg))
+        assert g.category == "config"
+        assert g.code == "permission_denied"
+        assert g.retryable is False
 
 
 # ── 兜底 ─────────────────────────────────────────────────────
@@ -255,3 +411,67 @@ class TestClassifyWorkspaceFull:
         g = classify_workspace_full()
         assert g.code == "workspace_full"
         assert g.diagnostic_id  # 非空
+
+
+# ── 会话相关错误分类 ─────────────────────────────────────────
+
+
+class _FakeSessionBusyError(Exception):
+    """模拟 excelmanus.session.SessionBusyError。"""
+    pass
+
+
+class _FakeSessionLimitExceededError(Exception):
+    """模拟 excelmanus.session.SessionLimitExceededError。"""
+    pass
+
+
+class _FakeSessionNotFoundError(Exception):
+    """模拟 excelmanus.session.SessionNotFoundError。"""
+    pass
+
+
+class TestClassifySessionErrors:
+    def test_session_busy(self):
+        exc = _FakeSessionBusyError("会话正在处理中")
+        g = classify_failure(exc)
+        assert g.category == "transport"
+        assert g.code == "session_busy"
+        assert g.retryable is True
+        assert "retry" in [a["type"] for a in g.actions]
+
+    def test_session_limit_exceeded(self):
+        exc = _FakeSessionLimitExceededError("会话数量已达上限")
+        g = classify_failure(exc)
+        assert g.category == "quota"
+        assert g.code == "session_limit"
+        assert g.retryable is True
+
+    def test_session_not_found(self):
+        exc = _FakeSessionNotFoundError("会话不存在")
+        g = classify_failure(exc)
+        assert g.category == "config"
+        assert g.code == "session_not_found"
+        assert g.retryable is False
+
+    def test_real_session_busy_error(self):
+        """使用真实的 SessionBusyError 类。"""
+        from excelmanus.session import SessionBusyError
+        exc = SessionBusyError("会话 'abc' 正在处理中")
+        g = classify_failure(exc, stage="initializing")
+        assert g.code == "session_busy"
+        assert g.stage == "initializing"
+
+    def test_real_session_limit_exceeded_error(self):
+        """使用真实的 SessionLimitExceededError 类。"""
+        from excelmanus.session import SessionLimitExceededError
+        exc = SessionLimitExceededError("会话数量已达上限（10）")
+        g = classify_failure(exc)
+        assert g.code == "session_limit"
+
+    def test_real_session_not_found_error(self):
+        """使用真实的 SessionNotFoundError 类。"""
+        from excelmanus.session import SessionNotFoundError
+        exc = SessionNotFoundError("会话 'xyz' 不存在")
+        g = classify_failure(exc)
+        assert g.code == "session_not_found"

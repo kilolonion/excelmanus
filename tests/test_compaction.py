@@ -16,6 +16,7 @@ from excelmanus.compaction import (
     CompactionManager,
     CompactionResult,
     CompactionStats,
+    _extract_rule_based_summary,
     _format_messages_for_compaction,
 )
 from excelmanus.config import ExcelManusConfig
@@ -523,3 +524,516 @@ class TestPromptQuality:
         """确保包含防止幻觉的规则。"""
         assert "不要编造" in COMPACTION_SYSTEM_PROMPT
         assert "精确" in COMPACTION_SYSTEM_PROMPT
+
+
+# ── _extract_rule_based_summary 专项测试 ──────────────────
+
+
+def _tc(tc_id: str, name: str, arguments: str) -> dict:
+    """构造 tool_call 字典的辅助函数。"""
+    return {
+        "id": tc_id,
+        "function": {"name": name, "arguments": arguments},
+    }
+
+
+class TestExtractRuleBasedSummaryOriginal:
+    """测试原有 3 个维度（文件路径、工具调用、用户意图）。"""
+
+    def test_empty_messages(self) -> None:
+        assert _extract_rule_based_summary([]) == ""
+
+    def test_file_path_extraction_from_content(self) -> None:
+        messages = [
+            {"role": "user", "content": '打开 file_path: "/data/report.xlsx" 进行处理'},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "/data/report.xlsx" in result
+        assert "**涉及文件**" in result
+
+    def test_file_path_extraction_from_tool_args(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "/data/sales.xlsx" in result
+
+    def test_tool_calls_summary(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/a.xlsx"}'),
+                    _tc("tc_2", "read_excel", '{"file_path": "/b.xlsx"}'),
+                    _tc("tc_3", "list_sheets", '{"file_path": "/a.xlsx"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**已执行工具**" in result
+        assert "read_excel×2" in result
+        assert "list_sheets×1" in result
+
+    def test_user_intents(self) -> None:
+        messages = [
+            {"role": "user", "content": "帮我整理销售数据"},
+            {"role": "user", "content": "按月份汇总"},
+            {"role": "user", "content": "生成图表"},
+            {"role": "user", "content": "导出为PDF"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**用户意图**" in result
+        # 只保留最后 3 条
+        assert "按月份汇总" in result
+        assert "生成图表" in result
+        assert "导出为PDF" in result
+
+    def test_system_user_messages_excluded(self) -> None:
+        messages = [
+            {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
+            {"role": "user", "content": "真正的用户消息"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "[系统]" not in result
+        assert "真正的用户消息" in result
+
+
+class TestExtractRuleBasedSummaryWriteOps:
+    """测试新增维度：写入操作记录。"""
+
+    def test_write_text_file_recorded(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "write_text_file", '{"file_path": "/scripts/process.py", "content": "print(1)"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**写入操作**" in result
+        assert "write_text_file" in result
+        assert "/scripts/process.py" in result
+
+    def test_run_code_with_sheet_and_range(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_1",
+                        "run_code",
+                        '{"file_path": "/data/report.xlsx", "sheet": "Sheet1", "range": "A1:D100"}',
+                    ),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**写入操作**" in result
+        assert "run_code → /data/report.xlsx / Sheet1 / A1:D100" in result
+
+    def test_read_only_tools_not_in_write_ops(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/data/report.xlsx"}'),
+                    _tc("tc_2", "list_sheets", '{"file_path": "/data/report.xlsx"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**写入操作**" not in result
+
+    def test_duplicate_write_ops_deduped(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "write_text_file", '{"file_path": "/a.py", "content": "v1"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_2", "write_text_file", '{"file_path": "/a.py", "content": "v1"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        # 相同的写入描述应被去重
+        assert result.count("write_text_file → /a.py") == 1
+
+
+class TestExtractRuleBasedSummaryTaskStatus:
+    """测试新增维度：任务状态重放。"""
+
+    def test_task_create_and_update(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_1",
+                        "task_create",
+                        '{"title": "整理销售数据", "subtasks": ["读取数据", "清洗数据", "生成报表"]}',
+                    ),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_2", "task_update", '{"index": 0, "new_status": "completed"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_3", "task_update", '{"index": 1, "new_status": "in_progress"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**任务进度**" in result
+        assert "整理销售数据" in result
+        assert "completed: 1" in result
+        assert "待完成" in result
+        assert "清洗数据" in result  # in_progress
+        assert "生成报表" in result  # pending
+
+    def test_task_create_with_dict_subtasks(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_1",
+                        "task_create",
+                        '{"title": "测试任务", "subtasks": [{"title": "子任务1"}, {"title": "子任务2"}]}',
+                    ),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**任务进度**" in result
+        assert "测试任务" in result
+        assert "pending: 2" in result
+
+    def test_no_task_create_no_section(self) -> None:
+        messages = [
+            {"role": "user", "content": "帮我做个任务"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**任务进度**" not in result
+
+    def test_task_update_out_of_range_ignored(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "task_create", '{"title": "T", "subtasks": ["A"]}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_2", "task_update", '{"index": 99, "new_status": "completed"}'),
+                ],
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**任务进度**" in result
+        assert "pending: 1" in result
+
+
+class TestExtractRuleBasedSummaryAssistantConclusions:
+    """测试新增维度：助手结论。"""
+
+    def test_assistant_conclusions_extracted(self) -> None:
+        messages = [
+            {"role": "assistant", "content": "分析完成，合计销售额为 ¥1,234,567，其中华东地区占比最高。"},
+            {"role": "assistant", "content": "已将结果写入 Sheet2 的 E 列，数据格式为人民币。"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**助手结论**" in result
+        assert "合计销售额" in result
+        assert "Sheet2" in result
+
+    def test_short_assistant_messages_skipped(self) -> None:
+        messages = [
+            {"role": "assistant", "content": "好的"},
+            {"role": "assistant", "content": "收到"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**助手结论**" not in result
+
+    def test_only_last_two_kept(self) -> None:
+        messages = [
+            {"role": "assistant", "content": "第一条较长的助手回复内容，包含分析结论"},
+            {"role": "assistant", "content": "第二条较长的助手回复内容，包含操作记录"},
+            {"role": "assistant", "content": "第三条较长的助手回复内容，包含最终结果"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "第一条" not in result
+        assert "第二条" in result
+        assert "第三条" in result
+
+
+class TestExtractRuleBasedSummaryToolErrors:
+    """测试新增维度：工具执行错误。"""
+
+    def test_tool_error_extracted(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/missing.xlsx"}'),
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "content": "工具执行错误: FileNotFoundError: /missing.xlsx 不存在",
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**近期错误**" in result
+        assert "read_excel" in result
+        assert "FileNotFoundError" in result
+
+    def test_successful_tool_result_not_in_errors(self) -> None:
+        messages = [
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/data.xlsx"}'),
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "content": "成功读取 100 行数据",
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**近期错误**" not in result
+
+    def test_only_last_three_errors_kept(self) -> None:
+        messages = []
+        for i in range(5):
+            messages.append({
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [_tc(f"tc_{i}", "run_code", "{}")],
+            })
+            messages.append({
+                "role": "tool",
+                "tool_call_id": f"tc_{i}",
+                "content": f"工具执行错误: ValueError: 错误编号{i}",
+            })
+        result = _extract_rule_based_summary(messages)
+        assert "错误编号2" in result
+        assert "错误编号3" in result
+        assert "错误编号4" in result
+        assert "错误编号0" not in result
+        assert "错误编号1" not in result
+
+    def test_unknown_tool_name_for_orphan_result(self) -> None:
+        messages = [
+            {
+                "role": "tool",
+                "tool_call_id": "orphan_id",
+                "content": "工具执行错误: TypeError: 未知错误",
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+        assert "**近期错误**" in result
+        assert "unknown:" in result
+
+
+class TestExtractRuleBasedSummaryLengthControl:
+    """测试总长度软限控制。"""
+
+    def test_max_total_chars_truncates_low_priority(self) -> None:
+        messages = [
+            {"role": "user", "content": "用户意图消息 " * 20},
+            {"role": "assistant", "content": "助手结论内容 " * 50},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/very/long/path/to/file.xlsx"}'),
+                    _tc("tc_2", "write_text_file", '{"file_path": "/output.py", "content": "x"}'),
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_99",
+                "content": "工具执行错误: ValueError: 一个很长的错误信息",
+            },
+        ]
+        # 设置极小的 max_total_chars
+        result = _extract_rule_based_summary(messages, max_total_chars=200)
+        # 高优先级维度应被保留
+        assert "**涉及文件**" in result
+        # 低优先级维度可能被截断
+        # 总长度应合理控制
+        assert len(result) <= 400  # 允许最后一个 section 溢出
+
+    def test_default_limit_allows_rich_summary(self) -> None:
+        messages = [
+            {"role": "user", "content": "处理销售数据"},
+            {"role": "assistant", "content": "好的，我来帮你处理销售数据，首先读取文件了解结构。"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_2", "run_code", '{"file_path": "/data/sales.xlsx", "sheet": "Sheet1"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_3",
+                        "task_create",
+                        '{"title": "销售数据处理", "subtasks": ["读取", "清洗", "汇总"]}',
+                    ),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_4", "task_update", '{"index": 0, "new_status": "completed"}'),
+                ],
+            },
+            {"role": "assistant", "content": "数据读取完成，共 1000 行，10 列。接下来进行数据清洗。"},
+        ]
+        result = _extract_rule_based_summary(messages)
+        # 默认 2000 字符限制下应包含所有维度
+        assert "**涉及文件**" in result
+        assert "**已执行工具**" in result
+        assert "**写入操作**" in result
+        assert "**任务进度**" in result
+        assert "**用户意图**" in result
+        assert "**助手结论**" in result
+
+
+class TestExtractRuleBasedSummaryIntegration:
+    """端到端集成测试：模拟真实对话流。"""
+
+    def test_realistic_conversation(self) -> None:
+        """模拟一个真实的 ExcelManus 对话，验证摘要覆盖度。"""
+        messages = [
+            {"role": "user", "content": "帮我把 sales.xlsx 的数据按月份汇总到 summary.xlsx"},
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_1",
+                "content": "成功读取：Sheet1，1000行×5列（日期、产品、数量、单价、金额）",
+            },
+            {
+                "role": "assistant",
+                "content": "文件包含 1000 行销售数据，我来按月份汇总并写入新文件。",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_2",
+                        "task_create",
+                        '{"title": "按月汇总销售数据", "subtasks": ["读取源数据", "按月聚合", "写入目标文件"]}',
+                    ),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_3", "task_update", '{"index": 0, "new_status": "completed"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc(
+                        "tc_4",
+                        "run_code",
+                        '{"file_path": "/data/summary.xlsx", "sheet": "月度汇总"}',
+                    ),
+                ],
+            },
+            {
+                "role": "tool",
+                "tool_call_id": "tc_4",
+                "content": "代码执行成功：已生成 12 行月度汇总数据并写入 summary.xlsx",
+            },
+            {
+                "role": "assistant",
+                "content": None,
+                "tool_calls": [
+                    _tc("tc_5", "task_update", '{"index": 1, "new_status": "completed"}'),
+                    _tc("tc_6", "task_update", '{"index": 2, "new_status": "completed"}'),
+                ],
+            },
+            {
+                "role": "assistant",
+                "content": "已完成所有任务：按月汇总了 1000 行销售数据，结果写入 summary.xlsx 的「月度汇总」工作表。",
+            },
+        ]
+        result = _extract_rule_based_summary(messages)
+
+        # 文件路径
+        assert "sales.xlsx" in result
+        assert "summary.xlsx" in result
+        # 工具调用
+        assert "read_excel" in result
+        assert "run_code" in result
+        assert "task_update" in result
+        # 写入操作
+        assert "**写入操作**" in result
+        assert "月度汇总" in result
+        # 任务状态
+        assert "**任务进度**" in result
+        assert "completed: 3" in result
+        # 用户意图
+        assert "按月份汇总" in result
+        # 助手结论
+        assert "**助手结论**" in result

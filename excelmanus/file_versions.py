@@ -24,13 +24,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
+from excelmanus.excel_extensions import EXCEL_EXTENSIONS as _EXCEL_EXTENSIONS_BASE
 from excelmanus.security.path_utils import resolve_in_workspace, to_workspace_relative
 
 logger = logging.getLogger(__name__)
 
 VersionReason = Literal["staging", "audit", "cow", "restore", "manual", "turn"]
 
-_EXCEL_EXTENSIONS = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"})
+_EXCEL_EXTENSIONS = _EXCEL_EXTENSIONS_BASE | frozenset({".csv"})
 
 
 @dataclass

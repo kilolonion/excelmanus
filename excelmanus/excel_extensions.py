@@ -10,3 +10,6 @@ EXCEL_EXTENSIONS: frozenset[str] = frozenset({
     ".xlsb",
 })
 
+# Excel + CSV（文件扫描、注册表等需要同时匹配 CSV 的场景）。
+EXCEL_AND_CSV_EXTENSIONS: frozenset[str] = EXCEL_EXTENSIONS | frozenset({".csv"})
+

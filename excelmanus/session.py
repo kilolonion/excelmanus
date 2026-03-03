@@ -152,50 +152,39 @@ class SessionManager:
         engine: AgentEngine,
         user_id: str | None,
     ) -> None:
-        """同步用户私有订阅模型档案（当前支持 OpenAI Codex）。"""
+        """为已有 DB profile 注入用户的订阅 OAuth 凭证。
+
+        统一架构：DB profile 是唯一来源，此方法仅填充运行时 OAuth token。
+        对 name 以 ``openai-codex/`` 开头的 profile，用 CredentialStore 中的
+        access_token 替换空 api_key，并更新 base_url。
+        """
         from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
 
-        existing_profiles = [
-            p for p in engine._config.models
-            if not OpenAICodexProvider.is_codex_profile_name(p.name)
-        ]
-
         if user_id is None or self._credential_store is None:
-            engine.sync_model_profiles(tuple(existing_profiles))
             return
 
         try:
-            active_profile = self._credential_store.get_active_profile(user_id, "openai-codex")
+            active_cred = self._credential_store.get_active_profile(user_id, "openai-codex")
         except Exception:
             logger.debug("读取用户 Codex 凭证失败", exc_info=True)
-            engine.sync_model_profiles(tuple(existing_profiles))
             return
 
-        if active_profile is None or not active_profile.access_token:
-            engine.sync_model_profiles(tuple(existing_profiles))
+        if active_cred is None or not active_cred.access_token:
             return
 
-        api_key, base_url = OpenAICodexProvider().get_api_credential(active_profile.access_token)
-        plan = (getattr(active_profile, "plan_type", "") or "").strip().lower()
-        is_pro = plan == "pro"
-        _PRO_ONLY_MODELS = {"gpt-5.3-codex-spark"}
+        api_key, base_url = OpenAICodexProvider().get_api_credential(active_cred.access_token)
 
-        codex_profiles: list[ModelProfile] = []
-        for item in OpenAICodexProvider.list_supported_model_entries():
-            if item["model"] in _PRO_ONLY_MODELS and not is_pro:
-                continue
-            codex_profiles.append(ModelProfile(
-                name=item["profile_name"],
-                model=item["model"],
-                api_key=api_key,
-                base_url=base_url,
-                description=item["display_name"],
-                protocol=OpenAICodexProvider.PROTOCOL,
-                thinking_mode="openai_reasoning",
-                model_family="gpt",
-            ))
+        augmented: list[ModelProfile] = []
+        changed = False
+        for p in engine._config.models:
+            if OpenAICodexProvider.is_codex_profile_name(p.name):
+                augmented.append(replace(p, api_key=api_key, base_url=base_url))
+                changed = True
+            else:
+                augmented.append(p)
 
-        engine.sync_model_profiles(tuple(existing_profiles + codex_profiles))
+        if changed:
+            engine.sync_model_profiles(tuple(augmented))
 
     def reset_mcp_initialized(self) -> None:
         """MCP 热重载后重置初始化标志。"""

@@ -37,7 +37,8 @@ services:
       - EXCELMANUS_DATABASE_URL=postgresql://${PG_USER:-excelmanus}:${PG_PASSWORD:?}@postgres:5432/excelmanus
       - EXCELMANUS_WORKSPACE_ROOT=/workspace
       - EXCELMANUS_DB_PATH=/data/excelmanus.db
-      - EXCELMANUS_CORS_ALLOW_ORIGINS=${EXCELMANUS_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost}
+      - EXCELMANUS_CORS_ALLOW_ORIGINS=${EXCELMANUS_CORS_ALLOW_ORIGINS:-http://localhost:3000,http://localhost,https://kilon.top,https://excelmanus.com}
+      - EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${EXCELMANUS_ALLOWED_OAUTH_ORIGINS:-https://kilon.top,https://excelmanus.com,http://localhost:3000}
     volumes:
       - workspace_data:/workspace
       - db_data:/data
@@ -63,9 +64,11 @@ services:
     restart: unless-stopped
     environment:
       - BACKEND_INTERNAL_URL=http://backend:8000
-    # 默认 NEXT_PUBLIC_BACKEND_ORIGIN 留空 → 前端自动回退 http://{hostname}:8000 直连后端
-    # 生产环境使用 Nginx 时，在 frontend.build.args 中添加：
-    #   NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
+      # 运行时后端地址（无需重新构建镜像即可修改）：
+      #   - 留空 → 回退到构建时 NEXT_PUBLIC_BACKEND_ORIGIN 或 http://{hostname}:8000
+      #   - same-origin → 走 Nginx 反代（生产推荐）
+      # - EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin
+    # 向后兼容：也可在 frontend.build.args 中设置构建时 NEXT_PUBLIC_BACKEND_ORIGIN
     ports:
       - "${FRONTEND_PORT:-3000}:3000"
     depends_on:
@@ -73,8 +76,9 @@ services:
         condition: service_healthy
 
   # ── Nginx Reverse Proxy (optional, for production with TLS) ──
-  # 启用 Nginx 时，请同时在 frontend.build.args 中设置：
-  #   NEXT_PUBLIC_BACKEND_ORIGIN: same-origin
+  # 启用 Nginx 时，请在 frontend.environment 中设置：
+  #   EXCELMANUS_RUNTIME_BACKEND_ORIGIN: same-origin
+  # （或在 frontend.build.args 中设置 NEXT_PUBLIC_BACKEND_ORIGIN: same-origin）
   nginx:
     image: nginx:alpine
     container_name: excelmanus-nginx
