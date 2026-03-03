@@ -25,6 +25,7 @@
 - GET    /api/v1/sessions/{sid}/operations/{id} 操作详情（含 diff）
 - POST   /api/v1/sessions/{sid}/operations/{id}/undo 回滚指定操作
 - GET    /api/v1/health                       健康检查
+- GET    /api/v1/channels                     渠道协同启动状态
 """
 
 from __future__ import annotations
@@ -277,6 +278,8 @@ _skillpack_manager: "SkillpackManager | None" = None
 _config: ExcelManusConfig | None = None
 _config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
+_draining: bool = False  # True during graceful shutdown, health returns "draining"
+_channel_launcher: Any = None  # 类型：ChannelLauncher | None（渠道协同启动器）
 
 
 _session_stream_states: dict[str, _SessionStreamState] = {}
@@ -719,7 +722,7 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database, _config_incomplete
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database, _config_incomplete, _channel_launcher
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
@@ -759,30 +762,35 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scan_once,
     )
     project_root = Path(__file__).resolve().parent.parent
+    logger.info("部署模式: %s", _config.deploy_mode)
     try:
         register_installation(project_root)
-        scan_once()
+        # 服务器/Docker 模式跳过桌面目录扫描（无 GUI 环境）
+        scan_once(skip_desktop_scan=_config.is_server)
         migrate_project_env(project_root)
         if _config.data_root:
             ensure_data_dirs()
-            # 首次运行且项目内有旧数据 → 自动迁移
-            if not is_data_centralized() and has_project_local_data(project_root):
-                stats = migrate_data_from_project(project_root)
-                if stats:
-                    logger.info("首次运行数据迁移完成: %s", stats)
+            # 仅 standalone 模式执行自动迁移；服务器模式由管理员手动触发
+            if _config.is_standalone:
+                if not is_data_centralized() and has_project_local_data(project_root):
+                    stats = migrate_data_from_project(project_root)
+                    if stats:
+                        logger.info("首次运行数据迁移完成: %s", stats)
     except Exception:
         logger.debug("集中数据管理初始化失败（非致命）", exc_info=True)
 
     # ── 首次启动自动创建桌面快捷方式 ──────────────────────
-    try:
-        from excelmanus.shortcuts import get_shortcut_info, create_desktop_shortcut
-        si = get_shortcut_info()
-        if not si.get("exists"):
-            sc_path = create_desktop_shortcut(project_root)
-            if sc_path:
-                logger.info("已自动创建桌面快捷方式: %s", sc_path)
-    except Exception:
-        logger.debug("自动创建桌面快捷方式失败（非致命）", exc_info=True)
+    # 服务器/Docker 模式跳过自动创建（服务器无桌面环境，用户可通过 API 手动创建浏览器书签）
+    if _config.is_standalone:
+        try:
+            from excelmanus.shortcuts import get_shortcut_info, create_desktop_shortcut
+            si = get_shortcut_info()
+            if not si.get("exists"):
+                sc_path = create_desktop_shortcut(project_root)
+                if sc_path:
+                    logger.info("已自动创建桌面快捷方式: %s", sc_path)
+        except Exception:
+            logger.debug("自动创建桌面快捷方式失败（非致命）", exc_info=True)
 
     # 初始化工具层
     _tool_registry = ToolRegistry()
@@ -1004,7 +1012,61 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         len(loaded_skillpacks),
     )
 
+    # ── 后台静默检查更新（非阻塞） ──────────────────────
+    async def _background_update_check() -> None:
+        try:
+            import asyncio
+            from functools import partial
+            from excelmanus.updater import check_for_updates, get_current_version
+            loop = asyncio.get_running_loop()
+            info = await loop.run_in_executor(None, partial(check_for_updates, project_root, force=False))
+            if info.has_update:
+                logger.info(
+                    "发现新版本: %s → %s（%d 个新提交）。"
+                    "可在设置页「版本管理」中执行更新。",
+                    get_current_version(project_root), info.latest, info.commits_behind,
+                )
+        except Exception:
+            logger.debug("启动时后台版本检查失败（非致命）", exc_info=True)
+
+    asyncio.create_task(_background_update_check())
+
+    # ── 渠道协同启动（可选） ──────────────────────────────
+    _channels_config: list[str] = getattr(app.state, "channels", None) or []
+    if not _channels_config:
+        from excelmanus.channels.launcher import parse_channels_config
+        _channels_config = parse_channels_config()
+    if _channels_config:
+        from excelmanus.channels.launcher import ChannelLauncher
+        api_port = int(os.environ.get("EXCELMANUS_API_PORT", "8000"))
+        _channel_launcher = ChannelLauncher(_channels_config, api_port=api_port)
+        await _channel_launcher.start()
+
     yield
+
+    # ── Graceful Shutdown: 标记 draining 并等待活跃连接排空 ──
+    global _draining
+    _draining = True
+    logger.info("API 服务进入 draining 状态，等待活跃连接排空...")
+
+    if _session_manager is not None:
+        drain_timeout = 30  # 最长等待 30 秒
+        for _drain_i in range(drain_timeout):
+            active = await _session_manager.get_active_count()
+            if active == 0:
+                logger.info("所有活跃连接已排空")
+                break
+            if _drain_i % 5 == 0:
+                logger.info("等待 %d 个活跃连接排空... (%d/%ds)", active, _drain_i, drain_timeout)
+            await asyncio.sleep(1)
+        else:
+            active = await _session_manager.get_active_count()
+            if active > 0:
+                logger.warning("排空超时，仍有 %d 个活跃连接，强制关闭", active)
+
+    # 停止渠道协同 Bot
+    if _channel_launcher is not None:
+        await _channel_launcher.stop()
 
     # 关闭所有会话与 MCP 连接
     if _session_manager is not None:
@@ -1198,8 +1260,18 @@ def _register_exception_handlers(application: FastAPI) -> None:
     application.add_exception_handler(Exception, _handle_unexpected)
 
 
-def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
-    """创建 FastAPI 应用，CORS 与运行期配置共享同一来源。"""
+def create_app(
+    config: ExcelManusConfig | None = None,
+    *,
+    channels: list[str] | None = None,
+) -> FastAPI:
+    """创建 FastAPI 应用，CORS 与运行期配置共享同一来源。
+
+    Args:
+        config: 预构建的配置对象；为 None 时自动从环境加载。
+        channels: 要协同启动的渠道列表（如 ["telegram"]）；
+                  为 None 时从 EXCELMANUS_CHANNELS 环境变量读取。
+    """
     bootstrap_error: ConfigError | None = None
     bootstrap_config = config
     if bootstrap_config is None:
@@ -1213,6 +1285,7 @@ def create_app(config: ExcelManusConfig | None = None) -> FastAPI:
     )
     application.state.bootstrap_config = bootstrap_config
     application.state.bootstrap_config_error = bootstrap_error
+    application.state.channels = channels
 
     # 构建 CORS 允许来源列表：除了显式配置的来源外，自动添加本机 LAN IP
     # 的前端端口来源，以便浏览器直连后端的 SSE 流式请求不被 CORS 拦截。
@@ -3510,6 +3583,160 @@ async def get_file_registry(request: Request) -> JSONResponse:
     return JSONResponse(content={"files": files, "total": len(files)})
 
 
+# ── File Groups API ──────────────────────────────────────────
+
+
+@_router.get("/api/v1/files/groups")
+async def list_file_groups(request: Request) -> JSONResponse:
+    """列出当前工作区的所有文件组（附成员摘要）。"""
+    assert _config is not None, "服务未初始化"
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
+    if registry is None:
+        return JSONResponse(content={"groups": []})
+
+    try:
+        groups = registry.list_groups()
+        result = []
+        for g in groups:
+            members = registry.get_group_files(g.id)
+            result.append({
+                **g.to_dict(),
+                "members": members,
+            })
+        return JSONResponse(content={"groups": result})
+    except Exception:
+        return JSONResponse(content={"groups": []})
+
+
+@_router.post("/api/v1/files/groups")
+async def create_file_group(request: Request) -> JSONResponse:
+    """创建文件组。
+
+    Body: {name: str, description?: str, file_ids?: [{id: str, role?: str}]}
+    """
+    assert _config is not None, "服务未初始化"
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
+    if registry is None:
+        return _error_json_response(500, "FileRegistry 不可用")
+
+    body = await request.json()
+    name = body.get("name", "").strip()
+    if not name:
+        return _error_json_response(400, "缺少文件组名称")
+
+    description = body.get("description", "")
+    file_ids_raw = body.get("file_ids", [])
+
+    # 提取纯 file_id 列表用于创建
+    plain_ids = []
+    role_map: dict[str, str] = {}
+    for item in file_ids_raw:
+        if isinstance(item, dict):
+            fid = item.get("id", "")
+            role = item.get("role", "member")
+        else:
+            fid = str(item)
+            role = "member"
+        if fid:
+            plain_ids.append(fid)
+            role_map[fid] = role
+
+    try:
+        group = registry.create_group(name, file_ids=plain_ids, description=description)
+        # 设置角色（create_group 默认 member，需更新非默认角色）
+        for fid, role in role_map.items():
+            if role != "member":
+                registry.add_to_group(group.id, fid, role)
+        members = registry.get_group_files(group.id)
+        return JSONResponse(status_code=201, content={**group.to_dict(), "members": members})
+    except Exception as exc:
+        return _error_json_response(500, f"创建文件组失败: {exc}")
+
+
+@_router.put("/api/v1/files/groups/{group_id}")
+async def update_file_group(group_id: str, request: Request) -> JSONResponse:
+    """更新文件组名称/描述。
+
+    Body: {name?: str, description?: str}
+    """
+    assert _config is not None, "服务未初始化"
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
+    if registry is None:
+        return _error_json_response(500, "FileRegistry 不可用")
+
+    body = await request.json()
+    name = body.get("name")
+    description = body.get("description")
+
+    group = registry.update_group(group_id, name=name, description=description)
+    if group is None:
+        return _error_json_response(404, f"文件组未找到: {group_id}")
+
+    members = registry.get_group_files(group.id)
+    return JSONResponse(content={**group.to_dict(), "members": members})
+
+
+@_router.delete("/api/v1/files/groups/{group_id}")
+async def delete_file_group(group_id: str, request: Request) -> JSONResponse:
+    """删除文件组。"""
+    assert _config is not None, "服务未初始化"
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
+    if registry is None:
+        return _error_json_response(500, "FileRegistry 不可用")
+
+    ok = registry.delete_group(group_id)
+    if not ok:
+        return _error_json_response(404, f"文件组未找到: {group_id}")
+    return JSONResponse(content={"status": "deleted", "group_id": group_id})
+
+
+@_router.put("/api/v1/files/groups/{group_id}/members")
+async def update_file_group_members(group_id: str, request: Request) -> JSONResponse:
+    """管理文件组成员。
+
+    Body: {add?: [{file_id: str, role?: str}], remove?: [str]}
+    """
+    assert _config is not None, "服务未初始化"
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    registry = _get_file_registry(ws_root, user_id=_iso_uid)
+    if registry is None:
+        return _error_json_response(500, "FileRegistry 不可用")
+
+    group = registry.get_group(group_id)
+    if group is None:
+        return _error_json_response(404, f"文件组未找到: {group_id}")
+
+    body = await request.json()
+    to_add = body.get("add", [])
+    to_remove = body.get("remove", [])
+
+    for item in to_add:
+        if isinstance(item, dict):
+            fid = item.get("file_id", "")
+            role = item.get("role", "member")
+        else:
+            fid = str(item)
+            role = "member"
+        if fid:
+            registry.add_to_group(group_id, fid, role)
+
+    for fid in to_remove:
+        if fid:
+            registry.remove_from_group(group_id, str(fid))
+
+    members = registry.get_group_files(group_id)
+    return JSONResponse(content={**group.to_dict(), "members": members})
+
+
 @_router.get("/api/v1/files/excel")
 async def get_excel_file(request: Request) -> StreamingResponse:
     """返回 xlsx 文件二进制流供前端 Univer 加载。"""
@@ -3952,6 +4179,159 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         return _error_json_response(500, f"读取文件失败: {exc}")
 
 
+@_router.get("/api/v1/files/excel/compare")
+async def get_excel_compare(request: Request) -> JSONResponse:
+    """返回两个 Excel 文件的快照 + 跨文件列关系，供前端对比视图使用。
+
+    参数:
+      - path_a: 左侧文件路径
+      - path_b: 右侧文件路径
+      - session_id: 会话 ID（可选）
+      - max_rows: 最大行数（默认 50）
+    """
+    assert _config is not None, "服务未初始化"
+
+    path_a = request.query_params.get("path_a", "")
+    path_b = request.query_params.get("path_b", "")
+    session_id = request.query_params.get("session_id")
+    max_rows = int(request.query_params.get("max_rows", "50"))
+
+    if not path_a or not path_b:
+        return _error_json_response(400, "缺少 path_a 或 path_b 参数")
+
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+
+    resolved_a = _resolve_excel_path(path_a, session_id, workspace_root=ws_root, user_id=_iso_uid)
+    resolved_b = _resolve_excel_path(path_b, session_id, workspace_root=ws_root, user_id=_iso_uid)
+
+    if resolved_a is None:
+        return _error_json_response(404, f"文件不存在: {path_a}")
+    if resolved_b is None:
+        return _error_json_response(404, f"文件不存在: {path_b}")
+
+    import asyncio
+
+    def _load_snapshot(resolved: str) -> dict[str, Any]:
+        """自包含的 snapshot 加载（不依赖 get_excel_snapshot 内部函数）。"""
+        from openpyxl import load_workbook as _lwb
+
+        def _read_ws(ws_obj: Any, _max_rows: int = max_rows) -> dict[str, Any]:
+            s_total_rows = ws_obj.max_row or 0
+            s_total_cols = ws_obj.max_column or 0
+            s_headers: list[str] = []
+            s_col_letters: list[str] = []
+            for c in range(1, min(s_total_cols + 1, 101)):
+                from openpyxl.utils import get_column_letter as _gcl
+                s_col_letters.append(_gcl(c))
+                cell_val = ws_obj.cell(row=1, column=c).value
+                s_headers.append(str(cell_val) if cell_val is not None else "")
+            s_rows: list[list[Any]] = []
+            s_row_limit = min(_max_rows, s_total_rows, 200)
+            for r in range(2, s_row_limit + 2):
+                if r > s_total_rows:
+                    break
+                row_data: list[Any] = []
+                for c in range(1, min(s_total_cols + 1, 101)):
+                    val = ws_obj.cell(row=r, column=c).value
+                    if val is None:
+                        row_data.append(None)
+                    elif isinstance(val, (int, float, bool)):
+                        row_data.append(val)
+                    else:
+                        row_data.append(str(val))
+                s_rows.append(row_data)
+            return {
+                "sheet": ws_obj.title,
+                "shape": {"rows": s_total_rows, "columns": s_total_cols},
+                "column_letters": s_col_letters,
+                "headers": s_headers,
+                "rows": s_rows,
+                "total_rows": s_total_rows,
+                "truncated": s_total_rows > s_row_limit,
+            }
+
+        try:
+            wb = _lwb(resolved, data_only=True, read_only=True)
+            sheet_names = wb.sheetnames
+            snapshots = []
+            for sn in sheet_names:
+                ws_obj = wb[sn]
+                snap = _read_ws(ws_obj)
+                snap["file"] = os.path.basename(resolved)
+                snap["sheets"] = sheet_names
+                snapshots.append(snap)
+            wb.close()
+            return {
+                "file": os.path.basename(resolved),
+                "sheets": sheet_names,
+                "all_snapshots": snapshots,
+            }
+        except Exception as exc:
+            logger.error("Compare snapshot 失败: %s — %s", resolved, exc)
+            return {
+                "file": os.path.basename(resolved),
+                "sheets": [],
+                "all_snapshots": [],
+                "error": str(exc),
+            }
+
+    snap_a, snap_b = await asyncio.gather(
+        asyncio.to_thread(_load_snapshot, resolved_a),
+        asyncio.to_thread(_load_snapshot, resolved_b),
+    )
+
+    # ── 跨文件关系检测 ──
+    relationships: dict[str, Any] = {"shared_columns": []}
+    try:
+        from excelmanus.tools.data_tools import discover_file_relationships as _dfr
+        import json as _json
+
+        rel_json = await asyncio.to_thread(
+            _dfr, file_paths=[resolved_a, resolved_b], max_files=2
+        )
+        rel_data = _json.loads(rel_json)
+        pairs = rel_data.get("file_pairs", [])
+        if pairs:
+            relationships["shared_columns"] = pairs[0].get("shared_columns", [])
+        hints = rel_data.get("merge_hints", [])
+        if hints:
+            relationships["merge_hint"] = hints[0]
+    except Exception as exc:
+        logger.debug("Compare 关系检测失败: %s", exc)
+
+    return JSONResponse(content={
+        "file_a": snap_a,
+        "file_b": snap_b,
+        "relationships": relationships,
+    })
+
+
+@_router.get("/api/v1/files/relationships")
+async def get_file_relationships(request: Request) -> JSONResponse:
+    """发现工作区内 Excel 文件之间的列关联关系。
+
+    参数:
+      - directory: 扫描目录（可选，默认 "."）
+    """
+    assert _config is not None, "服务未初始化"
+
+    directory = request.query_params.get("directory", ".")
+
+    import asyncio
+
+    try:
+        from excelmanus.tools.data_tools import discover_file_relationships as _dfr
+        import json as _json
+
+        rel_json = await asyncio.to_thread(_dfr, directory=directory, max_files=5)
+        rel_data = _json.loads(rel_json)
+        return JSONResponse(content=rel_data)
+    except Exception as exc:
+        logger.error("文件关系发现失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"分析失败: {exc}")
+
+
 class ExcelWriteRequest(BaseModel):
     """Excel 单元格写入请求。"""
 
@@ -4374,6 +4754,13 @@ async def workspace_rename_item(request: Request) -> JSONResponse:
 @_router.post("/api/v1/files/reveal")
 async def reveal_file(request: Request) -> JSONResponse:
     """在本地文件管理器中打开文件所在目录。"""
+    # 服务器/Docker 模式下此功能无意义（打开的是服务器端文件管理器，用户不可见）
+    if _config is not None and _config.is_server:
+        return _error_json_response(
+            400,
+            "此功能仅在本地部署模式下可用。服务器模式下无法打开本地文件管理器。",
+        )
+
     import platform
     import subprocess
 
@@ -7021,6 +7408,12 @@ async def execute_command(request: Request) -> JSONResponse:
 @_router.get("/api/v1/health")
 async def health(request: Request) -> dict:
     """健康检查：返回版本号和已加载的工具/技能包。"""
+    if _draining:
+        return {
+            "status": "draining",
+            "version": excelmanus.__version__,
+        }
+
     if _is_external_safe_mode():
         return {
             "status": "ok",
@@ -7064,6 +7457,10 @@ async def health(request: Request) -> dict:
         except Exception:
             pass
 
+    # 发布清单摘要（供前端版本轮询使用）
+    from excelmanus.api_routes_version import get_manifest_data, _API_SCHEMA_VERSION
+    _manifest = get_manifest_data()
+
     return {
         "status": "ok",
         "version": excelmanus.__version__,
@@ -7076,6 +7473,22 @@ async def health(request: Request) -> dict:
         "login_methods": login_methods,
         "session_isolation_enabled": getattr(request.app.state, "session_isolation_enabled", False),
         "docker_sandbox_enabled": getattr(request.app.state, "docker_sandbox_enabled", False),
+        "build_id": _manifest.get("frontend_build_id"),
+        "api_schema_version": _API_SCHEMA_VERSION,
+        "git_commit": _manifest.get("git_commit"),
+        "deploy_mode": _config.deploy_mode if _config is not None else "standalone",
+        "channels": _channel_launcher.active_channels if _channel_launcher is not None else [],
+    }
+
+
+@_router.get("/api/v1/channels")
+async def channels_status() -> dict:
+    """查询渠道协同启动状态。"""
+    if _channel_launcher is None:
+        return {"enabled": False, "channels": []}
+    return {
+        "enabled": True,
+        "channels": _channel_launcher.active_channels,
     }
 
 
@@ -7198,10 +7611,28 @@ async def shortcut_info(request: Request) -> JSONResponse:
 
 @_router.post("/api/v1/shortcut/create")
 async def shortcut_create(request: Request) -> JSONResponse:
-    """创建桌面快捷方式。"""
+    """创建桌面快捷方式。
+
+    服务器/Docker 模式下需传入 site_url 参数来创建浏览器书签，
+    standalone 模式下创建启动脚本快捷方式。
+    """
     from excelmanus.shortcuts import create_desktop_shortcut
     project_root = Path(__file__).resolve().parent.parent
-    result = create_desktop_shortcut(project_root)
+    mode = _config.deploy_mode if _config is not None else "standalone"
+    site_url = ""
+    if mode in ("server", "docker"):
+        try:
+            body = await request.json()
+            site_url = body.get("site_url", "")
+        except Exception:
+            pass
+        if not site_url:
+            return _error_json_response(
+                400, "服务器模式下需要提供 site_url 参数（如 http://your-server:3000）"
+            )
+    result = create_desktop_shortcut(
+        project_root, deploy_mode=mode, site_url=site_url,
+    )
     if result:
         return JSONResponse(content={"status": "ok", "path": result})
     return _error_json_response(500, "创建快捷方式失败，请查看日志。")
@@ -7225,10 +7656,44 @@ app = create_app()
 
 
 def main() -> None:
-    """API 服务入口函数（pyproject.toml 入口点）。"""
+    """API 服务入口函数（pyproject.toml 入口点）。
+
+    支持 --channels 参数或 EXCELMANUS_CHANNELS 环境变量来协同启动渠道 Bot::
+
+        # 启动 API + Telegram Bot
+        python -m excelmanus.api --channels telegram
+
+        # 多渠道
+        python -m excelmanus.api --channels telegram,qq
+
+        # 通过环境变量（适合 Docker / systemd）
+        EXCELMANUS_CHANNELS=telegram python -m excelmanus.api
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        prog="excelmanus-api",
+        description="ExcelManus API Server",
+    )
+    parser.add_argument(
+        "--channels",
+        type=str,
+        default="",
+        help="要协同启动的渠道 Bot，逗号分隔（如 telegram,qq）",
+    )
+    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--port", type=int, default=8000)
+    args, _ = parser.parse_known_args()
+
+    # 将 CLI 参数提升为环境变量，供 lifespan 读取
+    # （模块级 app = create_app() 已在 import 时创建，lifespan 延迟读取环境变量）
+    os.environ["EXCELMANUS_API_PORT"] = str(args.port)
+    if args.channels:
+        os.environ["EXCELMANUS_CHANNELS"] = args.channels
+
     uvicorn.run(
         "excelmanus.api:app",
-        host="0.0.0.0",
-        port=8000,
+        host=args.host,
+        port=args.port,
         log_level="info",
     )

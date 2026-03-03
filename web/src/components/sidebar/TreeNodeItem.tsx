@@ -17,6 +17,8 @@ import {
   Pencil,
   AtSign,
   Info,
+  Combine,
+  ArrowLeftRight,
 } from "lucide-react";
 import {
   DropdownMenu,
@@ -298,7 +300,6 @@ export function TreeNodeItem(props: TreeNodeProps) {
   const isSelected = selectedPaths.has(file.path);
 
   const handleFileClick = () => {
-    if (selectMode) { /* toggle handled by parent */ return; }
     onClick(file.path);
   };
   const handleFileDblClick = () => {
@@ -352,7 +353,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
 
   return (
     <div
-      draggable={!selectMode && !renaming}
+      draggable={(!selectMode || isSelected) && !renaming}
       onDragStart={(e) => onDragStart(e, file)}
       onDragEnd={onDragEnd}
       onClick={handleFileClick}
@@ -425,6 +426,25 @@ export function TreeNodeItem(props: TreeNodeProps) {
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); downloadFile(file.path, file.filename, sessionId).catch(() => {}); }}>
                 <Download className="h-4 w-4" />
                 下载
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem onClick={(e) => {
+                e.stopPropagation();
+                useExcelStore.getState().setPendingTemplateMessage(
+                  `请将 @file:${file.filename} 与 进行合并`
+                );
+              }}>
+                <Combine className="h-4 w-4" />
+                与其他文件合并
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={(e) => {
+                e.stopPropagation();
+                useExcelStore.getState().setPendingTemplateMessage(
+                  `请对比 @file:${file.filename} 和 的差异`
+                );
+              }}>
+                <ArrowLeftRight className="h-4 w-4" />
+                与其他文件对比
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem onClick={(e) => { e.stopPropagation(); setRenaming(true); }}>

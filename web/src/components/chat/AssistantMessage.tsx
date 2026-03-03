@@ -8,6 +8,7 @@ import {
   Zap,
   CircleStop,
   FolderOpen,
+  Copy,
   ChevronsUpDown,
   Brain,
   Download,
@@ -25,6 +26,7 @@ import remarkGfm from "remark-gfm";
 import { ThinkingBlock } from "./ThinkingBlock";
 import { MentionHighlighter } from "./MentionHighlighter";
 import { ToolCallCard } from "./ToolCallCard";
+import { AskUserCard } from "./AskUserCard";
 import { SubagentBlock } from "./SubagentBlock";
 import { TaskList } from "./TaskList";
 import { UndoableCard } from "./UndoableCard";
@@ -42,6 +44,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
+import { useAuthConfigStore } from "@/stores/auth-config-store";
 import type { AssistantBlock } from "@/lib/types";
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
@@ -201,13 +204,20 @@ const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
 function SaveResultCard({ path }: { path: string }) {
   const filename = path.split("/").pop() || path;
   const dir = path.substring(0, path.length - filename.length);
+  const deployMode = useAuthConfigStore((s) => s.deployMode);
+  const canReveal = deployMode === "standalone";
 
   const handleReveal = useCallback(() => {
+    if (!canReveal) return;
     fetch(buildApiUrl("/files/reveal"), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     }).catch(() => {});
+  }, [path, canReveal]);
+
+  const handleCopyPath = useCallback(() => {
+    navigator.clipboard.writeText(path).catch(() => {});
   }, [path]);
 
   return (
@@ -215,11 +225,15 @@ function SaveResultCard({ path }: { path: string }) {
       <p className="text-sm text-foreground mb-2">对话已保存至：</p>
       <button
         type="button"
-        onClick={handleReveal}
+        onClick={canReveal ? handleReveal : handleCopyPath}
         className="group flex items-start gap-2.5 w-full rounded-lg px-3 py-2.5 text-left cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)]"
-        title="点击在文件管理器中打开"
+        title={canReveal ? "点击在文件管理器中打开" : "点击复制路径"}
       >
-        <FolderOpen className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--em-primary)] group-hover:scale-110 transition-transform" />
+        {canReveal ? (
+          <FolderOpen className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--em-primary)] group-hover:scale-110 transition-transform" />
+        ) : (
+          <Copy className="h-4 w-4 mt-0.5 flex-shrink-0 text-[var(--em-primary)] group-hover:scale-110 transition-transform" />
+        )}
         <div className="min-w-0 flex-1">
           <span className="block text-sm font-medium text-[var(--em-primary)] break-all">
             {filename}
@@ -229,7 +243,7 @@ function SaveResultCard({ path }: { path: string }) {
           </span>
         </div>
         <span className="text-[10px] text-muted-foreground self-center flex-shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-          打开文件夹
+          {canReveal ? "打开文件夹" : "复制路径"}
         </span>
       </button>
     </div>
@@ -698,6 +712,15 @@ const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
       return <MemoizedMarkdown content={block.content} isStreamingText={isStreamingText} defaultExpanded={defaultExpanded} />;
     }
     case "tool_call": {
+      if (block.name === "ask_user" || block.name === "suggest_mode_switch") {
+        return (
+          <AskUserCard
+            args={block.args}
+            status={block.status}
+            result={block.result}
+          />
+        );
+      }
       const isVlmExtract = block.name === "extract_table_spec";
       const imagePath = isVlmExtract
         ? (block.args?.file_path as string | undefined)

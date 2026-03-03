@@ -226,7 +226,7 @@ export function SessionStatusBar() {
                         />
                       </svg>
                     )}
-                    <span className="tabular-nums text-[10px]">
+                    <span className="hidden sm:inline tabular-nums text-[10px]">
                       {Math.round(c.usage_ratio * 100)}%
                     </span>
                     {compacting && (
@@ -329,7 +329,7 @@ export function SessionStatusBar() {
             </TooltipContent>
           </Tooltip>
           {lastExtractResult && !extracting && (
-            <Badge variant="outline" className="h-4 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-400 border-emerald-500/30 whitespace-nowrap max-w-[120px] sm:max-w-none truncate flex-shrink-0 sm:flex-shrink">
+            <Badge variant="outline" className="hidden sm:inline-flex h-4 px-1.5 text-[10px] text-emerald-600 dark:text-emerald-400 border-emerald-500/30 whitespace-nowrap max-w-[120px] sm:max-w-none truncate flex-shrink-0 sm:flex-shrink">
               {lastExtractResult}
             </Badge>
           )}

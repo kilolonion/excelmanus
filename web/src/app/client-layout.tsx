@@ -57,7 +57,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <Sidebar />
         <main className="flex-1 flex flex-col overflow-hidden">
           {/* 顶栏 — 模型选择器 */}
-          <div className="flex items-center h-12 px-3 flex-shrink-0 topbar-glass overflow-hidden">
+          <div className="flex items-center h-12 px-2 sm:px-3 flex-shrink-0 topbar-glass overflow-hidden">
             {/* 左侧：导航 + 模型 */}
             <SidebarToggle />
             <TopModelSelector />
@@ -66,7 +66,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
             <div className="flex-1" />
 
             {/* 右侧：状态指示 */}
-            <div className="flex items-center gap-2 min-w-0">
+            <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
               <BackupApplyBadge />
               <TurnBrowser />
               <CheckpointTimeline />

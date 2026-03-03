@@ -210,7 +210,7 @@ export function TopModelSelector() {
             }}
           />
           <span
-            className={`truncate max-w-[100px] sm:max-w-[200px] ${
+            className={`truncate max-w-[80px] sm:max-w-[200px] ${
               currentModelUnhealthy ? "text-destructive" : ""
             }`}
           >

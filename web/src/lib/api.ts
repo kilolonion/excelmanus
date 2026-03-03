@@ -899,6 +899,143 @@ export async function fetchFileRegistry(opts?: {
   return apiGet(`/files/registry${qs ? `?${qs}` : ""}`);
 }
 
+// ── File Groups API ──────────────────────────────────────
+
+export interface FileGroupMember {
+  file_id: string;
+  canonical_path: string;
+  original_name: string;
+  file_type: string;
+  role: string;
+  added_at: string;
+}
+
+export interface FileGroup {
+  id: string;
+  workspace: string;
+  name: string;
+  description: string;
+  members: FileGroupMember[];
+  created_at: string;
+  updated_at: string;
+}
+
+export async function fetchFileGroups(): Promise<{ groups: FileGroup[] }> {
+  try {
+    return await apiGet<{ groups: FileGroup[] }>("/files/groups");
+  } catch {
+    return { groups: [] };
+  }
+}
+
+export async function createFileGroup(opts: {
+  name: string;
+  description?: string;
+  file_ids?: { id: string; role?: string }[];
+}): Promise<FileGroup> {
+  return apiPost<FileGroup>("/files/groups", opts);
+}
+
+export async function updateFileGroup(
+  groupId: string,
+  opts: { name?: string; description?: string },
+): Promise<FileGroup> {
+  return apiPut<FileGroup>(`/files/groups/${encodeURIComponent(groupId)}`, opts);
+}
+
+export async function deleteFileGroup(groupId: string): Promise<void> {
+  await apiDelete(`/files/groups/${encodeURIComponent(groupId)}`);
+}
+
+export async function updateFileGroupMembers(
+  groupId: string,
+  opts: { add?: { file_id: string; role?: string }[]; remove?: string[] },
+): Promise<FileGroup> {
+  return apiPut<FileGroup>(
+    `/files/groups/${encodeURIComponent(groupId)}/members`,
+    opts,
+  );
+}
+
+// ── Cross-file Compare & Relationships APIs ──────────────
+
+export interface SharedColumnAPI {
+  col_a: string;
+  col_b: string;
+  match_type: "exact" | "normalized" | "value_overlap";
+  overlap_ratio: number;
+}
+
+export interface CompareResponse {
+  file_a: AllSheetsSnapshotResponse;
+  file_b: AllSheetsSnapshotResponse;
+  relationships: {
+    shared_columns: SharedColumnAPI[];
+    merge_hint?: { file_a: string; file_b: string; key_column_a: string; key_column_b: string; suggested_join: string };
+  };
+}
+
+export async function fetchExcelCompare(
+  pathA: string,
+  pathB: string,
+  opts?: { sessionId?: string; maxRows?: number },
+): Promise<CompareResponse> {
+  const params = new URLSearchParams({
+    path_a: normalizeExcelPath(pathA),
+    path_b: normalizeExcelPath(pathB),
+  });
+  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
+  const url = buildApiUrl(`/files/excel/compare?${params.toString()}`);
+  const res = await fetch(url, {
+    headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Compare error: ${res.status}`);
+  }
+  return res.json();
+}
+
+export interface RelationshipDiscoveryAPI {
+  files_analyzed: number;
+  file_pairs: {
+    file_a: string;
+    file_b: string;
+    shared_columns: SharedColumnAPI[];
+  }[];
+  summary: string;
+  merge_hints?: {
+    file_a: string;
+    file_b: string;
+    key_column_a: string;
+    key_column_b: string;
+    suggested_join: string;
+    suggested_join_label?: string;
+    relationship?: string;
+    pandas_hint?: string;
+  }[];
+}
+
+export async function fetchFileRelationships(
+  opts?: { directory?: string },
+): Promise<RelationshipDiscoveryAPI> {
+  const params = new URLSearchParams();
+  if (opts?.directory) params.set("directory", opts.directory);
+  const qs = params.toString();
+  const url = buildApiUrl(`/files/relationships${qs ? `?${qs}` : ""}`);
+  const res = await fetch(url, {
+    headers: { ...getAuthHeaders() },
+    signal: _withTimeout(60_000),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `Relationships error: ${res.status}`);
+  }
+  return res.json();
+}
+
 // ── Workspace file management APIs ───────────────────────
 
 export async function workspaceMkdir(path: string): Promise<void> {
@@ -1619,4 +1756,323 @@ export async function migrateVersionData(
   source?: string,
 ): Promise<{ status: string; migrated: Record<string, unknown> }> {
   return apiPost("/version/data/migrate", { source: source ?? "" });
+}
+
+// ── Version Manifest ────────────────────────────────────
+
+export interface VersionManifest {
+  release_id: string;
+  backend_version: string;
+  api_schema_version: number;
+  frontend_build_id: string | null;
+  git_commit: string | null;
+  deployed_at: string | null;
+  deploy_mode: string | null;
+  topology: string | null;
+}
+
+export async function fetchVersionManifest(): Promise<VersionManifest> {
+  return apiGet<VersionManifest>("/version/manifest");
+}
+
+// ── Streaming Update (SSE) ──────────────────────────────
+
+export interface UpdateProgressEvent {
+  message: string;
+  percent: number;
+}
+
+export type UpdateDoneEvent = UpdateApplyResult;
+
+/**
+ * 以 SSE 流式执行更新，实时接收进度事件。
+ * 返回一个 AbortController 供调用方取消。
+ */
+export function streamVersionUpdate(
+  opts: {
+    skipBackup?: boolean;
+    skipDeps?: boolean;
+    useMirror?: boolean;
+  },
+  callbacks: {
+    onProgress: (ev: UpdateProgressEvent) => void;
+    onDone: (ev: UpdateDoneEvent) => void;
+    onError: (error: string) => void;
+  },
+): AbortController {
+  const controller = new AbortController();
+
+  (async () => {
+    try {
+      const resp = await directFetch(
+        `${API_BASE_PATH}/version/update/stream`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            skip_backup: opts.skipBackup ?? false,
+            skip_deps: opts.skipDeps ?? false,
+            use_mirror: opts.useMirror ?? false,
+          }),
+          signal: controller.signal,
+        },
+      );
+
+      if (!resp.ok) {
+        const text = await resp.text().catch(() => "");
+        callbacks.onError(`HTTP ${resp.status}: ${text}`);
+        return;
+      }
+
+      const reader = resp.body?.getReader();
+      if (!reader) {
+        callbacks.onError("服务端未返回响应体");
+        return;
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        let currentEvent = "";
+        let currentData = "";
+
+        for (const line of lines) {
+          if (line.startsWith("event:")) {
+            currentEvent = line.slice(6).trim();
+          } else if (line.startsWith("data:")) {
+            currentData = line.slice(5).trim();
+          } else if (line === "" && currentEvent && currentData) {
+            try {
+              const parsed = JSON.parse(currentData);
+              if (currentEvent === "progress") {
+                callbacks.onProgress(parsed as UpdateProgressEvent);
+              } else if (currentEvent === "done") {
+                callbacks.onDone(parsed as UpdateDoneEvent);
+              } else if (currentEvent === "error") {
+                callbacks.onError(parsed.error || "未知错误");
+              }
+            } catch {
+              // malformed JSON, skip
+            }
+            currentEvent = "";
+            currentData = "";
+          }
+        }
+      }
+
+      reader.releaseLock();
+    } catch (err) {
+      if ((err as Error).name !== "AbortError") {
+        callbacks.onError((err as Error).message || "流式更新连接失败");
+      }
+    }
+  })();
+
+  return controller;
+}
+
+// ── Remote Deploy Operations ────────────────────────────
+
+export interface DeployStatusInfo {
+  deploy_script_found: boolean;
+  deploy_script_path: string | null;
+  env_deploy_found: boolean;
+  servers: Record<string, string>;
+  site_urls: string[];
+  version: string;
+  artifacts: {
+    name: string;
+    path: string;
+    size_mb: number;
+    modified: string;
+  }[];
+  recent_history: string[];
+  is_deploying: boolean;
+}
+
+export async function fetchDeployStatus(): Promise<DeployStatusInfo> {
+  return apiGet<DeployStatusInfo>("/deploy/status");
+}
+
+export interface DeployResult {
+  success: boolean;
+  version: string;
+  artifact_path: string;
+  steps_completed: string[];
+  deploy_output?: string;
+  error: string | null;
+}
+
+export async function buildFrontendArtifact(): Promise<DeployResult> {
+  return apiPost<DeployResult>("/deploy/build", {});
+}
+
+export async function executeRemoteDeploy(opts?: {
+  target?: "full" | "backend" | "frontend";
+  skipBuild?: boolean;
+  artifactPath?: string;
+  fromLocal?: boolean;
+  skipDeps?: boolean;
+}): Promise<DeployResult> {
+  return apiPost<DeployResult>("/deploy/execute", {
+    target: opts?.target ?? "full",
+    skip_build: opts?.skipBuild ?? false,
+    artifact_path: opts?.artifactPath ?? "",
+    from_local: opts?.fromLocal ?? true,
+    skip_deps: opts?.skipDeps ?? false,
+  });
+}
+
+// ── Structured Deploy History ───────────────────────────
+
+export interface DeployHistoryEntry {
+  release_id: string;
+  timestamp: string;
+  status: string;
+  topology: string;
+  mode: string;
+  branch: string;
+  duration_s: number;
+  git_commit: string;
+  pre_deploy_commit: string;
+}
+
+export async function fetchDeployHistory(): Promise<{ history: DeployHistoryEntry[] }> {
+  return apiGet<{ history: DeployHistoryEntry[] }>("/deploy/history");
+}
+
+// ── Remote Rollback ─────────────────────────────────────
+
+export interface RollbackResult {
+  success: boolean;
+  output?: string;
+  target?: string;
+  release_id?: string;
+  commit?: string;
+  error?: string;
+}
+
+export async function executeRollback(opts: {
+  target?: "full" | "backend" | "frontend";
+  releaseId?: string;
+  commit?: string;
+  skipDeps?: boolean;
+}): Promise<RollbackResult> {
+  return apiPost<RollbackResult>("/deploy/rollback", {
+    target: opts.target ?? "full",
+    release_id: opts.releaseId ?? "",
+    commit: opts.commit ?? "",
+    skip_deps: opts.skipDeps ?? false,
+  });
+}
+
+/**
+ * 以 SSE 流式执行回滚，实时接收进度事件。
+ */
+export function streamRollback(
+  opts: {
+    target?: "full" | "backend" | "frontend";
+    releaseId?: string;
+    commit?: string;
+    skipDeps?: boolean;
+  },
+  handlers: {
+    onProgress?: (ev: { message: string; percent: number }) => void;
+    onDone?: (result: RollbackResult) => void;
+    onError?: (error: string) => void;
+  },
+): AbortController {
+  const controller = new AbortController();
+  const url = buildApiUrl("/deploy/rollback/stream");
+
+  fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      target: opts.target ?? "full",
+      release_id: opts.releaseId ?? "",
+      commit: opts.commit ?? "",
+      skip_deps: opts.skipDeps ?? false,
+    }),
+    signal: controller.signal,
+  })
+    .then(async (resp) => {
+      if (!resp.ok || !resp.body) {
+        handlers.onError?.(`HTTP ${resp.status}`);
+        return;
+      }
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        const lines = buf.split("\n");
+        buf = lines.pop() || "";
+
+        let eventType = "progress";
+        for (const line of lines) {
+          if (line.startsWith("event: ")) {
+            eventType = line.slice(7).trim();
+          } else if (line.startsWith("data: ")) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              if (eventType === "progress") handlers.onProgress?.(data);
+              else if (eventType === "done") handlers.onDone?.(data);
+              else if (eventType === "error") handlers.onError?.(data.error || "未知错误");
+            } catch { /* ignore parse errors */ }
+          }
+        }
+      }
+    })
+    .catch((err) => {
+      if (err.name !== "AbortError") handlers.onError?.(String(err));
+    });
+
+  return controller;
+}
+
+// ── Canary (灰度) Management ────────────────────────────
+
+export interface CanaryStatus {
+  active: boolean;
+  current_weight: number;
+  step: number;
+  total_steps: number;
+  started_at: string | null;
+  candidate_port: number | null;
+  observe_seconds: number | null;
+}
+
+export async function fetchCanaryStatus(): Promise<CanaryStatus> {
+  return apiGet<CanaryStatus>("/deploy/canary/status");
+}
+
+export async function promoteCanary(): Promise<{
+  success: boolean;
+  new_weight?: number;
+  step?: number;
+  total_steps?: number;
+  error?: string;
+}> {
+  return apiPost("/deploy/canary/promote", {});
+}
+
+export async function abortCanary(): Promise<{
+  success: boolean;
+  message?: string;
+  error?: string;
+}> {
+  return apiPost("/deploy/canary/abort", {});
 }

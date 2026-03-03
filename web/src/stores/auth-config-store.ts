@@ -10,8 +10,11 @@ interface LoginMethods {
   require_agreement: boolean;
 }
 
+export type DeployMode = "standalone" | "server" | "docker";
+
 interface AuthConfigState {
   authEnabled: boolean | null;
+  deployMode: DeployMode;
   loginMethods: LoginMethods;
   checked: boolean;
   checkAuthEnabled: () => Promise<boolean>;
@@ -27,6 +30,7 @@ const DEFAULT_LOGIN_METHODS: LoginMethods = {
 
 export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
   authEnabled: null,
+  deployMode: "standalone",
   loginMethods: { ...DEFAULT_LOGIN_METHODS },
   checked: false,
 
@@ -47,7 +51,11 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
               require_agreement: lm.require_agreement ?? true,
             }
           : { ...DEFAULT_LOGIN_METHODS };
-        set({ authEnabled: enabled, loginMethods, checked: true });
+        const deployMode: DeployMode =
+          data.deploy_mode === "server" ? "server"
+            : data.deploy_mode === "docker" ? "docker"
+              : "standalone";
+        set({ authEnabled: enabled, deployMode, loginMethods, checked: true });
         // Propagate backend config status to onboarding store
         if (typeof data.configured === "boolean") {
           useOnboardingStore.getState().setBackendConfigured(data.configured);

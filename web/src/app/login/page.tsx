@@ -131,7 +131,9 @@ function LoginForm() {
         setAutoLoggingIn(true);
         setEmail(account.email);
         setShowRecentList(false);
+        let timerFired = false;
         const timer = setTimeout(async () => {
+          timerFired = true;
           if (!mountedRef.current) return;
           try {
             setError("");
@@ -154,7 +156,25 @@ function LoginForm() {
             setError("自动登录失败，请重新输入密码");
           }
         }, 100);
-        return () => clearTimeout(timer);
+        // 安全超时：防止 login / decryptCredential 长时间无响应导致永久卡在 spinner
+        const safetyTimer = setTimeout(() => {
+          if (mountedRef.current) {
+            setAutoLoggingIn(false);
+            setError("自动登录超时，请手动登录");
+          }
+        }, 15000);
+        return () => {
+          clearTimeout(timer);
+          clearTimeout(safetyTimer);
+          // React Strict Mode 会先卸载再重新挂载，导致 timer 被取消但
+          // autoLoginAttemptedRef 仍为 true、autoLoggingIn 仍为 true，
+          // 使第二次挂载无法重新发起自动登录，界面永久停留在"正在自动登录"。
+          // 仅当 timer 未实际执行时才重置状态，允许下次挂载重试。
+          if (!timerFired) {
+            autoLoginAttemptedRef.current = false;
+            setAutoLoggingIn(false);
+          }
+        };
       }
     }
   }, [recentAccounts, searchParams, autoLoggingIn, router, skipAutoLoginAfterLogout]);

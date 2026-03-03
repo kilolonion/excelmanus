@@ -6,6 +6,8 @@ import { ClientLayout } from "./client-layout";
 import { AuthProvider } from "@/components/providers/AuthProvider";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
+import { useVersionPoll } from "@/hooks/use-version-poll";
+import { VersionUpdateToast } from "@/components/VersionUpdateToast";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 const STANDALONE_PATHS = ["/admin"];
@@ -18,6 +20,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const cancelledRef = useRef(false);
+  const versionPoll = useVersionPoll();
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -61,10 +64,21 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const isStandalone = STANDALONE_PATHS.some((p) => pathname.startsWith(p));
 
+  const versionToast = (
+    <VersionUpdateToast
+      newVersionAvailable={versionPoll.newVersionAvailable}
+      apiIncompatible={versionPoll.apiIncompatible}
+      remoteVersion={versionPoll.remoteVersion}
+      onDismiss={versionPoll.dismiss}
+      onRefresh={versionPoll.refreshNow}
+    />
+  );
+
   if (isStandalone) {
     return (
       <AuthProvider authEnabled={checked && authEnabled === true}>
         {children}
+        {versionToast}
       </AuthProvider>
     );
   }
@@ -72,6 +86,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   return (
     <AuthProvider authEnabled={checked && authEnabled === true}>
       <ClientLayout>{children}</ClientLayout>
+      {versionToast}
     </AuthProvider>
   );
 }

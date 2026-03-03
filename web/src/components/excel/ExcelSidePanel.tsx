@@ -15,6 +15,7 @@ import {
 import { panelSlideVariants, panelSlideVariantsMobile, panelSlideVariantsMedium } from "@/lib/sidebar-motion";
 import { useShallow } from "zustand/react/shallow";
 import { useIsMobile, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
+import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl, downloadFile, normalizeExcelPath, invalidateSnapshotCache } from "@/lib/api";
@@ -54,12 +55,20 @@ export function ExcelSidePanel() {
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
 
+  // ── 桌面端拖拽调宽 ──
+  const {
+    panelWidth: resizableWidth,
+    isFloatingByResize,
+    handleProps: resizeHandleProps,
+    isDragging: isResizing,
+  } = useResizablePanel(isDesktop);
+
   // 根据屏幕尺寸决定显示模式
-  // 桌面端（>=1280px）：固定右侧栏
+  // 桌面端（>=1280px）：固定右侧栏（拖宽超过 50vw 时切换为浮动）
   // 中等屏幕（1024-1279px）：浮层模式，类似移动端但更大
   // 移动端（<1024px）：全屏浮层
-  const useFloatingMode = !isDesktop;
-  const panelWidth = isMobile ? undefined : isMediumScreen ? 600 : 520;
+  const useFloatingMode = !isDesktop || isFloatingByResize;
+  const panelWidth = isMobile ? undefined : isDesktop ? resizableWidth : 600;
 
   const hasBackupForFile = useMemo(
     () => {
@@ -209,33 +218,63 @@ export function ExcelSidePanel() {
   if (!hasEverMounted && !isOpen) return null;
 
   return (
-    <motion.div
-      key="excel-side-panel"
-      data-coach-id="coach-excel-panel"
-      variants={getAnimationVariants()}
-      initial="initial"
-      animate={isOpen ? "animate" : "exit"}
-      className={
-        useFloatingMode
-          ? isMobile
-            ? "fixed inset-0 z-50 flex flex-col bg-background"
-            : "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-xl"
-          : "flex flex-col h-full border-l border-border bg-background"
-      }
-      style={{
-        ...(useFloatingMode ? (isMobile ? {} : { width: panelWidth }) : { width: panelWidth }),
-        // 关闭时隐藏但保持挂载
-        ...(!isOpen ? { display: "none" } : {}),
-      }}
-      onTouchStart={handlePanelTouchStart}
-      onTouchEnd={handlePanelTouchEnd}
-    >
-          {/* 移动端与中等屏幕的滑动指示条 */}
-          {useFloatingMode && (
-            <div className="flex justify-center py-1.5 flex-shrink-0">
-              <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
+    <>
+      {/* 拖拽超阈值浮动时的背景遮罩 */}
+      {isDesktop && isFloatingByResize && isOpen && (
+        <div
+          className="fixed inset-0 z-39 bg-black/20 transition-opacity"
+          onClick={closePanel}
+        />
+      )}
+
+      <motion.div
+        key="excel-side-panel"
+        data-coach-id="coach-excel-panel"
+        variants={isResizing ? undefined : getAnimationVariants()}
+        initial={isResizing ? false : "initial"}
+        animate={isResizing ? undefined : isOpen ? "animate" : "exit"}
+        className={
+          useFloatingMode
+            ? isMobile
+              ? "fixed inset-0 z-50 flex flex-col bg-background"
+              : isFloatingByResize
+                ? "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-2xl"
+                : "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-xl"
+            : "relative flex flex-col h-full border-l border-border bg-background"
+        }
+        style={{
+          ...(useFloatingMode ? (isMobile ? {} : { width: panelWidth }) : { width: panelWidth }),
+          // 拖拽中禁用 transition 以获得流畅体验
+          ...(isResizing ? { transition: "none" } : {}),
+          // 关闭时隐藏但保持挂载
+          ...(!isOpen ? { display: "none" } : {}),
+        }}
+        onTouchStart={handlePanelTouchStart}
+        onTouchEnd={handlePanelTouchEnd}
+      >
+        {/* ── 桌面端：左侧拖拽手柄 ── */}
+        {isDesktop && isOpen && (
+          <div
+            {...resizeHandleProps}
+            className={`absolute left-0 top-0 bottom-0 w-1 z-10 cursor-col-resize group/handle transition-colors
+              ${isResizing ? "bg-[var(--em-primary)]" : "hover:bg-[var(--em-primary)]/60 bg-transparent"}`}
+            title="拖拽调整宽度 · 双击恢复默认"
+          >
+            {/* 抓手指示器 — 居中的三条短线 */}
+            <div className="absolute left-0 top-1/2 -translate-y-1/2 flex flex-col gap-1 items-center w-1 py-2 opacity-0 group-hover/handle:opacity-100 transition-opacity">
+              <div className="w-0.5 h-1.5 rounded-full bg-muted-foreground/60" />
+              <div className="w-0.5 h-1.5 rounded-full bg-muted-foreground/60" />
+              <div className="w-0.5 h-1.5 rounded-full bg-muted-foreground/60" />
             </div>
-          )}
+          </div>
+        )}
+
+            {/* 移动端与中等屏幕的滑动指示条 */}
+            {useFloatingMode && !isFloatingByResize && (
+              <div className="flex justify-center py-1.5 flex-shrink-0">
+                <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
+              </div>
+            )}
 
           {/* 多文件 Tab 栏 */}
           {recentFiles.length > 1 && (
@@ -516,6 +555,7 @@ export function ExcelSidePanel() {
               })}
             </div>
           )}
-    </motion.div>
+      </motion.div>
+    </>
   );
 }

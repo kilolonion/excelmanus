@@ -13,6 +13,10 @@ import {
   Eye,
   EyeOff,
   GripVertical,
+  AtSign,
+  Combine,
+  ArrowLeftRight,
+  Layers,
 } from "lucide-react";
 import {
   Tooltip,
@@ -45,6 +49,7 @@ import {
 import { InlineCreateInput } from "./InlineInputs";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
+import { FileGroupListView } from "./FileGroupListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import { StorageBar } from "./StorageBar";
 
@@ -104,6 +109,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const showSystemFiles = useExcelStore((s) => s.showSystemFiles);
   const toggleShowSystemFiles = useExcelStore((s) => s.toggleShowSystemFiles);
   const demoFile = useExcelStore((s) => s.demoFile);
+  const groupViewMode = useExcelStore((s) => s.groupViewMode);
+  const toggleGroupViewMode = useExcelStore((s) => s.toggleGroupViewMode);
+  const createGroupFromSelected = useExcelStore((s) => s.createGroupFromSelected);
 
   // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
   const visibleFiles = useMemo(
@@ -140,6 +148,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [confirmRemoveOpen, setConfirmRemoveOpen] = useState(false);
   const [pendingRemovePaths, setPendingRemovePaths] = useState<string[]>([]);
   const [creatingRootFolder, setCreatingRootFolder] = useState(false);
+  const [creatingGroup, setCreatingGroup] = useState(false);
 
   const exitSelectMode = useCallback(() => {
     setSelectMode(false);
@@ -219,14 +228,18 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   }, [wsFilesLoaded, refreshWorkspaceFiles]);
 
   // Agent 创建/修改文件时自动刷新树（files_changed SSE 事件）
+  const loadFileGroups = useExcelStore((s) => s.loadFileGroups);
   const prevVersionRef = useRef(workspaceFilesVersion);
   useEffect(() => {
     if (workspaceFilesVersion === prevVersionRef.current) return;
     prevVersionRef.current = workspaceFilesVersion;
     // 短延迟以合并快速连续事件
-    const timer = setTimeout(() => refreshWorkspaceFiles(), 500);
+    const timer = setTimeout(() => {
+      refreshWorkspaceFiles();
+      if (groupViewMode) loadFileGroups();
+    }, 500);
     return () => clearTimeout(timer);
-  }, [workspaceFilesVersion, refreshWorkspaceFiles]);
+  }, [workspaceFilesVersion, refreshWorkspaceFiles, groupViewMode, loadFileGroups]);
 
   const handleUpload = useCallback(
     async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -343,6 +356,24 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   const handleDragStart = useCallback(
     (e: React.DragEvent, file: { path: string; filename: string }) => {
+      // 多选模式下：如果被拖拽的文件在已选集合中，携带全部已选文件
+      if (selectMode && selectedPaths.has(file.path) && selectedPaths.size > 0) {
+        const selectedFiles = visibleFiles
+          .filter((f) => !f.is_dir && selectedPaths.has(f.path))
+          .map((f) => ({ path: f.path, filename: f.filename }));
+        e.dataTransfer.setData(
+          "text/plain",
+          selectedFiles.map((f) => `@file:${f.filename}`).join(" ")
+        );
+        e.dataTransfer.setData(
+          "application/x-excel-file",
+          JSON.stringify(selectedFiles)
+        );
+        e.dataTransfer.effectAllowed = "copy";
+        setDraggingPath(file.path);
+        useExcelStore.getState().draggingFileCount = selectedFiles.length;
+        return;
+      }
       if (selectMode) return;
       e.dataTransfer.setData("text/plain", `@file:${file.filename}`);
       e.dataTransfer.setData(
@@ -351,12 +382,14 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       );
       e.dataTransfer.effectAllowed = "copy";
       setDraggingPath(file.path);
+      useExcelStore.getState().draggingFileCount = 1;
     },
-    [selectMode]
+    [selectMode, selectedPaths, visibleFiles]
   );
 
   const handleDragEnd = useCallback(() => {
     setDraggingPath(null);
+    useExcelStore.getState().draggingFileCount = 0;
   }, []);
 
   const isDeleteAll = pendingRemovePaths.length === wsFilePaths.length && wsFilePaths.length > 0;
@@ -479,17 +512,34 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={() => setTreeView((v) => !v)}
+                    onClick={() => { if (groupViewMode) toggleGroupViewMode(); else setTreeView((v) => !v); }}
                     className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
-                      treeView
+                      !groupViewMode && treeView
+                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
+                        : !groupViewMode
+                          ? "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
+                          : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
+                    }`}
+                  >
+                    {treeView && !groupViewMode ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
+                  </button>
+                </TooltipTrigger>
+                <TooltipContent side="bottom">{groupViewMode ? "切换文件视图" : treeView ? "切换列表视图" : "切换文件夹视图"}</TooltipContent>
+              </Tooltip>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <button
+                    onClick={toggleGroupViewMode}
+                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
+                      groupViewMode
                         ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
                         : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
                     }`}
                   >
-                    {treeView ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
+                    <Layers className="h-3.5 w-3.5" />
                   </button>
                 </TooltipTrigger>
-                <TooltipContent side="bottom">{treeView ? "切换列表视图" : "切换文件夹视图"}</TooltipContent>
+                <TooltipContent side="bottom">{groupViewMode ? "退出文件组视图" : "文件组视图"}</TooltipContent>
               </Tooltip>
             </div>
             {/* Right group: actions */}
@@ -612,17 +662,128 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 · 已选 {selectedPaths.size} 项
               </span>
               <button
+                onClick={() => {
+                  const selectedFiles = visibleFiles
+                    .filter((f) => !f.is_dir && selectedPaths.has(f.path))
+                    .map((f) => ({ path: f.path, filename: f.filename }));
+                  if (selectedFiles.length > 0) {
+                    useExcelStore.getState().mentionFilesToInput(selectedFiles);
+                    exitSelectMode();
+                  }
+                }}
+                className="ml-auto text-[10px] transition-colors"
+                style={{ color: "var(--em-primary)" }}
+                title="将已选文件引用到聊天输入框"
+              >
+                <span className="inline-flex items-center gap-0.5">
+                  <AtSign className="h-3 w-3" />
+                  引用到聊天
+                </span>
+              </button>
+              {selectedPaths.size === 2 && (() => {
+                const pair = visibleFiles
+                  .filter((f) => !f.is_dir && selectedPaths.has(f.path))
+                  .map((f) => f.filename);
+                return pair.length === 2 ? (
+                  <>
+                    <button
+                      onClick={() => {
+                        useExcelStore.getState().setPendingTemplateMessage(
+                          `请将 @file:${pair[0]} 与 @file:${pair[1]} 进行合并`
+                        );
+                        exitSelectMode();
+                      }}
+                      className="text-[10px] transition-colors"
+                      style={{ color: "var(--em-primary)" }}
+                      title="将两个文件合并"
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        <Combine className="h-3 w-3" />
+                        合并
+                      </span>
+                    </button>
+                    <button
+                      onClick={() => {
+                        const paths = visibleFiles
+                          .filter((f) => !f.is_dir && selectedPaths.has(f.path))
+                          .map((f) => f.path);
+                        if (paths.length === 2) {
+                          useExcelStore.getState().openCompare(paths[0], paths[1]);
+                        }
+                        exitSelectMode();
+                      }}
+                      className="text-[10px] transition-colors"
+                      style={{ color: "var(--em-primary)" }}
+                      title="可视化对比两个文件"
+                    >
+                      <span className="inline-flex items-center gap-0.5">
+                        <ArrowLeftRight className="h-3 w-3" />
+                        对比
+                      </span>
+                    </button>
+                  </>
+                ) : null;
+              })()}
+              <button
+                onClick={() => setCreatingGroup(true)}
+                className="text-[10px] transition-colors"
+                style={{ color: "var(--em-primary)" }}
+                title="将已选文件创建为文件组"
+              >
+                <span className="inline-flex items-center gap-0.5">
+                  <Layers className="h-3 w-3" />
+                  创建文件组
+                </span>
+              </button>
+              <button
                 onClick={() => requestRemove(Array.from(selectedPaths))}
-                className="ml-auto text-[10px] text-destructive hover:text-destructive/80 transition-colors"
+                className="text-[10px] text-destructive hover:text-destructive/80 transition-colors"
               >
                 移除所选
               </button>
             </>
           )}
+          {creatingGroup && (
+            <div className="flex items-center gap-1 mt-1 w-full">
+              <Layers className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+              <InlineCreateInput
+                placeholder="输入文件组名称"
+                onConfirm={async (name) => {
+                  setCreatingGroup(false);
+                  const fileIds = Array.from(selectedPaths);
+                  // 需要通过 file registry 获取 file_id，这里用 path 作为 id
+                  // 后端 create_group 接收的是 file_registry 的 id
+                  // 前端需要先获取 registry entry ids
+                  const { fetchFileRegistry } = await import("@/lib/api");
+                  try {
+                    const regData = await fetchFileRegistry();
+                    if ("files" in regData) {
+                      const pathToId = new Map<string, string>();
+                      for (const f of regData.files) {
+                        pathToId.set(f.canonical_path, f.id);
+                      }
+                      const ids = fileIds
+                        .map((p) => pathToId.get(p) ?? pathToId.get(`./${p}`))
+                        .filter((id): id is string => !!id);
+                      if (ids.length > 0) {
+                        await createGroupFromSelected(name, ids);
+                      }
+                    }
+                  } catch {
+                    // silent
+                  }
+                  exitSelectMode();
+                }}
+                onCancel={() => setCreatingGroup(false)}
+              />
+            </div>
+          )}
         </div>
       )}
 
-      {!wsFilesLoaded ? (
+      {groupViewMode ? (
+        <FileGroupListView onClickFile={handleClick} />
+      ) : !wsFilesLoaded ? (
         <div className="flex flex-col items-center justify-center py-6 gap-2 text-muted-foreground/60">
           <div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
           <span className="text-[11px]">加载文件列表…</span>

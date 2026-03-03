@@ -7,6 +7,7 @@ import { MessageStream } from "@/components/chat/MessageStream";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { CommandResultDialog, useCommandResult } from "@/components/modals/CommandResultDialog";
 import { ExcelFullView } from "@/components/excel/ExcelFullView";
+import { ExcelCompareView } from "@/components/excel/ExcelCompareView";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
@@ -22,6 +23,7 @@ function ChatPage() {
   const isStreaming = useChatStore((s) => s.isStreaming);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
+  const compareMode = useExcelStore((s) => s.compareMode);
   const cmdResult = useCommandResult();
 
   useEffect(() => {
@@ -35,7 +37,11 @@ function ChatPage() {
   return (
     <div className="flex flex-col h-full">
       <AnimatePresence mode="wait" initial={false}>
-        {fullViewPath ? (
+        {compareMode ? (
+          <motion.div key="compare" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <ExcelCompareView />
+          </motion.div>
+        ) : fullViewPath ? (
           <motion.div key="excel" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <ExcelFullView />
           </motion.div>

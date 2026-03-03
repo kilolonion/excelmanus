@@ -36,6 +36,7 @@ import { TextDiffView } from "./TextDiffView";
 import { TextPreviewView } from "./TextPreviewView";
 import StreamingTextPreview from "./StreamingTextPreview";
 import { CodeBlock } from "./CodeBlock";
+import { MergeResultCard } from "./MergeResultCard";
 
 // 工具分类 → 图标映射
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
@@ -185,6 +186,41 @@ function getToolCategory(name: string): string {
 
 function getTheme(name: string): ToolCategoryTheme {
   return CATEGORY_THEMES[getToolCategory(name)] || CATEGORY_THEMES.default;
+}
+
+/** Try to extract merge result info from a tool's JSON result string. */
+function parseMergeResult(toolName: string, resultStr: string | undefined): {
+  sourceFiles: string[]; outputFile: string;
+  rowsMatched: number; rowsAdded: number; rowsUnmatched: number;
+  keyColumns: string[]; joinType: string;
+} | null {
+  if (!resultStr) return null;
+  // Only attempt for code execution or merge/relationship tools
+  if (!["run_code", "discover_file_relationships", "compare_excel"].includes(toolName)) return null;
+  const trimmed = resultStr.trimStart();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
+  try {
+    const data = JSON.parse(trimmed);
+    if (typeof data !== "object" || data === null) return null;
+    // Detect merge result by presence of key fields
+    const hasStats = typeof data.rows_matched === "number"
+      || typeof data.matched_count === "number"
+      || typeof data.merge_rows === "number";
+    const hasMergeHint = typeof data.merge_result === "object" || typeof data.output_file === "string";
+    if (!hasStats && !hasMergeHint) return null;
+    const src = data.merge_result ?? data;
+    return {
+      sourceFiles: Array.isArray(src.source_files) ? src.source_files : [],
+      outputFile: src.output_file ?? src.output ?? "",
+      rowsMatched: src.rows_matched ?? src.matched_count ?? 0,
+      rowsAdded: src.rows_added ?? src.added_count ?? 0,
+      rowsUnmatched: src.rows_unmatched ?? src.unmatched_count ?? 0,
+      keyColumns: Array.isArray(src.key_columns) ? src.key_columns : [],
+      joinType: src.join_type ?? src.how ?? "",
+    };
+  } catch {
+    return null;
+  }
 }
 
 const EXCEL_READ_TOOLS = new Set(["read_excel", "rebuild_excel_from_spec"]);
@@ -503,6 +539,22 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
           )}
         </div>
       )}
+      {/* 合并结果卡片 — 从 run_code 等工具结果中智能检测 */}
+      {(() => {
+        const mr = parseMergeResult(name, result);
+        if (!mr || (!mr.outputFile && mr.sourceFiles.length === 0)) return null;
+        return (
+          <MergeResultCard
+            sourceFiles={mr.sourceFiles}
+            outputFile={mr.outputFile}
+            rowsMatched={mr.rowsMatched}
+            rowsAdded={mr.rowsAdded}
+            rowsUnmatched={mr.rowsUnmatched}
+            keyColumns={mr.keyColumns}
+            joinType={mr.joinType}
+          />
+        );
+      })()}
     </div>
   );
 });

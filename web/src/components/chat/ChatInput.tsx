@@ -450,6 +450,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   // 监听侧边栏 @ 按钮的快捷添加文件提及
   const pendingFileMention = useExcelStore((s) => s.pendingFileMention);
   const clearPendingFileMention = useExcelStore((s) => s.clearPendingFileMention);
+  const pendingFileMentions = useExcelStore((s) => s.pendingFileMentions);
+  const clearPendingFileMentions = useExcelStore((s) => s.clearPendingFileMentions);
+  const pendingTemplateMessage = useExcelStore((s) => s.pendingTemplateMessage);
+  const clearPendingTemplateMessage = useExcelStore((s) => s.clearPendingTemplateMessage);
 
   useEffect(() => {
     if (!pendingFileMention) return;
@@ -482,6 +486,84 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     clearPendingFileMention();
   }, [pendingFileMention, clearPendingFileMention, text, autoResize]);
+
+  // 监听侧边栏多选批量引用文件
+  useEffect(() => {
+    if (!pendingFileMentions || pendingFileMentions.length === 0) return;
+    const displayTokens: string[] = [];
+    for (const { path, filename } of pendingFileMentions) {
+      const fullMention = `@file:${filename}`;
+      const [displayMention, fullToken] = truncateMention(fullMention);
+      if (displayMention !== fullToken) tokenMapRef.current.set(displayMention, fullToken);
+      displayTokens.push(displayMention);
+      // 记录到最近文件
+      const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
+      if ([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"].includes(extLower)) {
+        useExcelStore.getState().addRecentFile({ path, filename });
+      }
+    }
+    setConfirmedTokens((prev) => {
+      const next = new Set(prev);
+      for (const t of displayTokens) next.add(t);
+      return next;
+    });
+    const textarea = textareaRef.current;
+    const cursorPos = textarea?.selectionStart ?? text.length;
+    const before = text.slice(0, cursorPos);
+    const after = text.slice(cursorPos);
+    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
+    const prefix = needsSpace ? " " : "";
+    const mentions = displayTokens.join(" ");
+    const newText = before + prefix + mentions + " " + after;
+    setText(newText);
+    const newCursorPos = (before + prefix + mentions + " ").length;
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(newCursorPos, newCursorPos);
+      autoResize();
+    });
+    clearPendingFileMentions();
+  }, [pendingFileMentions, clearPendingFileMentions, text, autoResize]);
+
+  // 监听模板消息注入（右键"合并/对比"快捷操作）
+  useEffect(() => {
+    if (!pendingTemplateMessage) return;
+    const template = pendingTemplateMessage;
+    clearPendingTemplateMessage();
+
+    // 在模板中查找 @file:xxx 标记并加入 confirmedTokens
+    const mentionRegex = /@file:\S+/g;
+    const mentionTokens: string[] = [];
+    let match;
+    while ((match = mentionRegex.exec(template)) !== null) {
+      const [displayToken, fullToken] = truncateMention(match[0]);
+      if (displayToken !== fullToken) tokenMapRef.current.set(displayToken, fullToken);
+      mentionTokens.push(displayToken);
+    }
+    setConfirmedTokens((prev) => {
+      const next = new Set(prev);
+      for (const t of mentionTokens) next.add(t);
+      return next;
+    });
+    setText(template);
+
+    // 将光标定位到模板中 "与 " 或 "和 " 后的空位（方便用户继续输入第二个文件引用）
+    const textarea = textareaRef.current;
+    const gapPatterns = [/与 (?=进行)/, /和 (?=的差异)/];
+    let cursorPos = template.length;
+    for (const pattern of gapPatterns) {
+      const gapMatch = pattern.exec(template);
+      if (gapMatch) {
+        cursorPos = gapMatch.index + gapMatch[0].length;
+        break;
+      }
+    }
+    requestAnimationFrame(() => {
+      textarea?.focus();
+      textarea?.setSelectionRange(cursorPos, cursorPos);
+      autoResize();
+    });
+  }, [pendingTemplateMessage, clearPendingTemplateMessage, autoResize]);
 
   // ── URL 链接上传 ──────────────────────────────────────
   const triggerUrlUpload = useCallback(async (url: string) => {
@@ -551,6 +633,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   });
 
   // 处理来自 ExcelFilesBar 的拖拽（自定义数据格式，非原生文件）
+  // 支持单文件对象 {path,filename} 和多文件数组 [{path,filename}, ...]
   const handleExcelDrop = useCallback(
     (e: React.DragEvent) => {
       const excelData = e.dataTransfer.getData("application/x-excel-file");
@@ -558,18 +641,31 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       e.preventDefault();
       e.stopPropagation();
       try {
-        const file = JSON.parse(excelData) as { path: string; filename: string };
-        const mention = `@file:${file.filename}`;
-        setConfirmedTokens((prev) => new Set(prev).add(mention));
+        const parsed = JSON.parse(excelData);
+        const files: { path: string; filename: string }[] = Array.isArray(parsed) ? parsed : [parsed];
+        if (files.length === 0) return;
+        const displayTokens: string[] = [];
+        setConfirmedTokens((prev) => {
+          const next = new Set(prev);
+          for (const file of files) {
+            const fullMention = `@file:${file.filename}`;
+            const [display, full] = truncateMention(fullMention);
+            if (display !== full) tokenMapRef.current.set(display, full);
+            next.add(display);
+            displayTokens.push(display);
+          }
+          return next;
+        });
         const textarea = textareaRef.current;
         const cursorPos = textarea?.selectionStart ?? text.length;
         const before = text.slice(0, cursorPos);
         const after = text.slice(cursorPos);
         const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
         const prefix = needsSpace ? " " : "";
-        const newText = before + prefix + mention + " " + after;
+        const mentions = displayTokens.join(" ");
+        const newText = before + prefix + mentions + " " + after;
         setText(newText);
-        const newCursorPos = (before + prefix + mention + " ").length;
+        const newCursorPos = (before + prefix + mentions + " ").length;
         requestAnimationFrame(() => {
           textarea?.focus();
           textarea?.setSelectionRange(newCursorPos, newCursorPos);
@@ -1220,7 +1316,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         <div className="absolute inset-0 z-40 flex items-center justify-center rounded-[20px] bg-[var(--em-primary-alpha-06)] border-2 border-dashed border-[var(--em-primary-light)] backdrop-blur-[2px]">
           <div className="flex flex-col items-center gap-1.5 text-[var(--em-primary)]">
             <Plus className="h-6 w-6" />
-            <span className="text-sm font-medium">拖放文件到这里</span>
+            <span className="text-sm font-medium">
+              {excelDragOver && useExcelStore.getState().draggingFileCount > 1
+                ? `拖放 ${useExcelStore.getState().draggingFileCount} 个文件到这里`
+                : "拖放文件到这里"}
+            </span>
             <span className="text-[10px] text-muted-foreground">支持 xlsx、xls、csv、图片</span>
           </div>
         </div>
