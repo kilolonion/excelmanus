@@ -226,21 +226,59 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
 }
 
 
-# ── 基于 task_tags 的动态工具裁剪映射 ────────────────────────
-# tag → 该任务类型下可隐藏的域工具集合（不影响元工具）。
-# 宽标签（cross_sheet、large_data、image_replica）和无标签情况不做裁剪。
-# introspect_capability 永不被裁剪，作为 LLM 发现隐藏能力的安全阀。
+# ── 视觉工具集合 ──────────────────────────────────────────────
 
 _VISION_TOOLS: frozenset[str] = frozenset({
-    "read_image", "rebuild_excel_from_spec",
-    "verify_excel_replica", "extract_table_spec",
+    "read_image",
+    "rebuild_excel_from_spec",
+    "verify_excel_replica",
+    "extract_table_spec",
 })
+
+# ── 基于 task_tags 的工具排除映射（旧版黑名单，保留供兼容引用） ──
 
 TAG_EXCLUDED_TOOLS: dict[str, frozenset[str]] = {
     "simple_read": _VISION_TOOLS | frozenset({"create_excel_chart"}),
     "formatting": _VISION_TOOLS | frozenset({"create_excel_chart"}),
     "chart": _VISION_TOOLS,
     "data_fill": _VISION_TOOLS | frozenset({"create_excel_chart"}),
+}
+
+
+# ── 基于 LLM 路由标签的工具域白名单映射 ────────────────────────
+# route_tag → 该路由下允许暴露的域工具白名单。
+# 不在白名单中的域工具将被隐藏（元工具不受影响）。
+# "all_tools" 标签不在此映射中 → 不做过滤。
+# introspect_capability 在所有标签中保留，作为 LLM 发现隐藏工具的安全阀。
+
+_DATA_READ_TOOLS: frozenset[str] = frozenset({
+    "read_excel", "inspect_excel_files", "filter_data", "compare_excel",
+    "scan_excel_snapshot", "search_excel_values",
+    "list_sheets", "focus_window",
+    "discover_file_relationships", "memory_read_topic",
+    "introspect_capability",
+})
+
+ROUTE_TOOL_SCOPE: dict[str, frozenset[str]] = {
+    "data_read": _DATA_READ_TOOLS,
+    "data_write": _DATA_READ_TOOLS | frozenset({
+        "run_code", "write_text_file", "edit_text_file",
+        "copy_file", "rename_file",
+    }),
+    "chart": _DATA_READ_TOOLS | frozenset({
+        "create_excel_chart", "run_code",
+    }),
+    "vision": _DATA_READ_TOOLS | frozenset({
+        "read_image", "rebuild_excel_from_spec",
+        "verify_excel_replica", "extract_table_spec", "run_code",
+    }),
+    "code": frozenset({
+        "run_code", "run_shell",
+        "write_text_file", "edit_text_file", "read_text_file",
+        "list_directory", "copy_file", "rename_file", "delete_file",
+        "introspect_capability",
+    }),
+    # "all_tools" 不在此映射中 → 不做过滤
 }
 
 

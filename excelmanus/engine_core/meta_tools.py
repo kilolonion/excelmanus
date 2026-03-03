@@ -3,7 +3,7 @@
 包括：
 - _build_meta_tools: 构建 activate_skill / delegate / list_subagents / ask_user / finish_task
 - _build_v5_tools: 带脏标记缓存的工具 schema 构建
-- _build_v5_tools_impl: 实际构建逻辑（read_only 过滤、task_tags 裁剪）
+- _build_v5_tools_impl: 实际构建逻辑（read_only 过滤、route_tool_tags 白名单裁剪）
 """
 
 from __future__ import annotations
@@ -397,7 +397,7 @@ class MetaToolBuilder:
         self,
         *,
         write_hint: str = "unknown",
-        task_tags: tuple[str, ...] = (),
+        route_tool_tags: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具（带脏标记缓存）。"""
         e = self._engine
@@ -406,11 +406,14 @@ class MetaToolBuilder:
             _normalize_write_hint(getattr(e, "_current_write_hint", "unknown")),
             frozenset(s.name for s in e._active_skills),
             getattr(e, "_bench_mode", False),
-            task_tags,
+            route_tool_tags,
         )
         if e._tools_cache is not None and e._tools_cache_key == cache_key:
             return e._tools_cache
-        tools = self.build_v5_tools_impl(write_hint=write_hint, task_tags=task_tags)
+        tools = self.build_v5_tools_impl(
+            write_hint=write_hint,
+            route_tool_tags=route_tool_tags,
+        )
         e._tools_cache = tools
         e._tools_cache_key = cache_key
         return tools
@@ -419,14 +422,15 @@ class MetaToolBuilder:
         self,
         *,
         write_hint: str = "unknown",
-        task_tags: tuple[str, ...] = (),
+        route_tool_tags: tuple[str, ...] = (),
     ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具。
 
-        当 write_hint == "read_only" 时，仅暴露只读工具子集 + run_code + 元工具，
-        减少约 40-60% 的工具 schema token 开销。
+        统一过滤管线：
+        1. write_hint == "read_only" → 仅暴露只读工具子集 + run_code + 元工具
+        2. route_tool_tags → ROUTE_TOOL_SCOPE 白名单过滤（LLM 驱动）
         """
-        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, TAG_EXCLUDED_TOOLS
+        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, ROUTE_TOOL_SCOPE
 
         e = self._engine
         domain_schemas = e._registry.get_tiered_schemas(
@@ -454,17 +458,27 @@ class MetaToolBuilder:
                 if s.get("function", {}).get("name", "") not in _meta_blocked
             ]
 
-        # 基于 task_tags 的动态工具裁剪
-        if task_tags:
-            excluded: set[str] = set()
-            for tag in task_tags:
-                tag_excluded = TAG_EXCLUDED_TOOLS.get(tag)
-                if tag_excluded is not None:
-                    excluded |= tag_excluded
-            if excluded:
+        # 基于 LLM 路由标签的域工具白名单过滤（替代 TAG_EXCLUDED_TOOLS 黑名单）
+        if route_tool_tags:
+            allowed: set[str] = set()
+            _has_all = False
+            for tag in route_tool_tags:
+                scope = ROUTE_TOOL_SCOPE.get(tag)
+                if scope is not None:
+                    allowed |= scope
+                else:
+                    # "all_tools" 或未知标签 → 不做过滤
+                    _has_all = True
+                    break
+
+            if not _has_all and allowed:
                 filtered_domain = [
                     s for s in filtered_domain
-                    if s.get("function", {}).get("name", "") not in excluded
+                    if s.get("function", {}).get("name", "") in allowed
                 ]
+                logger.debug(
+                    "LLM 路由过滤: tags=%s, 保留 %d 个域工具",
+                    route_tool_tags, len(filtered_domain),
+                )
 
         return meta_schemas + filtered_domain
