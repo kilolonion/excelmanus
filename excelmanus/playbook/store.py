@@ -33,7 +33,7 @@ class PlaybookBullet:
     """单条战术手册条目。"""
 
     id: str
-    category: str  # "cross_sheet" | "formatting" | "formula" | "data_cleaning" | "error_recovery" | "general"
+    category: str  # "cross_sheet" | "multi_file" | "formatting" | "formula" | "data_cleaning" | "error_recovery" | "general"
     content: str
     source_task_tags: list[str] = field(default_factory=list)
     helpful_count: int = 0
@@ -272,15 +272,16 @@ class PlaybookStore:
         )
         total_pruned += cursor.rowcount
 
-        # 2. 删除超过 max_age_days 未使用的
+        # 2. 删除超过 max_age_days 未使用或从未使用的老旧条目
         if max_age_days > 0:
             from datetime import timedelta
             cutoff = (datetime.now(timezone.utc) - timedelta(days=max_age_days)).isoformat()
             cursor = conn.execute(
                 """DELETE FROM playbook_bullets
-                   WHERE last_used_at IS NOT NULL AND last_used_at < ?
+                   WHERE ((last_used_at IS NOT NULL AND last_used_at < ?)
+                          OR (last_used_at IS NULL AND created_at < ?))
                    AND helpful_count <= 1""",
-                (cutoff,),
+                (cutoff, cutoff),
             )
             total_pruned += cursor.rowcount
 

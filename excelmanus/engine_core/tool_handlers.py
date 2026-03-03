@@ -593,7 +593,31 @@ class SuggestModeSwitchHandler(BaseToolHandler):
 
         e._question_flow.pop_current()
         e._interaction_registry.cleanup_done()
-        result_str = _json.dumps(payload, ensure_ascii=False) if isinstance(payload, dict) else str(payload)
+
+        # 解析用户选择并执行实际模式切换
+        accepted = False
+        if isinstance(payload, dict):
+            selected_options = payload.get("selected_options", [])
+            if selected_options:
+                first_label = str(selected_options[0].get("label", "")).strip()
+                # 第一个选项 = 确认切换
+                if first_label.startswith("切换到"):
+                    accepted = True
+
+        old_mode = getattr(e, "_current_chat_mode", "write")
+        if accepted and target_mode in ("write", "read", "plan"):
+            e._current_chat_mode = target_mode
+            e._tools_cache = None  # 失效工具缓存，下轮重建时反映新模式
+            result_str = (
+                f"用户已确认切换。模式已从「{mode_labels.get(old_mode, old_mode)}」"
+                f"切换到「{target_label}」。请按新模式继续执行任务。"
+            )
+        else:
+            result_str = (
+                f"用户选择保持当前「{mode_labels.get(old_mode, old_mode)}」模式。"
+                "请在当前模式下继续。"
+            )
+
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=True)
 

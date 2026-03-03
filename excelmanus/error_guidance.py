@@ -288,6 +288,26 @@ def classify_failure(
         )
 
     if status_code == 404:
+        # 区分 "路由不存在"（base URL 路径错误）和 "模型不存在"（模型 ID 错误）
+        _route_keywords = ("route", "completions not found", "endpoint not found", "path not found", "not found")
+        _model_keywords = ("model", "deployment")
+        _is_route_error = any(kw in exc_text for kw in _route_keywords) and not any(kw in exc_text for kw in _model_keywords)
+        if _is_route_error:
+            return FailureGuidance(
+                category="config",
+                code="base_url_misconfigured",
+                title="API 路径错误",
+                message=(
+                    "模型服务返回 404，通常是 Base URL 路径不正确。"
+                    "OpenAI 兼容 API 的 Base URL 应以 /v1 结尾，请在设置中检查。"
+                ),
+                stage=stage,
+                retryable=False,
+                diagnostic_id=diagnostic_id,
+                actions=_actions_for(False),
+                provider=provider,
+                model=model,
+            )
         return FailureGuidance(
             category="model",
             code="model_not_found",

@@ -269,31 +269,16 @@ class ContextBuilder:
         return f"## 持久记忆（语义相关）\n{text.strip()}"
 
     def _build_playbook_notice(self) -> str:
-        """检索并构建 Playbook 历史经验注入文本。
+        """构建 Playbook 历史经验注入文本。
 
-        根据当前用户消息 + task_tags 语义检索最相关的 playbook bullets，
-        格式化为 system prompt 注入段落。无 playbook 或未启用时零开销。
+        读取 engine 中缓存的语义检索结果（由 _search_playbook 在 chat() 中
+        并行预取并存入 _relevant_playbook_text）。无 playbook 或未启用时零开销。
         """
         e = self._engine
-        _store = getattr(e, "_playbook_store", None)
-        if _store is None:
+        text = getattr(e, "_relevant_playbook_text", "")
+        if not text or not text.strip():
             return ""
-        _config = getattr(e, "_config", None)
-        if _config is None or not getattr(_config, "playbook_enabled", False):
-            return ""
-
-        try:
-            bullets = _store.list_all(limit=getattr(_config, "playbook_inject_top_k", 5))
-        except Exception:
-            return ""
-
-        if not bullets:
-            return ""
-
-        lines = ["## 历史经验参考（基于过往成功经验自动检索）"]
-        for b in bullets:
-            lines.append(f"- **[{b.category}]** {b.content}")
-        return "\n".join(lines)
+        return text.strip()
 
     def _build_skill_hints_notice(self) -> str:
         """构建语义技能匹配提示文本。
@@ -522,6 +507,9 @@ class ContextBuilder:
     def _try_auto_prescan(excel_paths: list[str], state: Any) -> bool:
         """尝试自动调用 scan_excel_snapshot 并将结果注入 explorer_reports。
 
+        当成功扫描 ≥2 个文件时，额外调用 discover_file_relationships
+        检测跨文件列关联，将结果作为 relationship 类型的 finding 注入。
+
         Returns:
             True 如果至少一个文件扫描成功并注入了缓存。
         """
@@ -532,6 +520,7 @@ class ContextBuilder:
             return False
 
         any_success = False
+        scanned_paths: list[str] = []
         for path in excel_paths:
             try:
                 raw = scan_excel_snapshot(file_path=path, max_sample_rows=200)
@@ -543,8 +532,117 @@ class ContextBuilder:
                 if report:
                     state.explorer_reports.append(report)
                     any_success = True
+                    scanned_paths.append(path)
             except Exception:
                 continue
+
+        # 跨文件关系自动发现：≥2 个文件成功扫描时触发
+        if len(scanned_paths) >= 2:
+            try:
+                from excelmanus.tools.data_tools import discover_file_relationships
+                rel_raw = discover_file_relationships(
+                    file_paths=scanned_paths, sample_rows=200,
+                )
+                rel_data = _json.loads(rel_raw)
+                file_pairs = rel_data.get("file_pairs", [])
+                if file_pairs:
+                    # 将跨文件关系转换为 explorer_report findings
+                    rel_findings: list[dict] = []
+                    for pair in file_pairs:
+                        fa = pair.get("file_a", "?")
+                        fb = pair.get("file_b", "?")
+                        for col_info in pair.get("shared_columns", []):
+                            ca = col_info.get("col_a", "?")
+                            cb = col_info.get("col_b", "?")
+                            mt = col_info.get("match_type", "exact")
+                            ov = col_info.get("overlap_ratio", 0)
+                            rel = col_info.get("relationship", "")
+                            sj = col_info.get("suggested_join", "")
+                            # 构建富信息 detail
+                            if ca == cb:
+                                detail = (
+                                    f"跨文件关联：{fa} 和 {fb} 共享列 '{ca}'"
+                                    f"（{mt}匹配，值重叠率 {ov:.0%}）"
+                                )
+                            else:
+                                detail = (
+                                    f"跨文件关联：{fa}.{ca} ↔ {fb}.{cb}"
+                                    f"（{mt}匹配，值重叠率 {ov:.0%}）"
+                                )
+                            if rel:
+                                detail += f"，关系: {rel}"
+                            if sj:
+                                detail += f"，建议: {sj} join"
+                            # 类型告警
+                            tw = col_info.get("type_warning")
+                            if tw:
+                                detail += f"⚠️ {tw}"
+                            rel_findings.append({
+                                "type": "cross_file_relationship",
+                                "severity": "high" if ov >= 0.7 else "medium",
+                                "detail": detail,
+                            })
+                    if rel_findings:
+                        # 收集合并提示摘要
+                        merge_hints = rel_data.get("merge_hints", [])
+                        rec_parts = [
+                            "检测到跨文件列关联，可使用这些列作为合并/匹配的键列。",
+                        ]
+                        if merge_hints:
+                            hint = merge_hints[0]
+                            rec_parts.append(
+                                f"推荐: {hint.get('pandas_hint', '')}"
+                            )
+                        rec_parts.append(
+                            "如需更详细的关系分析，可调用 `discover_file_relationships` 工具。"
+                            "跨文件数据操作建议用 run_code + pandas merge。"
+                        )
+                        rel_report: dict = {
+                            "summary": rel_data.get("summary", ""),
+                            "files": [],
+                            "schema": {},
+                            "findings": rel_findings[:10],
+                            "recommendation": " ".join(rec_parts),
+                        }
+                        state.explorer_reports.append(rel_report)
+            except Exception:
+                logger.debug("跨文件关系自动发现失败，不影响正常使用", exc_info=True)
+
+        # 注入已有文件组上下文：让 agent 知道用户已建立的逻辑分组
+        if any_success:
+            try:
+                _reg = getattr(state, "_file_registry", None)
+                if _reg is not None and hasattr(_reg, "list_groups"):
+                    groups = _reg.list_groups()
+                    if groups:
+                        group_findings: list[dict] = []
+                        for g in groups:
+                            members = _reg.get_group_files(g.id)
+                            if members:
+                                names = [m["original_name"] for m in members]
+                                group_findings.append({
+                                    "type": "file_group",
+                                    "severity": "info",
+                                    "detail": (
+                                        f"用户文件组「{g.name}」: {', '.join(names)}"
+                                        + (f" ({g.description})" if g.description else "")
+                                    ),
+                                })
+                        if group_findings:
+                            group_report: dict = {
+                                "summary": f"用户已创建 {len(groups)} 个文件组",
+                                "files": [],
+                                "schema": {},
+                                "findings": group_findings,
+                                "recommendation": (
+                                    "同一文件组内的文件通常有逻辑关联，"
+                                    "跨文件操作时优先在同组内匹配。"
+                                ),
+                            }
+                            state.explorer_reports.append(group_report)
+            except Exception:
+                pass  # 组表可能尚未创建
+
         return any_success
 
     @staticmethod
@@ -602,7 +700,7 @@ class ContextBuilder:
         tags = set(getattr(route_result, "task_tags", []) or [])
         if wh == "read_only":
             return "lightweight"
-        if tags & {"cross_sheet", "large_data"}:
+        if tags & {"cross_sheet", "large_data", "multi_file"}:
             return "complete"
         if wh == "may_write":
             return "standard"

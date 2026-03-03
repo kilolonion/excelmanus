@@ -96,6 +96,18 @@ _TASK_TAG_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
         r"(?:image|screenshot|picture|photo).*(?:to|into).*(?:excel|spreadsheet))",
         re.IGNORECASE,
     )),
+    ("multi_file", re.compile(
+        r"(跨文件|多文件|多个文件|两个文件|几个文件|"
+        r".{1,20}文件.{0,6}和.{1,20}文件|"
+        r"从.{1,20}文件.{0,10}[导写填合]入.{0,10}文件|"
+        r"从.{1,20}导入到|"
+        r".{1,6}\.xlsx.{0,30}\.xlsx|"
+        r"文件[间的]+合并|文件[间的]+对比|文件[间的]+匹配|合并.*文件|"
+        r"cross[\-\s]?file|multi[\-\s]?file|multiple\s+files?|"
+        r"merge\s+files?|combine\s+files?|"
+        r"from\s+\S+\.xlsx\s+to\s+\S+\.xlsx)",
+        re.IGNORECASE,
+    )),
 ]
 
 class SkillRouter:
@@ -240,6 +252,12 @@ class SkillRouter:
         classified_hint = write_hint or self._MODE_TO_HINT.get(chat_mode, "may_write")
         lexical_tags = list(self._classify_task_tags_lexical(user_message))
 
+        # 检测到多个候选文件路径时自动添加 multi_file 标签
+        if candidate_file_paths and len(candidate_file_paths) >= 2:
+            if "multi_file" not in lexical_tags:
+                lexical_tags.append("multi_file")
+                logger.debug("检测到 %d 个候选文件，自动添加 multi_file 标签", len(candidate_file_paths))
+
         # 如果用户上传了图片附件，自动添加 image_replica 标签
         # 这确保了即使消息中没有明确说明"复刻"，只要上传了图片就会触发图片复刻策略
         if images and len(images) > 0:
@@ -265,7 +283,7 @@ class SkillRouter:
             else:
                 lexical_tags.append("plan_not_needed")
         # simple_read 推断：read_only 且无宽标签时自动追加，用于工具裁剪
-        _WIDE_TAGS = {"cross_sheet", "large_data", "image_replica"}
+        _WIDE_TAGS = {"cross_sheet", "large_data", "image_replica", "multi_file"}
         if classified_hint == "read_only" and not (set(lexical_tags) & _WIDE_TAGS):
             if "simple_read" not in lexical_tags:
                 lexical_tags.append("simple_read")
@@ -550,6 +568,7 @@ class SkillRouter:
             "- 仅当完全确定不涉及写入时才判定 read_only\n\n"
             "task_tags 可选值（选择所有适用的）：\n"
             "- cross_sheet：涉及跨工作表查找或数据传输\n"
+            "- multi_file：涉及两个或多个 Excel 文件之间的数据合并/匹配/导入/对比\n"
             "- formatting：涉及样式/颜色/字体/边框等格式化\n"
             "- chart：涉及图表生成\n"
             "- data_fill：涉及数据填充或批量写入\n"

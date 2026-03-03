@@ -27,6 +27,7 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "inspect_excel_files",
         "scan_excel_snapshot",
         "search_excel_values",
+        "discover_file_relationships",
         "memory_read_topic",
         # 任务工具仅修改会话内存态，不触达工作区文件。
         "task_create",
@@ -55,6 +56,7 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
         "inspect_excel_files",
         "scan_excel_snapshot",
         "search_excel_values",
+        "discover_file_relationships",
         "memory_read_topic",
         "read_image",
         "introspect_capability",

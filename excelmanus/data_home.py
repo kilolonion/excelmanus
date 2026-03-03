@@ -378,14 +378,20 @@ def _read_version_from_dir(directory: Path) -> str | None:
 
 def scan_for_installations(
     extra_dirs: list[str | Path] | None = None,
+    *,
+    skip_desktop_scan: bool = False,
 ) -> list[dict[str, Any]]:
     """主动扫描磁盘上的 ExcelManus 安装目录。
 
     扫描策略：
     1. 当前安装的同级目录（兄弟目录）
-    2. 桌面目录
-    3. 用户主目录下的常见开发目录
+    2. 桌面目录（skip_desktop_scan=True 时跳过）
+    3. 用户主目录下的常见开发目录（skip_desktop_scan=True 时跳过）
     4. 调用者指定的额外目录
+
+    Args:
+        skip_desktop_scan: 服务器/Docker 模式下设为 True，跳过桌面、下载、
+            开发目录的扫描（无 GUI 环境下这些目录通常不存在或无意义）。
 
     找到的安装会自动注册到 ``installations.json``。
     返回所有发现的安装记录。
@@ -398,24 +404,25 @@ def scan_for_installations(
     if current_project.parent.is_dir():
         scan_roots.append(current_project.parent)
 
-    # 桌面
-    home = Path.home()
-    for desktop_name in ("Desktop", "桌面"):
-        desktop = home / desktop_name
-        if desktop.is_dir():
-            scan_roots.append(desktop)
+    if not skip_desktop_scan:
+        # 桌面
+        home = Path.home()
+        for desktop_name in ("Desktop", "桌面"):
+            desktop = home / desktop_name
+            if desktop.is_dir():
+                scan_roots.append(desktop)
 
-    # 下载目录
-    for dl_name in ("Downloads", "下载"):
-        dl_dir = home / dl_name
-        if dl_dir.is_dir():
-            scan_roots.append(dl_dir)
+        # 下载目录
+        for dl_name in ("Downloads", "下载"):
+            dl_dir = home / dl_name
+            if dl_dir.is_dir():
+                scan_roots.append(dl_dir)
 
-    # 常见开发目录
-    for dev_name in ("Projects", "projects", "dev", "Dev", "Code", "code", "workspace"):
-        dev_dir = home / dev_name
-        if dev_dir.is_dir():
-            scan_roots.append(dev_dir)
+        # 常见开发目录
+        for dev_name in ("Projects", "projects", "dev", "Dev", "Code", "code", "workspace"):
+            dev_dir = home / dev_name
+            if dev_dir.is_dir():
+                scan_roots.append(dev_dir)
 
     # 额外指定目录
     if extra_dirs:
@@ -467,17 +474,20 @@ def scan_for_installations(
 _scan_done = False
 
 
-def scan_once() -> list[dict[str, Any]]:
+def scan_once(*, skip_desktop_scan: bool = False) -> list[dict[str, Any]]:
     """首次调用时执行一次主动扫描，后续调用直接返回空列表。
 
     适合在应用启动时调用，避免每次请求都扫描。
+
+    Args:
+        skip_desktop_scan: 传递给 scan_for_installations()，服务器模式下跳过桌面扫描。
     """
     global _scan_done
     if _scan_done:
         return []
     _scan_done = True
     try:
-        return scan_for_installations()
+        return scan_for_installations(skip_desktop_scan=skip_desktop_scan)
     except Exception as e:
         logger.debug("主动扫描失败（非致命）: %s", e)
         return []

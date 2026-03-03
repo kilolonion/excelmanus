@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 
@@ -63,6 +64,32 @@ def is_responses_api_enabled() -> bool:
     return os.environ.get("EXCELMANUS_USE_RESPONSES_API", "").strip() in ("1", "true", "yes")
 
 
+def normalize_openai_base_url(base_url: str) -> str:
+    """规范化 OpenAI 兼容 API 的 base_url：去尾斜杠、检测缺失 /v1。
+
+    仅对 OpenAI 兼容协议使用（非 Gemini/Anthropic 原生 API）。
+    此函数为轻量级运行时规范化，与 config._normalize_base_url 互补。
+    """
+    url = base_url.rstrip("/")
+    # 已经以 /v1 结尾 — 正常
+    if url.endswith("/v1"):
+        return url
+    # 路径中已有 /v1/（如 /v1/chat）→ 不自动修正，但记录日志
+    if "/v1/" in url:
+        logging.getLogger(__name__).warning(
+            "base_url %r 包含 /v1/ 后的额外子路径，"
+            "OpenAI SDK 会自动拼接 /chat/completions，最终 URL 可能不正确。",
+            base_url,
+        )
+        return url
+    # 缺失 /v1 — 自动补全
+    logging.getLogger(__name__).info(
+        "base_url %r 未以 /v1 结尾，已自动补全为 %s/v1",
+        base_url, url,
+    )
+    return url + "/v1"
+
+
 def create_client(
     api_key: str,
     base_url: str,
@@ -90,8 +117,10 @@ def create_client(
     if normalized == "anthropic":
         return ClaudeClient(api_key=api_key, base_url=base_url)
     if normalized == "openai_responses":
+        base_url = normalize_openai_base_url(base_url)
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     if normalized == "openai":
+        base_url = normalize_openai_base_url(base_url)
         return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
     # auto: 按 URL 模式自动检测（旧行为）
@@ -99,6 +128,8 @@ def create_client(
         return GeminiClient(api_key=api_key, base_url=base_url)
     if is_claude_provider(base_url):
         return ClaudeClient(api_key=api_key, base_url=base_url)
+    # OpenAI 兼容协议 — 规范化 base_url
+    base_url = normalize_openai_base_url(base_url)
     if is_responses_api_enabled():
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
@@ -106,6 +137,7 @@ def create_client(
 
 __all__ = [
     "create_client",
+    "normalize_openai_base_url",
     "is_gemini_provider",
     "is_claude_provider",
     "is_responses_api_enabled",

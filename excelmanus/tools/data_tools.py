@@ -3797,6 +3797,467 @@ def search_excel_values(
     return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
 
 
+# ── 跨文件关系发现 ──────────────────────────────────────
+
+
+# 列名归一化映射：中英文常见同义词（小写 key → 归一化标准形式）
+_COLUMN_NAME_SYNONYMS: dict[str, str] = {
+    "customerid": "客户id",
+    "customer_id": "客户id",
+    "客户编号": "客户id",
+    "客户号": "客户id",
+    "cust_id": "客户id",
+    "employeeid": "员工id",
+    "employee_id": "员工id",
+    "员工编号": "员工id",
+    "工号": "员工id",
+    "emp_id": "员工id",
+    "productid": "产品id",
+    "product_id": "产品id",
+    "产品编号": "产品id",
+    "商品编号": "产品id",
+    "prod_id": "产品id",
+    "orderid": "订单id",
+    "order_id": "订单id",
+    "订单编号": "订单id",
+    "order_no": "订单id",
+    "订单号": "订单id",
+    # 注意：不映射 name/姓名/名称、date/日期/时间 等泛化列名，
+    # 因为它们语义过于宽泛（产品名称 vs 客户姓名），会导致大量误匹配。
+    # 这些列只能通过精确列名匹配来发现关联。
+}
+
+# 列名后缀去除列表（归一化时尝试剥离）
+# 注意：compact 形式已去除下划线，所以后缀列表中不含下划线前缀
+_COLUMN_SUFFIX_STRIP = ("id", "编号", "号", "编码", "代码", "code", "no", "num")
+
+
+def _normalize_column_name(name: str) -> str:
+    """将列名归一化为标准形式，用于跨文件列匹配。
+
+    策略：
+    1. strip + 统一小写 + 去除空格/下划线差异
+    2. 查同义词表精确映射
+    3. 去常见后缀后二次查表
+    """
+    raw = str(name).strip()
+    if not raw:
+        return ""
+    # 统一小写、去首尾空白
+    lower = raw.lower().strip()
+    # 去除空格和下划线差异
+    compact = lower.replace(" ", "").replace("_", "").replace("-", "")
+
+    # 查同义词表（精确匹配原始小写形式）
+    if lower in _COLUMN_NAME_SYNONYMS:
+        return _COLUMN_NAME_SYNONYMS[lower]
+    if compact in _COLUMN_NAME_SYNONYMS:
+        return _COLUMN_NAME_SYNONYMS[compact]
+
+    # 去后缀后二次查表
+    for suffix in _COLUMN_SUFFIX_STRIP:
+        if compact.endswith(suffix) and len(compact) > len(suffix):
+            stripped = compact[: -len(suffix)]
+            if stripped in _COLUMN_NAME_SYNONYMS:
+                return _COLUMN_NAME_SYNONYMS[stripped]
+
+    return compact
+
+
+def _detect_cross_file_relationships(
+    file_columns: dict[str, dict[str, list[str]]],
+    file_dfs: dict[str, dict[str, "pd.DataFrame"]],
+    *,
+    overlap_threshold: float = 0.5,
+    max_sample: int = 500,
+) -> list[dict[str, Any]]:
+    """检测跨文件列关联：精确列名 + 归一化列名 + 值重叠率 + 方向性 + 类型兼容性。
+
+    每个匹配列对额外输出：
+    - unique_ratio_a/b: 各列唯一值占比（用于判断一对多方向）
+    - relationship: "one_to_many" | "many_to_one" | "one_to_one" | "many_to_many"
+    - suggested_join: 推荐的 pandas merge 策略
+    - type_a/type_b: 推断列类型
+    - type_compatible: 类型是否兼容
+
+    Args:
+        file_columns: {file_path: {sheet_name: [col_names]}}
+        file_dfs: {file_path: {sheet_name: DataFrame}}
+        overlap_threshold: 值重叠率阈值（默认 0.5）
+        max_sample: 值重叠检测的最大采样数
+
+    Returns:
+        file_pairs 列表
+    """
+    from itertools import combinations
+    from typing import NamedTuple
+
+    # 展开为 (file, sheet, col_name) 四元组
+    class _ColRef(NamedTuple):
+        file: str
+        sheet: str
+        col: str
+        normalized: str
+
+    all_cols: list[_ColRef] = []
+    for fp, sheets in file_columns.items():
+        for sheet_name, cols in sheets.items():
+            for col in cols:
+                if str(col).startswith("Unnamed"):
+                    continue
+                norm = _normalize_column_name(col)
+                if norm:
+                    all_cols.append(_ColRef(file=fp, sheet=sheet_name, col=col, normalized=norm))
+
+    # 类型兼容性矩阵（对称）
+    _COMPATIBLE_TYPES: set[frozenset[str]] = {
+        frozenset({"numeric", "numeric"}),
+        frozenset({"string", "string"}),
+        frozenset({"date", "date"}),
+        frozenset({"numeric", "string"}),  # 数字可能以字符串形式存储
+        frozenset({"string", "mixed"}),
+        frozenset({"numeric", "mixed"}),
+    }
+
+    def _types_compatible(t1: str, t2: str) -> bool:
+        if t1 == t2:
+            return True
+        return frozenset({t1, t2}) in _COMPATIBLE_TYPES
+
+    # 按文件对分组比较
+    file_paths_sorted = sorted(file_columns.keys())
+    file_pairs: list[dict[str, Any]] = []
+
+    for fp_a, fp_b in combinations(file_paths_sorted, 2):
+        cols_a = [c for c in all_cols if c.file == fp_a]
+        cols_b = [c for c in all_cols if c.file == fp_b]
+        if not cols_a or not cols_b:
+            continue
+
+        shared_columns: list[dict[str, Any]] = []
+        seen_pairs: set[tuple[str, str, str, str]] = set()  # 去重
+
+        for ca in cols_a:
+            for cb in cols_b:
+                pair_key = (ca.sheet, ca.col, cb.sheet, cb.col)
+                if pair_key in seen_pairs:
+                    continue
+
+                # 判断匹配类型
+                match_type: str | None = None
+                if ca.col.lower().strip() == cb.col.lower().strip():
+                    match_type = "exact"
+                elif ca.normalized == cb.normalized:
+                    match_type = "normalized"
+                else:
+                    continue
+
+                seen_pairs.add(pair_key)
+
+                # 值重叠检测 + 方向性分析
+                df_a = file_dfs.get(fp_a, {}).get(ca.sheet)
+                df_b = file_dfs.get(fp_b, {}).get(cb.sheet)
+                overlap_ratio = 0.0
+                sample_overlap: list[str] = []
+                unique_ratio_a = 0.0
+                unique_ratio_b = 0.0
+                type_a = "unknown"
+                type_b = "unknown"
+
+                if df_a is not None and df_b is not None:
+                    if ca.col in df_a.columns and cb.col in df_b.columns:
+                        series_a = df_a[ca.col].dropna()
+                        series_b = df_b[cb.col].dropna()
+                        vals_a = set(series_a.astype(str).tolist()[:max_sample])
+                        vals_b = set(series_b.astype(str).tolist()[:max_sample])
+
+                        if vals_a and vals_b:
+                            overlap = vals_a & vals_b
+                            smaller = min(len(vals_a), len(vals_b))
+                            overlap_ratio = round(len(overlap) / smaller, 2) if smaller > 0 else 0.0
+                            sample_overlap = sorted(overlap)[:5]
+
+                        # 唯一值占比（方向性信号）
+                        len_a = len(series_a)
+                        len_b = len(series_b)
+                        if len_a > 0:
+                            unique_ratio_a = round(series_a.nunique() / len_a, 2)
+                        if len_b > 0:
+                            unique_ratio_b = round(series_b.nunique() / len_b, 2)
+
+                        # 列类型推断
+                        type_a = _infer_column_type(df_a[ca.col])
+                        type_b = _infer_column_type(df_b[cb.col])
+
+                if overlap_ratio >= overlap_threshold or match_type == "exact":
+                    # 方向性判断
+                    relationship = "many_to_many"
+                    if unique_ratio_a >= 0.95 and unique_ratio_b >= 0.95:
+                        relationship = "one_to_one"
+                    elif unique_ratio_a >= 0.95:
+                        relationship = "one_to_many"  # A 是主表（唯一键），B 是多端
+                    elif unique_ratio_b >= 0.95:
+                        relationship = "many_to_one"  # B 是主表，A 是多端
+
+                    # 合并策略建议
+                    suggested_join = "inner"  # 默认内连接
+                    if overlap_ratio >= 0.8:
+                        if relationship in ("one_to_many", "one_to_one"):
+                            suggested_join = "left"   # A 为主表左连接
+                        elif relationship == "many_to_one":
+                            suggested_join = "right"  # B 为主表
+                        else:
+                            suggested_join = "inner"
+                    elif overlap_ratio >= 0.5:
+                        suggested_join = "left"  # 中等重叠用 left 保留主表全量
+                    else:
+                        suggested_join = "outer"  # 低重叠用 outer 避免丢数据
+
+                    entry: dict[str, Any] = {
+                        "col_a": ca.col,
+                        "sheet_a": ca.sheet,
+                        "col_b": cb.col,
+                        "sheet_b": cb.sheet,
+                        "match_type": match_type,
+                        "overlap_ratio": overlap_ratio,
+                        "unique_ratio_a": unique_ratio_a,
+                        "unique_ratio_b": unique_ratio_b,
+                        "relationship": relationship,
+                        "suggested_join": suggested_join,
+                        "type_a": type_a,
+                        "type_b": type_b,
+                        "type_compatible": _types_compatible(type_a, type_b),
+                    }
+                    if sample_overlap:
+                        entry["sample_overlap"] = sample_overlap
+                    if not _types_compatible(type_a, type_b):
+                        entry["type_warning"] = (
+                            f"列类型不一致（{type_a} vs {type_b}），"
+                            "合并前可能需要类型转换"
+                        )
+                    shared_columns.append(entry)
+
+        if shared_columns:
+            file_pairs.append({
+                "file_a": fp_a,
+                "file_b": fp_b,
+                "shared_columns": shared_columns,
+            })
+
+    return file_pairs
+
+
+def discover_file_relationships(
+    file_paths: list[str] | None = None,
+    directory: str = ".",
+    max_files: int = 5,
+    sample_rows: int = 200,
+) -> str:
+    """发现多个 Excel 文件之间的列关联关系（共享列名、疑似外键）。
+
+    对指定文件（或目录内所有 Excel 文件）提取各 sheet 的列名和样本值，
+    跨文件交叉比对（精确匹配 + 归一化匹配 + 值重叠检测）。
+
+    Args:
+        file_paths: 要分析的文件路径列表。为空时扫描 directory。
+        directory: 扫描目录（相对于工作目录），默认当前目录。
+        max_files: 最多分析的文件数，默认 5。
+        sample_rows: 每个 sheet 采样的行数，默认 200。
+
+    Returns:
+        JSON 格式的跨文件关系报告。
+    """
+    from pathlib import Path
+
+    guard = _get_guard()
+
+    # ── 收集文件路径 ──
+    paths: list[Path] = []
+    if file_paths:
+        for fp in file_paths[:max_files]:
+            try:
+                safe = guard.resolve_and_validate(fp)
+                if safe.exists() and safe.suffix.lower() in {".xlsx", ".xlsm", ".xls", ".xlsb", ".csv", ".tsv"}:
+                    paths.append(safe)
+            except Exception:
+                continue
+    else:
+        safe_dir = guard.resolve_and_validate(directory)
+        if safe_dir.is_dir():
+            for ext in ("*.xlsx", "*.xlsm", "*.xls", "*.xlsb"):
+                for p in safe_dir.rglob(ext):
+                    if p.name.startswith((".", "~$")):
+                        continue
+                    # 跳过噪音目录（与 inspect_excel_files 一致）
+                    try:
+                        rel_parts = p.relative_to(safe_dir).parts[:-1]
+                        if any(part in _SCAN_SKIP_DIRS for part in rel_parts):
+                            continue
+                    except ValueError:
+                        pass
+                    paths.append(p)
+                    if len(paths) >= max_files:
+                        break
+                if len(paths) >= max_files:
+                    break
+            paths.sort(key=lambda p: str(p).lower())
+            paths = paths[:max_files]
+
+    if len(paths) < 2:
+        return json.dumps({
+            "files_analyzed": len(paths),
+            "file_pairs": [],
+            "summary": "需要至少 2 个文件才能分析跨文件关系" if len(paths) < 2 else "",
+        }, ensure_ascii=False)
+
+    # ── 提取列信息和样本数据 ──
+    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+
+    file_columns: dict[str, dict[str, list[str]]] = {}  # rel_path → {sheet → [cols]}
+    file_dfs: dict[str, dict[str, pd.DataFrame]] = {}  # rel_path → {sheet → df}
+    file_display: dict[str, str] = {}  # rel_path → display_name
+
+    for fp in paths:
+        rel_path = str(fp.relative_to(guard.workspace_root)) if fp.is_relative_to(guard.workspace_root) else str(fp)
+        file_display[rel_path] = fp.name
+
+        try:
+            if _is_csv_file(fp):
+                df, _ = _read_csv_df(fp, max_rows=sample_rows)
+                cols = [str(c) for c in df.columns if not str(c).startswith("Unnamed")]
+                file_columns[rel_path] = {"Sheet1": cols}
+                file_dfs[rel_path] = {"Sheet1": df}
+                continue
+
+            compat_path = ensure_openpyxl_compatible(fp)
+            from openpyxl import load_workbook
+            wb = load_workbook(compat_path, read_only=True, data_only=True)
+            sheets_cols: dict[str, list[str]] = {}
+            sheets_dfs: dict[str, pd.DataFrame] = {}
+            try:
+                for ws in wb.worksheets[:8]:  # 最多 8 个 sheet
+                    sheet_name = ws.title
+                    try:
+                        read_kwargs = _build_read_kwargs(compat_path, sheet_name, max_rows=sample_rows)
+                        read_kwargs.pop("_form_type_document", None)
+                        df = pd.read_excel(**read_kwargs)
+                        cols = [str(c) for c in df.columns if not str(c).startswith("Unnamed")]
+                        if cols:
+                            sheets_cols[sheet_name] = cols
+                            sheets_dfs[sheet_name] = df
+                    except Exception:
+                        continue
+            finally:
+                wb.close()
+            if sheets_cols:
+                file_columns[rel_path] = sheets_cols
+                file_dfs[rel_path] = sheets_dfs
+        except Exception as exc:
+            logger.debug("跨文件关系发现：读取 %s 失败: %s", fp, exc)
+            continue
+
+    if len(file_columns) < 2:
+        return json.dumps({
+            "files_analyzed": len(file_columns),
+            "file_pairs": [],
+            "summary": "可读取的文件不足 2 个，无法分析跨文件关系",
+        }, ensure_ascii=False)
+
+    # ── 跨文件关系检测 ──
+    file_pairs = _detect_cross_file_relationships(file_columns, file_dfs)
+
+    # ── 构建摘要 + 合并提示 ──
+    summary_parts: list[str] = []
+    merge_hints: list[dict[str, Any]] = []
+    type_warnings: list[str] = []
+    related_file_set: set[str] = set()  # 用于 suggested_groups
+
+    for pair in file_pairs:
+        fa = file_display.get(pair["file_a"], pair["file_a"])
+        fb = file_display.get(pair["file_b"], pair["file_b"])
+        related_file_set.add(pair["file_a"])
+        related_file_set.add(pair["file_b"])
+        cols = pair["shared_columns"]
+
+        col_descs: list[str] = []
+        for c in cols[:3]:
+            if c["col_a"] == c["col_b"]:
+                col_descs.append(f"{c['col_a']}(重叠{c['overlap_ratio']:.0%})")
+            else:
+                col_descs.append(f"{c['col_a']}↔{c['col_b']}(重叠{c['overlap_ratio']:.0%})")
+            # 收集类型告警
+            if c.get("type_warning"):
+                type_warnings.append(f"{fa}.{c['col_a']} vs {fb}.{c['col_b']}: {c['type_warning']}")
+        desc = "、".join(col_descs)
+        if len(cols) > 3:
+            desc += f" 等{len(cols)}对"
+        summary_parts.append(f"{fa} ↔ {fb}: {desc}")
+
+        # 合并提示（取第一个最强关联列的建议）
+        best_col = max(cols, key=lambda x: x.get("overlap_ratio", 0))
+        _JOIN_LABELS = {
+            "left": "左连接（保留左表全量）",
+            "right": "右连接（保留右表全量）",
+            "inner": "内连接（仅保留匹配行）",
+            "outer": "全外连接（保留两表全量）",
+        }
+        _REL_LABELS = {
+            "one_to_one": "一对一",
+            "one_to_many": f"{fa} 为主表，{fb} 为多端",
+            "many_to_one": f"{fb} 为主表，{fa} 为多端",
+            "many_to_many": "多对多",
+        }
+        merge_hints.append({
+            "file_a": fa,
+            "file_b": fb,
+            "key_column_a": best_col["col_a"],
+            "key_column_b": best_col["col_b"],
+            "relationship": _REL_LABELS.get(best_col.get("relationship", ""), ""),
+            "suggested_join": best_col.get("suggested_join", "inner"),
+            "suggested_join_label": _JOIN_LABELS.get(best_col.get("suggested_join", "inner"), ""),
+            "pandas_hint": (
+                f"pd.merge(df_a, df_b, "
+                f"left_on='{best_col['col_a']}', right_on='{best_col['col_b']}', "
+                f"how='{best_col.get('suggested_join', 'inner')}')"
+            ),
+        })
+
+    summary = ""
+    if summary_parts:
+        summary = "跨文件关联发现：" + "；".join(summary_parts)
+    else:
+        analyzed_names = [file_display.get(k, k) for k in file_columns]
+        summary = f"在 {', '.join(analyzed_names)} 之间未发现明显的列关联"
+
+    result: dict[str, Any] = {
+        "files_analyzed": len(file_columns),
+        "file_pairs": file_pairs,
+        "summary": summary,
+    }
+
+    # 合并操作提示（供 agent 直接参考的可操作建议）
+    if merge_hints:
+        result["merge_hints"] = merge_hints
+
+    # 类型兼容性告警
+    if type_warnings:
+        result["type_warnings"] = type_warnings
+
+    # 方面4联动：文件组建议（当 ≥2 个文件有强关联时）
+    if len(related_file_set) >= 2:
+        group_files = [
+            {"path": fp, "display_name": file_display.get(fp, fp)}
+            for fp in sorted(related_file_set)
+        ]
+        result["suggested_groups"] = [{
+            "name": "关联文件组",
+            "reason": summary,
+            "files": group_files,
+        }]
+
+    return json.dumps(result, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
 # ── get_tools() 导出 ──────────────────────────────────────
 
 
@@ -4191,6 +4652,48 @@ def get_tools() -> list[ToolDef]:
             },
             func=search_excel_values,
             max_result_chars=8000,
+            write_effect="none",
+        ),
+        ToolDef(
+            name="discover_file_relationships",
+            description=(
+                "发现多个 Excel 文件之间的列关联关系（共享列名、疑似外键、归一化匹配）。"
+                "对指定文件（或目录内所有 Excel）提取列名+样本值，跨文件交叉比对。"
+                "适用场景：多文件合并/匹配前的关系探查、确定哪些列可用作 JOIN 键。"
+                "不适用：单文件跨 Sheet 关系（改用 scan_excel_snapshot 的 include_relationships）。"
+            ),
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "要分析的文件路径列表（最多 5 个）。为空时扫描 directory 下所有 Excel 文件",
+                    },
+                    "directory": {
+                        "type": "string",
+                        "description": "扫描目录（相对于工作目录），默认当前目录。仅在 file_paths 为空时生效",
+                        "default": ".",
+                    },
+                    "max_files": {
+                        "type": "integer",
+                        "description": "最多分析的文件数，默认 5",
+                        "default": 5,
+                        "minimum": 2,
+                        "maximum": 10,
+                    },
+                    "sample_rows": {
+                        "type": "integer",
+                        "description": "每个 sheet 采样的行数（用于值重叠检测），默认 200",
+                        "default": 200,
+                        "minimum": 10,
+                    },
+                },
+                "required": [],
+                "additionalProperties": False,
+            },
+            func=discover_file_relationships,
+            max_result_chars=10000,
             write_effect="none",
         ),
     ]

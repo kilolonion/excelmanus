@@ -307,7 +307,11 @@ class MetaToolBuilder:
                     "name": "suggest_mode_switch",
                     "description": (
                         "当前模式不适合用户任务时，向用户建议切换到更合适的模式。"
-                        "仅在明确检测到模式不匹配时调用（如 read 模式下需要写入、plan 模式下用户要求执行）。"
+                        "仅在明确检测到模式不匹配时调用。典型场景："
+                        "read 模式下用户需要写入→建议 write；"
+                        "plan 模式下用户要求立即执行→建议 write；"
+                        "write 模式下用户只需分析/统计→建议 read；"
+                        "write 模式下任务复杂需先规划→建议 plan。"
                     ),
                     "parameters": {
                         "type": "object",

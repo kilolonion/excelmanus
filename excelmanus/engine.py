@@ -568,6 +568,9 @@ class AgentEngine:
         self._relevant_memory_text: str = ""
         # 缓存语义文件注册表检索结果，供 context_builder 使用
         self._relevant_file_summary: str = ""
+        # 缓存 Playbook 语义检索结果，供 context_builder 使用
+        self._relevant_playbook_text: str = ""
+        self._injected_playbook_ids: list[str] = []
 
         # ── 用户自定义规则 ─────────────────────────────────
         self._rules_manager: Any = None  # 类型：RulesManager | None
@@ -2158,6 +2161,8 @@ class AgentEngine:
         self._relevant_memory_text = ""
         self._relevant_file_summary = ""
         self._relevant_skill_hints = ""
+        self._relevant_playbook_text = ""
+        self._injected_playbook_ids = []
         _semantic_tasks: list[tuple[str, asyncio.Task[Any]]] = []
         _sem_launch_ts = time.monotonic()
 
@@ -2185,6 +2190,10 @@ class AgentEngine:
                     )
                     _t.add_done_callback(_sem_task_done_cb)
                     _semantic_tasks.append(("skill_router", _t))
+            if self._playbook_store is not None and getattr(self._config, "playbook_enabled", False):
+                _t = asyncio.create_task(self._search_playbook(user_message))
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("playbook", _t))
 
         # ── 路由（斜杠命令 + chat_mode 映射） ──
         _route_elapsed_ms = 0.0
@@ -2452,6 +2461,8 @@ class AgentEngine:
                     self._relevant_file_summary = _res
                 elif _label == "skill_router":
                     self._relevant_skill_hints = _res
+                elif _label == "playbook":
+                    self._relevant_playbook_text = _res if isinstance(_res, str) else ""
             _sem_elapsed = (time.monotonic() - _sem_launch_ts) * 1000
             if _sem_elapsed > 50:
                 logger.debug("perf.chat: semantic_search %.0fms (overlapped with routing)", _sem_elapsed)
@@ -2538,12 +2549,25 @@ class AgentEngine:
             except Exception:
                 logger.debug("周期性记忆提取失败，已跳过", exc_info=True)
 
+        # Playbook 反馈闭环：根据任务结果对本轮注入的 bullet 做评分
+        if self._playbook_store is not None and self._injected_playbook_ids:
+            try:
+                if self._last_failure_count == 0:
+                    for _bid in self._injected_playbook_ids:
+                        self._playbook_store.mark_helpful(_bid)
+                elif self._last_failure_count > self._last_success_count:
+                    for _bid in self._injected_playbook_ids:
+                        self._playbook_store.mark_harmful(_bid)
+            except Exception:
+                logger.debug("Playbook 反馈评分失败", exc_info=True)
+            self._injected_playbook_ids = []
+
         # Playbook 后台反思：任务完成后异步提取策略教训
+        # 触发条件：有写入操作，或交互 ≥3 轮（说明任务有一定复杂度值得学习）
         if (
             self._task_reflector is not None
             and self._playbook_curator is not None
-            and self._state.has_write_tool_call
-            and chat_result.iterations > 1
+            and (self._state.has_write_tool_call or chat_result.iterations >= 3)
         ):
             try:
                 _trajectory = self._memory.get_messages()
@@ -2562,6 +2586,7 @@ class AgentEngine:
                         if deltas:
                             report = await self._playbook_curator.integrate(
                                 deltas, session_id=self._session_id or "",
+                                task_tags=_task_tags,
                             )
                             logger.info(
                                 "Playbook 反思完成: new=%d, merged=%d, total=%d",
@@ -2743,6 +2768,43 @@ class AgentEngine:
         """规范化 subagent 输入文件路径。委托给 SubagentOrchestrator。"""
         from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
         return SubagentOrchestrator.normalize_file_paths(file_paths)
+
+    async def _search_playbook(self, query: str) -> str:
+        """语义检索 playbook，返回格式化文本。无 embedding 时降级为 list_all。"""
+        if self._playbook_store is None:
+            return ""
+        if not getattr(self._config, "playbook_enabled", False):
+            return ""
+
+        top_k = getattr(self._config, "playbook_inject_top_k", 5)
+        bullets = []
+
+        # 优先语义检索
+        if self._embedding_client is not None and query.strip():
+            try:
+                emb = await self._embedding_client.embed([query])
+                bullets = self._playbook_store.search(emb[0], top_k=top_k)
+            except Exception:
+                logger.debug("Playbook 语义检索失败，降级为 list_all", exc_info=True)
+                bullets = []
+
+        # 降级：无 embedding 或语义检索无结果
+        if not bullets:
+            try:
+                bullets = self._playbook_store.list_all(limit=top_k)
+            except Exception:
+                return ""
+
+        if not bullets:
+            return ""
+
+        ids = [b.id for b in bullets]
+        self._injected_playbook_ids = ids
+
+        lines = ["## 历史经验参考（基于过往成功经验自动检索）"]
+        for b in bullets:
+            lines.append(f"- **[{b.category}]** {b.content}")
+        return "\n".join(lines)
 
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""
