@@ -110,6 +110,14 @@ class SessionManager:
         self._user_store = user_store
         self._credential_store = None  # CredentialStore，由 lifespan 注入
         self._credential_resolver = None  # CredentialResolver，由 lifespan 注入
+        # 历史会话摘要存储
+        self._session_summary_store: Any = None
+        if database is not None and config.session_summary_enabled:
+            try:
+                from excelmanus.stores.session_summary_store import SessionSummaryStore
+                self._session_summary_store = SessionSummaryStore(database)
+            except Exception:
+                logger.debug("SessionSummaryStore 初始化失败", exc_info=True)
         self._mcp_initialized: bool = False
         self._mcp_init_lock = asyncio.Lock()
         self._sessions: dict[str, _SessionEntry] = {}
@@ -536,6 +544,9 @@ class SessionManager:
                     engine.set_model_capabilities(caps)
             except Exception:
                 logger.debug("加载模型能力缓存失败", exc_info=True)
+        # 注入历史会话摘要存储（供 engine 在 chat() 中检索历史摘要）
+        if self._session_summary_store is not None:
+            engine._session_summary_store = self._session_summary_store
         engine.start_registry_scan()
         return engine
 
@@ -787,6 +798,12 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("会话 %s 记忆提取失败", session_id, exc_info=True)
+            try:
+                await self._generate_session_summary(
+                    session_id, engine, user_id=user_id,
+                )
+            except Exception:
+                logger.debug("会话 %s 摘要生成失败", session_id, exc_info=True)
             if self._shared_mcp_manager is None:
                 try:
                     await engine.shutdown_mcp()
@@ -882,6 +899,10 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("会话 %s 记忆提取失败", sid, exc_info=True)
+            try:
+                await self._generate_session_summary(sid, engine, user_id=user_id)
+            except Exception:
+                logger.debug("会话 %s 摘要生成失败", sid, exc_info=True)
             if self._shared_mcp_manager is None:
                 try:
                     await engine.shutdown_mcp()
@@ -1003,6 +1024,12 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("过期会话 %s 记忆提取失败", sid, exc_info=True)
+            try:
+                await self._generate_session_summary(
+                    sid, engine, user_id=getattr(engine, "_user_id", None),
+                )
+            except Exception:
+                logger.debug("过期会话 %s 摘要生成失败", sid, exc_info=True)
             if self._shared_mcp_manager is None:
                 try:
                     await engine.shutdown_mcp()
@@ -1028,6 +1055,12 @@ class SessionManager:
                 await engine.extract_and_save_memory()
             except Exception:
                 logger.warning("会话 %s 关闭时记忆提取失败", sid, exc_info=True)
+            try:
+                await self._generate_session_summary(
+                    sid, engine, user_id=getattr(engine, "_user_id", None),
+                )
+            except Exception:
+                logger.debug("会话 %s 关闭时摘要生成失败", sid, exc_info=True)
             if self._shared_mcp_manager is None:
                 try:
                     await engine.shutdown_mcp()
@@ -1053,6 +1086,115 @@ class SessionManager:
         if user_id is not None and entry.user_id != user_id:
             return None
         return entry.engine
+
+    @property
+    def session_summary_store(self) -> Any:
+        """底层 SessionSummaryStore 实例（只读）。"""
+        return self._session_summary_store
+
+    async def _generate_session_summary(
+        self,
+        session_id: str,
+        engine: AgentEngine,
+        *,
+        user_id: str | None = None,
+    ) -> None:
+        """为指定会话异步生成结构化摘要并持久化。
+
+        门控条件：
+        - session_summary_enabled 开启
+        - session_turn >= min_turns
+        - 有 chat_history 可加载消息
+        - 该 session 尚无摘要或摘要已过期
+        """
+        if self._session_summary_store is None:
+            return
+        if not self._config.session_summary_enabled:
+            return
+        if engine.session_turn < self._config.session_summary_min_turns:
+            return
+        if self._chat_history is None:
+            return
+
+        # 检查是否已有摘要（避免重复生成）
+        try:
+            existing = self._session_summary_store.get_by_session(session_id)
+            if existing is not None:
+                return
+        except Exception:
+            pass
+
+        # 加载消息
+        try:
+            messages = self._chat_history.load_messages(session_id)
+        except Exception:
+            logger.debug("会话摘要: 加载消息失败 %s", session_id, exc_info=True)
+            return
+        if not messages:
+            return
+
+        # 创建 summarizer（优先 aux 模型节省 token）
+        from excelmanus.session_summarizer import SessionSummarizer
+        from excelmanus.providers import create_client
+
+        mem_model = self._config.aux_model or self._config.model
+        mem_api_key = self._config.aux_api_key or self._config.api_key
+        mem_base_url = self._config.aux_base_url or self._config.base_url
+        _protocol = (
+            self._config.aux_protocol
+            if self._config.aux_enabled and self._config.aux_model
+            else self._config.protocol
+        )
+        client = create_client(
+            api_key=mem_api_key,
+            base_url=mem_base_url,
+            protocol=_protocol,
+        )
+        summarizer = SessionSummarizer(client=client, model=mem_model)
+
+        result = await summarizer.summarize(messages)
+        if result is None:
+            return
+
+        from excelmanus.stores.session_summary_store import SessionSummary
+        from excelmanus.memory import TokenCounter
+
+        summary_text = result.get("summary", "")
+        token_count = TokenCounter.count(summary_text) if summary_text else 0
+
+        summary = SessionSummary(
+            session_id=session_id,
+            summary_text=summary_text,
+            user_id=user_id,
+            task_goal=result.get("task_goal", ""),
+            files_involved=result.get("files_involved", []),
+            outcome=result.get("outcome", "partial"),
+            unfinished=result.get("unfinished", ""),
+            token_count=token_count,
+        )
+
+        # embedding 向量化（如果 embedding 客户端可用）
+        if self._config.embedding_enabled and summary_text:
+            try:
+                _emb_client = getattr(engine, "_embedding_client", None)
+                if _emb_client is not None:
+                    vec = await _emb_client.embed_single(summary_text)
+                    summary.embedding = vec
+            except Exception:
+                logger.debug("会话摘要向量化失败，跳过", exc_info=True)
+
+        try:
+            self._session_summary_store.upsert(summary)
+            logger.info(
+                "会话摘要已生成: session=%s goal=%s outcome=%s files=%d tokens=%d",
+                session_id,
+                summary.task_goal[:40],
+                summary.outcome,
+                len(summary.files_involved),
+                token_count,
+            )
+        except Exception:
+            logger.warning("会话摘要持久化失败 %s", session_id, exc_info=True)
 
     async def is_session_in_flight(self, session_id: str) -> bool:
         """W10: 检查会话是否正在处理中（用于防止 backup apply 竞态）。"""
@@ -1614,6 +1756,20 @@ class SessionManager:
                     diff.get("sheet", ""),
                     diff.get("affected_range", ""),
                     diff.get("changes", []),
+                )
+            except Exception:
+                pass
+        for preview in parsed.get("excel_previews") or []:
+            try:
+                ch.save_excel_preview(
+                    new_session_id,
+                    preview.get("tool_call_id", ""),
+                    preview.get("file_path", ""),
+                    preview.get("sheet", ""),
+                    preview.get("columns", []),
+                    preview.get("rows", []),
+                    preview.get("total_rows", 0),
+                    preview.get("truncated", False),
                 )
             except Exception:
                 pass

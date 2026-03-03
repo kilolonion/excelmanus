@@ -571,6 +571,9 @@ class AgentEngine:
         # 缓存 Playbook 语义检索结果，供 context_builder 使用
         self._relevant_playbook_text: str = ""
         self._injected_playbook_ids: list[str] = []
+        # 缓存历史会话摘要检索结果，供 context_builder 使用
+        self._relevant_session_history: str = ""
+        self._session_summary_store: Any = None  # 由 SessionManager 注入
 
         # ── 用户自定义规则 ─────────────────────────────────
         self._rules_manager: Any = None  # 类型：RulesManager | None
@@ -2213,6 +2216,7 @@ class AgentEngine:
         self._relevant_skill_hints = ""
         self._relevant_playbook_text = ""
         self._injected_playbook_ids = []
+        self._relevant_session_history = ""
         _semantic_tasks: list[tuple[str, asyncio.Task[Any]]] = []
         _sem_launch_ts = time.monotonic()
 
@@ -2244,6 +2248,10 @@ class AgentEngine:
                 _t = asyncio.create_task(self._search_playbook(user_message))
                 _t.add_done_callback(_sem_task_done_cb)
                 _semantic_tasks.append(("playbook", _t))
+            if self._session_summary_store is not None and self._session_turn <= 1:
+                _t = asyncio.create_task(self._search_session_history(user_message))
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("session_history", _t))
 
         # ── 路由（斜杠命令 + chat_mode 映射） ──
         _route_elapsed_ms = 0.0
@@ -2551,6 +2559,8 @@ class AgentEngine:
                     self._relevant_skill_hints = _res
                 elif _label == "playbook":
                     self._relevant_playbook_text = _res if isinstance(_res, str) else ""
+                elif _label == "session_history":
+                    self._relevant_session_history = _res if isinstance(_res, str) else ""
             _sem_elapsed = (time.monotonic() - _sem_launch_ts) * 1000
             if _sem_elapsed > 50:
                 logger.debug("perf.chat: semantic_search %.0fms (overlapped with routing)", _sem_elapsed)
@@ -2899,6 +2909,100 @@ class AgentEngine:
         for b in bullets:
             lines.append(f"- **[{b.category}]** {b.content}")
         return "\n".join(lines)
+
+    async def _search_session_history(self, query: str) -> str:
+        """语义检索历史会话摘要，返回格式化文本注入 system prompt。
+
+        混合策略：embedding 语义检索 + 文件名匹配 + 时间序兜底。
+        仅首轮/第二轮调用（由 chat() 门控），后续轮次零开销。
+        """
+        store = self._session_summary_store
+        if store is None:
+            return ""
+
+        top_k = self._config.session_summary_inject_top_k
+        max_tokens = self._config.session_summary_max_tokens
+        user_id = self._user_id
+
+        matched: list[Any] = []
+
+        # 路径 A：embedding 语义检索
+        if self._embedding_client is not None and query.strip():
+            try:
+                q_vec = await self._embedding_client.embed_single(query)
+                results = store.search_by_embedding(
+                    q_vec, user_id=user_id, top_k=top_k,
+                )
+                matched = [s for s, _ in results]
+            except Exception:
+                logger.debug("历史会话语义检索失败，降级", exc_info=True)
+
+        # 路径 B：文件名匹配（补充语义检索可能遗漏的同文件场景）
+        if len(matched) < top_k:
+            try:
+                _reg = self._file_registry
+                if _reg is not None:
+                    _all_files = _reg.list_all()
+                    _paths = [f.get("canonical_path", "") for f in _all_files if isinstance(f, dict)]
+                    if _paths:
+                        file_matched = store.search_by_files(
+                            _paths, user_id=user_id, limit=top_k,
+                        )
+                        _existing_ids = {s.session_id for s in matched}
+                        for s in file_matched:
+                            if s.session_id not in _existing_ids and len(matched) < top_k:
+                                matched.append(s)
+                                _existing_ids.add(s.session_id)
+            except Exception:
+                logger.debug("历史会话文件匹配失败", exc_info=True)
+
+        # 路径 C：时间序兜底
+        if not matched:
+            try:
+                matched = store.list_recent(user_id=user_id, limit=top_k)
+            except Exception:
+                return ""
+
+        if not matched:
+            return ""
+
+        # 格式化输出（控制 token 预算）
+        lines = ["## 历史会话参考"]
+        total_tokens = 0
+        for s in matched:
+            # 计算相对时间描述
+            _time_desc = s.updated_at[:10] if s.updated_at else "未知时间"
+            goal_text = s.task_goal or "（未记录目标）"
+            outcome_icon = {"completed": "✅", "partial": "⚠️", "failed": "❌"}.get(
+                s.outcome, "❓"
+            )
+
+            entry_lines = [f"### {_time_desc} — {goal_text}"]
+            if s.files_involved:
+                files_str = ", ".join(
+                    f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
+                    for f in s.files_involved[:5]
+                )
+                entry_lines.append(f"- **文件**: {files_str}")
+            entry_lines.append(f"- **结果**: {outcome_icon} {s.outcome}")
+            if s.unfinished:
+                entry_lines.append(f"- **未完成**: {s.unfinished}")
+            if s.summary_text:
+                # 截断过长摘要
+                _summary = s.summary_text if len(s.summary_text) <= 200 else s.summary_text[:200] + "..."
+                entry_lines.append(f"- **摘要**: {_summary}")
+
+            entry_text = "\n".join(entry_lines)
+            entry_tokens = TokenCounter.count(entry_text)
+            if total_tokens + entry_tokens > max_tokens:
+                break
+            lines.append(entry_text)
+            total_tokens += entry_tokens
+
+        if len(lines) <= 1:
+            return ""
+
+        return "\n\n".join(lines)
 
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""

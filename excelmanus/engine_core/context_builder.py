@@ -287,6 +287,21 @@ class ContextBuilder:
             return ""
         return f"## 持久记忆（语义相关）\n{text.strip()}"
 
+    def _build_session_history_notice(self) -> str:
+        """构建历史会话摘要注入文本。
+
+        仅在 session_turn <= 1 时注入（首轮/第二轮），后续轮次零开销。
+        从 engine 缓存的语义检索结果中读取（由 _search_session_history 在
+        chat() 中并行预取并存入 _relevant_session_history）。
+        """
+        e = self._engine
+        if e._session_turn > 1:
+            return ""
+        text = getattr(e, "_relevant_session_history", "")
+        if not text or not text.strip():
+            return ""
+        return text.strip()
+
     def _build_playbook_notice(self) -> str:
         """构建 Playbook 历史经验注入文本。
 
@@ -937,6 +952,11 @@ class ContextBuilder:
         if memory_notice:
             dynamic_prompt = dynamic_prompt + "\n\n" + memory_notice if dynamic_prompt else memory_notice
 
+        # 历史会话摘要注入（仅首轮/第二轮，后续零开销）
+        session_history_notice = self._build_session_history_notice()
+        if session_history_notice:
+            dynamic_prompt = dynamic_prompt + "\n\n" + session_history_notice if dynamic_prompt else session_history_notice
+
         # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
         playbook_notice = self._build_playbook_notice()
         if playbook_notice:
@@ -1022,6 +1042,8 @@ class ContextBuilder:
             _snapshot_components["task_plan_notice"] = task_plan_notice
         if memory_notice:
             _snapshot_components["memory_notice"] = memory_notice
+        if session_history_notice:
+            _snapshot_components["session_history_notice"] = session_history_notice
         if playbook_notice:
             _snapshot_components["playbook_notice"] = playbook_notice
         if verification_fix_notice:
