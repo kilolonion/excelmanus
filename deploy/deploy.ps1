@@ -927,6 +927,78 @@ rm -rf "`$WEB_DIR/.next/standalone" "`$WEB_DIR/.next/static" "`$WEB_DIR/public"
 }
 
 # ═══════════════════════════════════════════════════════════════
+#  版本号同步 + 前端依赖预检
+# ═══════════════════════════════════════════════════════════════
+
+function Sync-Version {
+    param([string]$TargetHost, [string]$TargetDir, [string]$KeyPath = "")
+    Write-Info "syncing version numbers..."
+    $cmd = @"
+cd '$TargetDir'
+_ver=`$(python3 -c "
+import re
+with open('pyproject.toml') as f:
+    m = re.search(r'version\s*=\s*\"([^\"]+)\"', f.read())
+    print(m.group(1) if m else '')
+" 2>/dev/null || echo '')
+if [ -z "`$_ver" ]; then
+    echo '[WARN] cannot read version from pyproject.toml, skipping'
+    exit 0
+fi
+_pkg='web/package.json'
+if [ -f "`$_pkg" ]; then
+    _cur=`$(python3 -c "import json; print(json.load(open('`$_pkg')).get('version',''))" 2>/dev/null || echo '')
+    if [ "`$_cur" != "`$_ver" ]; then
+        python3 -c "
+import json
+with open('`$_pkg') as f: d = json.load(f)
+d['version'] = '`$_ver'
+with open('`$_pkg', 'w') as f: json.dump(d, f, indent=2)
+print()
+" 2>/dev/null
+        echo "[OK] version synced: `$_cur -> `$_ver"
+    else
+        echo "[OK] version already matches: `$_ver"
+    fi
+fi
+"@
+    Invoke-Remote -TargetHost $TargetHost -RemoteCmd $cmd -KeyPath $KeyPath | Out-Null
+}
+
+function Test-FrontendDeps {
+    Write-Info "checking frontend dependencies..."
+    $cfg = $Script:CFG
+    $cmd = @"
+cd '$($cfg.FrontendDir)/web'
+_ok=true
+if ! command -v node >/dev/null 2>&1; then
+    echo '[FAIL] node not installed'
+    _ok=false
+else
+    echo "[OK] node: `$(node --version)"
+fi
+if ! command -v npm >/dev/null 2>&1; then
+    echo '[FAIL] npm not installed'
+    _ok=false
+else
+    echo "[OK] npm: `$(npm --version)"
+fi
+if [ ! -d node_modules ]; then
+    echo '[WARN] node_modules missing, will install during deploy'
+elif ! npx next --version >/dev/null 2>&1; then
+    echo '[WARN] next command unavailable (node_modules may be incomplete), will reinstall'
+else
+    echo "[OK] next: `$(npx next --version 2>/dev/null)"
+fi
+if [ "`$_ok" != true ]; then
+    echo '[FATAL] frontend base environment missing, install Node.js first'
+    exit 1
+fi
+"@
+    return (Invoke-RemoteFrontend $cmd)
+}
+
+# ═══════════════════════════════════════════════════════════════
 #  部署流程
 # ═══════════════════════════════════════════════════════════════
 
@@ -1065,7 +1137,7 @@ function Deploy-Docker {
 # ═══════════════════════════════════════════════════════════════
 
 function Invoke-Verify {
-    if ($NoVerify -or -not $Script:CFG.HealthUrl) { return }
+    if ($NoVerify -or -not $Script:CFG.HealthUrl) { return $true }
 
     Write-Step "Verify Deployment"
     Write-Info "waiting for service startup..."
@@ -1078,7 +1150,7 @@ function Invoke-Verify {
             if ($response.status -eq "ok") {
                 Write-Log "deploy verified! service running normally"
                 if ($Script:SITE_URL) { Write-Info "URL: $Script:SITE_URL" }
-                return
+                return $true
             }
         } catch {
             # retry
@@ -1088,6 +1160,7 @@ function Invoke-Verify {
 
     Write-Warn "health check failed ($($Script:CFG.HealthUrl))"
     Write-Warn "check logs on remote servers"
+    return $false
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1272,11 +1345,30 @@ function Invoke-CmdCheck {
     $ok = $true
 
     function Test-Tool {
-        param([string]$Name, [string]$Cmd, [bool]$Required = $true)
+        param(
+            [string]$Name,
+            [string]$Cmd,
+            [bool]$Required = $true,
+            [string[]]$VersionArgs = @("--version")
+        )
         $found = Get-Command $Cmd -ErrorAction SilentlyContinue
         if ($found) {
-            $ver = & $Cmd --version 2>&1 | Select-Object -First 1
-            Write-Log "${Name}: $ver"
+            $output = & $Cmd @VersionArgs 2>&1
+            $exitCode = $LASTEXITCODE
+
+            # OpenSSH on Windows uses `-V` instead of `--version`
+            if ($exitCode -ne 0 -and $Cmd -eq "ssh" -and ($VersionArgs -contains "--version")) {
+                $output = & $Cmd -V 2>&1
+                $exitCode = $LASTEXITCODE
+            }
+
+            if ($exitCode -eq 0) {
+                $ver = ($output | Select-Object -First 1).ToString().Trim()
+                Write-Log "${Name}: $ver"
+            } else {
+                $hint = ($output | Select-Object -First 1)
+                Write-Warn "${Name}: installed, but version check failed ($hint)"
+            }
         } elseif ($Required) {
             Write-Err "${Name}: not installed (required)"
             $script:ok = $false
@@ -1287,7 +1379,7 @@ function Invoke-CmdCheck {
 
     Write-Host "`nLocal tools:" -ForegroundColor White
     Test-Tool "Git" "git"
-    Test-Tool "SSH" "ssh"
+    Test-Tool "SSH" "ssh" $true @("-V")
     Test-Tool "Python" "python" $false
     Test-Tool "Node" "node" $false
     Test-Tool "Docker" "docker" $false
@@ -1659,14 +1751,69 @@ try {
     switch ($Script:CFG.Topology) {
         "docker" { Deploy-Docker }
         default {
+            # 前端依赖预检（非 backend-only 模式）
+            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "frontend") {
+                if (-not (Test-FrontendDeps)) {
+                    throw "frontend dependency check failed"
+                }
+            }
+
             if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "backend")  { Deploy-Backend }
+
+            # 版本号同步（代码同步后、构建前）
+            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "frontend") {
+                $verHost = if ($Script:CFG.Topology -eq "split") { $Script:CFG.FrontendHost } else { $Script:CFG.BackendHost }
+                $verDir  = if ($Script:CFG.Topology -eq "split") { $Script:CFG.FrontendDir }  else { $Script:CFG.BackendDir }
+                $verKey  = if ($Script:CFG.Topology -eq "split") { $Script:CFG.FrontendSshKeyPath } else { $Script:CFG.BackendSshKeyPath }
+                Sync-Version -TargetHost $verHost -TargetDir $verDir -KeyPath $verKey
+            }
+
             if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "frontend") { Deploy-Frontend }
         }
     }
 
-    Invoke-Verify
-    $crossOk = Test-CrossConnectivity -Label "Post-deploy"
-    if (-not $crossOk) { Write-Warn "Cross-connectivity check not fully passed, please verify config" }
+    if ($DryRun) {
+        Write-Info "dry-run mode: skip health verification and cross-connectivity checks"
+    } else {
+        # 健康检查 + 失败自动回滚
+        $verifyOk = Invoke-Verify
+        if ($verifyOk -eq $false) {
+            Write-Warn "health check failed, attempting auto-rollback..."
+            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "backend") {
+                $rollbackCmd = @"
+cd '$($Script:CFG.BackendDir)'
+_target=''
+if [ -f .deploy_meta.json ]; then
+    _target=`$(python3 -c "import json; print(json.load(open('.deploy_meta.json')).get('pre_deploy_commit',''))" 2>/dev/null || echo '')
+fi
+if [ -n "`$_target" ]; then
+    git reset --hard "`$_target" 2>/dev/null
+else
+    git reset --hard HEAD~1 2>/dev/null
+fi
+"@
+                Invoke-RemoteBackend $rollbackCmd | Out-Null
+                if ($Script:CFG.ServiceManager -eq "systemd") {
+                    Invoke-RemoteBackend "sudo systemctl restart '$($Script:CFG.Pm2Backend)'" | Out-Null
+                } elseif ($Script:CFG.ServiceManager -eq "nssm") {
+                    Invoke-Run "nssm restart $($Script:CFG.Pm2Backend)" | Out-Null
+                } else {
+                    Invoke-RemoteBackend "pm2 restart '$($Script:CFG.Pm2Backend)' --update-env" | Out-Null
+                }
+            }
+            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "frontend") {
+                Rollback-FrontendFromLastBackup | Out-Null
+                Restart-FrontendService | Out-Null
+            }
+            Write-Err "health check failed after deploy, auto-rollback attempted. Please verify manually."
+            Record-DeployHistory -Status "ROLLBACK"
+            Release-Lock
+            exit 1
+        }
+
+        $crossOk = Test-CrossConnectivity -Label "Post-deploy"
+        if (-not $crossOk) { Write-Warn "Cross-connectivity check not fully passed, please verify config" }
+    }
     Invoke-Hook -HookName "post-deploy" -HookScript $PostDeployHook
 
     $elapsed = [int]((Get-Date) - $Script:DEPLOY_START_TIME).TotalSeconds

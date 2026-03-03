@@ -1,34 +1,18 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
-    ExcelManus 一键更新脚本 (Windows PowerShell)
-    傻瓜式覆盖旧版本，自动保留用户数据
+    ExcelManus update helper for Windows PowerShell.
 
 .DESCRIPTION
-    用法:  .\deploy\update.ps1 [选项]
+    Pulls the latest git commits, optionally backs up local user data,
+    updates Python and frontend dependencies, and runs a migration precheck.
 
-    选项:
-      -CheckOnly           仅检查是否有更新
-      -SkipBackup          跳过数据备份（不推荐）
-      -SkipDeps            跳过依赖重装
-      -Mirror              使用国内镜像
-      -Force               强制覆盖（git reset --hard）
-      -Rollback            从最近的备份恢复
-      -ListBackups         列出所有备份
-      -Yes                 跳过确认提示
-      -Verbose             详细输出
-
-.EXAMPLE
-    .\deploy\update.ps1
-    交互式更新
-
-.EXAMPLE
-    .\deploy\update.ps1 -CheckOnly
-    仅检查更新
-
-.EXAMPLE
-    .\deploy\update.ps1 -Mirror -Yes
-    使用国内镜像，跳过确认
+    Usage:
+      .\deploy\update.ps1
+      .\deploy\update.ps1 -CheckOnly
+      .\deploy\update.ps1 -Yes -Mirror
+      .\deploy\update.ps1 -Rollback
+      .\deploy\update.ps1 -ListBackups
 #>
 
 [CmdletBinding()]
@@ -44,272 +28,407 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+
 $Script:SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Script:PROJECT_ROOT = Split-Path -Parent $Script:SCRIPT_DIR
+$Script:PIP_MIRROR = "https://pypi.tuna.tsinghua.edu.cn/simple"
+$Script:NPM_MIRROR = "https://registry.npmmirror.com"
 
-function Write-Log { param([string]$M) Write-Host "[OK] $M" -ForegroundColor Green }
-function Write-Info { param([string]$M) Write-Host "[--] $M" -ForegroundColor Cyan }
-function Write-Warn { param([string]$M) Write-Host "[!!] $M" -ForegroundColor Yellow }
-function Write-Err { param([string]$M) Write-Host "[XX] $M" -ForegroundColor Red }
-function Write-Step { param([string]$M) Write-Host "`n-- $M --" -ForegroundColor White }
+function Write-Log {
+    param([string]$Message)
+    Write-Host "[OK] $Message" -ForegroundColor Green
+}
+
+function Write-Info {
+    param([string]$Message)
+    Write-Host "[--] $Message" -ForegroundColor Cyan
+}
+
+function Write-Warn {
+    param([string]$Message)
+    Write-Host "[!!] $Message" -ForegroundColor Yellow
+}
+
+function Write-Err {
+    param([string]$Message)
+    Write-Host "[XX] $Message" -ForegroundColor Red
+}
+
+function Write-Step {
+    param([string]$Message)
+    Write-Host ""
+    Write-Host "-- $Message --" -ForegroundColor White
+}
 
 function Get-ProjectVersion {
     $toml = Join-Path $Script:PROJECT_ROOT "pyproject.toml"
-    if (Test-Path $toml) {
-        $line = Get-Content $toml | Where-Object { $_ -match '^\s*version\s*=' } | Select-Object -First 1
-        if ($line -match '"([^"]+)"') { return $Matches[1] }
+    if (-not (Test-Path $toml)) { return "unknown" }
+
+    $line = Get-Content $toml | Where-Object { $_ -match '^\s*version\s*=\s*".*"' } | Select-Object -First 1
+    if ($line -and $line -match '"([^"]+)"') {
+        return $Matches[1]
     }
     return "unknown"
 }
 
-$CurrentVersion = Get-ProjectVersion
+function Get-LatestBackup {
+    $backupRoot = Join-Path $Script:PROJECT_ROOT "backups"
+    if (-not (Test-Path $backupRoot)) { return $null }
 
-# ── 列出备份 ──
-if ($ListBackups) {
-    $backupDir = Join-Path $Script:PROJECT_ROOT "backups"
-    if (-not (Test-Path $backupDir)) { Write-Info "暂无备份"; exit 0 }
-    Write-Host "可用备份:" -ForegroundColor White
-    Get-ChildItem $backupDir -Directory | Where-Object { $_.Name -like "backup_*" } |
-        Sort-Object Name -Descending | ForEach-Object {
-            $size = "{0:N1} MB" -f ((Get-ChildItem $_.FullName -Recurse -File |
-                Measure-Object Length -Sum).Sum / 1MB)
-            Write-Host "  $($_.Name)  ($size)" -ForegroundColor Cyan
-        }
-    exit 0
+    return Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "backup_*" } |
+        Sort-Object Name -Descending |
+        Select-Object -First 1
 }
 
-# ── 回滚 ──
-if ($Rollback) {
-    $backupDir = Join-Path $Script:PROJECT_ROOT "backups"
-    $latest = Get-ChildItem $backupDir -Directory -ErrorAction SilentlyContinue |
-        Where-Object { $_.Name -like "backup_*" } |
-        Sort-Object Name -Descending | Select-Object -First 1
-    if (-not $latest) { Write-Err "未找到任何备份"; exit 1 }
-    Write-Step "从备份恢复: $($latest.Name)"
+function Backup-UserData {
+    param([string]$CurrentVersion)
+
+    $timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $backupPath = Join-Path $Script:PROJECT_ROOT "backups" "backup_${CurrentVersion}_${timestamp}"
+    New-Item -Path $backupPath -ItemType Directory -Force | Out-Null
+
+    foreach ($item in @(".env", "users", "outputs", "uploads")) {
+        $src = Join-Path $Script:PROJECT_ROOT $item
+        $dst = Join-Path $backupPath $item
+
+        if (Test-Path $src -PathType Leaf) {
+            Copy-Item $src $dst -Force
+            Write-Log "Backed up: $item"
+        } elseif ((Test-Path $src -PathType Container) -and (Get-ChildItem $src -ErrorAction SilentlyContinue)) {
+            Copy-Item $src $dst -Recurse -Force
+            Write-Log "Backed up: $item/"
+        }
+    }
+
+    $homeDb = Join-Path $env:USERPROFILE ".excelmanus"
+    if (Test-Path $homeDb) {
+        $dbDst = Join-Path $backupPath ".excelmanus_home"
+        New-Item -Path $dbDst -ItemType Directory -Force | Out-Null
+        Copy-Item (Join-Path $homeDb "*.db*") $dbDst -Force -ErrorAction SilentlyContinue
+        Write-Log "Backed up: .excelmanus DB files"
+    }
+
+    return $backupPath
+}
+
+function Restore-LatestBackup {
+    $latest = Get-LatestBackup
+    if (-not $latest) {
+        Write-Err "No backup found."
+        exit 1
+    }
+
+    Write-Step "Rollback from backup: $($latest.Name)"
+
     $envSrc = Join-Path $latest.FullName ".env"
     if (Test-Path $envSrc) {
         Copy-Item $envSrc (Join-Path $Script:PROJECT_ROOT ".env") -Force
-        Write-Log "恢复 .env"
+        Write-Log "Restored .env"
     }
+
     foreach ($dir in @("users", "outputs", "uploads")) {
         $src = Join-Path $latest.FullName $dir
+        $dst = Join-Path $Script:PROJECT_ROOT $dir
         if (Test-Path $src) {
-            $dst = Join-Path $Script:PROJECT_ROOT $dir
             if (Test-Path $dst) { Remove-Item $dst -Recurse -Force }
-            Copy-Item $src $dst -Recurse
-            Write-Log "恢复 $dir/"
+            Copy-Item $src $dst -Recurse -Force
+            Write-Log "Restored $dir/"
         }
     }
+
     $dbBackup = Join-Path $latest.FullName ".excelmanus_home"
     if (Test-Path $dbBackup) {
         $homeDb = Join-Path $env:USERPROFILE ".excelmanus"
         if (-not (Test-Path $homeDb)) { New-Item $homeDb -ItemType Directory -Force | Out-Null }
         Copy-Item (Join-Path $dbBackup "*.db*") $homeDb -Force -ErrorAction SilentlyContinue
-        Write-Log "恢复数据库"
+        Write-Log "Restored .excelmanus DB files"
     }
-    Write-Log "回滚完成！请重启服务。"
+
+    Write-Log "Rollback completed."
     exit 0
 }
 
-# ── 主流程 ──
+function Show-Backups {
+    $backupRoot = Join-Path $Script:PROJECT_ROOT "backups"
+    if (-not (Test-Path $backupRoot)) {
+        Write-Info "No backups found."
+        exit 0
+    }
+
+    $items = Get-ChildItem $backupRoot -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -like "backup_*" } |
+        Sort-Object Name -Descending
+
+    if (-not $items) {
+        Write-Info "No backups found."
+        exit 0
+    }
+
+    Write-Host "Available backups:" -ForegroundColor White
+    foreach ($item in $items) {
+        $sizeBytes = (Get-ChildItem $item.FullName -Recurse -File -ErrorAction SilentlyContinue | Measure-Object Length -Sum).Sum
+        if (-not $sizeBytes) { $sizeBytes = 0 }
+        $sizeMb = "{0:N1}" -f ($sizeBytes / 1MB)
+        Write-Host "  $($item.Name)  (${sizeMb} MB)" -ForegroundColor Cyan
+    }
+    exit 0
+}
+
+function Get-PythonExe {
+    $venvPy = Join-Path $Script:PROJECT_ROOT ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) { return $venvPy }
+    return "python"
+}
+
+function Install-Dependencies {
+    $pythonExe = Get-PythonExe
+
+    Write-Step "Install backend dependencies"
+    $backendInstalled = $false
+
+    if (Get-Command uv -ErrorAction SilentlyContinue) {
+        Write-Info "Trying uv sync..."
+        $uvArgs = @("sync", "--all-extras", "--project", $Script:PROJECT_ROOT)
+        if ($Mirror) { $uvArgs += @("--index-url", $Script:PIP_MIRROR) }
+        & uv @uvArgs
+        if ($LASTEXITCODE -eq 0) {
+            $backendInstalled = $true
+            Write-Log "Backend dependencies installed by uv."
+        } else {
+            Write-Warn "uv sync failed, falling back to pip."
+        }
+    }
+
+    if (-not $backendInstalled) {
+        Push-Location $Script:PROJECT_ROOT
+        try {
+            $pipArgs = @("-m", "pip", "install", "-e", ".[all]")
+            if ($Mirror) { $pipArgs += @("-i", $Script:PIP_MIRROR) }
+            & $pythonExe @pipArgs
+            if ($LASTEXITCODE -eq 0) {
+                $backendInstalled = $true
+                Write-Log "Backend dependencies installed by pip."
+            } elseif (-not $Mirror) {
+                Write-Warn "Default index failed, retrying with mirror."
+                & $pythonExe -m pip install -e ".[all]" -i $Script:PIP_MIRROR
+                if ($LASTEXITCODE -eq 0) {
+                    $backendInstalled = $true
+                    Write-Log "Backend dependencies installed by pip mirror."
+                }
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+
+    if (-not $backendInstalled) {
+        Write-Err "Backend dependency install failed."
+    }
+
+    $webDir = Join-Path $Script:PROJECT_ROOT "web"
+    if ((Test-Path $webDir) -and (Test-Path (Join-Path $webDir "package.json"))) {
+        Write-Step "Install frontend dependencies"
+        Push-Location $webDir
+        try {
+            $npmArgs = @("install")
+            if ($Mirror) { $npmArgs += "--registry=$Script:NPM_MIRROR" }
+            & npm @npmArgs
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Frontend dependencies installed."
+            } elseif (-not $Mirror) {
+                Write-Warn "npm install failed, retrying with mirror."
+                & npm install "--registry=$Script:NPM_MIRROR"
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "Frontend dependencies installed via mirror."
+                } else {
+                    Write-Warn "Frontend dependency install failed (non-fatal)."
+                }
+            } else {
+                Write-Warn "Frontend dependency install failed (non-fatal)."
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+}
+
+function Verify-DatabaseMigration {
+    Write-Step "Precheck database migration"
+    $pythonExe = Get-PythonExe
+    $env:EXCELMANUS_UPDATE_PROJECT_ROOT = $Script:PROJECT_ROOT
+    try {
+        $result = & $pythonExe -c @"
+import os
+import sys
+try:
+    from excelmanus.updater import verify_database_migration
+    ok, msg = verify_database_migration(os.environ.get("EXCELMANUS_UPDATE_PROJECT_ROOT"))
+    print(msg)
+    sys.exit(0 if ok else 1)
+except Exception as exc:
+    print(f"skip migration precheck: {exc}")
+    sys.exit(0)
+"@ 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            Write-Log "Migration precheck: $result"
+        } else {
+            Write-Warn "Migration precheck warning: $result"
+        }
+    } catch {
+        Write-Warn "Migration precheck skipped: $_"
+    } finally {
+        Remove-Item Env:EXCELMANUS_UPDATE_PROJECT_ROOT -ErrorAction SilentlyContinue
+    }
+}
+
+if ($ListBackups) {
+    Show-Backups
+}
+
+if ($Rollback) {
+    Restore-LatestBackup
+}
+
+$currentVersion = Get-ProjectVersion
+
 Write-Host ""
 Write-Host "  +======================================+" -ForegroundColor Cyan
-Write-Host "  |     ExcelManus 更新工具 v1.0         |" -ForegroundColor Cyan
+Write-Host "  |       ExcelManus Update Tool         |" -ForegroundColor Cyan
 Write-Host "  +======================================+" -ForegroundColor Cyan
 Write-Host ""
-Write-Info "当前版本: $CurrentVersion"
-Write-Info "项目目录: $($Script:PROJECT_ROOT)"
+Write-Info "Current version: $currentVersion"
+Write-Info "Project root: $($Script:PROJECT_ROOT)"
 Write-Host ""
 
-# 检查 Git
 $gitDir = Join-Path $Script:PROJECT_ROOT ".git"
 if (-not (Test-Path $gitDir)) {
-    Write-Err "项目不是 Git 仓库，无法更新"
-    exit 1
-}
-if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
-    Write-Err "未找到 Git，请先安装"
+    Write-Err "Project is not a git repository."
     exit 1
 }
 
-# Step 1: 检查更新
-Write-Step "检查更新"
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+    Write-Err "Git is not installed."
+    exit 1
+}
+
+Write-Step "Check updates"
 try {
     git -C $Script:PROJECT_ROOT fetch origin --tags --quiet 2>$null
 } catch {
-    Write-Warn "git fetch 失败，请检查网络"
+    Write-Warn "git fetch failed, please check your network."
     exit 1
 }
 
 $branch = git -C $Script:PROJECT_ROOT rev-parse --abbrev-ref HEAD 2>$null
 if (-not $branch) { $branch = "main" }
+
 $behind = git -C $Script:PROJECT_ROOT rev-list --count "HEAD..origin/$branch" 2>$null
 if (-not $behind) { $behind = "0" }
 
 if ([int]$behind -eq 0) {
-    Write-Log "已是最新版本 ($CurrentVersion)"
+    Write-Log "Already up to date ($currentVersion)."
     exit 0
 }
 
 $remoteToml = git -C $Script:PROJECT_ROOT show "origin/${branch}:pyproject.toml" 2>$null
 $remoteVersion = "unknown"
 if ($remoteToml) {
-    $vline = $remoteToml | Where-Object { $_ -match '^\s*version\s*=' } | Select-Object -First 1
-    if ($vline -match '"([^"]+)"') { $remoteVersion = $Matches[1] }
+    $versionLine = $remoteToml | Where-Object { $_ -match '^\s*version\s*=' } | Select-Object -First 1
+    if ($versionLine -match '"([^"]+)"') { $remoteVersion = $Matches[1] }
 }
 
 Write-Host ""
-Write-Info "发现新版本!"
-Write-Host "  当前: " -NoNewline; Write-Host $CurrentVersion -ForegroundColor Red
-Write-Host "  最新: " -NoNewline; Write-Host $remoteVersion -ForegroundColor Green
-Write-Info "  落后: $behind 个提交"
+Write-Info "Update available."
+Write-Host "  Current: " -NoNewline
+Write-Host $currentVersion -ForegroundColor Red
+Write-Host "  Latest : " -NoNewline
+Write-Host $remoteVersion -ForegroundColor Green
+Write-Info "  Behind : $behind commits"
 Write-Host ""
 
-if ($CheckOnly) { exit 0 }
+if ($CheckOnly) {
+    exit 0
+}
 
-# 确认
 if (-not $Yes) {
-    $confirm = Read-Host "是否开始更新？[Y/n]"
-    if ($confirm -match "^[Nn]") { Write-Info "已取消"; exit 0 }
+    $confirm = Read-Host "Proceed with update? [Y/n]"
+    if ($confirm -match "^[Nn]") {
+        Write-Info "Cancelled."
+        exit 0
+    }
 }
 
-# Step 2: 备份
 if (-not $SkipBackup) {
-    Write-Step "备份用户数据"
-    $ts = Get-Date -Format "yyyyMMdd_HHmmss"
-    $backupPath = Join-Path $Script:PROJECT_ROOT "backups" "backup_${CurrentVersion}_${ts}"
-    New-Item $backupPath -ItemType Directory -Force | Out-Null
-
-    foreach ($item in @(".env", "users", "outputs", "uploads")) {
-        $src = Join-Path $Script:PROJECT_ROOT $item
-        if (Test-Path $src -PathType Leaf) {
-            Copy-Item $src (Join-Path $backupPath $item) -Force
-            Write-Log "备份: $item"
-        } elseif ((Test-Path $src -PathType Container) -and (Get-ChildItem $src -ErrorAction SilentlyContinue)) {
-            Copy-Item $src (Join-Path $backupPath $item) -Recurse
-            Write-Log "备份: $item/"
-        }
-    }
-    $homeDb = Join-Path $env:USERPROFILE ".excelmanus"
-    if (Test-Path $homeDb) {
-        $dbDst = Join-Path $backupPath ".excelmanus_home"
-        New-Item $dbDst -ItemType Directory -Force | Out-Null
-        Copy-Item (Join-Path $homeDb "*.db*") $dbDst -Force -ErrorAction SilentlyContinue
-        Write-Log "备份: 数据库"
-    }
-    Write-Log "备份完成: $backupPath"
+    Write-Step "Backup user data"
+    $backupPath = Backup-UserData -CurrentVersion $currentVersion
+    Write-Log "Backup complete: $backupPath"
 } else {
-    Write-Warn "跳过备份 (-SkipBackup)"
+    Write-Warn "Skip backup (-SkipBackup)."
 }
 
-# Step 3: 更新代码
-Write-Step "拉取最新代码"
-$status = git -C $Script:PROJECT_ROOT status --porcelain 2>$null
-if ($status) {
-    Write-Info "暂存本地修改..."
-    git -C $Script:PROJECT_ROOT stash --include-untracked --quiet 2>$null
+Write-Step "Pull latest code"
+
+# 记录更新前的 commit（供回滚精确回退）
+$preDeployCommit = git -C $Script:PROJECT_ROOT rev-parse HEAD 2>$null
+
+$hasLocalChanges = git -C $Script:PROJECT_ROOT status --porcelain 2>$null
+if ($hasLocalChanges) {
+    Write-Info "Stashing local changes..."
+    git -C $Script:PROJECT_ROOT stash --include-untracked --quiet 2>$null | Out-Null
 }
 
 if ($Force) {
-    Write-Info "强制覆盖模式"
+    Write-Warn "Force mode enabled: reset to origin/$branch"
     git -C $Script:PROJECT_ROOT reset --hard "origin/$branch" --quiet
 } else {
     try {
         git -C $Script:PROJECT_ROOT pull origin $branch --ff-only --quiet 2>$null
     } catch {
-        Write-Warn "fast-forward 失败，执行强制覆盖..."
+        Write-Warn "Fast-forward pull failed; resetting to origin/$branch."
         git -C $Script:PROJECT_ROOT reset --hard "origin/$branch" --quiet
     }
 }
-$NewVersion = Get-ProjectVersion
-Write-Log "代码已更新: $CurrentVersion -> $NewVersion"
 
-# Step 4: 依赖
+$newVersion = Get-ProjectVersion
+Write-Log "Code updated: $currentVersion -> $newVersion"
+
 if (-not $SkipDeps) {
-    Write-Step "更新后端依赖"
-    $venvPy = Join-Path $Script:PROJECT_ROOT ".venv" "Scripts" "python.exe"
-    if (-not (Test-Path $venvPy)) { $venvPy = "python" }
-
-    $hasUv = Get-Command uv -ErrorAction SilentlyContinue
-    $installed = $false
-    if ($hasUv) {
-        Write-Info "使用 uv sync 安装后端依赖..."
-        $uvArgs = @("sync", "--all-extras", "--project", $Script:PROJECT_ROOT, "--quiet")
-        if ($Mirror) { $uvArgs += @("--index-url", "https://pypi.tuna.tsinghua.edu.cn/simple") }
-        & uv @uvArgs 2>$null
-        if ($LASTEXITCODE -eq 0) { $installed = $true; Write-Log "后端依赖已更新" }
-        else { Write-Warn "uv sync 失败，回退到 pip..." }
-    }
-    if (-not $installed) {
-        $pipArgs = @("-m", "pip", "install", "-e", "$($Script:PROJECT_ROOT)[all]", "--quiet")
-        if ($Mirror) { $pipArgs += @("-i", "https://pypi.tuna.tsinghua.edu.cn/simple") }
-        try {
-            & $venvPy $pipArgs 2>$null
-            Write-Log "后端依赖已更新"
-        } catch {
-            Write-Warn "pip 失败，尝试清华镜像..."
-            try {
-                & $venvPy -m pip install -e "$($Script:PROJECT_ROOT)[all]" -i "https://pypi.tuna.tsinghua.edu.cn/simple" --quiet 2>$null
-                Write-Log "后端依赖已更新"
-            } catch {
-                Write-Err "后端依赖安装失败"
-            }
-        }
-    }
-
-    $webDir = Join-Path $Script:PROJECT_ROOT "web"
-    if ((Test-Path $webDir) -and (Test-Path (Join-Path $webDir "package.json"))) {
-        Write-Step "更新前端依赖"
-        $npmArgs = @("install")
-        if ($Mirror) { $npmArgs += "--registry=https://registry.npmmirror.com" }
-        try {
-            Push-Location $webDir
-            & npm $npmArgs --silent 2>$null
-            Write-Log "前端依赖已更新"
-        } catch {
-            Write-Warn "前端依赖安装失败（非致命）"
-        } finally {
-            Pop-Location
-        }
-    }
+    Install-Dependencies
 } else {
-    Write-Warn "跳过依赖更新 (-SkipDeps)"
+    Write-Warn "Skip dependency update (-SkipDeps)."
 }
 
-# Step 5: 预验证数据库迁移
-Write-Step "预验证数据库迁移"
-$venvPyCheck = Join-Path $Script:PROJECT_ROOT ".venv" "Scripts" "python.exe"
-if (-not (Test-Path $venvPyCheck)) { $venvPyCheck = "python" }
+Verify-DatabaseMigration
+
+# 写入 .deploy_meta.json（与 deploy.sh 行为一致）
+$metaFile = Join-Path $Script:PROJECT_ROOT ".deploy_meta.json"
 try {
-    $dbCheckResult = & $venvPyCheck -c @"
-import sys
-try:
-    from excelmanus.updater import verify_database_migration
-    ok, msg = verify_database_migration('$($Script:PROJECT_ROOT -replace '\\','\\\\')')
-    print(msg)
-    sys.exit(0 if ok else 1)
-except Exception as e:
-    print(f'跳过预验证: {e}')
-    sys.exit(0)
-"@ 2>&1
-    if ($LASTEXITCODE -eq 0) {
-        Write-Log "数据库迁移验证: $dbCheckResult"
-    } else {
-        Write-Warn "数据库迁移预验证警告: $dbCheckResult（将在启动时自动重试）"
+    $gitCommitShort = git -C $Script:PROJECT_ROOT rev-parse --short HEAD 2>$null
+    $gitCommitFull = git -C $Script:PROJECT_ROOT rev-parse HEAD 2>$null
+    $meta = @{
+        release_id        = (Get-Date -Format "yyyyMMddTHHmmss")
+        deployed_at       = (Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ")
+        git_commit        = $(if ($gitCommitShort) { $gitCommitShort } else { "unknown" })
+        git_commit_full   = $(if ($gitCommitFull) { $gitCommitFull } else { "" })
+        pre_deploy_commit = $(if ($preDeployCommit) { $preDeployCommit } else { "" })
+        deploy_mode       = "standalone"
+        topology          = "local"
+        branch            = $(if ($branch) { $branch } else { "unknown" })
+        updater           = "update.ps1"
     }
+    $meta | ConvertTo-Json -Depth 2 | Set-Content -Path $metaFile -Encoding UTF8
+    Write-Log "Deploy metadata written: $metaFile"
 } catch {
-    Write-Warn "数据库迁移预验证跳过: $_"
+    Write-Warn "Failed to write .deploy_meta.json (non-fatal): $_"
 }
 
-# 完成
 Write-Host ""
 Write-Host "  +======================================+" -ForegroundColor Green
-Write-Host "  |         更新成功！                   |" -ForegroundColor Green
+Write-Host "  |            Update Success            |" -ForegroundColor Green
 Write-Host "  +======================================+" -ForegroundColor Green
 Write-Host ""
-Write-Info "版本: $CurrentVersion -> $NewVersion"
-Write-Info "数据库迁移将在下次启动时自动执行"
-Write-Host ""
-Write-Info "请重启服务以应用更新:"
+Write-Info "Version: $currentVersion -> $newVersion"
+Write-Info "Restart service to apply updates:"
 Write-Info "  .\deploy\start.ps1"
 Write-Host ""

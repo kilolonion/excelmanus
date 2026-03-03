@@ -9,11 +9,14 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_API_KEY` | LLM API Key (required) | — |
 | `EXCELMANUS_BASE_URL` | LLM API endpoint (required) | — |
 | `EXCELMANUS_MODEL` | Model name (required; Gemini can be auto-extracted from BASE_URL) | — |
+| `EXCELMANUS_PROTOCOL` | Main model protocol type (`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`) | `auto` |
 | `EXCELMANUS_MAX_ITERATIONS` | Maximum agent iteration rounds | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | Consecutive failure circuit-breaker threshold | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API session idle timeout (seconds) | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | Maximum concurrent API sessions | `1000` |
 | `EXCELMANUS_WORKSPACE_ROOT` | File access whitelist root directory | `.` |
+| `EXCELMANUS_DATA_ROOT` | Centralized data directory | `~/.excelmanus/data` |
+| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`/`docker`), `auto` infers automatically | `auto` |
 | `EXCELMANUS_LOG_LEVEL` | Log level | `INFO` |
 | `EXCELMANUS_EXTERNAL_SAFE_MODE` | External safe mode (hides thinking/tool details and routing metadata) | `true` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS allowed origins (comma-separated) | `http://localhost:3000, http://localhost:5173` |
@@ -38,6 +41,10 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_AUX_API_KEY` | AUX API Key (routing + subagent default model + window advisor) | — |
 | `EXCELMANUS_AUX_BASE_URL` | AUX Base URL (falls back to main config if not set) | — |
 | `EXCELMANUS_AUX_MODEL` | AUX model name (falls back to main model if not set) | — |
+| `EXCELMANUS_AUX_PROTOCOL` | AUX model protocol type | `auto` |
+| `EXCELMANUS_CLAWHUB_ENABLED` | Enable ClawHub skill marketplace | `true` |
+| `EXCELMANUS_CLAWHUB_REGISTRY_URL` | ClawHub registry URL | `https://clawhub.ai` |
+| `EXCELMANUS_CLAWHUB_PREFER_CLI` | ClawHub prefers CLI installation | `true` |
 | `EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS` | Tool result global hard truncation length (0 = unlimited) | `12000` |
 
 ## Subagent Configuration
@@ -145,9 +152,11 @@ Supports image recognition and vision-enhanced descriptions. VLM model can be co
 
 | Environment Variable | Description | Default |
 |---|---|---|
+| `EXCELMANUS_VLM_ENABLED` | VLM master switch (`false` to fall back to main model even if VLM is configured) | `true` |
 | `EXCELMANUS_VLM_API_KEY` | VLM API Key (optional) | — |
 | `EXCELMANUS_VLM_BASE_URL` | VLM Base URL (optional) | — |
 | `EXCELMANUS_VLM_MODEL` | VLM model name (optional) | — |
+| `EXCELMANUS_VLM_PROTOCOL` | VLM model protocol type | `auto` |
 | `EXCELMANUS_VLM_TIMEOUT_SECONDS` | VLM request timeout (seconds) | `300` |
 | `EXCELMANUS_VLM_MAX_RETRIES` | VLM maximum retries | `1` |
 | `EXCELMANUS_VLM_RETRY_BASE_DELAY_SECONDS` | VLM retry base delay (seconds) | `5.0` |
