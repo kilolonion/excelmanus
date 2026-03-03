@@ -712,7 +712,7 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
     ],
     20: [
         """CREATE TABLE IF NOT EXISTS session_summaries (
-            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            id              SERIAL PRIMARY KEY,
             session_id      TEXT NOT NULL UNIQUE,
             user_id         TEXT,
             summary_text    TEXT NOT NULL,
@@ -720,7 +720,7 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
             files_involved  TEXT DEFAULT '[]',
             outcome         TEXT DEFAULT '',
             unfinished      TEXT DEFAULT '',
-            embedding       BLOB,
+            embedding       BYTEA,
             token_count     INTEGER DEFAULT 0,
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL

@@ -2925,6 +2925,7 @@ class AgentEngine:
         user_id = self._user_id
 
         matched: list[Any] = []
+        current_session_id = self._session_id
 
         # 路径 A：embedding 语义检索
         if self._embedding_client is not None and query.strip():
@@ -2933,7 +2934,10 @@ class AgentEngine:
                 results = store.search_by_embedding(
                     q_vec, user_id=user_id, top_k=top_k,
                 )
-                matched = [s for s, _ in results]
+                matched = [
+                    s for s, _ in results
+                    if s.session_id != current_session_id
+                ]
             except Exception:
                 logger.debug("历史会话语义检索失败，降级", exc_info=True)
 
@@ -2946,10 +2950,12 @@ class AgentEngine:
                     _paths = [f.get("canonical_path", "") for f in _all_files if isinstance(f, dict)]
                     if _paths:
                         file_matched = store.search_by_files(
-                            _paths, user_id=user_id, limit=top_k,
+                            _paths, user_id=user_id, limit=top_k + 1,
                         )
                         _existing_ids = {s.session_id for s in matched}
                         for s in file_matched:
+                            if s.session_id == current_session_id:
+                                continue
                             if s.session_id not in _existing_ids and len(matched) < top_k:
                                 matched.append(s)
                                 _existing_ids.add(s.session_id)
@@ -2959,7 +2965,8 @@ class AgentEngine:
         # 路径 C：时间序兜底
         if not matched:
             try:
-                matched = store.list_recent(user_id=user_id, limit=top_k)
+                recent = store.list_recent(user_id=user_id, limit=top_k + 1)
+                matched = [s for s in recent if s.session_id != current_session_id][:top_k]
             except Exception:
                 return ""
 
