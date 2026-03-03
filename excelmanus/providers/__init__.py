@@ -90,10 +90,31 @@ def normalize_openai_base_url(base_url: str) -> str:
     return url + "/v1"
 
 
+def _infer_protocol_from_model(model: str) -> str | None:
+    """根据模型名称前缀推断协议类型（运行时轻量版）。
+
+    返回 None 表示无法推断。
+    """
+    if not model:
+        return None
+    lower = model.strip().lower()
+    _PREFIXES = (
+        ("claude-", "anthropic"), ("claude3", "anthropic"),
+        ("claude4", "anthropic"), ("claude_", "anthropic"),
+        ("gemini-", "gemini"), ("gemini2", "gemini"),
+        ("gemini1", "gemini"), ("gemini_", "gemini"),
+    )
+    for prefix, proto in _PREFIXES:
+        if lower.startswith(prefix):
+            return proto
+    return None
+
+
 def create_client(
     api_key: str,
     base_url: str,
     protocol: str = "auto",
+    model: str = "",
 ) -> openai.AsyncOpenAI | GeminiClient | ClaudeClient | OpenAIResponsesClient:
     """根据 protocol（或 base_url 自动检测）创建合适的 LLM 客户端。
 
@@ -105,10 +126,11 @@ def create_client(
       - "gemini"：强制使用 Gemini 原生 API
 
     auto 检测优先级：
-      1. Gemini 原生 API → GeminiClient
-      2. Claude / Anthropic 原生 API → ClaudeClient
-      3. EXCELMANUS_USE_RESPONSES_API=1 → OpenAIResponsesClient
-      4. 其他 → 标准 openai.AsyncOpenAI（Chat Completions）
+      1. Gemini 原生 URL → GeminiClient
+      2. Claude / Anthropic 原生 URL → ClaudeClient
+      3. 模型名称前缀推断（claude-* → ClaudeClient, gemini-* → GeminiClient）
+      4. EXCELMANUS_USE_RESPONSES_API=1 → OpenAIResponsesClient
+      5. 其他 → 标准 openai.AsyncOpenAI（Chat Completions）
     """
     normalized = (protocol or "auto").strip().lower()
 
@@ -128,6 +150,20 @@ def create_client(
         return GeminiClient(api_key=api_key, base_url=base_url)
     if is_claude_provider(base_url):
         return ClaudeClient(api_key=api_key, base_url=base_url)
+
+    # auto: URL 未匹配时，按模型名称前缀推断
+    inferred = _infer_protocol_from_model(model)
+    if inferred == "anthropic":
+        logging.getLogger(__name__).info(
+            "auto 模式：从模型名 %r 推断为 Anthropic 协议，使用 ClaudeClient。", model,
+        )
+        return ClaudeClient(api_key=api_key, base_url=base_url)
+    if inferred == "gemini":
+        logging.getLogger(__name__).info(
+            "auto 模式：从模型名 %r 推断为 Gemini 协议，使用 GeminiClient。", model,
+        )
+        return GeminiClient(api_key=api_key, base_url=base_url)
+
     # OpenAI 兼容协议 — 规范化 base_url
     base_url = normalize_openai_base_url(base_url)
     if is_responses_api_enabled():

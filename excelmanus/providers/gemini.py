@@ -28,6 +28,17 @@ from excelmanus.providers.stream_types import (
 
 logger = get_logger("gemini_provider")
 
+# 已知的非 Gemini 原生 extra_body 字段，合并到 generationConfig 前需要移除
+_NON_GEMINI_EXTRA_KEYS = frozenset({
+    "enable_thinking", "thinking_budget", "thinking",
+    "reasoning", "reasoning_effort",
+})
+
+
+def _strip_non_gemini_extra_body(extra_body: dict[str, Any]) -> dict[str, Any]:
+    """过滤 extra_body 中非 Gemini 原生字段，避免 generationConfig 中出现未知参数导致 API 错误。"""
+    return {k: v for k, v in extra_body.items() if k not in _NON_GEMINI_EXTRA_KEYS}
+
 
 # ── 响应数据结构（模拟 OpenAI SDK 对象） ─────────────────────────
 
@@ -578,11 +589,13 @@ class GeminiClient:
             gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
             body["generationConfig"] = gen_config
 
-        # 透传 extra_body：将 OpenAI 风格的 extra_body 合并到 Gemini generationConfig
+        # 透传 extra_body：过滤非 Gemini 原生字段后合并到 generationConfig
         if extra_body and isinstance(extra_body, dict):
-            gen_config = body.get("generationConfig", {})
-            gen_config.update(extra_body)
-            body["generationConfig"] = gen_config
+            cleaned = _strip_non_gemini_extra_body(extra_body)
+            if cleaned:
+                gen_config = body.get("generationConfig", {})
+                gen_config.update(cleaned)
+                body["generationConfig"] = gen_config
 
         # 构建请求 URL
         url = f"{self._base_url}/models/{effective_model}:generateContent"
@@ -673,11 +686,13 @@ class GeminiClient:
             gen_config = body.get("generationConfig", {})
             gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
             body["generationConfig"] = gen_config
-        # 透传 extra_body 到 generationConfig
+        # 透传 extra_body：过滤非 Gemini 原生字段后合并到 generationConfig
         if extra_body and isinstance(extra_body, dict):
-            gen_config = body.get("generationConfig", {})
-            gen_config.update(extra_body)
-            body["generationConfig"] = gen_config
+            cleaned = _strip_non_gemini_extra_body(extra_body)
+            if cleaned:
+                gen_config = body.get("generationConfig", {})
+                gen_config.update(cleaned)
+                body["generationConfig"] = gen_config
 
         url = f"{self._base_url}/models/{effective_model}:streamGenerateContent?alt=sse"
         headers = {"Content-Type": "application/json"}
