@@ -10,6 +10,7 @@ import re
 from typing import Any, ClassVar
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.skillpacks.arguments import parse_arguments, substitute
@@ -53,7 +54,13 @@ _CHITCHAT_RE = re.compile(
     r"^\s*(?:"
     # 问候
     r"你好|您好|hi|hello|hey|嗨|哈喽|早上好|下午好|晚上好|good\s*(?:morning|afternoon|evening)"
-    r"|在吗|在不在|谢谢|thanks|thank\s*you|好的|ok|okay"
+    r"|在吗|在不在"
+    # 感谢
+    r"|谢谢|thanks|thank\s*you|感谢|thx|ty|谢了|多谢"
+    # 短确认/应答
+    r"|好的|ok|okay|嗯|嗯嗯|好|收到|明白|了解|知道了|没问题|可以|行|对|是的|是|没事了|不用了"
+    # 告别
+    r"|再见|拜拜|bye|goodbye|see\s*you|晚安|good\s*night|88|886"
     # 身份/元问题（你是谁、介绍一下你自己、what are you 等）
     r"|你是谁|你是什么|你叫什么|介绍一下你?自己|你能做什么|你会什么|你有什么功能"
     r"|who\s*are\s*you|what\s*are\s*you|what\s*can\s*you\s*do|introduce\s*yourself"
@@ -110,6 +117,27 @@ _TASK_TAG_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     )),
 ]
 
+# ── LLM 工具路由分类器常量 ─────────────────────────────────
+
+_TOOL_ROUTE_PROMPT = """\
+你是一个任务分类器。根据用户消息，判断需要哪类工具。只输出一个标签，不要输出任何其他内容。
+
+标签定义：
+- data_read: 读取、查看、分析、对比、筛选、统计Excel/CSV数据（不修改文件）
+- data_write: 修改、填充、写入、格式化、排序、合并、替换Excel数据
+- chart: 创建图表、画图、可视化（柱状图、饼图、折线图等）
+- vision: 图片识别、截图还原表格、OCR相关
+- code: 编写Python脚本、执行代码、shell命令、非Excel文件操作
+- all_tools: 复杂多步骤任务、跨多种能力的任务、或无法确定类型
+
+用户消息: {message}
+标签:"""
+
+_VALID_ROUTE_TAGS = frozenset({
+    "data_read", "data_write", "chart", "vision", "code", "all_tools",
+})
+
+
 class SkillRouter:
     """简化后的技能路由器：仅负责斜杠直连路由和技能目录生成。"""
 
@@ -122,6 +150,12 @@ class SkillRouter:
             tuple[str, int, int], tuple[list[str], int, int]
         ] = OrderedDict()
         self._file_structure_cache_limit = 64
+
+        # LLM 工具路由分类器：复用 AUX 端点客户端（_get_router_client）
+        self._route_llm_enabled = (
+            config.aux_enabled
+            and bool(config.aux_model)
+        )
 
     def _get_router_client(self) -> Any:
         """懒加载 AUX 端点客户端，首次调用时创建并缓存。"""
@@ -146,6 +180,54 @@ class SkillRouter:
                 protocol=self._config.protocol,
             )
         return self._fallback_client
+
+    async def _classify_tool_route_llm(
+        self,
+        user_message: str,
+        *,
+        timeout: float = 2.0,
+    ) -> tuple[str, ...]:
+        """调用 LLM 分类器推断工具路由标签。
+
+        返回:
+            tuple[str, ...]: 路由标签元组，如 ("data_read",)
+            超时或异常时返回 ("all_tools",) 作为安全 fallback。
+        """
+        if not self._route_llm_enabled:
+            return ("all_tools",)
+
+        try:
+            client = self._get_router_client()
+            resp = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model=self._config.aux_model,
+                    messages=[
+                        {"role": "user", "content": _TOOL_ROUTE_PROMPT.format(
+                            message=user_message[:500],
+                        )},
+                    ],
+                    max_tokens=20,
+                    temperature=0,
+                    extra_body=_AUX_NO_THINKING_EXTRA_BODY,
+                ),
+                timeout=timeout,
+            )
+            raw = (resp.choices[0].message.content or "").strip().lower()
+            label = raw.split("\n")[0].strip().strip("`\"'")
+
+            if label in _VALID_ROUTE_TAGS:
+                logger.debug("LLM 工具路由: %s → %s", user_message[:30], label)
+                return (label,)
+            else:
+                logger.warning("LLM 工具路由: 无效标签 '%s'，fallback all_tools", label)
+                return ("all_tools",)
+
+        except asyncio.TimeoutError:
+            logger.warning("LLM 工具路由: 超时 (%.1fs)，fallback all_tools", timeout)
+            return ("all_tools",)
+        except Exception as exc:
+            logger.warning("LLM 工具路由: 异常 %s，fallback all_tools", exc)
+            return ("all_tools",)
 
     _MODE_TO_HINT: ClassVar[dict[str, str]] = {
         "write": "may_write",
@@ -238,12 +320,22 @@ class SkillRouter:
             )
 
         # ── 1. 纯问候/闲聊短路：跳过 LLM 分类，零延迟返回 ──
-        if _CHITCHAT_RE.match(user_message.strip()) and not candidate_file_paths:
+        # 保守策略：宁可多花 token 也不误判任务为闲聊
+        # 安全门控：正则全匹配 + 无文件路径 + 无图片附件 + 消息长度 ≤ 50 字
+        _is_chitchat = (
+            _CHITCHAT_RE.match(user_message.strip())
+            and not candidate_file_paths
+            and not images
+            and len(user_message.strip()) <= 50
+        )
+        if _is_chitchat:
             logger.debug("chitchat 短路: %s", user_message[:30])
             _plan_tags: tuple[str, ...] = ("plan_not_needed",) if chat_mode == "plan" else ()
-            return await self._build_all_tools_result(
-                user_message=user_message,
-                candidate_file_paths=candidate_file_paths,
+            return SkillMatchResult(
+                skills_used=[],
+                route_mode="chitchat",
+                system_contexts=[],
+                parameterized=False,
                 write_hint="read_only",
                 task_tags=_plan_tags,
             )
@@ -288,12 +380,37 @@ class SkillRouter:
             if "simple_read" not in lexical_tags:
                 lexical_tags.append("simple_read")
         deduped_tags = tuple(dict.fromkeys(lexical_tags))
-        return await self._build_all_tools_result(
-            user_message=user_message,
-            candidate_file_paths=candidate_file_paths,
-            write_hint=classified_hint,
-            task_tags=deduped_tags,
-        )
+
+        # 并行启动 LLM 工具路由分类（与文件结构扫描同步进行）
+        _llm_route_task: asyncio.Task | None = None
+        if self._route_llm_enabled:
+            _llm_route_task = asyncio.create_task(
+                self._classify_tool_route_llm(user_message)
+            )
+
+        try:
+            result = await self._build_all_tools_result(
+                user_message=user_message,
+                candidate_file_paths=candidate_file_paths,
+                write_hint=classified_hint,
+                task_tags=deduped_tags,
+            )
+        except BaseException:
+            if _llm_route_task is not None and not _llm_route_task.done():
+                _llm_route_task.cancel()
+            raise
+
+        # 收割 LLM 分类结果
+        route_tool_tags: tuple[str, ...] = ()
+        if _llm_route_task is not None:
+            route_tool_tags = await _llm_route_task
+
+        # 图片附件时强制包含 vision
+        if images and "vision" not in route_tool_tags:
+            route_tool_tags = ("vision",)
+            logger.debug("检测到图片附件，强制 route_tool_tags=vision")
+
+        return replace(result, route_tool_tags=route_tool_tags)
 
     @staticmethod
     def _has_explicit_mode_intent(user_message: str) -> bool:
@@ -590,6 +707,7 @@ class SkillRouter:
                         messages=messages,
                         max_tokens=60,
                         temperature=0,
+                        extra_body=_AUX_NO_THINKING_EXTRA_BODY,
                     ),
                     timeout=timeout,
                 )
