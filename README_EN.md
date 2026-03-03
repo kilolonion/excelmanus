@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.9-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.0-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/tests-3900+-brightgreen.svg" alt="Tests" />
 </p>
@@ -25,7 +25,7 @@
 
 **ExcelManus** is a fully open-source, LLM-powered Excel Agent framework. Describe what you need in plain language and it will read data, write formulas, run analysis scripts, and create charts — like an AI assistant that truly understands Excel.
 
-- **Three interfaces** — Web UI / CLI Terminal / Telegram Bot
+- **Four interfaces** — Web UI / CLI Terminal / Multi-Channel Bot (Telegram · QQ · Feishu) / REST API
 - **Any LLM** — OpenAI · Claude · Gemini · local Ollama / vLLM, plug and play
 - **Production-ready** — Multi-arch Docker · hot updates · multi-user isolation · approval flows · version rollback
 
@@ -62,9 +62,9 @@ Auto-validates before task completion, blocks agent if checks fail
 </td>
 <td width="50%">
 
-### 🧠 Persistent Memory & Playbook
+### 🧠 Persistent Memory & Session History Awareness
 Cross-session memory for user preferences and operation patterns; Playbook auto-distills task experience
-Semantic dedup, smart context compaction, relevance-based differential truncation
+**Episodic Memory**: auto-generates structured session summaries, semantically retrieves past sessions to inject context
 
 ### 🧩 Skillpack & ClawHub Market
 One Markdown = one skill, auto-discovery, on-demand activation
@@ -78,9 +78,9 @@ Large files and complex tasks auto-delegated to sub-agents
 Adaptive window perception engine for intelligent context focus management
 Embedding-powered parallel semantic retrieval for memory / files / skills, zero extra latency
 
-### 🤖 Telegram Bot
-Chat with ExcelManus directly through Telegram, with file send/receive support
-User whitelist for access control
+### 🤖 Multi-Channel Bot
+Telegram · QQ · Feishu — three channels with file send/receive
+Three concurrency modes (Queue / Steer / Guide), adaptive streaming output strategies
 
 ### � In-App Hot Update
 One-click version check → backup → update → auto-restart from Web UI
@@ -224,19 +224,23 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 
 </details>
 
-### Telegram Bot
+### Multi-Channel Bot
 
-Chat with ExcelManus through Telegram, with file send/receive support:
+Supports **Telegram** · **QQ** · **Feishu** with a unified message handling framework:
+
+| Feature | Description |
+| --- | --- |
+| **Unified Adapter Layer** | Message send/receive, file upload/download, event bridging abstracted uniformly |
+| **Three Concurrency Modes** | Queue · Steer · Guide, switch via `/concurrency` |
+| **Adaptive Streaming Output** | Telegram edit-stream · QQ progressive paragraphs · Feishu card-stream, optimal UX per channel |
+| **HTTP Retry & Backoff** | Connection-level retry + exponential backoff + 429 Retry-After respect |
 
 ```bash
+# Telegram
 EXCELMANUS_TG_TOKEN=xxx python3 excelmanus_tg_bot.py
-```
 
-| Env Var | Description |
-| --- | --- |
-| `EXCELMANUS_TG_TOKEN` | Telegram Bot Token (required) |
-| `EXCELMANUS_API_URL` | Backend URL (default `http://localhost:8000`) |
-| `EXCELMANUS_TG_USERS` | Allowed Telegram user IDs, comma-separated (empty = no restriction) |
+# QQ / Feishu: configure channel credentials in Web UI settings
+```
 
 ### REST API
 
@@ -304,6 +308,7 @@ ExcelManus includes an **adaptive window perception engine** and **embedding-pow
 | **Semantic Memory Retrieval** | User preferences and history vectorized, auto-recalled for new tasks |
 | **Semantic File Registry** | Workspace files indexed by embedding, injected into context by relevance |
 | **Semantic Skill Router** | Skillpack descriptions vectorized, auto-matches optimal skill |
+| **Session History Retrieval** | Auto-generates structured session summaries, semantic / filename / recency three-path hybrid retrieval, injects history context on first turn |
 | **Error Solution Store** | Error → solution vector index, auto-recalls past fixes for similar errors |
 | **Smart Context Compaction** | Relevance-scored differential truncation, high-relevance messages retain more detail |
 
@@ -397,9 +402,9 @@ Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse prox
 Images support **amd64** + **arm64** dual architecture:
 
 ```bash
-docker pull kilol/excelmanus-api:1.6.9       # Backend API
-docker pull kilol/excelmanus-sandbox:1.6.9   # Code sandbox (optional)
-docker pull kilol/excelmanus-web:1.6.9       # Frontend Web
+docker pull kilol/excelmanus-api:1.7.0       # Backend API
+docker pull kilol/excelmanus-sandbox:1.7.0   # Code sandbox (optional)
+docker pull kilol/excelmanus-web:1.7.0       # Frontend Web
 ```
 
 ### Windows GUI Setup
@@ -462,12 +467,14 @@ For manual deployment, see [Ops Manual](docs/ops-manual_en.md).
 
 | Optimization | Impact |
 | --- | --- |
+| **Claude Layered Cache** | System prompt split into stable prefix + dynamic block, 2nd request TTFT drops to 3-5s |
+| **Chitchat Fast Path** | Chitchat routing skips tool building, prompt tokens 28k → ~3k |
 | **SACR Sparse Compression** | Strips null keys from tool results, up to **74% token savings** on sparse data |
 | **Single-Pass Extraction** | Strong VLM models complete all 4 extraction phases in one call |
 | **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns |
 | **Auxiliary Model Separation** | Routing/sub-agents use lightweight AUX model, main model focuses on reasoning |
 | **Context Budget Management** | Dynamic budget allocation with relevance-scored differential truncation |
-| **Parallel Semantic Retrieval** | `asyncio.gather` runs memory/file/skill retrieval in parallel, zero extra latency |
+| **Parallel Semantic Retrieval** | `asyncio.gather` runs memory/file/skill/session-history retrieval in parallel, zero extra latency |
 | **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler |
 | **Database WAL Mode** | SQLite WAL for concurrent reads/writes |
 
@@ -486,6 +493,7 @@ Only 3 env vars to get started. Common configuration categories:
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
 | **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EMBEDDING_MODEL` |
+| **Session Summary** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `SESSION_SUMMARY_MIN_TURNS` |
 
 Full reference in [Configuration](docs/configuration_en.md).
 

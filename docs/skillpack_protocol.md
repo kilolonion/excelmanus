@@ -28,7 +28,7 @@
 - 斜杠命令：`/<skill_name> args...` 直连技能（`slash_direct`）。
 - 非斜杠消息：进入 `fallback`，所有工具始终可见（core 完整 schema，extended 摘要 schema）。
 - LLM 通过 `activate_skill` 注入领域知识，通过 `expand_tools` 展开指定类别的扩展工具获取完整参数。
-- **语义技能路由**（v1.6.9）：启用 Embedding 后，`SemanticSkillRouter` 对 Skillpack 描述建立向量索引，`chat()` 中并行检索自动匹配最优技能包，并将匹配提示注入 system prompt。未启用 Embedding 时降级为无操作。
+- **语义技能路由**：启用 Embedding 后，`SemanticSkillRouter` 对 Skillpack 描述建立向量索引，`chat()` 中并行检索自动匹配最优技能包，并将匹配提示注入 system prompt。未启用 Embedding 时降级为无操作。
 
 ## 5. 内置 system Skillpacks（权威清单）
 - `data_basic`

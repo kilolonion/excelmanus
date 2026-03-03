@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.6.9-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.0-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/tests-3900+-brightgreen.svg" alt="Tests" />
 </p>
@@ -25,7 +25,7 @@
 
 **ExcelManus** 是一个完全开源的 LLM 驱动 Excel Agent 框架。用一句话描述你想做的事，它就能自动读取数据、编写公式、运行分析脚本、绘制图表 —— 像一个真正理解 Excel 的 AI 助手。
 
-- **三种交互入口** — Web UI / CLI 终端 / Telegram Bot，按需选用
+- **四种交互入口** — Web UI / CLI 终端 / 多渠道 Bot（Telegram · QQ · 飞书） / REST API
 - **任意大模型** — OpenAI · Claude · Gemini · 本地 Ollama / vLLM，即插即用
 - **生产可用** — Docker 多架构镜像 · 热更新 · 多用户隔离 · 操作审批 · 版本回滚
 
@@ -62,9 +62,9 @@ Excel 修改前后 Diff 可视化，文本文件 unified diff 展示
 </td>
 <td width="50%">
 
-### 🧠 持久记忆 & Playbook
+### 🧠 持久记忆 & 会话历史感知
 跨会话记忆用户偏好与操作模式；Playbook 自动归纳任务经验
-语义去重、智能上下文压缩、按相关性差异化截断
+**会话历史感知**：自动生成结构化会话摘要，语义检索历史会话注入上下文
 
 ### 🧩 Skillpack & ClawHub 市场
 一个 Markdown = 一个技能，自动发现、按需激活
@@ -78,9 +78,9 @@ Excel 修改前后 Diff 可视化，文本文件 unified diff 展示
 自适应窗口感知引擎，智能管理上下文焦点
 词嵌入驱动的语义记忆 / 文件 / 技能并行检索，零额外延迟
 
-### 🤖 Telegram Bot
-通过 Telegram 直接与 ExcelManus 对话，支持文件收发
-用户白名单控制访问权限
+### 🤖 多渠道 Bot
+Telegram · QQ · 飞书三渠道接入，支持文件收发
+三种并发模式（排队 / 转向 / 引导），自适应流式输出策略
 
 ### � 应用内热更新
 Web UI 一键检测新版本 → 备份 → 更新 → 自动重启
@@ -228,19 +228,23 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 
 </details>
 
-### Telegram Bot
+### 多渠道 Bot
 
-通过 Telegram 与 ExcelManus 交互，支持消息对话和文件收发：
+支持 **Telegram** · **QQ** · **飞书** 三种机器人渠道，统一消息处理框架：
+
+| 特性 | 说明 |
+| --- | --- |
+| **统一适配层** | 消息收发、文件上传/下载、事件桥接统一抽象 |
+| **三种并发模式** | 排队（Queue）· 转向（Steer）· 引导（Guide），`/concurrency` 切换 |
+| **自适应流式输出** | Telegram 编辑流 · QQ 段落渐进 · 飞书卡片流，各渠道最优体验 |
+| **HTTP 重试 & 退避** | 连接级重试 + 指数退避 + 429 Retry-After 尊重 |
 
 ```bash
+# Telegram
 EXCELMANUS_TG_TOKEN=xxx python3 excelmanus_tg_bot.py
-```
 
-| 环境变量 | 说明 |
-| --- | --- |
-| `EXCELMANUS_TG_TOKEN` | Telegram Bot Token（必填） |
-| `EXCELMANUS_API_URL` | 后端地址（默认 `http://localhost:8000`） |
-| `EXCELMANUS_TG_USERS` | 允许使用的 user ID，逗号分隔（留空 = 不限制） |
+# QQ / 飞书：通过 Web UI 设置页配置渠道凭据即可
+```
 
 ### REST API
 
@@ -308,6 +312,7 @@ ExcelManus 内置**自适应窗口感知引擎**和**词嵌入语义检索系统
 | **语义记忆检索** | 用户偏好和历史操作向量化存储，新任务自动召回相关记忆 |
 | **语义文件注册表** | 对工作区文件建立 embedding 索引，按语义相关性注入上下文 |
 | **语义技能路由** | 对 Skillpack 描述建立向量索引，自动匹配最优技能 |
+| **会话历史检索** | 自动生成结构化会话摘要，语义 / 文件名 / 时间序三路混合检索，首轮注入历史上下文 |
 | **错误解决方案库** | 错误 → 解决方案向量索引，同类错误自动召回历史解法 |
 | **智能上下文压缩** | 按语义相关性评分差异化截断，高相关消息保留更多细节 |
 
@@ -401,9 +406,9 @@ docker compose -f deploy/docker-compose.yml up -d
 镜像支持 **amd64** + **arm64** 双架构：
 
 ```bash
-docker pull kilol/excelmanus-api:1.6.9       # 后端 API
-docker pull kilol/excelmanus-sandbox:1.6.9   # 代码沙盒（可选）
-docker pull kilol/excelmanus-web:1.6.9       # 前端 Web
+docker pull kilol/excelmanus-api:1.7.0       # 后端 API
+docker pull kilol/excelmanus-sandbox:1.7.0   # 代码沙盒（可选）
+docker pull kilol/excelmanus-web:1.7.0       # 前端 Web
 ```
 
 ### Windows 图形化部署
@@ -466,12 +471,14 @@ ExcelManus 内置应用级热更新能力：
 
 | 优化项 | 效果 |
 | --- | --- |
+| **Claude 分层 Cache** | System Prompt 拆分为稳定前缀 + 动态块，第 2 次请求 TTFT 降至 3-5s |
+| **闲聊快速通道** | Chitchat 路由跳过工具构建，prompt tokens 28k → ~3k |
 | **SACR 稀疏压缩** | 工具结果去除 null 键，高空值率数据最高节省 **74% token** |
 | **单轮合并提取** | 强 VLM 模型单次调用完成 4 阶段视觉提取 |
 | **图片生命周期管理** | 自动管理多轮对话中的图片保留/降级，避免重复传输 |
 | **辅助模型分离** | 路由/子代理走轻量 AUX 模型，主模型专注推理 |
 | **上下文预算管理** | 动态分配预算，语义相关性评分驱动差异化截断 |
-| **语义并行检索** | `asyncio.gather` 并行执行记忆/文件/技能检索，零额外延迟 |
+| **语义并行检索** | `asyncio.gather` 并行执行记忆/文件/技能/历史会话检索，零额外延迟 |
 | **SSE 事件去重** | 前端统一 `dispatchSSEEvent` 处理器 |
 | **数据库 WAL 模式** | SQLite 启用 WAL，并发读写不阻塞 |
 
@@ -490,6 +497,7 @@ ExcelManus 内置应用级热更新能力：
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
 | **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EMBEDDING_MODEL` |
+| **会话摘要** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `SESSION_SUMMARY_MIN_TURNS` |
 
 完整配置列表见 [配置文档](docs/configuration.md)。
 
