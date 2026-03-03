@@ -30,6 +30,23 @@ from excelmanus.providers.stream_types import (
 
 logger = get_logger("claude_provider")
 
+# Anthropic 原生 API 已知合法的顶层参数（用于过滤 extra_body 中的非原生字段）
+_CLAUDE_NATIVE_BODY_KEYS = frozenset({
+    "model", "messages", "max_tokens", "system", "tools", "tool_choice",
+    "thinking", "stream", "temperature", "top_p", "top_k", "stop_sequences",
+    "metadata", "service_tier",
+})
+
+
+def _strip_non_claude_extra_body(extra_body: dict[str, Any]) -> dict[str, Any]:
+    """过滤 extra_body 中非 Anthropic 原生字段，避免 API 400 错误。
+
+    保留 Claude 原生参数（如 thinking）和未知但可能为新版 API 新增的字段，
+    仅移除已知的其他 provider 专用字段。
+    """
+    _NON_CLAUDE_KEYS = {"enable_thinking", "thinking_budget", "reasoning", "reasoning_effort"}
+    return {k: v for k, v in extra_body.items() if k not in _NON_CLAUDE_KEYS}
+
 # 默认 max_tokens（Claude 要求必传）
 # Claude 4 系列支持 64k+ 输出 token，提升默认值以避免长输出截断。
 _DEFAULT_MAX_TOKENS = 16384
@@ -258,11 +275,13 @@ def _openai_messages_to_claude(
             }
         ]
     elif system_parts:
-        # 多个 system block：仅在最后一个上设置 cache_control breakpoint
+        # 分层 cache 优化：在第一个 system block（稳定前缀）上设置 cache_control
+        # breakpoint，使 session 内不变的前缀可被 Anthropic 缓存复用。
+        # 后续 block（动态内容）每请求可自由变化而不影响前缀 cache 命中。
         system_blocks: list[dict[str, Any]] = []
         for i, part in enumerate(system_parts):
             block: dict[str, Any] = {"type": "text", "text": part}
-            if i == len(system_parts) - 1:
+            if i == 0:
                 block["cache_control"] = {"type": "ephemeral"}
             system_blocks.append(block)
         system = system_blocks
@@ -541,9 +560,9 @@ class ClaudeClient:
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
 
-        # 透传 extra_body：将用户自定义参数合并到请求体
+        # 透传 extra_body：过滤非 Claude 原生字段后合并到请求体
         if extra_body and isinstance(extra_body, dict):
-            body.update(extra_body)
+            body.update(_strip_non_claude_extra_body(extra_body))
 
         url = f"{self._base_url}/v1/messages"
         headers = {
@@ -621,9 +640,9 @@ class ClaudeClient:
         mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
         if mapped_tool_choice is not None:
             body["tool_choice"] = mapped_tool_choice
-        # 透传 extra_body
+        # 透传 extra_body：过滤非 Claude 原生字段
         if extra_body and isinstance(extra_body, dict):
-            body.update(extra_body)
+            body.update(_strip_non_claude_extra_body(extra_body))
 
         url = f"{self._base_url}/v1/messages"
         headers = {
