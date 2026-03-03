@@ -18,10 +18,12 @@ from __future__ import annotations
 import json
 import logging
 from datetime import datetime
+
 from typing import TYPE_CHECKING, Any
 
 import openai
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 
 if TYPE_CHECKING:
@@ -157,6 +159,7 @@ class MemoryMaintainer:
             response = await self._client.chat.completions.create(
                 model=self._model,
                 messages=messages,
+                extra_body=_AUX_NO_THINKING_EXTRA_BODY,
             )
         except Exception:
             logger.error("记忆维护 LLM 调用失败", exc_info=True)

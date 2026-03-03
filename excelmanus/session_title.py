@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Any
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
+
 logger = logging.getLogger(__name__)
 
 _TITLE_SYSTEM_PROMPT = (
@@ -47,6 +49,7 @@ async def generate_session_title(
             ],
             max_tokens=30,
             temperature=0.3,
+            extra_body=_AUX_NO_THINKING_EXTRA_BODY,
         )
         title = (resp.choices[0].message.content or "").strip().strip('"\'')
         if not title:

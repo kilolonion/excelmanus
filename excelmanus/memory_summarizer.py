@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.logger import get_logger
 
 logger = get_logger("memory_summarizer")
@@ -56,6 +57,7 @@ async def summarize_history(
             ],
             max_tokens=max_summary_tokens,
             temperature=0.0,
+            extra_body=_AUX_NO_THINKING_EXTRA_BODY,
         )
         content = response.choices[0].message.content
         return (content or "").strip()

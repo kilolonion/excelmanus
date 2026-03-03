@@ -249,7 +249,7 @@ class TestParseEmx:
 
     def test_invalid_version(self):
         with pytest.raises(EMXImportError, match="不支持的版本"):
-            parse_emx({"format": EMX_FORMAT_ID, "version": "2.0.0", "session": {}, "messages": []})
+            parse_emx({"format": EMX_FORMAT_ID, "version": "3.0.0", "session": {}, "messages": []})
 
     def test_missing_session(self):
         with pytest.raises(EMXImportError, match="缺少 session"):
