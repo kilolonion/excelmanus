@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
@@ -62,6 +63,8 @@ class MessageHandler:
         self.allowed_users = allowed_users or set()
         # (chat_id:user_id) → PendingInteraction
         self._pending: dict[str, PendingInteraction] = {}
+        # per-user async locks: 防止同一用户并发 stream_chat 导致 session 覆盖/竞争
+        self._user_locks: dict[str, asyncio.Lock] = {}
 
     @staticmethod
     def _pending_key(chat_id: str, user_id: str) -> str:
@@ -75,30 +78,51 @@ class MessageHandler:
 
     # ── 入口 ──
 
+    def _get_user_lock(self, chat_id: str, user_id: str) -> asyncio.Lock:
+        """获取或创建 per-user 异步锁。"""
+        key = self._pending_key(chat_id, user_id)
+        lock = self._user_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            self._user_locks[key] = lock
+        return lock
+
+    async def _with_user_lock(
+        self, msg: ChannelMessage, coro_func, *args,
+    ) -> None:
+        """在 per-user 锁保护下执行协程，排队时通知用户。"""
+        lock = self._get_user_lock(msg.chat_id, msg.user.user_id)
+        if lock.locked():
+            await self.adapter.send_text(
+                msg.chat_id, "⏳ 上一条消息正在处理中，已排队等待…",
+            )
+        async with lock:
+            await coro_func(msg, *args)
+
     async def handle_message(self, msg: ChannelMessage) -> None:
         """处理入站消息的统一入口。"""
         if not self.check_user(msg.user.user_id):
             await self.adapter.send_text(msg.chat_id, "⛔ 无权限使用此 Bot")
             return
 
-        # 回调数据（按钮点击）
+        # 回调数据（按钮点击）— 需要锁保护以防与进行中的 chat 竞争
         if msg.callback_data:
-            await self._handle_callback(msg)
+            await self._with_user_lock(msg, self._handle_callback)
             return
 
-        # 文件上传
+        # 文件上传 — 需要锁保护
         if msg.files:
-            await self._handle_file_upload(msg)
+            await self._with_user_lock(msg, self._handle_file_upload)
             return
 
-        # 命令
+        # 命令 — 不加锁，确保 /abort /new 等在处理中仍可执行
         if msg.is_command:
             await self._handle_command(msg)
             return
 
-        # 普通文本
+        # 普通文本 — 需要锁保护
         if msg.text.strip():
-            await self._handle_text(msg)
+            await self._with_user_lock(msg, self._handle_text)
 
     # ── 命令路由 ──
 
