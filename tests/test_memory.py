@@ -571,3 +571,139 @@ class TestRepairDanglingToolCalls:
         memory.add_user_message("hello")
         memory.add_assistant_message("hi there")
         assert memory.repair_dangling_tool_calls() == 0
+
+
+# ---------------------------------------------------------------------------
+# trim_for_request 消息清洗回归测试
+# ---------------------------------------------------------------------------
+
+
+class TestSanitizeMessagesForApi:
+    """验证 trim_for_request 在发送到 API 前剥离非标准字段。
+
+    回归场景：LLM 返回的 assistant 消息包含 provider 特有字段
+    （thinking / reasoning / reasoning_content），这些字段被存入 memory 后
+    在后续轮次随 trim_for_request 一并发送给 API，导致部分 provider
+    返回 400 Bad Request。
+    """
+
+    def test_strips_thinking_fields_from_assistant(self, memory: ConversationMemory) -> None:
+        """assistant 消息中的 thinking/reasoning/reasoning_content 应被剥离。"""
+        memory.add_user_message("hello")
+        # 模拟 add_assistant_tool_message 存入带 provider 扩展字段的消息
+        memory.add_assistant_tool_message({
+            "role": "assistant",
+            "content": "Let me check",
+            "tool_calls": [
+                {"id": "tc_1", "type": "function", "function": {"name": "read_excel", "arguments": "{}"}},
+            ],
+            "thinking": "I should read the file first",
+            "reasoning": "I should read the file first",
+            "reasoning_content": "I should read the file first",
+        })
+        memory.add_tool_result("tc_1", "ok")
+
+        msgs = memory.trim_for_request(
+            system_prompts=["You are a helpful assistant."],
+            max_context_tokens=128000,
+        )
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        a = assistant_msgs[0]
+        assert "thinking" not in a
+        assert "reasoning" not in a
+        assert "reasoning_content" not in a
+        # 标准字段保留
+        assert a["role"] == "assistant"
+        assert a["content"] == "Let me check"
+        assert len(a["tool_calls"]) == 1
+
+    def test_strips_null_tool_calls(self, memory: ConversationMemory) -> None:
+        """tool_calls 为 None 时应从输出中移除该键。"""
+        memory.add_user_message("hello")
+        memory.add_assistant_tool_message({
+            "role": "assistant",
+            "content": "Sure thing",
+            "tool_calls": None,
+            "reasoning_content": None,
+        })
+
+        msgs = memory.trim_for_request(
+            system_prompts=["system"],
+            max_context_tokens=128000,
+        )
+        assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
+        assert len(assistant_msgs) == 1
+        a = assistant_msgs[0]
+        assert "tool_calls" not in a
+        assert "reasoning_content" not in a
+
+    def test_preserves_standard_tool_message_fields(self, memory: ConversationMemory) -> None:
+        """tool 消息应仅保留 role/content/tool_call_id/name。"""
+        memory.add_user_message("go")
+        memory.add_assistant_tool_message({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tc_x", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+            ],
+        })
+        memory.add_tool_result("tc_x", "done")
+
+        msgs = memory.trim_for_request(
+            system_prompts=["sys"],
+            max_context_tokens=128000,
+        )
+        tool_msgs = [m for m in msgs if m.get("role") == "tool"]
+        assert len(tool_msgs) == 1
+        t = tool_msgs[0]
+        assert set(t.keys()) <= {"role", "content", "tool_call_id", "name"}
+
+    def test_ensures_first_message_is_user_after_truncation(self, memory: ConversationMemory) -> None:
+        """截断后首条消息若为 assistant，应被移除直到首条为 user。"""
+        # 构造：user → assistant(tc) → tool → assistant(text) → user → assistant
+        memory.add_user_message("first")
+        memory.add_assistant_tool_message({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [
+                {"id": "tc_a", "type": "function", "function": {"name": "t", "arguments": "{}"}},
+            ],
+        })
+        memory.add_tool_result("tc_a", "ok")
+        memory.add_assistant_message("middle text")
+        memory.add_user_message("second")
+        memory.add_assistant_message("final")
+
+        # 手动移除第一条 user 消息模拟截断效果
+        memory._messages.pop(0)
+        # 现在首条为 assistant(tc)
+
+        msgs = memory.trim_for_request(
+            system_prompts=["sys"],
+            max_context_tokens=128000,
+        )
+        non_system = [m for m in msgs if m.get("role") != "system"]
+        assert non_system, "应至少保留一条非 system 消息"
+        assert non_system[0]["role"] == "user", (
+            f"首条非 system 消息应为 user，实际为 {non_system[0]['role']}"
+        )
+
+    def test_user_multimodal_content_preserved(self, memory: ConversationMemory) -> None:
+        """user 消息的多模态 content（list）结构应原样保留。"""
+        parts = [
+            {"type": "text", "text": "describe this"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc", "detail": "auto"}},
+        ]
+        memory.add_user_message(parts)
+
+        msgs = memory.trim_for_request(
+            system_prompts=["sys"],
+            max_context_tokens=128000,
+        )
+        user_msgs = [m for m in msgs if m.get("role") == "user"]
+        assert len(user_msgs) == 1
+        # content 结构保留（_image_id 等内部字段应已被剥离）
+        u = user_msgs[0]
+        assert isinstance(u["content"], list)
+        assert "_image_id" not in u

@@ -165,7 +165,7 @@ class TaskReflector:
         """
         from excelmanus.providers import create_client
 
-        model = self._config.aux_model or self._config.main_model
+        model = self._config.aux_model or self._config.model
         if not model:
             logger.debug("无可用模型，跳过反思")
             return []
@@ -179,8 +179,9 @@ class TaskReflector:
 
         try:
             client = create_client(
-                base_url=self._config.aux_base_url or self._config.main_base_url,
-                api_key=self._config.aux_api_key or self._config.main_api_key,
+                base_url=self._config.aux_base_url or self._config.base_url,
+                api_key=self._config.aux_api_key or self._config.api_key,
+                protocol=self._config.aux_protocol,
             )
             response = await client.chat.completions.create(
                 model=model,

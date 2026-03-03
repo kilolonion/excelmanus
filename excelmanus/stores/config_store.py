@@ -12,12 +12,16 @@ from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.db_adapter import user_filter_clause
+from excelmanus.security.cipher import TokenCipher
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
     from excelmanus.db_adapter import ConnectionAdapter
 
 logger = logging.getLogger(__name__)
+
+# 模块级单例，避免每次操作都重新派生密钥
+_api_key_cipher = TokenCipher()
 
 
 def _now_iso() -> str:
@@ -38,13 +42,22 @@ class GlobalConfigStore:
 
     # ── model_profiles CRUD ──────────────────────────────
 
+    @staticmethod
+    def _decrypt_profile_row(row: dict[str, Any]) -> dict[str, Any]:
+        """解密 profile 行中的 api_key（兼容明文迁移）。"""
+        d = dict(row)
+        raw = d.get("api_key")
+        if raw:
+            d["api_key"] = _api_key_cipher.decrypt_or_passthrough(raw)
+        return d
+
     def list_profiles(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT name, model, api_key, base_url, description, protocol, "
             "thinking_mode, model_family, custom_extra_body, custom_extra_headers "
             "FROM model_profiles ORDER BY id ASC"
         ).fetchall()
-        return [dict(row) for row in rows]
+        return [self._decrypt_profile_row(row) for row in rows]
 
     def get_profile(self, name: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -53,7 +66,7 @@ class GlobalConfigStore:
             "FROM model_profiles WHERE name = ?",
             (name,),
         ).fetchone()
-        return dict(row) if row else None
+        return self._decrypt_profile_row(row) if row else None
 
     def add_profile(
         self,
@@ -70,19 +83,21 @@ class GlobalConfigStore:
     ) -> bool:
         now = _now_iso()
         try:
+            enc_api_key = _api_key_cipher.encrypt(api_key) if api_key else api_key
             self._conn.execute(
                 "INSERT INTO model_profiles "
                 "(name, model, api_key, base_url, description, protocol, "
                 "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
                 "created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, model, api_key, base_url, description, protocol,
+                (name, model, enc_api_key, base_url, description, protocol,
                  thinking_mode, model_family, custom_extra_body, custom_extra_headers,
                  now, now),
             )
             self._conn.commit()
             return True
         except Exception:
+            logger.warning("添加模型配置失败 (name=%s)", name, exc_info=True)
             return False
 
     def update_profile(
@@ -110,7 +125,11 @@ class GlobalConfigStore:
             params.append(model)
         if api_key is not None:
             sets.append("api_key = ?")
-            params.append(api_key)
+            try:
+                params.append(_api_key_cipher.encrypt(api_key) if api_key else api_key)
+            except Exception:
+                logger.warning("加密 api_key 失败，跳过该字段更新")
+                sets.pop()  # 撤销刚添加的 SET 子句
         if base_url is not None:
             sets.append("base_url = ?")
             params.append(base_url)

@@ -450,6 +450,152 @@ class TestErrorRecoveryStrategy:
             assert "错误恢复策略内容。" in text, f"write_hint={hint} 时未注入 error_recovery"
 
 
+class TestInheritStrategies:
+    """compose_for_subagent 策略继承测试。"""
+
+    @staticmethod
+    def _make_full_dir(tmp_path: Path) -> Path:
+        """创建含 core + strategies + subagent 的完整 prompts 目录。"""
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "00_id.md").write_text(
+            '---\nname: id\nversion: "1.0"\npriority: 0\nlayer: core\n---\n身份。',
+            encoding="utf-8",
+        )
+        strats = tmp_path / "strategies"
+        strats.mkdir()
+        (strats / "error_recovery.md").write_text(
+            '---\nname: error_recovery\nversion: "1.0"\npriority: 25\nlayer: strategy\n'
+            'conditions: {}\n---\n错误恢复内容。',
+            encoding="utf-8",
+        )
+        (strats / "sandbox_awareness.md").write_text(
+            '---\nname: sandbox_awareness\nversion: "1.0"\npriority: 20\nlayer: strategy\n'
+            'conditions: {}\n---\n沙盒感知内容。',
+            encoding="utf-8",
+        )
+        (strats / "run_code_patterns.md").write_text(
+            '---\nname: run_code_patterns\nversion: "1.0"\npriority: 35\nlayer: strategy\n'
+            'conditions:\n  chat_mode: "write"\n---\nrun_code 模板。',
+            encoding="utf-8",
+        )
+        sa = tmp_path / "subagent"
+        sa.mkdir()
+        (sa / "_base.md").write_text(
+            '---\nname: base\npriority: 0\nlayer: subagent\n---\n共享约束。',
+            encoding="utf-8",
+        )
+        (sa / "explorer.md").write_text(
+            '---\nname: explorer\npriority: 10\nlayer: subagent\n---\n探查专用。',
+            encoding="utf-8",
+        )
+        (sa / "worker.md").write_text(
+            '---\nname: worker\npriority: 10\nlayer: subagent\n---\n写入专用。',
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_no_inherit_strategies_no_strategies_in_output(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent("explorer")
+        assert result is not None
+        assert "错误恢复内容。" not in result
+        assert "沙盒感知内容。" not in result
+
+    def test_explicit_strategy_names(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "explorer", inherit_strategies=["error_recovery", "sandbox_awareness"]
+        )
+        assert result is not None
+        assert "错误恢复内容。" in result
+        assert "沙盒感知内容。" in result
+        assert "run_code 模板。" not in result  # 未指定，不应包含
+
+    def test_universal_inherits_unconditional_only(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "worker", inherit_strategies=["__universal__"]
+        )
+        assert result is not None
+        assert "错误恢复内容。" in result  # conditions: {}
+        assert "沙盒感知内容。" in result  # conditions: {}
+        assert "run_code 模板。" not in result  # has conditions → excluded
+
+    def test_all_inherits_everything(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "worker", inherit_strategies=["__all__"]
+        )
+        assert result is not None
+        assert "错误恢复内容。" in result
+        assert "沙盒感知内容。" in result
+        assert "run_code 模板。" in result  # __all__ includes conditional too
+
+    def test_mixed_universal_and_explicit(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "explorer",
+            inherit_strategies=["__universal__", "run_code_patterns"],
+        )
+        assert result is not None
+        assert "错误恢复内容。" in result
+        assert "沙盒感知内容。" in result
+        assert "run_code 模板。" in result  # explicitly named
+
+    def test_inherited_strategies_sorted_by_priority(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "worker", inherit_strategies=["__all__"]
+        )
+        assert result is not None
+        # sandbox(priority=20) should come before error_recovery(priority=25)
+        # which should come before run_code_patterns(priority=35)
+        sandbox_pos = result.index("沙盒感知内容。")
+        error_pos = result.index("错误恢复内容。")
+        run_code_pos = result.index("run_code 模板。")
+        assert sandbox_pos < error_pos < run_code_pos
+
+    def test_empty_inherit_strategies_list(self, tmp_path: Path) -> None:
+        d = self._make_full_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent("explorer", inherit_strategies=[])
+        assert result is not None
+        assert "错误恢复内容。" not in result
+
+    def test_real_subagent_files_with_strategy_inheritance(self) -> None:
+        """验证实际 prompts/ 文件：子代理可继承策略。"""
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not (prompts_dir / "subagent").is_dir():
+            pytest.skip("prompts/subagent/ 不存在")
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+        # subagent 应继承所有策略
+        result = composer.compose_for_subagent("subagent", inherit_strategies=["__all__"])
+        assert result is not None
+        assert "继承策略" in result
+        # explorer 应继承 error_recovery 和 sandbox_awareness
+        result = composer.compose_for_subagent(
+            "explorer", inherit_strategies=["error_recovery", "sandbox_awareness"]
+        )
+        assert result is not None
+        assert "错误恢复策略" in result
+        assert "沙盒安全机制" in result
+
+
 class TestPlanModeStrategyRouting:
     """plan 模式策略分流测试。"""
 
@@ -492,6 +638,124 @@ class TestPlanModeStrategyRouting:
         )
         text = composer.compose_strategies_text(ctx)
         assert "## 规划模式轻量分流" in text
+
+
+class TestVariableSubstitution:
+    """变量替换机制测试。"""
+
+    @staticmethod
+    def _make_dir_with_placeholders(tmp_path: Path) -> Path:
+        core = tmp_path / "core"
+        core.mkdir()
+        (core / "00_id.md").write_text(
+            '---\nname: id\nversion: "1.0"\npriority: 0\nlayer: core\n---\n'
+            '根目录：`{workspace_root}`。',
+            encoding="utf-8",
+        )
+        strats = tmp_path / "strategies"
+        strats.mkdir()
+        (strats / "topo.md").write_text(
+            '---\nname: topo\nversion: "1.0"\npriority: 15\nlayer: strategy\n'
+            'conditions: {}\n---\n工作区 `{workspace_root}` 拓扑。',
+            encoding="utf-8",
+        )
+        sa = tmp_path / "subagent"
+        sa.mkdir()
+        (sa / "_base.md").write_text(
+            '---\nname: base\npriority: 0\nlayer: subagent\n---\n基础 {workspace_root}。',
+            encoding="utf-8",
+        )
+        (sa / "worker.md").write_text(
+            '---\nname: worker\npriority: 10\nlayer: subagent\n---\n工人 {workspace_root}。',
+            encoding="utf-8",
+        )
+        return tmp_path
+
+    def test_compose_text_substitutes_variables(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext(write_hint="unknown")
+        text = composer.compose_text(ctx, variables={"workspace_root": "/data/user1"})
+        assert "/data/user1" in text
+        assert "{workspace_root}" not in text
+
+    def test_compose_text_without_variables_keeps_placeholder(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext(write_hint="unknown")
+        text = composer.compose_text(ctx)
+        assert "{workspace_root}" in text
+
+    def test_compose_strategies_text_substitutes_variables(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext()
+        text = composer.compose_strategies_text(ctx, variables={"workspace_root": "/ws"})
+        assert "/ws" in text
+        assert "{workspace_root}" not in text
+
+    def test_compose_strategies_text_without_variables_keeps_placeholder(
+        self, tmp_path: Path,
+    ) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext()
+        text = composer.compose_strategies_text(ctx)
+        assert "{workspace_root}" in text
+
+    def test_compose_for_subagent_substitutes_variables(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "worker", variables={"workspace_root": "/agent/ws"},
+        )
+        assert result is not None
+        assert "/agent/ws" in result
+        assert "{workspace_root}" not in result
+
+    def test_compose_for_subagent_with_inherited_strategies_substitutes(
+        self, tmp_path: Path,
+    ) -> None:
+        d = self._make_dir_with_placeholders(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        result = composer.compose_for_subagent(
+            "worker",
+            inherit_strategies=["__all__"],
+            variables={"workspace_root": "/sub"},
+        )
+        assert result is not None
+        assert "{workspace_root}" not in result
+        # 策略中的占位符也应被替换
+        assert "/sub" in result
+
+    def test_substitute_static_method(self) -> None:
+        assert PromptComposer._substitute("hello {x}", {"x": "world"}) == "hello world"
+        assert PromptComposer._substitute("no placeholder", {"x": "v"}) == "no placeholder"
+        assert PromptComposer._substitute("", {"x": "v"}) == ""
+        assert PromptComposer._substitute("keep {x}", None) == "keep {x}"
+
+    def test_real_files_no_unresolved_workspace_root(self) -> None:
+        """验证实际 .md 文件中 {workspace_root} 经替换后不残留。"""
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not prompts_dir.is_dir():
+            pytest.skip("prompts/ 目录不存在")
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+        variables = {"workspace_root": "/test/workspace", "auto_generated_capability_map": ""}
+        # core + 无条件策略
+        ctx = PromptContext()
+        full_text = composer.compose_text(ctx, variables=variables)
+        assert "{workspace_root}" not in full_text
+        assert "{auto_generated_capability_map}" not in full_text
+        # 策略文本
+        strat_text = composer.compose_strategies_text(ctx, variables=variables)
+        assert "{workspace_root}" not in strat_text
 
 
 class TestCoreSegmentsMatchLegacy:

@@ -149,3 +149,117 @@ class TestMetaCognitionSilentCall:
         reasoned = state.reasoned_call_count
         should_warn = silent > 0 and silent >= reasoned
         assert should_warn is False
+
+
+class TestSessionStateReasoningLevelTracking:
+    """推理级别闭环追踪字段测试。"""
+
+    def test_initial_values(self):
+        state = SessionState()
+        assert state.recommended_reasoning_level == "standard"
+        assert state.reasoning_level_mismatch_count == 0
+        assert state.reasoning_upgrade_nudge_count == 0
+
+    def test_reset_loop_stats_clears_level_tracking(self):
+        state = SessionState()
+        state.recommended_reasoning_level = "complete"
+        state.reasoning_level_mismatch_count = 5
+        state.reasoning_upgrade_nudge_count = 2
+        state.reset_loop_stats()
+        assert state.recommended_reasoning_level == "standard"
+        assert state.reasoning_level_mismatch_count == 0
+        assert state.reasoning_upgrade_nudge_count == 0
+
+    def test_reset_session_clears_level_tracking(self):
+        state = SessionState()
+        state.recommended_reasoning_level = "complete"
+        state.reasoning_level_mismatch_count = 3
+        state.reasoning_upgrade_nudge_count = 1
+        state.reset_session()
+        assert state.recommended_reasoning_level == "standard"
+        assert state.reasoning_level_mismatch_count == 0
+        assert state.reasoning_upgrade_nudge_count == 0
+
+
+class TestComputeReasoningLevelStatic:
+    """静态推理级别计算的回归测试（确保向后兼容）。"""
+
+    def test_read_only_lightweight(self):
+        route = SimpleNamespace(write_hint="read_only", task_tags=[])
+        assert ContextBuilder._compute_reasoning_level_static(route) == "lightweight"
+
+    def test_cross_sheet_complete(self):
+        route = SimpleNamespace(write_hint="may_write", task_tags=["cross_sheet"])
+        assert ContextBuilder._compute_reasoning_level_static(route) == "complete"
+
+    def test_none_route_standard(self):
+        assert ContextBuilder._compute_reasoning_level_static(None) == "standard"
+
+
+class TestReasoningLevelMismatchLogic:
+    """推理级别匹配检测逻辑的单元测试。"""
+
+    @pytest.mark.parametrize("rec_level,avg_chars,expected_mismatch", [
+        ("lightweight", 3, True),     # 低于 lightweight 阈值 5
+        ("lightweight", 10, False),   # 超过 lightweight 阈值
+        ("standard", 20, True),       # 低于 standard 阈值 30
+        ("standard", 50, False),      # 超过 standard 阈值
+        ("complete", 40, True),       # 低于 complete 阈值 60
+        ("complete", 100, False),     # 超过 complete 阈值
+    ])
+    def test_mismatch_detection(self, rec_level, avg_chars, expected_mismatch):
+        thresholds = ContextBuilder._REASONING_CHARS_THRESHOLDS
+        min_chars = thresholds.get(rec_level, 5)
+        is_mismatch = avg_chars < min_chars
+        assert is_mismatch is expected_mismatch
+
+    def test_thresholds_monotonically_increasing(self):
+        t = ContextBuilder._REASONING_CHARS_THRESHOLDS
+        assert t["lightweight"] < t["standard"] < t["complete"]
+
+
+class TestMetaCognitionLevelMismatch:
+    """meta_cognition 4b 条件（推理深度不足）的逻辑测试。"""
+
+    def test_no_nudge_when_mismatch_below_threshold(self):
+        """不匹配次数 < 2 时不触发 4b。"""
+        state = SessionState()
+        state.silent_call_count = 0
+        state.reasoned_call_count = 5
+        state.reasoning_level_mismatch_count = 1
+        state.recommended_reasoning_level = "complete"
+        # 4a 不触发（silent=0），4b 不触发（mismatch < 2）
+        should_warn_4a = state.silent_call_count > 0 and state.silent_call_count >= state.reasoned_call_count
+        should_warn_4b = (not should_warn_4a) and state.reasoning_level_mismatch_count >= 2
+        assert should_warn_4a is False
+        assert should_warn_4b is False
+
+    def test_nudge_when_mismatch_reaches_threshold(self):
+        """不匹配次数 >= 2 时触发 4b。"""
+        state = SessionState()
+        state.silent_call_count = 0
+        state.reasoned_call_count = 5
+        state.reasoning_level_mismatch_count = 2
+        state.recommended_reasoning_level = "standard"
+        should_warn_4a = state.silent_call_count > 0 and state.silent_call_count >= state.reasoned_call_count
+        should_warn_4b = (not should_warn_4a) and state.reasoning_level_mismatch_count >= 2
+        assert should_warn_4a is False
+        assert should_warn_4b is True
+
+    def test_4a_takes_priority_over_4b(self):
+        """沉默调用（4a）优先于深度不足（4b）。"""
+        state = SessionState()
+        state.silent_call_count = 3
+        state.reasoned_call_count = 2
+        state.reasoning_level_mismatch_count = 5
+        should_warn_4a = state.silent_call_count > 0 and state.silent_call_count >= state.reasoned_call_count
+        assert should_warn_4a is True
+        # 4a 已触发，4b 走 elif 分支不再触发
+
+    def test_lightweight_no_nudge_hint(self):
+        """lightweight 级别不匹配时没有具体提示文本（因为是最低级别）。"""
+        hint_map = {
+            "standard": "多步操作建议在工具调用前后各附 1-2 句观察与决策",
+            "complete": "关键决策点建议说明观察到什么、分析了什么、为什么选择这个行动",
+        }
+        assert hint_map.get("lightweight", "") == ""

@@ -235,6 +235,102 @@ def test_state_machine_flush():
     assert "Hello<" in all_content
 
 
+# ── <think> 标签支持（MiniMax / DeepSeek R1 等） ────────
+
+
+def test_extract_inline_think_tag():
+    """<think>...</think> 标签内容被正确提取。"""
+    from excelmanus.providers.stream_types import extract_inline_thinking as _extract_inline_thinking
+
+    text = "<think>Let me reason step by step.</think>\n\nThe answer is 42."
+    thinking, clean = _extract_inline_thinking(text)
+    assert thinking == "Let me reason step by step."
+    assert "<think>" not in clean
+    assert "The answer is 42." in clean
+
+
+def test_extract_inline_think_multiple():
+    """多个 <think> 块合并提取。"""
+    from excelmanus.providers.stream_types import extract_inline_thinking as _extract_inline_thinking
+
+    text = "<think>Step 1</think>middle<think>Step 2</think>end"
+    thinking, clean = _extract_inline_thinking(text)
+    assert "Step 1" in thinking
+    assert "Step 2" in thinking
+    assert "<think>" not in clean
+    assert "middle" in clean
+    assert "end" in clean
+
+
+def test_extract_inline_mixed_think_and_thinking():
+    """同一段文本中混合 <think> 和 <thinking> 标签。"""
+    from excelmanus.providers.stream_types import extract_inline_thinking as _extract_inline_thinking
+
+    text = "<think>From think tag</think>mid<thinking>From thinking tag</thinking>end"
+    thinking, clean = _extract_inline_thinking(text)
+    assert "From think tag" in thinking
+    assert "From thinking tag" in thinking
+    assert "<think>" not in clean
+    assert "<thinking>" not in clean
+    assert "mid" in clean
+    assert "end" in clean
+
+
+def test_extract_inline_mismatched_tags_not_matched():
+    """开闭标签不匹配时不提取（<think>...</thinking> 不应匹配）。"""
+    from excelmanus.providers.stream_types import extract_inline_thinking as _extract_inline_thinking
+
+    text = "<think>mismatched</thinking>content"
+    thinking, clean = _extract_inline_thinking(text)
+    assert thinking == ""
+    assert clean == text
+
+
+def test_state_machine_think_tag_single_chunk():
+    """单 chunk 包含完整 <think> 标签。"""
+    from excelmanus.providers.stream_types import InlineThinkingStateMachine
+
+    sm = InlineThinkingStateMachine()
+    results = sm.feed("<think>reasoning here</think>The answer.")
+    thinking = "".join(r.thinking_delta for r in results)
+    content = "".join(r.content_delta for r in results)
+    assert "reasoning here" in thinking
+    assert "The answer." in content
+    assert "<think>" not in content
+
+
+def test_state_machine_think_tag_cross_chunk():
+    """<think> 标签跨 chunk 边界。"""
+    from excelmanus.providers.stream_types import InlineThinkingStateMachine
+
+    sm = InlineThinkingStateMachine()
+    all_results = []
+    for chunk in ["<thi", "nk>My reasoning</th", "ink>Done"]:
+        all_results.extend(sm.feed(chunk))
+    all_results.extend(sm.flush())
+    thinking = "".join(r.thinking_delta for r in all_results)
+    content = "".join(r.content_delta for r in all_results)
+    assert "My reasoning" in thinking
+    assert "Done" in content
+
+
+def test_state_machine_think_then_thinking():
+    """同一流中先出现 <think> 再出现 <thinking>。"""
+    from excelmanus.providers.stream_types import InlineThinkingStateMachine
+
+    sm = InlineThinkingStateMachine()
+    all_results = []
+    all_results.extend(sm.feed("<think>first</think>mid"))
+    all_results.extend(sm.feed("<thinking>second</thinking>end"))
+    all_results.extend(sm.flush())
+    thinking = "".join(r.thinking_delta for r in all_results)
+    content = "".join(r.content_delta for r in all_results)
+    assert "first" in thinking
+    assert "second" in thinking
+    assert "mid" in content
+    assert "end" in content
+
+
 # ── Gemini provider 内联 thinking ───────────────────────
 
 

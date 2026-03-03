@@ -83,6 +83,17 @@ class TestClassifyToolError:
         "ETIMEDOUT",
         "temporary failure in name resolution",
         "internal server error",
+        "ssl certificate verify failed",
+        "proxy error: refused",
+        "tunnel connection failed",
+        "incomplete chunked encoding",
+        "IncompleteRead: 0 bytes read",
+        "remote end closed connection",
+        "stream ended unexpectedly",
+        "premature end of data",
+        "json decode error",
+        "Expecting value: line 1",
+        "invalid json from server",
     ])
     def test_retryable_by_string(self, error_str: str):
         result = classify_tool_error(error_str)
@@ -98,6 +109,26 @@ class TestClassifyToolError:
     def test_retryable_by_connection_error(self):
         result = classify_tool_error(ConnectionError("refused"))
         assert result.kind == ToolErrorKind.RETRYABLE
+
+    # --- PERMANENT by exception type ---
+
+    def test_permanent_by_permission_error(self):
+        result = classify_tool_error(PermissionError("access denied"))
+        assert result.kind == ToolErrorKind.PERMANENT
+        assert "权限" in result.suggestion
+
+    def test_permanent_by_unicode_decode_error(self):
+        try:
+            b"\x80".decode("utf-8")
+        except UnicodeDecodeError as exc:
+            result = classify_tool_error(exc)
+            assert result.kind == ToolErrorKind.PERMANENT
+            assert "编码" in result.suggestion
+
+    def test_permanent_by_file_not_found_error(self):
+        result = classify_tool_error(FileNotFoundError("missing.xlsx"))
+        assert result.kind == ToolErrorKind.PERMANENT
+        assert "文件" in result.suggestion or "路径" in result.suggestion
 
     # --- CONTEXT_OVERFLOW ---
 
@@ -130,7 +161,7 @@ class TestClassifyToolError:
             f"Expected NEEDS_HUMAN for: {error_str!r}, got {result.kind}"
         )
 
-    # --- PERMANENT (兜底) ---
+    # --- PERMANENT (精确模式 + 兜底) ---
 
     @pytest.mark.parametrize("error_str", [
         "FileNotFoundError: test.xlsx",
@@ -138,6 +169,17 @@ class TestClassifyToolError:
         "KeyError: 'sheet1'",
         "PermissionError: access denied",
         "工具执行错误: 参数无效",
+        "permission denied: /workspace/file.xlsx",
+        "access denied to resource",
+        "operation not permitted on this file",
+        "[Errno 28] No space left on device",
+        "disk full",
+        "disk quota exceeded",
+        "磁盘空间不足",
+        "UnicodeDecodeError: codec can't decode",
+        "invalid start byte at position 0",
+        "charmap codec can't encode",
+        "文件编码异常",
     ])
     def test_permanent_by_string(self, error_str: str):
         result = classify_tool_error(error_str)
