@@ -3,6 +3,7 @@
 import { useEffect, useRef, useCallback, useState } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { useTouchGesture } from "@/hooks/use-touch-gesture";
 import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
 
 // ── Univer 模块预加载缓存（全局单例，只加载一次） ──
@@ -655,6 +656,17 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   // 是否显示选区指示器
   const showSelectionIndicator = selectionMode;
 
+  // ── 移动端选区模式：长按进入选区 ──
+  const { handlers: touchGestureHandlers } = useTouchGesture({
+    onLongPress: useCallback(() => {
+      if (selectionMode && isMobile) {
+        // 长按时 Univer 原生选区已通过 enableSelection 启用
+      }
+    }, [selectionMode, isMobile]),
+    onSelectionEnd: useCallback(() => {
+      // 选区拖拽结束后的回调（可用于未来扩展）
+    }, []),
+  });
 
   return (
     <div className="relative w-full h-full min-h-[400px] bg-white dark:bg-gray-800">
@@ -663,6 +675,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         className="w-full h-full bg-white dark:bg-gray-800"
         data-univer-container
         style={{ position: "relative" }}
+        {...(isMobile && selectionMode ? touchGestureHandlers : {})}
       />
       {/* 选区模式指示（显式按钮或移动端长按） */}
       {showSelectionIndicator && (

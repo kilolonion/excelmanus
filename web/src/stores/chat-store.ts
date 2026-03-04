@@ -449,6 +449,25 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
+          // 从 offer_download 工具结果中恢复 file_download 块
+          if (toolName === "offer_download" && hasResult && tcId) {
+            const dlResultText = toolResultByCallId.get(tcId);
+            if (dlResultText) {
+              try {
+                const dlParsed = JSON.parse(dlResultText);
+                const dlData = dlParsed?._file_download;
+                if (dlData && dlData.file_path) {
+                  blocks.push({
+                    type: "file_download",
+                    toolCallId: tcId,
+                    filePath: dlData.file_path,
+                    filename: dlData.filename || dlData.file_path.split("/").pop() || "download",
+                    description: dlData.description || "",
+                  });
+                }
+              } catch { /* ignore parse errors */ }
+            }
+          }
           if (_ALL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
             const argFilePath = typeof args.file_path === "string" ? args.file_path : "";
             const normalizedArgPath = _normalizeRecoveredPath(argFilePath);

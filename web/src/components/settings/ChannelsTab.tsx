@@ -10,7 +10,6 @@ import {
   Check,
   Radio,
   Terminal,
-  BookOpen,
   Zap,
   FolderOpen,
   Shield,
@@ -25,12 +24,10 @@ import {
   Eye,
   EyeOff,
   AlertCircle,
-  CheckCircle2,
   RotateCw,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import {
-  fetchChannelsStatus,
   fetchServerPublicIp,
   saveChannelConfig,
   startChannel,
@@ -45,6 +42,18 @@ import {
   type ChannelSettings,
 } from "@/lib/api";
 import { ChannelIcon, CHANNEL_META } from "@/components/ui/ChannelIcons";
+import { ChannelBindSection } from "@/components/channels/ChannelBindSection";
+
+// ── Shared Props ──────────────────────────────────────────
+
+interface TabProps {
+  status: ChannelStatusInfo | null;
+  loading?: boolean;
+  error?: string | null;
+  onRefresh: () => void;
+  onToast: (msg: string, type: "success" | "error" | "info") => void;
+  showBind?: boolean;
+}
 
 // ── Collapsible Section ───────────────────────────────────
 
@@ -63,22 +72,25 @@ function Section({
 }) {
   const [open, setOpen] = useState(defaultOpen);
   return (
-    <div className="rounded-lg border border-border overflow-hidden">
+    <div className="rounded-xl border border-border/60 overflow-hidden bg-gradient-to-b from-background to-muted/5">
       <div
         role="button"
         tabIndex={0}
         onClick={() => setOpen(!open)}
         onKeyDown={(e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); setOpen(!open); } }}
-        className="flex items-center gap-2 w-full px-4 py-3 text-left hover:bg-muted/40 transition-colors cursor-pointer"
+        className="flex items-center gap-2 sm:gap-2.5 w-full px-3 sm:px-4 py-2.5 sm:py-3 text-left hover:bg-muted/30 transition-colors cursor-pointer"
       >
-        <Icon className="h-4 w-4 shrink-0" style={{ color: "var(--em-primary)" }} />
-        <span className="text-sm font-medium flex-1">{title}</span>
+        <div
+          className="h-6 w-6 sm:h-7 sm:w-7 rounded-lg flex items-center justify-center shrink-0"
+          style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+        >
+          <Icon className="h-3 w-3 sm:h-3.5 sm:w-3.5" style={{ color: "var(--em-primary)" }} />
+        </div>
+        <span className="text-sm font-semibold flex-1">{title}</span>
         {badge}
-        {open ? (
+        <motion.div animate={{ rotate: open ? 180 : 0 }} transition={{ duration: 0.2 }}>
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-        )}
+        </motion.div>
       </div>
       <AnimatePresence initial={false}>
         {open && (
@@ -86,10 +98,10 @@ function Section({
             initial={{ height: 0, opacity: 0 }}
             animate={{ height: "auto", opacity: 1 }}
             exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
+            transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
             className="overflow-hidden"
           >
-            <div className="px-4 pb-4 pt-1 border-t border-border/50">
+            <div className="px-3 sm:px-4 pb-3 sm:pb-4 pt-1 border-t border-border/40">
               {children}
             </div>
           </motion.div>
@@ -125,7 +137,7 @@ function CopyButton({ text }: { text: string }) {
 function CodeBlock({ children }: { children: string }) {
   return (
     <div className="relative group">
-      <pre className="text-xs font-mono bg-muted/60 rounded-md px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
+      <pre className="text-xs font-mono bg-muted/60 rounded-lg px-3 py-2.5 overflow-x-auto whitespace-pre-wrap break-all">
         {children}
       </pre>
       <div className="absolute top-1.5 right-1.5 opacity-0 group-hover:opacity-100 transition-opacity">
@@ -135,70 +147,33 @@ function CodeBlock({ children }: { children: string }) {
   );
 }
 
-// ── Toast Notification ────────────────────────────────────
-
-function Toast({
-  message,
-  type,
-  onClose,
-}: {
-  message: string;
-  type: "success" | "error" | "info";
-  onClose: () => void;
-}) {
-  useEffect(() => {
-    const t = setTimeout(onClose, 4000);
-    return () => clearTimeout(t);
-  }, [onClose]);
-
-  const colors = {
-    success: "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30",
-    error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    info: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
-  };
-  const icons = {
-    success: <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />,
-    error: <AlertCircle className="h-3.5 w-3.5 shrink-0" />,
-    info: <Info className="h-3.5 w-3.5 shrink-0" />,
-  };
-
-  return (
-    <motion.div
-      initial={{ opacity: 0, y: -10 }}
-      animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, y: -10 }}
-      className={`flex items-center gap-2 px-3 py-2 rounded-md border text-xs ${colors[type]}`}
-    >
-      {icons[type]}
-      <span className="flex-1">{message}</span>
-      <button onClick={onClose} className="text-current opacity-60 hover:opacity-100 cursor-pointer">×</button>
-    </motion.div>
-  );
-}
-
 // ── Status Badge ──────────────────────────────────────────
 
 function StatusBadge({ status }: { status: string }) {
   if (status === "running") {
     return (
-      <span className="flex items-center gap-1 text-[10px] text-green-600 dark:text-green-400 font-medium">
-        <span className="h-1.5 w-1.5 rounded-full bg-green-500 animate-pulse" />
+      <span className="flex items-center gap-1.5 text-[11px] text-green-600 dark:text-green-400 font-semibold">
+        <span className="relative flex h-2 w-2">
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
+          <span className="relative inline-flex rounded-full h-2 w-2 bg-green-500" />
+        </span>
         运行中
       </span>
     );
   }
   if (status === "error") {
     return (
-      <span className="flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400 font-medium">
-        <span className="h-1.5 w-1.5 rounded-full bg-red-500" />
+      <span className="flex items-center gap-1.5 text-[11px] text-red-600 dark:text-red-400 font-semibold">
+        <span className="h-2 w-2 rounded-full bg-red-500" />
         异常
       </span>
     );
   }
   return (
-    <Badge variant="secondary" className="text-[10px] px-2 py-0.5 border-0 bg-muted text-muted-foreground shrink-0">
+    <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-medium">
+      <span className="h-2 w-2 rounded-full bg-muted-foreground/30" />
       未启动
-    </Badge>
+    </span>
   );
 }
 
@@ -295,7 +270,7 @@ function FeishuWebhookGuide() {
   );
 }
 
-// ── Channel Config Card ───────────────────────────────────
+// ── Channel Config Card (Redesigned with breathing glow) ──
 
 function ChannelConfigCard({
   detail,
@@ -311,18 +286,26 @@ function ChannelConfigCard({
   const [enabled, setEnabled] = useState(detail.enabled);
   const [saving, setSaving] = useState(false);
   const [testing, setTesting] = useState(false);
-  const [starting, setStarting] = useState(false);
-  const [stopping, setStopping] = useState(false);
   const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
   const [dirty, setDirty] = useState(false);
 
+  // ── Optimistic status overlay ──
+  // null = use detail.status from server; string = optimistic override
+  const [optimisticStatus, setOptimisticStatus] = useState<string | null>(null);
+  const [pendingOp, setPendingOp] = useState<"starting" | "stopping" | null>(null);
+
   const meta = CHANNEL_META[detail.name] || { label: detail.name, color: "#666", description: detail.name };
 
-  // Reset form when detail changes from parent refresh
+  // Derive effective status: optimistic override wins if set
+  const effectiveStatus = optimisticStatus ?? detail.status;
+
   useEffect(() => {
     setCreds(detail.credentials || {});
     setEnabled(detail.enabled);
     setDirty(false);
+    // Clear optimistic state when server data arrives
+    setOptimisticStatus(null);
+    setPendingOp(null);
   }, [detail]);
 
   const handleFieldChange = (key: string, value: string) => {
@@ -337,6 +320,10 @@ function ChannelConfigCard({
 
   const handleSave = async () => {
     setSaving(true);
+    // Optimistic: immediately clear dirty flag
+    const prevCreds = { ...creds };
+    const prevEnabled = enabled;
+    setDirty(false);
     try {
       const res = await saveChannelConfig(detail.name, creds, enabled);
       if (res.missing_fields && res.missing_fields.length > 0) {
@@ -344,9 +331,12 @@ function ChannelConfigCard({
       } else {
         onToast(`${meta.label} 配置已保存`, "success");
       }
-      setDirty(false);
       onRefresh();
     } catch (e: unknown) {
+      // Rollback: restore dirty state
+      setCreds(prevCreds);
+      setEnabled(prevEnabled);
+      setDirty(true);
       onToast(`保存失败: ${e instanceof Error ? e.message : String(e)}`, "error");
     } finally {
       setSaving(false);
@@ -366,13 +356,11 @@ function ChannelConfigCard({
   };
 
   const handleStart = async () => {
-    // Auto-save before starting if dirty
     if (dirty) {
       setSaving(true);
       try {
         await saveChannelConfig(detail.name, creds, true);
         setDirty(false);
-        onRefresh();
       } catch (e: unknown) {
         onToast(`保存失败: ${e instanceof Error ? e.message : String(e)}`, "error");
         setSaving(false);
@@ -380,269 +368,346 @@ function ChannelConfigCard({
       }
       setSaving(false);
     }
-    setStarting(true);
+    // Optimistic: immediately show running
+    setOptimisticStatus("running");
+    setPendingOp("starting");
     try {
       const res = await startChannel(detail.name);
       onToast(res.message, "success");
       onRefresh();
     } catch (e: unknown) {
+      // Rollback: revert to server status
+      setOptimisticStatus(null);
+      setPendingOp(null);
       onToast(`启动失败: ${e instanceof Error ? e.message : String(e)}`, "error");
-    } finally {
-      setStarting(false);
     }
   };
 
   const handleStop = async () => {
-    setStopping(true);
+    // Optimistic: immediately show stopped
+    setOptimisticStatus("stopped");
+    setPendingOp("stopping");
     try {
       const res = await stopChannel(detail.name);
       onToast(res.message, "success");
       onRefresh();
     } catch (e: unknown) {
+      // Rollback: revert to server status
+      setOptimisticStatus(null);
+      setPendingOp(null);
       onToast(`停止失败: ${e instanceof Error ? e.message : String(e)}`, "error");
-    } finally {
-      setStopping(false);
     }
   };
 
-  const isRunning = detail.status === "running";
+  const isRunning = effectiveStatus === "running";
+  const isError = effectiveStatus === "error";
+  const isPending = pendingOp !== null;
 
   return (
-    <div className="rounded-lg border border-border overflow-hidden">
-      {/* Header */}
-      <button
-        type="button"
-        onClick={() => setOpen(!open)}
-        className="flex items-center gap-3 w-full px-4 py-3 text-left hover:bg-muted/40 transition-colors cursor-pointer"
-      >
+    <motion.div
+      initial={{ opacity: 0, y: 10 }}
+      animate={{ opacity: 1, y: 0 }}
+      className={`relative rounded-xl overflow-hidden transition-shadow duration-300 ${
+        isRunning
+          ? "shadow-[0_0_20px_-4px_var(--glow-color)]"
+          : isError
+            ? "shadow-sm"
+            : "shadow-sm hover:shadow-md"
+      }`}
+      style={{
+        "--glow-color": isRunning ? `${meta.color}40` : "transparent",
+      } as React.CSSProperties}
+    >
+      {/* Breathing glow border for running channels */}
+      {isRunning && (
         <div
-          className="h-9 w-9 rounded-lg flex items-center justify-center text-white shrink-0"
-          style={{ backgroundColor: isRunning ? meta.color : "#9ca3af" }}
-        >
-          <ChannelIcon channel={detail.name} className="h-4.5 w-4.5" />
-        </div>
-        <div className="flex-1 min-w-0">
-          <div className="flex items-center gap-2">
-            <span className="text-sm font-medium">{meta.label}</span>
-            {detail.dep_installed === false ? (
-              <span className="flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400 font-medium">
-                <AlertCircle className="h-3 w-3" />
-                缺少依赖
-              </span>
-            ) : (
-              <StatusBadge status={detail.status} />
-            )}
-            {dirty && (
-              <span className="text-[10px] text-amber-500 font-medium">未保存</span>
-            )}
-          </div>
-          <p className="text-xs text-muted-foreground">{meta.description}</p>
-        </div>
-        {open ? (
-          <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
-        ) : (
-          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground" />
-        )}
-      </button>
+          className="absolute inset-0 rounded-xl pointer-events-none"
+          style={{
+            border: `2px solid ${meta.color}30`,
+            animation: "breathe 3s ease-in-out infinite",
+          }}
+        />
+      )}
+      <style>{`
+        @keyframes breathe {
+          0%, 100% { opacity: 0.4; box-shadow: 0 0 8px ${meta.color}15; }
+          50% { opacity: 1; box-shadow: 0 0 16px ${meta.color}30; }
+        }
+      `}</style>
 
-      {/* Config Panel */}
-      <AnimatePresence initial={false}>
-        {open && (
-          <motion.div
-            initial={{ height: 0, opacity: 0 }}
-            animate={{ height: "auto", opacity: 1 }}
-            exit={{ height: 0, opacity: 0 }}
-            transition={{ duration: 0.2, ease: "easeOut" }}
-            className="overflow-hidden"
+      <div className={`border rounded-xl overflow-hidden ${
+        isRunning ? "border-transparent" : isError ? "border-red-500/30" : "border-border/60"
+      }`}>
+        {/* Card Header */}
+        <button
+          type="button"
+          onClick={() => setOpen(!open)}
+          className="flex items-center gap-2.5 sm:gap-3 w-full px-3 sm:px-4 py-3 sm:py-3.5 text-left hover:bg-muted/30 transition-colors cursor-pointer"
+        >
+          <div
+            className="h-9 w-9 sm:h-10 sm:w-10 rounded-xl flex items-center justify-center text-white shrink-0 transition-all duration-300"
+            style={{
+              backgroundColor: isRunning ? meta.color : isError ? "#ef4444" : "#9ca3af",
+              boxShadow: isRunning ? `0 4px 12px ${meta.color}40` : "none",
+            }}
           >
-            <div className="px-4 pb-4 pt-2 border-t border-border/50 space-y-4">
-              {/* Auto-start toggle */}
-              <div className="flex items-center justify-between">
-                <div>
-                  <p className="text-xs font-medium">随服务自动启动</p>
-                  <p className="text-[11px] text-muted-foreground">保存配置后，服务重启时自动启动此渠道</p>
-                </div>
+            <ChannelIcon channel={detail.name} className="h-4.5 w-4.5 sm:h-5 sm:w-5" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-2">
+              <span className="text-sm font-semibold">{meta.label}</span>
+              {detail.dep_installed === false ? (
+                <span className="flex items-center gap-1 text-[10px] text-red-600 dark:text-red-400 font-medium">
+                  <AlertCircle className="h-3 w-3" />
+                  缺少依赖
+                </span>
+              ) : isPending ? (
+                <span className="flex items-center gap-1.5 text-[11px] text-muted-foreground font-medium">
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                  {pendingOp === "starting" ? "启动中…" : "停止中…"}
+                </span>
+              ) : (
+                <StatusBadge status={effectiveStatus} />
+              )}
+              {dirty && (
+                <span className="text-[10px] text-amber-500 font-semibold px-1.5 py-0.5 rounded bg-amber-500/10">未保存</span>
+              )}
+            </div>
+            <p className="text-xs text-muted-foreground mt-0.5">{meta.description}</p>
+          </div>
+
+          {/* Quick action button — hidden during pending ops since status badge shows spinner */}
+          {!open && !isPending && (
+            <div className="flex items-center gap-2 shrink-0">
+              {isRunning ? (
                 <button
                   type="button"
-                  onClick={() => handleEnabledChange(!enabled)}
-                  className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer ${
-                    enabled ? "bg-green-500" : "bg-muted-foreground/30"
-                  }`}
+                  onClick={(e) => { e.stopPropagation(); handleStop(); }}
+                  className="h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] font-medium bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer inline-flex items-center gap-1"
                 >
-                  <span
-                    className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                      enabled ? "translate-x-4.5" : "translate-x-0.5"
-                    }`}
-                  />
+                  <Square className="h-3 w-3" />
+                  <span className="hidden sm:inline">停止</span>
                 </button>
-              </div>
+              ) : detail.dep_installed !== false && (
+                <button
+                  type="button"
+                  onClick={(e) => { e.stopPropagation(); handleStart(); }}
+                  disabled={saving}
+                  className="h-7 sm:h-8 px-2 sm:px-3 rounded-lg text-[11px] font-medium bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-500/20 transition-colors cursor-pointer disabled:opacity-50 inline-flex items-center gap-1"
+                >
+                  <Play className="h-3 w-3" />
+                  <span className="hidden sm:inline">启动</span>
+                </button>
+              )}
+            </div>
+          )}
 
-              {/* Credential Fields */}
-              <div className="space-y-3">
-                <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-                  <Settings2 className="h-3 w-3" />
-                  凭证配置
-                </p>
-                {detail.fields.map((field: ChannelFieldDef) => {
-                  if (field.type === "boolean") {
-                    const checked = (creds[field.key] || "").toLowerCase() === "true";
-                    return (
-                      <div key={field.key} className="flex items-center justify-between py-1">
-                        <div>
-                          <label className="text-xs font-medium">{field.label}</label>
-                          <p className="text-[10px] text-muted-foreground">{field.hint}</p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleFieldChange(field.key, checked ? "false" : "true")}
-                          className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer ${
-                            checked ? "bg-green-500" : "bg-muted-foreground/30"
-                          }`}
-                        >
-                          <span
-                            className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
-                              checked ? "translate-x-4.5" : "translate-x-0.5"
-                            }`}
-                          />
-                        </button>
-                      </div>
-                    );
-                  }
+          <motion.div
+            animate={{ rotate: open ? 180 : 0 }}
+            transition={{ duration: 0.2 }}
+            className="shrink-0"
+          >
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+          </motion.div>
+        </button>
 
-                  const isSecret = field.secret;
-                  const showThis = showSecrets[field.key] || false;
+        {/* Expanded Config Panel */}
+        <AnimatePresence initial={false}>
+          {open && (
+            <motion.div
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: "auto", opacity: 1 }}
+              exit={{ height: 0, opacity: 0 }}
+              transition={{ duration: 0.3, ease: [0.25, 0.1, 0.25, 1] }}
+              className="overflow-hidden"
+            >
+              <div className="px-3 sm:px-4 pb-3 sm:pb-4 pt-2 border-t border-border/40 space-y-3 sm:space-y-4">
+                {/* Auto-start toggle */}
+                <div className="flex items-center justify-between rounded-lg bg-muted/30 px-2.5 sm:px-3 py-2 sm:py-2.5">
+                  <div>
+                    <p className="text-xs font-medium">随服务自动启动</p>
+                    <p className="text-[11px] text-muted-foreground">服务重启时自动启动此渠道</p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleEnabledChange(!enabled)}
+                    className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer ${
+                      enabled ? "bg-green-500" : "bg-muted-foreground/30"
+                    }`}
+                  >
+                    <span
+                      className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                        enabled ? "translate-x-4.5" : "translate-x-0.5"
+                      }`}
+                    />
+                  </button>
+                </div>
 
-                  return (
-                    <div key={field.key}>
-                      <div className="flex items-center gap-1.5 mb-1">
-                        <label className="text-xs font-medium">{field.label}</label>
-                        {field.required && (
-                          <span className="text-[9px] text-red-500 font-medium">必填</span>
-                        )}
-                      </div>
-                      <div className="relative">
-                        <input
-                          type={isSecret && !showThis ? "password" : "text"}
-                          value={creds[field.key] || ""}
-                          onChange={(e) => handleFieldChange(field.key, e.target.value)}
-                          placeholder={field.hint}
-                          className="w-full text-xs px-3 py-2 rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring pr-8"
-                        />
-                        {isSecret && (
+                {/* Credential Fields */}
+                <div className="space-y-3">
+                  <p className="text-xs font-semibold text-muted-foreground flex items-center gap-1.5">
+                    <Settings2 className="h-3 w-3" />
+                    凭证配置
+                  </p>
+                  {detail.fields.map((field: ChannelFieldDef) => {
+                    if (field.type === "boolean") {
+                      const checked = (creds[field.key] || "").toLowerCase() === "true";
+                      return (
+                        <div key={field.key} className="flex items-center justify-between py-1">
+                          <div>
+                            <label className="text-xs font-medium">{field.label}</label>
+                            <p className="text-[10px] text-muted-foreground">{field.hint}</p>
+                          </div>
                           <button
                             type="button"
-                            onClick={() =>
-                              setShowSecrets((prev) => ({ ...prev, [field.key]: !showThis }))
-                            }
-                            className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                            onClick={() => handleFieldChange(field.key, checked ? "false" : "true")}
+                            className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors cursor-pointer ${
+                              checked ? "bg-green-500" : "bg-muted-foreground/30"
+                            }`}
                           >
-                            {showThis ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                            <span
+                              className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${
+                                checked ? "translate-x-4.5" : "translate-x-0.5"
+                              }`}
+                            />
                           </button>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
+                        </div>
+                      );
+                    }
 
-              {/* Dependency not installed warning */}
-              {detail.dep_installed === false && (
-                <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-md bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400">
-                  <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
-                  <div className="flex-1 min-w-0 space-y-1.5">
-                    <p className="text-xs font-medium">Python 依赖未安装</p>
-                    <p className="text-[11px] leading-relaxed opacity-80">
-                      此渠道需要安装额外的 Python 包才能使用。请在服务器终端中执行以下命令，然后刷新页面：
-                    </p>
-                    {detail.install_hint && (
-                      <div className="relative group">
-                        <code className="block text-[11px] font-mono bg-red-500/10 rounded px-2.5 py-1.5 break-all">
-                          {detail.install_hint}
-                        </code>
-                        <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
-                          <CopyButton text={detail.install_hint} />
+                    const isSecret = field.secret;
+                    const showThis = showSecrets[field.key] || false;
+
+                    return (
+                      <div key={field.key}>
+                        <div className="flex items-center gap-1.5 mb-1">
+                          <label className="text-xs font-medium">{field.label}</label>
+                          {field.required && (
+                            <span className="text-[9px] text-red-500 font-semibold px-1 py-0.5 rounded bg-red-500/10">必填</span>
+                          )}
+                        </div>
+                        <div className="relative">
+                          <input
+                            type={isSecret && !showThis ? "password" : "text"}
+                            value={creds[field.key] || ""}
+                            onChange={(e) => handleFieldChange(field.key, e.target.value)}
+                            placeholder={field.hint}
+                            className="w-full text-xs px-3 py-2 rounded-lg border border-border bg-background focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)]/20 focus:border-[var(--em-primary)]/50 pr-8 transition-shadow"
+                          />
+                          {isSecret && (
+                            <button
+                              type="button"
+                              onClick={() =>
+                                setShowSecrets((prev) => ({ ...prev, [field.key]: !showThis }))
+                              }
+                              className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground cursor-pointer"
+                            >
+                              {showThis ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+                            </button>
+                          )}
                         </div>
                       </div>
-                    )}
-                  </div>
+                    );
+                  })}
                 </div>
-              )}
 
-              {/* QQ Bot IP whitelist guidance */}
-              {detail.name === "qq" && <QQWhitelistGuide />}
-
-              {/* Feishu webhook URL guidance */}
-              {detail.name === "feishu" && <FeishuWebhookGuide />}
-
-              {/* Missing fields warning — computed from local creds to avoid stale detail */}
-              {(() => {
-                const localMissing = detail.fields
-                  .filter((f: ChannelFieldDef) => f.required && !creds[f.key])
-                  .map((f: ChannelFieldDef) => f.key);
-                return localMissing.length > 0 ? (
-                  <div className="flex items-center gap-2 px-3 py-2 rounded-md bg-amber-500/10 text-amber-600 dark:text-amber-400">
-                    <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                    <span className="text-xs">缺少必填项: {localMissing.join(", ")}</span>
+                {/* Dependency not installed warning */}
+                {detail.dep_installed === false && (
+                  <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-lg bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400">
+                    <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+                    <div className="flex-1 min-w-0 space-y-1.5">
+                      <p className="text-xs font-medium">Python 依赖未安装</p>
+                      <p className="text-[11px] leading-relaxed opacity-80">
+                        此渠道需要安装额外的 Python 包才能使用：
+                      </p>
+                      {detail.install_hint && (
+                        <div className="relative group">
+                          <code className="block text-[11px] font-mono bg-red-500/10 rounded-lg px-2.5 py-1.5 break-all">
+                            {detail.install_hint}
+                          </code>
+                          <div className="absolute top-1 right-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                            <CopyButton text={detail.install_hint} />
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                ) : null;
-              })()}
-
-              {/* Action Buttons */}
-              <div className="flex items-center gap-2 flex-wrap">
-                <button
-                  type="button"
-                  onClick={handleSave}
-                  disabled={saving || !dirty}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  style={{
-                    backgroundColor: dirty ? "var(--em-primary)" : undefined,
-                    color: dirty ? "white" : undefined,
-                  }}
-                >
-                  {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
-                  保存配置
-                </button>
-
-                <button
-                  type="button"
-                  onClick={handleTest}
-                  disabled={testing}
-                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors cursor-pointer disabled:opacity-50"
-                >
-                  {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <FlaskConical className="h-3 w-3" />}
-                  测试凭证
-                </button>
-
-                <div className="flex-1" />
-
-                {isRunning ? (
-                  <button
-                    type="button"
-                    onClick={handleStop}
-                    disabled={stopping}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-red-500/15 text-red-600 dark:text-red-400 hover:bg-red-500/25 transition-colors cursor-pointer disabled:opacity-50"
-                  >
-                    {stopping ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
-                    停止
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={handleStart}
-                    disabled={starting || saving || detail.dep_installed === false}
-                    title={detail.dep_installed === false ? "请先安装 Python 依赖" : undefined}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-green-500/15 text-green-600 dark:text-green-400 hover:bg-green-500/25 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-                  >
-                    {starting || saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
-                    启动
-                  </button>
                 )}
+
+                {detail.name === "qq" && <QQWhitelistGuide />}
+                {detail.name === "feishu" && <FeishuWebhookGuide />}
+
+                {/* Missing fields warning */}
+                {(() => {
+                  const localMissing = detail.fields
+                    .filter((f: ChannelFieldDef) => f.required && !creds[f.key])
+                    .map((f: ChannelFieldDef) => f.key);
+                  return localMissing.length > 0 ? (
+                    <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/10 text-amber-600 dark:text-amber-400">
+                      <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                      <span className="text-xs">缺少必填项: {localMissing.join(", ")}</span>
+                    </div>
+                  ) : null;
+                })()}
+
+                {/* Action Buttons */}
+                <div className="flex items-center gap-1.5 sm:gap-2 flex-wrap pt-1">
+                  <button
+                    type="button"
+                    onClick={handleSave}
+                    disabled={saving || !dirty}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold transition-all cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    style={{
+                      backgroundColor: dirty ? "var(--em-primary)" : undefined,
+                      color: dirty ? "white" : undefined,
+                      boxShadow: dirty ? "0 2px 8px var(--em-primary-alpha-25)" : undefined,
+                    }}
+                  >
+                    {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+                    保存
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={handleTest}
+                    disabled={testing}
+                    className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-medium bg-muted hover:bg-muted/80 transition-colors cursor-pointer disabled:opacity-50"
+                  >
+                    {testing ? <Loader2 className="h-3 w-3 animate-spin" /> : <FlaskConical className="h-3 w-3" />}
+                    测试
+                  </button>
+
+                  <div className="flex-1" />
+
+                  {isRunning ? (
+                    <button
+                      type="button"
+                      onClick={handleStop}
+                      disabled={isPending}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-red-500/10 text-red-600 dark:text-red-400 hover:bg-red-500/20 transition-colors cursor-pointer disabled:opacity-50"
+                    >
+                      {pendingOp === "stopping" ? <Loader2 className="h-3 w-3 animate-spin" /> : <Square className="h-3 w-3" />}
+                      停止
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={handleStart}
+                      disabled={isPending || saving || detail.dep_installed === false}
+                      title={detail.dep_installed === false ? "请先安装 Python 依赖" : undefined}
+                      className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-semibold bg-green-500/10 text-green-600 dark:text-green-400 hover:bg-green-500/20 transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {pendingOp === "starting" || saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Play className="h-3 w-3" />}
+                      启动
+                    </button>
+                  )}
+                </div>
               </div>
-            </div>
-          </motion.div>
-        )}
-      </AnimatePresence>
-    </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+      </div>
+    </motion.div>
   );
 }
 
@@ -1707,228 +1772,300 @@ function RequireBindToggle({
   );
 }
 
-// ── Main Tab ──────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════
+// ══ TAB 1: Channel Overview ═══════════════════════════════
+// ═══════════════════════════════════════════════════════════
 
-export function ChannelsTab() {
-  const [status, setStatus] = useState<ChannelStatusInfo | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const [toast, setToast] = useState<{ msg: string; type: "success" | "error" | "info" } | null>(null);
+export function ChannelOverviewTab({
+  status,
+  loading,
+  error,
+  onRefresh,
+  onToast,
+  showBind,
+}: TabProps) {
   const [savingBind, setSavingBind] = useState(false);
-
-  const refresh = useCallback(() => {
-    setError(null);
-    fetchChannelsStatus()
-      .then((next) => {
-        setStatus(next);
-        setError(null);
-      })
-      .catch((e: Error) => setError(e.message))
-      .finally(() => setLoading(false));
-  }, []);
-
-  useEffect(() => {
-    refresh();
-  }, [refresh]);
-
-  const handleToast = useCallback((msg: string, type: "success" | "error" | "info") => {
-    setToast({ msg, type });
-  }, []);
-
-  const activeCount = status?.channels?.length || 0;
+  const [bindToast, setBindToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
+  const showBindToast = useCallback(
+    (message: string, type: "success" | "error") => {
+      setBindToast({ message, type });
+      setTimeout(() => setBindToast(null), 3000);
+    },
+    [],
+  );
 
   return (
-    <div className="space-y-4">
-      {/* Toast — fixed at top-center so it's visible regardless of scroll */}
-      <AnimatePresence>
-        {toast && (
-          <div className="fixed top-4 left-1/2 -translate-x-1/2 z-100 w-[90vw] max-w-sm pointer-events-auto">
-            <Toast
-              message={toast.msg}
-              type={toast.type}
-              onClose={() => setToast(null)}
-            />
-          </div>
-        )}
-      </AnimatePresence>
+    <>
+      {/* Refresh Bar */}
+      <div className="flex items-center justify-between">
+        <p className="text-xs text-muted-foreground">
+          配置凭证后即可启动渠道 Bot，支持运行时热启停。
+        </p>
+        <button
+          type="button"
+          onClick={onRefresh}
+          className="h-7 w-7 inline-flex items-center justify-center rounded-lg text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer shrink-0"
+          title="刷新状态"
+        >
+          <RotateCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+        </button>
+      </div>
 
-      {/* Channel Configuration */}
-      <Section
-        title="渠道配置"
-        icon={Radio}
-        defaultOpen={true}
-        badge={
-          <div className="flex items-center gap-1.5">
-            {activeCount > 0 && (
-              <Badge variant="secondary" className="text-[10px] px-2 py-0.5 border-0 bg-green-500/15 text-green-600 dark:text-green-400">
-                {activeCount} 运行中
-              </Badge>
-            )}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                setLoading(true);
-                refresh();
-              }}
-              className="h-6 w-6 inline-flex items-center justify-center rounded text-muted-foreground hover:text-foreground hover:bg-muted transition-colors cursor-pointer"
-              title="刷新状态"
-            >
-              <RotateCw className={`h-3 w-3 ${loading ? "animate-spin" : ""}`} />
-            </button>
-          </div>
-        }
-      >
-        {/* 强制绑定开关 */}
-        {status && (
-          <RequireBindToggle
-            checked={status.require_bind}
-            source={status.require_bind_source}
-            saving={savingBind}
-            onToggle={async (val) => {
-              setSavingBind(true);
-              try {
-                await updateChannelSettings({ require_bind: val });
-                handleToast(val ? "已开启强制绑定" : "已关闭强制绑定", "success");
-                refresh();
-              } catch (e: unknown) {
-                handleToast(
-                  `设置失败: ${e instanceof Error ? e.message : String(e)}`,
-                  "error",
-                );
-              } finally {
-                setSavingBind(false);
-              }
-            }}
-          />
-        )}
-        {loading && !status ? (
-          <div className="flex items-center justify-center py-6 text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin mr-2" />
-            <span className="text-xs">加载渠道状态...</span>
-          </div>
-        ) : error ? (
-          <div className="flex items-center gap-2 py-4 px-3 rounded-md bg-red-500/10 text-red-600 dark:text-red-400">
-            <Info className="h-4 w-4 shrink-0" />
-            <span className="text-xs">无法获取渠道状态: {error}</span>
-          </div>
-        ) : status?.details && status.details.length > 0 ? (
-          <div className="space-y-2">
-            <p className="text-xs text-muted-foreground mb-3">
-              配置凭证后即可启动渠道 Bot。支持运行时热启停，无需重启服务。
-            </p>
-            {status.details.map((detail) => (
-              <ChannelConfigCard
-                key={detail.name}
-                detail={detail}
-                onRefresh={refresh}
-                onToast={handleToast}
-              />
-            ))}
-          </div>
-        ) : (
-          <div className="flex items-center gap-3 p-4 rounded-lg border border-dashed border-border bg-muted/20">
-            <div
-              className="h-10 w-10 rounded-xl flex items-center justify-center shrink-0"
-              style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-            >
-              <Radio className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
-            </div>
-            <div className="min-w-0">
-              <p className="text-sm font-medium">暂无可配置的渠道</p>
-              <p className="text-xs text-muted-foreground mt-0.5">
-                请检查后端是否正常运行
-              </p>
-            </div>
-          </div>
-        )}
-      </Section>
-
-      {/* Access Control */}
-      {status?.settings && (
-        <Section title="访问控制" icon={Shield} defaultOpen={false}>
-          <AccessControlSettings
-            settings={status.settings}
-            envOverrides={status.settings_env_overrides || {}}
-            onSave={async (patch) => {
-              const res = await updateChannelSettings(patch);
-              if (res.locked_fields && res.locked_fields.length > 0) {
-                handleToast(res.message || `部分字段被环境变量锁定`, "info");
-              } else {
-                handleToast("访问控制设置已保存", "success");
-              }
-              refresh();
-            }}
-          />
-        </Section>
+      {/* Require Bind Toggle */}
+      {status && (
+        <RequireBindToggle
+          checked={status.require_bind}
+          source={status.require_bind_source}
+          saving={savingBind}
+          onToggle={async (val) => {
+            setSavingBind(true);
+            try {
+              await updateChannelSettings({ require_bind: val });
+              onToast(val ? "已开启强制绑定" : "已关闭强制绑定", "success");
+              onRefresh();
+            } catch (e: unknown) {
+              onToast(`设置失败: ${e instanceof Error ? e.message : String(e)}`, "error");
+            } finally {
+              setSavingBind(false);
+            }
+          }}
+        />
       )}
+
+      {/* Channel Cards */}
+      {loading && !status ? (
+        <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
+          <Loader2 className="h-6 w-6 animate-spin" style={{ color: "var(--em-primary)" }} />
+          <span className="text-xs">加载渠道状态...</span>
+        </div>
+      ) : error ? (
+        <div className="flex items-center gap-2.5 py-4 px-4 rounded-xl bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400">
+          <AlertCircle className="h-4 w-4 shrink-0" />
+          <span className="text-xs">无法获取渠道状态: {error}</span>
+        </div>
+      ) : status?.details && status.details.length > 0 ? (
+        <div className="space-y-3">
+          {status.details.map((detail, i) => (
+            <motion.div
+              key={detail.name}
+              initial={{ opacity: 0, y: 12 }}
+              animate={{ opacity: 1, y: 0 }}
+              transition={{ delay: i * 0.08, duration: 0.3, ease: "easeOut" }}
+            >
+              <ChannelConfigCard
+                detail={detail}
+                onRefresh={onRefresh}
+                onToast={onToast}
+              />
+            </motion.div>
+          ))}
+        </div>
+      ) : (
+        <div className="flex flex-col items-center gap-3 py-12 text-center">
+          <div
+            className="h-14 w-14 rounded-2xl flex items-center justify-center"
+            style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+          >
+            <Radio className="h-7 w-7" style={{ color: "var(--em-primary)" }} />
+          </div>
+          <div>
+            <p className="text-sm font-semibold">暂无可配置的渠道</p>
+            <p className="text-xs text-muted-foreground mt-1">请检查后端是否正常运行</p>
+          </div>
+        </div>
+      )}
+
+      {/* ── 渠道绑定 ── */}
+      {showBind && (
+        <>
+          <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
+          <div>
+            <div className="flex items-center gap-2 mb-4">
+              <div
+                className="h-8 w-8 rounded-lg flex items-center justify-center"
+                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+              >
+                <Link2 className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+              </div>
+              <h3 className="text-sm font-semibold">渠道绑定</h3>
+            </div>
+            <ChannelBindSection showToast={showBindToast} />
+          </div>
+
+          {/* Bind toast */}
+          <AnimatePresence>
+            {bindToast && (
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
+                  bindToast.type === "success"
+                    ? "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30"
+                    : "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
+                }`}
+              >
+                {bindToast.type === "success" ? (
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span className="flex-1">{bindToast.message}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+        </>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// ══ TAB 2: Settings ═══════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+
+export function ChannelSettingsTab({
+  status,
+  loading,
+  onRefresh,
+  onToast,
+}: TabProps) {
+  if (loading && !status) {
+    return (
+      <div className="flex flex-col items-center justify-center py-12 text-muted-foreground gap-3">
+        <Loader2 className="h-6 w-6 animate-spin" style={{ color: "var(--em-primary)" }} />
+        <span className="text-xs">加载设置...</span>
+      </div>
+    );
+  }
+
+  if (!status?.settings) {
+    return (
+      <div className="flex flex-col items-center gap-3 py-12 text-center">
+        <div
+          className="h-14 w-14 rounded-2xl flex items-center justify-center"
+          style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+        >
+          <Settings2 className="h-7 w-7" style={{ color: "var(--em-primary)" }} />
+        </div>
+        <div>
+          <p className="text-sm font-semibold">设置不可用</p>
+          <p className="text-xs text-muted-foreground mt-1">请确认后端已连接</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Access Control */}
+      <Section title="访问控制" icon={Shield} defaultOpen={true}>
+        <AccessControlSettings
+          settings={status.settings}
+          envOverrides={status.settings_env_overrides || {}}
+          onSave={async (patch) => {
+            const res = await updateChannelSettings(patch);
+            if (res.locked_fields && res.locked_fields.length > 0) {
+              onToast(res.message || "部分字段被环境变量锁定", "info");
+            } else {
+              onToast("访问控制设置已保存", "success");
+            }
+            onRefresh();
+          }}
+        />
+      </Section>
 
       {/* Behavior Settings */}
-      {status?.settings && (
-        <Section title="行为设置" icon={Settings2} defaultOpen={false}>
-          <BehaviorSettings
-            settings={status.settings}
-            envOverrides={status.settings_env_overrides || {}}
-            onSave={async (patch) => {
-              const res = await updateChannelSettings(patch);
-              if (res.locked_fields && res.locked_fields.length > 0) {
-                handleToast(res.message || `部分字段被环境变量锁定`, "info");
-              } else {
-                handleToast("行为设置已保存", "success");
-              }
-              refresh();
-            }}
-          />
-        </Section>
-      )}
-
-      {/* Output Tuning */}
-      {status?.settings && (
-        <Section title="输出调优" icon={Zap} defaultOpen={false}>
-          <OutputTuningSettings
-            settings={status.settings}
-            onSave={async (patch) => {
-              await updateChannelSettings(patch);
-              handleToast("输出调优设置已保存", "success");
-              refresh();
-            }}
-          />
-        </Section>
-      )}
-
-      {/* Env Var Fallback */}
-      <Section title="环境变量配置（高级）" icon={Terminal} defaultOpen={false}>
-        <EnvFallbackGuide />
+      <Section title="行为设置" icon={Settings2} defaultOpen={false}>
+        <BehaviorSettings
+          settings={status.settings}
+          envOverrides={status.settings_env_overrides || {}}
+          onSave={async (patch) => {
+            const res = await updateChannelSettings(patch);
+            if (res.locked_fields && res.locked_fields.length > 0) {
+              onToast(res.message || "部分字段被环境变量锁定", "info");
+            } else {
+              onToast("行为设置已保存", "success");
+            }
+            onRefresh();
+          }}
+        />
       </Section>
 
-      {/* Bot Commands Reference */}
+      {/* Output Tuning */}
+      <Section title="输出调优" icon={Zap} defaultOpen={false}>
+        <OutputTuningSettings
+          settings={status.settings}
+          onSave={async (patch) => {
+            await updateChannelSettings(patch);
+            onToast("输出调优设置已保存", "success");
+            onRefresh();
+          }}
+        />
+      </Section>
+
+      {/* Rate Limit — moved from 命令参考 to here */}
+      {status.rate_limit && (
+        <Section title="速率限制" icon={Shield} defaultOpen={false}>
+          <RateLimitSettings
+            config={status.rate_limit}
+            envOverrides={status.rate_limit_env_overrides || {}}
+            onToast={onToast}
+            onRefresh={onRefresh}
+          />
+        </Section>
+      )}
+    </>
+  );
+}
+
+// ═══════════════════════════════════════════════════════════
+// ══ TAB 3: Reference ══════════════════════════════════════
+// ═══════════════════════════════════════════════════════════
+
+// eslint-disable-next-line @typescript-eslint/no-unused-vars
+export function ChannelReferenceTab(_props: TabProps) {
+  return (
+    <>
+      {/* Bot Commands */}
       <Section
         title="Bot 命令参考"
-        icon={BookOpen}
-        defaultOpen={false}
+        icon={MessageSquare}
+        defaultOpen={true}
         badge={
           <Badge variant="secondary" className="text-[10px] px-2 py-0.5 border-0 bg-muted text-muted-foreground">
-            22 个命令
+            22 命令
           </Badge>
         }
       >
         <div className="space-y-1">
           <p className="text-xs text-muted-foreground mb-3">
-            在 Bot 对话中使用以下命令控制 ExcelManus。所有命令均以 <code className="px-1 py-0.5 rounded bg-muted font-mono">/</code> 开头。
+            在 Bot 对话中使用以下命令控制 ExcelManus。所有命令以 <code className="px-1.5 py-0.5 rounded-md bg-muted font-mono text-[11px]">/</code> 开头。
           </p>
           <CommandReference />
-          <ConcurrencyModesInfo />
-          {status?.rate_limit && (
-            <RateLimitSettings
-              config={status.rate_limit}
-              envOverrides={status.rate_limit_env_overrides || {}}
-              onToast={handleToast}
-              onRefresh={refresh}
-            />
-          )}
-          <BindFlowOverview />
         </div>
       </Section>
-    </div>
+
+      {/* Concurrency Modes */}
+      <Section title="并发模式" icon={Zap} defaultOpen={false}>
+        <ConcurrencyModesInfo />
+      </Section>
+
+      {/* Bind Flow Overview — moved from 命令参考 to here */}
+      <Section title="账号绑定流程" icon={Link2} defaultOpen={false}>
+        <BindFlowOverview />
+      </Section>
+
+      {/* Env Var Guide */}
+      <Section title="环境变量配置（高级）" icon={Terminal} defaultOpen={false}>
+        <EnvFallbackGuide />
+      </Section>
+    </>
   );
+}
+
+// ── Legacy export for backward compatibility ──────────────
+
+export function ChannelsTab() {
+  return null;
 }

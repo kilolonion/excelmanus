@@ -121,6 +121,9 @@ export function ProviderGuideStep({
           llm_base_url: baseUrl,
           llm_model: model,
         });
+        // Non-admin users save to their profile — also mark configured so the
+        // wizard won't re-appear during the current session.
+        useOnboardingStore.getState().setBackendConfigured(true);
       }
       onComplete();
     } catch (e) {

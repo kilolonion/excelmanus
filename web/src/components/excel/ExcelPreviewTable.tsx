@@ -5,7 +5,7 @@ import { ExternalLink, Table2 } from "lucide-react";
 import type { ExcelPreviewData, CellStyle } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText, formatCellByPattern } from "./cell-style-utils";
-import { buildMergeMaps } from "./merge-utils";
+import { buildMergeMaps, getMergeInfo } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
 
 interface ExcelPreviewTableProps {
@@ -73,8 +73,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                 </th>
                 {data.columns.map((col, i) => {
                   const colNum = i + 1; // 1-based
-                  const mergeInfo = masterMap.get(`1,${colNum}`);
-                  if (hiddenSet.has(`1,${colNum}`)) return null;
+                  const merge = getMergeInfo(masterMap, hiddenSet, 1, colNum);
+                  if (merge.isHidden) return null;
                   const hStyle = headerStyles?.[i];
                   const css = hStyle ? cellStyleToCSS(hStyle as CellStyle) : {};
                   return (
@@ -82,8 +82,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                       key={i}
                       className="sticky top-0 z-10 bg-muted/80 backdrop-blur-sm border-r border-b border-border/60 px-2 py-1 text-left font-semibold whitespace-nowrap text-muted-foreground/90 min-w-[56px]"
                       style={css}
-                      colSpan={mergeInfo?.colSpan}
-                      rowSpan={mergeInfo?.rowSpan}
+                      colSpan={merge.span?.colSpan}
+                      rowSpan={merge.span?.rowSpan}
                     >
                       {col}
                     </th>
@@ -103,8 +103,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                     {row.map((cell, colIdx) => {
                       const excelRow = rowIdx + 2; // 1-based, offset by header row
                       const excelCol = colIdx + 1; // 1-based
-                      if (hiddenSet.has(`${excelRow},${excelCol}`)) return null;
-                      const mergeInfo = masterMap.get(`${excelRow},${excelCol}`);
+                      const merge = getMergeInfo(masterMap, hiddenSet, excelRow, excelCol);
+                      if (merge.isHidden) return null;
                       const cStyle = rowStyles?.[colIdx];
                       const css = cStyle ? cellStyleToCSS(cStyle as CellStyle) : {};
                       const wrap = hasWrapText(cStyle as CellStyle);
@@ -122,8 +122,8 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
                           }`}
                           style={hasStyles ? css : undefined}
                           title={cell != null ? String(cell) : ""}
-                          colSpan={mergeInfo?.colSpan}
-                          rowSpan={mergeInfo?.rowSpan}
+                          colSpan={merge.span?.colSpan}
+                          rowSpan={merge.span?.rowSpan}
                         >
                           {display != null ? display : <span className="text-muted-foreground/20">—</span>}
                         </td>

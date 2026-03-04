@@ -19,6 +19,7 @@ import {
   Search,
   FileText,
   Timer,
+  Globe,
   type LucideIcon,
 } from "lucide-react";
 import {
@@ -57,6 +58,7 @@ const TOOL_ICON_MAP: Record<string, LucideIcon> = {
 };
 
 function getToolIcon(name: string): LucideIcon {
+  if (name.startsWith("mcp_exa_")) return Globe;
   return TOOL_ICON_MAP[name] || Wrench;
 }
 
@@ -85,6 +87,10 @@ function argsSummary(name: string, args: Record<string, unknown>): string | null
   if (name === "run_code" && typeof args.code === "string") {
     const firstLine = args.code.split("\n")[0].slice(0, 50);
     parts.push(firstLine + (args.code.length > 50 ? "…" : ""));
+  }
+  // MCP Exa 搜索工具参数预览
+  if (name.startsWith("mcp_exa_") && typeof args.query === "string") {
+    parts.push(`🔍 ${args.query.slice(0, 60)}${args.query.length > 60 ? "…" : ""}`);
   }
   if (name === "sleep") {
     if (args.seconds) parts.push(`${args.seconds}s`);
@@ -151,6 +157,17 @@ const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
     border: "border-green-300/40 dark:border-green-500/20",
     label: "完成",
   },
+  search: {
+    bar: "#0891b2",
+    iconBg: "bg-cyan-500/10 dark:bg-cyan-400/15",
+    iconColor: "text-cyan-600 dark:text-cyan-400",
+    pillBg: "bg-cyan-500/8 dark:bg-cyan-400/10",
+    pillText: "text-cyan-700 dark:text-cyan-300",
+    cardBg: "bg-cyan-500/[0.02] dark:bg-cyan-500/[0.03]",
+    cardHover: "hover:bg-cyan-500/[0.05] dark:hover:bg-cyan-400/[0.06]",
+    border: "border-cyan-300/40 dark:border-cyan-500/20",
+    label: "搜索",
+  },
   sleep: {
     bar: "#6366f1",
     iconBg: "bg-indigo-500/10 dark:bg-indigo-400/15",
@@ -175,7 +192,25 @@ const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
   },
 };
 
+/** MCP 工具友好显示名（pill 标签用） */
+function getToolDisplayName(name: string): string {
+  if (name.startsWith("mcp_exa_")) {
+    // mcp_exa_web_search_exa → Exa Web Search
+    const raw = name.slice("mcp_exa_".length).replace(/_exa$/, "").replace(/_/g, " ");
+    return `exa:${raw}`;
+  }
+  if (name.startsWith("mcp_")) {
+    // mcp_server_tool_name → server:tool_name
+    const rest = name.slice("mcp_".length);
+    const sep = rest.indexOf("_");
+    if (sep > 0) return `${rest.slice(0, sep)}:${rest.slice(sep + 1)}`;
+    return rest;
+  }
+  return name;
+}
+
 function getToolCategory(name: string): string {
+  if (name.startsWith("mcp_exa_")) return "search";
   if (["read_excel", "list_sheets", "read_text_file"].includes(name)) return "read";
   if (["write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"].includes(name)) return "write";
   if (name === "run_code") return "code";
@@ -395,7 +430,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
 
             {/* 工具名胶囊 */}
             <span className={`inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium font-mono flex-shrink-0 ${theme.pillBg} ${theme.pillText}`}>
-              {name}
+              {getToolDisplayName(name)}
             </span>
 
             {/* 参数预览 — 移动端隐藏以腾出进度信息空间 */}

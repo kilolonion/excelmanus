@@ -14,7 +14,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { panelSlideVariants, panelSlideVariantsMobile, panelSlideVariantsMedium } from "@/lib/sidebar-motion";
 import { useShallow } from "zustand/react/shallow";
-import { useIsMobile, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
+import { useIsMobile, useIsTablet, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
 import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -27,6 +27,7 @@ const UniverSheet = dynamic(
 
 export function ExcelSidePanel() {
   const isMobile = useIsMobile();
+  const isTablet = useIsTablet();
   const isDesktop = useIsDesktop();
   const isMediumScreen = useIsMediumScreen();
 
@@ -68,7 +69,7 @@ export function ExcelSidePanel() {
   // 中等屏幕（1024-1279px）：浮层模式，类似移动端但更大
   // 移动端（<1024px）：全屏浮层
   const useFloatingMode = !isDesktop || isFloatingByResize;
-  const panelWidth = isMobile ? undefined : isDesktop ? resizableWidth : 600;
+  const panelWidth = isMobile ? undefined : isDesktop ? resizableWidth : isTablet ? 420 : 600;
 
   const hasBackupForFile = useMemo(
     () => {

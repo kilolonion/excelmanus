@@ -202,7 +202,12 @@ if (typeof window !== "undefined") {
     const uid = state.user?.id ?? "anonymous";
     if (_prevUserId !== undefined && _prevUserId !== uid) {
       _prevUserId = uid;
-      useOnboardingStore.persist.rehydrate();
+      // Temporarily block rendering to avoid a flash of stale onboarding state
+      // while rehydrating from the new per-user localStorage key.
+      useOnboardingStore.setState({ _userSynced: false });
+      Promise.resolve(useOnboardingStore.persist.rehydrate()).then(() => {
+        useOnboardingStore.setState({ _userSynced: true });
+      });
     }
   });
 }

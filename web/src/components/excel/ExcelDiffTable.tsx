@@ -5,7 +5,7 @@ import { ExternalLink, Plus, Minus, RefreshCw } from "lucide-react";
 import type { ExcelDiffEntry, ExcelDiffSummary, ExcelCellDiff, CellStyle, MergeRange } from "@/stores/excel-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
-import { buildMergeMaps, type MergeSpan } from "./merge-utils";
+import { buildMergeMaps, getMergeInfo, type MergeSpan } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
 
 // ── 阈值 ────────────────────────────────────────────────
@@ -301,15 +301,15 @@ function GridHalfTable({
               </td>
               {cols.map((c) => {
                 // 合并单元格检测
-                if (hiddenSet?.has(`${r},${c}`)) return null;
-                const mergeSpan = masterMap?.get(`${r},${c}`);
+                const merge = (masterMap && hiddenSet) ? getMergeInfo(masterMap, hiddenSet, r, c) : { isMaster: false, isHidden: false };
+                if (merge.isHidden) return null;
 
                 const ref = `${indexToColLetter(c)}${r}`;
                 const cell = cellMap.get(ref);
                 if (!cell) {
                   return (
                     <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center"
-                      colSpan={mergeSpan?.colSpan} rowSpan={mergeSpan?.rowSpan}
+                      colSpan={merge.span?.colSpan} rowSpan={merge.span?.rowSpan}
                     >
                       <span className="text-muted-foreground/15">·</span>
                     </td>
@@ -323,7 +323,7 @@ function GridHalfTable({
                 if (isEmptySlot) {
                   return (
                     <td key={c} className="border-r border-b border-border/15 px-2 py-1 text-center"
-                      colSpan={mergeSpan?.colSpan} rowSpan={mergeSpan?.rowSpan}
+                      colSpan={merge.span?.colSpan} rowSpan={merge.span?.rowSpan}
                     >
                       <span className="text-muted-foreground/20">—</span>
                     </td>
@@ -343,8 +343,8 @@ function GridHalfTable({
                     } font-medium`}
                     style={css}
                     title={formatCellValue(val) || undefined}
-                    colSpan={mergeSpan?.colSpan}
-                    rowSpan={mergeSpan?.rowSpan}
+                    colSpan={merge.span?.colSpan}
+                    rowSpan={merge.span?.rowSpan}
                   >
                     {formatCellValue(val) || <span className="text-muted-foreground/20">—</span>}
                   </td>
