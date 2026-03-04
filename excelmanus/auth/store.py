@@ -330,17 +330,6 @@ class UserStore:
         row = self._conn.execute("SELECT COUNT(*) as c FROM users WHERE is_active = 1").fetchone()
         return row["c"] if row else 0  # type: ignore[index]
 
-    def email_exists(self, email: str) -> bool:
-        if self._is_pg:
-            row = self._conn.execute(
-                "SELECT 1 FROM users WHERE LOWER(email) = LOWER(%s)", (email,)
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT 1 FROM users WHERE email = ? COLLATE NOCASE", (email,)
-            ).fetchone()
-        return row is not None
-
     # ── 令牌用量追踪 ──────────────────────────────
 
     def record_token_usage(self, user_id: str, tokens: int) -> None:

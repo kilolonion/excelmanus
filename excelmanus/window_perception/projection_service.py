@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .domain import ExplorerWindow, SheetWindow, Window
+from .domain import ExplorerWindow, Window
 from .models import ChangeRecord, WindowType
 from .projection_models import ConfirmationProjection, NoticeProjection, ToolPayloadProjection
 

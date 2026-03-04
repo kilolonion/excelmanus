@@ -7,12 +7,11 @@
 from __future__ import annotations
 
 import json
-import re
 from typing import Any
 
 from openpyxl import load_workbook
 from openpyxl.utils import get_column_letter
-from openpyxl.utils.cell import coordinate_to_tuple, range_boundaries
+from openpyxl.utils.cell import coordinate_to_tuple
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard

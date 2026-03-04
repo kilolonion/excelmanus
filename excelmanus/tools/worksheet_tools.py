@@ -7,11 +7,8 @@
 from __future__ import annotations
 
 import json
-from typing import Any
 
 from openpyxl import load_workbook
-from openpyxl.worksheet.page import PageMargins, PrintPageSetup
-from openpyxl.worksheet.header_footer import HeaderFooter, HeaderFooterItem
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard

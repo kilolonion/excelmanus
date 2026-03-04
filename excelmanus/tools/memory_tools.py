@@ -41,19 +41,6 @@ _TOPIC_ALIASES: dict[str, str] = {
 }
 
 
-def init_memory(persistent_memory: PersistentMemory | None) -> None:
-    """兼容入口：设置模块级回退 PersistentMemory 引用。
-
-    运行时优先使用 bind_memory_context 绑定的上下文实例。
-    仅在未绑定上下文时回退到该全局引用（主要用于测试过渡与兼容旧调用）。
-
-    Args:
-        persistent_memory: PersistentMemory 实例或 None（None 表示禁用回退）。
-    """
-    global _persistent_memory
-    _persistent_memory = persistent_memory
-
-
 @contextmanager
 def bind_memory_context(
     persistent_memory: PersistentMemory | None,

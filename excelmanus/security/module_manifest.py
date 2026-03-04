@@ -48,7 +48,3 @@ def module_root(name: str) -> str:
 
 def normalize_module_root(root: str) -> str:
     return MODULE_ROOT_ALIASES.get(root, root)
-
-
-def canonical_module_root(module_name: str) -> str:
-    return normalize_module_root(module_root(module_name))

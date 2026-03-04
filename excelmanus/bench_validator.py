@@ -412,6 +412,12 @@ def _check_golden_cells(
 
         # ── 解析范围边界 ──
         min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+        if None in (min_col, min_row, max_col, max_row):
+            return AssertionResult(
+                rule="golden_cells",
+                passed=False,
+                message=f"无效的单元格范围: {cell_range!r}",
+            )
 
         # ── 批量读取（优化：使用迭代器代替逐个单元格访问）────
         total = 0

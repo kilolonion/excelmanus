@@ -7,7 +7,6 @@ FileAccessGuard 进行安全校验。
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -241,7 +240,7 @@ class MentionResolver:
         """
         try:
             from openpyxl import load_workbook
-            from openpyxl.utils import column_index_from_string, get_column_letter
+            from openpyxl.utils import get_column_letter
             from openpyxl.utils.cell import range_boundaries
             from excelmanus.tools._helpers import ensure_openpyxl_compatible
             path = ensure_openpyxl_compatible(path)

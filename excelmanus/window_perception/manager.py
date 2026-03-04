@@ -234,6 +234,10 @@ class WindowPerceptionManager:
         elif is_new_task:
             self._turn_hint_task_tags = ()
 
+    def notify_repeat_tripwire(self) -> str:
+        """外部（如 stuck detection）通知检测到循环，触发感知模式降级。"""
+        return self._adaptive_selector.mark_repeat_tripwire()
+
     def reset(self) -> None:
         """重置状态。"""
         self._cancel_advisor_task()

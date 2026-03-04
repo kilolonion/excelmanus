@@ -13,7 +13,6 @@ from typing import TYPE_CHECKING, Any
 
 from rich.console import Console
 from rich.table import Table
-from rich.text import Text
 
 from excelmanus.cli.theme import THEME
 from excelmanus.control_commands import CONTROL_COMMAND_SPECS

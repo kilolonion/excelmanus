@@ -6,7 +6,6 @@ import os
 from typing import TYPE_CHECKING
 
 from rich.console import Console
-from rich.text import Text
 
 from excelmanus.cli.theme import THEME
 from excelmanus.cli.utils import separator_line

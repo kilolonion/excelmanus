@@ -10,7 +10,6 @@ from excelmanus.logger import get_logger
 from excelmanus.skillpacks.loader import SkillpackLoader, SkillpackValidationError
 from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
 from excelmanus.subagent.models import (
-    SubagentCapabilityMode,
     SubagentConfig,
     SubagentMemoryScope,
     SubagentPermissionMode,

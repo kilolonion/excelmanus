@@ -98,11 +98,6 @@ _DATA_DIR_NAME = "data"
 # ── 路径获取 ──────────────────────────────────────────────
 
 
-def get_config_home() -> Path:
-    """返回 ExcelManus 全局配置目录: ``~/.excelmanus``。"""
-    return _EXCELMANUS_HOME
-
-
 def get_data_home() -> Path:
     """返回集中数据根目录。
 
@@ -324,15 +319,6 @@ def discover_old_installations() -> list[dict[str, Any]]:
     installations = _load_installations()
     installations.sort(key=lambda x: x.get("last_seen", ""), reverse=True)
     return installations
-
-
-def get_current_installation(project_root: str | Path) -> dict[str, Any] | None:
-    """查找指定路径的安装记录。"""
-    norm = _normalize_path(str(project_root))
-    for inst in _load_installations():
-        if _normalize_path(inst.get("path", "")) == norm:
-            return inst
-    return None
 
 
 # ── 主动扫描发现 ────────────────────────────────────────

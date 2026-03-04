@@ -772,7 +772,6 @@ def _perform_update_impl(
     _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
     branch = branch or "main"
     # Step 1 的 check_for_updates(force=True) 已执行 git fetch，直接 merge 即可
-    git_remote = "origin"
     rc, _, err = _run_cmd(
         ["git", "merge", f"origin/{branch}", "--ff-only"], cwd=project_root,
     )
@@ -781,7 +780,6 @@ def _perform_update_impl(
         _ensure_github_remote(project_root)
         rc2, _, _ = _run_cmd(["git", "fetch", "github", branch], cwd=project_root, timeout=120)
         if rc2 == 0:
-            git_remote = "github"
             rc, _, err = _run_cmd(
                 ["git", "merge", f"github/{branch}", "--ff-only"], cwd=project_root,
             )

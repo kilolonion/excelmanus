@@ -56,44 +56,6 @@ class CowWriter:
             Path(tmp).unlink(missing_ok=True)
             raise
 
-    def atomic_save_dataframe(
-        self,
-        df: Any,
-        target: Path,
-        sheet_name: str,
-        *,
-        preserve_other_sheets: bool = True,
-        index: bool = False,
-    ) -> None:
-        """pandas DataFrame 原子写入。
-
-        当 *preserve_other_sheets* 为 True 且目标文件已存在时，
-        使用 mode="a" + if_sheet_exists="replace" 保留其他 sheet。
-        """
-        import pandas as pd
-
-        target.parent.mkdir(parents=True, exist_ok=True)
-
-        if preserve_other_sheets and target.exists():
-            # 先写到临时文件，再替换
-            fd, tmp = tempfile.mkstemp(suffix=".xlsx", dir=str(target.parent))
-            os.close(fd)
-            try:
-                shutil.copy2(str(target), tmp)
-                with pd.ExcelWriter(
-                    tmp,
-                    engine="openpyxl",
-                    mode="a",
-                    if_sheet_exists="replace",
-                ) as w:
-                    df.to_excel(w, sheet_name=sheet_name, index=index)
-                os.replace(tmp, str(target))
-            except BaseException:
-                Path(tmp).unlink(missing_ok=True)
-                raise
-        else:
-            df.to_excel(str(target), sheet_name=sheet_name, index=index)
-
     # ── 内部实现 ──────────────────────────────────────────────
 
     def _load_bench_protected_dirs(self) -> list[Path]:

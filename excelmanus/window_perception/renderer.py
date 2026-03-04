@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .domain import ExplorerWindow, SheetWindow, Window
-from .models import DetailLevel, IntentTag, WindowSnapshot, WindowType
+from .models import DetailLevel, IntentTag, WindowSnapshot
 from .projection_models import NoticeProjection, ToolPayloadProjection
 from .projection_service import project_notice, project_tool_payload
 
@@ -870,21 +870,6 @@ def _format_map_preview(values: dict[str, Any], *, max_items: int) -> str:
     if len(ordered) > max_items:
         chunks.append(f"...(+{len(ordered) - max_items})")
     return ", ".join(chunks)
-
-
-def _extract_columns_from_preview(rows: list[Any]) -> list[str]:
-    columns: list[str] = []
-    seen: set[str] = set()
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        for key in row.keys():
-            name = str(key).strip()
-            if not name or name in seen:
-                continue
-            seen.add(name)
-            columns.append(name)
-    return columns
 
 
 def _render_pipe_rows(

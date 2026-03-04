@@ -121,6 +121,22 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         description="模型推理过程展示",
         arguments=("on", "off", "status"),
     ),
+    ControlCommandSpec(
+        command="/context",
+        description="上下文预算管理",
+        help_label="/context [status|reset]",
+        arguments=("status", "reset"),
+    ),
+    ControlCommandSpec(
+        command="/probe",
+        description="模型能力探测",
+        help_label="/probe context",
+        arguments=("context",),
+    ),
+    ControlCommandSpec(
+        command="/clear",
+        description="清除对话历史（保留会话）",
+    ),
 )
 
 

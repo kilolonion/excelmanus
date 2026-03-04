@@ -719,10 +719,14 @@ def _execute_script_docker(
     safe_args = [str(item) for item in (args or [])]
     sandbox_warnings: list[str] = []
 
-    sandbox_tmpdir = workspace_root / ".tmp"
-    sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
-    cow_log_name = f"_cow_{uuid.uuid4().hex[:12]}.log"
-    cow_log_path = sandbox_tmpdir / cow_log_name
+    _sandbox_env_obj = _get_active_sandbox_env()
+    if _sandbox_env_obj is not None:
+        sandbox_tmpdir = _sandbox_env_obj.get_tmp_dir()
+        cow_log_path = _sandbox_env_obj.get_cow_log_path()
+    else:
+        sandbox_tmpdir = workspace_root / ".tmp"
+        sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
+        cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     container_tmpdir = f"{CONTAINER_WORKSPACE}/.tmp"
 
     env_vars = {
@@ -965,18 +969,23 @@ def _execute_script(
     preexec_fn, limits_applied, limit_warnings = _build_unix_limits_preexec(
         timeout_seconds
     )
-    sandbox_warnings = [*env_warnings, *limit_warnings]
+    _sandbox_warnings = [*env_warnings, *limit_warnings]  # noqa: F841 — reserved for future logging
     safe_args = [str(item) for item in (args or [])]
 
     # ── 注入工作区本地临时目录（确保 et_xmlfile 等库的 temp 文件在工作区内） ──
-    sandbox_tmpdir = guard.workspace_root / ".tmp"
-    sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
+    _sandbox_env_obj = _get_active_sandbox_env()
+    if _sandbox_env_obj is not None:
+        sandbox_tmpdir = _sandbox_env_obj.get_tmp_dir()
+        cow_log_path = _sandbox_env_obj.get_cow_log_path()
+    else:
+        sandbox_tmpdir = guard.workspace_root / ".tmp"
+        sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
+        cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     sandbox_env["TMPDIR"] = str(sandbox_tmpdir)
     sandbox_env["TMP"] = str(sandbox_tmpdir)
     sandbox_env["TEMP"] = str(sandbox_tmpdir)
 
     # ── CoW 日志 ──
-    cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     sandbox_env["EXCELMANUS_COW_LOG"] = str(cow_log_path)
 
     # ── 路径上下文：帮助Agent理解sandbox中的工作目录 ──

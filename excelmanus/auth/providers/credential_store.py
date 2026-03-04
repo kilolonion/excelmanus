@@ -13,7 +13,6 @@ from excelmanus.auth.providers.base import (
     ValidatedCredential,
 )
 from excelmanus.security.cipher import TokenCipher as _TokenCipher
-from excelmanus.security.cipher import derive_fernet_key as _derive_fernet_key
 
 if TYPE_CHECKING:
     from excelmanus.db_adapter import ConnectionAdapter

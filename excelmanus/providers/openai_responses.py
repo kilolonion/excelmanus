@@ -290,8 +290,10 @@ def _apply_chat_kwargs_to_responses_body(body: dict[str, Any], kwargs: dict[str,
             reasoning_payload = {}
         # 若 extra_body 已显式设置 reasoning.effort，则优先保留用户覆盖值
         reasoning_payload.setdefault("effort", reasoning_effort.strip().lower())
-        # OpenAI Responses 仅提供思考摘要而非原始 CoT，默认请求 summary 以便前端可展示。
-        reasoning_payload.setdefault("summary", "auto")
+        # OpenAI Responses 仅提供思考摘要而非原始 CoT。
+        # 使用 "detailed" 以尽量获取更丰富的推理摘要内容，
+        # "auto" 在部分模型（如 codex）上仅返回一行标题。
+        reasoning_payload.setdefault("summary", "detailed")
         body["reasoning"] = reasoning_payload
 
     max_tokens = kwargs.get("max_tokens")
@@ -362,19 +364,15 @@ def _collect_reasoning_texts_from_output_item(item: Any) -> list[str]:
 
 
 def _extract_reasoning_delta_from_event(event_type: str, event_data: dict[str, Any]) -> str:
-    """从 Responses 流事件中提取 reasoning delta。"""
-    if event_type in {"response.reasoning_summary_text.delta", "response.reasoning_summary_text.done"}:
-        text = event_data.get("delta") or event_data.get("text") or ""
-        return text if isinstance(text, str) else ""
+    """从 Responses 流事件中提取 reasoning delta（仅增量）。
 
-    if event_type in {"response.reasoning_summary_part.added", "response.reasoning_summary_part.done"}:
-        part = event_data.get("part") or event_data.get("item")
-        if isinstance(part, str):
-            return part
-        if isinstance(part, dict):
-            text = part.get("text") or part.get("summary_text") or ""
-            return text if isinstance(text, str) else ""
-        return ""
+    只处理 ``response.reasoning_summary_text.delta`` 事件——
+    ``.done`` / ``.part.added`` / ``.part.done`` 事件包含的是已流式发送过的
+    完整累积文本，若一并提取会导致 reasoning 内容重复 2~3 倍。
+    """
+    if event_type == "response.reasoning_summary_text.delta":
+        text = event_data.get("delta") or ""
+        return text if isinstance(text, str) else ""
 
     return ""
 
@@ -602,12 +600,9 @@ class OpenAIResponsesClient:
         )
 
         # 通过流式请求收集完整响应（backend-api 不支持非流式）
-        text_parts: list[str] = []
-        reasoning_parts: list[str] = []
-        tool_calls: list[_ToolCall] = []
-        current_tools: dict[int, dict] = {}
-        usage = _Usage()
-        finish_reason = "stop"
+        # 消费所有流事件，在 response.completed 时提取完整响应对象，
+        # 然后通过 _responses_output_to_openai 统一转换为 ChatCompletion 格式。
+        completed_response: dict[str, Any] | None = None
 
         async with self._http.stream("POST", url, json=body, headers=headers) as resp:
             if resp.status_code != 200:
@@ -628,91 +623,13 @@ class OpenAIResponsesClient:
                 except json.JSONDecodeError:
                     continue
 
-                event_type = event_data.get("type", "")
-                reasoning_delta = _extract_reasoning_delta_from_event(event_type, event_data)
-                if reasoning_delta:
-                    reasoning_parts.append(reasoning_delta)
+                if event_data.get("type") == "response.completed":
+                    completed_response = event_data.get("response", {})
 
-                if event_type == "response.output_text.delta":
-                    delta_text = event_data.get("delta", "")
-                    if delta_text:
-                        text_parts.append(delta_text)
+        if completed_response is None:
+            raise ResponsesAPIError(0, "Responses API 流未返回 response.completed 事件")
 
-                elif event_type == "response.output_item.added":
-                    item = event_data.get("item", {})
-                    output_index = event_data.get("output_index", 0)
-                    if item.get("type") == "function_call":
-                        current_tools[output_index] = {
-                            "id": item.get("call_id", item.get("id", "")),
-                            "name": item.get("name", ""),
-                            "arguments": "",
-                        }
-                    elif item.get("type") == "reasoning":
-                        reasoning_parts.extend(_collect_reasoning_texts_from_output_item(item))
-
-                elif event_type == "response.function_call_arguments.delta":
-                    output_index = event_data.get("output_index", 0)
-                    delta_args = event_data.get("delta", "")
-                    if output_index not in current_tools:
-                        current_tools[output_index] = {
-                            "id": event_data.get("item_id", ""),
-                            "name": "",
-                            "arguments": "",
-                        }
-                    current_tools[output_index]["arguments"] += delta_args
-
-                elif event_type == "response.completed":
-                    response_obj = event_data.get("response", {})
-                    usage_data = response_obj.get("usage", {})
-                    if usage_data:
-                        usage = _Usage(
-                            prompt_tokens=usage_data.get("input_tokens", 0),
-                            completion_tokens=usage_data.get("output_tokens", 0),
-                            total_tokens=usage_data.get("input_tokens", 0)
-                            + usage_data.get("output_tokens", 0),
-                        )
-                        _input_details = usage_data.get("input_tokens_details", {})
-                        if isinstance(_input_details, dict):
-                            _cached = _input_details.get("cached_tokens", 0)
-                            if _cached:
-                                usage.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
-                    output = response_obj.get("output", [])
-                    for item in output:
-                        reasoning_parts.extend(_collect_reasoning_texts_from_output_item(item))
-                    has_tool = any(
-                        item.get("type") == "function_call"
-                        for item in output
-                        if isinstance(item, dict)
-                    )
-                    if has_tool:
-                        finish_reason = "tool_calls"
-
-        # 组装 tool_calls
-        for idx in sorted(current_tools.keys()):
-            tc = current_tools[idx]
-            tool_calls.append(_ToolCall(
-                id=tc["id"],
-                function=_Function(name=tc["name"], arguments=tc["arguments"]),
-            ))
-
-        raw_text = "".join(text_parts)
-        inline_thinking, clean_text = extract_inline_thinking(raw_text)
-        thinking_joined = _join_reasoning_parts(reasoning_parts, inline_thinking)
-
-        message = _Message(
-            content=clean_text if clean_text else None,
-            tool_calls=tool_calls if tool_calls else None,
-            thinking=thinking_joined,
-            reasoning=thinking_joined,
-            reasoning_content=thinking_joined,
-        )
-
-        result = _ChatCompletion(
-            id=f"resp_{uuid.uuid4().hex[:12]}",
-            model=model,
-            choices=[_Choice(message=message, finish_reason=finish_reason)],
-            usage=usage,
-        )
+        result = _responses_output_to_openai(completed_response, model)
         logger.debug(
             "Responses API 响应: tool_calls=%d, content_len=%d, tokens=%d",
             len(result.choices[0].message.tool_calls or []),
@@ -797,9 +714,8 @@ class OpenAIResponsesClient:
                                 "name": item.get("name", ""),
                                 "arguments": "",
                             }
-                        elif item.get("type") == "reasoning":
-                            for text in _collect_reasoning_texts_from_output_item(item):
-                                yield StreamDelta(thinking_delta=text)
+                        # reasoning item 的文本通过 reasoning_summary_text.delta
+                        # 事件逐增量流式发送，此处不再重复提取以避免内容重复。
 
                     elif event_type == "response.function_call_arguments.delta":
                         output_index = event_data.get("output_index", 0)

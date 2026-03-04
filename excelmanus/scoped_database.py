@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from excelmanus.db_adapter import Backend, ConnectionAdapter, create_sqlite_adapter
 from excelmanus.user_context import UserContext
@@ -94,8 +94,3 @@ class ScopedDatabase:
             )
 
 
-def resolve_global_db_path(workspace_root: str) -> str:
-    """返回全局共享 DB 的路径（仅 SQLite 模式使用）。"""
-    p = Path(workspace_root) / _GLOBAL_DB_DIRNAME
-    p.mkdir(parents=True, exist_ok=True)
-    return str(p / _GLOBAL_DB_FILENAME)

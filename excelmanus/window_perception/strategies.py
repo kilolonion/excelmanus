@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol
+
+if TYPE_CHECKING:
+    from .models import OpEntry
 
 from .domain import ExplorerWindow, SheetWindow, Window
 from .extractor import (
-    extract_directory,
-    extract_explorer_entries,
     is_excel_path,
-    normalize_path,
 )
 from .ingest import (
     extract_columns,
@@ -20,9 +20,7 @@ from .ingest import (
     make_change_record,
 )
 from .models import (
-    ChangeRecord,
     DetailLevel,
-    IntentTag,
     WindowType,
 )
 
@@ -241,7 +239,6 @@ class ExplorerStrategy:
         window.current_iteration = iteration
 
         # 记录操作和变更
-        from .models import ChangeRecord
 
         window.operation_history.append(
             _make_op_entry(tool_name, arguments, iteration)
