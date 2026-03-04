@@ -228,6 +228,27 @@ function QQWhitelistGuide() {
   );
 }
 
+// ── QQ Download Link Domain Guide ─────────────────────────
+
+function QQDownloadLinkGuide() {
+  return (
+    <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400">
+      <Info className="h-4 w-4 shrink-0 mt-0.5" />
+      <div className="flex-1 min-w-0 space-y-1">
+        <p className="text-xs font-medium">文件下载链接说明</p>
+        <p className="text-[11px] leading-relaxed opacity-80">
+          QQ 机器人不支持直接发送文件，会以<strong>下载链接</strong>形式回传。请注意：
+        </p>
+        <ul className="text-[11px] leading-relaxed opacity-80 list-disc list-inside space-y-0.5">
+          <li>需在「渠道设置 → 行为设置」中配置<strong>公开访问 URL</strong>（HTTPS），否则链接不可达</li>
+          <li>QQ 平台可能拦截未备案域名的链接，建议使用已备案的 HTTPS 域名</li>
+          <li>如需在 QQ 开放平台添加域名白名单，前往「安全设置 → 消息 URL 白名单」</li>
+        </ul>
+      </div>
+    </div>
+  );
+}
+
 // ── Feishu Webhook Guide ──────────────────────────────────
 
 function FeishuWebhookGuide() {
@@ -635,6 +656,7 @@ function ChannelConfigCard({
                 )}
 
                 {detail.name === "qq" && <QQWhitelistGuide />}
+                {detail.name === "qq" && <QQDownloadLinkGuide />}
                 {detail.name === "feishu" && <FeishuWebhookGuide />}
 
                 {/* Missing fields warning */}
@@ -1505,7 +1527,18 @@ function BehaviorSettings({
           disabled={isLocked("public_url")}
           className="w-full text-xs px-3 py-2 rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
         />
-        <p className="text-[10px] text-muted-foreground mt-0.5">Bot 向用户发送文件下载链接时使用的外部访问地址</p>
+        <p className="text-[10px] text-muted-foreground mt-0.5">Bot 向用户发送文件下载链接时使用的外部访问地址，必须为外网可达的 HTTPS 地址</p>
+        {!values.public_url && !isLocked("public_url") && (
+          <div className="flex items-start gap-2 mt-1.5 px-2.5 py-2 rounded-md bg-amber-500/10 border border-amber-500/20 text-amber-600 dark:text-amber-400">
+            <AlertCircle className="h-3.5 w-3.5 shrink-0 mt-0.5" />
+            <div className="flex-1 min-w-0">
+              <p className="text-[11px] leading-relaxed font-medium">未配置公开 URL</p>
+              <p className="text-[10px] leading-relaxed opacity-80 mt-0.5">
+                Bot 渠道生成的文件下载链接将使用 localhost 地址，用户在 QQ/Telegram 等平台上<strong>无法访问</strong>。请填入服务器的外网地址（如 <code className="px-1 py-0.5 rounded bg-amber-500/10 font-mono text-[9px]">https://yourdomain.com</code>）。
+              </p>
+            </div>
+          </div>
+        )}
       </div>
 
       {/* 保存 */}
@@ -1811,6 +1844,49 @@ export function ChannelOverviewTab({
         </button>
       </div>
 
+      {/* ── 渠道绑定 ── */}
+      {showBind && (
+        <>
+          <div>
+            <div className="flex items-center gap-2 mb-2.5">
+              <div
+                className="h-6 w-6 rounded-md flex items-center justify-center"
+                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+              >
+                <Link2 className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
+              </div>
+              <h3 className="text-sm font-semibold">渠道绑定</h3>
+            </div>
+            <ChannelBindSection showToast={showBindToast} />
+          </div>
+
+          {/* Bind toast */}
+          <AnimatePresence>
+            {bindToast && (
+              <motion.div
+                initial={{ opacity: 0, y: -8 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, y: -8 }}
+                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs backdrop-blur-xl shadow-sm ${
+                  bindToast.type === "success"
+                    ? "bg-green-50/80 dark:bg-green-950/70 text-green-700 dark:text-green-400 border-green-500/30"
+                    : "bg-red-50/80 dark:bg-red-950/70 text-red-700 dark:text-red-400 border-red-500/30"
+                }`}
+              >
+                {bindToast.type === "success" ? (
+                  <Check className="h-3.5 w-3.5 shrink-0" />
+                ) : (
+                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
+                )}
+                <span className="flex-1">{bindToast.message}</span>
+              </motion.div>
+            )}
+          </AnimatePresence>
+
+          <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
+        </>
+      )}
+
       {/* Require Bind Toggle */}
       {status && (
         <RequireBindToggle
@@ -1875,47 +1951,6 @@ export function ChannelOverviewTab({
         </div>
       )}
 
-      {/* ── 渠道绑定 ── */}
-      {showBind && (
-        <>
-          <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
-          <div>
-            <div className="flex items-center gap-2 mb-4">
-              <div
-                className="h-8 w-8 rounded-lg flex items-center justify-center"
-                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-              >
-                <Link2 className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
-              </div>
-              <h3 className="text-sm font-semibold">渠道绑定</h3>
-            </div>
-            <ChannelBindSection showToast={showBindToast} />
-          </div>
-
-          {/* Bind toast */}
-          <AnimatePresence>
-            {bindToast && (
-              <motion.div
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs ${
-                  bindToast.type === "success"
-                    ? "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30"
-                    : "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30"
-                }`}
-              >
-                {bindToast.type === "success" ? (
-                  <Check className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                )}
-                <span className="flex-1">{bindToast.message}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </>
-      )}
     </>
   );
 }

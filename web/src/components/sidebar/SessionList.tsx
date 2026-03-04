@@ -356,10 +356,10 @@ export function SessionList() {
       {/* Import toast */}
       {importToast && (
         <div
-          className={`mx-1 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-300 ${
+          className={`mx-1 flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-[11px] font-medium transition-all duration-300 backdrop-blur-xl shadow-sm ${
             importToast.type === "success"
-              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-              : "bg-destructive/10 text-destructive border border-destructive/20"
+              ? "bg-emerald-50/80 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+              : "bg-red-50/80 dark:bg-red-950/70 text-destructive border border-destructive/20"
           }`}
         >
           <span className="flex-1 min-w-0 truncate">{importToast.msg}</span>

@@ -714,7 +714,7 @@ export function SkillsTab() {
           <AnimatePresence>
             {chError && (
               <motion.div initial={{ opacity: 0, height: 0 }} animate={{ opacity: 1, height: "auto" }} exit={{ opacity: 0, height: 0 }} className="overflow-hidden">
-                <div className="flex items-start gap-2 px-3 py-2 text-xs rounded-lg bg-destructive/10 text-destructive border border-destructive/20">
+                <div className="flex items-start gap-2 px-3 py-2 text-xs rounded-lg bg-red-50/80 dark:bg-red-950/70 backdrop-blur-xl shadow-sm text-destructive border border-destructive/20">
                   <AlertCircle className="h-3.5 w-3.5 flex-shrink-0 mt-0.5" />
                   <span className="break-words flex-1">{chError}</span>
                   <button onClick={() => setChError(null)} className="flex-shrink-0 opacity-60 hover:opacity-100 transition-opacity"><X className="h-3 w-3" /></button>
@@ -723,7 +723,7 @@ export function SkillsTab() {
             )}
             {chSuccessMsg && (
               <motion.div initial={{ opacity: 0, height: 0, scale: 0.95 }} animate={{ opacity: 1, height: "auto", scale: 1 }} exit={{ opacity: 0, height: 0, scale: 0.95 }} className="overflow-hidden">
-                <div className="flex items-center gap-2 px-3 py-2 text-xs rounded-lg bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
+                <div className="flex items-center gap-2 px-3 py-2 text-xs rounded-lg bg-emerald-50/80 dark:bg-emerald-950/70 backdrop-blur-xl shadow-sm text-emerald-700 dark:text-emerald-400 border border-emerald-500/20">
                   <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
                   <span className="flex-1">{chSuccessMsg}</span>
                 </div>

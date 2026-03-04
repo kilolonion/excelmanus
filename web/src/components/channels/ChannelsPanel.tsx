@@ -41,9 +41,9 @@ function PanelToast({
   }, [onClose]);
 
   const colors = {
-    success: "bg-green-500/15 text-green-700 dark:text-green-400 border-green-500/30",
-    error: "bg-red-500/15 text-red-700 dark:text-red-400 border-red-500/30",
-    info: "bg-blue-500/15 text-blue-700 dark:text-blue-400 border-blue-500/30",
+    success: "bg-green-50/80 dark:bg-green-950/70 backdrop-blur-xl text-green-700 dark:text-green-400 border-green-500/30 shadow-sm",
+    error: "bg-red-50/80 dark:bg-red-950/70 backdrop-blur-xl text-red-700 dark:text-red-400 border-red-500/30 shadow-sm",
+    info: "bg-blue-50/80 dark:bg-blue-950/70 backdrop-blur-xl text-blue-700 dark:text-blue-400 border-blue-500/30 shadow-sm",
   };
   const icons = {
     success: <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />,

@@ -29,9 +29,6 @@ import { Separator } from "@/components/ui/separator";
 import {
   apiGet,
   apiPost,
-  fetchShortcutInfo,
-  createDesktopShortcut,
-  removeDesktopShortcut,
   cleanupVersionBackups,
   restoreVersionBackup,
   migrateVersionData,
@@ -40,7 +37,7 @@ import {
   executeRemoteDeploy,
   streamVersionUpdate,
 } from "@/lib/api";
-import type { ShortcutInfo, DeployStatusInfo, DeployResult } from "@/lib/api";
+import type { DeployStatusInfo, DeployResult } from "@/lib/api";
 import { fetchVersionManifest } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { RollbackPanel } from "@/components/settings/RollbackPanel";
@@ -100,8 +97,6 @@ export function VersionTab() {
   const [checking, setChecking] = useState(false);
   const [deletingBackup, setDeletingBackup] = useState<string | null>(null);
   const [deletingInstall, setDeletingInstall] = useState<string | null>(null);
-  const [shortcut, setShortcut] = useState<ShortcutInfo | null>(null);
-  const [shortcutBusy, setShortcutBusy] = useState(false);
   const [updating, setUpdating] = useState(false);
   const [updateProgress, setUpdateProgress] = useState<number | null>(null);
   const [updateMessage, setUpdateMessage] = useState<string>("");
@@ -126,18 +121,16 @@ export function VersionTab() {
   const fetchAll = useCallback(async () => {
     setLoading(true);
     try {
-      const [v, b, i, sc, ds, manifest] = await Promise.all([
+      const [v, b, i, ds, manifest] = await Promise.all([
         apiGet<VersionInfo>("/version/check"),
         apiGet<{ backups: BackupEntry[] }>("/version/backups"),
         apiGet<{ installations: InstallationEntry[] }>("/version/installations"),
-        fetchShortcutInfo().catch(() => null),
         fetchDeployStatus().catch(() => null),
         fetchVersionManifest().catch(() => null),
       ]);
       setVersion(v);
       setBackups(b.backups ?? []);
       setInstallations(i.installations ?? []);
-      if (sc) setShortcut(sc);
       if (ds) setDeployStatus(ds);
       if (manifest?.git_commit) setCurrentGitCommit(manifest.git_commit);
     } catch {
@@ -151,32 +144,13 @@ export function VersionTab() {
     fetchAll();
   }, [fetchAll]);
 
-  const handleToggleShortcut = async () => {
-    setShortcutBusy(true);
-    try {
-      if (shortcut?.exists) {
-        await removeDesktopShortcut();
-        setShortcut((prev) => prev ? { ...prev, exists: false, shortcut_path: null } : prev);
-        showMsg("ok", "已删除桌面快捷方式");
-      } else {
-        const res = await createDesktopShortcut();
-        setShortcut((prev) => prev ? { ...prev, exists: true, shortcut_path: res.path } : prev);
-        showMsg("ok", "桌面快捷方式已创建");
-      }
-    } catch {
-      showMsg("err", shortcut?.exists ? "删除快捷方式失败" : "创建快捷方式失败");
-    } finally {
-      setShortcutBusy(false);
-    }
-  };
-
   const handleCheckUpdate = async () => {
     setChecking(true);
     try {
       const v = await apiGet<VersionInfo>("/version/check?force=1");
       setVersion(v);
-      if (v.check_failed && v.error) {
-        showMsg("err", `检查更新失败: ${v.error}`);
+      if (v.check_failed) {
+        showMsg("err", v.error ? `检查更新失败: ${v.error}` : "检查更新失败");
       } else if (v.has_update) {
         showMsg("ok", `发现新版本 ${v.latest}（落后 ${v.commits_behind} 个提交）`);
       } else {
@@ -472,52 +446,6 @@ export function VersionTab() {
           </div>
         )}
       </div>
-
-      {/* ── 桌面快捷方式 ── */}
-      {/* Docker 模式隐藏（容器内无桌面环境） */}
-      {shortcut && !isDocker && (
-        <>
-          <Separator />
-          <div className="rounded-lg border border-border p-4">
-            <div className="flex items-center justify-between gap-2 sm:gap-3">
-              <div className="flex items-center gap-2 sm:gap-2.5 min-w-0">
-                <span className="shrink-0" style={{ color: "var(--em-primary)" }}>
-                  <MapPin className="h-5 w-5" />
-                </span>
-                <div className="min-w-0">
-                  <div className="text-sm font-semibold">桌面快捷方式</div>
-                  <div className="text-[11px] text-muted-foreground mt-0.5 truncate">
-                    {shortcut.exists ? (
-                      <span className="text-green-600 dark:text-green-400 inline-flex items-center gap-1 max-w-full">
-                        <CheckCircle2 className="h-3 w-3 shrink-0" />
-                        <span className="truncate">已创建 · {shortcut.shortcut_path}</span>
-                      </span>
-                    ) : (
-                      "未创建 — 点击按钮一键添加"
-                    )}
-                  </div>
-                </div>
-              </div>
-              <Button
-                variant="outline"
-                size="sm"
-                disabled={shortcutBusy}
-                onClick={handleToggleShortcut}
-                className="gap-1.5 h-8 shrink-0"
-              >
-                {shortcutBusy ? (
-                  <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                ) : shortcut.exists ? (
-                  <Trash2 className="h-3.5 w-3.5" />
-                ) : (
-                  <CheckCircle2 className="h-3.5 w-3.5" />
-                )}
-                <span className="hidden sm:inline">{shortcut.exists ? "删除" : "创建"}</span>
-              </Button>
-            </div>
-          </div>
-        </>
-      )}
 
       <Separator />
 
