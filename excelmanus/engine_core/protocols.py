@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 if TYPE_CHECKING:
     from excelmanus.config import ExcelManusConfig
     from excelmanus.events import EventCallback
-    from excelmanus.memory import ConversationMemory
     from excelmanus.skillpacks import SkillMatchResult
 
 

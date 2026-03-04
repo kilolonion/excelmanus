@@ -12,10 +12,8 @@ from __future__ import annotations
 import asyncio
 import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
-
-import numpy as np
 
 from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.logger import get_logger
@@ -277,6 +275,8 @@ class CompactionManager:
             return None
 
         try:
+            import numpy as np
+
             # 并行 embed query 和 old_texts
             query_vec, old_vecs = await asyncio.gather(
                 self._embedding_client.embed_single(query_text),

@@ -20,6 +20,7 @@ from excelmanus.task_list import TaskStatus
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
+    from excelmanus.engine_types import ChatResult
     from excelmanus.events import EventCallback
     from excelmanus.skillpacks import SkillMatchResult
 
@@ -924,12 +925,13 @@ class ContextBuilder:
             return [_chitchat_prompt], None
 
         # ── 动态内容（每请求/每迭代可能变化，作为独立 system 消息） ──
-        dynamic_prompt = ""
+        # 使用 list 收集各段，最后 join，避免反复创建中间字符串对象。
+        _dynamic_parts: list[str] = []
 
         # 统一文件全景 + CoW 路径映射（turn 内缓存，写入时标脏重建）
         file_registry_notice = self._build_file_registry_notice()
         if file_registry_notice:
-            dynamic_prompt = dynamic_prompt + file_registry_notice
+            _dynamic_parts.append(file_registry_notice)
 
         # 注入任务策略（PromptComposer strategies，同一轮次内不变）
         _strategy_text_captured = ""
@@ -948,7 +950,7 @@ class ContextBuilder:
                     _p_ctx, variables=getattr(e, "_runtime_vars", None),
                 )
                 if _strategy_text:
-                    dynamic_prompt = dynamic_prompt + "\n\n" + _strategy_text if dynamic_prompt else _strategy_text
+                    _dynamic_parts.append(_strategy_text)
                     _strategy_text_captured = _strategy_text
             except Exception:
                 logger.debug("策略注入失败，跳过", exc_info=True)
@@ -956,22 +958,22 @@ class ContextBuilder:
         # D2: 语义记忆动态注入（替代 system_prompt 中的全量静态注入）
         memory_notice = self._build_memory_notice()
         if memory_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + memory_notice if dynamic_prompt else memory_notice
+            _dynamic_parts.append(memory_notice)
 
         # 历史会话摘要注入（仅首轮/第二轮，后续零开销）
         session_history_notice = self._build_session_history_notice()
         if session_history_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + session_history_notice if dynamic_prompt else session_history_notice
+            _dynamic_parts.append(session_history_notice)
 
         # Playbook 历史经验注入（半静态，session 内稳定，每轮检查一次）
         playbook_notice = self._build_playbook_notice()
         if playbook_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + playbook_notice if dynamic_prompt else playbook_notice
+            _dynamic_parts.append(playbook_notice)
 
         # D3: 语义技能匹配提示（embedding 检索相关 skillpack，帮助 agent 推荐技能）
         skill_hints = self._build_skill_hints_notice()
         if skill_hints:
-            dynamic_prompt = dynamic_prompt + "\n\n" + skill_hints if dynamic_prompt else skill_hints
+            _dynamic_parts.append(skill_hints)
 
         _hook_context_captured = ""
         if e._transient_hook_contexts:
@@ -979,32 +981,32 @@ class ContextBuilder:
             e._transient_hook_contexts.clear()
             if hook_context:
                 _hc = "## Hook 上下文\n" + hook_context
-                dynamic_prompt = dynamic_prompt + "\n\n" + _hc if dynamic_prompt else _hc
+                _dynamic_parts.append(_hc)
                 _hook_context_captured = hook_context
 
         # 注入运行时元数据（每轮/每迭代变化）
         runtime_line = self._build_runtime_metadata_line()
-        dynamic_prompt = dynamic_prompt + "\n\n" + runtime_line if dynamic_prompt else runtime_line
+        _dynamic_parts.append(runtime_line)
 
         # 注入任务清单状态 + 计划文档引用（每迭代重建，不缓存）
         task_plan_notice = self._build_task_plan_notice()
         if task_plan_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + task_plan_notice
+            _dynamic_parts.append(task_plan_notice)
 
         # 条件性注入进展反思（仅在退化条件下触发，正常情况零开销）
         meta_cognition = self._build_meta_cognition_notice()
         if meta_cognition:
-            dynamic_prompt = dynamic_prompt + "\n\n" + meta_cognition
+            _dynamic_parts.append(meta_cognition)
 
         # 验证门控修复提示（验证失败时注入，正常情况零开销）
         verification_fix_notice = self._build_verification_fix_notice()
         if verification_fix_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + verification_fix_notice
+            _dynamic_parts.append(verification_fix_notice)
 
         # R8: 写入后即时验证提示（借鉴 Windsurf post_write hooks）
         post_write_hint = self._build_post_write_verification_hint()
         if post_write_hint:
-            dynamic_prompt = dynamic_prompt + "\n\n" + post_write_hint
+            _dynamic_parts.append(post_write_hint)
 
         # R7: 自动预扫描（必须在 R6 之前，以便注入缓存后被 R6 读取）
         scan_hint = self._build_scan_tool_hint()
@@ -1012,11 +1014,13 @@ class ContextBuilder:
         # R6: 注入已缓存的 explorer 结构化报告摘要
         explorer_notice = self._build_explorer_report_notice()
         if explorer_notice:
-            dynamic_prompt = dynamic_prompt + "\n\n" + explorer_notice
+            _dynamic_parts.append(explorer_notice)
 
         # R7 降级提示：自动扫描失败时的文本提示
         if scan_hint:
-            dynamic_prompt = dynamic_prompt + "\n\n" + scan_hint
+            _dynamic_parts.append(scan_hint)
+
+        dynamic_prompt = "\n\n".join(_dynamic_parts)
 
         window_perception_context = self._build_window_perception_notice()
         window_at_tail = e._effective_window_return_mode() != "enriched"
@@ -1188,7 +1192,10 @@ class ContextBuilder:
         # 任务清单状态（复用 _build_task_list_status_notice 的逻辑）
         parts.append(self._build_task_list_status_notice())
 
-        return "\n".join(parts)
+        result = "\n".join(parts)
+        if len(result) > _PLAN_CONTEXT_MAX_CHARS:
+            result = result[:_PLAN_CONTEXT_MAX_CHARS] + "\n…（计划上下文已截断）"
+        return result
 
     def _build_task_list_status_notice(self) -> str:
         """构建当前任务清单状态摘要，用于注入 system prompt。"""
@@ -1279,7 +1286,7 @@ class ContextBuilder:
                 attempt + 1,
                 _MAX_PLAN_AUTO_CONTINUE,
             )
-            e.memory.add_user_message(
+            e._state._pending_system_notices.append(
                 "请继续执行剩余的未完成子任务，直到全部完成。"
             )
             e._set_window_perception_turn_hints(
@@ -1338,7 +1345,7 @@ class ContextBuilder:
         if task_list is not None and task_index < len(task_list.items):
             task_list.items[task_index].force_retry()
 
-        e.memory.add_user_message(fix_msg)
+        e._state._pending_system_notices.append(fix_msg)
         e._set_window_perception_turn_hints(
             user_message=fix_msg,
             is_new_task=False,

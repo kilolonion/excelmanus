@@ -17,7 +17,7 @@ import numpy as np
 from excelmanus.db_adapter import ConnectionAdapter
 
 if TYPE_CHECKING:
-    from excelmanus.database import Database
+    pass
 
 logger = logging.getLogger(__name__)
 

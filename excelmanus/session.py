@@ -16,6 +16,7 @@ from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import MCPManager
 from excelmanus.skillpacks import SkillRouter
+from excelmanus.skillpacks.user_skill_service import UserSkillService
 from excelmanus.user_context import UserContext
 from excelmanus.user_scope import UserScope
 from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
@@ -26,6 +27,8 @@ if __import__("typing").TYPE_CHECKING:
     from excelmanus.auth.store import UserStore
     from excelmanus.chat_history import ChatHistoryStore
     from excelmanus.database import Database
+    from excelmanus.memory_extractor import MemoryExtractor
+    from excelmanus.persistent_memory import PersistentMemory
 
 logger = get_logger("session")
 
@@ -94,12 +97,15 @@ class SessionManager:
         database: "Database | None" = None,
         config_store: Any = None,
         user_store: "UserStore | None" = None,
+        user_skill_service: UserSkillService | None = None,
     ) -> None:
         self._max_sessions = max_sessions
+        self._max_sessions_per_user = config.max_sessions_per_user
         self._ttl_seconds = ttl_seconds
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
+        self._user_skill_service = user_skill_service
         self._shared_mcp_manager = shared_mcp_manager
         self._chat_history = chat_history
         self._conv_persistence: ConversationPersistence | None = (
@@ -231,19 +237,20 @@ class SessionManager:
             for entry in self._sessions.values():
                 entry.engine.sync_model_profiles(profiles)
 
-    def set_sandbox_docker_enabled(self, enabled: bool) -> None:
+    async def set_sandbox_docker_enabled(self, enabled: bool) -> None:
         """更新 Docker 沙盒开关（由 API lifespan 调用）。
 
         同时同步到所有活跃会话，使已有会话无需重建即可生效。
         """
         self._sandbox_config = SandboxConfig(docker_enabled=enabled)
-        for entry in self._sessions.values():
-            engine = entry.engine
-            ws = engine.workspace
-            ws.sandbox_config = self._sandbox_config
-            engine.sandbox_env = ws.create_sandbox_env(
-                transaction=engine.transaction,
-            )
+        async with self._lock:
+            for entry in self._sessions.values():
+                engine = entry.engine
+                ws = engine.workspace
+                ws.sandbox_config = self._sandbox_config
+                engine.sandbox_env = ws.create_sandbox_env(
+                    transaction=engine.transaction,
+                )
 
     def notify_file_deleted(self, file_path: str) -> None:
         """W4: 通知活跃 session 文件已被删除，清理 staging 条目。
@@ -498,10 +505,15 @@ class SessionManager:
         persistent_memory, memory_extractor = self._create_memory_components(
             user_id=user_id, scope=scope,
         )
+        # 技能隔离：优先使用 per-user router，回退到全局 router
+        if self._user_skill_service is not None:
+            _user_skill_router = self._user_skill_service.get_router(user_id)
+        else:
+            _user_skill_router = self._skill_router
         engine = AgentEngine(
             config=engine_config,
             registry=self._registry,
-            skill_router=self._skill_router,
+            skill_router=_user_skill_router,
             persistent_memory=persistent_memory,
             memory_extractor=memory_extractor,
             mcp_manager=self._shared_mcp_manager,
@@ -569,7 +581,7 @@ class SessionManager:
                 （用于 rollback 等不应受上限约束的场景）。
         """
         # ── Phase 1: 锁内快速路径 ──────────────────────────────
-        need_create = False
+        _need_create = False
         new_id: str = ""
         async with self._lock:
             now = time.monotonic()
@@ -603,10 +615,25 @@ class SessionManager:
                     f"会话数量已达上限（{self._max_sessions}），请稍后重试。"
                 )
 
+            # W8: 每用户会话上限检查
+            if (
+                not _skip_limit_check
+                and user_id is not None
+                and self._max_sessions_per_user > 0
+            ):
+                _user_count = sum(
+                    1 for e in self._sessions.values() if e.user_id == user_id
+                )
+                if _user_count >= self._max_sessions_per_user:
+                    raise SessionLimitExceededError(
+                        f"用户会话数量已达上限（{self._max_sessions_per_user}），"
+                        f"请关闭部分会话后重试。"
+                    )
+
             # 预留 slot
             new_id = session_id if session_id is not None else str(uuid.uuid4())
             self._pending_creates.add(new_id)
-            need_create = True
+            _need_create = True
 
         # ── Phase 2: 锁外执行重量级操作 ────────────────────────
         engine: AgentEngine | None = None
@@ -703,7 +730,8 @@ class SessionManager:
         # 仅对 Anthropic ClaudeClient 生效：预热稳定 system prompt 前缀，
         # 使首条用户消息即可命中 cache，大幅降低首次 TTFT。
         try:
-            asyncio.create_task(engine.warmup_prompt_cache())
+            from excelmanus.engine_utils import fire_and_forget
+            fire_and_forget(engine.warmup_prompt_cache(), name="warmup_prompt_cache")
         except Exception:
             logger.debug("prompt cache 预热任务创建失败，跳过", exc_info=True)
 
@@ -1283,17 +1311,6 @@ class SessionManager:
                 if entry is not None:
                     entry.restored_readonly = True
         return engine
-
-    def get_any_engine(self) -> "AgentEngine | None":
-        """同步获取任一活跃会话的 AgentEngine（无锁，仅用于只读查询）。
-
-        注意：CPython dict.get 是原子的，但 values() 迭代在极端并发下
-        可能因 dict 大小变化抛出 RuntimeError，此处做防御处理。
-        """
-        try:
-            return next(iter(self._sessions.values())).engine
-        except (StopIteration, RuntimeError):
-            return None
 
     async def get_active_count(self) -> int:
         """获取当前活跃会话数量（锁保护）。"""

@@ -12,7 +12,7 @@ import logging
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Literal
+from typing import TYPE_CHECKING, Any, Callable, Literal
 
 from excelmanus.mcp.client import MCPClientWrapper
 from excelmanus.mcp.processes import (
@@ -20,6 +20,11 @@ from excelmanus.mcp.processes import (
     terminate_workspace_mcp_processes,
 )
 from excelmanus.tools.registry import ToolDef
+
+if TYPE_CHECKING:
+    from excelmanus.config import ExcelManusConfig as Config
+    from excelmanus.mcp.config import MCPServerConfig
+    from excelmanus.tools.registry import ToolRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -247,6 +252,34 @@ def _adapt_mcp_call_arguments(
 # ---------------------------------------------------------------------------
 
 
+def _make_async_tool_func(
+    client: "MCPClientWrapper",
+    server_name: str,
+    original_name: str,
+    workspace_root: str,
+) -> Callable[..., Any]:
+    """创建异步包装函数，直接 await MCP 工具调用。
+
+    优先使用此函数，在主 event loop 中直接 await，
+    避免 asyncio.run() 创建新 event loop 的开销。
+
+    Returns:
+        异步可调用对象，签名为 ``async (**kwargs) -> str``。
+    """
+
+    async def async_tool_func(**kwargs: Any) -> str:
+        safe_kwargs = _adapt_mcp_call_arguments(
+            server_name=server_name,
+            arguments=kwargs,
+            workspace_root=workspace_root,
+        )
+        # client.call_tool 内部已有 asyncio.wait_for(timeout) 保护
+        result = await client.call_tool(original_name, safe_kwargs)
+        return format_tool_result(result)
+
+    return async_tool_func
+
+
 def _make_tool_func(
     client: "MCPClientWrapper",
     server_name: str,
@@ -255,6 +288,9 @@ def _make_tool_func(
     workspace_root: str,
 ) -> Callable[..., str]:
     """创建同步包装函数，内部通过 event loop 执行异步 MCP 工具调用。
+
+    仅作为 async_func 不可用时的兜底路径。
+    正常流程应使用 _make_async_tool_func 创建的异步版本。
 
     Args:
         client: MCP 客户端封装实例。
@@ -347,11 +383,19 @@ def make_tool_def(
         workspace_root,
     )
 
+    async_func = _make_async_tool_func(
+        client,
+        server_name,
+        original_name,
+        workspace_root,
+    )
+
     return ToolDef(
         name=prefixed_name,
         description=tagged_description,
         input_schema=input_schema,
         func=func,
+        async_func=async_func,
         max_result_chars=5000,
         write_effect="unknown",
     )
@@ -398,8 +442,14 @@ class MCPManager:
         await manager.shutdown()
     """
 
-    def __init__(self, workspace_root: str = ".") -> None:
+    def __init__(
+        self,
+        workspace_root: str = ".",
+        *,
+        app_config: "Config | None" = None,
+    ) -> None:
         self._workspace_root = workspace_root
+        self._app_config = app_config
         self._clients: dict[str, MCPClientWrapper] = {}
         self._leaked_clients: list[MCPClientWrapper] = []  # discover 失败且 close 异常的僵尸连接
         self._managed_workspace_pids: set[int] = set()
@@ -443,6 +493,10 @@ class MCPManager:
             self._registry = registry
 
             configs = MCPConfigLoader.load(workspace_root=self._workspace_root)
+
+            # ── 注入内置 MCP Server（如 Exa 搜索），用户同名配置优先 ──
+            configs = self._merge_builtin_configs(configs)
+
             if not configs:
                 self._initialized = True
                 logger.debug("无 MCP Server 配置，跳过初始化")
@@ -537,7 +591,6 @@ class MCPManager:
         Returns:
             (tool_defs, auto_approved_names) — 尚未注册到 registry，由调用方批量注册。
         """
-        from excelmanus.mcp.config import MCPServerConfig as _Cfg  # noqa: F811
 
         started = time.monotonic()
         state = self._server_states.get(cfg.name)
@@ -748,6 +801,37 @@ class MCPManager:
         self._managed_workspace_pids.update(valid_pids)
         grouped = self._managed_workspace_pids_by_state_dir.setdefault(state_dir, set())
         grouped.update(valid_pids)
+
+    def _merge_builtin_configs(
+        self,
+        user_configs: list["MCPServerConfig"],
+    ) -> list["MCPServerConfig"]:
+        """将内置 MCP Server 配置与用户配置合并。
+
+        规则：用户 mcp.json 中同名条目优先（覆盖内置）。
+        内置 Server 追加到列表末尾（用户配置的 Server 先连接）。
+        """
+        if self._app_config is None:
+            return user_configs
+
+        from excelmanus.mcp.builtin import get_builtin_mcp_configs
+
+        builtin_configs = get_builtin_mcp_configs(self._app_config)
+        if not builtin_configs:
+            return user_configs
+
+        user_names = {cfg.name for cfg in user_configs}
+        merged = list(user_configs)
+        for bcfg in builtin_configs:
+            if bcfg.name in user_names:
+                logger.debug(
+                    "内置 MCP Server '%s' 被用户配置覆盖，跳过内置",
+                    bcfg.name,
+                )
+                continue
+            merged.append(bcfg)
+            logger.info("注入内置 MCP Server: %s (%s)", bcfg.name, bcfg.url)
+        return merged
 
     async def shutdown(self) -> None:
         """关闭所有 MCP Server 连接。

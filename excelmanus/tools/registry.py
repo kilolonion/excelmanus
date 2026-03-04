@@ -85,6 +85,7 @@ class ToolDef:
     description: str
     input_schema: dict[str, Any]
     func: Callable[..., Any]
+    async_func: Callable[..., Any] | None = None
     sensitive_fields: set[str] = field(default_factory=set)
     max_result_chars: int = 3000
     truncate_head_chars: int | None = None
@@ -705,6 +706,72 @@ class ToolRegistry:
         except Exception as exc:
             logger.warning(
                 "工具 '%s' 执行异常: %s; arguments=%s",
+                tool_name,
+                exc,
+                arguments,
+            )
+            return self._format_execution_error(
+                tool_name=tool_name,
+                exc=exc,
+            )
+
+    async def call_tool_async(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str] | None = None,
+    ) -> Any:
+        """异步执行工具（MCP 工具直接 await，避免线程池开销）。
+
+        仅适用于具有 ``async_func`` 的工具（如 MCP 工具）。
+        校验逻辑与 ``call_tool`` 完全一致。
+        """
+        if tool_scope is not None and tool_name not in set(tool_scope):
+            raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
+
+        tool = self._tools.get(tool_name)
+        if tool is None:
+            raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
+
+        if tool.async_func is None:
+            raise RuntimeError(
+                f"工具 '{tool_name}' 未提供 async_func，不能使用 call_tool_async。"
+            )
+
+        schema_error = self.validate_arguments_by_schema(
+            tool_name=tool_name,
+            arguments=arguments,
+            schema=tool.input_schema,
+        )
+        if schema_error is not None:
+            return schema_error
+
+        signature: inspect.Signature | None = None
+        try:
+            signature = inspect.signature(tool.async_func)
+        except (TypeError, ValueError):
+            signature = None
+        if signature is not None:
+            try:
+                signature.bind(**arguments)
+            except TypeError as exc:
+                logger.warning(
+                    "工具 '%s' 参数绑定失败: %s; arguments=%s",
+                    tool_name,
+                    exc,
+                    arguments,
+                )
+                return self._format_argument_validation_error(
+                    tool=tool,
+                    arguments=arguments,
+                    detail=str(exc),
+                )
+
+        try:
+            return await tool.async_func(**arguments)
+        except Exception as exc:
+            logger.warning(
+                "工具 '%s' 异步执行异常: %s; arguments=%s",
                 tool_name,
                 exc,
                 arguments,

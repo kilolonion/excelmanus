@@ -191,6 +191,13 @@ class ImageLifecycleManager:
             return entry
         return None
 
+    def get_degraded_image_ids(self) -> list[int]:
+        """返回所有已降级且可重注入的图片 ID 列表。"""
+        return [
+            e.image_id for e in self._cache.values()
+            if e.degraded and e.raw_base64
+        ]
+
     def clear(self) -> None:
         """清空所有缓存。"""
         self._cache.clear()

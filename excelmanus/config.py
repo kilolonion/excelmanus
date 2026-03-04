@@ -333,6 +333,7 @@ class ExcelManusConfig:
     max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
+    max_sessions_per_user: int = 0  # 每用户会话上限，0 表示不限制
     workspace_root: str = "."
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
     deploy_mode: str = "standalone"  # standalone|server|docker — 部署模式
@@ -359,6 +360,7 @@ class ExcelManusConfig:
         "http://localhost:5173",
     )
     mcp_shared_manager: bool = False
+    exa_search_enabled: bool = True  # 内置 Exa 免费搜索（无需 API Key）
     # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
     aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
     aux_api_key: str | None = None
@@ -1166,6 +1168,10 @@ def load_config() -> ExcelManusConfig:
     max_sessions = _parse_int(
         os.environ.get("EXCELMANUS_MAX_SESSIONS"), "EXCELMANUS_MAX_SESSIONS", 1000
     )
+    max_sessions_per_user = _parse_int(
+        os.environ.get("EXCELMANUS_MAX_SESSIONS_PER_USER"),
+        "EXCELMANUS_MAX_SESSIONS_PER_USER", 0,
+    )
 
     workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
     data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "")
@@ -1255,6 +1261,11 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_MCP_SHARED_MANAGER"),
         "EXCELMANUS_MCP_SHARED_MANAGER",
         False,
+    )
+    exa_search_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_EXA_SEARCH"),
+        "EXCELMANUS_EXA_SEARCH",
+        True,
     )
 
     # AUX 配置（统一配置）
@@ -1705,6 +1716,7 @@ def load_config() -> ExcelManusConfig:
         max_consecutive_failures=max_consecutive_failures,
         session_ttl_seconds=session_ttl_seconds,
         max_sessions=max_sessions,
+        max_sessions_per_user=max_sessions_per_user,
         workspace_root=workspace_root,
         data_root=data_root,
         deploy_mode=deploy_mode,
@@ -1728,6 +1740,7 @@ def load_config() -> ExcelManusConfig:
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
+        exa_search_enabled=exa_search_enabled,
         aux_enabled=aux_enabled,
         aux_api_key=aux_api_key,
         aux_base_url=aux_base_url,

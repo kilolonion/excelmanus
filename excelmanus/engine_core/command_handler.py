@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from excelmanus.control_commands import (
     NORMALIZED_ALIAS_TO_CANONICAL_CONTROL_COMMAND,
@@ -180,7 +180,19 @@ class CommandHandler:
                 return "\n".join(lines)
             # 其余视为模型名称，尝试切换
             model_arg = " ".join(parts[1:])
-            return e.switch_model(model_arg)
+            result_msg = e.switch_model(model_arg)
+            # W2: 异步精确更新上下文预算（通过 API 查询真实窗口大小）
+            if result_msg.startswith("已切换"):
+                try:
+                    new_tokens = await e.context_budget.update_for_model_async(
+                        e.active_model, client=e._client,
+                        base_url=e._active_base_url,
+                    )
+                    e._memory.update_context_window(new_tokens)
+                    e._compaction_manager.max_context_tokens = new_tokens
+                except Exception:
+                    logger.debug("异步上下文预算更新失败，保持同步推断值", exc_info=True)
+            return result_msg
 
         if command == "/backup":
             return self._handle_backup_command(parts)
@@ -212,6 +224,15 @@ class CommandHandler:
 
         if command == "/reasoning":
             return self._handle_reasoning_command(parts, on_event=on_event)
+
+        if command == "/context":
+            return await self._handle_context_command(parts)
+
+        if command == "/probe":
+            return await self._handle_probe_command(parts)
+
+        if command == "/clear":
+            return self._handle_clear_command()
 
         return self._handle_undo_command(parts)
 
@@ -610,12 +631,45 @@ class CommandHandler:
             lines.append("\n使用 `/undo <id>` 回滚指定操作。")
             return "\n".join(lines)
 
+        # W9: /undo diff <file> → 显示文件版本差异
+        if action == "diff":
+            if len(parts) < 3:
+                return "无效参数。用法：/undo diff <文件路径>。"
+            file_path = " ".join(parts[2:]).strip()
+            registry = getattr(e, "_file_registry", None)
+            if registry is None:
+                return "FileRegistry 未初始化。"
+            original = registry.get_version_original(file_path)
+            latest = registry.get_version_latest(file_path)
+            if original is None and latest is None:
+                return f"未找到文件 {file_path!r} 的版本记录。"
+            if original is None or latest is None:
+                return f"文件 {file_path!r} 仅有单一版本，无法生成差异。"
+            orig_text = original if isinstance(original, str) else str(original)
+            latest_text = latest if isinstance(latest, str) else str(latest)
+            if orig_text == latest_text:
+                return f"文件 {file_path!r} 的最早版本与最新版本一致，无差异。"
+            import difflib
+            diff_lines = list(difflib.unified_diff(
+                orig_text.splitlines(keepends=True),
+                latest_text.splitlines(keepends=True),
+                fromfile=f"{file_path} (original)",
+                tofile=f"{file_path} (latest)",
+                n=3,
+            ))
+            if not diff_lines:
+                return f"文件 {file_path!r} 无差异。"
+            diff_text = "".join(diff_lines)
+            if len(diff_text) > 3000:
+                diff_text = diff_text[:3000] + "\n... (截断)"
+            return f"**文件版本差异** `{file_path}`\n```diff\n{diff_text}\n```"
+
         # /undo <id> → 执行回滚
         if len(parts) == 2:
             approval_id = parts[1].strip()
             return e.approval.undo(approval_id)
 
-        return "无效参数。用法：/undo [list] 或 /undo <id>。"
+        return "无效参数。用法：/undo [list|diff <文件>] 或 /undo <id>。"
 
     @staticmethod
     def _parse_subagent_run_command(
@@ -1020,3 +1074,83 @@ class CommandHandler:
         self._emit_mode_changed(on_event, "show_reasoning", e._show_reasoning)
         status = "开启" if e._show_reasoning else "关闭"
         return f"模型推理过程展示已{status}。"
+
+    # ── W3: /context 命令处理 ──────────────────────────────────
+
+    async def _handle_context_command(self, parts: list[str]) -> str:
+        """处理 /context 命令：上下文预算管理。
+
+        用法：
+        - /context          — 显示当前预算状态
+        - /context status   — 同上
+        - /context reset    — 清除自适应 override，恢复默认预算
+        """
+        e = self._engine
+        action = parts[1].strip().lower() if len(parts) >= 2 else "status"
+        budget = e._context_budget
+
+        if action in {"status", ""}:
+            lines = [
+                "**上下文预算状态**",
+                f"- 当前上限: {budget.max_tokens:,} tokens",
+                f"- 模型推断值: {budget._model_tokens:,} tokens",
+            ]
+            if budget._override_tokens > 0:
+                kind = "自适应" if budget._override_is_adaptive else "用户"
+                lines.append(f"- Override: {budget._override_tokens:,} tokens（{kind}）")
+            if budget._base_tokens > 0:
+                lines.append(f"- 用户固定值: {budget._base_tokens:,} tokens")
+            return "\n".join(lines)
+
+        if action == "reset":
+            old = budget.max_tokens
+            budget.clear_override()
+            new = budget.max_tokens
+            e._memory.update_context_window(new)
+            e._compaction_manager.max_context_tokens = new
+            if old != new:
+                return f"已清除上下文预算 override：{old:,} → {new:,} tokens。"
+            return "当前无活跃 override，预算未变更。"
+
+        return "无效参数。用法：/context [status|reset]。"
+
+    # ── W4: /probe 命令处理 ──────────────────────────────────
+
+    async def _handle_probe_command(self, parts: list[str]) -> str:
+        """处理 /probe 命令：模型能力探测。
+
+        用法：
+        - /probe context  — 探测当前模型的实际上下文窗口大小
+        """
+        e = self._engine
+        action = parts[1].strip().lower() if len(parts) >= 2 else ""
+
+        if action != "context":
+            return "无效参数。用法：/probe context。"
+
+        from excelmanus.model_probe import probe_context_window
+        result = await probe_context_window(
+            client=e._client,
+            model=e.active_model,
+            base_url=e._active_base_url,
+        )
+        if result is None:
+            return "探测失败：无法确定模型上下文窗口大小。"
+
+        old = e._context_budget.max_tokens
+        e._context_budget.set_override(result, adaptive=True)
+        e._memory.update_context_window(result)
+        e._compaction_manager.max_context_tokens = result
+        return (
+            f"探测完成：模型 {e.active_model} 上下文窗口 ≈ {result:,} tokens。\n"
+            f"已更新预算：{old:,} → {result:,} tokens。"
+        )
+
+    # ── W7: /clear 命令处理 ──────────────────────────────────
+
+    def _handle_clear_command(self) -> str:
+        """处理 /clear 命令：清除对话历史但保留会话。"""
+        e = self._engine
+        e.clear_memory()
+        e.set_message_snapshot_index(0)
+        return "已清除对话历史。"

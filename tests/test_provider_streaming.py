@@ -190,4 +190,4 @@ async def test_openai_responses_stream_forwards_reasoning_effort() -> None:
         await client.close()
 
     assert captured_body.get("reasoning", {}).get("effort") == "high"
-    assert captured_body.get("reasoning", {}).get("summary") == "auto"
+    assert captured_body.get("reasoning", {}).get("summary") == "detailed"

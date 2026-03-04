@@ -2,8 +2,6 @@
 from __future__ import annotations
 
 import logging
-import time
-from datetime import datetime
 from typing import TYPE_CHECKING
 
 from excelmanus.rules import Rule

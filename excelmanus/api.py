@@ -55,10 +55,10 @@ import re
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Annotated, Any, AsyncIterator, Literal
+from typing import TYPE_CHECKING, Annotated, Any, AsyncIterator, Literal
 
 import uvicorn
-from fastapi import APIRouter, FastAPI, Request, UploadFile, File as FastAPIFile
+from fastapi import APIRouter, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
@@ -95,6 +95,7 @@ from excelmanus.skillpacks import (
     SkillpackNotFoundError,
     SkillRouter,
 )
+from excelmanus.skillpacks.user_skill_service import UserSkillService
 from excelmanus.skillpacks.clawhub import ClawHubError, ClawHubNotFoundError
 from excelmanus.skillpacks.importer import SkillImportError
 from excelmanus.tools import ToolRegistry
@@ -104,6 +105,12 @@ from excelmanus.api_sse import (
     sse_format as _sse_format,
 )
 from excelmanus.error_guidance import FailureGuidance, classify_failure, classify_workspace_full
+
+if TYPE_CHECKING:
+    from excelmanus.channels.rate_limit import RateLimitConfig
+    from excelmanus.engine import AgentEngine
+    from excelmanus.skillpacks import SkillpackManager
+    from excelmanus.workspace import IsolatedWorkspace
 
 logger = get_logger("api")
 
@@ -276,6 +283,7 @@ _tool_registry: ToolRegistry | None = None
 _skillpack_loader: SkillpackLoader | None = None
 _skill_router: SkillRouter | None = None
 _skillpack_manager: "SkillpackManager | None" = None
+_user_skill_service: UserSkillService | None = None
 _config: ExcelManusConfig | None = None
 _config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
 _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
@@ -565,6 +573,12 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
         logger.debug("持久化 Excel 事件失败", exc_info=True)
 
 
+def _fire_and_forget(coro: Any, *, name: str = "bridge_notify") -> None:
+    """安全地 fire-and-forget 一个协程，捕获异常避免 'Task exception was never retrieved' 警告。"""
+    from excelmanus.engine_utils import fire_and_forget
+    fire_and_forget(coro, name=name)
+
+
 def _error_json_response(status_code: int, message: str) -> JSONResponse:
     """构建统一错误响应。"""
     error_id = str(uuid.uuid4())
@@ -593,6 +607,17 @@ def _require_skillpack_manager():
     if _skillpack_manager is None:
         raise HTTPException(status_code=503, detail="SkillpackManager 未初始化")
     return _skillpack_manager
+
+
+def _require_user_skill_manager(user_id: str | None = None) -> "SkillpackManager":
+    """获取 per-user SkillpackManager 实例（技能隔离）。
+
+    优先使用 UserSkillService 返回 per-user 管理器，
+    回退到全局 _skillpack_manager（单用户/未初始化场景）。
+    """
+    if _user_skill_service is not None:
+        return _user_skill_service.get_manager(user_id)
+    return _require_skillpack_manager()
 
 
 def _to_skill_summary(detail: dict[str, Any]) -> SkillpackSummaryResponse:
@@ -724,7 +749,7 @@ def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database, _config_incomplete, _channel_launcher
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _user_skill_service, _config, _database, _config_incomplete, _channel_launcher
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
@@ -805,6 +830,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     from excelmanus.skillpacks import SkillpackManager
     _skillpack_manager = SkillpackManager(_config, _skillpack_loader)
 
+    # 初始化 per-user 技能服务（多用户隔离）
+    _user_skill_service = UserSkillService(_config, _tool_registry)
+
     # 初始化统一数据库
     from excelmanus.database import Database
 
@@ -884,6 +912,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         database=_database,
         config_store=_config_store,
         user_store=None,  # 延迟设置，等 UserStore 初始化完成后注入
+        user_skill_service=_user_skill_service,
     )
     await _session_manager.start_background_cleanup()
 
@@ -1006,7 +1035,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     init_docker_sandbox(_docker_env)
     # 将 Docker 沙盒状态传播到会话管理器，用于按工作区注入。
     if _session_manager is not None:
-        _session_manager.set_sandbox_docker_enabled(_docker_env)
+        await _session_manager.set_sandbox_docker_enabled(_docker_env)
 
     logger.info(
         "API 服务启动完成，已加载 %d 个工具、%d 个 Skillpack",
@@ -1031,7 +1060,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.debug("启动时后台版本检查失败（非致命）", exc_info=True)
 
-    asyncio.create_task(_background_update_check())
+    _fire_and_forget(_background_update_check(), name="update_check")
 
     # ── 渠道绑定管理器 + 服务令牌 ──────────────────────────
     _bind_manager = None
@@ -1586,11 +1615,11 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                     _ch.update_session(session_id, title=generated_title, title_source="truncated")
                 except Exception:
                     logger.debug("截取标题写入失败", exc_info=True)
-        asyncio.create_task(_generate_session_title_background(
+        _fire_and_forget(_generate_session_title_background(
             session_id=session_id,
             user_message=display_text,
             assistant_reply=normalized_reply,
-        ))
+        ), name="session_title")
     route = engine.last_route_result
     route_mode, skills_used, tool_scope = _public_route_fields(
         route.route_mode,
@@ -1701,15 +1730,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             # EventBridge: 通知其他渠道 chat 已开始
             _origin_channel = request.channel or "web"
             if _bridge is not None and isolation_user_id:
-                try:
-                    _loop = asyncio.get_running_loop()
-                    _loop.create_task(_bridge.notify(isolation_user_id, "chat_started", {
+                _fire_and_forget(
+                    _bridge.notify(isolation_user_id, "chat_started", {
                         "session_id": session_id,
                         "origin_channel": _origin_channel,
                         "message_preview": (request.message or "")[:80],
-                    }))
-                except RuntimeError:
-                    pass
+                    }),
+                    name="bridge_chat_started",
+                )
 
             # ── 工作区配额检查 ──
             _auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
@@ -1782,11 +1810,38 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             _sse_event_count = 0
 
+            _flush_scheduled = False
+
+            def _schedule_flush() -> None:
+                """将同步 flush 调度为异步任务，避免在事件回调中阻塞事件循环。
+
+                同一轮 tool batch 中多个 TOOL_CALL_END 事件只触发一次 flush：
+                首个 TOOL_CALL_END 设置标记并调度，后续的跳过。
+                标记在 flush 完成后重置，为下一轮 batch 做准备。
+                """
+                nonlocal _flush_scheduled
+                if _flush_scheduled:
+                    return
+                _flush_scheduled = True
+
+                async def _do_flush() -> None:
+                    nonlocal _flush_scheduled
+                    try:
+                        if _session_manager is not None:
+                            await asyncio.to_thread(
+                                _session_manager.flush_messages_sync, session_id,
+                            )
+                    except Exception:
+                        logger.debug("异步消息持久化失败", exc_info=True)
+                    finally:
+                        _flush_scheduled = False
+
+                _fire_and_forget(_do_flush(), name="flush_messages")
+
             def _on_event(event: ToolCallEvent) -> None:
                 """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
 
-                注意：flush_messages_sync 在事件循环线程上做同步 SQLite I/O。
-                单次写入耗时毫秒级，当前可接受；高并发场景如需优化可改用 asyncio.to_thread。
+                消息持久化通过 asyncio.to_thread 异步执行，不阻塞事件循环。
                 """
                 nonlocal _sse_event_count
                 _sse_event_count += 1
@@ -1804,13 +1859,17 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     event.event_type == EventType.TOOL_CALL_END
                     and _session_manager is not None
                 ):
-                    _session_manager.flush_messages_sync(session_id)
+                    _schedule_flush()
                 # EventBridge: 跨渠道实时事件推送（Web↔Bot 双向）
                 # origin_channel 用于接收方过滤自身发出的事件，防止回声
                 if (
                     _bridge is not None
                     and isolation_user_id
-                    and event.event_type in (EventType.PENDING_APPROVAL, EventType.USER_QUESTION)
+                    and event.event_type in (
+                        EventType.PENDING_APPROVAL,
+                        EventType.USER_QUESTION,
+                        EventType.APPROVAL_RESOLVED,
+                    )
                 ):
                     _bridge_data: dict[str, Any] = {}
                     _bridge_evt = ""
@@ -1835,14 +1894,18 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                             "session_id": session_id,
                             "origin_channel": _origin,
                         }
+                    elif event.event_type == EventType.APPROVAL_RESOLVED:
+                        _bridge_evt = "approval_resolved"
+                        _bridge_data = {
+                            "approval_id": event.approval_id,
+                            "session_id": session_id,
+                            "origin_channel": _origin,
+                        }
                     if _bridge_evt:
-                        try:
-                            loop = asyncio.get_running_loop()
-                            loop.create_task(
-                                _bridge.notify(isolation_user_id, _bridge_evt, _bridge_data)
-                            )
-                        except RuntimeError:
-                            pass  # no running loop
+                        _fire_and_forget(
+                            _bridge.notify(isolation_user_id, _bridge_evt, _bridge_data),
+                            name=f"bridge_{_bridge_evt}",
+                        )
 
             async def _run_chat_inner() -> ChatResult:
                 """后台执行 engine.chat，完成后释放会话锁。"""
@@ -1929,20 +1992,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             # EventBridge: 通知其他渠道 chat 已完成
             if _bridge is not None and isolation_user_id:
-                _completed_data = {
-                    "session_id": session_id,
-                    "origin_channel": _origin_channel,
-                    "reply_summary": normalized_reply[:300] if normalized_reply else "",
-                    "tool_count": chat_result.total_tool_calls,
-                    "has_error": bool(chat_result.reply and "❌" in chat_result.reply),
-                }
-                try:
-                    _loop2 = asyncio.get_running_loop()
-                    _loop2.create_task(
-                        _bridge.notify(isolation_user_id, "chat_completed", _completed_data)
-                    )
-                except RuntimeError:
-                    pass
+                _fire_and_forget(
+                    _bridge.notify(isolation_user_id, "chat_completed", {
+                        "session_id": session_id,
+                        "origin_channel": _origin_channel,
+                        "reply_summary": normalized_reply[:300] if normalized_reply else "",
+                        "tool_count": len(chat_result.tool_calls),
+                        "has_error": any(not tc.success for tc in chat_result.tool_calls),
+                    }),
+                    name="bridge_chat_completed",
+                )
 
             # 记录已认证用户的 token 使用量
             if auth_user_id and chat_result.total_tokens > 0:
@@ -1968,11 +2027,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         except Exception:
                             logger.debug("截取标题写入失败", exc_info=True)
                 # fire-and-forget：后台 AI 生成更好的标题，前端通过 SessionSync poll 获取
-                asyncio.create_task(_generate_session_title_background(
-                    session_id=session_id,
-                    user_message=display_text,
-                    assistant_reply=normalized_reply,
-                ))
+                _fire_and_forget(
+                    _generate_session_title_background(
+                        session_id=session_id,
+                        user_message=display_text,
+                        assistant_reply=normalized_reply,
+                    ),
+                    name="generate_session_title",
+                )
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
@@ -2584,11 +2646,11 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                                         _ch.update_session(session_id, title=_instant_title, title_source="truncated")
                                     except Exception:
                                         pass
-                            asyncio.create_task(_generate_session_title_background(
+                            _fire_and_forget(_generate_session_title_background(
                                 session_id=session_id,
                                 user_message=_user_msg,
                                 assistant_reply=normalized_reply,
-                            ))
+                            ), name="session_title")
                 except asyncio.CancelledError:
                     pass
                 except Exception as exc:
@@ -2866,9 +2928,10 @@ def _sse_event_to_sse(
         500: _error_responses[500],
     },
 )
-async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
-    """列出全部已加载 skillpack 摘要。"""
-    manager = _require_skillpack_manager()
+async def list_skills(raw_request: Request) -> list[SkillpackSummaryResponse] | JSONResponse:
+    """列出全部已加载 skillpack 摘要（per-user 隔离）。"""
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     details = manager.list_skillpacks()
     return [_to_skill_summary(detail) for detail in details]
 
@@ -2882,9 +2945,10 @@ async def list_skills() -> list[SkillpackSummaryResponse] | JSONResponse:
         500: _error_responses[500],
     },
 )
-async def get_skill(name: str) -> SkillpackDetailResponse | SkillpackSummaryResponse | JSONResponse:
-    """查询单个 skillpack。"""
-    manager = _require_skillpack_manager()
+async def get_skill(name: str, raw_request: Request) -> SkillpackDetailResponse | SkillpackSummaryResponse | JSONResponse:
+    """查询单个 skillpack（per-user 隔离）。"""
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     try:
         detail = manager.get_skillpack(name)
     except SkillpackInputError as exc:
@@ -2910,23 +2974,27 @@ async def get_skill(name: str) -> SkillpackDetailResponse | SkillpackSummaryResp
 )
 async def create_skill(
     request: SkillpackCreateRequest,
+    raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
-    """创建 project 层 skillpack。"""
+    """创建 skillpack（per-user 隔离）。"""
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    manager = _require_skillpack_manager()
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     try:
         detail = manager.create_skillpack(
             name=request.name,
             payload=request.payload,
-            actor="api",
+            actor=user_id or "api",
         )
     except SkillpackInputError as exc:
         return _error_json_response(422, str(exc))
     except SkillpackConflictError as exc:
         return _error_json_response(409, str(exc))
 
+    if _user_skill_service is not None:
+        _user_skill_service.invalidate(user_id)
     return SkillpackMutationResponse(
         status="created",
         name=str(detail.get("name", request.name)),
@@ -2948,17 +3016,19 @@ async def create_skill(
 async def patch_skill(
     name: str,
     request: SkillpackPatchRequest,
+    raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
-    """更新 project 层 skillpack。"""
+    """更新 skillpack（per-user 隔离）。"""
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    manager = _require_skillpack_manager()
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     try:
         detail = manager.patch_skillpack(
             name=name,
             payload=request.payload,
-            actor="api",
+            actor=user_id or "api",
         )
     except SkillpackInputError as exc:
         return _error_json_response(422, str(exc))
@@ -2967,6 +3037,8 @@ async def patch_skill(
     except SkillpackConflictError as exc:
         return _error_json_response(409, str(exc))
 
+    if _user_skill_service is not None:
+        _user_skill_service.invalidate(user_id)
     return SkillpackMutationResponse(
         status="updated",
         name=str(detail.get("name", name)),
@@ -2987,17 +3059,19 @@ async def patch_skill(
 )
 async def delete_skill(
     name: str,
+    raw_request: Request,
     reason: str = "",
 ) -> SkillpackMutationResponse | JSONResponse:
-    """软删除 project 层 skillpack。"""
+    """软删除 skillpack（per-user 隔离）。"""
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    manager = _require_skillpack_manager()
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     try:
         detail = manager.delete_skillpack(
             name=name,
-            actor="api",
+            actor=user_id or "api",
             reason=reason,
         )
     except SkillpackInputError as exc:
@@ -3007,6 +3081,8 @@ async def delete_skill(
     except SkillpackConflictError as exc:
         return _error_json_response(409, str(exc))
 
+    if _user_skill_service is not None:
+        _user_skill_service.invalidate(user_id)
     return SkillpackMutationResponse(
         status="deleted",
         name=str(detail.get("name", name)),
@@ -3027,17 +3103,19 @@ async def delete_skill(
 )
 async def import_skill(
     request: SkillpackImportRequest,
+    raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
-    """从本地路径或 GitHub URL 导入 SKILL.md 及附属资源。"""
+    """从本地路径或 GitHub URL 导入 SKILL.md 及附属资源（per-user 隔离）。"""
     if _is_external_safe_mode():
         return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
 
-    manager = _require_skillpack_manager()
+    user_id = _get_isolation_user_id(raw_request)
+    manager = _require_user_skill_manager(user_id)
     try:
         result = await manager.import_skillpack_async(
             source=request.source,
             value=request.value,
-            actor="api",
+            actor=user_id or "api",
             overwrite=request.overwrite,
         )
     except SkillpackInputError as exc:
@@ -3047,6 +3125,8 @@ async def import_skill(
     except SkillImportError as exc:
         return _error_json_response(422, str(exc))
 
+    if _user_skill_service is not None:
+        _user_skill_service.invalidate(user_id)
     return SkillpackMutationResponse(
         status="imported",
         name=str(result.get("name", "")),
@@ -4756,7 +4836,6 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
 
 def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
     """在 uploads_dir 下解析 relative 路径并确保不越界。"""
-    from pathlib import Path as _Path
     cleaned = relative.replace("\\", "/").strip("/")
     if ".." in cleaned.split("/"):
         return None
@@ -8562,16 +8641,18 @@ async def feishu_webhook(request: Request) -> JSONResponse:
     if event_type == "im.message.receive_v1":
         from excelmanus.channels.feishu.handlers import handle_feishu_event
         # 异步处理，不阻塞 webhook 响应
-        asyncio.create_task(
+        _fire_and_forget(
             handle_feishu_event(feishu_adapter, feishu_handler, event),
+            name="feishu_message",
         )
         return JSONResponse(content={"code": 0, "msg": "ok"})
 
     # 4) 卡片按钮回调
     if event_type == "card.action.trigger":
         from excelmanus.channels.feishu.handlers import handle_feishu_card_action
-        asyncio.create_task(
+        _fire_and_forget(
             handle_feishu_card_action(feishu_adapter, feishu_handler, event),
+            name="feishu_card_action",
         )
         return JSONResponse(content={"code": 0, "msg": "ok"})
 
@@ -8581,8 +8662,9 @@ async def feishu_webhook(request: Request) -> JSONResponse:
         v1_type = v1_event.get("type", "")
         if v1_type == "message":
             from excelmanus.channels.feishu.handlers import handle_feishu_event
-            asyncio.create_task(
+            _fire_and_forget(
                 handle_feishu_event(feishu_adapter, feishu_handler, v1_event),
+                name="feishu_v1_message",
             )
             return JSONResponse(content={"code": 0, "msg": "ok"})
 
