@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .domain import ExplorerWindow, Window
+from .extractor import is_csv_path
 from .models import ChangeRecord, WindowType
 from .projection_models import ConfirmationProjection, NoticeProjection, ToolPayloadProjection
 
@@ -109,6 +110,8 @@ def project_confirmation(
     cols = int(window.total_cols or (window.viewport.total_cols if window.viewport else 0) or len(window.columns or window.schema))
     file_name = window.file_path or "未知文件"
     sheet_name = window.sheet_name or "未知Sheet"
+    if is_csv_path(file_name) and sheet_name in {"Sheet1", "未知Sheet"}:
+        sheet_name = "Sheet1(CSV)"
     window_label = f"{window.id}: {file_name} / {sheet_name}"
     change_summary = _latest_change_summary(window.change_log) or "状态同步"
     intent = window.intent_tag.value

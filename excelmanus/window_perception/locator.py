@@ -36,6 +36,12 @@ class WindowLocator:
         self._index[identity] = window_id
         self._window_to_identity[window_id] = identity
 
+    def unregister(self, window_id: str) -> None:
+        identity = self._window_to_identity.pop(window_id, None)
+        if identity is not None:
+            if self._index.get(identity) == window_id:
+                del self._index[identity]
+
     def find(self, identity: WindowIdentity, *, expected_kind: str | None = None) -> str | None:
         if expected_kind:
             actual_kind = _identity_kind(identity)

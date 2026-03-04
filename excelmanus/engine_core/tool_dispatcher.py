@@ -1133,7 +1133,7 @@ class ToolDispatcher:
                 success = False
                 try:
                     _err = json.loads(result_str)
-                    error = _err.get("message") or result_str
+                    error = _err.get("message") or _err.get("error") or result_str
                 except Exception:
                     error = result_str
 
@@ -1988,7 +1988,7 @@ class ToolDispatcher:
     # ── Excel 预览/Diff 事件辅助 ────────────────────────────
 
     _EXCEL_READ_TOOLS = {"read_excel"}
-    _EXCEL_WRITE_TOOLS = {"write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"}
+    _EXCEL_WRITE_TOOLS = {"write_to_sheet", "format_range"}
 
     @staticmethod
     def _extract_preview_styles(

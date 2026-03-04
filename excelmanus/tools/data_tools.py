@@ -864,7 +864,7 @@ def read_excel(
     if range is not None:
         if _is_csv_file(safe_path):
             return json.dumps(
-                {"error": "range 参数不支持 CSV 文件，请使用 offset + max_rows 分页读取"},
+                {"status": "error", "message": "range 参数不支持 CSV 文件，请使用 offset + max_rows 分页读取"},
                 ensure_ascii=False,
             )
         result = _read_range_direct(safe_path, sheet_name, range)

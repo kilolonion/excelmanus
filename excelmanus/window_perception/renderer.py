@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import Any
 
 from .domain import ExplorerWindow, SheetWindow, Window
+from .extractor import is_csv_path
 from .models import DetailLevel, IntentTag, WindowSnapshot
 from .projection_models import NoticeProjection, ToolPayloadProjection
 from .projection_service import project_notice, project_tool_payload
@@ -219,10 +220,16 @@ def render_tool_perception_block(payload: dict[str, Any] | None) -> str:
     _visible_cols = viewport.get("visible_cols", 0)
     _total_cols = viewport.get("total_cols", 0)
     if _total_cols > _visible_cols > 0:
-        lines.append(
-            f"⚠️ 列截断：工作表共 {_total_cols} 列，视口仅显示 {_visible_cols} 列，"
-            f"格式化整行时建议使用行引用（如 1:1）"
-        )
+        _file = str(payload.get("file") or "")
+        if is_csv_path(_file):
+            lines.append(
+                f"⚠️ 列截断：文件共 {_total_cols} 列，视口仅显示 {_visible_cols} 列"
+            )
+        else:
+            lines.append(
+                f"⚠️ 列截断：工作表共 {_total_cols} 列，视口仅显示 {_visible_cols} 列，"
+                f"格式化整行时建议使用行引用（如 1:1）"
+            )
 
     freeze = payload.get("freeze_panes")
     if freeze:

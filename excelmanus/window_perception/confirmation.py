@@ -37,6 +37,7 @@ class ConfirmationRecord:
     intent: str
     hint: str = ""
     localized_hint: str = ""
+    sheet_dimensions: tuple[tuple[str, int, int], ...] = ()
 
 
 def build_confirmation_record(
@@ -66,6 +67,7 @@ def build_confirmation_record(
         intent=projection.intent,
         hint=projection.hint,
         localized_hint=projection.localized_hint,
+        sheet_dimensions=projection.sheet_dimensions,
     )
 
 

@@ -53,8 +53,7 @@ class FixVerifyOutcome:
 
 # 写入工具集合（触发验证门控的工具）
 _WRITE_TOOLS = frozenset({
-    "write_cells", "write_excel", "advanced_format",
-    "create_sheet", "delete_sheet", "insert_rows", "insert_columns",
+    "write_to_sheet", "format_range",
     "write_text_file", "edit_text_file",
 })
 
