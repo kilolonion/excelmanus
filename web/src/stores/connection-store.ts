@@ -25,15 +25,31 @@ function resolveHealthUrl(): string {
 
 const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-async function probeHealth(): Promise<boolean> {
+interface ProbeResult {
+  ok: boolean;
+  fingerprint?: string;
+  gitCommit?: string;
+}
+
+async function probeHealth(): Promise<ProbeResult> {
   try {
     const r = await fetch(resolveHealthUrl(), {
       method: "GET",
       signal: AbortSignal.timeout(2000),
     });
-    return r.ok;
+    if (!r.ok) return { ok: false };
+    try {
+      const data = await r.json();
+      return {
+        ok: true,
+        fingerprint: data.version_fingerprint ?? undefined,
+        gitCommit: data.git_commit ?? undefined,
+      };
+    } catch {
+      return { ok: true };
+    }
   } catch {
-    return false;
+    return { ok: false };
   }
 }
 
@@ -77,25 +93,58 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
       });
       startElapsedTimer();
 
-      // Phase 1: 等待后端下线（最多 15 秒）
+      // 捕获重启前的版本指纹作为 baseline
+      const baseline = await probeHealth();
+      const baselineFingerprint = baseline.fingerprint;
+      const baselineCommit = baseline.gitCommit;
+
+      /** 检查版本指纹/commit 是否已变化（即后端已用新版本重启完成） */
+      const hasVersionChanged = (probe: ProbeResult): boolean => {
+        if (!probe.ok) return false;
+        if (baselineFingerprint && probe.fingerprint && probe.fingerprint !== baselineFingerprint) return true;
+        if (baselineCommit && probe.gitCommit && probe.gitCommit !== baselineCommit) return true;
+        return false;
+      };
+
+      // Phase 1: 等待后端下线或版本变化（最多 15 秒）
       await wait(2000);
       if (restartAborted) return;
 
       set({ phase: "服务正在重启…" });
+      let versionChanged = false;
       for (let i = 0; i < 26; i++) {
         if (restartAborted) return;
-        if (!(await probeHealth())) break;
+        const probe = await probeHealth();
+        // 快速重启检测：后端仍在线但版本已变化 → 直接完成
+        if (hasVersionChanged(probe)) {
+          versionChanged = true;
+          break;
+        }
+        // 原逻辑：后端已下线 → 进入 Phase 2
+        if (!probe.ok) break;
         await wait(500);
       }
 
-      // Phase 2: 等待后端上线（最多 60 秒）
+      if (restartAborted) return;
+
+      // 如果 Phase 1 已检测到版本变化，跳过 Phase 2
+      if (versionChanged) {
+        clearElapsedTimer();
+        set({ phase: "连接已恢复，正在刷新…" });
+        await wait(500);
+        window.location.reload();
+        return;
+      }
+
+      // Phase 2: 等待后端上线（最多 60 秒），上线后验证版本变化
       if (!restartAborted) {
         set({ phase: "正在恢复连接…" });
       }
       let online = false;
       for (let i = 0; i < 60; i++) {
         if (restartAborted) return;
-        if (await probeHealth()) {
+        const probe = await probeHealth();
+        if (probe.ok) {
           online = true;
           break;
         }
@@ -135,7 +184,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
       const autoReconnect = async () => {
         for (let i = 0; i < 120; i++) {
           if (restartAborted || get().status === "connected") return;
-          if (await probeHealth()) {
+          if ((await probeHealth()).ok) {
             clearElapsedTimer();
             set({
               status: "connected",

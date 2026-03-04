@@ -667,6 +667,37 @@ def perform_update(
         _update_lock.release()
 
 
+def _restart_frontend_process(
+    project_root: Path,
+    _p: Callable[[str, int], None],
+) -> None:
+    """尝试重启前端进程，使新构建产物生效。
+
+    依次尝试 pm2 → systemctl → 写入 restart signal 文件。
+    全部失败时仅记录提示，不阻断更新流程。
+    """
+    # 尝试 pm2
+    rc, _, _ = _run_cmd(["pm2", "restart", "excelmanus-web"], cwd=project_root, timeout=15)
+    if rc == 0:
+        _p("前端进程已通过 pm2 重启", 83)
+        return
+    # 尝试 systemctl（仅 Linux）
+    if platform.system() != "Windows":
+        for svc in ("excelmanus-web", "excelmanus-frontend"):
+            rc, _, _ = _run_cmd(["systemctl", "restart", svc], cwd=project_root, timeout=15)
+            if rc == 0:
+                _p(f"前端进程已通过 systemctl restart {svc} 重启", 83)
+                return
+    # 写入 restart signal 文件，供外部看门狗或脚本轮询
+    try:
+        signal_file = project_root / "web" / ".next" / ".restart_signal"
+        signal_file.parent.mkdir(parents=True, exist_ok=True)
+        signal_file.write_text(str(time.time()), encoding="utf-8")
+    except Exception:
+        pass
+    _p("前端已重新构建，但未检测到 pm2/systemctl 进程管理器。如前端独立运行，请手动重启前端服务。", 83)
+
+
 def _perform_update_impl(
     project_root: str | Path | None = None, *,
     skip_backup: bool = False, skip_deps: bool = False,
@@ -850,11 +881,33 @@ def _perform_update_impl(
 
         if fe_ok:
             result.steps_completed.append("npm_install")
-            _p("前端依赖已更新", 80)
+            _p("前端依赖已更新", 70)
         else:
-            _p("前端依赖更新失败（非致命）", 80)
+            _p("前端依赖更新失败（非致命）", 70)
 
-    # Step 5: 预验证数据库迁移
+    # Step 5: 重新构建前端（生产模式必须，否则新代码不生效）
+    # 放宽条件：只要有 package.json 即可构建（.next 可能不存在于首次部署或清理后）
+    web_dir = project_root / "web"
+    if web_dir.is_dir() and (web_dir / "package.json").exists():
+        _p("正在重新构建前端...", 75)
+        rc_build, _, build_err = _run_cmd(
+            ["npm", "run", "build"], cwd=web_dir, timeout=600,
+        )
+        if rc_build != 0:
+            _p("默认构建失败，尝试 webpack 兜底...", 78)
+            rc_build, _, build_err = _run_cmd(
+                ["npm", "run", "build:webpack"], cwd=web_dir, timeout=600,
+            )
+        if rc_build == 0:
+            result.steps_completed.append("frontend_build")
+            _p("前端构建完成", 82)
+            # 尝试重启前端进程（pm2 / systemctl），失败则提示用户手动重启
+            _restart_frontend_process(project_root, _p)
+        else:
+            _p(f"前端构建失败（非致命）: {build_err[-200:] if build_err else '未知错误'}", 82)
+            _p("生产模式下请手动执行: cd web && npm run build", 82)
+
+    # Step 6: 预验证数据库迁移
     _p("正在预验证数据库迁移...", 85)
     db_ok, db_msg = verify_database_migration(project_root)
     if db_ok:
@@ -863,7 +916,7 @@ def _perform_update_impl(
     else:
         _p(f"数据库迁移预验证警告: {db_msg}（将在启动时自动重试）", 90)
 
-    # Step 6: 验证（从磁盘读取，绕过模块缓存以获取 git pull 后的真实版本）
+    # Step 7: 验证（从磁盘读取，绕过模块缓存以获取 git pull 后的真实版本）
     _p("正在验证...", 95)
     result.new_version = _read_version_from_disk(project_root)
     result.success = True
@@ -1183,6 +1236,128 @@ def _perform_remote_deploy_impl(
     return result
 
 
+def _parse_env_deploy(project_root: Path) -> dict[str, str]:
+    """解析 deploy/.env.deploy 返回键值对字典。"""
+    env_file = project_root / "deploy" / ".env.deploy"
+    result: dict[str, str] = {}
+    if not env_file.is_file():
+        return result
+    try:
+        for line in env_file.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("#") or "=" not in line:
+                continue
+            k, v = line.split("=", 1)
+            result[k.strip()] = v.strip().strip('"').strip("'")
+    except Exception:
+        pass
+    return result
+
+
+_REMOTE_LOCK_PATH = "/tmp/.excelmanus-deploy.lock"
+_REMOTE_LOCK_TTL = 1800  # 30 分钟
+
+
+def check_remote_deploy_lock(
+    project_root: str | Path | None = None,
+) -> dict:
+    """检查远程服务器上的部署锁状态。
+
+    返回:
+        {
+            "locked": bool,
+            "holder_host": str,   # 持锁者主机名
+            "holder_user": str,   # 持锁者用户名
+            "holder_pid": str,    # 持锁进程 PID
+            "locked_since": str,  # Unix 时间戳
+            "elapsed_s": int,     # 已持续秒数
+            "expired": bool,      # 是否已超过 TTL
+            "error": str | None,  # SSH 连接失败等错误
+        }
+    """
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(project_root)
+
+    env = _parse_env_deploy(project_root)
+    backend_host = env.get("BACKEND_HOST") or env.get("BACKEND_SERVER") or ""
+    ssh_user = env.get("SSH_USER") or env.get("SERVER_USER") or ""
+    ssh_key = env.get("SSH_KEY_PATH") or env.get("BACKEND_SSH_KEY_PATH") or ""
+    if env.get("SSH_KEY_NAME"):
+        ssh_key = str(project_root / env["SSH_KEY_NAME"])
+    if env.get("BACKEND_SSH_KEY_NAME"):
+        ssh_key = str(project_root / env["BACKEND_SSH_KEY_NAME"])
+    ssh_port = env.get("SSH_PORT", "22")
+
+    default = {
+        "locked": False,
+        "holder_host": "",
+        "holder_user": "",
+        "holder_pid": "",
+        "locked_since": "",
+        "elapsed_s": 0,
+        "expired": False,
+        "error": None,
+    }
+
+    if not backend_host or not ssh_user:
+        default["error"] = "未配置远程服务器信息"
+        return default
+
+    # 构建 SSH 命令
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no"]
+    if ssh_key:
+        ssh_cmd.extend(["-i", ssh_key])
+    if ssh_port and ssh_port != "22":
+        ssh_cmd.extend(["-p", ssh_port])
+    ssh_cmd.append(f"{ssh_user}@{backend_host}")
+    ssh_cmd.append(f"cat '{_REMOTE_LOCK_PATH}' 2>/dev/null || echo ''")
+
+    try:
+        r = subprocess.run(ssh_cmd, capture_output=True, text=True, timeout=10, check=False)
+        content = r.stdout.strip()
+        if not content:
+            return default
+
+        # 解析: hostname:PID:timestamp:user
+        parts = content.split(":", 3)
+        if len(parts) < 3:
+            return default
+
+        r_host = parts[0]
+        r_pid = parts[1]
+        r_ts = parts[2]
+        r_user = parts[3] if len(parts) > 3 else ""
+
+        try:
+            ts_int = int(r_ts)
+        except (ValueError, TypeError):
+            ts_int = 0
+
+        elapsed = int(time.time()) - ts_int
+        expired = elapsed >= _REMOTE_LOCK_TTL
+
+        return {
+            "locked": True,
+            "holder_host": r_host,
+            "holder_user": r_user,
+            "holder_pid": r_pid,
+            "locked_since": r_ts,
+            "elapsed_s": max(0, elapsed),
+            "expired": expired,
+            "error": None,
+        }
+    except subprocess.TimeoutExpired:
+        default["error"] = "SSH 连接超时"
+        return default
+    except FileNotFoundError:
+        default["error"] = "ssh 命令不可用"
+        return default
+    except Exception as e:
+        default["error"] = str(e)[:200]
+        return default
+
+
 def get_deploy_status(
     project_root: str | Path | None = None,
 ) -> dict:
@@ -1195,24 +1370,16 @@ def get_deploy_status(
     env_deploy = (project_root / "deploy" / ".env.deploy") if script else None
 
     # 解析 .env.deploy 中的关键配置
+    env = _parse_env_deploy(project_root)
     servers: dict[str, str] = {}
     site_urls: list[str] = []
-    if env_deploy and env_deploy.is_file():
-        try:
-            for line in env_deploy.read_text(encoding="utf-8").splitlines():
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                k, v = line.split("=", 1)
-                k, v = k.strip(), v.strip().strip('"').strip("'")
-                if k in ("BACKEND_HOST", "BACKEND_SERVER"):
-                    servers["backend"] = v
-                elif k in ("FRONTEND_HOST", "FRONTEND_SERVER"):
-                    servers["frontend"] = v
-                elif k in ("SITE_URL", "SITE_URLS"):
-                    site_urls = [u.strip() for u in v.split(",") if u.strip()]
-        except Exception:
-            pass
+    for k, v in env.items():
+        if k in ("BACKEND_HOST", "BACKEND_SERVER") and v:
+            servers["backend"] = v
+        elif k in ("FRONTEND_HOST", "FRONTEND_SERVER") and v:
+            servers["frontend"] = v
+        elif k in ("SITE_URL", "SITE_URLS") and v:
+            site_urls = [u.strip() for u in v.split(",") if u.strip()]
 
     # 检查最近的制品
     dist_dir = project_root / "web-dist"
@@ -1237,6 +1404,20 @@ def get_deploy_status(
         except Exception:
             pass
 
+    # 本地锁信息
+    local_lock_info: dict | None = None
+    lock_file = project_root / "deploy" / ".deploy.lock"
+    if lock_file.is_file():
+        try:
+            lines = lock_file.read_text(encoding="utf-8").strip().splitlines()
+            if lines:
+                local_lock_info = {
+                    "pid": lines[0] if len(lines) > 0 else "",
+                    "started_at": lines[1] if len(lines) > 1 else "",
+                }
+        except Exception:
+            pass
+
     return {
         "deploy_script_found": script is not None,
         "deploy_script_path": str(script) if script else None,
@@ -1247,6 +1428,7 @@ def get_deploy_status(
         "artifacts": artifacts,
         "recent_history": history,
         "is_deploying": _deploy_lock.locked(),
+        "local_lock": local_lock_info,
     }
 
 
@@ -1507,3 +1689,105 @@ def canary_abort(
         pass
 
     return {"success": True, "message": "灰度已中止"}
+
+
+def canary_start(
+    project_root: str | Path | None = None,
+    *,
+    target: str = "full",
+    observe_seconds: int = 60,
+) -> dict:
+    """发起灰度部署（通过 deploy.sh canary 子命令）。
+
+    前置条件：deploy.sh 存在且支持 canary 模式。
+    """
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(project_root)
+
+    script = _find_deploy_script(project_root)
+    if not script:
+        return {"success": False, "error": "未找到 deploy.sh"}
+
+    # 检查是否已有活跃灰度
+    canary_file = project_root / "deploy" / ".deploy_canary.json"
+    if canary_file.is_file():
+        try:
+            data = json.loads(canary_file.read_text(encoding="utf-8"))
+            if data.get("active"):
+                return {"success": False, "error": "已有灰度部署进行中，请先中止或等待完成"}
+        except Exception:
+            pass
+
+    # 构建命令
+    cmd = ["bash", str(script), "deploy", "--canary", "--force"]
+    if target == "backend":
+        cmd.append("--backend-only")
+    if observe_seconds > 0:
+        cmd.extend(["--canary-observe", str(observe_seconds)])
+
+    try:
+        r = subprocess.run(
+            cmd,
+            cwd=str(project_root),
+            capture_output=True, text=True,
+            timeout=30,  # 仅启动，不等待灰度完成
+            check=False,
+            env={**os.environ, "FORCE_COLOR": "0"},
+        )
+        if r.returncode != 0:
+            return {
+                "success": False,
+                "error": f"启动灰度失败 (exit {r.returncode}): {r.stderr[-500:]}",
+            }
+    except subprocess.TimeoutExpired:
+        # 灰度进入后台观察循环是正常的超时
+        pass
+    except FileNotFoundError:
+        return {"success": False, "error": "bash 未找到"}
+    except Exception as e:
+        return {"success": False, "error": str(e)[:200]}
+
+    return {"success": True, "message": "灰度部署已发起"}
+
+
+def get_deploy_log(
+    project_root: str | Path | None = None,
+    release_id: str = "",
+) -> str:
+    """读取指定 release_id 的部署日志。
+
+    日志文件约定: deploy/.deploy_logs/{release_id}.log
+    回退: deploy/.deploy_history 中对应行（纯文本历史）。
+    """
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    project_root = Path(project_root)
+
+    if not release_id:
+        return ""
+
+    # 安全检查：release_id 不能包含路径穿越字符
+    if "/" in release_id or "\\" in release_id or ".." in release_id:
+        return ""
+
+    # 优先查找独立日志文件
+    log_file = project_root / "deploy" / ".deploy_logs" / f"{release_id}.log"
+    if log_file.is_file():
+        try:
+            content = log_file.read_text(encoding="utf-8", errors="replace")
+            return content[-10000:]  # 限制返回大小
+        except Exception:
+            pass
+
+    # 回退：从 .deploy_history 纯文本中查找匹配行
+    history_file = project_root / "deploy" / ".deploy_history"
+    if history_file.is_file():
+        try:
+            for line in history_file.read_text(encoding="utf-8").splitlines():
+                if release_id in line:
+                    return line
+        except Exception:
+            pass
+
+    return ""

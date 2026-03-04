@@ -14,6 +14,9 @@ import {
   ChevronUp,
   ArrowUpCircle,
   Pause,
+  Play,
+  FileText,
+  Lock,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -22,12 +25,16 @@ import {
   fetchCanaryStatus,
   promoteCanary,
   abortCanary,
+  startCanary,
   streamRollback,
+  fetchDeployLog,
+  fetchDeployLockStatus,
 } from "@/lib/api";
 import type {
   DeployHistoryEntry,
   CanaryStatus,
   RollbackResult,
+  DeployLockStatus,
 } from "@/lib/api";
 
 function formatDuration(s: number): string {
@@ -74,7 +81,13 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
   const [rollbackMessage, setRollbackMessage] = useState("");
   const [promotingCanary, setPromotingCanary] = useState(false);
   const [abortingCanary, setAbortingCanary] = useState(false);
+  const [startingCanary, setStartingCanary] = useState(false);
   const [actionMsg, setActionMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
+  const [expandedLogId, setExpandedLogId] = useState<string | null>(null);
+  const [logContent, setLogContent] = useState<string>("");
+  const [logLoading, setLogLoading] = useState(false);
+  const [lockStatus, setLockStatus] = useState<DeployLockStatus | null>(null);
+  const [canaryExpanded, setCanaryExpanded] = useState(false);
   const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
   const showMsg = (type: "ok" | "err", text: string) => {
@@ -85,12 +98,14 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
   const fetchData = useCallback(async () => {
     setLoading(true);
     try {
-      const [h, c] = await Promise.all([
+      const [h, c, lk] = await Promise.all([
         fetchDeployHistory().catch(() => ({ history: [] })),
         fetchCanaryStatus().catch(() => null),
+        fetchDeployLockStatus().catch(() => null),
       ]);
       setHistory(h.history ?? []);
       if (c) setCanary(c);
+      if (lk) setLockStatus(lk);
     } finally {
       setLoading(false);
     }
@@ -109,6 +124,25 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
     }, 10_000);
     return () => clearInterval(timer);
   }, [canary?.active]);
+
+  const handleToggleLog = async (releaseId: string) => {
+    if (expandedLogId === releaseId) {
+      setExpandedLogId(null);
+      setLogContent("");
+      return;
+    }
+    setExpandedLogId(releaseId);
+    setLogLoading(true);
+    setLogContent("");
+    try {
+      const res = await fetchDeployLog(releaseId);
+      setLogContent(res.log || "无日志记录");
+    } catch {
+      setLogContent("加载日志失败");
+    } finally {
+      setLogLoading(false);
+    }
+  };
 
   const handleRollback = (entry: DeployHistoryEntry) => {
     const label = entry.release_id || entry.git_commit || "上一版本";
@@ -188,6 +222,25 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
     }
   };
 
+  const handleStartCanary = async () => {
+    if (!confirm("确定发起灰度部署？")) return;
+    setStartingCanary(true);
+    try {
+      const res = await startCanary({ target: "full" });
+      if (res.success) {
+        showMsg("ok", res.message || "灰度部署已发起");
+        const c = await fetchCanaryStatus().catch(() => null);
+        if (c) setCanary(c);
+      } else {
+        showMsg("err", res.error || "发起失败");
+      }
+    } catch {
+      showMsg("err", "发起灰度请求失败");
+    } finally {
+      setStartingCanary(false);
+    }
+  };
+
   if (loading) {
     return (
       <div className="flex items-center justify-center py-6 text-muted-foreground text-sm">
@@ -220,78 +273,126 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
         </div>
       )}
 
-      {/* ── 灰度状态面板 ── */}
-      {canary?.active && (
-        <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3 space-y-2.5">
-          <div className="flex items-center gap-2">
-            <ArrowUpCircle className="h-4 w-4 text-amber-600 dark:text-amber-400" />
-            <span className="text-sm font-medium text-amber-700 dark:text-amber-300">
-              灰度部署进行中
-            </span>
-            <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-amber-600 dark:text-amber-400 border-amber-500/30">
-              {canary.current_weight}% 流量
-            </Badge>
+      {/* ── 部署锁状态 ── */}
+      {lockStatus?.remote?.locked && !lockStatus.remote.expired && (
+        <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-3">
+          <div className="flex items-center gap-2 text-sm text-red-700 dark:text-red-400">
+            <Lock className="h-4 w-4 shrink-0" />
+            <span className="font-medium">远程部署锁已被占用</span>
           </div>
-
-          {/* 权重进度条 */}
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <span className="text-[11px] text-muted-foreground">
-                阶段 {canary.step}/{canary.total_steps}
-              </span>
-              <span className="text-[11px] font-mono text-muted-foreground">
-                {canary.current_weight}%
-              </span>
-            </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full rounded-full bg-amber-500 transition-all duration-500"
-                style={{ width: `${Math.min(100, canary.current_weight)}%` }}
-              />
-            </div>
-          </div>
-
-          {canary.started_at && (
-            <div className="text-[10px] text-muted-foreground flex items-center gap-1">
-              <Clock className="h-3 w-3" />
-              开始于 {formatTimestamp(canary.started_at)}
-              {canary.observe_seconds && ` · 每阶段观察 ${canary.observe_seconds}s`}
-            </div>
-          )}
-
-          {/* 灰度操作按钮 */}
-          <div className="flex items-center gap-2 pt-1">
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1"
-              disabled={promotingCanary || abortingCanary}
-              onClick={handlePromoteCanary}
-            >
-              {promotingCanary ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <ArrowUpCircle className="h-3 w-3" />
-              )}
-              提升比例
-            </Button>
-            <Button
-              variant="outline"
-              size="sm"
-              className="h-7 text-xs gap-1 text-destructive hover:text-destructive"
-              disabled={promotingCanary || abortingCanary}
-              onClick={handleAbortCanary}
-            >
-              {abortingCanary ? (
-                <Loader2 className="h-3 w-3 animate-spin" />
-              ) : (
-                <Pause className="h-3 w-3" />
-              )}
-              中止灰度
-            </Button>
+          <div className="mt-1 text-[11px] text-muted-foreground space-y-0.5">
+            <div>持锁者: {lockStatus.remote.holder_user}@{lockStatus.remote.holder_host}</div>
+            <div>已持续: {formatDuration(lockStatus.remote.elapsed_s)}</div>
           </div>
         </div>
       )}
+
+      {/* ── 灰度控制面板（始终可见） ── */}
+      <div className="rounded-lg border border-border p-3 space-y-2.5">
+        <button
+          className="flex items-center gap-2 w-full text-left"
+          onClick={() => setCanaryExpanded(!canaryExpanded)}
+        >
+          <ArrowUpCircle className={`h-4 w-4 ${canary?.active ? "text-amber-600 dark:text-amber-400" : "text-muted-foreground"}`} />
+          <span className={`text-sm font-medium ${canary?.active ? "text-amber-700 dark:text-amber-300" : "text-muted-foreground"}`}>
+            {canary?.active ? "灰度部署进行中" : "灰度部署"}
+          </span>
+          {canary?.active && (
+            <Badge variant="outline" className="text-[10px] h-4 px-1.5 text-amber-600 dark:text-amber-400 border-amber-500/30">
+              {canary.current_weight}% 流量
+            </Badge>
+          )}
+          <span className="ml-auto">
+            {canaryExpanded ? <ChevronUp className="h-3.5 w-3.5 text-muted-foreground" /> : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />}
+          </span>
+        </button>
+
+        {canaryExpanded && (
+          <div className="space-y-2.5 pt-1">
+            {canary?.active ? (
+              <>
+                {/* 权重进度条 */}
+                <div>
+                  <div className="flex items-center justify-between mb-1">
+                    <span className="text-[11px] text-muted-foreground">
+                      阶段 {canary.step}/{canary.total_steps}
+                    </span>
+                    <span className="text-[11px] font-mono text-muted-foreground">
+                      {canary.current_weight}%
+                    </span>
+                  </div>
+                  <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-amber-500 transition-all duration-500"
+                      style={{ width: `${Math.min(100, canary.current_weight)}%` }}
+                    />
+                  </div>
+                </div>
+
+                {canary.started_at && (
+                  <div className="text-[10px] text-muted-foreground flex items-center gap-1">
+                    <Clock className="h-3 w-3" />
+                    开始于 {formatTimestamp(canary.started_at)}
+                    {canary.observe_seconds && ` · 每阶段观察 ${canary.observe_seconds}s`}
+                  </div>
+                )}
+
+                {/* 灰度操作按钮 */}
+                <div className="flex items-center gap-2 pt-1">
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs gap-1"
+                    disabled={promotingCanary || abortingCanary}
+                    onClick={handlePromoteCanary}
+                  >
+                    {promotingCanary ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <ArrowUpCircle className="h-3 w-3" />
+                    )}
+                    提升比例
+                  </Button>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 text-xs gap-1 text-destructive hover:text-destructive"
+                    disabled={promotingCanary || abortingCanary}
+                    onClick={handleAbortCanary}
+                  >
+                    {abortingCanary ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Pause className="h-3 w-3" />
+                    )}
+                    中止灰度
+                  </Button>
+                </div>
+              </>
+            ) : (
+              <div className="space-y-2">
+                <p className="text-[11px] text-muted-foreground">
+                  当前无活跃灰度部署。灰度部署可逐步将流量切换到新版本，降低发布风险。
+                </p>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs gap-1"
+                  disabled={startingCanary}
+                  onClick={handleStartCanary}
+                >
+                  {startingCanary ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Play className="h-3 w-3" />
+                  )}
+                  发起灰度部署
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
 
       {/* ── 回滚进度 ── */}
       {rollingBack && rollbackProgress !== null && (
@@ -343,6 +444,7 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
             const isCurrent = currentGitCommit && entry.git_commit === currentGitCommit;
             const colorClass = statusColors[entry.status] || "bg-muted/30 text-muted-foreground border-border";
             const label = statusLabels[entry.status] || entry.status;
+            const isLogExpanded = expandedLogId === entry.release_id;
 
             return (
               <div key={entry.release_id || idx} className="flex gap-3 group">
@@ -402,17 +504,48 @@ export function RollbackPanel({ currentGitCommit }: RollbackPanelProps) {
                     <span>{entry.topology}/{entry.mode}</span>
                   </div>
 
-                  {/* 回滚按钮 */}
-                  {!rollingBack && entry.status === "SUCCESS" && !isCurrent && (
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      className="h-6 text-[10px] text-muted-foreground hover:text-foreground gap-1 px-1.5 mt-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
-                      onClick={() => handleRollback(entry)}
-                    >
-                      <RotateCcw className="h-3 w-3" />
-                      回滚到此版本
-                    </Button>
+                  {/* 操作按钮行 */}
+                  <div className="flex items-center gap-1 mt-1">
+                    {/* 回滚按钮 */}
+                    {!rollingBack && entry.status === "SUCCESS" && !isCurrent && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-[10px] text-muted-foreground hover:text-foreground gap-1 px-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                        onClick={() => handleRollback(entry)}
+                      >
+                        <RotateCcw className="h-3 w-3" />
+                        回滚到此版本
+                      </Button>
+                    )}
+                    {/* 查看日志按钮 */}
+                    {entry.release_id && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-6 text-[10px] text-muted-foreground hover:text-foreground gap-1 px-1.5 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity"
+                        onClick={() => handleToggleLog(entry.release_id)}
+                      >
+                        <FileText className="h-3 w-3" />
+                        {isLogExpanded ? "收起日志" : "查看日志"}
+                      </Button>
+                    )}
+                  </div>
+
+                  {/* 展开的日志内容 */}
+                  {isLogExpanded && (
+                    <div className="mt-1.5 rounded border border-border bg-muted/30 p-2 max-h-48 overflow-auto">
+                      {logLoading ? (
+                        <div className="flex items-center gap-1.5 text-[10px] text-muted-foreground">
+                          <Loader2 className="h-3 w-3 animate-spin" />
+                          加载日志…
+                        </div>
+                      ) : (
+                        <pre className="text-[10px] text-muted-foreground whitespace-pre-wrap font-mono leading-relaxed">
+                          {logContent}
+                        </pre>
+                      )}
+                    </div>
                   )}
                 </div>
               </div>

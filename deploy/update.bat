@@ -19,6 +19,7 @@ set USE_MIRROR=0
 set FORCE_MODE=0
 set AUTO_YES=0
 set ROLLBACK=0
+set LIST_BACKUPS=0
 
 :parse_args
 if "%~1"=="" goto args_done
@@ -30,6 +31,7 @@ if /i "%~1"=="--force" set FORCE_MODE=1
 if /i "%~1"=="-y" set AUTO_YES=1
 if /i "%~1"=="--yes" set AUTO_YES=1
 if /i "%~1"=="--rollback" set ROLLBACK=1
+if /i "%~1"=="--list-backups" set LIST_BACKUPS=1
 if /i "%~1"=="--help" goto show_help
 if /i "%~1"=="-h" goto show_help
 shift
@@ -42,6 +44,19 @@ for /f "tokens=2 delims==" %%a in ('findstr /r "^version" pyproject.toml 2^>nul'
     set "CURRENT_VERSION=%%a"
     set "CURRENT_VERSION=!CURRENT_VERSION: =!"
     set "CURRENT_VERSION=!CURRENT_VERSION:"=!"
+)
+
+REM ── 列出备份 ──
+if %LIST_BACKUPS%==1 (
+    if not exist "backups\backup_*" (
+        echo [--] 暂无备份
+        exit /b 0
+    )
+    echo 可用备份:
+    for /f "delims=" %%d in ('dir /b /ad /o-n "backups\backup_*" 2^>nul') do (
+        echo   %%d
+    )
+    exit /b 0
 )
 
 REM ── 回滚 ──
@@ -188,7 +203,7 @@ for /f "tokens=2 delims==" %%a in ('findstr /r "^version" pyproject.toml 2^>nul'
 )
 echo [OK] 代码已更新: %CURRENT_VERSION% -^> %NEW_VERSION%
 
-REM ── Step 4: 依赖 ──
+REM ── Step 4: 依赖（uv 优先，pip 回退） ──
 if %SKIP_DEPS%==0 (
     echo -- 更新后端依赖 --
     set "PY=python"
@@ -197,13 +212,28 @@ if %SKIP_DEPS%==0 (
     set "PIP_MIRROR="
     if %USE_MIRROR%==1 set "PIP_MIRROR=-i https://pypi.tuna.tsinghua.edu.cn/simple"
 
-    !PY! -m pip install -e ".[all]" !PIP_MIRROR! --quiet 2>nul
-    if errorlevel 1 (
-        echo [!!] pip 失败，尝试清华镜像...
-        !PY! -m pip install -e ".[all]" -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet 2>nul
-        if errorlevel 1 echo [XX] 后端依赖安装失败
+    set "BACKEND_OK=0"
+    where uv >nul 2>&1 && (
+        echo [--] 使用 uv sync 安装后端依赖...
+        set "UV_MIRROR="
+        if %USE_MIRROR%==1 set "UV_MIRROR=--index-url https://pypi.tuna.tsinghua.edu.cn/simple"
+        uv sync --all-extras --project . !UV_MIRROR! --quiet 2>nul
+        if not errorlevel 1 (
+            set "BACKEND_OK=1"
+            echo [OK] 后端依赖已更新（uv）
+        ) else (
+            echo [!!] uv sync 失败，回退到 pip...
+        )
     )
-    echo [OK] 后端依赖已更新
+    if !BACKEND_OK!==0 (
+        !PY! -m pip install -e ".[all]" !PIP_MIRROR! --quiet 2>nul
+        if errorlevel 1 (
+            echo [!!] pip 失败，尝试清华镜像...
+            !PY! -m pip install -e ".[all]" -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet 2>nul
+            if errorlevel 1 echo [XX] 后端依赖安装失败
+        )
+        if not errorlevel 1 echo [OK] 后端依赖已更新（pip）
+    )
 
     if exist "web\package.json" (
         echo -- 更新前端依赖 --
@@ -222,7 +252,29 @@ if %SKIP_DEPS%==0 (
     echo [!!] 跳过依赖更新
 )
 
-REM ── Step 5: 预验证数据库迁移 ──
+REM ── Step 5: 重新构建前端（生产模式必须，否则新代码不生效） ──
+if exist "web\package.json" (
+    if exist "web\.next" (
+        echo -- 构建前端 --
+        echo [--] 重新构建前端以使更新生效...
+        cd web
+        call npm run build 2>nul
+        if errorlevel 1 (
+            echo [!!] 默认构建失败，尝试 webpack 兜底...
+            call npm run build:webpack 2>nul
+            if errorlevel 1 (
+                echo [!!] 前端构建失败（非致命）。生产模式下请手动执行: cd web ^&^& npm run build
+            ) else (
+                echo [OK] 前端构建完成（webpack 兜底）
+            )
+        ) else (
+            echo [OK] 前端构建完成
+        )
+        cd ..
+    )
+)
+
+REM ── Step 6: 预验证数据库迁移 ──
 echo -- 预验证数据库迁移 --
 set "DB_PY=python"
 if exist ".venv\Scripts\python.exe" set "DB_PY=.venv\Scripts\python.exe"
@@ -232,6 +284,30 @@ if errorlevel 1 (
 ) else (
     echo [OK] 数据库迁移验证通过
 )
+
+REM ── 写入 .deploy_meta.json ──
+set "META_PY=python"
+if exist ".venv\Scripts\python.exe" set "META_PY=.venv\Scripts\python.exe"
+for /f "delims=" %%h in ('git rev-parse --short HEAD 2^>nul') do set "GIT_SHORT=%%h"
+if not defined GIT_SHORT set "GIT_SHORT=unknown"
+for /f "delims=" %%f in ('git rev-parse HEAD 2^>nul') do set "GIT_FULL=%%f"
+if not defined GIT_FULL set "GIT_FULL="
+for /f "delims=" %%t in ('powershell -NoProfile -Command "Get-Date -Format 'yyyyMMddTHHmmss'"') do set "RELEASE_ID=%%t"
+if not defined RELEASE_ID set "RELEASE_ID=unknown"
+for /f "delims=" %%d in ('powershell -NoProfile -Command "Get-Date -Format 'yyyy-MM-ddTHH:mm:ssZ'"') do set "DEPLOY_AT=%%d"
+if not defined DEPLOY_AT set "DEPLOY_AT=unknown"
+>  ".deploy_meta.json" echo {
+>> ".deploy_meta.json" echo   "release_id": "!RELEASE_ID!",
+>> ".deploy_meta.json" echo   "deployed_at": "!DEPLOY_AT!",
+>> ".deploy_meta.json" echo   "git_commit": "!GIT_SHORT!",
+>> ".deploy_meta.json" echo   "git_commit_full": "!GIT_FULL!",
+>> ".deploy_meta.json" echo   "pre_deploy_commit": "",
+>> ".deploy_meta.json" echo   "deploy_mode": "standalone",
+>> ".deploy_meta.json" echo   "topology": "local",
+>> ".deploy_meta.json" echo   "branch": "%BRANCH%",
+>> ".deploy_meta.json" echo   "updater": "update.bat"
+>> ".deploy_meta.json" echo }
+echo [OK] 部署元数据已写入
 
 REM ── 完成 ──
 echo.
@@ -256,6 +332,7 @@ echo   --skip-deps     跳过依赖重装
 echo   --mirror        使用国内镜像
 echo   --force         强制覆盖
 echo   --rollback      从最近备份恢复
+echo   --list-backups  列出所有备份
 echo   -y, --yes       跳过确认
 echo   -h, --help      显示帮助
 exit /b 0

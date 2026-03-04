@@ -523,7 +523,7 @@ _remote_backend()  { _remote "$BACKEND_HOST" "$BACKEND_SSH_KEY_PATH" "$@"; }
 _remote_frontend() { _remote "$FRONTEND_HOST" "$FRONTEND_SSH_KEY_PATH" "$@"; }
 
 _ensure_frontend_standalone_assets() {
-  info "检查 standalone 静态资源..."
+  info "检查 standalone 静态资源（原子切换）..."
   _remote_frontend "
     cd '${FRONTEND_DIR}/web'
     if [[ ! -d .next/standalone ]]; then
@@ -545,28 +545,37 @@ _ensure_frontend_standalone_assets() {
     _server_dir=\$(dirname \"\$_server_js\")
     echo \"[INFO] server.js 位于: \$_server_js\"
 
+    # ── 原子切换辅助函数 ──
+    # 先复制到 .new 临时目录，再 mv 切换，崩溃时旧文件不受影响
+    _atomic_replace_dir() {
+      local _src=\"\$1\" _dst=\"\$2\"
+      local _new=\"\${_dst}.new\" _old=\"\${_dst}.old\"
+      rm -rf \"\$_new\" \"\$_old\"
+      cp -r \"\$_src\" \"\$_new\"
+      # mv 是原子操作（同文件系统内）
+      [[ -d \"\$_dst\" ]] && mv \"\$_dst\" \"\$_old\"
+      mv \"\$_new\" \"\$_dst\"
+      rm -rf \"\$_old\"
+    }
+
     # 根级别（.next/standalone/）始终需要静态资源
     mkdir -p .next/standalone/.next
-    rm -rf .next/standalone/.next/static
-    rm -rf .next/standalone/public
     if [[ -d .next/static ]]; then
-      cp -r .next/static .next/standalone/.next/static
+      _atomic_replace_dir .next/static .next/standalone/.next/static
     fi
     if [[ -d public ]]; then
-      cp -r public .next/standalone/public
+      _atomic_replace_dir public .next/standalone/public
     fi
 
     # 如果 server.js 在嵌套子目录中，还需要在该子目录中也放一份静态资源
     if [[ \"\$_server_dir\" != '.next/standalone' ]]; then
       echo \"[INFO] server.js 在嵌套目录中（\$_server_dir），同步静态资源到该目录...\"
       mkdir -p \"\$_server_dir/.next\"
-      rm -rf \"\$_server_dir/.next/static\"
-      rm -rf \"\$_server_dir/public\"
       if [[ -d .next/static ]]; then
-        cp -r .next/static \"\$_server_dir/.next/static\"
+        _atomic_replace_dir .next/static \"\$_server_dir/.next/static\"
       fi
       if [[ -d public ]]; then
-        cp -r public \"\$_server_dir/public\"
+        _atomic_replace_dir public \"\$_server_dir/public\"
       fi
     fi
 
@@ -721,6 +730,20 @@ _build_frontend_remote() {
     find . -maxdepth 1 -type d \( -name 'src.bak.*' -o -name 'src.backup.*' -o -name 'src_old*' \) -exec rm -rf {} + 2>/dev/null || true
   " || true
 
+  # 构建前备份关键产物，构建失败时恢复（避免 .next 被部分覆盖导致运行版本损坏）
+  info "备份当前构建产物..."
+  _remote_frontend "
+    cd '${FRONTEND_DIR}/web'
+    _bak='.next/_pre_build_backup'
+    rm -rf \"\$_bak\" 2>/dev/null || true
+    mkdir -p \"\$_bak\"
+    [[ -f .next/BUILD_ID ]] && cp .next/BUILD_ID \"\$_bak/BUILD_ID\"
+    [[ -f .next/routes-manifest.json ]] && cp .next/routes-manifest.json \"\$_bak/routes-manifest.json\"
+    [[ -d .next/standalone ]] && cp -a .next/standalone \"\$_bak/standalone\"
+    [[ -d .next/static ]] && cp -a .next/static \"\$_bak/static\"
+    echo '[OK] pre-build backup created'
+  " || true
+
   # 注意：不使用 | tail 管道，避免吞掉 npm run build 的退出码
   info "构建前端..."
   if _remote_frontend "
@@ -731,18 +754,48 @@ _build_frontend_remote() {
     echo \"[deploy] npm run build exit code: \$BUILD_EXIT\"; \
     exit \$BUILD_EXIT
   "; then
+    # 构建成功，清理备份
+    _remote_frontend "rm -rf '${FRONTEND_DIR}/web/.next/_pre_build_backup' 2>/dev/null || true" || true
     return 0
   fi
 
   warn "默认构建失败，尝试 webpack 兜底（npm run build:webpack）..."
-  _remote_frontend "
+  if _remote_frontend "
     cd '${FRONTEND_DIR}/web' && \
     export NODE_OPTIONS=\"--max-old-space-size=4096\" && \
     ${cold_cmd}npm run build:webpack 2>&1; \
     BUILD_EXIT=\$?; \
     echo \"[deploy] webpack build exit code: \$BUILD_EXIT\"; \
     exit \$BUILD_EXIT
-  "
+  "; then
+    # 构建成功，清理备份
+    _remote_frontend "rm -rf '${FRONTEND_DIR}/web/.next/_pre_build_backup' 2>/dev/null || true" || true
+    return 0
+  fi
+
+  # 两种构建都失败 → 从备份恢复关键产物
+  warn "前端构建失败，从备份恢复当前运行版本..."
+  _remote_frontend "
+    cd '${FRONTEND_DIR}/web'
+    _bak='.next/_pre_build_backup'
+    if [[ -d \"\$_bak\" ]]; then
+      [[ -f \"\$_bak/BUILD_ID\" ]] && cp -f \"\$_bak/BUILD_ID\" .next/BUILD_ID
+      [[ -f \"\$_bak/routes-manifest.json\" ]] && cp -f \"\$_bak/routes-manifest.json\" .next/routes-manifest.json
+      if [[ -d \"\$_bak/standalone\" ]]; then
+        rm -rf .next/standalone
+        mv \"\$_bak/standalone\" .next/standalone
+      fi
+      if [[ -d \"\$_bak/static\" ]]; then
+        rm -rf .next/static
+        mv \"\$_bak/static\" .next/static
+      fi
+      rm -rf \"\$_bak\"
+      echo '[OK] 已从备份恢复当前运行版本'
+    else
+      echo '[WARN] 无备份可恢复'
+    fi
+  " || true
+  return 1
 }
 
 # ── 构建产物完整性校验（返回 0=通过，1=失败）──
@@ -1683,8 +1736,13 @@ _preflight() {
 }
 
 # ── 部署锁 ──
+REMOTE_LOCK_FILE="/tmp/.excelmanus-deploy.lock"
+REMOTE_LOCK_TTL=1800  # 30 分钟 TTL
+
 _acquire_lock() {
   [[ "$NO_LOCK" == true || "$DRY_RUN" == true ]] && return 0 || true
+
+  # ── 本地锁 ──
   LOCK_FILE="${SCRIPT_DIR}/.deploy.lock"
   if [[ -f "$LOCK_FILE" ]]; then
     local lock_pid lock_time
@@ -1702,10 +1760,71 @@ _acquire_lock() {
   fi
   echo "$$" > "$LOCK_FILE"
   echo "$(date '+%Y-%m-%d %H:%M:%S')" >> "$LOCK_FILE"
+
+  # ── 远程服务器锁（仅非 local 拓扑）──
+  if [[ "$TOPOLOGY" != "local" && -n "$BACKEND_HOST" ]]; then
+    _acquire_remote_lock "$BACKEND_HOST" "$BACKEND_SSH_KEY_PATH"
+  fi
+}
+
+_acquire_remote_lock() {
+  local host="$1" key="$2"
+  local my_hostname my_user my_ts
+  my_hostname=$(hostname 2>/dev/null || echo "unknown")
+  my_user=$(whoami 2>/dev/null || echo "unknown")
+  my_ts=$(date +%s)
+
+  # 读取远程锁文件内容
+  local remote_content
+  remote_content=$(ssh $(_ssh_opts "$key") "${SSH_USER}@${host}" \
+    "cat '${REMOTE_LOCK_FILE}' 2>/dev/null || echo ''" 2>/dev/null || echo "")
+
+  if [[ -n "$remote_content" ]]; then
+    # 解析: hostname:PID:timestamp:user
+    local r_host r_pid r_ts r_user
+    IFS=':' read -r r_host r_pid r_ts r_user <<< "$remote_content"
+
+    # 检查是否超过 TTL
+    local now elapsed
+    now=$(date +%s)
+    elapsed=$(( now - ${r_ts:-0} ))
+    if [[ $elapsed -lt $REMOTE_LOCK_TTL ]]; then
+      # 检查远端持锁进程是否还活着
+      local alive
+      alive=$(ssh $(_ssh_opts "$key") "${SSH_USER}@${host}" \
+        "kill -0 ${r_pid} 2>/dev/null && echo yes || echo no" 2>/dev/null || echo "no")
+      if [[ "$alive" == "yes" ]]; then
+        error "远程服务器部署锁已被占用"
+        error "  持锁者: ${r_user}@${r_host} (PID: ${r_pid})"
+        error "  开始于: $(date -d @"${r_ts}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo "${r_ts}")"
+        error "  已持续: ${elapsed}s"
+        error "如需强制部署，请使用 --no-lock 或在远程服务器上删除 ${REMOTE_LOCK_FILE}"
+        # 清理本地锁
+        rm -f "$LOCK_FILE"
+        exit 1
+      else
+        warn "远程锁文件存在但持锁进程已不存在 (PID: ${r_pid}@${r_host})，清理中..."
+      fi
+    else
+      warn "远程锁文件已过期（${elapsed}s > ${REMOTE_LOCK_TTL}s TTL），清理中..."
+    fi
+  fi
+
+  # 写入远程锁
+  ssh $(_ssh_opts "$key") "${SSH_USER}@${host}" \
+    "echo '${my_hostname}:$$:${my_ts}:${my_user}' > '${REMOTE_LOCK_FILE}'" 2>/dev/null || \
+    warn "无法写入远程部署锁（非致命）"
 }
 
 _release_lock() {
+  # 释放本地锁
   [[ -n "$LOCK_FILE" && -f "$LOCK_FILE" ]] && rm -f "$LOCK_FILE" || true
+
+  # 释放远程锁
+  if [[ "$NO_LOCK" != true && "$TOPOLOGY" != "local" && -n "$BACKEND_HOST" ]]; then
+    ssh $(_ssh_opts "$BACKEND_SSH_KEY_PATH") "${SSH_USER}@${BACKEND_HOST}" \
+      "rm -f '${REMOTE_LOCK_FILE}'" 2>/dev/null || true
+  fi
 }
 
 # ── 信号处理 ──

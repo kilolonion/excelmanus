@@ -259,6 +259,9 @@ fi
 # ── Step 3: 更新代码 ──
 step "拉取最新代码"
 
+# 记录更新前的 commit（供回滚精确回退）
+PRE_DEPLOY_COMMIT="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+
 # 暂存本地修改（如果有）
 if [[ -n "$(git -C "$PROJECT_ROOT" status --porcelain 2>/dev/null)" ]]; then
   info "暂存本地修改..."
@@ -358,6 +361,67 @@ if [[ "$SKIP_DEPS" != true ]]; then
 else
   warn "跳过依赖更新（--skip-deps）"
 fi
+
+# ── Step 5: 重新构建前端（生产模式必须，否则新代码不生效） ──
+_web_dir="${PROJECT_ROOT}/web"
+if [[ -d "$_web_dir" ]] && [[ -f "${_web_dir}/package.json" ]]; then
+  # 仅在 .next 目录存在时才构建（说明用户曾以生产模式运行过）
+  if [[ -d "${_web_dir}/.next" ]] || [[ "$SKIP_DEPS" != true ]]; then
+    step "构建前端"
+    info "重新构建前端以使更新生效（npm run build）..."
+    if ! (cd "$_web_dir" && npm run build 2>&1); then
+      warn "默认构建失败，尝试 webpack 兜底..."
+      if ! (cd "$_web_dir" && npm run build:webpack 2>&1); then
+        warn "前端构建失败（非致命）。生产模式下请手动执行: cd web && npm run build"
+      else
+        log "前端构建完成（webpack 兜底）"
+      fi
+    else
+      log "前端构建完成"
+    fi
+  fi
+fi
+
+# ── Step 6: 预验证数据库迁移 ──
+step "预验证数据库迁移"
+if [[ -f "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+  _DB_PY="${PROJECT_ROOT}/.venv/bin/python"
+elif [[ -f "${PROJECT_ROOT}/.venv/Scripts/python.exe" ]]; then
+  _DB_PY="${PROJECT_ROOT}/.venv/Scripts/python.exe"
+else
+  _DB_PY="python3"
+fi
+_db_result=$("$_DB_PY" -c "
+import sys
+try:
+    from excelmanus.updater import verify_database_migration
+    ok, msg = verify_database_migration()
+    print(msg)
+    sys.exit(0 if ok else 1)
+except Exception as e:
+    print(f'跳过预验证: {e}')
+    sys.exit(0)
+" 2>/dev/null) && log "数据库迁移验证: ${_db_result}" || warn "数据库迁移预验证警告: ${_db_result}（将在启动时自动重试）"
+
+# ── 写入 .deploy_meta.json ──
+_meta_file="${PROJECT_ROOT}/.deploy_meta.json"
+_git_short="$(git -C "$PROJECT_ROOT" rev-parse --short HEAD 2>/dev/null || echo "unknown")"
+_git_full="$(git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null || echo "")"
+_pre_commit="${PRE_DEPLOY_COMMIT:-}"
+cat > "$_meta_file" <<METAEOF
+{
+  "release_id": "$(date +%Y%m%dT%H%M%S)",
+  "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || date +%Y-%m-%dT%H:%M:%S)",
+  "git_commit": "${_git_short}",
+  "git_commit_full": "${_git_full}",
+  "pre_deploy_commit": "${_pre_commit}",
+  "deploy_mode": "standalone",
+  "topology": "local",
+  "branch": "${BRANCH}",
+  "updater": "update.sh"
+}
+METAEOF
+log "部署元数据已写入: ${_meta_file}"
 
 # ── 完成 ──
 echo ""

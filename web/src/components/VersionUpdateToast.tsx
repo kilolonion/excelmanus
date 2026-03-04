@@ -42,8 +42,19 @@ export function VersionUpdateToast({
             </p>
             <p className="text-xs text-destructive/80 mt-1">
               后端已更新{remoteVersion ? ` (v${remoteVersion})` : ""}，
-              当前页面版本不兼容，即将自动刷新…
+              当前页面版本不兼容。请保存当前工作后刷新页面。
             </p>
+            <div className="flex items-center gap-2 mt-2.5">
+              <Button
+                variant="destructive"
+                size="sm"
+                className="h-7 text-xs gap-1.5"
+                onClick={onRefresh}
+              >
+                <RefreshCw className="h-3 w-3" />
+                立即刷新
+              </Button>
+            </div>
           </div>
         </div>
       </div>
