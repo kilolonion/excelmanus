@@ -90,6 +90,7 @@ def build_telegram_app(
             return
         text = update.message.text or ""
         cmd, args = _parse_command(text)
+        _ct = update.effective_chat.type if update.effective_chat else "private"
         msg = ChannelMessage(
             channel="telegram",
             user=_make_user(update),
@@ -99,6 +100,7 @@ def build_telegram_app(
             command=cmd,
             command_args=args,
             raw=update,
+            chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
         try:
             await handler.handle_message(msg)
@@ -122,12 +124,14 @@ def build_telegram_app(
         except Exception:
             pass
 
+        _ct = update.effective_chat.type if update.effective_chat else "private"
         msg = ChannelMessage(
             channel="telegram",
             user=_make_user(update),
             chat_id=str(update.effective_chat.id),
             text=text,
             raw=update,
+            chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
         try:
             await handler.handle_message(msg)
@@ -158,6 +162,7 @@ def build_telegram_app(
             pass
 
         caption = update.message.caption or ""
+        _ct = update.effective_chat.type if update.effective_chat else "private"
         msg = ChannelMessage(
             channel="telegram",
             user=_make_user(update),
@@ -168,6 +173,7 @@ def build_telegram_app(
                 media_type="image/jpeg",
             )],
             raw=update,
+            chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
         await handler.handle_message(msg)
 
@@ -198,6 +204,7 @@ def build_telegram_app(
                 media_type=mime,
             ))
 
+        _ct = update.effective_chat.type if update.effective_chat else "private"
         msg = ChannelMessage(
             channel="telegram",
             user=_make_user(update),
@@ -210,6 +217,7 @@ def build_telegram_app(
             )],
             images=images,
             raw=update,
+            chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
         await handler.handle_message(msg)
 
@@ -219,12 +227,14 @@ def build_telegram_app(
             return
         await query.answer()
 
+        _ct = query.message.chat.type if query.message and query.message.chat else "private"
         msg = ChannelMessage(
             channel="telegram",
             user=_make_user(update),
             chat_id=str(query.message.chat_id),
             callback_data=query.data,
             raw=update,
+            chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
         await handler.handle_message(msg)
 
@@ -267,6 +277,7 @@ def build_telegram_app(
                 BotCommand("bind", "绑定 ExcelManus 账号"),
                 BotCommand("bindstatus", "查看绑定状态"),
                 BotCommand("unbind", "解除账号绑定"),
+                BotCommand("admin", "管理员命令"),
             ])
         except Exception:
             logger.warning("set_my_commands 失败（网络不可达？），Bot 仍将继续启动", exc_info=True)

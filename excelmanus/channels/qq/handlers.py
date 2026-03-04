@@ -328,6 +328,7 @@ async def _handle_group_message(
         command=cmd,
         command_args=args,
         raw=message,
+        chat_type="group",
     )
     await handler.handle_message(msg)
 
@@ -374,6 +375,7 @@ async def _handle_c2c_message(
         command=cmd,
         command_args=args,
         raw=message,
+        chat_type="private",
     )
     await handler.handle_message(msg)
 
@@ -425,6 +427,7 @@ async def _handle_guild_message(
         command=cmd,
         command_args=args,
         raw=message,
+        chat_type="channel",
     )
     await handler.handle_message(msg)
 

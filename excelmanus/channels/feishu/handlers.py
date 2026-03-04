@@ -195,6 +195,7 @@ async def handle_feishu_event(
         return
 
     is_cmd, cmd, args = _parse_command(text) if text.strip() else (False, "", [])
+    _chat_type_raw = message.get("chat_type", "p2p")
     channel_msg = ChannelMessage(
         channel="feishu",
         user=user,
@@ -206,6 +207,7 @@ async def handle_feishu_event(
         command=cmd,
         command_args=args,
         raw=event,
+        chat_type="private" if _chat_type_raw == "p2p" else "group",
     )
     try:
         await handler.handle_message(channel_msg)
@@ -247,6 +249,7 @@ async def handle_feishu_card_action(
         chat_id=chat_id,
         callback_data=callback_data,
         raw=action,
+        chat_type="private",
     )
     try:
         await handler.handle_message(msg)

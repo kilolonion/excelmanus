@@ -42,14 +42,33 @@ async def get_current_user(
         )
 
     payload = decode_token(credentials.credentials)
-    if payload is None or payload.get("type") != "access":
+    if payload is None:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="无效或过期的 token",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user_id: str | None = payload.get("sub")
+    token_type = payload.get("type")
+
+    # ── 服务令牌：通过 X-On-Behalf-Of 代理用户身份 ──
+    if token_type == "service":
+        on_behalf_of = request.headers.get("x-on-behalf-of", "").strip()
+        if not on_behalf_of or on_behalf_of.startswith("channel_anon:"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="服务令牌需要绑定账号才能访问此端点",
+            )
+        user_id = on_behalf_of
+    elif token_type == "access":
+        user_id = payload.get("sub")
+    else:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="无效或过期的 token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
     if not user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,

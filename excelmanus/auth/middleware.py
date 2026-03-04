@@ -30,6 +30,7 @@ logger = logging.getLogger(__name__)
 _PUBLIC_PREFIXES = (
     "/api/v1/auth/",
     "/api/v1/health",
+    "/api/v1/files/dl/",
     "/docs",
     "/openapi.json",
     "/redoc",

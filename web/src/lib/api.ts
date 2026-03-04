@@ -1722,6 +1722,8 @@ export interface VersionManifest {
   deployed_at: string | null;
   deploy_mode: string | null;
   topology: string | null;
+  min_frontend_build_id: string | null;
+  min_backend_version: string | null;
 }
 
 export async function fetchVersionManifest(): Promise<VersionManifest> {
@@ -1849,6 +1851,7 @@ export interface DeployStatusInfo {
   }[];
   recent_history: string[];
   is_deploying: boolean;
+  local_lock: { pid: string; started_at: string } | null;
 }
 
 export async function fetchDeployStatus(): Promise<DeployStatusInfo> {
@@ -2030,6 +2033,44 @@ export async function abortCanary(): Promise<{
   return apiPost("/deploy/canary/abort", {});
 }
 
+export async function startCanary(opts?: {
+  target?: "full" | "backend";
+  observeSeconds?: number;
+}): Promise<{ success: boolean; message?: string; error?: string }> {
+  return apiPost("/deploy/canary/start", {
+    target: opts?.target ?? "full",
+    observe_seconds: opts?.observeSeconds ?? 60,
+  });
+}
+
+// ── Deploy Lock Status ──────────────────────────────────
+
+export interface RemoteLockInfo {
+  locked: boolean;
+  holder_host: string;
+  holder_user: string;
+  holder_pid: string;
+  locked_since: string;
+  elapsed_s: number;
+  expired: boolean;
+  error: string | null;
+}
+
+export interface DeployLockStatus {
+  local_locked: boolean;
+  remote: RemoteLockInfo;
+}
+
+export async function fetchDeployLockStatus(): Promise<DeployLockStatus> {
+  return apiGet<DeployLockStatus>("/deploy/lock/status");
+}
+
+// ── Deploy Log ──────────────────────────────────────────
+
+export async function fetchDeployLog(releaseId: string): Promise<{ release_id: string; log: string }> {
+  return apiGet<{ release_id: string; log: string }>(`/deploy/history/${encodeURIComponent(releaseId)}/log`);
+}
+
 // ── Channel Status API ───────────────────────────────────
 
 export interface ChannelFieldDef {
@@ -2069,6 +2110,22 @@ export interface RateLimitConfig {
   auto_ban_duration_seconds: number;
 }
 
+export interface ChannelSettings {
+  admin_users: string;
+  group_policy: string;
+  group_whitelist: string;
+  group_blacklist: string;
+  allowed_users: string;
+  default_concurrency: string;
+  default_chat_mode: string;
+  public_url: string;
+  tg_edit_interval_min: string;
+  tg_edit_interval_max: string;
+  qq_progressive_chars: string;
+  qq_progressive_interval: string;
+  feishu_update_interval: string;
+}
+
 export interface ChannelStatusInfo {
   enabled: boolean;
   channels: string[];
@@ -2077,6 +2134,8 @@ export interface ChannelStatusInfo {
   require_bind_source: "env" | "config" | "default";
   rate_limit: RateLimitConfig;
   rate_limit_env_overrides: Record<string, string>;
+  settings: ChannelSettings;
+  settings_env_overrides: Record<string, string>;
 }
 
 export async function fetchServerPublicIp(): Promise<{ ip: string | null }> {
@@ -2092,8 +2151,8 @@ export async function fetchChannelsStatus(): Promise<ChannelStatusInfo> {
 }
 
 export async function updateChannelSettings(
-  settings: { require_bind?: boolean },
-): Promise<{ status: string }> {
+  settings: Partial<ChannelSettings> & { require_bind?: boolean },
+): Promise<{ status: string; updated_fields?: string[]; locked_fields?: string[]; message?: string }> {
   return apiPut("/channels/settings", settings);
 }
 

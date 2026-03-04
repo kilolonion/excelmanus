@@ -243,6 +243,40 @@ def rotate_service_token() -> str:
     return token
 
 
+DOWNLOAD_TOKEN_EXPIRE_MINUTES = 30  # 文件下载令牌有效期 30 分钟
+
+
+def create_download_token(
+    file_path: str,
+    user_id: str = "",
+    expires_delta: timedelta | None = None,
+) -> str:
+    """创建短效文件下载令牌（供 Bot 渠道生成可分享的下载链接）。
+
+    令牌携带 ``type=download``，验证时无需额外 auth。
+    """
+    expire = datetime.now(tz=timezone.utc) + (
+        expires_delta or timedelta(minutes=DOWNLOAD_TOKEN_EXPIRE_MINUTES)
+    )
+    payload = {
+        "type": "download",
+        "file_path": file_path,
+        "sub": user_id,
+        "exp": expire,
+    }
+    return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
+
+
+def decode_download_token(token: str) -> dict[str, Any] | None:
+    """解码并验证文件下载令牌。返回 claims 字典或 None。"""
+    payload = decode_token(token)
+    if payload is None or payload.get("type") != "download":
+        return None
+    if not payload.get("file_path"):
+        return None
+    return payload
+
+
 MERGE_TOKEN_EXPIRE_MINUTES = 5  # 合并令牌有效期 5 分钟
 
 

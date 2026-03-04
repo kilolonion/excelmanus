@@ -42,6 +42,7 @@ import {
   type ChannelDetail,
   type ChannelFieldDef,
   type RateLimitConfig,
+  type ChannelSettings,
 } from "@/lib/api";
 import { ChannelIcon, CHANNEL_META } from "@/components/ui/ChannelIcons";
 
@@ -1106,6 +1107,505 @@ function BindFlowOverview() {
   );
 }
 
+// ── Tag Input (comma-separated values) ────────────────────
+
+function TagInput({
+  value,
+  onChange,
+  placeholder,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+}) {
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      placeholder={placeholder}
+      disabled={disabled}
+      className="w-full text-xs px-3 py-2 rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
+    />
+  );
+}
+
+// ── Select Input ──────────────────────────────────────────
+
+function SelectInput({
+  value,
+  onChange,
+  options,
+  disabled,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string }[];
+  disabled?: boolean;
+}) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      disabled={disabled}
+      className="text-xs px-2 py-1.5 rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed cursor-pointer"
+    >
+      {options.map((opt) => (
+        <option key={opt.value} value={opt.value}>{opt.label}</option>
+      ))}
+    </select>
+  );
+}
+
+// ── Access Control Settings ───────────────────────────────
+
+function AccessControlSettings({
+  settings,
+  envOverrides,
+  onSave,
+}: {
+  settings: ChannelSettings;
+  envOverrides: Record<string, string>;
+  onSave: (patch: Partial<ChannelSettings>) => Promise<void>;
+}) {
+  const [values, setValues] = useState({
+    admin_users: settings.admin_users,
+    group_policy: settings.group_policy,
+    group_whitelist: settings.group_whitelist,
+    group_blacklist: settings.group_blacklist,
+    allowed_users: settings.allowed_users,
+  });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValues({
+      admin_users: settings.admin_users,
+      group_policy: settings.group_policy,
+      group_whitelist: settings.group_whitelist,
+      group_blacklist: settings.group_blacklist,
+      allowed_users: settings.allowed_users,
+    });
+    setDirty(false);
+  }, [settings]);
+
+  const update = (key: string, val: string) => {
+    setValues((prev) => ({ ...prev, [key]: val }));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(values);
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const isLocked = (key: string) => key in envOverrides;
+
+  const GROUP_POLICY_OPTIONS = [
+    { value: "auto", label: "自动（绑定模式=禁止，否则=允许）" },
+    { value: "deny", label: "禁止 — 仅支持私聊" },
+    { value: "allow", label: "允许 — 所有群聊可用" },
+    { value: "whitelist", label: "白名单 — 仅指定群可用" },
+    { value: "blacklist", label: "黑名单 — 排除指定群" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* 管理员用户 */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">管理员用户</label>
+          {isLocked("admin_users") && (
+            <span className="text-[9px] text-amber-500" title={`环境变量 ${envOverrides.admin_users} 锁定`}>🔒</span>
+          )}
+        </div>
+        <TagInput
+          value={values.admin_users}
+          onChange={(v) => update("admin_users", v)}
+          placeholder="用户ID，多个用逗号分隔"
+          disabled={isLocked("admin_users")}
+        />
+        <p className="text-[10px] text-muted-foreground mt-0.5">管理员始终放行，不受限流和准入策略限制</p>
+      </div>
+
+      {/* 允许用户列表 */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">允许用户列表</label>
+        </div>
+        <TagInput
+          value={values.allowed_users}
+          onChange={(v) => update("allowed_users", v)}
+          placeholder='JSON 数组，如 ["user1","user2"]，留空=不限制'
+        />
+        <p className="text-[10px] text-muted-foreground mt-0.5">限制可使用 Bot 的用户，留空表示所有人可用</p>
+      </div>
+
+      {/* 群聊策略 */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">群聊准入策略</label>
+          {isLocked("group_policy") && (
+            <span className="text-[9px] text-amber-500" title={`环境变量 ${envOverrides.group_policy} 锁定`}>🔒</span>
+          )}
+        </div>
+        <SelectInput
+          value={values.group_policy}
+          onChange={(v) => update("group_policy", v)}
+          options={GROUP_POLICY_OPTIONS}
+          disabled={isLocked("group_policy")}
+        />
+      </div>
+
+      {/* 群白名单 — 仅 whitelist 模式显示 */}
+      {values.group_policy === "whitelist" && (
+        <div>
+          <label className="text-xs font-medium mb-1 block">群聊白名单</label>
+          <TagInput
+            value={values.group_whitelist}
+            onChange={(v) => update("group_whitelist", v)}
+            placeholder='JSON 数组，如 ["chat_id_1","chat_id_2"]'
+          />
+          <p className="text-[10px] text-muted-foreground mt-0.5">仅这些群可使用 Bot</p>
+        </div>
+      )}
+
+      {/* 群黑名单 — 仅 blacklist 模式显示 */}
+      {values.group_policy === "blacklist" && (
+        <div>
+          <label className="text-xs font-medium mb-1 block">群聊黑名单</label>
+          <TagInput
+            value={values.group_blacklist}
+            onChange={(v) => update("group_blacklist", v)}
+            placeholder='JSON 数组，如 ["chat_id_1","chat_id_2"]'
+          />
+          <p className="text-[10px] text-muted-foreground mt-0.5">这些群将被禁止使用 Bot</p>
+        </div>
+      )}
+
+      {/* 保存 */}
+      {dirty && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: "var(--em-primary)" }}
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            保存
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setValues({
+                admin_users: settings.admin_users,
+                group_policy: settings.group_policy,
+                group_whitelist: settings.group_whitelist,
+                group_blacklist: settings.group_blacklist,
+                allowed_users: settings.allowed_users,
+              });
+              setDirty(false);
+            }}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RotateCw className="h-3 w-3" />
+            重置
+          </button>
+        </div>
+      )}
+
+      <p className="text-[10px] text-muted-foreground">
+        访问控制修改后对运行中的渠道 Bot 立即生效，无需重启。
+      </p>
+    </div>
+  );
+}
+
+// ── Behavior Settings ─────────────────────────────────────
+
+function BehaviorSettings({
+  settings,
+  envOverrides,
+  onSave,
+}: {
+  settings: ChannelSettings;
+  envOverrides: Record<string, string>;
+  onSave: (patch: Partial<ChannelSettings>) => Promise<void>;
+}) {
+  const [values, setValues] = useState({
+    default_concurrency: settings.default_concurrency,
+    default_chat_mode: settings.default_chat_mode,
+    public_url: settings.public_url,
+  });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValues({
+      default_concurrency: settings.default_concurrency,
+      default_chat_mode: settings.default_chat_mode,
+      public_url: settings.public_url,
+    });
+    setDirty(false);
+  }, [settings]);
+
+  const update = (key: string, val: string) => {
+    setValues((prev) => ({ ...prev, [key]: val }));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(values);
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const isLocked = (key: string) => key in envOverrides;
+
+  const CONCURRENCY_OPTIONS = [
+    { value: "queue", label: "⏳ 排队 — FIFO 串行执行" },
+    { value: "steer", label: "🔄 转向 — 中断旧任务" },
+    { value: "guide", label: "📨 引导 — 注入上下文" },
+  ];
+
+  const CHAT_MODE_OPTIONS = [
+    { value: "write", label: "✏️ 写入 — 可读写执行" },
+    { value: "read", label: "🔍 读取 — 只读分析" },
+    { value: "plan", label: "📋 计划 — 规划不执行" },
+  ];
+
+  return (
+    <div className="space-y-4">
+      {/* 默认并发模式 */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">默认并发模式</label>
+          {isLocked("default_concurrency") && (
+            <span className="text-[9px] text-amber-500" title={`环境变量 ${envOverrides.default_concurrency} 锁定`}>🔒</span>
+          )}
+        </div>
+        <SelectInput
+          value={values.default_concurrency}
+          onChange={(v) => update("default_concurrency", v)}
+          options={CONCURRENCY_OPTIONS}
+          disabled={isLocked("default_concurrency")}
+        />
+        <p className="text-[10px] text-muted-foreground mt-0.5">新用户的默认并发模式，用户可通过 /concurrency 命令切换</p>
+      </div>
+
+      {/* 默认聊天模式 */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">默认聊天模式</label>
+          {isLocked("default_chat_mode") && (
+            <span className="text-[9px] text-amber-500" title={`环境变量 ${envOverrides.default_chat_mode} 锁定`}>🔒</span>
+          )}
+        </div>
+        <SelectInput
+          value={values.default_chat_mode}
+          onChange={(v) => update("default_chat_mode", v)}
+          options={CHAT_MODE_OPTIONS}
+          disabled={isLocked("default_chat_mode")}
+        />
+        <p className="text-[10px] text-muted-foreground mt-0.5">新会话的默认聊天模式，用户可通过 /mode 命令切换</p>
+      </div>
+
+      {/* 公开访问 URL */}
+      <div>
+        <div className="flex items-center gap-1.5 mb-1">
+          <label className="text-xs font-medium">公开访问 URL</label>
+          {isLocked("public_url") && (
+            <span className="text-[9px] text-amber-500" title={`环境变量 ${envOverrides.public_url} 锁定`}>🔒</span>
+          )}
+        </div>
+        <input
+          type="text"
+          value={values.public_url}
+          onChange={(e) => update("public_url", e.target.value)}
+          placeholder="如 https://example.com（用于 Bot 生成文件下载链接）"
+          disabled={isLocked("public_url")}
+          className="w-full text-xs px-3 py-2 rounded-md border border-border bg-background focus:outline-none focus:ring-1 focus:ring-ring disabled:opacity-50 disabled:cursor-not-allowed"
+        />
+        <p className="text-[10px] text-muted-foreground mt-0.5">Bot 向用户发送文件下载链接时使用的外部访问地址</p>
+      </div>
+
+      {/* 保存 */}
+      {dirty && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: "var(--em-primary)" }}
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            保存
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setValues({
+                default_concurrency: settings.default_concurrency,
+                default_chat_mode: settings.default_chat_mode,
+                public_url: settings.public_url,
+              });
+              setDirty(false);
+            }}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RotateCw className="h-3 w-3" />
+            重置
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Output Tuning Settings ────────────────────────────────
+
+function OutputTuningSettings({
+  settings,
+  onSave,
+}: {
+  settings: ChannelSettings;
+  onSave: (patch: Partial<ChannelSettings>) => Promise<void>;
+}) {
+  const [values, setValues] = useState({
+    tg_edit_interval_min: settings.tg_edit_interval_min,
+    tg_edit_interval_max: settings.tg_edit_interval_max,
+    qq_progressive_chars: settings.qq_progressive_chars,
+    qq_progressive_interval: settings.qq_progressive_interval,
+    feishu_update_interval: settings.feishu_update_interval,
+  });
+  const [dirty, setDirty] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setValues({
+      tg_edit_interval_min: settings.tg_edit_interval_min,
+      tg_edit_interval_max: settings.tg_edit_interval_max,
+      qq_progressive_chars: settings.qq_progressive_chars,
+      qq_progressive_interval: settings.qq_progressive_interval,
+      feishu_update_interval: settings.feishu_update_interval,
+    });
+    setDirty(false);
+  }, [settings]);
+
+  const update = (key: string, val: string) => {
+    setValues((prev) => ({ ...prev, [key]: val }));
+    setDirty(true);
+  };
+
+  const handleSave = async () => {
+    setSaving(true);
+    try {
+      await onSave(values);
+      setDirty(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const FIELDS: { key: string; label: string; hint: string; unit: string; group: string }[] = [
+    { key: "tg_edit_interval_min", label: "编辑间隔（最小）", hint: "前几次编辑的最小间隔", unit: "秒", group: "Telegram" },
+    { key: "tg_edit_interval_max", label: "编辑间隔（最大）", hint: "稳定后的最大间隔", unit: "秒", group: "Telegram" },
+    { key: "qq_progressive_chars", label: "渐进发送阈值", hint: "累积多少字符后发送一段", unit: "字符", group: "QQ" },
+    { key: "qq_progressive_interval", label: "渐进发送间隔", hint: "两次发送的最小间隔", unit: "秒", group: "QQ" },
+    { key: "feishu_update_interval", label: "卡片更新间隔", hint: "飞书消息卡片的刷新间隔", unit: "秒", group: "飞书" },
+  ];
+
+  const groups = ["Telegram", "QQ", "飞书"];
+
+  return (
+    <div className="space-y-4">
+      {groups.map((group) => {
+        const groupFields = FIELDS.filter((f) => f.group === group);
+        return (
+          <div key={group}>
+            <p className="text-[11px] font-medium text-muted-foreground mb-2">{group}</p>
+            <div className="space-y-2.5">
+              {groupFields.map((field) => (
+                <div key={field.key} className="flex items-center justify-between gap-3">
+                  <div className="min-w-0">
+                    <p className="text-xs font-medium">{field.label}</p>
+                    <p className="text-[10px] text-muted-foreground">{field.hint}</p>
+                  </div>
+                  <div className="flex items-center gap-1 shrink-0">
+                    <input
+                      type="number"
+                      step={field.unit === "字符" ? 10 : 0.1}
+                      min={field.unit === "字符" ? 50 : 0.1}
+                      value={values[field.key as keyof typeof values]}
+                      onChange={(e) => update(field.key, e.target.value)}
+                      className="w-16 text-xs text-right tabular-nums px-1.5 py-1 rounded border border-border/60 bg-background focus:outline-none focus:ring-1 focus:ring-ring"
+                    />
+                    <span className="text-[10px] text-muted-foreground w-6">{field.unit}</span>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        );
+      })}
+
+      {/* 保存 */}
+      {dirty && (
+        <div className="flex items-center gap-2 pt-1">
+          <button
+            type="button"
+            onClick={handleSave}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium text-white transition-colors cursor-pointer disabled:opacity-50"
+            style={{ backgroundColor: "var(--em-primary)" }}
+          >
+            {saving ? <Loader2 className="h-3 w-3 animate-spin" /> : <Save className="h-3 w-3" />}
+            保存
+          </button>
+          <button
+            type="button"
+            onClick={() => {
+              setValues({
+                tg_edit_interval_min: settings.tg_edit_interval_min,
+                tg_edit_interval_max: settings.tg_edit_interval_max,
+                qq_progressive_chars: settings.qq_progressive_chars,
+                qq_progressive_interval: settings.qq_progressive_interval,
+                feishu_update_interval: settings.feishu_update_interval,
+              });
+              setDirty(false);
+            }}
+            disabled={saving}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-md text-xs font-medium bg-muted hover:bg-muted/80 transition-colors cursor-pointer disabled:opacity-50"
+          >
+            <RotateCw className="h-3 w-3" />
+            重置
+          </button>
+        </div>
+      )}
+
+      <p className="text-[10px] text-muted-foreground">
+        输出调优参数在下次启动渠道 Bot 时生效。调节不当可能导致消息发送异常或触发平台限流。
+      </p>
+    </div>
+  );
+}
+
 // ── Env Fallback Guide ────────────────────────────────────
 
 function EnvFallbackGuide() {
@@ -1343,6 +1843,58 @@ export function ChannelsTab() {
           </div>
         )}
       </Section>
+
+      {/* Access Control */}
+      {status?.settings && (
+        <Section title="访问控制" icon={Shield} defaultOpen={false}>
+          <AccessControlSettings
+            settings={status.settings}
+            envOverrides={status.settings_env_overrides || {}}
+            onSave={async (patch) => {
+              const res = await updateChannelSettings(patch);
+              if (res.locked_fields && res.locked_fields.length > 0) {
+                handleToast(res.message || `部分字段被环境变量锁定`, "info");
+              } else {
+                handleToast("访问控制设置已保存", "success");
+              }
+              refresh();
+            }}
+          />
+        </Section>
+      )}
+
+      {/* Behavior Settings */}
+      {status?.settings && (
+        <Section title="行为设置" icon={Settings2} defaultOpen={false}>
+          <BehaviorSettings
+            settings={status.settings}
+            envOverrides={status.settings_env_overrides || {}}
+            onSave={async (patch) => {
+              const res = await updateChannelSettings(patch);
+              if (res.locked_fields && res.locked_fields.length > 0) {
+                handleToast(res.message || `部分字段被环境变量锁定`, "info");
+              } else {
+                handleToast("行为设置已保存", "success");
+              }
+              refresh();
+            }}
+          />
+        </Section>
+      )}
+
+      {/* Output Tuning */}
+      {status?.settings && (
+        <Section title="输出调优" icon={Zap} defaultOpen={false}>
+          <OutputTuningSettings
+            settings={status.settings}
+            onSave={async (patch) => {
+              await updateChannelSettings(patch);
+              handleToast("输出调优设置已保存", "success");
+              refresh();
+            }}
+          />
+        </Section>
+      )}
 
       {/* Env Var Fallback */}
       <Section title="环境变量配置（高级）" icon={Terminal} defaultOpen={false}>

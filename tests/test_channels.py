@@ -1139,6 +1139,7 @@ class TestImageMessageHandler:
     async def test_image_message_calls_stream_chat_with_images(self, mock_handler):
         """发送图片消息 → stream_chat 应收到 base64 编码的 images 参数。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
         mock_fn = _make_stream_mock(ChatResult(reply="这是一张图表", session_id="s1"))
         api.stream_chat_events = mock_fn
 
@@ -1160,13 +1161,14 @@ class TestImageMessageHandler:
         import base64
         decoded = base64.b64decode(call["images"][0]["data"])
         assert decoded == img_data
-        # caption 应作为 message 传递
-        assert call["message"] == "这是什么图"
+        # caption 应作为 message 的一部分（现在还包含 @file: 引用）
+        assert "这是什么图" in call["message"]
 
     @pytest.mark.asyncio
     async def test_image_no_caption_buffers(self, mock_handler):
         """无 caption 的图片 → 缓冲并询问用户意图。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
 
         msg = ChannelMessage(
             channel="mock", user=ChannelUser(user_id="1"),
@@ -1184,6 +1186,7 @@ class TestImageMessageHandler:
     async def test_image_then_text_saves_session(self, mock_handler):
         """图片 + 后续文本指令返回的 session_id 应被保存。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
         api.stream_chat_events = _make_stream_mock(ChatResult(
             reply="ok", session_id="img-session",
         ))
@@ -1208,6 +1211,7 @@ class TestImageMessageHandler:
     async def test_pure_image_with_text_routes_to_image_handler(self, mock_handler):
         """纯图片消息（无文件）带 text 时，应走 _handle_image_message 而非 _handle_text。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
         mock_fn = _make_stream_mock(ChatResult(reply="ok", session_id="s1"))
         api.stream_chat_events = mock_fn
 
@@ -1288,6 +1292,7 @@ class TestImageMessageHandler:
     async def test_image_buffers_without_text(self, mock_handler):
         """纯图片无文本 → 缓冲 + 询问用户。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
 
         msg = ChannelMessage(
             channel="mock", user=ChannelUser(user_id="1"),
@@ -1303,6 +1308,7 @@ class TestImageMessageHandler:
     async def test_image_error_handling(self, mock_handler):
         """图片 + 文本处理失败 → 发送错误消息。"""
         handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/photo.jpg")
         api.stream_chat_events = _make_stream_mock(RuntimeError("VLM 不可用"))
 
         msg = ChannelMessage(
@@ -2157,3 +2163,194 @@ class TestModelQuotaUnification:
         await handler.handle_message(msg)
         text = adapter.sent_texts[0][1]
         assert "/quota" in text
+
+
+# ── 纯压缩照片上传到工作区测试 ──
+
+
+class TestPhotoUploadToWorkspace:
+    """验证纯压缩照片（非文档附件）也会上传到工作区，使 agent 文件工具可操作。"""
+
+    @pytest.mark.asyncio
+    async def test_photo_uploaded_to_workspace(self, mock_handler):
+        """纯图片消息 → 应调用 upload_to_workspace 写入工作区。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/abc123_photo_aabbcc.jpg")
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[ImageAttachment(data=b"\xff\xd8fake-jpeg", media_type="image/jpeg")],
+        )
+        await handler.handle_message(msg)
+
+        api.upload_to_workspace.assert_called_once()
+        call_args = api.upload_to_workspace.call_args
+        filename = call_args[0][0]
+        data = call_args[0][1]
+        # 文件名应以 photo_ 开头，以 .jpg 结尾
+        assert filename.startswith("photo_")
+        assert filename.endswith(".jpg")
+        assert data == b"\xff\xd8fake-jpeg"
+
+    @pytest.mark.asyncio
+    async def test_photo_pending_has_workspace_path(self, mock_handler):
+        """上传后 PendingFile 应包含 workspace_path。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/abc_photo_001.jpg")
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[ImageAttachment(data=b"img", media_type="image/jpeg")],
+        )
+        await handler.handle_message(msg)
+
+        pk = "100:1"
+        assert pk in handler._pending_files
+        pending = handler._pending_files[pk][0]
+        assert pending.workspace_path == "./uploads/abc_photo_001.jpg"
+        assert pending.is_image is True
+        assert pending.image_data == b"img"
+        assert pending.filename.startswith("photo_")
+
+    @pytest.mark.asyncio
+    async def test_photo_generates_file_ref_in_chat(self, mock_handler):
+        """照片上传后 + 文本指令 → stream_chat 消息应包含 @file: 引用。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/abc_photo_x.jpg")
+        mock_fn = _make_stream_mock(ChatResult(reply="已分析", session_id="s1"))
+        api.stream_chat_events = mock_fn
+
+        # Step 1: 发送图片（缓冲）
+        msg1 = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[ImageAttachment(data=b"img", media_type="image/jpeg")],
+        )
+        await handler.handle_message(msg1)
+
+        # Step 2: 文本指令（消费缓冲）
+        msg2 = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="分析这张图",
+        )
+        await handler.handle_message(msg2)
+
+        assert len(mock_fn.calls) == 1
+        chat_msg = mock_fn.calls[0]["message"]
+        # 消息应包含 @file: 引用
+        assert "@file:./uploads/abc_photo_x.jpg" in chat_msg
+        assert "分析这张图" in chat_msg
+        # 同时应有 vision images
+        assert mock_fn.calls[0]["images"] is not None
+        assert len(mock_fn.calls[0]["images"]) == 1
+
+    @pytest.mark.asyncio
+    async def test_photo_with_caption_immediate(self, mock_handler):
+        """照片 + caption → 立即上传并处理，不缓冲。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/abc_photo_y.png")
+        mock_fn = _make_stream_mock(ChatResult(reply="ok", session_id="s1"))
+        api.stream_chat_events = mock_fn
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="这是什么图表",
+            images=[ImageAttachment(data=b"png-data", media_type="image/png")],
+        )
+        await handler.handle_message(msg)
+
+        api.upload_to_workspace.assert_called_once()
+        assert len(mock_fn.calls) == 1
+        chat_msg = mock_fn.calls[0]["message"]
+        assert "@file:" in chat_msg
+        assert "这是什么图表" in chat_msg
+        # 缓冲应已清空
+        assert "100:1" not in handler._pending_files
+
+    @pytest.mark.asyncio
+    async def test_photo_mime_to_ext_mapping(self, mock_handler):
+        """不同 mime 类型应生成正确的扩展名。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/x.png")
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[ImageAttachment(data=b"png", media_type="image/png")],
+        )
+        await handler.handle_message(msg)
+
+        filename = api.upload_to_workspace.call_args[0][0]
+        assert filename.endswith(".png")
+
+    @pytest.mark.asyncio
+    async def test_photo_unknown_mime_defaults_jpg(self, mock_handler):
+        """未知 mime 类型应默认 .jpg 扩展名。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(return_value="./uploads/x.jpg")
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[ImageAttachment(data=b"raw", media_type="image/unknown-format")],
+        )
+        await handler.handle_message(msg)
+
+        filename = api.upload_to_workspace.call_args[0][0]
+        assert filename.endswith(".jpg")
+
+    @pytest.mark.asyncio
+    async def test_multiple_photos_all_uploaded(self, mock_handler):
+        """多张照片 → 每张都应上传到工作区。"""
+        handler, adapter, api, store = mock_handler
+        call_count = [0]
+
+        async def fake_upload(filename, data, **kw):
+            call_count[0] += 1
+            return f"./uploads/photo_{call_count[0]}.jpg"
+
+        api.upload_to_workspace = fake_upload
+
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="",
+            images=[
+                ImageAttachment(data=b"img1", media_type="image/jpeg"),
+                ImageAttachment(data=b"img2", media_type="image/jpeg"),
+                ImageAttachment(data=b"img3", media_type="image/png"),
+            ],
+        )
+        await handler.handle_message(msg)
+
+        assert call_count[0] == 3
+        pk = "100:1"
+        assert len(handler._pending_files[pk]) == 3
+        # 每个都应有 workspace_path
+        for pf in handler._pending_files[pk]:
+            assert pf.workspace_path.startswith("./uploads/")
+
+    @pytest.mark.asyncio
+    async def test_photo_upload_failure_graceful(self, mock_handler):
+        """upload_to_workspace 失败 → 降级为仅 vision 模式，仍正常缓冲并处理。"""
+        handler, adapter, api, store = mock_handler
+        api.upload_to_workspace = AsyncMock(side_effect=RuntimeError("网络错误"))
+        mock_fn = _make_stream_mock(ChatResult(reply="ok", session_id="s1"))
+        api.stream_chat_events = mock_fn
+
+        # 发送带 caption 的图片 → 上传失败但仍应走 vision 路径
+        msg = ChannelMessage(
+            channel="mock", user=ChannelUser(user_id="1"),
+            chat_id="100", text="分析图片",
+            images=[ImageAttachment(data=b"img", media_type="image/jpeg")],
+        )
+        await handler.handle_message(msg)
+
+        # 应成功调用 AI（降级为仅 vision）
+        assert len(mock_fn.calls) == 1
+        # workspace_path 为空 → 无 @file: 引用，消息仅为用户文本
+        assert mock_fn.calls[0]["message"] == "分析图片"
+        # 但仍有 vision images
+        assert mock_fn.calls[0]["images"] is not None
+        assert len(mock_fn.calls[0]["images"]) == 1

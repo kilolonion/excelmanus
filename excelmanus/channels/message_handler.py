@@ -8,9 +8,11 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import json
 import logging
 import os
 import time
+import uuid as _uuid
 from pathlib import Path
 
 from typing import Any
@@ -99,7 +101,7 @@ class MessageHandler:
     # 速率限制豁免命令（即使被限流也允许执行）
     _EXEMPT_COMMANDS: frozenset[str] = frozenset({"abort", "new", "start", "help"})
     # 未绑定用户仍可执行的命令（绑定流程必需）
-    _BIND_EXEMPT_COMMANDS: frozenset[str] = frozenset({"bind", "bindstatus", "help", "start"})
+    _BIND_EXEMPT_COMMANDS: frozenset[str] = frozenset({"bind", "bindstatus", "help", "start", "admin"})
 
     def __init__(
         self,
@@ -139,6 +141,8 @@ class MessageHandler:
         self._bridge_registered: dict[str, str] = {}
         # 待处理文件缓冲：用户发送附件后等待进一步指令
         self._pending_files: dict[str, list[PendingFile]] = {}
+        # 群聊拒绝消息冷却：chat_id → 上次发送时间（monotonic）
+        self._group_deny_last: dict[str, float] = {}
 
     @property
     def _require_bind(self) -> bool:
@@ -157,6 +161,117 @@ class MessageHandler:
             except Exception:
                 pass
         return False
+
+    # ── 群聊策略 ──
+
+    # 群聊拒绝消息的冷却时间（每个 chat_id 5 分钟内只回复一次）
+    _GROUP_DENY_COOLDOWN = 300.0
+
+    @property
+    def _group_policy(self) -> str:
+        """群聊准入策略。优先级: 环境变量 > config_kv > 智能默认值。
+
+        可选值: "deny" | "allow" | "whitelist" | "blacklist"
+        """
+        _VALID = ("deny", "allow", "whitelist", "blacklist")
+        env_val = os.environ.get("EXCELMANUS_CHANNEL_GROUP_POLICY", "").strip().lower()
+        if env_val in _VALID:
+            return env_val
+        if self._config_store is not None:
+            try:
+                db_val = self._config_store.get("channel_group_policy", "")
+                if db_val.strip().lower() in _VALID:
+                    return db_val.strip().lower()
+            except Exception:
+                pass
+        # 智能默认: 强制绑定模式下默认 deny, 否则 allow
+        return "deny" if self._require_bind else "allow"
+
+    @property
+    def _group_whitelist(self) -> set[str]:
+        """白名单群 chat_id 集合。"""
+        if self._config_store is None:
+            return set()
+        try:
+            raw = self._config_store.get("channel_group_whitelist", "")
+            if raw:
+                return set(json.loads(raw))
+        except Exception:
+            pass
+        return set()
+
+    @property
+    def _group_blacklist(self) -> set[str]:
+        """黑名单群 chat_id 集合。"""
+        if self._config_store is None:
+            return set()
+        try:
+            raw = self._config_store.get("channel_group_blacklist", "")
+            if raw:
+                return set(json.loads(raw))
+        except Exception:
+            pass
+        return set()
+
+    @property
+    def _admin_users(self) -> set[str]:
+        """管理员平台用户 ID 集合。环境变量 + config_kv 合并。"""
+        result: set[str] = set()
+        env_val = os.environ.get("EXCELMANUS_CHANNEL_ADMINS", "").strip()
+        if env_val:
+            result.update(uid.strip() for uid in env_val.split(",") if uid.strip())
+        if self._config_store is not None:
+            try:
+                db_val = self._config_store.get("channel_admin_users", "")
+                if db_val:
+                    result.update(uid.strip() for uid in db_val.split(",") if uid.strip())
+            except Exception:
+                pass
+        return result
+
+    def _is_admin(self, user_id: str) -> bool:
+        """检查用户是否为 Bot 管理员。"""
+        admins = self._admin_users
+        if not admins:
+            return False
+        return user_id in admins
+
+    def _check_group_access(self, msg: ChannelMessage) -> bool:
+        """检查群聊准入。返回 True 表示应拒绝（已处理回复）。"""
+        # 管理员始终放行
+        if self._is_admin(msg.user.user_id):
+            return False
+
+        policy = self._group_policy
+        if policy == "allow":
+            return False
+
+        if policy == "deny":
+            self._send_group_deny_once(msg.chat_id, "🔒 此 Bot 仅支持私聊使用，不支持群聊。")
+            return True
+
+        if policy == "whitelist":
+            if msg.chat_id in self._group_whitelist:
+                return False
+            self._send_group_deny_once(msg.chat_id, "🔒 此群未获授权使用 Bot。请联系管理员。")
+            return True
+
+        if policy == "blacklist":
+            if msg.chat_id in self._group_blacklist:
+                self._send_group_deny_once(msg.chat_id, "🚫 此群已被禁止使用 Bot。")
+                return True
+            return False
+
+        return False
+
+    def _send_group_deny_once(self, chat_id: str, text: str) -> None:
+        """发送群聊拒绝消息，带冷却避免刷屏。"""
+        now = time.monotonic()
+        last = self._group_deny_last.get(chat_id, 0.0)
+        if (now - last) < self._GROUP_DENY_COOLDOWN:
+            return
+        self._group_deny_last[chat_id] = now
+        asyncio.ensure_future(self.adapter.send_text(chat_id, text))
 
     @staticmethod
     def _pending_key(chat_id: str, user_id: str) -> str:
@@ -184,11 +299,32 @@ class MessageHandler:
         if expired_files:
             logger.debug("清理 %d 个过期的待处理文件缓冲", len(expired_files))
 
+    @property
+    def _dynamic_allowed_users(self) -> set[str]:
+        """从 config_kv 读取的动态允许用户列表。"""
+        if self._config_store is None:
+            return set()
+        try:
+            raw = self._config_store.get("channel_allowed_users", "")
+            if raw:
+                return set(json.loads(raw))
+        except Exception:
+            pass
+        return set()
+
     def check_user(self, user_id: str) -> bool:
-        """检查用户是否有权使用。空集合 = 不限制。"""
+        """检查用户是否有权使用。空集合 = 不限制。管理员始终放行。"""
+        if self._is_admin(user_id):
+            return True
         if not self.allowed_users:
             return True
-        return user_id in self.allowed_users
+        if user_id in self.allowed_users:
+            return True
+        # 检查动态允许用户
+        dynamic = self._dynamic_allowed_users
+        if dynamic and user_id in dynamic:
+            return True
+        return False
 
     # ── 入口 ──
 
@@ -354,8 +490,19 @@ class MessageHandler:
         _user_id = user_id
 
         async def _on_bridge_event(event_type: str, data: dict) -> None:
-            """EventBridge 回调：处理从 Web 推送来的审批/问答事件。"""
+            """EventBridge 回调：处理跨渠道推送的事件。
+
+            支持事件类型：
+            - approval / question：审批/问答卡片推送
+            - chat_started：其他渠道开始聊天通知
+            - chat_completed：其他渠道完成聊天通知（含回复摘要）
+            """
             try:
+                # 过滤自身渠道发出的事件，防止回声
+                origin = data.get("origin_channel", "")
+                if origin == self.adapter.name:
+                    return
+
                 if event_type == "approval":
                     await self.adapter.send_approval_card(
                         _chat_id,
@@ -386,6 +533,47 @@ class MessageHandler:
                         session_id=data.get("session_id", ""),
                         chat_id=_chat_id,
                     )
+                elif event_type == "chat_started":
+                    event_sid = data.get("session_id", "")
+                    current_sid = self.sessions.get(
+                        self.adapter.name, _chat_id, _user_id,
+                    )
+                    # 自动同步：如果其他渠道使用了不同的会话，更新本地映射
+                    if event_sid and event_sid != current_sid:
+                        self.sessions.set(
+                            self.adapter.name, _chat_id, _user_id, event_sid,
+                        )
+                    preview = data.get("message_preview", "")
+                    hint = f"🌐 Web 端正在处理: {preview}" if preview else "🌐 Web 端正在处理请求..."
+                    await self.adapter.send_text(_chat_id, hint)
+                elif event_type == "chat_completed":
+                    event_sid = data.get("session_id", "")
+                    current_sid = self.sessions.get(
+                        self.adapter.name, _chat_id, _user_id,
+                    )
+                    # 自动同步会话 ID
+                    if event_sid and event_sid != current_sid:
+                        self.sessions.set(
+                            self.adapter.name, _chat_id, _user_id, event_sid,
+                        )
+                    reply_summary = data.get("reply_summary", "")
+                    tool_count = data.get("tool_count", 0)
+                    has_error = data.get("has_error", False)
+                    # 构建通知消息
+                    parts: list[str] = []
+                    if has_error:
+                        parts.append("🌐 Web 端操作出现异常")
+                    else:
+                        parts.append("🌐 Web 端已完成操作")
+                    if tool_count:
+                        parts.append(f"（{tool_count} 个工具调用）")
+                    if reply_summary:
+                        # 截断过长的回复摘要
+                        summary = reply_summary[:200]
+                        if len(reply_summary) > 200:
+                            summary += "…"
+                        parts.append(f"\n{summary}")
+                    await self.adapter.send_text(_chat_id, "".join(parts))
             except Exception:
                 logger.warning("EventBridge callback error", exc_info=True)
 
@@ -401,6 +589,11 @@ class MessageHandler:
                 await self.adapter.send_text(msg.chat_id, "⛔ 无权限使用此 Bot")
             return
 
+        # 群聊策略检查
+        if msg.chat_type in ("group", "channel"):
+            if self._check_group_access(msg):
+                return
+
         # 强制绑定检查：未绑定用户只允许执行绑定相关命令
         if self._require_bind and self._bind_manager is not None:
             is_bind_exempt = (
@@ -412,8 +605,8 @@ class MessageHandler:
                 if auth_uid is None:
                     await self.adapter.send_text(
                         msg.chat_id,
-                        "🔒 此 Bot 要求绑定 ExcelManus 账号后才能使用。\n\n"
-                        "请先使用 /bind 获取绑定码，在 Web 端完成绑定。",
+                        "🔒 此 Bot 要求绑定账号后才能使用。\n"
+                        "请使用 /bind 获取绑定码，在 Web 端完成绑定。",
                     )
                     return
 
@@ -476,6 +669,7 @@ class MessageHandler:
             "bind": self._cmd_bind,
             "bindstatus": self._cmd_bindstatus,
             "unbind": self._cmd_unbind,
+            "admin": self._cmd_admin,
         }
         handler = handlers.get(cmd)
         if handler:
@@ -528,7 +722,9 @@ class MessageHandler:
             "  /bind — 获取绑定码（关联 Web 账号）\n"
             "  /bindstatus — 查看绑定状态\n"
             "  /unbind — 解除绑定\n\n"
-            "📎 支持的文件\n"
+            "� 管理员\n"
+            "  /admin — 查看/管理访问策略\n\n"
+            "� 支持的文件\n"
             "  Excel: .xlsx .xls .csv\n"
             "  图片: .png .jpg .jpeg",
         )
@@ -1168,21 +1364,46 @@ class MessageHandler:
 
     # ── 图片消息 ──
 
+    # mime → 扩展名映射（纯压缩照片无原始文件名，需推断）
+    _MIME_TO_EXT: dict[str, str] = {
+        "image/jpeg": ".jpg",
+        "image/png": ".png",
+        "image/gif": ".gif",
+        "image/webp": ".webp",
+        "image/bmp": ".bmp",
+        "image/tiff": ".tiff",
+    }
+
     async def _handle_image_message(self, msg: ChannelMessage) -> None:
-        """处理纯图片消息 → 缓冲等待用户指令或立即处理。
+        """处理纯图片消息 → 上传到工作区 → 缓冲等待用户指令或立即处理。
 
         若消息携带文本（如 Telegram 照片 caption），立即处理。
         否则缓冲图片数据，等待用户下一条文本指令。
         """
         user_id = msg.user.user_id
         pk = self._pending_key(msg.chat_id, user_id)
+        obo = self._resolve_on_behalf_of(user_id)
 
         for img in msg.images:
+            ext = self._MIME_TO_EXT.get(img.media_type, ".jpg")
+            photo_filename = f"photo_{_uuid.uuid4().hex[:6]}{ext}"
+
+            # 上传到工作区，使 agent 文件工具可操作；失败时降级为仅 vision
+            ws_path = ""
+            try:
+                await self.adapter.show_typing(msg.chat_id)
+                ws_path = await self.api.upload_to_workspace(
+                    photo_filename, img.data, on_behalf_of=obo,
+                )
+            except Exception:
+                logger.warning("照片上传到工作区失败，降级为仅 vision 模式", exc_info=True)
+
             pending = PendingFile(
-                filename="photo",
+                filename=photo_filename,
                 is_image=True,
                 mime_type=img.media_type,
                 image_data=img.data,
+                workspace_path=ws_path,
             )
             self._pending_files.setdefault(pk, []).append(pending)
 
@@ -1266,7 +1487,7 @@ class MessageHandler:
         await self.adapter.send_text(chat_id, self._PROCESSING_HINT_FILE)
 
         # 构建消息：@file:引用 + 用户文本
-        file_refs = [f for f in files if f.filename != "photo"]
+        file_refs = [f for f in files if f.workspace_path]
         if file_refs:
             refs_str = " ".join(
                 f"@file:{f.workspace_path}" if f.workspace_path else f"@file:{f.filename}"
@@ -1502,13 +1723,41 @@ class MessageHandler:
         for dl in file_downloads:
             file_path = dl.get("file_path", "")
             filename = dl.get("filename", "") or Path(file_path).name
-            if file_path:
-                try:
-                    obo = self._resolve_on_behalf_of(user_id)
-                    file_bytes, _ = await self.api.download_file(file_path, on_behalf_of=obo)
-                    await self.adapter.send_file(chat_id, file_bytes, filename)
-                except Exception:
-                    logger.warning("发送文件失败: %s", file_path, exc_info=True)
+            if not file_path:
+                continue
+
+            obo = self._resolve_on_behalf_of(user_id)
+
+            # 1) 预生成下载链接（即使直接发送成功也可能需要）
+            download_url: str | None = None
+            try:
+                download_url = await self.api.generate_download_link(
+                    file_path, user_id=user_id, on_behalf_of=obo,
+                )
+            except Exception:
+                logger.debug("生成下载链接失败: %s", file_path, exc_info=True)
+
+            # 2) 尝试直接发送文件
+            file_sent = False
+            try:
+                file_bytes, _ = await self.api.download_file(file_path, on_behalf_of=obo)
+                await self.adapter.send_file(chat_id, file_bytes, filename)
+                file_sent = True
+            except Exception:
+                logger.warning("发送文件失败: %s", file_path, exc_info=True)
+
+            # 3) 未成功发送文件 → 发送下载链接文本
+            if not file_sent:
+                if download_url:
+                    await self.adapter.send_text(
+                        chat_id,
+                        f"📎 文件已生成: {filename}\n🔗 下载链接（30 分钟有效）:\n{download_url}",
+                    )
+                else:
+                    await self.adapter.send_text(
+                        chat_id,
+                        f"📎 文件已生成: {filename}\n请通过 Web 界面下载。",
+                    )
 
         # 审批请求
         if approval:
@@ -1660,8 +1909,7 @@ class MessageHandler:
         if existing:
             await self.adapter.send_text(
                 msg.chat_id,
-                "✅ 当前渠道账号已绑定 ExcelManus 用户。\n"
-                "如需解绑，请使用 /unbind",
+                "✅ 已绑定 ExcelManus 用户，如需解绑请使用 /unbind",
             )
             return
 
@@ -1677,9 +1925,9 @@ class MessageHandler:
 
         await self.adapter.send_markdown(
             msg.chat_id,
-            f"🔗 绑定码: <b>{code}</b>\n\n"
-            f"请在 ExcelManus Web 端「个人中心 → 渠道绑定」中输入此码。\n"
-            f"有效期 5 分钟，过期后请重新 /bind",
+            f"🔗 绑定码: <b>{code}</b>\n"
+            f"请在 Web 端「个人中心 → 渠道绑定」中输入此码。\n"
+            f"有效期 5 分钟，过期请重新 /bind",
         )
 
     async def _cmd_bindstatus(self, msg: ChannelMessage) -> None:
@@ -1692,15 +1940,13 @@ class MessageHandler:
         if auth_uid:
             await self.adapter.send_text(
                 msg.chat_id,
-                f"✅ 已绑定 ExcelManus 用户\n"
-                f"用户 ID: {auth_uid[:8]}…\n\n"
+                f"✅ 已绑定 ExcelManus 用户（ID: {auth_uid[:8]}…）\n"
                 f"解绑: /unbind",
             )
         else:
             await self.adapter.send_text(
                 msg.chat_id,
-                "❌ 当前渠道账号未绑定 ExcelManus 用户。\n"
-                "使用 /bind 获取绑定码",
+                "❌ 未绑定 ExcelManus 用户，使用 /bind 获取绑定码",
             )
 
     async def _cmd_unbind(self, msg: ChannelMessage) -> None:
@@ -1726,7 +1972,272 @@ class MessageHandler:
             reg_key = f"{self.adapter.name}:{msg.chat_id}:{msg.user.user_id}"
             self._bridge_registered.pop(reg_key, None)
             await self.adapter.send_text(
-                msg.chat_id, "✅ 已解绑。后续消息将以匿名身份处理。\n重新绑定: /bind",
+                msg.chat_id, "✅ 已解绑，后续消息将以匿名身份处理。重新绑定: /bind",
             )
         else:
             await self.adapter.send_text(msg.chat_id, "❌ 解绑失败，请稍后重试")
+
+    # ── 管理员命令 ──
+
+    async def _cmd_admin(self, msg: ChannelMessage) -> None:
+        """管理员命令入口。"""
+        if not self._is_admin(msg.user.user_id):
+            await self.adapter.send_text(msg.chat_id, "⛔ 此命令需要管理员权限")
+            return
+
+        args = msg.command_args
+        if not args:
+            await self._admin_status(msg)
+            return
+
+        sub = args[0].lower()
+        sub_args = args[1:]
+
+        sub_handlers: dict[str, Any] = {
+            "group": self._admin_group,
+            "allowgroup": self._admin_allowgroup,
+            "blockgroup": self._admin_blockgroup,
+            "removegroup": self._admin_removegroup,
+            "listgroups": self._admin_listgroups,
+            "adduser": self._admin_adduser,
+            "removeuser": self._admin_removeuser,
+            "listusers": self._admin_listusers,
+            "addadmin": self._admin_addadmin,
+            "removeadmin": self._admin_removeadmin,
+        }
+        handler_fn = sub_handlers.get(sub)
+        if handler_fn:
+            await handler_fn(msg, sub_args)
+        else:
+            await self.adapter.send_text(
+                msg.chat_id,
+                "❓ 未知子命令。可用:\n"
+                "  /admin — 查看状态\n"
+                "  /admin group <deny|allow|whitelist|blacklist>\n"
+                "  /admin allowgroup — 白名单当前群\n"
+                "  /admin blockgroup — 黑名单当前群\n"
+                "  /admin removegroup [chat_id]\n"
+                "  /admin listgroups\n"
+                "  /admin adduser <user_id>\n"
+                "  /admin removeuser <user_id>\n"
+                "  /admin listusers\n"
+                "  /admin addadmin <user_id>\n"
+                "  /admin removeadmin <user_id>",
+            )
+
+    async def _admin_status(self, msg: ChannelMessage) -> None:
+        """显示当前管理状态汇总。"""
+        policy = self._group_policy
+        wl = self._group_whitelist
+        bl = self._group_blacklist
+        admins = self._admin_users
+        dynamic_users = self._dynamic_allowed_users
+        static_users = self.allowed_users
+
+        lines = ["🔐 Bot 管理状态\n"]
+        lines.append(f"群聊策略: {policy}")
+        lines.append(f"白名单群: {len(wl)} 个")
+        lines.append(f"黑名单群: {len(bl)} 个")
+        lines.append(f"管理员: {', '.join(sorted(admins)) if admins else '(未设置)'}")
+        total_users = len(static_users | dynamic_users) if static_users or dynamic_users else 0
+        lines.append(f"允许用户: {'不限制' if not static_users and not dynamic_users else f'{total_users} 个'}")
+        lines.append(f"强制绑定: {'开启' if self._require_bind else '关闭'}")
+        lines.append(f"\n当前 chat_id: {msg.chat_id}")
+        lines.append(f"当前 chat_type: {msg.chat_type}")
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _admin_group(self, msg: ChannelMessage, args: list[str]) -> None:
+        """设置群聊策略。"""
+        if not args:
+            await self.adapter.send_text(
+                msg.chat_id,
+                f"当前群聊策略: {self._group_policy}\n"
+                "用法: /admin group <deny|allow|whitelist|blacklist>",
+            )
+            return
+        target = args[0].lower()
+        if target not in ("deny", "allow", "whitelist", "blacklist"):
+            await self.adapter.send_text(
+                msg.chat_id,
+                f"❌ 无效策略: {target}\n可选: deny / allow / whitelist / blacklist",
+            )
+            return
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        self._config_store.set("channel_group_policy", target)
+        await self.adapter.send_text(msg.chat_id, f"✅ 群聊策略已设为: {target}")
+
+    async def _admin_allowgroup(self, msg: ChannelMessage, args: list[str]) -> None:
+        """将当前群或指定 chat_id 加入白名单。"""
+        chat_id = args[0] if args else msg.chat_id
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        wl = self._group_whitelist
+        if chat_id in wl:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {chat_id} 已在白名单中")
+            return
+        wl.add(chat_id)
+        self._config_store.set("channel_group_whitelist", json.dumps(sorted(wl)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已将 {chat_id} 加入白名单")
+
+    async def _admin_blockgroup(self, msg: ChannelMessage, args: list[str]) -> None:
+        """将当前群或指定 chat_id 加入黑名单。"""
+        chat_id = args[0] if args else msg.chat_id
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        bl = self._group_blacklist
+        if chat_id in bl:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {chat_id} 已在黑名单中")
+            return
+        bl.add(chat_id)
+        self._config_store.set("channel_group_blacklist", json.dumps(sorted(bl)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已将 {chat_id} 加入黑名单")
+
+    async def _admin_removegroup(self, msg: ChannelMessage, args: list[str]) -> None:
+        """从白名单和黑名单中移除群。"""
+        chat_id = args[0] if args else msg.chat_id
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        removed = False
+        wl = self._group_whitelist
+        if chat_id in wl:
+            wl.discard(chat_id)
+            self._config_store.set("channel_group_whitelist", json.dumps(sorted(wl)))
+            removed = True
+        bl = self._group_blacklist
+        if chat_id in bl:
+            bl.discard(chat_id)
+            self._config_store.set("channel_group_blacklist", json.dumps(sorted(bl)))
+            removed = True
+        if removed:
+            await self.adapter.send_text(msg.chat_id, f"✅ 已将 {chat_id} 从白/黑名单中移除")
+        else:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {chat_id} 不在任何名单中")
+
+    async def _admin_listgroups(self, msg: ChannelMessage, args: list[str]) -> None:
+        """列出白名单和黑名单群。"""
+        wl = self._group_whitelist
+        bl = self._group_blacklist
+        lines = ["📋 群名单\n"]
+        if wl:
+            lines.append("白名单:")
+            for cid in sorted(wl):
+                lines.append(f"  ✅ {cid}")
+        else:
+            lines.append("白名单: (空)")
+        if bl:
+            lines.append("\n黑名单:")
+            for cid in sorted(bl):
+                lines.append(f"  🚫 {cid}")
+        else:
+            lines.append("\n黑名单: (空)")
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _admin_adduser(self, msg: ChannelMessage, args: list[str]) -> None:
+        """添加允许用户。"""
+        if not args:
+            await self.adapter.send_text(msg.chat_id, "用法: /admin adduser <user_id>")
+            return
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        uid = args[0].strip()
+        users = self._dynamic_allowed_users
+        if uid in users:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {uid} 已在允许用户列表中")
+            return
+        users.add(uid)
+        self._config_store.set("channel_allowed_users", json.dumps(sorted(users)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已添加允许用户: {uid}")
+
+    async def _admin_removeuser(self, msg: ChannelMessage, args: list[str]) -> None:
+        """移除允许用户。"""
+        if not args:
+            await self.adapter.send_text(msg.chat_id, "用法: /admin removeuser <user_id>")
+            return
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        uid = args[0].strip()
+        users = self._dynamic_allowed_users
+        if uid not in users:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {uid} 不在动态允许用户列表中")
+            return
+        users.discard(uid)
+        self._config_store.set("channel_allowed_users", json.dumps(sorted(users)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已移除允许用户: {uid}")
+
+    async def _admin_listusers(self, msg: ChannelMessage, args: list[str]) -> None:
+        """列出允许用户。"""
+        static = self.allowed_users
+        dynamic = self._dynamic_allowed_users
+        lines = ["📋 允许用户列表\n"]
+        if not static and not dynamic:
+            lines.append("(未设置限制，所有用户可用)")
+        else:
+            if static:
+                lines.append("启动配置:")
+                for uid in sorted(static):
+                    lines.append(f"  {uid}")
+            if dynamic:
+                lines.append("\n动态添加:")
+                for uid in sorted(dynamic):
+                    lines.append(f"  {uid}")
+        await self.adapter.send_text(msg.chat_id, "\n".join(lines))
+
+    async def _admin_addadmin(self, msg: ChannelMessage, args: list[str]) -> None:
+        """添加管理员。"""
+        if not args:
+            await self.adapter.send_text(msg.chat_id, "用法: /admin addadmin <user_id>")
+            return
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        uid = args[0].strip()
+        # 读取现有 config_kv 管理员（不含环境变量管理员）
+        try:
+            raw = self._config_store.get("channel_admin_users", "")
+            existing = set(u.strip() for u in raw.split(",") if u.strip()) if raw else set()
+        except Exception:
+            existing = set()
+        if uid in existing:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {uid} 已是管理员")
+            return
+        existing.add(uid)
+        self._config_store.set("channel_admin_users", ",".join(sorted(existing)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已添加管理员: {uid}")
+
+    async def _admin_removeadmin(self, msg: ChannelMessage, args: list[str]) -> None:
+        """移除管理员（仅可移除 config_kv 中的，环境变量管理员不可移除）。"""
+        if not args:
+            await self.adapter.send_text(msg.chat_id, "用法: /admin removeadmin <user_id>")
+            return
+        if self._config_store is None:
+            await self.adapter.send_text(msg.chat_id, "❌ 配置存储不可用")
+            return
+        uid = args[0].strip()
+        # 检查是否为环境变量管理员
+        env_admins = set()
+        env_val = os.environ.get("EXCELMANUS_CHANNEL_ADMINS", "").strip()
+        if env_val:
+            env_admins = set(u.strip() for u in env_val.split(",") if u.strip())
+        if uid in env_admins:
+            await self.adapter.send_text(
+                msg.chat_id, f"⛔ {uid} 是环境变量管理员，不可通过命令移除",
+            )
+            return
+        try:
+            raw = self._config_store.get("channel_admin_users", "")
+            existing = set(u.strip() for u in raw.split(",") if u.strip()) if raw else set()
+        except Exception:
+            existing = set()
+        if uid not in existing:
+            await self.adapter.send_text(msg.chat_id, f"ℹ️ {uid} 不在动态管理员列表中")
+            return
+        existing.discard(uid)
+        self._config_store.set("channel_admin_users", ",".join(sorted(existing)))
+        await self.adapter.send_text(msg.chat_id, f"✅ 已移除管理员: {uid}")

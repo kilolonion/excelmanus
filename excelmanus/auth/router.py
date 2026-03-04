@@ -2390,8 +2390,47 @@ async def confirm_channel_bind(
             f"已绑定到 ExcelManus 账号: <b>{display}</b>\n"
             f"现在可以直接在此对话中使用 ExcelManus 啦！"
         )
+        guide_text = (
+            "📖 <b>快速上手指南</b>\n\n"
+            "💬 <b>对话</b>\n"
+            "  直接发文字 → 与 AI 对话\n"
+            "  发送文件 → 上传到工作区并分析\n"
+            "  /new — 新建对话（清除历史）\n"
+            "  /abort — 终止当前任务\n\n"
+            "🤖 <b>模型管理</b>\n"
+            "  /model — 查看模型列表\n"
+            "  /model &lt;名称&gt; — 切换模型\n"
+            "  /addmodel — 添加新模型（查看格式）\n"
+            "  /delmodel &lt;名称&gt; — 删除模型\n"
+            "  /quota — 查看 token 用量和配额\n\n"
+            "⚙️ <b>模式切换</b>\n"
+            "  /mode — 查看当前模式\n"
+            "  /mode &lt;write|read|plan&gt; — 切换对话模式\n\n"
+            "📂 <b>会话管理</b>\n"
+            "  /sessions — 列出历史会话\n"
+            "  /sessions &lt;编号&gt; — 切换到指定会话\n"
+            "  /history — 查看当前会话轮次\n"
+            "  /rollback [轮次号] — 回退到指定轮次\n"
+            "  /undo — 撤销最近操作\n\n"
+            "⚡ <b>并发控制</b>\n"
+            "  /concurrency — 查看当前并发模式\n"
+            "  /concurrency &lt;queue|steer|guide&gt; — 切换并发模式\n\n"
+            "📦 <b>文件管理</b>\n"
+            "  /staged — 查看待确认文件\n"
+            "  /apply [编号|all] — 确认应用文件变更\n"
+            "  /discard [编号|all] — 丢弃文件变更\n"
+            "  /undoapply — 撤销最近一次 apply\n\n"
+            "🔗 <b>渠道绑定</b>\n"
+            "  /bindstatus — 查看绑定状态\n"
+            "  /unbind — 解除绑定\n\n"
+            "📎 <b>支持的文件</b>\n"
+            "  Excel: .xlsx .xls .csv\n"
+            "  图片: .png .jpg .jpeg\n\n"
+            "输入 /help 可随时查看此指南 😊"
+        )
         try:
             await launcher.send_notification(channel, platform_id, notify_text)
+            await launcher.send_notification(channel, platform_id, guide_text)
         except Exception:
             logger.debug("绑定成功通知发送失败", exc_info=True)
 

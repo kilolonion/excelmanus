@@ -230,13 +230,8 @@ class QQBotAdapter(ChannelAdapter):
         await self.send_text(chat_id, plain)
 
     async def send_file(self, chat_id: str, data: bytes, filename: str) -> None:
-        """发送文件。QQ 群/C2C 文件 API 需要 URL，暂降级为文本提示。"""
-        size_kb = len(data) / 1024
-        await self.send_text(
-            chat_id,
-            f"📎 文件已生成: {filename} ({size_kb:.1f} KB)\n"
-            f"QQ 暂不支持直接发送文件，请通过 Web 界面下载。",
-        )
+        """发送文件。QQ 群/C2C 文件 API 需要 URL，抛出异常由 message_handler 回退到下载链接。"""
+        raise NotImplementedError("QQ 不支持直接发送文件，由调用方回退到下载链接")
 
     async def send_approval_card(
         self,

@@ -13,6 +13,7 @@ interface UIState {
   settingsTab: string;
   sidebarTab: "chats" | "files";
   profileOpen: boolean;
+  channelsOpen: boolean;
   adminOpen: boolean;
   configReady: boolean | null;
   configError: string | null;
@@ -30,6 +31,8 @@ interface UIState {
   closeSettings: () => void;
   openProfile: () => void;
   closeProfile: () => void;
+  openChannels: () => void;
+  closeChannels: () => void;
   openAdmin: () => void;
   closeAdmin: () => void;
   setConfigReady: (ready: boolean) => void;
@@ -52,6 +55,7 @@ export const useUIStore = create<UIState>()(
   settingsTab: "model",
   sidebarTab: "chats" as const,
   profileOpen: false,
+  channelsOpen: false,
   adminOpen: false,
   configReady: null,
   configError: null,
@@ -69,6 +73,8 @@ export const useUIStore = create<UIState>()(
   closeSettings: () => set({ settingsOpen: false }),
   openProfile: () => set({ profileOpen: true }),
   closeProfile: () => set({ profileOpen: false }),
+  openChannels: () => set({ channelsOpen: true }),
+  closeChannels: () => set({ channelsOpen: false }),
   openAdmin: () => set({ adminOpen: true }),
   closeAdmin: () => set({ adminOpen: false }),
   setConfigReady: (ready) => set({ configReady: ready, ...(ready ? { configError: null } : {}) }),

@@ -1650,6 +1650,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
         实现毫秒级首次视觉反馈。
         """
         safe_mode = _is_external_safe_mode()
+        _is_channel_request = bool(request.channel)
 
         # ── 所有可能在 finally 中引用的变量预初始化 ──
         session_id: str | None = None
@@ -1696,6 +1697,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             assert session_id is not None and engine is not None
             yield _sse_format("session_init", {"session_id": session_id})
+
+            # EventBridge: 通知其他渠道 chat 已开始
+            _origin_channel = request.channel or "web"
+            if _bridge is not None and isolation_user_id:
+                try:
+                    _loop = asyncio.get_running_loop()
+                    _loop.create_task(_bridge.notify(isolation_user_id, "chat_started", {
+                        "session_id": session_id,
+                        "origin_channel": _origin_channel,
+                        "message_preview": (request.message or "")[:80],
+                    }))
+                except RuntimeError:
+                    pass
 
             # ── 工作区配额检查 ──
             _auth_enabled = getattr(raw_request.app.state, "auth_enabled", False)
@@ -1791,15 +1805,16 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     and _session_manager is not None
                 ):
                     _session_manager.flush_messages_sync(session_id)
-                # EventBridge: Web→Bot 推送审批/问答事件
+                # EventBridge: 跨渠道实时事件推送（Web↔Bot 双向）
+                # origin_channel 用于接收方过滤自身发出的事件，防止回声
                 if (
-                    not _is_service
-                    and _bridge is not None
+                    _bridge is not None
                     and isolation_user_id
                     and event.event_type in (EventType.PENDING_APPROVAL, EventType.USER_QUESTION)
                 ):
                     _bridge_data: dict[str, Any] = {}
                     _bridge_evt = ""
+                    _origin = request.channel or "web"
                     if event.event_type == EventType.PENDING_APPROVAL:
                         _bridge_evt = "approval"
                         _bridge_data = {
@@ -1808,6 +1823,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                             "risk_level": event.approval_risk_level,
                             "args_summary": event.approval_args_summary or {},
                             "session_id": session_id,
+                            "origin_channel": _origin,
                         }
                     elif event.event_type == EventType.USER_QUESTION:
                         _bridge_evt = "question"
@@ -1817,6 +1833,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                             "text": event.question_text,
                             "options": event.question_options or [],
                             "session_id": session_id,
+                            "origin_channel": _origin,
                         }
                     if _bridge_evt:
                         try:
@@ -1882,7 +1899,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     if event is not None:
                         if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                             _last_pipeline_stage = event.pipeline_stage
-                        sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                        sse = _sse_event_to_sse(event, safe_mode=safe_mode, is_channel=_is_channel_request)
                         if sse is not None:
                             yield sse
                     if chat_task.done():
@@ -1900,7 +1917,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         if event is not None:
                             if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                                 _last_pipeline_stage = event.pipeline_stage
-                            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                            sse = _sse_event_to_sse(event, safe_mode=safe_mode, is_channel=_is_channel_request)
                             if sse is not None:
                                 yield sse
                     break
@@ -1909,6 +1926,24 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             chat_result = chat_task.result()
             normalized_reply = guard_public_reply((chat_result.reply or "").strip())
             yield _build_reply_sse(chat_result, engine)
+
+            # EventBridge: 通知其他渠道 chat 已完成
+            if _bridge is not None and isolation_user_id:
+                _completed_data = {
+                    "session_id": session_id,
+                    "origin_channel": _origin_channel,
+                    "reply_summary": normalized_reply[:300] if normalized_reply else "",
+                    "tool_count": chat_result.total_tool_calls,
+                    "has_error": bool(chat_result.reply and "❌" in chat_result.reply),
+                }
+                try:
+                    _loop2 = asyncio.get_running_loop()
+                    _loop2.create_task(
+                        _bridge.notify(isolation_user_id, "chat_completed", _completed_data)
+                    )
+                except RuntimeError:
+                    pass
+
             # 记录已认证用户的 token 使用量
             if auth_user_id and chat_result.total_tokens > 0:
                 try:
@@ -2813,11 +2848,13 @@ def _sse_event_to_sse(
     event: ToolCallEvent,
     *,
     safe_mode: bool,
+    is_channel: bool = False,
 ) -> str | None:
     """将 ToolCallEvent 转换为 SSE 文本（委托到 api/sse.py）。"""
     return _sse_event_to_sse_impl(
         event,
         safe_mode=safe_mode,
+        is_channel=is_channel,
         public_path_fn=lambda path, sm: _public_excel_path(path, safe_mode=sm),
     )
 
@@ -4088,6 +4125,106 @@ async def download_file(request: Request) -> StreamingResponse:
         media_type=content_type,
         headers={"Content-Disposition": _make_content_disposition(file_path.name)},
     )
+
+
+@_router.get("/api/v1/files/dl/{token}")
+async def download_file_by_token(token: str) -> StreamingResponse:
+    """通过短效令牌下载文件（无需 auth，供 Bot 渠道分享下载链接）。"""
+    assert _config is not None, "服务未初始化"
+
+    from excelmanus.auth.security import decode_download_token
+
+    claims = decode_download_token(token)
+    if claims is None:
+        return _error_json_response(403, "下载链接已过期或无效")  # type: ignore[return-value]
+
+    file_path_str = claims.get("file_path", "")
+    user_id = claims.get("sub", "")
+
+    _auth_on = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
+    ws = IsolatedWorkspace.resolve(
+        _config.workspace_root,
+        user_id=user_id or None,
+        auth_enabled=_auth_on,
+        sandbox_config=SandboxConfig(docker_enabled=False),
+        data_root=_config.data_root,
+    )
+    ws_root = str(ws.root_dir)
+
+    resolved = _resolve_excel_path(file_path_str, None, workspace_root=ws_root, user_id=user_id)
+    if resolved is None:
+        return _error_json_response(404, "文件不存在或路径非法")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+    import mimetypes
+
+    fp = _Path(resolved)
+    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
+
+    def _iter():
+        with open(resolved, "rb") as f:  # type: ignore[arg-type]
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter(),
+        media_type=content_type,
+        headers={"Content-Disposition": _make_content_disposition(fp.name)},
+    )
+
+
+@_router.post("/api/v1/files/download/link")
+async def create_download_link(request: Request) -> JSONResponse:
+    """生成文件的短效下载链接（供 Bot 渠道使用）。
+
+    请求体: {"file_path": "...", "user_id": "..."}
+    返回: {"url": "https://...", "token": "...", "expires_minutes": 30}
+    """
+    assert _config is not None, "服务未初始化"
+
+    body = await request.json()
+    file_path_str = body.get("file_path", "")
+    user_id = body.get("user_id", "")
+
+    if not file_path_str:
+        return _error_json_response(400, "缺少 file_path 参数")
+
+    # 验证文件存在
+    _auth_on = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower() in ("1", "true", "yes")
+    from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
+    ws = IsolatedWorkspace.resolve(
+        _config.workspace_root,
+        user_id=user_id or None,
+        auth_enabled=_auth_on,
+        sandbox_config=SandboxConfig(docker_enabled=False),
+        data_root=_config.data_root,
+    )
+    ws_root = str(ws.root_dir)
+
+    resolved = _resolve_excel_path(file_path_str, None, workspace_root=ws_root, user_id=user_id)
+    if resolved is None:
+        return _error_json_response(404, f"文件不存在或路径非法: {file_path_str}")
+
+    from excelmanus.auth.security import create_download_token, DOWNLOAD_TOKEN_EXPIRE_MINUTES
+
+    token = create_download_token(file_path_str, user_id=user_id)
+
+    # 构建公开 URL
+    public_url = _config.public_url
+    if not public_url:
+        # 回退：从请求 Host 推断
+        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
+        host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8000"))
+        public_url = f"{scheme}://{host}"
+
+    download_url = f"{public_url}/api/v1/files/dl/{token}"
+
+    return JSONResponse(content={
+        "url": download_url,
+        "token": token,
+        "expires_minutes": DOWNLOAD_TOKEN_EXPIRE_MINUTES,
+    })
 
 
 @_router.get("/api/v1/files/excel/snapshot")
@@ -7681,8 +7818,11 @@ async def health(request: Request) -> dict:
         "session_isolation_enabled": getattr(request.app.state, "session_isolation_enabled", False),
         "docker_sandbox_enabled": getattr(request.app.state, "docker_sandbox_enabled", False),
         "build_id": _manifest.get("frontend_build_id"),
+        "version_fingerprint": _manifest.get("version_fingerprint"),
         "api_schema_version": _API_SCHEMA_VERSION,
         "git_commit": _manifest.get("git_commit"),
+        "min_frontend_build_id": _manifest.get("min_frontend_build_id"),
+        "min_backend_version": _manifest.get("min_backend_version"),
         "deploy_mode": _config.deploy_mode if _config is not None else "standalone",
         "channels": _channel_launcher.active_channels if _channel_launcher is not None else [],
     }
@@ -7789,6 +7929,67 @@ async def channels_status() -> dict:
     rl_cfg = RateLimitConfig.from_store(_config_store)
     rl_env_overrides = RateLimitConfig.env_overrides()
 
+    # ── 读取扩展渠道设置 ──
+
+    def _read_setting(db_key: str, env_key: str, default: str = "") -> tuple[str, str]:
+        """返回 (value, source)。source: 'env' | 'config' | 'default'。"""
+        env_val = os.environ.get(env_key, "").strip()
+        if env_val:
+            return env_val, "env"
+        if _config_store is not None:
+            db_val = _config_store.get(db_key, "")
+            if db_val:
+                return db_val.strip(), "config"
+        return default, "default"
+
+    # 访问控制
+    admin_users_val, admin_users_src = _read_setting(
+        "channel_admin_users", "EXCELMANUS_CHANNEL_ADMINS",
+    )
+    group_policy_val, group_policy_src = _read_setting(
+        "channel_group_policy", "EXCELMANUS_CHANNEL_GROUP_POLICY", "auto",
+    )
+    group_whitelist_val, _ = _read_setting(
+        "channel_group_whitelist", "", "",
+    )
+    group_blacklist_val, _ = _read_setting(
+        "channel_group_blacklist", "", "",
+    )
+    allowed_users_val, _ = _read_setting(
+        "channel_allowed_users", "", "",
+    )
+
+    # 行为设置
+    default_concurrency_val, default_concurrency_src = _read_setting(
+        "channel_default_concurrency", "EXCELMANUS_CHANNEL_DEFAULT_CONCURRENCY", "queue",
+    )
+    default_chat_mode_val, default_chat_mode_src = _read_setting(
+        "channel_default_chat_mode", "EXCELMANUS_CHANNEL_DEFAULT_CHAT_MODE", "write",
+    )
+    public_url_val, public_url_src = _read_setting(
+        "channel_public_url", "EXCELMANUS_PUBLIC_URL", "",
+    )
+
+    # 输出调优
+    tg_edit_interval_min_val, _ = _read_setting("channel_tg_edit_interval_min", "", "1.5")
+    tg_edit_interval_max_val, _ = _read_setting("channel_tg_edit_interval_max", "", "3.0")
+    qq_progressive_chars_val, _ = _read_setting("channel_qq_progressive_chars", "", "200")
+    qq_progressive_interval_val, _ = _read_setting("channel_qq_progressive_interval", "", "3.0")
+    feishu_update_interval_val, _ = _read_setting("channel_feishu_update_interval", "", "0.5")
+
+    # 构建 env_overrides 映射（前端用于判断锁定状态）
+    settings_env_overrides: dict[str, str] = {}
+    if admin_users_src == "env":
+        settings_env_overrides["admin_users"] = "EXCELMANUS_CHANNEL_ADMINS"
+    if group_policy_src == "env":
+        settings_env_overrides["group_policy"] = "EXCELMANUS_CHANNEL_GROUP_POLICY"
+    if default_concurrency_src == "env":
+        settings_env_overrides["default_concurrency"] = "EXCELMANUS_CHANNEL_DEFAULT_CONCURRENCY"
+    if default_chat_mode_src == "env":
+        settings_env_overrides["default_chat_mode"] = "EXCELMANUS_CHANNEL_DEFAULT_CHAT_MODE"
+    if public_url_src == "env":
+        settings_env_overrides["public_url"] = "EXCELMANUS_PUBLIC_URL"
+
     return {
         "enabled": _channel_launcher is not None,
         "channels": _channel_launcher.active_channels if _channel_launcher is not None else [],
@@ -7797,6 +7998,23 @@ async def channels_status() -> dict:
         "require_bind_source": require_bind_source,
         "rate_limit": rl_cfg.to_dict(),
         "rate_limit_env_overrides": rl_env_overrides,
+        # 扩展设置
+        "settings": {
+            "admin_users": admin_users_val,
+            "group_policy": group_policy_val,
+            "group_whitelist": group_whitelist_val,
+            "group_blacklist": group_blacklist_val,
+            "allowed_users": allowed_users_val,
+            "default_concurrency": default_concurrency_val,
+            "default_chat_mode": default_chat_mode_val,
+            "public_url": public_url_val,
+            "tg_edit_interval_min": tg_edit_interval_min_val,
+            "tg_edit_interval_max": tg_edit_interval_max_val,
+            "qq_progressive_chars": qq_progressive_chars_val,
+            "qq_progressive_interval": qq_progressive_interval_val,
+            "feishu_update_interval": feishu_update_interval_val,
+        },
+        "settings_env_overrides": settings_env_overrides,
     }
 
 
@@ -7804,7 +8022,21 @@ async def channels_status() -> dict:
 async def update_channel_settings(request: Request) -> JSONResponse:
     """更新渠道全局设置（管理员）。
 
-    请求体: {"require_bind": true}
+    请求体支持以下字段（均可选，仅传入需修改的）：
+    - require_bind: bool — 强制绑定前端账号
+    - admin_users: str — 管理员用户 ID（逗号分隔）
+    - group_policy: str — 群聊策略 deny/allow/whitelist/blacklist/auto
+    - group_whitelist: str — 群白名单 JSON 数组
+    - group_blacklist: str — 群黑名单 JSON 数组
+    - allowed_users: str — 允许用户 JSON 数组
+    - default_concurrency: str — 默认并发模式 queue/steer/guide
+    - default_chat_mode: str — 默认聊天模式 write/read/plan
+    - public_url: str — 公开访问 URL
+    - tg_edit_interval_min: str — Telegram 编辑间隔最小值
+    - tg_edit_interval_max: str — Telegram 编辑间隔最大值
+    - qq_progressive_chars: str — QQ 渐进发送字符阈值
+    - qq_progressive_interval: str — QQ 渐进发送间隔
+    - feishu_update_interval: str — 飞书卡片更新间隔
     """
     if _config_store is None:
         return _error_json_response(503, "数据库未初始化。")
@@ -7816,13 +8048,104 @@ async def update_channel_settings(request: Request) -> JSONResponse:
             return _error_json_response(403, "需要管理员权限。")
 
     body = await request.json()
+    updated: list[str] = []
+    locked: list[str] = []
 
+    # ── require_bind ──
     if "require_bind" in body:
-        val = "true" if body["require_bind"] else "false"
-        _config_store.set("channel_require_bind", val)
-        logger.info("渠道强制绑定设置已更新: %s", val)
+        env_rb = os.environ.get("EXCELMANUS_CHANNEL_REQUIRE_BIND", "").strip()
+        if env_rb:
+            locked.append("require_bind")
+        else:
+            val = "true" if body["require_bind"] else "false"
+            _config_store.set("channel_require_bind", val)
+            updated.append("require_bind")
+            logger.info("渠道强制绑定设置已更新: %s", val)
 
-    return JSONResponse({"status": "ok"})
+    # ── 访问控制字段 ──
+
+    # 检查 env 锁定的辅助函数
+    _ENV_LOCK_MAP: dict[str, str] = {
+        "admin_users": "EXCELMANUS_CHANNEL_ADMINS",
+        "group_policy": "EXCELMANUS_CHANNEL_GROUP_POLICY",
+        "default_concurrency": "EXCELMANUS_CHANNEL_DEFAULT_CONCURRENCY",
+        "default_chat_mode": "EXCELMANUS_CHANNEL_DEFAULT_CHAT_MODE",
+        "public_url": "EXCELMANUS_PUBLIC_URL",
+    }
+    _DB_KEY_MAP: dict[str, str] = {
+        "admin_users": "channel_admin_users",
+        "group_policy": "channel_group_policy",
+        "group_whitelist": "channel_group_whitelist",
+        "group_blacklist": "channel_group_blacklist",
+        "allowed_users": "channel_allowed_users",
+        "default_concurrency": "channel_default_concurrency",
+        "default_chat_mode": "channel_default_chat_mode",
+        "public_url": "channel_public_url",
+        "tg_edit_interval_min": "channel_tg_edit_interval_min",
+        "tg_edit_interval_max": "channel_tg_edit_interval_max",
+        "qq_progressive_chars": "channel_qq_progressive_chars",
+        "qq_progressive_interval": "channel_qq_progressive_interval",
+        "feishu_update_interval": "channel_feishu_update_interval",
+    }
+
+    # 验证枚举值
+    _VALID_GROUP_POLICIES = {"deny", "allow", "whitelist", "blacklist", "auto"}
+    _VALID_CONCURRENCY = {"queue", "steer", "guide"}
+    _VALID_CHAT_MODES = {"write", "read", "plan"}
+
+    for field, db_key in _DB_KEY_MAP.items():
+        if field not in body:
+            continue
+
+        # 检查 env 锁定
+        env_var = _ENV_LOCK_MAP.get(field, "")
+        if env_var and os.environ.get(env_var, "").strip():
+            locked.append(field)
+            continue
+
+        value = body[field]
+
+        # 枚举验证
+        if field == "group_policy" and value not in _VALID_GROUP_POLICIES:
+            return _error_json_response(400, f"无效的群聊策略: {value}，可选值: {', '.join(_VALID_GROUP_POLICIES)}")
+        if field == "default_concurrency" and value not in _VALID_CONCURRENCY:
+            return _error_json_response(400, f"无效的并发模式: {value}，可选值: {', '.join(_VALID_CONCURRENCY)}")
+        if field == "default_chat_mode" and value not in _VALID_CHAT_MODES:
+            return _error_json_response(400, f"无效的聊天模式: {value}，可选值: {', '.join(_VALID_CHAT_MODES)}")
+
+        # 数值验证
+        if field in ("tg_edit_interval_min", "tg_edit_interval_max", "qq_progressive_interval", "feishu_update_interval"):
+            try:
+                fval = float(value)
+                if fval < 0.1 or fval > 60.0:
+                    return _error_json_response(400, f"字段 {field} 超出合理范围 (0.1-60.0): {value}")
+                value = str(fval)
+            except (ValueError, TypeError):
+                return _error_json_response(400, f"字段 {field} 必须为数字: {value}")
+        if field == "qq_progressive_chars":
+            try:
+                ival = int(value)
+                if ival < 50 or ival > 5000:
+                    return _error_json_response(400, f"字段 {field} 超出合理范围 (50-5000): {value}")
+                value = str(ival)
+            except (ValueError, TypeError):
+                return _error_json_response(400, f"字段 {field} 必须为整数: {value}")
+
+        _config_store.set(db_key, str(value))
+        updated.append(field)
+
+    if updated:
+        logger.info("渠道设置已更新: %s", updated)
+
+    # 热更新运行中的 handler
+    if _channel_launcher is not None:
+        _propagate_channel_settings()
+
+    result: dict = {"status": "ok", "updated_fields": updated}
+    if locked:
+        result["locked_fields"] = locked
+        result["message"] = f"以下字段被环境变量锁定: {', '.join(locked)}"
+    return JSONResponse(result)
 
 
 @_router.put("/api/v1/channels/rate-limit")
@@ -7898,6 +8221,26 @@ def _propagate_rate_limit_config(cfg: "RateLimitConfig") -> None:
                 logger.debug("渠道 %s 速率限制配置已热更新", name)
         except Exception:
             logger.debug("渠道 %s 速率限制配置热更新失败", name, exc_info=True)
+
+
+def _propagate_channel_settings() -> None:
+    """将渠道扩展设置传播到所有运行中的 MessageHandler。
+
+    读取 config_store 中的最新值并更新 handler 内部状态。
+    仅处理可安全热更新的字段（default_concurrency 等）。
+    """
+    if _channel_launcher is None or _config_store is None:
+        return
+    for name, handler in _channel_launcher._handlers.items():
+        try:
+            # 默认并发模式
+            dc = _config_store.get("channel_default_concurrency", "")
+            if dc and dc in ("queue", "steer", "guide"):
+                handler._default_concurrency = dc
+
+            logger.debug("渠道 %s 扩展设置已热更新", name)
+        except Exception:
+            logger.debug("渠道 %s 扩展设置热更新失败", name, exc_info=True)
 
 
 @_router.put("/api/v1/channels/{channel_name}/config")
