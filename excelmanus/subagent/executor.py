@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import json
 import hashlib
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import uuid4
 
 import openai
@@ -27,6 +27,12 @@ from excelmanus.message_serialization import assistant_message_to_dict
 from excelmanus.memory import ConversationMemory, _sanitize_messages_for_api
 from excelmanus.subagent.models import SubagentConfig, SubagentFileChange, SubagentResult
 from excelmanus.subagent.tool_filter import FilteredToolRegistry
+
+if TYPE_CHECKING:
+    from excelmanus.memory_extractor import MemoryExtractor
+    from excelmanus.persistent_memory import PersistentMemory
+
+from excelmanus.engine_types import ToolCallResult
 
 _SUMMARY_MAX_CHARS = 4000
 _FULL_MODE_SUMMARY_MAX_CHARS = 12000

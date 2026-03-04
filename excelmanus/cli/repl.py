@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import time
 from contextlib import suppress
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 
 from rich.console import Console
 from rich.markdown import Markdown
@@ -15,15 +14,13 @@ from rich.text import Text
 from rich.cells import cell_len
 
 from excelmanus.cli.theme import THEME
-from excelmanus.cli.utils import separator_line
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.renderer import StreamRenderer
 
 if TYPE_CHECKING:
     from excelmanus.approval import PendingApproval
     from excelmanus.engine import AgentEngine
-    from excelmanus.question_flow import PendingQuestion
-    from excelmanus.types import ChatResult
+    from excelmanus.engine_types import ChatResult
 
 logger = logging.getLogger(__name__)
 

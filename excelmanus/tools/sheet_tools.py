@@ -6,7 +6,6 @@ import json
 from typing import Any
 
 from openpyxl import Workbook, load_workbook
-from openpyxl.utils import get_column_letter
 
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard

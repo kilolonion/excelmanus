@@ -5,7 +5,10 @@ from __future__ import annotations
 import base64
 import json
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from datetime import date
 
 from excelmanus.security import FileAccessGuard, SecurityViolationError
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard

@@ -23,7 +23,6 @@ console = Console()
 async def _async_main() -> None:
     """异步入口：初始化组件并启动 REPL。"""
     from excelmanus import __version__
-    from excelmanus.cli.commands import render_farewell
     from excelmanus.cli.repl import repl_loop
     from excelmanus.cli.welcome import render_welcome
     from excelmanus.config import ConfigError, load_config

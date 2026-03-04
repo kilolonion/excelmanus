@@ -9,12 +9,6 @@ from excelmanus.tools.registry import ToolDef
 _store: TaskStore | None = None
 
 
-def init_store(store: TaskStore) -> None:
-    """兼容旧接口：设置模块级 TaskStore。"""
-    global _store
-    _store = store
-
-
 def _resolve_store(store: TaskStore | None = None) -> TaskStore:
     """解析可用的 TaskStore（优先显式注入，其次模块级实例）。"""
     global _store

@@ -109,7 +109,6 @@ def _convert_xls(src: Path, dst: Path) -> Path:
         )
 
     from openpyxl import Workbook
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 
     try:
         xls_wb = xlrd.open_workbook(str(src), formatting_info=True)
@@ -200,7 +199,7 @@ def _convert_xls(src: Path, dst: Path) -> Path:
                 if hasattr(xls_ws, 'rowinfo_map') and row_idx in xls_ws.rowinfo_map:
                     row_info = xls_ws.rowinfo_map[row_idx]
                     # xlrd 行高单位是 twips (1/20 point)
-                    height = row_info.height / 20.0
+                    height = (row_info.height or 0) / 20.0
                     if height > 0:
                         xlsx_ws.row_dimensions[row_idx + 1].height = height
             except Exception:
@@ -226,7 +225,7 @@ def _apply_xls_style(
     xls_wb: Any,
 ) -> None:
     """将 xlrd XF 记录的样式应用到 openpyxl cell。"""
-    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+    from openpyxl.styles import Alignment, Font, PatternFill
 
     if xf_idx >= len(xf_list):
         return

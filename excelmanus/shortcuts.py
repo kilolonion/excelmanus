@@ -334,7 +334,7 @@ def create_desktop_shortcut(
     if result is not None:
         # 更新 installations.json 中的 shortcut 字段
         try:
-            from excelmanus.data_home import get_current_installation, _load_installations, _save_installations
+            from excelmanus.data_home import _load_installations, _save_installations
             installations = _load_installations()
             project_str = str(project_root)
             for inst in installations:
@@ -346,18 +346,6 @@ def create_desktop_shortcut(
             pass
         return str(result)
     return None
-
-
-def update_desktop_shortcut(
-    project_root: str | Path,
-    name: str = _APP_NAME,
-) -> str | None:
-    """更新桌面快捷方式指向新的安装路径。
-
-    先删除旧的，再创建新的。
-    """
-    remove_desktop_shortcut(name)
-    return create_desktop_shortcut(project_root, name)
 
 
 def remove_desktop_shortcut(name: str = _APP_NAME) -> bool:

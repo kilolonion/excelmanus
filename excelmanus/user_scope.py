@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from excelmanus.db_adapter import ConnectionAdapter
 from excelmanus.scoped_database import ScopedDatabase

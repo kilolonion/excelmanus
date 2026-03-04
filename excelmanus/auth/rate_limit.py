@@ -11,7 +11,7 @@ import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, status
 
 logger = logging.getLogger(__name__)
 
@@ -48,21 +48,6 @@ class RateLimiter:
         self._cph = chat_per_hour
         self._general: dict[str, _WindowEntry] = defaultdict(_WindowEntry)
         self._chat: dict[str, _WindowEntry] = defaultdict(_WindowEntry)
-
-    def check_general(self, user_id: str) -> None:
-        """检查通用 API 速率限制。超限时抛出 429。"""
-        entry = self._general[user_id]
-        if entry.count_in_window(60) >= self._rpm:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"请求频率过高，每分钟最多 {self._rpm} 次请求",
-            )
-        if entry.count_in_window(3600) >= self._rph:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail=f"请求频率过高，每小时最多 {self._rph} 次请求",
-            )
-        entry.record()
 
     def check_chat(self, user_id: str) -> None:
         """检查对话专用速率限制。超限时抛出 429。"""

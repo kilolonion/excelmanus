@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import secrets
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -17,7 +16,6 @@ from excelmanus.auth.models import (
     ForgotPasswordRequest,
     LoginRequest,
     MergeRequiredResponse,
-    OAuthCallbackParams,
     OAuthLinkInfo,
     RefreshRequest,
     RegisterPendingResponse,
@@ -1032,14 +1030,11 @@ async def upload_avatar(
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
     """上传头像图片，自动压缩后保存在用户工作区的 .avatars 隐藏目录中。"""
-    from fastapi import UploadFile
-    import io
 
     content_type = request.headers.get("content-type", "")
     if "multipart/form-data" not in content_type:
         raise HTTPException(400, "请使用 multipart/form-data 上传")
 
-    from starlette.formparsers import MultiPartParser
     form = await request.form()
     file = form.get("avatar")
     if file is None or not hasattr(file, "read"):
@@ -1461,8 +1456,6 @@ async def admin_clear_user_workspace(
     ws_root = _get_workspace_root(request)
     ws = IsolatedWorkspace.resolve(ws_root, user_id=user_id, auth_enabled=True, data_root=_get_data_root(request))
 
-    import shutil
-    from pathlib import Path
     ws_path = ws.root_dir
     deleted_count = 0
     if ws_path.is_dir():
@@ -1718,18 +1711,6 @@ def get_login_config(request: Request) -> dict[str, Any]:
         result[key] = _mask_secret(val) if key in _SECRET_KEYS else val
 
     return result
-
-
-def _get_credential_raw(request: Request, key: str) -> str:
-    """读取凭据原始值（不脱敏），供内部逻辑使用。"""
-    import os
-    store = _get_config_store(request)
-    if store is not None:
-        val = store.get(key, "")
-        if val:
-            return val
-    env_name = _LOGIN_CREDENTIAL_KEYS.get(key, "")
-    return os.environ.get(env_name, "").strip() if env_name else ""
 
 
 @router.get("/admin/login-config")

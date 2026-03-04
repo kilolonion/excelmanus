@@ -7,9 +7,7 @@
 from __future__ import annotations
 
 import base64
-import asyncio
 import logging
-import time
 from typing import Any, Callable, Awaitable
 
 from excelmanus.pipeline.models import (
@@ -22,13 +20,11 @@ from excelmanus.pipeline.phases import (
     build_phase2_chunked_prompt,
     build_phase3_prompt,
     build_phase4_prompt,
-    build_phase4_chunked_prompt,
     build_skeleton_spec,
     build_structure_summary,
     build_full_summary,
     fill_data_into_spec,
     apply_styles_to_spec,
-    build_partial_summary,
 )
 from excelmanus.replica_spec import ReplicaSpec
 from excelmanus.pipeline.formula_detector import detect_formulas

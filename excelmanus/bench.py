@@ -16,7 +16,6 @@ import json
 import os
 import re
 import shutil
-import sys
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -1548,6 +1547,7 @@ async def run_suite(
                 iterations=0,
                 route_mode="error",
                 skills_used=[],
+                tool_scope=[],
                 tool_calls=[],
                 thinking_log=[],
                 reply=f"[CRASH] {exc}",
@@ -1681,6 +1681,7 @@ async def run_suite(
                 iterations=0,
                 route_mode="error",
                 skills_used=[],
+                tool_scope=[],
                 tool_calls=[],
                 thinking_log=[],
                 reply="[CRASH] case result missing",

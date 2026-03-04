@@ -19,7 +19,6 @@ from typing import Any, Dict
 from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.table import Table
-from rich.text import Text
 
 from excelmanus.cli.theme import THEME
 from excelmanus.cli.utils import (
@@ -33,7 +32,6 @@ from excelmanus.cli.utils import (
     format_elapsed,
     format_subagent_tools,
     is_narrow_terminal,
-    looks_like_json,
     render_syntax_block,
     separator_line,
     truncate,

@@ -1680,64 +1680,6 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f}TB"
 
 
-# ── 样式概览辅助函数 ──────────────────────────────────────
-
-
-def _collect_style_summary(file_path: Any, sheet_name: str | None) -> dict[str, Any]:
-    """用 openpyxl 扫描工作表，收集样式概览信息。"""
-    from pathlib import Path
-
-    from openpyxl import load_workbook
-    from openpyxl.utils import get_column_letter
-
-    path = Path(file_path) if not isinstance(file_path, Path) else file_path
-    wb = load_workbook(path, data_only=True)
-    ws = get_worksheet(wb, sheet_name)
-
-    fill_colors: set[str] = set()
-    font_colors: set[str] = set()
-    has_colored_cells = False
-
-    # 抽样扫描（最多前 100 行）避免大文件性能问题
-    max_scan_rows = min(ws.max_row or 0, 100)
-    for row in ws.iter_rows(min_row=1, max_row=max_scan_rows):
-        for cell in row:
-            # 填充色
-            if cell.fill and cell.fill.fgColor:
-                fg = cell.fill.fgColor
-                if hasattr(fg, "rgb") and fg.rgb and fg.rgb not in ("00000000", "FFFFFFFF"):
-                    rgb = str(fg.rgb)
-                    color = rgb[2:] if len(rgb) == 8 else rgb
-                    fill_colors.add(color)
-                    has_colored_cells = True
-            # 字体色
-            if cell.font and cell.font.color:
-                fc = cell.font.color
-                if hasattr(fc, "rgb") and fc.rgb and fc.rgb not in ("00000000", "FF000000"):
-                    rgb = str(fc.rgb)
-                    color = rgb[2:] if len(rgb) == 8 else rgb
-                    font_colors.add(color)
-                    has_colored_cells = True
-
-    # 合并单元格
-    merged_ranges = [str(mr) for mr in ws.merged_cells.ranges]
-
-    # 条件格式
-    has_conditional = len(ws.conditional_formatting) > 0
-
-    wb.close()
-
-    return {
-        "has_colored_cells": has_colored_cells,
-        "fill_colors_used": sorted(fill_colors),
-        "font_colors_used": sorted(font_colors),
-        "has_merged_cells": len(merged_ranges) > 0,
-        "merged_ranges": merged_ranges,
-        "has_conditional_formatting": has_conditional,
-        "rows_scanned": max_scan_rows,
-    }
-
-
 # ── include 维度采集函数 ──────────────────────────────────
 
 # include 参数所有合法维度
@@ -2819,7 +2761,6 @@ def compare_excel(
 
     else:
         # ── 4A. 行号对齐模式 ──
-        max_rows_cmp = max(len(df_a), len(df_b))
         rows_added = max(0, len(df_b) - len(df_a))
         rows_deleted = max(0, len(df_a) - len(df_b))
         min_rows = min(len(df_a), len(df_b))
@@ -3694,9 +3635,7 @@ def search_excel_values(
 
         # 读取 header 行（仅用于列名标注，不再跳过 row 1 的搜索）
         header: list[str] = []
-        header_row_data: list[Any] = []
         for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
-            header_row_data = list(row)
             header = [str(c) if c is not None else f"Col_{i}" for i, c in enumerate(row)]
             break
 

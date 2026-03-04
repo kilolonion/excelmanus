@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from excelmanus.bench_validator import SuiteValidationSummary, ValidationSummary
+from excelmanus.bench_validator import SuiteValidationSummary
 
 
 # ── 单 case 报告行 ───────────────────────────────────────

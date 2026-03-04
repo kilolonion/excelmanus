@@ -17,7 +17,6 @@ from excelmanus.skillpacks.arguments import parse_arguments, substitute
 from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.skillpacks.loader import SkillpackLoader
 from excelmanus.skillpacks.models import SkillMatchResult, Skillpack
-from excelmanus.tools.policy import TOOL_CATEGORIES
 
 logger = get_logger("skillpacks.router")
 
