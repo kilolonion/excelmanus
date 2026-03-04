@@ -26,6 +26,11 @@ router = APIRouter()
 # 递增此常量以表示 API schema 不兼容变更（仅在破坏性变更时递增）
 _API_SCHEMA_VERSION = 1
 
+# 最低兼容前端 build ID（None = 不约束；设置后，低于此值的前端将被提示升级）
+_MIN_FRONTEND_BUILD_ID: str | None = None
+# 最低兼容后端版本（None = 不约束；设置后，低于此值的后端将被前端提示不兼容）
+_MIN_BACKEND_VERSION: str | None = None
+
 
 # ── 辅助函数 ──────────────────────────────────────────
 
@@ -61,14 +66,27 @@ def _get_git_commit(root: Path) -> str | None:
         return None
 
 
-def _get_frontend_build_id(root: Path) -> str | None:
-    """读取 Next.js BUILD_ID 文件，不存在返回 None。"""
+def _get_frontend_build_id(root: Path, deploy_meta: dict | None = None) -> str | None:
+    """读取前端 build 指纹，支持 split topology 回退链。
+
+    优先级：
+      1. web/.next/BUILD_ID（同机部署）
+      2. .deploy_meta.json 中的 frontend_build_id（远程部署写入）
+      3. None（调用方可继续回退到 git_commit）
+    """
     build_id_file = root / "web" / ".next" / "BUILD_ID"
     try:
         if build_id_file.is_file():
-            return build_id_file.read_text(encoding="utf-8").strip() or None
+            val = build_id_file.read_text(encoding="utf-8").strip()
+            if val:
+                return val
     except Exception:
         pass
+    # 回退: deploy_meta 中可能记录了远程构建的 build_id
+    if deploy_meta:
+        meta_bid = deploy_meta.get("frontend_build_id")
+        if meta_bid:
+            return str(meta_bid)
     return None
 
 
@@ -100,18 +118,29 @@ def get_manifest_data() -> dict:
     root = _get_project_root()
     meta = _get_deploy_meta(root)
     git_commit = _get_git_commit(root)
-    build_id = _get_frontend_build_id(root)
+    build_id = _get_frontend_build_id(root, deploy_meta=meta)
+
+    # version_fingerprint: 组合指纹，确保 split topology 下也有可比较的值
+    fingerprint_parts = [excelmanus.__version__]
+    if build_id:
+        fingerprint_parts.append(build_id)
+    elif git_commit:
+        fingerprint_parts.append(git_commit)
+    version_fingerprint = "|".join(fingerprint_parts)
 
     return {
         "release_id": meta.get("release_id") or git_commit or "unknown",
         "backend_version": excelmanus.__version__,
         "api_schema_version": _API_SCHEMA_VERSION,
         "frontend_build_id": build_id,
+        "version_fingerprint": version_fingerprint,
         "git_commit": git_commit,
         "deployed_at": meta.get("deployed_at"),
         "deploy_mode": meta.get("deploy_mode"),
         "topology": meta.get("topology"),
         "requires_db_migration": _check_db_migration_needed(root),
+        "min_frontend_build_id": _MIN_FRONTEND_BUILD_ID or meta.get("min_frontend_build_id"),
+        "min_backend_version": _MIN_BACKEND_VERSION or meta.get("min_backend_version"),
     }
 
 
@@ -703,3 +732,65 @@ async def canary_abort(request: Request) -> JSONResponse:
     result = _canary_abort(_get_project_root())
     status_code = 200 if result.get("success") else 500
     return JSONResponse(status_code=status_code, content=result)
+
+
+# ── 灰度发起 ──────────────────────────────────────────
+
+
+class CanaryStartRequest(BaseModel):
+    target: str = Field(default="full", description="部署目标: full | backend")
+    observe_seconds: int = Field(default=60, description="每阶段观察时间（秒）")
+
+
+@router.post("/api/v1/deploy/canary/start")
+async def canary_start(body: CanaryStartRequest, request: Request) -> JSONResponse:
+    """发起灰度部署（仅管理员）。"""
+    if not _is_admin_or_noauth(request):
+        return _error(403, "需要管理员权限")
+
+    from excelmanus.updater import canary_start as _canary_start
+
+    root = _get_project_root()
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(
+        None,
+        lambda: _canary_start(root, target=body.target, observe_seconds=body.observe_seconds),
+    )
+    status_code = 200 if result.get("success") else 500
+    return JSONResponse(status_code=status_code, content=result)
+
+
+# ── 部署锁状态 ────────────────────────────────────────
+
+
+@router.get("/api/v1/deploy/lock/status")
+async def deploy_lock_status(request: Request) -> JSONResponse:
+    """查询本地 + 远程部署锁状态。"""
+    import asyncio
+    from excelmanus.updater import check_remote_deploy_lock
+
+    root = _get_project_root()
+    loop = asyncio.get_running_loop()
+    remote_lock = await loop.run_in_executor(None, check_remote_deploy_lock, root)
+
+    # 本地 threading.Lock 状态
+    from excelmanus.updater import _deploy_lock
+    local_locked = _deploy_lock.locked()
+
+    return JSONResponse(content={
+        "local_locked": local_locked,
+        "remote": remote_lock,
+    })
+
+
+# ── 部署日志查看 ──────────────────────────────────────
+
+
+@router.get("/api/v1/deploy/history/{release_id}/log")
+async def deploy_history_log(release_id: str, request: Request) -> JSONResponse:
+    """按需加载单条部署的日志内容。"""
+    from excelmanus.updater import get_deploy_log
+
+    root = _get_project_root()
+    log_content = get_deploy_log(root, release_id)
+    return JSONResponse(content={"release_id": release_id, "log": log_content})

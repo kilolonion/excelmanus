@@ -175,6 +175,30 @@ function Show-Backups {
     exit 0
 }
 
+# ── 网络探测：自动识别国内网络，优先使用镜像 ──
+function Test-DomesticNetwork {
+    $pythonExe = "python"
+    $venvPy = Join-Path $Script:PROJECT_ROOT ".venv\Scripts\python.exe"
+    if (Test-Path $venvPy) { $pythonExe = $venvPy }
+    try {
+        $result = & $pythonExe -c @"
+import socket, time, concurrent.futures
+def ping(host):
+    try:
+        t=time.monotonic(); socket.create_connection((host,443),3); return time.monotonic()-t
+    except: return 999
+with concurrent.futures.ThreadPoolExecutor(2) as p:
+    fm=p.submit(ping,'pypi.tuna.tsinghua.edu.cn')
+    fp=p.submit(ping,'pypi.org')
+    tm,tp=fm.result(5),fp.result(5)
+print('1' if tm<5 and (tp>5 or tm<tp*0.8) else '0')
+"@ 2>$null
+        return ($result -eq "1")
+    } catch {
+        return $false
+    }
+}
+
 function Get-PythonExe {
     $venvPy = Join-Path $Script:PROJECT_ROOT ".venv\Scripts\python.exe"
     if (Test-Path $venvPy) { return $venvPy }
@@ -182,73 +206,79 @@ function Get-PythonExe {
 }
 
 function Install-Dependencies {
-    $pythonExe = Get-PythonExe
+    Write-Step "Install dependencies (parallel)"
+    Write-Info "Backend + frontend dependencies installing in parallel..."
 
-    Write-Step "Install backend dependencies"
-    $backendInstalled = $false
+    $useMirror = [bool]$Mirror
+    $projectRoot = $Script:PROJECT_ROOT
+    $pipMirror = $Script:PIP_MIRROR
+    $npmMirror = $Script:NPM_MIRROR
 
-    if (Get-Command uv -ErrorAction SilentlyContinue) {
-        Write-Info "Trying uv sync..."
-        $uvArgs = @("sync", "--all-extras", "--project", $Script:PROJECT_ROOT)
-        if ($Mirror) { $uvArgs += @("--index-url", $Script:PIP_MIRROR) }
-        & uv @uvArgs
-        if ($LASTEXITCODE -eq 0) {
-            $backendInstalled = $true
-            Write-Log "Backend dependencies installed by uv."
-        } else {
-            Write-Warn "uv sync failed, falling back to pip."
+    # ── 后端依赖 Job ──
+    $backendJob = Start-Job -ScriptBlock {
+        param($ProjectRoot, $UseMirror, $PipMirror)
+        $venvPy = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+        $pythonExe = if (Test-Path $venvPy) { $venvPy } else { "python" }
+
+        # 优先 uv
+        if (Get-Command uv -ErrorAction SilentlyContinue) {
+            $uvArgs = @("sync", "--all-extras", "--project", $ProjectRoot, "--quiet")
+            if ($UseMirror) { $uvArgs += @("--index-url", $PipMirror) }
+            & uv @uvArgs 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { return "ok" }
         }
-    }
-
-    if (-not $backendInstalled) {
-        Push-Location $Script:PROJECT_ROOT
+        # 回退 pip
+        Push-Location $ProjectRoot
         try {
-            $pipArgs = @("-m", "pip", "install", "-e", ".[all]")
-            if ($Mirror) { $pipArgs += @("-i", $Script:PIP_MIRROR) }
-            & $pythonExe @pipArgs
-            if ($LASTEXITCODE -eq 0) {
-                $backendInstalled = $true
-                Write-Log "Backend dependencies installed by pip."
-            } elseif (-not $Mirror) {
-                Write-Warn "Default index failed, retrying with mirror."
-                & $pythonExe -m pip install -e ".[all]" -i $Script:PIP_MIRROR
-                if ($LASTEXITCODE -eq 0) {
-                    $backendInstalled = $true
-                    Write-Log "Backend dependencies installed by pip mirror."
-                }
+            $pipArgs = @("-m", "pip", "install", "-e", ".[all]", "--quiet")
+            if ($UseMirror) { $pipArgs += @("-i", $PipMirror) }
+            & $pythonExe @pipArgs 2>&1 | Out-Null
+            if ($LASTEXITCODE -eq 0) { return "ok" }
+            # 回退: 强制使用镜像
+            if (-not $UseMirror) {
+                & $pythonExe -m pip install -e ".[all]" -i $PipMirror --quiet 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { return "ok" }
             }
-        } finally {
-            Pop-Location
-        }
+        } finally { Pop-Location }
+        return "fail"
+    } -ArgumentList $projectRoot, $useMirror, $pipMirror
+
+    # ── 前端依赖 Job ──
+    $webDir = Join-Path $projectRoot "web"
+    $frontendJob = $null
+    if ((Test-Path $webDir) -and (Test-Path (Join-Path $webDir "package.json"))) {
+        $frontendJob = Start-Job -ScriptBlock {
+            param($WebDir, $UseMirror, $NpmMirror)
+            Push-Location $WebDir
+            try {
+                $npmArgs = @("install", "--silent")
+                if ($UseMirror) { $npmArgs += "--registry=$NpmMirror" }
+                & npm @npmArgs 2>&1 | Out-Null
+                if ($LASTEXITCODE -eq 0) { return "ok" }
+                # 回退: 强制使用 npmmirror
+                if (-not $UseMirror) {
+                    & npm install "--registry=$NpmMirror" --silent 2>&1 | Out-Null
+                    if ($LASTEXITCODE -eq 0) { return "ok" }
+                }
+            } finally { Pop-Location }
+            return "fail"
+        } -ArgumentList $webDir, $useMirror, $npmMirror
     }
 
-    if (-not $backendInstalled) {
+    # ── 等待并行完成 ──
+    $beResult = Receive-Job -Job $backendJob -Wait -AutoRemoveJob
+    if ($beResult -eq "ok") {
+        Write-Log "Backend dependencies installed."
+    } else {
         Write-Err "Backend dependency install failed."
     }
 
-    $webDir = Join-Path $Script:PROJECT_ROOT "web"
-    if ((Test-Path $webDir) -and (Test-Path (Join-Path $webDir "package.json"))) {
-        Write-Step "Install frontend dependencies"
-        Push-Location $webDir
-        try {
-            $npmArgs = @("install")
-            if ($Mirror) { $npmArgs += "--registry=$Script:NPM_MIRROR" }
-            & npm @npmArgs
-            if ($LASTEXITCODE -eq 0) {
-                Write-Log "Frontend dependencies installed."
-            } elseif (-not $Mirror) {
-                Write-Warn "npm install failed, retrying with mirror."
-                & npm install "--registry=$Script:NPM_MIRROR"
-                if ($LASTEXITCODE -eq 0) {
-                    Write-Log "Frontend dependencies installed via mirror."
-                } else {
-                    Write-Warn "Frontend dependency install failed (non-fatal)."
-                }
-            } else {
-                Write-Warn "Frontend dependency install failed (non-fatal)."
-            }
-        } finally {
-            Pop-Location
+    if ($frontendJob) {
+        $feResult = Receive-Job -Job $frontendJob -Wait -AutoRemoveJob
+        if ($feResult -eq "ok") {
+            Write-Log "Frontend dependencies installed."
+        } else {
+            Write-Warn "Frontend dependency install failed (non-fatal)."
         }
     }
 }
@@ -288,6 +318,14 @@ if ($ListBackups) {
 
 if ($Rollback) {
     Restore-LatestBackup
+}
+
+# ── 自动探测国内网络 ──
+if (-not $Mirror) {
+    if (Test-DomesticNetwork) {
+        $Mirror = [switch]::new($true)
+        Write-Info "Detected domestic network, auto-enabling mirror."
+    }
 }
 
 $currentVersion = Get-ProjectVersion
@@ -400,6 +438,33 @@ if (-not $SkipDeps) {
 }
 
 Verify-DatabaseMigration
+
+# ── Step: 重新构建前端（生产模式必须，否则新代码不生效） ──
+$webDir = Join-Path $Script:PROJECT_ROOT "web"
+if ((Test-Path $webDir) -and (Test-Path (Join-Path $webDir "package.json"))) {
+    $nextDir = Join-Path $webDir ".next"
+    if ((Test-Path $nextDir) -or (-not $SkipDeps)) {
+        Write-Step "Build frontend"
+        Write-Info "Rebuilding frontend for production (npm run build)..."
+        Push-Location $webDir
+        try {
+            & npm run build 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                Write-Log "Frontend build complete."
+            } else {
+                Write-Warn "Default build failed, trying webpack fallback..."
+                & npm run build:webpack 2>&1
+                if ($LASTEXITCODE -eq 0) {
+                    Write-Log "Frontend build complete (webpack fallback)."
+                } else {
+                    Write-Warn "Frontend build failed (non-fatal). For production, run manually: cd web && npm run build"
+                }
+            }
+        } finally {
+            Pop-Location
+        }
+    }
+}
 
 # 写入 .deploy_meta.json（与 deploy.sh 行为一致）
 $metaFile = Join-Path $Script:PROJECT_ROOT ".deploy_meta.json"

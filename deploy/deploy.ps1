@@ -213,6 +213,13 @@ param(
     [string]$RepoUrl = "",
     [string]$Branch = "",
 
+    [switch]$BackendBlueGreen,
+    [int]$BackendCandidatePort = 0,
+    [int]$BackendDrainSeconds = 0,
+    [switch]$BackendCanary,
+    [string]$CanarySteps = "",
+    [int]$CanaryObserveSeconds = 0,
+
     [string]$HealthUrl = "",
     [switch]$NoVerify,
     [int]$VerifyTimeout = 0,
@@ -355,6 +362,12 @@ $Script:CFG = @{
     HealthUrl        = $HealthUrl
     VerifyTimeout    = $VerifyTimeout
     KeepFrontendReleases = $KeepFrontendReleases
+    BackendBlueGreen = [bool]$BackendBlueGreen
+    BackendCandidatePort = $BackendCandidatePort
+    BackendDrainSeconds = $BackendDrainSeconds
+    BackendCanary    = [bool]$BackendCanary
+    CanarySteps      = $CanarySteps
+    CanaryObserveSeconds = $CanaryObserveSeconds
 }
 
 function Load-Config {
@@ -386,6 +399,12 @@ function Load-Config {
                         "FRONTEND_PORT"      { if ($Script:CFG.FrontendPort -eq 0){ $Script:CFG.FrontendPort = [int]$val } }
                         "SITE_URL"           { $Script:SITE_URL = $val }
                         "SITE_DOMAIN"        { $Script:SITE_DOMAIN = $val }
+                        "BACKEND_BLUEGREEN"  { if (-not $Script:CFG.BackendBlueGreen) { $Script:CFG.BackendBlueGreen = ($val -eq "true") } }
+                        "BACKEND_CANDIDATE_PORT" { if ($Script:CFG.BackendCandidatePort -eq 0) { $Script:CFG.BackendCandidatePort = [int]$val } }
+                        "BACKEND_DRAIN_SECONDS"  { if ($Script:CFG.BackendDrainSeconds -eq 0) { $Script:CFG.BackendDrainSeconds = [int]$val } }
+                        "BACKEND_CANARY"     { if (-not $Script:CFG.BackendCanary) { $Script:CFG.BackendCanary = ($val -eq "true") } }
+                        "CANARY_STEPS"       { if (-not $Script:CFG.CanarySteps) { $Script:CFG.CanarySteps = $val } }
+                        "CANARY_OBSERVE_SECONDS" { if ($Script:CFG.CanaryObserveSeconds -eq 0) { $Script:CFG.CanaryObserveSeconds = [int]$val } }
                     }
                 }
             }
@@ -429,6 +448,10 @@ function Apply-Defaults {
     if (-not $Script:CFG.Branch)         { $Script:CFG.Branch         = "main" }
     if ($Script:CFG.VerifyTimeout -eq 0) { $Script:CFG.VerifyTimeout  = 30 }
     if ($Script:CFG.KeepFrontendReleases -eq 0) { $Script:CFG.KeepFrontendReleases = 3 }
+    if ($Script:CFG.BackendCandidatePort -eq 0) { $Script:CFG.BackendCandidatePort = 8001 }
+    if ($Script:CFG.BackendDrainSeconds -eq 0)  { $Script:CFG.BackendDrainSeconds  = 30 }
+    if (-not $Script:CFG.CanarySteps)           { $Script:CFG.CanarySteps          = "10,50,100" }
+    if ($Script:CFG.CanaryObserveSeconds -eq 0) { $Script:CFG.CanaryObserveSeconds = 60 }
 
     # 默认启用 QQ 渠道 Bot（可通过 .env 或环境变量覆盖）
     if (-not [System.Environment]::GetEnvironmentVariable("EXCELMANUS_CHANNELS")) {
@@ -728,13 +751,17 @@ sudo systemctl restart '$($cfg.Pm2Frontend)'
         $cmd = @"
 cd '$($cfg.FrontendDir)/web'
 if command -v pm2 >/dev/null 2>&1; then
-    pm2 delete '$($cfg.Pm2Frontend)' 2>/dev/null || true
-    if [ -f .next/standalone/server.js ]; then
-        echo '[INFO] using standalone mode (PM2)'
-        pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+    if pm2 describe '$($cfg.Pm2Frontend)' >/dev/null 2>&1; then
+        echo '[INFO] PM2 process exists, using reload (zero-downtime)'
+        pm2 reload '$($cfg.Pm2Frontend)' --update-env
     else
-        echo '[INFO] standalone not found, using next start (PM2)'
-        pm2 start "npx next start -p $($cfg.FrontendPort)" --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+        if [ -f .next/standalone/server.js ]; then
+            echo '[INFO] using standalone mode (PM2)'
+            pm2 start .next/standalone/server.js --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+        else
+            echo '[INFO] standalone not found, using next start (PM2)'
+            pm2 start "npx next start -p $($cfg.FrontendPort)" --name '$($cfg.Pm2Frontend)' --cwd '$($cfg.FrontendDir)/web'
+        fi
     fi
     pm2 save
 else
@@ -802,14 +829,58 @@ function Build-FrontendRemote {
     Write-Info "cleaning stale backup dirs that break Next.js build..."
     Invoke-RemoteFrontend "cd '$($cfg.FrontendDir)/web' && find . -maxdepth 1 -type d \( -name 'src.bak.*' -o -name 'src.backup.*' -o -name 'src_old*' \) -exec rm -rf {} + 2>/dev/null || true" | Out-Null
 
+    # 构建前备份关键产物，构建失败时恢复（避免 .next 被部分覆盖导致运行版本损坏）
+    Write-Info "backing up current build artifacts..."
+    Invoke-RemoteFrontend @"
+cd '$($cfg.FrontendDir)/web'
+_bak='.next/_pre_build_backup'
+rm -rf "`$_bak" 2>/dev/null || true
+mkdir -p "`$_bak"
+[ -f .next/BUILD_ID ] && cp .next/BUILD_ID "`$_bak/BUILD_ID"
+[ -f .next/routes-manifest.json ] && cp .next/routes-manifest.json "`$_bak/routes-manifest.json"
+[ -d .next/standalone ] && cp -a .next/standalone "`$_bak/standalone"
+[ -d .next/static ] && cp -a .next/static "`$_bak/static"
+echo '[OK] pre-build backup created'
+"@ | Out-Null
+
     # 注意：不使用 | tail 管道，避免吞掉 npm run build 的退出码
     Write-Info "building frontend..."
     $cmd = "cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build 2>&1; BUILD_EXIT=`$?; echo `"[deploy] npm run build exit code: `$BUILD_EXIT`"; exit `$BUILD_EXIT"
-    if (Invoke-RemoteFrontend $cmd) { return $true }
+    if (Invoke-RemoteFrontend $cmd) {
+        Invoke-RemoteFrontend "rm -rf '$($cfg.FrontendDir)/web/.next/_pre_build_backup' 2>/dev/null || true" | Out-Null
+        return $true
+    }
 
     Write-Warn "default build failed, trying webpack fallback..."
     $cmd = "cd '$($cfg.FrontendDir)/web' && ${coldCmd}npm run build:webpack 2>&1; BUILD_EXIT=`$?; echo `"[deploy] webpack build exit code: `$BUILD_EXIT`"; exit `$BUILD_EXIT"
-    return (Invoke-RemoteFrontend $cmd)
+    if (Invoke-RemoteFrontend $cmd) {
+        Invoke-RemoteFrontend "rm -rf '$($cfg.FrontendDir)/web/.next/_pre_build_backup' 2>/dev/null || true" | Out-Null
+        return $true
+    }
+
+    # 两种构建都失败 → 从备份恢复关键产物
+    Write-Warn "frontend build failed, restoring previous version from backup..."
+    Invoke-RemoteFrontend @"
+cd '$($cfg.FrontendDir)/web'
+_bak='.next/_pre_build_backup'
+if [ -d "`$_bak" ]; then
+    [ -f "`$_bak/BUILD_ID" ] && cp -f "`$_bak/BUILD_ID" .next/BUILD_ID
+    [ -f "`$_bak/routes-manifest.json" ] && cp -f "`$_bak/routes-manifest.json" .next/routes-manifest.json
+    if [ -d "`$_bak/standalone" ]; then
+        rm -rf .next/standalone
+        mv "`$_bak/standalone" .next/standalone
+    fi
+    if [ -d "`$_bak/static" ]; then
+        rm -rf .next/static
+        mv "`$_bak/static" .next/static
+    fi
+    rm -rf "`$_bak"
+    echo '[OK] restored previous running version from backup'
+else
+    echo '[WARN] no backup available to restore'
+fi
+"@ | Out-Null
+    return $false
 }
 
 # ── 构建产物完整性校验（返回 $true=通过，$false=失败）──
@@ -1001,6 +1072,282 @@ if [ "`$_ok" != true ]; then
 fi
 "@
     return (Invoke-RemoteFrontend $cmd)
+}
+
+# ═══════════════════════════════════════════════════════════════
+#  Blue/Green + Canary 部署（与 deploy.sh 对齐）
+# ═══════════════════════════════════════════════════════════════
+
+function Set-NginxCanaryWeight {
+    param([int]$ActivePort, [int]$CandidatePort, [int]$Weight)
+    # Weight: 0=全部走 active，100=全部走 candidate，中间值按 Nginx weight 分流
+    $cmd = @"
+NGINX_CONF=`$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \; 2>/dev/null | head -1)
+if [ -z "`$NGINX_CONF" ]; then
+    echo '[WARN] upstream backend not found in Nginx config'
+    exit 1
+fi
+
+if [ $Weight -eq 0 ]; then
+    cat > /tmp/_upstream_backend.conf <<'UPEOF'
+upstream backend {
+    server 127.0.0.1:${ActivePort};          # active
+    # server 127.0.0.1:${CandidatePort};     # candidate
+}
+UPEOF
+elif [ $Weight -ge 100 ]; then
+    cat > /tmp/_upstream_backend.conf <<'UPEOF'
+upstream backend {
+    # server 127.0.0.1:${ActivePort};        # active
+    server 127.0.0.1:${CandidatePort};        # candidate
+}
+UPEOF
+else
+    _aw=`$(( 100 - $Weight ))
+    cat > /tmp/_upstream_backend.conf <<UPEOF
+upstream backend {
+    server 127.0.0.1:${ActivePort} weight=`${_aw};     # active
+    server 127.0.0.1:${CandidatePort} weight=${Weight};  # candidate (canary)
+}
+UPEOF
+fi
+
+python3 -c "
+import re
+with open('`$NGINX_CONF') as f: content = f.read()
+with open('/tmp/_upstream_backend.conf') as f: new_block = f.read()
+content = re.sub(r'upstream\s+backend\s*\{[^}]*\}', new_block.strip(), content)
+with open('`$NGINX_CONF', 'w') as f: f.write(content)
+" && nginx -t 2>/dev/null && nginx -s reload
+rm -f /tmp/_upstream_backend.conf
+"@
+    return (Invoke-RemoteBackend $cmd)
+}
+
+function Write-CanaryState {
+    param([string]$State, [int]$Weight, [int]$StepIdx, [int]$Total)
+    $canaryFile = Join-Path $Script:SCRIPT_DIR ".deploy_canary.json"
+    $ts = Get-Date -Format "yyyy-MM-ddTHH:mm:ssZ"
+    $isActive = if ($State -eq "active") { "true" } else { "false" }
+    $cfg = $Script:CFG
+    @"
+{
+  "active": $isActive,
+  "current_weight": $Weight,
+  "step": $StepIdx,
+  "total_steps": $Total,
+  "started_at": "$ts",
+  "candidate_port": $($cfg.BackendCandidatePort),
+  "observe_seconds": $($cfg.CanaryObserveSeconds)
+}
+"@ | Set-Content -Path $canaryFile -Encoding UTF8
+}
+
+function Test-CandidateHealth {
+    param([int]$Port, [int]$MaxAttempts = 12)
+    for ($i = 1; $i -le $MaxAttempts; $i++) {
+        Invoke-RemoteBackend "curl -s --max-time 5 http://localhost:${Port}/api/v1/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get(""status"",""""))' 2>/dev/null || echo ''" | Out-Null
+        if ($Script:LAST_OUTPUT -match "ok") { return $true }
+        Write-Debug2 "candidate not ready (attempt $i/$MaxAttempts)..."
+        Start-Sleep -Seconds 5
+    }
+    return $false
+}
+
+function Stop-CandidateInstance {
+    Invoke-RemoteBackend "[[ -f /tmp/excelmanus-candidate.pid ]] && kill `$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true; rm -f /tmp/excelmanus-candidate.pid" | Out-Null
+}
+
+function Deploy-BackendBlueGreen {
+    $cfg = $Script:CFG
+    Write-Step "Deploy Backend (Blue/Green)"
+
+    Sync-Code -TargetHost $cfg.BackendHost -RemoteDir $cfg.BackendDir -Label "backend" -KeyPath $cfg.BackendSshKeyPath | Out-Null
+
+    if (-not $SkipDeps) {
+        Write-Info "installing Python deps..."
+        Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && if command -v uv &>/dev/null; then uv sync --all-extras -q && uv pip install 'httpx[socks]' -q 2>/dev/null || true; else source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q && pip install 'httpx[socks]' -q 2>/dev/null || true; fi" | Out-Null
+    }
+
+    # 1. 启动候选实例在影子端口
+    $cp = $cfg.BackendCandidatePort
+    Write-Info "starting candidate instance (port $cp)..."
+    Invoke-RemoteBackend @"
+cd '$($cfg.BackendDir)'
+nohup $($cfg.VenvDir)/bin/python -m uvicorn excelmanus.api:app \
+  --host 0.0.0.0 --port $cp --log-level info \
+  > /tmp/excelmanus-candidate.log 2>&1 &
+echo `$! > /tmp/excelmanus-candidate.pid
+sleep 3
+"@ | Out-Null
+
+    # 2. 健康检查
+    Write-Info "checking candidate health..."
+    if (-not (Test-CandidateHealth -Port $cp)) {
+        Write-Err "candidate health check failed, aborting Blue/Green deploy"
+        Stop-CandidateInstance
+        return $false
+    }
+    Write-Log "candidate health check passed"
+
+    # 3. 切换 Nginx upstream 到候选端口
+    Write-Info "switching Nginx upstream to candidate port $cp..."
+    Invoke-RemoteBackend @"
+NGINX_CONF=`$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \; 2>/dev/null | head -1)
+if [ -z "`$NGINX_CONF" ]; then
+    echo '[WARN] upstream backend not found'
+    exit 0
+fi
+sed -i 's|^\(\s*server.*:\)$($cfg.BackendPort)\(.*# active\)|# \1$($cfg.BackendPort)\2|' "`$NGINX_CONF"
+sed -i 's|^\s*#\s*\(server.*:\)$cp\(.*# candidate\)|    \1$cp\2|' "`$NGINX_CONF"
+nginx -t 2>/dev/null && nginx -s reload
+"@ | Out-Null
+
+    # 4. 等待旧连接排空
+    Write-Info "draining old connections ($($cfg.BackendDrainSeconds)s)..."
+    Start-Sleep -Seconds $cfg.BackendDrainSeconds
+
+    # 5. 下线旧实例
+    Write-Info "stopping old instance..."
+    if ($cfg.ServiceManager -eq "systemd") {
+        Invoke-RemoteBackend "sudo systemctl stop '$($cfg.Pm2Backend)' 2>/dev/null || true" | Out-Null
+    } else {
+        Invoke-RemoteBackend "pm2 delete '$($cfg.Pm2Backend)' 2>/dev/null || true" | Out-Null
+    }
+
+    # 6. 候选转正式
+    Write-Info "promoting candidate to production..."
+    Invoke-RemoteBackend @"
+[[ -f /tmp/excelmanus-candidate.pid ]] && kill `$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
+rm -f /tmp/excelmanus-candidate.pid
+sleep 2
+if command -v pm2 >/dev/null 2>&1; then
+    pm2 start '$($cfg.BackendDir)/$($cfg.VenvDir)/bin/python' \
+        --name '$($cfg.Pm2Backend)' --cwd '$($cfg.BackendDir)' \
+        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port $($cfg.BackendPort) --log-level info
+    pm2 save
+fi
+"@ | Out-Null
+
+    # 7. 恢复 Nginx upstream 到正式端口
+    Invoke-RemoteBackend @"
+NGINX_CONF=`$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \; 2>/dev/null | head -1)
+if [ -n "`$NGINX_CONF" ]; then
+    sed -i 's|^\s*#\s*\(server.*:\)$($cfg.BackendPort)\(.*# active\)|    \1$($cfg.BackendPort)\2|' "`$NGINX_CONF"
+    sed -i 's|^\(\s*server.*:\)$cp\(.*# candidate\)|# \1$cp\2|' "`$NGINX_CONF"
+    nginx -t 2>/dev/null && nginx -s reload
+fi
+"@ | Out-Null
+
+    Write-Log "Backend Blue/Green deploy complete"
+    return $true
+}
+
+function Deploy-BackendCanary {
+    $cfg = $Script:CFG
+    Write-Step "Deploy Backend (Canary)"
+
+    Sync-Code -TargetHost $cfg.BackendHost -RemoteDir $cfg.BackendDir -Label "backend" -KeyPath $cfg.BackendSshKeyPath | Out-Null
+
+    if (-not $SkipDeps) {
+        Write-Info "installing Python deps..."
+        Invoke-RemoteBackend "cd '$($cfg.BackendDir)' && if command -v uv &>/dev/null; then uv sync --all-extras -q && uv pip install 'httpx[socks]' -q 2>/dev/null || true; else source '$($cfg.VenvDir)/bin/activate' && pip install -e '.[all]' -q && pip install 'httpx[socks]' -q 2>/dev/null || true; fi" | Out-Null
+    }
+
+    $cp = $cfg.BackendCandidatePort
+    $bp = $cfg.BackendPort
+
+    # 1. 启动候选实例
+    Write-Info "starting candidate instance (port $cp)..."
+    Invoke-RemoteBackend @"
+cd '$($cfg.BackendDir)'
+nohup $($cfg.VenvDir)/bin/python -m uvicorn excelmanus.api:app \
+  --host 0.0.0.0 --port $cp --log-level info \
+  > /tmp/excelmanus-candidate.log 2>&1 &
+echo `$! > /tmp/excelmanus-candidate.pid
+sleep 3
+"@ | Out-Null
+
+    # 2. 健康检查
+    Write-Info "checking candidate health..."
+    if (-not (Test-CandidateHealth -Port $cp)) {
+        Write-Err "candidate health check failed, aborting canary deploy"
+        Stop-CandidateInstance
+        Write-CanaryState -State "inactive" -Weight 0 -StepIdx 0 -Total 0
+        return $false
+    }
+    Write-Log "candidate health check passed"
+
+    # 3. 按权重阶梯逐步切流
+    $weights = $cfg.CanarySteps -split "," | ForEach-Object { [int]$_.Trim() }
+    $totalSteps = $weights.Count
+    $stepIdx = 0
+
+    foreach ($cw in $weights) {
+        $stepIdx++
+        Write-Info "canary stage ${stepIdx}/${totalSteps}: routing ${cw}% to candidate..."
+        Write-CanaryState -State "active" -Weight $cw -StepIdx $stepIdx -Total $totalSteps
+
+        if (-not (Set-NginxCanaryWeight -ActivePort $bp -CandidatePort $cp -Weight $cw)) {
+            Write-Err "Nginx canary weight switch failed, rolling back to 0%"
+            Set-NginxCanaryWeight -ActivePort $bp -CandidatePort $cp -Weight 0 | Out-Null
+            Stop-CandidateInstance
+            Write-CanaryState -State "inactive" -Weight 0 -StepIdx 0 -Total 0
+            return $false
+        }
+
+        # 观察期：每 10 秒检查一次候选健康
+        if ($cw -lt 100) {
+            $obs = $cfg.CanaryObserveSeconds
+            Write-Info "observing ${obs}s..."
+            $elapsed = 0
+            while ($elapsed -lt $obs) {
+                Start-Sleep -Seconds 10
+                $elapsed += 10
+                Invoke-RemoteBackend "curl -s --max-time 5 http://localhost:${cp}/api/v1/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get(""status"",""""))' 2>/dev/null || echo ''" | Out-Null
+                if ($Script:LAST_OUTPUT -notmatch "ok") {
+                    Write-Err "canary stage ${stepIdx}: candidate health check failed (${elapsed}s), rolling back to 0%"
+                    Set-NginxCanaryWeight -ActivePort $bp -CandidatePort $cp -Weight 0 | Out-Null
+                    Stop-CandidateInstance
+                    Write-CanaryState -State "inactive" -Weight 0 -StepIdx 0 -Total 0
+                    return $false
+                }
+                Write-Debug2 "candidate healthy (${elapsed}/${obs}s, weight=${cw}%)"
+            }
+            Write-Log "canary stage $stepIdx observation passed (${cw}%)"
+        }
+    }
+
+    # 4. 100% 切流完成，候选转正式
+    Write-Info "canary complete, promoting candidate..."
+
+    Write-Info "draining old connections ($($cfg.BackendDrainSeconds)s)..."
+    Start-Sleep -Seconds $cfg.BackendDrainSeconds
+
+    Write-Info "stopping old instance..."
+    if ($cfg.ServiceManager -eq "systemd") {
+        Invoke-RemoteBackend "sudo systemctl stop '$($cfg.Pm2Backend)' 2>/dev/null || true" | Out-Null
+    } else {
+        Invoke-RemoteBackend "pm2 delete '$($cfg.Pm2Backend)' 2>/dev/null || true" | Out-Null
+    }
+
+    Invoke-RemoteBackend @"
+[[ -f /tmp/excelmanus-candidate.pid ]] && kill `$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
+rm -f /tmp/excelmanus-candidate.pid
+sleep 2
+if command -v pm2 >/dev/null 2>&1; then
+    pm2 start '$($cfg.BackendDir)/$($cfg.VenvDir)/bin/python' \
+        --name '$($cfg.Pm2Backend)' --cwd '$($cfg.BackendDir)' \
+        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port $bp --log-level info
+    pm2 save
+fi
+"@ | Out-Null
+
+    # 恢复 Nginx 到正式端口
+    Set-NginxCanaryWeight -ActivePort $bp -CandidatePort $cp -Weight 0 | Out-Null
+    Write-CanaryState -State "inactive" -Weight 0 -StepIdx 0 -Total 0
+    Write-Log "Backend Canary deploy complete"
+    return $true
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -1771,7 +2118,15 @@ try {
                 }
             }
 
-            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "backend")  { Deploy-Backend }
+            if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "backend") {
+                if ($Script:CFG.BackendCanary) {
+                    Deploy-BackendCanary
+                } elseif ($Script:CFG.BackendBlueGreen) {
+                    Deploy-BackendBlueGreen
+                } else {
+                    Deploy-Backend
+                }
+            }
 
             # 版本号同步（代码同步后、构建前）
             if ($Script:CFG.Mode -eq "full" -or $Script:CFG.Mode -eq "frontend") {

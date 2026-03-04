@@ -136,6 +136,7 @@ deploy/.deploy.lock
 deploy/.deploy_logs/
 deploy/.deploy_history
 deploy/.env.deploy
+!deploy/.env.deploy.example
 .deploy_meta.json
 
 RELEASE_v1.6.4.md
