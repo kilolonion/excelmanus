@@ -27,6 +27,55 @@ from excelmanus.channels.chunking import smart_chunk
 
 logger = logging.getLogger("excelmanus.channels.qq")
 
+# Markdown → 纯文本降级正则（编译一次复用）
+_RE_HTML_TAG = re.compile(r"<[^>]+>")
+_RE_FENCED_CODE = re.compile(r"```[\s\S]*?```")           # ```code```
+_RE_INLINE_CODE = re.compile(r"`([^`]+)`")                # `code`
+_RE_IMAGE = re.compile(r"!\[([^\]]*)\]\([^)]+\)")         # ![alt](url)
+_RE_LINK = re.compile(r"\[([^\]]*)\]\([^)]+\)")           # [text](url)
+_RE_BOLD_ITALIC = re.compile(r"\*{1,3}(.+?)\*{1,3}")      # *em* **bold** ***both***
+_RE_UNDERLINE_BOLD = re.compile(r"_{1,3}(.+?)_{1,3}")     # _em_ __bold__
+_RE_STRIKETHROUGH = re.compile(r"~~(.+?)~~")              # ~~del~~
+_RE_HEADING = re.compile(r"^#{1,6}\s+", re.MULTILINE)     # ### heading
+_RE_BLOCKQUOTE = re.compile(r"^>\s?", re.MULTILINE)       # > quote
+_RE_HR = re.compile(r"^[-*_]{3,}\s*$", re.MULTILINE)      # ---
+
+
+def _strip_markdown(text: str) -> str:
+    """将 Markdown + HTML 混合文本降级为纯文本。
+
+    处理顺序：围栏代码块（保护内容） → HTML 标签 → 行内代码 → 图片
+    → 链接 → 加粗/斜体/删除线 → 标题/引用/分割线。
+    """
+    # 1) 围栏代码块：先提取为占位符，保护内容不被后续正则破坏
+    _code_blocks: list[str] = []
+
+    def _extract_code(m: re.Match) -> str:
+        raw = m.group(0)
+        # 去掉 ``` 标记，保留代码内容（跳过语言标识行）
+        inner = raw.strip("`").strip()
+        content = inner.split("\n", 1)[-1] if "\n" in inner else inner
+        _code_blocks.append(content)
+        return f"\x00CODE{len(_code_blocks) - 1}\x00"
+
+    t = _RE_FENCED_CODE.sub(_extract_code, text)
+    # 2) 其余 Markdown/HTML 降级
+    t = _RE_HTML_TAG.sub("", t)
+    t = _RE_INLINE_CODE.sub(r"\1", t)
+    t = _RE_IMAGE.sub(r"[图片: \1]", t)
+    t = _RE_LINK.sub(r"\1", t)
+    t = _RE_BOLD_ITALIC.sub(r"\1", t)
+    t = _RE_UNDERLINE_BOLD.sub(r"\1", t)
+    t = _RE_STRIKETHROUGH.sub(r"\1", t)
+    t = _RE_HEADING.sub("", t)
+    t = _RE_BLOCKQUOTE.sub("", t)
+    t = _RE_HR.sub("───", t)
+    # 3) 还原代码块内容
+    for i, block in enumerate(_code_blocks):
+        t = t.replace(f"\x00CODE{i}\x00", block)
+    return t
+
+
 # QQ 消息长度上限（群/C2C 约 2000 字符，频道约 4000）
 QQ_MAX_MESSAGE_LEN = 2000
 # 被动回复窗口（秒）
@@ -35,6 +84,9 @@ QQ_PASSIVE_REPLY_WINDOW = 300
 # 发送重试配置（botpy 超时后返回 None，需应用层重试）
 QQ_SEND_MAX_RETRIES = 2
 QQ_SEND_RETRY_BASE_DELAY = 1.0  # 秒，指数退避基数
+
+# 被动回复 msg_seq 上限：超过此值后切换为主动消息，避免 QQ 服务端去重丢弃
+MAX_PASSIVE_SEQ = 5
 
 # chat_id 前缀常量
 PREFIX_GROUP = "group:"
@@ -131,6 +183,23 @@ class QQBotAdapter(ChannelAdapter):
         self._msg_seq[chat_id] = seq + 1
         return seq
 
+    def _get_reply_context(self, chat_id: str) -> tuple[str | None, int | None]:
+        """获取回复上下文 (msg_id, msg_seq)。
+
+        返回 (None, None) 表示应使用主动消息（窗口过期或 seq 超限）。
+        被动回复窗口内且 seq <= MAX_PASSIVE_SEQ 时返回有效值。
+        """
+        msg_id = self._get_reply_msg_id(chat_id)
+        if msg_id is None:
+            return None, None  # 窗口已过期
+
+        seq = self._msg_seq.get(chat_id, 1)
+        if seq > MAX_PASSIVE_SEQ:
+            return None, None  # seq 超限，降级为主动消息
+
+        self._msg_seq[chat_id] = seq + 1
+        return msg_id, seq
+
     # ── 生命周期 ──
 
     async def start(self) -> None:
@@ -146,6 +215,10 @@ class QQBotAdapter(ChannelAdapter):
     async def _send_to_chat(self, chat_id: str, content: str) -> dict | None:
         """向指定 chat_id 发送文本消息。根据前缀路由到对应 API。
 
+        自动选择被动回复或主动消息：
+        - msg_id 有效且 msg_seq <= MAX_PASSIVE_SEQ → 被动回复（带 msg_id）
+        - 否则 → 主动消息（不传 msg_id/msg_seq，受每日配额限制）
+
         botpy 在 HTTP 超时时静默返回 None（不抛异常），因此当结果为 None
         时进行应用层重试，使用指数退避避免雪崩。
         """
@@ -154,34 +227,40 @@ class QQBotAdapter(ChannelAdapter):
             return None
 
         chat_type, target_id = parse_chat_id(chat_id)
-        msg_id = self._get_reply_msg_id(chat_id)
-        msg_seq = self._next_msg_seq(chat_id)
+        msg_id, msg_seq = self._get_reply_context(chat_id)
+        is_passive = msg_id is not None
 
         last_exc: Exception | None = None
         for attempt in range(1 + QQ_SEND_MAX_RETRIES):
             try:
                 if chat_type == "group":
-                    result = await self._api.post_group_message(
-                        group_openid=target_id,
-                        msg_type=0,
-                        content=content,
-                        msg_id=msg_id,
-                        msg_seq=msg_seq,
-                    )
+                    kwargs: dict[str, Any] = {
+                        "group_openid": target_id,
+                        "msg_type": 0,
+                        "content": content,
+                    }
+                    if is_passive:
+                        kwargs["msg_id"] = msg_id
+                        kwargs["msg_seq"] = msg_seq
+                    result = await self._api.post_group_message(**kwargs)
                 elif chat_type == "c2c":
-                    result = await self._api.post_c2c_message(
-                        openid=target_id,
-                        msg_type=0,
-                        content=content,
-                        msg_id=msg_id,
-                        msg_seq=msg_seq,
-                    )
+                    kwargs = {
+                        "openid": target_id,
+                        "msg_type": 0,
+                        "content": content,
+                    }
+                    if is_passive:
+                        kwargs["msg_id"] = msg_id
+                        kwargs["msg_seq"] = msg_seq
+                    result = await self._api.post_c2c_message(**kwargs)
                 else:
-                    result = await self._api.post_message(
-                        channel_id=target_id,
-                        content=content,
-                        msg_id=msg_id,
-                    )
+                    kwargs = {
+                        "channel_id": target_id,
+                        "content": content,
+                    }
+                    if is_passive:
+                        kwargs["msg_id"] = msg_id
+                    result = await self._api.post_message(**kwargs)
 
                 if result is not None:
                     return result
@@ -190,14 +269,14 @@ class QQBotAdapter(ChannelAdapter):
                 if attempt < QQ_SEND_MAX_RETRIES:
                     delay = QQ_SEND_RETRY_BASE_DELAY * (2 ** attempt)
                     logger.warning(
-                        "QQ 发送消息返回空（可能超时），%0.1fs 后重试 (%d/%d) chat_id=%s",
-                        delay, attempt + 1, QQ_SEND_MAX_RETRIES, chat_id,
+                        "QQ 发送消息返回空（可能超时），%0.1fs 后重试 (%d/%d) chat_id=%s passive=%s",
+                        delay, attempt + 1, QQ_SEND_MAX_RETRIES, chat_id, is_passive,
                     )
                     await asyncio.sleep(delay)
                 else:
                     logger.error(
-                        "QQ 发送消息失败（重试耗尽） chat_id=%s type=%s",
-                        chat_id, chat_type,
+                        "QQ 发送消息失败（重试耗尽） chat_id=%s type=%s passive=%s",
+                        chat_id, chat_type, is_passive,
                     )
             except Exception as exc:
                 last_exc = exc
@@ -225,13 +304,18 @@ class QQBotAdapter(ChannelAdapter):
 
     async def send_markdown(self, chat_id: str, text: str) -> None:
         """发送 Markdown 消息。QQ 对 Markdown 支持有限，降级为纯文本。"""
-        # 剥离 HTML 标签（send_markdown 内容可能含 <b> 等 Telegram HTML 标记）
-        plain = re.sub(r"<[^>]+>", "", text)
+        plain = _strip_markdown(text)
         await self.send_text(chat_id, plain)
 
     async def send_file(self, chat_id: str, data: bytes, filename: str) -> None:
-        """发送文件。QQ 群/C2C 文件 API 需要 URL，抛出异常由 message_handler 回退到下载链接。"""
-        raise NotImplementedError("QQ 不支持直接发送文件，由调用方回退到下载链接")
+        """发送文件。QQ 群/C2C 不支持直接发送字节流文件。
+
+        抛出 NotImplementedError，由 message_handler 的 3 级回退处理：
+        1. send_file → 捕获异常
+        2. 发送预生成的短效下载链接
+        3. 提示用户通过 Web 界面下载
+        """
+        raise NotImplementedError("QQ 不支持直接发送文件字节流")
 
     async def send_approval_card(
         self,
@@ -316,7 +400,7 @@ class QQBotAdapter(ChannelAdapter):
         self, chat_id: str, text: str, reply_to: str | None = None,
     ) -> str:
         """发送 Markdown 并返回消息 ID（降级为纯文本）。"""
-        plain = re.sub(r"<[^>]+>", "", text)
+        plain = _strip_markdown(text)
         return await self.send_text_return_id(chat_id, plain, reply_to)
 
     async def send_progress(self, chat_id: str, stage: str, message: str) -> None:

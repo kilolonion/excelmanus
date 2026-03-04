@@ -271,6 +271,15 @@ class ChannelLauncher:
             if channel == "feishu":
                 await app.send_text(str(platform_id), text)
                 return True
+            if channel == "qq":
+                handler = self._handlers.get("qq")
+                if handler is None:
+                    logger.debug("QQ handler 不可用，无法发送通知")
+                    return False
+                import re as _re
+                plain = _re.sub(r"<[^>]+>", "", text)
+                await handler.adapter.send_text(str(platform_id), plain)
+                return True
             logger.debug("渠道 %s 暂不支持主动通知", channel)
             return False
         except Exception:
@@ -338,15 +347,15 @@ class ChannelLauncher:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout
         health_url = f"{api_url}/api/v1/health"
-        while loop.time() < deadline:
-            try:
-                async with httpx.AsyncClient(timeout=3) as client:
+        async with httpx.AsyncClient(timeout=3) as client:
+            while loop.time() < deadline:
+                try:
                     resp = await client.get(health_url)
                     if resp.status_code == 200:
                         return True
-            except Exception:
-                pass
-            await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
         logger.warning("等待 API 就绪超时（%ss），渠道 Bot 仍将尝试启动", timeout)
         return False
 
@@ -480,6 +489,7 @@ class ChannelLauncher:
             service_token=self._service_token,
             is_sandbox=is_sandbox,
             config_store=self._config_store,
+            event_bridge=self._event_bridge,
         )
         # 移除 botpy 添加的 root handler，防止日志重复输出
         for _h in _root.handlers:
@@ -518,6 +528,12 @@ class ChannelLauncher:
                     await qq_client.close()
             except Exception:
                 logger.debug("QQ Bot 清理异常", exc_info=True)
+            # 释放附件下载 HTTP 客户端
+            try:
+                from excelmanus.channels.qq.handlers import close_download_client
+                await close_download_client()
+            except Exception:
+                logger.debug("QQ 下载客户端清理异常", exc_info=True)
 
     async def _run_feishu(
         self,

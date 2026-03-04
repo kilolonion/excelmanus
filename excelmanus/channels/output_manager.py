@@ -16,7 +16,8 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-from excelmanus.channels.base import ChannelAdapter, ChannelCapabilities
+from excelmanus.channels.base import ChannelAdapter
+from excelmanus.channels.feishu.adapter import FEISHU_CARD_UPDATE_INTERVAL
 from excelmanus.channels.chunking import (
     degrade_tables,
     find_sentence_boundary,
@@ -485,7 +486,7 @@ class CardStreamStrategy(OutputStrategy):
         adapter: ChannelAdapter,
         chat_id: str,
         *,
-        update_interval: float = 0.5,
+        update_interval: float = FEISHU_CARD_UPDATE_INTERVAL,
     ) -> None:
         super().__init__(adapter, chat_id)
         self._update_interval = update_interval
@@ -718,7 +719,7 @@ class BatchSendStrategy(OutputStrategy):
 
     P2 增强：
     - 段落级渐进发送：遇到段落边界且缓冲 ≥ 阈值时即时发送
-    - 工具完成即时反馈：每个工具结束后发送状态通知
+    - 工具状态聚合：成功工具静默累积，仅失败工具即时通知
     - 保活消息携带进度信息
     """
 
@@ -733,7 +734,7 @@ class BatchSendStrategy(OutputStrategy):
         chat_id: str,
         *,
         send_interval: float = 1.0,
-        keepalive_interval: float = 240.0,
+        keepalive_interval: float = 150.0,
     ) -> None:
         super().__init__(adapter, chat_id)
         self._send_interval = send_interval
@@ -765,11 +766,11 @@ class BatchSendStrategy(OutputStrategy):
     async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
         self._tool_states.append({"name": tool_name, "status": "running", "summary": args_summary})
         self._tools_total += 1
-        # 首个工具开始时发送"处理中"提示
-        if len(self._tool_states) == 1 and not self._sent_keepalive:
-            await self._adapter.send_text(self._chat_id, "⏳ 正在处理，请稍候...")
-            self._sent_keepalive = True
+        # 不再发送独立的"处理中"提示（由 message_handler._delayed_hint 统一负责）
+        # 仅更新 keepalive 计时器，确保长时间运行时仍有保活消息
+        if self._tools_total == 1:
             self._last_keepalive_time = time.monotonic()
+        await self._check_keepalive()
 
     async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
         for tc in reversed(self._tool_states):
@@ -779,23 +780,27 @@ class BatchSendStrategy(OutputStrategy):
                     tc["error"] = error[:80]
                 break
         self._tools_done += 1
-        # P2b: 工具完成即时反馈
-        icon = "✅" if success else "❌"
-        status_word = "完成" if success else "失败"
-        detail = f": {error[:60]}" if error and not success else ""
-        await self._adapter.send_text(
-            self._chat_id, f"{icon} {tool_name} {status_word}{detail}",
-        )
-        self._last_keepalive_time = time.monotonic()
-        self._sent_keepalive = True
+        # 仅失败工具即时通知（重要反馈不能延迟）；成功工具静默累积到 finalize
+        if not success:
+            detail = f": {error[:60]}" if error else ""
+            await self._adapter.send_text(
+                self._chat_id, f"❌ {tool_name} 失败{detail}",
+            )
+            self._last_keepalive_time = time.monotonic()
+            self._sent_keepalive = True
 
     async def on_progress(self, stage: str, message: str) -> None:
         await self._check_keepalive()
 
     async def finalize(self) -> None:
+        # 如果有聚合的工具摘要尚未发送，先发送
+        await self._flush_tool_summary()
         # P2a: 发送残余缓冲
         remaining = "".join(self._progressive_buffer).strip()
         if remaining:
+            # 首次发送时内联工具摘要（之前渐进发送过的部分已不含摘要）
+            if not self._progressive_sent_parts and self._tool_states:
+                remaining = self._prepend_tool_summary(remaining)
             full = self._postprocess_text(remaining)
             chunks = smart_chunk(
                 full, self._max_len,
@@ -876,6 +881,32 @@ class BatchSendStrategy(OutputStrategy):
         self._last_progressive_send = now
         self._last_keepalive_time = now
         self._sent_keepalive = True
+
+    async def _flush_tool_summary(self) -> None:
+        """发送聚合的工具执行摘要（成功工具不单独通知，在此处汇总）。"""
+        if not self._tool_states:
+            return
+        # 如果已通过 _prepend_tool_summary 内联到文本中，不重复发送
+        if self._progressive_sent_parts or self.get_full_text():
+            return
+        # 无文本输出时才独立发送工具摘要
+        summary = self._build_tool_chain_summary()
+        if summary:
+            await self._adapter.send_text(self._chat_id, summary)
+
+    def _build_tool_chain_summary(self) -> str:
+        """构建工具链聚合摘要文本。"""
+        if not self._tool_states:
+            return ""
+        icons = {"done": "✅", "error": "❌", "running": "🔧"}
+        parts = []
+        for tc in self._tool_states:
+            icon = icons.get(tc["status"], "🔧")
+            if tc["status"] == "error" and tc.get("error"):
+                parts.append(f"{icon} {tc['name']}: {tc['error']}")
+            else:
+                parts.append(f"{icon} {tc['name']}")
+        return "⚙️ " + " → ".join(parts)
 
     async def _check_keepalive(self) -> None:
         """P2c: 保活消息携带进度信息。"""

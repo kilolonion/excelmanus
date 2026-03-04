@@ -11,7 +11,6 @@ from excelmanus.channels.base import (
     FileAttachment,
 )
 from excelmanus.channels.launcher import ChannelLauncher, parse_channels_config
-from excelmanus.channels.registry import ChannelRegistry
 
 __all__ = [
     "ChannelAdapter",
@@ -19,6 +18,5 @@ __all__ = [
     "ChannelUser",
     "FileAttachment",
     "ChannelLauncher",
-    "ChannelRegistry",
     "parse_channels_config",
 ]

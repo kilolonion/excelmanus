@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
 
@@ -33,6 +35,7 @@ class SessionStore:
         self._path = Path(store_path)
         self._ttl = ttl_seconds
         self._data: dict[str, dict[str, Any]] = {}
+        self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="session-save")
         self._load()
 
     def _load(self) -> None:
@@ -49,11 +52,28 @@ class SessionStore:
             self._data = {}
 
     def _save(self) -> None:
-        """持久化到磁盘。"""
+        """原子持久化到磁盘。
+
+        有运行中的事件循环时，IO 在后台线程执行以避免阻塞；
+        否则（测试/脚本场景）同步写入以保证即时可见。
+        """
+        snapshot = json.dumps(self._data, ensure_ascii=False, indent=2)
+        try:
+            asyncio.get_running_loop()
+            # 事件循环运行中 → 后台线程写入，不阻塞
+            self._executor.submit(self._do_write, snapshot)
+        except RuntimeError:
+            # 无事件循环（测试/脚本）→ 同步写入
+            self._do_write(snapshot)
+
+    def _do_write(self, snapshot: str) -> None:
+        """执行实际的文件写入（可在后台线程或主线程中调用）。"""
         try:
             self._path.parent.mkdir(parents=True, exist_ok=True)
-            with open(self._path, "w", encoding="utf-8") as f:
-                json.dump(self._data, f, ensure_ascii=False, indent=2)
+            tmp = self._path.with_suffix(".tmp")
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(snapshot)
+            tmp.replace(self._path)  # 原子替换（同文件系统内）
         except Exception:
             logger.warning("保存会话映射失败: %s", self._path, exc_info=True)
 

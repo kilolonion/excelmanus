@@ -99,6 +99,8 @@ class ExcelManusAPIClient:
         self,
         method: str,
         url: str,
+        *,
+        on_behalf_of: str | None = None,
         **kwargs,
     ) -> httpx.Response:
         """带指数退避重试的 HTTP 请求。
@@ -107,10 +109,13 @@ class ExcelManusAPIClient:
         - httpx.TransportError（连接重置、DNS 等）
         - httpx.TimeoutException
         - HTTP 429 / 502 / 503 / 504
+
+        Args:
+            on_behalf_of: 代理用户 ID，自动注入到 X-On-Behalf-Of 请求头。
         """
-        # 自动注入认证请求头
+        # 自动注入认证请求头（含 service_token + on_behalf_of）
         req_headers = kwargs.pop("headers", {}) or {}
-        req_headers.update(self._auth_headers())
+        req_headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         kwargs["headers"] = req_headers
 
         last_exc: Exception | None = None
@@ -424,14 +429,11 @@ class ExcelManusAPIClient:
         Args:
             decision: "approve" 或 "reject"。
         """
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/chat/{session_id}/approve",
+            on_behalf_of=on_behalf_of,
             json={"approval_id": approval_id, "decision": decision},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -447,14 +449,11 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """提交问答回答。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/chat/{session_id}/answer",
+            on_behalf_of=on_behalf_of,
             json={"question_id": question_id, "answer": answer},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -465,14 +464,11 @@ class ExcelManusAPIClient:
         self, session_id: str, *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """终止活跃聊天任务。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/chat/abort",
+            on_behalf_of=on_behalf_of,
             json={"session_id": session_id},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -484,14 +480,11 @@ class ExcelManusAPIClient:
         *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """向运行中的会话注入引导消息（不启动新 chat）。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/chat/{session_id}/guide",
+            on_behalf_of=on_behalf_of,
             json={"message": message},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -502,11 +495,9 @@ class ExcelManusAPIClient:
         self, *, on_behalf_of: str | None = None,
     ) -> list[dict[str, Any]]:
         """获取可用模型列表。携带 on_behalf_of 时按用户 allowed_models 过滤。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
-            "GET", f"{self.api_url}/api/v1/models", headers=headers or None,
+            "GET", f"{self.api_url}/api/v1/models",
+            on_behalf_of=on_behalf_of,
         )
         resp.raise_for_status()
         return resp.json().get("models", [])
@@ -515,14 +506,11 @@ class ExcelManusAPIClient:
         self, name: str, *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """切换活跃模型。携带 on_behalf_of 时持久化到用户级配置。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "PUT",
             f"{self.api_url}/api/v1/models/active",
+            on_behalf_of=on_behalf_of,
             json={"name": name},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -538,12 +526,10 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """添加模型配置。需要管理员权限。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/config/models/profiles",
+            on_behalf_of=on_behalf_of,
             json={
                 "name": name,
                 "model": model,
@@ -551,7 +537,6 @@ class ExcelManusAPIClient:
                 "api_key": api_key,
                 "description": description,
             },
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -560,13 +545,10 @@ class ExcelManusAPIClient:
         self, name: str, *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """删除模型配置。需要管理员权限。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "DELETE",
             f"{self.api_url}/api/v1/config/models/profiles/{name}",
-            headers=headers or None,
+            on_behalf_of=on_behalf_of,
         )
         resp.raise_for_status()
         return resp.json()
@@ -575,12 +557,9 @@ class ExcelManusAPIClient:
         self, *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """获取当前用户的 token 用量和配额信息。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "GET", f"{self.api_url}/api/v1/auth/me/usage",
-            headers=headers or None,
+            on_behalf_of=on_behalf_of,
         )
         resp.raise_for_status()
         return resp.json()
@@ -591,11 +570,9 @@ class ExcelManusAPIClient:
         self, *, on_behalf_of: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出会话。携带 on_behalf_of 时按用户过滤。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
-            "GET", f"{self.api_url}/api/v1/sessions", headers=headers or None,
+            "GET", f"{self.api_url}/api/v1/sessions",
+            on_behalf_of=on_behalf_of,
         )
         resp.raise_for_status()
         return resp.json().get("sessions", [])
@@ -604,14 +581,11 @@ class ExcelManusAPIClient:
         self, session_id: str, *, on_behalf_of: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出指定会话的用户轮次摘要。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "GET",
             f"{self.api_url}/api/v1/chat/turns",
+            on_behalf_of=on_behalf_of,
             params={"session_id": session_id},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json().get("turns", [])
@@ -625,18 +599,15 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """回退对话到指定用户轮次。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/chat/rollback",
+            on_behalf_of=on_behalf_of,
             json={
                 "session_id": session_id,
                 "turn_index": turn_index,
                 "rollback_files": rollback_files,
             },
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -646,14 +617,11 @@ class ExcelManusAPIClient:
         *, on_behalf_of: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出指定会话的操作历史。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "GET",
             f"{self.api_url}/api/v1/sessions/{session_id}/operations",
+            on_behalf_of=on_behalf_of,
             params={"limit": limit},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json().get("operations", [])
@@ -663,13 +631,10 @@ class ExcelManusAPIClient:
         *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """回滚指定操作。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/sessions/{session_id}/operations/{approval_id}/undo",
-            headers=headers or None,
+            on_behalf_of=on_behalf_of,
         )
         resp.raise_for_status()
         return resp.json()
@@ -681,14 +646,11 @@ class ExcelManusAPIClient:
         *, on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """列出指定会话的待应用 staged 文件。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "GET",
             f"{self.api_url}/api/v1/backup/list",
+            on_behalf_of=on_behalf_of,
             params={"session_id": session_id},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -701,14 +663,11 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """将 staged 文件应用回原始位置。files 为空时应用全部。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/backup/apply",
+            on_behalf_of=on_behalf_of,
             json={"session_id": session_id, "files": files},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -721,14 +680,11 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """丢弃 staged 文件。files 为空时丢弃全部。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/backup/discard",
+            on_behalf_of=on_behalf_of,
             json={"session_id": session_id, "files": files},
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -742,18 +698,15 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> dict[str, Any]:
         """撤销已应用的备份，恢复到 apply 前状态。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "POST",
             f"{self.api_url}/api/v1/backup/undo",
+            on_behalf_of=on_behalf_of,
             json={
                 "session_id": session_id,
                 "original_path": original_path,
                 "undo_path": undo_path,
             },
-            headers=headers or None,
         )
         resp.raise_for_status()
         return resp.json()
@@ -765,14 +718,11 @@ class ExcelManusAPIClient:
         *, on_behalf_of: str | None = None,
     ) -> tuple[bytes, str]:
         """下载工作区文件。返回 (content_bytes, filename)。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         resp = await self._request(
             "GET",
             f"{self.api_url}/api/v1/files/excel",
+            on_behalf_of=on_behalf_of,
             params={"path": file_path},
-            headers=headers or None,
         )
         resp.raise_for_status()
         filename = Path(file_path).name
@@ -784,15 +734,12 @@ class ExcelManusAPIClient:
         on_behalf_of: str | None = None,
     ) -> str | None:
         """生成文件的短效公开下载链接。返回 URL 或 None（失败时）。"""
-        headers = {}
-        if on_behalf_of:
-            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
         try:
             resp = await self._request(
                 "POST",
                 f"{self.api_url}/api/v1/files/download/link",
+                on_behalf_of=on_behalf_of,
                 json={"file_path": file_path, "user_id": user_id},
-                headers=headers or None,
             )
             resp.raise_for_status()
             return resp.json().get("url")
@@ -814,14 +761,11 @@ class ExcelManusAPIClient:
         # 优先尝试 HTTP 上传
         try:
             import io
-            headers = {}
-            if on_behalf_of:
-                headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
             resp = await self._request(
                 "POST",
                 f"{self.api_url}/api/v1/upload",
+                on_behalf_of=on_behalf_of,
                 files={"file": (filename, io.BytesIO(data))},
-                headers=headers or None,
             )
             if resp.status_code < 400:
                 result = resp.json()

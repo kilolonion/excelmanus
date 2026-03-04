@@ -16,6 +16,7 @@ import asyncio
 import io
 import json
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
 from excelmanus.channels.base import ChannelAdapter, ChannelCapabilities
@@ -62,6 +63,9 @@ class FeishuAdapter(ChannelAdapter):
         max_edits_per_minute=300,
         preferred_format="markdown",
     )
+
+    # 飞书 SDK 是同步阻塞的，使用独立线程池避免占满默认 asyncio 线程池
+    _io_pool = ThreadPoolExecutor(max_workers=4, thread_name_prefix="feishu-io")
 
     def __init__(self, app_id: str = "", app_secret: str = "", **kwargs) -> None:
         self.app_id = app_id
@@ -116,8 +120,9 @@ class FeishuAdapter(ChannelAdapter):
                 .build()
             ).build()
         try:
-            response = await asyncio.to_thread(
-                self._client.im.v1.message.create, request,
+            loop = asyncio.get_running_loop()
+            response = await loop.run_in_executor(
+                self._io_pool, self._client.im.v1.message.create, request,
             )
             if not response.success():
                 logger.error(
@@ -172,8 +177,9 @@ class FeishuAdapter(ChannelAdapter):
                     .file(file_obj)
                     .build()
                 ).build()
-            resp = await asyncio.to_thread(
-                self._client.im.v1.file.create, request,
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                self._io_pool, self._client.im.v1.file.create, request,
             )
             if not resp.success():
                 logger.error("飞书上传文件失败: code=%s msg=%s", resp.code, resp.msg)
@@ -322,8 +328,9 @@ class FeishuAdapter(ChannelAdapter):
                     .content(content)
                     .build()
                 ).build()
-            resp = await asyncio.to_thread(
-                self._client.im.v1.message.patch, request,
+            loop = asyncio.get_running_loop()
+            resp = await loop.run_in_executor(
+                self._io_pool, self._client.im.v1.message.patch, request,
             )
             if not resp.success():
                 logger.debug("飞书更新卡片失败: code=%s msg=%s", resp.code, resp.msg)

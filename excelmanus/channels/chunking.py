@@ -245,14 +245,6 @@ def _fix_unclosed_code_fence(chunk: str) -> str:
     return chunk
 
 
-def _prepend_code_fence(chunk: str, lang: str, fence_char: str = "`", fence_len: int = 3) -> str:
-    """在块首添加代码围栏续接标记。"""
-    prefix = fence_char * fence_len
-    if lang:
-        prefix += lang
-    return prefix + "\n" + chunk
-
-
 class SmartChunker:
     """将长文本按语义边界切分，保证每块 Markdown 合法。
 

@@ -175,7 +175,14 @@ def build_telegram_app(
             raw=update,
             chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
-        await handler.handle_message(msg)
+        try:
+            await handler.handle_message(msg)
+        except Exception:
+            logger.error("处理照片消息时异常", exc_info=True)
+            try:
+                await update.message.reply_text("❌ 处理照片时发生内部错误，请查看服务端日志")
+            except Exception:
+                pass
 
     async def _on_document(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not update.effective_user or not update.message or not update.message.document:
@@ -219,7 +226,14 @@ def build_telegram_app(
             raw=update,
             chat_type="group" if _ct in ("group", "supergroup") else _ct,
         )
-        await handler.handle_message(msg)
+        try:
+            await handler.handle_message(msg)
+        except Exception:
+            logger.error("处理文件消息时异常", exc_info=True)
+            try:
+                await update.message.reply_text("❌ 处理文件时发生内部错误，请查看服务端日志")
+            except Exception:
+                pass
 
     async def _on_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         query = update.callback_query
@@ -313,27 +327,3 @@ def build_telegram_app(
     app.add_error_handler(_on_error)
 
     return app, adapter, handler
-
-
-def run_telegram_bot(
-    token: str | None = None,
-    api_url: str | None = None,
-    allowed_users: set[str] | None = None,
-    service_token: str | None = None,
-) -> None:
-    """一键启动 Telegram Bot（阻塞运行）。"""
-    app, adapter, handler = build_telegram_app(
-        token=token,
-        api_url=api_url,
-        allowed_users=allowed_users,
-        service_token=service_token,
-    )
-
-    logger.info("ExcelManus Telegram Bot 启动中...")
-    logger.info("API: %s", handler.api.api_url)
-    if allowed_users:
-        logger.info("允许的用户: %s", allowed_users)
-    else:
-        logger.info("⚠️ 未设置用户限制，所有人可用")
-
-    app.run_polling(drop_pending_updates=True)

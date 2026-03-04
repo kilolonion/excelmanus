@@ -98,6 +98,14 @@ class MessageHandler:
     - 用户权限检查
     """
 
+    # origin_channel → 用户可见标签映射
+    _CHANNEL_LABELS: dict[str, str] = {
+        "web": "Web 端",
+        "telegram": "Telegram",
+        "qq": "QQ",
+        "feishu": "飞书",
+    }
+
     # 速率限制豁免命令（即使被限流也允许执行）
     _EXEMPT_COMMANDS: frozenset[str] = frozenset({"abort", "new", "start", "help"})
     # 未绑定用户仍可执行的命令（绑定流程必需）
@@ -136,13 +144,19 @@ class MessageHandler:
         # steer/guide 模式：跟踪每个用户的 in-flight task
         self._user_tasks: dict[str, asyncio.Task] = {}  # type: ignore[type-arg]
         # 渠道用户 → auth user_id 缓存（避免每条消息都查 DB）
-        self._auth_user_cache: dict[str, str | None] = {}
+        # 值为 (auth_uid, monotonic_timestamp)
+        self._auth_user_cache: dict[str, tuple[str | None, float]] = {}
+        self._AUTH_CACHE_TTL: float = 60.0  # 缓存有效期（秒），bind/unbind 会主动失效
         # EventBridge: 记录每个 chat/user 当前绑定到哪个 auth_user_id（用于解绑/重绑后的订阅切换）
         self._bridge_registered: dict[str, str] = {}
         # 待处理文件缓冲：用户发送附件后等待进一步指令
         self._pending_files: dict[str, list[PendingFile]] = {}
         # 群聊拒绝消息冷却：chat_id → 上次发送时间（monotonic）
         self._group_deny_last: dict[str, float] = {}
+        # 过期状态清理计数器：每 N 次 handle_message 触发一次全量清理
+        self._msg_count: int = 0
+        self._STALE_CLEANUP_INTERVAL: int = 200  # 每 200 条消息清理一次
+        self._STALE_TTL: float = 3600.0  # 1 小时无活动视为过期
 
     @property
     def _require_bind(self) -> bool:
@@ -271,7 +285,8 @@ class MessageHandler:
         if (now - last) < self._GROUP_DENY_COOLDOWN:
             return
         self._group_deny_last[chat_id] = now
-        asyncio.ensure_future(self.adapter.send_text(chat_id, text))
+        task = asyncio.create_task(self.adapter.send_text(chat_id, text))
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
 
     @staticmethod
     def _pending_key(chat_id: str, user_id: str) -> str:
@@ -298,6 +313,66 @@ class MessageHandler:
             self._pending_files.pop(k, None)
         if expired_files:
             logger.debug("清理 %d 个过期的待处理文件缓冲", len(expired_files))
+
+    def _cleanup_stale_state(self) -> None:
+        """清理长时间无活动用户的内存状态，防止 dict 无界增长。
+
+        清理对象：_user_locks（无 waiter 的锁）、_staged_cache、_last_apply、
+        _user_concurrency、_user_tasks（已完成）、_auth_user_cache、
+        _bridge_registered、_group_deny_last。
+        """
+        now = time.monotonic()
+        cleaned = 0
+
+        # _user_locks: 移除未锁定且无 waiter 的锁
+        stale = [k for k, lock in self._user_locks.items() if not lock.locked()]
+        for k in stale:
+            del self._user_locks[k]
+        cleaned += len(stale)
+
+        # _user_tasks: 移除已完成的 task
+        done = [k for k, t in self._user_tasks.items() if t.done()]
+        for k in done:
+            del self._user_tasks[k]
+        cleaned += len(done)
+
+        # _staged_cache / _last_apply: 直接清空（短期缓存，下次 /staged 会重建）
+        if self._staged_cache:
+            cleaned += len(self._staged_cache)
+            self._staged_cache.clear()
+        if self._last_apply:
+            cleaned += len(self._last_apply)
+            self._last_apply.clear()
+
+        # _group_deny_last: 移除超过冷却时间的条目
+        stale_deny = [
+            k for k, ts in self._group_deny_last.items()
+            if (now - ts) > self._GROUP_DENY_COOLDOWN
+        ]
+        for k in stale_deny:
+            del self._group_deny_last[k]
+        cleaned += len(stale_deny)
+
+        # _auth_user_cache: 清除过期条目（TTL 已过期的）
+        stale_auth = [
+            k for k, (_, ts) in self._auth_user_cache.items()
+            if (now - ts) > self._AUTH_CACHE_TTL * 10  # 10x TTL 才清理条目本身
+        ]
+        for k in stale_auth:
+            del self._auth_user_cache[k]
+        cleaned += len(stale_auth)
+
+        # _user_concurrency: 移除默认值条目（等于 _default_concurrency 的无需保留）
+        default_cc = [
+            k for k, v in self._user_concurrency.items()
+            if v == self._default_concurrency
+        ]
+        for k in default_cc:
+            del self._user_concurrency[k]
+        cleaned += len(default_cc)
+
+        if cleaned:
+            logger.debug("清理 %d 个过期的用户状态条目", cleaned)
 
     @property
     def _dynamic_allowed_users(self) -> set[str]:
@@ -380,7 +455,7 @@ class MessageHandler:
             )
             if session_id:
                 obo = self._resolve_on_behalf_of(msg.user.user_id)
-                asyncio.create_task(self._safe_abort(session_id, on_behalf_of=obo))
+                await self._safe_abort(session_id, on_behalf_of=obo)
             old_task.cancel()
             try:
                 await old_task
@@ -472,7 +547,14 @@ class MessageHandler:
         return False
 
     def _ensure_bridge_subscription(self, chat_id: str, user_id: str) -> None:
-        """为已绑定用户在 EventBridge 上注册回调（懒注册，每 chat 仅一次）。"""
+        """为已绑定用户在 EventBridge 上注册回调（懒注册，每 chat 仅一次）。
+
+        设计说明：匿名用户（channel_anon:*）不注册 EventBridge 订阅。
+        这是有意的限制——匿名用户在 Bot 与 Web 之间无法建立身份关联，
+        EventBridge 按 auth_user_id 路由事件，匿名 ID 包含渠道前缀
+        (如 ``channel_anon:telegram:12345``)，与 Web 端的匿名 ID 不同，
+        事件无法正确路由。用户需通过 /bind 绑定账号后才能获得跨渠道通知。
+        """
         if self._event_bridge is None:
             return
         auth_uid = self._resolve_auth_user_id(user_id)
@@ -494,14 +576,18 @@ class MessageHandler:
 
             支持事件类型：
             - approval / question：审批/问答卡片推送
+            - approval_resolved：审批已被其他渠道处理，清除本地待处理状态
             - chat_started：其他渠道开始聊天通知
             - chat_completed：其他渠道完成聊天通知（含回复摘要）
             """
             try:
                 # 过滤自身渠道发出的事件，防止回声
+                # 例外：approval_resolved 需要所有渠道处理（清除待处理状态）
                 origin = data.get("origin_channel", "")
-                if origin == self.adapter.name:
+                if origin == self.adapter.name and event_type != "approval_resolved":
                     return
+
+                origin_label = self._CHANNEL_LABELS.get(origin, origin or "其他渠道")
 
                 if event_type == "approval":
                     await self.adapter.send_approval_card(
@@ -533,38 +619,64 @@ class MessageHandler:
                         session_id=data.get("session_id", ""),
                         chat_id=_chat_id,
                     )
+                elif event_type == "approval_resolved":
+                    # 审批已被其他渠道处理，清除本地待处理状态
+                    pk = self._pending_key(_chat_id, _user_id)
+                    pending = self._pending.get(pk)
+                    resolved_id = data.get("approval_id", "")
+                    if (
+                        pending
+                        and pending.type == "approval"
+                        and (not resolved_id or pending.id == resolved_id)
+                    ):
+                        self._pending.pop(pk, None)
+                        await self.adapter.send_text(
+                            _chat_id, f"✅ 审批已由{origin_label}处理",
+                        )
                 elif event_type == "chat_started":
                     event_sid = data.get("session_id", "")
                     current_sid = self.sessions.get(
                         self.adapter.name, _chat_id, _user_id,
                     )
-                    # 自动同步：如果其他渠道使用了不同的会话，更新本地映射
-                    if event_sid and event_sid != current_sid:
+                    # 仅在本地无活跃会话时自动同步，避免意外切换用户正在使用的会话
+                    if event_sid and not current_sid:
                         self.sessions.set(
                             self.adapter.name, _chat_id, _user_id, event_sid,
                         )
+                    # 多群聊去重：仅对会话匹配或无会话的群发送通知，
+                    # 有不同活跃会话的群跳过（用户在那里做其他事）
+                    if current_sid and event_sid and current_sid != event_sid:
+                        return
                     preview = data.get("message_preview", "")
-                    hint = f"🌐 Web 端正在处理: {preview}" if preview else "🌐 Web 端正在处理请求..."
+                    hint = f"🌐 {origin_label}正在处理: {preview}" if preview else f"🌐 {origin_label}正在处理请求..."
                     await self.adapter.send_text(_chat_id, hint)
                 elif event_type == "chat_completed":
                     event_sid = data.get("session_id", "")
                     current_sid = self.sessions.get(
                         self.adapter.name, _chat_id, _user_id,
                     )
-                    # 自动同步会话 ID
-                    if event_sid and event_sid != current_sid:
+                    # 仅在本地无活跃会话时自动同步
+                    if event_sid and not current_sid:
                         self.sessions.set(
                             self.adapter.name, _chat_id, _user_id, event_sid,
                         )
+                    # 清除残留的待处理交互（审批/问答已随 chat 完成而隐式解决）
+                    pk = self._pending_key(_chat_id, _user_id)
+                    self._pending.pop(pk, None)
+
+                    # 多群聊去重：同上
+                    if current_sid and event_sid and current_sid != event_sid:
+                        return
+
                     reply_summary = data.get("reply_summary", "")
                     tool_count = data.get("tool_count", 0)
                     has_error = data.get("has_error", False)
                     # 构建通知消息
                     parts: list[str] = []
                     if has_error:
-                        parts.append("🌐 Web 端操作出现异常")
+                        parts.append(f"🌐 {origin_label}操作出现异常")
                     else:
-                        parts.append("🌐 Web 端已完成操作")
+                        parts.append(f"🌐 {origin_label}已完成操作")
                     if tool_count:
                         parts.append(f"（{tool_count} 个工具调用）")
                     if reply_summary:
@@ -583,6 +695,9 @@ class MessageHandler:
     async def handle_message(self, msg: ChannelMessage) -> None:
         """处理入站消息的统一入口。"""
         self._cleanup_expired_pending()
+        self._msg_count += 1
+        if self._msg_count % self._STALE_CLEANUP_INTERVAL == 0:
+            self._cleanup_stale_state()
         self._ensure_bridge_subscription(msg.chat_id, msg.user.user_id)
         if not self.check_user(msg.user.user_id):
             if self._rate_limiter.check_reject_cooldown(msg.user.user_id):
@@ -670,6 +785,8 @@ class MessageHandler:
             "bindstatus": self._cmd_bindstatus,
             "unbind": self._cmd_unbind,
             "admin": self._cmd_admin,
+            "approve": self._cmd_approve,
+            "reject": self._cmd_reject,
         }
         handler = handlers.get(cmd)
         if handler:
@@ -722,9 +839,9 @@ class MessageHandler:
             "  /bind — 获取绑定码（关联 Web 账号）\n"
             "  /bindstatus — 查看绑定状态\n"
             "  /unbind — 解除绑定\n\n"
-            "� 管理员\n"
+            "🔐 管理员\n"
             "  /admin — 查看/管理访问策略\n\n"
-            "� 支持的文件\n"
+            "📄 支持的文件\n"
             "  Excel: .xlsx .xls .csv\n"
             "  图片: .png .jpg .jpeg",
         )
@@ -820,6 +937,57 @@ class MessageHandler:
         except Exception as e:
             await self.adapter.send_text(msg.chat_id, f"❌ 终止失败: {e}")
 
+    async def _cmd_approve(self, msg: ChannelMessage) -> None:
+        """通过命令批准审批（QQ 等无 inline keyboard 的平台使用）。"""
+        await self._cmd_approval_decision(msg, "approve")
+
+    async def _cmd_reject(self, msg: ChannelMessage) -> None:
+        """通过命令拒绝审批（QQ 等无 inline keyboard 的平台使用）。"""
+        await self._cmd_approval_decision(msg, "reject")
+
+    async def _cmd_approval_decision(self, msg: ChannelMessage, decision: str) -> None:
+        """处理 /approve <id> 或 /reject <id> 命令。"""
+        args = msg.command_args
+        user_id = msg.user.user_id
+        pk = self._pending_key(msg.chat_id, user_id)
+
+        # 无参数时，尝试从 pending 中取 approval_id
+        if args:
+            approval_id = args[0]
+        else:
+            pending = self._pending.get(pk)
+            if pending and pending.type == "approval":
+                approval_id = pending.id
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    f"用法: /{decision} <approval_id>\n（或在有待处理审批时直接 /{decision}）",
+                )
+                return
+
+        session_id = self.sessions.get(self.adapter.name, msg.chat_id, user_id)
+        if not session_id:
+            await self.adapter.send_text(msg.chat_id, "⚠️ 当前没有活跃的会话")
+            return
+
+        result_text = "✅ 已批准" if decision == "approve" else "❌ 已拒绝"
+
+        # 清除 pending 状态
+        pending = self._pending.pop(pk, None)
+        if pending and pending.message_id:
+            await self.adapter.update_approval_result(
+                msg.chat_id, pending.message_id, result_text,
+            )
+
+        try:
+            await self.adapter.show_typing(msg.chat_id)
+            obo = self._resolve_on_behalf_of(user_id)
+            await self.api.approve(session_id, approval_id, decision, on_behalf_of=obo)
+            await self.adapter.send_text(msg.chat_id, result_text)
+        except Exception as e:
+            logger.exception("Approval command error for /%s", decision)
+            await self.adapter.send_text(msg.chat_id, f"❌ 处理审批失败: {e}")
+
     async def _cmd_model(self, msg: ChannelMessage) -> None:
         args = msg.command_args
         obo = self._resolve_on_behalf_of(msg.user.user_id)
@@ -856,6 +1024,14 @@ class MessageHandler:
             await self.adapter.send_text(msg.chat_id, f"❌ 出错了: {e}")
 
     async def _cmd_addmodel(self, msg: ChannelMessage) -> None:
+        # S1: 群聊中禁用此命令，避免 API key 明文暴露给其他群成员
+        if msg.chat_type in ("group", "channel"):
+            await self.adapter.send_text(
+                msg.chat_id,
+                "🔒 /addmodel 涉及 API Key，请在私聊中使用此命令。",
+            )
+            return
+
         args = msg.command_args
         if len(args) < 4:
             await self.adapter.send_text(
@@ -1349,9 +1525,11 @@ class MessageHandler:
             return
 
         chat_mode = self.sessions.get_mode(self.adapter.name, msg.chat_id, user_id)
-        # P4b: 动态处理提示
+        # P4b/P1b: 延迟处理提示 — 快速响应（<2s）时不发送，避免刷屏
         hint = self._PROCESSING_HINTS.get(chat_mode, self._PROCESSING_HINT_DEFAULT)
-        await self.adapter.send_text(msg.chat_id, hint)
+        hint_task = asyncio.create_task(
+            self._delayed_hint(msg.chat_id, hint, delay=2.0),
+        )
         session_id = self.sessions.get(self.adapter.name, msg.chat_id, user_id)
         try:
             result = await self._stream_chat_chunked(
@@ -1361,6 +1539,8 @@ class MessageHandler:
         except Exception as e:
             logger.exception("Chat error for user %s", user_id)
             await self.adapter.send_text(msg.chat_id, f"❌ 出错了: {type(e).__name__}: {e}")
+        finally:
+            hint_task.cancel()
 
     # ── 图片消息 ──
 
@@ -1656,6 +1836,16 @@ class MessageHandler:
             else:
                 await self.adapter.send_text(msg.chat_id, f"❌ 操作失败: {e}")
 
+    # ── 延迟处理提示 ──
+
+    async def _delayed_hint(self, chat_id: str, hint: str, delay: float = 2.0) -> None:
+        """延迟发送处理提示。快速响应（<delay 秒）完成时 task 被 cancel，不发送。"""
+        try:
+            await asyncio.sleep(delay)
+            await self.adapter.send_text(chat_id, hint)
+        except asyncio.CancelledError:
+            pass
+
     # ── 流式分块输出 ──
 
     async def _stream_chat_chunked(
@@ -1850,27 +2040,36 @@ class MessageHandler:
     def _resolve_auth_user_id(self, platform_user_id: str) -> str | None:
         """解析渠道用户对应的 auth user_id。
 
-        优先查缓存，未命中则查 ChannelBindManager。
-        未绑定用户返回 None（后端按匿名处理）。
+        带 TTL 缓存：命中且未过期时直接返回（跳过 DB 查询）。
+        bind/unbind 通过 invalidate_auth_cache() 主动失效，保证即时生效。
         """
         cache_key = f"{self.adapter.name}:{platform_user_id}"
-        cached_uid = self._auth_user_cache.get(cache_key)
+        now = time.monotonic()
+        cached = self._auth_user_cache.get(cache_key)
 
-        auth_uid: str | None = cached_uid
-        if self._bind_manager is not None:
-            # 始终回源检查，确保 Web 端解绑/换绑能在 Bot 侧即时生效。
-            auth_uid = self._bind_manager.check_bind_status(
-                self.adapter.name, platform_user_id,
-            )
+        # 缓存命中且未过期 → 直接返回
+        if cached is not None:
+            cached_uid, cached_ts = cached
+            if (now - cached_ts) < self._AUTH_CACHE_TTL:
+                return cached_uid
 
-        # 清理失效缓存（例如 Web 端解绑）
+        # 缓存未命中或已过期 → 回源查 DB
+        if self._bind_manager is None:
+            return None
+        auth_uid: str | None = self._bind_manager.check_bind_status(
+            self.adapter.name, platform_user_id,
+        )
+
+        # 未绑定 → 清理缓存
         if auth_uid is None:
             self._auth_user_cache.pop(cache_key, None)
             return None
 
-        # 仅在映射变化时写缓存并回填，避免重复 IO
-        if cached_uid != auth_uid:
-            self._auth_user_cache[cache_key] = auth_uid
+        # 写入/更新缓存
+        prev_uid = cached[0] if cached else None
+        self._auth_user_cache[cache_key] = (auth_uid, now)
+        # 绑定关系变化时回填 session store
+        if prev_uid != auth_uid:
             self.sessions.backfill_auth_user_id(
                 self.adapter.name, platform_user_id, auth_uid,
             )
