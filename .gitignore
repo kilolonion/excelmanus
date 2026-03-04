@@ -130,6 +130,11 @@ web/.next/
 web/.env.local
 
 # ==============================
+# 部署文档（含服务器信息）
+# ==============================
+ExcelManus_Deployment_Guide*.md
+
+# ==============================
 # 部署产物
 # ==============================
 deploy/.deploy.lock
@@ -156,3 +161,7 @@ backups/
 
 # Pyright 原始输出（baseline JSON 保留跟踪）
 .pyright-baseline.txt
+
+# 安装标记与打包产物
+.install_complete
+*.tar.gz
