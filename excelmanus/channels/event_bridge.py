@@ -1,16 +1,27 @@
 """EventBridge：跨渠道实时事件推送。
 
-当 Web 端发起的 chat 产生审批/问答事件时，通过 EventBridge 推送到已绑定的 Bot 渠道，
-使 Bot 用户能收到通知并操作。
+当任一渠道发起的 chat 产生审批/问答/状态事件时，通过 EventBridge 推送到已绑定的其他渠道，
+使用户能在任意渠道收到通知并操作。
 
 架构：
     api.py _on_event → EventBridge.notify(auth_user_id, event_type, data)
                          ↓
-    MessageHandler 注册的回调 → adapter.send_approval_card / send_question_card
+    MessageHandler 注册的回调 → adapter.send_approval_card / send_question_card / send_text
+
+支持事件类型：
+    - approval / question：审批/问答卡片推送（所有渠道接收）
+    - approval_resolved：审批已处理，清除其他渠道的待处理状态
+    - chat_started / chat_completed：跨渠道聊天状态通知（受会话去重过滤）
+
+已知限制：
+    - Bot→Web 方向无实时推送。Web 前端通过 SessionSync 轮询 (2-5s) 感知 Bot 发起的变更，
+      包括新会话发现 (15s 间隔) 和 inFlight 状态变化。如需改善可考虑 WebSocket 推送。
+    - 仅已绑定用户（auth_user_id）可接收事件，匿名用户不注册订阅。
 """
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Awaitable
@@ -95,7 +106,9 @@ class EventBridge:
         event_type: str,
         data: dict[str, Any],
     ) -> int:
-        """向指定用户的所有订阅回调推送事件。
+        """向指定用户的所有订阅回调并行推送事件。
+
+        使用 asyncio.gather 并行执行所有回调，避免慢渠道阻塞其他渠道的通知。
 
         Returns:
             成功投递的回调数量。
@@ -104,17 +117,37 @@ class EventBridge:
         if not subs:
             return 0
 
-        delivered = 0
-        for sub in list(subs):  # 复制列表，防止回调中修改
+        snapshot = list(subs)  # 复制列表，防止回调中修改
+
+        if len(snapshot) == 1:
+            # 单订阅快速路径：无需 gather 开销
             try:
-                await sub.callback(event_type, data)
-                delivered += 1
+                await snapshot[0].callback(event_type, data)
+                delivered = 1
             except Exception:
                 logger.warning(
                     "EventBridge: callback failed for user=%s channel=%s",
-                    auth_user_id, sub.channel,
+                    auth_user_id, snapshot[0].channel,
                     exc_info=True,
                 )
+                delivered = 0
+        else:
+            # 多订阅并行执行
+            results = await asyncio.gather(
+                *(sub.callback(event_type, data) for sub in snapshot),
+                return_exceptions=True,
+            )
+            delivered = 0
+            for sub, result in zip(snapshot, results):
+                if isinstance(result, BaseException):
+                    logger.warning(
+                        "EventBridge: callback failed for user=%s channel=%s: %s",
+                        auth_user_id, sub.channel, result,
+                        exc_info=(type(result), result, result.__traceback__),
+                    )
+                else:
+                    delivered += 1
+
         if delivered:
             logger.debug(
                 "EventBridge: notified user=%s event=%s delivered=%d",

@@ -564,15 +564,14 @@ class TestToolEndErrorDetail:
 
     @pytest.mark.asyncio
     async def test_qq_tool_end_success_no_error(self):
-        """BatchSendStrategy tool_call_end 成功时不显示错误。"""
+        """BatchSendStrategy tool_call_end 成功时静默（不单独发送通知）。"""
         adapter = _qq_adapter()
         strategy = BatchSendStrategy(adapter, "chat1")
         await strategy.on_tool_start("read_excel")
+        call_count_before = adapter.send_text.call_count
         await strategy.on_tool_end("read_excel", True, error="")
-        calls = adapter.send_text.call_args_list
-        last_text = calls[-1][0][1]
-        assert "完成" in last_text
-        assert ":" not in last_text  # no error detail
+        # 成功工具不发送独立消息
+        assert adapter.send_text.call_count == call_count_before
 
     @pytest.mark.asyncio
     async def test_card_tool_state_stores_error(self):

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 import os
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 
 from excelmanus.channels.base import ChannelAdapter, ChannelCapabilities
 from excelmanus.channels.chunking import smart_chunk

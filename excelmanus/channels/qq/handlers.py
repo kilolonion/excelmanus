@@ -60,6 +60,14 @@ def _get_download_client() -> httpx.AsyncClient:
     return _download_client
 
 
+async def close_download_client() -> None:
+    """关闭全局附件下载客户端，释放连接资源。应在 Bot 停止时调用。"""
+    global _download_client
+    if _download_client is not None and not _download_client.is_closed:
+        await _download_client.aclose()
+        _download_client = None
+
+
 async def _download_attachment(url: str) -> bytes | None:
     """从 QQ CDN 下载附件内容，带指数退避重试。失败时返回 None。"""
     if not url:
@@ -179,6 +187,7 @@ def build_qq_app(
     service_token: str | None = None,
     is_sandbox: bool = False,
     config_store: object | None = None,
+    event_bridge: object | None = None,
     timeout: int = 20,
 ):
     """构建 QQ Bot Client，注册所有事件 handler。
@@ -206,6 +215,7 @@ def build_qq_app(
         allowed_users=allowed_users,
         rate_limit_config=rate_limit_config,
         bind_manager=bind_manager,
+        event_bridge=event_bridge,
         config_store=config_store,
     )
 
@@ -300,6 +310,8 @@ async def _handle_group_message(
     user_openid = getattr(author, "member_openid", "") if author else ""
     if not user_openid:
         return
+    # botpy 群消息 author 可能携带 nickname
+    nickname = getattr(author, "nickname", "") or "" if author else ""
 
     # 提取附件（图片/文件）
     attachment_metas = _extract_attachments(message)
@@ -317,8 +329,8 @@ async def _handle_group_message(
         channel="qq",
         user=ChannelUser(
             user_id=user_openid,
-            username="",
-            display_name="",
+            username=nickname,
+            display_name=nickname,
         ),
         chat_id=chat_id,
         text=content,
@@ -343,6 +355,8 @@ async def _handle_c2c_message(
     user_openid = getattr(author, "user_openid", "") if author else ""
     if not user_openid:
         return
+    # botpy C2C author 可能携带 nickname
+    nickname = getattr(author, "nickname", "") or "" if author else ""
 
     msg_id = getattr(message, "id", "")
     content = getattr(message, "content", "") or ""
@@ -364,8 +378,8 @@ async def _handle_c2c_message(
         channel="qq",
         user=ChannelUser(
             user_id=user_openid,
-            username="",
-            display_name="",
+            username=nickname,
+            display_name=nickname,
         ),
         chat_id=chat_id,
         text=content,
@@ -430,32 +444,3 @@ async def _handle_guild_message(
         chat_type="channel",
     )
     await handler.handle_message(msg)
-
-
-def run_qq_bot(
-    app_id: str | None = None,
-    secret: str | None = None,
-    api_url: str | None = None,
-    allowed_users: set[str] | None = None,
-    service_token: str | None = None,
-) -> None:
-    """一键启动 QQ Bot（阻塞运行）。"""
-    _app_id = app_id or os.environ.get("EXCELMANUS_QQ_APPID", "")
-    _secret = secret or os.environ.get("EXCELMANUS_QQ_SECRET", "")
-
-    client, adapter, handler = build_qq_app(
-        app_id=_app_id,
-        secret=_secret,
-        api_url=api_url,
-        allowed_users=allowed_users,
-        service_token=service_token,
-    )
-
-    logger.info("ExcelManus QQ Bot 启动中...")
-    logger.info("API: %s", handler.api.api_url)
-    if allowed_users:
-        logger.info("允许的用户: %s", allowed_users)
-    else:
-        logger.info("⚠️ 未设置用户限制，所有人可用")
-
-    client.run(appid=_app_id, secret=_secret)

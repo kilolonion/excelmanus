@@ -442,12 +442,12 @@ class TestBatchSendStrategy:
         assert adapter.markdowns[0][1] == "Hello World"
 
     @pytest.mark.asyncio
-    async def test_tool_start_sends_processing_hint(self):
+    async def test_tool_start_no_standalone_hint(self):
+        """on_tool_start 不再发送独立"处理中"（由 _delayed_hint 统一负责）。"""
         adapter = FakeAdapter()
         strategy = BatchSendStrategy(adapter, "c1")
         await strategy.on_tool_start("read_excel")
-        assert len(adapter.texts) == 1
-        assert "处理" in adapter.texts[0][1]
+        assert len(adapter.texts) == 0  # 不发独立消息
 
     @pytest.mark.asyncio
     async def test_tool_summary_prepended(self):

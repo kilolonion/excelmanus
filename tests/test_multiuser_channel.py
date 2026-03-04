@@ -526,6 +526,7 @@ class TestMessageHandlerIdentity:
             session_store=store, bind_manager=bind_manager,
         )
 
+        handler._AUTH_CACHE_TTL = 0  # 禁用缓存 TTL，确保每次回源
         assert handler._resolve_auth_user_id("1") == "user-1"
         assert "telegram:1" in handler._auth_user_cache
 
@@ -552,6 +553,7 @@ class TestMessageHandlerIdentity:
             session_store=store, bind_manager=bind_manager,
         )
 
+        handler._AUTH_CACHE_TTL = 0  # 禁用缓存 TTL，确保每次回源
         assert handler._resolve_auth_user_id("1") == "user-1"
 
         # Simulate Web-side rebind to another account.
@@ -560,7 +562,8 @@ class TestMessageHandlerIdentity:
         tmp_db.link_channel_user("user-2", "telegram", "1")
 
         assert handler._resolve_auth_user_id("1") == "user-2"
-        assert handler._auth_user_cache.get("telegram:1") == "user-2"
+        cached = handler._auth_user_cache.get("telegram:1")
+        assert cached is not None and cached[0] == "user-2"
 
     @pytest.mark.asyncio
     async def test_resolve_unbound_returns_none(self, mock_adapter, tmp_path, bind_manager):

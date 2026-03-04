@@ -243,13 +243,17 @@ async def handle_feishu_card_action(
     if not callback_data or not chat_id or not user_id:
         return
 
+    # 飞书卡片回调不携带 chat_type，从 action 中推断：
+    # open_chat_id 以 "oc_" 开头的可能是群聊或私聊，无法区分。
+    # 保守策略：默认 private，避免误触群聊拒绝策略。
+    _card_chat_type = action.get("chat_type", "p2p")
     msg = ChannelMessage(
         channel="feishu",
         user=ChannelUser(user_id=user_id),
         chat_id=chat_id,
         callback_data=callback_data,
         raw=action,
-        chat_type="private",
+        chat_type="private" if _card_chat_type == "p2p" else "group",
     )
     try:
         await handler.handle_message(msg)

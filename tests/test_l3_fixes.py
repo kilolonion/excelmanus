@@ -170,29 +170,36 @@ class TestRedundantFileReadDetection:
         if warning:
             assert "已读取" not in warning
 
-    def test_list_sheets_counted_as_read(self) -> None:
-        """list_sheets 也应被计为读取。"""
+    def test_list_sheets_not_counted_as_read(self) -> None:
+        """list_sheets 是轻量元数据查询，不应被计为重复读取。"""
+        state = SessionState()
+        # 混合 list_sheets 和少量 read_excel，总读取不应超过阈值
+        state.record_tool_call_for_stuck_detection(
+            "read_excel", {"file_path": "test.xlsx", "sheet_name": "A"}
+        )
+        state.record_tool_call_for_stuck_detection(
+            "list_sheets", {"file_path": "test.xlsx"}
+        )
+        state.record_tool_call_for_stuck_detection(
+            "read_excel", {"file_path": "test.xlsx", "range": "A1:B5"}
+        )
+        state.record_tool_call_for_stuck_detection(
+            "list_sheets", {"file_path": "test.xlsx"}
+        )
+        # list_sheets 不计入，只有 2 次 read_excel，远低于阈值
+        warning = state.detect_stuck_pattern()
+        if warning:
+            assert "已读取" not in warning
+
+    def test_scan_excel_snapshot_counted_as_read(self) -> None:
+        """scan_excel_snapshot 是数据读取工具，应被计入。"""
         state = SessionState()
         for i in range(_REDUNDANT_READ_THRESHOLD):
             state.record_tool_call_for_stuck_detection(
-                "list_sheets", {"file_path": "test.xlsx"}
+                "read_excel" if i % 2 == 0 else "scan_excel_snapshot",
+                {"file_path": "test.xlsx", "sheet_name": f"Sheet{i}"},
             )
-        # list_sheets with same args will trigger Pattern 1 first
-        # So let's use different args
-        state2 = SessionState()
-        state2.record_tool_call_for_stuck_detection(
-            "read_excel", {"file_path": "test.xlsx", "sheet_name": "A"}
-        )
-        state2.record_tool_call_for_stuck_detection(
-            "list_sheets", {"file_path": "test.xlsx"}
-        )
-        state2.record_tool_call_for_stuck_detection(
-            "read_excel", {"file_path": "test.xlsx", "range": "A1:B5"}
-        )
-        state2.record_tool_call_for_stuck_detection(
-            "scan_excel_snapshot", {"file_path": "test.xlsx"}
-        )
-        warning = state2.detect_stuck_pattern()
+        warning = state.detect_stuck_pattern()
         assert warning is not None
         assert "已读取" in warning
 
@@ -215,6 +222,37 @@ class TestRedundantFileReadDetection:
         w2 = state.detect_stuck_pattern()
         assert w1 is not None
         assert w2 is None
+
+    def test_relaxed_tags_delay_redundant_read_trigger(self) -> None:
+        """复杂任务（cross_sheet 等）在默认阈值处不应触发。"""
+        state = SessionState()
+        for i in range(_REDUNDANT_READ_THRESHOLD):
+            state.record_tool_call_for_stuck_detection(
+                "read_excel", {"file_path": "test.xlsx", "sheet_name": f"Sheet{i}"}
+            )
+        warning = state.detect_stuck_pattern(task_tags=("cross_sheet",))
+        assert warning is None, "complex task should NOT trigger at default threshold"
+
+    def test_relaxed_tags_trigger_at_higher_threshold(self) -> None:
+        """复杂任务在放宽阈值处应正常触发。"""
+        state = SessionState()
+        for i in range(SessionState._RELAXED_REDUNDANT_READ_THRESHOLD):
+            state.record_tool_call_for_stuck_detection(
+                "read_excel", {"file_path": "test.xlsx", "sheet_name": f"Sheet{i}"}
+            )
+        warning = state.detect_stuck_pattern(task_tags=("cross_sheet",))
+        assert warning is not None
+        assert "已读取" in warning
+
+    def test_non_relaxed_tag_uses_default_threshold(self) -> None:
+        """非复杂标签仍使用默认阈值。"""
+        state = SessionState()
+        for i in range(_REDUNDANT_READ_THRESHOLD):
+            state.record_tool_call_for_stuck_detection(
+                "read_excel", {"file_path": "test.xlsx", "sheet_name": f"Sheet{i}"}
+            )
+        warning = state.detect_stuck_pattern(task_tags=("simple",))
+        assert warning is not None
 
 
 # ── L3-3: ObservationMasker Iteration Fallback ─────────────────

@@ -232,22 +232,19 @@ class TestBatchSendP2:
         assert len(strategy._progressive_sent_parts) == 0
 
     @pytest.mark.asyncio
-    async def test_p2b_tool_end_feedback(self):
-        """P2b: 工具完成后应发送即时状态反馈。"""
+    async def test_p2b_tool_end_success_silent(self):
+        """P1a: 成功工具不即时通知（静默累积到 finalize）。"""
         adapter = _qq_adapter()
         strategy = BatchSendStrategy(adapter, "chat1")
         await strategy.on_tool_start("read_excel")
         adapter.send_text.reset_mock()
         await strategy.on_tool_end("read_excel", success=True)
-        # Should have sent "✅ read_excel 完成"
-        adapter.send_text.assert_called()
-        text = adapter.send_text.call_args[0][1]
-        assert "read_excel" in text
-        assert "✅" in text
+        # 成功工具不发送独立消息
+        adapter.send_text.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_p2b_tool_end_failure_feedback(self):
-        """P2b: 工具失败时应发送失败反馈。"""
+        """P1a: 工具失败时应立即发送失败反馈。"""
         adapter = _qq_adapter()
         strategy = BatchSendStrategy(adapter, "chat1")
         await strategy.on_tool_start("write_excel")
@@ -256,6 +253,59 @@ class TestBatchSendP2:
         text = adapter.send_text.call_args[0][1]
         assert "❌" in text
         assert "失败" in text
+
+    @pytest.mark.asyncio
+    async def test_p1a_tool_chain_summary_in_finalize(self):
+        """P1a: finalize 时无文本输出则发送聚合工具摘要。"""
+        adapter = _qq_adapter()
+        strategy = BatchSendStrategy(adapter, "chat1")
+        await strategy.on_tool_start("read_excel")
+        await strategy.on_tool_end("read_excel", success=True)
+        await strategy.on_tool_start("write_cell")
+        await strategy.on_tool_end("write_cell", success=True)
+        adapter.send_text.reset_mock()
+        await strategy.finalize()
+        # 应发送聚合摘要
+        adapter.send_text.assert_called()
+        text = adapter.send_text.call_args[0][1]
+        assert "read_excel" in text
+        assert "write_cell" in text
+        assert "✅" in text
+        assert "→" in text
+
+    @pytest.mark.asyncio
+    async def test_p1a_tool_summary_not_sent_when_text_exists(self):
+        """P1a: 有文本输出时工具摘要内联到文本中，不独立发送。"""
+        adapter = _qq_adapter()
+        strategy = BatchSendStrategy(adapter, "chat1")
+        await strategy.on_tool_start("read_excel")
+        await strategy.on_tool_end("read_excel", success=True)
+        # 模拟有文本输出
+        await strategy.on_text_delta("分析结果如下...")
+        adapter.send_text.reset_mock()
+        adapter.send_markdown.reset_mock()
+        await strategy.finalize()
+        # _flush_tool_summary 不应独立发送（因为有文本）
+        # finalize 应通过 send_markdown 发送文本
+        adapter.send_markdown.assert_called()
+
+    @pytest.mark.asyncio
+    async def test_p1a_mixed_success_and_failure(self):
+        """P1a: 混合成功和失败工具 — 失败即时通知，成功静默。"""
+        adapter = _qq_adapter()
+        strategy = BatchSendStrategy(adapter, "chat1")
+        await strategy.on_tool_start("read_excel")
+        await strategy.on_tool_end("read_excel", success=True)
+        # 成功 → 无通知
+        call_count_after_success = adapter.send_text.call_count
+
+        await strategy.on_tool_start("write_cell")
+        await strategy.on_tool_end("write_cell", success=False, error="权限不足")
+        # 失败 → 即时通知
+        assert adapter.send_text.call_count > call_count_after_success
+        text = adapter.send_text.call_args[0][1]
+        assert "❌" in text
+        assert "权限不足" in text
 
     @pytest.mark.asyncio
     async def test_p2c_keepalive_with_progress(self):
