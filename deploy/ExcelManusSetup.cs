@@ -918,9 +918,14 @@ public class Engine
 
     private string CheckToolVersion(string displayName, string exe, string versionArg, string wingetId, string versionContains)
     {
+        return CheckToolVersion(displayName, exe, versionArg, wingetId, versionContains, true);
+    }
+
+    private string CheckToolVersion(string displayName, string exe, string versionArg, string wingetId, string versionContains, bool autoInstall)
+    {
         string ver = CmdRun(exe, versionArg);
         bool ok = !string.IsNullOrEmpty(ver) && (versionContains == null || ver.Contains(versionContains));
-        if (!ok)
+        if (!ok && autoInstall)
         {
             if (TryAutoInstall(displayName, wingetId))
             {
@@ -946,8 +951,11 @@ public class Engine
 
     private void RunCheckEnv()
     {
+        // Check-only mode: do NOT auto-install via winget (autoInstall=false)
+        // Auto-install only happens in RunDeploy()
+
         // Python (E2: try "python" first, then "py -3" as fallback)
-        string pyV = CheckToolVersion("Python", "python", "--version", "Python.Python.3.11", "Python 3");
+        string pyV = CheckToolVersion("Python", "python", "--version", "Python.Python.3.11", "Python 3", false);
         bool pyOk = pyV != null;
         if (pyOk) { _pythonExe = "python"; }
         else
@@ -964,7 +972,7 @@ public class Engine
         LogCk("Python", pyOk, pyV);
 
         // Node.js (includes npm) — E6: require major >= 18
-        string ndV = CheckToolVersion("Node.js", "node", "--version", "OpenJS.NodeJS.LTS", null);
+        string ndV = CheckToolVersion("Node.js", "node", "--version", "OpenJS.NodeJS.LTS", null, false);
         bool ndOk = ndV != null;
         if (ndOk)
         {
@@ -979,7 +987,7 @@ public class Engine
         LogCk("Node.js", ndOk, ndV);
 
         // Git
-        string gtV = CheckToolVersion("Git", "git", "--version", "Git.Git", null);
+        string gtV = CheckToolVersion("Git", "git", "--version", "Git.Git", null, false);
         bool gtOk = gtV != null;
         lock (_lock) { _checks["git"] = gtOk ? 1 : 2; _details["git"] = gtOk ? gtV.Replace("git version ", "v") : "未找到"; }
         LogCk("Git", gtOk, gtV);
