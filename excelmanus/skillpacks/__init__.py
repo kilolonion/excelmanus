@@ -24,6 +24,7 @@ from excelmanus.skillpacks.manager import (
     SkillpackNotFoundError,
 )
 from excelmanus.skillpacks.router import SkillRouter
+from excelmanus.skillpacks.user_skill_service import UserSkillService
 
 __all__ = [
     "SkillMatchResult",
@@ -43,4 +44,5 @@ __all__ = [
     "SkillpackNotFoundError",
     "FrontmatterError",
     "substitute",
+    "UserSkillService",
 ]

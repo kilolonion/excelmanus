@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import io
-import json
 import shutil
-import subprocess
 import zipfile
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -129,6 +127,19 @@ class ClawHubClient:
         self._prefer_cli = prefer_cli
         self._timeout = timeout
         self._cli_path: str | None | bool = None  # None=未检测, False=不可用
+        self._http_client: httpx.AsyncClient | None = None
+
+    def _ensure_client(self) -> httpx.AsyncClient:
+        """懒初始化共享 HTTP 连接池。"""
+        if self._http_client is None or self._http_client.is_closed:
+            self._http_client = httpx.AsyncClient(timeout=self._timeout)
+        return self._http_client
+
+    async def close(self) -> None:
+        """关闭共享 HTTP 连接池。"""
+        if self._http_client is not None and not self._http_client.is_closed:
+            await self._http_client.aclose()
+            self._http_client = None
 
     @property
     def registry_url(self) -> str:
@@ -257,6 +268,35 @@ class ClawHubClient:
             latest_version=latest.get("version") if latest else None,
         )
 
+    # ── 版本并行解析 ──────────────────────────────────
+
+    async def _resolve_version_parallel(self, slug: str) -> str:
+        """并行解析版本：resolve_version 和 get_skill 同时发起，取先到的有效结果。"""
+        logger.info("[clawhub] 并行解析版本 slug=%s ...", slug)
+
+        async def _via_resolve() -> str | None:
+            try:
+                info = await self.resolve_version(slug)
+                return info.latest_version
+            except ClawHubError as exc:
+                logger.debug("[clawhub] resolve_version 失败：%s", exc)
+                return None
+
+        async def _via_detail() -> str | None:
+            try:
+                detail = await self.get_skill(slug)
+                return detail.latest_version
+            except ClawHubError as exc:
+                logger.debug("[clawhub] get_skill 失败：%s", exc)
+                return None
+
+        results = await asyncio.gather(_via_resolve(), _via_detail())
+        version = results[0] or results[1]
+        if not version:
+            raise ClawHubNotFoundError(f"技能 `{slug}` 无可用版本")
+        logger.info("[clawhub] 并行解析完成 → %s", version)
+        return version
+
     # ── 下载并解压 ────────────────────────────────────
 
     async def download_and_extract(
@@ -287,29 +327,9 @@ class ClawHubClient:
         version: str | None,
         overwrite: bool,
     ) -> tuple[str, list[str]]:
-        # 先解析版本
+        # 并行解析版本：resolve_version 和 get_skill 同时发起
         if not version:
-            try:
-                logger.info("[clawhub] 解析版本 slug=%s ...", slug)
-                info = await self.resolve_version(slug)
-                version = info.latest_version
-                logger.info("[clawhub] resolve_version → %s", version)
-            except ClawHubError as exc:
-                logger.warning("[clawhub] resolve_version 失败，降级到 get_skill：%s", exc)
-                version = None
-            # fallback: 通过技能详情获取最新版本
-            if not version:
-                try:
-                    logger.info("[clawhub] 通过 get_skill 获取版本 slug=%s ...", slug)
-                    detail = await self.get_skill(slug)
-                    version = detail.latest_version
-                    logger.info("[clawhub] get_skill → latest_version=%s", version)
-                except ClawHubError as exc:
-                    logger.warning("[clawhub] get_skill 也失败：%s", exc)
-            if not version:
-                raise ClawHubNotFoundError(
-                    f"技能 `{slug}` 无可用版本"
-                )
+            version = await self._resolve_version_parallel(slug)
 
         skill_dir = dest_dir / slug
         if skill_dir.exists() and not overwrite:
@@ -440,15 +460,15 @@ class ClawHubClient:
         params: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.get(url, params=params)
-                if resp.status_code == 404:
-                    raise ClawHubNotFoundError(f"资源不存在：{url}")
-                if resp.status_code != 200:
-                    raise ClawHubNetworkError(
-                        f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
-                    )
-                return resp.json()
+            client = self._ensure_client()
+            resp = await client.get(url, params=params)
+            if resp.status_code == 404:
+                raise ClawHubNotFoundError(f"资源不存在：{url}")
+            if resp.status_code != 200:
+                raise ClawHubNetworkError(
+                    f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
+                )
+            return resp.json()
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             raise ClawHubNetworkError(f"网络请求失败：{exc}") from exc
 
@@ -459,15 +479,15 @@ class ClawHubClient:
         json_body: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.post(url, json=json_body)
-                if resp.status_code == 404:
-                    raise ClawHubNotFoundError(f"资源不存在：{url}")
-                if resp.status_code not in (200, 201):
-                    raise ClawHubNetworkError(
-                        f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
-                    )
-                return resp.json()
+            client = self._ensure_client()
+            resp = await client.post(url, json=json_body)
+            if resp.status_code == 404:
+                raise ClawHubNotFoundError(f"资源不存在：{url}")
+            if resp.status_code not in (200, 201):
+                raise ClawHubNetworkError(
+                    f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
+                )
+            return resp.json()
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             raise ClawHubNetworkError(f"网络请求失败：{exc}") from exc
 
@@ -478,15 +498,15 @@ class ClawHubClient:
         params: dict[str, str] | None = None,
     ) -> bytes:
         try:
-            async with httpx.AsyncClient(timeout=self._timeout) as client:
-                resp = await client.get(url, params=params)
-                if resp.status_code == 404:
-                    raise ClawHubNotFoundError(f"资源不存在：{url}")
-                if resp.status_code != 200:
-                    raise ClawHubNetworkError(
-                        f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
-                    )
-                return resp.content
+            client = self._ensure_client()
+            resp = await client.get(url, params=params)
+            if resp.status_code == 404:
+                raise ClawHubNotFoundError(f"资源不存在：{url}")
+            if resp.status_code != 200:
+                raise ClawHubNetworkError(
+                    f"HTTP {resp.status_code}：{url}{self._extract_error_detail(resp)}"
+                )
+            return resp.content
         except (httpx.TimeoutException, httpx.ConnectError) as exc:
             raise ClawHubNetworkError(f"网络请求失败：{exc}") from exc
 

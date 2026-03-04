@@ -97,6 +97,36 @@ class SkillpackLoader:
         logger.info("已加载 %d 个 Skillpack（全量发现后）", len(self._skillpacks))
         return dict(self._skillpacks)
 
+    def load_single(self, skill_dir: Path, *, source: str = "project") -> Skillpack | None:
+        """增量加载单个技能目录，merge 到已有 _skillpacks 中。
+
+        相比 load_all() 的全量 rglob 扫描，仅解析指定目录的 SKILL.md，
+        适用于 install/update 后的增量刷新。
+
+        Args:
+            skill_dir: 技能目录（包含 SKILL.md）。
+            source: 技能来源标识（"project" / "user"）。
+
+        Returns:
+            解析成功的 Skillpack，失败返回 None。
+        """
+        skill_file = Path(skill_dir) / "SKILL.md"
+        if not skill_file.exists():
+            logger.warning("load_single: SKILL.md 不存在 → %s", skill_file)
+            return None
+        try:
+            skillpack = self._parse_skillpack_file(
+                source=source,
+                skill_dir=Path(skill_dir),
+                skill_file=skill_file,
+            )
+        except SkillpackValidationError as exc:
+            logger.warning("load_single: 解析失败 → %s: %s", skill_file, exc)
+            return None
+        self._skillpacks[skillpack.name] = skillpack
+        logger.info("增量加载 Skillpack '%s'（来源=%s）", skillpack.name, source)
+        return skillpack
+
     def _iter_discovery_roots(self) -> list[tuple[str, Path]]:
         """返回按覆盖优先级排序的扫描根目录（低优先级在前）。"""
         roots: list[tuple[str, Path]] = []

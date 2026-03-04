@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import re
 import shutil
 from pathlib import Path
@@ -338,6 +339,9 @@ def _parse_github_url(url: str) -> tuple[str, str, str, str, str]:
     )
 
 
+_GITHUB_DOWNLOAD_CONCURRENCY = 5
+
+
 async def _fetch_github_tree_recursive(
     client: httpx.AsyncClient,
     owner: str,
@@ -348,21 +352,26 @@ async def _fetch_github_tree_recursive(
     *,
     max_files: int = 50,
     max_file_size: int = 512 * 1024,
+    _semaphore: asyncio.Semaphore | None = None,
 ) -> list[dict[str, str]]:
-    """递归获取 GitHub 目录下的所有文件内容。
+    """递归获取 GitHub 目录下的所有文件内容（并行下载）。
 
     Returns:
         list of {"path": relative_path, "content": text_content}
     """
-    results: list[dict[str, str]] = []
+    if _semaphore is None:
+        _semaphore = asyncio.Semaphore(_GITHUB_DOWNLOAD_CONCURRENCY)
+
+    # 分离文件和目录
+    file_items: list[tuple[str, str]] = []  # (rel_path, download_url)
+    dir_items: list[tuple[str, str]] = []   # (rel_path, api_url)
 
     for item in items:
-        if len(results) >= max_files:
+        if len(file_items) + len(dir_items) >= max_files:
             break
         item_name = item.get("name", "")
         item_type = item.get("type", "")
 
-        # 跳过忽略项
         if item_name.startswith(".") or item_name in _IGNORED_NAMES:
             continue
 
@@ -374,39 +383,60 @@ async def _fetch_github_tree_recursive(
                 logger.warning("跳过大文件 %s（%d bytes）", rel_path, size)
                 continue
             download_url = item.get("download_url", "")
-            if not download_url:
-                continue
+            if download_url:
+                file_items.append((rel_path, download_url))
+        elif item_type == "dir":
+            sub_url = item.get("url", "")
+            if sub_url:
+                dir_items.append((rel_path, sub_url))
+
+    # 并行下载文件
+    async def _download_one(rel_path: str, url: str) -> dict[str, str] | None:
+        async with _semaphore:
             try:
-                file_resp = await client.get(download_url)
+                file_resp = await client.get(url)
                 if file_resp.status_code == 200:
-                    results.append({
-                        "path": rel_path,
-                        "content": file_resp.text,
-                    })
+                    return {"path": rel_path, "content": file_resp.text}
             except Exception as exc:
                 logger.warning("下载文件 %s 失败：%s", rel_path, exc)
+            return None
 
-        elif item_type == "dir":
-            # 递归获取子目录
-            sub_url = item.get("url", "")
-            if not sub_url:
-                continue
+    file_tasks = [_download_one(rp, url) for rp, url in file_items]
+
+    # 并行获取子目录列表
+    async def _list_subdir(rel_path: str, api_url: str) -> list[dict[str, str]]:
+        async with _semaphore:
             try:
                 sub_resp = await client.get(
-                    sub_url,
+                    api_url,
                     headers={"Accept": "application/vnd.github.v3+json"},
                 )
                 if sub_resp.status_code == 200:
                     sub_items = sub_resp.json()
                     if isinstance(sub_items, list):
-                        sub_results = await _fetch_github_tree_recursive(
+                        remaining = max_files - len(file_items)
+                        return await _fetch_github_tree_recursive(
                             client, owner, repo, ref,
                             sub_items, rel_path,
-                            max_files=max_files - len(results),
+                            max_files=max(remaining, 0),
                             max_file_size=max_file_size,
+                            _semaphore=_semaphore,
                         )
-                        results.extend(sub_results)
             except Exception as exc:
                 logger.warning("获取子目录 %s 失败：%s", rel_path, exc)
+        return []
 
-    return results
+    dir_tasks = [_list_subdir(rp, url) for rp, url in dir_items]
+
+    # 并行执行所有 IO
+    all_results = await asyncio.gather(*file_tasks, *dir_tasks)
+
+    results: list[dict[str, str]] = []
+    for r in all_results[:len(file_tasks)]:
+        if r is not None:
+            results.append(r)
+    for r in all_results[len(file_tasks):]:
+        if isinstance(r, list):
+            results.extend(r)
+
+    return results[:max_files]

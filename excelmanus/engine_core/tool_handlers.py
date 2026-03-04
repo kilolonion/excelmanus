@@ -8,15 +8,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.logger import get_logger, log_tool_call
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from excelmanus.engine import AgentEngine
     from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
-    from excelmanus.events import EventCallback
+    from excelmanus.pipeline.models import PipelineConfig
+    from excelmanus.replica_spec import ReplicaSpec
 
 logger = get_logger("tool_handlers")
 
@@ -77,6 +81,392 @@ class SkillActivationHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
+# 技能管理处理器（SkillManagementHandler）
+# ---------------------------------------------------------------------------
+
+class SkillManagementHandler(BaseToolHandler):
+    """处理 manage_skills 工具调用：搜索/安装/卸载/查看技能。"""
+
+    _VERSION_CACHE_TTL = 300  # 5 分钟
+
+    def __init__(self, engine: "AgentEngine", dispatcher: "ToolDispatcher") -> None:
+        super().__init__(engine, dispatcher)
+        self._version_cache: dict[str, tuple[str, float]] = {}  # slug → (version, timestamp)
+
+    def _cache_version(self, slug: str, version: str | None) -> None:
+        """缓存 slug→version 映射。"""
+        if slug and version:
+            self._version_cache[slug] = (version, time.monotonic())
+
+    def _get_cached_version(self, slug: str) -> str | None:
+        """获取缓存的版本号，过期返回 None。"""
+        entry = self._version_cache.get(slug)
+        if entry is None:
+            return None
+        version, ts = entry
+        if time.monotonic() - ts > self._VERSION_CACHE_TTL:
+            self._version_cache.pop(slug, None)
+            return None
+        return version
+
+    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
+        return tool_name == "manage_skills"
+
+    async def handle(self, tool_name, tool_call_id, arguments, **kwargs):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        action = str(arguments.get("action", "")).strip()
+        dispatch = {
+            "search": self._handle_search,
+            "detail": self._handle_detail,
+            "install": self._handle_install,
+            "list": self._handle_list,
+            "uninstall": self._handle_uninstall,
+            "update": self._handle_update,
+        }
+        handler_fn = dispatch.get(action)
+        if handler_fn is None:
+            result_str = f"不支持的操作: {action}（支持 search/install/detail/list/uninstall/update）"
+            log_tool_call(logger, tool_name, arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        return await handler_fn(arguments)
+
+    # ── search ────────────────────────────────────────────
+
+    async def _handle_search(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        query = str(arguments.get("query", "")).strip()
+        if not query:
+            result_str = "参数错误: search 操作需要提供 query 参数。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        try:
+            results = await manager.clawhub_search(query, limit=10)
+        except Exception as exc:
+            result_str = f"ClawHub 搜索失败: {exc}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        if not results:
+            result_str = f"未找到与 '{query}' 相关的技能。"
+            log_tool_call(logger, "manage_skills", arguments, result=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=True)
+
+        lines = [f"找到 {len(results)} 个相关技能：\n"]
+        for r in results:
+            slug = r.get("slug", "")
+            display_name = r.get("display_name", slug)
+            summary = r.get("summary", "")
+            version = r.get("version", "")
+            line = f"  - {display_name} (slug={slug}, v{version})"
+            if summary:
+                line += f" — {summary}"
+            lines.append(line)
+        # P2: 缓存搜索结果中的版本号，供后续 install 跳过版本解析
+        for r in results:
+            self._cache_version(r.get("slug", ""), r.get("version"))
+
+        lines.append("\n可使用 action=install, slug=<slug> 安装感兴趣的技能。")
+        result_str = "\n".join(lines)
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── detail ────────────────────────────────────────────
+
+    async def _handle_detail(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        slug = str(arguments.get("slug", "")).strip()
+        if not slug:
+            result_str = "参数错误: detail 操作需要提供 slug 参数。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        try:
+            detail = await manager.clawhub_skill_detail(slug)
+        except Exception as exc:
+            result_str = f"获取技能详情失败: {exc}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        parts = [
+            f"技能: {detail.get('display_name', slug)}",
+            f"标识: {detail.get('slug', slug)}",
+            f"版本: {detail.get('latest_version', '未知')}",
+        ]
+        summary = detail.get("summary", "")
+        if summary:
+            parts.append(f"简介: {summary}")
+        tags = detail.get("tags")
+        if tags:
+            parts.append(f"标签: {', '.join(tags)}")
+        owner = detail.get("owner_display_name") or detail.get("owner_handle")
+        if owner:
+            parts.append(f"作者: {owner}")
+        changelog = detail.get("latest_changelog", "")
+        if changelog:
+            parts.append(f"更新日志: {changelog}")
+        stats = detail.get("stats")
+        if isinstance(stats, dict):
+            dl = stats.get("downloads")
+            if dl is not None:
+                parts.append(f"下载量: {dl}")
+
+        result_str = "\n".join(parts)
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── install ───────────────────────────────────────────
+
+    async def _handle_install(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        slug = str(arguments.get("slug", "")).strip()
+        if not slug:
+            result_str = "参数错误: install 操作需要提供 slug 参数（ClawHub 标识符或 GitHub URL）。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 安全门控
+        e = self._engine
+        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
+            result_str = "安全模式已开启，禁止安装技能。请关闭 external_safe_mode 后重试。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        overwrite = bool(arguments.get("overwrite", False))
+
+        # 自动检测来源：GitHub URL vs ClawHub slug
+        source = "github_url" if slug.startswith("http") else "clawhub"
+
+        # P2: 从缓存获取版本号，跳过版本解析
+        cached_version = self._get_cached_version(slug) if source == "clawhub" else None
+
+        try:
+            result = await manager.import_skillpack_async(
+                source=source, value=slug, actor="agent", overwrite=overwrite,
+                version=cached_version,
+            )
+        except Exception as exc:
+            exc_str = str(exc)
+            # 对冲突错误提供更友好的提示
+            if "已存在" in exc_str or "conflict" in exc_str.lower():
+                result_str = f"技能已存在: {exc_str}\n如需覆盖安装，请传入 overwrite=true。"
+            else:
+                result_str = f"安装失败: {exc_str}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 安装成功 → 失效工具缓存，使新技能出现在 activate_skill enum 中
+        e._tools_cache = None
+
+        name = result.get("name", slug)
+        desc = result.get("description", "")
+        version = result.get("version", "")
+        parts = [f"OK 技能 '{name}' 安装成功。"]
+        if version:
+            parts[0] = f"OK 技能 '{name}' (v{version}) 安装成功。"
+        if desc:
+            parts.append(f"描述: {desc}")
+        parts.append("现在可以通过 activate_skill 激活使用此技能。")
+        result_str = "\n".join(parts)
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── list ──────────────────────────────────────────────
+
+    async def _handle_list(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        skills = manager.list_skillpacks()
+        if not skills:
+            result_str = "当前没有已安装的技能。"
+            log_tool_call(logger, "manage_skills", arguments, result=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=True)
+
+        loaded_names: set[str] = set()
+        try:
+            loaded = self._engine._skill_resolver.get_loaded_skillpacks()
+            if loaded:
+                loaded_names = set(loaded.keys())
+        except Exception:
+            pass
+
+        lines = [f"已安装 {len(skills)} 个技能：\n"]
+        for s in skills:
+            name = s.get("name", "")
+            desc = s.get("description", "")
+            version = s.get("version", "")
+            line = f"  - {name}"
+            if version:
+                line += f" (v{version})"
+            if name in loaded_names:
+                line += " [已加载]"
+            if desc:
+                line += f" — {desc}"
+            lines.append(line)
+        result_str = "\n".join(lines)
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── uninstall ─────────────────────────────────────────
+
+    async def _handle_uninstall(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        slug = str(arguments.get("slug", "")).strip()
+        if not slug:
+            result_str = "参数错误: uninstall 操作需要提供 slug 参数（技能名称）。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 安全门控
+        e = self._engine
+        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
+            result_str = "安全模式已开启，禁止卸载技能。请关闭 external_safe_mode 后重试。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        try:
+            result = manager.delete_skillpack(name=slug, actor="agent")
+        except Exception as exc:
+            result_str = f"卸载失败: {exc}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        # 卸载成功 → 清理运行时状态
+        e._tools_cache = None
+        # 移除已激活的该技能（防止过期引用）
+        deleted_name = result.get("name", slug)
+        if hasattr(e, "_active_skills"):
+            e._active_skills = [
+                s for s in e._active_skills if s.name != deleted_name
+            ]
+        if hasattr(e, "_loaded_skill_names"):
+            e._loaded_skill_names.pop(deleted_name, None)
+        # 清理 ClawHub lockfile 残留条目
+        lockfile = getattr(manager, "_clawhub_lockfile", None)
+        if lockfile is not None:
+            try:
+                lockfile.remove(deleted_name)
+            except Exception:
+                logger.debug("清理 ClawHub lockfile 条目失败: %s", deleted_name, exc_info=True)
+
+        result_str = f"OK 技能 '{deleted_name}' 已卸载。"
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── update ─────────────────────────────────────────────
+
+    async def _handle_update(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        # 安全门控
+        e = self._engine
+        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
+            result_str = "安全模式已开启，禁止更新技能。请关闭 external_safe_mode 后重试。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        manager = self._get_manager()
+        if manager is None:
+            return self._manager_unavailable(arguments)
+
+        slug = str(arguments.get("slug", "")).strip()
+
+        # 无 slug → 检查可用更新
+        if not slug:
+            try:
+                updates = await manager.clawhub_check_updates()
+            except Exception as exc:
+                result_str = f"检查更新失败: {exc}"
+                log_tool_call(logger, "manage_skills", arguments, error=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+            if not updates:
+                result_str = "所有已安装的 ClawHub 技能均为最新版本。"
+                log_tool_call(logger, "manage_skills", arguments, result=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=True)
+
+            available = [u for u in updates if u.get("update_available")]
+            if not available:
+                result_str = "所有已安装的 ClawHub 技能均为最新版本。"
+                log_tool_call(logger, "manage_skills", arguments, result=result_str)
+                return _ToolExecOutcome(result_str=result_str, success=True)
+
+            lines = [f"发现 {len(available)} 个可更新技能：\n"]
+            for u in available:
+                lines.append(
+                    f"  - {u.get('slug')} : {u.get('installed_version', '?')} → {u.get('latest_version', '?')}"
+                )
+            lines.append("\n可使用 action=update, slug=<slug> 更新指定技能。")
+            result_str = "\n".join(lines)
+            log_tool_call(logger, "manage_skills", arguments, result=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=True)
+
+        # 有 slug → 执行更新
+        try:
+            results = await manager.clawhub_update(slug=slug)
+        except Exception as exc:
+            result_str = f"更新失败: {exc}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        e._tools_cache = None
+
+        if results and results[0].get("success"):
+            version = results[0].get("version", "")
+            result_str = f"OK 技能 '{slug}' 已更新到 v{version}。"
+        else:
+            error = results[0].get("error", "未知错误") if results else "未知错误"
+            result_str = f"更新失败: {error}"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        log_tool_call(logger, "manage_skills", arguments, result=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=True)
+
+    # ── helpers ───────────────────────────────────────────
+
+    def _get_manager(self):
+        """获取 SkillpackManager，不可用时返回 None。"""
+        try:
+            return self._engine._require_skillpack_manager()
+        except RuntimeError:
+            return None
+
+    def _manager_unavailable(self, arguments: dict[str, Any]):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        result_str = "技能管理器不可用。请检查技能系统是否已正确配置。"
+        log_tool_call(logger, "manage_skills", arguments, error=result_str)
+        return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+
+# ---------------------------------------------------------------------------
 # 委托处理器（DelegationHandler）
 # ---------------------------------------------------------------------------
 
@@ -87,7 +477,6 @@ class DelegationHandler(BaseToolHandler):
         return tool_name in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate")
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
         if tool_name == "list_subagents":
             return self._handle_list(arguments)
@@ -147,8 +536,6 @@ class DelegationHandler(BaseToolHandler):
             and sub_result.pending_approval_id is not None
         ):
             import asyncio
-            import json as _json
-            from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
 
             pending = e.approval.pending
             approval_id_value = sub_result.pending_approval_id
@@ -300,7 +687,8 @@ class FinishTaskHandler(BaseToolHandler):
 
         # ── 输出空值率前置检查 ────────────────────────────
         if finish_accepted and _has_write:
-            null_warning = self._check_output_null_rate(e)
+            import asyncio as _asyncio
+            null_warning = await _asyncio.to_thread(self._check_output_null_rate, e)
             if null_warning:
                 finish_accepted = False
                 result_str = null_warning
@@ -376,7 +764,7 @@ class FinishTaskHandler(BaseToolHandler):
             return None
 
         # 收集写入涉及的 (file_path, sheet) 对
-        guard = getattr(engine, "_guard", None)
+        guard = getattr(engine, "_file_access_guard", None)
         if guard is None:
             return None
 
@@ -551,9 +939,7 @@ class SuggestModeSwitchHandler(BaseToolHandler):
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         import asyncio
-        import json as _json
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-        from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
 
         e = self._engine
         target_mode = str(arguments.get("target_mode", "write")).strip()
@@ -741,12 +1127,8 @@ class ExtractTableSpecHandler(BaseToolHandler):
         self, tool_name, tool_call_id, arguments, *,
         tool_scope=None, on_event=None, iteration=0, route_result=None,
     ):
-        from datetime import datetime, timezone
-        from pathlib import Path
 
-        from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
-        from excelmanus.pipeline import PipelineConfig, PipelinePauseError, ProgressivePipeline
-        from excelmanus.pipeline.batch import ProgressivePipelineBatch, BatchPipelineConfig
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
         file_path = arguments.get("file_path", "")
         file_paths = arguments.get("file_paths", [])
@@ -1052,7 +1434,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
         from excelmanus.events import EventType, ToolCallEvent
 
         e = self._engine
-        dispatcher = self._dispatcher
+        _dispatcher = self._dispatcher
 
         # 发射进度事件
         if on_event:
@@ -1250,7 +1632,7 @@ class ExtractTableSpecHandler(BaseToolHandler):
 
         # 输出目录
         out_path = Path(output_path)
-        output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
+        _output_dir = str(out_path.parent) if out_path.parent != Path(".") else "outputs"
 
         # 批量管线配置
         batch_config = BatchPipelineConfig.from_pipeline_config(PipelineConfig(
