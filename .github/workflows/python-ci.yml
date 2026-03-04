@@ -35,6 +35,55 @@ jobs:
             tests/test_session_mcp_lifecycle.py \
             tests/test_api.py
 
+  type-check:
+    runs-on: ubuntu-latest
+    # PR 时只检查变更文件；push 到 main 时全量检查
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          version: "latest"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install dependencies
+        run: uv sync --all-extras --dev
+
+      - name: Install pyright
+        run: uv run pip install pyright
+
+      - name: Determine files to check
+        id: files
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            # PR: 只检查本次变更的 .py 文件（限定 excelmanus/ 目录）
+            CHANGED=$(git diff --name-only --diff-filter=ACMR origin/${{ github.base_ref }}...HEAD -- 'excelmanus/**/*.py' | tr '\n' ' ')
+            if [ -z "$CHANGED" ]; then
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              echo "No Python files changed in excelmanus/, skipping type check."
+            else
+              echo "skip=false" >> "$GITHUB_OUTPUT"
+              echo "targets=$CHANGED" >> "$GITHUB_OUTPUT"
+              echo "Checking changed files: $CHANGED"
+            fi
+          else
+            # push to main: 全量检查
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+            echo "targets=excelmanus/" >> "$GITHUB_OUTPUT"
+            echo "Full type check on excelmanus/"
+          fi
+
+      - name: Run pyright
+        if: steps.files.outputs.skip != 'true'
+        run: |
+          uv run pyright ${{ steps.files.outputs.targets }}
+
   frontend-build:
     runs-on: ubuntu-latest
     steps:

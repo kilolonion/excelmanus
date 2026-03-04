@@ -1,0 +1,52 @@
+{
+  "include": ["excelmanus"],
+  "exclude": [
+    "**/__pycache__",
+    "tests",
+    "scripts",
+    "deploy",
+    "skills"
+  ],
+  "pythonVersion": "3.12",
+  "pythonPlatform": "All",
+  "typeCheckingMode": "basic",
+
+  // ── 高信号：保持 error ──
+  "reportMissingImports": "warning",
+  "reportUndefinedVariable": "error",
+  "reportOptionalOperand": "warning",
+  "reportOptionalCall": "error",
+  "reportOptionalIterable": "warning",
+  "reportCallIssue": "warning",
+  "reportDuplicateImport": "error",
+
+  // ── 中信号：降为 warning（逐步收紧） ──
+  "reportAttributeAccessIssue": "warning",
+  "reportArgumentType": "warning",
+  "reportReturnType": "warning",
+  "reportOptionalMemberAccess": "warning",
+  "reportOptionalSubscript": "warning",
+  "reportOperatorIssue": "warning",
+  "reportIndexIssue": "warning",
+  "reportGeneralTypeIssues": "warning",
+  "reportAssignmentType": "warning",
+
+  // ── 低信号 / 清理类：warning ──
+  "reportUnusedImport": "warning",
+  "reportUnusedVariable": "warning",
+
+  // ── 已知存量问题，暂为 warning（逐步收紧） ──
+  "reportRedeclaration": "warning",
+  "reportInvalidTypeForm": "warning",
+  "reportPrivateImportUsage": "warning",
+
+  // ── 噪声太高，暂时关闭 ──
+  "reportMissingTypeStubs": false,
+  "reportPrivateUsage": "none",
+  "reportUnknownMemberType": "none",
+  "reportUnknownParameterType": "none",
+  "reportUnknownVariableType": "none",
+  "reportUnknownArgumentType": "none",
+  "reportMissingTypeArgument": "none",
+  "reportUntypedBaseClass": "none"
+}

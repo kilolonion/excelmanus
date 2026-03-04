@@ -78,6 +78,24 @@ export default function DeployPanel({
     }
   }, [deployError, view]);
 
+  // Safety net: deploying finished but neither running nor error → implicit failure
+  const [deployStarted, setDeployStarted] = useState(false);
+  useEffect(() => {
+    if (view === "deploying") setDeployStarted(true);
+  }, [view]);
+  useEffect(() => {
+    if (deployStarted && view === "deploying" && !running && progress > 0) {
+      // Give a short grace period before declaring implicit failure
+      const t = setTimeout(() => {
+        // Re-check: still in deploying view, not running, no explicit error
+        if (!running && view === "deploying") {
+          setView("failed");
+        }
+      }, 5000);
+      return () => clearTimeout(t);
+    }
+  }, [deployStarted, view, running, progress]);
+
   // Countdown redirect
   useEffect(() => {
     if (!redirectActive) return;
@@ -197,30 +215,30 @@ export default function DeployPanel({
           )}
 
           {/* Failed */}
-      {view === "failed" && (
-        <div>
-          <div className="py-4 text-center">
-            <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-red-50">
-              <IconStop size={32} className="text-[var(--em-error)]" />
+          {view === "failed" && (
+            <div>
+              <div className="py-4 text-center">
+                <div className="mx-auto mb-3 flex h-14 w-14 items-center justify-center rounded-full bg-em-red/[.06]">
+                  <IconStop size={32} className="text-em-red" />
+                </div>
+                <div className="mb-1.5 text-lg font-bold text-em-red">
+                  部署失败
+                </div>
+                <div className="mb-4 text-sm text-em-t3">
+                  {deployError || "未知错误，请查看日志详情"}
+                </div>
+                <div className="flex justify-center gap-2">
+                  <button onClick={startDeploy} className="btn-primary flex items-center gap-1.5 px-5 py-2.5 text-sm">
+                    <IconRefresh size={14} /> 重新部署
+                  </button>
+                  <button onClick={onBack} className="btn-secondary flex items-center gap-1.5 px-5 py-2.5 text-sm">
+                    <IconBack size={14} /> 返回
+                  </button>
+                </div>
+              </div>
+              <LogConsole logs={logs} />
             </div>
-            <div className="mb-1.5 text-lg font-bold text-[var(--em-error)]">
-              部署失败
-            </div>
-            <div className="mb-4 text-sm text-[var(--muted-fg)]">
-              {deployError || "未知错误，请查看日志详情"}
-            </div>
-            <div className="flex justify-center gap-2">
-              <button onClick={startDeploy} className="auth-btn-primary flex items-center gap-1.5 px-5 py-2.5 text-sm">
-                <IconRefresh size={14} /> 重新部署
-              </button>
-              <button onClick={onBack} className="auth-btn-secondary flex items-center gap-1.5 px-5 py-2.5 text-sm">
-                <IconBack size={14} /> 返回
-              </button>
-            </div>
-          </div>
-          <LogConsole logs={logs} />
-        </div>
-      )}
+          )}
 
       {/* Success */}
           {view === "success" && (

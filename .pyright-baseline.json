@@ -1,0 +1,31 @@
+{
+  "generated": "2026-03-04",
+  "pyright_version": "1.1.408",
+  "typeCheckingMode": "basic",
+  "summary": {
+    "errors": 0,
+    "warnings": 880,
+    "informations": 0
+  },
+  "fixed": {
+    "reportUndefinedVariable": "41→0: added TYPE_CHECKING imports across 10 files",
+    "reportMissingImports_excelmanus_types": "fixed wrong module path: excelmanus.types → excelmanus.engine_types",
+    "HTTPException_runtime_bug": "api.py: added missing HTTPException import (was a real NameError risk)"
+  },
+  "remaining_warnings_by_priority": {
+    "high_value_tighten_next": {
+      "reportOptionalMemberAccess": "86 — real None-safety gaps",
+      "reportOptionalOperand": "27 — openpyxl range_boundaries() Optional ints",
+      "reportCallIssue": "17 — mostly type stub mismatches"
+    },
+    "cleanup": {
+      "reportUnusedImport": "174 — dead import cleanup candidates",
+      "reportUnusedVariable": "43 — dead variable cleanup"
+    },
+    "low_priority": {
+      "reportAttributeAccessIssue": "~250 — many from dynamic patterns",
+      "reportArgumentType": "~180 — Pydantic/generic false positives"
+    }
+  },
+  "ci_strategy": "0 errors now. CI gate is clean. Tighten by promoting warning→error categories one at a time."
+}
