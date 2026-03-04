@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 import json
-import random
-import re as _re
-from dataclasses import dataclass, field, replace
+from dataclasses import replace
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, Any, Awaitable, Callable, Literal
+from typing import TYPE_CHECKING, Any
 
 import openai
 
@@ -23,19 +22,12 @@ from excelmanus.providers import create_client
 from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.hooks import (
-    HookAgentAction,
-    HookCallContext,
     HookDecision,
     HookEvent,
-    HookResult,
     SkillHookRunner,
 )
-from excelmanus.logger import get_logger, log_tool_call
+from excelmanus.logger import get_logger
 from excelmanus.memory import ConversationMemory, TokenCounter
-from excelmanus.plan_mode import (
-    parse_plan_markdown,
-    utc_now_iso,
-)
 from excelmanus.interaction import InteractionRegistry, DEFAULT_INTERACTION_TIMEOUT
 from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
 from excelmanus.skillpacks import (
@@ -44,9 +36,8 @@ from excelmanus.skillpacks import (
     Skillpack,
     SkillpackManager,
 )
-from excelmanus.skillpacks.context_builder import build_contexts_with_budget
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
-from excelmanus.task_list import TaskStatus, TaskStore
+from excelmanus.task_list import TaskStore
 from excelmanus.tools import focus_tools, task_tools
 from excelmanus.tools.introspection_tools import register_introspection_tools
 from excelmanus.engine_core.command_handler import CommandHandler
@@ -69,13 +60,9 @@ from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.window_perception import (
-    AdvisorContext,
-    LifecyclePlan,
     PerceptionBudget,
     WindowPerceptionManager,
 )
-from excelmanus.window_perception.domain import Window
-from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 from excelmanus.engine_types import (  # noqa: F401 — re-export for backwards compat
     ThinkingConfig,
     ToolCallResult,
@@ -138,12 +125,14 @@ from excelmanus.engine_utils import (  # noqa: F401 — re-export for backwards 
     _summarize_text,
     _split_tool_call_batches,
     _extract_text_tool_calls,
+    fire_and_forget,
 )
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
-    from excelmanus.persistent_memory import PersistentMemory
+    from excelmanus.engine_core.subagent_orchestrator import ParallelDelegateOutcome
     from excelmanus.memory_extractor import MemoryExtractor
+    from excelmanus.persistent_memory import PersistentMemory
 
 logger = get_logger("engine")
 
@@ -171,7 +160,9 @@ class AgentEngine:
     """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
     # auto 模式系统消息兼容性探测结果（key-based 缓存，按 model+base_url 隔离）
-    _system_mode_fallback_cache: dict[tuple[str, str], str] = {}
+    # 使用 OrderedDict 限制最大条目数，防止长期运行无界增长
+    _SYSTEM_MODE_CACHE_MAX = 64
+    _system_mode_fallback_cache: "OrderedDict[tuple[str, str], str]" = OrderedDict()
 
     def __init__(
         self,
@@ -250,7 +241,10 @@ class AgentEngine:
                 logger.warning("工具 schema 校验配置注入失败，已回退默认策略", exc_info=True)
         self._skill_router = skill_router
         self._skillpack_manager = (
-            SkillpackManager(config, skill_router._loader)
+            SkillpackManager(
+                config, skill_router._loader,
+                user_skill_dir=Path(config.skills_user_dir).expanduser().resolve(),
+            )
             if skill_router is not None
             else None
         )
@@ -615,7 +609,9 @@ class AgentEngine:
                 self._playbook_curator = None
 
         # ── MCP Client 集成 ──────────────────────────────────
-        self._mcp_manager = mcp_manager or MCPManager(config.workspace_root)
+        self._mcp_manager = mcp_manager or MCPManager(
+            config.workspace_root, app_config=config,
+        )
         self._own_mcp_manager = own_mcp_manager
 
         # ── 多模型切换 ──────────────────────────────────
@@ -658,7 +654,6 @@ class AgentEngine:
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
-        self._pending_classify_task: asyncio.Task[Any] | None = None  # 后台 LLM 分类任务
         self._pending_verifier_task: asyncio.Task[str | None] | None = None  # advisory 模式后台验证任务
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
@@ -692,7 +687,13 @@ class AgentEngine:
 
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(_do_probe())
+            _probe_task = loop.create_task(_do_probe())
+            _probe_task.add_done_callback(
+                lambda t: (
+                    logger.debug("后台 probe 任务异常: %s", t.exception())
+                    if not t.cancelled() and t.exception() else None
+                )
+            )
             logger.info("已调度后台 probe 检测: model=%s", config.model)
         except RuntimeError:
             logger.debug("无事件循环，跳过后台 probe")
@@ -1399,6 +1400,7 @@ class AgentEngine:
         auto_approved = self._mcp_manager.auto_approved_tools
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
+            self._approval.register_read_only_safe_tools(auto_approved)
 
     async def warmup_prompt_cache(self) -> None:
         """异步预热 Anthropic prompt cache（fire-and-forget）。
@@ -1421,6 +1423,7 @@ class AgentEngine:
             await self._client.chat.completions.create(
                 model=self._active_model,
                 messages=messages,
+                max_tokens=1,
             )
             logger.info("prompt cache 预热完成: stable_prefix=%d chars", len(stable_prompt))
         except Exception:
@@ -2125,6 +2128,22 @@ class AgentEngine:
         if _repaired:
             logger.info("修复了 %d 个中断遗留的悬空 tool_call", _repaired)
 
+        # W6: 用户追问已降级图片时自动重注入
+        _IMAGE_REF_KEYWORDS = (
+            "图片", "图", "image", "img", "照片", "截图", "screenshot",
+            "picture", "photo", "看看", "这张", "那张", "上面的",
+        )
+        _msg_lower = user_message.lower()
+        if any(kw in _msg_lower for kw in _IMAGE_REF_KEYWORDS):
+            _degraded_ids = self._memory._lifecycle.get_degraded_image_ids()
+            if _degraded_ids:
+                _reinjected = 0
+                for _img_id in _degraded_ids:
+                    if self._memory.reinject_image(_img_id):
+                        _reinjected += 1
+                if _reinjected:
+                    logger.info("自动重注入 %d 张已降级图片", _reinjected)
+
         if self._question_flow.has_pending():
             pending_chat_start = time.monotonic()
             pending_result = await self._interaction_handler.handle_pending_question_answer(
@@ -2575,8 +2594,6 @@ class AgentEngine:
         else:
             logger.debug("perf.chat: pre-loop total %.0fms", _pre_loop_ms)
 
-        # ── 异步 LLM 分类：已内化到 router._classify_task 同步流程 ──
-        self._pending_classify_task = None
         self._pending_verifier_task = None
 
         try:
@@ -2587,11 +2604,9 @@ class AgentEngine:
             )
         except BaseException:
             # 取消可能泄漏的后台任务
-            for _bg in (self._pending_verifier_task, self._pending_classify_task):
-                if _bg is not None and not _bg.done():
-                    _bg.cancel()
+            if self._pending_verifier_task is not None and not self._pending_verifier_task.done():
+                self._pending_verifier_task.cancel()
             self._pending_verifier_task = None
-            self._pending_classify_task = None
             raise
 
         # ── F: 等待后台 advisory verifier 完成（不阻塞 finish_task 回复） ──
@@ -2700,7 +2715,7 @@ class AgentEngine:
                     except Exception:
                         logger.debug("Playbook 反思失败", exc_info=True)
 
-                asyncio.create_task(_reflect_and_curate())
+                fire_and_forget(_reflect_and_curate(), name="playbook_reflect")
             except Exception:
                 logger.debug("Playbook 反思调度失败", exc_info=True)
 
@@ -3642,6 +3657,7 @@ class AgentEngine:
         question_resolver: QuestionResolver | None = None,
     ) -> ChatResult:
         """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。"""
+        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider as _OpenAICodexProvider
 
         def _finalize_result(**kwargs: Any) -> ChatResult:
             """统一出口：刷新 registry + checkpoint + 自动发射 FILES_CHANGED 事件。"""
@@ -3872,6 +3888,16 @@ class AgentEngine:
                 )
                 logger.info("注入 %d 条 guide 消息到本轮迭代", len(_guide_msgs))
 
+            # 系统级通知注入：以 system prompt 注入，避免泄露到用户消息气泡
+            # 包括：stuck detection 警告、auto-continue 指令、fix-verify 修复指令等
+            if self._state._pending_system_notices:
+                _notices = self._state._pending_system_notices[:]
+                self._state._pending_system_notices.clear()
+                for _notice in _notices:
+                    system_prompts.append(
+                        f"<system_notice>\n{_notice}\n</system_notice>"
+                    )
+
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
                 max_context_tokens=self.max_context_tokens,
@@ -3891,9 +3917,8 @@ class AgentEngine:
 
             # 安全网：确保发送到 API 的 model 是实际模型 ID，不含 provider 前缀
             _api_model = self._active_model
-            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-            if OpenAICodexProvider.is_codex_profile_name(_api_model):
-                _api_model = OpenAICodexProvider.model_from_profile_name(_api_model) or _api_model
+            if _OpenAICodexProvider.is_codex_profile_name(_api_model):
+                _api_model = _OpenAICodexProvider.model_from_profile_name(_api_model) or _api_model
 
             kwargs: dict[str, Any] = {
                 "model": _api_model,
@@ -4427,7 +4452,12 @@ class AgentEngine:
             # ── 批次拆分：相邻只读工具合并为并行批次 ──
             if self._config.parallel_readonly_tools:
                 from excelmanus.tools.policy import PARALLELIZABLE_READONLY_TOOLS
-                _batches = _split_tool_call_batches(tool_calls, PARALLELIZABLE_READONLY_TOOLS)
+                _parallel_names = PARALLELIZABLE_READONLY_TOOLS
+                # MCP auto-approved 工具（如 Exa 搜索）也可并行
+                _mcp_auto = self._mcp_manager.auto_approved_tools
+                if _mcp_auto:
+                    _parallel_names = _parallel_names | frozenset(_mcp_auto)
+                _batches = _split_tool_call_batches(tool_calls, _parallel_names)
             else:
                 _batches = [_ToolCallBatch([tc], False) for tc in tool_calls]
 
@@ -4663,10 +4693,14 @@ class AgentEngine:
             _stuck_tags = tuple(getattr(self._last_route_result, "task_tags", ()) or ())
             stuck_warning = self._state.detect_stuck_pattern(task_tags=_stuck_tags)
             if stuck_warning:
-                self._memory.add_user_message(stuck_warning)
+                self._state._pending_system_notices.append(stuck_warning)
                 if diag:
                     diag.guard_events.append("stuck_detection")
                 logger.warning("Stuck Detection 触发: %s", stuck_warning[:100])
+                try:
+                    self._window_perception.notify_repeat_tripwire()
+                except Exception:
+                    pass
 
             # ── Turn Checkpoint：每轮结束后对被修改文件做快照 ──
             if self._checkpoint_enabled and self._has_write_tool_call:
@@ -5615,18 +5649,17 @@ class AgentEngine:
 
         # 切换回默认
         if name.lower() == "default":
-            self._active_model = self._config.model
-            self._active_api_key = self._config.api_key
-            self._active_base_url = self._config.base_url
-            self._active_protocol = self._config.protocol
+            # W1: 委托给 LLMClientManager 统一管理客户端切换
+            self._llm_clients.switch_active_model(
+                model=self._config.model,
+                api_key=self._config.api_key,
+                base_url=self._config.base_url,
+                protocol=self._config.protocol,
+                name=None,
+            )
             self._active_model_name = None
             self._active_profile = None
-            self._client = create_client(
-                api_key=self._active_api_key,
-                base_url=self._active_base_url,
-                protocol=self._active_protocol,
-                model=self._active_model,
-            )
+            self._sync_from_llm_clients()
             self._sync_router_model_runtime()
             self._model_capabilities = None
             self._context_budget.update_for_model(self._config.model)
@@ -5658,18 +5691,17 @@ class AgentEngine:
             available = ", ".join(p.name for p in profiles) if profiles else "无"
             return f"未找到模型 {name!r}。可用模型：default, {available}"
 
-        self._active_model = matched.model
-        self._active_api_key = matched.api_key
-        self._active_base_url = matched.base_url
-        self._active_protocol = matched.protocol
+        # W1: 委托给 LLMClientManager 统一管理客户端切换
+        self._llm_clients.switch_active_model(
+            model=matched.model,
+            api_key=matched.api_key,
+            base_url=matched.base_url,
+            protocol=matched.protocol,
+            name=matched.name,
+        )
         self._active_model_name = matched.name
         self._active_profile = matched
-        self._client = create_client(
-            api_key=self._active_api_key,
-            base_url=self._active_base_url,
-            protocol=self._active_protocol,
-            model=self._active_model,
-        )
+        self._sync_from_llm_clients()
         self._sync_router_model_runtime()
         self._model_capabilities = None
         self._context_budget.update_for_model(matched.model)
@@ -5677,6 +5709,15 @@ class AgentEngine:
         self._compaction_manager.max_context_tokens = self.max_context_tokens
         desc = f"（{matched.description}）" if matched.description else ""
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
+
+    def _sync_from_llm_clients(self) -> None:
+        """从 LLMClientManager 同步活跃模型状态到引擎本地字段。"""
+        mgr = self._llm_clients
+        self._active_model = mgr.active_model
+        self._active_api_key = mgr.active_api_key
+        self._active_base_url = mgr.active_base_url
+        self._active_protocol = mgr.active_protocol
+        self._client = mgr.main_client
 
     def _sync_router_model_runtime(self) -> None:
         """在主模型切换后同步路由模型运行时（仅跟随模式）。"""

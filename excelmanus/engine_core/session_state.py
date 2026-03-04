@@ -21,12 +21,13 @@ from typing import Any
 _STUCK_WINDOW_SIZE = 15
 _ACTION_REPEAT_THRESHOLD = 3
 _READ_ONLY_LOOP_THRESHOLD = 8
-_REDUNDANT_READ_THRESHOLD = 4  # 同一文件读取 N 次触发提示
+_REDUNDANT_READ_THRESHOLD = 6  # 同一文件读取 N 次触发提示
 
-# 读取类工具名集合（用于 Pattern 3 同文件重复读取检测）
+# 数据读取类工具名集合（用于 Pattern 3 同文件重复读取检测）
+# 注意：list_sheets / inspect_excel_files 是轻量元数据查询，不计入重复读取
 _READ_TOOLS: frozenset[str] = frozenset({
-    "read_excel", "list_sheets", "scan_excel_snapshot",
-    "search_excel_values", "inspect_excel_files",
+    "read_excel", "scan_excel_snapshot",
+    "search_excel_values",
 })
 
 
@@ -87,6 +88,8 @@ class SessionState:
         self._file_read_counts: Counter[str] = Counter()
         # 当前轮次内是否已触发过 stuck 警告（避免重复注入）
         self.stuck_warning_fired: bool = False
+        # 待注入的系统级提示（下次迭代以 system prompt 形式注入，避免泄露到用户气泡）
+        self._pending_system_notices: list[str] = []
 
         # ── Think-Act 推理检测 ─────────────────────────────────
         self.silent_call_count: int = 0
@@ -114,6 +117,7 @@ class SessionState:
         self._recent_tool_calls.clear()
         self._file_read_counts.clear()
         self.stuck_warning_fired = False
+        self._pending_system_notices.clear()
         self.affected_files = []
         self.write_operations_log = []
         # 注意：explorer_reports 是跨轮次缓存，不在此处清空
@@ -144,6 +148,7 @@ class SessionState:
         self._recent_tool_calls.clear()
         self._file_read_counts.clear()
         self.stuck_warning_fired = False
+        self._pending_system_notices.clear()
         self.affected_files = []
         self.write_operations_log = []
         self.explorer_reports = []
@@ -278,6 +283,7 @@ class SessionState:
         "form_document", "complex",
     })
     _RELAXED_READ_ONLY_THRESHOLD: int = 12
+    _RELAXED_REDUNDANT_READ_THRESHOLD: int = 10
 
     def detect_stuck_pattern(
         self,
@@ -313,8 +319,13 @@ class SessionState:
             )
 
         # 模式 3：同文件重复读取（不同参数但同一 file_path）
+        # 动态阈值：复杂任务（cross_sheet/multi_file 等）确实需要更多探查
+        _read_threshold = _REDUNDANT_READ_THRESHOLD
+        if task_tags and any(t in self._RELAXED_TAGS for t in task_tags):
+            _read_threshold = max(_read_threshold, self._RELAXED_REDUNDANT_READ_THRESHOLD)
+
         for file_path, count in self._file_read_counts.items():
-            if count >= _REDUNDANT_READ_THRESHOLD:
+            if count >= _read_threshold:
                 fname = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
                 self.stuck_warning_fired = True
                 return (

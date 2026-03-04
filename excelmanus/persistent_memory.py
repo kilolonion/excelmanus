@@ -18,6 +18,8 @@ from excelmanus.stores.file_memory_backend import (
     _infer_category_by_filename,
 )
 
+__all__ = ["PersistentMemory", "CORE_MEMORY_FILE"]
+
 if TYPE_CHECKING:
     from excelmanus.stores.memory_backend import MemoryStorageBackend
 

@@ -26,7 +26,7 @@ from excelmanus.engine_utils import (
     _message_content_to_text,
 )
 from excelmanus.logger import get_logger
-from excelmanus.providers.stream_types import InlineThinkingStateMachine, extract_inline_thinking
+from excelmanus.providers.stream_types import InlineThinkingStateMachine
 from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
@@ -707,6 +707,23 @@ class LLMCaller:
                     retry_kwargs.pop("prompt_cache_key", None)
                     return await e._client.chat.completions.create(**retry_kwargs)
 
+            # W5: 不支持参数错误 → 自动剥离可疑参数后重试
+            if is_unsupported_param_error(exc):
+                # 识别并剥离 provider 不支持的可选参数
+                _suspect_keys = {
+                    "prompt_cache_key", "stream_options",
+                    "top_logprobs", "logprobs", "parallel_tool_calls",
+                    "service_tier",
+                }
+                stripped = _suspect_keys & set(kwargs)
+                if stripped:
+                    logger.warning(
+                        "检测到不支持参数错误，自动剥离 %s 后重试: %s",
+                        stripped, exc,
+                    )
+                    retry_kwargs = {k: v for k, v in kwargs.items() if k not in stripped}
+                    return await e._client.chat.completions.create(**retry_kwargs)
+
             # 上下文超长自动恢复：自适应缩减预算 + 紧急截断对话历史后重试一次
             if _is_context_length_error(exc):
                 # 自适应缩减：当前预算可能偏大，缩减 20% 防止后续轮次再次超限
@@ -748,7 +765,10 @@ class LLMCaller:
                 and is_system_compatibility_error(exc)
             ):
                 logger.warning("检测到 replace(system 分段) 兼容性错误，自动回退到 merge 模式")
-                type(e)._system_mode_fallback_cache[e._system_mode_cache_key] = "merge"
+                _cache = type(e)._system_mode_fallback_cache
+                _cache[e._system_mode_cache_key] = "merge"
+                while len(_cache) > e._SYSTEM_MODE_CACHE_MAX:
+                    _cache.popitem(last=False)
                 e._system_mode_fallback = "merge"
                 source_messages = kwargs.get("messages")
                 if not isinstance(source_messages, list):

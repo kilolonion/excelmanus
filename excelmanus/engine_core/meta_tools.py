@@ -1,7 +1,7 @@
 """元工具构建 — 从 AgentEngine 提取的 LLM-Native 工具 schema 构建逻辑。
 
 包括：
-- _build_meta_tools: 构建 activate_skill / delegate / list_subagents / ask_user / finish_task
+- _build_meta_tools: 构建 activate_skill / manage_skills / delegate / list_subagents / ask_user / finish_task
 - _build_v5_tools: 带脏标记缓存的工具 schema 构建
 - _build_v5_tools_impl: 实际构建逻辑（read_only 过滤、route_tool_tags 白名单裁剪）
 """
@@ -333,6 +333,49 @@ class MetaToolBuilder:
             },
         ]
 
+        # ── manage_skills：技能搜索 / 安装 / 卸载 ──
+        manage_skills_description = (
+            "管理技能包：搜索 ClawHub 技能市场、安装/卸载技能、查看已安装技能或技能详情。\n"
+            "适用场景：用户需要新技能、想查找特定领域的技能、或管理已有技能时。\n"
+            "安装后的技能可通过 activate_skill 激活使用。\n"
+            "⚠️ 安装/卸载操作需要关闭安全模式（external_safe_mode=false）。"
+        )
+        tools.append({
+            "type": "function",
+            "function": {
+                "name": "manage_skills",
+                "description": manage_skills_description,
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["search", "install", "detail", "list", "uninstall", "update"],
+                            "description": (
+                                "操作类型: search=搜索技能市场, install=安装技能, "
+                                "detail=查看技能详情, list=列出已安装技能, "
+                                "uninstall=卸载技能, update=检查/执行更新"
+                            ),
+                        },
+                        "query": {
+                            "type": "string",
+                            "description": "搜索关键词（action=search 时必填）",
+                        },
+                        "slug": {
+                            "type": "string",
+                            "description": "技能标识符或 GitHub URL（action=install/detail/uninstall 时必填）",
+                        },
+                        "overwrite": {
+                            "type": "boolean",
+                            "description": "安装时是否覆盖已存在的同名技能（默认 false）",
+                        },
+                    },
+                    "required": ["action"],
+                    "additionalProperties": False,
+                },
+            },
+        })
+
         # ── finish_task：agent 主动终止任务的逃逸出口 ──
         if getattr(e, "_bench_mode", False):
             finish_task_tool = {
@@ -475,6 +518,7 @@ class MetaToolBuilder:
                 filtered_domain = [
                     s for s in filtered_domain
                     if s.get("function", {}).get("name", "") in allowed
+                    or s.get("function", {}).get("name", "").startswith("mcp_")
                 ]
                 logger.debug(
                     "LLM 路由过滤: tags=%s, 保留 %d 个域工具",

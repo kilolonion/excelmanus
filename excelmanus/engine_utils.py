@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+import asyncio as _asyncio
 import json as _json
 import re as _re
 import uuid as _uuid
 from types import SimpleNamespace
 from typing import Any
+
+from excelmanus.logger import get_logger as _get_logger
+
+_ff_logger = _get_logger("fire_and_forget")
 
 from excelmanus.engine_types import _ToolCallBatch
 from excelmanus.mentions.parser import ResolvedMention
@@ -699,3 +704,26 @@ def _extract_text_tool_calls(
     cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).strip()
 
     return parsed, cleaned
+
+
+# ── 异步辅助 ──────────────────────────────────────────────────
+
+def fire_and_forget(coro: Any, *, name: str = "background") -> None:
+    """安全地 fire-and-forget 一个协程，捕获异常避免 'Task exception was never retrieved' 警告。
+
+    可从任何模块调用，替代裸 ``asyncio.create_task()``。
+    """
+    try:
+        task = _asyncio.get_running_loop().create_task(coro, name=name)
+    except RuntimeError:
+        coro.close()
+        return
+
+    def _on_done(t: _asyncio.Task[Any]) -> None:
+        if t.cancelled():
+            return
+        exc = t.exception()
+        if exc is not None:
+            _ff_logger.debug("fire-and-forget task %r failed: %s", name, exc)
+
+    task.add_done_callback(_on_done)

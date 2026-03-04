@@ -27,7 +27,6 @@ if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
     from excelmanus.engine_types import ChatResult
     from excelmanus.events import EventCallback
-    from excelmanus.interaction import InteractionRegistry
     from excelmanus.question_flow import PendingQuestion
 
 logger = get_logger("interaction_handler")
@@ -529,8 +528,6 @@ class InteractionHandler:
         )
         if same_batch:
             # 累积到 _batch_answers，暂不写入 tool_result
-            if not hasattr(e, "_batch_answers"):
-                e._batch_answers = {}
             batch_key = popped.tool_call_id
             if batch_key not in e._batch_answers:
                 e._batch_answers[batch_key] = []
@@ -539,7 +536,7 @@ class InteractionHandler:
             # 最后一个问题（或单问题模式）：合并所有累积回答 + 当前回答，一次性写入
             batch_key = popped.tool_call_id
             accumulated = []
-            if hasattr(e, "_batch_answers") and batch_key in e._batch_answers:
+            if batch_key in e._batch_answers:
                 accumulated = e._batch_answers.pop(batch_key)
             accumulated.append(parsed.to_tool_result())
             if len(accumulated) == 1:
