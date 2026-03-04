@@ -49,6 +49,7 @@ class ChannelMessage:
     command: str = ""                     # 解析后的命令名（不含 /）
     command_args: list[str] = field(default_factory=list)  # 命令参数
     raw: Any = None                       # 原始平台消息对象（供适配器内部使用）
+    chat_type: str = "private"            # "private" | "group" | "channel"
 
 
 @dataclass

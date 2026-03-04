@@ -1513,3 +1513,99 @@ class TestEventBridge:
         await bridge.notify("user-1", "test", {})
         assert len(calls_old) == 0
         assert len(calls_new) == 1
+
+
+# ── get_current_user + Service Token 回归测试 ──
+# 修复: /api/v1/auth/me/* 在 middleware PUBLIC_PREFIXES 中被跳过，
+# 而 get_current_user 只接受 type=access 的 token，导致 bot 渠道
+# 用服务令牌调用 /me/usage 时返回 401，/quota 命令永远显示"未绑定"。
+
+
+class TestGetCurrentUserServiceToken:
+    """验证 get_current_user 依赖对服务令牌 + X-On-Behalf-Of 的支持。"""
+
+    @pytest.mark.asyncio
+    async def test_service_token_with_valid_obo_resolves_user(self):
+        """服务令牌 + 有效 X-On-Behalf-Of 应返回目标用户。"""
+        with patch.dict("os.environ", {"EXCELMANUS_JWT_SECRET": "test-secret-key-for-jwt"}):
+            from excelmanus.auth.security import create_service_token
+            from excelmanus.auth.dependencies import get_current_user
+            from fastapi.security import HTTPAuthorizationCredentials
+
+            token = create_service_token("test-bot")
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+            target_user = UserRecord(id="user-42", email="alice@test.com", password_hash="hash")
+            mock_store = MagicMock()
+            mock_store.get_by_id.return_value = target_user
+
+            request = MagicMock()
+            request.headers.get.return_value = "user-42"
+            request.app.state.user_store = mock_store
+            request.state = MagicMock()
+
+            user = await get_current_user(request, credentials)
+            assert user.id == "user-42"
+            mock_store.get_by_id.assert_called_once_with("user-42")
+
+    @pytest.mark.asyncio
+    async def test_service_token_without_obo_raises_401(self):
+        """服务令牌但无 X-On-Behalf-Of 应返回 401。"""
+        with patch.dict("os.environ", {"EXCELMANUS_JWT_SECRET": "test-secret-key-for-jwt"}):
+            from excelmanus.auth.security import create_service_token
+            from excelmanus.auth.dependencies import get_current_user
+            from fastapi import HTTPException
+            from fastapi.security import HTTPAuthorizationCredentials
+
+            token = create_service_token("test-bot")
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+            request = MagicMock()
+            request.headers.get.return_value = ""
+            request.app.state.user_store = MagicMock()
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_current_user(request, credentials)
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_service_token_with_anon_obo_raises_401(self):
+        """服务令牌 + channel_anon: 前缀的匿名 ID 应返回 401。"""
+        with patch.dict("os.environ", {"EXCELMANUS_JWT_SECRET": "test-secret-key-for-jwt"}):
+            from excelmanus.auth.security import create_service_token
+            from excelmanus.auth.dependencies import get_current_user
+            from fastapi import HTTPException
+            from fastapi.security import HTTPAuthorizationCredentials
+
+            token = create_service_token("test-bot")
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+            request = MagicMock()
+            request.headers.get.return_value = "channel_anon:telegram:12345"
+            request.app.state.user_store = MagicMock()
+
+            with pytest.raises(HTTPException) as exc_info:
+                await get_current_user(request, credentials)
+            assert exc_info.value.status_code == 401
+
+    @pytest.mark.asyncio
+    async def test_access_token_still_works(self):
+        """普通 access token 应继续正常工作。"""
+        with patch.dict("os.environ", {"EXCELMANUS_JWT_SECRET": "test-secret-key-for-jwt"}):
+            from excelmanus.auth.security import create_access_token
+            from excelmanus.auth.dependencies import get_current_user
+            from fastapi.security import HTTPAuthorizationCredentials
+
+            token = create_access_token({"sub": "user-1", "type": "access", "role": "user"})
+            credentials = HTTPAuthorizationCredentials(scheme="Bearer", credentials=token)
+
+            target_user = UserRecord(id="user-1", email="alice@test.com", password_hash="hash")
+            mock_store = MagicMock()
+            mock_store.get_by_id.return_value = target_user
+
+            request = MagicMock()
+            request.app.state.user_store = mock_store
+            request.state = MagicMock()
+
+            user = await get_current_user(request, credentials)
+            assert user.id == "user-1"

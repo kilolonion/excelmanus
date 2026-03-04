@@ -91,7 +91,7 @@ class TelegramAdapter(ChannelAdapter):
     async def send_file(self, chat_id: str, data: bytes, filename: str) -> None:
         """发送文件给用户。data 为文件内容字节。"""
         if self._app is None:
-            return
+            raise RuntimeError("Telegram app 未初始化，无法发送文件")
         import io
         bot = self._app.bot
         buf = io.BytesIO(data)

@@ -778,6 +778,27 @@ class ExcelManusAPIClient:
         filename = Path(file_path).name
         return resp.content, filename
 
+    async def generate_download_link(
+        self, file_path: str,
+        *, user_id: str = "",
+        on_behalf_of: str | None = None,
+    ) -> str | None:
+        """生成文件的短效公开下载链接。返回 URL 或 None（失败时）。"""
+        headers = {}
+        if on_behalf_of:
+            headers.update(self._auth_headers(on_behalf_of=on_behalf_of))
+        try:
+            resp = await self._request(
+                "POST",
+                f"{self.api_url}/api/v1/files/download/link",
+                json={"file_path": file_path, "user_id": user_id},
+                headers=headers or None,
+            )
+            resp.raise_for_status()
+            return resp.json().get("url")
+        except Exception:
+            return None
+
     def get_workspace_path(self) -> str:
         """获取工作区路径。"""
         return os.environ.get(

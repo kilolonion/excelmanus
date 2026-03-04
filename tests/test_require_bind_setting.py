@@ -49,6 +49,7 @@ def mock_adapter():
     adapter.update_approval_result = AsyncMock()
     adapter.update_question_result = AsyncMock()
     adapter.send_staged_card = AsyncMock()
+    adapter.send_markdown = AsyncMock()
     return adapter
 
 

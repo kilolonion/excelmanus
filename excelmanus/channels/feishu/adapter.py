@@ -160,7 +160,7 @@ class FeishuAdapter(ChannelAdapter):
     async def send_file(self, chat_id: str, data: bytes, filename: str) -> None:
         """上传文件到飞书并发送文件消息。"""
         if not self._ensure_client():
-            return
+            raise RuntimeError("飞书客户端未初始化，无法发送文件")
         try:
             # 1) 上传文件获取 file_key
             file_obj = io.BytesIO(data)
@@ -177,12 +177,7 @@ class FeishuAdapter(ChannelAdapter):
             )
             if not resp.success():
                 logger.error("飞书上传文件失败: code=%s msg=%s", resp.code, resp.msg)
-                await self.send_text(
-                    chat_id,
-                    f"📎 文件已生成: {filename} ({len(data)/1024:.1f} KB)\n"
-                    f"上传失败，请通过 Web 界面下载。",
-                )
-                return
+                raise RuntimeError(f"飞书上传文件失败: code={resp.code}")
             file_key = resp.data.file_key
 
             # 2) 发送文件消息
@@ -190,11 +185,7 @@ class FeishuAdapter(ChannelAdapter):
             await self._send_message(chat_id, "file", content)
         except Exception:
             logger.error("飞书发送文件异常", exc_info=True)
-            await self.send_text(
-                chat_id,
-                f"📎 文件已生成: {filename} ({len(data)/1024:.1f} KB)\n"
-                f"发送失败，请通过 Web 界面下载。",
-            )
+            raise
 
     async def send_approval_card(
         self,

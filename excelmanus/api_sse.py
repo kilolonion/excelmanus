@@ -129,6 +129,7 @@ def sse_event_to_sse(
     event: ToolCallEvent,
     *,
     safe_mode: bool,
+    is_channel: bool = False,
     public_path_fn: PublicPathFn = _default_public_path,
 ) -> str | None:
     """将 ToolCallEvent 转换为 SSE 文本。
@@ -136,6 +137,8 @@ def sse_event_to_sse(
     Args:
         event: 引擎事件。
         safe_mode: 是否启用对外安全模式（过滤内部事件）。
+        is_channel: 是否为 Bot 渠道请求。渠道请求需要工具追踪事件，
+                    即使 safe_mode 开启也保留工具/子代理/审批事件。
         public_path_fn: 路径脱敏回调，签名 (path, safe_mode) -> str。
     """
     if safe_mode and event.event_type in {
@@ -154,7 +157,20 @@ def sse_event_to_sse(
         EventType.APPROVAL_RESOLVED,
         EventType.RETRACT_THINKING,
     }:
-        return None
+        # Bot 渠道需要工具追踪、子代理进度、审批事件才能正常反馈用户
+        if is_channel and event.event_type in {
+            EventType.TOOL_CALL_START,
+            EventType.TOOL_CALL_END,
+            EventType.SUBAGENT_START,
+            EventType.SUBAGENT_END,
+            EventType.SUBAGENT_TOOL_START,
+            EventType.SUBAGENT_TOOL_END,
+            EventType.PENDING_APPROVAL,
+            EventType.APPROVAL_RESOLVED,
+        }:
+            pass  # 允许通过
+        else:
+            return None
 
     event_map = {
         EventType.THINKING: "thinking",

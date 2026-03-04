@@ -336,6 +336,7 @@ class ExcelManusConfig:
     workspace_root: str = "."
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
     deploy_mode: str = "standalone"  # standalone|server|docker — 部署模式
+    public_url: str = ""  # 公开访问 URL（如 https://kilon.top），用于 Bot 渠道生成下载链接
     log_level: str = "INFO"
     skills_system_dir: str = "excelmanus/skillpacks/system"
     skills_user_dir: str = "~/.excelmanus/skillpacks"
@@ -1707,6 +1708,7 @@ def load_config() -> ExcelManusConfig:
         workspace_root=workspace_root,
         data_root=data_root,
         deploy_mode=deploy_mode,
+        public_url=os.environ.get("EXCELMANUS_PUBLIC_URL", "").rstrip("/"),
         log_level=log_level,
         skills_system_dir=skills_system_dir,
         skills_user_dir=skills_user_dir,

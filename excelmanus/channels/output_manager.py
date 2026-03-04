@@ -59,6 +59,30 @@ _HEARTBEAT_LONG_RUNNING: list[str] = [
 _HEARTBEAT_INTERVALS: list[float] = [15.0, 30.0, 60.0]
 
 
+def _brief_tool_args(tool_name: str, arguments: dict[str, Any] | None) -> str:
+    """将工具参数格式化为简洁摘要（轻量版，避免导入 api_sse）。
+
+    示例: read_excel(path="data.xlsx", sheet="Sheet1")
+    """
+    if not isinstance(arguments, dict) or not arguments:
+        return f"{tool_name}()"
+    parts: list[str] = []
+    for k, v in arguments.items():
+        if v is None or v == "":
+            continue
+        if k == "code" and isinstance(v, str):
+            parts.append(f"code=<{v.count(chr(10)) + 1}行>")
+            continue
+        sv = str(v)
+        if len(sv) > 50:
+            sv = sv[:47] + "..."
+        parts.append(f'{k}="{sv}"')
+    summary = f"{tool_name}({', '.join(parts)})"
+    if len(summary) > 160:
+        summary = summary[:157] + "..."
+    return summary
+
+
 def _format_elapsed(seconds: float) -> str:
     """将秒数格式化为易读的耗时文本。"""
     if seconds < 60:
@@ -117,12 +141,12 @@ class OutputStrategy(ABC):
         """接收一段文本增量。"""
 
     @abstractmethod
-    async def on_tool_start(self, tool_name: str) -> None:
-        """工具开始执行。"""
+    async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
+        """工具开始执行。args_summary 为参数摘要如 read_excel(path="x.xlsx")。"""
 
     @abstractmethod
-    async def on_tool_end(self, tool_name: str, success: bool) -> None:
-        """工具执行结束。"""
+    async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
+        """工具执行结束。error 为失败时的简要错误信息。"""
 
     @abstractmethod
     async def on_progress(self, stage: str, message: str) -> None:
@@ -237,15 +261,17 @@ class EditStreamStrategy(OutputStrategy):
         else:
             await self._try_edit()
 
-    async def on_tool_start(self, tool_name: str) -> None:
-        self._tool_states.append({"name": tool_name, "status": "running"})
+    async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
+        self._tool_states.append({"name": tool_name, "status": "running", "summary": args_summary})
         # P1d: 工具进度内联到主消息
         await self._try_edit_with_tools()
 
-    async def on_tool_end(self, tool_name: str, success: bool) -> None:
+    async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
         for tc in reversed(self._tool_states):
             if tc["name"] == tool_name and tc["status"] == "running":
                 tc["status"] = "done" if success else "error"
+                if error:
+                    tc["error"] = error[:80]
                 break
         # P1d: 工具状态变化时强制更新
         await self._try_edit_with_tools(force=True)
@@ -387,14 +413,20 @@ class EditStreamStrategy(OutputStrategy):
         self._buffer_len = 0
 
     def _build_tool_status_text(self) -> str:
-        """P1d: 构建工具状态单行文本。"""
+        """P1d: 构建工具状态单行文本（含参数摘要）。"""
         if not self._tool_states:
             return ""
         icons = {"done": "✅", "error": "❌", "running": "🔄"}
         parts = []
         for tc in self._tool_states:
             icon = icons.get(tc["status"], "🔧")
-            parts.append(f"{icon} {tc['name']}")
+            # 运行中的工具显示参数摘要，已完成的仅显示名称
+            if tc["status"] == "running" and tc.get("summary"):
+                parts.append(f"{icon} {tc['summary']}")
+            elif tc["status"] == "error" and tc.get("error"):
+                parts.append(f"{icon} {tc['name']}: {tc['error']}")
+            else:
+                parts.append(f"{icon} {tc['name']}")
         return "⚙️ " + " → ".join(parts)
 
     async def on_tool_notice(self, summary: str) -> None:
@@ -420,13 +452,20 @@ class EditStreamStrategy(OutputStrategy):
         await self._adapter.send_text(self._chat_id, message)
 
     def _prepend_tool_summary(self, text: str) -> str:
-        """在文本前添加工具链摘要（短回复场景）。"""
+        """在文本前添加工具链摘要（短回复场景，含参数摘要）。"""
         if not self._tool_states:
             return text
         icons = {"done": "✅", "error": "❌", "running": "🔧"}
-        chain = " → ".join(
-            f"{icons.get(tc['status'], '🔧')} {tc['name']}" for tc in self._tool_states
-        )
+        parts = []
+        for tc in self._tool_states:
+            icon = icons.get(tc["status"], "🔧")
+            if tc["status"] == "running" and tc.get("summary"):
+                parts.append(f"{icon} {tc['summary']}")
+            elif tc["status"] == "error" and tc.get("error"):
+                parts.append(f"{icon} {tc['name']}: {tc['error']}")
+            else:
+                parts.append(f"{icon} {tc['name']}")
+        chain = " → ".join(parts)
         return f"⚙️ {chain}\n\n{text}"
 
 
@@ -472,14 +511,16 @@ class CardStreamStrategy(OutputStrategy):
         self._all_text_parts.append(content)
         await self._try_update()
 
-    async def on_tool_start(self, tool_name: str) -> None:
-        self._tool_states.append({"name": tool_name, "status": "running"})
+    async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
+        self._tool_states.append({"name": tool_name, "status": "running", "summary": args_summary})
         await self._try_update(force=True)
 
-    async def on_tool_end(self, tool_name: str, success: bool) -> None:
+    async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
         for tc in reversed(self._tool_states):
             if tc["name"] == tool_name and tc["status"] == "running":
                 tc["status"] = "done" if success else "error"
+                if error:
+                    tc["error"] = error[:80]
                 break
         await self._try_update(force=True)
 
@@ -582,7 +623,12 @@ class CardStreamStrategy(OutputStrategy):
             tool_lines = []
             for tc in self._tool_states:
                 icon = icons.get(tc["status"], "🔧")
-                tool_lines.append(f"{icon} {tc['name']}")
+                if tc["status"] == "running" and tc.get("summary"):
+                    tool_lines.append(f"{icon} {tc['summary']}")
+                elif tc["status"] == "error" and tc.get("error"):
+                    tool_lines.append(f"{icon} {tc['name']}: {tc['error']}")
+                else:
+                    tool_lines.append(f"{icon} {tc['name']}")
             elements.append({
                 "tag": "div",
                 "text": {"tag": "plain_text", "content": " → ".join(tool_lines)},
@@ -716,8 +762,8 @@ class BatchSendStrategy(OutputStrategy):
         # P2a: 检查是否可以渐进发送
         await self._try_progressive_send()
 
-    async def on_tool_start(self, tool_name: str) -> None:
-        self._tool_states.append({"name": tool_name, "status": "running"})
+    async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
+        self._tool_states.append({"name": tool_name, "status": "running", "summary": args_summary})
         self._tools_total += 1
         # 首个工具开始时发送"处理中"提示
         if len(self._tool_states) == 1 and not self._sent_keepalive:
@@ -725,17 +771,20 @@ class BatchSendStrategy(OutputStrategy):
             self._sent_keepalive = True
             self._last_keepalive_time = time.monotonic()
 
-    async def on_tool_end(self, tool_name: str, success: bool) -> None:
+    async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
         for tc in reversed(self._tool_states):
             if tc["name"] == tool_name and tc["status"] == "running":
                 tc["status"] = "done" if success else "error"
+                if error:
+                    tc["error"] = error[:80]
                 break
         self._tools_done += 1
         # P2b: 工具完成即时反馈
         icon = "✅" if success else "❌"
         status_word = "完成" if success else "失败"
+        detail = f": {error[:60]}" if error and not success else ""
         await self._adapter.send_text(
-            self._chat_id, f"{icon} {tool_name} {status_word}",
+            self._chat_id, f"{icon} {tool_name} {status_word}{detail}",
         )
         self._last_keepalive_time = time.monotonic()
         self._sent_keepalive = True
@@ -848,9 +897,16 @@ class BatchSendStrategy(OutputStrategy):
         if not self._tool_states:
             return text
         icons = {"done": "✅", "error": "❌", "running": "🔧"}
-        chain = " → ".join(
-            f"{icons.get(tc['status'], '🔧')} {tc['name']}" for tc in self._tool_states
-        )
+        parts = []
+        for tc in self._tool_states:
+            icon = icons.get(tc["status"], "🔧")
+            if tc["status"] == "running" and tc.get("summary"):
+                parts.append(f"{icon} {tc['summary']}")
+            elif tc["status"] == "error" and tc.get("error"):
+                parts.append(f"{icon} {tc['name']}: {tc['error']}")
+            else:
+                parts.append(f"{icon} {tc['name']}")
+        chain = " → ".join(parts)
         return f"⚙️ {chain}\n\n{text}"
 
 
@@ -973,17 +1029,20 @@ class ChunkedOutputManager:
 
         elif event_type == "tool_call_start":
             tool_name = data.get("tool_name", "unknown")
+            arguments = data.get("arguments")
+            args_summary = _brief_tool_args(tool_name, arguments) if arguments else ""
             self._tool_calls.append({"name": tool_name, "status": "running"})
-            await self._strategy.on_tool_start(tool_name)
+            await self._strategy.on_tool_start(tool_name, args_summary=args_summary)
 
         elif event_type == "tool_call_end":
             tool_name = data.get("tool_name", "")
             success = data.get("success", True)
+            error = data.get("error") or ""
             for tc in reversed(self._tool_calls):
                 if tc["name"] == tool_name and tc["status"] == "running":
                     tc["status"] = "done" if success else "error"
                     break
-            await self._strategy.on_tool_end(tool_name, success)
+            await self._strategy.on_tool_end(tool_name, success, error=error)
 
         elif event_type == "pending_approval":
             self._approval = data
@@ -1013,7 +1072,11 @@ class ChunkedOutputManager:
         elif event_type == "failure_guidance":
             title = data.get("title", "")
             message = data.get("message", "")
-            self._error = f"{title}: {message}" if title else message
+            retryable = data.get("retryable", False)
+            err = f"{title}: {message}" if title else message
+            if retryable:
+                err += "\n💡 该错误可能是暂时的，请稍后重试"
+            self._error = err
 
         elif event_type == "tool_call_notice":
             summary = data.get("args_summary", "")
@@ -1027,6 +1090,70 @@ class ChunkedOutputManager:
 
         elif event_type == "staging_updated":
             self._staging_event = data
+
+        # ── P2: 子代理事件 ──
+        elif event_type == "subagent_start":
+            name = data.get("name", "子任务")
+            reason = data.get("reason", "")
+            label = f"↳ {name}"
+            summary = f"↳ {name}: {reason[:60]}" if reason else ""
+            self._tool_calls.append({"name": label, "status": "running"})
+            await self._strategy.on_tool_start(label, args_summary=summary)
+
+        elif event_type == "subagent_tool_start":
+            tool_name = data.get("tool_name", "unknown")
+            arguments = data.get("arguments")
+            args_summary = _brief_tool_args(tool_name, arguments) if arguments else ""
+            label = f"  ↳ {tool_name}"
+            self._tool_calls.append({"name": label, "status": "running"})
+            await self._strategy.on_tool_start(label, args_summary=args_summary)
+
+        elif event_type == "subagent_tool_end":
+            tool_name = data.get("tool_name", "")
+            success = data.get("success", True)
+            error = data.get("error") or ""
+            label = f"  ↳ {tool_name}"
+            for tc in reversed(self._tool_calls):
+                if tc["name"] == label and tc["status"] == "running":
+                    tc["status"] = "done" if success else "error"
+                    break
+            await self._strategy.on_tool_end(label, success, error=error)
+
+        elif event_type == "subagent_end":
+            name = data.get("name", "子任务")
+            success = data.get("success", True)
+            label = f"↳ {name}"
+            for tc in reversed(self._tool_calls):
+                if tc["name"] == label and tc["status"] == "running":
+                    tc["status"] = "done" if success else "error"
+                    break
+            await self._strategy.on_tool_end(label, success)
+
+        # ── P3: LLM 重试事件 ──
+        elif event_type == "llm_retry":
+            status = data.get("retry_status", "")
+            attempt = data.get("retry_attempt", 0)
+            max_attempts = data.get("retry_max_attempts", 0)
+            delay = data.get("retry_delay_seconds", 0)
+            if status == "retrying":
+                msg = f"⚠️ 模型服务暂时不可用，{delay:.0f}秒后第 {attempt}/{max(1, max_attempts - 1)} 次重试..."
+                await self._strategy.on_progress("llm_retrying", msg)
+            elif status == "exhausted":
+                await self._strategy.on_progress("llm_retry_exhausted", "❌ 模型重试次数已耗尽")
+
+        # ── P5: 批量进度事件 ──
+        elif event_type == "batch_progress":
+            idx = data.get("batch_index", 0)
+            total = data.get("batch_total", 0)
+            item_name = data.get("batch_item_name", "")
+            batch_msg = data.get("message", "")
+            if batch_msg:
+                progress_text = f"📋 [{idx}/{total}] {batch_msg}"
+            elif item_name:
+                progress_text = f"📋 [{idx}/{total}] {item_name}"
+            else:
+                progress_text = f"📋 批量处理 {idx}/{total}"
+            await self._strategy.on_progress("batch_progress", progress_text)
 
     async def finalize(self) -> dict[str, Any]:
         """流结束，刷新策略缓冲区，返回结构化结果。

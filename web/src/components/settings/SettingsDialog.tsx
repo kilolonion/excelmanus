@@ -2,7 +2,7 @@
 
 import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle, Radio } from "lucide-react";
+import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,7 +19,6 @@ const MCPTab = lazy(() => import("./MCPTab").then(m => ({ default: m.MCPTab })))
 const MemoryTab = lazy(() => import("./MemoryTab").then(m => ({ default: m.MemoryTab })));
 const RuntimeTab = lazy(() => import("./RuntimeTab").then(m => ({ default: m.RuntimeTab })));
 const VersionTab = lazy(() => import("./VersionTab").then(m => ({ default: m.VersionTab })));
-const ChannelsTab = lazy(() => import("./ChannelsTab").then(m => ({ default: m.ChannelsTab })));
 
 function TabSpinner() {
   return (
@@ -42,7 +41,6 @@ const TAB_META = [
   { value: "skills", label: "技能", icon: <Package className="size-4" /> },
   { value: "mcp", label: "MCP", icon: <Plug className="size-4" /> },
   { value: "memory", label: "记忆", icon: <Brain className="size-4" /> },
-  { value: "channels", label: "渠道", icon: <Radio className="size-4" /> },
   { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
   { value: "version", label: "版本", icon: <ArrowUpCircle className="size-4" /> },
 ];
@@ -217,9 +215,6 @@ export function SettingsDialog() {
                 </TabsContent>
                 <TabsContent value="memory" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "memory" ? true : undefined} data-coach-id="coach-settings-content-memory">
                   {settingsTab === "memory" && <MemoryTab />}
-                </TabsContent>
-                <TabsContent value="channels" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "channels" ? true : undefined}>
-                  {settingsTab === "channels" && <ChannelsTab />}
                 </TabsContent>
                 <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
                   {settingsTab === "runtime" && <RuntimeTab />}
