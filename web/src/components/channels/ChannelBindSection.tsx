@@ -54,12 +54,24 @@ function OtpInput({
     if (disabled) return;
     const d = char.replace(/\D/g, "");
     if (!d) return;
+    // Multi-char input (e.g. paste via onChange on some browsers): fill from position i
+    if (d.length > 1) {
+      const arr = [...digits];
+      for (let k = 0; k < d.length && i + k < 6; k++) {
+        arr[i + k] = d[k];
+      }
+      const next = arr.join("");
+      onChange(next);
+      focusAt(Math.min(i + d.length, 5));
+      if (next.length === 6 && !next.includes(" ")) setTimeout(onComplete, 80);
+      return;
+    }
     const arr = [...digits];
     arr[i] = d[0];
     const next = arr.join("");
     onChange(next);
     if (i < 5) focusAt(i + 1);
-    if (next.length === 6 && !next.includes("")) {
+    if (next.length === 6 && !next.includes(" ")) {
       setTimeout(onComplete, 80);
     }
   };
@@ -255,13 +267,13 @@ export function ChannelBindSection({
       </p>
 
       {/* ── 绑定流程指引 ── */}
-      <div className="rounded-xl bg-gradient-to-br from-muted/50 to-muted/20 border border-border/60 p-4">
+      <div className="rounded-xl bg-gradient-to-br from-muted/50 to-muted/20 border border-border/60 p-3 sm:p-4">
         <div className="flex items-start">
           {STEPS.map((step, i) => (
             <div key={step.num} className="flex-1 flex items-start">
               <div className="flex flex-col items-center text-center flex-1">
                 <div
-                  className="h-8 w-8 rounded-full flex items-center justify-center text-xs font-bold text-white shadow-sm relative"
+                  className="h-7 w-7 sm:h-8 sm:w-8 rounded-full flex items-center justify-center text-[11px] sm:text-xs font-bold text-white shadow-sm relative"
                   style={{
                     background: `linear-gradient(135deg, var(--em-primary), var(--em-primary-dark, var(--em-primary)))`,
                   }}
@@ -272,11 +284,11 @@ export function ChannelBindSection({
                     style={{ boxShadow: "0 0 12px var(--em-primary)" }}
                   />
                 </div>
-                <p className="text-[11px] font-semibold mt-2 leading-tight text-foreground">{step.label}</p>
-                <p className="text-[10px] text-muted-foreground mt-0.5 leading-snug px-0.5">{step.desc}</p>
+                <p className="text-[10px] sm:text-[11px] font-semibold mt-1.5 sm:mt-2 leading-tight text-foreground">{step.label}</p>
+                <p className="text-[9px] sm:text-[10px] text-muted-foreground mt-0.5 leading-snug px-0.5">{step.desc}</p>
               </div>
               {i < STEPS.length - 1 && (
-                <div className="flex-shrink-0 w-8 sm:w-12 mt-4 flex items-center">
+                <div className="flex-shrink-0 w-6 sm:w-12 mt-3.5 sm:mt-4 flex items-center">
                   <div className="w-full border-t-2 border-dashed border-[var(--em-primary)]/30" />
                 </div>
               )}
@@ -296,14 +308,14 @@ export function ChannelBindSection({
                 key={link.id}
                 initial={{ opacity: 0, y: 8 }}
                 animate={{ opacity: 1, y: 0 }}
-                className="flex items-center justify-between rounded-xl border border-border bg-gradient-to-r from-background to-muted/20 px-3.5 py-3 shadow-sm"
+                className="flex items-center justify-between rounded-xl border border-border bg-gradient-to-r from-background to-muted/20 px-2.5 sm:px-3.5 py-2.5 sm:py-3 shadow-sm"
               >
                 <div className="flex items-center gap-3 min-w-0">
                   <div
-                    className="h-9 w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"
+                    className="h-8 w-8 sm:h-9 sm:w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"
                     style={{ backgroundColor: meta?.color || "#6b7280" }}
                   >
-                    <ChannelIcon channel={link.channel} className="h-4.5 w-4.5" />
+                    <ChannelIcon channel={link.channel} className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
                   </div>
                   <div className="min-w-0">
                     <p className="text-sm font-semibold truncate">
@@ -406,7 +418,7 @@ export function ChannelBindSection({
           获取 6 位绑定码，然后在下方输入。
         </p>
 
-        <div className="flex flex-col sm:flex-row items-start sm:items-end gap-3">
+        <div className="flex flex-col items-stretch gap-3">
           <OtpInput
             value={bindCode}
             onChange={setBindCode}
@@ -416,7 +428,7 @@ export function ChannelBindSection({
           <Button
             onClick={handleBind}
             disabled={bindCode.trim().length < 6 || binding}
-            className="h-11 sm:h-13 px-5 rounded-xl text-sm font-semibold shadow-sm transition-all duration-200 hover:shadow-md"
+            className="h-11 w-full sm:w-auto px-5 rounded-xl text-sm font-semibold shadow-sm transition-all duration-200 hover:shadow-md"
             style={
               bindCode.trim().length >= 6
                 ? { backgroundColor: "var(--em-primary)", color: "#fff" }
@@ -447,7 +459,7 @@ export function ChannelBindSection({
           <motion.div
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="flex items-center gap-3 py-3 px-3.5 rounded-xl border-2 border-green-500/30 bg-green-500/5"
+            className="flex items-center gap-2.5 sm:gap-3 py-2.5 sm:py-3 px-3 sm:px-3.5 rounded-xl border-2 border-green-500/30 bg-green-500/5"
           >
             <div
               className="h-9 w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"

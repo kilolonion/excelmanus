@@ -7,8 +7,9 @@ import { Loader2, Github, Eye, EyeOff, AlertCircle, X, Clock, Shield, FileSpread
 import { motion, AnimatePresence } from "framer-motion";
 import { Suspense } from "react";
 import { Button } from "@/components/ui/button";
-import { login, getOAuthUrl } from "@/lib/auth-api";
+import { login, getOAuthUrl, isTokenExpired } from "@/lib/auth-api";
 import { resolveAvatarSrc } from "@/lib/api";
+import { useAuthStore } from "@/stores/auth-store";
 import { useRecentAccountsStore, canAutoLogin, type RecentAccount } from "@/stores/recent-accounts-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { encryptCredential, decryptCredential } from "@/lib/credential-crypto";
@@ -107,6 +108,15 @@ function LoginForm() {
     }
   }, [searchParams]);
 
+  // 已认证用户访问登录页 → 直接重定向到首页，避免闪烁
+  // AppShell 对 /login 跳过了 AuthProvider，此处补偿该逻辑
+  useEffect(() => {
+    const state = useAuthStore.getState();
+    if (state.isAuthenticated && state.accessToken && !isTokenExpired(state.accessToken)) {
+      router.replace("/");
+    }
+  }, [router]);
+
   useEffect(() => {
     const handlePageShow = (e: PageTransitionEvent) => {
       if (e.persisted) setOauthLoading(null);
@@ -123,6 +133,12 @@ function LoginForm() {
     if (searchParams.get("email")) return;
     // 用户刚主动退出：本次页面生命周期内禁止自动登录
     if (skipAutoLoginAfterLogout) return;
+    // 循环防护：如果本次浏览器会话中自动登录已成功过但又被重定向回来，
+    // 说明 validateSession 持续失败，停止自动登录以避免无限循环。
+    if (typeof window !== "undefined" && sessionStorage.getItem("auto-login-redirected") === "1") {
+      sessionStorage.removeItem("auto-login-redirected");
+      return;
+    }
     // 如果已经有最近账号，尝试自动登录第一个可用的
     if (recentAccounts.length > 0 && !autoLoggingIn) {
       const account = recentAccounts.find(canAutoLogin);
@@ -146,6 +162,8 @@ function LoginForm() {
             }
             await login(account.email, plainPwd);
             if (!mountedRef.current) return;
+            // 标记自动登录已成功跳转，若被 validateSession 重定向回来则不再重试
+            sessionStorage.setItem("auto-login-redirected", "1");
             router.push("/");
           } catch (err) {
             if (!mountedRef.current) return;
@@ -205,6 +223,8 @@ function LoginForm() {
         password: encPwd,
         rememberMe,
       });
+      // 手动登录成功：清除循环防护标记，允许后续自动登录正常工作
+      sessionStorage.removeItem("auto-login-redirected");
       router.push("/");
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : "登录失败");
@@ -253,6 +273,7 @@ function LoginForm() {
           return;
         }
         await login(account.email, plainPwd);
+        sessionStorage.setItem("auto-login-redirected", "1");
         router.push("/");
       } catch (err) {
         console.error("快捷登录失败:", err);

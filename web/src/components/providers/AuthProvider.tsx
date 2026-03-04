@@ -89,6 +89,7 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
     try {
       const user = await fetchCurrentUser();
       if (!user) {
+        // fetchCurrentUser 返回 null 说明后端明确拒绝（401 等），尝试刷新
         const refreshed = await refreshAccessToken();
         if (!refreshed) {
           useAuthStore.getState().logout();
@@ -97,9 +98,10 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
         }
       }
     } catch {
-      useAuthStore.getState().logout();
-      clearSessionCookie();
-      router.replace("/login");
+      // 网络错误（Failed to fetch / DNS / timeout）→ 不登出，保留本地 session，
+      // 避免瞬时网络波动把用户踢出登录并导致与自动登录形成重定向循环。
+      // 下次用户主动操作时会自然重试。
+      console.warn("[auth] validation network error, keeping session");
     }
   }, [authEnabled, pathname, router, isPublic]);
 
