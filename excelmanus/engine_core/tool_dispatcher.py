@@ -20,7 +20,6 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_core.tool_errors import (
     DEFAULT_RETRY_POLICY,
-    ToolErrorKind,
     classify_tool_error,
     compact_error,
 )
@@ -51,6 +50,8 @@ class _ToolExecOutcome:
     raw_result_str: str | None = None  # 截断前的原始结果，供窗口感知解析使用
 
 if TYPE_CHECKING:
+    from pathlib import Path
+
     from excelmanus.engine import AgentEngine
     from excelmanus.events import EventCallback
     from excelmanus.stores.tool_call_store import ToolCallStore
@@ -264,6 +265,8 @@ class ToolDispatcher:
         self._last_vlm_description_image_hash: str | None = None
         # 每会话 sleep 取消事件（abort 时中断正在执行的 sleep 工具）
         self._sleep_cancel_event = threading.Event()
+        # 最近一次工具调用的截断前原始结果（供窗口感知解析）
+        self._last_call_raw_result: str = ""
 
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
@@ -285,6 +288,7 @@ class ToolDispatcher:
             FinishTaskHandler,
             HighRiskApprovalHandler,
             SkillActivationHandler,
+            SkillManagementHandler,
             SuggestModeSwitchHandler,
         )
         # T2: 按工具名建立 O(1) 索引，跳过需动态判断的 handler
@@ -292,6 +296,7 @@ class ToolDispatcher:
         _specific: dict[str, Any] = {}
         _skill = SkillActivationHandler(engine, self)
         _specific["activate_skill"] = _skill
+        _specific["manage_skills"] = SkillManagementHandler(engine, self)
         _deleg = DelegationHandler(engine, self)
         for _dn in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate"):
             _specific[_dn] = _deleg
@@ -664,7 +669,6 @@ class ToolDispatcher:
             if 180 <= mean_brightness <= 230 and stddev < 60:
                 # 用灰度图判断哪些像素属于背景，生成 mask，
                 # 再对 RGB 图统一白化，避免逐通道独立比较导致颜色失真
-                from PIL import ImageChops
                 thresh = int(mean_brightness - 20)
                 bg_mask = gray.point(lambda p: 255 if p > thresh else 0, "1")
                 white = Image.new("RGB", img.size, (255, 255, 255))
@@ -867,30 +871,53 @@ class ToolDispatcher:
         arguments: dict[str, Any],
         tool_scope: Sequence[str] | None = None,
     ) -> str:
-        """在线程池中调用工具，返回截断后的结果字符串。"""
+        """调用工具，返回截断后的结果字符串。
+
+        MCP 工具（具有 async_func）直接 await，避免线程池 + asyncio.run 开销。
+        普通工具仍走 asyncio.to_thread 线程池路径。
+        """
         from excelmanus.tools import memory_tools
         from excelmanus.tools.sleep_tools import set_cancel_event, reset_cancel_event
 
         registry = self._registry
-        persistent_memory = self._persistent_memory
-        sleep_cancel_event = self._sleep_cancel_event
 
-        # 将每会话的 sleep 取消事件注入 contextvar，
-        # asyncio.to_thread 会自动拷贝到工作线程。
-        _sleep_token = set_cancel_event(sleep_cancel_event)
+        # 检测是否有异步快速路径（MCP 工具）
+        tool_def = registry.get_tool(tool_name)
+        _has_async = (
+            tool_def is not None
+            and getattr(tool_def, "async_func", None) is not None
+            and callable(tool_def.async_func)
+            and asyncio.iscoroutinefunction(tool_def.async_func)
+        )
+        if _has_async:
+            # MCP 异步快速路径：直接 await，不经线程池
+            result_value = await registry.call_tool_async(
+                tool_name,
+                arguments,
+                tool_scope=tool_scope,
+            )
+        else:
+            # 普通工具：走线程池路径
+            persistent_memory = self._persistent_memory
+            sleep_cancel_event = self._sleep_cancel_event
 
-        def _call() -> Any:
-            with memory_tools.bind_memory_context(persistent_memory):
-                return registry.call_tool(
-                    tool_name,
-                    arguments,
-                    tool_scope=tool_scope,
-                )
+            # 将每会话的 sleep 取消事件注入 contextvar，
+            # asyncio.to_thread 会自动拷贝到工作线程。
+            _sleep_token = set_cancel_event(sleep_cancel_event)
 
-        try:
-            result_value = await asyncio.to_thread(_call)
-        finally:
-            reset_cancel_event(_sleep_token)
+            def _call() -> Any:
+                with memory_tools.bind_memory_context(persistent_memory):
+                    return registry.call_tool(
+                        tool_name,
+                        arguments,
+                        tool_scope=tool_scope,
+                    )
+
+            try:
+                result_value = await asyncio.to_thread(_call)
+            finally:
+                reset_cancel_event(_sleep_token)
+
         result_str = str(result_value)
 
         # 先处理图片注入（移除 base64 载荷），再做截断，
@@ -924,8 +951,6 @@ class ToolDispatcher:
         从 AgentEngine._execute_tool_call 整体搬迁，通过 self._engine
         引用回调 AgentEngine 上的基础设施方法。
         """
-        from excelmanus.engine import ToolCallResult, _AuditedExecutionError
-        from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.tools.code_tools import set_sandbox_env as _set_sandbox_env
         from excelmanus.tools._guard_ctx import set_guard as _set_guard, reset_guard as _reset_guard
 
@@ -954,7 +979,7 @@ class ToolDispatcher:
         skip_start_event: bool,
         _sandbox_token: Any,
     ) -> Any:
-        from excelmanus.engine import ToolCallResult, _AuditedExecutionError
+        from excelmanus.engine import ToolCallResult
         from excelmanus.events import EventType, ToolCallEvent
 
         e = self._engine
@@ -1153,6 +1178,7 @@ class ToolDispatcher:
             cow_reminders=_cow_reminders,
             start_time=_t0,
             raw_result_str=_raw_result_str,
+            error_kind=error_kind,
         )
 
         return ToolCallResult(
@@ -1338,6 +1364,7 @@ class ToolDispatcher:
         cow_reminders: list[str],
         start_time: float = 0.0,
         raw_result_str: str | None = None,
+        error_kind: str | None = None,
     ) -> tuple[str, bool, str | None]:
         """后处理流水线：CoW/备份/图片/VLM/窗口感知/硬截断/事件/审计/任务清单。
 
@@ -1510,7 +1537,7 @@ class ToolDispatcher:
                     success=success,
                     duration_ms=(time.monotonic() - start_time) * 1000 if start_time else 0.0,
                     result_chars=len(result_str) if result_str else 0,
-                    error_type=type(error).__name__ if isinstance(error, Exception) else (error[:50] if error else None),
+                    error_type=error_kind if error_kind else (error[:50] if error else None),
                     error_preview=str(error)[:200] if error else None,
                 )
             except Exception:
@@ -2045,7 +2072,6 @@ class ToolDispatcher:
         过滤掉 AST 无法解析的 ``<variable>`` 占位符，并从执行结果中
         补充实际被修改的文件路径，确保 diff 快照能正确工作。
         """
-        from pathlib import Path
         from excelmanus.window_perception.extractor import is_excel_path, normalize_path
 
         seen: set[str] = set()

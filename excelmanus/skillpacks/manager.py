@@ -14,15 +14,9 @@ from typing import Any
 from excelmanus.config import ExcelManusConfig
 from excelmanus.skillpacks.clawhub import (
     ClawHubClient,
-    ClawHubError,
-    ClawHubSearchResult,
-    ClawHubSkillDetail,
-    ClawHubUpdateInfo,
 )
 from excelmanus.skillpacks.clawhub_lockfile import ClawHubLockfile
 from excelmanus.skillpacks.importer import (
-    SkillImportError,
-    SkillImportResult,
     import_from_github_url,
     import_from_local_path,
 )
@@ -94,9 +88,19 @@ class SkillpackConflictError(SkillpackManagerError):
 
 
 class SkillpackManager:
-    """统一管理 project 层 skillpack 的写入与归档。"""
+    """统一管理 project 层 skillpack 的写入与归档。
 
-    def __init__(self, config: ExcelManusConfig, loader: SkillpackLoader) -> None:
+    当提供 ``user_skill_dir`` 时，用户通过 API 创建的技能将写入
+    该目录（per-user 隔离），而非共享的 project 目录。
+    """
+
+    def __init__(
+        self,
+        config: ExcelManusConfig,
+        loader: SkillpackLoader,
+        *,
+        user_skill_dir: Path | None = None,
+    ) -> None:
         self._config = config
         self._loader = loader
         self._lock = threading.Lock()
@@ -107,6 +111,12 @@ class SkillpackManager:
             workspace = workspace.resolve()
         self._workspace_root = workspace
         self._project_dir = self._resolve_path(config.skills_project_dir)
+        # per-user 技能写入目录（为 None 时回退到 project_dir）
+        self._user_skill_dir: Path | None = (
+            user_skill_dir.resolve() if user_skill_dir is not None else None
+        )
+        if self._user_skill_dir is not None:
+            self._user_skill_dir.mkdir(parents=True, exist_ok=True)
         self._archive_root = self._workspace_root / ".excelmanus" / "skillpacks_archive"
 
         self._ensure_in_workspace(self._project_dir, "skills_project_dir")
@@ -143,22 +153,22 @@ class SkillpackManager:
     ) -> dict[str, Any]:
         normalized_name = self._validate_skill_name(name)
         normalized_payload = self._normalize_payload(payload, for_create=True)
+        write_dir = self._write_target_dir()
         with self._lock:
             skillpacks = self._ensure_loaded()
             existing_name = self._resolve_skill_name(normalized_name, skillpacks)
-            if (
-                existing_name is not None
-                and skillpacks[existing_name].source == "project"
-            ):
-                raise SkillpackConflictError(
-                    f"Skillpack `{normalized_name}` 在 project 层已存在。"
-                )
+            if existing_name is not None:
+                existing_source = skillpacks[existing_name].source
+                if existing_source in ("project", "user"):
+                    raise SkillpackConflictError(
+                        f"Skillpack `{normalized_name}` 在 {existing_source} 层已存在。"
+                    )
             content = self._build_skill_file_content(
                 name=normalized_name,
                 payload=normalized_payload,
                 base=None,
             )
-            skill_dir = self._project_dir / normalized_name
+            skill_dir = write_dir / normalized_name
             skill_file = skill_dir / "SKILL.md"
             skill_dir.mkdir(parents=True, exist_ok=True)
             self._atomic_write_text(skill_file, content)
@@ -180,21 +190,22 @@ class SkillpackManager:
             if resolved_name is None:
                 raise SkillpackNotFoundError(f"未找到 Skillpack `{normalized_name}`。")
             skill = skillpacks[resolved_name]
-            if skill.source != "project":
+            if skill.source not in ("project", "user"):
                 raise SkillpackConflictError(
                     f"Skillpack `{resolved_name}` 来源为 `{skill.source}`，"
-                    "请先在 project 层创建同名覆盖版本。"
+                    "仅支持修改 project/user 层技能。"
                 )
             content = self._build_skill_file_content(
                 name=skill.name,
                 payload=normalized_payload,
                 base=skill,
             )
-            skill_dir = self._project_dir / skill.name
+            # 定位技能所在的实际目录
+            skill_dir = self._locate_skill_dir(skill)
             skill_file = skill_dir / "SKILL.md"
             if not skill_file.exists():
                 raise SkillpackNotFoundError(
-                    f"project 层 Skillpack 文件不存在：`{skill_file}`。"
+                    f"Skillpack 文件不存在：`{skill_file}`。"
                 )
             self._atomic_write_text(skill_file, content)
             self._loader.load_all()
@@ -214,13 +225,13 @@ class SkillpackManager:
             if resolved_name is None:
                 raise SkillpackNotFoundError(f"未找到 Skillpack `{normalized_name}`。")
             skill = skillpacks[resolved_name]
-            if skill.source != "project":
+            if skill.source not in ("project", "user"):
                 raise SkillpackConflictError(
                     f"Skillpack `{resolved_name}` 来源为 `{skill.source}`，"
-                    "仅支持删除 project 层技能。"
+                    "仅支持删除 project/user 层技能。"
                 )
 
-            src_dir = self._project_dir / skill.name
+            src_dir = self._locate_skill_dir(skill)
             if not src_dir.exists():
                 raise SkillpackNotFoundError(f"待删除目录不存在：`{src_dir}`。")
 
@@ -296,6 +307,7 @@ class SkillpackManager:
         value: str,
         actor: str,
         overwrite: bool = False,
+        version: str | None = None,
     ) -> dict[str, Any]:
         """从本地路径或 GitHub URL 导入 SKILL.md 及附属资源（异步）。
 
@@ -304,6 +316,7 @@ class SkillpackManager:
             value: SKILL.md 路径或 GitHub URL。
             actor: 操作者标识。
             overwrite: 是否覆盖已存在的同名技能。
+            version: 可选，预缓存的版本号（仅 clawhub 源有效，跳过版本解析）。
 
         Returns:
             导入结果字典。
@@ -322,7 +335,7 @@ class SkillpackManager:
             return result.to_dict()
         if source == "clawhub":
             return await self._import_from_clawhub(
-                slug=value, actor=actor, overwrite=overwrite,
+                slug=value, actor=actor, overwrite=overwrite, version=version,
             )
         raise SkillpackInputError(
             f"不支持的导入来源：{source}（支持 local_path / github_url / clawhub）"
@@ -388,10 +401,13 @@ class SkillpackManager:
                 overwrite=overwrite,
             )
             lockfile.add(slug, resolved_version)
-            self._loader.load_all()
+            skill_dir = self._project_dir / slug
+            loaded = self._loader.load_single(skill_dir, source="project")
+            if loaded is None:
+                self._loader.load_all()
         return {
             "name": slug,
-            "description": "",
+            "description": loaded.description if loaded else "",
             "source_type": "clawhub",
             "files_copied": files,
             "dest_dir": str(self._project_dir / slug),
@@ -443,7 +459,9 @@ class SkillpackManager:
                     overwrite=True,
                 )
                 lockfile.update_version(s, resolved)
-                self._loader.load_all()
+                skill_dir = self._project_dir / s
+                if self._loader.load_single(skill_dir, source="project") is None:
+                    self._loader.load_all()
                 results.append({
                     "slug": s,
                     "version": resolved,
@@ -466,6 +484,25 @@ class SkillpackManager:
             {"slug": slug, "version": ver}
             for slug, ver in sorted(installed.items())
         ]
+
+    def _write_target_dir(self) -> Path:
+        """返回新建技能的写入目标目录。
+
+        有 user_skill_dir 时写入用户私有目录，否则回退到 project 目录。
+        """
+        return self._user_skill_dir if self._user_skill_dir is not None else self._project_dir
+
+    def _locate_skill_dir(self, skill: Skillpack) -> Path:
+        """根据技能的 root_dir 定位其在文件系统上的实际目录。
+
+        优先使用 skill.root_dir（加载时已记录的绝对路径），
+        回退到按 source 推断目录。
+        """
+        if skill.root_dir and Path(skill.root_dir).exists():
+            return Path(skill.root_dir)
+        if skill.source == "user" and self._user_skill_dir is not None:
+            return self._user_skill_dir / skill.name
+        return self._project_dir / skill.name
 
     def _ensure_loaded(self) -> dict[str, Skillpack]:
         skillpacks = self._loader.get_skillpacks()
@@ -764,7 +801,7 @@ class SkillpackManager:
             "description": skill.description,
             "instructions": skill.instructions,
             "source": skill.source,
-            "writable": skill.source == "project",
+            "writable": skill.source in ("project", "user"),
             "file_patterns": list(skill.file_patterns),
             "resources": list(skill.resources),
             "version": skill.version,
