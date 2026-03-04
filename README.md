@@ -99,21 +99,6 @@ Web UI 一键检测新版本 → 备份 → 更新 → 自动重启
 自动安装依赖、启动后端和前端，适合大多数用户。
 
 <details open>
-<summary><b>🪟 Windows — 图形化部署工具（最简单）</b></summary>
-
-**无需提前 clone 仓库**，直接从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe` 双击运行即可。
-
-两步向导式界面，全程引导：
-1. **环境检测** — 自动检测 Python / Node.js / Git，缺失时 winget 自动安装
-2. **一键部署** — 克隆仓库 → 安装依赖 → 启动服务，进度条实时展示
-
-部署完成后浏览器自动打开 `http://localhost:3000`。
-
-> 🇨🇳 **国内网络友好**：GitHub 失败自动回退 Gitee 镜像 · npm 淘宝源 · pip 清华源
-
-</details>
-
-<details>
 <summary><b>🍎 macOS / 🐧 Linux — 启动脚本</b></summary>
 
 ```bash
@@ -240,10 +225,7 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 | **HTTP 重试 & 退避** | 连接级重试 + 指数退避 + 429 Retry-After 尊重 |
 
 ```bash
-# Telegram
-EXCELMANUS_TG_TOKEN=xxx python3 excelmanus_tg_bot.py
-
-# QQ / 飞书：通过 Web UI 设置页配置渠道凭据即可
+# 所有渠道（Telegram / QQ / 飞书）：通过 Web UI 设置页配置渠道凭据即可
 ```
 
 ### REST API
@@ -410,10 +392,6 @@ docker pull kilol/excelmanus-api:1.7.0       # 后端 API
 docker pull kilol/excelmanus-sandbox:1.7.0   # 代码沙盒（可选）
 docker pull kilol/excelmanus-web:1.7.0       # 前端 Web
 ```
-
-### Windows 图形化部署
-
-从 [Releases](https://github.com/kilolonion/excelmanus/releases) 下载 `ExcelManus.exe`，双击运行。两步向导式界面（Vite + React + Tailwind CSS），自动完成环境检测和部署。零外部依赖，源码：`deploy/ExcelManusSetup.cs`。
 
 ### 一键启动脚本（本地开发）
 

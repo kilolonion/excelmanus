@@ -1648,27 +1648,6 @@ export async function checkpointRollback(
   });
 }
 
-// ── Desktop Shortcut API ─────────────────────────────────
-
-export interface ShortcutInfo {
-  exists: boolean;
-  desktop_path: string | null;
-  shortcut_path: string | null;
-  platform: string;
-}
-
-export async function fetchShortcutInfo(): Promise<ShortcutInfo> {
-  return apiGet<ShortcutInfo>("/shortcut/info");
-}
-
-export async function createDesktopShortcut(): Promise<{ status: string; path: string }> {
-  return apiPost<{ status: string; path: string }>("/shortcut/create", {});
-}
-
-export async function removeDesktopShortcut(): Promise<{ status: string }> {
-  return apiPost<{ status: string }>("/shortcut/remove", {});
-}
-
 // ── Version Advanced Operations ─────────────────────────
 
 export async function cleanupVersionBackups(

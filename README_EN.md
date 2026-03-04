@@ -99,19 +99,6 @@ Version compatibility validation, blue-green deployment, rollback window protect
 Auto-installs dependencies and launches both backend and frontend.
 
 <details open>
-<summary><b>🪟 Windows — GUI Setup Tool (Easiest)</b></summary>
-
-**No need to clone first** — download `ExcelManus.exe` from [Releases](https://github.com/kilolonion/excelmanus/releases) and double-click.
-
-Two-step wizard:
-1. **Environment check** — Auto-detects Python / Node.js / Git, installs via winget if missing
-2. **One-click deploy** — Clones repo → installs deps → starts services with live progress
-
-Browser auto-opens `http://localhost:3000` when done.
-
-</details>
-
-<details>
 <summary><b>🍎 macOS / 🐧 Linux — Start Script</b></summary>
 
 ```bash
@@ -236,10 +223,7 @@ Supports **Telegram** · **QQ** · **Feishu** with a unified message handling fr
 | **HTTP Retry & Backoff** | Connection-level retry + exponential backoff + 429 Retry-After respect |
 
 ```bash
-# Telegram
-EXCELMANUS_TG_TOKEN=xxx python3 excelmanus_tg_bot.py
-
-# QQ / Feishu: configure channel credentials in Web UI settings
+# All channels (Telegram / QQ / Feishu): configure channel credentials in Web UI settings
 ```
 
 ### REST API
@@ -406,10 +390,6 @@ docker pull kilol/excelmanus-api:1.7.0       # Backend API
 docker pull kilol/excelmanus-sandbox:1.7.0   # Code sandbox (optional)
 docker pull kilol/excelmanus-web:1.7.0       # Frontend Web
 ```
-
-### Windows GUI Setup
-
-Download `ExcelManus.exe` from [Releases](https://github.com/kilolonion/excelmanus/releases) and double-click. Two-step wizard (Vite + React + Tailwind CSS), auto environment detection and deployment. Zero external dependencies, source: `deploy/ExcelManusSetup.cs`.
 
 ### Start Scripts (Local Development)
 
