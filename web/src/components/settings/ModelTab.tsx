@@ -61,6 +61,7 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
 import { formatModelIdForDisplay } from "@/lib/model-display";
+import { PROVIDER_COLORS as PROVIDER_BRAND_COLOR } from "@/lib/provider-brand";
 
 interface ModelSection {
   api_key?: string;
@@ -185,49 +186,6 @@ const PROVIDER_LOGO_SLUG: Record<string, string> = {
   minimax: "minimax",
 };
 
-const PROVIDER_BRAND_COLOR: Record<string, string> = {
-  openai: "#10a37f",
-  "openai-codex": "#10a37f",
-  anthropic: "#d4a574",
-  claude: "#d4a574",
-  gemini: "#4285f4",
-  google: "#4285f4",
-  deepseek: "#4d6bfe",
-  qwen: "#ff6a00",
-  dashscope: "#ff6a00",
-  aliyuncs: "#ff6a00",
-  aliyun: "#ff6a00",
-  alibaba: "#ff6a00",
-  alibabacloud: "#ff6a00",
-  zhipu: "#2563eb",
-  glm: "#2563eb",
-  openrouter: "#7c3aed",
-  kimi: "#7c3aed",
-  moonshot: "#7c3aed",
-  x: "#f28834",
-  xai: "#f28834",
-  grok: "#f28834",
-  mistral: "#fa520f",
-  mistralai: "#fa520f",
-  tencent: "#1ebafc",
-  hunyuan: "#1ebafc",
-  qq: "#1ebafc",
-  bytedance: "#3c8cff",
-  doubao: "#3c8cff",
-  volcengine: "#3c8cff",
-  ark: "#3c8cff",
-  meta: "#0467df",
-  llama: "#0467df",
-  perplexity: "#1fb8cd",
-  baidu: "#2932e1",
-  huawei: "#ff0000",
-  nvidia: "#76b900",
-  huggingface: "#ffd21e",
-  hf: "#ffd21e",
-  siliconflow: "#06b6d4",
-  siliconcloud: "#06b6d4",
-  minimax: "#ec5f27",
-};
 
 function ProviderLogo({ id, color }: { id: string; color?: string }) {
   const slug = PROVIDER_LOGO_SLUG[id];

@@ -166,7 +166,7 @@ export function SessionStatusBar() {
   return (
     <>
       <TooltipProvider delayDuration={300}>
-        <div className="flex items-center gap-1.5 md:gap-3 text-[11px] text-muted-foreground min-w-0 overflow-hidden">
+        <div className="flex items-center gap-1 sm:gap-1.5 md:gap-3 text-[11px] text-muted-foreground min-w-0 overflow-hidden">
           {/* ── Compaction Ring ── */}
           {c.enabled && c.max_tokens > 0 && (() => {
             const pct = Math.min(c.usage_ratio, 1);
@@ -257,7 +257,7 @@ export function SessionStatusBar() {
           <Tooltip>
             <TooltipTrigger asChild>
               <span
-                className="touch-compact flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
+                className="touch-compact hidden sm:flex items-center gap-1 cursor-pointer hover:opacity-80 transition-opacity"
                 role="button"
                 tabIndex={0}
                 onClick={() => {

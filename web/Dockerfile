@@ -41,7 +41,13 @@ ENV HOSTNAME="0.0.0.0"
 #   - 留空（默认）→ 回退到 NEXT_PUBLIC_BACKEND_ORIGIN 或 http://{hostname}:8000
 #   - "same-origin" → 走同源（Nginx 反代场景推荐）
 #   - "http://backend:8000" → 直连指定后端
-# 此变量无需重新构建镜像即可在 docker run / docker-compose 中修改。
+#
+# ★ 无需重新构建镜像 ★ — 通过 RuntimeConfigScript (Server Component) 在 HTML 中
+# 注入 window.__EXCELMANUS_RUNTIME__，客户端自动优先读取运行时值。
+#
+# 用法示例：
+#   docker run -e EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin ...
+#   docker compose: environment: - EXCELMANUS_RUNTIME_BACKEND_ORIGIN=http://backend:8000
 # ENV EXCELMANUS_RUNTIME_BACKEND_ORIGIN=""
 
 CMD ["node", "server.js"]
