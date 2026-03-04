@@ -229,7 +229,7 @@ export function TurnBrowser() {
             <Button
               variant="ghost"
               size="icon"
-              className="h-7 w-7 p-0 relative"
+              className="hidden sm:inline-flex h-7 w-7 p-0 relative"
               onClick={() => setPanelOpen(true)}
               aria-label="轮次浏览"
             >

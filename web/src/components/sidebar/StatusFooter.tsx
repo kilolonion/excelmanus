@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
-import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings, UserCircle } from "lucide-react";
+import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings, UserCircle, Radio } from "lucide-react";
 import { apiGet, resolveAvatarSrc } from "@/lib/api";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuthStore } from "@/stores/auth-store";
@@ -435,6 +435,7 @@ function UserBadge({ compact = false }: { compact?: boolean }) {
           <MenuButton icon={Users} label="用户管理" onClick={() => { close(); useUIStore.getState().openAdmin(); }} />
         )}
         <MenuButton icon={UserCircle} label="个人中心" onClick={() => { close(); useUIStore.getState().openProfile(); }} />
+        <MenuButton icon={Radio} label="渠道配置" onClick={() => { close(); useUIStore.getState().openChannels(); }} />
         {isMobile && (
           <MenuButton icon={Settings} label="设置" onClick={() => { close(); openSettings("model"); }} />
         )}

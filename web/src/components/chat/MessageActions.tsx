@@ -11,6 +11,7 @@ import { apiGet } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
+import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
 
 interface MessageActionsProps {
   blocks: AssistantBlock[];
@@ -29,61 +30,6 @@ function extractPlainText(blocks: AssistantBlock[]): string {
     .map((b) => (b as Extract<AssistantBlock, { type: "text" }>).content)
     .join("\n\n")
     .trim();
-}
-
-function extractProvider(baseUrl: string | undefined): string {
-  if (!baseUrl) return "unknown";
-  try {
-    const hostname = new URL(baseUrl).hostname;
-    const parts = hostname.split(".");
-    if (parts.length >= 2) return parts[parts.length - 2];
-    return parts[0] || "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-/** Provider brand colors — keep in sync with TopModelSelector */
-const PROVIDER_COLORS: Record<string, string> = {
-  openai: "#10a37f",
-  deepseek: "#4d6bfe",
-  aliyuncs: "#ff6a00",
-  dashscope: "#ff6a00",
-  anthropic: "#d4a574",
-  google: "#4285f4",
-  moonshot: "#7c3aed",
-  zhipu: "#2563eb",
-  baidu: "#2932e1",
-  groq: "#f55036",
-  mistral: "#ff7000",
-  together: "#6366f1",
-  cohere: "#39594d",
-  siliconflow: "#06b6d4",
-};
-
-const PROVIDER_DISPLAY: Record<string, string> = {
-  openai: "OpenAI",
-  deepseek: "DeepSeek",
-  aliyuncs: "阿里云",
-  dashscope: "DashScope",
-  anthropic: "Anthropic",
-  google: "Google",
-  moonshot: "Moonshot",
-  zhipu: "智谱",
-  baidu: "百度",
-  groq: "Groq",
-  mistral: "Mistral",
-  together: "Together",
-  cohere: "Cohere",
-  siliconflow: "SiliconFlow",
-};
-
-function getProviderColor(provider: string): string {
-  return PROVIDER_COLORS[provider] || "#888";
-}
-
-function getProviderDisplayName(provider: string): string {
-  return PROVIDER_DISPLAY[provider] || provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
 interface ProviderGroup {

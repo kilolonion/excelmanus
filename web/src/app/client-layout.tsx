@@ -13,6 +13,7 @@ import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { ProfilePanel } from "@/components/profile/ProfilePanel";
+import { ChannelsPanel } from "@/components/channels/ChannelsPanel";
 import { AdminPanel } from "@/components/admin/AdminPanel";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
@@ -68,7 +69,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
             <div className="flex-1" />
 
             {/* 右侧：状态指示 */}
-            <div className="flex items-center gap-1.5 sm:gap-2 flex-shrink-0">
+            <div className="flex items-center gap-1 sm:gap-1.5 md:gap-2 flex-shrink-0 min-w-0">
               <BackupApplyBadge />
               <TurnBrowser />
               <CheckpointTimeline />
@@ -88,6 +89,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <PlaceholderAlert />
         <SettingsDialog />
         <ProfilePanel />
+        <ChannelsPanel />
         <AdminPanel />
       </div>
     </>

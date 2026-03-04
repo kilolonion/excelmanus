@@ -13,74 +13,13 @@ import { useShallow } from "zustand/react/shallow";
 import { apiGet, apiPut } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
+import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
 
 interface ModelCapabilitySummary {
   name: string;
   model: string;
   base_url: string;
   capabilities: { healthy: boolean | null; health_error: string } | null;
-}
-
-/** Provider brand colors for visual distinction */
-const PROVIDER_COLORS: Record<string, string> = {
-  openai: "#10a37f",
-  deepseek: "#4d6bfe",
-  aliyuncs: "#ff6a00",
-  dashscope: "#ff6a00",
-  anthropic: "#d4a574",
-  google: "#4285f4",
-  moonshot: "#7c3aed",
-  zhipu: "#2563eb",
-  baidu: "#2932e1",
-  groq: "#f55036",
-  mistral: "#ff7000",
-  together: "#6366f1",
-  cohere: "#39594d",
-  siliconflow: "#06b6d4",
-};
-
-/** Friendly display names for known providers */
-const PROVIDER_DISPLAY: Record<string, string> = {
-  openai: "OpenAI",
-  deepseek: "DeepSeek",
-  aliyuncs: "阿里云",
-  dashscope: "DashScope",
-  anthropic: "Anthropic",
-  google: "Google",
-  moonshot: "Moonshot",
-  zhipu: "智谱",
-  baidu: "百度",
-  groq: "Groq",
-  mistral: "Mistral",
-  together: "Together",
-  cohere: "Cohere",
-  siliconflow: "SiliconFlow",
-};
-
-/**
- * 从 base_url 提取二级域名作为 provider 名称。
- * 例如 https://api.deepseek.com/v1 → deepseek
- *      https://dashscope.aliyuncs.com/compatible-mode/v1 → aliyuncs
- *      https://api.openai.com/v1 → openai
- */
-function extractProvider(baseUrl: string | undefined): string {
-  if (!baseUrl) return "unknown";
-  try {
-    const hostname = new URL(baseUrl).hostname;
-    const parts = hostname.split(".");
-    if (parts.length >= 2) return parts[parts.length - 2];
-    return parts[0] || "unknown";
-  } catch {
-    return "unknown";
-  }
-}
-
-function getProviderColor(provider: string): string {
-  return PROVIDER_COLORS[provider] || "#888";
-}
-
-function getProviderDisplayName(provider: string): string {
-  return PROVIDER_DISPLAY[provider] || provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
 interface ProviderGroup {

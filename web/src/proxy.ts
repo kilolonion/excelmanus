@@ -25,7 +25,7 @@ const PUBLIC_PATHS = [
 
 const SESSION_COOKIE = "em-session";
 
-export function middleware(request: NextRequest) {
+export function proxy(request: NextRequest) {
   // 认证未显式启用 → 中间件不拦截
   if (process.env.NEXT_PUBLIC_AUTH_ENABLED !== "true") {
     return NextResponse.next();
