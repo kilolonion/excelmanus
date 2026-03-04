@@ -578,6 +578,7 @@ public class Engine
     private Process _procFE;
     private bool _running;
     private bool _deploying;
+    private string _deployError;
     private bool _needsClone;
     private readonly Dictionary<string, int> _checks = new Dictionary<string, int>();
     private readonly Dictionary<string, string> _details = new Dictionary<string, string>();
@@ -796,6 +797,7 @@ public class Engine
         {
             if (_running || _deploying) return;
             _deploying = true;
+            _deployError = null;
             _progress = 85;
         }
         _log.Hl("═══ 快速启动模式 ═══");
@@ -811,7 +813,7 @@ public class Engine
             catch (Exception ex)
             {
                 _log.Err(string.Format("快速启动失败: {0}", ex.Message));
-                lock (_lock) { _deploying = false; }
+                lock (_lock) { _deployError = string.Format("快速启动失败: {0}", ex.Message); _deploying = false; }
             }
         });
     }
@@ -831,6 +833,10 @@ public class Engine
             sb.Append("{\"running\":"); sb.Append(_running ? "true" : "false");
             sb.Append(",\"deploying\":"); sb.Append(_deploying ? "true" : "false");
             sb.Append(",\"progress\":"); sb.Append(_progress);
+            if (_deployError != null)
+            {
+                sb.Append(",\"deploy_error\":\""); sb.Append(JE(_deployError)); sb.Append("\"");
+            }
             sb.Append(",\"checks\":{");
             bool first = true;
             foreach (KeyValuePair<string, int> kv in _checks)
@@ -989,6 +995,7 @@ public class Engine
         {
             if (_deploying || _running) return;
             _deploying = true;
+            _deployError = null;
         }
 
         SaveEnv();
@@ -1064,7 +1071,7 @@ public class Engine
         if (!pyOk || !ndOk || !npOk)
         {
             _log.Err("缺少必要环境组件，请手动安装后重试");
-            lock (_lock) { _deploying = false; }
+            lock (_lock) { _deployError = "缺少必要环境组件 (Python/Node.js/npm)，请手动安装后重试"; _deploying = false; }
             return;
         }
 
@@ -1075,14 +1082,14 @@ public class Engine
             {
                 _log.Err("单独运行模式需要 Git 来克隆仓库，请先安装 Git");
                 setCk("repo", false, "需要 Git");
-                lock (_lock) { _deploying = false; }
+                lock (_lock) { _deployError = "单独运行模式需要 Git，请先安装 Git"; _deploying = false; }
                 return;
             }
             bool cloneOk = CloneRepo();
             setCk("repo", cloneOk, cloneOk ? "就绪" : "克隆失败");
             if (!cloneOk)
             {
-                lock (_lock) { _deploying = false; }
+                lock (_lock) { _deployError = "仓库克隆失败，请检查网络连接"; _deploying = false; }
                 return;
             }
         }
@@ -1100,9 +1107,9 @@ public class Engine
         beThread.Join(); feThread.Join();
 
         setCk("backend", beOk, beOk ? "就绪" : "失败");
-        if (!beOk) { lock (_lock) { _deploying = false; } return; }
+        if (!beOk) { lock (_lock) { _deployError = "后端依赖安装失败，请查看日志"; _deploying = false; } return; }
         setCk("frontend", feOk, feOk ? "就绪" : "失败");
-        if (!feOk) { lock (_lock) { _deploying = false; } return; }
+        if (!feOk) { lock (_lock) { _deployError = "前端依赖安装或构建失败，请查看日志"; _deploying = false; } return; }
 
         WriteInstallComplete();
         lock (_lock) { _progress = 100; _deploying = false; }
@@ -1555,41 +1562,45 @@ public class Engine
         CleanupStalePids();
         KillPort(_bePort); KillPort(_fePort);
 
-        ThreadPool.QueueUserWorkItem(delegate
+        // Start backend process synchronously (no ThreadPool race)
+        try
         {
-            try
-            {
-                string vpy = Path.Combine(_root, ".venv", "Scripts", "python.exe");
-                if (!File.Exists(vpy)) vpy = "python";
-                _log.Info(string.Format("后端可执行文件: {0}", vpy));
-                ProcessStartInfo si = new ProcessStartInfo();
-                si.FileName = vpy;
-                si.Arguments = string.Format("-m uvicorn excelmanus.api:app --host 0.0.0.0 --port {0}", _bePort);
-                si.WorkingDirectory = _root;
-                si.RedirectStandardOutput = true;
-                si.RedirectStandardError = true;
-                si.UseShellExecute = false;
-                si.CreateNoWindow = true;
-                si.StandardOutputEncoding = Encoding.UTF8;
-                si.StandardErrorEncoding = Encoding.UTF8;
-                si.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
-                si.EnvironmentVariables["EXCELMANUS_CORS_ALLOW_ORIGINS"] =
-                    string.Format("http://localhost:{0},http://localhost:5173", _fePort);
-                si.EnvironmentVariables["EXCELMANUS_AUTH_ENABLED"] = "false";
-                si.EnvironmentVariables["EXCELMANUS_EXTERNAL_SAFE_MODE"] = "false";
-                _procBE = Process.Start(si);
-                _procBE.EnableRaisingEvents = true;
-                _procBE.Exited += delegate { OnServiceCrash("后端"); };
-                _procBE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
-                _procBE.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
-                _procBE.BeginOutputReadLine();
-                _procBE.BeginErrorReadLine();
-                SavePid(_procBE.Id, "backend");
-                _log.Ok(string.Format("后端已启动 → http://localhost:{0}", _bePort));
-            }
-            catch (Exception ex) { _log.Err(string.Format("后端启动失败: {0}", ex.Message)); }
-        });
+            string vpy = Path.Combine(_root, ".venv", "Scripts", "python.exe");
+            if (!File.Exists(vpy)) vpy = "python";
+            _log.Info(string.Format("后端可执行文件: {0}", vpy));
+            ProcessStartInfo si = new ProcessStartInfo();
+            si.FileName = vpy;
+            si.Arguments = string.Format("-m uvicorn excelmanus.api:app --host 0.0.0.0 --port {0}", _bePort);
+            si.WorkingDirectory = _root;
+            si.RedirectStandardOutput = true;
+            si.RedirectStandardError = true;
+            si.UseShellExecute = false;
+            si.CreateNoWindow = true;
+            si.StandardOutputEncoding = Encoding.UTF8;
+            si.StandardErrorEncoding = Encoding.UTF8;
+            si.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+            si.EnvironmentVariables["EXCELMANUS_CORS_ALLOW_ORIGINS"] =
+                string.Format("http://localhost:{0},http://localhost:5173", _fePort);
+            si.EnvironmentVariables["EXCELMANUS_AUTH_ENABLED"] = "false";
+            si.EnvironmentVariables["EXCELMANUS_EXTERNAL_SAFE_MODE"] = "false";
+            _procBE = Process.Start(si);
+            _procBE.EnableRaisingEvents = true;
+            _procBE.Exited += delegate { OnServiceCrash("后端"); };
+            _procBE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
+            _procBE.ErrorDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
+            _procBE.BeginOutputReadLine();
+            _procBE.BeginErrorReadLine();
+            SavePid(_procBE.Id, "backend");
+            _log.Ok(string.Format("后端已启动 → http://localhost:{0}", _bePort));
+        }
+        catch (Exception ex)
+        {
+            _log.Err(string.Format("后端启动失败: {0}", ex.Message));
+            lock (_lock) { _deployError = string.Format("后端启动失败: {0}", ex.Message); }
+            return;
+        }
 
+        // Health check + frontend startup in a single background thread (backend is already started above)
         ThreadPool.QueueUserWorkItem(delegate
         {
             try
@@ -1600,6 +1611,12 @@ public class Engine
                 for (int attempt = 0; attempt < 30; attempt++)
                 {
                     Thread.Sleep(2000);
+                    // Early exit if backend process already died
+                    if (_procBE == null || _procBE.HasExited)
+                    {
+                        _log.Err("后端进程已退出，请检查日志排查问题");
+                        break;
+                    }
                     try
                     {
                         HttpWebRequest req = (HttpWebRequest)WebRequest.Create(
@@ -1622,6 +1639,7 @@ public class Engine
                 if (!backendReady)
                 {
                     _log.Err("后端在 60 秒内未就绪，请检查日志排查问题");
+                    lock (_lock) { _deployError = "后端服务启动超时，请检查 .env 配置和日志"; }
                     KillProc(_procBE); _procBE = null;
                     KillPort(_bePort);
                     return;
@@ -1629,19 +1647,20 @@ public class Engine
                 _log.Ok(string.Format("后端已就绪: http://localhost:{0}", _bePort));
                 _log.Hl("启动前端服务 (生产模式)...");
                 _log.Info(string.Format("前端目录: {0}", Path.Combine(_root, "web")));
-                ProcessStartInfo si = new ProcessStartInfo();
-                si.FileName = "cmd.exe";
-                si.Arguments = string.Format("/c npm run start -- --port {0}", _fePort);
-                si.WorkingDirectory = Path.Combine(_root, "web");
-                si.RedirectStandardOutput = true;
-                si.RedirectStandardError = true;
-                si.UseShellExecute = false;
-                si.CreateNoWindow = true;
-                si.StandardOutputEncoding = Encoding.UTF8;
-                si.StandardErrorEncoding = Encoding.UTF8;
-                si.EnvironmentVariables["BACKEND_INTERNAL_URL"] = string.Format("http://127.0.0.1:{0}", _bePort);
-                si.EnvironmentVariables["NEXT_PUBLIC_BACKEND_ORIGIN"] = string.Format("http://localhost:{0}", _bePort);
-                _procFE = Process.Start(si);
+                ProcessStartInfo fsi = new ProcessStartInfo();
+                fsi.FileName = "cmd.exe";
+                fsi.Arguments = string.Format("/c npm run start -- --port {0}", _fePort);
+                fsi.WorkingDirectory = Path.Combine(_root, "web");
+                fsi.RedirectStandardOutput = true;
+                fsi.RedirectStandardError = true;
+                fsi.UseShellExecute = false;
+                fsi.CreateNoWindow = true;
+                fsi.StandardOutputEncoding = Encoding.UTF8;
+                fsi.StandardErrorEncoding = Encoding.UTF8;
+                fsi.EnvironmentVariables["PORT"] = _fePort;
+                fsi.EnvironmentVariables["BACKEND_INTERNAL_URL"] = string.Format("http://127.0.0.1:{0}", _bePort);
+                fsi.EnvironmentVariables["NEXT_PUBLIC_BACKEND_ORIGIN"] = string.Format("http://localhost:{0}", _bePort);
+                _procFE = Process.Start(fsi);
                 _procFE.EnableRaisingEvents = true;
                 _procFE.Exited += delegate { OnServiceCrash("前端"); };
                 _procFE.OutputDataReceived += delegate(object s, DataReceivedEventArgs ev) { if (ev.Data != null) _log.Info(ev.Data); };
@@ -1654,6 +1673,11 @@ public class Engine
                 for (int fa = 0; fa < 30; fa++)
                 {
                     Thread.Sleep(2000);
+                    if (_procFE == null || _procFE.HasExited)
+                    {
+                        _log.Err("前端进程已退出，请检查日志排查问题");
+                        break;
+                    }
                     try
                     {
                         HttpWebRequest freq = (HttpWebRequest)WebRequest.Create(
@@ -1677,6 +1701,7 @@ public class Engine
                 {
                     _log.Err("前端在 60 秒内未就绪，请检查日志排查问题");
                     _log.Warn("清理前端和后端进程...");
+                    lock (_lock) { _deployError = "前端服务启动超时，请检查日志"; }
                     KillProc(_procFE); _procFE = null;
                     KillPort(_fePort);
                     KillProc(_procBE); _procBE = null;
@@ -1689,7 +1714,11 @@ public class Engine
                 // 自动创建桌面快捷方式
                 CreateDesktopShortcut();
             }
-            catch (Exception ex) { _log.Err(string.Format("前端启动失败: {0}", ex.Message)); }
+            catch (Exception ex)
+            {
+                _log.Err(string.Format("服务启动失败: {0}", ex.Message));
+                lock (_lock) { _deployError = string.Format("服务启动失败: {0}", ex.Message); }
+            }
         });
     }
 
@@ -1813,11 +1842,13 @@ public class Engine
     public void StopServices()
     {
         _log.Warn("正在停止服务...");
+        // Set _running=false BEFORE killing processes so OnServiceCrash (Exited event)
+        // sees the flag and doesn't log false crash errors or kill companion processes
+        lock (_lock) { _running = false; _deploying = false; }
         KillProc(_procBE); KillProc(_procFE);
         _procBE = null; _procFE = null;
         KillPort(_bePort); KillPort(_fePort);
         ClearPidFiles();
-        lock (_lock) { _running = false; _deploying = false; }
         _log.Ok("所有服务已停止");
     }
 
@@ -1873,6 +1904,8 @@ public class Engine
     }
 
     public bool IsRunning { get { lock (_lock) { return _running; } } }
+    public bool IsDeploying { get { lock (_lock) { return _deploying; } } }
+    public string Root { get { return _root; } }
 
     public string GetVersion()
     {
@@ -2364,12 +2397,14 @@ public class ModernMenuRenderer : ToolStripProfessionalRenderer
     protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e)
     {
         e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        string tag = e.Item.Tag != null ? e.Item.Tag.ToString() : "";
 
-        // Header area: subtle green-tinted background
-        if (e.Item.Tag != null && e.Item.Tag.ToString() == "header")
+        // Header area: gradient green-tinted background
+        if (tag == "header")
         {
             Rectangle hrc = new Rectangle(4, 0, e.Item.Width - 8, e.Item.Height);
-            using (SolidBrush b = new SolidBrush(HeaderBg))
+            using (LinearGradientBrush b = new LinearGradientBrush(hrc,
+                Color.FromArgb(240, 249, 244), Color.FromArgb(228, 242, 234), 135f))
             using (GraphicsPath p = RoundedRect(hrc, 6))
                 e.Graphics.FillPath(b, p);
             return;
@@ -2380,18 +2415,33 @@ public class ModernMenuRenderer : ToolStripProfessionalRenderer
         if (e.Item.Selected || e.Item.Pressed)
         {
             Rectangle rc = new Rectangle(5, 2, e.Item.Width - 10, e.Item.Height - 4);
-            Color bg, brd;
-            if (e.Item.Tag != null && e.Item.Tag.ToString() == "exit")
-            { bg = ExitHoverBg; brd = ExitHoverBorder; }
+            bool isDanger = tag == "exit" || tag == "stop";
+            Color bg, brd, accent;
+            if (isDanger)
+            { bg = ExitHoverBg; brd = ExitHoverBorder; accent = ExitRed; }
             else
-            { bg = HoverBg; brd = HoverBorder; }
+            { bg = HoverBg; brd = HoverBorder; accent = BrandGreen; }
+
+            // Lighter top for gradient hover effect
+            Color bgTop = isDanger
+                ? Color.FromArgb(255, 249, 249)
+                : Color.FromArgb(244, 251, 248);
 
             using (GraphicsPath path = RoundedRect(rc, 7))
             {
-                using (SolidBrush br = new SolidBrush(bg))
-                    e.Graphics.FillPath(br, path);
+                using (LinearGradientBrush gr = new LinearGradientBrush(rc, bgTop, bg, 90f))
+                    e.Graphics.FillPath(gr, path);
                 using (Pen pen = new Pen(brd))
                     e.Graphics.DrawPath(pen, path);
+            }
+
+            // Left accent bar
+            int barH = rc.Height - 14;
+            if (barH > 4)
+            {
+                int barY = rc.Y + (rc.Height - barH) / 2;
+                using (SolidBrush ab = new SolidBrush(accent))
+                    e.Graphics.FillRectangle(ab, 8, barY, 3, barH);
             }
         }
     }
@@ -2411,10 +2461,12 @@ public class ModernMenuRenderer : ToolStripProfessionalRenderer
         }
         else if (tag == "status")
         {
-            e.TextColor = TextSub;
-            e.TextFont = new Font("Segoe UI", 8.25f);
+            // Green when running (● present), gray when stopped
+            bool running = e.Item.Text.IndexOf("\u25CF") >= 0;
+            e.TextColor = running ? BrandGreen : TextSub;
+            e.TextFont = new Font("Segoe UI", 8.25f, running ? FontStyle.Bold : FontStyle.Regular);
         }
-        else if (tag == "exit")
+        else if (tag == "exit" || tag == "stop")
         {
             e.TextColor = (e.Item.Selected || e.Item.Pressed) ? ExitRed : TextMain;
             e.TextFont = new Font("Segoe UI", 9.5f);
@@ -2461,6 +2513,7 @@ public class AppTray : ApplicationContext
     private WebServer _server;
     private Engine _engine;
     private ToolStripMenuItem _statusItem;
+    private ToolStripMenuItem _toggleItem;
     private System.Windows.Forms.Timer _statusTimer;
 
     public AppTray(WebServer server, Engine engine)
@@ -2494,17 +2547,21 @@ public class AppTray : ApplicationContext
         menu.Renderer = new ModernMenuRenderer();
         menu.BackColor = Color.White;
         menu.ShowImageMargin = false;
-        menu.Padding = new Padding(2, 6, 2, 6);
+        menu.Padding = new Padding(2, 8, 2, 8);
         menu.AutoSize = false;
-        menu.Width = 240;
+        menu.Width = 280;
 
-        // Apply rounded corners when menu opens
+        // Apply rounded corners + drop shadow when menu opens
         menu.Opening += delegate
         {
             try
             {
-                IntPtr rgn = CreateRoundRectRgn(0, 0, menu.Width + 1, menu.Height + 1, 12, 12);
+                IntPtr rgn = CreateRoundRectRgn(0, 0, menu.Width + 1, menu.Height + 1, 14, 14);
                 if (rgn != IntPtr.Zero) SetWindowRgn(menu.Handle, rgn, true);
+                // CS_DROPSHADOW for subtle popup shadow
+                int style = GetClassLong(menu.Handle, -26);
+                if ((style & 0x20000) == 0)
+                    SetClassLong(menu.Handle, -26, style | 0x20000);
             }
             catch { }
         };
@@ -2513,28 +2570,28 @@ public class AppTray : ApplicationContext
         ToolStripMenuItem headerItem = new ToolStripMenuItem("\u2009\u25C6\u2009ExcelManus");
         headerItem.Tag = "header";
         headerItem.Enabled = false;
-        headerItem.Padding = new Padding(6, 8, 6, 0);
+        headerItem.Padding = new Padding(6, 10, 6, 0);
         menu.Items.Add(headerItem);
 
-        // Subtitle with version (dynamic from pyproject.toml)
+        // Subtitle with version
         string ver = _engine.GetVersion();
         ToolStripMenuItem subItem = new ToolStripMenuItem(string.Format("\u2009\u2009\u2009\u2009v{0} \u00B7 \u90E8\u7F72\u5DE5\u5177", ver));
         subItem.Tag = "subtitle";
         subItem.Enabled = false;
-        subItem.Padding = new Padding(6, 0, 6, 4);
+        subItem.Padding = new Padding(6, 0, 6, 2);
         menu.Items.Add(subItem);
 
         // Status indicator
         _statusItem = new ToolStripMenuItem(GetStatusText());
         _statusItem.Tag = "status";
         _statusItem.Enabled = false;
-        _statusItem.Padding = new Padding(6, 0, 6, 6);
+        _statusItem.Padding = new Padding(6, 0, 6, 8);
         menu.Items.Add(_statusItem);
 
         menu.Items.Add(new ToolStripSeparator());
 
-        // ── Action Items ──
-        ToolStripMenuItem openItem = new ToolStripMenuItem("\u2009\u25B8\u2009 \u6253\u5F00 ExcelManus");
+        // ── Primary Actions ──
+        ToolStripMenuItem openItem = new ToolStripMenuItem("\u2009\u25B6\u2009 \u6253\u5F00 ExcelManus");
         openItem.Padding = new Padding(4, 6, 4, 6);
         openItem.Click += delegate { OpenUI(); };
         menu.Items.Add(openItem);
@@ -2546,8 +2603,22 @@ public class AppTray : ApplicationContext
 
         menu.Items.Add(new ToolStripSeparator());
 
+        // ── Service Control ──
+        _toggleItem = new ToolStripMenuItem(GetToggleText());
+        _toggleItem.Tag = GetToggleTag();
+        _toggleItem.Padding = new Padding(4, 6, 4, 6);
+        _toggleItem.Click += delegate { ToggleService(); };
+        menu.Items.Add(_toggleItem);
+
+        ToolStripMenuItem folderItem = new ToolStripMenuItem("\u2009\u25B8\u2009 \u6253\u5F00\u9879\u76EE\u76EE\u5F55");
+        folderItem.Padding = new Padding(4, 6, 4, 6);
+        folderItem.Click += delegate { OpenFolder(); };
+        menu.Items.Add(folderItem);
+
+        menu.Items.Add(new ToolStripSeparator());
+
         // ── Exit ──
-        ToolStripMenuItem exitItem = new ToolStripMenuItem("\u2009\u25B8\u2009 \u9000\u51FA");
+        ToolStripMenuItem exitItem = new ToolStripMenuItem("\u2009\u00D7\u2009 \u9000\u51FA");
         exitItem.Tag = "exit";
         exitItem.Padding = new Padding(4, 6, 4, 6);
         exitItem.Click += delegate { ExitApp(); };
@@ -2560,8 +2631,21 @@ public class AppTray : ApplicationContext
     {
         if (_engine.IsRunning)
             return "\u2009\u2009\u2009\u2009\u25CF \u670D\u52A1\u8FD0\u884C\u4E2D";
-        else
-            return "\u2009\u2009\u2009\u2009\u25CB \u670D\u52A1\u672A\u542F\u52A8";
+        if (_engine.IsDeploying)
+            return "\u2009\u2009\u2009\u2009\u25D4 \u90E8\u7F72\u4E2D...";
+        return "\u2009\u2009\u2009\u2009\u25CB \u670D\u52A1\u672A\u542F\u52A8";
+    }
+
+    private string GetToggleText()
+    {
+        if (_engine.IsRunning)
+            return "\u2009\u25A0\u2009 \u505C\u6B62\u670D\u52A1";
+        return "\u2009\u25B6\u2009 \u542F\u52A8\u670D\u52A1";
+    }
+
+    private string GetToggleTag()
+    {
+        return _engine.IsRunning ? "stop" : "start";
     }
 
     private void RefreshStatus()
@@ -2570,6 +2654,16 @@ public class AppTray : ApplicationContext
         {
             string text = GetStatusText();
             if (_statusItem.Text != text) _statusItem.Text = text;
+        }
+        if (_toggleItem != null)
+        {
+            string toggleText = GetToggleText();
+            if (_toggleItem.Text != toggleText)
+            {
+                _toggleItem.Text = toggleText;
+                _toggleItem.Tag = GetToggleTag();
+            }
+            _toggleItem.Enabled = !_engine.IsDeploying;
         }
         _tray.Text = _engine.IsRunning ? "ExcelManus - \u8FD0\u884C\u4E2D" : "ExcelManus - \u5DF2\u505C\u6B62";
     }
@@ -2582,6 +2676,33 @@ public class AppTray : ApplicationContext
     private void OpenPanel()
     {
         try { Process.Start(new ProcessStartInfo(_server.Url) { UseShellExecute = true }); } catch { }
+    }
+
+    private void ToggleService()
+    {
+        if (_engine.IsDeploying) return;
+        if (_engine.IsRunning)
+        {
+            _engine.StopServices();
+            _tray.ShowBalloonTip(1500, "ExcelManus", "\u670D\u52A1\u5DF2\u505C\u6B62", ToolTipIcon.Info);
+        }
+        else
+        {
+            _engine.QuickStart();
+            _tray.ShowBalloonTip(1500, "ExcelManus", "\u6B63\u5728\u542F\u52A8\u670D\u52A1...", ToolTipIcon.Info);
+        }
+        RefreshStatus();
+    }
+
+    private void OpenFolder()
+    {
+        try
+        {
+            string root = _engine.Root;
+            if (root != null && Directory.Exists(root))
+                Process.Start(new ProcessStartInfo(root) { UseShellExecute = true });
+        }
+        catch { }
     }
 
     private void ExitApp()
@@ -2639,6 +2760,12 @@ public class AppTray : ApplicationContext
 
     [System.Runtime.InteropServices.DllImport("user32.dll")]
     private static extern int SetWindowRgn(IntPtr hWnd, IntPtr hRgn, bool bRedraw);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int GetClassLong(IntPtr hWnd, int nIndex);
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern int SetClassLong(IntPtr hWnd, int nIndex, int dwNewLong);
 }
 
 // ═══════════════════════════════════════════════════════════

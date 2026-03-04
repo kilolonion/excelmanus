@@ -99,6 +99,7 @@ export default function App() {
         progress={progress}
         running={running}
         fePort={config.fePort}
+        deployError={deployError}
       />
     );
   }

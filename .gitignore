@@ -153,3 +153,6 @@ backups/
 
 # Vite 缓存
 .vite/
+
+# Pyright 原始输出（baseline JSON 保留跟踪）
+.pyright-baseline.txt

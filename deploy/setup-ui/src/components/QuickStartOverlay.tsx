@@ -9,9 +9,10 @@ interface Props {
   progress: number;
   running: boolean;
   fePort: string;
+  deployError?: string | null;
 }
 
-type Phase = "checking" | "update-found" | "updating" | "starting";
+type Phase = "checking" | "update-found" | "updating" | "starting" | "failed";
 
 export default function QuickStartOverlay({
   onCancel,
@@ -19,6 +20,7 @@ export default function QuickStartOverlay({
   progress,
   running,
   fePort,
+  deployError,
 }: Props) {
   const [phase, setPhase] = useState<Phase>("checking");
   const [updateInfo, setUpdateInfo] = useState<UpdateInfo | null>(null);
@@ -52,6 +54,13 @@ export default function QuickStartOverlay({
     }
   }, [running, phase, fePort]);
 
+  // Detect deploy error → show failure
+  useEffect(() => {
+    if (deployError && (phase === "starting" || phase === "updating")) {
+      setPhase("failed");
+    }
+  }, [deployError, phase]);
+
   function skipUpdate() {
     setPhase("starting");
     api.quickStart().catch(() => {});
@@ -80,6 +89,8 @@ export default function QuickStartOverlay({
       ? IconParty
       : phase === "updating"
       ? IconUpdate
+      : phase === "failed"
+      ? IconRefresh
       : IconZap;
 
   const title =
@@ -89,6 +100,8 @@ export default function QuickStartOverlay({
       ? "发现新版本！"
       : phase === "updating"
       ? "正在更新..."
+      : phase === "failed"
+      ? "启动失败"
       : "快速启动中...";
 
   const sub =
@@ -98,6 +111,8 @@ export default function QuickStartOverlay({
       ? ""
       : phase === "updating"
       ? "下载并安装新版本，完成后自动启动"
+      : phase === "failed"
+      ? (deployError || "服务启动失败，请进入完整设置向导查看详情")
       : "正在启动服务，请稍候";
 
   const barWidth =
@@ -107,6 +122,8 @@ export default function QuickStartOverlay({
       ? 50
       : phase === "updating"
       ? 40
+      : phase === "failed"
+      ? 100
       : Math.max(progress, 85);
 
   return (
