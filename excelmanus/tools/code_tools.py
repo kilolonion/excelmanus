@@ -892,7 +892,7 @@ def _execute_script_docker(
             ):
                 hints.append(
                     "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。"
-                    "请放弃尝试网络请求，或仅使用安全的数据处理库（pandas/numpy）。"
+                    "请放弃尝试网络请求，改用预装的数据处理库（pandas/numpy/sklearn/matplotlib/seaborn/plotly/scipy/openpyxl）。"
                 )
         if hints:
             result["recovery_hint"] = " ".join(hints)
@@ -1125,7 +1125,7 @@ def _execute_script(
         if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
             if any(m in stderr_text for m in ["requests", "urllib", "http", "socket", "os", "sys", "subprocess", "No module named"]):
                 hints.append(
-                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。请放弃尝试网络请求，或仅使用安全的数据处理库（pandas/numpy）。"
+                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。请放弃尝试网络请求，改用预装的数据处理库（pandas/numpy/sklearn/matplotlib/seaborn/plotly/scipy/openpyxl）。"
                 )
 
         if hints:
@@ -1235,6 +1235,7 @@ def get_tools() -> list[ToolDef]:
                 "写入后在 stdout 打印关键验证数据（行数、列名、抽样值）。"
                 "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
                 "适用场景：所有数据写入、格式修改、跨表操作、批量计算、任何需要 openpyxl/pandas 的操作。"
+                "预装库：pandas, openpyxl, numpy, scikit-learn(sklearn), matplotlib, seaborn, plotly, scipy, xlsxwriter, xlrd, pyxlsb。"
                 "不适用：简单数据查看（改用 read_excel）、简单筛选（改用 filter_data）。"
                 "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
                 "相关工具：write_text_file（先写脚本再用 script_path 执行）、read_excel（执行前了解数据结构）。"

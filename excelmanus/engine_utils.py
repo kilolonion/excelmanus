@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import json as _json
 import re as _re
+import uuid as _uuid
 from types import SimpleNamespace
 from typing import Any
 
@@ -522,3 +524,178 @@ def _split_tool_call_batches(
     if current_parallel:
         batches.append(_ToolCallBatch(current_parallel, len(current_parallel) > 1))
     return batches
+
+
+# ── 文本工具调用恢复 ─────────────────────────────────────────
+# 部分模型（如 DeepSeek）以纯文本 JSON 输出工具调用而非使用
+# API 的 tool_calls 机制。以下函数检测常见格式并恢复为正规调用。
+
+_TOOL_NAME_KEYS = ("command", "name", "tool_name", "function", "tool")
+_TOOL_ARGS_KEYS = ("kwargs", "arguments", "parameters", "params", "args", "input")
+
+# ```json ... ``` 或 ``` ... ``` 代码块
+_CODE_BLOCK_RE = _re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', _re.DOTALL)
+# <tool_call>...</tool_call> XML 标签
+_XML_TOOL_CALL_RE = _re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', _re.DOTALL)
+
+
+def _try_parse_json_object(text: str) -> dict | None:
+    """尝试将文本解析为 JSON object，失败返回 None。"""
+    text = text.strip()
+    if not text.startswith("{"):
+        return None
+    try:
+        obj = _json.loads(text)
+        return obj if isinstance(obj, dict) else None
+    except (_json.JSONDecodeError, ValueError):
+        return None
+
+
+def _match_tool_in_dict(
+    obj: dict,
+    registered_names: set[str] | frozenset[str],
+) -> tuple[str, str] | None:
+    """从 dict 中提取 (tool_name, arguments_json)。
+
+    识别多种键名格式：command/name/tool_name + kwargs/arguments/parameters。
+    工具名必须在 registered_names 中才算有效。
+    """
+    tool_name: str | None = None
+    name_key: str | None = None
+    for key in _TOOL_NAME_KEYS:
+        val = obj.get(key)
+        if isinstance(val, str) and val.strip():
+            candidate = val.strip()
+            if candidate in registered_names:
+                tool_name = candidate
+                name_key = key
+                break
+
+    if not tool_name or not name_key:
+        return None
+
+    # 提取参数
+    for key in _TOOL_ARGS_KEYS:
+        val = obj.get(key)
+        if isinstance(val, dict):
+            return tool_name, _json.dumps(val, ensure_ascii=False)
+
+    # 兜底：name_key 以外的所有字段视为参数
+    remaining = {k: v for k, v in obj.items() if k != name_key}
+    return tool_name, _json.dumps(remaining, ensure_ascii=False)
+
+
+def _find_balanced_json(text: str, start: int) -> str | None:
+    """从 start 位置的 '{' 开始，匹配平衡的 JSON 对象字符串。"""
+    if start >= len(text) or text[start] != "{":
+        return None
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if escape:
+            escape = False
+            continue
+        if ch == "\\":
+            if in_string:
+                escape = True
+            continue
+        if ch == '"':
+            in_string = not in_string
+            continue
+        if in_string:
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start : i + 1]
+    return None
+
+
+def _extract_text_tool_calls(
+    text: str,
+    registered_tool_names: set[str] | frozenset[str],
+) -> tuple[list[SimpleNamespace], str]:
+    """检测并解析 LLM 以纯文本输出的工具调用。
+
+    支持格式:
+    - 代码块: ``json {"command": "...", "kwargs": {...}} ``
+    - XML 标签: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    - 裸 JSON: {"command": "...", "kwargs": {...}}
+
+    Args:
+        text: LLM 回复的文本内容。
+        registered_tool_names: 可用工具名集合，用于验证。
+
+    Returns:
+        (tool_calls, cleaned_text):
+        - tool_calls: 解析出的工具调用列表（SimpleNamespace 格式）。
+        - cleaned_text: 去除 JSON 块后的自然语言文本。
+        若未检测到有效工具调用，返回 ([], 原文本)。
+    """
+    if not text or not registered_tool_names:
+        return [], text
+
+    parsed: list[SimpleNamespace] = []
+    regions: list[tuple[int, int]] = []
+
+    def _make_tc(name: str, args_json: str) -> SimpleNamespace:
+        return SimpleNamespace(
+            id=f"text_recovery_{_uuid.uuid4().hex[:12]}",
+            type="function",
+            function=SimpleNamespace(name=name, arguments=args_json),
+        )
+
+    # 策略 1: ```json ... ``` 代码块
+    for m in _CODE_BLOCK_RE.finditer(text):
+        obj = _try_parse_json_object(m.group(1))
+        if obj is None:
+            continue
+        result = _match_tool_in_dict(obj, registered_tool_names)
+        if result:
+            parsed.append(_make_tc(*result))
+            regions.append((m.start(), m.end()))
+
+    # 策略 2: <tool_call>...</tool_call>
+    if not parsed:
+        for m in _XML_TOOL_CALL_RE.finditer(text):
+            obj = _try_parse_json_object(m.group(1))
+            if obj is None:
+                continue
+            result = _match_tool_in_dict(obj, registered_tool_names)
+            if result:
+                parsed.append(_make_tc(*result))
+                regions.append((m.start(), m.end()))
+
+    # 策略 3: 裸 JSON — 逐个 '{' 尝试平衡匹配
+    if not parsed:
+        i = 0
+        while i < len(text):
+            pos = text.find("{", i)
+            if pos < 0:
+                break
+            json_str = _find_balanced_json(text, pos)
+            if json_str is None:
+                i = pos + 1
+                continue
+            obj = _try_parse_json_object(json_str)
+            if obj is not None:
+                result = _match_tool_in_dict(obj, registered_tool_names)
+                if result:
+                    parsed.append(_make_tc(*result))
+                    regions.append((pos, pos + len(json_str)))
+            i = pos + len(json_str) if json_str else pos + 1
+
+    if not parsed:
+        return [], text
+
+    # 清理文本：移除 JSON 块，保留自然语言
+    cleaned = text
+    for start, end in sorted(regions, reverse=True):
+        cleaned = cleaned[:start] + cleaned[end:]
+    cleaned = _re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+    return parsed, cleaned

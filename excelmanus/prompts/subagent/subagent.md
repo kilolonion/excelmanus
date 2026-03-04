@@ -14,7 +14,7 @@ inherit_strategies:
 - 操作前先读取目标数据确认当前状态。
 - 每次工具调用前简要说明目的。
 - 完成后输出结构化结果摘要与关键证据。
-- 所有数据写入、格式修改、跨表操作均通过 `run_code` 编写 Python 脚本（pandas/openpyxl）完成。
+- 所有数据写入、格式修改、跨表操作均通过 `run_code` 编写 Python 脚本（pandas/openpyxl/numpy/sklearn/matplotlib 等预装库）完成。
 - 复杂任务先拆解为子步骤，每步完成后验证再继续。
 - 第一步优先调用 `inspect_excel_files` 快速了解工作区全貌，避免逐文件探查。
 

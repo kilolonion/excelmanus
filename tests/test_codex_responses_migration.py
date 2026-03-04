@@ -115,6 +115,27 @@ class TestCreateClientRouting:
         )
         assert isinstance(client, OpenAIResponsesClient)
 
+    def test_codex_backend_url_not_normalized_with_v1(self):
+        """Codex backend-api URL 不应被追加 /v1（回归测试）。"""
+        client = create_client(
+            api_key="test_key",
+            base_url="https://chatgpt.com/backend-api/codex",
+            protocol="openai_responses",
+        )
+        assert isinstance(client, OpenAIResponsesClient)
+        assert client._base_url == "https://chatgpt.com/backend-api/codex"
+        assert "/v1" not in client._base_url
+
+    def test_standard_openai_url_still_normalized_for_responses(self):
+        """标准 OpenAI URL 仍应追加 /v1。"""
+        client = create_client(
+            api_key="test_key",
+            base_url="https://api.openai.com",
+            protocol="openai_responses",
+        )
+        assert isinstance(client, OpenAIResponsesClient)
+        assert client._base_url == "https://api.openai.com/v1"
+
     def test_openai_protocol_creates_async_openai(self):
         import openai
         client = create_client(
