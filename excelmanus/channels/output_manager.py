@@ -1199,8 +1199,11 @@ class ChunkedOutputManager:
             self._strategy.set_error(self._error)
 
         # 如果有错误且没有文本，通过策略输出错误消息
+        error_is_reply = False
         if self._error and not self._strategy.get_full_text():
-            await self._strategy.on_text_delta(f"❌ {self._error}")
+            display_error = self._rewrite_error_for_bot(self._error)
+            await self._strategy.on_text_delta(f"❌ {display_error}")
+            error_is_reply = True
 
         await self._strategy.finalize()
 
@@ -1217,4 +1220,30 @@ class ChunkedOutputManager:
             "progress_events": self._progress_events,
             "staging_event": self._staging_event,
             "error": self._error,
+            "error_is_reply": error_is_reply,
         }
+
+    # Web 端语言 → Bot 端替换映射（与 MessageHandler._ERROR_REWRITES 保持一致）
+    _BOT_ERROR_REWRITES: list[tuple[str, str]] = [
+        ("请刷新页面开始新对话", "请使用 /new 开始新对话"),
+        ("请刷新页面重新开始", "请使用 /new 重新开始"),
+        ("请刷新页面后重试", "请稍后重试"),
+        ("请刷新页面", "请使用 /new"),
+        ("请在模型设置中更新", "请使用 /addmodel 添加有效模型，或联系管理员检查 API Key"),
+        ("请在设置中确认 Model ID", "请使用 /model 查看可用模型"),
+        ("请重新登录", "请使用 /bind 绑定账号"),
+        ("请检查服务商账户余额", "请检查服务商账户余额，或使用 /model 切换到其他模型"),
+        ("请检查服务商账户", "请检查服务商账户，或使用 /model 切换模型"),
+        ("请检查模型配置", "请使用 /model 检查模型配置"),
+        ("请检查网络或 Base URL 配置", "请检查网络连接，或联系管理员检查 Base URL"),
+        ("请检查 Base URL", "请联系管理员检查 Base URL 配置"),
+        ("请检查工作区目录权限设置", "请联系管理员检查服务器权限"),
+    ]
+
+    @classmethod
+    def _rewrite_error_for_bot(cls, error: str) -> str:
+        """将后端错误消息中的 Web 端语言替换为 Bot 可操作的提示。"""
+        for web_text, bot_text in cls._BOT_ERROR_REWRITES:
+            if web_text in error:
+                error = error.replace(web_text, bot_text)
+        return error

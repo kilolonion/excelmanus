@@ -17,8 +17,21 @@ if TYPE_CHECKING:
 logger = logging.getLogger("excelmanus.mcp.builtin")
 
 # Exa 免费搜索 MCP 端点（无需 API Key）
-_EXA_MCP_URL = "https://mcp.exa.ai/mcp"
+_EXA_STREAMABLE_HTTP_URL = "https://mcp.exa.ai/mcp"  # streamable_http 端点
+_EXA_SSE_URL = "https://mcp.exa.ai/sse"  # SSE 回退端点
 _EXA_SERVER_NAME = "exa"
+
+# 向后兼容：测试和外部引用可能使用旧常量名
+_EXA_MCP_URL = _EXA_STREAMABLE_HTTP_URL
+
+
+def _sdk_supports_streamable_http() -> bool:
+    """检测当前 MCP SDK 是否支持 streamable_http 传输。"""
+    try:
+        from mcp.client.streamable_http import streamable_http_client  # noqa: F401
+        return True
+    except Exception:
+        return False
 
 
 def get_builtin_mcp_configs(config: "Config") -> list[MCPServerConfig]:
@@ -36,16 +49,26 @@ def get_builtin_mcp_configs(config: "Config") -> list[MCPServerConfig]:
     configs: list[MCPServerConfig] = []
 
     if config.exa_search_enabled:
+        if _sdk_supports_streamable_http():
+            transport = "streamable_http"
+            url = _EXA_STREAMABLE_HTTP_URL
+        else:
+            transport = "sse"
+            url = _EXA_SSE_URL
+            logger.info(
+                "MCP SDK 不支持 streamable_http，Exa 搜索降级为 SSE 传输 (%s)",
+                url,
+            )
         configs.append(
             MCPServerConfig(
                 name=_EXA_SERVER_NAME,
-                transport="streamable_http",
-                url=_EXA_MCP_URL,
+                transport=transport,
+                url=url,
                 timeout=30,
                 auto_approve=["*"],
             )
         )
-        logger.debug("内置 Exa 搜索已启用")
+        logger.debug("内置 Exa 搜索已启用 (transport=%s)", transport)
     else:
         logger.debug("内置 Exa 搜索已禁用（EXCELMANUS_EXA_SEARCH=false）")
 

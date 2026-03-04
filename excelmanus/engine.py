@@ -2226,11 +2226,10 @@ class AgentEngine:
                     effective_raw_args = parse_result.clean_text
                     break
 
-        # ── D2 优化: 提前启动语义检索（与路由并行执行，减少串行等待） ──
-        # 语义检索仅依赖 user_message，与路由互不依赖，可安全并行。
-        # 仅非斜杠路径启动（斜杠命令路由极快且多数会提前返回）。
-        # 注意：此处使用的 user_message 是 Hook 处理前的原始版本；
-        #       Hook 修改 user_message 是极少见的边缘场景，语义搜索为模糊匹配，影响可忽略。
+        # ── D2 优化: 查询向量预计算 + 语义检索与路由并行 ──
+        # 所有语义检索共享同一个 user_message 的 embedding 向量，
+        # 预计算一次后传递给各模块，避免 5 次冗余 HTTP 调用。
+        # 预计算与路由并行执行，语义检索在路由后用预计算向量快速完成。
         self._relevant_memory_text = ""
         self._relevant_file_summary = ""
         self._relevant_skill_hints = ""
@@ -2239,39 +2238,23 @@ class AgentEngine:
         self._relevant_session_history = ""
         _semantic_tasks: list[tuple[str, asyncio.Task[Any]]] = []
         _sem_launch_ts = time.monotonic()
+        _query_vec_task: asyncio.Task[Any] | None = None
 
         def _sem_task_done_cb(t: asyncio.Task[Any]) -> None:
             """防止孤儿 task 的 'exception was never retrieved' 日志噪音。"""
             if not t.cancelled() and t.exception() is not None:
                 logger.debug("语义检索后台任务异常（已忽略）: %s", t.exception())
 
-        if effective_slash_command is None:
-            if self._memory_injection_mode == "semantic" and self._semantic_memory is not None:
-                _t = asyncio.create_task(self._semantic_memory.search(user_message))
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("memory", _t))
-            if self._semantic_registry is not None and self._file_registry is not None:
-                _t = asyncio.create_task(
-                    self._semantic_registry.get_relevant_summary(user_message, self._file_registry)
-                )
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("file_registry", _t))
-            if self._semantic_skill_router is not None and self._skill_router is not None:
-                _skillpacks = self._skill_router._loader.get_skillpacks() or {}
-                if _skillpacks:
-                    _t = asyncio.create_task(
-                        self._semantic_skill_router.get_relevant_skill_hints(user_message, _skillpacks)
-                    )
-                    _t.add_done_callback(_sem_task_done_cb)
-                    _semantic_tasks.append(("skill_router", _t))
-            if self._playbook_store is not None and getattr(self._config, "playbook_enabled", False):
-                _t = asyncio.create_task(self._search_playbook(user_message))
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("playbook", _t))
-            if self._session_summary_store is not None and self._session_turn <= 1:
-                _t = asyncio.create_task(self._search_session_history(user_message))
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("session_history", _t))
+        # P2: 预计算查询向量（与路由并行），后续语义检索共享此向量
+        _need_semantic = (
+            effective_slash_command is None
+            and self._embedding_client is not None
+        )
+        if _need_semantic:
+            _query_vec_task = asyncio.create_task(
+                self._embedding_client.embed_single(user_message)
+            )
+            _query_vec_task.add_done_callback(_sem_task_done_cb)
 
         # ── 路由（斜杠命令 + chat_mode 映射） ──
         _route_elapsed_ms = 0.0
@@ -2296,6 +2279,54 @@ class AgentEngine:
             slash_command=effective_slash_command,
             raw_args=effective_raw_args,
         )
+
+        # ── P2: 收割预计算向量 + 启动语义检索任务（路由已完成，向量应已就绪） ──
+        _query_vec = None
+        if _query_vec_task is not None:
+            try:
+                _query_vec = await _query_vec_task
+            except Exception:
+                logger.debug("查询向量预计算失败，语义检索降级为无 embedding", exc_info=True)
+                _query_vec = None
+
+        # P3 门控: 仅非斜杠 + 非 chitchat（chitchat 后续可能降级，先启动任务）
+        if effective_slash_command is None:
+            if self._memory_injection_mode == "semantic" and self._semantic_memory is not None:
+                _t = asyncio.create_task(
+                    self._semantic_memory.search(user_message, query_vec=_query_vec)
+                )
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("memory", _t))
+            if self._semantic_registry is not None and self._file_registry is not None:
+                _t = asyncio.create_task(
+                    self._semantic_registry.get_relevant_summary(
+                        user_message, self._file_registry, query_vec=_query_vec,
+                    )
+                )
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("file_registry", _t))
+            if self._semantic_skill_router is not None and self._skill_router is not None:
+                _skillpacks = self._skill_router._loader.get_skillpacks() or {}
+                if _skillpacks:
+                    _t = asyncio.create_task(
+                        self._semantic_skill_router.get_relevant_skill_hints(
+                            user_message, _skillpacks, query_vec=_query_vec,
+                        )
+                    )
+                    _t.add_done_callback(_sem_task_done_cb)
+                    _semantic_tasks.append(("skill_router", _t))
+            if self._playbook_store is not None and getattr(self._config, "playbook_enabled", False):
+                _t = asyncio.create_task(
+                    self._search_playbook(user_message, query_vec=_query_vec)
+                )
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("playbook", _t))
+            if self._session_summary_store is not None and self._session_turn <= 1:
+                _t = asyncio.create_task(
+                    self._search_session_history(user_message, query_vec=_query_vec)
+                )
+                _t.add_done_callback(_sem_task_done_cb)
+                _semantic_tasks.append(("session_history", _t))
 
         # ── 分层路由安全降级：chitchat 在多轮任务上下文中保守回退 ──
         # 宁可多花 token 也不误判任务续接消息为闲聊
@@ -2561,17 +2592,46 @@ class AgentEngine:
         self._mention_contexts = mention_contexts
 
 
-        # D2: 收割提前启动的语义检索结果（已与路由并行执行）
+        # D2: 收割语义检索结果（P1: 非阻塞——用已完成的，跳过未完成的）
+        # 有了 P2 预计算向量，任务多数为纯 CPU cosine 搜索，应秒完。
+        # 超时仅作安全网（如首次建索引需额外 embedding 调用）。
+        _SEM_GATHER_TIMEOUT = 2.0  # 秒
         if _semantic_tasks:
-            _sem_results = await asyncio.gather(
-                *[t for _, t in _semantic_tasks], return_exceptions=True,
+            self._emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.PIPELINE_PROGRESS,
+                    pipeline_stage="prefetching",
+                    pipeline_message="正在预取上下文...",
+                ),
             )
-            for (_label, _), _res in zip(_semantic_tasks, _sem_results):
-                if isinstance(_res, BaseException):
-                    logger.debug("语义检索 %s 失败: %s", _label, _res)
+            _all_task_set = {t for _, t in _semantic_tasks}
+            _done, _pending = await asyncio.wait(
+                _all_task_set, timeout=_SEM_GATHER_TIMEOUT,
+            )
+            # 取消仍在跑的任务，避免泄漏
+            for _pt in _pending:
+                _pt.cancel()
+            if _pending:
+                _pending_labels = [
+                    _l for _l, _t in _semantic_tasks if _t in _pending
+                ]
+                logger.info(
+                    "perf.chat: 语义检索超时跳过 %s (%.1fs)",
+                    _pending_labels, _SEM_GATHER_TIMEOUT,
+                )
+            # 收割已完成任务的结果
+            for _label, _task in _semantic_tasks:
+                if _task not in _done:
+                    continue
+                try:
+                    _res = _task.result()
+                except Exception as _exc:
+                    logger.debug("语义检索 %s 失败: %s", _label, _exc)
                     if _label == "memory" and self._persistent_memory is not None:
                         self._relevant_memory_text = self._persistent_memory.load_core()
-                elif _label == "memory":
+                    continue
+                if _label == "memory":
                     self._relevant_memory_text = _res
                 elif _label == "file_registry":
                     self._relevant_file_summary = _res
@@ -2583,7 +2643,10 @@ class AgentEngine:
                     self._relevant_session_history = _res if isinstance(_res, str) else ""
             _sem_elapsed = (time.monotonic() - _sem_launch_ts) * 1000
             if _sem_elapsed > 50:
-                logger.debug("perf.chat: semantic_search %.0fms (overlapped with routing)", _sem_elapsed)
+                logger.debug(
+                    "perf.chat: semantic_search %.0fms (done=%d, skipped=%d)",
+                    _sem_elapsed, len(_done), len(_pending),
+                )
 
         _pre_loop_ms = (time.monotonic() - chat_start) * 1000
         if _pre_loop_ms > 1000:
@@ -2889,7 +2952,7 @@ class AgentEngine:
         from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
         return SubagentOrchestrator.normalize_file_paths(file_paths)
 
-    async def _search_playbook(self, query: str) -> str:
+    async def _search_playbook(self, query: str, *, query_vec: Any = None) -> str:
         """语义检索 playbook，返回格式化文本。无 embedding 时降级为 list_all。"""
         if self._playbook_store is None:
             return ""
@@ -2899,11 +2962,17 @@ class AgentEngine:
         top_k = getattr(self._config, "playbook_inject_top_k", 5)
         bullets = []
 
-        # 优先语义检索
-        if self._embedding_client is not None and query.strip():
+        # 优先语义检索（使用预计算向量或现场计算）
+        _vec = query_vec
+        if _vec is None and self._embedding_client is not None and query.strip():
             try:
                 emb = await self._embedding_client.embed([query])
-                bullets = self._playbook_store.search(emb[0], top_k=top_k)
+                _vec = emb[0]
+            except Exception:
+                logger.debug("Playbook 查询向量化失败", exc_info=True)
+        if _vec is not None:
+            try:
+                bullets = self._playbook_store.search(_vec, top_k=top_k)
             except Exception:
                 logger.debug("Playbook 语义检索失败，降级为 list_all", exc_info=True)
                 bullets = []
@@ -2926,7 +2995,7 @@ class AgentEngine:
             lines.append(f"- **[{b.category}]** {b.content}")
         return "\n".join(lines)
 
-    async def _search_session_history(self, query: str) -> str:
+    async def _search_session_history(self, query: str, *, query_vec: Any = None) -> str:
         """语义检索历史会话摘要，返回格式化文本注入 system prompt。
 
         混合策略：embedding 语义检索 + 文件名匹配 + 时间序兜底。
@@ -2943,10 +3012,15 @@ class AgentEngine:
         matched: list[Any] = []
         current_session_id = self._session_id
 
-        # 路径 A：embedding 语义检索
-        if self._embedding_client is not None and query.strip():
+        # 路径 A：embedding 语义检索（使用预计算向量或现场计算）
+        q_vec = query_vec
+        if q_vec is None and self._embedding_client is not None and query.strip():
             try:
                 q_vec = await self._embedding_client.embed_single(query)
+            except Exception:
+                logger.debug("历史会话查询向量化失败", exc_info=True)
+        if q_vec is not None:
+            try:
                 results = store.search_by_embedding(
                     q_vec, user_id=user_id, top_k=top_k,
                 )

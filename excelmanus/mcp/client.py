@@ -112,7 +112,12 @@ class MCPClientWrapper:
         """建立 SSE 传输连接，返回 (read_stream, write_stream)。"""
         headers = self._config.headers or None
         read_stream, write_stream = await self._exit_stack.enter_async_context(
-            sse_client(self._config.url, headers=headers)
+            sse_client(
+                self._config.url,
+                headers=headers,
+                timeout=self._config.timeout,
+                sse_read_timeout=self._config.timeout * 10,
+            )
         )
         return read_stream, write_stream
 

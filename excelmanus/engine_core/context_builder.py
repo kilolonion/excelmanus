@@ -1491,8 +1491,11 @@ class ContextBuilder:
         servers = e._mcp_manager.get_server_info()
         if not servers:
             return ""
+        ready_servers = [s for s in servers if s.get("status") == "ready"]
+        if not ready_servers:
+            return ""
         lines = ["## MCP 扩展能力"]
-        for srv in servers:
+        for srv in ready_servers:
             name = srv["name"]
             tool_count = srv.get("tool_count", 0)
             tool_names = srv.get("tools", [])

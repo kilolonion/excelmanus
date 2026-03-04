@@ -542,6 +542,15 @@ _TOOL_ARGS_KEYS = ("kwargs", "arguments", "parameters", "params", "args", "input
 _CODE_BLOCK_RE = _re.compile(r'```(?:json)?\s*\n?(.*?)\n?\s*```', _re.DOTALL)
 # <tool_call>...</tool_call> XML 标签
 _XML_TOOL_CALL_RE = _re.compile(r'<tool_call>\s*(.*?)\s*</tool_call>', _re.DOTALL)
+# <function name="...">...</function> XML 标签（部分模型使用此格式）
+_XML_FUNCTION_RE = _re.compile(
+    r'<function\s+name=["\']([^"\']+)["\']\s*>(.*?)</function>',
+    _re.DOTALL,
+)
+_XML_PARAM_RE = _re.compile(
+    r'<parameter\s+name=["\']([^"\']+)["\'](?:\s+type=["\']([^"\']*)["\'])?\s*>(.*?)</parameter>',
+    _re.DOTALL,
+)
 
 
 def _try_parse_json_object(text: str) -> dict | None:
@@ -629,6 +638,7 @@ def _extract_text_tool_calls(
     支持格式:
     - 代码块: ``json {"command": "...", "kwargs": {...}} ``
     - XML 标签: <tool_call>{"name": "...", "arguments": {...}}</tool_call>
+    - XML 函数: <function name="..."><parameter name="..." type="...">value</parameter></function>
     - 裸 JSON: {"command": "...", "kwargs": {...}}
 
     Args:
@@ -674,6 +684,34 @@ def _extract_text_tool_calls(
             if result:
                 parsed.append(_make_tc(*result))
                 regions.append((m.start(), m.end()))
+
+    # 策略 2b: <function name="...">...<parameter>...</parameter>...</function>
+    if not parsed:
+        for m in _XML_FUNCTION_RE.finditer(text):
+            func_name = m.group(1).strip()
+            if func_name not in registered_tool_names:
+                continue
+            params_text = m.group(2)
+            args_dict: dict[str, Any] = {}
+            for pm in _XML_PARAM_RE.finditer(params_text):
+                p_name = pm.group(1).strip()
+                p_type = (pm.group(2) or "").strip().lower()
+                p_val: Any = pm.group(3).strip()
+                if p_type == "boolean":
+                    p_val = p_val.lower() in ("true", "1", "yes")
+                elif p_type in ("integer", "int"):
+                    try:
+                        p_val = int(p_val)
+                    except ValueError:
+                        pass
+                elif p_type in ("number", "float"):
+                    try:
+                        p_val = float(p_val)
+                    except ValueError:
+                        pass
+                args_dict[p_name] = p_val
+            parsed.append(_make_tc(func_name, _json.dumps(args_dict, ensure_ascii=False)))
+            regions.append((m.start(), m.end()))
 
     # 策略 3: 裸 JSON — 逐个 '{' 尝试平衡匹配
     if not parsed:
