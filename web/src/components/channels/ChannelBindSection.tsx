@@ -8,7 +8,6 @@ import {
   Link2,
   AlertCircle,
   Unlink,
-  MessageSquare,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -261,97 +260,35 @@ export function ChannelBindSection({
   }
 
   return (
-    <div className="space-y-5">
-      <p className="text-[13px] text-muted-foreground leading-relaxed">
+    <div className="space-y-4">
+      <p className="text-[13px] text-muted-foreground leading-relaxed text-center">
         将 Telegram / QQ / 飞书等 Bot 渠道绑定到当前账号，实现跨渠道的会话和工作区共享。
       </p>
 
       {/* ── 绑定流程指引 ── */}
-      <div className="rounded-xl bg-gradient-to-br from-muted/50 to-muted/20 border border-border/60 p-3 sm:p-4">
-        <div className="flex items-start">
-          {STEPS.map((step, i) => (
-            <div key={step.num} className="flex-1 flex items-start">
-              <div className="flex flex-col items-center text-center flex-1">
-                <div
-                  className="h-7 w-7 sm:h-8 sm:w-8 rounded-full flex items-center justify-center text-[11px] sm:text-xs font-bold text-white shadow-sm relative"
-                  style={{
-                    background: `linear-gradient(135deg, var(--em-primary), var(--em-primary-dark, var(--em-primary)))`,
-                  }}
-                >
-                  {step.num}
-                  <div
-                    className="absolute inset-0 rounded-full opacity-20"
-                    style={{ boxShadow: "0 0 12px var(--em-primary)" }}
-                  />
-                </div>
-                <p className="text-[10px] sm:text-[11px] font-semibold mt-1.5 sm:mt-2 leading-tight text-foreground">{step.label}</p>
-                <p className="text-[9px] sm:text-[10px] text-muted-foreground mt-0.5 leading-snug px-0.5">{step.desc}</p>
-              </div>
-              {i < STEPS.length - 1 && (
-                <div className="flex-shrink-0 w-6 sm:w-12 mt-3.5 sm:mt-4 flex items-center">
-                  <div className="w-full border-t-2 border-dashed border-[var(--em-primary)]/30" />
-                </div>
-              )}
-            </div>
-          ))}
-        </div>
-      </div>
-
-      {/* ── 已绑定列表 ── */}
-      {links.length > 0 && (
-        <div className="space-y-2">
-          <p className="text-xs font-medium text-muted-foreground mb-1">已绑定渠道</p>
-          {links.map((link) => {
-            const meta = CHANNEL_META[link.channel];
-            return (
-              <motion.div
-                key={link.id}
-                initial={{ opacity: 0, y: 8 }}
-                animate={{ opacity: 1, y: 0 }}
-                className="flex items-center justify-between rounded-xl border border-border bg-gradient-to-r from-background to-muted/20 px-2.5 sm:px-3.5 py-2.5 sm:py-3 shadow-sm"
+      <div className="flex items-center justify-center gap-0 py-2">
+        {STEPS.map((step, i) => (
+          <div key={step.num} className="flex items-center">
+            <div className="flex items-center gap-1.5">
+              <div
+                className="h-5 w-5 rounded-full flex items-center justify-center text-[10px] font-bold text-white shrink-0"
+                style={{
+                  background: `linear-gradient(135deg, var(--em-primary), var(--em-primary-dark, var(--em-primary)))`,
+                }}
               >
-                <div className="flex items-center gap-3 min-w-0">
-                  <div
-                    className="h-8 w-8 sm:h-9 sm:w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"
-                    style={{ backgroundColor: meta?.color || "#6b7280" }}
-                  >
-                    <ChannelIcon channel={link.channel} className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
-                  </div>
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold truncate">
-                      {meta?.label || link.channel}
-                      {link.display_name && (
-                        <span className="text-muted-foreground ml-1.5 font-normal text-xs">
-                          {link.display_name}
-                        </span>
-                      )}
-                    </p>
-                    <p className="text-[11px] text-muted-foreground truncate flex items-center gap-1">
-                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shrink-0" />
-                      ID: {link.platform_id} · 绑定于{" "}
-                      {new Date(link.linked_at).toLocaleDateString("zh-CN")}
-                    </p>
-                  </div>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  className="h-7 text-xs text-red-500 hover:text-red-600 hover:bg-red-500/10 shrink-0 rounded-lg"
-                  disabled={unlinking === link.channel}
-                  onClick={() => openUnlinkDialog(link.channel)}
-                >
-                  {unlinking === link.channel ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <Unlink className="h-3 w-3 mr-1" />
-                  )}
-                  解绑
-                </Button>
-              </motion.div>
-            );
-          })}
-        </div>
-      )}
+                {step.num}
+              </div>
+              <div className="flex flex-col">
+                <span className="text-[11px] font-medium text-foreground leading-tight">{step.label}</span>
+                <span className="text-[9px] text-muted-foreground leading-tight">{step.desc}</span>
+              </div>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div className="w-6 sm:w-10 mx-1.5 sm:mx-2 border-t border-dashed border-[var(--em-primary)]/30" />
+            )}
+          </div>
+        ))}
+      </div>
 
       {/* ── 解绑确认弹窗 ── */}
       <Dialog open={!!unlinkTarget} onOpenChange={(open) => { if (!open) closeUnlinkDialog(); }}>
@@ -394,17 +331,8 @@ export function ChannelBindSection({
       </Dialog>
 
       {/* ── 绑定码输入 ── */}
-      <div className="space-y-3">
-        <div className="flex items-center gap-2">
-          <div
-            className="h-5 w-5 rounded-md flex items-center justify-center"
-            style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-          >
-            <MessageSquare className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
-          </div>
-          <p className="text-sm font-semibold">输入绑定码</p>
-        </div>
-        <p className="text-xs text-muted-foreground leading-relaxed">
+      <div className="rounded-xl border border-border/60 bg-gradient-to-b from-muted/30 to-transparent p-3 sm:p-4 space-y-3">
+        <p className="text-xs text-muted-foreground leading-relaxed text-center">
           在 Bot 中发送{" "}
           <code
             className="px-1.5 py-0.5 rounded-md font-mono font-semibold text-[11px]"
@@ -415,10 +343,10 @@ export function ChannelBindSection({
           >
             /bind
           </code>{" "}
-          获取 6 位绑定码，然后在下方输入。
+          获取 6 位绑定码，然后在下方输入
         </p>
 
-        <div className="flex flex-col items-stretch gap-3">
+        <div className="flex flex-col items-center gap-2.5">
           <OtpInput
             value={bindCode}
             onChange={setBindCode}
@@ -428,7 +356,7 @@ export function ChannelBindSection({
           <Button
             onClick={handleBind}
             disabled={bindCode.trim().length < 6 || binding}
-            className="h-11 w-full sm:w-auto px-5 rounded-xl text-sm font-semibold shadow-sm transition-all duration-200 hover:shadow-md"
+            className="h-9 w-full max-w-[220px] rounded-lg text-[13px] font-semibold shadow-sm transition-all duration-200 hover:shadow-md"
             style={
               bindCode.trim().length >= 6
                 ? { backgroundColor: "var(--em-primary)", color: "#fff" }
@@ -436,9 +364,9 @@ export function ChannelBindSection({
             }
           >
             {binding ? (
-              <Loader2 className="h-4 w-4 animate-spin" />
+              <Loader2 className="h-3.5 w-3.5 animate-spin" />
             ) : (
-              <Link2 className="h-4 w-4 mr-1.5" />
+              <Link2 className="h-3.5 w-3.5 mr-1.5" />
             )}
             绑定
           </Button>
@@ -505,6 +433,62 @@ export function ChannelBindSection({
           </motion.div>
         )}
       </div>
+
+      {/* ── 已绑定列表 ── */}
+      {links.length > 0 && (
+        <div className="space-y-2">
+          <p className="text-xs font-medium text-muted-foreground mb-1">已绑定渠道</p>
+          {links.map((link) => {
+            const meta = CHANNEL_META[link.channel];
+            return (
+              <motion.div
+                key={link.id}
+                initial={{ opacity: 0, y: 8 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex items-center justify-between rounded-xl border border-border bg-gradient-to-r from-background to-muted/20 px-2.5 sm:px-3.5 py-2.5 sm:py-3 shadow-sm"
+              >
+                <div className="flex items-center gap-3 min-w-0">
+                  <div
+                    className="h-8 w-8 sm:h-9 sm:w-9 rounded-xl flex items-center justify-center text-white shrink-0 shadow-sm"
+                    style={{ backgroundColor: meta?.color || "#6b7280" }}
+                  >
+                    <ChannelIcon channel={link.channel} className="h-4 w-4 sm:h-4.5 sm:w-4.5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold truncate">
+                      {meta?.label || link.channel}
+                      {link.display_name && (
+                        <span className="text-muted-foreground ml-1.5 font-normal text-xs">
+                          {link.display_name}
+                        </span>
+                      )}
+                    </p>
+                    <p className="text-[11px] text-muted-foreground truncate flex items-center gap-1">
+                      <span className="h-1.5 w-1.5 rounded-full bg-green-500 shrink-0" />
+                      ID: {link.platform_id} · 绑定于{" "}
+                      {new Date(link.linked_at).toLocaleDateString("zh-CN")}
+                    </p>
+                  </div>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  className="h-7 text-xs text-red-500 hover:text-red-600 hover:bg-red-500/10 shrink-0 rounded-lg"
+                  disabled={unlinking === link.channel}
+                  onClick={() => openUnlinkDialog(link.channel)}
+                >
+                  {unlinking === link.channel ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Unlink className="h-3 w-3 mr-1" />
+                  )}
+                  解绑
+                </Button>
+              </motion.div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

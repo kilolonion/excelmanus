@@ -907,10 +907,10 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
       {/* ── Save toast ── */}
       {userSaveToast && (
         <div
-          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity ${
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity backdrop-blur-xl shadow-sm ${
             userSaveToast.type === "success"
-              ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-              : "bg-destructive/10 text-destructive border border-destructive/20"
+              ? "bg-emerald-50/80 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+              : "bg-red-50/80 dark:bg-red-950/70 text-destructive border border-destructive/20"
           }`}
         >
           {userSaveToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
@@ -2362,10 +2362,10 @@ export function ModelTab() {
         {/* ── Save toast ── */}
         {saveToast && (
           <div
-            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity ${
+            className={`flex items-center gap-2 px-3 py-2 rounded-lg text-xs font-medium transition-opacity backdrop-blur-xl shadow-sm ${
               saveToast.type === "success"
-                ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
-                : "bg-destructive/10 text-destructive border border-destructive/20"
+                ? "bg-emerald-50/80 dark:bg-emerald-950/70 text-emerald-600 dark:text-emerald-400 border border-emerald-500/20"
+                : "bg-red-50/80 dark:bg-red-950/70 text-destructive border border-destructive/20"
             }`}
           >
             {saveToast.type === "success" ? <CheckCircle2 className="h-3.5 w-3.5 shrink-0" /> : <AlertTriangle className="h-3.5 w-3.5 shrink-0" />}
