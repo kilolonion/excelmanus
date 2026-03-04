@@ -42,6 +42,7 @@ from .extractor import (
     extract_status_bar,
     extract_style_summary,
     extract_viewport_geometry,
+    is_csv_path,
     is_excel_path,
     normalize_path,
     parse_json_payload,
@@ -911,6 +912,17 @@ class WindowPerceptionManager:
             parsed = parse_json_payload(result_text)
         result_json = parsed if isinstance(parsed, dict) else None
 
+        # 错误 payload 透传：工具返回 {"error": ...} 或 {"status": "error", ...}
+        # 时不应创建/更新窗口，否则会生成误导性的 [OK] 0r x 0c 确认，
+        # 吞掉 LLM 需要的错误指引信息。
+        if isinstance(result_json, dict):
+            if result_json.get("status") == "error":
+                return None
+            if "error" in result_json and not any(
+                k in result_json for k in ("shape", "columns", "data", "sheets", "file")
+            ):
+                return None
+
         # focus_window 快速路径：状态已由 focus_window_action 更新，
         # 跳过 _update_sheet_window 避免二次 ingest，仅构建感知 payload。
         if tool_name in {"focus_window", "focus_window_refill"}:
@@ -1422,6 +1434,10 @@ class WindowPerceptionManager:
                 file_path = active.file_path or ""
                 if not sheet_name:
                     sheet_name = active.sheet_name or ""
+
+        # CSV 文件无 sheet 概念，自动填充 "Sheet1" 与 data_tools 保持一致
+        if file_path and is_csv_path(file_path) and not sheet_name:
+            sheet_name = "Sheet1"
 
         normalized_sheet = str(sheet_name or "").strip()
         window_id: str | None = None
@@ -2301,7 +2317,7 @@ class WindowPerceptionManager:
     def _drop_window(self, window_id: str) -> None:
         if self._windows.pop(window_id, None) is None:
             return
-
+        self._locator.unregister(window_id)
         if self._active_window_id == window_id:
             self._active_window_id = None
 

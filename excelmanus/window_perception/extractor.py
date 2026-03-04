@@ -37,6 +37,7 @@ __all__ = [
     "extract_status_bar",
     "extract_style_summary",
     "extract_viewport_geometry",
+    "is_csv_path",
     "is_excel_path",
     "normalize_path",
     "parse_json_payload",
@@ -71,10 +72,24 @@ def normalize_path(path: Any) -> str:
     return normalized
 
 
+_CSV_EXTENSIONS = (".csv", ".tsv", ".txt")
+
+
 def is_excel_path(path: str) -> bool:
-    """判断是否 Excel 文件路径。"""
+    """判断是否 Excel/CSV 表格文件路径。"""
     lower = (path or "").lower()
-    return lower.endswith(".xlsx") or lower.endswith(".xlsm") or lower.endswith(".xls") or lower.endswith(".xlsb")
+    return (
+        lower.endswith(".xlsx") or lower.endswith(".xlsm")
+        or lower.endswith(".xls") or lower.endswith(".xlsb")
+        or lower.endswith(".csv") or lower.endswith(".tsv")
+        or lower.endswith(".txt")
+    )
+
+
+def is_csv_path(path: str) -> bool:
+    """判断是否 CSV/TSV/TXT 文件路径。"""
+    lower = (path or "").lower()
+    return any(lower.endswith(ext) for ext in _CSV_EXTENSIONS)
 
 
 def extract_file_path(arguments: dict[str, Any], result_json: dict[str, Any] | None) -> str:
@@ -304,7 +319,9 @@ def extract_explorer_entries(result_json: dict[str, Any] | None) -> list[str]:
                 continue
             item_type = str(item.get("type", "")).strip()
             prefix = "[DIR]" if item_type == "directory" else "[FILE]"
-            if is_excel_path(name):
+            if is_csv_path(name):
+                prefix = "[CSV]"
+            elif is_excel_path(name):
                 prefix = "[XLS]"
             size = str(item.get("size", "")).strip()
             if size:
@@ -322,7 +339,9 @@ def extract_explorer_entries(result_json: dict[str, Any] | None) -> list[str]:
                 continue
             item_type = str(item.get("type", "")).strip()
             prefix = "[DIR]" if item_type == "directory" else "[FILE]"
-            if is_excel_path(path):
+            if is_csv_path(path):
+                prefix = "[CSV]"
+            elif is_excel_path(path):
                 prefix = "[XLS]"
             entries.append(f"{prefix} {path}")
         return entries

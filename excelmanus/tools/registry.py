@@ -852,15 +852,29 @@ class ToolRegistry:
         return json.dumps(payload, ensure_ascii=False)
     @staticmethod
     def is_error_result(result: Any) -> bool:
-        """检测工具返回值是否为 registry 层格式化的错误 JSON。"""
+        """检测工具返回值是否为结构化错误 JSON。
+
+        支持两种格式：
+        - 标准格式: ``{"status": "error", "message": "..."}``
+        - 简写格式: ``{"error": "..."}``（data_tools/file_tools/cell_tools 等广泛使用）
+        """
         if not isinstance(result, str):
             return False
         # 快速前缀检测，避免对所有返回值做 JSON 解析
-        if not result.startswith('{"status": "error"'):
+        if not result.startswith('{"status": "error"') and not result.startswith('{"error"'):
             return False
         try:
             parsed = json.loads(result)
-            return isinstance(parsed, dict) and parsed.get("status") == "error"
+            if not isinstance(parsed, dict):
+                return False
+            if parsed.get("status") == "error":
+                return True
+            # 简写格式：顶层有 "error" 键，且无数据键（shape/columns/data/sheets）
+            if "error" in parsed and not any(
+                k in parsed for k in ("shape", "columns", "data", "sheets", "file")
+            ):
+                return True
+            return False
         except (json.JSONDecodeError, AttributeError):
             return False
 
