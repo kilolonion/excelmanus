@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+import numpy as np
 
 from excelmanus.embedding.search import cosine_top_k
 from excelmanus.embedding.store import VectorStore
@@ -130,11 +131,15 @@ class SemanticMemory:
             logger.warning("增量向量索引失败", exc_info=True)
             return 0
 
-    async def search(self, query: str) -> str:
+    async def search(self, query: str, *, query_vec: np.ndarray | None = None) -> str:
         """语义检索记忆，返回格式化的 Markdown 文本。
 
         混合策略：embedding top-k + 最近 N 条兜底，避免遗漏。
         API 不可用时降级到 PersistentMemory.load_core()。
+
+        Args:
+            query: 用户查询文本。
+            query_vec: 预计算的查询向量。提供时跳过 embed_single 调用。
         """
         # 确保索引已同步
         if not self._synced:
@@ -143,11 +148,14 @@ class SemanticMemory:
         if self._store.size == 0:
             return self._pm.load_core()
 
-        try:
-            query_vec = await self._client.embed_single(query)
-        except Exception:
-            logger.warning("查询向量化失败，降级到传统加载", exc_info=True)
-            return self._pm.load_core()
+        if query_vec is not None:
+            pass  # 使用调用方预计算的向量
+        else:
+            try:
+                query_vec = await self._client.embed_single(query)
+            except Exception:
+                logger.warning("查询向量化失败，降级到传统加载", exc_info=True)
+                return self._pm.load_core()
 
         # 语义检索 top-k
         results = cosine_top_k(

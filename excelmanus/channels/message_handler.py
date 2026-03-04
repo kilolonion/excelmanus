@@ -1003,17 +1003,23 @@ class MessageHandler:
                 await self.adapter.send_text(msg.chat_id, "暂无可用模型")
                 return
 
-            lines = ["🤖 可用模型：\n"]
+            lines = ["🤖 可用模型："]
             for m in models:
                 name = m["name"]
                 model_id = m.get("model", "")
                 desc = m.get("description", "")
-                line = f"  {'→ ' if m.get('active') else '   '}{name}"
-                if m.get("active"):
-                    line += " ✅"
-                line += f"\n    {model_id}"
+                active = m.get("active", False)
+
+                prefix = "→" if active else "•"
+                suffix = " ✅" if active else ""
+                # 主行: 名称 + 描述
                 if desc:
-                    line += f"\n    {desc}"
+                    line = f"{prefix} {name}{suffix} — {desc}"
+                else:
+                    line = f"{prefix} {name}{suffix}"
+                # model_id 与 name 不同时追加显示
+                if model_id and model_id != name:
+                    line += f"\n    {model_id}"
                 lines.append(line)
 
             lines.append(f"\n切换: /model <名称>")
@@ -1836,6 +1842,189 @@ class MessageHandler:
             else:
                 await self.adapter.send_text(msg.chat_id, f"❌ 操作失败: {e}")
 
+    # ── Bot 错误文本适配 ──
+
+    # Web 端语言 → Bot 端替换映射
+    _ERROR_REWRITES: list[tuple[str, str]] = [
+        ("请刷新页面开始新对话", "请使用 /new 开始新对话"),
+        ("请刷新页面重新开始", "请使用 /new 重新开始"),
+        ("请刷新页面后重试", "请稍后重试"),
+        ("请刷新页面", "请使用 /new"),
+        ("请在模型设置中更新", "请使用 /addmodel 添加有效模型，或联系管理员检查 API Key"),
+        ("请在设置中确认 Model ID", "请使用 /model 查看可用模型"),
+        ("请重新登录", "请使用 /bind 绑定账号"),
+        ("请检查服务商账户余额", "请检查服务商账户余额，或使用 /model 切换到其他模型"),
+        ("请检查服务商账户", "请检查服务商账户，或使用 /model 切换模型"),
+        ("请检查模型配置", "请使用 /model 检查模型配置"),
+        ("请检查网络或 Base URL 配置", "请检查网络连接，或联系管理员检查 Base URL"),
+        ("请检查 Base URL", "请联系管理员检查 Base URL 配置"),
+        ("请检查工作区目录权限设置", "请联系管理员检查服务器权限"),
+    ]
+
+    @classmethod
+    def _rewrite_error_for_bot(cls, error: str) -> str:
+        """将后端错误消息中的 Web 端语言替换为 Bot 可操作的提示。"""
+        for web_text, bot_text in cls._ERROR_REWRITES:
+            if web_text in error:
+                error = error.replace(web_text, bot_text)
+        return error
+
+    # 错误模式 → (关键词列表, 引导文本) 映射
+    # 顺序重要：优先匹配更具体的模式，避免宽泛关键词先命中
+    _ERROR_GUIDANCE_PATTERNS: list[tuple[list[str], str]] = [
+        # ── 会话类 ──
+        (
+            ["会话不存在", "会话已过期", "session_not_found", "SessionNotFoundError"],
+            "💡 请使用 /new 新建对话后重试",
+        ),
+        (
+            ["会话忙碌", "正在处理另一个请求", "SessionBusyError"],
+            "💡 会话正在处理中，请等待完成或使用 /abort 终止",
+        ),
+        (
+            ["会话数量超限", "会话数量已达上限", "SessionLimitExceededError"],
+            "💡 会话数量已达上限\n"
+            "  → /sessions 查看并关闭不需要的会话\n"
+            "  → 或稍后重试",
+        ),
+        # ── 模型认证 / 配置类 ──
+        (
+            ["API Key", "认证失败", "模型认证", "AuthenticationError", "api_key"],
+            "💡 当前模型的 API Key 无效\n"
+            "  → /model 查看可用模型并切换\n"
+            "  → /addmodel 添加新模型（含有效 API Key）",
+        ),
+        (
+            ["模型不存在", "模型标识无效", "model_not_found"],
+            "💡 请使用 /model 查看并切换到可用的模型",
+        ),
+        (
+            ["API 路径错误", "Base URL 路径不正确", "base_url_misconfigured"],
+            "💡 模型服务地址配置有误\n"
+            "  → 请联系管理员检查 Base URL 配置\n"
+            "  → OpenAI 兼容 API 的 Base URL 应以 /v1 结尾",
+        ),
+        # ── 配额 / 费用类 ──
+        (
+            ["额度不足", "额度已用尽", "quota_exceeded", "账单"],
+            "💡 模型 API 额度已用尽\n"
+            "  → 请检查服务商账户余额\n"
+            "  → /model 切换到其他可用模型",
+        ),
+        (
+            ["频率", "rate_limit", "RateLimitError", "频率受限", "调用频率超限"],
+            "💡 请求过于频繁，请稍等片刻后重试",
+        ),
+        # ── 上下文 / 请求格式类 ──
+        (
+            ["上下文超长", "context_length", "上下文窗口"],
+            "💡 对话历史超出模型上下文限制\n"
+            "  → 发送 /compact 压缩上下文\n"
+            "  → 或使用 /new 开始新对话",
+        ),
+        (
+            ["请求格式错误", "请求参数无效", "invalid_request", "请求体过大"],
+            "💡 请求格式或内容有误\n"
+            "  → 发送 /compact 压缩上下文\n"
+            "  → 或使用 /model 检查模型配置",
+        ),
+        # ── 内容安全类 ──
+        (
+            ["内容审查拦截", "content_filter", "内容安全策略"],
+            "💡 请求或回复触发了内容安全策略\n"
+            "  → 请调整输入内容后重试\n"
+            "  → 或 /model 切换到其他模型",
+        ),
+        # ── 网络 / 传输类 ──
+        (
+            ["代理连接失败", "proxy_error", "proxy"],
+            "💡 网络代理连接失败\n"
+            "  → 请检查代理配置\n"
+            "  → 或联系管理员",
+        ),
+        (
+            ["SSL", "TLS", "安全连接失败", "证书"],
+            "💡 与模型服务的安全连接失败\n"
+            "  → 请联系管理员检查 SSL/证书配置",
+        ),
+        (
+            ["网络连接失败", "无法连接", "network_error", "ConnectionError"],
+            "💡 无法连接到模型服务\n"
+            "  → 请检查网络连接\n"
+            "  → 或联系管理员检查 Base URL",
+        ),
+        (
+            ["超时", "timeout", "Timeout"],
+            "💡 模型服务响应超时，请稍后重试",
+        ),
+        (
+            ["流式传输中断", "stream_interrupted", "传输中断"],
+            "💡 模型响应传输中断，请重新发送消息重试",
+        ),
+        (
+            ["响应解析失败", "response_parse", "JSON"],
+            "💡 模型返回了无法解析的数据，请稍后重试",
+        ),
+        # ── 模型服务类 ──
+        (
+            ["模型服务过载", "暂时不可用", "overloaded"],
+            "💡 模型服务暂时过载，请稍后重试\n"
+            "  → 或 /model 切换到其他模型",
+        ),
+        (
+            ["模型服务异常", "provider_internal_error", "服务返回 5"],
+            "💡 模型服务端异常，请稍后重试\n"
+            "  → 或 /model 切换到其他模型",
+        ),
+        # ── 服务器 / 文件类 ──
+        (
+            ["工作区已满", "工作区配额超限", "workspace_full"],
+            "💡 工作区存储已满\n"
+            "  → 请清理不需要的文件后重试",
+        ),
+        (
+            ["磁盘空间不足", "disk_full", "no space left"],
+            "💡 服务器磁盘空间不足，请联系管理员",
+        ),
+        (
+            ["编码错误", "encoding_error", "编码异常"],
+            "💡 文件编码不兼容，请检查输入文件的编码格式",
+        ),
+        # ── 权限类 ──
+        (
+            ["权限不足", "PermissionError", "无权限", "操作权限不足"],
+            "💡 权限不足，请使用 /bind 绑定有权限的账号",
+        ),
+    ]
+
+    def _bot_error_guidance(self, error: str, platform_user_id: str | None = None) -> str:
+        """根据错误内容返回上下文感知的 Bot 操作引导。
+
+        当检测到模型认证错误且用户未绑定 Web 账号时，优先提示 /bind，
+        因为 OAuth 模型（如 Codex GPT）需要绑定后才能解析凭证。
+        """
+        error_lower = error.lower()
+        # 特殊处理：模型认证错误 + 未绑定用户 → 优先提示绑定
+        _AUTH_HINT_KEYWORDS = ("api key", "认证失败", "模型认证", "authenticationerror")
+        if (
+            platform_user_id
+            and self._bind_manager is not None
+            and any(kw in error_lower for kw in _AUTH_HINT_KEYWORDS)
+        ):
+            auth_uid = self._resolve_auth_user_id(platform_user_id)
+            if auth_uid is None:
+                return (
+                    "💡 当前未绑定 Web 账号，无法使用需要登录的模型\n"
+                    "  → /bind 绑定 Web 账号后可使用 OAuth 模型\n"
+                    "  → 或 /addmodel 添加独立 API Key 的模型"
+                )
+        for keywords, guidance in self._ERROR_GUIDANCE_PATTERNS:
+            for kw in keywords:
+                if kw.lower() in error_lower:
+                    return guidance
+        # 默认引导
+        return "💡 可尝试: /abort 终止 → /undo 撤销 → 重新发送请求"
+
     # ── 延迟处理提示 ──
 
     async def _delayed_hint(self, chat_id: str, hint: str, delay: float = 2.0) -> None:
@@ -1847,6 +2036,8 @@ class MessageHandler:
             pass
 
     # ── 流式分块输出 ──
+
+    _SESSION_EXPIRED_KEYWORDS = ("会话不存在", "session_not_found", "SessionNotFoundError")
 
     async def _stream_chat_chunked(
         self,
@@ -1863,6 +2054,10 @@ class MessageHandler:
         替代原来的 stream_chat() + _send_chat_result() 流程，
         文本回复已由 ChunkedOutputManager 实时推送，
         返回的 dict 仅含非文本结果（审批/问答/文件等）。
+
+        会话过期自动恢复：当 API 返回 session_not_found 且本地持有旧
+        session_id 时，自动清除过期会话并以 session_id=None 重试一次
+        （服务端会创建新会话），用户无需手动 /new。
         """
         # 解析 on_behalf_of：已绑定→真实 user_id；未绑定→匿名隔离 ID
         auth_uid = self._resolve_on_behalf_of(user_id)
@@ -1874,6 +2069,25 @@ class MessageHandler:
             on_behalf_of=auth_uid, channel=self.adapter.name,
         ):
             await manager.feed(event_type, data)
+
+        # 会话过期自动恢复：抑制错误输出，清除过期 session，以新会话重试
+        if (
+            session_id
+            and manager._error
+            and any(kw in manager._error for kw in self._SESSION_EXPIRED_KEYWORDS)
+        ):
+            manager._stop_heartbeat()
+            logger.info("会话 %s 已过期，自动创建新会话重试 (user=%s)", session_id, user_id)
+            self.sessions.remove(self.adapter.name, chat_id, user_id)
+            await self.adapter.send_text(chat_id, "🔄 会话已过期，正在自动创建新会话...")
+            manager = ChunkedOutputManager(self.adapter, chat_id)
+            manager.start_heartbeat()
+            async for event_type, data in self.api.stream_chat_events(
+                message, None, chat_mode=chat_mode, images=images,
+                on_behalf_of=auth_uid, channel=self.adapter.name,
+            ):
+                await manager.feed(event_type, data)
+
         result = await manager.finalize()
 
         # 更新 session_id
@@ -1900,14 +2114,15 @@ class MessageHandler:
         error = result.get("error")
 
         # 流式输出中途出错：已有部分文本输出但后端报错，补充通知用户
-        if error and reply:
-            await self.adapter.send_text(chat_id, f"⚠️ 处理未完成: {error}")
-        # P5b: 错误后操作引导
+        # error_is_reply=True 时，错误已作为主回复发送（无其他文本），跳过重复提示
+        error_is_reply = result.get("error_is_reply", False)
+        if error and reply and not error_is_reply:
+            bot_error = self._rewrite_error_for_bot(error)
+            await self.adapter.send_text(chat_id, f"⚠️ 处理未完成: {bot_error}")
+        # P5b: 错误后操作引导（根据错误类型给出精确建议）
         if error and not approval and not question:
-            await self.adapter.send_text(
-                chat_id,
-                "💡 可尝试: /abort 终止 → /undo 撤销 → 重新发送请求",
-            )
+            guidance = self._bot_error_guidance(error, platform_user_id=user_id)
+            await self.adapter.send_text(chat_id, guidance)
 
         # 文件下载（通过 API 获取字节，支持 Bot 与 API 不同机部署）
         for dl in file_downloads:
@@ -2166,13 +2381,34 @@ class MessageHandler:
         )
         self.invalidate_auth_cache(msg.user.user_id)
         if ok:
+            # 清理 EventBridge 订阅
             if self._event_bridge is not None:
                 self._event_bridge.unsubscribe(auth_uid, self.adapter.name, msg.chat_id)
             reg_key = f"{self.adapter.name}:{msg.chat_id}:{msg.user.user_id}"
             self._bridge_registered.pop(reg_key, None)
-            await self.adapter.send_text(
-                msg.chat_id, "✅ 已解绑，后续消息将以匿名身份处理。重新绑定: /bind",
-            )
+
+            # 清理旧会话和待处理状态，避免身份切换后 session 不匹配
+            pk = self._pending_key(msg.chat_id, msg.user.user_id)
+            self.sessions.remove(self.adapter.name, msg.chat_id, msg.user.user_id)
+            self._pending.pop(pk, None)
+            self._pending_files.pop(pk, None)
+            self._staged_cache.pop(pk, None)
+            self._last_apply.pop(pk, None)
+
+            # 根据强制绑定设置给出不同提示
+            if self._require_bind:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    "✅ 已解绑，当前 Bot 要求绑定后才能使用。\n"
+                    "如需继续使用，请 /bind 重新绑定。",
+                )
+            else:
+                await self.adapter.send_text(
+                    msg.chat_id,
+                    "✅ 已解绑，会话已清除。\n"
+                    "后续消息将以匿名身份处理（独立工作区，不与 Web 端共享）。\n"
+                    "重新绑定: /bind",
+                )
         else:
             await self.adapter.send_text(msg.chat_id, "❌ 解绑失败，请稍后重试")
 

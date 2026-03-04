@@ -401,7 +401,7 @@ def make_tool_def(
     )
 
 
-_ServerStatus = Literal["ready", "connect_failed", "discover_failed"]
+_ServerStatus = Literal["ready", "connect_failed", "discover_failed", "installing", "install_failed"]
 
 
 @dataclass

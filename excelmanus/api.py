@@ -806,19 +806,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     except Exception:
         logger.debug("集中数据管理初始化失败（非致命）", exc_info=True)
 
-    # ── 首次启动自动创建桌面快捷方式 ──────────────────────
-    # 服务器/Docker 模式跳过自动创建（服务器无桌面环境，用户可通过 API 手动创建浏览器书签）
-    if _config.is_standalone:
-        try:
-            from excelmanus.shortcuts import get_shortcut_info, create_desktop_shortcut
-            si = get_shortcut_info()
-            if not si.get("exists"):
-                sc_path = create_desktop_shortcut(project_root)
-                if sc_path:
-                    logger.info("已自动创建桌面快捷方式: %s", sc_path)
-        except Exception:
-            logger.debug("自动创建桌面快捷方式失败（非致命）", exc_info=True)
-
     # 初始化工具层
     _tool_registry = ToolRegistry()
     _tool_registry.register_builtin_tools(_config.workspace_root)
@@ -4290,8 +4277,10 @@ async def create_download_link(request: Request) -> JSONResponse:
 
     token = create_download_token(file_path_str, user_id=user_id)
 
-    # 构建公开 URL
+    # 构建公开 URL（优先级：env > config_kv > 请求 Host 推断）
     public_url = _config.public_url
+    if not public_url and _config_store is not None:
+        public_url = (_config_store.get("channel_public_url", "") or "").strip().rstrip("/")
     if not public_url:
         # 回退：从请求 Host 推断
         scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
@@ -8426,6 +8415,7 @@ async def start_channel(channel_name: str, request: Request) -> JSONResponse:
             bind_manager=_bind_mgr,
             service_token=_svc_token,
             event_bridge=_evt_bridge,
+            config_store=_config_store,
         )
 
     # 从持久化配置加载凭证
@@ -8775,57 +8765,6 @@ async def build_docker_sandbox_image(request: Request) -> JSONResponse:
     if ok:
         return JSONResponse(content={"status": "ok", "message": msg})
     return _error_json_response(500, f"镜像构建失败: {msg}")
-
-
-# ── 快捷方式管理 API ────────────────────────────────────
-# 注意: 版本检查、备份管理、更新执行、安装注册表、数据迁移
-# 已统一迁移到 api_routes_version.py（/api/v1/version/* 命名空间）
-
-
-@_router.get("/api/v1/shortcut/info")
-async def shortcut_info(request: Request) -> JSONResponse:
-    """返回桌面快捷方式状态。"""
-    from excelmanus.shortcuts import get_shortcut_info
-    return JSONResponse(content=get_shortcut_info())
-
-
-@_router.post("/api/v1/shortcut/create")
-async def shortcut_create(request: Request) -> JSONResponse:
-    """创建桌面快捷方式。
-
-    服务器/Docker 模式下需传入 site_url 参数来创建浏览器书签，
-    standalone 模式下创建启动脚本快捷方式。
-    """
-    from excelmanus.shortcuts import create_desktop_shortcut
-    project_root = Path(__file__).resolve().parent.parent
-    mode = _config.deploy_mode if _config is not None else "standalone"
-    site_url = ""
-    if mode in ("server", "docker"):
-        try:
-            body = await request.json()
-            site_url = body.get("site_url", "")
-        except Exception:
-            pass
-        if not site_url:
-            return _error_json_response(
-                400, "服务器模式下需要提供 site_url 参数（如 http://your-server:3000）"
-            )
-    result = create_desktop_shortcut(
-        project_root, deploy_mode=mode, site_url=site_url,
-    )
-    if result:
-        return JSONResponse(content={"status": "ok", "path": result})
-    return _error_json_response(500, "创建快捷方式失败，请查看日志。")
-
-
-@_router.post("/api/v1/shortcut/remove")
-async def shortcut_remove(request: Request) -> JSONResponse:
-    """删除桌面快捷方式。"""
-    from excelmanus.shortcuts import remove_desktop_shortcut
-    ok = remove_desktop_shortcut()
-    if ok:
-        return JSONResponse(content={"status": "ok"})
-    return _error_json_response(404, "未找到桌面快捷方式。")
 
 
 # 默认 ASGI app（供 `uvicorn excelmanus.api:app` 与测试直接导入）

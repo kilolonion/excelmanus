@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 
+import numpy as np
 
 from excelmanus.embedding.search import cosine_top_k
 from excelmanus.embedding.store import VectorStore
@@ -116,6 +117,8 @@ class SemanticRegistry:
         registry: "FileRegistry",
         k: int | None = None,
         threshold: float | None = None,
+        *,
+        query_vec: np.ndarray | None = None,
     ) -> list[tuple["FileEntry", float]]:
         """语义搜索，返回 (FileEntry, score) 列表。"""
         await self.index_registry(registry)
@@ -123,11 +126,12 @@ class SemanticRegistry:
         if self._store is None or self._store.size == 0:
             return []
 
-        try:
-            query_vec = await self._client.embed_single(query)
-        except Exception:
-            logger.warning("查询向量化失败", exc_info=True)
-            return []
+        if query_vec is None:
+            try:
+                query_vec = await self._client.embed_single(query)
+            except Exception:
+                logger.warning("查询向量化失败", exc_info=True)
+                return []
 
         results = cosine_top_k(
             query_vec,
@@ -147,9 +151,11 @@ class SemanticRegistry:
         self,
         query: str,
         registry: "FileRegistry",
+        *,
+        query_vec: np.ndarray | None = None,
     ) -> str:
         """返回与查询最相关的文件摘要文本，用于注入 system prompt。"""
-        results = await self.search(query, registry)
+        results = await self.search(query, registry, query_vec=query_vec)
 
         if not results:
             return ""

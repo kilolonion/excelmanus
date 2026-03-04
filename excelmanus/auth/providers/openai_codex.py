@@ -68,8 +68,10 @@ class OpenAICodexProvider(AuthProvider):
         ("gpt-5.1-codex-mini", "Codex Mini"),
         ("gpt-5.1-codex-max", "Codex Max"),
         ("codex-mini-latest", "Codex Mini Latest"),
+        ("gpt-5-codex", "Codex 5"),
         ("gpt-5.2", "GPT-5.2 (Codex)"),
         ("gpt-5.1", "GPT-5.1 (Codex)"),
+        ("gpt-5", "GPT-5 (Codex)"),
     )
 
     # ── Device Code Flow (RFC 8628) ───────────────────────────

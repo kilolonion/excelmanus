@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import OrderedDict
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -34,11 +35,15 @@ class EmbeddingClient:
         model: str = DEFAULT_EMBEDDING_MODEL,
         dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
         timeout_seconds: float = 30.0,
+        cache_max_size: int = 64,
     ) -> None:
         self._client = client
         self._model = model
         self._dimensions = dimensions
         self._timeout = timeout_seconds
+        # LRU 缓存：避免对相同文本重复调用 API
+        self._cache: OrderedDict[str, np.ndarray] = OrderedDict()
+        self._cache_max_size = cache_max_size
 
     @property
     def model(self) -> str:
@@ -88,9 +93,21 @@ class EmbeddingClient:
         return result
 
     async def embed_single(self, text: str) -> np.ndarray:
-        """向量化单条文本，返回 (dimensions,) 的一维数组。"""
+        """向量化单条文本，返回 (dimensions,) 的一维数组。
+
+        内置 LRU 缓存：相同文本不重复调用 API。
+        """
+        stripped = (text or "").strip()
+        if stripped and stripped in self._cache:
+            self._cache.move_to_end(stripped)
+            return self._cache[stripped].copy()
         matrix = await self.embed([text])
-        return matrix[0]
+        vec = matrix[0]
+        if stripped:
+            self._cache[stripped] = vec.copy()
+            while len(self._cache) > self._cache_max_size:
+                self._cache.popitem(last=False)
+        return vec
 
     async def _embed_batch(self, texts: list[str]) -> np.ndarray:
         """单批 API 调用。"""

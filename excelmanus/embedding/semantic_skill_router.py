@@ -102,6 +102,8 @@ class SemanticSkillRouter:
         skillpacks: dict[str, "Skillpack"],
         k: int | None = None,
         threshold: float | None = None,
+        *,
+        query_vec: np.ndarray | None = None,
     ) -> list[tuple["Skillpack", float]]:
         """语义匹配，返回 (Skillpack, score) 列表（按相关性降序）。"""
         await self.index_skills(skillpacks)
@@ -109,11 +111,12 @@ class SemanticSkillRouter:
         if self._skill_vectors is None or self._skill_vectors.shape[0] == 0:
             return []
 
-        try:
-            query_vec = await self._client.embed_single(query)
-        except Exception:
-            logger.warning("查询向量化失败", exc_info=True)
-            return []
+        if query_vec is None:
+            try:
+                query_vec = await self._client.embed_single(query)
+            except Exception:
+                logger.warning("查询向量化失败", exc_info=True)
+                return []
 
         results = cosine_top_k(
             query_vec,
@@ -146,12 +149,14 @@ class SemanticSkillRouter:
         self,
         query: str,
         skillpacks: dict[str, "Skillpack"],
+        *,
+        query_vec: np.ndarray | None = None,
     ) -> str:
         """返回语义匹配到的技能提示文本，用于注入 system prompt。
 
         即使不激活 skill，也可以告诉 agent 哪些 skill 与当前任务最相关。
         """
-        results = await self.match(query, skillpacks)
+        results = await self.match(query, skillpacks, query_vec=query_vec)
         if not results:
             return ""
 

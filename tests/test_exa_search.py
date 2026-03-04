@@ -17,6 +17,9 @@ import pytest
 from excelmanus.mcp.builtin import (
     _EXA_MCP_URL,
     _EXA_SERVER_NAME,
+    _EXA_SSE_URL,
+    _EXA_STREAMABLE_HTTP_URL,
+    _sdk_supports_streamable_http,
     get_builtin_mcp_configs,
 )
 from excelmanus.mcp.config import MCPServerConfig
@@ -44,14 +47,58 @@ class TestGetBuiltinMcpConfigs:
         assert len(configs) == 1
         cfg = configs[0]
         assert cfg.name == _EXA_SERVER_NAME
-        assert cfg.url == _EXA_MCP_URL
-        assert cfg.transport == "streamable_http"
         assert cfg.auto_approve == ["*"]
         assert cfg.timeout == 30
+        # transport 取决于 SDK 版本
+        assert cfg.transport in ("streamable_http", "sse")
+        if cfg.transport == "streamable_http":
+            assert cfg.url == _EXA_STREAMABLE_HTTP_URL
+        else:
+            assert cfg.url == _EXA_SSE_URL
 
     def test_disabled_returns_empty(self):
         configs = get_builtin_mcp_configs(_FakeConfig(exa_search_enabled=False))
         assert configs == []
+
+
+# ── SDK 能力检测与 SSE 降级 ─────────────────────────────────
+
+
+class TestSdkFallback:
+    """测试 SDK 能力检测和 SSE 降级逻辑。"""
+
+    def test_sdk_detection_returns_bool(self):
+        """_sdk_supports_streamable_http 返回布尔值。"""
+        result = _sdk_supports_streamable_http()
+        assert isinstance(result, bool)
+
+    def test_current_sdk_no_streamable_http(self):
+        """当前 SDK 1.3.0 不支持 streamable_http。"""
+        # 如果安装了新版 SDK 这个测试会失败，可以更新
+        assert _sdk_supports_streamable_http() is False
+
+    def test_fallback_uses_sse_transport(self):
+        """SDK 不支持 streamable_http 时降级为 SSE。"""
+        configs = get_builtin_mcp_configs(_FakeConfig(exa_search_enabled=True))
+        cfg = configs[0]
+        if not _sdk_supports_streamable_http():
+            assert cfg.transport == "sse"
+            assert cfg.url == _EXA_SSE_URL
+
+    def test_fallback_uses_streamable_http_when_available(self, monkeypatch):
+        """SDK 支持 streamable_http 时使用 streamable_http。"""
+        import excelmanus.mcp.builtin as builtin_mod
+        monkeypatch.setattr(builtin_mod, "_sdk_supports_streamable_http", lambda: True)
+        configs = get_builtin_mcp_configs(_FakeConfig(exa_search_enabled=True))
+        cfg = configs[0]
+        assert cfg.transport == "streamable_http"
+        assert cfg.url == _EXA_STREAMABLE_HTTP_URL
+
+    def test_sse_url_differs_from_streamable_http_url(self):
+        """SSE 和 streamable_http 端点 URL 不同。"""
+        assert _EXA_SSE_URL != _EXA_STREAMABLE_HTTP_URL
+        assert _EXA_SSE_URL == "https://mcp.exa.ai/sse"
+        assert _EXA_STREAMABLE_HTTP_URL == "https://mcp.exa.ai/mcp"
 
 
 # ── MCPManager._merge_builtin_configs ───────────────────────
@@ -82,7 +129,7 @@ class TestMergeBuiltinConfigs:
         assert len(result) == 2
         assert result[0].name == "excel"
         assert result[1].name == "exa"
-        assert result[1].url == _EXA_MCP_URL
+        assert result[1].url in (_EXA_STREAMABLE_HTTP_URL, _EXA_SSE_URL)
 
     def test_user_override_builtin(self):
         """用户 mcp.json 同名配置覆盖内置。"""
