@@ -12,7 +12,7 @@ conditions: {}
 
 1. **全局探查先行**：用 `scan_excel_snapshot`（或 `inspect_excel_files`）一次性了解所有相关文件和 sheet 的结构（列名、行数、数据类型），在操作前完成全部探查。特别注意返回的 `has_merged_cells` 和 `merged_cell_summary`——高合并率表单（如课表、模板）需要先用 openpyxl 读取合并区域并做值传播，不能直接依赖 pandas 读取。
 
-2. **积极使用 `run_code`**：涉及数据透视/转置、分组聚合、跨表匹配填充、条件行删除、多列计算、批量写入等操作时，直接用 `run_code` 编写 Python 脚本（pandas/openpyxl）一次性完成。
+2. **积极使用 `run_code`**：涉及数据透视/转置、分组聚合、跨表匹配填充、条件行删除、多列计算、批量写入等操作时，直接用 `run_code` 编写 Python 脚本（pandas/openpyxl/numpy/sklearn 等预装库）一次性完成。
 
 3. **制定步骤清单**：用 `task_create` 列出子任务，每步做一件事。步骤间有数据依赖时注明。子任务标题保持简洁（≤30 字），验证条件记录在推理块中。对于 5 步以上的复杂任务，建议用 `write_plan` 撰写完整计划文档（末尾含任务清单），自动创建可追踪的子任务。
 

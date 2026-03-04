@@ -30,6 +30,21 @@ from excelmanus.providers.stream_types import (
 logger = get_logger("openai_responses_provider")
 
 
+# ── 异常类型 ──────────────────────────────────────────────────
+
+
+class ResponsesAPIError(Exception):
+    """Responses API 请求失败。
+
+    携带 status_code 属性，使 retry / classify_failure 管线
+    能像处理 openai.APIStatusError 一样识别 429 / 5xx / 401 等状态码。
+    """
+
+    def __init__(self, status_code: int, message: str) -> None:
+        self.status_code = status_code
+        super().__init__(message)
+
+
 # ── 响应数据结构 ─────────────────────────────────────────────
 
 
@@ -597,8 +612,9 @@ class OpenAIResponsesClient:
         async with self._http.stream("POST", url, json=body, headers=headers) as resp:
             if resp.status_code != 200:
                 error_text = await resp.aread()
-                raise RuntimeError(
-                    f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                raise ResponsesAPIError(
+                    resp.status_code,
+                    f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}",
                 )
 
             async for line in resp.aiter_lines():
@@ -745,8 +761,9 @@ class OpenAIResponsesClient:
             async with self._http.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
                     error_text = await resp.aread()
-                    raise RuntimeError(
-                        f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}"
+                    raise ResponsesAPIError(
+                        resp.status_code,
+                        f"Responses API 错误 (HTTP {resp.status_code}): {error_text[:500]}",
                     )
 
                 async for line in resp.aiter_lines():

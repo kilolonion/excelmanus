@@ -139,7 +139,10 @@ def create_client(
     if normalized == "anthropic":
         return ClaudeClient(api_key=api_key, base_url=base_url)
     if normalized == "openai_responses":
-        base_url = normalize_openai_base_url(base_url)
+        # 自定义后端 URL（如 chatgpt.com/backend-api/codex）直接使用 Responses API
+        # 格式但不遵循标准 /v1 路径约定，跳过规范化以免追加错误的 /v1。
+        if "backend-api" not in base_url:
+            base_url = normalize_openai_base_url(base_url)
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     if normalized == "openai":
         base_url = normalize_openai_base_url(base_url)

@@ -907,6 +907,12 @@ class ContextBuilder:
             # 构建真正精简的 chitchat prompt（identity + rules + channel）
             # 不使用 stable_prompt 因为它还包含 access/backup/mcp
             _chitchat_prompt = e.memory.system_prompt
+            # 剥离能力图谱：chitchat 不传工具（tools=[]），若系统提示仍描述工具，
+            # 部分模型（如 DeepSeek）会以纯文本 JSON 方式"模拟"工具调用，
+            # 导致用户看到原始 JSON 而非正常回复。
+            _cap_map = getattr(e, "_capability_map_text", "")
+            if isinstance(_cap_map, str) and _cap_map and _cap_map in _chitchat_prompt:
+                _chitchat_prompt = _chitchat_prompt.replace(_cap_map, "").strip()
             if rules_notice:
                 _chitchat_prompt = _chitchat_prompt + "\n\n" + rules_notice
             if channel_notice:

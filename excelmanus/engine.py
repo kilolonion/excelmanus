@@ -137,6 +137,7 @@ from excelmanus.engine_utils import (  # noqa: F401 — re-export for backwards 
     _detect_write_intent,
     _summarize_text,
     _split_tool_call_batches,
+    _extract_text_tool_calls,
 )
 
 if TYPE_CHECKING:
@@ -4175,6 +4176,63 @@ class AgentEngine:
                 )
 
             tool_calls = _normalize_tool_calls(getattr(message, "tool_calls", None))
+
+            # ── 文本工具调用恢复 ──────────────────────────────────
+            # 部分模型（如 DeepSeek）将工具调用以纯文本 JSON 输出到
+            # content 中，而非使用 API 的 tool_calls 机制。
+            # 检测并恢复为正规工具调用，避免用户看到原始 JSON。
+            _text_tc_recovered = False
+            if not tool_calls:
+                _raw_content = _message_content_to_text(
+                    getattr(message, "content", None),
+                )
+                _registered = set(self._context_builder._all_tool_names())
+                _recovered_calls, _cleaned_content = _extract_text_tool_calls(
+                    _raw_content, _registered,
+                )
+                if _recovered_calls:
+                    _text_tc_recovered = True
+                    if _is_chitchat_route:
+                        # chitchat 模式：不执行工具，仅剥离 JSON 文本
+                        logger.info(
+                            "chitchat 文本工具调用剥离: %s",
+                            [tc.function.name for tc in _recovered_calls],
+                        )
+                        message = SimpleNamespace(
+                            content=_cleaned_content or "你好！有什么可以帮你的吗？",
+                            tool_calls=None,
+                            thinking=getattr(message, "thinking", None),
+                            reasoning=getattr(message, "reasoning", None),
+                            reasoning_content=getattr(message, "reasoning_content", None),
+                            _thinking_streamed=getattr(message, "_thinking_streamed", False),
+                            _stream_truncated=getattr(message, "_stream_truncated", False),
+                        )
+                    else:
+                        # 正常模式：恢复为真实工具调用并执行
+                        logger.info(
+                            "文本工具调用恢复: %d 个 [%s]",
+                            len(_recovered_calls),
+                            ", ".join(tc.function.name for tc in _recovered_calls),
+                        )
+                        tool_calls = _recovered_calls
+                        message = SimpleNamespace(
+                            content=_cleaned_content,
+                            tool_calls=_recovered_calls,
+                            thinking=getattr(message, "thinking", None),
+                            reasoning=getattr(message, "reasoning", None),
+                            reasoning_content=getattr(message, "reasoning_content", None),
+                            _thinking_streamed=getattr(message, "_thinking_streamed", False),
+                            _stream_truncated=getattr(message, "_stream_truncated", False),
+                        )
+                        self._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.PIPELINE_PROGRESS,
+                                pipeline_stage="text_tool_recovery",
+                                pipeline_message="检测到文本格式工具调用，正在恢复执行...",
+                            ),
+                        )
+
             _llm_elapsed_ms = (time.monotonic() - _llm_start_ts) * 1000
             _tc_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in (tool_calls or [])]
             if iteration == start_iteration:
@@ -4241,6 +4299,7 @@ class AgentEngine:
                 cache_read_input_tokens=iter_cache_read,
                 ttft_ms=iter_ttft,
                 thinking_content=thinking_content,
+                text_tool_call_recovered=_text_tc_recovered,
                 tool_names=[
                     s.get("function", {}).get("name", "")
                     for s in tools

@@ -47,7 +47,7 @@ inherit_strategies:
 
 ## 3. run_code 使用规范
 
-- **仅限分析性代码**：pandas/openpyxl 只读操作。
+- **仅限分析性代码**：pandas/openpyxl/numpy/sklearn/scipy 等预装库，只读操作。
 - **只读权限**：严禁写入操作。
 - **顶层 try/except**：所有代码用 try/except 包裹。
 - **优先用原生工具**：快照已覆盖 dtypes/nulls/unique/min/max/outliers/duplicates，不要用 run_code 重复计算。

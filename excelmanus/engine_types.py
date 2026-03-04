@@ -118,6 +118,8 @@ class TurnDiagnostic:
     has_reasoning: bool = True
     reasoning_chars: int = 0
     silent_tool_call_count: int = 0
+    # 文本工具调用恢复
+    text_tool_call_recovered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -145,6 +147,8 @@ class TurnDiagnostic:
             d["reasoning_chars"] = self.reasoning_chars
         if self.silent_tool_call_count:
             d["silent_tool_call_count"] = self.silent_tool_call_count
+        if self.text_tool_call_recovered:
+            d["text_tool_call_recovered"] = True
         return d
 
 
