@@ -241,6 +241,28 @@ Playbook automatically distills successful patterns and failure lessons from com
 | `EXCELMANUS_PLAYBOOK_MAX_BULLETS` | Maximum Playbook entries | `500` |
 | `EXCELMANUS_PLAYBOOK_INJECT_TOP_K` | Top-K most relevant tactics injected per turn | `5` |
 
+## Built-in Search Engines
+
+Three search engine MCP Servers are built-in (Exa / Tavily / Brave), requiring no manual `mcp.json` configuration.
+
+**Enabling strategy** ("default + optional" mode):
+1. `EXCELMANUS_EXA_SEARCH=false` → disables all built-in search engines
+2. The engine specified by `EXCELMANUS_SEARCH_DEFAULT` is always enabled
+3. Non-default engines are additionally enabled only when their API key is configured
+4. If the default engine is tavily/brave but lacks an API key or Node.js → auto-fallback to exa
+
+Tavily and Brave are launched via `npx` (stdio transport) and require Node.js. Exa connects via HTTP and does not require Node.js.
+
+| Environment Variable | Description | Default |
+|---|---|---|
+| `EXCELMANUS_EXA_SEARCH` | Master switch for built-in search engines | `true` |
+| `EXCELMANUS_SEARCH_DEFAULT` | Default search engine (`exa` / `tavily` / `brave`) | `exa` |
+| `EXCELMANUS_EXA_API_KEY` | Exa API key (optional, improves search quality and rate limits) | — |
+| `EXCELMANUS_TAVILY_API_KEY` | Tavily API key (enables Tavily search when configured) | — |
+| `EXCELMANUS_BRAVE_API_KEY` | Brave API key (enables Brave search when configured) | — |
+
+Users can override built-in configurations by defining a server with the same name (e.g., `"exa"`) in `mcp.json`.
+
 ## MCP Configuration
 
 The project root `mcp.json` uses launchers from `scripts/mcp/*.sh`:
