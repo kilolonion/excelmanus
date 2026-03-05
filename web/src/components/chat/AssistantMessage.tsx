@@ -527,6 +527,7 @@ export const AssistantMessage = React.memo(function AssistantMessage({ messageId
           onRetry={onRetry}
           onRetryWithModel={onRetryWithModel}
           isStreaming={isStreaming}
+          isLastMessage={isLastMessage}
         />
       </div>
     </div>

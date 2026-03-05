@@ -12,12 +12,15 @@ import { formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
 import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 
 interface MessageActionsProps {
   blocks: AssistantBlock[];
   onRetry?: () => void;
   onRetryWithModel?: (modelName: string) => void;
   isStreaming?: boolean;
+  isLastMessage?: boolean;
 }
 
 /**
@@ -63,13 +66,16 @@ export const MessageActions = React.memo(function MessageActions({
   onRetry,
   onRetryWithModel,
   isStreaming,
+  isLastMessage,
 }: MessageActionsProps) {
   const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
   const currentModel = useUIStore((s) => s.currentModel);
+  const isMobile = useIsMobile();
 
   const handleCopy = useCallback(() => {
     const text = extractPlainText(blocks);
@@ -101,7 +107,7 @@ export const MessageActions = React.memo(function MessageActions({
 
   return (
     <div
-      className={`flex items-center gap-1 mt-1.5 transition-opacity duration-200 touch-show ${dropdownOpen ? "opacity-100" : "opacity-0 group-hover/msg:opacity-100"}`}
+      className={`flex items-center gap-1 mt-1.5 transition-opacity duration-200 touch-show ${dropdownOpen || isLastMessage ? "opacity-100" : "opacity-0 group-hover/msg:opacity-100"}`}
       role="toolbar"
       aria-label="消息操作"
     >
@@ -125,7 +131,28 @@ export const MessageActions = React.memo(function MessageActions({
         </ActionButton>
       )}
 
-      {canRetry && onRetryWithModel && (
+      {canRetry && onRetryWithModel && isMobile && (
+        <>
+          <ActionButton
+            onClick={() => { fetchModelsOnce(); setMobileSheetOpen(true); }}
+            active={false}
+            activeColor=""
+            label="切换模型重试"
+          >
+            <ArrowRightLeft className="h-3.5 w-3.5" />
+          </ActionButton>
+          <ModelListBottomSheet
+            open={mobileSheetOpen}
+            onOpenChange={setMobileSheetOpen}
+            models={models}
+            currentModel={currentModel}
+            onSelect={(name) => onRetryWithModel(name)}
+            mode="retry"
+          />
+        </>
+      )}
+
+      {canRetry && onRetryWithModel && !isMobile && (
         <DropdownMenu onOpenChange={(open) => { setDropdownOpen(open); if (open) fetchModelsOnce(); }}>
           <DropdownMenuTrigger asChild>
             <button

@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useCallback, useRef, useMemo } from "react";
+import { motion, LayoutGroup } from "framer-motion";
 import {
   Plus,
   Trash2,
@@ -34,6 +35,7 @@ import {
   ChevronRight,
   ArrowRightLeft,
   ExternalLink,
+  Crown,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -310,19 +312,19 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "openai",
     label: "OpenAI",
     icon: "🟢",
-    model: "gpt-4o",
+    model: "gpt-5",
     base_url: "https://api.openai.com/v1",
     protocol: "openai",
     thinking_mode: "auto",
     model_family: "gpt",
-    description: "GPT-4o 多模态旗舰",
+    description: "GPT-5 通用旗舰",
     purchaseUrl: "https://platform.openai.com/api-keys",
   },
   {
     id: "anthropic",
     label: "Anthropic",
     icon: "🟤",
-    model: "claude-sonnet-4-20250514",
+    model: "claude-sonnet-4",
     base_url: "https://api.anthropic.com",
     protocol: "anthropic",
     thinking_mode: "claude",
@@ -553,6 +555,7 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
   const [showFallback, setShowFallback] = useState(false);
   const [showManualPaste, setShowManualPaste] = useState(false);
   const [codexSelectedModel, setCodexSelectedModel] = useState("");
+  const [codexCollapsed, setCodexCollapsed] = useState(true);
 
   // 加载当前用户的自定义 LLM 配置
   useEffect(() => {
@@ -934,10 +937,17 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
         </p>
 
         <div className="rounded-md border border-border/70 bg-muted/20 p-3 mb-3 space-y-2.5">
-          {/* Header */}
-          <div className="flex items-center gap-2">
+          {/* Header — clickable to toggle collapse when connected */}
+          <button
+            type="button"
+            className="w-full flex items-center gap-2 text-left"
+            onClick={() => { if (!codexLoading && (codexStatus?.status === "connected" || codexStatus?.status === "expired")) setCodexCollapsed((v) => !v); }}
+          >
             <ProviderLogo id="openai-codex" />
             <p className="text-xs font-semibold">OpenAI Codex 订阅登录</p>
+            {!codexLoading && (codexStatus?.status === "connected" || codexStatus?.status === "expired") && codexStatus?.plan_type && (
+              <span className="text-[10px] text-muted-foreground capitalize">{codexStatus.plan_type}</span>
+            )}
             <Badge variant="secondary" className="text-[10px] ml-auto">
               {codexLoading
                 ? "检测中"
@@ -947,7 +957,12 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
                     ? "已过期"
                     : "未连接"}
             </Badge>
-          </div>
+            {!codexLoading && (codexStatus?.status === "connected" || codexStatus?.status === "expired") && (
+              codexCollapsed
+                ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+                : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            )}
+          </button>
 
           {codexLoading && (
             <div className="flex items-center justify-center py-3">
@@ -956,7 +971,7 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
           )}
 
           {/* ── Connected / Expired state ── */}
-          {!codexLoading && (codexStatus?.status === "connected" || codexStatus?.status === "expired") && (
+          {!codexLoading && !codexCollapsed && (codexStatus?.status === "connected" || codexStatus?.status === "expired") && (
             <>
               <div className="flex items-center gap-2 mb-1">
                 <div className={`h-2 w-2 rounded-full ${codexStatus.status === "expired" ? "bg-amber-500" : "bg-green-500"}`} />
@@ -1247,7 +1262,7 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
               value={draft.model}
               onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
               className="h-8 text-xs font-mono"
-              placeholder="如: gpt-4o, qwen-plus, claude-sonnet-4 ..."
+              placeholder="如: gpt-5, qwen-plus, claude-sonnet-4 ..."
             />
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
@@ -1381,6 +1396,7 @@ function CodexOAuthAdminCard({
   const [addingModel, setAddingModel] = useState<string | null>(null);
   const [removingModel, setRemovingModel] = useState<string | null>(null);
   const [codexModelsExpanded, setCodexModelsExpanded] = useState(false);
+  const [cardCollapsed, setCardCollapsed] = useState(true);
 
   // Build a Set of existing codex profile names for quick lookup.
   // Map legacy short names (e.g. "codex-5.3", "Codex 5.3") to current full openai-codex/xxx format.
@@ -1594,14 +1610,26 @@ function CodexOAuthAdminCard({
           : "border-[var(--em-primary)]/30 bg-[var(--em-primary)]/5"
       }`}
     >
-      {/* Header */}
-      <div className="flex items-center gap-1.5">
+      {/* Header — clickable to toggle collapse when connected */}
+      <button
+        type="button"
+        className="w-full flex items-center gap-1.5 text-left"
+        onClick={() => { if (!loading && (isConnected || isExpired)) setCardCollapsed((v) => !v); }}
+      >
         <ProviderLogo id={CODEX_OAUTH_PRESET.id} />
         <p className="text-xs font-semibold">GPT Codex 订阅登录</p>
+        {!loading && (isConnected || isExpired) && status?.plan_type && (
+          <span className="text-[10px] text-muted-foreground capitalize">{status.plan_type}</span>
+        )}
         <Badge variant="secondary" className="text-[10px] ml-auto">
           {loading ? "检测中" : isConnected ? "已连接" : isExpired ? "已过期" : "未连接"}
         </Badge>
-      </div>
+        {!loading && (isConnected || isExpired) && (
+          cardCollapsed
+            ? <ChevronRight className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+            : <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
+        )}
+      </button>
 
       {loading && (
         <div className="flex items-center justify-center py-2">
@@ -1610,7 +1638,7 @@ function CodexOAuthAdminCard({
       )}
 
       {/* ── Connected / Expired ── */}
-      {!loading && (isConnected || isExpired) && (
+      {!loading && !cardCollapsed && (isConnected || isExpired) && (
         <>
           <div className="flex items-center gap-2">
             <div className={`h-2 w-2 rounded-full ${isExpired ? "bg-amber-500" : "bg-green-500"}`} />
@@ -1851,6 +1879,8 @@ export function ModelTab() {
   // 快速应用 profile 到角色
   const [applyingProfile, setApplyingProfile] = useState<string | null>(null);
   const [applyMenuOpen, setApplyMenuOpen] = useState<string | null>(null);
+  const applyMenuRef = useRef<HTMLDivElement>(null);
+  const [applyMenuDropUp, setApplyMenuDropUp] = useState(false);
   const [saveToast, setSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // 折叠/展开状态
@@ -1876,6 +1906,20 @@ export function ModelTab() {
   const user = useAuthStore((s) => s.user);
   const authEnabled = useAuthConfigStore((s) => s.authEnabled);
   const isAdmin = !authEnabled || !user || user.role === "admin";
+
+  // 排序 profiles: 主模型排在最前面
+  const sortedProfiles = useMemo(() => {
+    if (!config?.profiles) return [];
+    const mainModel = config.main?.model;
+    if (!mainModel) return config.profiles;
+    return [...config.profiles].sort((a, b) => {
+      const aIsMain = a.model === mainModel;
+      const bIsMain = b.model === mainModel;
+      if (aIsMain && !bIsMain) return -1;
+      if (!aIsMain && bIsMain) return 1;
+      return 0;
+    });
+  }, [config]);
 
   const formRef = useRef<HTMLDivElement>(null);
   const [pendingScrollToForm, setPendingScrollToForm] = useState(0);
@@ -2066,6 +2110,18 @@ export function ModelTab() {
     return () => document.removeEventListener("mousedown", handler);
   }, [modelDropdownTarget]);
 
+  // 点击外部关闭"应用到角色"下拉（不使用 fixed overlay，避免阻塞滚动）
+  useEffect(() => {
+    if (!applyMenuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (applyMenuRef.current && !applyMenuRef.current.contains(e.target as Node)) {
+        setApplyMenuOpen(null);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [applyMenuOpen]);
+
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
     try {
       const data = await apiPut<{ capabilities: ModelCapabilities | null }>("/config/models/capabilities", {
@@ -2186,6 +2242,10 @@ export function ModelTab() {
       setSaveToast({ msg: `已将 "${profile.name}" 应用为${roleLabel}`, type: "success" });
       fetchConfig(true);
       fetchAllCapabilities(true);
+      // 应用为主模型时，模型选择器中的 "default" 条目会变化
+      if (role === "main") {
+        useUIStore.getState().bumpModelProfiles();
+      }
     } catch (e) {
       setSaveToast({ msg: e instanceof Error ? e.message : `应用为${roleLabel}失败`, type: "error" });
     } finally {
@@ -2213,6 +2273,10 @@ export function ModelTab() {
       setTimeout(() => setSaved(null), 2000);
       setSaveToast({ msg: `${sectionLabel} 配置已保存`, type: "success" });
       fetchConfig(true);
+      // 主模型配置变更会影响模型选择器中的 "default" 条目
+      if (sectionKey === "main") {
+        useUIStore.getState().bumpModelProfiles();
+      }
     } catch (e) {
       setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 保存失败`, type: "error" });
     } finally {
@@ -2239,23 +2303,55 @@ export function ModelTab() {
     setProfileError(null);
     setAddingProfile(true);
     const newName = profileDraft.name;
+    const draftSnapshot = { ...profileDraft };
+
+    // 乐观插入：先在前端列表添加，避免等待网络请求。
+    const optimisticEntry: ProfileEntry = {
+      name: draftSnapshot.name,
+      model: draftSnapshot.model,
+      api_key: draftSnapshot.api_key,
+      base_url: draftSnapshot.base_url,
+      description: draftSnapshot.description,
+      protocol: draftSnapshot.protocol || "auto",
+      thinking_mode: draftSnapshot.thinking_mode || "auto",
+      model_family: draftSnapshot.model_family || "",
+      custom_extra_body: draftSnapshot.custom_extra_body || "",
+      custom_extra_headers: draftSnapshot.custom_extra_headers || "",
+    };
+    const prevProfiles = config?.profiles || [];
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, profiles: [...prev.profiles, optimisticEntry] };
+      settingsCache.set("/config/models", next);
+      return next;
+    });
+    setNewProfile(false);
+    setEditingProfile(null);
+    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    useUIStore.getState().bumpModelProfiles();
+    setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
+    setHighlightProfile(newName);
+    setTimeout(() => setHighlightProfile(null), 2000);
+    requestAnimationFrame(() => {
+      profileCardRefs.current[newName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+
     try {
-      await apiPost("/config/models/profiles", profileDraft, { direct: true });
-      setNewProfile(false);
-      setEditingProfile(null);
-      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
-      setTestResult((prev) => ({ ...prev, _profile_form: null }));
-      await fetchConfig(true);
-      useUIStore.getState().bumpModelProfiles();
-      setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
-      // 滚动到新卡片并高亮
-      setHighlightProfile(newName);
-      setTimeout(() => setHighlightProfile(null), 2000);
-      requestAnimationFrame(() => {
-        profileCardRefs.current[newName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      });
+      await apiPost("/config/models/profiles", draftSnapshot, { direct: true });
+      // 成功后从服务端同步最新数据
+      fetchConfig(true);
     } catch (e) {
+      // 添加失败回滚：恢复到之前的 profiles 列表。
+      setConfig((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, profiles: prevProfiles };
+        settingsCache.set("/config/models", next);
+        return next;
+      });
+      useUIStore.getState().bumpModelProfiles();
       setProfileError(e instanceof Error ? e.message : "添加失败，请检查网络或参数");
+      setSaveToast({ msg: e instanceof Error ? e.message : "添加失败", type: "error" });
     } finally {
       setAddingProfile(false);
     }
@@ -2264,23 +2360,55 @@ export function ModelTab() {
   const handleUpdateProfile = async (originalName: string) => {
     setProfileError(null);
     const updatedName = profileDraft.name;
+    const draftSnapshot = { ...profileDraft };
+
+    // 乐观更新：先在前端列表替换，避免等待网络请求。
+    const prevProfiles = config?.profiles || [];
+    const optimisticEntry: ProfileEntry = {
+      name: draftSnapshot.name,
+      model: draftSnapshot.model,
+      api_key: draftSnapshot.api_key,
+      base_url: draftSnapshot.base_url,
+      description: draftSnapshot.description,
+      protocol: draftSnapshot.protocol || "auto",
+      thinking_mode: draftSnapshot.thinking_mode || "auto",
+      model_family: draftSnapshot.model_family || "",
+      custom_extra_body: draftSnapshot.custom_extra_body || "",
+      custom_extra_headers: draftSnapshot.custom_extra_headers || "",
+    };
+    setConfig((prev) => {
+      if (!prev) return prev;
+      const next = { ...prev, profiles: prev.profiles.map((p) => p.name === originalName ? optimisticEntry : p) };
+      settingsCache.set("/config/models", next);
+      return next;
+    });
+    setEditingProfile(null);
+    setNewProfile(false);
+    setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    useUIStore.getState().bumpModelProfiles();
+    setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
+    setHighlightProfile(updatedName);
+    setTimeout(() => setHighlightProfile(null), 2000);
+    requestAnimationFrame(() => {
+      profileCardRefs.current[updatedName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+
     try {
-      await apiPut(`/config/models/profiles/${originalName}`, profileDraft, { direct: true });
-      setEditingProfile(null);
-      setNewProfile(false);
-      setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
-      setTestResult((prev) => ({ ...prev, _profile_form: null }));
-      await fetchConfig(true);
-      useUIStore.getState().bumpModelProfiles();
-      setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
-      // 滚动到更新后的卡片并高亮
-      setHighlightProfile(updatedName);
-      setTimeout(() => setHighlightProfile(null), 2000);
-      requestAnimationFrame(() => {
-        profileCardRefs.current[updatedName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-      });
+      await apiPut(`/config/models/profiles/${originalName}`, draftSnapshot, { direct: true });
+      // 成功后从服务端同步最新数据
+      fetchConfig(true);
     } catch (e) {
+      // 更新失败回滚：恢复到之前的 profiles 列表。
+      setConfig((prev) => {
+        if (!prev) return prev;
+        const next = { ...prev, profiles: prevProfiles };
+        settingsCache.set("/config/models", next);
+        return next;
+      });
+      useUIStore.getState().bumpModelProfiles();
       setProfileError(e instanceof Error ? e.message : "更新失败，请检查网络或参数");
+      setSaveToast({ msg: e instanceof Error ? e.message : "更新失败", type: "error" });
     }
   };
 
@@ -2359,6 +2487,12 @@ export function ModelTab() {
 
   return (
     <div className="flex flex-col gap-2">
+        <style>{`
+          @keyframes main-model-glow {
+            0%, 100% { box-shadow: 0 0 15px -3px var(--em-primary); }
+            50% { box-shadow: 0 0 25px -3px var(--em-primary); }
+          }
+        `}</style>
         {/* ── Save toast ── */}
         {saveToast && (
           <div
@@ -2764,7 +2898,7 @@ export function ModelTab() {
                           }}
                           onFocus={() => { if (remoteModels.length > 0) setModelDropdownTarget("_profile"); }}
                           className="h-8 sm:h-7 text-xs font-mono flex-1"
-                          placeholder="如: gpt-4o"
+                          placeholder="如: gpt-5"
                         />
                         <Button
                           type="button"
@@ -2978,11 +3112,11 @@ export function ModelTab() {
                       )}
                     </div>
                   )}
-                  <div className="flex flex-col-reverse sm:flex-row justify-end gap-2 pt-1">
+                  <div className="sticky bottom-0 -mx-3 -mb-3 px-3 py-2.5 sm:relative sm:mx-0 sm:mb-0 sm:px-0 sm:py-0 sm:pt-1 bg-background/80 backdrop-blur-lg sm:bg-transparent sm:backdrop-blur-none border-t border-border/40 sm:border-t-0 z-10 flex items-center gap-2 sm:justify-end pb-[max(0.625rem,env(safe-area-inset-bottom))] sm:pb-0">
                     <Button
                       size="sm"
                       variant="ghost"
-                      className="h-8 sm:h-7 text-xs gap-1"
+                      className="h-9 sm:h-7 text-xs gap-1"
                       onClick={() => {
                         setNewProfile(false);
                         setEditingProfile(null);
@@ -2992,11 +3126,11 @@ export function ModelTab() {
                     >
                       <X className="h-3 w-3" /> 取消
                     </Button>
-                    <div className="flex gap-2">
+                    <div className="flex gap-2 ml-auto">
                       <Button
                         size="sm"
                         variant="outline"
-                        className="h-8 sm:h-7 text-xs gap-1 flex-1 sm:flex-initial"
+                        className="h-9 sm:h-7 text-xs gap-1"
                         disabled={!profileDraft.model || testingKey === "_profile_form"}
                         onClick={() => handleTestConnection("_profile_form", {
                           model: profileDraft.model,
@@ -3013,7 +3147,7 @@ export function ModelTab() {
                       </Button>
                       <Button
                         size="sm"
-                        className="h-8 sm:h-7 text-xs gap-1 text-white flex-1 sm:flex-initial"
+                        className="h-9 sm:h-7 text-xs gap-1 text-white"
                         style={{ backgroundColor: "var(--em-primary)" }}
                         disabled={!profileDraft.name || !profileDraft.model || addingProfile}
                         onClick={() =>
@@ -3035,29 +3169,37 @@ export function ModelTab() {
               )}
 
               {/* Profile list */}
+              <LayoutGroup>
               <div className="space-y-2">
-                {config?.profiles.map((p) => {
+                {sortedProfiles.map((p) => {
                   const pCaps = capsMap[p.name];
                   const isHighlighted = highlightProfile === p.name;
                   const isCodexProfile = p.model.startsWith("openai-codex/");
+                  const isMainProfile = !isCodexProfile && p.model === config?.main?.model;
                   const isUnhealthy = isModelUnhealthy(pCaps);
                   const initials = p.name.slice(0, 2).toUpperCase();
                   const providerId = inferProfileProvider(p);
                   const hasProviderLogo = !!(providerId && PROVIDER_LOGO_SLUG[providerId]);
                   const providerColor = getProviderBrandColor(providerId);
                   return (
-                  <div
+                  <motion.div
+                    layout
+                    layoutId={`profile-${p.name}`}
+                    transition={{ layout: { type: "spring", stiffness: 400, damping: 30 } }}
                     key={p.name}
-                    ref={(el) => { profileCardRefs.current[p.name] = el; }}
-                    className={`group rounded-xl border text-sm transition-[border-color,background-color,box-shadow,transform] duration-200 ${
+                    ref={(el: HTMLDivElement | null) => { profileCardRefs.current[p.name] = el; }}
+                    className={`group rounded-xl border text-sm transition-[border-color,background-color] duration-200 ${
                       isCodexProfile
                         ? "border-[var(--em-primary)]/25 bg-gradient-to-r from-[var(--em-primary)]/5 to-transparent"
-                        : isHighlighted
-                          ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/20 scale-[1.005] cursor-pointer shadow-sm"
-                          : isUnhealthy
-                            ? "border-destructive/30 bg-destructive/3 cursor-pointer hover:border-destructive/50 hover:shadow-sm"
-                            : "border-border/60 bg-card cursor-pointer hover:border-border hover:shadow-sm hover:bg-muted/20"
+                        : isMainProfile
+                          ? "border-[var(--em-primary)] bg-gradient-to-br from-[var(--em-primary)]/10 via-[var(--em-primary)]/3 to-transparent ring-1 ring-[var(--em-primary)]/15 cursor-pointer"
+                          : isHighlighted
+                            ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/20 scale-[1.005] cursor-pointer shadow-sm"
+                            : isUnhealthy
+                              ? "border-destructive/30 bg-destructive/3 cursor-pointer hover:border-destructive/50 hover:shadow-sm"
+                              : "border-border/60 bg-card cursor-pointer hover:border-border hover:shadow-sm hover:bg-muted/20"
                     }`}
+                    style={isMainProfile ? { animation: "main-model-glow 3s ease-in-out infinite" } : undefined}
                     onClick={() => {
                       if (isCodexProfile) return;
                       setEditingProfile(p.name);
@@ -3085,7 +3227,9 @@ export function ModelTab() {
                         isCodexProfile
                           ? "bg-[var(--em-primary)]/15 text-[var(--em-primary)]"
                           : hasProviderLogo
-                            ? "bg-muted/40"
+                            ? (isMainProfile ? "bg-[var(--em-primary)]/10" : "bg-muted/40")
+                          : isMainProfile
+                            ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
                           : isUnhealthy
                             ? "bg-destructive/10 text-destructive"
                             : "bg-muted text-muted-foreground group-hover:bg-[var(--em-primary)]/10 group-hover:text-[var(--em-primary)] transition-colors"
@@ -3114,6 +3258,12 @@ export function ModelTab() {
                               OAuth
                             </span>
                           )}
+                          {isMainProfile && (
+                            <span className="flex-shrink-0 inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20">
+                              <Crown className="h-2.5 w-2.5" />
+                              主模型
+                            </span>
+                          )}
                           {isUnhealthy && (
                             <span className="flex-shrink-0 inline-flex items-center gap-0.5 text-destructive text-[9px] font-medium">
                               <AlertTriangle className="h-2.5 w-2.5" />
@@ -3137,11 +3287,22 @@ export function ModelTab() {
                       {/* Action buttons */}
                       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity touch-show">
                         {/* Apply role dropdown */}
-                        <div className="relative">
+                        <div className="relative" ref={applyMenuOpen === p.name ? applyMenuRef : undefined}>
                           <button
                             title="应用到角色"
                             className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40"
-                            onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(applyMenuOpen === p.name ? null : p.name); }}
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              if (applyMenuOpen === p.name) {
+                                setApplyMenuOpen(null);
+                              } else {
+                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+                                const dropdownHeight = 160;
+                                const spaceBelow = window.innerHeight - rect.bottom;
+                                setApplyMenuDropUp(spaceBelow < dropdownHeight && rect.top > dropdownHeight);
+                                setApplyMenuOpen(p.name);
+                              }
+                            }}
                             disabled={applyingProfile === p.name}
                           >
                             {applyingProfile === p.name ? (
@@ -3151,9 +3312,9 @@ export function ModelTab() {
                             )}
                           </button>
                           {applyMenuOpen === p.name && (
-                            <>
-                              <div className="fixed inset-0 z-40" onClick={(e) => { e.stopPropagation(); setApplyMenuOpen(null); }} />
-                              <div className="absolute right-0 bottom-full mb-1.5 sm:bottom-auto sm:top-full sm:mb-0 sm:mt-1.5 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden">
+                              <div className={`absolute right-0 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden ${
+                                applyMenuDropUp ? "bottom-full mb-1.5" : "top-full mt-1.5"
+                              }`}>
                                 <div className="px-2.5 py-1.5 border-b border-border/40">
                                   <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">应用到角色</p>
                                 </div>
@@ -3174,7 +3335,6 @@ export function ModelTab() {
                                   ))}
                                 </div>
                               </div>
-                            </>
                           )}
                         </div>
                         {/* Probe */}
@@ -3250,10 +3410,10 @@ export function ModelTab() {
                         </p>
                       </div>
                     )}
-                  </div>
+                  </motion.div>
                   );
                 })}
-                {config?.profiles.length === 0 && !newProfile && (
+                {sortedProfiles.length === 0 && !newProfile && (
                   <div className="flex flex-col items-center gap-2 py-8 text-center">
                     <div className="w-10 h-10 rounded-xl bg-muted/50 flex items-center justify-center">
                       <Bot className="h-5 w-5 text-muted-foreground/50" />
@@ -3267,6 +3427,7 @@ export function ModelTab() {
                   </div>
                 )}
               </div>
+              </LayoutGroup>
             </div>
           )}
         </div>

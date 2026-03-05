@@ -57,8 +57,14 @@ const TOOL_ICON_MAP: Record<string, LucideIcon> = {
   sleep: Timer,
 };
 
+// 内置搜索引擎 MCP 前缀
+const SEARCH_MCP_PREFIXES = ["mcp_exa_", "mcp_tavily_", "mcp_brave_"] as const;
+function isSearchMcpTool(name: string): boolean {
+  return SEARCH_MCP_PREFIXES.some((p) => name.startsWith(p));
+}
+
 function getToolIcon(name: string): LucideIcon {
-  if (name.startsWith("mcp_exa_")) return Globe;
+  if (isSearchMcpTool(name)) return Globe;
   return TOOL_ICON_MAP[name] || Wrench;
 }
 
@@ -88,8 +94,8 @@ function argsSummary(name: string, args: Record<string, unknown>): string | null
     const firstLine = args.code.split("\n")[0].slice(0, 50);
     parts.push(firstLine + (args.code.length > 50 ? "…" : ""));
   }
-  // MCP Exa 搜索工具参数预览
-  if (name.startsWith("mcp_exa_") && typeof args.query === "string") {
+  // MCP 搜索工具参数预览（Exa / Tavily / Brave）
+  if (isSearchMcpTool(name) && typeof args.query === "string") {
     parts.push(`🔍 ${args.query.slice(0, 60)}${args.query.length > 60 ? "…" : ""}`);
   }
   if (name === "sleep") {
@@ -194,10 +200,13 @@ const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
 
 /** MCP 工具友好显示名（pill 标签用） */
 function getToolDisplayName(name: string): string {
-  if (name.startsWith("mcp_exa_")) {
-    // mcp_exa_web_search_exa → Exa Web Search
-    const raw = name.slice("mcp_exa_".length).replace(/_exa$/, "").replace(/_/g, " ");
-    return `exa:${raw}`;
+  // 搜索引擎 MCP 工具友好显示名
+  for (const prefix of SEARCH_MCP_PREFIXES) {
+    if (name.startsWith(prefix)) {
+      const engine = prefix.slice(4, -1); // mcp_exa_ → exa
+      const raw = name.slice(prefix.length).replace(new RegExp(`_${engine}$`), "").replace(/_/g, " ");
+      return `${engine}:${raw}`;
+    }
   }
   if (name.startsWith("mcp_")) {
     // mcp_server_tool_name → server:tool_name
@@ -210,7 +219,7 @@ function getToolDisplayName(name: string): string {
 }
 
 function getToolCategory(name: string): string {
-  if (name.startsWith("mcp_exa_")) return "search";
+  if (isSearchMcpTool(name)) return "search";
   if (["read_excel", "list_sheets", "read_text_file"].includes(name)) return "read";
   if (["write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"].includes(name)) return "write";
   if (name === "run_code") return "code";

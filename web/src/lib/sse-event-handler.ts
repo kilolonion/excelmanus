@@ -416,6 +416,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         useExcelStore.getState().clearStreamingArgs(toolCallId);
         S().clearToolProgress(toolCallId);
       }
+      // ask_user batch 结束后清理残留的 pendingQuestion
+      if ((data.tool_name as string) === "ask_user" && S().pendingQuestion) {
+        S().setPendingQuestion(null);
+      }
       S().updateToolCallBlock(msgId, toolCallId, (b) => {
         if (b.type === "tool_call") {
           if (b.status === "pending") {
@@ -575,6 +579,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         text: (data.text as string) || "",
         options: (data.options as { label: string; description: string }[]) || [],
         multiSelect: Boolean(data.multi_select),
+        queueSize: typeof data.queue_size === "number" ? data.queue_size : undefined,
       });
       break;
     }

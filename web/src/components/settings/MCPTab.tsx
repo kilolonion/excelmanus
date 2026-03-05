@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import {
   Plus,
   Trash2,
@@ -18,12 +19,23 @@ import {
   CheckCircle2,
   XCircle,
   Circle,
+  Search,
+  Eye,
+  EyeOff,
+  Shield,
+  Compass,
+  ShieldCheck,
+  Sparkles,
+  Key,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
+import { Switch } from "@/components/ui/switch";
+import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost, apiPut, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
+import { useConnectionStore } from "@/stores/connection-store";
 
 interface MCPServer {
   name: string;
@@ -86,6 +98,419 @@ const STATUS_COLORS: Record<string, string> = {
   discover_failed: "text-orange-600 dark:text-orange-400",
   not_connected: "text-red-500 dark:text-red-400",
 };
+
+// ── 搜索引擎配置相关类型 ──
+interface SearchConfig {
+  exa_search_enabled: boolean;
+  search_default_provider: string;
+  exa_api_key: string;
+  tavily_api_key: string;
+  brave_api_key: string;
+}
+
+const SEARCH_ENGINES = [
+  {
+    id: "exa" as const,
+    name: "Exa",
+    desc: "通用网页搜索，通过 HTTP 连接，无需 Node.js",
+    keyField: "exa_api_key" as const,
+    keyHint: "可选，提升搜索质量和速率限制",
+    requiresNode: false,
+    color: "#0891b2",
+    icon: Compass,
+  },
+  {
+    id: "tavily" as const,
+    name: "Tavily",
+    desc: "AI 优化搜索引擎，通过 npx 启动",
+    keyField: "tavily_api_key" as const,
+    keyHint: "配置后启用 Tavily 搜索",
+    requiresNode: true,
+    color: "#7c3aed",
+    icon: Sparkles,
+  },
+  {
+    id: "brave" as const,
+    name: "Brave",
+    desc: "隐私优先搜索引擎，通过 npx 启动",
+    keyField: "brave_api_key" as const,
+    keyHint: "配置后启用 Brave 搜索",
+    requiresNode: true,
+    color: "#ea580c",
+    icon: ShieldCheck,
+  },
+] as const;
+
+function ApiKeyInput({
+  value,
+  onChange,
+  placeholder,
+  accentColor,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  accentColor?: string;
+}) {
+  const [visible, setVisible] = useState(false);
+  const [focused, setFocused] = useState(false);
+  const isMasked = value.includes("*");
+  return (
+    <div
+      className="relative rounded-lg transition-shadow duration-200"
+      style={{
+        boxShadow: focused && accentColor ? `0 0 0 2px ${accentColor}30` : "none",
+      }}
+    >
+      <div className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted-foreground/50">
+        <Key className="h-3 w-3" />
+      </div>
+      <Input
+        type={visible ? "text" : "password"}
+        value={isMasked && !visible ? value : value}
+        onChange={(e) => onChange(e.target.value)}
+        onFocus={() => {
+          setFocused(true);
+          if (isMasked) onChange("");
+        }}
+        onBlur={() => setFocused(false)}
+        className="h-8 sm:h-7 text-xs font-mono pl-8 pr-8 rounded-lg"
+        placeholder={placeholder}
+      />
+      <button
+        type="button"
+        onClick={() => setVisible((v) => !v)}
+        className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground/50 hover:text-foreground transition-colors"
+      >
+        {visible ? <EyeOff className="h-3.5 w-3.5" /> : <Eye className="h-3.5 w-3.5" />}
+      </button>
+    </div>
+  );
+}
+
+function BuiltinSearchSection() {
+  const [config, setConfig] = useState<SearchConfig | null>(null);
+  const [draft, setDraft] = useState<Partial<SearchConfig>>({});
+  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+  const [expanded, setExpanded] = useState(false);
+  const triggerRestart = useConnectionStore((s) => s.triggerRestart);
+
+  const fetchConfig = useCallback(async () => {
+    setLoading(true);
+    try {
+      const data = await apiGet<SearchConfig & Record<string, unknown>>("/config/runtime");
+      setConfig({
+        exa_search_enabled: data.exa_search_enabled,
+        search_default_provider: data.search_default_provider,
+        exa_api_key: data.exa_api_key,
+        tavily_api_key: data.tavily_api_key,
+        brave_api_key: data.brave_api_key,
+      });
+      setDraft({});
+    } catch {
+      // 后端未就绪
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchConfig();
+  }, [fetchConfig]);
+
+  const merged = config ? { ...config, ...draft } : null;
+  const hasChanges = Object.keys(draft).length > 0;
+
+  const handleSave = async () => {
+    if (!hasChanges) return;
+    setSaving(true);
+    try {
+      const res = await apiPut<{
+        restarting?: boolean;
+        restart_reason?: string;
+        mcp_reloaded?: boolean;
+        mcp_reload_error?: string;
+      }>("/config/runtime", draft);
+      if (res?.restarting) {
+        setSaving(false);
+        triggerRestart(res.restart_reason || "搜索引擎配置已更新");
+        return;
+      }
+      setSaved(true);
+      setTimeout(() => setSaved(false), 3000);
+      settingsCache.delete("/config/runtime");
+      settingsCache.delete("/mcp/servers");
+      await fetchConfig();
+    } catch {
+      // 忽略
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading && !config) {
+    return (
+      <div className="flex items-center justify-center py-6 text-muted-foreground">
+        <Loader2 className="h-4 w-4 animate-spin mr-2" />
+        <span className="text-xs">加载搜索配置…</span>
+      </div>
+    );
+  }
+
+  if (!merged) return null;
+
+  const enabledCount = SEARCH_ENGINES.filter((e) => {
+    const kv = merged[e.keyField];
+    return e.id === merged.search_default_provider || (kv && kv !== "" && (kv.includes("*") || !kv.startsWith("")));
+  }).length;
+
+  return (
+    <div className="rounded-xl border border-border/60 overflow-hidden bg-gradient-to-b from-background to-muted/5">
+      {/* Header */}
+      <button
+        type="button"
+        onClick={() => setExpanded((v) => !v)}
+        className="flex items-center gap-2 sm:gap-2.5 w-full px-3 sm:px-4 py-2.5 sm:py-3 text-left hover:bg-muted/30 transition-colors cursor-pointer"
+      >
+        <div
+          className="h-7 w-7 sm:h-8 sm:w-8 rounded-lg flex items-center justify-center shrink-0"
+          style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+        >
+          <Search className="h-3.5 w-3.5 sm:h-4 sm:w-4" style={{ color: "var(--em-primary)" }} />
+        </div>
+        <div className="min-w-0 text-left flex-1">
+          <div className="text-sm font-semibold">内置搜索引擎</div>
+          <div className="text-[11px] text-muted-foreground">
+            {merged.exa_search_enabled ? (
+              <span className="flex items-center gap-1.5">
+                <span className="relative flex h-1.5 w-1.5">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-60" />
+                  <span className="relative inline-flex rounded-full h-1.5 w-1.5 bg-green-500" />
+                </span>
+                已启用 · 默认: {merged.search_default_provider.charAt(0).toUpperCase() + merged.search_default_provider.slice(1)}
+                {enabledCount > 1 && ` · ${enabledCount} 个引擎`}
+              </span>
+            ) : (
+              "已禁用"
+            )}
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <AnimatePresence>
+            {hasChanges && (
+              <motion.div
+                initial={{ opacity: 0, scale: 0.8 }}
+                animate={{ opacity: 1, scale: 1 }}
+                exit={{ opacity: 0, scale: 0.8 }}
+              >
+                <Badge variant="outline" className="text-[10px] px-1.5 py-0 border-amber-500/60 text-amber-600 dark:text-amber-400 bg-amber-500/5">
+                  未保存
+                </Badge>
+              </motion.div>
+            )}
+          </AnimatePresence>
+          <motion.div animate={{ rotate: expanded ? 180 : 0 }} transition={{ duration: 0.2 }}>
+            <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
+          </motion.div>
+        </div>
+      </button>
+
+      {/* Expanded content */}
+      <AnimatePresence initial={false}>
+        {expanded && (
+          <motion.div
+            initial={{ height: 0, opacity: 0 }}
+            animate={{ height: "auto", opacity: 1 }}
+            exit={{ height: 0, opacity: 0 }}
+            transition={{ duration: 0.25, ease: [0.25, 0.1, 0.25, 1] }}
+            className="overflow-hidden"
+          >
+            <div className="px-3 sm:px-4 pb-3 sm:pb-4 pt-2 border-t border-border/40 space-y-4">
+              {/* Master switch + default provider */}
+              <div className="flex flex-col sm:flex-row sm:items-center gap-3 sm:gap-5">
+                <div className="flex items-center justify-between sm:justify-start gap-3">
+                  <div className="flex items-center gap-2">
+                    <Shield className="h-3.5 w-3.5 text-muted-foreground" />
+                    <span className="text-sm">总开关</span>
+                  </div>
+                  <Switch
+                    checked={merged.exa_search_enabled}
+                    onCheckedChange={(checked) =>
+                      setDraft((prev) => ({ ...prev, exa_search_enabled: checked }))
+                    }
+                  />
+                </div>
+                <Separator orientation="vertical" className="hidden sm:block h-6" />
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground whitespace-nowrap">默认引擎</span>
+                  <select
+                    value={merged.search_default_provider}
+                    onChange={(e) =>
+                      setDraft((prev) => ({ ...prev, search_default_provider: e.target.value }))
+                    }
+                    className="h-8 sm:h-7 rounded-lg border border-input bg-background px-2.5 text-xs flex-1 sm:flex-none sm:w-28 cursor-pointer"
+                    disabled={!merged.exa_search_enabled}
+                  >
+                    <option value="exa">Exa</option>
+                    <option value="tavily">Tavily</option>
+                    <option value="brave">Brave</option>
+                  </select>
+                </div>
+              </div>
+
+              <AnimatePresence>
+                {merged.exa_search_enabled && (
+                  <motion.div
+                    initial={{ opacity: 0, y: -8 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: -8 }}
+                    transition={{ duration: 0.2 }}
+                    className="space-y-4"
+                  >
+                    <Separator className="opacity-50" />
+                    {/* Engine cards */}
+                    <div className="grid gap-2.5">
+                      {SEARCH_ENGINES.map((engine, idx) => {
+                        const isDefault = merged.search_default_provider === engine.id;
+                        const keyValue = merged[engine.keyField];
+                        const hasKey = keyValue !== "" && !keyValue.includes("*") ? true : keyValue.includes("*");
+                        const EngineIcon = engine.icon;
+                        return (
+                          <motion.div
+                            key={engine.id}
+                            initial={{ opacity: 0, y: 10 }}
+                            animate={{ opacity: 1, y: 0 }}
+                            transition={{ duration: 0.25, delay: idx * 0.05 }}
+                            className={`group relative rounded-xl border p-3 sm:p-3.5 space-y-2.5 transition-all duration-200 hover:shadow-sm ${
+                              isDefault
+                                ? "border-transparent shadow-sm"
+                                : "border-border/60 hover:border-border"
+                            }`}
+                            style={{
+                              background: isDefault
+                                ? `linear-gradient(135deg, ${engine.color}08, ${engine.color}03)`
+                                : undefined,
+                              borderColor: isDefault ? `${engine.color}30` : undefined,
+                            }}
+                          >
+                            {/* Engine header */}
+                            <div className="flex items-center justify-between gap-2">
+                              <div className="flex items-center gap-2.5 min-w-0">
+                                <div
+                                  className="h-7 w-7 rounded-lg flex items-center justify-center shrink-0 transition-transform duration-200 group-hover:scale-105"
+                                  style={{
+                                    backgroundColor: `${engine.color}15`,
+                                    color: engine.color,
+                                  }}
+                                >
+                                  <EngineIcon className="h-3.5 w-3.5" />
+                                </div>
+                                <div className="min-w-0">
+                                  <div className="flex items-center gap-1.5">
+                                    <span className="text-sm font-semibold">{engine.name}</span>
+                                    {isDefault && (
+                                      <span
+                                        className="text-[10px] font-medium px-1.5 py-px rounded-full text-white"
+                                        style={{ backgroundColor: engine.color }}
+                                      >
+                                        默认
+                                      </span>
+                                    )}
+                                    {engine.requiresNode && (
+                                      <Badge variant="outline" className="text-[9px] px-1 py-0 font-normal opacity-60">
+                                        Node.js
+                                      </Badge>
+                                    )}
+                                  </div>
+                                  <p className="text-[11px] text-muted-foreground leading-tight mt-0.5">{engine.desc}</p>
+                                </div>
+                              </div>
+                              <div className="flex items-center gap-1.5 flex-shrink-0">
+                                {hasKey ? (
+                                  <span className="flex items-center gap-1 text-[10px] font-medium text-green-600 dark:text-green-400">
+                                    <CheckCircle2 className="h-3 w-3" />
+                                    <span className="hidden sm:inline">已配置</span>
+                                  </span>
+                                ) : (
+                                  !isDefault && (
+                                    <span className="text-[10px] text-muted-foreground/50">
+                                      未配置
+                                    </span>
+                                  )
+                                )}
+                              </div>
+                            </div>
+                            {/* API Key input */}
+                            <div>
+                              <label className="text-[11px] text-muted-foreground/70 mb-1 block font-medium">
+                                API Key {engine.id === "exa" ? "（可选）" : ""}
+                              </label>
+                              <ApiKeyInput
+                                value={draft[engine.keyField] !== undefined ? (draft[engine.keyField] as string) : (config?.[engine.keyField] ?? "")}
+                                onChange={(v) =>
+                                  setDraft((prev) => ({ ...prev, [engine.keyField]: v }))
+                                }
+                                placeholder={engine.keyHint}
+                                accentColor={engine.color}
+                              />
+                            </div>
+                          </motion.div>
+                        );
+                      })}
+                    </div>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+
+              {/* Hint */}
+              <p className="text-[11px] text-muted-foreground/70 leading-relaxed">
+                保存后自动热重载 MCP 连接，无需重启服务。在 mcp.json 中配置同名 Server 可覆盖内置配置。
+              </p>
+
+              {/* Save button */}
+              <AnimatePresence>
+                {hasChanges && (
+                  <motion.div
+                    initial={{ opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    exit={{ opacity: 0, y: 6 }}
+                    transition={{ duration: 0.2 }}
+                    className="flex justify-end"
+                  >
+                    <Button
+                      size="sm"
+                      className="h-8 text-xs gap-1.5 rounded-lg px-4 text-white shadow-sm transition-all duration-200 hover:shadow-md"
+                      style={{ backgroundColor: saving ? undefined : "var(--em-primary)" }}
+                      disabled={saving}
+                      onClick={handleSave}
+                    >
+                      {saving ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : saved ? (
+                        <motion.span
+                          initial={{ scale: 0 }}
+                          animate={{ scale: 1 }}
+                          className="flex items-center gap-1"
+                        >
+                          <CheckCircle2 className="h-3 w-3" />
+                        </motion.span>
+                      ) : (
+                        <Save className="h-3 w-3" />
+                      )}
+                      {saved ? "已保存" : "保存配置"}
+                    </Button>
+                  </motion.div>
+                )}
+              </AnimatePresence>
+            </div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+    </div>
+  );
+}
 
 export function MCPTab() {
   const [servers, setServers] = useState<MCPServer[]>([]);
@@ -311,6 +736,9 @@ export function MCPTab() {
 
   return (
     <div className="space-y-4">
+      {/* Built-in search engines */}
+      <BuiltinSearchSection />
+
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">

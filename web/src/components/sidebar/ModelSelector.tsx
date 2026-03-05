@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
+import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -81,11 +82,22 @@ export function ModelSelector() {
           <div className="flex items-center gap-2 min-w-0 flex-1">
             {/* Brand_Color 状态指示器圆点 */}
             <span
-              className="h-2 w-2 rounded-full flex-shrink-0"
+              className="h-2 w-2 rounded-full flex-shrink-0 transition-all duration-300"
               style={{ backgroundColor: "var(--em-primary)" }}
             />
             <div className="flex flex-col items-start min-w-0 flex-1">
-              <span className="truncate font-medium">{displayName}</span>
+              <AnimatePresence mode="wait" initial={false}>
+                <motion.span
+                  key={currentModel || "_none"}
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  exit={{ opacity: 0, y: -4 }}
+                  transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
+                  className="truncate font-medium"
+                >
+                  {displayName}
+                </motion.span>
+              </AnimatePresence>
               {activeModel?.model && activeModel.name !== "default" && activeModel.name !== resolvedModel(activeModel) && (
                 <span className="truncate text-muted-foreground text-[10px]">
                   {resolvedModel(activeModel)}
