@@ -767,7 +767,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "║    2. 编辑项目根目录下的 .env 文件，设置以下必填项：       ║\n"
             "║       EXCELMANUS_API_KEY=sk-xxx                            ║\n"
             "║       EXCELMANUS_BASE_URL=https://api.openai.com/v1        ║\n"
-            "║       EXCELMANUS_MODEL=gpt-4o                              ║\n"
+            "║       EXCELMANUS_MODEL=gpt-5                               ║\n"
             "║    3. 使用 EXCELMANUS_MODELS 环境变量配置多模型            ║\n"
             "║                                                            ║\n"
             "║  配置完成后，通过前端设置页保存即可生效（无需重启）。      ║\n"
@@ -875,7 +875,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     # 初始化会话管理器
     # 始终创建共享 MCP 管理器并在启动时自动连接
-    shared_mcp_manager = MCPManager(_config.workspace_root)
+    shared_mcp_manager = MCPManager(_config.workspace_root, app_config=_config)
     try:
         await shared_mcp_manager.initialize(_tool_registry)
         mcp_info = shared_mcp_manager.get_server_info()
@@ -5650,22 +5650,37 @@ async def list_models(request: Request) -> JSONResponse:
             active_name = _user_cfg.get_active_model()
         except Exception:
             active_name = _config_store.get_active_model() if hasattr(_config_store, 'get_active_model') else None
-    models: list[dict] = [{
-        "name": "default",
-        "model": _config.model,
-        "display_name": _config.model,
-        "description": "默认模型（主配置）",
-        "active": active_name is None,
-        "base_url": _config.base_url,
-    }]
     db_profiles = _config_store.list_profiles() if _config_store else []
+
+    # 去重：如果 default 的 model 与某个 profile 的 model 完全一致，
+    # 则隐藏 default 条目，避免模型列表出现两个相同模型。
+    default_duplicated_by = next(
+        (p["name"] for p in db_profiles if p["model"] == _config.model),
+        None,
+    )
+
+    models: list[dict] = []
+    if default_duplicated_by is None:
+        models.append({
+            "name": "default",
+            "model": _config.model,
+            "display_name": _config.model,
+            "description": "默认模型（主配置）",
+            "active": active_name is None,
+            "base_url": _config.base_url,
+        })
+
     for p in db_profiles:
+        is_active = p["name"] == active_name
+        # 当 default 被去重且用户选中的是 default 时，将 active 转移到匹配的 profile
+        if p["name"] == default_duplicated_by and active_name is None:
+            is_active = True
         models.append({
             "name": p["name"],
             "model": p["model"],
             "display_name": p.get("name", ""),
             "description": p.get("description", ""),
-            "active": p["name"] == active_name,
+            "active": is_active,
             "base_url": p.get("base_url", ""),
         })
 
@@ -6588,7 +6603,7 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     if _config is None:
         return _error_json_response(503, "服务未初始化")
 
-    from excelmanus.model_probe import delete_capabilities, run_full_probe
+    from excelmanus.model_probe import delete_capabilities, run_full_probe, save_capabilities
     from excelmanus.providers import create_client
 
     db = _session_manager.database if _session_manager else None
@@ -6605,13 +6620,22 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
 
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
 
+    # 保留 profile 级坐标用于缓存键（与 GET 端点一致），
+    # 同时剥离 Codex 前缀得到 API 实际使用的模型 ID。
+    cache_model, cache_base_url = model, base_url
+    api_model = model
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    if OpenAICodexProvider.is_codex_profile_name(model):
+        _real = OpenAICodexProvider.model_from_profile_name(model)
+        api_model = _real if _real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+
     # 优先尝试当前用户的运行时凭据（如 Codex OAuth access token），
     # 以便能通过 backend-api 执行真实探测并写入缓存。
     _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
     _user_id = _get_isolation_user_id(request)
     if _resolver is not None and _user_id:
         try:
-            _resolved_cred = _resolver.resolve_sync(_user_id, model)
+            _resolved_cred = _resolver.resolve_sync(_user_id, api_model)
             if _resolved_cred:
                 api_key = _resolved_cred.api_key or api_key
                 if _resolved_cred.base_url:
@@ -6632,10 +6656,10 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
             req_thinking_mode = _prof.get("thinking_mode", "auto")
 
     if db is not None:
-        delete_capabilities(db, model, base_url)
+        delete_capabilities(db, cache_model, cache_base_url)
 
     # 非 ASCII 字符检测（httpx 用 ASCII 编码 HTTP header）
-    for _fl, _fv in [("API Key", api_key), ("Base URL", base_url), ("Model", model)]:
+    for _fl, _fv in [("API Key", api_key), ("Base URL", base_url), ("Model", api_model)]:
         try:
             _fv.encode("ascii")
         except UnicodeEncodeError as _enc:
@@ -6650,20 +6674,26 @@ async def probe_model_capabilities(request: Request) -> JSONResponse:
     try:
         caps = await run_full_probe(
             client=client,
-            model=model,
+            model=api_model,
             base_url=base_url,
             skip_if_cached=False,
-            db=db,
+            db=None,  # 先不自动存，下面用 profile 坐标手动存
             thinking_mode=req_thinking_mode,
         )
     except Exception as exc:
         return _error_json_response(500, f"探测失败: {exc}")
 
+    # 用 profile 级坐标缓存（与 GET /capabilities/all 读取一致）
+    if db is not None:
+        caps.model = cache_model
+        caps.base_url = cache_base_url
+        save_capabilities(db, caps)
+
     # 同步到所有活跃会话的引擎
     if _session_manager is not None:
-        await _session_manager.broadcast_model_capabilities(model, caps)
+        await _session_manager.broadcast_model_capabilities(api_model, caps)
 
-    return JSONResponse(content={"capabilities": caps.to_dict(), "model": model})
+    return JSONResponse(content={"capabilities": caps.to_dict(), "model": cache_model})
 
 
 @_router.post("/api/v1/config/models/capabilities/probe-all")
@@ -6899,10 +6929,6 @@ _PROVIDER_FALLBACK_MODELS: list[tuple[str, list[dict], str]] = [
             {"id": "gemini-2.5-pro"},
             {"id": "gemini-2.5-flash"},
             {"id": "gemini-2.5-flash-lite"},
-            {"id": "gemini-2.0-flash"},
-            {"id": "gemini-2.0-flash-lite"},
-            {"id": "gemini-1.5-pro"},
-            {"id": "gemini-1.5-flash"},
         ],
         "Gemini OpenAI \u517c\u5bb9\u7aef\u70b9\u4e0d\u652f\u6301\u6807\u51c6 /models \u679a\u4e3e\uff0c\u5df2\u56de\u9000\u4e3a\u63a8\u8350\u6a21\u578b\u5217\u8868\u3002",
     ),
@@ -7133,6 +7159,16 @@ async def update_model_capabilities(request: Request) -> JSONResponse:
 
 # ── 运行时配置管理 API ──────────────────────────────────
 
+
+def _mask_api_key(key: str | None) -> str:
+    """将 API Key 遮掩为 sk-****xxxx 格式，前端仅需知道是否已配置。"""
+    if not key:
+        return ""
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:3] + "*" * (len(key) - 7) + key[-4:]
+
+
 _RUNTIME_ENV_KEYS: dict[str, str] = {
     # ── 会话与多用户 ──
     "auth_enabled": "EXCELMANUS_AUTH_ENABLED",
@@ -7257,6 +7293,12 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "playbook_inject_top_k": "EXCELMANUS_PLAYBOOK_INJECT_TOP_K",
     "registry_semantic_top_k": "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
     "registry_semantic_threshold": "EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD",
+    # ── 内置搜索引擎 ──
+    "exa_search_enabled": "EXCELMANUS_EXA_SEARCH",
+    "search_default_provider": "EXCELMANUS_SEARCH_DEFAULT",
+    "exa_api_key": "EXCELMANUS_EXA_API_KEY",
+    "tavily_api_key": "EXCELMANUS_TAVILY_API_KEY",
+    "brave_api_key": "EXCELMANUS_BRAVE_API_KEY",
 }
 
 
@@ -7391,6 +7433,12 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "playbook_inject_top_k": _config.playbook_inject_top_k,
         "registry_semantic_top_k": _config.registry_semantic_top_k,
         "registry_semantic_threshold": _config.registry_semantic_threshold,
+        # ── 内置搜索引擎 ──
+        "exa_search_enabled": _config.exa_search_enabled,
+        "search_default_provider": _config.search_default_provider,
+        "exa_api_key": _mask_api_key(_config.exa_api_key),
+        "tavily_api_key": _mask_api_key(_config.tavily_api_key),
+        "brave_api_key": _mask_api_key(_config.brave_api_key),
     })
 
 
@@ -7519,6 +7567,12 @@ class RuntimeConfigUpdate(BaseModel):
     playbook_inject_top_k: int | None = Field(default=None, gt=0)
     registry_semantic_top_k: int | None = Field(default=None, gt=0)
     registry_semantic_threshold: float | None = Field(default=None, ge=0, le=1)
+    # ── 内置搜索引擎 ──
+    exa_search_enabled: bool | None = None
+    search_default_provider: Literal["exa", "tavily", "brave"] | None = None
+    exa_api_key: str | None = None
+    tavily_api_key: str | None = None
+    brave_api_key: str | None = None
 
 
 @_router.put("/api/v1/config/runtime")
@@ -7534,6 +7588,12 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
     updates: dict[str, str] = {}
 
     payload = request.model_dump(exclude_none=True)
+    # 过滤掉前端回传的掩码 API Key（含 * 号），避免覆盖真实密钥
+    _API_KEY_FIELDS = {"exa_api_key", "tavily_api_key", "brave_api_key"}
+    for ak_field in _API_KEY_FIELDS:
+        val = payload.get(ak_field)
+        if isinstance(val, str) and ("*" in val or val == ""):
+            payload.pop(ak_field, None)
     if not payload:
         return _error_json_response(400, "无有效更新字段")
 
@@ -7572,8 +7632,19 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
         "deploy_mode": "部署模式已更改",
         "mcp_shared_manager": "MCP 管理器配置已更改",
     }
+    # 仅需 MCP 热重载的配置项（搜索引擎相关）
+    _MCP_RELOAD_KEYS = {
+        "exa_search_enabled",
+        "search_default_provider",
+        "exa_api_key",
+        "tavily_api_key",
+        "brave_api_key",
+    }
+
     restart_keys = payload.keys() & _RESTART_REQUIRED_KEYS
     need_restart = len(restart_keys) > 0
+    reload_keys = payload.keys() & _MCP_RELOAD_KEYS
+    need_mcp_reload = len(reload_keys) > 0 and not need_restart
 
     # 构建重启原因描述
     restart_reason = ""
@@ -7581,11 +7652,35 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
         reasons = [_RESTART_REASON_MAP.get(k, k) for k in restart_keys]
         restart_reason = "、".join(reasons)
 
+    # MCP 热重载：搜索引擎配置变更时重建 MCP 连接
+    mcp_reloaded = False
+    mcp_reload_error = ""
+    if need_mcp_reload:
+        try:
+            mcp_manager = (
+                getattr(_session_manager, "_shared_mcp_manager", None)
+                if _session_manager is not None
+                else None
+            )
+            if mcp_manager is not None and _tool_registry is not None:
+                await mcp_manager.shutdown()
+                mcp_manager._initialized = False
+                if _session_manager is not None:
+                    _session_manager.reset_mcp_initialized()
+                await mcp_manager.initialize(_tool_registry)
+                mcp_reloaded = True
+                logger.info("搜索引擎配置更新，MCP 热重载完成")
+        except Exception as exc:
+            mcp_reload_error = str(exc)
+            logger.error("MCP 热重载失败: %s", exc, exc_info=True)
+
     resp = JSONResponse(content={
         "status": "ok",
         "updated": list(payload.keys()),
         "restarting": need_restart,
         "restart_reason": restart_reason,
+        "mcp_reloaded": mcp_reloaded,
+        "mcp_reload_error": mcp_reload_error,
     })
     if need_restart:
         global _restart_reason

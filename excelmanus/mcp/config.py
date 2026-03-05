@@ -67,6 +67,7 @@ class MCPServerConfig:
     state_dir: str | None = None  # 进程识别目录（覆盖默认 <workspace>/.excelmanus/mcp）
     timeout: int = 30  # 工具调用超时（秒）
     auto_approve: list[str] = field(default_factory=list)  # 自动批准的工具名列表（白名单）
+    scope: str = "always"  # MCP 工具暴露范围：always(始终)|search(搜索意图)|dev_docs(开发文档)|自定义标签
 
 
 class MCPConfigLoader:
@@ -325,6 +326,7 @@ class MCPConfigLoader:
         if timeout is None:
             return None
         auto_approve = MCPConfigLoader._parse_auto_approve(name, effective_entry)
+        scope = MCPConfigLoader._parse_scope(name, effective_entry)
         state_dir = MCPConfigLoader._parse_optional_str(
             name,
             effective_entry,
@@ -379,6 +381,7 @@ class MCPConfigLoader:
                 timeout=timeout,
                 auto_approve=auto_approve,
                 state_dir=state_dir,
+                scope=scope,
             )
 
         url = effective_entry.get("url")
@@ -402,6 +405,7 @@ class MCPConfigLoader:
                 timeout=timeout,
                 auto_approve=auto_approve,
                 state_dir=state_dir,
+                scope=scope,
             )
 
         return MCPServerConfig(
@@ -412,6 +416,7 @@ class MCPConfigLoader:
             timeout=timeout,
             auto_approve=auto_approve,
             state_dir=state_dir,
+            scope=scope,
         )
 
     @staticmethod
@@ -479,6 +484,24 @@ class MCPConfigLoader:
             )
             return []
         return list(raw)
+
+    @staticmethod
+    def _parse_scope(name: str, entry: dict) -> str:
+        """解析 scope 字段（MCP 工具暴露范围）。
+
+        合法值：任意非空字符串，默认 ``"always"``。
+        常用值：``always`` / ``search`` / ``dev_docs``。
+        """
+        raw = entry.get("scope")
+        if raw is None:
+            return "always"
+        if not isinstance(raw, str) or not raw.strip():
+            logger.warning(
+                "MCP Server '%s' 的 scope 必须为非空字符串，回退 'always'",
+                name,
+            )
+            return "always"
+        return raw.strip().lower()
 
     @staticmethod
     def _parse_headers(name: str, entry: dict[str, Any]) -> dict[str, str] | None:

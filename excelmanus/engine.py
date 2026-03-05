@@ -727,6 +727,7 @@ class AgentEngine:
         # ── 兜底：根据模型名关键词推断（仅在无 probe 结果时使用）──
         model_lower = config.model.lower()
         _NON_VISION_KEYWORDS = (
+            # Legacy OpenAI alias; keep non-vision behavior for backward compatibility.
             "o1-mini", "o3-mini",
             "amazon.nova-micro", "amazon.nova-sonic",
             "gemini-embedding",
@@ -739,7 +740,7 @@ class AgentEngine:
             return False
 
         _VISION_KEYWORDS = (
-            "gpt-4o", "gpt-4-turbo", "gpt-4-vision", "gpt-4.1",
+            "gpt-4o", "gpt-4-turbo", "gpt-4.1",
             "gpt-5",
             "gpt-image-1",
             "o1", "o3", "o4",
@@ -1394,6 +1395,35 @@ class AgentEngine:
         """
         await self._mcp_manager.initialize(self._registry)
         self.sync_mcp_auto_approve()
+        # 注册并发搜索工具（依赖 MCPManager 已初始化）
+        self._register_search_tools()
+        # 注册重试回调：Exa 后台重试成功后补注册 parallel_search + auto_approve
+        self._mcp_manager._on_builtin_retry_success.append(
+            self._on_mcp_retry_success,
+        )
+
+    def _on_mcp_retry_success(self) -> None:
+        """MCP 内置 Server 重试成功后的回调。"""
+        self.sync_mcp_auto_approve()
+        self._register_search_tools()
+
+    def _register_search_tools(self) -> None:
+        """注册并发搜索工具（需在 MCP 初始化后调用，幂等）。
+
+        仅当 Exa 搜索可用时注册 parallel_search，避免无用工具占位。
+        已注册时跳过，保证幂等性。
+        """
+        if "exa" not in self._mcp_manager.connected_servers:
+            return
+        if self._registry.get_tool("parallel_search") is not None:
+            return
+        from excelmanus.tools.search_tools import get_tools as get_search_tools
+        search_tools = get_search_tools(self._mcp_manager)
+        if search_tools:
+            self._registry.register_tools(search_tools)
+            # parallel_search 是只读搜索工具，加入自动批准
+            for t in search_tools:
+                self._approval.register_read_only_safe_tools([t.name])
 
     def sync_mcp_auto_approve(self) -> None:
         """将当前 MCP 白名单同步到审批管理器。"""
@@ -2226,10 +2256,12 @@ class AgentEngine:
                     effective_raw_args = parse_result.clean_text
                     break
 
-        # ── D2 优化: 查询向量预计算 + 语义检索与路由并行 ──
+        # ── D2 优化: 查询向量预计算 + 语义检索并行 ──
         # 所有语义检索共享同一个 user_message 的 embedding 向量，
         # 预计算一次后传递给各模块，避免 5 次冗余 HTTP 调用。
-        # 预计算与路由并行执行，语义检索在路由后用预计算向量快速完成。
+        # P1 优化: embedding 不再阻塞 routing 阶段——各 semantic task 内部
+        # 并行 await 同一个 _query_vec_task，embedding 完成后全部继续。
+        # P2 门控: 词法已确定明确 task_tags 时跳过 embedding（增量价值低）。
         self._relevant_memory_text = ""
         self._relevant_file_summary = ""
         self._relevant_skill_hints = ""
@@ -2245,16 +2277,17 @@ class AgentEngine:
             if not t.cancelled() and t.exception() is not None:
                 logger.debug("语义检索后台任务异常（已忽略）: %s", t.exception())
 
-        # P2: 预计算查询向量（与路由并行），后续语义检索共享此向量
-        _need_semantic = (
-            effective_slash_command is None
-            and self._embedding_client is not None
-        )
-        if _need_semantic:
-            _query_vec_task = asyncio.create_task(
-                self._embedding_client.embed_single(user_message)
-            )
-            _query_vec_task.add_done_callback(_sem_task_done_cb)
+        async def _safe_await_query_vec(
+            vec_task: "asyncio.Task[Any] | None",
+        ) -> Any:
+            """安全收割预计算向量 task，失败时返回 None（降级到无 embedding）。"""
+            if vec_task is None:
+                return None
+            try:
+                return await vec_task
+            except Exception:
+                logger.debug("查询向量预计算失败，语义检索降级为无 embedding", exc_info=True)
+                return None
 
         # ── 路由（斜杠命令 + chat_mode 映射） ──
         _route_elapsed_ms = 0.0
@@ -2280,51 +2313,77 @@ class AgentEngine:
             raw_args=effective_raw_args,
         )
 
-        # ── P2: 收割预计算向量 + 启动语义检索任务（路由已完成，向量应已就绪） ──
-        _query_vec = None
-        if _query_vec_task is not None:
-            try:
-                _query_vec = await _query_vec_task
-            except Exception:
-                logger.debug("查询向量预计算失败，语义检索降级为无 embedding", exc_info=True)
-                _query_vec = None
+        # ── P2 智能门控: 词法已确定任务类型时跳过 embedding ──
+        # 这些 tag 对应的任务足够明确，语义检索增量价值低
+        _SKIP_SEMANTIC_TAGS = frozenset({
+            "cross_sheet",    # VLOOKUP/INDEX-MATCH，任务意图明确
+            "formatting",     # 格式化，不需要记忆/技能匹配
+            "chart",          # 图表生成，任务类型固定
+            "image_replica",  # 图片复刻，有专门流程
+        })
+        _route_tags = set(getattr(route_result, "task_tags", ()) or ())
+        _need_semantic = (
+            effective_slash_command is None
+            and self._embedding_client is not None
+            and not (_route_tags & _SKIP_SEMANTIC_TAGS)
+        )
+
+        # P1: embedding 预计算移到路由之后（受 P2 门控），
+        # 不再串行 await——改由各 semantic task 内部并行 await 同一个 task。
+        if _need_semantic:
+            _query_vec_task = asyncio.create_task(
+                self._embedding_client.embed_single(user_message)
+            )
+            _query_vec_task.add_done_callback(_sem_task_done_cb)
+        elif _route_tags & _SKIP_SEMANTIC_TAGS:
+            logger.debug(
+                "perf.chat: 智能门控跳过 embedding (命中 tags: %s)",
+                _route_tags & _SKIP_SEMANTIC_TAGS,
+            )
 
         # P3 门控: 仅非斜杠 + 非 chitchat（chitchat 后续可能降级，先启动任务）
-        if effective_slash_command is None:
+        # P1: 每个 semantic task 内部 await _query_vec_task（并行等待，不阻塞路由）
+        if effective_slash_command is None and _need_semantic:
             if self._memory_injection_mode == "semantic" and self._semantic_memory is not None:
-                _t = asyncio.create_task(
-                    self._semantic_memory.search(user_message, query_vec=_query_vec)
-                )
+                async def _sem_memory_search() -> str:
+                    _vec = await _safe_await_query_vec(_query_vec_task)
+                    return await self._semantic_memory.search(user_message, query_vec=_vec)
+                _t = asyncio.create_task(_sem_memory_search())
                 _t.add_done_callback(_sem_task_done_cb)
                 _semantic_tasks.append(("memory", _t))
             if self._semantic_registry is not None and self._file_registry is not None:
-                _t = asyncio.create_task(
-                    self._semantic_registry.get_relevant_summary(
-                        user_message, self._file_registry, query_vec=_query_vec,
+                _file_reg = self._file_registry  # 避免闭包捕获 self 属性变化
+                async def _sem_registry_search() -> str:
+                    _vec = await _safe_await_query_vec(_query_vec_task)
+                    return await self._semantic_registry.get_relevant_summary(
+                        user_message, _file_reg, query_vec=_vec,
                     )
-                )
+                _t = asyncio.create_task(_sem_registry_search())
                 _t.add_done_callback(_sem_task_done_cb)
                 _semantic_tasks.append(("file_registry", _t))
             if self._semantic_skill_router is not None and self._skill_router is not None:
                 _skillpacks = self._skill_router._loader.get_skillpacks() or {}
                 if _skillpacks:
-                    _t = asyncio.create_task(
-                        self._semantic_skill_router.get_relevant_skill_hints(
-                            user_message, _skillpacks, query_vec=_query_vec,
+                    async def _sem_skill_search() -> str:
+                        _vec = await _safe_await_query_vec(_query_vec_task)
+                        return await self._semantic_skill_router.get_relevant_skill_hints(
+                            user_message, _skillpacks, query_vec=_vec,
                         )
-                    )
+                    _t = asyncio.create_task(_sem_skill_search())
                     _t.add_done_callback(_sem_task_done_cb)
                     _semantic_tasks.append(("skill_router", _t))
             if self._playbook_store is not None and getattr(self._config, "playbook_enabled", False):
-                _t = asyncio.create_task(
-                    self._search_playbook(user_message, query_vec=_query_vec)
-                )
+                async def _sem_playbook_search() -> str:
+                    _vec = await _safe_await_query_vec(_query_vec_task)
+                    return await self._search_playbook(user_message, query_vec=_vec)
+                _t = asyncio.create_task(_sem_playbook_search())
                 _t.add_done_callback(_sem_task_done_cb)
                 _semantic_tasks.append(("playbook", _t))
             if self._session_summary_store is not None and self._session_turn <= 1:
-                _t = asyncio.create_task(
-                    self._search_session_history(user_message, query_vec=_query_vec)
-                )
+                async def _sem_session_search() -> str:
+                    _vec = await _safe_await_query_vec(_query_vec_task)
+                    return await self._search_session_history(user_message, query_vec=_vec)
+                _t = asyncio.create_task(_sem_session_search())
                 _t.add_done_callback(_sem_task_done_cb)
                 _semantic_tasks.append(("session_history", _t))
 

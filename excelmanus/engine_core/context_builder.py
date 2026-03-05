@@ -1485,6 +1485,15 @@ class ContextBuilder:
                     lines.append(f"\n当前有 {len(tracked)} 个文件受版本追踪保护。")
         return "\n".join(lines)
 
+    # 已知 MCP Server 使用场景指引（server_name → 中文描述）
+    _MCP_USAGE_HINTS: dict[str, str] = {
+        "exa": "通用网页搜索引擎，覆盖面广，适用于搜索新闻、产品、技术资讯、实时信息等任何网络信息查询",
+        "tavily": "AI 优化搜索引擎，擅长深度研究、事实核查和结构化信息提取，搜索结果更精准",
+        "brave": "隐私友好的网页搜索引擎，适用于通用信息查询",
+        "context7": "编程库/框架官方文档查询，仅适用于查找特定编程语言库的 API 文档和代码示例（如 React、Express 等），不适用于通用信息搜索",
+        "excel": "Excel 文件读写操作",
+    }
+
     def _build_mcp_context_notice(self) -> str:
         """生成已连接 MCP Server 的概要信息，注入 system prompt。"""
         e = self._engine
@@ -1495,18 +1504,70 @@ class ContextBuilder:
         if not ready_servers:
             return ""
         lines = ["## MCP 扩展能力"]
+        _has_search = False
+        _has_docs = False
         for srv in ready_servers:
             name = srv["name"]
             tool_count = srv.get("tool_count", 0)
             tool_names = srv.get("tools", [])
             tools_str = "、".join(tool_names) if tool_names else "无"
-            lines.append(f"- **{name}**（{tool_count} 个工具）：{tools_str}")
+            hint = self._MCP_USAGE_HINTS.get(name, "")
+            hint_suffix = f"  — {hint}" if hint else ""
+            lines.append(f"- **{name}**（{tool_count} 个工具）：{tools_str}{hint_suffix}")
+            _scope = e._mcp_manager.tool_scopes
+            if any(v == "search" for k, v in _scope.items() if k.startswith(f"mcp_{name}_") or k.startswith(f"mcp_{name.replace('-', '_')}_")):
+                _has_search = True
+            if name in ("context7",):
+                _has_docs = True
         lines.append(
-            "以上 MCP 工具已注册，工具名带 `mcp_{server}_` 前缀，可直接调用。"
+            "\n以上 MCP 工具已注册，工具名带 `mcp_{server}_` 前缀，可直接调用。"
             "当用户询问你有哪些 MCP 或外部能力时，据此如实回答。\n"
             "**工具优先级**：当内置工具（不带 `mcp_` 前缀）能完成任务时，"
             "优先使用内置工具。MCP 工具仅在内置工具无法覆盖的场景下使用。"
         )
+        # 收集已启用的搜索引擎名称（按 ready_servers 顺序）
+        _search_engine_names: list[str] = []
+        from excelmanus.mcp.builtin import BUILTIN_SEARCH_SERVER_NAMES
+        for srv in ready_servers:
+            if srv["name"] in BUILTIN_SEARCH_SERVER_NAMES:
+                _search_engine_names.append(srv["name"])
+        _has_exa = "exa" in _search_engine_names
+        _has_parallel_search = _has_exa  # parallel_search 仅在 exa 可用时注册
+        # 非 exa 的其他搜索引擎
+        _other_engines = [n for n in _search_engine_names if n != "exa"]
+
+        if _has_search and _has_docs:
+            guide_lines = ["\n**搜索工具选择指南**："]
+            if _has_parallel_search:
+                guide_lines.append("- 广泛信息搜索（新闻、产品、概念、最新动态）→ 使用 **parallel_search**（自动多查询并发，覆盖面更广）")
+                guide_lines.append("- 精确单条搜索（已知关键词、简单事实核查）→ 直接使用 mcp_exa_* 工具")
+            elif _search_engine_names:
+                engines_str = "、".join(f"mcp_{n}_*" for n in _search_engine_names)
+                guide_lines.append(f"- 通用信息搜索（新闻、产品、概念、最新动态）→ 使用 {engines_str} 搜索工具")
+            if _other_engines:
+                for eng in _other_engines:
+                    hint = self._MCP_USAGE_HINTS.get(eng, "网页搜索")
+                    guide_lines.append(f"- 也可使用 **mcp_{eng}_*** 工具（{hint}）")
+            guide_lines.append("- 编程库/框架文档查询（API 用法、代码示例）→ 使用 **context7** 文档查询")
+            if _has_parallel_search:
+                guide_lines.append("- 技术问题可同时调用 parallel_search 和 context7 工具（它们会并行执行）")
+                guide_lines.append("- 不确定时优先使用 parallel_search，因为它覆盖范围更广")
+            lines.append("\n".join(guide_lines))
+        elif _has_search:
+            guide_lines = ["\n**搜索指南**："]
+            if _has_parallel_search:
+                guide_lines.append("- 广泛信息搜索 → 使用 **parallel_search**（自动多查询并发，覆盖面更广）")
+                guide_lines.append("- 精确单条搜索 → 直接使用 mcp_exa_* 工具")
+            elif _search_engine_names:
+                engines_str = "、".join(f"mcp_{n}_*" for n in _search_engine_names)
+                guide_lines.append(f"- 搜索信息 → 使用 {engines_str} 搜索工具")
+            if _other_engines:
+                for eng in _other_engines:
+                    hint = self._MCP_USAGE_HINTS.get(eng, "网页搜索")
+                    guide_lines.append(f"- 也可使用 **mcp_{eng}_*** 工具（{hint}）")
+            if _has_parallel_search:
+                guide_lines.append("- 不确定时优先使用 parallel_search")
+            lines.append("\n".join(guide_lines))
         return "\n".join(lines)
 
     def _build_file_registry_notice(self) -> str:

@@ -459,9 +459,15 @@ class MCPManager:
         self._initialized = False
         # 初始化后填充：白名单中的 MCP 工具（prefixed_name 列表）
         self._auto_approved_tools: list[str] = []
+        # 初始化后填充：prefixed_name → scope 映射（用于路由过滤）
+        self._tool_scopes: dict[str, str] = {}
+        # 内置 MCP Server 名称（用于连接失败重试）
+        self._builtin_server_names: set[str] = set()
         # 后台安装任务
         self._background_tasks: list[asyncio.Task] = []
         self._registry: "ToolRegistry | None" = None
+        # 内置 Server 重试成功后的回调（engine 用于补注册 parallel_search 等）
+        self._on_builtin_retry_success: list[Callable[[], Any]] = []
 
     async def initialize(self, registry: "ToolRegistry") -> None:
         """加载配置 → 连接所有 Server → 注册远程工具到 ToolRegistry。
@@ -489,6 +495,7 @@ class MCPManager:
             self._managed_workspace_pids.clear()
             self._managed_workspace_pids_by_state_dir.clear()
             self._auto_approved_tools = []
+            self._tool_scopes.clear()
             self._server_states.clear()
             self._registry = registry
 
@@ -574,6 +581,22 @@ class MCPManager:
                     name="mcp-npx-deferred-install",
                 )
                 self._background_tasks.append(task)
+
+            # ── 内置 MCP Server 连接失败重试 ──────────
+            failed_builtin_configs = [
+                cfg for cfg in ready_configs
+                if cfg.name in self._builtin_server_names
+                and self._server_states.get(cfg.name)
+                and self._server_states[cfg.name].status != "ready"
+            ]
+            if failed_builtin_configs:
+                retry_task = asyncio.create_task(
+                    self._retry_failed_builtin_servers(
+                        failed_builtin_configs, registry,
+                    ),
+                    name="mcp-builtin-retry",
+                )
+                self._background_tasks.append(retry_task)
 
     async def _connect_and_register_server(
         self,
@@ -719,6 +742,9 @@ class MCPManager:
             if "*" in cfg.auto_approve or original_name in cfg.auto_approve:
                 auto_approved.append(tool_def.name)
 
+            # 记录工具 scope（用于路由过滤）
+            self._tool_scopes[tool_def.name] = cfg.scope
+
         self._clients[cfg.name] = client
         state.status = "ready"
         state.last_error = None
@@ -782,6 +808,73 @@ class MCPManager:
             len(self._server_states),
         )
 
+    async def _retry_failed_builtin_servers(
+        self,
+        failed_configs: list,
+        registry: "ToolRegistry",
+        *,
+        max_retries: int = 3,
+        base_delay: float = 5.0,
+    ) -> None:
+        """后台重试连接失败的内置 MCP Server（指数退避）。
+
+        内置 Server（如 Exa 搜索）连接失败通常是暂时性网络问题，
+        自动重试可以在不阻塞启动的前提下恢复搜索能力。
+        """
+        for attempt in range(1, max_retries + 1):
+            delay = base_delay * (2 ** (attempt - 1))  # 5s, 10s, 20s
+            await asyncio.sleep(delay)
+
+            still_failed = [
+                cfg for cfg in failed_configs
+                if self._server_states.get(cfg.name)
+                and self._server_states[cfg.name].status != "ready"
+            ]
+            if not still_failed:
+                logger.info("内置 MCP Server 全部恢复就绪，停止重试")
+                return
+
+            logger.info(
+                "内置 MCP Server 重试 %d/%d（%d 个待重试: %s）",
+                attempt,
+                max_retries,
+                len(still_failed),
+                ", ".join(c.name for c in still_failed),
+            )
+
+            for cfg in still_failed:
+                tool_defs, approved = await self._connect_and_register_server(
+                    cfg, registry,
+                )
+                if tool_defs:
+                    registry.register_tools(tool_defs)
+                    self._auto_approved_tools.extend(approved)
+                    logger.info(
+                        "内置 MCP Server '%s' 重试成功，注册 %d 个工具",
+                        cfg.name,
+                        len(tool_defs),
+                    )
+
+        # 重试成功后触发回调（如补注册 parallel_search）
+        if self._on_builtin_retry_success:
+            for cb in self._on_builtin_retry_success:
+                try:
+                    cb()
+                except Exception as exc:
+                    logger.warning("内置 MCP 重试成功回调异常: %s", exc)
+
+        # 最终仍然失败的 Server 记录警告
+        final_failed = [
+            cfg.name for cfg in failed_configs
+            if self._server_states.get(cfg.name)
+            and self._server_states[cfg.name].status != "ready"
+        ]
+        if final_failed:
+            logger.warning(
+                "内置 MCP Server 重试全部耗尽，以下 Server 不可用: %s",
+                ", ".join(final_failed),
+            )
+
     def _track_managed_pids(
         self,
         pids: set[int],
@@ -812,6 +905,10 @@ class MCPManager:
         内置 Server 追加到列表末尾（用户配置的 Server 先连接）。
         """
         if self._app_config is None:
+            logger.warning(
+                "MCPManager 未设置 app_config，内置 MCP Server（如 Exa 搜索）"
+                "将不会被注入。请在创建 MCPManager 时传递 app_config 参数。"
+            )
             return user_configs
 
         from excelmanus.mcp.builtin import get_builtin_mcp_configs
@@ -830,6 +927,7 @@ class MCPManager:
                 )
                 continue
             merged.append(bcfg)
+            self._builtin_server_names.add(bcfg.name)
             logger.info("注入内置 MCP Server: %s (%s)", bcfg.name, bcfg.url)
         return merged
 
@@ -930,6 +1028,11 @@ class MCPManager:
     def auto_approved_tools(self) -> list[str]:
         """返回白名单中的 MCP 工具名列表（prefixed_name）。"""
         return list(self._auto_approved_tools)
+
+    @property
+    def tool_scopes(self) -> dict[str, str]:
+        """返回 MCP 工具 scope 映射（prefixed_name → scope）。"""
+        return dict(self._tool_scopes)
 
     def get_server_info(self) -> list[dict[str, Any]]:
         """返回所有已尝试初始化的 Server 摘要信息。

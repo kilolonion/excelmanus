@@ -473,7 +473,7 @@ class MetaToolBuilder:
         1. write_hint == "read_only" → 仅暴露只读工具子集 + run_code + 元工具
         2. route_tool_tags → ROUTE_TOOL_SCOPE 白名单过滤（LLM 驱动）
         """
-        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, ROUTE_TOOL_SCOPE
+        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, ROUTE_TOOL_SCOPE, MCP_SCOPE_ACTIVATION
 
         e = self._engine
         domain_schemas = e._registry.get_tiered_schemas(
@@ -515,14 +515,45 @@ class MetaToolBuilder:
                     break
 
             if not _has_all and allowed:
+                # MCP scope 激活：根据路由标签决定哪些 MCP scope 可见
+                _active_mcp_scopes: set[str] = {"always"}  # "always" 始终可见
+                for tag in route_tool_tags:
+                    _tag_scopes = MCP_SCOPE_ACTIVATION.get(tag)
+                    if _tag_scopes is not None:
+                        _active_mcp_scopes |= _tag_scopes
+                _mcp_tool_scopes = e._mcp_manager.tool_scopes if hasattr(e, "_mcp_manager") else {}
+
+                def _mcp_tool_visible(name: str) -> bool:
+                    """检查 MCP 工具是否在当前路由下可见。"""
+                    if not name.startswith("mcp_"):
+                        return False
+                    tool_scope = _mcp_tool_scopes.get(name, "always")
+                    return tool_scope in _active_mcp_scopes
+
                 filtered_domain = [
                     s for s in filtered_domain
                     if s.get("function", {}).get("name", "") in allowed
-                    or s.get("function", {}).get("name", "").startswith("mcp_")
+                    or _mcp_tool_visible(s.get("function", {}).get("name", ""))
                 ]
                 logger.debug(
-                    "LLM 路由过滤: tags=%s, 保留 %d 个域工具",
-                    route_tool_tags, len(filtered_domain),
+                    "LLM 路由过滤: tags=%s, mcp_scopes=%s, 保留 %d 个域工具",
+                    route_tool_tags, _active_mcp_scopes, len(filtered_domain),
                 )
+
+                # 搜索路由下检查是否有可用的搜索 MCP 工具
+                if "search" in _active_mcp_scopes:
+                    _search_mcp_tools = [
+                        s.get("function", {}).get("name", "")
+                        for s in filtered_domain
+                        if s.get("function", {}).get("name", "").startswith("mcp_")
+                        and _mcp_tool_scopes.get(s.get("function", {}).get("name", "")) == "search"
+                    ]
+                    if not _search_mcp_tools:
+                        logger.warning(
+                            "搜索路由已激活但无可用的搜索 MCP 工具"
+                            "（搜索引擎可能未安装或连接失败，请检查 Exa/Tavily/Brave 配置）。"
+                            "mcp_tool_scopes=%s",
+                            _mcp_tool_scopes,
+                        )
 
         return meta_schemas + filtered_domain

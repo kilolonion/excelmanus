@@ -34,7 +34,7 @@ class EmbeddingClient:
         client: "openai.AsyncOpenAI",
         model: str = DEFAULT_EMBEDDING_MODEL,
         dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS,
-        timeout_seconds: float = 30.0,
+        timeout_seconds: float = 5.0,
         cache_max_size: int = 64,
     ) -> None:
         self._client = client
