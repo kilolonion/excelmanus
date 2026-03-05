@@ -1786,16 +1786,16 @@ def _get_credential_store(request: Request):
     return store
 
 
-_CODEX_DEFAULT_MODEL = "openai-codex/gpt-5.3-codex"
-_CODEX_DEFAULT_PROFILE_NAME = "openai-codex/gpt-5.3-codex"
+_CODEX_DEFAULT_MODEL = "openai-codex/gpt-5.2-codex"
+_CODEX_DEFAULT_PROFILE_NAME = "openai-codex/gpt-5.2-codex"
 _CODEX_DEFAULT_BASE_URL = "https://api.openai.com/v1"
 # 旧版自动创建的名称/模型，用于兼容去重（防止与旧数据重复）
-_CODEX_LEGACY_NAMES = {"Codex 5.3", "codex-5.3", "codex-oauth"}
-_CODEX_LEGACY_MODELS = {"gpt-5.3-codex"}
+_CODEX_LEGACY_NAMES = {"Codex 5.3", "codex-5.3", "codex-oauth", "Codex Spark", "codex-spark"}
+_CODEX_LEGACY_MODELS = {"gpt-5.3-codex", "gpt-5.3-codex-spark"}
 
 
 def _auto_add_codex_default_model(request: Request) -> None:
-    """Codex 连接成功后，若模型列表中还没有任何 gpt-5.3-codex 条目，则自动新增一个。
+    """Codex 连接成功后，若模型列表中还没有任何默认 Codex 条目，则自动新增一个。
 
     仅写入全局 model_profiles（config_store），不影响用户私有 Codex 动态模型列表。
     """
@@ -1817,7 +1817,7 @@ def _auto_add_codex_default_model(request: Request) -> None:
             model=_CODEX_DEFAULT_MODEL,
             api_key="",
             base_url=_CODEX_DEFAULT_BASE_URL,
-            description="Codex 5.3 — OAuth 登录（无需 API Key）",
+            description="Codex 5.2 - OAuth 登录（无需 API Key）",
             protocol="openai",
             thinking_mode="openai_reasoning",
             model_family="gpt",

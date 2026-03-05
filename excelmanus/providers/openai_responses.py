@@ -540,7 +540,7 @@ class OpenAIResponsesClient:
     用法：
         client = OpenAIResponsesClient(api_key="...", base_url="https://api.openai.com/v1")
         response = await client.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-5",
             messages=[...],
             tools=[...],
         )

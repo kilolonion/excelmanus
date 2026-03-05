@@ -68,6 +68,7 @@ from excelmanus.config import (
     ConfigError,
     ExcelManusConfig,
     ModelProfile,
+    format_deprecated_model_message,
     load_config,
     load_cors_allow_origins,
 )
@@ -767,7 +768,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "║    2. 编辑项目根目录下的 .env 文件，设置以下必填项：       ║\n"
             "║       EXCELMANUS_API_KEY=sk-xxx                            ║\n"
             "║       EXCELMANUS_BASE_URL=https://api.openai.com/v1        ║\n"
-            "║       EXCELMANUS_MODEL=gpt-5                               ║\n"
+            "║       EXCELMANUS_MODEL=gpt-5.2                             ║\n"
             "║    3. 使用 EXCELMANUS_MODELS 环境变量配置多模型            ║\n"
             "║                                                            ║\n"
             "║  配置完成后，通过前端设置页保存即可生效（无需重启）。      ║\n"
@@ -5713,11 +5714,29 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
     if name.lower() != "default":
         profile = _config_store.get_profile(name) if _config_store else None
         if profile is None:
-            available_names = _list_available_model_names_for_user(raw_request, user_id)
-            return _error_json_response(
-                404,
-                f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
-            )
+            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+            if OpenAICodexProvider.is_codex_profile_name(name):
+                profile = {"name": name, "model": name}
+            else:
+                available_names = _list_available_model_names_for_user(raw_request, user_id)
+                return _error_json_response(
+                    404,
+                    f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
+                )
+        deprecated = _deprecated_model_error_response(
+            profile.get("model", ""),
+            prefix=f"模型 {name!r} 使用了已弃用 Model ID。",
+        )
+        if deprecated is not None:
+            return deprecated
+    else:
+        deprecated = _deprecated_model_error_response(
+            _config.model,
+            prefix="默认模型配置已过时。",
+        )
+        if deprecated is not None:
+            return deprecated
 
     # 校验用户模型权限（allowed_models 为空表示不限制）
     allowed = _get_user_allowed_models(raw_request)
@@ -5912,6 +5931,15 @@ class ModelProfileCreate(BaseModel):
     custom_extra_headers: str = ""
 
 
+def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONResponse | None:
+    """Return unified 422 response when model id is deprecated."""
+    message = format_deprecated_model_message(model)
+    if not message:
+        return None
+    content = f"{prefix}{message}" if prefix else message
+    return _error_json_response(422, content)
+
+
 @_router.get("/api/v1/config/models")
 async def get_model_config(request: Request) -> JSONResponse:
     """获取全部模型配置（main/aux/vlm + profiles）。"""
@@ -6020,6 +6048,12 @@ async def update_model_config(
     if request.base_url is not None and "base_url" in key_map:
         updates[key_map["base_url"]] = request.base_url
     if request.model is not None and "model" in key_map:
+        deprecated = _deprecated_model_error_response(
+            request.model,
+            prefix=f"{section} 模型配置不可用。",
+        )
+        if deprecated is not None:
+            return deprecated
         updates[key_map["model"]] = request.model
     if request.enabled is not None and "enabled" in key_map:
         updates[key_map["enabled"]] = "true" if request.enabled else "false"
@@ -6085,6 +6119,13 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
     if _config_store.get_profile(request.name):
         return _error_json_response(409, f"模型名称已存在: {request.name}")
 
+    deprecated = _deprecated_model_error_response(
+        request.model,
+        prefix=f"模型档案 {request.name!r} 不可保存。",
+    )
+    if deprecated is not None:
+        return deprecated
+
     _config_store.add_profile(
         name=request.name,
         model=request.model,
@@ -6137,6 +6178,13 @@ async def update_model_profile(
 
     if not _config_store.get_profile(name):
         return _error_json_response(404, f"未找到模型: {name}")
+
+    deprecated = _deprecated_model_error_response(
+        request.model,
+        prefix=f"模型档案 {name!r} 不可更新。",
+    )
+    if deprecated is not None:
+        return deprecated
 
     _config_store.update_profile(
         name,
@@ -6339,6 +6387,13 @@ async def import_model_config(
                 val = section_data.get(field_name)
                 if val is None or not isinstance(val, str):
                     continue
+                if field_name == "model":
+                    deprecated = _deprecated_model_error_response(
+                        val,
+                        prefix=f"导入的 {section_key} 模型配置不可用。",
+                    )
+                    if deprecated is not None:
+                        return deprecated
                 env_key = key_map.get(field_name)
                 if not env_key:
                     continue
@@ -6388,6 +6443,12 @@ async def import_model_config(
                 model = p.get("model", "").strip()
                 if not name or not model:
                     continue
+                deprecated = _deprecated_model_error_response(
+                    model,
+                    prefix=f"导入的模型档案 {name!r} 不可用。",
+                )
+                if deprecated is not None:
+                    return deprecated
                 existing = _config_store.get_profile(name)
                 if existing:
                     _config_store.update_profile(
@@ -6428,6 +6489,13 @@ async def import_model_config(
                 for key, attr in (("api_key", "llm_api_key"), ("base_url", "llm_base_url"), ("model", "llm_model")):
                     val = user_data.get(key)
                     if val is not None and isinstance(val, str):
+                        if key == "model":
+                            deprecated = _deprecated_model_error_response(
+                                val,
+                                prefix="导入的用户模型配置不可用。",
+                            )
+                            if deprecated is not None:
+                                return deprecated
                         updates[attr] = val if val else None
                 if updates:
                     store.update_user(user_id, **updates)

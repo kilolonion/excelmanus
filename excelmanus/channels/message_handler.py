@@ -1045,7 +1045,7 @@ class MessageHandler:
                 "📝 添加模型格式：\n\n"
                 "/addmodel <名称> <模型ID> <base_url> <api_key> [描述]\n\n"
                 "示例：\n"
-                "/addmodel gpt4 gpt-4o https://api.openai.com/v1 sk-xxx 我的GPT4",
+                "/addmodel gpt52 gpt-5.2 https://api.openai.com/v1 sk-xxx 我的GPT5.2",
             )
             return
 

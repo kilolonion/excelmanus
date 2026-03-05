@@ -191,7 +191,7 @@ if (-not (Test-Path $envFilePath)) {
     Write-Host ""
     $inputApiKey = Read-Host "  API Key"
     $inputBaseUrl = Read-Host "  Base URL (例: https://api.openai.com/v1)"
-    $inputModel = Read-Host "  Model (例: gpt-5)"
+    $inputModel = Read-Host "  Model (例: gpt-5.2)"
     Write-Host ""
     if ([string]::IsNullOrWhiteSpace($inputApiKey)) {
         Write-Host "[!!] 未填写 API Key，创建空模板 .env 文件" -ForegroundColor Yellow

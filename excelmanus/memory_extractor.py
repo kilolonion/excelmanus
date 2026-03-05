@@ -64,7 +64,10 @@ _MAX_MESSAGES = 120
 _MAX_TOTAL_CHARS = 48_000
 _MAX_TOTAL_TOKENS = 12_000
 _MIN_USER_MESSAGES = 3  # 少于此数的对话不值得提取记忆
-_TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
+try:
+    _TOKEN_ENCODING = tiktoken.get_encoding("o200k_base")
+except Exception:
+    _TOKEN_ENCODING = tiktoken.get_encoding("cl100k_base")
 
 
 # 语义去重阈值：cosine similarity 超过此值视为重复记忆

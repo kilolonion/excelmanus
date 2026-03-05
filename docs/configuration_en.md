@@ -207,7 +207,7 @@ All integration points share a single `_embedding_client`, with `asyncio.gather`
 | `EXCELMANUS_EMBEDDING_ENABLED` | Enable semantic search (auto-enabled when API is configured) | `false` |
 | `EXCELMANUS_EMBEDDING_API_KEY` | Embedding API Key | — |
 | `EXCELMANUS_EMBEDDING_BASE_URL` | Embedding API Base URL | — |
-| `EXCELMANUS_EMBEDDING_MODEL` | Embedding model name | `text-embedding-v3` |
+| `EXCELMANUS_EMBEDDING_MODEL` | Embedding model name | `text-embedding-3-small` |
 | `EXCELMANUS_EMBEDDING_DIMENSIONS` | Vector dimensions | `1536` |
 | `EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS` | Request timeout (seconds) | `30.0` |
 | `EXCELMANUS_MEMORY_SEMANTIC_TOP_K` | Memory semantic search Top-K | `10` |

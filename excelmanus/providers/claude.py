@@ -514,7 +514,7 @@ class ClaudeClient:
     用法：
         client = ClaudeClient(api_key="...", base_url="https://api.anthropic.com")
         response = await client.chat.completions.create(
-            model="claude-sonnet-4-5-20250929",
+            model="claude-sonnet-4-6",
             messages=[...],
             tools=[...],
         )

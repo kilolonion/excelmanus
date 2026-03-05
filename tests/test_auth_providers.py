@@ -95,7 +95,7 @@ class TestOpenAICodexProvider:
 
         spark = next((item for item in entries if item["model"] == "gpt-5.3-codex-spark"), None)
         assert spark is not None
-        assert spark["display_name"] == "Codex Spark"
+        assert spark["display_name"] == "Codex Spark (Legacy)"
         assert spark["profile_name"] == "openai-codex/gpt-5.3-codex-spark"
         assert spark["public_model_id"] == "openai-codex/gpt-5.3-codex-spark"
 

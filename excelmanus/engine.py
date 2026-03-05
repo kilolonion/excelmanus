@@ -19,7 +19,7 @@ from excelmanus.compaction import CompactionManager
 from excelmanus.context_budget import ContextBudget
 from excelmanus.workspace import IsolatedWorkspace, SandboxEnv, WorkspaceTransaction
 from excelmanus.providers import create_client
-from excelmanus.config import ExcelManusConfig, ModelProfile
+from excelmanus.config import ExcelManusConfig, ModelProfile, format_deprecated_model_message
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.hooks import (
     HookDecision,
@@ -727,8 +727,7 @@ class AgentEngine:
         # ── 兜底：根据模型名关键词推断（仅在无 probe 结果时使用）──
         model_lower = config.model.lower()
         _NON_VISION_KEYWORDS = (
-            # Legacy OpenAI alias; keep non-vision behavior for backward compatibility.
-            "o1-mini", "o3-mini",
+            "o3-mini",
             "amazon.nova-micro", "amazon.nova-sonic",
             "gemini-embedding",
             "llama-3.2-1b", "llama-3.2-3b",
@@ -740,7 +739,7 @@ class AgentEngine:
             return False
 
         _VISION_KEYWORDS = (
-            "gpt-4o", "gpt-4-turbo", "gpt-4.1",
+            "gpt-4o", "gpt-4.1",
             "gpt-5",
             "gpt-image-1",
             "o1", "o3", "o4",
@@ -2112,7 +2111,7 @@ class AgentEngine:
             reject_msg = (
                 "当前主模型不支持图片识别，且未配置视觉模型（VLM），无法处理图片附件。\n\n"
                 "请通过以下任一方式启用图片支持：\n"
-                "1. 切换到支持视觉的主模型（如 GPT-4o、Claude Sonnet、Qwen-VL 等），"
+                "1. 切换到支持视觉的主模型（如 GPT-5、Claude Sonnet、Qwen-VL 等），"
                 "或设置 `EXCELMANUS_MAIN_MODEL_VISION=true`\n"
                 "2. 配置独立视觉模型：设置 `EXCELMANUS_VLM_BASE_URL` 和 `EXCELMANUS_VLM_MODEL`"
             )
@@ -5706,8 +5705,8 @@ class AgentEngine:
         此时热更新 _client 和相关字段，确保后续 LLM 调用使用新凭证。
         同时通过 SSE 通知前端 token 状态变化。
         """
-        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-5.3-codex），
-        # 先剥离为实际模型 ID（gpt-5.3-codex），避免发送无效 model 到 API。
+        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-5.2-codex），
+        # 先剥离为实际模型 ID（gpt-5.2-codex），避免发送无效 model 到 API。
         from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
         if OpenAICodexProvider.is_codex_profile_name(self._active_model):
             _real_model = OpenAICodexProvider.model_from_profile_name(self._active_model)
@@ -5782,6 +5781,9 @@ class AgentEngine:
 
         # 切换回默认
         if name.lower() == "default":
+            deprecated_msg = format_deprecated_model_message(self._config.model)
+            if deprecated_msg:
+                return f"默认模型已弃用。{deprecated_msg}"
             # W1: 委托给 LLMClientManager 统一管理客户端切换
             self._llm_clients.switch_active_model(
                 model=self._config.model,
@@ -5823,6 +5825,10 @@ class AgentEngine:
         if matched is None:
             available = ", ".join(p.name for p in profiles) if profiles else "无"
             return f"未找到模型 {name!r}。可用模型：default, {available}"
+
+        deprecated_msg = format_deprecated_model_message(matched.model)
+        if deprecated_msg:
+            return f"模型 {matched.name!r} 使用了已弃用 Model ID。{deprecated_msg}"
 
         # W1: 委托给 LLMClientManager 统一管理客户端切换
         self._llm_clients.switch_active_model(

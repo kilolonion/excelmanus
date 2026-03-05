@@ -37,7 +37,7 @@ async def summarize_history(
 
     Args:
         client: openai.AsyncOpenAI 兼容客户端
-        model: 摘要模型名称（建议用 gpt-4o-mini 等轻量模型）
+        model: 摘要模型名称（建议用 gpt-5-mini 等轻量模型）
         messages_to_summarize: 需要被摘要的消息列表
         max_summary_tokens: 摘要最大 token 数
 

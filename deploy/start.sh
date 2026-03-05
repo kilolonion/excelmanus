@@ -191,7 +191,7 @@ if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
   echo ""
   read -rp "  API Key: " input_api_key
   read -rp "  Base URL (例: https://api.openai.com/v1): " input_base_url
-  read -rp "  Model (例: gpt-5): " input_model
+  read -rp "  Model (例: gpt-5.2): " input_model
   echo ""
   if [[ -z "$input_api_key" ]]; then
     warn "未填写 API Key，创建空模板 .env 文件"

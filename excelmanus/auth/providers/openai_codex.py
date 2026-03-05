@@ -61,17 +61,18 @@ class OpenAICodexProvider(AuthProvider):
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
     # model: 真实模型 ID；display_name: 前端展示友好别名。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
-        ("gpt-5.3-codex-spark", "Codex Spark"),
-        ("gpt-5.3-codex", "Codex 5.3"),
         ("gpt-5.2-codex", "Codex 5.2"),
         ("gpt-5.1-codex", "Codex 5.1"),
         ("gpt-5.1-codex-mini", "Codex Mini"),
         ("gpt-5.1-codex-max", "Codex Max"),
-        ("codex-mini-latest", "Codex Mini Latest"),
+        ("gpt-5-codex-mini", "Codex Mini (GPT-5)"),
         ("gpt-5-codex", "Codex 5"),
         ("gpt-5.2", "GPT-5.2 (Codex)"),
         ("gpt-5.1", "GPT-5.1 (Codex)"),
         ("gpt-5", "GPT-5 (Codex)"),
+        # Legacy entries kept for backward compatibility.
+        ("gpt-5.3-codex", "Codex 5.3 (Legacy)"),
+        ("gpt-5.3-codex-spark", "Codex Spark (Legacy)"),
     )
 
     # ── Device Code Flow (RFC 8628) ───────────────────────────

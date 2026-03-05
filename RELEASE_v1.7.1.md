@@ -1,9 +1,17 @@
-# ExcelManus v1.7.1 Release Notes
+﻿# ExcelManus v1.7.1 Release Notes
 
 **发布日期**: 2026-03-04
 
----
+## Model Catalog Refresh
 
+- Removed deprecated model IDs from runtime context mapping (OpenAI legacy items, Gemini 1.5/2.0 generations, Claude 3.x aliases).
+- Added explicit migration guidance when users switch/configure/import deprecated model IDs.
+- Updated default and preset recommendations:
+  - `EXCELMANUS_EMBEDDING_MODEL` now defaults to `text-embedding-3-small`
+  - Anthropic/OpenRouter presets use `claude-sonnet-4-6`
+  - Deprecated Codex preset `codex-mini-latest` replaced by `gpt-5-codex-mini`
+
+---
 ## 🚀 部署基础设施升级
 
 ### Blue/Green 部署
@@ -113,8 +121,16 @@
 - **ModelTab** — 样式改进
 - **Dockerfile** — 多阶段构建优化 + `.dockerignore` 减小构建上下文
 
----
+## Model Catalog Refresh
 
+- Removed deprecated model IDs from runtime context mapping (OpenAI legacy items, Gemini 1.5/2.0 generations, Claude 3.x aliases).
+- Added explicit migration guidance when users switch/configure/import deprecated model IDs.
+- Updated default and preset recommendations:
+  - `EXCELMANUS_EMBEDDING_MODEL` now defaults to `text-embedding-3-small`
+  - Anthropic/OpenRouter presets use `claude-sonnet-4-6`
+  - Deprecated Codex preset `codex-mini-latest` replaced by `gpt-5-codex-mini`
+
+---
 ## 升级指南
 
 ```bash
@@ -156,3 +172,4 @@ cd web && npm install
 - 新增 **test_responses_api_error_handling.py** — ResponsesAPIError 错误处理回归测试
 - 新增 **test_text_tool_call_recovery.py** — 文本工具调用恢复测试
 - 更新既有测试：test_channels / test_multiuser_channel / test_require_bind_setting / test_codex_responses_migration
+

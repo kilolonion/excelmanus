@@ -226,11 +226,14 @@ _DEFAULT_SYSTEM_PROMPT = _load_system_prompt()
 class TokenCounter:
     """基于 tiktoken 的 token 计数器。
 
-    使用 cl100k_base 编码（GPT-4 系列），对 Qwen 等模型也能提供
+    优先使用 o200k_base 编码（GPT-5 系列），对 Qwen 等模型也能提供
     比字符估算更准确的近似值，用于 memory 截断判断。
     """
 
-    _encoding = tiktoken.get_encoding("cl100k_base")
+    try:
+        _encoding = tiktoken.get_encoding("o200k_base")
+    except Exception:
+        _encoding = tiktoken.get_encoding("cl100k_base")
 
     @staticmethod
     def count(text: str) -> int:

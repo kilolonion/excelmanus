@@ -20,7 +20,7 @@ class ConfigError(Exception):
 class ModelProfile:
     """单个模型配置档案。"""
 
-    name: str  # 用户可见的短名称，如 "gpt4", "qwen", "kimi"
+    name: str  # 用户可见的短名称，如 "gpt5", "qwen", "kimi"
     model: str  # 实际模型标识符
     api_key: str
     base_url: str
@@ -39,7 +39,7 @@ _ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
 _ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
 _ALLOWED_PROTOCOLS = {"auto", "openai", "openai_responses", "anthropic", "gemini"}
 _ALLOWED_WINDOW_RULE_ENGINE_VERSIONS = {"v1", "v2"}
-DEFAULT_EMBEDDING_MODEL = "text-embedding-v3"
+DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
 logger = logging.getLogger(__name__)
 
@@ -57,6 +57,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gpt-5.2": 400_000,
     "gpt-5.3": 400_000,
     "gpt-5-codex": 400_000,
+    "gpt-5-codex-mini": 400_000,
     "gpt-5-codex-latest": 400_000,
     "gpt-5.2-codex": 400_000,
     "gpt-5.3-codex": 400_000,
@@ -71,13 +72,10 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gpt-5.1-chat-latest": 128_000,
     "gpt-4o": 128_000,
     "gpt-4o-mini": 128_000,
-    "gpt-4-turbo": 128_000,
     "gpt-4.1": 1_047_576,
     "gpt-4.1-mini": 1_047_576,
     "gpt-4.1-nano": 1_047_576,
     "o1": 200_000,
-    # Legacy alias kept for backward compatibility with old user profiles.
-    "o1-mini": 128_000,
     "o1-pro": 200_000,
     "o3": 200_000,
     "o3-mini": 200_000,
@@ -86,26 +84,21 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "o4": 200_000,
     "o4-mini": 200_000,
     "o4-mini-deep-research": 200_000,
-    "codex-mini-latest": 200_000,
     # Anthropic（Claude）提供商
-    # Legacy Claude 3.x aliases kept for backward compatibility.
-    "claude-3-opus": 200_000,
-    "claude-3-sonnet": 200_000,
-    "claude-3-haiku": 200_000,
-    "claude-3-5-sonnet": 200_000,
-    "claude-3.5-sonnet": 200_000,
-    "claude-3-5-haiku": 200_000,
-    "claude-3.5-haiku": 200_000,
-    "claude-3-7-sonnet": 200_000,
-    "claude-3.7-sonnet": 200_000,
     "claude-4-sonnet": 200_000,
     "claude-4-opus": 200_000,
     "claude-sonnet-4": 200_000,
     "claude-opus-4": 200_000,
+    "claude-sonnet-4-5-20250929": 200_000,
+    "claude-opus-4-5-20251101": 200_000,
     "claude-opus-4.1": 200_000,
     "claude-opus-4.6": 200_000,
+    "claude-opus-4-6": 200_000,
     "claude-sonnet-4.6": 200_000,
+    "claude-sonnet-4-6": 200_000,
     "claude-haiku-4.5": 200_000,
+    "claude-haiku-4-5": 200_000,
+    "claude-haiku-4-5-20251001": 200_000,
     # Google Gemini 提供商
     "gemini-2.5-pro": 1_048_576,
     "gemini-2.5-pro-preview": 1_048_576,
@@ -114,15 +107,13 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-2.5-flash-image-preview": 1_048_576,
     "gemini-2.5-flash-lite": 1_048_576,
     "gemini-2.5-flash-lite-preview": 1_048_576,
-    # Legacy Gemini aliases kept for backward compatibility.
-    "gemini-2.0-flash": 1_048_576,
-    "gemini-2.0-flash-live": 1_048_576,
-    "gemini-2.0-flash-thinking-exp": 1_048_576,
-    "gemini-2.0-flash-lite": 1_048_576,
-    "gemini-2.0-flash-001": 1_048_576,
-    "gemini-2.0-flash-lite-001": 1_048_576,
-    "gemini-1.5-pro": 2_097_152,
-    "gemini-1.5-flash": 1_048_576,
+    "gemini-live-2.5-flash-preview": 1_048_576,
+    "gemini-2.5-flash-live-preview": 1_048_576,
+    "gemini-2.5-flash-native-audio-preview": 1_048_576,
+    "gemini-3.0-pro-preview-02-2026": 1_048_576,
+    "gemini-3.0-flash-preview-02-2026": 1_048_576,
+    "gemini-3.0-flash-lite-preview-02-2026": 1_048_576,
+    "gemini-3.0-flash-thinking-preview-02-2026": 262_144,
     # 通义千问（Qwen）提供商
     "qwen-max": 262_144,
     "qwen-max-latest": 262_144,
@@ -275,12 +266,80 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
 }
 
 
+_DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
+    # OpenAI
+    "codex-mini-latest": "gpt-5-codex-mini",
+    "gpt-4-turbo": "gpt-5.2",
+    "gpt-4-turbo-preview": "gpt-5.2",
+    "gpt-4-0125-preview": "gpt-5.2",
+    "gpt-4-1106-preview": "gpt-5.2",
+    "o1-mini": "o4-mini",
+    # Anthropic Claude 3.x
+    "claude-3-opus": "claude-opus-4-6",
+    "claude-3-sonnet": "claude-sonnet-4-6",
+    "claude-3-haiku": "claude-haiku-4-5",
+    "claude-3-5-sonnet": "claude-sonnet-4-6",
+    "claude-3.5-sonnet": "claude-sonnet-4-6",
+    "claude-3-5-haiku": "claude-haiku-4-5",
+    "claude-3.5-haiku": "claude-haiku-4-5",
+    "claude-3-7-sonnet": "claude-sonnet-4-6",
+    "claude-3.7-sonnet": "claude-sonnet-4-6",
+    # Gemini 1.5 / 2.0 generations
+    "gemini-1.5-pro": "gemini-2.5-pro",
+    "gemini-1.5-flash": "gemini-2.5-flash",
+    "gemini-2.0-flash": "gemini-2.5-flash",
+    "gemini-2.0-flash-001": "gemini-2.5-flash",
+    "gemini-2.0-flash-live": "gemini-live-2.5-flash-preview",
+    "gemini-2.0-flash-thinking-exp": "gemini-2.5-flash",
+    "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-lite-001": "gemini-2.5-flash-lite",
+}
+
+
 def _normalize_model_identifier(model: str) -> str:
     """归一化模型标识，兼容空格/下划线命名。"""
     normalized = model.strip().lower().replace("_", "-")
     normalized = re.sub(r"\s+", "-", normalized)
     normalized = re.sub(r"-+", "-", normalized)
     return normalized
+
+
+def get_deprecated_model_replacement(model: str) -> tuple[str, str] | None:
+    """返回弃用模型及推荐替代模型；未命中时返回 None。"""
+    model_normalized = _normalize_model_identifier(model)
+    candidates = [model_normalized]
+    if "/" in model_normalized:
+        tail = model_normalized.rsplit("/", 1)[-1]
+        if tail and tail not in candidates:
+            candidates.append(tail)
+
+    for candidate in candidates:
+        replacement = _DEPRECATED_MODEL_REPLACEMENTS.get(candidate)
+        if replacement:
+            return candidate, replacement
+        for deprecated, suggested in _DEPRECATED_MODEL_REPLACEMENTS.items():
+            if candidate.startswith(f"{deprecated}-"):
+                return deprecated, suggested
+    return None
+
+
+def format_deprecated_model_message(model: str) -> str | None:
+    """生成统一的弃用模型迁移提示文案。"""
+    matched = get_deprecated_model_replacement(model)
+    if not matched:
+        return None
+    deprecated, replacement = matched
+    return (
+        f"模型 {model!r} 已弃用（匹配 {deprecated!r}），"
+        f"请改用 {replacement!r}。"
+    )
+
+
+def _log_deprecated_model_warning(scope: str, model: str) -> None:
+    """记录模型弃用告警，不中断启动。"""
+    msg = format_deprecated_model_message(model)
+    if msg:
+        logger.warning("[%s] %s", scope, msg)
 
 
 def _infer_context_tokens_for_model(model: str) -> int:
@@ -977,9 +1036,11 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
         if not model or not isinstance(model, str):
             raise ConfigError(f"EXCELMANUS_MODELS[{i}] 缺少 model 字段。")
         name = name.strip()
+        model = model.strip()
         if name in seen_names:
             raise ConfigError(f"EXCELMANUS_MODELS 中 name 重复：{name!r}。")
         seen_names.add(name)
+        _log_deprecated_model_warning(f"EXCELMANUS_MODELS[{i}].model", model)
         api_key = item.get("api_key", "").strip() or default_api_key
         base_url = item.get("base_url", "").strip() or default_base_url
         _validate_base_url(base_url)
@@ -1158,6 +1219,7 @@ def load_config() -> ExcelManusConfig:
             "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
             "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-2.5-flash:generateContent）"
         )
+    _log_deprecated_model_warning("EXCELMANUS_MODEL", model)
 
     max_iterations = _parse_int(
         os.environ.get("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
@@ -1299,6 +1361,8 @@ def load_config() -> ExcelManusConfig:
     if aux_base_url:
         _validate_base_url(aux_base_url)
     aux_model = os.environ.get("EXCELMANUS_AUX_MODEL") or None
+    if aux_model:
+        _log_deprecated_model_warning("EXCELMANUS_AUX_MODEL", aux_model)
     aux_protocol = _parse_protocol(
         os.environ.get("EXCELMANUS_AUX_PROTOCOL"), "EXCELMANUS_AUX_PROTOCOL"
     )
@@ -1515,6 +1579,8 @@ def load_config() -> ExcelManusConfig:
     if vlm_base_url:
         _validate_base_url(vlm_base_url)
     vlm_model = os.environ.get("EXCELMANUS_VLM_MODEL") or None
+    if vlm_model:
+        _log_deprecated_model_warning("EXCELMANUS_VLM_MODEL", vlm_model)
     vlm_protocol = _parse_protocol(
         os.environ.get("EXCELMANUS_VLM_PROTOCOL"), "EXCELMANUS_VLM_PROTOCOL"
     )
@@ -1612,6 +1678,7 @@ def load_config() -> ExcelManusConfig:
         os.environ.get("EXCELMANUS_EMBEDDING_MODEL")
         or DEFAULT_EMBEDDING_MODEL
     )
+    _log_deprecated_model_warning("EXCELMANUS_EMBEDDING_MODEL", embedding_model)
     embedding_dimensions = _parse_int(
         os.environ.get("EXCELMANUS_EMBEDDING_DIMENSIONS"),
         "EXCELMANUS_EMBEDDING_DIMENSIONS",

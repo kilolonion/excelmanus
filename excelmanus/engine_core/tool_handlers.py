@@ -1370,8 +1370,8 @@ class ExtractTableSpecHandler(BaseToolHandler):
         ┌────────────┬─────────┬──────────┐
         │ model_tier │ simple  │ complex  │
         ├────────────┼─────────┼──────────┤
-        │ strong     │ single  │ single   │  ← Gemini 2.5 Pro 级别
-        │ standard   │ single  │ pipeline │  ← GPT-4o 级别
+        │ strong     │ single  │ single   │  ← Gemini 2.5 Pro / GPT-5 级别
+        │ standard   │ single  │ pipeline │  ← GPT-4.1 / Claude Sonnet 4 级别
         │ weak       │ pipeline│ pipeline │  ← 小模型
         └────────────┴─────────┴──────────┘
         """
@@ -1380,11 +1380,11 @@ class ExtractTableSpecHandler(BaseToolHandler):
         if tier == "auto":
             model_name = (engine.vlm_model or "").lower()
             if any(k in model_name for k in [
-                "gemini-2.5", "gemini-3", "gemini-2.0-flash",
+                "gemini-2.5", "gemini-3", "gpt-5",
             ]):
                 tier = "strong"
             elif any(k in model_name for k in [
-                "gpt-4o", "gpt-4.1", "claude-3.5", "claude-4",
+                "gpt-4o", "gpt-4.1", "claude-4",
                 "claude-sonnet", "claude-opus",
                 "qwen-vl-max", "qwen2.5-vl-72b",
             ]):

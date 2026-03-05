@@ -472,8 +472,8 @@ Only 3 env vars to get started. Common configuration categories:
 | **Performance** | `EXCELMANUS_WINDOW_PERCEPTION_*` / `IMAGE_KEEP_ROUNDS` |
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
-| **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EMBEDDING_MODEL` |
-| **Session Summary** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `SESSION_SUMMARY_MIN_TURNS` |
+| **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EXCELMANUS_EMBEDDING_MODEL` |
+| **Session Summary** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `EXCELMANUS_SESSION_SUMMARY_MIN_TURNS` |
 
 Full reference in [Configuration](docs/configuration_en.md).
 

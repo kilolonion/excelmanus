@@ -12,7 +12,13 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from excelmanus.config import ConfigError, load_config, load_cors_allow_origins
+from excelmanus.config import (
+    ConfigError,
+    format_deprecated_model_message,
+    get_deprecated_model_replacement,
+    load_config,
+    load_cors_allow_origins,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -986,18 +992,18 @@ class TestContextWindowInference:
         model_to_expected_tokens = {
             "gpt-5": 400_000,
             "gpt-5-chat-latest": 128_000,
+            "gpt-5-codex-mini": 400_000,
             "gpt-5.2-codex": 400_000,
             "gpt-5.3-codex": 400_000,
             "gpt-5.3-codex-spark": 128_000,
             "gpt 5.3 codex": 400_000,
             "gpt_5_1_codex_max": 400_000,
             "openai/gpt-5.2-codex": 400_000,
-            "codex-mini-latest": 200_000,
-            "openai/codex-mini-latest": 200_000,
             "o4": 200_000,
             "claude-opus-4.1": 200_000,
             "claude-sonnet-4.6": 200_000,
             "gemini-2.5-flash-lite": 1_048_576,
+            "gemini-live-2.5-flash-preview": 1_048_576,
             "qwen-plus": 1_000_000,
             "qwen3.5-plus": 1_000_000,
             "qwen-flash": 1_000_000,
@@ -1044,3 +1050,31 @@ class TestContextWindowInference:
             monkeypatch.setenv("EXCELMANUS_MODEL", model)
             cfg = load_config()
             assert cfg.max_context_tokens == expected_tokens
+
+    def test_deprecated_models_fall_back_to_default_context(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
+        monkeypatch.delenv("EXCELMANUS_MAX_CONTEXT_TOKENS", raising=False)
+
+        for model in ("gemini-2.0-flash", "claude-3.5-sonnet", "codex-mini-latest"):
+            monkeypatch.setenv("EXCELMANUS_MODEL", model)
+            cfg = load_config()
+            assert cfg.max_context_tokens == 128_000
+
+    @pytest.mark.parametrize(
+        ("model", "expected"),
+        [
+            ("gemini-2.0-flash", ("gemini-2.0-flash", "gemini-2.5-flash")),
+            ("claude-3-5-sonnet", ("claude-3-5-sonnet", "claude-sonnet-4-6")),
+            ("openai-codex/codex-mini-latest", ("codex-mini-latest", "gpt-5-codex-mini")),
+            ("gpt-5", None),
+        ],
+    )
+    def test_deprecated_model_replacement_lookup(self, model: str, expected) -> None:
+        assert get_deprecated_model_replacement(model) == expected
+
+    def test_deprecated_model_message_includes_replacement(self) -> None:
+        message = format_deprecated_model_message("gemini-2.0-flash")
+        assert message is not None
+        assert "gemini-2.5-flash" in message

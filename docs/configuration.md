@@ -207,7 +207,7 @@
 | `EXCELMANUS_EMBEDDING_ENABLED` | 是否启用语义检索（配置 API 后自动启用） | `false` |
 | `EXCELMANUS_EMBEDDING_API_KEY` | Embedding API Key | — |
 | `EXCELMANUS_EMBEDDING_BASE_URL` | Embedding API Base URL | — |
-| `EXCELMANUS_EMBEDDING_MODEL` | Embedding 模型名称 | `text-embedding-v3` |
+| `EXCELMANUS_EMBEDDING_MODEL` | Embedding 模型名称 | `text-embedding-3-small` |
 | `EXCELMANUS_EMBEDDING_DIMENSIONS` | 向量维度 | `1536` |
 | `EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS` | 请求超时（秒） | `30.0` |
 | `EXCELMANUS_MEMORY_SEMANTIC_TOP_K` | 记忆语义检索 Top-K | `10` |
