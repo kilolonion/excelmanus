@@ -41,6 +41,14 @@ interface UIState {
   bumpModelProfiles: () => void;
 }
 
+// 跨标签页模型档案同步
+let _modelProfileChannel: BroadcastChannel | null = null;
+if (typeof BroadcastChannel !== "undefined") {
+  try {
+    _modelProfileChannel = new BroadcastChannel("excelmanus-model-profiles");
+  } catch { /* SSR / 不支持时静默 */ }
+}
+
 export const useUIStore = create<UIState>()(
   persist(
     (set) => ({
@@ -80,7 +88,11 @@ export const useUIStore = create<UIState>()(
   setConfigReady: (ready) => set({ configReady: ready, ...(ready ? { configError: null } : {}) }),
   setConfigError: (error) => set({ configError: error }),
   setConfigPlaceholderItems: (items) => set({ configPlaceholderItems: items }),
-  bumpModelProfiles: () => set((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 })),
+  bumpModelProfiles: () => {
+      set((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
+      // 跨标签页同步：通知其他标签页刷新模型列表
+      try { _modelProfileChannel?.postMessage("bump"); } catch { /* 静默 */ }
+    },
     }),
     {
       name: "excelmanus-ui",
@@ -88,3 +100,10 @@ export const useUIStore = create<UIState>()(
     }
   )
 );
+
+// 跨标签页接收：其他标签页的 bumpModelProfiles 广播到达时，本地也递增版本号
+if (_modelProfileChannel) {
+  _modelProfileChannel.onmessage = () => {
+    useUIStore.setState((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
+  };
+}

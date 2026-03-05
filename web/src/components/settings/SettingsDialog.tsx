@@ -198,7 +198,7 @@ export function SettingsDialog() {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -8 }}
               transition={{ duration: 0.15 }}
-              className="overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col"
+              className="overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[env(safe-area-inset-bottom)]"
             >
               <Suspense fallback={<TabSpinner />}>
                 <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">

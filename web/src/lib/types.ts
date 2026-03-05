@@ -189,6 +189,8 @@ export interface Question {
   text: string;
   options: { label: string; description: string }[];
   multiSelect: boolean;
+  /** Number of questions remaining in the batch queue (including this one). */
+  queueSize?: number;
 }
 
 export interface ModelInfo {

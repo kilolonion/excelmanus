@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useAuthStore } from "@/stores/auth-store";
+import { useIsMobile } from "@/hooks/use-mobile";
 import { MentionHighlighter } from "./MentionHighlighter";
 import { downloadFile, buildApiUrl, resolveAvatarSrc, getAuthHeaders } from "@/lib/api";
 import { ImagePreviewModal } from "./ImagePreviewModal";
@@ -73,6 +74,9 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const [wsPickerOpen, setWsPickerOpen] = useState(false);
   const [wsFiles, setWsFiles] = useState<string[]>([]);
   const [wsFilter, setWsFilter] = useState("");
+  const [filesExpanded, setFilesExpanded] = useState(false);
+  const isMobile = useIsMobile();
+  const MOBILE_FILE_LIMIT = 2;
   const contentRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -100,6 +104,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     if (isStreaming) return;
     setEditText(content);
     setRetainedFiles(files ?? []);
+    setFilesExpanded(false);
     setEditing(true);
   }, [content, files, isStreaming]);
 
@@ -237,41 +242,43 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               className="w-full text-[13px] leading-relaxed rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
               rows={Math.min(editText.split("\n").length + 1, 8)}
             />
-            {(retainedFiles.length > 0 || editFiles.length > 0) && (
-              <div className="flex flex-wrap gap-1">
-                {retainedFiles.map((f, i) => {
-                  const image = isImageFile(f.filename);
-                  return (
-                    <Badge key={`retained-${i}`} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
-                      {image && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
-                      <span className="truncate">{f.filename}</span>
+            {(retainedFiles.length > 0 || editFiles.length > 0) && (() => {
+              const allEditBadges = [
+                ...retainedFiles.map((f, i) => ({ key: `retained-${i}`, filename: f.filename, isImage: isImageFile(f.filename), onRemove: () => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+                ...editFiles.map((f, i) => ({ key: `new-${i}`, filename: f.name, isImage: isImageFile(f.name), onRemove: () => setEditFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+              ];
+              const shouldCollapse = isMobile && allEditBadges.length > MOBILE_FILE_LIMIT && !filesExpanded;
+              const visible = shouldCollapse ? allEditBadges.slice(0, MOBILE_FILE_LIMIT) : allEditBadges;
+              const hiddenCount = allEditBadges.length - visible.length;
+              return (
+                <div className="flex flex-wrap gap-1">
+                  {visible.map((b) => (
+                    <Badge key={b.key} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
+                      {b.isImage && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
+                      <span className="truncate">{b.filename}</span>
                       <button
                         type="button"
-                        className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
+                        className="touch-compact rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
                         title="移除"
-                        onClick={() => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                        onClick={b.onRemove}
                       >
                         <X className="h-3 w-3" />
                       </button>
                     </Badge>
-                  );
-                })}
-                {editFiles.map((f, i) => (
-                  <Badge key={`new-${i}`} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
-                    {isImageFile(f.name) && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
-                    <span className="truncate">{f.name}</span>
+                  ))}
+                  {hiddenCount > 0 && (
                     <button
                       type="button"
-                      className="rounded p-0.5 hover:bg-foreground/10 transition-colors flex-shrink-0"
-                      title="移除"
-                      onClick={() => setEditFiles((prev) => prev.filter((_, idx) => idx !== i))}
+                      onClick={() => setFilesExpanded(true)}
+                      className="touch-compact inline-flex items-center gap-0.5 rounded-full text-[11px] font-medium px-2 py-0.5 bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
                     >
-                      <X className="h-3 w-3" />
+                      +{hiddenCount} 个文件
+                      <ChevronDown className="h-3 w-3" />
                     </button>
-                  </Badge>
-                ))}
-              </div>
-            )}
+                  )}
+                </div>
+              );
+            })()}
             <input
               ref={editFileInputRef}
               type="file"
@@ -417,9 +424,13 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
             )}
           </div>
         )}
-        {!editing && files && files.length > 0 && (
+        {!editing && files && files.length > 0 && (() => {
+          const shouldCollapseView = isMobile && files.length > MOBILE_FILE_LIMIT && !filesExpanded;
+          const visibleFiles = shouldCollapseView ? files.slice(0, MOBILE_FILE_LIMIT) : files;
+          const hiddenFileCount = files.length - visibleFiles.length;
+          return (
           <div className="flex flex-wrap gap-1 mt-1.5">
-            {files.map((f, i) => {
+            {visibleFiles.map((f, i) => {
               const excel = isExcelFile(f.filename);
               const image = isImageFile(f.filename);
               const code = isCodeFile(f.filename);
@@ -493,8 +504,19 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
               return attachment;
             })}
+            {hiddenFileCount > 0 && (
+              <button
+                type="button"
+                onClick={(e) => { e.stopPropagation(); setFilesExpanded(true); }}
+                className="touch-compact inline-flex items-center gap-0.5 rounded-full text-[11px] font-medium px-2 py-0.5 bg-muted text-muted-foreground hover:bg-muted/80 transition-colors"
+              >
+                +{hiddenFileCount} 个文件
+                <ChevronDown className="h-3 w-3" />
+              </button>
+            )}
           </div>
-        )}
+          );
+        })()}
       </div>
     </div>
   );

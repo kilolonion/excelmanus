@@ -26,6 +26,8 @@ import { apiGet } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { ModelInfo } from "@/lib/types";
+import { useIsMobile } from "@/hooks/use-mobile";
+import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 
 const STAGE_LABELS: Record<string, string> = {
   initializing: "初始化",
@@ -173,6 +175,8 @@ export function FailureGuidanceCard({
   const [copied, setCopied] = useState(false);
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const isMobile = useIsMobile();
 
   const fetchModelsOnce = useCallback(() => {
     if (modelsLoaded) return;
@@ -311,8 +315,28 @@ export function FailureGuidanceCard({
               </button>
             );
           })}
-          {/* 换模型重试下拉 */}
-          {onRetryWithModel && retryable && (
+          {/* 换模型重试 */}
+          {onRetryWithModel && retryable && isMobile && (
+            <>
+              <button
+                type="button"
+                onClick={() => { fetchModelsOnce(); setMobileSheetOpen(true); }}
+                className="group/btn flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition-all cursor-pointer bg-muted/50 hover:bg-muted text-foreground/70 hover:text-foreground"
+              >
+                <ArrowRightLeft className="h-3.5 w-3.5" />
+                换模型重试
+              </button>
+              <ModelListBottomSheet
+                open={mobileSheetOpen}
+                onOpenChange={setMobileSheetOpen}
+                models={models}
+                currentModel={currentModel}
+                onSelect={(name) => onRetryWithModel(name)}
+                mode="retry"
+              />
+            </>
+          )}
+          {onRetryWithModel && retryable && !isMobile && (
             <DropdownMenu onOpenChange={(open) => { if (open) fetchModelsOnce(); }}>
               <DropdownMenuTrigger asChild>
                 <button

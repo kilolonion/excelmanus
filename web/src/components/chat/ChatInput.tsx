@@ -1197,9 +1197,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       }
       setAnswerSubmitError(null);
       setIsAnswerSubmitting(true);
+      const hasMoreQuestions = (pendingQuestion.queueSize ?? 0) > 1;
       try {
         await answerQuestion(sessionId, questionId, answer);
-        setPendingQuestion(null);
+        if (!hasMoreQuestions) {
+          // 最后一个问题或独立问题：立即清除
+          setPendingQuestion(null);
+        }
+        // 批次中间问题：不清除 pendingQuestion，由下一个 SSE user_question 事件无缝替换
         setQuestionSelected(new Set());
         setText("");
         requestAnimationFrame(autoResize);
