@@ -1,0 +1,4 @@
+interface:
+  display_name: "Code Audit"
+  short_description: "Systematic repo health and bug-hunting code reviews"
+  default_prompt: "Use $code-audit to audit this repository and return evidence-backed findings with file paths and line numbers."
