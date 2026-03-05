@@ -277,7 +277,7 @@ ExcelManus 通过 URL 自动检测模型提供商，零配置切换：
 ```dotenv
 EXCELMANUS_AUX_API_KEY=sk-xxxx
 EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
-EXCELMANUS_AUX_MODEL=gpt-4o-mini
+EXCELMANUS_AUX_MODEL=gpt-5-mini
 ```
 
 ### 模型能力探测

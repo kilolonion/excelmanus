@@ -86,7 +86,7 @@ if not exist "%PROJECT_ROOT%\.env" (
     set "INPUT_MODEL="
     set /p "INPUT_API_KEY=  API Key: "
     set /p "INPUT_BASE_URL=  Base URL [例: https://api.openai.com/v1]: "
-    set /p "INPUT_MODEL=  Model [例: gpt-4o]: "
+    set /p "INPUT_MODEL=  Model [例: gpt-5]: "
     echo.
     if "!INPUT_API_KEY!"=="" (
         echo [!!] 未填写 API Key，创建空模板 .env 文件
@@ -360,6 +360,9 @@ goto :exit_with_pause
 
 REM -- Start frontend --
 if "%BACKEND_ONLY%"=="1" goto :skip_frontend
+
+REM 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
+set "BACKEND_INTERNAL_URL=http://127.0.0.1:%BACKEND_PORT%"
 
 if "%PRODUCTION%"=="1" (
     echo [--] 启动 Next.js 前端 [start] [端口 %FRONTEND_PORT%]...

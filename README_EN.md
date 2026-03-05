@@ -275,7 +275,7 @@ Configure an independent lighter model for **intent routing, sub-agents, and win
 ```dotenv
 EXCELMANUS_AUX_API_KEY=sk-xxxx
 EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
-EXCELMANUS_AUX_MODEL=gpt-4o-mini
+EXCELMANUS_AUX_MODEL=gpt-5-mini
 ```
 
 ### Model Capability Probing

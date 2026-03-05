@@ -191,7 +191,7 @@ if (-not (Test-Path $envFilePath)) {
     Write-Host ""
     $inputApiKey = Read-Host "  API Key"
     $inputBaseUrl = Read-Host "  Base URL (例: https://api.openai.com/v1)"
-    $inputModel = Read-Host "  Model (例: gpt-4o)"
+    $inputModel = Read-Host "  Model (例: gpt-5)"
     Write-Host ""
     if ([string]::IsNullOrWhiteSpace($inputApiKey)) {
         Write-Host "[!!] 未填写 API Key，创建空模板 .env 文件" -ForegroundColor Yellow
@@ -675,6 +675,9 @@ function Start-Frontend {
     Write-Info "启动 Next.js 前端 [$label] (端口 ${FrontendPort})..."
 
     $webDir = Join-Path $Script:PROJECT_ROOT "web"
+
+    # 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
+    $env:BACKEND_INTERNAL_URL = "http://127.0.0.1:${BackendPort}"
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     # npm is npm.cmd on Windows; .cmd files need cmd.exe to execute with UseShellExecute=false

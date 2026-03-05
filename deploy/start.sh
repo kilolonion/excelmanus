@@ -191,7 +191,7 @@ if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
   echo ""
   read -rp "  API Key: " input_api_key
   read -rp "  Base URL (例: https://api.openai.com/v1): " input_base_url
-  read -rp "  Model (例: gpt-4o): " input_model
+  read -rp "  Model (例: gpt-5): " input_model
   echo ""
   if [[ -z "$input_api_key" ]]; then
     warn "未填写 API Key，创建空模板 .env 文件"
@@ -614,6 +614,9 @@ _start_frontend() {
   fi
 
   info "启动 Next.js 前端 [${mode_label}] (端口 ${FRONTEND_PORT})..."
+
+  # 将后端端口传递给 Next.js rewrite 代理（next.config.ts 读取 BACKEND_INTERNAL_URL）
+  export BACKEND_INTERNAL_URL="http://127.0.0.1:${BACKEND_PORT}"
 
   if [[ -n "$LOG_DIR" ]]; then
     (cd web && PORT=${FRONTEND_PORT} exec $run_cmd >> "${LOG_DIR}/frontend.log" 2>&1) &
