@@ -194,16 +194,15 @@ class TestWindowPerceptionErrorPassthrough:
 
 
 class TestCsvRangeErrorFormat:
-    """read_excel 对 CSV 使用 range 参数时应返回标准错误格式。"""
+    """read_excel 对 CSV 使用 range 参数时应静默降级（非报错）。"""
 
-    def test_csv_range_returns_standard_error(self, tmp_path):
-        """CSV + range → {"status": "error", "message": "..."}。"""
+    def test_csv_range_graceful_fallback(self, tmp_path):
+        """CSV + range → 静默忽略 range，正常返回数据。"""
         csv_file = tmp_path / "test.csv"
         csv_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
         from excelmanus.tools.data_tools import read_excel
 
-        # 需要设置 guard
         from excelmanus.tools._guard_ctx import set_guard
         from excelmanus.security import FileAccessGuard
 
@@ -216,15 +215,14 @@ class TestCsvRangeErrorFormat:
                 range="A1:C5",
             )
             parsed = json.loads(result)
-            assert parsed["status"] == "error"
-            assert "range" in parsed["message"]
-            assert "CSV" in parsed["message"]
-            assert "offset" in parsed["message"]
+            assert "error" not in parsed
+            assert parsed["shape"]["rows"] == 1
+            assert parsed["shape"]["columns"] == 3
         finally:
             set_guard(None)  # type: ignore[arg-type]
 
-    def test_csv_range_detected_by_is_error_result(self, tmp_path):
-        """CSV + range 错误 → is_error_result 正确检测。"""
+    def test_csv_range_not_error(self, tmp_path):
+        """CSV + range → is_error_result 应为 False（非错误）。"""
         csv_file = tmp_path / "test.csv"
         csv_file.write_text("a,b,c\n1,2,3\n", encoding="utf-8")
 
@@ -240,7 +238,7 @@ class TestCsvRangeErrorFormat:
                 file_path=str(csv_file),
                 range="A1:C5",
             )
-            assert ToolRegistry.is_error_result(result) is True
+            assert ToolRegistry.is_error_result(result) is False
         finally:
             set_guard(None)  # type: ignore[arg-type]
 

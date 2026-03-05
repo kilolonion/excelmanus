@@ -665,17 +665,46 @@ def _get_sheet_total_rows(safe_path: Any, sheet_name: str | None) -> int | None:
         return None
 
 
+def _detect_header_row_csv(
+    safe_path: Any,
+    max_scan: int = _HEADER_SCAN_ROWS,
+) -> int | None:
+    """启发式检测 CSV 文件的 header 行号（0-indexed）。
+
+    读取前 max_scan 行为原始文本行，转为 list[list[Any]]，
+    复用 _guess_header_row_from_rows 打分逻辑。
+    """
+    try:
+        df_raw = pd.read_csv(safe_path, header=None, nrows=max_scan, dtype=str)
+    except Exception:
+        return None
+    if df_raw.empty:
+        return None
+    rows: list[list[Any]] = []
+    for _, row in df_raw.iterrows():
+        rows.append([_normalize_cell(v) if pd.notna(v) else None for v in row])
+    return _guess_header_row_from_rows(rows, max_scan=max_scan)
+
+
 def _read_csv_df(
     safe_path: Any,
     max_rows: int | None = None,
     header_row: int | None = None,
 ) -> tuple[pd.DataFrame, int]:
-    """读取 CSV/TSV 文件为 DataFrame。"""
+    """读取 CSV/TSV 文件为 DataFrame，含 header 自动检测。"""
     from pathlib import Path
 
     p = Path(safe_path) if not isinstance(safe_path, Path) else safe_path
     sep = "\t" if p.suffix.lower() == ".tsv" else ","
     kwargs: dict[str, Any] = {"filepath_or_buffer": safe_path, "sep": sep}
+
+    # header 自动检测（仅当用户未显式指定时）
+    if header_row is None:
+        detected = _detect_header_row_csv(safe_path)
+        if detected is not None and detected > 0:
+            header_row = detected
+            logger.info("CSV 自动检测 header_row=%d", detected)
+
     if header_row is not None:
         kwargs["header"] = header_row
     if max_rows is not None:
@@ -835,7 +864,7 @@ def read_excel(
             vba — VBA 宏信息（仅 .xlsm 文件有效，含模块列表及可选源码）
         max_style_scan_rows: styles/formulas 维度扫描的最大行数，默认 200。
         range: Excel 坐标范围（如 "A1:F20"、"B100:D200"），指定后进入精确读取模式，
-            绕过 pandas 直接用 openpyxl 读取指定区域，大文件友好。不支持 CSV。
+            绕过 pandas 直接用 openpyxl 读取指定区域，大文件友好。CSV 文件自动忽略此参数。
         offset: 数据行偏移（从0开始，header 之后起算），与 max_rows 组合实现分页。
         sample_rows: 等距采样行数，用于了解大表数据分布。
 
@@ -861,12 +890,7 @@ def read_excel(
         sheet_name = resolved_sheet  # 可能经过 case-insensitive 修正
 
     # ── range 模式：精确读取指定坐标范围 ──
-    if range is not None:
-        if _is_csv_file(safe_path):
-            return json.dumps(
-                {"status": "error", "message": "range 参数不支持 CSV 文件，请使用 offset + max_rows 分页读取"},
-                ensure_ascii=False,
-            )
+    if range is not None and not _is_csv_file(safe_path):
         result = _read_range_direct(safe_path, sheet_name, range)
         result["file"] = str(safe_path.name)
         return json.dumps(result, ensure_ascii=False, indent=2, default=str)
@@ -996,6 +1020,16 @@ def read_excel(
         include_set.discard("vba")
 
     # 分发 include 维度采集（需要用 openpyxl 打开，CSV 不支持）
+    _CSV_UNSUPPORTED_DIMS = {"styles", "charts", "images", "freeze_panes",
+                             "conditional_formatting", "data_validation",
+                             "print_settings", "column_widths", "formulas"}
+    if include_set and _is_csv_file(safe_path):
+        skipped = include_set & _CSV_UNSUPPORTED_DIMS
+        if skipped:
+            summary["csv_unsupported_dimensions"] = (
+                f"CSV 文件不支持以下维度（已跳过）: {sorted(skipped)}"
+            )
+            include_set -= skipped
     if include_set and not _is_csv_file(safe_path):
         from openpyxl import load_workbook
 
@@ -1038,11 +1072,23 @@ def write_excel(file_path: str, data: list[dict], sheet_name: str = "Sheet1") ->
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
+    df = pd.DataFrame(data)
+
+    # CSV/TSV：直接写回 CSV
+    if _is_csv_file(safe_path):
+        from pathlib import Path
+        p = Path(safe_path) if not isinstance(safe_path, Path) else safe_path
+        sep = "\t" if p.suffix.lower() == ".tsv" else ","
+        safe_path.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(safe_path, index=False, sep=sep)
+        return json.dumps(
+            {"status": "success", "file": str(safe_path.name), "rows": len(df), "columns": len(df.columns)},
+            ensure_ascii=False,
+        )
+
     # .xls/.xlsb → 透明转换为 xlsx
     from excelmanus.tools._helpers import ensure_openpyxl_compatible
     safe_path = ensure_openpyxl_compatible(safe_path)
-
-    df = pd.DataFrame(data)
 
     if safe_path.exists() and safe_path.suffix.lower() in (".xlsx", ".xlsm"):
         # 已有文件：使用 append 模式，仅替换指定 sheet，保留其他 sheet
@@ -1357,6 +1403,21 @@ def transform_data(
     else:
         out_safe = safe_path
 
+    # CSV/TSV 输出
+    if _is_csv_file(out_safe):
+        from pathlib import Path as _P
+        _p = _P(out_safe) if not isinstance(out_safe, _P) else out_safe
+        _sep = "\t" if _p.suffix.lower() == ".tsv" else ","
+        out_safe.parent.mkdir(parents=True, exist_ok=True)
+        df.to_csv(out_safe, index=False, sep=_sep)
+        return json.dumps({
+            "status": "success",
+            "file": str(out_safe.name),
+            "sheet": "Sheet1",
+            "operations_applied": applied,
+            "shape": {"rows": df.shape[0], "columns": df.shape[1]},
+        }, ensure_ascii=False, indent=2)
+
     target_sheet = _resolve_target_sheet(safe_path, sheet_name)
 
     source_ext = safe_path.suffix.lower()
@@ -1463,11 +1524,11 @@ def inspect_excel_files(
             ensure_ascii=False,
         )
 
-    # 收集 Excel 文件（.xlsx / .xlsm），跳过隐藏文件和临时文件
+    # 收集 Excel/CSV 文件，跳过隐藏文件和临时文件
     # 先收集全部再排序，确保结果确定性（glob 返回顺序依赖文件系统，不可靠）
     glob_method = safe_dir.rglob if recursive else safe_dir.glob
     excel_paths: list[Path] = []
-    for ext in ("*.xlsx", "*.xlsm", "*.xls", "*.xlsb"):
+    for ext in ("*.xlsx", "*.xlsm", "*.xls", "*.xlsb", "*.csv", "*.tsv"):
         for p in glob_method(ext):
             if p.name.startswith((".", "~$")):
                 continue
@@ -1528,65 +1589,99 @@ def inspect_excel_files(
 
         sheets_info: list[dict[str, Any]] = []
         try:
-            wb = load_workbook(_compat(fp), read_only=not needs_full, data_only=True)
-            for sn in wb.sheetnames:
-                ws = wb[sn]
-                total_cols = ws.max_column or 0
-                sheet_data: dict[str, Any] = {
-                    "name": sn,
-                    "rows": ws.max_row or 0,
-                    "columns": total_cols,
-                }
-
-                # 读取抽样行，用于表头识别与预览
-                scan_rows = max(8, preview_rows + 8)
-                scan_cols = max(1, min(total_cols if total_cols > 0 else _HEADER_SCAN_COLS, _HEADER_SCAN_COLS))
-                rows_raw: list[list[Any]] = []
-                for row in ws.iter_rows(
-                    min_row=1,
-                    max_row=scan_rows,
-                    min_col=1,
-                    max_col=scan_cols,
-                    values_only=True,
-                ):
-                    rows_raw.append([_normalize_cell(c) for c in row])
-
-                if rows_raw:
-                    header_idx = _guess_header_row_from_rows(rows_raw, max_scan=scan_rows)
+            if _is_csv_file(fp):
+                # ── CSV/TSV 分支：用 pandas 读取 ──
+                scan_rows_csv = max(8, preview_rows + 8)
+                try:
+                    df_raw = pd.read_csv(fp, header=None, nrows=scan_rows_csv, dtype=str)
+                except Exception as csv_exc:
+                    file_info["error"] = f"无法读取: {csv_exc}"
+                    df_raw = pd.DataFrame()
+                if not df_raw.empty:
+                    total_csv_rows = _get_sheet_total_rows(fp, None)
+                    rows_raw_csv: list[list[Any]] = []
+                    for _, r in df_raw.iterrows():
+                        rows_raw_csv.append([_normalize_cell(v) if pd.notna(v) else None for v in r])
+                    header_idx = _guess_header_row_from_rows(rows_raw_csv, max_scan=scan_rows_csv)
                     if header_idx is None:
                         header_idx = 0
+                    header_raw = rows_raw_csv[header_idx] if header_idx < len(rows_raw_csv) else []
+                    header_csv = _trim_trailing_nulls([_cell_to_str(c) for c in header_raw])
+                    preview_raw = rows_raw_csv[header_idx + 1:header_idx + 1 + preview_rows]
+                    preview_csv = [_trim_trailing_nulls([_cell_to_str(c) for c in r]) for r in preview_raw]
+                    if any(len(r) > max_columns for r in preview_csv):
+                        preview_csv = [r[:max_columns] for r in preview_csv]
+                    csv_sheet: dict[str, Any] = {
+                        "name": "Sheet1",
+                        "rows": total_csv_rows if total_csv_rows is not None else len(df_raw),
+                        "columns": len(df_raw.columns),
+                        "header_row_hint": header_idx,
+                        "business_columns": len(header_csv),
+                        "header": header_csv,
+                        "preview": preview_csv,
+                    }
+                    sheets_info.append(csv_sheet)
+            else:
+                # ── Excel 分支：用 openpyxl 读取 ──
+                wb = load_workbook(_compat(fp), read_only=not needs_full, data_only=True)
+                for sn in wb.sheetnames:
+                    ws = wb[sn]
+                    total_cols = ws.max_column or 0
+                    sheet_data: dict[str, Any] = {
+                        "name": sn,
+                        "rows": ws.max_row or 0,
+                        "columns": total_cols,
+                    }
 
-                    header_raw = rows_raw[header_idx] if header_idx < len(rows_raw) else []
-                    header = _trim_trailing_nulls([_cell_to_str(c) for c in header_raw])
+                    # 读取抽样行，用于表头识别与预览
+                    scan_rows = max(8, preview_rows + 8)
+                    scan_cols = max(1, min(total_cols if total_cols > 0 else _HEADER_SCAN_COLS, _HEADER_SCAN_COLS))
+                    rows_raw: list[list[Any]] = []
+                    for row in ws.iter_rows(
+                        min_row=1,
+                        max_row=scan_rows,
+                        min_col=1,
+                        max_col=scan_cols,
+                        values_only=True,
+                    ):
+                        rows_raw.append([_normalize_cell(c) for c in row])
 
-                    preview_raw = rows_raw[header_idx + 1:header_idx + 1 + preview_rows]
-                    preview = [_trim_trailing_nulls([_cell_to_str(c) for c in r]) for r in preview_raw]
+                    if rows_raw:
+                        header_idx = _guess_header_row_from_rows(rows_raw, max_scan=scan_rows)
+                        if header_idx is None:
+                            header_idx = 0
 
-                    # 仅对 preview 数据行限宽，header 完整保留以确保 agent 理解全部列语义
-                    if any(len(r) > max_columns for r in preview):
-                        preview = [r[:max_columns] for r in preview]
-                        sheet_data["preview_columns_truncated"] = max_columns
+                        header_raw = rows_raw[header_idx] if header_idx < len(rows_raw) else []
+                        header = _trim_trailing_nulls([_cell_to_str(c) for c in header_raw])
 
-                    sheet_data["header_row_hint"] = header_idx
-                    sheet_data["business_columns"] = len(header)
-                    sheet_data["header"] = header
-                    sheet_data["preview"] = preview
+                        preview_raw = rows_raw[header_idx + 1:header_idx + 1 + preview_rows]
+                        preview = [_trim_trailing_nulls([_cell_to_str(c) for c in r]) for r in preview_raw]
 
-                # 按需采集额外维度
-                if needs_full and include_set:
-                    if "freeze_panes" in include_set:
-                        sheet_data["freeze_panes"] = _collect_freeze_panes(ws)
-                    if "charts" in include_set:
-                        sheet_data["charts"] = _collect_charts(ws)
-                    if "images" in include_set:
-                        sheet_data["images"] = _collect_images(ws)
-                    if "conditional_formatting" in include_set:
-                        sheet_data["conditional_formatting"] = _collect_conditional_formatting(ws)
-                    if "column_widths" in include_set:
-                        sheet_data["column_widths"] = _collect_column_widths(ws)
+                        # 仅对 preview 数据行限宽，header 完整保留以确保 agent 理解全部列语义
+                        if any(len(r) > max_columns for r in preview):
+                            preview = [r[:max_columns] for r in preview]
+                            sheet_data["preview_columns_truncated"] = max_columns
 
-                sheets_info.append(sheet_data)
-            wb.close()
+                        sheet_data["header_row_hint"] = header_idx
+                        sheet_data["business_columns"] = len(header)
+                        sheet_data["header"] = header
+                        sheet_data["preview"] = preview
+
+                    # 按需采集额外维度
+                    if needs_full and include_set:
+                        if "freeze_panes" in include_set:
+                            sheet_data["freeze_panes"] = _collect_freeze_panes(ws)
+                        if "charts" in include_set:
+                            sheet_data["charts"] = _collect_charts(ws)
+                        if "images" in include_set:
+                            sheet_data["images"] = _collect_images(ws)
+                        if "conditional_formatting" in include_set:
+                            sheet_data["conditional_formatting"] = _collect_conditional_formatting(ws)
+                        if "column_widths" in include_set:
+                            sheet_data["column_widths"] = _collect_column_widths(ws)
+
+                    sheets_info.append(sheet_data)
+                wb.close()
         except Exception as exc:  # noqa: BLE001
             file_info["error"] = f"无法读取: {exc}"
 
@@ -3377,7 +3472,7 @@ def _scan_csv_snapshot(
 ) -> str:
     """CSV 文件的 scan_excel_snapshot 简化实现。"""
     try:
-        df, _ = _read_csv_df(safe_path, max_rows=max_sample_rows)
+        df, effective_header = _read_csv_df(safe_path, max_rows=max_sample_rows)
     except Exception as exc:
         return json.dumps({"error": f"CSV 读取失败: {exc}"}, ensure_ascii=False)
 
@@ -3405,7 +3500,7 @@ def _scan_csv_snapshot(
         "name": "Sheet1",
         "rows": total_rows,
         "cols": len(df.columns),
-        "header_row": 0,
+        "header_row": effective_header,
         "duplicate_row_count": dup_count,
         "has_formulas": False,
         "has_merged_cells": False,
@@ -3613,31 +3708,19 @@ def search_excel_values(
             def _match(cell_str: str) -> bool:
                 return _q_lower in cell_str.lower()
 
-    from openpyxl import load_workbook
     from openpyxl.utils import get_column_letter
 
-    # .xls/.xlsb → 透明转换为 xlsx
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
-    safe_path = ensure_openpyxl_compatible(safe_path)
-
-    wb = load_workbook(safe_path, read_only=True, data_only=True)
     matches: list[dict[str, Any]] = []
     sheet_match_counts: dict[str, int] = {}
     total_matches = 0
     sheets_searched = 0
 
-    target_sheets = set(s.lower() for s in sheets) if sheets else None
-
-    for ws in wb.worksheets:
-        if target_sheets and ws.title.lower() not in target_sheets:
-            continue
-        sheets_searched += 1
-
-        # 读取 header 行（仅用于列名标注，不再跳过 row 1 的搜索）
-        header: list[str] = []
-        for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
-            header = [str(c) if c is not None else f"Col_{i}" for i, c in enumerate(row)]
-            break
+    # ── CSV/TSV 分支：用 pandas 搜索 ──
+    if _is_csv_file(safe_path):
+        df, _ = _read_csv_df(safe_path)
+        sheet_label = "Sheet1"
+        sheets_searched = 1
+        header = [str(c) for c in df.columns]
 
         target_col_indices: set[int] | None = None
         if columns:
@@ -3645,18 +3728,13 @@ def search_excel_values(
             target_col_indices = {
                 i for i, h in enumerate(header) if h.lower() in col_set_lower
             }
-            if not target_col_indices:
-                continue
 
-        # 逐行扫描（从第 1 行开始，包含 header 行——表单类文档的数据可能从第 1 行起）
-        for row_idx, row in enumerate(
-            ws.iter_rows(min_row=1, values_only=True), start=1
-        ):
+        for row_idx_0, row_series in df.iterrows():
             if len(matches) >= max_results:
                 break
-            row_list = list(row)
+            row_list = list(row_series)
             for col_idx, cell_val in enumerate(row_list):
-                if cell_val is None:
+                if pd.isna(cell_val):
                     continue
                 if target_col_indices is not None and col_idx not in target_col_indices:
                     continue
@@ -3665,17 +3743,17 @@ def search_excel_values(
                     continue
 
                 total_matches += 1
-                sheet_match_counts[ws.title] = sheet_match_counts.get(ws.title, 0) + 1
+                sheet_match_counts[sheet_label] = sheet_match_counts.get(sheet_label, 0) + 1
 
                 if len(matches) < max_results:
                     col_name = header[col_idx] if col_idx < len(header) else f"Col_{col_idx}"
-                    cell_ref = f"{get_column_letter(col_idx + 1)}{row_idx}"
+                    excel_row = int(row_idx_0) + 2  # header=row1, data starts row2
+                    cell_ref = f"{get_column_letter(col_idx + 1)}{excel_row}"
 
-                    # context: 同行其他列的值（最多 5 列）
                     context: dict[str, str] = {}
                     ctx_count = 0
                     for ci, cv in enumerate(row_list):
-                        if ci == col_idx or cv is None:
+                        if ci == col_idx or pd.isna(cv):
                             continue
                         h = header[ci] if ci < len(header) else f"Col_{ci}"
                         context[h] = str(cv)[:100]
@@ -3684,19 +3762,94 @@ def search_excel_values(
                             break
 
                     matches.append({
-                        "sheet": ws.title,
-                        "row": row_idx,
+                        "sheet": sheet_label,
+                        "row": excel_row,
                         "column": col_name,
                         "value": cell_str[:200],
                         "cell_ref": cell_ref,
                         "context": context,
                     })
+    else:
+        # ── Excel 分支：用 openpyxl 搜索 ──
+        from openpyxl import load_workbook
 
-        if len(matches) >= max_results:
-            # 继续统计剩余 sheet 的总匹配数（但不收集详情）
-            continue
+        # .xls/.xlsb → 透明转换为 xlsx
+        from excelmanus.tools._helpers import ensure_openpyxl_compatible
+        safe_path = ensure_openpyxl_compatible(safe_path)
 
-    wb.close()
+        wb = load_workbook(safe_path, read_only=True, data_only=True)
+
+        target_sheets = set(s.lower() for s in sheets) if sheets else None
+
+        for ws in wb.worksheets:
+            if target_sheets and ws.title.lower() not in target_sheets:
+                continue
+            sheets_searched += 1
+
+            # 读取 header 行（仅用于列名标注，不再跳过 row 1 的搜索）
+            header_xl: list[str] = []
+            for row in ws.iter_rows(min_row=1, max_row=1, values_only=True):
+                header_xl = [str(c) if c is not None else f"Col_{i}" for i, c in enumerate(row)]
+                break
+
+            target_col_indices_xl: set[int] | None = None
+            if columns:
+                col_set_lower = {c.lower() for c in columns}
+                target_col_indices_xl = {
+                    i for i, h in enumerate(header_xl) if h.lower() in col_set_lower
+                }
+                if not target_col_indices_xl:
+                    continue
+
+            # 逐行扫描（从第 1 行开始，包含 header 行——表单类文档的数据可能从第 1 行起）
+            for row_idx, row in enumerate(
+                ws.iter_rows(min_row=1, values_only=True), start=1
+            ):
+                if len(matches) >= max_results:
+                    break
+                row_list = list(row)
+                for col_idx, cell_val in enumerate(row_list):
+                    if cell_val is None:
+                        continue
+                    if target_col_indices_xl is not None and col_idx not in target_col_indices_xl:
+                        continue
+                    cell_str = str(cell_val)
+                    if not _match(cell_str):
+                        continue
+
+                    total_matches += 1
+                    sheet_match_counts[ws.title] = sheet_match_counts.get(ws.title, 0) + 1
+
+                    if len(matches) < max_results:
+                        col_name = header_xl[col_idx] if col_idx < len(header_xl) else f"Col_{col_idx}"
+                        cell_ref = f"{get_column_letter(col_idx + 1)}{row_idx}"
+
+                        # context: 同行其他列的值（最多 5 列）
+                        context_xl: dict[str, str] = {}
+                        ctx_count = 0
+                        for ci, cv in enumerate(row_list):
+                            if ci == col_idx or cv is None:
+                                continue
+                            h = header_xl[ci] if ci < len(header_xl) else f"Col_{ci}"
+                            context_xl[h] = str(cv)[:100]
+                            ctx_count += 1
+                            if ctx_count >= 5:
+                                break
+
+                        matches.append({
+                            "sheet": ws.title,
+                            "row": row_idx,
+                            "column": col_name,
+                            "value": cell_str[:200],
+                            "cell_ref": cell_ref,
+                            "context": context_xl,
+                        })
+
+            if len(matches) >= max_results:
+                # 继续统计剩余 sheet 的总匹配数（但不收集详情）
+                continue
+
+        wb.close()
 
     truncated = total_matches > len(matches)
     summary_by_sheet = [
