@@ -478,6 +478,26 @@ class TestModelSwitchConsistency:
         assert engine._router_client is old_router_client
         assert engine._router_client is not engine._client
 
+    def test_switch_model_rejects_deprecated_model_id(self) -> None:
+        config = _make_config(
+            model="main-a",
+            models=(
+                ModelProfile(
+                    name="legacy",
+                    model="claude-3.5-sonnet",
+                    api_key="alt-key",
+                    base_url="https://alt.example.com/v1",
+                    description="legacy",
+                ),
+            ),
+        )
+        engine = AgentEngine(config, _make_registry_with_tools())
+
+        msg = engine.switch_model("legacy")
+        assert "已弃用" in msg
+        assert "claude-sonnet-4-6" in msg
+        assert engine._active_model == "main-a"
+
     @pytest.mark.asyncio
     async def test_window_perception_advisor_follows_active_model_after_switch(self) -> None:
         config = _make_config(

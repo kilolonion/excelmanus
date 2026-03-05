@@ -30,7 +30,7 @@ def _count_tokens(text: str) -> int:
     try:
         import tiktoken
 
-        enc = tiktoken.encoding_for_model("gpt-4o")
+        enc = tiktoken.get_encoding("o200k_base")
         return len(enc.encode(text))
     except Exception:
         # 降级：1 token ≈ 4 字符
@@ -42,7 +42,7 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     try:
         import tiktoken
 
-        enc = tiktoken.encoding_for_model("gpt-4o")
+        enc = tiktoken.get_encoding("o200k_base")
         tokens = enc.encode(text)
         if len(tokens) <= max_tokens:
             return text

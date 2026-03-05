@@ -22,9 +22,12 @@ class AdaptiveModeSelector:
 
     _DEFAULT_PREFIX_MAP: tuple[tuple[str, str], ...] = (
         ("gpt-5", "unified"),
-        ("gpt-4", "unified"),
+        ("gpt-4.1", "unified"),
+        ("gemini-2.5", "anchored"),
         ("moonshotai/kimi", "anchored"),
         ("kimi", "anchored"),
+        ("claude-sonnet-4", "anchored"),
+        ("claude-opus-4", "anchored"),
         ("claude-sonnet", "anchored"),
         ("sonnet", "anchored"),
         ("deepseek", "anchored"),

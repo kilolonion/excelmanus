@@ -312,24 +312,24 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "openai",
     label: "OpenAI",
     icon: "🟢",
-    model: "gpt-5",
+    model: "gpt-5.2",
     base_url: "https://api.openai.com/v1",
     protocol: "openai",
     thinking_mode: "auto",
     model_family: "gpt",
-    description: "GPT-5 通用旗舰",
+    description: "GPT-5.2 通用旗舰",
     purchaseUrl: "https://platform.openai.com/api-keys",
   },
   {
     id: "anthropic",
     label: "Anthropic",
     icon: "🟤",
-    model: "claude-sonnet-4",
+    model: "claude-sonnet-4-6",
     base_url: "https://api.anthropic.com",
     protocol: "anthropic",
     thinking_mode: "claude",
     model_family: "claude",
-    description: "Claude Sonnet 4",
+    description: "Claude Sonnet 4.6",
     purchaseUrl: "https://console.anthropic.com/settings/keys",
   },
   {
@@ -384,7 +384,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     id: "openrouter",
     label: "OpenRouter",
     icon: "🔀",
-    model: "anthropic/claude-sonnet-4",
+    model: "anthropic/claude-sonnet-4-6",
     base_url: "https://openrouter.ai/api/v1",
     protocol: "openai",
     thinking_mode: "openrouter",
@@ -422,7 +422,7 @@ const CODEX_OAUTH_PRESET: ProviderPreset = {
   id: "openai-codex",
   label: "OpenAI Codex",
   icon: "🧩",
-  model: "openai-codex/gpt-5.3-codex-spark",
+  model: "openai-codex/gpt-5.2-codex",
   base_url: "https://api.openai.com/v1",
   protocol: "openai",
   thinking_mode: "openai_reasoning",
@@ -440,15 +440,17 @@ interface CodexModelEntry {
 }
 
 const CODEX_MODELS: CodexModelEntry[] = [
-  { modelId: "gpt-5.3-codex-spark", publicId: "openai-codex/gpt-5.3-codex-spark", profileName: "openai-codex/gpt-5.3-codex-spark", displayName: "Codex Spark", proOnly: true },
-  { modelId: "gpt-5.3-codex", publicId: "openai-codex/gpt-5.3-codex", profileName: "openai-codex/gpt-5.3-codex", displayName: "Codex 5.3", proOnly: false },
   { modelId: "gpt-5.2-codex", publicId: "openai-codex/gpt-5.2-codex", profileName: "openai-codex/gpt-5.2-codex", displayName: "Codex 5.2", proOnly: false },
   { modelId: "gpt-5.1-codex", publicId: "openai-codex/gpt-5.1-codex", profileName: "openai-codex/gpt-5.1-codex", displayName: "Codex 5.1", proOnly: false },
   { modelId: "gpt-5.1-codex-mini", publicId: "openai-codex/gpt-5.1-codex-mini", profileName: "openai-codex/gpt-5.1-codex-mini", displayName: "Codex Mini", proOnly: false },
   { modelId: "gpt-5.1-codex-max", publicId: "openai-codex/gpt-5.1-codex-max", profileName: "openai-codex/gpt-5.1-codex-max", displayName: "Codex Max", proOnly: false },
-  { modelId: "codex-mini-latest", publicId: "openai-codex/codex-mini-latest", profileName: "openai-codex/codex-mini-latest", displayName: "Codex Mini Latest", proOnly: false },
+  { modelId: "gpt-5-codex", publicId: "openai-codex/gpt-5-codex", profileName: "openai-codex/gpt-5-codex", displayName: "Codex 5", proOnly: false },
+  { modelId: "gpt-5-codex-mini", publicId: "openai-codex/gpt-5-codex-mini", profileName: "openai-codex/gpt-5-codex-mini", displayName: "Codex Mini (GPT-5)", proOnly: false },
   { modelId: "gpt-5.2", publicId: "openai-codex/gpt-5.2", profileName: "openai-codex/gpt-5.2", displayName: "GPT-5.2 (Codex)", proOnly: false },
   { modelId: "gpt-5.1", publicId: "openai-codex/gpt-5.1", profileName: "openai-codex/gpt-5.1", displayName: "GPT-5.1 (Codex)", proOnly: false },
+  { modelId: "gpt-5", publicId: "openai-codex/gpt-5", profileName: "openai-codex/gpt-5", displayName: "GPT-5 (Codex)", proOnly: false },
+  { modelId: "gpt-5.3-codex", publicId: "openai-codex/gpt-5.3-codex", profileName: "openai-codex/gpt-5.3-codex", displayName: "Codex 5.3 (Legacy)", proOnly: false },
+  { modelId: "gpt-5.3-codex-spark", publicId: "openai-codex/gpt-5.3-codex-spark", profileName: "openai-codex/gpt-5.3-codex-spark", displayName: "Codex Spark (Legacy)", proOnly: true },
 ];
 
 function getAvailableCodexModels(planType?: string): CodexModelEntry[] {
@@ -1262,7 +1264,7 @@ function UserApiConfigPanel({ user }: { user: AuthUser | null }) {
               value={draft.model}
               onChange={(e) => setDraft((d) => ({ ...d, model: e.target.value }))}
               className="h-8 text-xs font-mono"
-              placeholder="如: gpt-5, qwen-plus, claude-sonnet-4 ..."
+              placeholder="如: gpt-5.2, qwen-plus, claude-sonnet-4-6 ..."
             />
           </div>
           <div className="flex flex-col sm:flex-row sm:items-center gap-1 sm:gap-2">
@@ -1399,17 +1401,18 @@ function CodexOAuthAdminCard({
   const [cardCollapsed, setCardCollapsed] = useState(true);
 
   // Build a Set of existing codex profile names for quick lookup.
-  // Map legacy short names (e.g. "codex-5.3", "Codex 5.3") to current full openai-codex/xxx format.
+  // Map legacy short names and old defaults to current full openai-codex/xxx format.
   const _LEGACY_NAME_MAP: Record<string, string> = {
-    "Codex 5.3": "openai-codex/gpt-5.3-codex",
-    "codex-oauth": "openai-codex/gpt-5.3-codex",
+    "Codex 5.3": "openai-codex/gpt-5.2-codex",
+    "Codex Spark": "openai-codex/gpt-5.3-codex-spark",
+    "codex-oauth": "openai-codex/gpt-5.2-codex",
     "codex-spark": "openai-codex/gpt-5.3-codex-spark",
-    "codex-5.3": "openai-codex/gpt-5.3-codex",
+    "codex-5.3": "openai-codex/gpt-5.2-codex",
     "codex-5.2": "openai-codex/gpt-5.2-codex",
     "codex-5.1": "openai-codex/gpt-5.1-codex",
     "codex-mini": "openai-codex/gpt-5.1-codex-mini",
     "codex-max": "openai-codex/gpt-5.1-codex-max",
-    "codex-mini-latest": "openai-codex/codex-mini-latest",
+    "codex-mini-latest": "openai-codex/gpt-5-codex-mini",
     "codex-gpt-5.2": "openai-codex/gpt-5.2",
     "codex-gpt-5.1": "openai-codex/gpt-5.1",
   };
@@ -2883,7 +2886,7 @@ export function ModelTab() {
                         value={profileDraft.name}
                         onChange={(e) => setProfileDraft((d) => ({ ...d, name: e.target.value }))}
                         className="h-8 sm:h-7 text-xs"
-                        placeholder="如: gpt4"
+                        placeholder="如: gpt5"
                       />
                     </div>
                     <div className="relative" ref={modelDropdownRef}>
@@ -2898,7 +2901,7 @@ export function ModelTab() {
                           }}
                           onFocus={() => { if (remoteModels.length > 0) setModelDropdownTarget("_profile"); }}
                           className="h-8 sm:h-7 text-xs font-mono flex-1"
-                          placeholder="如: gpt-5"
+                          placeholder="如: gpt-5.2"
                         />
                         <Button
                           type="button"

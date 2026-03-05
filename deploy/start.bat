@@ -86,7 +86,7 @@ if not exist "%PROJECT_ROOT%\.env" (
     set "INPUT_MODEL="
     set /p "INPUT_API_KEY=  API Key: "
     set /p "INPUT_BASE_URL=  Base URL [例: https://api.openai.com/v1]: "
-    set /p "INPUT_MODEL=  Model [例: gpt-5]: "
+    set /p "INPUT_MODEL=  Model [例: gpt-5.2]: "
     echo.
     if "!INPUT_API_KEY!"=="" (
         echo [!!] 未填写 API Key，创建空模板 .env 文件

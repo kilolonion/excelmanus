@@ -512,7 +512,7 @@ class TestResolverTextFile:
         assert result.error is None
         # context_block 应该被截断
         import tiktoken
-        enc = tiktoken.encoding_for_model("gpt-4o")
+        enc = tiktoken.get_encoding("o200k_base")
         token_count = len(enc.encode(result.context_block))
         assert token_count <= 50
 

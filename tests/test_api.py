@@ -2859,14 +2859,14 @@ class TestAdminGuardForModelConfig:
 
         resp = await client.post(
             "/api/v1/config/models/capabilities/probe",
-            json={"model": "openai-codex/gpt-5.3-codex"},
+            json={"model": "openai-codex/gpt-5.2-codex"},
         )
 
         assert resp.status_code == 200
         body = resp.json()
-        assert body.get("model") == "gpt-5.3-codex"
+        assert body.get("model") == "openai-codex/gpt-5.2-codex"
         assert body.get("capabilities", {}).get("thinking_type") == "openai_reasoning"
-        resolver.resolve_sync.assert_called_once_with("u-1", "gpt-5.3-codex")
+        resolver.resolve_sync.assert_called_once_with("u-1", "gpt-5.2-codex")
         create_client_mock.assert_called_once_with(
             api_key="oauth-key",
             base_url="https://chatgpt.com/backend-api/codex",
@@ -2921,13 +2921,13 @@ class TestAdminGuardForModelConfig:
         )
         assert spark is None, "Spark 模型应仅对 Pro 订阅可见"
         # 检查非 Pro-only 模型正常出现
-        codex53 = next(
-            (m for m in models if m.get("name") == "openai-codex/gpt-5.3-codex"),
+        codex52 = next(
+            (m for m in models if m.get("name") == "openai-codex/gpt-5.2-codex"),
             None,
         )
-        assert codex53 is not None
-        assert codex53.get("display_name") == "Codex 5.3"
-        assert codex53.get("model") == "openai-codex/gpt-5.3-codex"
+        assert codex52 is not None
+        assert codex52.get("display_name") == "Codex 5.2"
+        assert codex52.get("model") == "openai-codex/gpt-5.2-codex"
         app.state.auth_enabled = False
 
     @pytest.mark.asyncio
@@ -2979,6 +2979,43 @@ class TestAdminGuardForModelConfig:
         # 不再返回 403，而是正常处理（200 或其他非 403 状态码）
         assert resp.status_code != 403
         app.state.auth_enabled = False
+
+    @pytest.mark.asyncio
+    async def test_switch_model_rejects_deprecated_profile_model(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = {"name": "legacy", "model": "gemini-2.0-flash"}
+        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+
+        resp = await client.put("/api/v1/models/active", json={"name": "legacy"})
+
+        assert resp.status_code == 422
+        assert "已弃用" in (resp.json().get("error") or "")
+        assert "gemini-2.5-flash" in (resp.json().get("error") or "")
+
+    @pytest.mark.asyncio
+    async def test_add_model_profile_rejects_deprecated_model_id(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = None
+        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+
+        resp = await client.post(
+            "/api/v1/config/models/profiles",
+            json={
+                "name": "legacy-claude",
+                "model": "claude-3.5-sonnet",
+                "api_key": "sk-test",
+                "base_url": "https://api.anthropic.com/v1",
+            },
+        )
+
+        assert resp.status_code == 422
+        assert "已弃用" in (resp.json().get("error") or "")
+        assert "claude-sonnet-4-6" in (resp.json().get("error") or "")
+        mock_cfg_store.add_profile.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_switch_model_accepts_codex_prefixed_profile_name(
