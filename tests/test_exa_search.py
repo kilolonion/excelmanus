@@ -34,6 +34,10 @@ class _FakeConfig:
     """最小化的 Config 替身。"""
 
     exa_search_enabled: bool = True
+    search_default_provider: str = "exa"
+    exa_api_key: str | None = None
+    tavily_api_key: str | None = None
+    brave_api_key: str | None = None
 
 
 # ── get_builtin_mcp_configs ─────────────────────────────────

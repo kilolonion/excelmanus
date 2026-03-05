@@ -38,6 +38,8 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
         "read_image",
         # 窗口聚焦工具：切换视口/滚动/展开，纯状态操作无文件写入
         "focus_window",
+        # 并发搜索：只读搜索聚合，无副作用
+        "parallel_search",
     }
 )
 
@@ -60,6 +62,7 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
         "memory_read_topic",
         "read_image",
         "introspect_capability",
+        "parallel_search",
     }
 )
 
@@ -260,6 +263,27 @@ ROUTE_TOOL_SCOPE: dict[str, frozenset[str]] = {
         "introspect_capability",
     }),
     # "all_tools" 不在此映射中 → 不做过滤
+    "search": frozenset({
+        "memory_read_topic",
+        "read_text_file",
+        "list_directory",
+        "introspect_capability",
+        "parallel_search",
+    }),
+}
+
+# ── MCP scope 激活映射 ──────────────────────────────────────────
+# route_tag → 该路由下可见的 MCP Server scope 集合。
+# MCP 工具的 scope 来自 MCPServerConfig.scope 字段。
+# scope == "always" 始终可见；其他 scope 仅在对应路由标签激活时可见。
+# "all_tools" 不在此映射中 → 所有 MCP scope 可见。
+MCP_SCOPE_ACTIVATION: dict[str, frozenset[str]] = {
+    "data_read": frozenset({"always"}),
+    "data_write": frozenset({"always"}),
+    "chart": frozenset({"always"}),
+    "vision": frozenset({"always"}),
+    "code": frozenset({"always", "dev_docs"}),
+    "search": frozenset({"always", "search"}),
 }
 
 

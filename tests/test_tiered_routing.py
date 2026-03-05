@@ -370,6 +370,7 @@ class TestContextBuilderChitchatFastPath:
         cb._build_post_write_verification_hint = MagicMock(return_value="")
         cb._build_scan_tool_hint = MagicMock(return_value="")
         cb._build_explorer_report_notice = MagicMock(return_value="")
+        cb._build_session_history_notice = MagicMock(return_value="")
         cb._build_window_perception_notice = MagicMock(return_value="")
         cb._build_stable_system_prompt = MagicMock(return_value="Stable prompt with access and mcp")
         engine._prompt_composer = None

@@ -2785,6 +2785,12 @@ class TestAdminGuardForModelConfig:
         assert any(m.get("id") == expected_model_id for m in models), (
             f"Expected model '{expected_model_id}' not found in {[m.get('id') for m in models]}"
         )
+        if "generativelanguage.googleapis.com" in base_url:
+            ids = {m.get("id") for m in models}
+            assert "gemini-2.0-flash" not in ids
+            assert "gemini-2.0-flash-lite" not in ids
+            assert "gemini-1.5-pro" not in ids
+            assert "gemini-1.5-flash" not in ids
         assert hint_keyword in (data.get("hint") or ""), (
             f"Expected hint keyword '{hint_keyword}' in: {data.get('hint')}"
         )

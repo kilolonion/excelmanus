@@ -76,6 +76,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gpt-4.1-mini": 1_047_576,
     "gpt-4.1-nano": 1_047_576,
     "o1": 200_000,
+    # Legacy alias kept for backward compatibility with old user profiles.
     "o1-mini": 128_000,
     "o1-pro": 200_000,
     "o3": 200_000,
@@ -87,6 +88,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "o4-mini-deep-research": 200_000,
     "codex-mini-latest": 200_000,
     # Anthropic（Claude）提供商
+    # Legacy Claude 3.x aliases kept for backward compatibility.
     "claude-3-opus": 200_000,
     "claude-3-sonnet": 200_000,
     "claude-3-haiku": 200_000,
@@ -112,6 +114,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-2.5-flash-image-preview": 1_048_576,
     "gemini-2.5-flash-lite": 1_048_576,
     "gemini-2.5-flash-lite-preview": 1_048_576,
+    # Legacy Gemini aliases kept for backward compatibility.
     "gemini-2.0-flash": 1_048_576,
     "gemini-2.0-flash-live": 1_048_576,
     "gemini-2.0-flash-thinking-exp": 1_048_576,
@@ -360,7 +363,11 @@ class ExcelManusConfig:
         "http://localhost:5173",
     )
     mcp_shared_manager: bool = False
-    exa_search_enabled: bool = True  # 内置 Exa 免费搜索（无需 API Key）
+    exa_search_enabled: bool = True  # 内置搜索引擎总开关（False 禁用全部内置搜索）
+    search_default_provider: str = "exa"  # 默认搜索引擎：exa | tavily | brave
+    exa_api_key: str | None = None  # Exa API 密钥（可选，提升搜索质量和速率限制）
+    tavily_api_key: str | None = None  # Tavily API 密钥（配置后额外启用 Tavily 搜索）
+    brave_api_key: str | None = None  # Brave API 密钥（配置后额外启用 Brave 搜索）
     # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
     aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
     aux_api_key: str | None = None
@@ -1267,6 +1274,19 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_EXA_SEARCH",
         True,
     )
+    _allowed_search_providers = {"exa", "tavily", "brave"}
+    search_default_provider = (
+        os.environ.get("EXCELMANUS_SEARCH_DEFAULT", "exa").strip().lower()
+    )
+    if search_default_provider not in _allowed_search_providers:
+        logger.warning(
+            "环境变量 EXCELMANUS_SEARCH_DEFAULT 值无效(%r)，回退默认值 exa",
+            search_default_provider,
+        )
+        search_default_provider = "exa"
+    exa_api_key = os.environ.get("EXCELMANUS_EXA_API_KEY") or None
+    tavily_api_key = os.environ.get("EXCELMANUS_TAVILY_API_KEY") or None
+    brave_api_key = os.environ.get("EXCELMANUS_BRAVE_API_KEY") or None
 
     # AUX 配置（统一配置）
     aux_enabled = _parse_bool(
@@ -1741,6 +1761,10 @@ def load_config() -> ExcelManusConfig:
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
         exa_search_enabled=exa_search_enabled,
+        search_default_provider=search_default_provider,
+        exa_api_key=exa_api_key,
+        tavily_api_key=tavily_api_key,
+        brave_api_key=brave_api_key,
         aux_enabled=aux_enabled,
         aux_api_key=aux_api_key,
         aux_base_url=aux_base_url,

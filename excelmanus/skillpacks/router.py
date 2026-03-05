@@ -127,13 +127,14 @@ _TOOL_ROUTE_PROMPT = """\
 - chart: 创建图表、画图、可视化（柱状图、饼图、折线图等）
 - vision: 图片识别、截图还原表格、OCR相关
 - code: 编写Python脚本、执行代码、shell命令、非Excel文件操作
+- search: 搜索网上信息、查询最新资讯、了解某个产品/技术/概念、查找文档或教程
 - all_tools: 复杂多步骤任务、跨多种能力的任务、或无法确定类型
 
 用户消息: {message}
 标签:"""
 
 _VALID_ROUTE_TAGS = frozenset({
-    "data_read", "data_write", "chart", "vision", "code", "all_tools",
+    "data_read", "data_write", "chart", "vision", "code", "search", "all_tools",
 })
 
 
