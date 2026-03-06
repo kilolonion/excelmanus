@@ -1,3 +1,4 @@
+# -*- coding: utf-8 -*-
 """Word 文档工具：提供 .docx 读取、写入、检查和搜索能力。"""
 
 from __future__ import annotations
@@ -15,7 +16,7 @@ from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.word")
 
-_WORD_SUFFIXES: frozenset[str] = frozenset({".docx", ".doc"})
+_WORD_SUFFIXES: frozenset[str] = frozenset({".docx"})
 
 # ---------------------------------------------------------------------------
 # helpers
@@ -235,7 +236,8 @@ def write_word(
                     continue
                 ref_para = doc.paragraphs[idx]
                 from docx.oxml.ns import qn
-                new_p = ref_para._element.addnext(ref_para._element.makeelement(qn("w:p"), {}))
+                new_p = ref_para._element.makeelement(qn("w:p"), {})
+                ref_para._element.addnext(new_p)
                 from docx.text.paragraph import Paragraph
                 new_para = Paragraph(new_p, ref_para._parent)
                 new_para.add_run(text)
@@ -396,20 +398,30 @@ def search_word(
 
     flags = 0 if case_sensitive else re.IGNORECASE
     matches: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    inspected_files = 0
 
     for fp in paths[:10]:
         fmt_err = _ensure_docx(fp)
         if fmt_err:
+            errors.append(json.loads(fmt_err))
             continue
 
         safe_path, err = _resolve_path(fp)
         if err:
+            errors.append(json.loads(err))
             continue
 
         try:
             doc = _open_docx(safe_path)
-        except Exception:
+        except Exception as exc:
+            errors.append({
+                "error": f"无法打开文档: {exc}",
+                "file_path": fp,
+            })
             continue
+
+        inspected_files += 1
 
         for i, para in enumerate(doc.paragraphs):
             text = para.text
@@ -440,12 +452,18 @@ def search_word(
         if len(matches) >= max_results:
             break
 
-    return json.dumps({
+    if len(paths[:10]) == 1 and inspected_files == 0 and errors:
+        return json.dumps(errors[0], ensure_ascii=False, default=str)
+
+    result: dict[str, Any] = {
         "query": query,
         "match_mode": match_mode,
         "total_matches": len(matches),
         "matches": matches,
-    }, ensure_ascii=False, default=str)
+    }
+    if errors:
+        result["errors"] = errors
+    return json.dumps(result, ensure_ascii=False, default=str)
 
 
 # ---------------------------------------------------------------------------
