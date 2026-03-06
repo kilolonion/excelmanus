@@ -1428,7 +1428,10 @@ class ToolDispatcher:
                     e.state.backup_write_notice_shown = True
 
         # ── Post-Write Inline Checkpoint（零 LLM 调用回读验证）──
-        if success and tool_name in self._EXCEL_WRITE_TOOLS:
+        if success and (
+            tool_name in self._EXCEL_WRITE_TOOLS
+            or tool_name in self._WORD_WRITE_TOOLS
+        ):
             _ws_root = getattr(getattr(e, "_config", None), "workspace_root", "")
             _ckpt = self._post_write_checkpoint(tool_name, arguments, _ws_root)
             if _ckpt:
@@ -1554,7 +1557,10 @@ class ToolDispatcher:
         if success and on_event is not None:
             _emit_fc = False
             _fc_files: list[str] = []
-            if tool_name in self._EXCEL_WRITE_TOOLS:
+            if (
+                tool_name in self._EXCEL_WRITE_TOOLS
+                or tool_name in self._WORD_WRITE_TOOLS
+            ):
                 _fp = (arguments.get("file_path") or "").strip()
                 if _fp:
                     _fc_files.append(_fp)
@@ -1581,7 +1587,10 @@ class ToolDispatcher:
         if success:
             _state = getattr(e, "_state", None)
             if _state is not None:
-                if tool_name in self._EXCEL_WRITE_TOOLS:
+                if (
+                    tool_name in self._EXCEL_WRITE_TOOLS
+                    or tool_name in self._WORD_WRITE_TOOLS
+                ):
                     _afp = (arguments.get("file_path") or "").strip()
                     if _afp:
                         _state.record_affected_file(_afp)
@@ -1681,7 +1690,10 @@ class ToolDispatcher:
                             )
 
                     _write_paths: list[str] = []
-                    if tool_name in self._EXCEL_WRITE_TOOLS:
+                    if (
+                        tool_name in self._EXCEL_WRITE_TOOLS
+                        or tool_name in self._WORD_WRITE_TOOLS
+                    ):
                         _wp = (arguments.get("file_path") or "").strip()
                         if _wp:
                             _write_paths.append(_wp)
@@ -1833,14 +1845,17 @@ class ToolDispatcher:
         abs_path = _P(file_path) if _P(file_path).is_absolute() else _P(workspace_root) / file_path
         abs_path = abs_path.resolve()
 
-        # .xls/.xlsb → 工具层已转换为 .xlsx，checkpoint 需要打开转换后的文件
-        from excelmanus.tools._helpers import ensure_openpyxl_compatible
-        abs_path = ensure_openpyxl_compatible(abs_path)
-
         if not abs_path.is_file():
             return ""
 
         try:
+            if tool_name == "write_word":
+                return ToolDispatcher._checkpoint_write_word(abs_path)
+
+            # .xls/.xlsb → 工具层已转换为 .xlsx，checkpoint 需要打开转换后的文件
+            from excelmanus.tools._helpers import ensure_openpyxl_compatible
+            abs_path = ensure_openpyxl_compatible(abs_path)
+
             if tool_name == "write_cells":
                 return ToolDispatcher._checkpoint_write_cells(abs_path, arguments)
             elif tool_name == "create_sheet":
@@ -1948,11 +1963,22 @@ class ToolDispatcher:
         finally:
             wb.close()
 
+    @staticmethod
+    def _checkpoint_write_word(abs_path: "Path") -> str:
+        """write_word 后回读验证：确认文档仍可读取并报告基本结构。"""
+        from docx import Document as _Document
+
+        doc = _Document(str(abs_path))
+        return (
+            f"\n✓ 回读确认: Word 文档可读，"
+            f"当前段落数={len(doc.paragraphs)}，表格数={len(doc.tables)}"
+        )
+
     # ── 写入操作日志辅助（供 verifier delta 注入）────────────
 
     @staticmethod
     def _extract_write_summary(tool_name: str, arguments: dict, result_str: str) -> str:
-        """从 Excel 写入工具的参数/结果中提取简洁摘要。"""
+        """从写入工具的参数/结果中提取简洁摘要。"""
         if tool_name == "write_cells":
             values = arguments.get("values")
             if isinstance(values, list):
@@ -1972,6 +1998,9 @@ class ToolDispatcher:
         elif tool_name == "insert_columns":
             count = arguments.get("count", 1)
             return f"插入 {count} 列"
+        elif tool_name == "write_word":
+            ops = arguments.get("operations", [])
+            return f"Word 文档写入 {len(ops)} 项操作"
         return ""
 
     @staticmethod
@@ -1989,6 +2018,7 @@ class ToolDispatcher:
 
     _EXCEL_READ_TOOLS = {"read_excel"}
     _EXCEL_WRITE_TOOLS = {"write_to_sheet", "format_range"}
+    _WORD_WRITE_TOOLS = {"write_word"}
 
     @staticmethod
     def _extract_preview_styles(

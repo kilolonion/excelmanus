@@ -25,6 +25,11 @@ _EXCEL_PATH_PATTERN = re.compile(
     re.IGNORECASE,
 )
 _EXCEL_SUFFIXES = {".xlsx", ".xlsm", ".xlsb", ".xls"}
+_WORD_PATH_PATTERN = re.compile(
+    r"""(?:"([^"]+\.docx)"|'([^']+\.docx)'|([^\s"'，。！？；：]+?\.docx))""",
+    re.IGNORECASE,
+)
+_WORD_SUFFIXES = {".docx", ".doc"}
 _MAY_WRITE_HINT_RE = re.compile(
     r"(创建|修改|写入|删除|替换|填充|插入|更新|设置|格式化|高亮|加粗|标红|美化|条件格式|"
     r"画图|生成图表|柱状图|饼图|折线图|雷达图|散点图|排序|合并|转置|拆分|"
@@ -122,8 +127,8 @@ _TOOL_ROUTE_PROMPT = """\
 你是一个任务分类器。根据用户消息，判断需要哪类工具。只输出一个标签，不要输出任何其他内容。
 
 标签定义：
-- data_read: 读取、查看、分析、对比、筛选、统计Excel/CSV数据（不修改文件）
-- data_write: 修改、填充、写入、格式化、排序、合并、替换Excel数据
+- data_read: 读取、查看、分析、对比、筛选、统计 Excel/CSV/Word 数据（不修改文件）
+- data_write: 修改、填充、写入、格式化、排序、合并、替换 Excel/Word 数据
 - chart: 创建图表、画图、可视化（柱状图、饼图、折线图等）
 - vision: 图片识别、截图还原表格、OCR相关
 - code: 编写Python脚本、执行代码、shell命令、非Excel文件操作
@@ -778,6 +783,8 @@ class SkillRouter:
         # 消息中包含 Excel 文件路径引用 → 大概率要操作文件，保守归为 may_write
         if _EXCEL_PATH_PATTERN.search(text):
             return "may_write"
+        if _WORD_PATH_PATTERN.search(text):
+            return "may_write"
         return None
 
     @staticmethod
@@ -855,6 +862,8 @@ class SkillRouter:
         merged.extend(file_paths)
         merged.extend(self._extract_excel_paths(user_message))
         merged.extend(self._extract_excel_paths(raw_args))
+        merged.extend(self._extract_word_paths(user_message))
+        merged.extend(self._extract_word_paths(raw_args))
         deduped: list[str] = []
         seen: set[str] = set()
         for path in merged:
@@ -873,7 +882,7 @@ class SkillRouter:
         max_sheets: int = 5,
         scan_rows: int = 12,
     ) -> tuple[str, int, int]:
-        """预读候选 Excel 文件的 sheet 结构，注入路由上下文。
+        """预读候选 Excel/Word 文件结构，注入路由上下文。
 
         用 openpyxl 只读模式仅读前几行，帮助 LLM 确定 header_row
         和可用列名，避免盲猜导致的多轮重试。
@@ -909,7 +918,8 @@ class SkillRouter:
                 continue
             seen.add(resolved_str)
 
-            if resolved.suffix.lower() not in _EXCEL_SUFFIXES:
+            suffix = resolved.suffix.lower()
+            if suffix not in _EXCEL_SUFFIXES and suffix not in _WORD_SUFFIXES:
                 continue
             try:
                 if not resolved.is_file():
@@ -929,6 +939,35 @@ class SkillRouter:
                     file_sections.append(
                         f"文件: {normalized}\n" + "\n".join(cached_sheet_lines)
                     )
+                    processed += 1
+                continue
+
+            if suffix in _WORD_SUFFIXES:
+                try:
+                    from docx import Document as DocxDocument
+
+                    doc = DocxDocument(str(resolved))
+                    word_lines = [f"  段落: {len(doc.paragraphs)}, 表格: {len(doc.tables)}"]
+                    headings = [
+                        paragraph.text[:60]
+                        for paragraph in doc.paragraphs
+                        if paragraph.style
+                        and paragraph.style.name.startswith("Heading")
+                        and paragraph.text.strip()
+                    ]
+                    if headings:
+                        word_lines.append(f"  标题: {', '.join(headings[:5])}")
+                except Exception:
+                    continue
+
+                self._set_file_structure_cache(
+                    cache_key=cache_key,
+                    sheet_lines=word_lines,
+                    sheet_count=0,
+                    max_total_rows=0,
+                )
+                if word_lines:
+                    file_sections.append(f"文件: {normalized}\n" + "\n".join(word_lines))
                     processed += 1
                 continue
 
@@ -1005,7 +1044,7 @@ class SkillRouter:
             return "", all_sheet_count, all_max_total_rows
 
         header = (
-            "[文件结构预览] 以下是用户提及的 Excel 文件结构，请据此确定正确的 header_row 和列名。\n"
+            "[文件结构预览] 以下是用户提及的 Excel/Word 文件结构；Excel 请据此确定正确的 header_row 和列名，Word 请据此了解段落、表格和标题。\n"
             "请基于以上预览直接调用工具执行用户请求，不要重复描述文件结构。"
         )
         return header + "\n" + "\n".join(file_sections), all_sheet_count, all_max_total_rows
@@ -1210,6 +1249,18 @@ class SkillRouter:
             return []
         paths: list[str] = []
         for match in _EXCEL_PATH_PATTERN.finditer(text):
+            value = next((group for group in match.groups() if group), "")
+            candidate = value.strip().strip("，。！？；：,.;:()[]{}")
+            if candidate:
+                paths.append(candidate)
+        return paths
+
+    @staticmethod
+    def _extract_word_paths(text: str) -> list[str]:
+        if not text:
+            return []
+        paths: list[str] = []
+        for match in _WORD_PATH_PATTERN.finditer(text):
             value = next((group for group in match.groups() if group), "")
             candidate = value.strip().strip("，。！？；：,.;:()[]{}")
             if candidate:

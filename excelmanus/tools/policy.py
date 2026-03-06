@@ -17,6 +17,10 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
         "read_excel",
         "compare_excel",
+        # Word 文档工具：只读
+        "read_word",
+        "inspect_word",
+        "search_word",
         # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
         "filter_data",
         "list_sheets",
@@ -51,6 +55,9 @@ PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
         "read_excel",
         "compare_excel",
+        "read_word",
+        "inspect_word",
+        "search_word",
         "filter_data",
         "list_sheets",
         "read_text_file",
@@ -90,6 +97,8 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         "edit_text_file",
         "rename_file",
         "copy_file",
+        # Word 文档写入（沙盒守卫，低风险）
+        "write_word",
         # 图表工具（写 Excel，低风险）
         "create_excel_chart",
         # Vision 工具（写文件，自动审批）
@@ -117,6 +126,7 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "edit_text_file": ("file_path",),
     "copy_file": ("destination",),
     "rename_file": ("source", "destination"),
+    "write_word": ("file_path",),
     "delete_file": ("file_path",),
     "create_excel_chart": ("file_path",),
     "rebuild_excel_from_spec": ("output_path",),
@@ -177,6 +187,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     # data_write: Batch 1 精简
     # format: Batch 2 精简
     # advanced_format + chart + sheet写入: Batch 3 精简
+    "word": ("read_word", "inspect_word", "search_word", "write_word"),
     "sheet": ("list_sheets", "focus_window"),  # list_sheets 保留为只读结构发现
     "chart": ("create_excel_chart",),
     "file": (
@@ -199,6 +210,10 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
     "filter_data": "按条件筛选 Excel/CSV 数据行，支持 14 种运算符、多条件组合、排序和 Top-N",
     "compare_excel": "对比两个 Excel 文件或同一文件的两个工作表，返回结构化差异报告（新增/删除/修改行和单元格）",
+    "read_word": "读取 Word (.docx) 文档的段落内容和表格，支持分页和行内格式",
+    "inspect_word": "检查 Word 文档的结构概览（标题树、段落数、表格数、节数、页面设置）",
+    "search_word": "在 Word 文档中全文搜索，支持包含/精确/正则/前缀匹配",
+    "write_word": "对 Word 文档执行段落写入操作（替换/插入/追加/删除）",
     # 数据写入
     # write_excel, write_cells, transform_data, insert_rows, insert_columns: Batch 1 精简
     # Batch 2 精简（format 全部）
@@ -238,6 +253,7 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
 _DATA_READ_TOOLS: frozenset[str] = frozenset({
     "read_excel", "inspect_excel_files", "filter_data", "compare_excel",
     "scan_excel_snapshot", "search_excel_values",
+    "read_word", "inspect_word", "search_word",
     "list_sheets", "focus_window",
     "discover_file_relationships", "memory_read_topic",
     "introspect_capability",
@@ -247,7 +263,7 @@ ROUTE_TOOL_SCOPE: dict[str, frozenset[str]] = {
     "data_read": _DATA_READ_TOOLS,
     "data_write": _DATA_READ_TOOLS | frozenset({
         "run_code", "write_text_file", "edit_text_file",
-        "copy_file", "rename_file",
+        "copy_file", "rename_file", "write_word",
     }),
     "chart": _DATA_READ_TOOLS | frozenset({
         "create_excel_chart", "run_code",

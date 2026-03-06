@@ -31,6 +31,10 @@ _SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 
 logger = get_logger("context_builder")
 
+_EXCEL_EXTS = frozenset({".xlsx", ".xlsm", ".xls", ".xlsb"})
+_WORD_EXTS = frozenset({".docx"})
+_DISCOVERABLE_EXTS = _EXCEL_EXTS | _WORD_EXTS
+
 
 def build_ref_graph_notice(cache: Any) -> str:
     """从 RefCache 构建引用关系图 notice 文本（模块级，方便单元测试）。"""
@@ -471,6 +475,7 @@ class ContextBuilder:
         )
         if not is_critical:
             return ""
+        readback_hint = _build_post_write_readback_hint(ops)
 
         # 构建最近写入的简要摘要
         recent = ops[-3:]  # 最近 3 条
@@ -493,10 +498,9 @@ class ContextBuilder:
         if _has_new_file:
             return (
                 "## ⚠ 新文件创建——必须回读验证\n"
-                "你刚创建了新的 Excel 文件，stdout 输出**不能**替代回读验证：\n"
+                "你刚创建了新的目标文件，stdout 输出**不能**替代回读验证：\n"
                 + "\n".join(f"- {s}" for s in summaries)
-                + "\n\n**必须**立即用 `read_excel` 或 `scan_excel_snapshot` 回读新文件，"
-                "确认：① 文件已创建 ② sheet 结构正确 ③ 数据行数/列数与预期一致。"
+                + f"\n\n**必须**立即{readback_hint}"
                 "\n验证通过后再继续下一步或汇报结果。"
             )
 
@@ -504,14 +508,15 @@ class ContextBuilder:
             "## ⚡ 写入后自检提示\n"
             "你刚执行了关键写入操作，建议在继续下一步前快速确认：\n"
             + "\n".join(f"- {s}" for s in summaries)
-            + "\n\n用 `read_excel` 或 `scan_excel_snapshot` 抽检目标区域，"
-            "确认数据正确后再继续。发现问题立即修正，不要等到 finish_task。"
+            + f"\n\n{readback_hint}"
+            "发现问题立即修正，不要等到 finish_task。"
         )
 
     def _build_scan_tool_hint(self) -> str:
-        """当工作区有 Excel 文件但无 explorer 缓存时，自动预扫描并注入缓存。
+        """当工作区有 Excel / Word 文件但无 explorer 缓存时，自动预扫描并注入缓存。
 
-        - 首次 chat 时检测到 Excel 文件且无缓存 → 自动调用 scan_excel_snapshot
+        - Excel 文件走 scan_excel_snapshot
+        - Word 文件走 inspect_word
         - 将扫描结果转换为 explorer_report 格式注入 session_state.explorer_reports
         - 同一轮的 _build_explorer_report_notice 即可接管展示
         - 如果自动扫描失败，降级为文本提示
@@ -527,37 +532,47 @@ class ContextBuilder:
         # 标记探索已启动，防止与 _auto_explore_after_scan 竞态重复注入
         if getattr(state, "_explore_in_progress", False):
             return ""
-        # 直接扫描磁盘目录发现 Excel 文件（不依赖 FileRegistry._path_cache，
+        # 直接扫描磁盘目录发现可扫描文件（不依赖 FileRegistry._path_cache，
         # 因为后台 scan_workspace 可能尚未完成）
         workspace_root = getattr(e.config, "workspace_root", None) or getattr(e, "_workspace_root", None)
         if not workspace_root:
             return ""
-        excel_paths = self._discover_excel_files_on_disk(str(workspace_root))
-        if not excel_paths:
+        discovered_paths = self._discover_excel_files_on_disk(str(workspace_root))
+        if not discovered_paths:
             return ""
+        has_excel = any(_classify_discovered_file(path) == "excel" for path in discovered_paths)
+        has_word = any(_classify_discovered_file(path) == "word" for path in discovered_paths)
         state._explore_in_progress = True  # type: ignore[attr-defined]
 
         # 尝试自动预扫描（最多扫描前 5 个文件，每个最多 500ms）
-        auto_scanned = self._try_auto_prescan(excel_paths[:5], state)
+        auto_scanned = self._try_auto_prescan(discovered_paths[:5], state)
         if auto_scanned:
             # 扫描成功 → 结果已注入 explorer_reports，_build_explorer_report_notice 会接管
             # 返回空字符串，不需要额外提示
             return ""
 
         # 自动扫描失败 → 降级为文本提示
-        return (
-            "## 💡 数据快速扫描提示\n"
-            "工作区有 Excel 文件但尚无数据概况缓存。"
-            "处理数据任务前，建议先调用 `scan_excel_snapshot` 一次性获取文件全貌"
-            "（schema、列统计、质量信号、跨 Sheet 关联），"
-            "或使用 `search_excel_values` 跨 Sheet 搜索特定值。"
-        )
+        hint_parts = [
+            "## 💡 数据快速扫描提示\n",
+            "工作区已有可处理文件，但尚无结构化概况缓存。",
+        ]
+        if has_excel:
+            hint_parts.append(
+                "处理表格任务前，建议先调用 `scan_excel_snapshot` 一次性获取 Excel 文件全貌"
+                "（schema、列统计、质量信号、跨 Sheet 关联），"
+                "或使用 `search_excel_values` 跨 Sheet 搜索特定值。"
+            )
+        if has_word:
+            hint_parts.append(
+                "也可以用 `inspect_word` 了解 Word 文档结构（段落数、表格数、标题摘要）。"
+            )
+        return "".join(hint_parts)
 
     @staticmethod
     def _try_auto_prescan(excel_paths: list[str], state: Any) -> bool:
-        """尝试自动调用 scan_excel_snapshot 并将结果注入 explorer_reports。
+        """尝试自动调用 scan_excel_snapshot / inspect_word 并注入 explorer_reports。
 
-        当成功扫描 ≥2 个文件时，额外调用 discover_file_relationships
+        当成功扫描 ≥2 个 Excel 文件时，额外调用 discover_file_relationships
         检测跨文件列关联，将结果作为 relationship 类型的 finding 注入。
 
         Returns:
@@ -567,31 +582,47 @@ class ContextBuilder:
         try:
             from excelmanus.tools.data_tools import scan_excel_snapshot
         except ImportError:
-            return False
+            scan_excel_snapshot = None
+        try:
+            from excelmanus.tools.word_tools import inspect_word
+        except ImportError:
+            inspect_word = None
 
         any_success = False
-        scanned_paths: list[str] = []
+        scanned_excel_paths: list[str] = []
         for path in excel_paths:
             try:
-                raw = scan_excel_snapshot(file_path=path, max_sample_rows=200)
-                scan = _json.loads(raw)
-                if "error" in scan:
-                    continue
-                # 转换为 explorer_report 格式
-                report = _convert_scan_to_explorer_report(scan, path)
+                file_kind = _classify_discovered_file(path)
+                if file_kind == "word":
+                    if inspect_word is None:
+                        continue
+                    raw = inspect_word(file_path=path)
+                    scan = _json.loads(raw)
+                    if "error" in scan:
+                        continue
+                    report = _convert_word_inspect_to_explorer_report(scan, path)
+                else:
+                    if scan_excel_snapshot is None:
+                        continue
+                    raw = scan_excel_snapshot(file_path=path, max_sample_rows=200)
+                    scan = _json.loads(raw)
+                    if "error" in scan:
+                        continue
+                    report = _convert_scan_to_explorer_report(scan, path)
                 if report:
                     state.explorer_reports.append(report)
                     any_success = True
-                    scanned_paths.append(path)
+                    if file_kind == "excel":
+                        scanned_excel_paths.append(path)
             except Exception:
                 continue
 
-        # 跨文件关系自动发现：≥2 个文件成功扫描时触发
-        if len(scanned_paths) >= 2:
+        # 跨文件关系自动发现：≥2 个 Excel 文件成功扫描时触发
+        if len(scanned_excel_paths) >= 2:
             try:
                 from excelmanus.tools.data_tools import discover_file_relationships
                 rel_raw = discover_file_relationships(
-                    file_paths=scanned_paths, sample_rows=200,
+                    file_paths=scanned_excel_paths, sample_rows=200,
                 )
                 rel_data = _json.loads(rel_raw)
                 file_pairs = rel_data.get("file_pairs", [])
@@ -697,7 +728,7 @@ class ContextBuilder:
 
     @staticmethod
     def _discover_excel_files_on_disk(workspace_root: str, *, max_files: int = 10) -> list[str]:
-        """直接扫描磁盘发现 Excel 文件，不依赖 FileRegistry 缓存。
+        """直接扫描磁盘发现 Excel / Word 文件，不依赖 FileRegistry 缓存。
 
         轻量级目录遍历，仅收集文件路径（不打开文件），
         用于在 FileRegistry scan 尚未完成时作为 fallback。
@@ -709,7 +740,6 @@ class ContextBuilder:
             ".git", ".venv", "node_modules", "__pycache__",
             ".worktrees", "dist", "build",
         })
-        _EXCEL_EXTS = frozenset({".xlsx", ".xlsm", ".xls", ".xlsb"})
         root = _Path(workspace_root)
         results: list[str] = []
         try:
@@ -719,7 +749,7 @@ class ContextBuilder:
                     if name.startswith((".", "~$")):
                         continue
                     ext = _os.path.splitext(name)[1].lower()
-                    if ext in _EXCEL_EXTS:
+                    if ext in _DISCOVERABLE_EXTS:
                         results.append(str(_Path(walk_root, name)))
                         if len(results) >= max_files:
                             return results
@@ -1788,6 +1818,53 @@ class ContextBuilder:
         return normalized[:max_chars]
 
 
+def _classify_discovered_file(file_path: str) -> str:
+    """根据文件后缀区分可扫描文件类型。"""
+    import os as _os
+
+    suffix = _os.path.splitext(str(file_path))[1].lower()
+    if suffix in _WORD_EXTS:
+        return "word"
+    if suffix in _EXCEL_EXTS:
+        return "excel"
+    return "other"
+
+
+def _build_post_write_readback_hint(ops: Sequence[dict[str, Any]]) -> str:
+    """根据写入日志生成回读验证提示。"""
+    has_excel_write = False
+    has_word_write = False
+    for entry in ops:
+        tool_name = str(entry.get("tool_name", "") or "")
+        file_kind = _classify_discovered_file(str(entry.get("file_path", "") or ""))
+        if tool_name == "write_word" or file_kind == "word":
+            has_word_write = True
+        elif tool_name in {"write_to_sheet", "format_range"} or file_kind == "excel":
+            has_excel_write = True
+
+    if has_excel_write and has_word_write:
+        return (
+            "用 `read_excel` 或 `scan_excel_snapshot` 抽检 Excel 区域，"
+            "并用 `read_word` 抽检目标段落，确认内容正确后再继续。"
+        )
+    if has_word_write:
+        return "用 `read_word` 抽检目标段落，确认内容正确后再继续。"
+    return "用 `read_excel` 或 `scan_excel_snapshot` 抽检目标区域，确认数据正确后再继续。"
+
+
+def _summarize_word_headings(headings: Sequence[dict[str, Any]], *, max_items: int = 3) -> str:
+    """提取前几个标题文本用于结构摘要。"""
+    texts: list[str] = []
+    for heading in headings:
+        text = " ".join(str(heading.get("text", "") or "").split())
+        if not text:
+            continue
+        texts.append(text)
+        if len(texts) >= max_items:
+            break
+    return " / ".join(texts)
+
+
 def _convert_scan_to_explorer_report(scan: dict, file_path: str) -> dict | None:
     """将 scan_excel_snapshot 的输出转换为 explorer_report 格式。
 
@@ -1894,5 +1971,57 @@ def _convert_scan_to_explorer_report(scan: dict, file_path: str) -> dict | None:
         "schema": schema,
         "findings": findings[:10],
         "recommendation": recommendation,
+    }
+
+
+def _convert_word_inspect_to_explorer_report(scan: dict, file_path: str) -> dict | None:
+    """将 inspect_word 的输出转换为 explorer_report 格式。"""
+    if "files" in scan:
+        files = scan.get("files", [])
+        if not files:
+            return None
+        scan = files[0]
+
+    if scan.get("error"):
+        return None
+
+    total_paragraphs = int(scan.get("total_paragraphs", 0) or 0)
+    total_tables = int(scan.get("total_tables", 0) or 0)
+    total_sections = int(scan.get("total_sections", 0) or 0)
+
+    heading_summary = _summarize_word_headings(scan.get("headings", []))
+    if not heading_summary and scan.get("title"):
+        heading_summary = " ".join(str(scan.get("title", "")).split())
+
+    summary = f"{file_path}: {total_paragraphs} 个段落, {total_tables} 个表格"
+    if total_sections:
+        summary += f", {total_sections} 个节"
+    if heading_summary:
+        summary += f", 标题摘要: {heading_summary}"
+    summary += " (自动预扫描)"
+
+    findings: list[dict[str, str]] = [{
+        "type": "document_structure",
+        "severity": "info",
+        "detail": f"文档概览：{total_paragraphs} 个段落，{total_tables} 个表格，{total_sections} 个节",
+    }]
+    if heading_summary:
+        findings.append({
+            "type": "document_heading",
+            "severity": "info",
+            "detail": f"标题摘要: {heading_summary}",
+        })
+
+    return {
+        "summary": summary,
+        "files": [{
+            "path": file_path,
+            "paragraphs": total_paragraphs,
+            "tables": total_tables,
+            "sections": total_sections,
+        }],
+        "schema": {},
+        "findings": findings,
+        "recommendation": "如需核对正文内容，可继续用 `read_word` 抽检关键段落。",
     }
 
