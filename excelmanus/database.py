@@ -374,6 +374,131 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
     ],
+    21: [
+        # ── 号池：池账号主表 ──
+        """CREATE TABLE IF NOT EXISTS pool_accounts (
+            id                   TEXT PRIMARY KEY,
+            label                TEXT NOT NULL DEFAULT '',
+            provider             TEXT NOT NULL DEFAULT 'openai-codex',
+            account_id           TEXT DEFAULT '',
+            plan_type            TEXT DEFAULT '',
+            status               TEXT NOT NULL DEFAULT 'active',
+            daily_budget_tokens  INTEGER NOT NULL DEFAULT 0,
+            weekly_budget_tokens INTEGER NOT NULL DEFAULT 0,
+            timezone             TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+            health_signal        TEXT NOT NULL DEFAULT 'ok',
+            health_confidence    REAL NOT NULL DEFAULT 0.0,
+            health_updated_at    TEXT DEFAULT '',
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        )""",
+        # ── 号池：用量台账 ──
+        """CREATE TABLE IF NOT EXISTS pool_usage_ledger (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            pool_account_id   TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            session_id        TEXT DEFAULT '',
+            user_id           TEXT DEFAULT '',
+            model             TEXT NOT NULL DEFAULT '',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens      INTEGER NOT NULL DEFAULT 0,
+            outcome           TEXT NOT NULL DEFAULT 'success',
+            error_code        TEXT DEFAULT '',
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_account ON pool_usage_ledger(pool_account_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_created ON pool_usage_ledger(created_at)",
+        # ── 号池：预算快照 ──
+        """CREATE TABLE IF NOT EXISTS pool_budget_snapshots (
+            pool_account_id    TEXT PRIMARY KEY REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            day_window_tokens  INTEGER NOT NULL DEFAULT 0,
+            week_window_tokens INTEGER NOT NULL DEFAULT 0,
+            daily_remaining    INTEGER NOT NULL DEFAULT 0,
+            weekly_remaining   INTEGER NOT NULL DEFAULT 0,
+            snapshot_at        TEXT NOT NULL
+        )""",
+        # ── 号池：人工激活映射 ──
+        """CREATE TABLE IF NOT EXISTS pool_manual_active (
+            provider         TEXT NOT NULL,
+            model_pattern    TEXT NOT NULL DEFAULT '*',
+            pool_account_id  TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            activated_by     TEXT DEFAULT '',
+            activated_at     TEXT NOT NULL,
+            PRIMARY KEY (provider, model_pattern)
+        )""",
+    ],
+    22: [
+        # ── 号池：自动轮换策略 ──
+        """CREATE TABLE IF NOT EXISTS pool_auto_policies (
+            id                    TEXT PRIMARY KEY,
+            provider              TEXT NOT NULL DEFAULT 'openai-codex',
+            model_pattern         TEXT NOT NULL DEFAULT '*',
+            enabled               INTEGER NOT NULL DEFAULT 1,
+            low_watermark         REAL NOT NULL DEFAULT 0.15,
+            rate_limit_threshold  INTEGER NOT NULL DEFAULT 3,
+            transient_threshold   INTEGER NOT NULL DEFAULT 5,
+            error_window_minutes  INTEGER NOT NULL DEFAULT 5,
+            cooldown_seconds      INTEGER NOT NULL DEFAULT 300,
+            fallback_to_default   INTEGER NOT NULL DEFAULT 1,
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL,
+            UNIQUE(provider, model_pattern)
+        )""",
+        # ── 号池：轮换审计事件 ──
+        """CREATE TABLE IF NOT EXISTS pool_rotation_events (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            provider          TEXT NOT NULL,
+            model_pattern     TEXT NOT NULL DEFAULT '*',
+            from_account_id   TEXT DEFAULT '',
+            to_account_id     TEXT DEFAULT '',
+            reason            TEXT NOT NULL DEFAULT '',
+            trigger           TEXT NOT NULL DEFAULT 'hard',
+            fallback_used     INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_rotation_events_time ON pool_rotation_events(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_rotation_events_scope ON pool_rotation_events(provider, model_pattern)",
+    ],
+    23: [
+        # ── 号池 P3：稳态治理 ──
+        """CREATE TABLE IF NOT EXISTS pool_scope_state (
+            provider          TEXT NOT NULL,
+            model_pattern     TEXT NOT NULL DEFAULT '*',
+            mode              TEXT NOT NULL DEFAULT 'auto',
+            current_account_id TEXT DEFAULT '',
+            current_score     REAL NOT NULL DEFAULT 0.0,
+            activated_at      TEXT DEFAULT '',
+            cooldown_until    TEXT DEFAULT '',
+            last_rotation_at  TEXT DEFAULT '',
+            updated_at        TEXT NOT NULL,
+            PRIMARY KEY (provider, model_pattern)
+        )""",
+        """CREATE TABLE IF NOT EXISTS pool_account_breakers (
+            pool_account_id       TEXT PRIMARY KEY,
+            consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+            breaker_state         TEXT NOT NULL DEFAULT 'closed',
+            open_until            TEXT DEFAULT '',
+            last_failure_at       TEXT DEFAULT '',
+            updated_at            TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS pool_rotation_metrics_minute (
+            minute_bucket   TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            model_pattern   TEXT NOT NULL DEFAULT '*',
+            total_requests  INTEGER NOT NULL DEFAULT 0,
+            success_count   INTEGER NOT NULL DEFAULT 0,
+            error_429       INTEGER NOT NULL DEFAULT 0,
+            error_5xx       INTEGER NOT NULL DEFAULT 0,
+            rotations       INTEGER NOT NULL DEFAULT 0,
+            fallbacks       INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (minute_bucket, provider, model_pattern)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_minute ON pool_rotation_metrics_minute(minute_bucket DESC)",
+        # ALTER 新列（SQLite 不支持 IF NOT EXISTS，用 try/except 在迁移框架中处理）
+        "ALTER TABLE pool_auto_policies ADD COLUMN hysteresis_delta REAL NOT NULL DEFAULT 0.12",
+        "ALTER TABLE pool_auto_policies ADD COLUMN min_dwell_seconds INTEGER NOT NULL DEFAULT 180",
+        "ALTER TABLE pool_auto_policies ADD COLUMN breaker_open_seconds INTEGER NOT NULL DEFAULT 120",
+    ],
 }
 
 # ── PostgreSQL 迁移 DDL ──────────────────────────────────────
@@ -727,6 +852,130 @@ _PG_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
+    ],
+    21: [
+        # ── 号池：池账号主表 ──
+        """CREATE TABLE IF NOT EXISTS pool_accounts (
+            id                   TEXT PRIMARY KEY,
+            label                TEXT NOT NULL DEFAULT '',
+            provider             TEXT NOT NULL DEFAULT 'openai-codex',
+            account_id           TEXT DEFAULT '',
+            plan_type            TEXT DEFAULT '',
+            status               TEXT NOT NULL DEFAULT 'active',
+            daily_budget_tokens  INTEGER NOT NULL DEFAULT 0,
+            weekly_budget_tokens INTEGER NOT NULL DEFAULT 0,
+            timezone             TEXT NOT NULL DEFAULT 'Asia/Shanghai',
+            health_signal        TEXT NOT NULL DEFAULT 'ok',
+            health_confidence    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            health_updated_at    TEXT DEFAULT '',
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL
+        )""",
+        # ── 号池：用量台账 ──
+        """CREATE TABLE IF NOT EXISTS pool_usage_ledger (
+            id                SERIAL PRIMARY KEY,
+            pool_account_id   TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            session_id        TEXT DEFAULT '',
+            user_id           TEXT DEFAULT '',
+            model             TEXT NOT NULL DEFAULT '',
+            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+            completion_tokens INTEGER NOT NULL DEFAULT 0,
+            total_tokens      INTEGER NOT NULL DEFAULT 0,
+            outcome           TEXT NOT NULL DEFAULT 'success',
+            error_code        TEXT DEFAULT '',
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_account ON pool_usage_ledger(pool_account_id, created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_created ON pool_usage_ledger(created_at)",
+        # ── 号池：预算快照 ──
+        """CREATE TABLE IF NOT EXISTS pool_budget_snapshots (
+            pool_account_id    TEXT PRIMARY KEY REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            day_window_tokens  INTEGER NOT NULL DEFAULT 0,
+            week_window_tokens INTEGER NOT NULL DEFAULT 0,
+            daily_remaining    INTEGER NOT NULL DEFAULT 0,
+            weekly_remaining   INTEGER NOT NULL DEFAULT 0,
+            snapshot_at        TEXT NOT NULL
+        )""",
+        # ── 号池：人工激活映射 ──
+        """CREATE TABLE IF NOT EXISTS pool_manual_active (
+            provider         TEXT NOT NULL,
+            model_pattern    TEXT NOT NULL DEFAULT '*',
+            pool_account_id  TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
+            activated_by     TEXT DEFAULT '',
+            activated_at     TEXT NOT NULL,
+            PRIMARY KEY (provider, model_pattern)
+        )""",
+    ],
+    22: [
+        # ── 号池：自动轮换策略 ──
+        """CREATE TABLE IF NOT EXISTS pool_auto_policies (
+            id                    TEXT PRIMARY KEY,
+            provider              TEXT NOT NULL DEFAULT 'openai-codex',
+            model_pattern         TEXT NOT NULL DEFAULT '*',
+            enabled               INTEGER NOT NULL DEFAULT 1,
+            low_watermark         DOUBLE PRECISION NOT NULL DEFAULT 0.15,
+            rate_limit_threshold  INTEGER NOT NULL DEFAULT 3,
+            transient_threshold   INTEGER NOT NULL DEFAULT 5,
+            error_window_minutes  INTEGER NOT NULL DEFAULT 5,
+            cooldown_seconds      INTEGER NOT NULL DEFAULT 300,
+            fallback_to_default   INTEGER NOT NULL DEFAULT 1,
+            created_at            TEXT NOT NULL,
+            updated_at            TEXT NOT NULL,
+            UNIQUE(provider, model_pattern)
+        )""",
+        # ── 号池：轮换审计事件 ──
+        """CREATE TABLE IF NOT EXISTS pool_rotation_events (
+            id                SERIAL PRIMARY KEY,
+            provider          TEXT NOT NULL,
+            model_pattern     TEXT NOT NULL DEFAULT '*',
+            from_account_id   TEXT DEFAULT '',
+            to_account_id     TEXT DEFAULT '',
+            reason            TEXT NOT NULL DEFAULT '',
+            trigger           TEXT NOT NULL DEFAULT 'hard',
+            fallback_used     INTEGER NOT NULL DEFAULT 0,
+            created_at        TEXT NOT NULL
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_rotation_events_time ON pool_rotation_events(created_at DESC)",
+        "CREATE INDEX IF NOT EXISTS idx_rotation_events_scope ON pool_rotation_events(provider, model_pattern)",
+    ],
+    23: [
+        # ── 号池 P3：稳态治理 ──
+        """CREATE TABLE IF NOT EXISTS pool_scope_state (
+            provider          TEXT NOT NULL,
+            model_pattern     TEXT NOT NULL DEFAULT '*',
+            mode              TEXT NOT NULL DEFAULT 'auto',
+            current_account_id TEXT DEFAULT '',
+            current_score     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
+            activated_at      TEXT DEFAULT '',
+            cooldown_until    TEXT DEFAULT '',
+            last_rotation_at  TEXT DEFAULT '',
+            updated_at        TEXT NOT NULL,
+            PRIMARY KEY (provider, model_pattern)
+        )""",
+        """CREATE TABLE IF NOT EXISTS pool_account_breakers (
+            pool_account_id       TEXT PRIMARY KEY,
+            consecutive_failures  INTEGER NOT NULL DEFAULT 0,
+            breaker_state         TEXT NOT NULL DEFAULT 'closed',
+            open_until            TEXT DEFAULT '',
+            last_failure_at       TEXT DEFAULT '',
+            updated_at            TEXT NOT NULL
+        )""",
+        """CREATE TABLE IF NOT EXISTS pool_rotation_metrics_minute (
+            minute_bucket   TEXT NOT NULL,
+            provider        TEXT NOT NULL,
+            model_pattern   TEXT NOT NULL DEFAULT '*',
+            total_requests  INTEGER NOT NULL DEFAULT 0,
+            success_count   INTEGER NOT NULL DEFAULT 0,
+            error_429       INTEGER NOT NULL DEFAULT 0,
+            error_5xx       INTEGER NOT NULL DEFAULT 0,
+            rotations       INTEGER NOT NULL DEFAULT 0,
+            fallbacks       INTEGER NOT NULL DEFAULT 0,
+            PRIMARY KEY (minute_bucket, provider, model_pattern)
+        )""",
+        "CREATE INDEX IF NOT EXISTS idx_metrics_minute ON pool_rotation_metrics_minute(minute_bucket DESC)",
+        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS hysteresis_delta DOUBLE PRECISION NOT NULL DEFAULT 0.12",
+        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS min_dwell_seconds INTEGER NOT NULL DEFAULT 180",
+        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS breaker_open_seconds INTEGER NOT NULL DEFAULT 120",
     ],
 }
 

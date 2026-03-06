@@ -186,18 +186,21 @@ class UserStore:
             except Exception:
                 pass  # 列已存在或其他错误
 
+    _STORAGE_QUOTA_COLUMNS = frozenset({"max_storage_mb", "max_files"})
+
     def _migrate_storage_quota(self) -> None:
         """为已有数据库添加 max_storage_mb / max_files 列（幂等）。"""
-        for col in ("max_storage_mb", "max_files"):
+        for col in self._STORAGE_QUOTA_COLUMNS:
+            # col 来自硬编码白名单，无 SQL 注入风险
             try:
-                self._conn.execute(f"SELECT {col} FROM users LIMIT 1")
+                self._conn.execute(f"SELECT {col} FROM users LIMIT 1")  # nosec: col from _STORAGE_QUOTA_COLUMNS
             except Exception:
                 try:
-                    self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")
+                    self._conn.execute(f"ALTER TABLE users ADD COLUMN {col} INTEGER DEFAULT 0")  # nosec
                     self._conn.commit()
                     logger.info("迁移：已添加 users.%s 列", col)
                 except Exception:
-                    pass
+                    logger.debug("迁移 users.%s 列失败", col, exc_info=True)
 
     def _migrate_oauth_links(self) -> None:
         """将 users 表中已有的 oauth_provider/oauth_id 迁移到 user_oauth_links（幂等）。"""

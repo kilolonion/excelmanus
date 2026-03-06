@@ -55,6 +55,8 @@ class CredentialResolver:
         self._user_store = user_store
         self._config = config
         self._refresh_locks: dict[str, asyncio.Lock] = {}
+        self._pool_service: Any = None  # PoolService，由 lifespan 注入
+        self._pool_enabled: bool = False  # 灰度开关，由 lifespan 注入
 
     def _get_refresh_lock(self, user_id: str, provider_name: str) -> asyncio.Lock:
         """获取 (user_id, provider) 对应的 asyncio.Lock（懒创建）。"""
@@ -72,8 +74,14 @@ class CredentialResolver:
         if not user_id:
             return None
 
-        # 1. 匹配 provider
+        # 0. 号池优先：检查人工激活映射
         provider_name = self._match_provider(model)
+        if provider_name:
+            pool_resolved = self._try_pool_account(provider_name, model)
+            if pool_resolved:
+                return pool_resolved
+
+        # 1. 匹配 provider → 用户 OAuth
         if provider_name and self._store:
             resolved = await self._try_oauth_profile(user_id, provider_name)
             if resolved:
@@ -102,6 +110,12 @@ class CredentialResolver:
         provider_name = self._match_provider(model)
         if not provider_name:
             return None
+
+        # 号池优先
+        pool_resolved = self._try_pool_account(provider_name, model)
+        if pool_resolved:
+            return pool_resolved
+
         profile = self._store.get_active_profile(user_id, provider_name)
         if not profile or not profile.access_token:
             return None
@@ -216,6 +230,49 @@ class CredentialResolver:
             created_at=profile.created_at,
             updated_at=profile.updated_at,
         )
+
+    def _try_pool_account(
+        self, provider_name: str, model: str,
+    ) -> ResolvedCredential | None:
+        """尝试从号池获取凭证（人工激活映射）。"""
+        if not self._pool_enabled:
+            return None
+        pool_svc = self._pool_service
+        if pool_svc is None or self._store is None:
+            return None
+        try:
+            account = pool_svc.resolve_active_account(provider_name, model)
+            if account is None:
+                return None
+            from excelmanus.pool.service import POOL_USER_ID
+            profile_name = pool_svc.get_pool_profile_name(account.id)
+            # 按 profile_name 精确获取池账号凭证（多池账号安全）
+            _get_by_name = getattr(self._store, "get_profile_by_name", None)
+            if _get_by_name is not None:
+                profile = _get_by_name(POOL_USER_ID, provider_name, profile_name)
+            else:
+                profile = self._store.get_active_profile(POOL_USER_ID, provider_name)
+                if profile is not None and profile.profile_name != profile_name:
+                    profile = None
+            if profile is None or not profile.access_token:
+                return None
+            provider = _PROVIDERS.get(provider_name)
+            if not provider:
+                return None
+            api_key, base_url = provider.get_api_credential(profile.access_token)
+            _protocol = getattr(provider, "PROTOCOL", "openai")
+            return ResolvedCredential(
+                api_key=api_key,
+                base_url=base_url,
+                source="pool_oauth",
+                provider=provider_name,
+                protocol=_protocol,
+                pool_account_id=account.id,
+                pool_profile_name=profile_name,
+            )
+        except Exception:
+            logger.debug("池账号凭证解析失败", exc_info=True)
+            return None
 
     @staticmethod
     def _match_provider(model: str) -> str | None:

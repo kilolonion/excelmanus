@@ -35,9 +35,11 @@ class ResolvedCredential:
 
     api_key: str
     base_url: str
-    source: str  # 'oauth' | 'user_key' | 'system'
+    source: str  # 'oauth' | 'user_key' | 'system' | 'pool_oauth'
     provider: str | None = None
     protocol: str = "openai"
+    pool_account_id: str | None = None
+    pool_profile_name: str | None = None
 
 
 @dataclass(frozen=True)

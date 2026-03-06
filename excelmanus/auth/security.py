@@ -62,19 +62,42 @@ def _get_jwt_secret() -> str:
         except OSError:
             pass
 
-    # 生成新密钥并持久化
+    # 生成新密钥并原子持久化（防止多 worker 同时写入竞态）
     import logging
     _logger = logging.getLogger(__name__)
     new_secret = secrets.token_urlsafe(64)
     try:
         key_dir.mkdir(parents=True, exist_ok=True)
-        key_file.write_text(new_secret, encoding="utf-8")
-        from excelmanus.security.cipher import _restrict_file_permissions
-        _restrict_file_permissions(key_file)
+        # 使用 O_CREAT | O_EXCL 原子创建：仅当文件不存在时成功，
+        # 避免多 worker 同时生成不同密钥覆盖彼此
+        _fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        try:
+            os.write(_fd, new_secret.encode("utf-8"))
+        finally:
+            os.close(_fd)
+        try:
+            from excelmanus.security.cipher import _restrict_file_permissions
+            _restrict_file_permissions(key_file)
+        except Exception:
+            pass  # 权限设置失败不影响功能
         _logger.info(
             "JWT 密钥已自动生成并持久化到 %s。"
             "多 worker 部署请改用 EXCELMANUS_JWT_SECRET 环境变量。",
             key_file,
+        )
+    except FileExistsError:
+        # 另一个 worker 已先行创建——读取它的密钥
+        try:
+            stored = key_file.read_text(encoding="utf-8").strip()
+            if stored:
+                _JWT_SECRET_KEY = stored
+                return _JWT_SECRET_KEY
+        except OSError:
+            pass
+        # 极端情况：文件已创建但读取失败，使用自己生成的密钥
+        _logger.warning(
+            "JWT 密钥文件已由其他 worker 创建但无法读取，"
+            "请设置 EXCELMANUS_JWT_SECRET 环境变量。"
         )
     except OSError:
         _logger.warning(

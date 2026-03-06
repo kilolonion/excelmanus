@@ -311,6 +311,8 @@ class AgentEngine:
         # _has_write_tool_call, _turn_diagnostics, _session_diagnostics,
         # _execution_guard_fired, _vba_exempt
         self._credential_resolver: Any = None  # CredentialResolver，由 SessionManager 注入
+        self._pool_account_id: str | None = None  # 号池账号 ID（pool_oauth 来源时设置）
+        self._pool_profile_name: str | None = None  # 号池 profile 名称
         self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root, database=database)
@@ -702,7 +704,9 @@ class AgentEngine:
     def _infer_vision_capable(config: "ExcelManusConfig", db: "Database | None" = None) -> bool:
         """推断主模型是否支持视觉输入。
 
-        优先级：手动覆盖 > probe 实际检测结果 > 关键词兜底推断。
+        优先级：手动覆盖 > 关键词+probe 交叉验证 > 关键词推断。
+        对已知视觉模型（关键词匹配），probe=False 不覆盖关键词推断，
+        避免 Codex 等 backend-api 的 probe 误判导致图片被拦截。
         """
         mv = config.main_model_vision
         if mv == "true":
@@ -710,21 +714,7 @@ class AgentEngine:
         if mv == "false":
             return False
 
-        # ── 优先使用 probe 实际检测结果（ground truth）──
-        if db is not None:
-            try:
-                from excelmanus.model_probe import load_capabilities
-                caps = load_capabilities(db, config.model, config.base_url)
-                if caps is not None and caps.supports_vision is not None:
-                    logger.info(
-                        "视觉能力来自 probe 检测结果: model=%s, vision=%s",
-                        config.model, caps.supports_vision,
-                    )
-                    return caps.supports_vision
-            except Exception:
-                logger.debug("加载 probe 视觉检测结果失败，回退到关键词推断", exc_info=True)
-
-        # ── 兜底：根据模型名关键词推断（仅在无 probe 结果时使用）──
+        # ── 关键词推断辅助 ──
         model_lower = config.model.lower()
         _NON_VISION_KEYWORDS = (
             "o3-mini",
@@ -775,12 +765,46 @@ class AgentEngine:
             "step-r1-v-mini", "step-1o-vision", "step-1o-turbo-vision",
             "llava",
         )
-        result = any(kw in model_lower for kw in _VISION_KEYWORDS)
+        keyword_vision = any(kw in model_lower for kw in _VISION_KEYWORDS)
+
+        # ── probe 交叉验证：probe 结果仅在与关键词推断一致时信任 ──
+        # 部分 backend-api（如 Codex）的 probe 可能因端点限制而误判 vision=False，
+        # 对已知视觉模型，关键词推断比 probe 更可靠。
+        if db is not None:
+            try:
+                from excelmanus.model_probe import load_capabilities
+                caps = load_capabilities(db, config.model, config.base_url)
+                if caps is not None and caps.supports_vision is not None:
+                    if caps.supports_vision:
+                        logger.info(
+                            "视觉能力来自 probe 检测结果: model=%s, vision=True",
+                            config.model,
+                        )
+                        return True
+                    # probe=False：仅对关键词也认为无视觉的模型信任
+                    if not keyword_vision:
+                        logger.info(
+                            "视觉能力来自 probe 检测结果: model=%s, vision=False",
+                            config.model,
+                        )
+                        return False
+                    # probe=False 但关键词=True：probe 可能因 backend-api 差异误判，
+                    # 信任关键词推断（如 Codex backend 不支持 probe 但实际支持 vision）
+                    logger.warning(
+                        "probe 标记 vision=False 但关键词推断为 True，"
+                        "信任关键词推断: model=%s。"
+                        "若确实不支持视觉，请设置 EXCELMANUS_MAIN_MODEL_VISION=false",
+                        config.model,
+                    )
+                    return True
+            except Exception:
+                logger.debug("加载 probe 视觉检测结果失败，回退到关键词推断", exc_info=True)
+
         logger.info(
-            "视觉能力来自关键词推断 (无 probe 缓存): model=%s → %s",
-            config.model, result,
+            "视觉能力来自关键词推断: model=%s → %s",
+            config.model, keyword_vision,
         )
-        return result
+        return keyword_vision
 
     # ── Property 代理：所有循环/会话级状态委托给 self._state ──────
 
@@ -5734,8 +5758,19 @@ class AgentEngine:
                 ),
             )
             return
-        if resolved is None or resolved.source != "oauth":
+        if resolved is None or resolved.source not in ("oauth", "pool_oauth"):
+            # 非池来源时清零，防止前一次 pool_oauth 残留导致误记账
+            self._pool_account_id = None
+            self._pool_profile_name = None
             return
+
+        # 记录或清零池账号信息供 api 层台账使用
+        if resolved.source == "pool_oauth" and resolved.pool_account_id:
+            self._pool_account_id = resolved.pool_account_id
+            self._pool_profile_name = resolved.pool_profile_name
+        else:
+            self._pool_account_id = None
+            self._pool_profile_name = None
 
         next_api_key = resolved.api_key or self._active_api_key
         next_base_url = resolved.base_url or self._active_base_url
