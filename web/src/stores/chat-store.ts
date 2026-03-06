@@ -1,4 +1,4 @@
-﻿import { create } from "zustand";
+import { create } from "zustand";
 import type { Message, Approval, Question, AssistantBlock, FileAttachment } from "@/lib/types";
 import { loadCachedMessages, saveCachedMessages, deleteCachedMessages, clearAllCachedMessages } from "@/lib/idb-cache";
 import { fetchSessionMessages, fetchSessionExcelEvents, clearAllSessions } from "@/lib/api";
@@ -10,10 +10,10 @@ import {
   isFallbackSessionTitle,
 } from "@/lib/session-title";
 
-// 鍐呭瓨蹇€熺紦瀛橈紙琛ュ厖 IndexedDB锛?
+// 内存快速缓存（扩展 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
 
-// F5: switchSession 鍙栨秷浠ょ墝 鈥?閫掑鐗堟湰鍙凤紝鏃х殑 loadAndSwitch 妫€娴嬪埌鐗堟湰鍙樺寲鍚庢斁寮冩洿鏂?
+// F5：switchSession 取消息令牌 —— 递归版本号，当 loadAndSwitch 检测到版本号变化后放送更新
 let _switchSessionVersion = 0;
 
 let _msgIdCounter = 0;
@@ -87,26 +87,26 @@ interface LoadMessagesOptions {
 }
 
 /**
- * 灏嗗悗绔?LLM 娑堟伅锛坮ole/content 瀛楀吀锛夎浆鎹负鍓嶇 Message[]銆?
- * 灏嗚繛缁殑 assistant/tool 娑堟伅鍚堝苟涓哄甫 blocks 鐨勫崟涓€ assistant 娑堟伅銆?
+ * 将后端 LLM 消息（role/content 字符）转换为前端 Message[]。
+ * 将连续的 assistant/tool 消息合并为带 blocks 的单个 assistant 消息。
  */
 const _EXCEL_WRITE_TOOL_NAMES = new Set([
   "write_cells", "insert_rows", "insert_columns",
   "create_sheet", "delete_sheet", "run_code",
 ]);
 
-// 鎵€鏈変細淇敼宸ヤ綔鍖烘枃浠剁殑宸ュ叿锛堝惈 Excel 鍐欏叆 + 鏂囨湰鍐欏叆锛夛紝鐢ㄤ簬鎭㈠ affected files
+// 所有会修改工作区文件的工具（包括 Excel 写入 + 文本写入），用于恢复 affected files
 const _ALL_WRITE_TOOL_NAMES = new Set([
   ...Array.from(_EXCEL_WRITE_TOOL_NAMES),
   "write_text_file", "edit_text_file",
 ]);
 
 const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
-const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(锛圽[])([^ \t\r\n`"'()锛堬級\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)锛塡]])/gi;
+const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(\【[])([^ \t\r\n`"'()【】\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)】\]\]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
 
-// 浠呯敱 SSE 浜嬩欢浜х敓鐨勫潡绫诲瀷锛屼笉鎸佷箙鍖栧埌鍚庣娑堟伅瀛樺偍銆?
-// 浠庡悗绔埛鏂版椂锛屽繀椤讳粠鐜版湁鍐呭瓨娑堟伅涓甫鍑猴紝閬垮厤瑙嗚鏁版嵁涓㈠け锛堝 SessionSync 妫€娴嬪埌 inFlight鈫抐alse 鍚?thinking 鍧楁秷澶憋級銆?
+// 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
+// 从后端刷新时，必须从已有缓存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 时 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
@@ -114,13 +114,13 @@ const _SSE_ONLY_BLOCK_TYPES = new Set([
   "tool_notice", "reasoning_notice",
 ]);
 
-// failure_guidance 涓庡叾浠?SSE-only 鍧椾笉鍚岋細鍚庣浼氬皢鍏舵寔涔呭寲涓?text block锛坃failure_guidance_text锛夈€?
-// 鍚堝苟鏃堕渶娑堣垂瀵瑰簲鐨勫悗绔?text block锛岄伩鍏嶉噸澶嶃€?
+// failure_guidance 与其他 SSE-only 块不同：后端会将其后端渲染为 text block（failure_guidance_text）。
+// 合并时需要移除对应的后端 text block，避免重复。
 const _SSE_ONLY_HAS_BACKEND_COUNTERPART = new Set(["failure_guidance"]);
 
 /**
- * 灏嗕粎鐢?SSE 浜х敓鐨勫潡锛坱hinking銆乮teration銆乤pproval_action銆乻ubagent锛変粠 oldMessages 鍚堝苟鍒?newMessages锛?
- * 浣垮悗绔埛鏂颁笉浼氫涪寮冨畠浠€傚湪 assistant 娑堟伅闂存寜浣嶇疆鍖归厤銆?
+ * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
+ * 使后端刷新不会丢失块数据。在 assistant 消息间按位置保留。
  */
 function _preserveSseOnlyBlocks(
   oldMessages: Message[],
@@ -133,8 +133,8 @@ function _preserveSseOnlyBlocks(
   }
   if (oldAssistant.length === 0) return newMessages;
 
-  // 鍚屾椂淇濈暀鐢ㄦ埛娑堟伅鐨勬枃浠讹細鍐呭瓨涓殑娑堟伅鍙兘鍚湁鏇村畬鏁寸殑 FileAttachment锛堝惈瀹為檯涓婁紶澶у皬锛夛紝
-  // 鑰屽悗绔粠閫氱煡瀛楃涓叉棤娉曞畬鍏ㄨ繕鍘熴€?
+  // 同时保留用户消息的文件：内存中的消息可能含有更完整的 FileAttachment（含实际上传大小），
+  // 而后端从通知字符串无法完全还原。
   const oldUserFiles: (FileAttachment[] | undefined)[] = [];
   for (const m of oldMessages) {
     if (m.role === "user") oldUserFiles.push(m.files);
@@ -695,7 +695,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
 
 /**
  * 灏嗘寔涔呭寲鐨?excel 浜嬩欢涓殑鏂囦欢璺緞锛屽洖濉埌瀵瑰簲 assistant 娑堟伅鐨?affectedFiles銆?
- * 淇濊瘉閲嶅惎鍚?"娑夊強鏂囦欢" 寰界珷鑳芥纭樉绀恒€?
+ * 注意重试"涉及文件"块眼能正确显示。
  */
 function _restoreAffectedFilesOnMessages(
   diffs: { tool_call_id: string; file_path: string }[],
@@ -1216,7 +1216,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearVlmPhases: () => set({ vlmPhases: [] }),
   clearMessages: () => {
     const { currentSessionId } = get();
-    // 娓呴櫎鍐呭瓨缂撳瓨
+    // 清除内存缓存
     if (currentSessionId) {
       _sessionMessages.delete(currentSessionId);
       // 娓呴櫎 IndexedDB 缂撳瓨
@@ -1300,7 +1300,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       _sessionMessages.set(state.currentSessionId, [...state.messages]);
       saveCachedMessages(state.currentSessionId, state.messages).catch(() => {});
     }
-    
+
     // 鍏堜粠鍐呭瓨缂撳瓨鍔犺浇鐩爣浼氳瘽娑堟伅
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
@@ -1399,7 +1399,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
       latestSeq: 0,
       resumeFailedReason: null,
     });
-    
+
     loadAndSwitch();
   },
 }));

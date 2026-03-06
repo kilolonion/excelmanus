@@ -13,7 +13,7 @@ import { buildDefaultSessionTitle } from "@/lib/session-title";
 import type { Session, AssistantBlock } from "@/lib/types";
 import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
 
-/** 灏嗗悗绔?route_mode 鏄犲皠涓虹敤鎴峰弸濂界殑涓枃鏍囩锛堜笌 chat-actions.ts 淇濇寔涓€鑷达級 */
+/** 将后端 route_mode 映射为用户友好的中文标签（与 chat-actions.ts 保持一致） */
 const _ROUTE_MODE_LABELS: Record<string, string> = {
   all_tools: "Smart Route",
   control_command: "Control Command",
@@ -30,8 +30,8 @@ function _friendlyRouteMode(mode: string): string {
 }
 
 /**
- * 鍒锋柊鍚庢仮澶嶈矾鐢辩姸鎬?block锛氬湪鏈€鍚庝竴涓?assistant 娑堟伅鐨?blocks 寮€澶存敞鍏ヨ矾鐢变俊鎭紝
- * 浠呭綋璇ユ秷鎭皻鏈寘鍚?route variant 鐨?status block 鏃舵墽琛屻€?
+ * 刷新后恢复路由状态 block：在最后一个 assistant 消息的 blocks 开头注入路由信息，
+ * 仅当该消息尚未包含 route variant 的 status block 时执行。
  */
 function _injectRouteBlock(
   chat: ReturnType<typeof useChatStore.getState>,
@@ -41,7 +41,7 @@ function _injectRouteBlock(
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (m.role !== "assistant") continue;
-    // 宸叉湁 route status block 鍒欒烦杩?
+    // 已有 route status block 则跳过
     if (m.blocks.some((b) => b.type === "status" && b.variant === "route")) return;
     const routeBlock: AssistantBlock = {
       type: "status",
@@ -58,8 +58,8 @@ function _injectRouteBlock(
 }
 
 /**
- * 灏嗘渶鍚庝竴涓?assistant 娑堟伅涓渶鍚庝竴涓?running/success 鐘舵€佺殑 tool_call 鏍囪涓?pending锛?
- * 鐢ㄤ簬鍒锋柊鍚庢仮澶嶅鎵瑰脊绐楁椂鍚屾宸ュ叿璋冪敤鍗＄墖鐨勮瑙夌姸鎬併€?
+ * 将最后一个 assistant 消息中最后一个 running/success 状态的 tool_call 标记为 pending，
+ * 用于刷新后恢复路由状态时避免工具调用卡片的应用状态。
  */
 function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>) {
   const msgs = chat.messages;
@@ -80,7 +80,7 @@ function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>
         return;
       }
     }
-    break; // 鍙鏌ユ渶鍚庝竴鏉?assistant 娑堟伅
+    break; // 查找最后一条 assistant 消息
   }
 }
 
@@ -99,7 +99,7 @@ export function SessionSync() {
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
 
-  // 鍚姩鏃舵媺鍙?thinking config 鍚屾鍒?store
+  // 启动时拉取 thinking config 同步到 store
   useEffect(() => {
     apiGet<{ effort: string }>("/thinking")
       .then((data) => {
@@ -127,16 +127,18 @@ export function SessionSync() {
         }));
         mergeSessions(mapped);
 
-        // 鑻?activeSessionId锛堜粠 localStorage 鎭㈠锛変笌鍚庣宸茬煡浼氳瘽閮戒笉鍖归厤锛屽垯娓呯┖浠ラ伩鍏嶉檲鏃?404 杞椋庢毚銆?
-        // 鑻ユ湁娲昏穬 SSE 娴侊紙涔愯鍒涘缓灏氭湭鍒拌揪鏈嶅姟绔級鍒欒烦杩囥€?
-        // Demo sessions are local-only 鈥?never prune them via backend sync.
+        // 若 activeSessionId（从 localStorage 恢复）与后端已知会话都不匹配，则清空以避免刚启动时 404 错误。
+        // 若有活跃 SSE 流（本地创建尚未到达服务端）则跳过。
+        // Demo sessions are local-only — never prune them via backend sync.
         const currentActive = useSessionStore.getState().activeSessionId;
         if (currentActive && !currentActive.startsWith(DEMO_SESSION_PREFIX) && !mapped.some((s) => s.id === currentActive)) {
           {
             const hasActiveStream = useChatStore.getState().abortController !== null;
             if (!hasActiveStream) {
-              // 淇濇姢鏈湴鏂板缓浣嗗皻鏈彂閫侀鏉℃秷鎭殑浼氳瘽锛氭鏌?session-store 涓槸鍚?
-              // 瀛樺湪璇ヤ細璇濅笖 messageCount === 0 涓斿垱寤轰笉瓒呰繃 60 绉掋€?
+              // 若本地会话列表中没有找到匹配的会话，则清空 activeSessionId。
+              // 若有活跃 SSE 流，则跳过。
+              // 保护本地新建但尚未发送首条消息的会话：检查 session-store 中是否存在
+              // 存在该会话且 messageCount === 0 且创建不超过 60 秒。
               const localSession = useSessionStore.getState().sessions.find((s) => s.id === currentActive);
               const GRACE_MS = 60_000;
               const isLocalUnsent = localSession
@@ -196,7 +198,7 @@ export function SessionSync() {
       return;
     }
 
-    // Demo sessions are local-only 鈥?skip backend polling entirely.
+    // Demo sessions are local-only — skip backend polling entirely.
     if (activeSessionId.startsWith(DEMO_SESSION_PREFIX)) return;
 
     let cancelled = false;

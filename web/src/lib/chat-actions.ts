@@ -1,4 +1,4 @@
-﻿import { consumeSSE, SSEError } from "./sse";
+import { consumeSSE, SSEError } from "./sse";
 import { buildApiUrl } from "./api";
 import { mapWithConcurrency } from "./concurrency";
 import { uuid } from "@/lib/utils";
@@ -30,7 +30,7 @@ function _isImageLike(file: File): boolean {
   return _isImageFile(file.name) || (file.type || "").toLowerCase().startsWith("image/");
 }
 
-/** 鍦ㄥ鎴风鏈湴鏋勯€?failure_guidance block锛堢敤浜庣綉缁滅骇閿欒锛屾棤 SSE 浜嬩欢鍙揪鐨勫満鏅級銆?*/
+/** 在客户端本地构建 failure_guidance block（用于网络级错误，无 SSE 事件可达的场景）。*/
 function _buildClientFailureGuidance(opts: {
   category?: "model" | "transport" | "config" | "quota" | "unknown";
   code: string;
@@ -58,7 +58,7 @@ function _buildClientFailureGuidance(opts: {
   };
 }
 
-/** 鏍规嵁 SSEError 鐨?HTTP 鐘舵€佺爜鐢熸垚瀵瑰簲鐨?failure_guidance block銆?*/
+/** 根据 SSEError 的 HTTP 状态码生成对应的 failure_guidance block。 */
 function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "failure_guidance" }> {
   const status = err.statusCode;
   if (status === 401 || status === 403) {
@@ -138,7 +138,7 @@ function _fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      // result 鏍煎紡涓?"data:<mime>;base64,<data>" 鈥?浠呮彁鍙?base64 閮ㄥ垎
+      // result 格式为 "data:<mime>;base64,<data>" — 只提取 base64 部分
       const result = reader.result as string;
       const idx = result.indexOf(",");
       resolve(idx >= 0 ? result.slice(idx + 1) : result);
@@ -149,9 +149,9 @@ function _fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// 鍩轰簬 RAF 鐨勫閲忔壒澶勭悊鍣細缂撳啿楂橀 text_delta / thinking_delta 浜嬩欢锛?
-// 姣忎釜鍔ㄧ敾甯ф渶澶氬埛鏂颁竴娆★紝閬垮厤杩囧害閲嶆覆鏌撱€?
-// 鏀硅繘锛氬鍔犵珛鍗冲埛鏂版満鍒讹紝纭繚闈炲閲忎簨浠朵笉浼氫笌缂撳啿鐨勫閲忎簨浠朵骇鐢熸椂搴忛棶棰?
+// 基于 RAF 的增量特性处理器：缓存高频率 text_delta / thinking_delta 事件，
+// 每个动画帧最多刷新一次，避免过度重复渲染。
+// 改进：增加独立刷新机制，确保非特性事件不会与缓存的特性事件产生时序问题。
 // ---------------------------------------------------------------------------
 class DeltaBatcher {
   private _textBuf = "";
@@ -184,7 +184,7 @@ class DeltaBatcher {
 
   dispose() {
     if (this._disposed) return;
-    // 鍏堝埛鏂版畫浣欏唴瀹瑰埌 store锛岄槻姝㈡柇杩?鐑噸杞芥椂涓㈠け灏鹃儴 delta
+    // 先刷新剩余内容到 store，防止断开连接时丢失部分 delta
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
@@ -195,7 +195,7 @@ class DeltaBatcher {
     this._thinkingBuf = "";
   }
 
-  // 妫€鏌ユ槸鍚︽湁寰呭鐞嗙殑鍐呭
+  // 检查是否有待处理的内容
   hasPendingContent(): boolean {
     return this._textBuf.length > 0 || this._thinkingBuf.length > 0;
   }
@@ -225,8 +225,8 @@ class DeltaBatcher {
   }
 }
 
-// 鍥犲緟澶勭悊浜や簰锛坅skuser / approval锛夎€屽欢杩熺殑 Token 缁熻銆?
-// sendContinuation 浼氬皢杩欎簺绱Н鍒版渶缁堢粺璁′腑銆?
+// 因延迟处理交互（askuser / approval）而累积的 Token 统计。
+// sendContinuation 会将这些细节到最终统计中。
 let _deferredTokenStats: {
   promptTokens: number;
   completionTokens: number;
@@ -245,7 +245,7 @@ export async function sendMessage(
 
   if (store.isStreaming) return;
 
-  // 绌烘秷鎭墠缃牎楠岋細鏃犳枃鏈笖鏃犻檮浠舵椂鐩存帴鎷︽埅
+  // 空消息前置拦截：无文本且无附件时直接拦截
   if (!text.trim() && (!files || files.length === 0)) {
     return;
   }
@@ -264,40 +264,40 @@ export async function sendMessage(
     return;
   }
 
-  // 灏芥棭鍒涘缓 AbortController 骞惰缃祦寮忕姸鎬?- 鍦ㄤ换浣曞紓姝ユ搷浣滀箣鍓嶃€?
-  // SessionSync 鐨?useEffect 閫氳繃妫€鏌?abortController 鏉ュ喅瀹氭槸鍚﹁皟鐢?switchSession()銆?
-  // 濡傛灉寤惰繜鍒板紓姝ユ搷浣滀箣鍚庯紝SessionSync 鐨?effect 鍙兘鍦?await 闂撮殭瑙﹀彂锛?
-  // 鍙戠幇 abortController===null 鍚庤皟鐢?switchSession锛屾竻绌?addUserMessage 鍗冲皢鍒涘缓鐨勬秷鎭€?
+  // 尽早创建 AbortController 并设置流状态 —— 在任何异常操作之前。
+  // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
+  // 如果延迟到异常操作之后，SessionSync 的 effect 可能在 await 间歇检查时，
+  // 发现 abortController===null 后调用 switchSession，清空 addUserMessage 即将创建的消息。
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
   store.setPipelineStatus({
     stage: "connecting",
-    message: "姝ｅ湪杩炴帴...",
+    message: "正在连接...",
     startedAt: Date.now(),
   });
 
   // 娓呴櫎涓婃鍙兘娈嬬暀鐨勫欢杩?token 缁熻锛岄伩鍏嶈法浼氳瘽娉勬紡
   _deferredTokenStats = null;
 
-  // 鈹€鈹€ 涔愯 UI锛氬湪浠讳綍 await 涔嬪墠绔嬪嵆灞曠ず鐢ㄦ埛娑堟伅姘旀场 + 鍔╂墜鍔犺浇鐘舵€?鈹€鈹€
+  // ... 提升UI：在任何 await 之前立即显示用户消息占位 + 手手加载状态 ...
 
-  // 鍚屾鏀堕泦鏂囦欢涓婁紶缁撴灉锛堜粎璇诲彇 ChatInput 棰勪笂浼犵殑缁撴灉锛屾棤闇€ await锛?
+  // 同步收集文件上传结果（仅读取 ChatInput 预上传的结果，无需 await）
   const fileUploadResults: { filename: string; path: string; size: number }[] = [];
   if (files && files.length > 0) {
     for (const af of files) {
       if (af.status === "success" && af.uploadResult) {
         fileUploadResults.push(af.uploadResult);
       }
-      // 璺宠繃涓婁紶澶辫触鐨勬枃浠讹紝閬垮厤绌鸿矾寰勮繘鍏ユ秷鎭?
+      // 跳过上传失败的文件，避免空路径进入消息
     }
   }
 
   const effectiveSessionId = sessionId || sessionStore.activeSessionId;
 
-  // 鍦ㄦ坊鍔犳秷鎭箣鍓嶅悓姝?currentSessionId锛岀‘淇?SessionSync 鐨?useEffect
-  //锛堝湪涓嬫娓叉煋鍚庤Е鍙戯級鐪嬪埌 currentSessionId === activeSessionId锛?
-  // 浠庤€岃烦杩囦細娓呯┖鎴戜滑鍗冲皢娣诲姞鐨勬秷鎭殑 switchSession() 璋冪敤銆?
+  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
+  //（在下下次渲染后触发）看到 currentSessionId === activeSessionId，
+  // 从而避免清空我们即将添加的消息的 switchSession() 调用。
   if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
     if (store.currentSessionId && store.messages.length > 0) {
       store.saveCurrentSession();
@@ -305,7 +305,7 @@ export async function sendMessage(
     useChatStore.setState({ currentSessionId: effectiveSessionId });
   }
 
-  // 绔嬪嵆娣诲姞鐢ㄦ埛娑堟伅鍜屽姪鎵嬪崰浣嶆秷鎭?鈥?鐢ㄦ埛鐬棿鐪嬪埌鑷繁鐨勬秷鎭皵娉?+ "姝ｅ湪杩炴帴" 鍔犺浇鐘舵€?
+  // 立即添加用户消息和助手占位消息 —— 用户界面看到自己的消息 + "正在连接" 加载状态
   const userMsgId = uuid();
   store.addUserMessage(
     userMsgId,
@@ -398,7 +398,7 @@ export async function sendMessage(
     }
   });
 
-  // 鈹€鈹€ SSE 浜嬩欢澶勭悊涓婁笅鏂?鈹€鈹€
+  // ── SSE 事件处理上下文 ───────────────────────────────────
   const sseCtx: SSEHandlerContext = {
     assistantMsgId,
     batcher: batcher as unknown as DeltaBatcherInterface,
@@ -540,7 +540,7 @@ export async function sendMessage(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // 闈欓粯澶勭悊 鈥?SessionSync 杞鏈€缁堜細鎭㈠
+          // 静默处理 —— SessionSync 轮询最终会恢复
         }
       }, 1500);
     }
@@ -578,7 +578,7 @@ export async function sendContinuation(
   store.setStreaming(true);
   store.setPipelineStatus({
     stage: "connecting",
-    message: "姝ｅ湪杩炴帴...",
+    message: "正在连接...",
     startedAt: Date.now(),
   });
 
@@ -745,7 +745,7 @@ export async function sendContinuation(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // 闈欓粯澶勭悊
+          // 静默处理
         }
       }, 1500);
     }
@@ -753,10 +753,10 @@ export async function sendContinuation(
 }
 
 /**
- * 鍥為€€瀵硅瘽鍒版寚瀹氱敤鎴锋秷鎭苟閲嶆柊鍙戦€侊紙缂栬緫鍚庣殑鍐呭锛夈€?
- * 1. 璋冪敤鍚庣 rollback API锛坮esend_mode=true 绉婚櫎鐩爣鐢ㄦ埛娑堟伅锛?
- * 2. 鎴柇鍓嶇娑堟伅鍒楄〃鍒扮洰鏍囨秷鎭箣鍓?
- * 3. 鐢?sendMessage 閲嶆柊鍙戦€侊紙鍦ㄥ墠鍚庣鍚勬坊鍔犱竴鏉＄敤鎴锋秷鎭級
+ * 回滚对话到指定用户消息并重新发送（编辑后的内容）。
+ * 1. 调用后端 rollback API（resend_mode=true 会移除目标用户消息）；
+ * 2. 截断前端消息列表到目标消息之前；
+ * 3. 用 sendMessage 重新发送（在前端后端各添加一条用户消息）
  */
 export async function rollbackAndResend(
   messageId: string,
@@ -769,7 +769,7 @@ export async function rollbackAndResend(
   const store = useChatStore.getState();
   if (store.isStreaming) return;
 
-  // 鎵惧埌鐩爣鐢ㄦ埛娑堟伅鍦ㄥ墠绔秷鎭垪琛ㄤ腑鐨勪綅缃?
+  // 找到目标用户消息在前端消息列表中的位置
   const messages = store.messages;
   const msgIndex = messages.findIndex((m) => m.id === messageId);
   if (msgIndex === -1) return;
@@ -1193,7 +1193,7 @@ export async function subscribeToSession(sessionId: string) {
             chat.clearResumeFailed();
           }
         } catch {
-          // 闈欓粯澶勭悊 鈥?SessionSync 杞鏈€缁堜細鎭㈠
+          // 静默处理 —— SessionSync 轮询最终会恢复
         }
       }, 200);
     }

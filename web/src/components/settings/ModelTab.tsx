@@ -57,13 +57,17 @@ import {
   connectCodex,
   disconnectCodex,
   refreshCodexToken,
+  fetchProviderDescriptors,
   type CodexStatus,
+  type ProviderDescriptor,
+  type ProviderModelEntry,
 } from "@/lib/auth-api";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { PROVIDER_COLORS as PROVIDER_BRAND_COLOR } from "@/lib/provider-brand";
+import { SubscriptionProviderCard } from "@/components/settings/SubscriptionProviderCard";
 
 interface ModelSection {
   api_key?: string;
@@ -361,7 +365,7 @@ const PROVIDER_PRESETS: ProviderPreset[] = [
     protocol: "openai",
     thinking_mode: "auto",
     model_family: "gemini",
-    description: "Gemini 2.5 Flash",
+    description: "Gemini 2.5 Flash (API Key)",
     purchaseUrl: "https://aistudio.google.com/apikey",
   },
   {
@@ -1907,6 +1911,7 @@ export function ModelTab() {
   const applyMenuRef = useRef<HTMLDivElement>(null);
   const [applyMenuDropUp, setApplyMenuDropUp] = useState(false);
   const [saveToast, setSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
+  const [subscriptionDescriptors, setSubscriptionDescriptors] = useState<ProviderDescriptor[]>([]);
 
   // 折叠/展开状态
   const [expandedSections, setExpandedSections] = useState<Record<string, boolean>>({});
@@ -1974,6 +1979,48 @@ export function ModelTab() {
     });
     scrollToForm();
   }, [scrollToForm]);
+
+  const focusProfileCard = useCallback((profileName: string) => {
+    setExpandedSections((prev) => ({ ...prev, profiles: true }));
+    setHighlightProfile(profileName);
+    setTimeout(() => setHighlightProfile(null), 2000);
+    requestAnimationFrame(() => {
+      profileCardRefs.current[profileName]?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+    });
+  }, []);
+
+  async function handleUseSubscriptionProviderModel(
+    descriptor: ProviderDescriptor,
+    model: ProviderModelEntry,
+  ) {
+    const profileName = model.profile_name;
+    if ((config?.profiles || []).some((profile) => profile.name === profileName)) {
+      focusProfileCard(profileName);
+      setSaveToast({ msg: `模型档案「${profileName}」已存在`, type: "success" });
+      return;
+    }
+
+    try {
+      await apiPost("/config/models/profiles", {
+        name: profileName,
+        model: model.public_id,
+        api_key: "",
+        base_url: descriptor.base_url,
+        description: `${model.display_name} - OAuth login (no API key)`,
+        protocol: descriptor.protocol || "auto",
+        thinking_mode: descriptor.thinking_mode || "auto",
+        model_family: descriptor.model_family || "",
+        custom_extra_body: "",
+        custom_extra_headers: "",
+      }, { direct: true });
+      await fetchConfig(true);
+      useUIStore.getState().bumpModelProfiles();
+      focusProfileCard(profileName);
+      setSaveToast({ msg: `已添加 ${model.display_name} 到模型档案`, type: "success" });
+    } catch (e) {
+      setSaveToast({ msg: e instanceof Error ? e.message : "添加订阅模型失败", type: "error" });
+    }
+  }
 
   const fetchThinkingConfig = useCallback(async (force = false) => {
     if (!force) {
@@ -2236,6 +2283,27 @@ export function ModelTab() {
       fetchThinkingConfig();
     }
   }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig, isAdmin]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    let cancelled = false;
+    fetchProviderDescriptors()
+      .then((data) => {
+        if (!cancelled) {
+          setSubscriptionDescriptors(
+            data.providers.filter((provider) => provider.id !== "openai-codex"),
+          );
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setSubscriptionDescriptors([]);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [isAdmin]);
 
   // 自动消失 saveToast
   useEffect(() => {
@@ -2876,10 +2944,20 @@ export function ModelTab() {
               {/* Provider presets - quick add */}
               {!editingProfile && (
                 <div className="mb-3 space-y-2.5">
+                  <p className="text-xs text-muted-foreground">订阅 OAuth 登录（无需 API Key）</p>
                   <CodexOAuthAdminCard
                     onProfileCreated={() => { fetchConfig(true); useUIStore.getState().bumpModelProfiles(); }}
                     existingProfileNames={(config?.profiles || []).map((p) => p.name)}
                   />
+
+                  {subscriptionDescriptors.map((descriptor) => (
+                    <SubscriptionProviderCard
+                      key={descriptor.id}
+                      descriptor={descriptor}
+                      onProfileCreated={() => { fetchConfig(true); useUIStore.getState().bumpModelProfiles(); }}
+                      onModelSelected={(model) => { void handleUseSubscriptionProviderModel(descriptor, model); }}
+                    />
+                  ))}
 
                   <p className="text-xs text-muted-foreground mb-2">常见 API Key 提供方（点击预填表单，只需补充 API Key）</p>
                   <div className="grid grid-cols-2 min-[360px]:grid-cols-3 sm:grid-cols-5 gap-1.5">

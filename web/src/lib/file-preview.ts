@@ -1,4 +1,4 @@
-const WORD_EXTENSIONS = new Set(["docx", "doc"]);
+const WORD_EXTENSIONS = new Set(["docx"]);
 
 const EXCEL_EXTENSIONS = new Set(["xlsx", "xls", "xlsm", "xlsb"]);
 

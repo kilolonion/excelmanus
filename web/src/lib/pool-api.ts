@@ -160,7 +160,7 @@ export async function importPoolAccountFromSubscription(body: {
 export async function deletePoolAccount(
   accountId: string,
 ): Promise<{ status: string; deleted_id: string }> {
-  return apiDelete(`${BASE}/accounts/${accountId}`) as Promise<{ status: string; deleted_id: string }>;
+  return apiDelete(`${BASE}/accounts/${accountId}`) as unknown as Promise<{ status: string; deleted_id: string }>;
 }
 
 /** 删除指定激活映射。 */

@@ -1,47 +1,48 @@
-﻿/**
- * 鍏变韩 SSE 浜嬩欢鍒嗗彂鍣?鈥?娑堥櫎 sendMessage / sendContinuation / subscribeToSession 鐨勪笁閲嶅鍒躲€?
+/**
+ * 共享 SSE 事件分发器——取代 sendMessage / sendContinuation / subscribeToSession 的三重重复。
  *
- * 鎵€鏈?SSE 浜嬩欢澶勭悊閫昏緫闆嗕腑鍦ㄦ鏂囦欢鐨?`dispatchSSEEvent()` 鍑芥暟涓€?
- * 璋冪敤鏂瑰彧闇€鏋勫缓 `SSEHandlerContext` 骞跺湪 consumeSSE 鍥炶皟涓鎵樼粰璇ュ嚱鏁般€?
+ * 所有 SSE 事件处理逻辑集中在此文件的 `dispatchSSEEvent()` 函数中。
+ * 调用方只需构建 `SSEHandlerContext` 并在 consumeSSE 回调中传递给该函数。
  */
 
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
+import { useWordStore } from "@/stores/word-store";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-/** SSE 浜嬩欢鐨勮鑼冨寲琛ㄧず锛堢敱 consumeSSE 瑙ｆ瀽鍚庝紶鍏ワ級銆?*/
+/** SSE 事件的规范化表示（由 consumeSSE 解析后传入）。 */
 export interface SSEEvent {
   event: string;
   data: Record<string, unknown>;
 }
 
-/** 浜嬩欢鍒嗗彂鍣ㄨ繍琛屾墍闇€鐨勪笂涓嬫枃锛岀敱璋冪敤鏂规瀯寤哄苟浼犲叆銆?*/
+/** 事件分发器运行所需的上上下文，由调用方构建并传入。 */
 export interface SSEHandlerContext {
-  /** 褰撳墠 assistant 娑堟伅 ID锛堜簨浠惰拷鍔犲埌姝ゆ秷鎭殑 blocks 涓級銆?*/
+  /** 当前 assistant 消息 ID（事件将追加到此消息的 blocks 中）。 */
   assistantMsgId: string;
-  /** RAF 澧為噺鎵瑰鐞嗗櫒瀹炰緥銆?*/
+  /** RAF 增量批处理器实例。 */
   batcher: DeltaBatcher;
-  /** 褰撳墠浼氳瘽 ID锛堢敤浜庡浠藉埛鏂扮瓑锛夈€?*/
+  /** 当前会话 ID（用于备件登录等）。 */
   effectiveSessionId: string;
-  /** 鏄惁澶勪簬 sendMessage 鐨勯娆″彂閫佹祦绋嬶紙vs continuation / subscribe锛夈€?*/
+  /** 是否属于 sendMessage 的首次发送流程（vs continuation / subscribe）。 */
   isFirstSend: boolean;
-  /** 鐢ㄦ埛鍘熷娑堟伅鏂囨湰锛堜粎 sendMessage 娴佺▼闇€瑕侊紝鐢ㄤ簬 session_init 鏍囬鎺ㄦ柇锛夈€?*/
+  /** 用户原始消息文本（仅 sendMessage 流程需要，用于 session_init 标题推断）。 */
   userText?: string;
 
-  // 鈹€鈹€ 鍙彉鐘舵€佸紩鐢紙鐢辫皟鐢ㄦ柟鎸佹湁锛屽垎鍙戝櫒璇诲啓锛夆攢鈹€
-  /** thinking block 鏄惁杩涜涓€?*/
+  // --- 可变状态引用（由调用方持有，分发器读写）---
+  /** thinking block 是否进行中。 */
   thinkingInProgress: boolean;
-  /** 娴佹槸鍚﹂亣鍒拌繃閿欒銆?*/
+  /** 流是否遇到错误。 */
   hadStreamError: boolean;
 }
 
-/** DeltaBatcher 鎺ュ彛锛堜粠 chat-actions.ts 澶嶇敤锛夈€?*/
+/** DeltaBatcher 接口（从 chat-actions.ts 复用）。 */
 export interface DeltaBatcher {
   pushText(delta: string): void;
   pushThinking(delta: string): void;
@@ -51,10 +52,10 @@ export interface DeltaBatcher {
 }
 
 // ---------------------------------------------------------------------------
-// Helpers (浠?chat-actions.ts 鎻愬崌涓烘ā鍧楃骇鍏变韩)
+// Helpers (从 chat-actions.ts 提升为模块级共享)
 // ---------------------------------------------------------------------------
 
-/** 灏嗗悗绔?route_mode 鏄犲皠涓虹敤鎴峰弸濂界殑涓枃鏍囩 */
+/** 将后端 route_mode 映射为用户友好的中文标签 */
 export function _friendlyRouteMode(mode: string): string {
   const map: Record<string, string> = {
     all_tools: "Smart Route",
@@ -69,7 +70,7 @@ export function _friendlyRouteMode(mode: string): string {
   return map[mode] || mode;
 }
 
-/** 灏嗗悗绔?snake_case diff changes 鏄犲皠涓哄墠绔?camelCase ExcelCellDiff[] */
+/** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
 export function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((item: unknown) => {
@@ -104,7 +105,7 @@ function normalizeTaskItems(taskListPayload: unknown): TaskItem[] {
         (item.content as string)
         || (item.title as string)
         || (item.description as string)
-        || `浠诲姟 ${i + 1}`,
+        || `任务 ${i + 1}`,
       status: (item.status as string) || "pending",
       index: typeof item.index === "number" ? item.index : i,
       verification: (item.verification as string) || undefined,
@@ -123,7 +124,7 @@ function applyTaskStatusPatch(
   );
 }
 
-/** 鑾峰彇鎸囧畾 assistant 娑堟伅銆?*/
+/** 获取指定 assistant 消息。 */
 export function getLastAssistantMessage(
   messages: ReturnType<typeof useChatStore.getState>["messages"],
   id: string,
@@ -134,7 +135,7 @@ export function getLastAssistantMessage(
 }
 
 // ---------------------------------------------------------------------------
-// 鍐呴儴蹇嵎寮曠敤
+// 内部快捷引用
 // ---------------------------------------------------------------------------
 
 const S = () => useChatStore.getState();
@@ -149,16 +150,16 @@ function _getLastBlockOfType(msgId: string, type: string) {
 }
 
 // ---------------------------------------------------------------------------
-// 鏍稿績鍒嗗彂鍣?
+// 核心分发器
 // ---------------------------------------------------------------------------
 
 /**
- * 澶勭悊鍗曚釜 SSE 浜嬩欢銆傜敱 sendMessage / sendContinuation / subscribeToSession 缁熶竴璋冪敤銆?
+ * 处理单个 SSE 事件。由 sendMessage / sendContinuation / subscribeToSession 统一调用。
  *
- * 璋冪敤鏂瑰湪 consumeSSE 鍥炶皟涓簲锛?
- * 1. 鍦ㄩ潪 thinking 浜嬩欢鍓嶈皟鐢?finalizeThinking(ctx)
- * 2. 鍦ㄩ潪澧為噺浜嬩欢鍓嶈皟鐢?ctx.batcher.flush()
- * 3. 璋冪敤 dispatchSSEEvent(event, ctx)
+ * 调用方在 consumeSSE 回调中应：
+ * 1. 在非 thinking 事件前调用 finalizeThinking(ctx)
+ * 2. 在非增量事件前调用 ctx.batcher.flush()
+ * 3. 调用 dispatchSSEEvent(event, ctx)
  */
 export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void {
   const { data } = event;
@@ -185,9 +186,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 浼氳瘽 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 会话 ---
     case "session_init": {
-      if (!ctx.isFirstSend) break; // continuation / subscribe 璺宠繃
+      if (!ctx.isFirstSend) break; // continuation / subscribe 跳过
       const sid = data.session_id as string;
       const ss = useSessionStore.getState();
       if (!ss.activeSessionId) {
@@ -213,7 +214,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鑷姩鐢熸垚鐨勪細璇濇爣棰?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 自动生成的会话标题 ---
     case "session_title": {
       const titleSid = (data.session_id as string) || "";
       const titleText = (data.title as string) || "";
@@ -223,7 +224,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 璁㈤槄鎭㈠锛堜粎 subscribe 娴佺▼锛?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 订阅恢复（仅 subscribe 流程）---
     case "subscribe_resume": {
       const status = (data.status as string) || "";
       const streamId = (data.stream_id as string) || eventStreamId;
@@ -234,7 +235,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (status === "reconnected") {
         S().setPipelineStatus({
           stage: "resuming",
-          message: "姝ｅ湪鎭㈠浜嬩欢娴?..",
+          message: "正在恢复事件流...",
           startedAt: Date.now(),
         });
       }
@@ -252,7 +253,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 娴佹按绾胯繘搴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 流水线进度 ---
     case "pipeline_progress": {
       const stage = (data.stage as string) || "";
       const pipelineMsg = (data.message as string) || "";
@@ -277,7 +278,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
         });
       }
-      // 绱Н VLM 鎻愬彇闃舵鐢ㄤ簬鏃堕棿绾垮崱鐗囷紙鍚崟杞彁鍙栵級
+      // 兼容 VLM 图片提取用于时间线卡片（无需异步提交）
       if (ctx.isFirstSend) {
         const phaseIndex = typeof data.phase_index === "number" ? data.phase_index : undefined;
         const totalPhases = typeof data.total_phases === "number" ? data.total_phases : undefined;
@@ -296,12 +297,12 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鎵归噺浠诲姟杩涘害 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // 批量任务进度
     case "batch_progress": {
       S().setBatchProgress({
         batchIndex: typeof data.batch_index === "number" ? data.batch_index : 0,
         batchTotal: typeof data.batch_total === "number" ? data.batch_total : 1,
-        batchItemName: (data.batch_item_name as string) || `浠诲姟 ${((data.batch_index as number) || 0) + 1}`,
+        batchItemName: (data.batch_item_name as string) || `任务 ${((data.batch_index as number) || 0) + 1}`,
         batchStatus: ((data.batch_status as string) || "running") as "running" | "failed" | "completed",
         batchElapsed: typeof data.batch_elapsed_seconds === "number" ? data.batch_elapsed_seconds : 0,
         message: (data.message as string) || "",
@@ -309,7 +310,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 璺敱 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // 路由
     case "route_start":
       break;
 
@@ -327,7 +328,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 杩唬 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // 迭代
     case "iteration_start": {
       const iter = (data.iteration as number) || 0;
       if (iter > 1) {
@@ -336,7 +337,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鎬濊€?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // 思考
     case "thinking_delta": {
       S().setPipelineStatus(null);
       const lastThinking = _getLastBlockOfType(msgId, "thinking");
@@ -371,7 +372,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鏂囨湰 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 文本 ---
     case "text_delta": {
       S().setPipelineStatus(null);
       const msg = getLastAssistantMessage(S().messages, msgId);
@@ -383,7 +384,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 娴佸紡宸ュ叿鍙傛暟 delta 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 流式工具参数 delta ---
     case "tool_call_args_delta": {
       const adToolCallId = (data.tool_call_id as string) || "";
       const adToolName = (data.tool_name as string) || "";
@@ -409,7 +410,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 宸ュ叿璋冪敤 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 工具调用 ---
     case "tool_call_start": {
       S().setPipelineStatus(null);
       const toolCallIdRaw = data.tool_call_id;
@@ -452,7 +453,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         useExcelStore.getState().clearStreamingArgs(toolCallId);
         S().clearToolProgress(toolCallId);
       }
-      // ask_user batch 缁撴潫鍚庢竻鐞嗘畫鐣欑殑 pendingQuestion
+      // ask_user batch 结束后清理残留的 pendingQuestion
       if ((data.tool_name as string) === "ask_user" && S().pendingQuestion) {
         S().setPendingQuestion(null);
       }
@@ -472,7 +473,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         }
         return b;
       });
-      // 浠?run_code 绛夊伐鍏风粨鏋滀腑鎻愬彇鍚堝苟鎽樿 鈫?store
+      // 从 run_code 等工具结果中提取合并结果到 store
       if (data.success) {
         const toolName = (data.tool_name as string) || "";
         const resultStr = (data.result as string) || "";
@@ -498,7 +499,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 瀛愪唬鐞?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 子代理 ---
     case "subagent_start": {
       S().appendBlock(msgId, {
         type: "subagent",
@@ -543,7 +544,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           tools: [...(b.tools || []), {
             index: (data.tool_index as number) || 0,
             name: (data.tool_name as string) || "",
-            argsSummary: parts.join(" \u00b7 "),
+            argsSummary: parts.join(" · "),
             status: "running" as const,
             args,
           }],
@@ -607,7 +608,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 浜や簰 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 交互 ---
     case "user_question": {
       S().setPendingQuestion({
         id: (data.id as string) || "",
@@ -666,7 +667,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         undoable,
         hasChanges,
       });
-      // 瀹炴椂鍒锋柊鎿嶄綔鍘嗗彶鏃堕棿绾?
+      // 实时刷新操作历史时间线
       if (success && hasChanges) {
         const sid = useSessionStore.getState().activeSessionId;
         if (sid) {
@@ -676,7 +677,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 浠诲姟鍒楄〃 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- 任务列表 ---
     case "task_update": {
       const payloadItems = normalizeTaskItems(data.task_list);
       const taskIndex = typeof data.task_index === "number" ? data.task_index : null;
@@ -697,7 +698,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ Excel 棰勮 / 宸紓 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // --- Excel 预览 / 差异 ---
     case "excel_preview": {
       const epFilePath = (data.file_path as string) || "";
       useExcelStore.getState().addPreview({
@@ -756,7 +757,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
         S().addAffectedFiles(msgId, [edFilePath]);
       }
-      // 璺ㄦ枃浠跺姣旇嚜鍔ㄦ墦寮€瀵规瘮瑙嗗浘
+      // 跨文件差异自动打开对比视图
       if (edDiffMode === "cross_file" && edEntry.filePathB && edEntry.diffSummary) {
         const es = useExcelStore.getState();
         if (!es.compareMode && !es.panelOpen) {
@@ -809,6 +810,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "files_changed": {
       const changedFiles = (data.files as string[]) || [];
       const excelStore = useExcelStore.getState();
+      const wordStore = useWordStore.getState();
       for (const filePath of changedFiles) {
         if (filePath) {
           const filename = filePath.split("/").pop() || filePath;
@@ -816,6 +818,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         }
       }
       if (changedFiles.length > 0) {
+        wordStore.handleFilesChanged(changedFiles);
         S().addAffectedFiles(msgId, changedFiles);
         excelStore.bumpWorkspaceFilesVersion();
         if (ctx.effectiveSessionId) {
@@ -874,25 +877,25 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 璁″垝鍒涘缓 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // 计划创建
     case "plan_created": {
       const planTitle = (data.plan_title as string) || "";
       const planTaskCount = (data.plan_task_count as number) || 0;
       if (planTitle) {
         S().appendBlock(msgId, {
           type: "status",
-          label: `宸插垱寤鸿鍒掋€?{planTitle}銆嶏紙${planTaskCount} 椤逛换鍔★級`,
+          label: `计划创建成功：${planTitle}，共 ${planTaskCount} 个任务`,
           variant: "info",
         });
       }
       break;
     }
 
-    // 鈹€鈹€ 瀵硅瘽鎽樿锛堝墠绔潤榛樻秷璐癸紝涓嶆覆鏌擄級 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 对话摘要（前端静默消费，不覆写） ───────────────────────
     case "chat_summary":
       break;
 
-    // 鈹€鈹€ 妯″紡鍙樻洿 鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 模式变更 ───────────────────────────────────────────
     case "mode_changed": {
       const uiMode = useUIStore.getState();
       const modeName = data.mode_name as string;
@@ -913,7 +916,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鍥炲涓庡畬鎴?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 回复与完成 ───────────────────────────────────────────
     case "reply": {
       const content = (data.content as string) || "";
       const hasPendingInteraction =
@@ -932,21 +935,21 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (typeof data.chat_mode === "string") {
         uiReply.setChatMode(data.chat_mode as "write" | "read" | "plan");
       }
-      // Token 缁熻鐢卞悇璋冪敤鏂瑰湪 dispatchSSEEvent 涔嬪悗鑷澶勭悊
-      // 锛坰endMessage 鏈夊欢杩熼€昏緫锛宻endContinuation 鏈夌疮鍔犻€昏緫锛夈€?
+      // Token 统计由其他调用方在 dispatchSSEEvent 之后自行处理
+      // （sendMessage 有清理逻辑，sendContinuation 有附加逻辑，等等）
       break;
     }
 
     case "done": {
-      // 浠呮竻闄ゆ祦姘寸嚎杩涘害鎸囩ず鍣ㄣ€?
-      // 涓嶈鍦ㄦ澶勮皟鐢?setStreaming(false) / setAbortController(null) / saveCurrentSession()锛?
-      // 杩欎簺娓呯悊鐢?chat-actions.ts 鐨?finally 鍧楃粺涓€鎵ц銆?
-      // 濡傛灉鍦?done 浜嬩欢涓彁鍓嶆竻闄わ紝浼氬鑷?SessionSync 鐨?useEffect 鍦?finally 涔嬪墠瑙﹀彂锛?
-      // 寮曞彂 refreshSessionMessagesFromBackend 璇诲埌鍚庣灏氭湭鎸佷箙鍖栫殑鏃ф暟鎹紝閫犳垚娑堟伅闂儊銆?
+      // 仅清除流水线进度指示器。
+      // 不要在此处调用 setStreaming(false) / setAbortController(null) / saveCurrentSession()；
+      // 这些清理由 chat-actions.ts 的 finally 块统一执行。
+      // 如果在 done 事件中提前清除，会导致 SessionSync 的 useEffect 在 finally 之前触发，
+      // 触发 refreshSessionMessagesFromBackend 读到后端尚未持久化的数据，造成消息丢失。
       S().setPipelineStatus(null);
 
-      // 鈹€鈹€ 鑷姩鎵撳紑 Excel 棰勮闈㈡澘 鈹€鈹€
-      // 浠诲姟瀹屾垚鍚庯紝鑻ユ湰杞璇濇秹鍙?Excel 鏂囦欢鍙樻洿锛岃嚜鍔ㄦ墦寮€鏈€鍚庝竴涓枃浠剁殑棰勮
+      // ── 自动打开 Excel 预览面板 ──
+      // 任务完成后，如本轮对话涉及 Excel 文件变更，自动打开最后一个文件的预览
       {
         const EXCEL_RE = /\.(xlsx|xlsm|xls|csv)$/i;
         const doneMsg = getLastAssistantMessage(S().messages, msgId);
@@ -955,7 +958,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         if (excelFiles.length > 0) {
           const lastFile = excelFiles[excelFiles.length - 1];
           const excelStore = useExcelStore.getState();
-          // 浠呭湪闈㈡澘鏈墦寮€鏃惰嚜鍔ㄦ墦寮€锛岄伩鍏嶈鐩栫敤鎴锋鍦ㄦ煡鐪嬬殑鍐呭
+          // 只在面板未打开时自动打开，避免覆盖用户正在查看的内容
           if (!excelStore.panelOpen) {
             excelStore.openPanel(lastFile);
           }
@@ -972,7 +975,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const retryError = (data.retry_error_message as string) || "";
 
       if (retryStatus === "retrying") {
-        // 杩藉姞鎴栨洿鏂?retry block
+        // 追加重试 retry block
         S().upsertBlockByType(msgId, "llm_retry", {
           type: "llm_retry",
           retryAttempt: retryAttempt,
@@ -982,7 +985,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           retryStatus: "retrying",
         });
       } else if (retryStatus === "succeeded") {
-        // 閲嶈瘯鎴愬姛锛氭洿鏂?block 鐘舵€?
+        // 重试成功，更新 block 状态
         S().upsertBlockByType(msgId, "llm_retry", {
           type: "llm_retry",
           retryAttempt: retryAttempt,
@@ -992,7 +995,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           retryStatus: "succeeded",
         });
       } else if (retryStatus === "exhausted") {
-        // 閲嶈瘯鑰楀敖
+        // 重试耗尽
         S().upsertBlockByType(msgId, "llm_retry", {
           type: "llm_retry",
           retryAttempt: retryAttempt,
@@ -1008,7 +1011,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     case "failure_guidance": {
       ctx.hadStreamError = true;
       S().setPipelineStatus(null);
-      // 鍚?category 鍘婚噸锛氱Щ闄ゅ悓娑堟伅鍐呯浉鍚?category 鐨勬棫 failure_guidance block
+      // 用 category 去重，避免同一 category 的多个 failure_guidance block
       const fgCategory = (data.category as string) || "unknown";
       const existingBlocks = (() => {
         const msgs = S().messages;
@@ -1023,7 +1026,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         (b) => b.type === "failure_guidance" && b.category === fgCategory,
       );
       if (hasSameCategory) {
-        // 鏇挎崲鐜版湁鍚?category 鐨?block
+        // 替换已有同 category 的 block
         S().updateAssistantMessage(msgId, (m) => ({
           ...m,
           blocks: m.blocks.map((b) => {
@@ -1060,7 +1063,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           model: (data.model as string) || undefined,
         });
       }
-      // 鎶樺彔鍚岃疆 llm_retry(exhausted) block
+      // 收起同期的 llm_retry(exhausted) block
       S().updateAssistantMessage(msgId, (m) => ({
         ...m,
         blocks: m.blocks.filter(
@@ -1070,7 +1073,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 宸ュ叿璋冪敤閫氱煡锛?tools 寮€鍚椂锛?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 工具调用通知：（tools 开启时）──────────────────────────────
     case "tool_call_notice": {
       const tnToolName = (data.tool_name as string) || "";
       const tnArgsSummary = (data.args_summary as string) || "";
@@ -1084,7 +1087,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 鈹€鈹€ 鎺ㄧ悊杩囩▼閫氱煡锛?reasoning 寮€鍚椂锛?鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€鈹€
+    // ── 推理过程通知：（reasoning 开启时）────────────────────────────
     case "reasoning_notice": {
       const rnContent = (data.content as string) || "";
       const rnIteration = (data.iteration as number) || 0;
@@ -1104,10 +1107,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
 }
 
 // ---------------------------------------------------------------------------
-// 渚挎嵎鍑芥暟锛歵hinking 鐘舵€佺鐞?
+// 辅助函数：thinking 状态管理
 // ---------------------------------------------------------------------------
 
-/** 鍦ㄩ潪 thinking 浜嬩欢鍓嶈皟鐢紝鍏抽棴杩涜涓殑 thinking block銆?*/
+/** 在非 thinking 事件前调用，关闭进行中的 thinking block。*/
 export function finalizeThinking(ctx: SSEHandlerContext): void {
   if (!ctx.thinkingInProgress) return;
   ctx.thinkingInProgress = false;
@@ -1120,7 +1123,7 @@ export function finalizeThinking(ctx: SSEHandlerContext): void {
   });
 }
 
-/** 鏍囧噯鐨勪簨浠跺墠澶勭悊锛氳皟鐢ㄦ柟鍦?consumeSSE 鍥炶皟椤堕儴浣跨敤銆?*/
+/** 标准的事件前处理：调用方在 consumeSSE 回调顶部使用。*/
 export function preDispatch(event: SSEEvent, ctx: SSEHandlerContext): void {
   if (event.event !== "thinking_delta" && event.event !== "thinking") {
     finalizeThinking(ctx);
