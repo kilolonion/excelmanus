@@ -19,6 +19,9 @@ _EXPLORER_TOOLS: list[str] = [
     "scan_excel_snapshot",    # 一次拿全貌（schema + 统计 + 质量信号 + 跨 Sheet 关联）
     "search_excel_values",    # Excel grep：跨 Sheet 搜索值/模式
     "read_excel",
+    "read_word",       # Word 文档只读
+    "inspect_word",    # Word 文档结构
+    "search_word",     # Word 文档搜索
     "list_sheets",
     "inspect_excel_files",
     "filter_data",
@@ -34,6 +37,9 @@ _VERIFIER_TOOLS: list[str] = [
     "scan_excel_snapshot",    # 快速校验文件结构和数据质量
     "search_excel_values",    # 跨 Sheet 搜索验证特定值
     "read_excel",
+    "read_word",       # Word 文档只读
+    "inspect_word",    # Word 文档结构
+    "search_word",     # Word 文档搜索
     "list_sheets",
     "inspect_excel_files",
     "filter_data",

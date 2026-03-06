@@ -9,7 +9,12 @@ import inspect
 
 import pytest
 
-from excelmanus.skillpacks.router import SkillRouter, _MAY_WRITE_HINT_RE, _CHITCHAT_RE
+from excelmanus.skillpacks.router import (
+    SkillRouter,
+    _CHITCHAT_RE,
+    _MAY_WRITE_HINT_RE,
+    _TOOL_ROUTE_PROMPT,
+)
 
 
 # ── 1. 新增英文写入意图词匹配 ──
@@ -117,6 +122,24 @@ def test_issue_82_38_full_message() -> None:
 
 
 # ── 6. 提示词包含新规则文本 ──
+
+def test_extract_word_paths_from_message() -> None:
+    """应能从用户消息中提取 .docx 路径。"""
+    paths = SkillRouter._extract_word_paths("请修改 report.docx 中的内容")
+    assert "report.docx" in paths
+
+
+def test_docx_path_implies_may_write() -> None:
+    """包含 .docx 路径时应保守归类为 may_write。"""
+    result = SkillRouter._classify_write_hint_lexical("修改 report.docx")
+    assert result == "may_write"
+
+
+def test_tool_route_prompt_mentions_word_documents() -> None:
+    """路由提示词中的 data_read/data_write 应覆盖 Word 文档。"""
+    assert "Excel/CSV/Word" in _TOOL_ROUTE_PROMPT
+    assert "Excel/Word" in _TOOL_ROUTE_PROMPT
+
 
 def test_llm_prompt_contains_expanded_may_write_examples() -> None:
     """_classify_task_llm 的提示词应包含扩充后的 may_write 示例。"""

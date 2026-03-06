@@ -54,6 +54,24 @@ def excel_standard_header(tmp_path: Path) -> Path:
     return fp
 
 
+@pytest.fixture()
+def word_with_heading_and_table(tmp_path: Path) -> Path:
+    """包含标题和表格的最小 Word 文档。"""
+    from docx import Document
+
+    doc = Document()
+    doc.add_heading("季度总结", level=1)
+    doc.add_paragraph("这是一个测试段落。")
+    table = doc.add_table(rows=2, cols=2)
+    table.cell(0, 0).text = "项目"
+    table.cell(0, 1).text = "值"
+    table.cell(1, 0).text = "营收"
+    table.cell(1, 1).text = "100"
+    fp = tmp_path / "report.docx"
+    doc.save(fp)
+    return fp
+
+
 class TestBuildFileStructureContext:
     """_build_file_structure_context 测试。"""
 
@@ -97,6 +115,18 @@ class TestBuildFileStructureContext:
             candidate_file_paths=[str(txt_file)]
         )
         assert result == ""
+
+    def test_word_file_includes_lightweight_structure_context(
+        self, router: SkillRouter, word_with_heading_and_table: Path
+    ) -> None:
+        result, sc, mr = router._build_file_structure_context_sync(
+            candidate_file_paths=[str(word_with_heading_and_table)]
+        )
+        assert "report.docx" in result
+        assert "段落" in result
+        assert "表格" in result
+        assert "标题" in result
+        assert "季度总结" in result
 
     def test_max_files_limit(
         self, router: SkillRouter, tmp_path: Path

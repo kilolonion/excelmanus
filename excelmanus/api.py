@@ -63,6 +63,34 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstraints
 
+try:
+    import orjson
+except ModuleNotFoundError:
+    orjson = None
+
+
+class CustomJSONResponse(JSONResponse):
+    """自定义JSON响应类，支持中文字符（ensure_ascii=False）"""
+
+    def render(self, content: Any) -> bytes:
+        if orjson is not None:
+            # 使用orjson序列化，设置ensure_ascii=False支持中文
+            try:
+                return orjson.dumps(
+                    content,
+                    option=orjson.OPT_INDENT_2 | orjson.OPT_NON_STR_KEYS,
+                )
+            except (TypeError, ValueError):
+                pass
+
+        return json.dumps(
+            content,
+            ensure_ascii=False,
+            allow_nan=False,
+            indent=None,
+            separators=(",", ":"),
+        ).encode("utf-8")
+
 import excelmanus
 from excelmanus.config import (
     ConfigError,
@@ -388,7 +416,7 @@ def _resolve_workspace_root(request: Request) -> str:
 async def _has_session_access(session_id: str, request: Request) -> bool:
     """会话存在且属于当前用户时返回 True（不存在/无权均返回 False）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        return False
     user_id = _get_isolation_user_id(request)
     try:
         await _session_manager.get_session_detail(session_id, user_id=user_id)
@@ -405,7 +433,7 @@ async def _require_admin_if_auth_enabled(request: Request) -> JSONResponse | Non
 
     user = await get_current_user_from_request(request)
     if user.role != "admin":
-        return _error_json_response(403, "需要管理员权限。")
+        raise HTTPException(status_code=403, detail="需要管理员权限。")
     return None
 
 
@@ -582,11 +610,11 @@ def _fire_and_forget(coro: Any, *, name: str = "bridge_notify") -> None:
     fire_and_forget(coro, name=name)
 
 
-def _error_json_response(status_code: int, message: str) -> JSONResponse:
+def _error_json_response(status_code: int, message: str) -> CustomJSONResponse:
     """构建统一错误响应。"""
     error_id = str(uuid.uuid4())
     body = ErrorResponse(error=message, error_id=error_id)
-    return JSONResponse(status_code=status_code, content=body.model_dump())
+    return CustomJSONResponse(status_code=status_code, content=body.model_dump())
 
 
 def _make_content_disposition(filename: str) -> str:
@@ -1685,11 +1713,11 @@ async def _resolve_mentions(
 async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     """对话接口：创建或复用会话，将消息传递给 AgentEngine。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if _config_incomplete:
-        return _error_json_response(
-            503,
-            "模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+        raise HTTPException(
+            status_code=503,
+            detail="模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
         )
 
     from excelmanus.auth.dependencies import extract_user_id
@@ -1849,14 +1877,14 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     实现毫秒级首次视觉反馈。
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if _config_incomplete:
-        return _error_json_response(
-            503,
-            "模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+        raise HTTPException(
+            status_code=503,
+            detail="模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
         )
     if not (request.message or "").strip() and not request.images:
-        return _error_json_response(400, "消息内容不能为空。")
+        raise HTTPException(status_code=400, detail="消息内容不能为空。")
 
     # ── 仅保留纯内存操作在流外部（微秒级） ──
     from excelmanus.auth.dependencies import extract_user_id
@@ -2436,13 +2464,13 @@ class RollbackRequest(BaseModel):
 async def backup_list(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的待应用备份文件。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
         # 区分: session 属于其他用户 → 404（安全隔离）; session 不存在 → 200 空默认值（local-first）
         if user_id and _session_manager.get_engine(session_id) is not None:
-            return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+            raise HTTPException(status_code=404, detail=f"会话 '{session_id}' 不存在或未加载。")
         return JSONResponse(status_code=200, content={"files": [], "backup_enabled": False})
     tx = engine.transaction
     if tx is None:
@@ -2483,18 +2511,18 @@ async def backup_list(session_id: str, request: Request) -> JSONResponse:
 async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSONResponse:
     """将备份副本应用回原始文件。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
     try:
         engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
     except SessionBusyError:
-        return _error_json_response(409, "会话正在处理中，请等待完成后再应用备份。")
+        raise HTTPException(status_code=409, detail="会话正在处理中，请等待完成后再应用备份。")
     if engine is None:
-        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+        raise HTTPException(status_code=404, detail=f"会话 '{request.session_id}' 不存在或未加载。")
     tx = engine.transaction
     if tx is None:
-        return _error_json_response(400, "该会话未启用备份模式。")
+        return JSONResponse(status_code=400, content={"detail": "该会话未启用备份模式。"})
     if request.files:
         applied = []
         original_rel_paths: set[str] = set()
@@ -2541,18 +2569,18 @@ async def backup_apply(request: BackupApplyRequest, raw_request: Request) -> JSO
 async def backup_discard(request: BackupDiscardRequest, raw_request: Request) -> JSONResponse:
     """丢弃备份映射。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
     try:
         engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
     except SessionBusyError:
-        return _error_json_response(409, "会话正在处理中，请等待完成后再丢弃备份。")
+        return JSONResponse(status_code=400, content={"detail": "会话正在处理中，请等待完成后再丢弃备份。"})
     if engine is None:
-        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+        raise HTTPException(status_code=404, detail=f"会话 '{request.session_id}' 不存在或未加载。")
     tx = engine.transaction
     if tx is None:
-        return _error_json_response(400, "该会话未启用备份模式。")
+        return JSONResponse(status_code=400, content={"detail": "该会话未启用备份模式。"})
     if request.files:
         count = 0
         for fp in request.files:
@@ -2569,17 +2597,17 @@ async def backup_discard(request: BackupDiscardRequest, raw_request: Request) ->
 async def backup_undo(request: BackupUndoRequest, raw_request: Request) -> JSONResponse:
     """撤销已应用的备份，将原始文件恢复到应用前的状态。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
-        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+        raise HTTPException(status_code=404, detail=f"会话 '{request.session_id}' 不存在或未加载。")
     tx = engine.transaction
     if tx is None:
-        return _error_json_response(400, "该会话未启用备份模式。")
+        return JSONResponse(status_code=400, content={"detail": "该会话未启用备份模式。"})
     ok = tx.undo_commit(request.original_path, request.undo_path)
     if not ok:
-        return _error_json_response(400, "撤销失败：undo 备份文件不存在或已过期。")
+        return JSONResponse(status_code=400, content={"detail": "撤销失败：undo 备份文件不存在或已过期。"})
     return JSONResponse(status_code=200, content={"status": "ok", "undone": request.original_path})
 
 
@@ -2609,11 +2637,11 @@ async def workspace_rollback(request: BackupDiscardRequest, raw_request: Request
 async def checkpoint_list(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的轮次 checkpoint 时间线。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
-        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+        return JSONResponse(status_code=404, content={"detail": f"会话 '{session_id}' 不存在或未加载。"})
     if not engine.checkpoint_enabled:
         return JSONResponse(status_code=200, content={
             "checkpoints": [], "checkpoint_enabled": False,
@@ -2651,20 +2679,20 @@ async def checkpoint_rollback(
 ) -> JSONResponse:
     """回退到指定轮次之前的文件状态。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     # B3: 原子化检查 in_flight + 获取 engine，消除 TOCTOU 竞态
     try:
         engine = await _session_manager.get_engine_if_idle(request.session_id, user_id=user_id)
     except SessionBusyError:
-        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
+        return JSONResponse(status_code=409, content={"detail": "会话正在处理中，请等待完成后再回退。"})
     if engine is None:
-        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+        raise HTTPException(status_code=404, detail=f"会话 '{request.session_id}' 不存在或未加载。")
     if not engine.checkpoint_enabled:
-        return _error_json_response(400, "该会话未启用 checkpoint 模式。")
+        return JSONResponse(status_code=400, content={"detail": "该会话未启用 checkpoint 模式。"})
     _reg = engine.file_registry
     if _reg is None or not getattr(_reg, 'has_versions', False):
-        return _error_json_response(400, "FileRegistry not available for rollback.")
+        return JSONResponse(status_code=400, content={"detail": "FileRegistry not available for rollback."})
     restored = _reg.rollback_to_turn(request.turn_number)
     return JSONResponse(status_code=200, content={
         "status": "ok",
@@ -2689,15 +2717,15 @@ async def chat_rollback_preview(
 ) -> JSONResponse:
     """预览回滚到指定用户轮次后会影响的文件变更（不实际执行）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     engine = _session_manager.get_engine(request.session_id, user_id=user_id)
     if engine is None:
-        return _error_json_response(404, f"会话 '{request.session_id}' 不存在或未加载。")
+        raise HTTPException(status_code=404, detail=f"会话 '{request.session_id}' 不存在或未加载。")
     try:
         preview = engine.rollback_preview(request.turn_index)
     except IndexError as exc:
-        return _error_json_response(400, str(exc))
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
     return JSONResponse(status_code=200, content=preview)
 
 
@@ -2705,7 +2733,7 @@ async def chat_rollback_preview(
 async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONResponse:
     """回退对话到指定用户轮次，可选回滚文件变更。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
 
     try:
@@ -2718,11 +2746,11 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
             user_id=user_id,
         )
     except SessionNotFoundError as exc:
-        return _error_json_response(404, str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
     except SessionBusyError:
-        return _error_json_response(409, "会话正在处理中，请等待完成后再回退。")
+        return JSONResponse(status_code=409, content={"detail": "会话正在处理中，请等待完成后再回退。"})
     except IndexError as exc:
-        return _error_json_response(400, str(exc))
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     return JSONResponse(
         status_code=200,
@@ -2739,11 +2767,11 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
 async def chat_turns(session_id: str, request: Request) -> JSONResponse:
     """列出指定会话的用户轮次摘要。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     engine = _session_manager.get_engine(session_id, user_id=user_id)
     if engine is None:
-        return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载。")
+        return JSONResponse(status_code=404, content={"detail": f"会话 '{session_id}' 不存在或未加载。"})
 
     turns = engine.list_user_turns()
     return JSONResponse(
@@ -3049,7 +3077,7 @@ async def chat_guide(
     即使当前没有 in-flight 任务也可投递，下次 chat() 时生效。
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
@@ -3077,7 +3105,7 @@ async def chat_answer(
 ) -> JSONResponse:
     """提交 ask_user 问题的回答，resolve 阻塞中的 Future。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
@@ -3116,7 +3144,7 @@ async def chat_approve(
 ) -> JSONResponse:
     """提交审批决策，resolve 阻塞中的 Future。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
@@ -3469,7 +3497,7 @@ async def clawhub_search(
     try:
         results = await manager.clawhub_search(q.strip(), limit=limit)
     except ClawHubError as exc:
-        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
+        raise HTTPException(status_code=502, detail=f"ClawHub 请求失败：{exc}")
     return {"results": results}
 
 
@@ -3480,9 +3508,9 @@ async def clawhub_skill_detail(slug: str) -> dict[str, Any]:
     try:
         detail = await manager.clawhub_skill_detail(slug)
     except ClawHubNotFoundError as exc:
-        return _error_json_response(404, str(exc))
+        raise HTTPException(status_code=404, detail=str(exc))
     except ClawHubError as exc:
-        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
+        raise HTTPException(status_code=502, detail=f"ClawHub 请求失败：{exc}")
     return detail
 
 
@@ -3576,7 +3604,7 @@ async def clawhub_list_installed() -> dict[str, Any]:
 async def delete_session(session_id: str, request: Request) -> dict:
     """删除指定会话并释放资源。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     deleted = await _session_manager.delete(session_id, user_id=user_id)
@@ -3596,7 +3624,7 @@ async def archive_session(session_id: str, request: Request) -> dict:
     请求体: {"archive": false} 取消归档
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
 
     body = await request.json()
     archive = body.get("archive", True)
@@ -3621,7 +3649,7 @@ async def archive_session(session_id: str, request: Request) -> dict:
 async def update_session_title_api(session_id: str, request: Request) -> JSONResponse:
     """用户手动更新会话标题。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     body = await request.json()
     title = (body.get("title") or "").strip()
     if not title:
@@ -3644,7 +3672,7 @@ async def update_session_title_api(session_id: str, request: Request) -> JSONRes
 async def list_approvals(request: Request) -> JSONResponse:
     """列出已执行的审批记录（支持分页与筛选）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
 
     limit = int(request.query_params.get("limit", "50"))
     undoable_only = request.query_params.get("undoable_only", "false").lower() == "true"
@@ -3685,7 +3713,7 @@ async def list_approvals(request: Request) -> JSONResponse:
 async def undo_approval(approval_id: str, request: Request) -> JSONResponse:
     """回滚指定审批操作。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
 
     session_id = request.query_params.get("session_id")
     if not session_id:
@@ -3728,7 +3756,7 @@ async def list_operations(
 ) -> JSONResponse:
     """列出指定会话的写入操作历史（时间线）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, request):
         return _error_json_response(404, f"会话 '{session_id}' 不存在。")
     user_id = _get_isolation_user_id(request)
@@ -3794,7 +3822,7 @@ async def get_operation_detail(
 ) -> JSONResponse:
     """获取单条操作的详情（含 diff 内容）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, request):
         return _error_json_response(404, f"会话 '{session_id}' 不存在。")
     user_id = _get_isolation_user_id(request)
@@ -3867,7 +3895,7 @@ async def undo_operation(
 ) -> JSONResponse:
     """回滚指定操作。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     if not await _has_session_access(session_id, request):
         return _error_json_response(404, f"会话 '{session_id}' 不存在。")
     user_id = _get_isolation_user_id(request)
@@ -4417,12 +4445,12 @@ async def get_image_file(request: Request) -> StreamingResponse:
 
     ws_root = _resolve_workspace_root(request)
     _iso_uid = _get_isolation_user_id(request)
-    
+
     # 使用与下载相同的路径解析逻辑
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"图片文件不存在: {path}")  # type: ignore[return-value]
-    
+
     file_path = _Path(resolved)
 
     _IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"}
@@ -4457,12 +4485,12 @@ async def read_text_file(request: Request) -> JSONResponse:
 
     ws_root = _resolve_workspace_root(request)
     _iso_uid = _get_isolation_user_id(request)
-    
+
     # 使用与下载相同的路径解析逻辑
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
     if resolved is None:
         return _error_json_response(404, f"文本文件不存在: {path}")  # type: ignore[return-value]
-    
+
     file_path = _Path(resolved)
 
     # 支持的文本文件扩展名
@@ -5157,6 +5185,25 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
 # ── Word 文件 API ───────────────────────────────────────────────
 
 
+def _resolve_supported_word_file(
+    requested_path: str,
+    resolved_path: str | None,
+) -> tuple["Path | None", JSONResponse | None]:
+    from pathlib import Path as _Path
+
+    if resolved_path is None:
+        return None, _error_json_response(404, f"Word 文件不存在: {requested_path}")
+
+    file_path = _Path(resolved_path)
+    if not file_path.is_file():
+        return None, _error_json_response(404, f"Word 文件不存在: {requested_path}")
+
+    if file_path.suffix.lower() != ".docx":
+        return None, _error_json_response(404, f"Word 文件格式不支持（仅支持 .docx）: {requested_path}")
+
+    return file_path, None
+
+
 @_router.get("/api/v1/files/word")
 async def get_word_file(request: Request) -> StreamingResponse:
     """返回 .docx 文件二进制流供前端 Univer Doc 加载。"""
@@ -5167,17 +5214,12 @@ async def get_word_file(request: Request) -> StreamingResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
-    from pathlib import Path as _Path
-
     ws_root = _resolve_workspace_root(request)
     _iso_uid = _get_isolation_user_id(request)
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
-    if resolved is None:
-        return _error_json_response(404, f"Word 文件不存在: {path}")  # type: ignore[return-value]
-
-    file_path = _Path(resolved)
-    if not file_path.is_file() or file_path.suffix.lower() not in (".docx", ".doc"):
-        return _error_json_response(404, f"Word 文件不存在: {path}")  # type: ignore[return-value]
+    file_path, error_response = _resolve_supported_word_file(path, resolved)
+    if error_response is not None:
+        return error_response  # type: ignore[return-value]
 
     def _iter_file():
         with open(resolved, "rb") as f:  # type: ignore[arg-type]
@@ -5202,17 +5244,12 @@ async def get_word_snapshot(request: Request) -> JSONResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    from pathlib import Path as _Path
-
     ws_root = _resolve_workspace_root(request)
     _iso_uid = _get_isolation_user_id(request)
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
-    if resolved is None:
-        return _error_json_response(404, f"Word 文件不存在: {path}")
-
-    file_path = _Path(resolved)
-    if not file_path.is_file() or file_path.suffix.lower() != ".docx":
-        return _error_json_response(404, f"Word 文件不存在或格式不支持: {path}")
+    file_path, error_response = _resolve_supported_word_file(path, resolved)
+    if error_response is not None:
+        return error_response
 
     try:
         import asyncio
@@ -5334,8 +5371,9 @@ async def write_word_content(request: WordWriteRequest, raw_request: Request) ->
     ws_root = _resolve_workspace_root(raw_request)
     _iso_uid = _get_isolation_user_id(raw_request)
     resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root, user_id=_iso_uid)
-    if resolved is None:
-        return _error_json_response(404, f"Word 文件不存在或路径非法: {request.path}")
+    file_path, error_response = _resolve_supported_word_file(request.path, resolved)
+    if error_response is not None:
+        return error_response
 
     if request.session_id and _session_manager is not None:
         engine = _session_manager.get_engine(request.session_id, user_id=_iso_uid)
@@ -5347,9 +5385,13 @@ async def write_word_content(request: WordWriteRequest, raw_request: Request) ->
                 except ValueError:
                     pass
 
+    file_path, error_response = _resolve_supported_word_file(request.path, resolved)
+    if error_response is not None:
+        return error_response
+
     try:
         import asyncio
-        result = await asyncio.to_thread(_apply_word_write, resolved, request.operations)
+        result = await asyncio.to_thread(_apply_word_write, str(file_path), request.operations)
         return JSONResponse(content=result)
     except Exception as exc:
         logger.error("Word write 失败: %s", exc, exc_info=True)
@@ -5388,9 +5430,8 @@ def _apply_word_write(file_path: str, operations: list[dict[str, Any]]) -> dict[
                     errors.append(f"insert_after: 段落索引 {idx} 超出范围")
                     continue
                 ref_para = doc.paragraphs[idx]
-                new_p = ref_para._element.addnext(
-                    ref_para._element.makeelement(qn("w:p"), {})
-                )
+                new_p = ref_para._element.makeelement(qn("w:p"), {})
+                ref_para._element.addnext(new_p)
                 from docx.text.paragraph import Paragraph
                 new_para = Paragraph(new_p, ref_para._parent)
                 new_para.add_run(text)
@@ -5809,7 +5850,7 @@ async def reveal_file(request: Request) -> JSONResponse:
 async def list_sessions(request: Request) -> JSONResponse:
     """列出所有会话（含历史）。认证启用时仅返回当前用户的会话。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     include_archived = request.query_params.get("include_archived", "false").lower() == "true"
     sessions = await _session_manager.list_sessions(
@@ -5822,7 +5863,7 @@ async def list_sessions(request: Request) -> JSONResponse:
 async def clear_all_sessions(request: Request) -> JSONResponse:
     """清空当前用户的会话历史。认证启用时仅删除当前用户的会话。若有会话正在处理中则返回 409。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     sess_count, msg_count = await _session_manager.clear_all_sessions(user_id=user_id)
     return JSONResponse(content={
@@ -5836,7 +5877,7 @@ async def clear_all_sessions(request: Request) -> JSONResponse:
 async def get_session_messages(session_id: str, request: Request) -> JSONResponse:
     """分页获取会话消息。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     try:
         limit = max(1, min(500, int(request.query_params.get("limit", "50"))))
@@ -5869,7 +5910,7 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
 async def get_session_excel_events(session_id: str, request: Request) -> JSONResponse:
     """返回持久化的 Excel diff 和改动文件列表，供前端重启后恢复。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     ch = _session_manager.chat_history
     if ch is None:
@@ -5921,7 +5962,7 @@ async def export_session(session_id: str, request: Request) -> Response:
         include_workspace: true | false (默认 true，仅 emx 有效)
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     fmt = (request.query_params.get("format") or "md").lower().strip()
     if fmt not in ("md", "txt", "emx"):
@@ -6010,7 +6051,7 @@ async def import_session(request: Request) -> JSONResponse:
     消息、SessionState checkpoint、持久记忆、工作区文件。
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
 
     from excelmanus.session_export import parse_emx, EMXImportError
 
@@ -6041,7 +6082,7 @@ async def import_session(request: Request) -> JSONResponse:
 async def get_session_status(session_id: str, request: Request) -> JSONResponse:
     """获取会话运行时状态（上下文压缩 + 文件注册表）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     def _normalize_registry_status(registry_payload: dict[str, Any]) -> dict[str, Any]:
@@ -6101,7 +6142,7 @@ async def get_session_status(session_id: str, request: Request) -> JSONResponse:
 async def compact_session_context(session_id: str, request: Request) -> JSONResponse:
     """在指定会话内执行 /compact，并返回执行结果。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -6129,7 +6170,7 @@ async def compact_session_context(session_id: str, request: Request) -> JSONResp
 async def extract_session_memory(session_id: str, request: Request) -> JSONResponse:
     """手动触发指定会话的记忆提取。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -6158,7 +6199,7 @@ async def extract_session_memory(session_id: str, request: Request) -> JSONRespo
 async def scan_session_registry(session_id: str, request: Request) -> JSONResponse:
     """触发指定会话的 FileRegistry 后台扫描（force=True）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     engine = await _session_manager.get_or_restore_engine(
@@ -6184,7 +6225,7 @@ async def scan_session_registry(session_id: str, request: Request) -> JSONRespon
 async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
     """切换指定会话的 full_access 开关（供前端快捷按钮使用）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
 
     body = await request.json()
@@ -6222,7 +6263,7 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
 async def get_session(session_id: str, request: Request) -> JSONResponse:
     """获取会话详情含消息历史。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(request)
     try:
         detail = await _session_manager.get_session_detail(session_id, user_id=user_id)
@@ -6320,7 +6361,7 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
     如果用户配置了 allowed_models，则只能切换到允许的模型。
     """
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     assert _config is not None, "服务未初始化"
 
     name = request.name.strip()
@@ -6418,7 +6459,7 @@ class ThinkingConfigRequest(BaseModel):
 async def get_thinking_config(raw_request: Request) -> JSONResponse:
     """获取当前 thinking 配置（等级 + 预算）。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     user_id = _get_isolation_user_id(raw_request)
     sessions = await _session_manager.list_sessions(user_id=user_id)
     # 取第一个活跃 session 的 thinking_config
@@ -6444,7 +6485,7 @@ async def get_thinking_config(raw_request: Request) -> JSONResponse:
 async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Request) -> JSONResponse:
     """设置 thinking 等级和/或预算，同步到所有活跃会话。"""
     if _session_manager is None:
-        return _error_json_response(503, "服务未初始化")
+        raise HTTPException(status_code=503, detail="服务未初始化")
     from excelmanus.engine import _EFFORT_RATIOS
     if request.effort is not None and request.effort not in _EFFORT_RATIOS:
         return _error_json_response(400, f"无效的 effort 值: {request.effort!r}。可选: {', '.join(sorted(_EFFORT_RATIOS))}")
@@ -6957,7 +6998,7 @@ async def export_model_config(
         from excelmanus.config_transfer import export_config
         token = export_config(sections, password=request.password, mode=request.mode)
     except ValueError as exc:
-        return _error_json_response(400, str(exc))
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     return JSONResponse(content={"token": token, "sections": list(sections.keys()), "mode": request.mode})
 
@@ -6983,7 +7024,7 @@ async def import_model_config(
         from excelmanus.config_transfer import import_config
         payload = import_config(request.token, password=request.password)
     except ValueError as exc:
-        return _error_json_response(400, str(exc))
+        return JSONResponse(status_code=400, content={"detail": str(exc)})
 
     sections = payload.get("sections", {})
     imported: dict[str, Any] = {}
@@ -9835,8 +9876,5 @@ def main() -> None:
         port=args.port,
         log_level="info",
     )
-
-
-
 
 

@@ -55,6 +55,7 @@ class FixVerifyOutcome:
 _WRITE_TOOLS = frozenset({
     "write_to_sheet", "format_range",
     "write_text_file", "edit_text_file",
+    "write_word",
 })
 
 # run_code 需特殊处理：仅当有写入行为时触发

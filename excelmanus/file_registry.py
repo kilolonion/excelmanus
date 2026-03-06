@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 _EXCEL_EXTENSIONS = _EXCEL_EXTENSIONS_BASE | frozenset({".csv"})
 
 # Word 扩展名
-_WORD_EXTENSIONS = frozenset({".docx", ".doc"})
+_WORD_EXTENSIONS = frozenset({".docx"})
 
 # 图片扩展名
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"})
@@ -1038,9 +1038,11 @@ class FileRegistry:
             lines.append(f"\n### 用户文件 ({len(user_files)})")
             for e in sorted(user_files, key=lambda x: x.canonical_path):
                 sheets = ""
-                if e.sheet_meta:
+                if e.file_type in ("excel", "csv") and e.sheet_meta:
                     sheet_names = [s.get("name", "") for s in e.sheet_meta]
                     sheets = f" [{', '.join(sheet_names)}]"
+                elif e.file_type == "word" and e.sheet_meta:
+                    sheets = f" ({self._format_structure(e)})"
                 lines.append(f"- `{e.canonical_path}`{sheets}")
 
         if backups:
@@ -1288,6 +1290,11 @@ class FileRegistry:
                         sheet_meta = self._scan_file_sheets(fp, header_scan_rows)
                     except Exception:
                         logger.debug("扫描上传文件 %s 失败", fp, exc_info=True)
+                elif file_type == "word":
+                    try:
+                        sheet_meta = self._scan_word_meta(fp)
+                    except Exception:
+                        logger.debug("扫描上传 Word 文件 %s 失败", fp, exc_info=True)
 
                 self.register_from_scan(
                     canonical_path=rel_path,
