@@ -131,6 +131,8 @@ class Tier1Scanner:
 class Tier2Resolver:
     """单元格级深度引用解析（按需调用）。"""
 
+    _MAX_DEPTH = 5
+
     def __init__(self) -> None:
         self._extractor = FormulaRefExtractor()
 
@@ -147,9 +149,27 @@ class Tier2Resolver:
 
         wb = load_workbook(file_path, data_only=False, read_only=True)
         try:
-            return self._resolve(wb, sheet_name, address, direction, depth)
+            return self._resolve(wb, sheet_name, address, direction,
+                                 min(depth, self._MAX_DEPTH))
         finally:
             wb.close()
+
+    # ------------------------------------------------------------------
+
+    def _find_formula(self, wb: Any, sheet_name: str, address: str) -> str | None:
+        """读取指定单元格的公式（无公式返回 None）。"""
+        if sheet_name not in wb.sheetnames:
+            return None
+        ws = wb[sheet_name]
+        for row in ws.iter_rows():
+            for cell in row:
+                coord = cell.coordinate if hasattr(cell, "coordinate") else ""
+                if coord == address:
+                    val = cell.value
+                    if isinstance(val, str) and val.startswith("="):
+                        return val
+                    return None
+        return None
 
     def _resolve(
         self,
@@ -159,37 +179,106 @@ class Tier2Resolver:
         direction: str,
         depth: int,
     ) -> CellNode:
-        ws = wb[sheet_name]
+        formula = self._find_formula(wb, sheet_name, address)
 
-        formula: str | None = None
-        found = False
-        for row in ws.iter_rows():
-            if found:
-                break
-            for cell in row:
-                coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                if coord == address:
-                    val = cell.value
-                    if isinstance(val, str) and val.startswith("="):
-                        formula = val
-                    found = True
-                    break
-
-        precedents: list[CellRef] = []
+        direct_prec: list[CellRef] = []
         if formula and direction in ("both", "precedents"):
-            precedents = self._extractor.extract(formula)
+            direct_prec = self._extractor.extract(formula)
 
-        dependents: list[CellRef] = []
+        direct_deps: list[CellRef] = []
         if direction in ("both", "dependents"):
-            dependents = self._find_dependents(wb, sheet_name, address)
+            direct_deps = self._find_dependents(wb, sheet_name, address)
+
+        all_prec = list(direct_prec)
+        all_deps = list(direct_deps)
+
+        if depth > 1 and direction in ("both", "precedents"):
+            all_prec = self._expand_precedents(
+                wb, sheet_name, direct_prec, depth - 1,
+            )
+
+        if depth > 1 and direction in ("both", "dependents"):
+            all_deps = self._expand_dependents(
+                wb, sheet_name, address, direct_deps, depth - 1,
+            )
 
         return CellNode(
             sheet=sheet_name,
             address=address,
             formula=formula,
-            precedents=precedents,
-            dependents=dependents,
+            precedents=all_prec,
+            dependents=all_deps,
         )
+
+    # ------------------------------------------------------------------
+
+    def _expand_precedents(
+        self,
+        wb: Any,
+        origin_sheet: str,
+        direct: list[CellRef],
+        remaining_depth: int,
+    ) -> list[CellRef]:
+        """BFS 展开 precedents 至 remaining_depth 层。"""
+        result = list(direct)
+        seen: set[str] = {r.display() for r in direct}
+        frontier = list(direct)
+
+        for _ in range(remaining_depth):
+            if not frontier:
+                break
+            next_frontier: list[CellRef] = []
+            for ref in frontier:
+                if ":" in ref.cell_or_range:
+                    continue
+                ref_sheet = ref.sheet_name or origin_sheet
+                sub_formula = self._find_formula(wb, ref_sheet, ref.cell_or_range)
+                if not sub_formula:
+                    continue
+                sub_refs = self._extractor.extract(sub_formula)
+                for sr in sub_refs:
+                    key = sr.display()
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(sr)
+                        next_frontier.append(sr)
+            frontier = next_frontier
+        return result
+
+    def _expand_dependents(
+        self,
+        wb: Any,
+        origin_sheet: str,
+        origin_address: str,
+        direct: list[CellRef],
+        remaining_depth: int,
+    ) -> list[CellRef]:
+        """BFS 展开 dependents 至 remaining_depth 层。"""
+        result = list(direct)
+        seen: set[str] = {
+            f"{(r.sheet_name or origin_sheet)}!{r.cell_or_range}"
+            for r in direct
+        }
+        seen.add(f"{origin_sheet}!{origin_address}")
+        frontier = list(direct)
+
+        for _ in range(remaining_depth):
+            if not frontier:
+                break
+            next_frontier: list[CellRef] = []
+            for ref in frontier:
+                ref_sheet = ref.sheet_name or origin_sheet
+                sub_deps = self._find_dependents(wb, ref_sheet, ref.cell_or_range)
+                for sd in sub_deps:
+                    key = f"{(sd.sheet_name or ref_sheet)}!{sd.cell_or_range}"
+                    if key not in seen:
+                        seen.add(key)
+                        result.append(sd)
+                        next_frontier.append(sd)
+            frontier = next_frontier
+        return result
+
+    # ------------------------------------------------------------------
 
     def _find_dependents(
         self, wb: Any, sheet_name: str, address: str,

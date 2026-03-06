@@ -54,3 +54,27 @@ class TestTier2Resolver:
         node = resolver.resolve(str(chain_workbook), "Sheet1", "A2", direction="precedents", depth=1)
         assert node.formula is None
         assert node.precedents == []
+
+    def test_depth2_precedents(self, chain_workbook: Path) -> None:
+        """C2=B2+A2, B2=A2*2 → depth=2 应展开 B2 的 precedent A2。"""
+        resolver = Tier2Resolver()
+        node = resolver.resolve(str(chain_workbook), "Sheet1", "C2", direction="precedents", depth=2)
+        prec_addrs = {r.cell_or_range for r in node.precedents}
+        assert "B2" in prec_addrs
+        assert "A2" in prec_addrs
+        assert len(node.precedents) == 2  # A2 去重
+
+    def test_depth2_dependents(self, chain_workbook: Path) -> None:
+        """A2 → B2=A2*2, C2=B2+A2; B2 → C2 → depth=2 应包含 C2。"""
+        resolver = Tier2Resolver()
+        node = resolver.resolve(str(chain_workbook), "Sheet1", "A2", direction="dependents", depth=2)
+        dep_addrs = {r.cell_or_range for r in node.dependents}
+        assert "B2" in dep_addrs
+        assert "C2" in dep_addrs
+
+    def test_depth1_does_not_expand(self, chain_workbook: Path) -> None:
+        """depth=1 只返回直接引用。"""
+        resolver = Tier2Resolver()
+        d1 = resolver.resolve(str(chain_workbook), "Sheet1", "C2", direction="precedents", depth=1)
+        d2 = resolver.resolve(str(chain_workbook), "Sheet1", "C2", direction="precedents", depth=2)
+        assert len(d1.precedents) <= len(d2.precedents)
