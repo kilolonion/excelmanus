@@ -31,6 +31,99 @@ def _get_credential_store(request: Request):
     return store
 
 
+# ── GET /importable-subscriptions — 管理员可导入的订阅 ────────
+
+
+@router.get("/importable-subscriptions")
+async def list_importable_subscriptions(
+    request: Request,
+    admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """列出管理员已连接的订阅提供商凭证，可一键导入号池。"""
+    cred_store = getattr(request.app.state, "credential_store", None)
+    if cred_store is None:
+        return {"subscriptions": []}
+
+    profiles = cred_store.list_profiles(admin.id)
+    result: list[dict[str, Any]] = []
+    for p in profiles:
+        result.append({
+            "provider": p.provider,
+            "profile_name": p.profile_name,
+            "account_id": p.account_id or "",
+            "plan_type": p.plan_type or "",
+            "expires_at": p.expires_at or "",
+            "is_active": p.is_active,
+        })
+    return {"subscriptions": result}
+
+
+# ── POST /accounts/from-subscription — 从订阅导入池账号 ───────
+
+
+@router.post("/accounts/from-subscription")
+async def create_pool_account_from_subscription(
+    request: Request,
+    _admin: UserRecord = Depends(require_admin),
+) -> Any:
+    """将管理员自己的订阅凭证复制到号池。
+
+    Body:
+    {
+        "provider": "openai-codex",
+        "label": "我的订阅",
+        "daily_budget_tokens": 500000,
+        "weekly_budget_tokens": 3000000,
+        "timezone": "Asia/Shanghai"
+    }
+    """
+    svc = _get_pool_service(request)
+    body = await request.json()
+
+    provider_name = body.get("provider", "")
+    if not provider_name:
+        raise HTTPException(400, "缺少 provider 字段")
+
+    cred_store = getattr(request.app.state, "credential_store", None)
+    if cred_store is None:
+        raise HTTPException(503, "凭证存储未初始化")
+
+    profile = cred_store.get_active_profile(_admin.id, provider_name)
+    if profile is None:
+        raise HTTPException(404, f"未找到已连接的 {provider_name} 订阅，请先在模型配置中完成连接")
+
+    if not profile.access_token:
+        raise HTTPException(400, "订阅凭证的 access_token 为空，请先刷新")
+
+    from excelmanus.auth.providers.base import ValidatedCredential
+    credential = ValidatedCredential(
+        access_token=profile.access_token,
+        refresh_token=profile.refresh_token,
+        expires_at=profile.expires_at or "",
+        account_id=profile.account_id or "",
+        plan_type=profile.plan_type or "",
+        credential_type=profile.credential_type or "oauth",
+    )
+
+    account = svc.create_account(
+        label=body.get("label", ""),
+        provider=provider_name,
+        account_id=credential.account_id,
+        plan_type=credential.plan_type,
+        daily_budget_tokens=int(body.get("daily_budget_tokens", 0)),
+        weekly_budget_tokens=int(body.get("weekly_budget_tokens", 0)),
+        timezone_str=body.get("timezone", "Asia/Shanghai"),
+    )
+
+    svc.store_oauth_credential(account.id, credential)
+
+    logger.info(
+        "管理员 %s 从订阅导入池账号: id=%s, provider=%s, account_id=%s",
+        _admin.id, account.id, provider_name, credential.account_id,
+    )
+    return {"status": "ok", "account": account.to_dict()}
+
+
 # ── POST /accounts/oauth — 导入池账号 ────────────────────────
 
 

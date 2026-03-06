@@ -3,7 +3,7 @@
  * 所有端点均为管理员专用（/api/v1/admin/pool/*）。
  */
 
-import { apiGet, apiPost, apiPatch } from "./api";
+import { apiGet, apiPost, apiPatch, apiDelete } from "./api";
 
 // ── Types ─────────────────────────────────────────────────
 
@@ -126,6 +126,51 @@ export async function importPoolAccount(body: {
   timezone?: string;
 }): Promise<{ status: string; account: PoolAccount }> {
   return apiPost(`${BASE}/accounts/oauth`, body);
+}
+
+/** 管理员已连接的可导入订阅列表。 */
+export interface ImportableSubscription {
+  provider: string;
+  profile_name: string;
+  account_id: string;
+  plan_type: string;
+  expires_at: string;
+  is_active: boolean;
+}
+
+/** 列出管理员已连接的订阅（可一键导入号池）。 */
+export async function fetchImportableSubscriptions(): Promise<{
+  subscriptions: ImportableSubscription[];
+}> {
+  return apiGet(`${BASE}/importable-subscriptions`);
+}
+
+/** 从管理员订阅导入池账号。 */
+export async function importPoolAccountFromSubscription(body: {
+  provider: string;
+  label?: string;
+  daily_budget_tokens?: number;
+  weekly_budget_tokens?: number;
+  timezone?: string;
+}): Promise<{ status: string; account: PoolAccount }> {
+  return apiPost(`${BASE}/accounts/from-subscription`, body);
+}
+
+/** 删除池账号。 */
+export async function deletePoolAccount(
+  accountId: string,
+): Promise<{ status: string; deleted_id: string }> {
+  return apiDelete(`${BASE}/accounts/${accountId}`) as Promise<{ status: string; deleted_id: string }>;
+}
+
+/** 删除指定激活映射。 */
+export async function deleteManualActive(
+  provider: string,
+  modelPattern: string,
+): Promise<void> {
+  return apiDelete(
+    `${BASE}/manual-active?provider=${encodeURIComponent(provider)}&model_pattern=${encodeURIComponent(modelPattern)}`,
+  );
 }
 
 /** 更新池账号字段。 */
