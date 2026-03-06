@@ -6,7 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { Switch } from "@/components/ui/switch";
-import { type PoolAccountSummary, type PoolAutoPolicy, type PoolRotationEvent, type ProbeResult, fetchPoolSummary, importPoolAccount, updatePoolAccount, probePoolAccount, setManualActive, fetchAutoPolicies, upsertAutoPolicy, runAutoEvaluate, fetchRotationEvents } from "@/lib/pool-api";
+import { type PoolAccountSummary, type PoolAutoPolicy, type PoolRotationEvent, type ProbeResult, type ImportableSubscription, fetchPoolSummary, importPoolAccount, updatePoolAccount, probePoolAccount, setManualActive, fetchAutoPolicies, upsertAutoPolicy, runAutoEvaluate, fetchRotationEvents, fetchImportableSubscriptions, importPoolAccountFromSubscription } from "@/lib/pool-api";
 
 function fmtTok(n: number) { if (n >= 1e6) return `${(n/1e6).toFixed(1)}M`; if (n >= 1e3) return `${(n/1e3).toFixed(0)}K`; return String(n); }
 function fmtDate(iso: string) { if (!iso) return "\u2014"; try { return new Date(iso).toLocaleString("zh-CN",{month:"2-digit",day:"2-digit",hour:"2-digit",minute:"2-digit"}); } catch { return iso; } }
@@ -22,20 +22,51 @@ function BudgetBar({label,used,total,remaining}:{label:string;used:number;total:
 function HDot({s}:{s:string}) { const c=H_CFG[s]||H_CFG.ok; return (<span className="relative inline-flex h-2.5 w-2.5">{s==="ok"&&<span className={`absolute inline-flex h-full w-full rounded-full ${c.d} opacity-75 animate-ping`}/>}<span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${c.d}`}/></span>); }
 function CopyBtn({text}:{text:string}) { const [ok,setOk]=useState(false); return (<button className="text-muted-foreground hover:text-foreground transition-colors" onClick={()=>{navigator.clipboard.writeText(text);setOk(true);setTimeout(()=>setOk(false),1500);}}>{ok?<Check className="h-3 w-3 text-green-500"/>:<Copy className="h-3 w-3"/>}</button>); }
 
+const _PROVIDER_LABELS: Record<string, string> = { "openai-codex": "OpenAI Codex", "google-gemini": "Google Gemini" };
+
 function ImportDlg({open,onClose,onDone}:{open:boolean;onClose:()=>void;onDone:()=>void}) {
+  const [tab,setTab]=useState<"subscription"|"manual">("subscription");
   const [json,setJson]=useState(""); const [label,setLabel]=useState(""); const [daily,setDaily]=useState(500000); const [weekly,setWeekly]=useState(3000000); const [busy,setBusy]=useState(false); const [err,setErr]=useState("");
-  const submit=async()=>{ setErr(""); let td:Record<string,unknown>; try{td=JSON.parse(json);}catch{setErr("JSON \u683c\u5f0f\u65e0\u6548");return;} setBusy(true); try{await importPoolAccount({token_data:td,label:label||undefined,daily_budget_tokens:daily,weekly_budget_tokens:weekly});onDone();onClose();setJson("");setLabel("");}catch(e){setErr(e instanceof Error?e.message:"fail");}finally{setBusy(false);} };
+  const [subs,setSubs]=useState<ImportableSubscription[]>([]); const [subsLoading,setSubsLoading]=useState(false); const [selectedProvider,setSelectedProvider]=useState("");
+
+  useEffect(()=>{ if(!open) return; setErr(""); setSubsLoading(true); fetchImportableSubscriptions().then(d=>{ const active=d.subscriptions.filter(s=>s.is_active); setSubs(active); if(active.length===0) setTab("manual"); }).catch(()=>setSubs([])).finally(()=>setSubsLoading(false)); },[open]);
+
+  const submitManual=async()=>{ setErr(""); let td:Record<string,unknown>; try{td=JSON.parse(json);}catch{setErr("JSON 格式无效");return;} setBusy(true); try{await importPoolAccount({token_data:td,label:label||undefined,daily_budget_tokens:daily,weekly_budget_tokens:weekly});onDone();onClose();setJson("");setLabel("");}catch(e){setErr(e instanceof Error?e.message:"fail");}finally{setBusy(false);} };
+  const submitFromSub=async()=>{ if(!selectedProvider){setErr("请选择一个订阅");return;} setErr(""); setBusy(true); try{await importPoolAccountFromSubscription({provider:selectedProvider,label:label||undefined,daily_budget_tokens:daily,weekly_budget_tokens:weekly});onDone();onClose();setLabel("");setSelectedProvider("");}catch(e){setErr(e instanceof Error?e.message:"fail");}finally{setBusy(false);} };
+
   if (!open) return null;
   const inputCls="w-full h-8 rounded-lg border border-border bg-background px-3 text-xs focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none";
-  return (<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><motion.div initial={{opacity:0,scale:0.95}} animate={{opacity:1,scale:1}} className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg mx-4">
-    <div className="flex items-center justify-between px-5 py-4 border-b border-border"><h3 className="text-sm font-semibold">导入池账号</h3><button onClick={onClose}><X className="h-4 w-4 text-muted-foreground hover:text-foreground"/></button></div>
-    <div className="px-5 py-4 space-y-4">
-      <div><label className="block text-xs text-muted-foreground mb-1">OAuth Token JSON</label><textarea rows={5} value={json} onChange={e=>setJson(e.target.value)} placeholder="粘贴 auth.json" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] placeholder:text-muted-foreground/40 resize-none"/></div>
+  return (<div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 backdrop-blur-sm"><motion.div initial={{opacity:0,scale:0.95}} animate={{opacity:1,scale:1}} className="bg-card border border-border rounded-2xl shadow-2xl w-full max-w-lg mx-4 max-h-[85vh] flex flex-col">
+    <div className="flex items-center justify-between px-5 py-4 border-b border-border shrink-0"><h3 className="text-sm font-semibold">导入池账号</h3><button onClick={onClose}><X className="h-4 w-4 text-muted-foreground hover:text-foreground"/></button></div>
+
+    {/* Tabs */}
+    <div className="flex border-b border-border px-5 shrink-0">
+      <button className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${tab==="subscription"?"border-[var(--em-primary)] text-foreground":"border-transparent text-muted-foreground hover:text-foreground"}`} onClick={()=>setTab("subscription")}>从我的订阅</button>
+      <button className={`px-3 py-2 text-xs font-medium border-b-2 transition-colors ${tab==="manual"?"border-[var(--em-primary)] text-foreground":"border-transparent text-muted-foreground hover:text-foreground"}`} onClick={()=>setTab("manual")}>手动粘贴 Token</button>
+    </div>
+
+    <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
+      {tab==="subscription"&&(<>
+        {subsLoading?(<div className="flex items-center justify-center py-6"><Loader2 className="h-4 w-4 animate-spin text-muted-foreground"/></div>):subs.length===0?(<div className="text-center py-6 space-y-2"><p className="text-xs text-muted-foreground">暂无已连接的订阅</p><p className="text-[11px] text-muted-foreground">请先在「模型配置」中连接 OpenAI Codex 或 Google Gemini 订阅</p></div>):(<div className="space-y-2">
+          <label className="block text-xs text-muted-foreground mb-1">选择已连接的订阅</label>
+          {subs.map(s=>(<button key={s.provider} type="button" className={`w-full flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-all ${selectedProvider===s.provider?"border-[var(--em-primary)] bg-[var(--em-primary-alpha-06)] shadow-sm":"border-border hover:border-border/80 hover:bg-muted/30"}`} onClick={()=>setSelectedProvider(s.provider)}>
+            <div className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${selectedProvider===s.provider?"bg-[var(--em-primary-alpha-10)]":"bg-muted"}`}><Database className="h-4 w-4" style={selectedProvider===s.provider?{color:"var(--em-primary)"}:undefined}/></div>
+            <div className="flex-1 min-w-0"><p className="text-xs font-medium">{_PROVIDER_LABELS[s.provider]||s.provider}</p><p className="text-[11px] text-muted-foreground truncate">{s.plan_type&&<span className="capitalize">{s.plan_type}</span>}{s.account_id&&<span> · {s.account_id.slice(0,16)}</span>}</p></div>
+            {selectedProvider===s.provider&&<CheckCircle className="h-4 w-4 shrink-0" style={{color:"var(--em-primary)"}}/>}
+          </button>))}
+        </div>)}
+      </>)}
+
+      {tab==="manual"&&(<div><label className="block text-xs text-muted-foreground mb-1">OAuth Token JSON</label><textarea rows={5} value={json} onChange={e=>setJson(e.target.value)} placeholder="粘贴 auth.json" className="w-full rounded-lg border border-border bg-background px-3 py-2 text-xs font-mono focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)] placeholder:text-muted-foreground/40 resize-none"/></div>)}
+
       <div className="grid grid-cols-2 gap-3"><div><label className="block text-xs text-muted-foreground mb-1">标签</label><input type="text" value={label} onChange={e=>setLabel(e.target.value)} placeholder="账号A" className={inputCls}/></div><div><label className="block text-xs text-muted-foreground mb-1">时区</label><input defaultValue="Asia/Shanghai" disabled className="w-full h-8 rounded-lg border border-border bg-muted px-3 text-xs text-muted-foreground"/></div></div>
       <div className="grid grid-cols-2 gap-3"><div><label className="block text-xs text-muted-foreground mb-1">日预算</label><input type="number" value={daily||""} onChange={e=>setDaily(Number(e.target.value)||0)} className={inputCls}/></div><div><label className="block text-xs text-muted-foreground mb-1">周预算</label><input type="number" value={weekly||""} onChange={e=>setWeekly(Number(e.target.value)||0)} className={inputCls}/></div></div>
       {err&&<div className="flex items-center gap-2 text-xs text-red-500"><AlertCircle className="h-3.5 w-3.5"/>{err}</div>}
     </div>
-    <div className="flex justify-end gap-2 px-5 py-3 border-t border-border bg-muted/30"><Button variant="outline" size="sm" className="text-xs h-8" onClick={onClose}>取消</Button><Button size="sm" className="text-xs h-8 gap-1.5" onClick={submit} disabled={busy||!json.trim()}>{busy?<Loader2 className="h-3 w-3 animate-spin"/>:<Plus className="h-3 w-3"/>}导入</Button></div>
+    <div className="flex justify-end gap-2 px-5 py-3 border-t border-border bg-muted/30 shrink-0">
+      <Button variant="outline" size="sm" className="text-xs h-8" onClick={onClose}>取消</Button>
+      {tab==="subscription"?(<Button size="sm" className="text-xs h-8 gap-1.5" onClick={submitFromSub} disabled={busy||!selectedProvider}>{busy?<Loader2 className="h-3 w-3 animate-spin"/>:<Plus className="h-3 w-3"/>}导入</Button>):(<Button size="sm" className="text-xs h-8 gap-1.5" onClick={submitManual} disabled={busy||!json.trim()}>{busy?<Loader2 className="h-3 w-3 animate-spin"/>:<Plus className="h-3 w-3"/>}导入</Button>)}
+    </div>
   </motion.div></div>);
 }
 
