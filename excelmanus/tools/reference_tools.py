@@ -5,14 +5,13 @@ import json
 from pathlib import Path
 from typing import Any
 
-from excelmanus.reference_graph.cache import RefCache
+from excelmanus.reference_graph.cache import RefCache, get_session_cache
 from excelmanus.reference_graph.formula_parser import FormulaRefExtractor, address_in_ref
 from excelmanus.reference_graph.models import WorkbookRefIndex
 from excelmanus.reference_graph.scanner import Tier1Scanner, Tier2Resolver
 from excelmanus.tools.registry import ToolDef
 
 _workspace_root: str | None = None
-_cache = RefCache()
 _scanner = Tier1Scanner()
 _resolver = Tier2Resolver()
 
@@ -33,11 +32,12 @@ def _resolve_path(file_path: str) -> str:
 def _ensure_index(file_path: str) -> WorkbookRefIndex:
     """确保 Tier 1 索引已缓存。"""
     abs_path = _resolve_path(file_path)
-    cached = _cache.get_tier1(abs_path)
+    cache = get_session_cache()
+    cached = cache.get_tier1(abs_path)
     if cached is not None:
         return cached
     index = _scanner.scan(abs_path)
-    _cache.put_tier1(abs_path, index)
+    cache.put_tier1(abs_path, index)
     return index
 
 
@@ -195,8 +195,8 @@ def get_impact_analysis(
 
 
 def get_cache() -> RefCache:
-    """返回模块级缓存实例（供集成使用）。"""
-    return _cache
+    """返回当前会话的缓存实例（供集成使用）。"""
+    return get_session_cache()
 
 
 def get_tools() -> list[ToolDef]:
