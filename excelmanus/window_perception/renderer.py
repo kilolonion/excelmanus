@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .domain import ExplorerWindow, SheetWindow, Window
 from .extractor import is_csv_path
 from .models import DetailLevel, IntentTag, WindowSnapshot
 from .projection_models import NoticeProjection, ToolPayloadProjection
 from .projection_service import project_notice, project_tool_payload
+
+if TYPE_CHECKING:
+    from excelmanus.reference_graph.models import WorkbookRefIndex
 
 
 def render_system_notice(snapshots: list[WindowSnapshot], *, mode: str = "enriched") -> str:
@@ -904,3 +907,25 @@ def _render_pipe_rows(
     if omitted > 0:
         output.append(f"  ... ({len(rows)} total, {omitted} omitted)")
     return output
+
+
+def _build_reference_hints(sheet_name: str, ref_index: "WorkbookRefIndex") -> str:
+    """为窗口感知构建引用提示文本。"""
+    summary = ref_index.sheets.get(sheet_name)
+    if summary is None:
+        return ""
+
+    hints: list[str] = []
+
+    if summary.outgoing_refs:
+        targets = sorted({e.target_sheet for e in summary.outgoing_refs})
+        hints.append(f"refs-to: {', '.join(targets)}")
+
+    if summary.incoming_refs:
+        sources = sorted({e.source_sheet for e in summary.incoming_refs})
+        hints.append(f"refs-from: {', '.join(sources)}")
+
+    if summary.formula_patterns:
+        hints.append(f"patterns: {', '.join(summary.formula_patterns[:5])}")
+
+    return "\n".join(hints)
