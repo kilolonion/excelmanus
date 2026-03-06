@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useLayoutEffect, useCallback, useState, useMemo } from "react";
+import { useRef, useEffect, useLayoutEffect, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowDown } from "lucide-react";
@@ -13,7 +13,6 @@ import { useChatStore } from "@/stores/chat-store";
 import type { Message, FileAttachment } from "@/lib/types";
 
 interface MessageStreamProps {
-  messages: Message[];
   isStreaming: boolean;
   onEditAndResend?: (messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => void;
   onRetry?: (assistantMessageId: string, rollbackFiles?: boolean) => void;
@@ -47,14 +46,18 @@ function formatTimestamp(ts: number): string {
 }
 
 /** Indices of messages that should show a timestamp separator above them. */
-function computeTimestampIndices(messages: Message[]): Set<number> {
+function computeTimestampIndices(
+  messageOrder: string[],
+  messagesById: Record<string, Message>,
+): Set<number> {
   const indices = new Set<number>();
-  if (messages.length === 0) return indices;
+  if (messageOrder.length === 0) return indices;
   // 首条消息若有时间戳则始终显示
-  if (messages[0].timestamp) indices.add(0);
-  for (let i = 1; i < messages.length; i++) {
-    const prev = messages[i - 1].timestamp;
-    const curr = messages[i].timestamp;
+  const first = messagesById[messageOrder[0]];
+  if (first?.timestamp) indices.add(0);
+  for (let i = 1; i < messageOrder.length; i++) {
+    const prev = messagesById[messageOrder[i - 1]]?.timestamp;
+    const curr = messagesById[messageOrder[i]]?.timestamp;
     if (prev && curr && curr - prev >= TIMESTAMP_GAP_MS) {
       indices.add(i);
     }
@@ -62,7 +65,7 @@ function computeTimestampIndices(messages: Message[]): Set<number> {
   return indices;
 }
 
-export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry, onRetryWithModel }: MessageStreamProps) {
+export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWithModel }: MessageStreamProps) {
   const viewportRef = useRef<HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
   const renderedIdsRef = useRef(new Set<string>());
@@ -74,6 +77,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   const positioningRef = useRef(false);
 
   const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const messageOrder = useChatStore((s) => s.messageOrder);
 
   // 会话切换时清空动画去重集合，防止长期只增不减导致内存泄漏
   useEffect(() => {
@@ -92,9 +96,13 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   }>({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
 
   const virtualizer = useVirtualizer({
-    count: messages.length,
+    count: messageOrder.length,
     getScrollElement: () => viewportRef.current,
-    estimateSize: (index) => estimateMessageSize(messages[index]),
+    estimateSize: (index) => {
+      const id = messageOrder[index];
+      const msg = id ? useChatStore.getState().messagesById[id] : undefined;
+      return estimateMessageSize(msg);
+    },
     overscan: 5,
     paddingStart: 24,
     paddingEnd: 24,
@@ -106,7 +114,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
     if (immediate) {
       // 使用虚拟化器的 scrollToIndex 直接定位到最后一条消息
       // 这比手动设置 scrollTop 更可靠，因为虚拟化器知道精确的偏移量
-      virtualizer.scrollToIndex(messages.length - 1, { align: "end" });
+      virtualizer.scrollToIndex(messageOrder.length - 1, { align: "end" });
     } else {
       // 使用 requestAnimationFrame 确保在下一帧执行
       requestAnimationFrame(() => {
@@ -118,18 +126,18 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
         });
       });
     }
-  }, [autoScroll, isStreaming, virtualizer, messages.length]);
+  }, [autoScroll, isStreaming, virtualizer, messageOrder.length]);
 
   // 强制滚动到底部（同时使用 scrollToIndex + 原生 scrollTop 双保险）
   const forceScrollToEnd = useCallback(() => {
-    if (messages.length === 0) return;
-    virtualizer.scrollToIndex(messages.length - 1, { align: "end" });
+    if (messageOrder.length === 0) return;
+    virtualizer.scrollToIndex(messageOrder.length - 1, { align: "end" });
     // 同时用原生方式兜底（移动端 Safari 等场景下 scrollToIndex 可能不生效）
     const viewport = viewportRef.current;
     if (viewport) {
       viewport.scrollTop = viewport.scrollHeight;
     }
-  }, [virtualizer, messages.length]);
+  }, [virtualizer, messageOrder.length]);
 
   // SSR 安全的 useLayoutEffect
   const useIsomorphicLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
@@ -146,7 +154,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   //
   // positioningRef 屏蔽 handleScroll，避免 setState 风暴。
   useIsomorphicLayoutEffect(() => {
-    const currentCount = messages.length;
+    const currentCount = messageOrder.length;
     const prevCount = prevMessageCountRef.current;
 
     if (currentCount === 0) {
@@ -158,8 +166,8 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
     if (prevCount === 0 && currentCount > 0) {
       // 初次加载（刷新恢复 / 会话切换后消息到达）
-      for (const msg of messages) {
-        renderedIdsRef.current.add(msg.id);
+      for (const id of messageOrder) {
+        renderedIdsRef.current.add(id);
       }
 
       positioningRef.current = true;
@@ -183,12 +191,11 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       });
     }
     // 非初次加载场景不更新 prevMessageCountRef —— 交给下面的 useEffect
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages.length, virtualizer]);
+  }, [messageOrder.length, virtualizer]);
 
   // ── 新消息追加时的滚动 ────────────────────────────────────────
   useEffect(() => {
-    const currentMessageCount = messages.length;
+    const currentMessageCount = messageOrder.length;
     const prevCount = prevMessageCountRef.current;
 
     if (currentMessageCount === 0) {
@@ -203,7 +210,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       scrollToBottom(false);
     }
     prevMessageCountRef.current = currentMessageCount;
-  }, [messages.length, scrollToBottom]);
+  }, [messageOrder.length, scrollToBottom]);
 
   const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     // 定位期间屏蔽，防止 scroll 事件触发 setAutoScroll → re-render 风暴
@@ -217,12 +224,13 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   const handleEditAndResend = useCallback(
     (messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
       if (!onEditAndResend) return;
+      const latestMessages = useChatStore.getState().messages;
 
-      const msgIndex = messages.findIndex((m) => m.id === messageId);
+      const msgIndex = latestMessages.findIndex((m) => m.id === messageId);
       let hasFileChanges = false;
       if (msgIndex !== -1) {
-        for (let i = msgIndex + 1; i < messages.length; i++) {
-          const m = messages[i];
+        for (let i = msgIndex + 1; i < latestMessages.length; i++) {
+          const m = latestMessages[i];
           if (m.role === "assistant" && m.blocks.some((b) => b.type === "tool_call")) {
             hasFileChanges = true;
             break;
@@ -244,31 +252,32 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
       // 计算 turnIndex（第几个 user 消息）
       let turnIdx = 0;
       for (let i = 0; i < msgIndex; i++) {
-        if (messages[i].role === "user") turnIdx++;
+        if (latestMessages[i].role === "user") turnIdx++;
       }
       setRollbackDialog({ open: true, mode: "edit", messageId, newContent, turnIndex: turnIdx, files, retainedFiles });
     },
-    [onEditAndResend, messages]
+    [onEditAndResend]
   );
 
   const handleRetry = useCallback(
     (assistantMessageId: string) => {
       if (!onRetry) return;
+      const latestMessages = useChatStore.getState().messages;
 
-      const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
+      const assistantIdx = latestMessages.findIndex((m) => m.id === assistantMessageId);
       if (assistantIdx === -1) { onRetry(assistantMessageId); return; }
 
       // 找到该 assistant 前面最近的 user 消息
       let userIdx = -1;
       for (let i = assistantIdx - 1; i >= 0; i--) {
-        if (messages[i].role === "user") { userIdx = i; break; }
+        if (latestMessages[i].role === "user") { userIdx = i; break; }
       }
       if (userIdx === -1) { onRetry(assistantMessageId); return; }
 
       // 检查该 user 消息之后是否有工具调用（文件变更）
       let hasFileChanges = false;
-      for (let i = userIdx + 1; i < messages.length; i++) {
-        const m = messages[i];
+      for (let i = userIdx + 1; i < latestMessages.length; i++) {
+        const m = latestMessages[i];
         if (m.role === "assistant" && m.blocks.some((b) => b.type === "tool_call")) {
           hasFileChanges = true;
           break;
@@ -285,29 +294,30 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
       let turnIdx = 0;
       for (let i = 0; i < userIdx; i++) {
-        if (messages[i].role === "user") turnIdx++;
+        if (latestMessages[i].role === "user") turnIdx++;
       }
       setRollbackDialog({ open: true, mode: "retry", messageId: assistantMessageId, newContent: "", turnIndex: turnIdx });
     },
-    [onRetry, messages]
+    [onRetry]
   );
 
   const handleRetryWithModel = useCallback(
     (assistantMessageId: string, modelName: string) => {
       if (!onRetryWithModel) return;
+      const latestMessages = useChatStore.getState().messages;
 
-      const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
+      const assistantIdx = latestMessages.findIndex((m) => m.id === assistantMessageId);
       if (assistantIdx === -1) { onRetryWithModel(assistantMessageId, modelName); return; }
 
       let userIdx = -1;
       for (let i = assistantIdx - 1; i >= 0; i--) {
-        if (messages[i].role === "user") { userIdx = i; break; }
+        if (latestMessages[i].role === "user") { userIdx = i; break; }
       }
       if (userIdx === -1) { onRetryWithModel(assistantMessageId, modelName); return; }
 
       let hasFileChanges = false;
-      for (let i = userIdx + 1; i < messages.length; i++) {
-        const m = messages[i];
+      for (let i = userIdx + 1; i < latestMessages.length; i++) {
+        const m = latestMessages[i];
         if (m.role === "assistant" && m.blocks.some((b) => b.type === "tool_call")) {
           hasFileChanges = true;
           break;
@@ -324,11 +334,11 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
       let turnIdx = 0;
       for (let i = 0; i < userIdx; i++) {
-        if (messages[i].role === "user") turnIdx++;
+        if (latestMessages[i].role === "user") turnIdx++;
       }
       setRollbackDialog({ open: true, mode: "retry", messageId: assistantMessageId, newContent: "", turnIndex: turnIdx, switchToModel: modelName });
     },
-    [onRetryWithModel, messages]
+    [onRetryWithModel]
   );
 
   const handleRollbackConfirm = useCallback(
@@ -355,13 +365,13 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
     setRollbackDialog({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
   }, []);
 
-  const timestampIndices = useMemo(
-    () => computeTimestampIndices(messages),
-    [messages],
+  const timestampIndices = computeTimestampIndices(
+    messageOrder,
+    useChatStore.getState().messagesById,
   );
 
   const virtualItems = virtualizer.getVirtualItems();
-  const lastMsgIndex = messages.length - 1;
+  const lastMsgIndex = messageOrder.length - 1;
 
   return (
     <div className="relative flex-1 min-h-0 flex flex-col">
@@ -378,14 +388,16 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
           }}
         >
           {virtualItems.map((virtualRow) => {
-            const message = messages[virtualRow.index];
-            const isNew = !renderedIdsRef.current.has(message.id);
-            if (isNew) renderedIdsRef.current.add(message.id);
+            const messageId = messageOrder[virtualRow.index];
+            if (!messageId) return null;
+            const isNew = !renderedIdsRef.current.has(messageId);
+            if (isNew) renderedIdsRef.current.add(messageId);
             const isLast = virtualRow.index === lastMsgIndex;
+            const timestamp = useChatStore.getState().messagesById[messageId]?.timestamp;
 
             return (
               <div
-                key={message.id}
+                key={messageId}
                 ref={virtualizer.measureElement}
                 data-index={virtualRow.index}
                 style={{
@@ -397,7 +409,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
                 }}
               >
                 {/* Smart timestamp separator */}
-                {message.timestamp && timestampIndices.has(virtualRow.index) && (
+                {timestamp && timestampIndices.has(virtualRow.index) && (
                   <motion.div
                     className="flex items-center justify-center py-1 max-w-3xl mx-auto px-3 sm:px-4"
                     initial={isNew ? { opacity: 0, scale: 0.95 } : false}
@@ -405,7 +417,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
                     transition={{ duration: 0.2, ease: "easeOut" }}
                   >
                     <span className="text-[10px] text-muted-foreground/60 select-none">
-                      {formatTimestamp(message.timestamp)}
+                      {formatTimestamp(timestamp)}
                     </span>
                   </motion.div>
                 )}
@@ -416,27 +428,14 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
                   initial={isNew ? "initial" : false}
                   animate="animate"
                 >
-                  {message.role === "user" ? (
-                    <UserMessage
-                      content={message.content}
-                      files={message.files}
-                      isStreaming={isStreaming}
-                      onEditAndResend={
-                        onEditAndResend
-                          ? (newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => handleEditAndResend(message.id, newContent, files, retainedFiles)
-                          : undefined
-                      }
-                    />
-                  ) : (
-                    <AssistantMessage
-                      messageId={message.id}
-                      blocks={message.blocks}
-                      affectedFiles={message.affectedFiles}
-                      isLastMessage={isLast}
-                      onRetry={onRetry ? () => handleRetry(message.id) : undefined}
-                      onRetryWithModel={onRetryWithModel ? (model: string) => handleRetryWithModel(message.id, model) : undefined}
-                    />
-                  )}
+                  <MessageRowItem
+                    messageId={messageId}
+                    isStreaming={isStreaming}
+                    isLast={isLast}
+                    onEditAndResend={onEditAndResend ? handleEditAndResend : undefined}
+                    onRetry={onRetry ? handleRetry : undefined}
+                    onRetryWithModel={onRetryWithModel ? handleRetryWithModel : undefined}
+                  />
                 </motion.div>
               </div>
             );
@@ -446,7 +445,7 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
 
       {/* Scroll-to-bottom FAB */}
       <AnimatePresence>
-        {!autoScroll && messages.length > 0 && (
+        {!autoScroll && messageOrder.length > 0 && (
           <motion.button
             key="scroll-fab"
             type="button"
@@ -477,7 +476,52 @@ export function MessageStream({ messages, isStreaming, onEditAndResend, onRetry,
   );
 }
 
-function estimateMessageSize(msg: Message): number {
+function MessageRowItem({
+  messageId,
+  isStreaming,
+  isLast,
+  onEditAndResend,
+  onRetry,
+  onRetryWithModel,
+}: {
+  messageId: string;
+  isStreaming: boolean;
+  isLast: boolean;
+  onEditAndResend?: (messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => void;
+  onRetry?: (assistantMessageId: string) => void;
+  onRetryWithModel?: (assistantMessageId: string, modelName: string) => void;
+}) {
+  const message = useChatStore((s) => s.messagesById[messageId]);
+  if (!message) return null;
+  if (message.role === "user") {
+    return (
+      <UserMessage
+        content={message.content}
+        files={message.files}
+        isStreaming={isStreaming}
+        onEditAndResend={
+          onEditAndResend
+            ? (newContent: string, files?: File[], retainedFiles?: FileAttachment[]) =>
+                onEditAndResend(message.id, newContent, files, retainedFiles)
+            : undefined
+        }
+      />
+    );
+  }
+  return (
+    <AssistantMessage
+      messageId={message.id}
+      blocks={message.blocks}
+      affectedFiles={message.affectedFiles}
+      isLastMessage={isLast}
+      onRetry={onRetry ? () => onRetry(message.id) : undefined}
+      onRetryWithModel={onRetryWithModel ? (model: string) => onRetryWithModel(message.id, model) : undefined}
+    />
+  );
+}
+
+function estimateMessageSize(msg: Message | undefined): number {
+  if (!msg) return 96;
   if (msg.role === "user") {
     const lineCount = (msg.content.match(/\n/g) || []).length + 1;
     // 改进：考虑文件附件的高度

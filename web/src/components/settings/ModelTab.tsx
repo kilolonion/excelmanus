@@ -98,6 +98,26 @@ interface ModelCapabilities {
   detected_at: string;
   probe_errors: Record<string, string>;
   manual_override: boolean;
+  last_success_at?: string;
+  fresh_until?: string;
+  stale_until?: string;
+  source?: string;
+}
+
+interface ProbeJobTarget {
+  name: string;
+  model: string;
+  base_url: string;
+  state: string;
+  capabilities: ModelCapabilities | null;
+}
+
+interface ProbeJobSnapshot {
+  job_id: string;
+  state: string;
+  targets_total: number;
+  targets_done: number;
+  targets: ProbeJobTarget[];
 }
 
 interface ModelConfig {
@@ -1879,6 +1899,8 @@ export function ModelTab() {
   const [capsMap, setCapsMap] = useState<Record<string, ModelCapabilities>>({});
   const [probingKey, setProbingKey] = useState<string | null>(null);
   const [probingAll, setProbingAll] = useState(false);
+  const [probeJob, setProbeJob] = useState<ProbeJobSnapshot | null>(null);
+  const probeEsRef = useRef<EventSource | null>(null);
   // 快速应用 profile 到角色
   const [applyingProfile, setApplyingProfile] = useState<string | null>(null);
   const [applyMenuOpen, setApplyMenuOpen] = useState<string | null>(null);
@@ -2026,41 +2048,66 @@ export function ModelTab() {
     }
   }, []);
 
+  const subscribeToProbeJob = useCallback((jobId: string) => {
+    probeEsRef.current?.close();
+    const origin = typeof window !== "undefined" ? window.location.origin : "";
+    const esUrl = origin + "/api/v1/config/models/capabilities/jobs/" + jobId + "/events";
+    const es = new EventSource(esUrl);
+    probeEsRef.current = es;
+
+    const onMessage = (e: MessageEvent) => {
+      try {
+        const snapshot: ProbeJobSnapshot = JSON.parse(e.data);
+        setProbeJob(snapshot);
+        for (const t of snapshot.targets) {
+          if (t.capabilities) {
+            setCapsMap((prev) => {
+              const next = { ...prev, [t.name]: normalizeFetchedCapabilities(t.capabilities!) };
+              settingsCache.set("_capsMap", next);
+              return next;
+            });
+          }
+        }
+        if (["succeeded", "partial", "failed", "cancelled"].includes(snapshot.state)) {
+          es.close();
+          setProbeJob(null);
+          setProbingKey(null);
+          setProbingAll(false);
+        }
+      } catch { /* ignore parse errors */ }
+    };
+
+    es.addEventListener("job_update", onMessage);
+    es.onerror = () => {
+      es.close();
+      setProbeJob(null);
+      setProbingKey(null);
+      setProbingAll(false);
+    };
+  }, []);
+
+  // Cleanup EventSource on unmount
+  useEffect(() => () => { probeEsRef.current?.close(); }, []);
+
   const handleProbeOne = useCallback(async (profileName: string) => {
     setProbingKey(profileName);
     try {
-      const body: Record<string, string> = { name: profileName };
-      const data = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", body, { direct: true });
-      setCapsMap((prev) => {
-        const next = { ...prev, [profileName]: data.capabilities };
-        settingsCache.set("_capsMap", next);
-        return next;
-      });
+      const data = await apiPost<{ job_id: string }>("/config/models/capabilities/jobs", { name: profileName }, { direct: true });
+      subscribeToProbeJob(data.job_id);
     } catch {
-      // 忽略
-    } finally {
       setProbingKey(null);
     }
-  }, []);
+  }, [subscribeToProbeJob]);
 
   const handleProbeAll = useCallback(async () => {
     setProbingAll(true);
     try {
-      const data = await apiPost<{ results: { name: string; capabilities?: ModelCapabilities }[] }>("/config/models/capabilities/probe-all", {}, { direct: true });
-      setCapsMap((prev) => {
-        const next = { ...prev };
-        for (const r of data.results) {
-          if (r.capabilities) next[r.name] = r.capabilities;
-        }
-        settingsCache.set("_capsMap", next);
-        return next;
-      });
+      const data = await apiPost<{ job_id: string }>("/config/models/capabilities/jobs", { all: true }, { direct: true });
+      subscribeToProbeJob(data.job_id);
     } catch {
-      // 忽略
-    } finally {
       setProbingAll(false);
     }
-  }, []);
+  }, [subscribeToProbeJob]);
 
   const handleTestConnection = useCallback(async (key: string, opts: { name?: string; model?: string; base_url?: string; api_key?: string }) => {
     setTestingKey(key);
@@ -2205,21 +2252,7 @@ export function ModelTab() {
     try {
       // 视觉模型赋值前检查视觉能力
       if (role === "vlm") {
-        let caps = capsMap[profile.name];
-        // 尚未探测过则先 probe
-        if (!caps || caps.supports_vision === null) {
-          try {
-            const probeData = await apiPost<{ capabilities: ModelCapabilities }>("/config/models/capabilities/probe", { name: profile.name }, { direct: true });
-            caps = probeData.capabilities;
-            setCapsMap((prev) => {
-              const next = { ...prev, [profile.name]: caps! };
-              settingsCache.set("_capsMap", next);
-              return next;
-            });
-          } catch {
-            // probe 失败不阻塞，继续应用
-          }
-        }
+        const caps = capsMap[profile.name];
         if (caps && caps.supports_vision === false) {
           const ok = window.confirm(
             `模型 "${profile.model}" 不支持视觉能力。\n仍然要将其设为视觉模型吗？`
@@ -2228,6 +2261,12 @@ export function ModelTab() {
             setApplyingProfile(null);
             return;
           }
+        }
+        // 尚未探测过 → 异步探测 + 非阻塞应用
+        if (!caps || caps.supports_vision === null) {
+          apiPost<{ job_id: string }>("/config/models/capabilities/jobs", { name: profile.name }, { direct: true })
+            .then((d) => subscribeToProbeJob(d.job_id))
+            .catch(() => {});
         }
       }
 
@@ -2254,7 +2293,7 @@ export function ModelTab() {
     } finally {
       setApplyingProfile(null);
     }
-  }, [capsMap, fetchConfig, fetchAllCapabilities]);
+  }, [capsMap, fetchConfig, fetchAllCapabilities, subscribeToProbeJob]);
 
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);

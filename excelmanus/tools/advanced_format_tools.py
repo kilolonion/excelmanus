@@ -1,4 +1,4 @@
-﻿"""高级格式工具：已由 run_code 替代，仅保留 get_tools() 空壳。"""
+"""高级格式工具：已由 run_code 替代，仅保留 get_tools() 空壳。"""
 
 from __future__ import annotations
 

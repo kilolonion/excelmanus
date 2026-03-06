@@ -53,7 +53,7 @@ PHASE1_STRUCTURE_PROMPT = """\
   "tables": [
     {
       "name": "Sheet1",
-      "title": "表���标题（如果有）",
+      "title": "表格标题（如果有）",
       "dimensions": {"rows": 行数, "cols": 列数},
       "header_rows": [1],
       "total_rows": [],

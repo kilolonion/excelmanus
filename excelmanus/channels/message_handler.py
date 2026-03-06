@@ -286,7 +286,10 @@ class MessageHandler:
             return
         self._group_deny_last[chat_id] = now
         task = asyncio.create_task(self.adapter.send_text(chat_id, text))
-        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+        def _log_send_err(t: asyncio.Task) -> None:
+            if not t.cancelled() and t.exception() is not None:
+                logger.warning("群聊拒绝通知发送失败: %s", t.exception())
+        task.add_done_callback(_log_send_err)
 
     @staticmethod
     def _pending_key(chat_id: str, user_id: str) -> str:

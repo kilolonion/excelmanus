@@ -31,6 +31,7 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
 import { TextDiffView } from "./TextDiffView";
@@ -380,12 +381,13 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   const handleInlineApply = useCallback(async () => {
     if (!activeSessionId || diffFilePaths.length === 0) return;
     setApplyingInline(true);
-    let anyOk = false;
-    for (const fp of diffFilePaths) {
-      const ok = await applyFile(activeSessionId, fp);
-      if (ok) anyOk = true;
-    }
+    const results = await mapWithConcurrency(
+      diffFilePaths,
+      async (fp) => applyFile(activeSessionId, fp),
+      3,
+    );
     setApplyingInline(false);
+    const anyOk = results.some(Boolean);
     if (anyOk) setAppliedInline(true);
   }, [activeSessionId, diffFilePaths, applyFile]);
 

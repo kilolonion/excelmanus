@@ -13,16 +13,16 @@ import { buildDefaultSessionTitle } from "@/lib/session-title";
 import type { Session, AssistantBlock } from "@/lib/types";
 import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
 
-/** 将后端 route_mode 映射为用户友好的中文标签（与 chat-actions.ts 保持一致） */
+/** 灏嗗悗绔?route_mode 鏄犲皠涓虹敤鎴峰弸濂界殑涓枃鏍囩锛堜笌 chat-actions.ts 淇濇寔涓€鑷达級 */
 const _ROUTE_MODE_LABELS: Record<string, string> = {
-  all_tools: "智能路由",
-  control_command: "控制命令",
-  slash_direct: "技能指令",
-  slash_not_found: "技能未找到",
-  slash_not_user_invocable: "技能不可用",
-  no_skillpack: "基础模式",
-  fallback: "回退模式",
-  hidden: "路由",
+  all_tools: "Smart Route",
+  control_command: "Control Command",
+  slash_direct: "Slash Command",
+  slash_not_found: "Skill Not Found",
+  slash_not_user_invocable: "Skill Not Invocable",
+  no_skillpack: "Base Mode",
+  fallback: "Fallback Mode",
+  hidden: "Route",
 };
 
 function _friendlyRouteMode(mode: string): string {
@@ -30,8 +30,8 @@ function _friendlyRouteMode(mode: string): string {
 }
 
 /**
- * 刷新后恢复路由状态 block：在最后一个 assistant 消息的 blocks 开头注入路由信息，
- * 仅当该消息尚未包含 route variant 的 status block 时执行。
+ * 鍒锋柊鍚庢仮澶嶈矾鐢辩姸鎬?block锛氬湪鏈€鍚庝竴涓?assistant 娑堟伅鐨?blocks 寮€澶存敞鍏ヨ矾鐢变俊鎭紝
+ * 浠呭綋璇ユ秷鎭皻鏈寘鍚?route variant 鐨?status block 鏃舵墽琛屻€?
  */
 function _injectRouteBlock(
   chat: ReturnType<typeof useChatStore.getState>,
@@ -41,7 +41,7 @@ function _injectRouteBlock(
   for (let i = msgs.length - 1; i >= 0; i--) {
     const m = msgs[i];
     if (m.role !== "assistant") continue;
-    // 已有 route status block 则跳过
+    // 宸叉湁 route status block 鍒欒烦杩?
     if (m.blocks.some((b) => b.type === "status" && b.variant === "route")) return;
     const routeBlock: AssistantBlock = {
       type: "status",
@@ -49,17 +49,17 @@ function _injectRouteBlock(
       detail: route.skillsUsed.length > 0 ? route.skillsUsed.join(",") : undefined,
       variant: "route",
     };
-    const updatedBlocks = [routeBlock, ...m.blocks];
-    const updatedMsgs = [...msgs];
-    updatedMsgs[i] = { ...m, blocks: updatedBlocks };
-    chat.setMessages(updatedMsgs);
+    chat.updateAssistantMessage(m.id, (message) => ({
+      ...message,
+      blocks: [routeBlock, ...message.blocks],
+    }));
     return;
   }
 }
 
 /**
- * 将最后一个 assistant 消息中最后一个 running/success 状态的 tool_call 标记为 pending，
- * 用于刷新后恢复审批弹窗时同步工具调用卡片的视觉状态。
+ * 灏嗘渶鍚庝竴涓?assistant 娑堟伅涓渶鍚庝竴涓?running/success 鐘舵€佺殑 tool_call 鏍囪涓?pending锛?
+ * 鐢ㄤ簬鍒锋柊鍚庢仮澶嶅鎵瑰脊绐楁椂鍚屾宸ュ叿璋冪敤鍗＄墖鐨勮瑙夌姸鎬併€?
  */
 function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>) {
   const msgs = chat.messages;
@@ -69,15 +69,18 @@ function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>
     for (let j = m.blocks.length - 1; j >= 0; j--) {
       const b = m.blocks[j];
       if (b.type === "tool_call" && (b.status === "running" || b.status === "success")) {
-        const updatedBlocks = [...m.blocks];
-        updatedBlocks[j] = { ...b, status: "pending" as const };
-        const updatedMsgs = [...msgs];
-        updatedMsgs[i] = { ...m, blocks: updatedBlocks };
-        chat.setMessages(updatedMsgs);
+        chat.updateAssistantMessage(m.id, (message) => {
+          const updatedBlocks = [...message.blocks];
+          const block = updatedBlocks[j];
+          if (block?.type === "tool_call") {
+            updatedBlocks[j] = { ...block, status: "pending" as const };
+          }
+          return { ...message, blocks: updatedBlocks };
+        });
         return;
       }
     }
-    break; // 只检查最后一条 assistant 消息
+    break; // 鍙鏌ユ渶鍚庝竴鏉?assistant 娑堟伅
   }
 }
 
@@ -96,7 +99,7 @@ export function SessionSync() {
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
 
-  // 启动时拉取 thinking config 同步到 store
+  // 鍚姩鏃舵媺鍙?thinking config 鍚屾鍒?store
   useEffect(() => {
     apiGet<{ effort: string }>("/thinking")
       .then((data) => {
@@ -124,16 +127,16 @@ export function SessionSync() {
         }));
         mergeSessions(mapped);
 
-        // 若 activeSessionId（从 localStorage 恢复）与后端已知会话都不匹配，则清空以避免陈旧 404 轮询风暴。
-        // 若有活跃 SSE 流（乐观创建尚未到达服务端）则跳过。
-        // Demo sessions are local-only — never prune them via backend sync.
+        // 鑻?activeSessionId锛堜粠 localStorage 鎭㈠锛変笌鍚庣宸茬煡浼氳瘽閮戒笉鍖归厤锛屽垯娓呯┖浠ラ伩鍏嶉檲鏃?404 杞椋庢毚銆?
+        // 鑻ユ湁娲昏穬 SSE 娴侊紙涔愯鍒涘缓灏氭湭鍒拌揪鏈嶅姟绔級鍒欒烦杩囥€?
+        // Demo sessions are local-only 鈥?never prune them via backend sync.
         const currentActive = useSessionStore.getState().activeSessionId;
         if (currentActive && !currentActive.startsWith(DEMO_SESSION_PREFIX) && !mapped.some((s) => s.id === currentActive)) {
           {
             const hasActiveStream = useChatStore.getState().abortController !== null;
             if (!hasActiveStream) {
-              // 保护本地新建但尚未发送首条消息的会话：检查 session-store 中是否
-              // 存在该会话且 messageCount === 0 且创建不超过 60 秒。
+              // 淇濇姢鏈湴鏂板缓浣嗗皻鏈彂閫侀鏉℃秷鎭殑浼氳瘽锛氭鏌?session-store 涓槸鍚?
+              // 瀛樺湪璇ヤ細璇濅笖 messageCount === 0 涓斿垱寤轰笉瓒呰繃 60 绉掋€?
               const localSession = useSessionStore.getState().sessions.find((s) => s.id === currentActive);
               const GRACE_MS = 60_000;
               const isLocalUnsent = localSession
@@ -147,7 +150,7 @@ export function SessionSync() {
           }
         }
       } catch {
-        // 忽略
+        // 蹇界暐
       }
     };
 
@@ -163,10 +166,10 @@ export function SessionSync() {
   }, [mergeSessions, setActiveSession]);
 
   useEffect(() => {
-    // 本地 SSE 流活跃时不自动切换会话；等流结束再切换，避免清掉乐观进行中的消息。
+    // 鏈湴 SSE 娴佹椿璺冩椂涓嶈嚜鍔ㄥ垏鎹細璇濓紱绛夋祦缁撴潫鍐嶅垏鎹紝閬垮厤娓呮帀涔愯杩涜涓殑娑堟伅銆?
     if (abortController) return;
 
-    // Demo sessions are fully managed by CoachMarks — skip async switchSession
+    // Demo sessions are fully managed by CoachMarks 鈥?skip async switchSession
     // which would wipe mock messages by trying to load from IDB/backend.
     if (activeSessionId?.startsWith(DEMO_SESSION_PREFIX)) return;
 
@@ -184,21 +187,21 @@ export function SessionSync() {
   useEffect(() => {
     if (!activeSessionId) {
       setFullAccessEnabled(false);
-      // 此处不重置 chatMode，其为用户驱动状态（ChatModeTabs）；重置会导致用户切到 read/plan 后几秒又弹回 write。
-      // 此处不重置 currentModel；TopModelSelector 通过 /models API 独立管理全局模型名，清空会导致工具栏短暂显示「模型」再被重新拉取。
-      // 仅在没有活跃 SSE 连接时清除流式状态，否则流回调会继续写入已「停止」的 store。
+      // 姝ゅ涓嶉噸缃?chatMode锛屽叾涓虹敤鎴烽┍鍔ㄧ姸鎬侊紙ChatModeTabs锛夛紱閲嶇疆浼氬鑷寸敤鎴峰垏鍒?read/plan 鍚庡嚑绉掑張寮瑰洖 write銆?
+      // 姝ゅ涓嶉噸缃?currentModel锛汿opModelSelector 閫氳繃 /models API 鐙珛绠＄悊鍏ㄥ眬妯″瀷鍚嶏紝娓呯┖浼氬鑷村伐鍏锋爮鐭殏鏄剧ず銆屾ā鍨嬨€嶅啀琚噸鏂版媺鍙栥€?
+      // 浠呭湪娌℃湁娲昏穬 SSE 杩炴帴鏃舵竻闄ゆ祦寮忕姸鎬侊紝鍚﹀垯娴佸洖璋冧細缁х画鍐欏叆宸层€屽仠姝€嶇殑 store銆?
       if (!useChatStore.getState().abortController) {
         setStreaming(false);
       }
       return;
     }
 
-    // Demo sessions are local-only — skip backend polling entirely.
+    // Demo sessions are local-only 鈥?skip backend polling entirely.
     if (activeSessionId.startsWith(DEMO_SESSION_PREFIX)) return;
 
     let cancelled = false;
     const prevInFlightRef = { current: false };
-    let initialLoadDone = false;
+    let snapshotValidated = false;
     let notFoundCount = 0;
     const NOT_FOUND_THRESHOLD = 2;
     const pollDetail = async () => {
@@ -209,14 +212,14 @@ export function SessionSync() {
         }
 
         if (!detail) {
-          // 会话尚未被后端知晓（本地创建，首条消息未到服务端）。静默跳过，不要移除会话，否则会破坏乐观创建流程。
-          // 但如果连续多次 404，说明会话确实不存在（如后端重启），清理 activeSessionId。
-          // 如果存在活跃的 SSE 流（abortController !== null），说明消息正在发送中，
-          // 后端可能还未来得及注册该会话，不要重置。
+          // 浼氳瘽灏氭湭琚悗绔煡鏅擄紙鏈湴鍒涘缓锛岄鏉℃秷鎭湭鍒版湇鍔＄锛夈€傞潤榛樿烦杩囷紝涓嶈绉婚櫎浼氳瘽锛屽惁鍒欎細鐮村潖涔愯鍒涘缓娴佺▼銆?
+          // 浣嗗鏋滆繛缁娆?404锛岃鏄庝細璇濈‘瀹炰笉瀛樺湪锛堝鍚庣閲嶅惎锛夛紝娓呯悊 activeSessionId銆?
+          // 濡傛灉瀛樺湪娲昏穬鐨?SSE 娴侊紙abortController !== null锛夛紝璇存槑娑堟伅姝ｅ湪鍙戦€佷腑锛?
+          // 鍚庣鍙兘杩樻湭鏉ュ緱鍙婃敞鍐岃浼氳瘽锛屼笉瑕侀噸缃€?
           notFoundCount++;
           const hasActiveStream = useChatStore.getState().abortController !== null;
           if (notFoundCount >= NOT_FOUND_THRESHOLD && !hasActiveStream) {
-            // 保护本地新建但尚未发送首条消息的会话，避免轮询误清。
+            // 淇濇姢鏈湴鏂板缓浣嗗皻鏈彂閫侀鏉℃秷鎭殑浼氳瘽锛岄伩鍏嶈疆璇㈣娓呫€?
             const localSession = useSessionStore.getState().sessions.find((s) => s.id === activeSessionId);
             const GRACE_MS = 60_000;
             const isLocalUnsent = localSession
@@ -230,60 +233,62 @@ export function SessionSync() {
           return;
         }
 
-        // 收到有效响应，重置计数器
+        // 鏀跺埌鏈夋晥鍝嶅簲锛岄噸缃鏁板櫒
         notFoundCount = 0;
         consecutiveErrors = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
         setVisionCapable(detail.visionCapable);
-        // 注意：不要在轮询中用后端 chatMode 覆盖前端状态。
-        // chatMode 的权威来源是前端用户操作（ChatModeTabs 点击），
-        // 后端 _current_chat_mode 只在 engine.chat() 调用时更新，
-        // 轮询覆盖会导致用户切换模式后几秒被重置回旧值。
-        // 后端主动推送的模式变更（SSE mode_changed 事件）仍然生效。
+        // 娉ㄦ剰锛氫笉瑕佸湪杞涓敤鍚庣 chatMode 瑕嗙洊鍓嶇鐘舵€併€?
+        // chatMode 鐨勬潈濞佹潵婧愭槸鍓嶇鐢ㄦ埛鎿嶄綔锛圕hatModeTabs 鐐瑰嚮锛夛紝
+        // 鍚庣 _current_chat_mode 鍙湪 engine.chat() 璋冪敤鏃舵洿鏂帮紝
+        // 杞瑕嗙洊浼氬鑷寸敤鎴峰垏鎹㈡ā寮忓悗鍑犵琚噸缃洖鏃у€笺€?
+        // 鍚庣涓诲姩鎺ㄩ€佺殑妯″紡鍙樻洿锛圫SE mode_changed 浜嬩欢锛変粛鐒剁敓鏁堛€?
         const modelName = detail.currentModelName || detail.currentModel;
         if (modelName) setCurrentModel(modelName);
 
-        // 重要：pollDetail 为异步，可能与乐观本地 sendMessage() 竞态。
-        // 在任何会覆盖消息的刷新前，务必重新读取最新 chat 状态，避免擦除刚追加的本地 user/assistant 气泡。
+        // 閲嶈锛歱ollDetail 涓哄紓姝ワ紝鍙兘涓庝箰瑙傛湰鍦?sendMessage() 绔炴€併€?
+        // 鍦ㄤ换浣曚細瑕嗙洊娑堟伅鐨勫埛鏂板墠锛屽姟蹇呴噸鏂拌鍙栨渶鏂?chat 鐘舵€侊紝閬垮厤鎿﹂櫎鍒氳拷鍔犵殑鏈湴 user/assistant 姘旀场銆?
         const chat = useChatStore.getState();
+        const detailStreamId = detail.activeStreamId ?? null;
+        const detailLatestSeq = Math.max(0, detail.latestSeq ?? 0);
+        if (!chat.abortController) {
+          if (detail.inFlight && detailStreamId) {
+            chat.setStreamState(detailStreamId, Math.max(chat.latestSeq, detailLatestSeq));
+          } else if (!detail.inFlight) {
+            chat.setStreamState(null, 0);
+            chat.clearResumeFailed();
+          }
+        }
         const hasLocalLiveStream = chat.abortController !== null;
+        prevInFlightRef.current = detail.inFlight;
 
-        // 页面刷新后没有本地 stream 连接时，用后端 in_flight 状态接管。
+        // 椤甸潰鍒锋柊鍚庢病鏈夋湰鍦?stream 杩炴帴鏃讹紝鐢ㄥ悗绔?in_flight 鐘舵€佹帴绠°€?
         if (!hasLocalLiveStream) {
-          // 仅在以下情况刷新消息（避免轮询期间替换消息数组导致编辑状态丢失）：
-          // 1) 首次加载且本地消息为空（页面刷新恢复）
-          // 2) inFlight 刚从 true -> false（后端处理完毕），做最终同步
-          // 移除了 detail.inFlight 条件，避免在流式处理期间持续替换消息
-          const wasInFlight = prevInFlightRef.current;
-          const shouldRefresh =
-            (!initialLoadDone && chat.messages.length === 0)
-            || (wasInFlight && !detail.inFlight);
-          prevInFlightRef.current = detail.inFlight;
-          initialLoadDone = true;
-
-          if (shouldRefresh) {
+          // 仅在快照校验失败时回源，避免常态全量刷新。
+          if (detail.inFlight) {
+            snapshotValidated = false;
+          } else if (!snapshotValidated) {
+            snapshotValidated = true;
             const latestChat = useChatStore.getState();
-            // 确保没有活跃的 SSE 连接且不在流式处理中
             if (latestChat.abortController === null && !latestChat.isStreaming) {
-              // 首次加载需要 messages 为空才刷新；inFlight→false 始终刷新（权威最终同步）
-              const isInitialEmpty = !wasInFlight && latestChat.messages.length === 0;
-              const isTaskJustFinished = wasInFlight && !detail.inFlight;
-              if (isInitialEmpty || isTaskJustFinished) {
+              const remoteCount = Math.max(0, detail.messageCount ?? 0);
+              const localCount = latestChat.messageOrder.length;
+              if (remoteCount !== localCount) {
                 await refreshSessionMessagesFromBackend(activeSessionId);
               }
             }
           }
 
-          // SSE 重连：检测到后端仍在处理且前端无活跃 SSE 连接时，
-          // 自动调用 subscribeToSession 重新接入事件流。
+          // SSE 閲嶈繛锛氭娴嬪埌鍚庣浠嶅湪澶勭悊涓斿墠绔棤娲昏穬 SSE 杩炴帴鏃讹紝
+          // 鑷姩璋冪敤 subscribeToSession 閲嶆柊鎺ュ叆浜嬩欢娴併€?
           if (detail.inFlight) {
             const latest = useChatStore.getState();
             if (!latest.abortController && !latest.isStreaming) {
-              // 先设置 streaming 避免下一轮 poll 重复触发
+              // 鍏堣缃?streaming 閬垮厤涓嬩竴杞?poll 閲嶅瑙﹀彂
               latest.setStreaming(true);
               subscribeToSession(activeSessionId).catch(() => {
-                // 订阅失败时回退到轮询模式
+                // 璁㈤槄澶辫触鏃跺洖閫€鍒拌疆璇㈡ā寮?
                 const s = useChatStore.getState();
                 if (!s.abortController) s.setStreaming(false);
               });
@@ -292,31 +297,31 @@ export function SessionSync() {
             chat.setStreaming(detail.inFlight);
           }
 
-          // 注意：refreshSessionMessagesFromBackend 已更新 store，需重新获取最新状态
+          // 娉ㄦ剰锛歳efreshSessionMessagesFromBackend 宸叉洿鏂?store锛岄渶閲嶆柊鑾峰彇鏈€鏂扮姸鎬?
           const freshChat = useChatStore.getState();
 
-          // 恢复路由状态 block（刷新后丢失的 SSE route_end 产物）
+          // 鎭㈠璺敱鐘舵€?block锛堝埛鏂板悗涓㈠け鐨?SSE route_end 浜х墿锛?
           if (detail.lastRoute && detail.lastRoute.routeMode) {
             _injectRouteBlock(useChatStore.getState(), detail.lastRoute);
           }
 
-          // 恢复待处理审批弹窗（刷新后丢失的瞬态状态）
-          // 注意：用户点击允许/拒绝后会记录 _lastDismissedApprovalId，
-          // 防止 SessionSync 轮询在后端尚未处理完审批时把弹窗重新拉回来
+          // 鎭㈠寰呭鐞嗗鎵瑰脊绐楋紙鍒锋柊鍚庝涪澶辩殑鐬€佺姸鎬侊級
+          // 娉ㄦ剰锛氱敤鎴风偣鍑诲厑璁?鎷掔粷鍚庝細璁板綍 _lastDismissedApprovalId锛?
+          // 闃叉 SessionSync 杞鍦ㄥ悗绔皻鏈鐞嗗畬瀹℃壒鏃舵妸寮圭獥閲嶆柊鎷夊洖鏉?
           if (detail.pendingApproval && !freshChat.pendingApproval) {
             const dismissed = freshChat._lastDismissedApprovalId;
             const incomingId = (detail.pendingApproval as { id?: string })?.id
               ?? (detail.pendingApproval as { approval_id?: string })?.approval_id;
             if (!dismissed || dismissed !== incomingId) {
               freshChat.setPendingApproval(detail.pendingApproval);
-              // 同时将最后一个匹配的 tool_call block 标记为 pending
+              // 鍚屾椂灏嗘渶鍚庝竴涓尮閰嶇殑 tool_call block 鏍囪涓?pending
               _markLastToolCallPending(useChatStore.getState());
             }
           } else if (!detail.pendingApproval && freshChat.pendingApproval) {
             freshChat.setPendingApproval(null);
           }
 
-          // 恢复待处理问题弹窗
+          // 鎭㈠寰呭鐞嗛棶棰樺脊绐?
           if (detail.pendingQuestion && !freshChat.pendingQuestion) {
             freshChat.setPendingQuestion(detail.pendingQuestion);
           } else if (!detail.pendingQuestion && freshChat.pendingQuestion) {
@@ -327,15 +332,15 @@ export function SessionSync() {
         if (cancelled) {
           return;
         }
-        // 网络错误（如断网/超时）：不重置 UI 开关，避免瞬时网络波动导致用户丢失 Full Access 状态。
-        // fullAccessEnabled 等 UI 状态会在下一次成功轮询时自然恢复。
+        // 缃戠粶閿欒锛堝鏂綉/瓒呮椂锛夛細涓嶉噸缃?UI 寮€鍏筹紝閬垮厤鐬椂缃戠粶娉㈠姩瀵艰嚧鐢ㄦ埛涓㈠け Full Access 鐘舵€併€?
+        // fullAccessEnabled 绛?UI 鐘舵€佷細鍦ㄤ笅涓€娆℃垚鍔熻疆璇㈡椂鑷劧鎭㈠銆?
         consecutiveErrors++;
       }
     };
 
-    // 自适应轮询：inFlight 时 2s 高频同步，空闲时 5s 低频检查
-    // 连续失败时指数退避（最大 30s），成功时重置
-    // 性能优化：首次延迟 800ms 再触发，避免与 switchSession 的消息加载竞态
+    // 鑷€傚簲杞锛歩nFlight 鏃?2s 楂橀鍚屾锛岀┖闂叉椂 5s 浣庨妫€鏌?
+    // 杩炵画澶辫触鏃舵寚鏁伴€€閬匡紙鏈€澶?30s锛夛紝鎴愬姛鏃堕噸缃?
+    // 鎬ц兘浼樺寲锛氶娆″欢杩?800ms 鍐嶈Е鍙戯紝閬垮厤涓?switchSession 鐨勬秷鎭姞杞界珵鎬?
     const POLL_FAST = 2000;
     const POLL_IDLE = 5000;
     const POLL_MAX_BACKOFF = 30_000;
@@ -347,14 +352,14 @@ export function SessionSync() {
         if (cancelled) return;
         const isActive = prevInFlightRef.current;
         let nextInterval = isActive ? POLL_FAST : POLL_IDLE;
-        // 连续失败时指数退避
+        // 杩炵画澶辫触鏃舵寚鏁伴€€閬?
         if (consecutiveErrors > 0) {
           nextInterval = Math.min(nextInterval * Math.pow(2, consecutiveErrors), POLL_MAX_BACKOFF);
         }
         currentInterval = nextInterval;
         timer = window.setTimeout(schedule, currentInterval);
       });
-    }, POLL_INITIAL_DELAY); // 延迟首次触发，避免与 switchSession 竞态
+    }, POLL_INITIAL_DELAY); // 寤惰繜棣栨瑙﹀彂锛岄伩鍏嶄笌 switchSession 绔炴€?
 
     return () => {
       cancelled = true;
@@ -372,3 +377,4 @@ export function SessionSync() {
 
   return null;
 }
+

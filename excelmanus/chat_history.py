@@ -260,11 +260,17 @@ class ChatHistoryStore:
         self, session_id: str, limit: int = 10000, offset: int = 0
     ) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT content FROM messages WHERE session_id = ? "
+            "SELECT id, content FROM messages WHERE session_id = ? "
             "ORDER BY id ASC LIMIT ? OFFSET ?",
             (session_id, limit, offset),
         ).fetchall()
-        return [self._deserialize_message(r) for r in rows]
+        messages: list[dict] = []
+        for row in rows:
+            message = self._deserialize_message(row)
+            if not message.get("message_id"):
+                message["message_id"] = f"db:{row['id']}"  # type: ignore[index]
+            messages.append(message)
+        return messages
 
     def get_message_count(self, session_id: str) -> int:
         row = self._conn.execute(

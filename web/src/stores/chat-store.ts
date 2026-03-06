@@ -1,4 +1,4 @@
-import { create } from "zustand";
+﻿import { create } from "zustand";
 import type { Message, Approval, Question, AssistantBlock, FileAttachment } from "@/lib/types";
 import { loadCachedMessages, saveCachedMessages, deleteCachedMessages, clearAllCachedMessages } from "@/lib/idb-cache";
 import { fetchSessionMessages, fetchSessionExcelEvents, clearAllSessions } from "@/lib/api";
@@ -10,15 +10,75 @@ import {
   isFallbackSessionTitle,
 } from "@/lib/session-title";
 
-// 内存快速缓存（补充 IndexedDB）
+// 鍐呭瓨蹇€熺紦瀛橈紙琛ュ厖 IndexedDB锛?
 const _sessionMessages = new Map<string, Message[]>();
 
-// F5: switchSession 取消令牌 — 递增版本号，旧的 loadAndSwitch 检测到版本变化后放弃更新
+// F5: switchSession 鍙栨秷浠ょ墝 鈥?閫掑鐗堟湰鍙凤紝鏃х殑 loadAndSwitch 妫€娴嬪埌鐗堟湰鍙樺寲鍚庢斁寮冩洿鏂?
 let _switchSessionVersion = 0;
 
 let _msgIdCounter = 0;
 function _nextId(): string {
   return `restored-${++_msgIdCounter}-${Date.now()}`;
+}
+
+interface MessageEntities {
+  messages: Message[];
+  messageOrder: string[];
+  messagesById: Record<string, Message>;
+  messageIndexById: Record<string, number>;
+}
+
+function _buildMessageEntities(messages: Message[]): MessageEntities {
+  const normalized: Message[] = [];
+  const messageOrder: string[] = [];
+  const messagesById: Record<string, Message> = {};
+  const messageIndexById: Record<string, number> = {};
+
+  for (const msg of messages) {
+    const msgId = String(msg.id || "").trim();
+    if (!msgId) continue;
+    if (messageIndexById[msgId] != null) {
+      const idx = messageIndexById[msgId];
+      normalized[idx] = msg;
+      messagesById[msgId] = msg;
+      continue;
+    }
+    messageIndexById[msgId] = normalized.length;
+    messageOrder.push(msgId);
+    messagesById[msgId] = msg;
+    normalized.push(msg);
+  }
+
+  return { messages: normalized, messageOrder, messagesById, messageIndexById };
+}
+
+function _setMessagesSnapshot(messages: Message[]): Pick<
+  ChatState,
+  "messages" | "messageOrder" | "messagesById" | "messageIndexById"
+> {
+  const entities = _buildMessageEntities(messages);
+  return {
+    messages: entities.messages,
+    messageOrder: entities.messageOrder,
+    messagesById: entities.messagesById,
+    messageIndexById: entities.messageIndexById,
+  };
+}
+
+function _patchMessageById(
+  state: Pick<ChatState, "messageOrder" | "messagesById" | "messageIndexById">,
+  messageId: string,
+  updater: (message: Message) => Message,
+): Pick<ChatState, "messages" | "messagesById"> | null {
+  const current = state.messagesById[messageId];
+  if (!current) return null;
+  const next = updater(current);
+  if (next === current) return null;
+  const messagesById = { ...state.messagesById, [messageId]: next };
+  return {
+    messages: state.messageOrder.map(id => messagesById[id]),
+    messagesById,
+  };
 }
 
 interface LoadMessagesOptions {
@@ -27,26 +87,26 @@ interface LoadMessagesOptions {
 }
 
 /**
- * 将后端 LLM 消息（role/content 字典）转换为前端 Message[]。
- * 将连续的 assistant/tool 消息合并为带 blocks 的单一 assistant 消息。
+ * 灏嗗悗绔?LLM 娑堟伅锛坮ole/content 瀛楀吀锛夎浆鎹负鍓嶇 Message[]銆?
+ * 灏嗚繛缁殑 assistant/tool 娑堟伅鍚堝苟涓哄甫 blocks 鐨勫崟涓€ assistant 娑堟伅銆?
  */
 const _EXCEL_WRITE_TOOL_NAMES = new Set([
   "write_cells", "insert_rows", "insert_columns",
   "create_sheet", "delete_sheet", "run_code",
 ]);
 
-// 所有会修改工作区文件的工具（含 Excel 写入 + 文本写入），用于恢复 affected files
+// 鎵€鏈変細淇敼宸ヤ綔鍖烘枃浠剁殑宸ュ叿锛堝惈 Excel 鍐欏叆 + 鏂囨湰鍐欏叆锛夛紝鐢ㄤ簬鎭㈠ affected files
 const _ALL_WRITE_TOOL_NAMES = new Set([
   ...Array.from(_EXCEL_WRITE_TOOL_NAMES),
   "write_text_file", "edit_text_file",
 ]);
 
 const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
-const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(（\[])([^ \t\r\n`"'()（）\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)）\]])/gi;
+const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(锛圽[])([^ \t\r\n`"'()锛堬級\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)锛塡]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
 
-// 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
-// 从后端刷新时，必须从现有内存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 后 thinking 块消失）。
+// 浠呯敱 SSE 浜嬩欢浜х敓鐨勫潡绫诲瀷锛屼笉鎸佷箙鍖栧埌鍚庣娑堟伅瀛樺偍銆?
+// 浠庡悗绔埛鏂版椂锛屽繀椤讳粠鐜版湁鍐呭瓨娑堟伅涓甫鍑猴紝閬垮厤瑙嗚鏁版嵁涓㈠け锛堝 SessionSync 妫€娴嬪埌 inFlight鈫抐alse 鍚?thinking 鍧楁秷澶憋級銆?
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
@@ -54,27 +114,27 @@ const _SSE_ONLY_BLOCK_TYPES = new Set([
   "tool_notice", "reasoning_notice",
 ]);
 
-// failure_guidance 与其他 SSE-only 块不同：后端会将其持久化为 text block（_failure_guidance_text）。
-// 合并时需消费对应的后端 text block，避免重复。
+// failure_guidance 涓庡叾浠?SSE-only 鍧椾笉鍚岋細鍚庣浼氬皢鍏舵寔涔呭寲涓?text block锛坃failure_guidance_text锛夈€?
+// 鍚堝苟鏃堕渶娑堣垂瀵瑰簲鐨勫悗绔?text block锛岄伩鍏嶉噸澶嶃€?
 const _SSE_ONLY_HAS_BACKEND_COUNTERPART = new Set(["failure_guidance"]);
 
 /**
- * 将仅由 SSE 产生的块（thinking、iteration、approval_action、subagent）从 oldMessages 合并到 newMessages，
- * 使后端刷新不会丢弃它们。在 assistant 消息间按位置匹配。
+ * 灏嗕粎鐢?SSE 浜х敓鐨勫潡锛坱hinking銆乮teration銆乤pproval_action銆乻ubagent锛変粠 oldMessages 鍚堝苟鍒?newMessages锛?
+ * 浣垮悗绔埛鏂颁笉浼氫涪寮冨畠浠€傚湪 assistant 娑堟伅闂存寜浣嶇疆鍖归厤銆?
  */
 function _preserveSseOnlyBlocks(
   oldMessages: Message[],
   newMessages: Message[],
 ): Message[] {
-  // 按顺序收集旧 assistant 消息
+  // 鎸夐『搴忔敹闆嗘棫 assistant 娑堟伅
   const oldAssistant: AssistantBlock[][] = [];
   for (const m of oldMessages) {
     if (m.role === "assistant") oldAssistant.push(m.blocks);
   }
   if (oldAssistant.length === 0) return newMessages;
 
-  // 同时保留用户消息的文件：内存中的消息可能含有更完整的 FileAttachment（含实际上传大小），
-  // 而后端从通知字符串无法完全还原。
+  // 鍚屾椂淇濈暀鐢ㄦ埛娑堟伅鐨勬枃浠讹細鍐呭瓨涓殑娑堟伅鍙兘鍚湁鏇村畬鏁寸殑 FileAttachment锛堝惈瀹為檯涓婁紶澶у皬锛夛紝
+  // 鑰屽悗绔粠閫氱煡瀛楃涓叉棤娉曞畬鍏ㄨ繕鍘熴€?
   const oldUserFiles: (FileAttachment[] | undefined)[] = [];
   for (const m of oldMessages) {
     if (m.role === "user") oldUserFiles.push(m.files);
@@ -85,7 +145,7 @@ function _preserveSseOnlyBlocks(
   const result = newMessages.map((msg) => {
     if (msg.role === "user") {
       const oldFiles = oldUserFiles[uIdx++];
-      // 若旧消息有文件而新消息没有或更少，优先保留旧的
+      // 鑻ユ棫娑堟伅鏈夋枃浠惰€屾柊娑堟伅娌℃湁鎴栨洿灏戯紝浼樺厛淇濈暀鏃х殑
       if (oldFiles && oldFiles.length > 0 && (!msg.files || msg.files.length === 0)) {
         return { ...msg, files: oldFiles };
       }
@@ -95,8 +155,8 @@ function _preserveSseOnlyBlocks(
     const oldBlocks = oldAssistant[aIdx++];
     if (!oldBlocks) return msg;
 
-    // 按 toolCallId 建立旧 tool_call 块映射，用于状态恢复。
-    // SSE 事件携带的状态（error/result/status）比后端持久化更完整，此映射用于延续该状态。
+    // 鎸?toolCallId 寤虹珛鏃?tool_call 鍧楁槧灏勶紝鐢ㄤ簬鐘舵€佹仮澶嶃€?
+    // SSE 浜嬩欢鎼哄甫鐨勭姸鎬侊紙error/result/status锛夋瘮鍚庣鎸佷箙鍖栨洿瀹屾暣锛屾鏄犲皠鐢ㄤ簬寤剁画璇ョ姸鎬併€?
     const oldToolCallMap = new Map<string, AssistantBlock>();
     for (const ob of oldBlocks) {
       if (ob.type === "tool_call" && ob.toolCallId) {
@@ -107,9 +167,9 @@ function _preserveSseOnlyBlocks(
     const sseBlocks = oldBlocks.filter((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type));
     if (sseBlocks.length === 0 && oldToolCallMap.size === 0) return msg;
 
-    // 以旧块顺序为模板：保留仅 SSE 的块不动，用刷新后的块替换后端持久化的块。
+    // 浠ユ棫鍧楅『搴忎负妯℃澘锛氫繚鐣欎粎 SSE 鐨勫潡涓嶅姩锛岀敤鍒锋柊鍚庣殑鍧楁浛鎹㈠悗绔寔涔呭寲鐨勫潡銆?
     const newBackendBlocks = msg.blocks.map((nb) => {
-      // 延续 SSE 产生的 tool_call 状态（错误状态、结果、错误信息），后端转换可能已丢失。
+      // 寤剁画 SSE 浜х敓鐨?tool_call 鐘舵€侊紙閿欒鐘舵€併€佺粨鏋溿€侀敊璇俊鎭級锛屽悗绔浆鎹㈠彲鑳藉凡涓㈠け銆?
       if (
         nb.type === "tool_call"
         && nb.toolCallId
@@ -117,11 +177,11 @@ function _preserveSseOnlyBlocks(
       ) {
         const ob = oldToolCallMap.get(nb.toolCallId)!;
         if (ob.type === "tool_call") {
-          // 若旧块为错误状态则保留（后端对已解析调用总是返回 "success"）。
+          // 鑻ユ棫鍧椾负閿欒鐘舵€佸垯淇濈暀锛堝悗绔宸茶В鏋愯皟鐢ㄦ€绘槸杩斿洖 "success"锛夈€?
           if (ob.status === "error" && nb.status === "success") {
             return { ...nb, status: ob.status, result: ob.result, error: ob.error };
           }
-          // 若新块缺少结果文本则沿用旧的
+          // 鑻ユ柊鍧楃己灏戠粨鏋滄枃鏈垯娌跨敤鏃х殑
           if (!nb.result && ob.result) {
             return { ...nb, result: ob.result };
           }
@@ -131,7 +191,7 @@ function _preserveSseOnlyBlocks(
     });
 
     if (sseBlocks.length === 0) {
-      // 无仅 SSE 的块需要按位合并，但上面可能已修补了 tool_call 状态。
+      // 鏃犱粎 SSE 鐨勫潡闇€瑕佹寜浣嶅悎骞讹紝浣嗕笂闈㈠彲鑳藉凡淇ˉ浜?tool_call 鐘舵€併€?
       return { ...msg, blocks: newBackendBlocks };
     }
 
@@ -141,7 +201,7 @@ function _preserveSseOnlyBlocks(
     for (const ob of oldBlocks) {
       if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
         merged.push(ob);
-        // failure_guidance 有后端持久化对应的 text block，消费它以避免重复
+        // failure_guidance 鏈夊悗绔寔涔呭寲瀵瑰簲鐨?text block锛屾秷璐瑰畠浠ラ伩鍏嶉噸澶?
         if (_SSE_ONLY_HAS_BACKEND_COUNTERPART.has(ob.type) && ni < newBackendBlocks.length) {
           ni++;
         }
@@ -151,7 +211,7 @@ function _preserveSseOnlyBlocks(
         }
       }
     }
-    // 追加剩余的新块（如旧消息中最后一个仅 SSE 块之后新增的 tool_calls）。
+    // 杩藉姞鍓╀綑鐨勬柊鍧楋紙濡傛棫娑堟伅涓渶鍚庝竴涓粎 SSE 鍧椾箣鍚庢柊澧炵殑 tool_calls锛夈€?
     while (ni < newBackendBlocks.length) {
       merged.push(newBackendBlocks[ni++]);
     }
@@ -159,10 +219,10 @@ function _preserveSseOnlyBlocks(
     return { ...msg, blocks: merged };
   });
 
-  // ── 追加后端尚未持久化的尾部旧消息 ──
-  // 当后端返回的消息少于本地（如错误发生后助手消息未被持久化），
-  // 额外的本地消息（含 failure_guidance 等 SSE-only 块）会被上面的 map 丢弃。
-  // 此处将这些未匹配的尾部旧消息追加回结果，避免错误提示被刷新掉。
+  // 鈹€鈹€ 杩藉姞鍚庣灏氭湭鎸佷箙鍖栫殑灏鹃儴鏃ф秷鎭?鈹€鈹€
+  // 褰撳悗绔繑鍥炵殑娑堟伅灏戜簬鏈湴锛堝閿欒鍙戠敓鍚庡姪鎵嬫秷鎭湭琚寔涔呭寲锛夛紝
+  // 棰濆鐨勬湰鍦版秷鎭紙鍚?failure_guidance 绛?SSE-only 鍧楋級浼氳涓婇潰鐨?map 涓㈠純銆?
+  // 姝ゅ灏嗚繖浜涙湭鍖归厤鐨勫熬閮ㄦ棫娑堟伅杩藉姞鍥炵粨鏋滐紝閬垮厤閿欒鎻愮ず琚埛鏂版帀銆?
   if (aIdx < oldAssistant.length) {
     let consumedA = 0;
     let consumedU = 0;
@@ -173,7 +233,7 @@ function _preserveSseOnlyBlocks(
       } else if (m.role === "user") {
         if (consumedU < uIdx) { consumedU++; continue; }
       }
-      // 从第一条未消费的消息开始，检查是否有值得保留的 SSE-only 块
+      // 浠庣涓€鏉℃湭娑堣垂鐨勬秷鎭紑濮嬶紝妫€鏌ユ槸鍚︽湁鍊煎緱淇濈暀鐨?SSE-only 鍧?
       const trailing = oldMessages.slice(i);
       const hasPreservable = trailing.some(
         (tm) => tm.role === "assistant" && tm.blocks.some((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type)),
@@ -215,7 +275,7 @@ function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
       return parsed as Record<string, unknown>;
     }
   } catch {
-    // 继续向下
+    // 缁х画鍚戜笅
   }
   for (let i = text.length - 1; i >= 1; i--) {
     if (text[i] !== "}") continue;
@@ -225,7 +285,7 @@ function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
         return parsed as Record<string, unknown>;
       }
     } catch {
-      // 继续查找合法 JSON 后缀边界
+      // 缁х画鏌ユ壘鍚堟硶 JSON 鍚庣紑杈圭晫
     }
   }
   return null;
@@ -289,13 +349,13 @@ function _buildRecoveredDiffFromToolResult(
     sheet: typeof diffData.sheet === "string" ? diffData.sheet : "",
     affectedRange: typeof diffData.affected_range === "string" ? diffData.affected_range : "",
     changes,
-    // 历史消息不包含精确 diff 时间戳，恢复时使用当前时间。
+    // 鍘嗗彶娑堟伅涓嶅寘鍚簿纭?diff 鏃堕棿鎴筹紝鎭㈠鏃朵娇鐢ㄥ綋鍓嶆椂闂淬€?
     timestamp: Date.now(),
   };
 }
 
 /**
- * 从工具结果 JSON 中恢复 _text_diff 到 ExcelStore（write_text_file / edit_text_file）。
+ * 浠庡伐鍏风粨鏋?JSON 涓仮澶?_text_diff 鍒?ExcelStore锛坵rite_text_file / edit_text_file锛夈€?
  */
 function _recoverTextDiffFromToolResult(
   toolCallId: string,
@@ -321,26 +381,26 @@ function _recoverTextDiffFromToolResult(
 }
 
 function _isToolResultError(content: string): boolean {
-  // 简单启发：检查工具结果 JSON 是否含顶层 "status": "error"。
-  // 与后端约定一致：失败的工具调用以 {"status": "error", "message": "..."} 作为工具消息内容。
+  // 绠€鍗曞惎鍙戯細妫€鏌ュ伐鍏风粨鏋?JSON 鏄惁鍚《灞?"status": "error"銆?
+  // 涓庡悗绔害瀹氫竴鑷达細澶辫触鐨勫伐鍏疯皟鐢ㄤ互 {"status": "error", "message": "..."} 浣滀负宸ュ叿娑堟伅鍐呭銆?
   const text = content.trim();
   if (!text.startsWith("{")) return false;
   try {
     const parsed = JSON.parse(text);
     return parsed && typeof parsed === "object" && parsed.status === "error";
   } catch {
-    // 回退：对截断或大结果做简单子串检查
+    // 鍥為€€锛氬鎴柇鎴栧ぇ缁撴灉鍋氱畝鍗曞瓙涓叉鏌?
     return /"status"\s*:\s*"error"/.test(text.slice(0, 200));
   }
 }
 
-// 匹配 sendMessage 注入的文件上传通知的正则
-// "[已上传文件: ./path/to/file.xlsx]" or "[已上传图片: ./path/to/image.png]"
-const _UPLOAD_NOTICE_RE = /\[已上传(?:文件|图片):\s*([^\]]+)\]/g;
+// 鍖归厤 sendMessage 娉ㄥ叆鐨勬枃浠朵笂浼犻€氱煡鐨勬鍒?
+// "[宸蹭笂浼犳枃浠? ./path/to/file.xlsx]" or "[宸蹭笂浼犲浘鐗? ./path/to/image.png]"
+const _UPLOAD_NOTICE_RE = /\[[^\]\n]*:\s*([^\]\n]+)\]/g;
 
 /**
- * 从用户消息内容中的上传通知行提取 FileAttachment[]，
- * 返回去除通知后的内容及附件列表。
+ * 浠庣敤鎴锋秷鎭唴瀹逛腑鐨勪笂浼犻€氱煡琛屾彁鍙?FileAttachment[]锛?
+ * 杩斿洖鍘婚櫎閫氱煡鍚庣殑鍐呭鍙婇檮浠跺垪琛ㄣ€?
  */
 function _extractFileAttachmentsFromContent(
   rawContent: string,
@@ -354,12 +414,22 @@ function _extractFileAttachmentsFromContent(
     const filename = filePath.split("/").pop() || filePath;
     files.push({ filename, path: filePath, size: 0 });
   }
-  // 为展示去掉内容中所有通知行；通知在开头，每行一条，后接 \n\n。
+  // 涓哄睍绀哄幓鎺夊唴瀹逛腑鎵€鏈夐€氱煡琛岋紱閫氱煡鍦ㄥ紑澶达紝姣忚涓€鏉★紝鍚庢帴 \n\n銆?
   const cleaned = rawContent
-    .replace(/\[已上传(?:文件|图片):\s*[^\]]+\]\n?/g, "")
+    .replace(/\[[^\]\n]*:\s*[^\]\n]+\]\n?/g, "")
     .replace(/^\n+/, "")
     .trim();
   return { content: cleaned || (files.length > 0 ? "" : rawContent.trim()), files };
+}
+
+function _resolveBackendMessageId(msg: Record<string, unknown>): string {
+  const messageId =
+    typeof msg.message_id === "string"
+      ? msg.message_id.trim()
+      : typeof msg.id === "string"
+        ? msg.id.trim()
+        : "";
+  return messageId || _nextId();
 }
 
 function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
@@ -385,16 +455,17 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
   const recoveredFilePaths = new Set<string>();
   for (const item of raw) {
     const msg = item as Record<string, unknown>;
+    const backendMessageId = _resolveBackendMessageId(msg);
     const role = msg.role as string;
     if (role === "user") {
       let content: string;
       if (typeof msg.content === "string") {
-        // 去掉 mark_images_sent() 注入的尾部降级图片占位符（如 "\n[图片 #1 已在之前的对话中发送]"）。
-        content = msg.content.replace(/\n?\[图片 #\d+ 已在之前的对话中发送\]\s*$/g, "").trim();
-        // 跳过仅包含系统注入图片的消息（C 通道降级），其整条内容仅为占位符时跳过。
+        // 鍘绘帀 mark_images_sent() 娉ㄥ叆鐨勫熬閮ㄩ檷绾у浘鐗囧崰浣嶇锛堝 "\n[鍥剧墖 #1 宸插湪涔嬪墠鐨勫璇濅腑鍙戦€乚"锛夈€?
+        content = msg.content.replace(/\n?\[鍥剧墖 #\d+ 宸插湪涔嬪墠鐨勫璇濅腑鍙戦€乗]\s*$/g, "").trim();
+        // 璺宠繃浠呭寘鍚郴缁熸敞鍏ュ浘鐗囩殑娑堟伅锛圕 閫氶亾闄嶇骇锛夛紝鍏舵暣鏉″唴瀹逛粎涓哄崰浣嶇鏃惰烦杩囥€?
         if (!content) continue;
       } else if (Array.isArray(msg.content)) {
-        // 多模态消息（文本 + image_url 部分）。仅提取文本部分；将 image_url 部分替换为短占位符，避免原始 base64 泄露到 UI。
+        // 澶氭ā鎬佹秷鎭紙鏂囨湰 + image_url 閮ㄥ垎锛夈€備粎鎻愬彇鏂囨湰閮ㄥ垎锛涘皢 image_url 閮ㄥ垎鏇挎崲涓虹煭鍗犱綅绗︼紝閬垮厤鍘熷 base64 娉勯湶鍒?UI銆?
         const textParts: string[] = [];
         let imageCount = 0;
         for (const part of msg.content as Record<string, unknown>[]) {
@@ -405,19 +476,19 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           }
         }
         const hasText = textParts.some((t) => t.trim().length > 0);
-        // 跳过系统注入的纯图片消息（C 通道 add_image_message 产物）：
-        // 这些消息仅含 image_url 部分、无文本，由工具执行时自动注入，
-        // 不应在 UI 中显示为用户发送的气泡。
+        // 璺宠繃绯荤粺娉ㄥ叆鐨勭函鍥剧墖娑堟伅锛圕 閫氶亾 add_image_message 浜х墿锛夛細
+        // 杩欎簺娑堟伅浠呭惈 image_url 閮ㄥ垎銆佹棤鏂囨湰锛岀敱宸ュ叿鎵ц鏃惰嚜鍔ㄦ敞鍏ワ紝
+        // 涓嶅簲鍦?UI 涓樉绀轰负鐢ㄦ埛鍙戦€佺殑姘旀场銆?
         if (imageCount > 0 && !hasText) {
           continue;
         }
-        content = textParts.join("\n").trim() || "(多模态消息)";
+        content = textParts.join("\n").trim() || "(澶氭ā鎬佹秷鎭?";
       } else {
         content = JSON.stringify(msg.content ?? "");
       }
-      // 从内容中嵌入的上传通知提取文件附件
+      // 浠庡唴瀹逛腑宓屽叆鐨勪笂浼犻€氱煡鎻愬彇鏂囦欢闄勪欢
       const extracted = _extractFileAttachmentsFromContent(content);
-      const userMsg: Message = { id: _nextId(), role: "user", content: extracted.content };
+      const userMsg: Message = { id: backendMessageId, role: "user", content: extracted.content };
       if (extracted.files.length > 0) {
         userMsg.files = extracted.files;
       }
@@ -449,7 +520,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
-          // 从 offer_download 工具结果中恢复 file_download 块
+          // 浠?offer_download 宸ュ叿缁撴灉涓仮澶?file_download 鍧?
           if (toolName === "offer_download" && hasResult && tcId) {
             const dlResultText = toolResultByCallId.get(tcId);
             if (dlResultText) {
@@ -489,7 +560,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
               if (recoveredDiff) {
                 recoveredDiffs.push(recoveredDiff);
               }
-              // 恢复文本文件 diff（write_text_file / edit_text_file）
+              // 鎭㈠鏂囨湰鏂囦欢 diff锛坵rite_text_file / edit_text_file锛?
               _recoverTextDiffFromToolResult(tcId, toolResultText);
             }
           }
@@ -504,7 +575,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
           prev.affectedFiles = Array.from(existing);
         }
       } else {
-        const newMsg: Message = { id: _nextId(), role: "assistant", blocks };
+        const newMsg: Message = { id: backendMessageId, role: "assistant", blocks };
         if (affectedFilePaths.size > 0) {
           (newMsg as Extract<Message, { role: "assistant" }>).affectedFiles = Array.from(affectedFilePaths);
         }
@@ -512,12 +583,12 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       }
     }
   }
-  // 后端消息不携带时间戳，为恢复的消息合成近似时间，使时间分隔线能正常显示。
-  // 每个对话轮次（user→assistant）间隔 6 分钟（> TIMESTAMP_GAP_MS 5 分钟），
-  // 同一轮次内共享时间戳。
+  // 鍚庣娑堟伅涓嶆惡甯︽椂闂存埑锛屼负鎭㈠鐨勬秷鎭悎鎴愯繎浼兼椂闂达紝浣挎椂闂村垎闅旂嚎鑳芥甯告樉绀恒€?
+  // 姣忎釜瀵硅瘽杞锛坲ser鈫抋ssistant锛夐棿闅?6 鍒嗛挓锛? TIMESTAMP_GAP_MS 5 鍒嗛挓锛夛紝
+  // 鍚屼竴杞鍐呭叡浜椂闂存埑銆?
   if (result.length > 0) {
     const TURN_GAP = 6 * 60 * 1000;
-    // 统计轮次数（每个 user 消息开始一个新轮次）
+    // 缁熻杞鏁帮紙姣忎釜 user 娑堟伅寮€濮嬩竴涓柊杞锛?
     let turnCount = 0;
     for (const m of result) {
       if (m.role === "user") turnCount++;
@@ -568,8 +639,8 @@ function _mergeRecoveredExcelState(
 }
 
 /**
- * 从后端持久化的 excel-events 端点恢复 diff 和改动文件到 store。
- * 返回的数据来自 SQLite，不依赖前端推断，重启后 100% 可恢复。
+ * 浠庡悗绔寔涔呭寲鐨?excel-events 绔偣鎭㈠ diff 鍜屾敼鍔ㄦ枃浠跺埌 store銆?
+ * 杩斿洖鐨勬暟鎹潵鑷?SQLite锛屼笉渚濊禆鍓嶇鎺ㄦ柇锛岄噸鍚悗 100% 鍙仮澶嶃€?
  */
 async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
   try {
@@ -600,7 +671,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
       _mergeRecoveredExcelState(converted, []);
     }
 
-    // 恢复预览数据到 excel-store
+    // 鎭㈠棰勮鏁版嵁鍒?excel-store
     if (previews.length > 0) {
       for (const p of previews) {
         excelStore.addPreview({
@@ -615,16 +686,16 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
       }
     }
 
-    // 恢复消息上的 affectedFiles 徽章
+    // 鎭㈠娑堟伅涓婄殑 affectedFiles 寰界珷
     _restoreAffectedFilesOnMessages(diffs, affected_files, sessionId);
   } catch {
-    // 端点不可用或格式错误时静默降级
+    // 绔偣涓嶅彲鐢ㄦ垨鏍煎紡閿欒鏃堕潤榛橀檷绾?
   }
 }
 
 /**
- * 将持久化的 excel 事件中的文件路径，回填到对应 assistant 消息的 affectedFiles。
- * 保证重启后 "涉及文件" 徽章能正确显示。
+ * 灏嗘寔涔呭寲鐨?excel 浜嬩欢涓殑鏂囦欢璺緞锛屽洖濉埌瀵瑰簲 assistant 娑堟伅鐨?affectedFiles銆?
+ * 淇濊瘉閲嶅惎鍚?"娑夊強鏂囦欢" 寰界珷鑳芥纭樉绀恒€?
  */
 function _restoreAffectedFilesOnMessages(
   diffs: { tool_call_id: string; file_path: string }[],
@@ -669,11 +740,11 @@ function _restoreAffectedFilesOnMessages(
   });
 
   if (changed) {
-    // 异步恢复期间会话可能已切换。
+    // 寮傛鎭㈠鏈熼棿浼氳瘽鍙兘宸插垏鎹€?
     const latest = useChatStore.getState().currentSessionId;
     if (latest !== sessionId) return;
 
-    useChatStore.setState({ messages: updated });
+    useChatStore.getState().setMessages(updated);
     const store = useChatStore.getState();
     if (store.currentSessionId === sessionId) {
       saveCachedMessages(sessionId, updated).catch(() => {});
@@ -682,7 +753,7 @@ function _restoreAffectedFilesOnMessages(
 }
 
 /**
- * 异步加载：优先 IDB，回退到后端 API。仅当会话仍为当前会话时更新 store。
+ * 寮傛鍔犺浇锛氫紭鍏?IDB锛屽洖閫€鍒板悗绔?API銆備粎褰撲細璇濅粛涓哄綋鍓嶄細璇濇椂鏇存柊 store銆?
  */
 async function _loadMessagesAsync(sessionId: string): Promise<void> {
   const opts: LoadMessagesOptions = {};
@@ -708,7 +779,7 @@ async function _loadMessagesAsyncWithOptions(
   const shouldPreferCache = opts.preferCache !== false;
   const shouldReplaceVisibleMessages = opts.replaceVisibleMessages === true;
 
-  // 优先尝试 IndexedDB
+  // 浼樺厛灏濊瘯 IndexedDB
   if (shouldPreferCache) {
     const cached = await loadCachedMessages(sessionId);
     if (cached && cached.length > 0) {
@@ -721,15 +792,15 @@ async function _loadMessagesAsyncWithOptions(
         && !store.abortController
         && (store.messages.length === 0 || shouldReplaceVisibleMessages)
       ) {
-        useChatStore.setState({ messages: cached });
+        useChatStore.getState().setMessages(cached);
       }
-      // 消息已加载到 store，立即恢复 Excel 事件并回填 affectedFiles
+      // 娑堟伅宸插姞杞藉埌 store锛岀珛鍗虫仮澶?Excel 浜嬩欢骞跺洖濉?affectedFiles
       _loadPersistedExcelEvents(sessionId).catch(() => {});
       return;
     }
   }
 
-  // 回退到后端 API
+  // 鍥為€€鍒板悗绔?API
   try {
     const raw = await fetchSessionMessages(sessionId, 200, 0);
     if (raw.length === 0) return;
@@ -739,8 +810,8 @@ async function _loadMessagesAsyncWithOptions(
       recoveredFilePaths,
     } = _convertBackendMessages(raw);
     _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths);
-    // 替换可见消息时，从当前 store 带出仅 SSE 的块（thinking、iteration、approval_action），
-    // 避免后端刷新时被丢弃。
+    // 鏇挎崲鍙娑堟伅鏃讹紝浠庡綋鍓?store 甯﹀嚭浠?SSE 鐨勫潡锛坱hinking銆乮teration銆乤pproval_action锛夛紝
+    // 閬垮厤鍚庣鍒锋柊鏃惰涓㈠純銆?
     const store = useChatStore.getState();
     const shouldReplace =
       store.currentSessionId === sessionId
@@ -755,8 +826,8 @@ async function _loadMessagesAsyncWithOptions(
     maybeBackfillTitle(finalMessages);
     saveCachedMessages(sessionId, finalMessages).catch(() => {});
     if (shouldReplace) {
-      // 若合并结果与 store 当前内容语义等价则避免视觉闪烁。
-      // 完整深度比较成本高，故做轻量结构检查：消息数、角色、块数与类型、文本内容一致。
+      // 鑻ュ悎骞剁粨鏋滀笌 store 褰撳墠鍐呭璇箟绛変环鍒欓伩鍏嶈瑙夐棯鐑併€?
+      // 瀹屾暣娣卞害姣旇緝鎴愭湰楂橈紝鏁呭仛杞婚噺缁撴瀯妫€鏌ワ細娑堟伅鏁般€佽鑹层€佸潡鏁颁笌绫诲瀷銆佹枃鏈唴瀹逛竴鑷淬€?
       const cur = useChatStore.getState().messages;
       let equiv = cur.length === finalMessages.length;
       if (equiv) {
@@ -784,13 +855,13 @@ async function _loadMessagesAsyncWithOptions(
         }
       }
       if (!equiv) {
-        useChatStore.setState({ messages: finalMessages });
+        useChatStore.getState().setMessages(finalMessages);
       }
     }
-    // 消息已加载，立即恢复 Excel 事件并回填 affectedFiles
+    // 娑堟伅宸插姞杞斤紝绔嬪嵆鎭㈠ Excel 浜嬩欢骞跺洖濉?affectedFiles
     _loadPersistedExcelEvents(sessionId).catch(() => {});
   } catch {
-    // 静默忽略
+    // 闈欓粯蹇界暐
   }
 }
 
@@ -838,7 +909,7 @@ export interface PipelineStatus {
     summary: string;
   };
   checkpoint?: Record<string, unknown>;
-  // 批量任务相关字段
+  // 鎵归噺浠诲姟鐩稿叧瀛楁
   batchIndex?: number;
   batchTotal?: number;
 }
@@ -854,7 +925,13 @@ export interface BatchProgress {
 
 interface ChatState {
   messages: Message[];
+  messageOrder: string[];
+  messagesById: Record<string, Message>;
+  messageIndexById: Record<string, number>;
   currentSessionId: string | null;
+  activeStreamId: string | null;
+  latestSeq: number;
+  resumeFailedReason: string | null;
   isStreaming: boolean;
   pendingApproval: Approval | null;
   _lastDismissedApprovalId: string | null;
@@ -867,6 +944,10 @@ interface ChatState {
   isLoadingMessages: boolean;
 
   setMessages: (messages: Message[]) => void;
+  updateAssistantMessage: (
+    messageId: string,
+    updater: (message: Extract<Message, { role: "assistant" }>) => Extract<Message, { role: "assistant" }>,
+  ) => void;
   addUserMessage: (id: string, content: string, files?: FileAttachment[]) => void;
   addAssistantMessage: (id: string) => void;
   appendBlock: (messageId: string, block: AssistantBlock) => void;
@@ -891,6 +972,9 @@ interface ChatState {
   setPendingQuestion: (question: Question | null) => void;
   setAbortController: (controller: AbortController | null) => void;
   setPipelineStatus: (status: PipelineStatus | null) => void;
+  setStreamState: (streamId: string | null, latestSeq: number) => void;
+  markResumeFailed: (reason: string) => void;
+  clearResumeFailed: () => void;
   setBatchProgress: (progress: BatchProgress | null) => void;
   setToolProgress: (toolCallId: string, progress: { stage: string; message: string; phaseIndex?: number; totalPhases?: number }) => void;
   clearToolProgress: (toolCallId: string) => void;
@@ -905,7 +989,13 @@ interface ChatState {
 
 export const useChatStore = create<ChatState>((set, get) => ({
   messages: [],
+  messageOrder: [],
+  messagesById: {},
+  messageIndexById: {},
   currentSessionId: null,
+  activeStreamId: null,
+  latestSeq: 0,
+  resumeFailedReason: null,
   isStreaming: false,
   pendingApproval: null,
   _lastDismissedApprovalId: null,
@@ -917,68 +1007,93 @@ export const useChatStore = create<ChatState>((set, get) => ({
   toolProgress: {},
   isLoadingMessages: false,
 
-  setMessages: (messages) => set({ messages }),
+  setMessages: (messages) => set(() => _setMessagesSnapshot(messages)),
+  updateAssistantMessage: (messageId, updater) =>
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        return updater(message);
+      });
+      return patch ?? {};
+    }),
   addUserMessage: (id, content, files) =>
-    set((state) => ({
-      messages: [...state.messages, { id, role: "user" as const, content, files, timestamp: Date.now() }],
-    })),
+    set((state) => {
+      const message: Message = { id, role: "user", content, files, timestamp: Date.now() };
+      const newOrder = [...state.messageOrder, id];
+      const newById = { ...state.messagesById, [id]: message };
+      return {
+        messages: newOrder.map(mid => newById[mid]),
+        messageOrder: newOrder,
+        messageIndexById: { ...state.messageIndexById, [id]: state.messageOrder.length },
+        messagesById: newById,
+      };
+    }),
   addAssistantMessage: (id) =>
-    set((state) => ({
-      messages: [...state.messages, { id, role: "assistant" as const, blocks: [], timestamp: Date.now() }],
-    })),
+    set((state) => {
+      const message: Message = { id, role: "assistant", blocks: [], timestamp: Date.now() };
+      const newOrder = [...state.messageOrder, id];
+      const newById = { ...state.messagesById, [id]: message };
+      return {
+        messages: newOrder.map(mid => newById[mid]),
+        messageOrder: newOrder,
+        messageIndexById: { ...state.messageIndexById, [id]: state.messageOrder.length },
+        messagesById: newById,
+      };
+    }),
   appendBlock: (messageId, block) =>
-    set((state) => ({
-      messages: state.messages.map((m) =>
-        m.id === messageId && m.role === "assistant"
-          ? { ...m, blocks: [...m.blocks, block] }
-          : m
-      ),
-    })),
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        return { ...message, blocks: [...message.blocks, block] };
+      });
+      return patch ?? {};
+    }),
   updateLastBlock: (messageId, updater) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant" || m.blocks.length === 0)
-          return m;
-        const blocks = [...m.blocks];
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant" || message.blocks.length === 0) return message;
+        const blocks = [...message.blocks];
         blocks[blocks.length - 1] = updater(blocks[blocks.length - 1]);
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   updateBlockByType: (messageId, blockType, updater) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant") return m;
-        const idx = [...m.blocks].reverse().findIndex((b) => b.type === blockType);
-        if (idx === -1) return m;
-        const realIdx = m.blocks.length - 1 - idx;
-        const blocks = [...m.blocks];
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        const idx = [...message.blocks].reverse().findIndex((b) => b.type === blockType);
+        if (idx === -1) return message;
+        const realIdx = message.blocks.length - 1 - idx;
+        const blocks = [...message.blocks];
         blocks[realIdx] = updater(blocks[realIdx]);
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   upsertBlockByType: (messageId, blockType, block) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant") return m;
-        const idx = [...m.blocks].reverse().findIndex((b) => b.type === blockType);
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        const idx = [...message.blocks].reverse().findIndex((b) => b.type === blockType);
         if (idx === -1) {
-          return { ...m, blocks: [...m.blocks, block] };
+          return { ...message, blocks: [...message.blocks, block] };
         }
-        const realIdx = m.blocks.length - 1 - idx;
-        const blocks = [...m.blocks];
+        const realIdx = message.blocks.length - 1 - idx;
+        const blocks = [...message.blocks];
         blocks[realIdx] = block;
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   updateSubagentBlock: (messageId, conversationId, updater) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant") return m;
-        // 按 conversationId 精准匹配；无 id 时回退到最后一个 running subagent block
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
         let targetIdx = -1;
         if (conversationId) {
-          for (let i = m.blocks.length - 1; i >= 0; i--) {
-            const b = m.blocks[i];
+          for (let i = message.blocks.length - 1; i >= 0; i--) {
+            const b = message.blocks[i];
             if (b.type === "subagent" && b.conversationId === conversationId) {
               targetIdx = i;
               break;
@@ -986,8 +1101,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
         if (targetIdx === -1) {
-          for (let i = m.blocks.length - 1; i >= 0; i--) {
-            const b = m.blocks[i];
+          for (let i = message.blocks.length - 1; i >= 0; i--) {
+            const b = message.blocks[i];
             if (b.type === "subagent" && b.status === "running") {
               targetIdx = i;
               break;
@@ -995,22 +1110,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
         if (targetIdx === -1) {
-          // 最终回退：最后一个 subagent block
-          for (let i = m.blocks.length - 1; i >= 0; i--) {
-            if (m.blocks[i].type === "subagent") { targetIdx = i; break; }
+          for (let i = message.blocks.length - 1; i >= 0; i--) {
+            if (message.blocks[i].type === "subagent") { targetIdx = i; break; }
           }
         }
-        if (targetIdx === -1) return m;
-        const blocks = [...m.blocks];
+        if (targetIdx === -1) return message;
+        const blocks = [...message.blocks];
         blocks[targetIdx] = updater(blocks[targetIdx]);
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   updateToolCallBlock: (messageId, toolCallId, updater) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant") return m;
-        const blocks = [...m.blocks];
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        const blocks = [...message.blocks];
         const isActive = (s: string) => s === "running" || s === "pending" || s === "streaming";
 
         let targetIndex = -1;
@@ -1028,7 +1143,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
 
-        // 向后兼容：旧事件不带 tool_call_id 时，回退到"最近 running/pending 工具调用"。
         if (targetIndex === -1) {
           for (let i = blocks.length - 1; i >= 0; i--) {
             const block = blocks[i];
@@ -1039,46 +1153,52 @@ export const useChatStore = create<ChatState>((set, get) => ({
           }
         }
 
-        if (targetIndex === -1) return m;
+        if (targetIndex === -1) return message;
         blocks[targetIndex] = updater(blocks[targetIndex]);
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   addAffectedFiles: (messageId, files) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant") return m;
-        const existing = new Set(m.affectedFiles ?? []);
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant") return message;
+        const existing = new Set(message.affectedFiles ?? []);
         for (const f of files) {
           if (f && f.length <= 260 && !/[\n\r\t]/.test(f)) existing.add(f);
         }
-        return { ...m, affectedFiles: Array.from(existing) };
-      }),
-    })),
+        return { ...message, affectedFiles: Array.from(existing) };
+      });
+      return patch ?? {};
+    }),
   retractLastThinking: (messageId) =>
-    set((state) => ({
-      messages: state.messages.map((m) => {
-        if (m.id !== messageId || m.role !== "assistant" || m.blocks.length === 0)
-          return m;
-        const blocks = [...m.blocks];
-        // Remove the last unclosed thinking block
+    set((state) => {
+      const patch = _patchMessageById(state, messageId, (message) => {
+        if (message.role !== "assistant" || message.blocks.length === 0) return message;
+        const blocks = [...message.blocks];
         const lastIdx = blocks.length - 1;
         if (blocks[lastIdx].type === "thinking" && blocks[lastIdx].duration == null) {
           blocks.pop();
-          // Also remove a preceding iteration divider if it's now the last block
           if (blocks.length > 0 && blocks[blocks.length - 1].type === "iteration") {
             blocks.pop();
           }
         }
-        return { ...m, blocks };
-      }),
-    })),
+        return { ...message, blocks };
+      });
+      return patch ?? {};
+    }),
   setStreaming: (streaming) => set({ isStreaming: streaming }),
   setPendingApproval: (approval) => set({ pendingApproval: approval }),
   dismissApproval: (approvalId) => set({ pendingApproval: null, _lastDismissedApprovalId: approvalId }),
   setPendingQuestion: (question) => set({ pendingQuestion: question }),
   setAbortController: (controller) => set({ abortController: controller }),
   setPipelineStatus: (status) => set({ pipelineStatus: status }),
+  setStreamState: (streamId, latestSeq) => set({
+    activeStreamId: streamId,
+    latestSeq: Math.max(0, latestSeq || 0),
+  }),
+  markResumeFailed: (reason) => set({ resumeFailedReason: reason || "unknown" }),
+  clearResumeFailed: () => set({ resumeFailedReason: null }),
   setBatchProgress: (progress) => set({ batchProgress: progress }),
   setToolProgress: (toolCallId, progress) =>
     set((state) => ({
@@ -1096,13 +1216,22 @@ export const useChatStore = create<ChatState>((set, get) => ({
   clearVlmPhases: () => set({ vlmPhases: [] }),
   clearMessages: () => {
     const { currentSessionId } = get();
-    // 清除内存缓存
+    // 娓呴櫎鍐呭瓨缂撳瓨
     if (currentSessionId) {
       _sessionMessages.delete(currentSessionId);
-      // 清除 IndexedDB 缓存
+      // 娓呴櫎 IndexedDB 缂撳瓨
       deleteCachedMessages(currentSessionId).catch(() => {});
     }
-    set({ messages: [], isLoadingMessages: false, pendingApproval: null, pendingQuestion: null, pipelineStatus: null });
+    set({
+      ..._setMessagesSnapshot([]),
+      isLoadingMessages: false,
+      pendingApproval: null,
+      pendingQuestion: null,
+      pipelineStatus: null,
+      activeStreamId: null,
+      latestSeq: 0,
+      resumeFailedReason: null,
+    });
   },
 
   removeSessionCache: (sessionId) => {
@@ -1113,16 +1242,19 @@ export const useChatStore = create<ChatState>((set, get) => ({
     if (state.currentSessionId === sessionId) {
       set({
         currentSessionId: null,
-        messages: [],
+        ..._setMessagesSnapshot([]),
         isLoadingMessages: false,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
+        activeStreamId: null,
+        latestSeq: 0,
+        resumeFailedReason: null,
       });
     }
   },
 
-  /** 清空所有会话历史：后端 + IndexedDB + 内存 + 本地 session 列表。 */
+  /** 娓呯┖鎵€鏈変細璇濆巻鍙诧細鍚庣 + IndexedDB + 鍐呭瓨 + 鏈湴 session 鍒楄〃銆?*/
   clearAllHistory: async () => {
     const { stopGeneration } = await import("@/lib/chat-actions");
     if (get().abortController) {
@@ -1135,10 +1267,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
     useSessionStore.getState().setActiveSession(null);
     set({
       currentSessionId: null,
-      messages: [],
+      ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
       pendingApproval: null,
       pendingQuestion: null,
+      activeStreamId: null,
+      latestSeq: 0,
+      resumeFailedReason: null,
     });
   },
 
@@ -1153,90 +1288,98 @@ export const useChatStore = create<ChatState>((set, get) => ({
   switchSession: (sessionId) => {
     const state = get();
 
-    // 仅当处于当前会话且正在流式输出时跳过。此前在 messages.length > 0 时也会跳过，导致异步加载后点击被静默忽略。
+    // 浠呭綋澶勪簬褰撳墠浼氳瘽涓旀鍦ㄦ祦寮忚緭鍑烘椂璺宠繃銆傛鍓嶅湪 messages.length > 0 鏃朵篃浼氳烦杩囷紝瀵艰嚧寮傛鍔犺浇鍚庣偣鍑昏闈欓粯蹇界暐銆?
     if (sessionId && sessionId === state.currentSessionId) {
       if (state.abortController) return;
-      // 已加载，无需重新拉取
+      // 宸插姞杞斤紝鏃犻渶閲嶆柊鎷夊彇
       if (state.messages.length > 0) return;
     }
 
-    // 将当前会话消息写入两处缓存
+    // 灏嗗綋鍓嶄細璇濇秷鎭啓鍏ヤ袱澶勭紦瀛?
     if (state.currentSessionId && state.messages.length > 0) {
       _sessionMessages.set(state.currentSessionId, [...state.messages]);
       saveCachedMessages(state.currentSessionId, state.messages).catch(() => {});
     }
     
-    // 先从内存缓存加载目标会话消息
+    // 鍏堜粠鍐呭瓨缂撳瓨鍔犺浇鐩爣浼氳瘽娑堟伅
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
-      // F5：即使命中同步缓存也递增版本，以取消未完成的异步加载
+      // F5锛氬嵆浣垮懡涓悓姝ョ紦瀛樹篃閫掑鐗堟湰锛屼互鍙栨秷鏈畬鎴愮殑寮傛鍔犺浇
       ++_switchSessionVersion;
       set({
         currentSessionId: sessionId,
-        messages: memCached,
+        ..._setMessagesSnapshot(memCached),
         isLoadingMessages: false,
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
+        resumeFailedReason: null,
       });
       return;
     }
 
-    // F5: 递增版本号，取消之前的 loadAndSwitch 异步操作
+    // F5: 閫掑鐗堟湰鍙凤紝鍙栨秷涔嬪墠鐨?loadAndSwitch 寮傛鎿嶄綔
     const myVersion = ++_switchSessionVersion;
 
-    // 改进：不立即清空消息，而是先尝试从 IndexedDB 加载
-    // 只有在确实没有缓存时才清空，减少消息闪烁
+    // 鏀硅繘锛氫笉绔嬪嵆娓呯┖娑堟伅锛岃€屾槸鍏堝皾璇曚粠 IndexedDB 鍔犺浇
+    // 鍙湁鍦ㄧ‘瀹炴病鏈夌紦瀛樻椂鎵嶆竻绌猴紝鍑忓皯娑堟伅闂儊
     const loadAndSwitch = async () => {
       if (!sessionId) {
         set({
           currentSessionId: null,
-          messages: [],
+          ..._setMessagesSnapshot([]),
           isLoadingMessages: false,
           pendingApproval: null,
           pendingQuestion: null,
           pipelineStatus: null,
+          activeStreamId: null,
+          latestSeq: 0,
+          resumeFailedReason: null,
         });
         return;
       }
 
-      // 先尝试从 IndexedDB 快速加载
+      // 鍏堝皾璇曚粠 IndexedDB 蹇€熷姞杞?
       try {
         const cached = await loadCachedMessages(sessionId);
         if (cached && cached.length > 0) {
-          // F5: 检查版本号 — 若已被更新的 switchSession 调用取代则放弃
+          // F5: 妫€鏌ョ増鏈彿 鈥?鑻ュ凡琚洿鏂扮殑 switchSession 璋冪敤鍙栦唬鍒欐斁寮?
           if (_switchSessionVersion !== myVersion) return;
-          // 若 sendMessage 已在此期间启动流式输出，不要覆盖其乐观添加的消息
+          // 鑻?sendMessage 宸插湪姝ゆ湡闂村惎鍔ㄦ祦寮忚緭鍑猴紝涓嶈瑕嗙洊鍏朵箰瑙傛坊鍔犵殑娑堟伅
           if (get().abortController) return;
           _sessionMessages.set(sessionId, cached);
           set({
             currentSessionId: sessionId,
-            messages: cached,
+            ..._setMessagesSnapshot(cached),
             isLoadingMessages: false,
             pendingApproval: null,
             pendingQuestion: null,
             pipelineStatus: null,
+            resumeFailedReason: null,
           });
-          // 立即恢复 Excel 事件，确保 diff 数据及时显示
+          // 绔嬪嵆鎭㈠ Excel 浜嬩欢锛岀‘淇?diff 鏁版嵁鍙婃椂鏄剧ず
           _loadPersistedExcelEvents(sessionId).catch(() => {});
           return;
         }
       } catch {
-        // IndexedDB 失败，继续后续流程
+        // IndexedDB 澶辫触锛岀户缁悗缁祦绋?
       }
 
-      // F5: 再次检查版本号
+      // F5: 鍐嶆妫€鏌ョ増鏈彿
       if (_switchSessionVersion !== myVersion) return;
-      // 同上：若流式输出已启动则放弃覆盖
+      // 鍚屼笂锛氳嫢娴佸紡杈撳嚭宸插惎鍔ㄥ垯鏀惧純瑕嗙洊
       if (get().abortController) return;
 
-      // IndexedDB 没有缓存，现在才清空并异步加载
+      // IndexedDB 娌℃湁缂撳瓨锛岀幇鍦ㄦ墠娓呯┖骞跺紓姝ュ姞杞?
       set({
         currentSessionId: sessionId,
-        messages: [],
+        ..._setMessagesSnapshot([]),
         pendingApproval: null,
         pendingQuestion: null,
         pipelineStatus: null,
+        activeStreamId: null,
+        latestSeq: 0,
+        resumeFailedReason: null,
       });
       _loadMessagesAsync(sessionId).catch(() => {}).finally(() => {
         if (_switchSessionVersion === myVersion) {
@@ -1245,13 +1388,16 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     };
 
-    // 立即更新 currentSessionId，但保持当前消息直到新消息加载完成
+    // 绔嬪嵆鏇存柊 currentSessionId锛屼絾淇濇寔褰撳墠娑堟伅鐩村埌鏂版秷鎭姞杞藉畬鎴?
     set({
       currentSessionId: sessionId,
       isLoadingMessages: true,
       pendingApproval: null,
       pendingQuestion: null,
       pipelineStatus: null,
+      activeStreamId: null,
+      latestSeq: 0,
+      resumeFailedReason: null,
     });
     
     loadAndSwitch();

@@ -17,7 +17,7 @@ import type { AttachedFile, FileAttachment } from "@/lib/types";
 const viewTransition = { duration: 0.2, ease: "easeOut" as const };
 
 export default function Home() {
-  const messages = useChatStore((s) => s.messages);
+  const messageOrder = useChatStore((s) => s.messageOrder);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
   const currentSessionId = useChatStore((s) => s.currentSessionId);
@@ -46,7 +46,7 @@ export default function Home() {
     stopGeneration();
   };
 
-  const hasMessages = messages.length > 0;
+  const hasMessages = messageOrder.length > 0;
   // 会话恢复中：activeSessionId 已从 localStorage 恢复但消息尚未加载
   // 不展示 WelcomePage，避免闪烁
   const isRestoringSession = !!activeSessionId && !hasMessages
@@ -66,7 +66,6 @@ export default function Home() {
         ) : hasMessages ? (
           <motion.div key="chat" className="relative flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <MessageStream
-              messages={messages}
               isStreaming={isStreaming}
               onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
                 rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);

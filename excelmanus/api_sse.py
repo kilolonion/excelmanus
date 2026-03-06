@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid as _uuid
 from typing import Any, Callable
 
 from excelmanus.events import EventType, ToolCallEvent
@@ -28,31 +29,68 @@ def sse_format(event_type: str, data: dict) -> str:
     return f"event: {event_type}\ndata: {payload}\n\n"
 
 
+def sse_format_seq(event_type: str, data: dict, seq: int, stream_id: str) -> str:
+    """将事件格式化为携带 seq 和 stream_id 的 SSE 文本行。"""
+    enriched = {**data, "seq": seq, "stream_id": stream_id}
+    payload = json.dumps(enriched, ensure_ascii=False)
+    return f"event: {event_type}\ndata: {payload}\n\n"
+
+
+def inject_seq_into_sse(sse_text: str, seq: int, stream_id: str) -> str:
+    """向已序列化的 SSE 文本中注入 seq 和 stream_id 字段。
+
+    在 ``data:`` 行的 JSON 对象中追加字段，避免重新完整序列化事件。
+    """
+    # SSE 格式: "event: xxx\ndata: {...}\n\n"
+    # 在 JSON 最后一个 } 之前插入字段
+    rpos = sse_text.rfind("}")
+    if rpos < 0:
+        return sse_text
+    insert = f',"seq":{seq},"stream_id":"{stream_id}"'
+    return sse_text[:rpos] + insert + sse_text[rpos:]
+
+
+# 带序号的事件条目：(seq, event)
+SeqEvent = tuple[int, ToolCallEvent]
+
+
 class SessionStreamState:
     """管理单个会话的 SSE 事件流状态，支持断连后缓冲与重连。
+
+    每个事件在投递时被分配单调递增的序号（seq），客户端断连后通过
+    ``/chat/subscribe`` 携带 ``after_seq`` 精确补发缺失事件。
 
     当客户端断开时（如页面刷新），事件被缓冲到 event_buffer；
     新客户端通过 /chat/subscribe 重连时，先重放缓冲事件，再接收实时事件。
     """
 
     __slots__ = (
+        "stream_id",
         "event_buffer",
         "subscriber_queue",
         "_buffer_limit",
         "_overflow_warned",
+        "_dropped_count",
+        "_next_seq",
     )
 
     def __init__(self, buffer_limit: int = 500) -> None:
-        self.event_buffer: list[ToolCallEvent] = []
-        self.subscriber_queue: asyncio.Queue[ToolCallEvent | None] | None = None
+        self.stream_id: str = _uuid.uuid4().hex[:12]
+        self.event_buffer: list[SeqEvent] = []
+        self.subscriber_queue: asyncio.Queue[SeqEvent | None] | None = None
         self._buffer_limit = buffer_limit
         self._overflow_warned = False
+        self._dropped_count = 0
+        self._next_seq: int = 1
 
-    def deliver(self, event: ToolCallEvent) -> None:
-        """投递事件：有订阅者时入队，否则缓冲。"""
+    def deliver(self, event: ToolCallEvent) -> int:
+        """投递事件：有订阅者时入队，否则缓冲。返回分配的 seq。"""
+        seq = self._next_seq
+        self._next_seq += 1
+        item: SeqEvent = (seq, event)
         q = self.subscriber_queue
         if q is not None:
-            q.put_nowait(event)
+            q.put_nowait(item)
         else:
             if self._buffer_limit <= 0:
                 if not self._overflow_warned:
@@ -61,10 +99,11 @@ class SessionStreamState:
                         self._buffer_limit,
                     )
                     self._overflow_warned = True
-                return
+                self._dropped_count += 1
+                return seq
 
             if len(self.event_buffer) < self._buffer_limit:
-                self.event_buffer.append(event)
+                self.event_buffer.append(item)
             else:
                 if not self._overflow_warned:
                     logger.warning(
@@ -74,11 +113,28 @@ class SessionStreamState:
                     self._overflow_warned = True
                 # 保留最新事件，丢弃最旧事件。
                 self.event_buffer.pop(0)
-                self.event_buffer.append(event)
+                self._dropped_count += 1
+                self.event_buffer.append(item)
+        return seq
 
-    def attach(self) -> asyncio.Queue[ToolCallEvent | None]:
+    @property
+    def current_seq(self) -> int:
+        """已分配的最大 seq（0 表示尚无事件）。"""
+        return self._next_seq - 1
+
+    @property
+    def first_buffered_seq(self) -> int | None:
+        """缓冲区中最早事件的 seq，无缓冲时返回 None。"""
+        return self.event_buffer[0][0] if self.event_buffer else None
+
+    @property
+    def has_dropped(self) -> bool:
+        """是否发生过事件丢弃（缓冲溢出）。"""
+        return self._dropped_count > 0
+
+    def attach(self) -> asyncio.Queue[SeqEvent | None]:
         """创建新订阅者队列并附着。返回新队列。"""
-        q: asyncio.Queue[ToolCallEvent | None] = asyncio.Queue()
+        q: asyncio.Queue[SeqEvent | None] = asyncio.Queue()
         self.subscriber_queue = q
         self._overflow_warned = False
         return q
@@ -87,11 +143,17 @@ class SessionStreamState:
         """断开当前订阅者，后续事件进入缓冲。"""
         self.subscriber_queue = None
 
-    def drain_buffer(self) -> list[ToolCallEvent]:
-        """取出并清空缓冲区。"""
+    def drain_buffer(self, after_seq: int = 0) -> list[SeqEvent]:
+        """取出并清空缓冲区。
+
+        Args:
+            after_seq: 仅返回 seq > after_seq 的事件。0 表示返回全部。
+        """
         buf = self.event_buffer
         self.event_buffer = []
         self._overflow_warned = False
+        if after_seq > 0:
+            return [(s, e) for s, e in buf if s > after_seq]
         return buf
 
 

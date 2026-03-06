@@ -30,6 +30,8 @@ export interface SessionDetail {
   id: string;
   messageCount: number;
   inFlight: boolean;
+  activeStreamId: string | null;
+  latestSeq: number;
   fullAccessEnabled: boolean;
   chatMode: "write" | "read" | "plan";
   currentModel: string | null;

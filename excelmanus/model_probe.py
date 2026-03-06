@@ -240,7 +240,24 @@ async def probe_vision(
         return True, ""
     except Exception as exc:
         err = str(exc)[:200]
-        if _is_param_unsupported_error(err):
+        # ── ResponsesAPIError：利用 HTTP 状态码精确分类 ──
+        # 避免把 store/max_output_tokens 等无关参数错误误判为"视觉不支持"
+        status_code = getattr(exc, "status_code", None)
+        if status_code is not None:
+            # 认证/限流/服务端错误 → 不定论，不应标记为不支持
+            if status_code in (401, 403, 429) or status_code >= 500:
+                logger.debug("vision 探测 HTTP %d 非视觉相关: %s", status_code, err)
+                return None, err
+            # HTTP 400：只有明确拒绝 image/vision 才标记为不支持
+            if _is_vision_unsupported_error(err):
+                return False, err
+            # 其他 400 错误（如 store/参数不支持）→ 不定论
+            logger.debug("vision 探测 HTTP %d 非视觉拒绝，视为不定论: %s", status_code, err)
+            return None, err
+        # ── 非 ResponsesAPIError（openai.APIStatusError 等）──
+        # openai SDK 的 APIStatusError 也有 status_code 属性，上面已处理。
+        # 剩余异常使用 vision 专用分类器。
+        if _is_vision_unsupported_error(err):
             return False, err
         logger.debug("vision 探测异常: %s", err)
         return None, err
@@ -379,9 +396,16 @@ async def _probe_openai_thinking(
 
     last_err = ""
     hit_fatal = False
+    t_start = time.monotonic()
     for strategy_name, extra_kwargs, thinking_type in strategies:
-        logger.debug("思考探测策略: %s (provider=%s, model=%s)", strategy_name, provider, model)
-        ok, err = await _try_thinking_stream(client, model, messages, timeout, extra_kwargs)
+        elapsed = time.monotonic() - t_start
+        remaining = timeout - elapsed
+        if remaining <= 0:
+            logger.debug("思考探测总预算耗尽 (%.1fs elapsed), 停止尝试", elapsed)
+            break
+        per_strategy = min(strategy_timeout, remaining)
+        logger.debug("思考探测策略: %s (provider=%s, model=%s, budget=%.1fs)", strategy_name, provider, model, per_strategy)
+        ok, err = await _try_thinking_stream(client, model, messages, per_strategy, extra_kwargs)
         if ok:
             logger.info("思考探测成功: strategy=%s → thinking_type=%s", strategy_name, thinking_type)
             return True, "", thinking_type
@@ -407,6 +431,14 @@ async def run_full_probe(
     skip_if_cached: bool = True,
     db: Any = None,
     thinking_mode: str = "auto",
+    *,
+    health_timeout: float = 15.0,
+    tool_timeout: float = 30.0,
+    vision_timeout: float = 30.0,
+    thinking_total_timeout: float = 30.0,
+    thinking_strategy_timeout: float = 8.0,
+    stage_callback: Any = None,
+    source: str = "",
 ) -> ModelCapabilities:
     """运行完整的三项能力探测，返回 ModelCapabilities。
 
@@ -424,6 +456,8 @@ async def run_full_probe(
                 cached.supports_vision,
                 cached.supports_thinking,
             )
+            if not cached.source:
+                _mark_freshness(cached, source="cache")
             return cached
 
     logger.info("开始探测模型 %s 的能力...", model)
@@ -434,12 +468,14 @@ async def run_full_probe(
     )
 
     # ── 先做健康检查：模型不可达则跳过能力探测 ──
-    health_ok, health_err = await probe_health(client, model)
+    await _emit_stage_callback(stage_callback, "health", "running")
+    health_ok, health_err = await probe_health(client, model, timeout=health_timeout)
     caps.healthy = health_ok
     caps.health_error = health_err
 
     if not health_ok:
         caps.probe_errors["health"] = health_err
+        await _emit_stage_callback(stage_callback, "health", "failed", {"error": health_err})
         if health_ok is False:
             # 永久性错误（认证/模型不存在/额度不足）：持久化不健康状态
             logger.warning("模型 %s 健康检查失败（永久性错误），跳过能力探测: %s", model, health_err)
@@ -449,11 +485,21 @@ async def run_full_probe(
             # 瞬时错误（超时/限流/网络抖动）：不持久化，下次可重试
             logger.warning("模型 %s 健康检查失败（瞬时错误），跳过能力探测且不缓存: %s", model, health_err)
         return caps
+    await _emit_stage_callback(stage_callback, "health", "completed")
 
     # ── 健康检查通过，并发探测三项能力 ──
-    tool_task = asyncio.create_task(probe_tool_calling(client, model))
-    vision_task = asyncio.create_task(probe_vision(client, model))
-    thinking_task = asyncio.create_task(probe_thinking(client, model, base_url, thinking_mode=thinking_mode))
+    await _emit_stage_callback(stage_callback, "tool_calling", "running")
+    await _emit_stage_callback(stage_callback, "vision", "running")
+    await _emit_stage_callback(stage_callback, "thinking", "running")
+
+    tool_task = asyncio.create_task(probe_tool_calling(client, model, timeout=tool_timeout))
+    vision_task = asyncio.create_task(probe_vision(client, model, timeout=vision_timeout))
+    thinking_task = asyncio.create_task(probe_thinking(
+        client, model, base_url,
+        timeout=thinking_total_timeout,
+        strategy_timeout=thinking_strategy_timeout,
+        thinking_mode=thinking_mode,
+    ))
 
     tool_ok, tool_err = await tool_task
     vision_ok, vision_err = await vision_task
@@ -466,10 +512,19 @@ async def run_full_probe(
 
     if tool_err:
         caps.probe_errors["tool_calling"] = tool_err
+        await _emit_stage_callback(stage_callback, "tool_calling", "completed", {"result": tool_ok, "error": tool_err})
+    else:
+        await _emit_stage_callback(stage_callback, "tool_calling", "completed", {"result": tool_ok})
     if vision_err:
         caps.probe_errors["vision"] = vision_err
+        await _emit_stage_callback(stage_callback, "vision", "completed", {"result": vision_ok, "error": vision_err})
+    else:
+        await _emit_stage_callback(stage_callback, "vision", "completed", {"result": vision_ok})
     if thinking_err:
         caps.probe_errors["thinking"] = thinking_err
+        await _emit_stage_callback(stage_callback, "thinking", "completed", {"result": thinking_ok, "error": thinking_err})
+    else:
+        await _emit_stage_callback(stage_callback, "thinking", "completed", {"result": thinking_ok})
 
     logger.info(
         "模型 %s 探测完成: tool_calling=%s, vision=%s, thinking=%s (type=%s)",
@@ -479,6 +534,8 @@ async def run_full_probe(
         caps.supports_thinking,
         caps.thinking_type,
     )
+
+    _mark_freshness(caps, source=source or "auto_probe")
 
     if db is not None:
         save_capabilities(db, caps)
@@ -542,6 +599,7 @@ def update_capabilities_override(
             setattr(caps, k, v)
     caps.manual_override = True
     caps.detected_at = datetime.now(tz=timezone.utc).isoformat()
+    _mark_freshness(caps, source="override")
     save_capabilities(db, caps)
     return caps
 
@@ -570,10 +628,28 @@ def _is_param_unsupported_error(err: str) -> bool:
         "does not support",
         "not available",
         "not allowed",
-        "image_url",
         "deserialize",
     ]
     return any(kw in lowered for kw in keywords)
+
+
+def _is_vision_unsupported_error(err: str) -> bool:
+    """判断错误是否**明确**表示模型不支持图片/视觉输入。
+
+    比 _is_param_unsupported_error 更严格：只匹配与 vision/image 直接相关的
+    拒绝信息，避免 store/max_output_tokens 等无关参数错误被误判为"视觉不支持"。
+    """
+    lowered = err.lower()
+    # 必须同时满足：(A) 提到了 image/vision/multimodal + (B) 表示不支持/不可用
+    image_keywords = ("image", "vision", "multimodal", "图片", "视觉")
+    reject_keywords = (
+        "not support", "unsupported", "does not support",
+        "not available", "not allowed", "cannot process",
+        "不支持", "无法处理",
+    )
+    has_image = any(kw in lowered for kw in image_keywords)
+    has_reject = any(kw in lowered for kw in reject_keywords)
+    return has_image and has_reject
 
 
 def _is_permanent_health_failure(err: str) -> bool:

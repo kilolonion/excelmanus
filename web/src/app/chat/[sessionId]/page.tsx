@@ -19,7 +19,6 @@ const viewTransition = { duration: 0.2, ease: "easeOut" as const };
 function ChatPage() {
   const params = useParams();
   const sessionId = params.sessionId as string;
-  const messages = useChatStore((s) => s.messages);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
@@ -48,7 +47,6 @@ function ChatPage() {
         ) : (
           <motion.div key={`chat-${sessionId}`} className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <MessageStream
-              messages={messages}
               isStreaming={isStreaming}
               onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
                 rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
