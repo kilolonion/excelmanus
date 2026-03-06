@@ -171,7 +171,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
 
   return (
     <motion.div
-      className="relative flex-1 min-h-0 flex flex-col items-center justify-center px-4 overflow-y-auto"
+      className="relative flex-1 min-h-0 flex flex-col items-center px-4 py-6 overflow-y-auto before:content-[''] before:flex-[1_0_0px] after:content-[''] after:flex-[1_0_0px]"
       variants={containerVariants}
       initial="hidden"
       animate="show"

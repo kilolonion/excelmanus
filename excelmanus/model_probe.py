@@ -8,12 +8,13 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import inspect
 import json
 import logging
 import re
 import time
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 
@@ -52,6 +53,10 @@ class ModelCapabilities:
     detected_at: str = ""
     probe_errors: dict[str, str] = field(default_factory=dict)
     manual_override: bool = False
+    last_success_at: str = ""
+    fresh_until: str = ""
+    stale_until: str = ""
+    source: str = ""  # auto_probe|manual_probe|override|cache
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +67,43 @@ class ModelCapabilities:
         return cls(**{k: v for k, v in d.items() if k in known})
 
 
+def _mark_freshness(
+    caps: ModelCapabilities,
+    *,
+    source: str,
+    now: datetime | None = None,
+    fresh_ttl: timedelta = timedelta(hours=1),
+    stale_ttl: timedelta = timedelta(days=1),
+) -> None:
+    ts = now or datetime.now(tz=timezone.utc)
+    caps.last_success_at = ts.isoformat()
+    caps.fresh_until = (ts + fresh_ttl).isoformat()
+    caps.stale_until = (ts + stale_ttl).isoformat()
+    caps.source = source
+
+
+async def _emit_stage_callback(
+    stage_callback: Any,
+    stage: str,
+    state: str,
+    payload: dict[str, Any] | None = None,
+) -> None:
+    if stage_callback is None:
+        return
+    payload = payload or {}
+    try:
+        rv = stage_callback(stage, state, payload)
+        if inspect.isawaitable(rv):
+            await rv
+    except Exception:
+        logger.debug(
+            "stage callback failed: stage=%s state=%s",
+            stage,
+            state,
+            exc_info=True,
+        )
+
+
 # ── 探测实现 ──────────────────────────────────────────────────
 
 
@@ -69,8 +111,14 @@ async def probe_health(
     client: Any,
     model: str,
     timeout: float = 15.0,
-) -> tuple[bool, str]:
-    """最小化健康检查：发一条 Hi 看模型是否可达、鉴权是否正常。"""
+) -> tuple[bool | None, str]:
+    """最小化健康检查：发一条 Hi 看模型是否可达、鉴权是否正常。
+
+    Returns:
+        (True, "")  — 模型可达且鉴权正常
+        (False, err) — 永久性错误（认证失败、模型不存在、额度不足）
+        (None, err)  — 瞬时错误（超时、限流、网络抖动），不应持久化为不健康
+    """
     messages = [{"role": "user", "content": "Hi"}]
     try:
         if isinstance(client, (GeminiClient, ClaudeClient)):
@@ -87,7 +135,11 @@ async def probe_health(
             )
         return True, ""
     except Exception as exc:
-        return False, str(exc)[:200]
+        err = str(exc)[:200]
+        if _is_permanent_health_failure(err):
+            return False, err
+        logger.debug("健康检查瞬时异常（不标记为不可用）: %s", err)
+        return None, err
 
 
 async def probe_tool_calling(
@@ -198,7 +250,8 @@ async def probe_thinking(
     client: Any,
     model: str,
     base_url: str,
-    timeout: float = 45.0,
+    timeout: float = 30.0,
+    strategy_timeout: float = 8.0,
     thinking_mode: str = "auto",
 ) -> tuple[bool, str, str]:
     """探测模型是否支持输出思考过程。
@@ -228,7 +281,14 @@ async def probe_thinking(
         return await _probe_gemini_thinking(client, model, messages, timeout)
 
     # ── OpenAI 兼容: 多策略探测 reasoning_content / reasoning 字段 ──
-    return await _probe_openai_thinking(client, model, messages, timeout, base_url)
+    return await _probe_openai_thinking(
+        client,
+        model,
+        messages,
+        timeout,
+        strategy_timeout,
+        base_url,
+    )
 
 
 async def _probe_claude_thinking(
@@ -306,6 +366,7 @@ async def _probe_openai_thinking(
     model: str,
     messages: list[dict],
     timeout: float,
+    strategy_timeout: float,
     base_url: str = "",
 ) -> tuple[bool, str, str]:
     """OpenAI 兼容 API 多策略思考探测。
@@ -379,9 +440,14 @@ async def run_full_probe(
 
     if not health_ok:
         caps.probe_errors["health"] = health_err
-        logger.warning("模型 %s 健康检查失败，跳过能力探测: %s", model, health_err)
-        if db is not None:
-            save_capabilities(db, caps)
+        if health_ok is False:
+            # 永久性错误（认证/模型不存在/额度不足）：持久化不健康状态
+            logger.warning("模型 %s 健康检查失败（永久性错误），跳过能力探测: %s", model, health_err)
+            if db is not None:
+                save_capabilities(db, caps)
+        else:
+            # 瞬时错误（超时/限流/网络抖动）：不持久化，下次可重试
+            logger.warning("模型 %s 健康检查失败（瞬时错误），跳过能力探测且不缓存: %s", model, health_err)
         return caps
 
     # ── 健康检查通过，并发探测三项能力 ──
@@ -506,6 +572,23 @@ def _is_param_unsupported_error(err: str) -> bool:
         "not allowed",
         "image_url",
         "deserialize",
+    ]
+    return any(kw in lowered for kw in keywords)
+
+
+def _is_permanent_health_failure(err: str) -> bool:
+    """判断健康检查失败是否为永久性错误（认证/模型不存在/额度不足）。
+
+    瞬时错误（超时、限流、网络抖动、5xx）不应永久标记模型为不可用。
+    """
+    lowered = err.lower()
+    keywords = [
+        "unauthorized", "401", "403", "forbidden",
+        "invalid api", "authentication",
+        "402", "payment_required", "insufficient quota", "quota exceeded",
+        "billing", "balance",
+        "404", "model not found", "model_not_found",
+        "does not exist", "no such model",
     ]
     return any(kw in lowered for kw in keywords)
 
@@ -672,6 +755,16 @@ async def _try_thinking_stream(
             if time.monotonic() > deadline:
                 break
 
+            # ── 路径 A：StreamDelta（OpenAIResponsesClient / 自定义适配器）──
+            _thinking_d = getattr(chunk, "thinking_delta", None)
+            if _thinking_d:
+                found = True
+                break
+            _content_d = getattr(chunk, "content_delta", None)
+            if _content_d:
+                break  # 有内容输出但无思考 → 不支持 thinking
+
+            # ── 路径 B：标准 OpenAI SDK chunk ──
             choices = getattr(chunk, "choices", None)
             if not choices:
                 continue
