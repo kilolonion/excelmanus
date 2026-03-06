@@ -17,6 +17,8 @@ id_new_server.pem.pub
 # ==============================
 *.broken-*
 *.patch
+morph-smoke.jsonl
+tests/test_session_stream_metadata.py
 
 # ==============================
 # Python
