@@ -52,10 +52,26 @@ def _target_cache_key(model: str, base_url: str) -> str:
     return f"{model.strip().lower()}|{base_url.strip().rstrip('/')}"
 
 
-def _target_state_from_caps(caps: ModelCapabilities) -> str:
-    if caps.healthy is not True:
+def _target_state_from_caps(caps: ModelCapabilities | Any) -> str:
+    # Test doubles may only expose to_dict(), so support both object attributes
+    # and mapping-style payloads when deriving the final target state.
+    if hasattr(caps, "to_dict"):
+        try:
+            payload = caps.to_dict()
+        except Exception:
+            payload = {}
+    else:
+        payload = {}
+
+    healthy = getattr(caps, "healthy", payload.get("healthy"))
+    if healthy is not True:
         return "failed"
-    vals = [caps.supports_tool_calling, caps.supports_vision, caps.supports_thinking]
+
+    vals = [
+        getattr(caps, "supports_tool_calling", payload.get("supports_tool_calling")),
+        getattr(caps, "supports_vision", payload.get("supports_vision")),
+        getattr(caps, "supports_thinking", payload.get("supports_thinking")),
+    ]
     if all(v is not None for v in vals):
         return "succeeded"
     if any(v is not None for v in vals):

@@ -1428,7 +1428,15 @@ class SessionManager:
         if engine is not None:
             messages = []
             if hasattr(engine, "raw_messages"):
-                messages = list(engine.raw_messages)
+                raw_messages = list(engine.raw_messages)
+                for idx, message in enumerate(raw_messages):
+                    if isinstance(message, dict):
+                        item = dict(message)
+                    else:
+                        item = {"role": "unknown", "content": str(message)}
+                    if not item.get("message_id"):
+                        item["message_id"] = f"volatile:{session_id}:{idx}"
+                    messages.append(item)
 
             # 序列化待处理的审批/问题状态，供前端刷新后恢复
             pending_approval_data = None
@@ -1584,8 +1592,18 @@ class SessionManager:
                 if user_id is not None and entry.user_id != user_id:
                     return []  # 不属于当前用户，返回空
                 engine = entry.engine
-                msgs = engine.raw_messages
-                return msgs[offset: offset + limit]
+                raw_messages = list(engine.raw_messages)
+                page = raw_messages[offset: offset + limit]
+                normalized: list[dict] = []
+                for idx, message in enumerate(page):
+                    if isinstance(message, dict):
+                        item = dict(message)
+                    else:
+                        item = {"role": "unknown", "content": str(message)}
+                    if not item.get("message_id"):
+                        item["message_id"] = f"volatile:{session_id}:{offset + idx}"
+                    normalized.append(item)
+                return normalized
 
         # 回退到 SQLite（需校验归属）
         if self._chat_history is not None:

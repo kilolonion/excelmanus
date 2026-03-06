@@ -36,6 +36,7 @@ import {
   workspaceMkdir,
   workspaceDeleteItem,
 } from "@/lib/api";
+import { mapWithConcurrency } from "@/lib/concurrency";
 import { isExcelFile } from "@/components/ui/file-type-icon";
 import { isImageFile, isTextPreviewableFile } from "@/lib/file-preview";
 import { CodePreviewModal } from "@/components/chat/CodePreviewModal";
@@ -246,13 +247,21 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
       if (!files) return;
-      for (const file of Array.from(files)) {
-        try {
-          const result = await uploadFile(file);
-          addRecentFile({ path: result.path, filename: result.filename });
-        } catch {
-          // 上传静默失败
-        }
+      const fileList = Array.from(files);
+      const uploaded = await mapWithConcurrency(
+        fileList,
+        async (file) => {
+          try {
+            return await uploadFile(file);
+          } catch {
+            return null;
+          }
+        },
+        4,
+      );
+      for (const result of uploaded) {
+        if (!result) continue;
+        addRecentFile({ path: result.path, filename: result.filename });
       }
       e.target.value = "";
       refreshWorkspaceFiles();
@@ -321,15 +330,20 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       wsFilesLoaded: true,
     });
 
-    let hasFailure = false;
     try {
-      for (const p of pendingRemovePaths) {
-        try {
-          await workspaceDeleteItem(p);
-        } catch (err) {
-          if (!isNotFoundError(err)) hasFailure = true;
-        }
-      }
+      const deleteResults = await mapWithConcurrency(
+        pendingRemovePaths,
+        async (path) => {
+          try {
+            await workspaceDeleteItem(path);
+            return true;
+          } catch (err) {
+            return isNotFoundError(err);
+          }
+        },
+        4,
+      );
+      const hasFailure = deleteResults.some((ok) => !ok);
       if (hasFailure) {
         useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
       } else {
@@ -942,13 +956,21 @@ function FileTreeView(props: TreeViewProps) {
     async (e: React.ChangeEvent<HTMLInputElement>) => {
       const files = e.target.files;
       if (!files) return;
-      for (const file of Array.from(files)) {
-        try {
-          const result = await uploadFileToFolder(file, uploadTargetFolder);
-          props.onAddRecentFile({ path: result.path, filename: result.filename });
-        } catch {
-          // 静默
-        }
+      const fileList = Array.from(files);
+      const uploaded = await mapWithConcurrency(
+        fileList,
+        async (file) => {
+          try {
+            return await uploadFileToFolder(file, uploadTargetFolder);
+          } catch {
+            return null;
+          }
+        },
+        4,
+      );
+      for (const result of uploaded) {
+        if (!result) continue;
+        props.onAddRecentFile({ path: result.path, filename: result.filename });
       }
       e.target.value = "";
       props.onRefresh();

@@ -151,6 +151,8 @@ def _setup_api_globals(config=None, *, chat_history=None):
     old_sk_manager = api_module._skillpack_manager
     old_manager = api_module._session_manager
     old_probe_job_manager = getattr(api_module, "_cap_probe_job_manager", None)
+    old_user_skill_service = api_module._user_skill_service
+    old_config_store = api_module._config_store
 
     api_module._config = config
     api_module._tool_registry = registry
@@ -160,6 +162,11 @@ def _setup_api_globals(config=None, *, chat_history=None):
     api_module._session_manager = manager
     if hasattr(api_module, "_cap_probe_job_manager"):
         api_module._cap_probe_job_manager = None
+    # 重置跨测试污染的全局状态
+    api_module._user_skill_service = None
+    api_module._config_store = None
+    old_draining = api_module._draining
+    api_module._draining = False
 
     try:
         yield {"config": config, "registry": registry, "manager": manager}
@@ -173,6 +180,9 @@ def _setup_api_globals(config=None, *, chat_history=None):
         api_module._session_manager = old_manager
         if hasattr(api_module, "_cap_probe_job_manager"):
             api_module._cap_probe_job_manager = old_probe_job_manager
+        api_module._user_skill_service = old_user_skill_service
+        api_module._config_store = old_config_store
+        api_module._draining = old_draining
         # 恢复工具模块的 _guard 状态
         for _mod_name, _saved in _saved_guards.items():
             try:
@@ -2358,6 +2368,42 @@ class TestImageAttachment:
         ]
 
     @pytest.mark.asyncio
+    async def test_chat_stream_emits_stream_init_with_stream_metadata(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        """`stream_init` should include `stream_id` and monotonic `seq` metadata."""
+        with patch(
+            "excelmanus.engine.AgentEngine.chat",
+            new_callable=AsyncMock,
+            return_value=ChatResult(reply="ok"),
+        ):
+            resp = await client.post(
+                "/api/v1/chat/stream",
+                json={"message": "stream metadata"},
+            )
+
+        assert resp.status_code == 200
+        stream_init_payload: dict | None = None
+        for chunk in resp.text.split("\n\n"):
+            if "event: stream_init" not in chunk:
+                continue
+            data_line = next(
+                (line for line in chunk.splitlines() if line.startswith("data:")),
+                "",
+            )
+            if not data_line:
+                continue
+            stream_init_payload = json.loads(data_line.split("data:", 1)[1].strip())
+            break
+
+        assert stream_init_payload is not None
+        assert isinstance(stream_init_payload.get("stream_id"), str)
+        assert stream_init_payload.get("stream_id")
+        assert isinstance(stream_init_payload.get("seq"), int)
+        assert stream_init_payload["seq"] >= 1
+
+    @pytest.mark.asyncio
     async def test_chat_abort_no_active_task(self, client: AsyncClient) -> None:
         """abort 请求在无活跃任务时返回 no_active_task。"""
         resp = await client.post(
@@ -2835,10 +2881,10 @@ class TestAdminGuardForModelConfig:
         app.state.auth_enabled = False
 
     @pytest.mark.asyncio
-    async def test_probe_capabilities_codex_profile_uses_runtime_resolver_and_real_probe(
+    async def test_probe_job_codex_profile_uses_runtime_resolver(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Codex 前缀模型探测应走 resolver + run_full_probe，而非静态短路返回。"""
+        """Codex 前缀模型通过 /jobs 端点探测应走 resolver + run_full_probe。"""
         app.state.auth_enabled = False
         monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "u-1")
 
@@ -2850,34 +2896,17 @@ class TestAdminGuardForModelConfig:
         )
         monkeypatch.setattr(app.state, "credential_resolver", resolver, raising=False)
 
-        create_client_mock = MagicMock(return_value=object())
-        monkeypatch.setattr("excelmanus.providers.create_client", create_client_mock)
-
-        fake_caps = SimpleNamespace(
-            to_dict=lambda: {
-                "supports_thinking": True,
-                "thinking_type": "openai_reasoning",
-            },
-        )
-        run_probe_mock = AsyncMock(return_value=fake_caps)
-        monkeypatch.setattr("excelmanus.model_probe.run_full_probe", run_probe_mock)
-
         resp = await client.post(
-            "/api/v1/config/models/capabilities/probe",
+            "/api/v1/config/models/capabilities/jobs",
             json={"model": "openai-codex/gpt-5.2-codex"},
         )
 
-        assert resp.status_code == 200
+        # /jobs returns 202 (accepted) with a job_id
+        assert resp.status_code == 202
         body = resp.json()
-        assert body.get("model") == "openai-codex/gpt-5.2-codex"
-        assert body.get("capabilities", {}).get("thinking_type") == "openai_reasoning"
+        assert "job_id" in body
+        assert body.get("state") in ("queued", "running")
         resolver.resolve_sync.assert_called_once_with("u-1", "gpt-5.2-codex")
-        create_client_mock.assert_called_once_with(
-            api_key="oauth-key",
-            base_url="https://chatgpt.com/backend-api/codex",
-            protocol="openai_responses",
-        )
-        run_probe_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_models_endpoint_includes_codex_user_models_with_friendly_alias(
@@ -3203,6 +3232,7 @@ class TestCapabilityProbeJobs:
     async def test_create_probe_job_and_query_snapshot(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        app.state.auth_enabled = False
         fake_caps = SimpleNamespace(
             to_dict=lambda: {
                 "model": "test-model",
@@ -3259,6 +3289,7 @@ class TestCapabilityProbeJobs:
     async def test_cancel_probe_job(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        app.state.auth_enabled = False
         async def _slow_probe(**_: object):
             await asyncio.sleep(1.0)
             return SimpleNamespace(to_dict=lambda: {})

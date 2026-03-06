@@ -954,12 +954,10 @@ function ApprovalActionBlock({
   blockIndex: number;
   messageId: string;
 }) {
-  const setMessages = useChatStore((s) => s.setMessages);
-  const messages = useChatStore((s) => s.messages);
+  const updateAssistantMessage = useChatStore((s) => s.updateAssistantMessage);
 
   const handleUndone = (_approvalId: string, error?: string) => {
-    const updated = messages.map((m) => {
-      if (m.id !== messageId || m.role !== "assistant") return m;
+    updateAssistantMessage(messageId, (m) => {
       const blocks = [...m.blocks];
       blocks[blockIndex] = {
         ...blocks[blockIndex],
@@ -968,7 +966,6 @@ function ApprovalActionBlock({
       } as AssistantBlock;
       return { ...m, blocks };
     });
-    setMessages(updated);
   };
 
   return (

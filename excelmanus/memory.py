@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from uuid import uuid4
 
 import tiktoken
 
@@ -355,6 +356,7 @@ class ConversationMemory:
             image_id = self._image_seq
             self._messages.append({
                 "role": "user", "content": content, "_image_id": image_id,
+                "message_id": uuid4().hex,
             })
             self._fresh_image_ids.add(image_id)
             # 注册到生命周期管理器（提取第一张图片的 base64/mime/detail）
@@ -373,7 +375,7 @@ class ConversationMemory:
                             )
                         break  # 只注册第一张
         else:
-            self._messages.append({"role": "user", "content": content})
+            self._messages.append({"role": "user", "content": content, "message_id": uuid4().hex})
         self._truncate_if_needed()
 
     def add_image_message(
@@ -393,7 +395,7 @@ class ConversationMemory:
                 "detail": detail,
             },
         }
-        msg = {"role": "user", "content": [part], "_image_id": image_id}
+        msg = {"role": "user", "content": [part], "_image_id": image_id, "message_id": uuid4().hex}
         self._messages.append(msg)
         self._fresh_image_ids.add(image_id)
         # 注册到生命周期管理器
@@ -404,7 +406,7 @@ class ConversationMemory:
 
     def add_assistant_message(self, content: str) -> None:
         """添加助手纯文本回复。"""
-        self._messages.append({"role": "assistant", "content": content})
+        self._messages.append({"role": "assistant", "content": content, "message_id": uuid4().hex})
         self._truncate_if_needed()
 
     def add_tool_call(self, tool_call_id: str, name: str, arguments: str) -> None:
@@ -419,6 +421,7 @@ class ConversationMemory:
                     "function": {"name": name, "arguments": arguments},
                 }
             ],
+            "message_id": uuid4().hex,
         })
         self._truncate_if_needed()
 
@@ -435,6 +438,8 @@ class ConversationMemory:
             for tc in tcs:
                 if isinstance(tc, dict) and "type" not in tc:
                     tc["type"] = "function"
+        if not normalized.get("message_id"):
+            normalized["message_id"] = uuid4().hex
         self._messages.append(normalized)
         self._truncate_if_needed()
 
@@ -444,6 +449,7 @@ class ConversationMemory:
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": content,
+            "message_id": uuid4().hex,
         })
         self._truncate_if_needed()
 

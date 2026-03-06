@@ -674,8 +674,8 @@ class ToolDispatcher:
                 white = Image.new("RGB", img.size, (255, 255, 255))
                 img = Image.composite(white, img, bg_mask)
                 logger.debug("图片预处理: 检测到灰色背景，已白化")
-        except Exception:
-            pass
+        except (ValueError, OSError, RuntimeError):
+            logger.debug("图片预处理: 灰色背景白化失败", exc_info=True)
 
         # ── 5. 自适应对比度增强 ──
         try:
@@ -687,8 +687,8 @@ class ToolDispatcher:
                 # 中等对比度：适度增强
                 img = ImageOps.autocontrast(img, cutoff=0.5)
             # stddev >= 70：高对比度图片，跳过对比度增强
-        except Exception:
-            pass
+        except (ValueError, OSError, RuntimeError):
+            logger.debug("图片预处理: 对比度增强失败", exc_info=True)
 
         # ── 6. 扫描件二值化检测 ──
         # 通过直方图分析：如果亮度分布呈双峰（文字+背景），适用二值化
@@ -707,8 +707,8 @@ class ToolDispatcher:
                     binary = gray_for_thresh.point(lambda p: 255 if p > threshold else 0, "L")
                     img = binary.convert("RGB")
                     logger.debug("图片预处理: 扫描件特征，已二值化(阈值=%d)", threshold)
-        except Exception:
-            pass
+        except (ValueError, OSError, RuntimeError):
+            logger.debug("图片预处理: 扫描件二值化失败", exc_info=True)
 
         # ── 7. 智能锐化（仅对模糊图片） ──
         try:
@@ -723,8 +723,8 @@ class ToolDispatcher:
             elif edge_mean < 30:
                 # 中等清晰度：轻度锐化
                 img = img.filter(ImageFilter.DETAIL)
-        except Exception:
-            pass
+        except (ValueError, OSError, RuntimeError):
+            logger.debug("图片预处理: 智能锐化失败", exc_info=True)
 
         # ── 8. 输出 JPEG ──
         buf = io.BytesIO()

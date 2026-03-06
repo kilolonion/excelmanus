@@ -2,14 +2,14 @@
 
 **发布日期**: 2026-03-04
 
-## Model Catalog Refresh
+## 🔄 模型目录更新
 
-- Removed deprecated model IDs from runtime context mapping (OpenAI legacy items, Gemini 1.5/2.0 generations, Claude 3.x aliases).
-- Added explicit migration guidance when users switch/configure/import deprecated model IDs.
-- Updated default and preset recommendations:
-  - `EXCELMANUS_EMBEDDING_MODEL` now defaults to `text-embedding-3-small`
-  - Anthropic/OpenRouter presets use `claude-sonnet-4-6`
-  - Deprecated Codex preset `codex-mini-latest` replaced by `gpt-5-codex-mini`
+- 从运行时上下文映射中移除已弃用的模型 ID（OpenAI 旧版、Gemini 1.5/2.0 代、Claude 3.x 别名）
+- 新增显式迁移引导：用户切换/配置/导入已弃用模型 ID 时自动提示
+- 更新默认值与预设推荐：
+  - `EXCELMANUS_EMBEDDING_MODEL` 默认值改为 `text-embedding-3-small`
+  - Anthropic/OpenRouter 预设使用 `claude-sonnet-4-6`
+  - 已弃用的 Codex 预设 `codex-mini-latest` 替换为 `gpt-5-codex-mini`
 
 ---
 ## 🚀 部署基础设施升级
@@ -121,14 +121,14 @@
 - **ModelTab** — 样式改进
 - **Dockerfile** — 多阶段构建优化 + `.dockerignore` 减小构建上下文
 
-## Model Catalog Refresh
+## 🔄 模型目录更新
 
-- Removed deprecated model IDs from runtime context mapping (OpenAI legacy items, Gemini 1.5/2.0 generations, Claude 3.x aliases).
-- Added explicit migration guidance when users switch/configure/import deprecated model IDs.
-- Updated default and preset recommendations:
-  - `EXCELMANUS_EMBEDDING_MODEL` now defaults to `text-embedding-3-small`
-  - Anthropic/OpenRouter presets use `claude-sonnet-4-6`
-  - Deprecated Codex preset `codex-mini-latest` replaced by `gpt-5-codex-mini`
+- 从运行时上下文映射中移除已弃用的模型 ID（OpenAI 旧版、Gemini 1.5/2.0 代、Claude 3.x 别名）
+- 新增显式迁移引导：用户切换/配置/导入已弃用模型 ID 时自动提示
+- 更新默认值与预设推荐：
+  - `EXCELMANUS_EMBEDDING_MODEL` 默认值改为 `text-embedding-3-small`
+  - Anthropic/OpenRouter 预设使用 `claude-sonnet-4-6`
+  - 已弃用的 Codex 预设 `codex-mini-latest` 替换为 `gpt-5-codex-mini`
 
 ---
 ## 升级指南

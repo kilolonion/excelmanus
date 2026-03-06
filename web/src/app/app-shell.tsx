@@ -6,9 +6,9 @@ import { ClientLayout } from "./client-layout";
 import { AuthProvider } from "@/components/providers/AuthProvider";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
-import { useVersionPoll } from "@/hooks/use-version-poll";
 import { VersionUpdateToast } from "@/components/VersionUpdateToast";
 import { GlobalRestartOverlay } from "@/components/GlobalRestartOverlay";
+import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 const STANDALONE_PATHS = ["/admin"];
@@ -21,7 +21,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   const [ready, setReady] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
   const cancelledRef = useRef(false);
-  const versionPoll = useVersionPoll();
+  const newVersionAvailable = useHealthHubStore((s) => s.newVersionAvailable);
+  const apiIncompatible = useHealthHubStore((s) => s.apiIncompatible);
+  const remoteVersion = useHealthHubStore((s) => s.remoteVersion);
+  const dismissVersion = useHealthHubStore((s) => s.dismissVersion);
+  const refreshNow = useHealthHubStore((s) => s.refreshNow);
 
   useEffect(() => {
     cancelledRef.current = false;
@@ -48,6 +52,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     };
   }, [checkAuthEnabled]);
 
+  useEffect(() => {
+    ensureHealthHubPolling();
+  }, []);
+
   // bypass 路径（login/register/callback）立即渲染，不等 /health
   if (isBypass) {
     return (
@@ -72,11 +80,11 @@ export function AppShell({ children }: { children: React.ReactNode }) {
 
   const versionToast = (
     <VersionUpdateToast
-      newVersionAvailable={versionPoll.newVersionAvailable}
-      apiIncompatible={versionPoll.apiIncompatible}
-      remoteVersion={versionPoll.remoteVersion}
-      onDismiss={versionPoll.dismiss}
-      onRefresh={versionPoll.refreshNow}
+      newVersionAvailable={newVersionAvailable}
+      apiIncompatible={apiIncompatible}
+      remoteVersion={remoteVersion}
+      onDismiss={dismissVersion}
+      onRefresh={refreshNow}
     />
   );
 

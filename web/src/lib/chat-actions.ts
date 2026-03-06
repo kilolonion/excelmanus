@@ -1,5 +1,6 @@
-import { consumeSSE, SSEError } from "./sse";
-import { buildApiUrl, fetchWorkspaceStorage } from "./api";
+﻿import { consumeSSE, SSEError } from "./sse";
+import { buildApiUrl } from "./api";
+import { mapWithConcurrency } from "./concurrency";
 import { uuid } from "@/lib/utils";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -29,7 +30,7 @@ function _isImageLike(file: File): boolean {
   return _isImageFile(file.name) || (file.type || "").toLowerCase().startsWith("image/");
 }
 
-/** 在客户端本地构造 failure_guidance block（用于网络级错误，无 SSE 事件可达的场景）。 */
+/** 鍦ㄥ鎴风鏈湴鏋勯€?failure_guidance block锛堢敤浜庣綉缁滅骇閿欒锛屾棤 SSE 浜嬩欢鍙揪鐨勫満鏅級銆?*/
 function _buildClientFailureGuidance(opts: {
   category?: "model" | "transport" | "config" | "quota" | "unknown";
   code: string;
@@ -50,24 +51,24 @@ function _buildClientFailureGuidance(opts: {
     diagnosticId: crypto.randomUUID?.() || uuid(),
     actions: opts.retryable
       ? [
-          { type: "retry", label: "立即重试" },
-          { type: "open_settings", label: "检查模型设置" },
+          { type: "retry", label: "Retry Now" },
+          { type: "open_settings", label: "Check Settings" },
         ]
-      : [{ type: "open_settings", label: "检查模型设置" }],
+      : [{ type: "open_settings", label: "Check Settings" }],
   };
 }
 
-/** 根据 SSEError 的 HTTP 状态码生成对应的 failure_guidance block。 */
+/** 鏍规嵁 SSEError 鐨?HTTP 鐘舵€佺爜鐢熸垚瀵瑰簲鐨?failure_guidance block銆?*/
 function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "failure_guidance" }> {
   const status = err.statusCode;
   if (status === 401 || status === 403) {
     return _buildClientFailureGuidance({
       category: "model",
       code: "model_auth_failed",
-      title: "认证失败",
+      title: "Authentication Failed",
       message: status === 401
-        ? "API Key 无效或已过期，请在设置中检查模型配置。"
-        : "无权访问该模型服务，请检查 API Key 权限。",
+        ? "API key is invalid or expired. Check your model settings."
+        : "Unauthorized to access the model provider. Check API key permissions.",
       retryable: false,
     });
   }
@@ -75,8 +76,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "quota",
       code: "quota_exceeded",
-      title: "额度不足",
-      message: "模型 API 额度已用完，请充值后重试。",
+      title: "Quota Exceeded",
+      message: "Model API quota has been exhausted. Recharge and retry.",
       retryable: false,
     });
   }
@@ -84,8 +85,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "model",
       code: "model_not_found",
-      title: "模型不存在",
-      message: "请求的模型不存在或已下线，请在设置中选择其他模型。",
+      title: "Model Not Found",
+      message: "Requested model does not exist or is offline. Choose another model.",
       retryable: false,
     });
   }
@@ -93,8 +94,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "transport",
       code: "session_busy",
-      title: "会话忙碌",
-      message: "当前会话正在处理另一个请求，请等待完成后再试。",
+      title: "Session Busy",
+      message: "This session is processing another request. Wait and try again.",
       retryable: true,
     });
   }
@@ -102,8 +103,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "quota",
       code: "rate_limited",
-      title: "请求频率受限",
-      message: "API 调用频率超限，请稍后重试。",
+      title: "Rate Limited",
+      message: "API rate limit exceeded. Retry later.",
       retryable: true,
     });
   }
@@ -111,8 +112,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "model",
       code: "provider_internal_error",
-      title: "模型服务异常",
-      message: `模型服务返回 ${status} 错误，请稍后重试。`,
+      title: "Provider Internal Error",
+      message: `Model provider returned ${status}. Retry later.`,
       retryable: true,
     });
   }
@@ -120,14 +121,14 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "transport",
       code: "stream_interrupted",
-      title: "传输中断",
-      message: err.message || "与服务端的连接意外断开",
+      title: "Connection Interrupted",
+      message: err.message || "Connection to backend was interrupted.",
       retryable: true,
     });
   }
   return _buildClientFailureGuidance({
     code: "http_error",
-    title: "请求错误",
+    title: "Request Error",
     message: err.message || `HTTP ${status}`,
     retryable: status >= 500,
   });
@@ -137,7 +138,7 @@ function _fileToBase64(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = () => {
-      // result 格式为 "data:<mime>;base64,<data>" — 仅提取 base64 部分
+      // result 鏍煎紡涓?"data:<mime>;base64,<data>" 鈥?浠呮彁鍙?base64 閮ㄥ垎
       const result = reader.result as string;
       const idx = result.indexOf(",");
       resolve(idx >= 0 ? result.slice(idx + 1) : result);
@@ -148,9 +149,9 @@ function _fileToBase64(file: File): Promise<string> {
 }
 
 // ---------------------------------------------------------------------------
-// 基于 RAF 的增量批处理器：缓冲高频 text_delta / thinking_delta 事件，
-// 每个动画帧最多刷新一次，避免过度重渲染。
-// 改进：增加立即刷新机制，确保非增量事件不会与缓冲的增量事件产生时序问题
+// 鍩轰簬 RAF 鐨勫閲忔壒澶勭悊鍣細缂撳啿楂橀 text_delta / thinking_delta 浜嬩欢锛?
+// 姣忎釜鍔ㄧ敾甯ф渶澶氬埛鏂颁竴娆★紝閬垮厤杩囧害閲嶆覆鏌撱€?
+// 鏀硅繘锛氬鍔犵珛鍗冲埛鏂版満鍒讹紝纭繚闈炲閲忎簨浠朵笉浼氫笌缂撳啿鐨勫閲忎簨浠朵骇鐢熸椂搴忛棶棰?
 // ---------------------------------------------------------------------------
 class DeltaBatcher {
   private _textBuf = "";
@@ -183,7 +184,7 @@ class DeltaBatcher {
 
   dispose() {
     if (this._disposed) return;
-    // 先刷新残余内容到 store，防止断连/热重载时丢失尾部 delta
+    // 鍏堝埛鏂版畫浣欏唴瀹瑰埌 store锛岄槻姝㈡柇杩?鐑噸杞芥椂涓㈠け灏鹃儴 delta
     if (this._rafId !== null) {
       cancelAnimationFrame(this._rafId);
       this._rafId = null;
@@ -194,7 +195,7 @@ class DeltaBatcher {
     this._thinkingBuf = "";
   }
 
-  // 检查是否有待处理的内容
+  // 妫€鏌ユ槸鍚︽湁寰呭鐞嗙殑鍐呭
   hasPendingContent(): boolean {
     return this._textBuf.length > 0 || this._thinkingBuf.length > 0;
   }
@@ -224,8 +225,8 @@ class DeltaBatcher {
   }
 }
 
-// 因待处理交互（askuser / approval）而延迟的 Token 统计。
-// sendContinuation 会将这些累积到最终统计中。
+// 鍥犲緟澶勭悊浜や簰锛坅skuser / approval锛夎€屽欢杩熺殑 Token 缁熻銆?
+// sendContinuation 浼氬皢杩欎簺绱Н鍒版渶缁堢粺璁′腑銆?
 let _deferredTokenStats: {
   promptTokens: number;
   completionTokens: number;
@@ -244,7 +245,7 @@ export async function sendMessage(
 
   if (store.isStreaming) return;
 
-  // 空消息前置校验：无文本且无附件时直接拦截
+  // 绌烘秷鎭墠缃牎楠岋細鏃犳枃鏈笖鏃犻檮浠舵椂鐩存帴鎷︽埅
   if (!text.trim() && (!files || files.length === 0)) {
     return;
   }
@@ -263,40 +264,40 @@ export async function sendMessage(
     return;
   }
 
-  // 尽早创建 AbortController 并设置流式状态 - 在任何异步操作之前。
-  // SessionSync 的 useEffect 通过检查 abortController 来决定是否调用 switchSession()。
-  // 如果延迟到异步操作之后，SessionSync 的 effect 可能在 await 间隙触发，
-  // 发现 abortController===null 后调用 switchSession，清空 addUserMessage 即将创建的消息。
+  // 灏芥棭鍒涘缓 AbortController 骞惰缃祦寮忕姸鎬?- 鍦ㄤ换浣曞紓姝ユ搷浣滀箣鍓嶃€?
+  // SessionSync 鐨?useEffect 閫氳繃妫€鏌?abortController 鏉ュ喅瀹氭槸鍚﹁皟鐢?switchSession()銆?
+  // 濡傛灉寤惰繜鍒板紓姝ユ搷浣滀箣鍚庯紝SessionSync 鐨?effect 鍙兘鍦?await 闂撮殭瑙﹀彂锛?
+  // 鍙戠幇 abortController===null 鍚庤皟鐢?switchSession锛屾竻绌?addUserMessage 鍗冲皢鍒涘缓鐨勬秷鎭€?
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
   store.setPipelineStatus({
     stage: "connecting",
-    message: "正在连接...",
+    message: "姝ｅ湪杩炴帴...",
     startedAt: Date.now(),
   });
 
-  // 清除上次可能残留的延迟 token 统计，避免跨会话泄漏
+  // 娓呴櫎涓婃鍙兘娈嬬暀鐨勫欢杩?token 缁熻锛岄伩鍏嶈法浼氳瘽娉勬紡
   _deferredTokenStats = null;
 
-  // ── 乐观 UI：在任何 await 之前立即展示用户消息气泡 + 助手加载状态 ──
+  // 鈹€鈹€ 涔愯 UI锛氬湪浠讳綍 await 涔嬪墠绔嬪嵆灞曠ず鐢ㄦ埛娑堟伅姘旀场 + 鍔╂墜鍔犺浇鐘舵€?鈹€鈹€
 
-  // 同步收集文件上传结果（仅读取 ChatInput 预上传的结果，无需 await）
+  // 鍚屾鏀堕泦鏂囦欢涓婁紶缁撴灉锛堜粎璇诲彇 ChatInput 棰勪笂浼犵殑缁撴灉锛屾棤闇€ await锛?
   const fileUploadResults: { filename: string; path: string; size: number }[] = [];
   if (files && files.length > 0) {
     for (const af of files) {
       if (af.status === "success" && af.uploadResult) {
         fileUploadResults.push(af.uploadResult);
       }
-      // 跳过上传失败的文件，避免空路径进入消息
+      // 璺宠繃涓婁紶澶辫触鐨勬枃浠讹紝閬垮厤绌鸿矾寰勮繘鍏ユ秷鎭?
     }
   }
 
   const effectiveSessionId = sessionId || sessionStore.activeSessionId;
 
-  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
-  //（在下次渲染后触发）看到 currentSessionId === activeSessionId，
-  // 从而跳过会清空我们即将添加的消息的 switchSession() 调用。
+  // 鍦ㄦ坊鍔犳秷鎭箣鍓嶅悓姝?currentSessionId锛岀‘淇?SessionSync 鐨?useEffect
+  //锛堝湪涓嬫娓叉煋鍚庤Е鍙戯級鐪嬪埌 currentSessionId === activeSessionId锛?
+  // 浠庤€岃烦杩囦細娓呯┖鎴戜滑鍗冲皢娣诲姞鐨勬秷鎭殑 switchSession() 璋冪敤銆?
   if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
     if (store.currentSessionId && store.messages.length > 0) {
       store.saveCurrentSession();
@@ -304,7 +305,7 @@ export async function sendMessage(
     useChatStore.setState({ currentSessionId: effectiveSessionId });
   }
 
-  // 立即添加用户消息和助手占位消息 — 用户瞬间看到自己的消息气泡 + "正在连接" 加载状态
+  // 绔嬪嵆娣诲姞鐢ㄦ埛娑堟伅鍜屽姪鎵嬪崰浣嶆秷鎭?鈥?鐢ㄦ埛鐬棿鐪嬪埌鑷繁鐨勬秷鎭皵娉?+ "姝ｅ湪杩炴帴" 鍔犺浇鐘舵€?
   const userMsgId = uuid();
   store.addUserMessage(
     userMsgId,
@@ -315,86 +316,63 @@ export async function sendMessage(
   const assistantMsgId = uuid();
   store.addAssistantMessage(assistantMsgId);
 
-  // ── 以下为异步操作，消息气泡已可见 ──
+  // 鈹€鈹€ 浠ヤ笅涓哄紓姝ユ搷浣滐紝娑堟伅姘旀场宸插彲瑙?鈹€鈹€
 
-  // 工作区配额前置检查：超限时直接在聊天中显示提示，避免 SSE 往返
-  try {
-    const wsStorage = await fetchWorkspaceStorage();
-    if (wsStorage && (wsStorage.over_files || wsStorage.over_size)) {
-      const parts: string[] = [];
-      if (wsStorage.over_files) parts.push(`文件数 ${wsStorage.file_count}/${wsStorage.max_files}`);
-      if (wsStorage.over_size) parts.push(`存储 ${wsStorage.size_mb.toFixed(1)} MB/${wsStorage.max_size_mb.toFixed(1)} MB`);
-      store.appendBlock(assistantMsgId, {
-        type: "text",
-        content:
-          `⚠️ **工作区已满**（${parts.join("、")}），无法继续对话。\n\n` +
-          "请先清理工作区文件后再试：\n" +
-          "- 在左侧文件列表中删除不需要的文件\n" +
-          "- 或联系管理员调整配额",
-      });
-      store.saveCurrentSession();
-      store.setStreaming(false);
-      store.setAbortController(null);
-      store.setPipelineStatus(null);
-      return;
-    }
-  } catch {
-    // 配额检查失败不阻断发送，交由后端兜底
-  }
 
-  // 文件已由 ChatInput 预先上传。这里收集路径和 base64 数据用于 SSE 载荷。
+  // 鏂囦欢宸茬敱 ChatInput 棰勫厛涓婁紶銆傝繖閲屾敹闆嗚矾寰勫拰 base64 鏁版嵁鐢ㄤ簬 SSE 杞借嵎銆?
   const uploadedDocPaths: string[] = [];
   const uploadedImagePaths: string[] = [];
   const imageAttachments: { data: string; media_type: string }[] = [];
   if (files && files.length > 0) {
-    for (const af of files) {
+    const successfulFiles = files.filter((af) => af.status === "success" && af.uploadResult);
+    for (const af of successfulFiles) {
       const isImage = _isImageLike(af.file);
+      if (isImage) uploadedImagePaths.push(af.uploadResult!.path);
+      else uploadedDocPaths.push(af.uploadResult!.path);
+    }
 
-      // 将上传成功的图片编码为 base64 用于 LLM 多模态载荷。
-      // 仅在上传成功时发送 base64，避免模型"看到图"但附件状态不一致。
-      // 跳过空 File 对象（保留附件使用 new File([], name) 创建，无实际内容）
-      if (isImage && af.file.size > 0 && af.status === "success") {
+    const imageCandidates = successfulFiles.filter(
+      (af) => _isImageLike(af.file) && af.file.size > 0,
+    );
+    const encodedImages = await mapWithConcurrency(
+      imageCandidates,
+      async (af) => {
         try {
-          // 优先使用预编码的 base64（示例卡片预上传时已生成）
           const b64 = af.cachedBase64 ?? await _fileToBase64(af.file);
-          imageAttachments.push({
+          return {
             data: b64,
             media_type: af.file.type || "image/png",
-          });
+          };
         } catch (b64Err) {
           console.error("Base64 encoding failed for image:", af.file.name, b64Err);
+          return null;
         }
-      }
-
-      // 收集上传成功的路径用于 agent 通知
-      if (af.status === "success" && af.uploadResult) {
-        if (isImage) {
-          uploadedImagePaths.push(af.uploadResult.path);
-        } else {
-          uploadedDocPaths.push(af.uploadResult.path);
-        }
-      }
-    }
+      },
+      4,
+    );
+    imageAttachments.push(
+      ...encodedImages.filter((item): item is { data: string; media_type: string } => item !== null),
+    );
   }
 
-  // 为 agent 构建结构化文件通知
+  // 涓?agent 鏋勫缓缁撴瀯鍖栨枃浠堕€氱煡
   let messageContent = text;
   const notices: string[] = [];
   for (const p of uploadedDocPaths) {
-    notices.push(`[已上传文件: ${p}]`);
+    notices.push(`[宸蹭笂浼犳枃浠? ${p}]`);
   }
   for (const p of uploadedImagePaths) {
-    notices.push(`[已上传图片: ${p}]`);
+    notices.push(`[宸蹭笂浼犲浘鐗? ${p}]`);
   }
   if (notices.length > 0) {
     messageContent = `${notices.join("\n")}\n\n${text}`;
   }
 
-  // 辅助函数：获取最新的 store 状态
+  // 杈呭姪鍑芥暟锛氳幏鍙栨渶鏂扮殑 store 鐘舵€?
   const S = () => useChatStore.getState();
 
-  // RAF 批量增量刷新器：累积 text_delta / thinking_delta，
-  // 每个动画帧最多应用一次到 store。
+  // RAF 鎵归噺澧為噺鍒锋柊鍣細绱Н text_delta / thinking_delta锛?
+  // 姣忎釜鍔ㄧ敾甯ф渶澶氬簲鐢ㄤ竴娆″埌 store銆?
   const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
     if (textDelta) {
       const msg = getLastAssistantMessage(S().messages, assistantMsgId);
@@ -420,7 +398,7 @@ export async function sendMessage(
     }
   });
 
-  // ── SSE 事件处理上下文 ──
+  // 鈹€鈹€ SSE 浜嬩欢澶勭悊涓婁笅鏂?鈹€鈹€
   const sseCtx: SSEHandlerContext = {
     assistantMsgId,
     batcher: batcher as unknown as DeltaBatcherInterface,
@@ -431,8 +409,8 @@ export async function sendMessage(
     hadStreamError: false,
   };
 
-  // 流停滞检测：初始连接 30 秒超时，之后每次收到事件重置为 90 秒。
-  // 如果中途 LLM 或后端处理挂起超过 90 秒无任何事件，自动中止。
+  // 娴佸仠婊炴娴嬶細鍒濆杩炴帴 30 绉掕秴鏃讹紝涔嬪悗姣忔鏀跺埌浜嬩欢閲嶇疆涓?90 绉掋€?
+  // 濡傛灉涓€?LLM 鎴栧悗绔鐞嗘寕璧疯秴杩?90 绉掓棤浠讳綍浜嬩欢锛岃嚜鍔ㄤ腑姝€?
   let _connectionTimedOut = false;
   let _stallTimedOut = false;
   const _INITIAL_TIMEOUT_MS = 30_000;
@@ -449,7 +427,7 @@ export async function sendMessage(
     }, _STALL_TIMEOUT_MS);
   };
 
-  // 诊断日志：记录图片附件状态
+  // 璇婃柇鏃ュ織锛氳褰曞浘鐗囬檮浠剁姸鎬?
   if (files && files.length > 0) {
     console.log(
       "[sendMessage] files=%d, imageAttachments=%d, uploadedImagePaths=%o",
@@ -476,18 +454,18 @@ export async function sendMessage(
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
-        // 收到事件，重置停滞检测计时器
+        // 鏀跺埌浜嬩欢锛岄噸缃仠婊炴娴嬭鏃跺櫒
         _resetStallTimer();
 
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
 
-        // ── sendMessage 独有的后分发逻辑 ──
+        // 鈹€鈹€ sendMessage 鐙湁鐨勫悗鍒嗗彂閫昏緫 鈹€鈹€
         const data = event.data;
 
         if (sseEvent.event === "reply") {
-          // Token 统计：sendMessage 有延迟累加逻辑
+          // Token 缁熻锛歴endMessage 鏈夊欢杩熺疮鍔犻€昏緫
           const hasPendingInteraction =
             S().pendingApproval !== null || S().pendingQuestion !== null;
           const totalTokens = (data.total_tokens as number) || 0;
@@ -521,8 +499,8 @@ export async function sendMessage(
       } else {
         S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "连接错误",
-          message: (err as Error).message || "网络连接失败",
+          title: "杩炴帴閿欒",
+          message: (err as Error).message || "缃戠粶杩炴帴澶辫触",
           retryable: true,
         }));
       }
@@ -530,16 +508,16 @@ export async function sendMessage(
       sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "连接超时",
-        message: "未能在 30 秒内建立连接，请检查模型配置或网络。",
+        title: "Connection Timeout",
+        message: "Unable to establish connection within 30 seconds. Check model settings or network.",
         retryable: true,
       }));
     } else if (_stallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "响应停滞",
-        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
+        title: "Stream Stalled",
+        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
         retryable: true,
       }));
     }
@@ -562,7 +540,7 @@ export async function sendMessage(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // 静默处理 — SessionSync 轮询最终会恢复
+          // 闈欓粯澶勭悊 鈥?SessionSync 杞鏈€缁堜細鎭㈠
         }
       }, 1500);
     }
@@ -570,8 +548,8 @@ export async function sendMessage(
 }
 
 /**
- * 发送延续消息（审批/问答回复），复用最后一条 assistant 消息。
- * 不创建 user/assistant 气泡，绿线不会断开。
+ * 鍙戦€佸欢缁秷鎭紙瀹℃壒/闂瓟鍥炲锛夛紝澶嶇敤鏈€鍚庝竴鏉?assistant 娑堟伅銆?
+ * 涓嶅垱寤?user/assistant 姘旀场锛岀豢绾夸笉浼氭柇寮€銆?
  */
 export async function sendContinuation(
   text: string,
@@ -600,7 +578,7 @@ export async function sendContinuation(
   store.setStreaming(true);
   store.setPipelineStatus({
     stage: "connecting",
-    message: "正在连接...",
+    message: "姝ｅ湪杩炴帴...",
     startedAt: Date.now(),
   });
 
@@ -637,7 +615,7 @@ export async function sendContinuation(
     hadStreamError: false,
   };
 
-  // 流停滞检测（与 sendMessage 一致）
+  // 娴佸仠婊炴娴嬶紙涓?sendMessage 涓€鑷达級
   let _contConnectionTimedOut = false;
   let _contStallTimedOut = false;
   let _contStallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
@@ -662,7 +640,7 @@ export async function sendContinuation(
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
 
-        // ── sendContinuation 独有：reply 的 token 累加逻辑 ──
+        // 鈹€鈹€ sendContinuation 鐙湁锛歳eply 鐨?token 绱姞閫昏緫 鈹€鈹€
         if (sseEvent.event === "reply") {
           const data = event.data;
           const hasPendingInteraction =
@@ -699,12 +677,10 @@ export async function sendContinuation(
                   }
                 }
                 if (curMsg.blocks.some((b) => b.type === "token_stats")) {
-                  S().setMessages(
-                    S().messages.map((m) => {
-                      if (m.id !== msgId || m.role !== "assistant") return m;
-                      return { ...m, blocks: m.blocks.filter((b) => b.type !== "token_stats") };
-                    }),
-                  );
+                  S().updateAssistantMessage(msgId, (m) => ({
+                    ...m,
+                    blocks: m.blocks.filter((b) => b.type !== "token_stats"),
+                  }));
                 }
               }
               S().appendBlock(msgId, {
@@ -728,8 +704,8 @@ export async function sendContinuation(
       } else {
         S().appendBlock(msgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "连接错误",
-          message: (err as Error).message || "网络连接失败",
+          title: "杩炴帴閿欒",
+          message: (err as Error).message || "缃戠粶杩炴帴澶辫触",
           retryable: true,
         }));
       }
@@ -737,16 +713,16 @@ export async function sendContinuation(
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "连接超时",
-        message: "未能在 30 秒内建立连接，请检查模型配置或网络。",
+        title: "Connection Timeout",
+        message: "Unable to establish connection within 30 seconds. Check model settings or network.",
         retryable: true,
       }));
     } else if (_contStallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "响应停滞",
-        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
+        title: "Stream Stalled",
+        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
         retryable: true,
       }));
     }
@@ -769,7 +745,7 @@ export async function sendContinuation(
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
-          // 静默处理
+          // 闈欓粯澶勭悊
         }
       }, 1500);
     }
@@ -777,10 +753,10 @@ export async function sendContinuation(
 }
 
 /**
- * 回退对话到指定用户消息并重新发送（编辑后的内容）。
- * 1. 调用后端 rollback API（resend_mode=true 移除目标用户消息）
- * 2. 截断前端消息列表到目标消息之前
- * 3. 用 sendMessage 重新发送（在前后端各添加一条用户消息）
+ * 鍥為€€瀵硅瘽鍒版寚瀹氱敤鎴锋秷鎭苟閲嶆柊鍙戦€侊紙缂栬緫鍚庣殑鍐呭锛夈€?
+ * 1. 璋冪敤鍚庣 rollback API锛坮esend_mode=true 绉婚櫎鐩爣鐢ㄦ埛娑堟伅锛?
+ * 2. 鎴柇鍓嶇娑堟伅鍒楄〃鍒扮洰鏍囨秷鎭箣鍓?
+ * 3. 鐢?sendMessage 閲嶆柊鍙戦€侊紙鍦ㄥ墠鍚庣鍚勬坊鍔犱竴鏉＄敤鎴锋秷鎭級
  */
 export async function rollbackAndResend(
   messageId: string,
@@ -793,15 +769,15 @@ export async function rollbackAndResend(
   const store = useChatStore.getState();
   if (store.isStreaming) return;
 
-  // 找到目标用户消息在前端消息列表中的位置
+  // 鎵惧埌鐩爣鐢ㄦ埛娑堟伅鍦ㄥ墠绔秷鎭垪琛ㄤ腑鐨勪綅缃?
   const messages = store.messages;
   const msgIndex = messages.findIndex((m) => m.id === messageId);
   if (msgIndex === -1) return;
 
-  // 目标必须是 user 消息
+  // 鐩爣蹇呴』鏄?user 娑堟伅
   if (messages[msgIndex].role !== "user") return;
 
-  // 计算 turn_index（第几个 user 消息）
+  // 璁＄畻 turn_index锛堢鍑犱釜 user 娑堟伅锛?
   let turnIndex = 0;
   for (let i = 0; i < msgIndex; i++) {
     if (messages[i].role === "user") turnIndex++;
@@ -810,7 +786,7 @@ export async function rollbackAndResend(
   const effectiveSessionId = sessionId || store.currentSessionId;
   if (!effectiveSessionId) return;
 
-  // 调用后端 rollback API（resend_mode 会移除目标用户消息）
+  // 璋冪敤鍚庣 rollback API锛坮esend_mode 浼氱Щ闄ょ洰鏍囩敤鎴锋秷鎭級
   try {
     const { rollbackChat } = await import("./api");
     await rollbackChat({
@@ -821,29 +797,29 @@ export async function rollbackAndResend(
     });
   } catch (err) {
     console.warn("Rollback failed, attempting to resync session:", err);
-    // 向用户展示错误，而非静默失败
+    // 鍚戠敤鎴峰睍绀洪敊璇紝鑰岄潪闈欓粯澶辫触
     const lastAssistant = [...messages].reverse().find((m) => m.role === "assistant");
     if (lastAssistant && lastAssistant.role === "assistant") {
       store.appendBlock(lastAssistant.id, _buildClientFailureGuidance({
         code: "network_error",
-        title: "编辑重发失败",
-        message: "回退对话时出错，请稍后重试或刷新页面。",
+        title: "Edit Resend Failed",
+        message: "Rollback failed. Retry later or refresh the page.",
         retryable: true,
       }));
     }
-    // 后端会话可能已过期/重建，尝试刷新前端消息以重新同步
+    // 鍚庣浼氳瘽鍙兘宸茶繃鏈?閲嶅缓锛屽皾璇曞埛鏂板墠绔秷鎭互閲嶆柊鍚屾
     try {
       const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
       await refreshSessionMessagesFromBackend(effectiveSessionId);
-    } catch { /* SessionSync 轮询最终会恢复 */ }
+    } catch { /* SessionSync 杞鏈€缁堜細鎭㈠ */ }
     return;
   }
 
-  // 前端截断到目标用户消息之前（与后端 resend_mode 一致）
+  // 鍓嶇鎴柇鍒扮洰鏍囩敤鎴锋秷鎭箣鍓嶏紙涓庡悗绔?resend_mode 涓€鑷达級
   const truncated = messages.slice(0, msgIndex);
   store.setMessages(truncated);
 
-  // 为保留的原有附件创建合成 AttachedFile（已上传，无需重传）
+  // 涓轰繚鐣欑殑鍘熸湁闄勪欢鍒涘缓鍚堟垚 AttachedFile锛堝凡涓婁紶锛屾棤闇€閲嶄紶锛?
   const retainedAttached: AttachedFile[] = (retainedFiles ?? []).map((f, i) => ({
     id: `retained-${Date.now()}-${i}`,
     file: new File([], f.filename),
@@ -851,8 +827,8 @@ export async function rollbackAndResend(
     uploadResult: { filename: f.filename, path: f.path, size: f.size },
   }));
 
-  // 预先上传新文件（与 ChatInput 的 triggerUpload 相同），
-  // 确保 sendMessage 收到带有 uploadResult 的正确 AttachedFile 对象。
+  // 棰勫厛涓婁紶鏂版枃浠讹紙涓?ChatInput 鐨?triggerUpload 鐩稿悓锛夛紝
+  // 纭繚 sendMessage 鏀跺埌甯︽湁 uploadResult 鐨勬纭?AttachedFile 瀵硅薄銆?
   let newAttached: AttachedFile[] = [];
   if (files && files.length > 0) {
     const { uploadFile } = await import("./api");
@@ -872,13 +848,13 @@ export async function rollbackAndResend(
 
   const allAttached = [...retainedAttached, ...newAttached];
 
-  // sendMessage 会在前后端各添加用户消息 + 触发流式回复
+  // sendMessage 浼氬湪鍓嶅悗绔悇娣诲姞鐢ㄦ埛娑堟伅 + 瑙﹀彂娴佸紡鍥炲
   await sendMessage(newContent, allAttached.length > 0 ? allAttached : undefined, effectiveSessionId);
 }
 
 /**
- * 重试指定 assistant 消息：回滚到其前一条 user 消息，然后重新发送。
- * 如果指定了 switchToModel，会先切换模型再重新发送。
+ * 閲嶈瘯鎸囧畾 assistant 娑堟伅锛氬洖婊氬埌鍏跺墠涓€鏉?user 娑堟伅锛岀劧鍚庨噸鏂板彂閫併€?
+ * 濡傛灉鎸囧畾浜?switchToModel锛屼細鍏堝垏鎹㈡ā鍨嬪啀閲嶆柊鍙戦€併€?
  */
 export async function retryAssistantMessage(
   assistantMessageId: string,
@@ -893,7 +869,7 @@ export async function retryAssistantMessage(
   const assistantIdx = messages.findIndex((m) => m.id === assistantMessageId);
   if (assistantIdx === -1) return;
 
-  // 找到该 assistant 消息前面最近的 user 消息
+  // 鎵惧埌璇?assistant 娑堟伅鍓嶉潰鏈€杩戠殑 user 娑堟伅
   let userIdx = -1;
   for (let i = assistantIdx - 1; i >= 0; i--) {
     if (messages[i].role === "user") {
@@ -907,7 +883,7 @@ export async function retryAssistantMessage(
   if (userMessage.role !== "user") return;
   const userContent = userMessage.content;
 
-  // 计算 turn_index（第几个 user 消息）
+  // 璁＄畻 turn_index锛堢鍑犱釜 user 娑堟伅锛?
   let turnIndex = 0;
   for (let i = 0; i < userIdx; i++) {
     if (messages[i].role === "user") turnIndex++;
@@ -916,7 +892,7 @@ export async function retryAssistantMessage(
   const effectiveSessionId = sessionId || store.currentSessionId;
   if (!effectiveSessionId) return;
 
-  // 如果需要切换模型，先切换
+  // 濡傛灉闇€瑕佸垏鎹㈡ā鍨嬶紝鍏堝垏鎹?
   if (switchToModel) {
     try {
       const { apiPut } = await import("./api");
@@ -928,7 +904,7 @@ export async function retryAssistantMessage(
     }
   }
 
-  // 调用后端 rollback API
+  // 璋冪敤鍚庣 rollback API
   try {
     const { rollbackChat } = await import("./api");
     await rollbackChat({
@@ -942,16 +918,16 @@ export async function retryAssistantMessage(
     try {
       const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
       await refreshSessionMessagesFromBackend(effectiveSessionId);
-    } catch { /* SessionSync 轮询最终会恢复 */ }
+    } catch { /* SessionSync 杞鏈€缁堜細鎭㈠ */ }
     return;
   }
 
-  // 前端截断到 user 消息之前
+  // 鍓嶇鎴柇鍒?user 娑堟伅涔嬪墠
   const truncated = messages.slice(0, userIdx);
   store.setMessages(truncated);
 
-  // 保留原始用户消息的文件附件（已上传，无需重传）
-  // 对于图片附件，需要从工作区重新下载内容，以便 sendMessage 能编码 base64 发给 LLM
+  // 淇濈暀鍘熷鐢ㄦ埛娑堟伅鐨勬枃浠堕檮浠讹紙宸蹭笂浼狅紝鏃犻渶閲嶄紶锛?
+  // 瀵逛簬鍥剧墖闄勪欢锛岄渶瑕佷粠宸ヤ綔鍖洪噸鏂颁笅杞藉唴瀹癸紝浠ヤ究 sendMessage 鑳界紪鐮?base64 鍙戠粰 LLM
   let retainedAttached: AttachedFile[] | undefined;
   if (userMessage.role === "user" && userMessage.files && userMessage.files.length > 0) {
     const { fetchFileBlob } = await import("./api");
@@ -961,13 +937,13 @@ export async function retryAssistantMessage(
         const isImage = _isImageFile(f.filename);
 
         if (isImage) {
-          // 图片需要重新获取内容，否则 sendMessage 因 file.size===0 跳过 base64 编码
+          // 鍥剧墖闇€瑕侀噸鏂拌幏鍙栧唴瀹癸紝鍚﹀垯 sendMessage 鍥?file.size===0 璺宠繃 base64 缂栫爜
           try {
             const blob = await fetchFileBlob(f.path, effectiveSessionId ?? undefined);
             const file = new File([blob], f.filename, { type: blob.type || "image/png" });
             return { id, file, status: "success" as const, uploadResult: { filename: f.filename, path: f.path, size: f.size } };
           } catch (err) {
-            console.warn("[retryAssistantMessage] 图片重新获取失败，回退到路径通知:", f.path, err);
+            console.warn("[retryAssistantMessage] 鍥剧墖閲嶆柊鑾峰彇澶辫触锛屽洖閫€鍒拌矾寰勯€氱煡:", f.path, err);
           }
         }
 
@@ -976,7 +952,7 @@ export async function retryAssistantMessage(
     );
   }
 
-  // 重新发送（携带原始附件信息）
+  // 閲嶆柊鍙戦€侊紙鎼哄甫鍘熷闄勪欢淇℃伅锛?
   await sendMessage(userContent, retainedAttached, effectiveSessionId);
 }
 
@@ -984,19 +960,19 @@ export function stopGeneration() {
   const store = useChatStore.getState();
   if (!store.abortController) return;
 
-  // 1. 通知后端取消服务端任务
+  // 1. 閫氱煡鍚庣鍙栨秷鏈嶅姟绔换鍔?
   const sessionId = store.currentSessionId;
   if (sessionId) {
     import("./api").then(({ abortChat }) => abortChat(sessionId)).catch(() => {});
   }
 
-  // 2. 中断前端 SSE 连接
+  // 2. 涓柇鍓嶇 SSE 杩炴帴
   store.abortController.abort();
   store.setAbortController(null);
   store.setStreaming(false);
 
-  // 3. 修补最后一条 assistant 消息：将进行中的 block 标记为失败，
-  //    并追加可见的"已停止"指示器。
+  // 3. 淇ˉ鏈€鍚庝竴鏉?assistant 娑堟伅锛氬皢杩涜涓殑 block 鏍囪涓哄け璐ワ紝
+  //    骞惰拷鍔犲彲瑙佺殑"宸插仠姝?鎸囩ず鍣ㄣ€?
   const messages = store.messages;
   const lastMsg = [...messages].reverse().find((m) => m.role === "assistant");
   if (lastMsg && lastMsg.role === "assistant") {
@@ -1004,41 +980,37 @@ export function stopGeneration() {
     const patchedBlocks = lastMsg.blocks.map((block): AssistantBlock => {
       if (block.type === "tool_call" && block.status === "running") {
         blocksChanged = true;
-        return { ...block, status: "error", error: "已被用户停止" };
+        return { ...block, status: "error", error: "宸茶鐢ㄦ埛鍋滄" };
       }
       if (block.type === "subagent" && block.status === "running") {
         blocksChanged = true;
-        return { ...block, status: "done", summary: "已被用户停止" };
+        return { ...block, status: "done", summary: "宸茶鐢ㄦ埛鍋滄" };
       }
       return block;
     });
 
     patchedBlocks.push({
       type: "status",
-      label: "对话已停止",
-      detail: "用户手动终止了本轮生成",
+      label: "Conversation Stopped",
+      detail: "Generation was manually stopped by the user.",
       variant: "info",
     });
 
-    store.setMessages(
-      messages.map((m) =>
-        m.id === lastMsg.id ? { ...m, blocks: patchedBlocks } : m
-      )
-    );
+    store.updateAssistantMessage(lastMsg.id, (m) => ({ ...m, blocks: patchedBlocks }));
     store.saveCurrentSession();
   }
 }
 
 // ---------------------------------------------------------------------------
-// 活跃订阅守卫：防止多个并发的 subscribe 连接。
+// 娲昏穬璁㈤槄瀹堝崼锛氶槻姝㈠涓苟鍙戠殑 subscribe 杩炴帴銆?
 // ---------------------------------------------------------------------------
 let _activeSubscribeSessionId: string | null = null;
 
 /**
- * SSE 重连：页面刷新后重新接入正在执行的聊天任务事件流。
- * 复用最后一条 assistant 消息（若存在），不创建新的用户消息。
+ * SSE 閲嶈繛锛氶〉闈㈠埛鏂板悗閲嶆柊鎺ュ叆姝ｅ湪鎵ц鐨勮亰澶╀换鍔′簨浠舵祦銆?
+ * 澶嶇敤鏈€鍚庝竴鏉?assistant 娑堟伅锛堣嫢瀛樺湪锛夛紝涓嶅垱寤烘柊鐨勭敤鎴锋秷鎭€?
  *
- * 由 SessionSync 在检测到 in_flight && !hasLocalLiveStream 时调用。
+ * 鐢?SessionSync 鍦ㄦ娴嬪埌 in_flight && !hasLocalLiveStream 鏃惰皟鐢ㄣ€?
  */
 export async function subscribeToSession(sessionId: string) {
   const store = useChatStore.getState();
@@ -1061,13 +1033,30 @@ export async function subscribeToSession(sessionId: string) {
 
   const msgId = assistantMsgId;
   _activeSubscribeSessionId = sessionId;
+  const subscribeStreamId = store.activeStreamId;
+  const subscribeAfterSeq = Math.max(0, store.latestSeq || 0);
+  store.clearResumeFailed();
+
+  if (!subscribeStreamId) {
+    _activeSubscribeSessionId = null;
+    store.setPipelineStatus(null);
+    store.setStreaming(false);
+    store.setAbortController(null);
+    try {
+      const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+      await refreshSessionMessagesFromBackend(sessionId);
+    } catch {
+      // ignore
+    }
+    return;
+  }
 
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
   store.setPipelineStatus({
     stage: "reconnecting",
-    message: "正在重连...",
+    message: "姝ｅ湪閲嶈繛...",
     startedAt: Date.now(),
   });
 
@@ -1103,7 +1092,7 @@ export async function subscribeToSession(sessionId: string) {
     hadStreamError: false,
   };
 
-  // 流停滞检测（与 sendMessage 一致）
+  // 娴佸仠婊炴娴嬶紙涓?sendMessage 涓€鑷达級
   let _subConnectionTimedOut = false;
   let _subStallTimedOut = false;
   let _subStallTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
@@ -1121,16 +1110,20 @@ export async function subscribeToSession(sessionId: string) {
   try {
     await consumeSSE(
       buildApiUrl("/chat/subscribe", { direct: true }),
-      { session_id: sessionId, skip_replay: true },
+      {
+        session_id: sessionId,
+        stream_id: subscribeStreamId,
+        after_seq: subscribeAfterSeq,
+      },
       (event) => {
-        // 收到事件，重置停滞检测计时器
+        // 鏀跺埌浜嬩欢锛岄噸缃仠婊炴娴嬭鏃跺櫒
         _resetSubStall();
 
         const sseEvent = event as SSEEvent;
         preDispatch(sseEvent, sseCtx);
         dispatchSSEEvent(sseEvent, sseCtx);
 
-        // ── subscribe 独有：reply 的简单 token 统计 ──
+        // 鈹€鈹€ subscribe 鐙湁锛歳eply 鐨勭畝鍗?token 缁熻 鈹€鈹€
         if (sseEvent.event === "reply") {
           const data = event.data;
           const hasPendingInteraction =
@@ -1157,8 +1150,8 @@ export async function subscribeToSession(sessionId: string) {
       } else {
         S().appendBlock(msgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "重连错误",
-          message: (err as Error).message || "重连失败",
+          title: "閲嶈繛閿欒",
+          message: (err as Error).message || "閲嶈繛澶辫触",
           retryable: true,
         }));
       }
@@ -1166,16 +1159,16 @@ export async function subscribeToSession(sessionId: string) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "重连超时",
-        message: "未能在 30 秒内重新连接，请检查网络或刷新页面。",
+        title: "Reconnect Timeout",
+        message: "Unable to reconnect within 30 seconds. Check network or refresh the page.",
         retryable: true,
       }));
     } else if (_subStallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "响应停滞",
-        message: "已连接但超过 90 秒未收到新数据，模型服务可能挂起。",
+        title: "Stream Stalled",
+        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
         retryable: true,
       }));
     }
@@ -1189,18 +1182,20 @@ export async function subscribeToSession(sessionId: string) {
     S().setStreaming(false);
     S().setAbortController(null);
 
-    // subscribe 始终需要从后端刷新：可能连接中途丢失事件或缓冲区溢出
-    const sid = sessionId;
-    setTimeout(async () => {
-      try {
-        const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
-        const chat = useChatStore.getState();
-        if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
-          await refreshSessionMessagesFromBackend(sid);
+    if (S().resumeFailedReason) {
+      const sid = sessionId;
+      setTimeout(async () => {
+        try {
+          const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+          const chat = useChatStore.getState();
+          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+            await refreshSessionMessagesFromBackend(sid);
+            chat.clearResumeFailed();
+          }
+        } catch {
+          // 闈欓粯澶勭悊 鈥?SessionSync 杞鏈€缁堜細鎭㈠
         }
-      } catch {
-        // 静默处理 — SessionSync 轮询最终会恢复
-      }
-    }, 1500);
+      }, 200);
+    }
   }
 }

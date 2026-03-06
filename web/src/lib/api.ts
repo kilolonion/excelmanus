@@ -345,6 +345,8 @@ export async function fetchSessionDetail(
     id: (data.id as string) ?? sessionId,
     messageCount: (data.message_count as number) ?? 0,
     inFlight: (data.in_flight as boolean) ?? false,
+    activeStreamId: (data.active_stream_id as string | null) ?? null,
+    latestSeq: (data.latest_seq as number) ?? 0,
     fullAccessEnabled: (data.full_access_enabled as boolean) ?? false,
     chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
     currentModel: (data.current_model as string | null) ?? null,

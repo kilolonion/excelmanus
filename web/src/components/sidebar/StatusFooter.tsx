@@ -1,17 +1,17 @@
 "use client";
 
-import { useEffect, useState, useCallback, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { createPortal } from "react-dom";
 import { useRouter } from "next/navigation";
 import { Circle, LogOut, ArrowRightLeft, ChevronUp, LogIn, X, Clock, Users, HardDrive, Settings, UserCircle, Radio } from "lucide-react";
-import { apiGet, resolveAvatarSrc } from "@/lib/api";
+import { resolveAvatarSrc } from "@/lib/api";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useRecentAccountsStore, type RecentAccount } from "@/stores/recent-accounts-store";
-import { useConnectionStore } from "@/stores/connection-store";
+import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
 import { logout, fetchMyWorkspaceUsage, type WorkspaceUsage } from "@/lib/auth-api";
 import {
   Tooltip,
@@ -30,20 +30,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 
 
-interface HealthData {
-  status: string;
-  version: string;
-  model: string;
-  tools: string[];
-  skillpacks: string[];
-  active_sessions: number;
-  channels?: string[];
-  restart_reason?: string;
-}
-
 export function StatusFooter() {
-  const [health, setHealth] = useState<HealthData | null>(null);
-  const [connected, setConnected] = useState<boolean | null>(null);
+  const health = useHealthHubStore((s) => s.health);
+  const connected = useHealthHubStore((s) => s.connected);
   const [reconnectFlash, setReconnectFlash] = useState(false);
   const prevConnected = useRef<boolean | null>(null);
   const isMobile = useIsMobile();
@@ -63,39 +52,9 @@ export function StatusFooter() {
     document.addEventListener("pointerdown", handler);
     return () => document.removeEventListener("pointerdown", handler);
   }, [isMobile, openTooltipId]);
-
-  const failCountRef = useRef(0);
-  const connectionStore = useConnectionStore;
-
-  const poll = useCallback(async () => {
-    try {
-      const data = await apiGet<HealthData>("/health");
-      setHealth(data);
-      setConnected(true);
-      failCountRef.current = 0;
-
-      // 检测 draining 状态 → 触发全局重启等待
-      if (data.status === "draining") {
-        connectionStore.getState().triggerRestart(data.restart_reason || "服务正在重启");
-      } else if (connectionStore.getState().status === "disconnected") {
-        // 后端恢复在线 → 更新全局状态
-        connectionStore.getState().setConnected();
-      }
-    } catch {
-      setConnected(false);
-      failCountRef.current += 1;
-      // 连续 2 次失败且当前非 restarting → 触发全局断连
-      if (failCountRef.current >= 2 && connectionStore.getState().status === "connected") {
-        connectionStore.getState().setDisconnected();
-      }
-    }
-  }, [connectionStore]);
-
   useEffect(() => {
-    poll();
-    const id = setInterval(poll, 15000);
-    return () => clearInterval(id);
-  }, [poll]);
+    ensureHealthHubPolling();
+  }, []);
 
   // 连接恢复闪烁动画
   useEffect(() => {
