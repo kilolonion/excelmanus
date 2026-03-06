@@ -713,6 +713,9 @@ export interface LoginConfig {
   google_client_id: string;
   google_client_secret: string;
   google_redirect_uri: string;
+  // Gemini OAuth
+  gemini_oauth_client_id: string;
+  gemini_oauth_client_secret: string;
   // QQ OAuth
   qq_client_id: string;
   qq_client_secret: string;
@@ -781,6 +784,36 @@ export interface ProviderInfo {
   is_active: boolean;
   created_at: string;
   updated_at: string;
+}
+
+export interface ProviderModelEntry {
+  model_id: string;
+  display_name: string;
+  public_id: string;
+  profile_name: string;
+  pro_only: boolean;
+}
+
+export interface ProviderDescriptor {
+  id: string;
+  label: string;
+  protocol: string;
+  base_url: string;
+  supported_flows: Array<"token_paste" | "pkce" | "device_code">;
+  models: ProviderModelEntry[];
+  default_model: string;
+  thinking_mode: string;
+  model_family: string;
+}
+
+export interface ProviderStatus {
+  status: "connected" | "disconnected" | "expired";
+  provider: string;
+  account_id?: string;
+  plan_type?: string;
+  expires_at?: string;
+  is_active?: boolean;
+  has_refresh_token?: boolean;
 }
 
 export interface CodexStatus {
@@ -954,6 +987,186 @@ export async function refreshCodexToken(): Promise<{
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.detail || data.error || `刷新 Token 失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchProviderDescriptors(): Promise<{
+  providers: ProviderDescriptor[];
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl("/auth/providers/descriptors"), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `获取提供商描述失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function providerOAuthStart(
+  providerName: string,
+  redirectUri?: string,
+): Promise<{
+  authorize_url: string;
+  state: string;
+  redirect_uri: string;
+  mode: "popup" | "paste";
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/oauth/start`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify(redirectUri ? { redirect_uri: redirectUri } : {}),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `发起 OAuth 失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function providerOAuthExchange(
+  providerName: string,
+  code: string,
+  state: string,
+): Promise<{
+  status: string;
+  provider: string;
+  account_id: string;
+  plan_type: string;
+  expires_at: string;
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/oauth/exchange`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ code, state }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `OAuth 交换失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function providerDeviceCodeStart(providerName: string): Promise<{
+  user_code: string;
+  verification_url: string;
+  interval: number;
+  state: string;
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/device-code/start`), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `发起设备码登录失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function providerDeviceCodePoll(
+  providerName: string,
+  state: string,
+): Promise<{
+  status: "pending" | "connected";
+  provider?: string;
+  account_id?: string;
+  plan_type?: string;
+  expires_at?: string;
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/device-code/poll`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ state }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `轮询授权状态失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function connectProvider(
+  providerName: string,
+  tokenData: Record<string, unknown>,
+): Promise<{
+  status: string;
+  provider: string;
+  account_id: string;
+  plan_type: string;
+  expires_at: string;
+}> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}`), {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ token_data: tokenData }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `连接提供商失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function disconnectProvider(
+  providerName: string,
+): Promise<{ status: string; provider: string }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}`), {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `断开提供商连接失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function fetchProviderStatus(
+  providerName: string,
+): Promise<ProviderStatus> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/status`), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `获取提供商状态失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function refreshProviderToken(
+  providerName: string,
+): Promise<{ status: string; provider: string; expires_at: string }> {
+  const { accessToken } = useAuthStore.getState();
+  const res = await fetch(buildApiUrl(`/auth/providers/${providerName}/refresh`), {
+    method: "POST",
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || data.error || `刷新提供商 Token 失败: ${res.status}`);
   }
   return res.json();
 }

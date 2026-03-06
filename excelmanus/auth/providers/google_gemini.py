@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import base64
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -68,6 +69,9 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
     DEFAULT_MODEL = "google-gemini/gemini-2.5-pro"
     DEFAULT_PROFILE_NAME = "google-gemini/gemini-2.5-pro"
 
+    def __init__(self, config_store: Any | None = None) -> None:
+        self._config_store = config_store
+
     # ── ProviderDescriptor / on_connect_success ───────────────
 
     def get_descriptor(self) -> ProviderDescriptor:
@@ -92,6 +96,33 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
             thinking_mode="auto",
             model_family="gemini",
         )
+
+    def _resolve_oauth_client_credentials(self) -> tuple[str, str]:
+        def _from_config(key: str) -> str:
+            if self._config_store is None:
+                return ""
+            getter = getattr(self._config_store, "get", None)
+            if not callable(getter):
+                return ""
+            try:
+                return (getter(key, "") or "").strip()
+            except TypeError:
+                return (getter(key) or "").strip()
+            except Exception:
+                logger.debug("读取 Gemini OAuth 配置失败: %s", key, exc_info=True)
+                return ""
+
+        client_id = (
+            _from_config("gemini_oauth_client_id")
+            or os.environ.get("EXCELMANUS_GEMINI_OAUTH_CLIENT_ID", "").strip()
+            or self.CLIENT_ID
+        )
+        client_secret = (
+            _from_config("gemini_oauth_client_secret")
+            or os.environ.get("EXCELMANUS_GEMINI_OAUTH_CLIENT_SECRET", "").strip()
+            or self.CLIENT_SECRET
+        )
+        return client_id, client_secret
 
     async def on_connect_success(
         self,
@@ -147,9 +178,10 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
         self, redirect_uri: str, state: str, code_challenge: str,
     ) -> str:
         from urllib.parse import urlencode
+        client_id, _ = self._resolve_oauth_client_credentials()
         params = {
             "response_type": "code",
-            "client_id": self.CLIENT_ID,
+            "client_id": client_id,
             "redirect_uri": redirect_uri,
             "scope": self.SCOPE,
             "code_challenge": code_challenge,
@@ -163,6 +195,7 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
     async def exchange_code(
         self, code: str, redirect_uri: str, code_verifier: str,
     ) -> ValidatedCredential:
+        client_id, client_secret = self._resolve_oauth_client_credentials()
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(
@@ -171,8 +204,8 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
                         "grant_type": "authorization_code",
                         "code": code,
                         "redirect_uri": redirect_uri,
-                        "client_id": self.CLIENT_ID,
-                        "client_secret": self.CLIENT_SECRET,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                         "code_verifier": code_verifier,
                     },
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
@@ -266,6 +299,7 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
                 "请重新运行 gemini CLI 登录或重新粘贴凭证。"
             )
 
+        client_id, client_secret = self._resolve_oauth_client_credentials()
         async with httpx.AsyncClient(timeout=30.0) as client:
             try:
                 resp = await client.post(
@@ -273,8 +307,8 @@ class GoogleGeminiProvider(AuthProvider, PKCECapable):
                     data={
                         "grant_type": "refresh_token",
                         "refresh_token": refresh_token,
-                        "client_id": self.CLIENT_ID,
-                        "client_secret": self.CLIENT_SECRET,
+                        "client_id": client_id,
+                        "client_secret": client_secret,
                     },
                     headers={"Content-Type": "application/x-www-form-urlencoded"},
                 )

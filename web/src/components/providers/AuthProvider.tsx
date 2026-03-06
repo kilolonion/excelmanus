@@ -10,6 +10,7 @@ import {
   clearSessionCookie,
 } from "@/lib/auth-api";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
+import { pathnameStartsWith } from "@/lib/pathname";
 
 const PUBLIC_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 
@@ -41,7 +42,7 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const accessToken = useAuthStore((s) => s.accessToken);
 
-  const isPublic = PUBLIC_PATHS.some((p) => pathname.startsWith(p));
+  const isPublic = pathnameStartsWith(pathname, PUBLIC_PATHS);
 
   // ── 水合监听 ───────────────────────────────────
   useEffect(() => {
@@ -68,7 +69,7 @@ export function AuthProvider({ children, authEnabled = false }: AuthProviderProp
 
     // 情况 2：已认证用户访问登录/注册页 → 重定向到首页
     const REDIRECT_WHEN_AUTHED = ["/login", "/register"];
-    if (REDIRECT_WHEN_AUTHED.some((p) => pathname.startsWith(p))) {
+    if (pathnameStartsWith(pathname, REDIRECT_WHEN_AUTHED)) {
       router.replace("/");
       return;
     }
