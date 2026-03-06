@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useCallback, useState, useEffect, useMemo } from "react";
+import { useRef, useCallback, useState, useEffect, useMemo, useId } from "react";
 import {
   FileSpreadsheet,
   FolderPlus,
@@ -37,10 +37,10 @@ import {
   workspaceDeleteItem,
 } from "@/lib/api";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { isExcelFile } from "@/components/ui/file-type-icon";
-import { isImageFile, isTextPreviewableFile } from "@/lib/file-preview";
+import { isExcelFile, isImageFile, isTextPreviewableFile, isWordFile } from "@/lib/file-preview";
 import { CodePreviewModal } from "@/components/chat/CodePreviewModal";
 import { ImagePreviewModal } from "@/components/chat/ImagePreviewModal";
+import { useWordStore } from "@/stores/word-store";
 import {
   buildTree,
   filterWorkspaceFiles,
@@ -55,7 +55,7 @@ import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
 import { StorageBar } from "./StorageBar";
 import { FileRelationshipGraph } from "./FileRelationshipGraph";
 
-const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx,.doc";
+const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx";
 
 function isNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -100,6 +100,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const mergeRecentFiles = useExcelStore((s) => s.mergeRecentFiles);
   const openPanel = useExcelStore((s) => s.openPanel);
   const openFullView = useExcelStore((s) => s.openFullView);
+  const closeExcelPanel = useExcelStore((s) => s.closePanel);
+  const closeExcelFullView = useExcelStore((s) => s.closeFullView);
+  const closeCompare = useExcelStore((s) => s.closeCompare);
   const panelOpen = useExcelStore((s) => s.panelOpen);
   const activeFilePath = useExcelStore((s) => s.activeFilePath);
   const pendingBackups = useExcelStore((s) => s.pendingBackups);
@@ -114,6 +117,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const groupViewMode = useExcelStore((s) => s.groupViewMode);
   const toggleGroupViewMode = useExcelStore((s) => s.toggleGroupViewMode);
   const createGroupFromSelected = useExcelStore((s) => s.createGroupFromSelected);
+  const openWordPanel = useWordStore((s) => s.openPanel);
+  const openWordFullView = useWordStore((s) => s.openFullView);
+  const closeWordPanel = useWordStore((s) => s.closePanel);
+  const closeWordFullView = useWordStore((s) => s.closeFullView);
 
   // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
   const visibleFiles = useMemo(
@@ -123,6 +130,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const currentUserId = useAuthStore((s) => s.user?.id ?? "__anonymous__");
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const fileInputId = useId();
   const scannedUserIdRef = useRef<string | null>(null);
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
@@ -229,6 +237,22 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     refreshWorkspaceFiles();
   }, [wsFilesLoaded, refreshWorkspaceFiles]);
 
+  const openFilePicker = useCallback(() => {
+    const input = fileInputRef.current;
+    if (!input) return;
+
+    try {
+      if (typeof input.showPicker === "function") {
+        input.showPicker();
+        return;
+      }
+    } catch {
+      // Fall back to click() for browsers/webviews without showPicker support.
+    }
+
+    input.click();
+  }, []);
+
   // Agent 创建/修改文件时自动刷新树（files_changed SSE 事件）
   const loadFileGroups = useExcelStore((s) => s.loadFileGroups);
   const prevVersionRef = useRef(workspaceFilesVersion);
@@ -280,7 +304,16 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       if (isExcelFile(filename)) {
         setTextPreviewOpen(false);
         setImagePreviewOpen(false);
+        closeWordPanel();
+        closeWordFullView();
         openPanel(path);
+        return;
+      }
+      if (isWordFile(filename)) {
+        setTextPreviewOpen(false);
+        setImagePreviewOpen(false);
+        closeExcelPanel();
+        openWordPanel(path);
         return;
       }
       if (isImageFile(filename)) {
@@ -297,7 +330,16 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       }
       downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
     },
-    [openPanel, selectMode, toggleSelect, activeSessionId]
+    [
+      activeSessionId,
+      closeExcelPanel,
+      closeWordFullView,
+      closeWordPanel,
+      openPanel,
+      openWordPanel,
+      selectMode,
+      toggleSelect,
+    ]
   );
 
   const handleDoubleClick = useCallback(
@@ -305,14 +347,34 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       if (selectMode) return;
       const filename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
       if (isExcelFile(filename)) {
+        closeWordPanel();
+        closeWordFullView();
         openFullView(path);
+        return;
+      }
+      if (isWordFile(filename)) {
+        closeCompare();
+        closeExcelFullView();
+        closeExcelPanel();
+        closeWordPanel();
+        openWordFullView(path);
         return;
       }
       // 文本/图片维持单击预览，双击不触发下载。
       if (isImageFile(filename) || isTextPreviewableFile(filename)) return;
       downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
     },
-    [openFullView, selectMode, activeSessionId]
+    [
+      activeSessionId,
+      closeCompare,
+      closeExcelFullView,
+      closeExcelPanel,
+      closeWordFullView,
+      closeWordPanel,
+      openFullView,
+      openWordFullView,
+      selectMode,
+    ]
   );
 
   // 移除前显示确认对话框
@@ -418,7 +480,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             工作区文件
           </span>
           <button
-            onClick={() => fileInputRef.current?.click()}
+            type="button"
+            onClick={openFilePicker}
             className="min-h-8 min-w-8 flex items-center justify-center rounded text-muted-foreground hover:text-white transition-all duration-150 ease-out"
             onPointerEnter={(e) => {
               e.currentTarget.style.backgroundColor = "var(--em-primary)";
@@ -432,7 +495,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           </button>
         </div>
         <button
-          onClick={() => fileInputRef.current?.click()}
+          type="button"
+          onClick={openFilePicker}
           className="w-full flex items-center gap-2 px-2 py-1.5 min-h-8 rounded-md border border-dashed text-xs text-muted-foreground hover:text-foreground hover:border-solid transition-all duration-150 ease-out"
           style={{ borderColor: "var(--em-primary)" }}
           onPointerEnter={(e) => {
@@ -450,9 +514,11 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           上传或 @引用 Excel 文件
         </button>
         <input
+          id={fileInputId}
+          data-file-picker="sidebar-upload"
           ref={fileInputRef}
           type="file"
-          className="hidden"
+          className="sr-only"
           accept={ALL_EXTENSIONS}
           multiple
           onChange={handleUpload}
@@ -502,7 +568,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               <Trash2 className="h-3 w-3" />
             </button>
             <button
-              onClick={() => fileInputRef.current?.click()}
+              type="button"
+              onClick={openFilePicker}
               className="min-h-8 min-w-8 flex items-center justify-center rounded text-muted-foreground hover:text-white transition-all duration-150 ease-out"
               onPointerEnter={(e) => {
                 e.currentTarget.style.backgroundColor = "var(--em-primary)";
@@ -616,7 +683,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               <Tooltip>
                 <TooltipTrigger asChild>
                   <button
-                    onClick={() => fileInputRef.current?.click()}
+                    type="button"
+                    onClick={openFilePicker}
                     className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-white shadow-sm transition-all duration-150 hover:opacity-90"
                     style={{ backgroundColor: "var(--em-primary)" }}
                   >
@@ -863,7 +931,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         />
       )}
 
-      {wsFilesLoaded && wsFilePaths.length === 0 && embedded && (
+      {false && wsFilesLoaded && wsFilePaths.length === 0 && embedded && (
         <div className="flex flex-col items-center gap-2 py-4 text-center">
           <FileSpreadsheet className="h-6 w-6 text-muted-foreground/40" />
           <span className="text-[11px] text-muted-foreground/60">
@@ -903,9 +971,11 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
       )}
 
       <input
+        id={fileInputId}
+        data-file-picker="sidebar-upload"
         ref={fileInputRef}
         type="file"
-        className="hidden"
+        className="sr-only"
         accept={ALL_EXTENSIONS}
         multiple
         onChange={handleUpload}
@@ -1012,7 +1082,7 @@ function FileTreeView(props: TreeViewProps) {
       <input
         ref={folderUploadRef}
         type="file"
-        className="hidden"
+        className="sr-only"
         multiple
         onChange={handleFolderUpload}
       />

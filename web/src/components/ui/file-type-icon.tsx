@@ -1,4 +1,5 @@
 import { type SVGProps } from "react";
+import { isWordFile } from "@/lib/file-preview";
 
 interface FileTypeIconProps extends SVGProps<SVGSVGElement> {
   filename: string;
@@ -47,7 +48,6 @@ const EXT_MAP: Record<string, { color: string; label: string }> = {
   txt:  { color: "#8b8b8b", label: "TX" },
   rst:  { color: "#8b8b8b", label: "RS" },
   pdf:  { color: "#e34726", label: "PD" },
-  doc:  { color: "#2b579a", label: "DC" },
   docx: { color: "#2b579a", label: "DC" },
 
   // 图片
@@ -94,6 +94,8 @@ function getExtInfo(filename: string): { color: string; label: string } {
     return EXT_MAP.dockerfile;
   if (lower === ".env" || lower.startsWith(".env."))
     return EXT_MAP.env;
+  if (isWordFile(lower))
+    return EXT_MAP.docx;
 
   const dotIdx = lower.lastIndexOf(".");
   if (dotIdx === -1) return FALLBACK;
@@ -146,17 +148,4 @@ export function FileTypeIcon({ filename, className, ...props }: FileTypeIconProp
   );
 }
 
-const EXCEL_EXTS = new Set(["xlsx", "xls", "xlsm", "xlsb", "csv"]);
-const WORD_EXTS = new Set(["docx", "doc"]);
-
-export function isExcelFile(filename: string): boolean {
-  const dotIdx = filename.lastIndexOf(".");
-  if (dotIdx === -1) return false;
-  return EXCEL_EXTS.has(filename.slice(dotIdx + 1).toLowerCase());
-}
-
-export function isWordFile(filename: string): boolean {
-  const dotIdx = filename.lastIndexOf(".");
-  if (dotIdx === -1) return false;
-  return WORD_EXTS.has(filename.slice(dotIdx + 1).toLowerCase());
-}
+export { isExcelFile, isWordFile } from "@/lib/file-preview";

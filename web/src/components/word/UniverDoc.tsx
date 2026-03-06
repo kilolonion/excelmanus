@@ -1,8 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
-import { useWordStore, type WordSnapshot } from "@/stores/word-store";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { fetchWordSnapshot } from "@/lib/api";
+import { useWordStore, type WordSnapshot } from "@/stores/word-store";
 
 let _univerDocModuleCache: Promise<{
   createUniver: any;
@@ -25,31 +25,38 @@ function getUniverDocModules() {
       docsCoreZhCN: zhCNMod.default,
     }));
   }
+
   return _univerDocModuleCache;
 }
 
 export function prefetchUniverDocModules() {
-  if (typeof window !== "undefined") {
-    const schedule =
-      (window as any).requestIdleCallback ??
-      ((cb: () => void) => setTimeout(cb, 2000));
-    schedule(() => {
-      getUniverDocModules();
-    });
-  }
+  if (typeof window === "undefined") return;
+
+  const windowWithIdleCallback = window as Window & {
+    requestIdleCallback?: (callback: () => void) => number;
+  };
+  const schedule =
+    windowWithIdleCallback.requestIdleCallback ??
+    ((callback: () => void) => window.setTimeout(callback, 2000));
+
+  schedule(() => {
+    void getUniverDocModules();
+  });
 }
 
 interface UniverDocProps {
   fileUrl: string;
-  onContentEdit?: (paragraphIndex: number, newText: string) => void;
 }
 
-function extractPathFromUrl(url: string): string {
+function parseWordFileUrl(url: string): { path: string; sessionId?: string } {
   try {
-    const u = new URL(url, window.location.origin);
-    return u.searchParams.get("path") || "";
+    const parsedUrl = new URL(url, window.location.origin);
+    return {
+      path: parsedUrl.searchParams.get("path") || "",
+      sessionId: parsedUrl.searchParams.get("session_id") || undefined,
+    };
   } catch {
-    return "";
+    return { path: "" };
   }
 }
 
@@ -74,7 +81,7 @@ function snapshotToDocData(
   let offset = 0;
 
   const HEADING_FONT_SIZES: Record<number, number> = {
-    0: 28, // Title
+    0: 28,
     1: 24,
     2: 20,
     3: 16,
@@ -110,7 +117,6 @@ function snapshotToDocData(
       offset += para.text.length;
     }
 
-    // Paragraph separator (\n in Univer Doc dataStream)
     dataStream += "\n";
     offset += 1;
 
@@ -140,7 +146,6 @@ function snapshotToDocData(
     paragraphs.push(paragraphProps);
   }
 
-  // Univer Doc dataStream must end with \r\n
   dataStream += "\r\n";
 
   return {
@@ -151,7 +156,7 @@ function snapshotToDocData(
       paragraphs,
     },
     documentStyle: {
-      pageSize: { width: 595, height: 842 }, // A4
+      pageSize: { width: 595, height: 842 },
       marginTop: 72,
       marginBottom: 72,
       marginLeft: 90,
@@ -160,7 +165,7 @@ function snapshotToDocData(
   };
 }
 
-export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
+export function UniverDoc({ fileUrl }: UniverDocProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<any>(null);
   const docIdRef = useRef<string>(createDocId());
@@ -168,8 +173,25 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
   const refreshCounter = useWordStore((s) => s.refreshCounter);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [retryNonce, setRetryNonce] = useState(0);
 
-  const filePath = extractPathFromUrl(fileUrl);
+  const { path: filePath, sessionId } = useMemo(() => parseWordFileUrl(fileUrl), [fileUrl]);
+
+  const renderSnapshot = useCallback((api: any, snapshot: WordSnapshot) => {
+    const previousDocId = docIdRef.current;
+
+    try {
+      if (api.getDocument?.(previousDocId)) {
+        api.disposeUnit?.(previousDocId);
+      }
+    } catch {
+      // ignore stale doc cleanup errors
+    }
+
+    const docId = createDocId();
+    docIdRef.current = docId;
+    api.createUniverDoc(snapshotToDocData(snapshot, docId));
+  }, []);
 
   const loadData = useCallback(
     async (api: any) => {
@@ -180,44 +202,26 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
       }
 
       const loadVersion = ++loadVersionRef.current;
+
       try {
         setLoading(true);
         setError(null);
 
-        const snapshot = await fetchWordSnapshot(filePath);
+        const snapshot = await fetchWordSnapshot(filePath, { sessionId });
         if (loadVersion !== loadVersionRef.current) return;
 
-        if (!snapshot.paragraphs?.length) {
-          setError("文档为空");
-          setLoading(false);
-          return;
-        }
-
-        const previousDocId = docIdRef.current;
-        try {
-          if (api.getDocument?.(previousDocId)) {
-            api.disposeUnit?.(previousDocId);
-          }
-        } catch {
-          // ignore stale doc cleanup errors
-        }
-
-        const docId = createDocId();
-        docIdRef.current = docId;
-        const docData = snapshotToDocData(snapshot, docId);
-
-        api.createUniverDoc(docData);
+        renderSnapshot(api, snapshot);
         if (loadVersion !== loadVersionRef.current) return;
 
         setLoading(false);
-      } catch (err: any) {
+      } catch (err: unknown) {
         if (loadVersion !== loadVersionRef.current) return;
         console.error("Error loading Word data:", err);
-        setError(err.message || "加载失败");
+        setError(err instanceof Error ? err.message : "加载失败");
         setLoading(false);
       }
     },
-    [filePath]
+    [filePath, renderSnapshot, sessionId]
   );
 
   useEffect(() => {
@@ -228,9 +232,12 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
 
     const init = async () => {
       try {
+        setLoading(true);
+        setError(null);
+
         const dataPromise = filePath
-          ? fetchWordSnapshot(filePath).catch(() => null)
-          : Promise.resolve(null);
+          ? fetchWordSnapshot(filePath, { sessionId }).catch(() => null)
+          : Promise.resolve<WordSnapshot | null>(null);
 
         const { createUniver, LocaleType, UniverDocsCorePreset, docsCoreZhCN } =
           await getUniverDocModules();
@@ -258,14 +265,15 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
         univerRef.current = univerAPI;
 
         const prefetchedData = await dataPromise;
-        if (prefetchedData && prefetchedData.paragraphs?.length) {
+        if (disposed) return;
+
+        if (prefetchedData) {
           const loadVersion = ++loadVersionRef.current;
           try {
-            const docId = createDocId();
-            docIdRef.current = docId;
-            const docData = snapshotToDocData(prefetchedData, docId);
-            univerAPI.createUniverDoc(docData);
-            if (loadVersion === loadVersionRef.current) setLoading(false);
+            renderSnapshot(univerAPI, prefetchedData);
+            if (loadVersion === loadVersionRef.current) {
+              setLoading(false);
+            }
           } catch {
             await loadData(univerAPI);
           }
@@ -279,7 +287,7 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
       }
     };
 
-    init();
+    void init();
 
     return () => {
       disposed = true;
@@ -293,32 +301,53 @@ export function UniverDoc({ fileUrl, onContentEdit }: UniverDocProps) {
       }
       univerRef.current = null;
     };
-  }, [loadData]);
+  }, [filePath, loadData, renderSnapshot, retryNonce, sessionId]);
 
   useEffect(() => {
     if (refreshCounter > 0 && univerRef.current) {
-      loadData(univerRef.current);
+      void loadData(univerRef.current);
     }
   }, [refreshCounter, loadData]);
 
+  const handleRetry = useCallback(() => {
+    setError(null);
+    setLoading(true);
+
+    if (univerRef.current) {
+      void loadData(univerRef.current);
+      return;
+    }
+
+    setRetryNonce((value) => value + 1);
+  }, [loadData]);
+
   return (
-    <div className="relative w-full h-full min-h-[400px] bg-white dark:bg-gray-800">
+    <div className="relative h-full min-h-[400px] w-full bg-white dark:bg-gray-800">
       <div
         ref={containerRef}
-        className="w-full h-full bg-white dark:bg-gray-800"
+        className="h-full w-full bg-white dark:bg-gray-800"
         data-univer-doc-container
         style={{ position: "relative" }}
       />
       {loading && (
-        <div className="absolute inset-0 flex items-center justify-center bg-background/60 z-10">
-          <span className="text-sm text-muted-foreground animate-pulse">
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/60">
+          <span className="animate-pulse text-sm text-muted-foreground">
             加载文档数据...
           </span>
         </div>
       )}
       {error && (
-        <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
-          <span className="text-sm text-destructive">{error}</span>
+        <div className="absolute inset-0 z-10 flex items-center justify-center bg-background/80">
+          <div className="flex flex-col items-center gap-3 px-6 text-center">
+            <span className="text-sm text-destructive">{error}</span>
+            <button
+              type="button"
+              onClick={handleRetry}
+              className="rounded border border-border px-3 py-1.5 text-xs text-foreground transition-colors hover:bg-muted"
+            >
+              重试
+            </button>
+          </div>
         </div>
       )}
     </div>
