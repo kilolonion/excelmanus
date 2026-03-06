@@ -1,4 +1,4 @@
-﻿"""API 服务模块：基于 FastAPI 的 REST API 服务。
+"""API 服务模块：基于 FastAPI 的 REST API 服务。
 
 端点：
 - POST   /api/v1/chat                        对话接口（完整 JSON）
@@ -292,6 +292,7 @@ _active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
 _draining: bool = False  # True during graceful shutdown, health returns "draining"
 _restart_reason: str = ""  # 重启原因，draining 期间通过 health 传递给前端
 _channel_launcher: Any = None  # 类型：ChannelLauncher | None（渠道协同启动器）
+_cap_probe_job_manager: Any = None  # 类型：CapabilityProbeJobManager | None
 
 
 _session_stream_states: dict[str, _SessionStreamState] = {}
@@ -875,6 +876,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.config_store = _config_store
         logger.info("ConfigStore 已初始化")
 
+    # 初始化异步能力探测任务管理器
+    global _cap_probe_job_manager
+    from excelmanus.capability_probe_jobs import CapabilityProbeJobManager
+    _cap_probe_job_manager = CapabilityProbeJobManager()
+
     # 初始化会话管理器
     # 始终创建共享 MCP 管理器并在启动时自动连接
     shared_mcp_manager = MCPManager(_config.workspace_root, app_config=_config)
@@ -1285,6 +1291,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # 停止渠道协同 Bot
     if _channel_launcher is not None:
         await _channel_launcher.stop()
+
+    # 停止异步探测任务
+    if _cap_probe_job_manager is not None:
+        await _cap_probe_job_manager.shutdown()
 
     # 关闭所有会话与 MCP 连接
     if _session_manager is not None:
@@ -5144,6 +5154,277 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
         return _error_json_response(500, f"写入失败: {exc}")
 
 
+# ── Word 文件 API ───────────────────────────────────────────────
+
+
+@_router.get("/api/v1/files/word")
+async def get_word_file(request: Request) -> StreamingResponse:
+    """返回 .docx 文件二进制流供前端 Univer Doc 加载。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    session_id = request.query_params.get("session_id")
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
+
+    from pathlib import Path as _Path
+
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
+    if resolved is None:
+        return _error_json_response(404, f"Word 文件不存在: {path}")  # type: ignore[return-value]
+
+    file_path = _Path(resolved)
+    if not file_path.is_file() or file_path.suffix.lower() not in (".docx", ".doc"):
+        return _error_json_response(404, f"Word 文件不存在: {path}")  # type: ignore[return-value]
+
+    def _iter_file():
+        with open(resolved, "rb") as f:  # type: ignore[arg-type]
+            while chunk := f.read(65536):
+                yield chunk
+
+    return StreamingResponse(
+        _iter_file(),
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": _make_content_disposition(file_path.name)},
+    )
+
+
+@_router.get("/api/v1/files/word/snapshot")
+async def get_word_snapshot(request: Request) -> JSONResponse:
+    """返回 Word 文档的 JSON 快照（段落+样式+表格），供前端 Univer Doc 渲染。"""
+    assert _config is not None, "服务未初始化"
+
+    path = request.query_params.get("path", "")
+    session_id = request.query_params.get("session_id")
+    max_paragraphs = int(request.query_params.get("max_paragraphs", "500"))
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    from pathlib import Path as _Path
+
+    ws_root = _resolve_workspace_root(request)
+    _iso_uid = _get_isolation_user_id(request)
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root, user_id=_iso_uid)
+    if resolved is None:
+        return _error_json_response(404, f"Word 文件不存在: {path}")
+
+    file_path = _Path(resolved)
+    if not file_path.is_file() or file_path.suffix.lower() != ".docx":
+        return _error_json_response(404, f"Word 文件不存在或格式不支持: {path}")
+
+    try:
+        import asyncio
+        snapshot = await asyncio.to_thread(_build_word_snapshot, str(file_path), max_paragraphs)
+        snapshot["file"] = path
+        return JSONResponse(content=snapshot)
+    except Exception as exc:
+        logger.error("Word snapshot 生成失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"读取 Word 文件失败: {exc}")
+
+
+def _build_word_snapshot(file_path: str, max_paragraphs: int = 500) -> dict[str, Any]:
+    """构建 Word 文档 JSON 快照。
+
+    返回结构化数据，包含段落列表（含文本、样式、行内格式）和表格，
+    供前端转换为 Univer Doc IDocumentData。
+    """
+    from docx import Document
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document(file_path)
+
+    alignment_map = {
+        WD_ALIGN_PARAGRAPH.LEFT: "left",
+        WD_ALIGN_PARAGRAPH.CENTER: "center",
+        WD_ALIGN_PARAGRAPH.RIGHT: "right",
+        WD_ALIGN_PARAGRAPH.JUSTIFY: "justify",
+    }
+
+    paragraphs: list[dict[str, Any]] = []
+    for i, para in enumerate(doc.paragraphs):
+        if i >= max_paragraphs:
+            break
+        style_name = para.style.name if para.style else "Normal"
+
+        entry: dict[str, Any] = {
+            "text": para.text,
+            "style": style_name,
+        }
+
+        if style_name.startswith("Heading"):
+            try:
+                entry["heading_level"] = int(style_name.split()[-1])
+            except (ValueError, IndexError):
+                pass
+        elif style_name == "Title":
+            entry["heading_level"] = 0
+
+        if para.alignment is not None:
+            entry["alignment"] = alignment_map.get(para.alignment, "left")
+
+        runs: list[dict[str, Any]] = []
+        for run in para.runs:
+            rd: dict[str, Any] = {"text": run.text}
+            if run.bold:
+                rd["bold"] = True
+            if run.italic:
+                rd["italic"] = True
+            if run.underline:
+                rd["underline"] = True
+            if run.font.size:
+                rd["size_pt"] = round(run.font.size.pt, 1)
+            if run.font.name:
+                rd["font_name"] = run.font.name
+            if run.font.color and run.font.color.rgb:
+                rd["color"] = str(run.font.color.rgb)
+            runs.append(rd)
+
+        if runs:
+            entry["runs"] = runs
+
+        paragraphs.append(entry)
+
+    tables: list[dict[str, Any]] = []
+    for idx, tbl in enumerate(doc.tables):
+        rows_data: list[list[str]] = []
+        for row in tbl.rows:
+            rows_data.append([cell.text.strip() for cell in row.cells])
+        tables.append({
+            "index": idx,
+            "rows": len(tbl.rows),
+            "columns": len(tbl.columns),
+            "data": rows_data,
+        })
+
+    properties: dict[str, Any] = {}
+    core = doc.core_properties
+    if core.title:
+        properties["title"] = core.title
+    if core.author:
+        properties["author"] = core.author
+
+    return {
+        "total_paragraphs": len(doc.paragraphs),
+        "returned_paragraphs": len(paragraphs),
+        "truncated": len(doc.paragraphs) > max_paragraphs,
+        "paragraphs": paragraphs,
+        "tables": tables,
+        "total_tables": len(doc.tables),
+        "sections": len(doc.sections),
+        "properties": properties,
+    }
+
+
+class WordWriteRequest(BaseModel):
+    """Word 文档写入请求。"""
+
+    model_config = ConfigDict(extra="forbid")
+    session_id: str | None = None
+    path: str
+    operations: list[dict[str, Any]]
+
+
+@_router.post("/api/v1/files/word/write")
+async def write_word_content(request: WordWriteRequest, raw_request: Request) -> JSONResponse:
+    """前端编辑回写：将内容变更写入 Word 文件。"""
+    assert _config is not None, "服务未初始化"
+
+    ws_root = _resolve_workspace_root(raw_request)
+    _iso_uid = _get_isolation_user_id(raw_request)
+    resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root, user_id=_iso_uid)
+    if resolved is None:
+        return _error_json_response(404, f"Word 文件不存在或路径非法: {request.path}")
+
+    if request.session_id and _session_manager is not None:
+        engine = _session_manager.get_engine(request.session_id, user_id=_iso_uid)
+        if engine is not None and engine.backup_enabled:
+            tx = engine.transaction
+            if tx is not None:
+                try:
+                    resolved = tx.stage_for_write(resolved)
+                except ValueError:
+                    pass
+
+    try:
+        import asyncio
+        result = await asyncio.to_thread(_apply_word_write, resolved, request.operations)
+        return JSONResponse(content=result)
+    except Exception as exc:
+        logger.error("Word write 失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"写入失败: {exc}")
+
+
+def _apply_word_write(file_path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
+    """执行 Word 文档写入操作。"""
+    from docx import Document
+    from docx.oxml.ns import qn
+
+    doc = Document(file_path)
+    applied: list[str] = []
+    errors: list[str] = []
+
+    for op in operations:
+        action = op.get("action", "")
+        idx = op.get("index")
+        text = op.get("text", "")
+        style = op.get("style")
+
+        try:
+            if action == "replace":
+                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
+                    errors.append(f"replace: 段落索引 {idx} 超出范围 (0-{len(doc.paragraphs)-1})")
+                    continue
+                para = doc.paragraphs[idx]
+                para.clear()
+                para.add_run(text)
+                if style:
+                    para.style = doc.styles[style]
+                applied.append(f"replace paragraph {idx}")
+
+            elif action == "insert_after":
+                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
+                    errors.append(f"insert_after: 段落索引 {idx} 超出范围")
+                    continue
+                ref_para = doc.paragraphs[idx]
+                new_p = ref_para._element.addnext(
+                    ref_para._element.makeelement(qn("w:p"), {})
+                )
+                from docx.text.paragraph import Paragraph
+                new_para = Paragraph(new_p, ref_para._parent)
+                new_para.add_run(text)
+                if style:
+                    new_para.style = doc.styles[style]
+                applied.append(f"insert_after paragraph {idx}")
+
+            elif action == "append":
+                doc.add_paragraph(text, style=style)
+                applied.append("append paragraph")
+
+            elif action == "delete":
+                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
+                    errors.append(f"delete: 段落索引 {idx} 超出范围")
+                    continue
+                p_element = doc.paragraphs[idx]._element
+                p_element.getparent().remove(p_element)
+                applied.append(f"delete paragraph {idx}")
+
+            else:
+                errors.append(f"未知操作: {action}")
+        except Exception as exc:
+            errors.append(f"{action} index={idx}: {exc}")
+
+    doc.save(file_path)
+
+    result: dict[str, Any] = {
+        "status": "success",
+        "applied": applied,
+        "applied_count": len(applied),
+    }
+    if errors:
+        result["errors"] = errors
+    return result
 
 
 def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
@@ -7159,6 +7440,244 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
             })
 
     return JSONResponse(content={"results": results})
+
+
+# ── 异步探测任务 API（Job-based） ──────────────────────────────
+
+
+def _get_probe_job_mgr() -> Any:
+    """获取或懒创建异步能力探测任务管理器。"""
+    global _cap_probe_job_manager
+    if _cap_probe_job_manager is None:
+        from excelmanus.capability_probe_jobs import CapabilityProbeJobManager
+        _cap_probe_job_manager = CapabilityProbeJobManager()
+    return _cap_probe_job_manager
+
+
+def _build_probe_targets(
+    names: list[str] | None = None,
+    *,
+    probe_all: bool = False,
+) -> list["ProbeTargetSpec"]:
+    """将 profile 名列表或 all=True 解析为 ProbeTargetSpec 列表。"""
+    from excelmanus.capability_probe_jobs import ProbeTargetSpec
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    assert _config is not None
+    default_protocol = _config.protocol or "auto"
+    profiles = _config_store.list_profiles() if _config_store else []
+    profile_map = {p["name"]: p for p in profiles}
+
+    # thinking_mode 映射
+    thinking_map: dict[str, str] = {}
+    for p in profiles:
+        thinking_map[p["name"]] = p.get("thinking_mode", "auto")
+
+    want_names: list[str]
+    if probe_all:
+        want_names = ["main"] + [p["name"] for p in profiles]
+    elif names:
+        want_names = names
+    else:
+        want_names = ["main"]
+
+    targets: list[ProbeTargetSpec] = []
+    seen_keys: set[str] = set()
+
+    for name in want_names:
+        if name == "main":
+            model, base_url, api_key = _config.model, _config.base_url, _config.api_key
+            protocol = default_protocol
+        elif name in profile_map:
+            p = profile_map[name]
+            model = p["model"]
+            base_url = p.get("base_url") or _config.base_url
+            api_key = p.get("api_key") or _config.api_key
+            protocol = p.get("protocol") or default_protocol
+        else:
+            continue
+
+        if model.startswith("openai-codex/"):
+            continue
+
+        cache_model = model
+        api_model = model
+        if OpenAICodexProvider.is_codex_profile_name(model):
+            real = OpenAICodexProvider.model_from_profile_name(model)
+            api_model = real if real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+
+        dedup_key = f"{cache_model}|{base_url}"
+        if dedup_key in seen_keys:
+            continue
+        seen_keys.add(dedup_key)
+
+        targets.append(ProbeTargetSpec(
+            name=name,
+            cache_model=cache_model,
+            api_model=api_model,
+            base_url=base_url,
+            api_key=api_key,
+            protocol=protocol,
+            thinking_mode=thinking_map.get(name, "auto"),
+        ))
+
+    return targets
+
+
+@_router.post("/api/v1/config/models/capabilities/jobs")
+async def create_probe_job(request: Request) -> JSONResponse:
+    """创建异步能力探测任务，立即返回 job_id。"""
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
+    if _config is None or _cap_probe_job_manager is None:
+        return _error_json_response(503, "服务未初始化")
+
+    from excelmanus.capability_probe_jobs import ProbeTargetSpec
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    body: dict = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+
+    probe_all = body.get("all", False)
+    req_name = body.get("name")
+    req_model = body.get("model")
+
+    targets: list[ProbeTargetSpec]
+
+    if probe_all or req_name:
+        names = [req_name] if req_name and not probe_all else None
+        targets = _build_probe_targets(names, probe_all=probe_all)
+    elif req_model:
+        model, base_url, api_key, protocol = _resolve_model_info(None, req_model, body.get("base_url"))
+        cache_model = model
+        api_model = model
+        if OpenAICodexProvider.is_codex_profile_name(model):
+            real = OpenAICodexProvider.model_from_profile_name(model)
+            api_model = real if real else model[len(OpenAICodexProvider.MODEL_NAME_PREFIX):]
+
+        _resolver = getattr(getattr(request, "app", None).state, "credential_resolver", None)
+        _user_id = _get_isolation_user_id(request)
+        if _resolver is not None and _user_id:
+            try:
+                _resolved_cred = _resolver.resolve_sync(_user_id, api_model)
+                if _resolved_cred:
+                    api_key = _resolved_cred.api_key or api_key
+                    if _resolved_cred.base_url:
+                        base_url = _resolved_cred.base_url
+                    if _resolved_cred.protocol:
+                        protocol = _resolved_cred.protocol
+            except Exception:
+                logger.debug("probe job 解析运行时凭证失败", exc_info=True)
+
+        targets = [ProbeTargetSpec(
+            name=req_name or "main",
+            cache_model=cache_model,
+            api_model=api_model,
+            base_url=base_url,
+            api_key=api_key,
+            protocol=protocol,
+            thinking_mode=body.get("thinking_mode", "auto"),
+        )]
+    else:
+        targets = _build_probe_targets(None, probe_all=False)
+
+    if not targets:
+        return _error_json_response(400, "无可探测的模型")
+
+    db = _session_manager.database if _session_manager else None
+
+    from excelmanus.model_probe import delete_capabilities
+    if db is not None:
+        for t in targets:
+            delete_capabilities(db, t.cache_model, t.base_url)
+
+    result = await _cap_probe_job_manager.create_job(
+        targets=targets,
+        db=db,
+        session_manager=_session_manager,
+    )
+    return JSONResponse(content=result, status_code=202)
+
+
+@_router.get("/api/v1/config/models/capabilities/jobs/{job_id}")
+async def get_probe_job(request: Request, job_id: str) -> JSONResponse:
+    """获取探测任务快照。"""
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
+    if _cap_probe_job_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    snapshot = await _cap_probe_job_manager.get_job_snapshot(job_id)
+    if snapshot is None:
+        return _error_json_response(404, "探测任务不存在")
+    return JSONResponse(content=snapshot)
+
+
+@_router.delete("/api/v1/config/models/capabilities/jobs/{job_id}")
+async def cancel_probe_job(request: Request, job_id: str) -> JSONResponse:
+    """取消探测任务。"""
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
+    if _cap_probe_job_manager is None:
+        return _error_json_response(503, "服务未初始化")
+    state = await _cap_probe_job_manager.cancel_job(job_id)
+    if state is None:
+        return _error_json_response(404, "探测任务不存在")
+    return JSONResponse(content={"state": state})
+
+
+@_router.get("/api/v1/config/models/capabilities/jobs/{job_id}/events")
+async def probe_job_events(request: Request, job_id: str) -> StreamingResponse:
+    """SSE 事件流：实时推送探测任务进度。"""
+    guard_error = await _require_admin_if_auth_enabled(request)
+    if guard_error is not None:
+        return guard_error
+    if _cap_probe_job_manager is None:
+        return _error_json_response(503, "服务未初始化")
+
+    queue = await _cap_probe_job_manager.subscribe(job_id)
+    if queue is None:
+        return _error_json_response(404, "探测任务不存在")
+
+    snapshot = await _cap_probe_job_manager.get_job_snapshot(job_id)
+
+    async def _event_gen() -> AsyncIterator[str]:
+        try:
+            if snapshot is not None:
+                yield _sse_format("job_update", snapshot)
+
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    event = await asyncio.wait_for(queue.get(), timeout=30.0)
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"
+                    continue
+
+                yield _sse_format(event.get("event", "job_update"), event.get("data", {}))
+
+                data = event.get("data") or {}
+                state = data.get("state", "")
+                if state in ("succeeded", "partial", "failed", "cancelled"):
+                    break
+        finally:
+            await _cap_probe_job_manager.unsubscribe(job_id, queue)
+
+    return StreamingResponse(
+        _event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 def _diagnose_connection_error(error: str, base_url: str, model: str) -> str:

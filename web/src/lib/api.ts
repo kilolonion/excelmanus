@@ -755,6 +755,86 @@ export function buildExcelFileUrl(path: string, sessionId?: string): string {
   return buildApiUrl(`/files/excel?${params.toString()}`);
 }
 
+// ── Word 预览 API ─────────────────────────────────────────
+
+export function buildWordFileUrl(path: string, sessionId?: string | null): string {
+  const params = new URLSearchParams({ path: normalizeExcelPath(path) });
+  if (sessionId) params.set("session_id", sessionId);
+  return buildApiUrl(`/files/word?${params.toString()}`);
+}
+
+function buildWordSnapshotUrl(
+  path: string,
+  opts?: { maxParagraphs?: number; sessionId?: string },
+): string {
+  const params = new URLSearchParams({ path: normalizeExcelPath(path) });
+  if (opts?.maxParagraphs) params.set("max_paragraphs", String(opts.maxParagraphs));
+  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  return buildApiUrl(`/files/word/snapshot?${params.toString()}`);
+}
+
+export interface WordSnapshotResponse {
+  file: string;
+  total_paragraphs: number;
+  returned_paragraphs: number;
+  truncated: boolean;
+  paragraphs: {
+    text: string;
+    style: string;
+    heading_level?: number;
+    alignment?: string;
+    runs?: {
+      text: string;
+      bold?: boolean;
+      italic?: boolean;
+      underline?: boolean;
+      size_pt?: number;
+      font_name?: string;
+      color?: string;
+    }[];
+  }[];
+  tables: {
+    index: number;
+    rows: number;
+    columns: number;
+    data: string[][];
+  }[];
+  total_tables: number;
+  sections: number;
+  properties: { title?: string; author?: string };
+}
+
+export async function fetchWordSnapshot(
+  path: string,
+  opts?: { maxParagraphs?: number; sessionId?: string },
+): Promise<WordSnapshotResponse> {
+  const res = await fetch(buildWordSnapshotUrl(path, opts), {
+    headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw new Error(`Word snapshot 请求失败: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function writeWordContent(
+  path: string,
+  operations: { action: string; index?: number; text?: string; style?: string }[],
+  sessionId?: string,
+): Promise<{ status: string; applied_count: number; errors?: string[] }> {
+  const res = await fetch(buildApiUrl("/files/word/write"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ path: normalizeExcelPath(path), operations, session_id: sessionId }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw new Error(`Word write 请求失败: ${res.status}`);
+  }
+  return res.json();
+}
+
 export interface ExcelFileListItem {
   path: string;
   filename: string;

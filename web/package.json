@@ -16,6 +16,7 @@
   },
   "dependencies": {
     "@tanstack/react-virtual": "^3.13.19",
+    "@univerjs/preset-docs-core": "^0.15.5",
     "@univerjs/preset-sheets-advanced": "^0.15.5",
     "@univerjs/preset-sheets-core": "^0.15.5",
     "@univerjs/presets": "^0.15.5",

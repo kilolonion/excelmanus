@@ -147,9 +147,16 @@ export function FileTypeIcon({ filename, className, ...props }: FileTypeIconProp
 }
 
 const EXCEL_EXTS = new Set(["xlsx", "xls", "xlsm", "xlsb", "csv"]);
+const WORD_EXTS = new Set(["docx", "doc"]);
 
 export function isExcelFile(filename: string): boolean {
   const dotIdx = filename.lastIndexOf(".");
   if (dotIdx === -1) return false;
   return EXCEL_EXTS.has(filename.slice(dotIdx + 1).toLowerCase());
+}
+
+export function isWordFile(filename: string): boolean {
+  const dotIdx = filename.lastIndexOf(".");
+  if (dotIdx === -1) return false;
+  return WORD_EXTS.has(filename.slice(dotIdx + 1).toLowerCase());
 }
