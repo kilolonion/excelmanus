@@ -1625,7 +1625,7 @@ class ContextBuilder:
             if _ref_notice:
                 parts.append(_ref_notice)
         except Exception:
-            pass
+            logger.debug("ref graph notice skipped", exc_info=True)
 
         # ── CoW 路径映射（始终实时追加，turn 内可增长） ──
         cow_registry: dict[str, str] = {}

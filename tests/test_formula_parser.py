@@ -116,3 +116,33 @@ class TestComplexFormulas:
         refs = extractor.extract("=INDEX(Sheet2!B:B,MATCH(A1,Sheet2!A:A,0))")
         cross = [r for r in refs if r.sheet_name == "Sheet2"]
         assert len(cross) >= 2
+
+
+class TestAddressInRef:
+    def test_exact_match(self) -> None:
+        from excelmanus.reference_graph.formula_parser import address_in_ref
+        assert address_in_ref("A1", "A1") is True
+        assert address_in_ref("A1", "A2") is False
+
+    def test_no_false_positive_on_prefix(self) -> None:
+        from excelmanus.reference_graph.formula_parser import address_in_ref
+        assert address_in_ref("A1", "A10") is False
+        assert address_in_ref("B2", "B20") is False
+
+    def test_whole_column_range(self) -> None:
+        from excelmanus.reference_graph.formula_parser import address_in_ref
+        assert address_in_ref("B5", "A:C") is True
+        assert address_in_ref("D5", "A:C") is False
+        assert address_in_ref("A1", "A:A") is True
+
+    def test_cell_range(self) -> None:
+        from excelmanus.reference_graph.formula_parser import address_in_ref
+        assert address_in_ref("B5", "A1:C10") is True
+        assert address_in_ref("D5", "A1:C10") is False
+        assert address_in_ref("B15", "A1:C10") is False
+        assert address_in_ref("A1", "A1:C10") is True
+        assert address_in_ref("C10", "A1:C10") is True
+
+    def test_no_range(self) -> None:
+        from excelmanus.reference_graph.formula_parser import address_in_ref
+        assert address_in_ref("A1", "B2") is False
