@@ -32,6 +32,21 @@ _SYSTEM_CONTEXT_SHRINK_MARKER = "[上下文已压缩以适配上下文窗口]"
 logger = get_logger("context_builder")
 
 
+def build_ref_graph_notice(cache: Any) -> str:
+    """从 RefCache 构建引用关系图 notice 文本（模块级，方便单元测试）。"""
+    all_tier1 = cache.all_tier1() if hasattr(cache, "all_tier1") else {}
+    if not all_tier1:
+        return ""
+    summaries: list[str] = []
+    for _fp, index in all_tier1.items():
+        text = index.render_summary()
+        if text:
+            summaries.append(text)
+    if not summaries:
+        return ""
+    return "### 引用关系图\n" + "\n".join(summaries)
+
+
 class ContextBuilder:
     """系统提示词组装器，从 AgentEngine 搬迁所有 _build_*_notice 和 _prepare_system_prompts。"""
 
@@ -1602,6 +1617,15 @@ class ContextBuilder:
 
         if self._panorama_cache:
             parts.append(self._panorama_cache)
+
+        # ── 引用关系图（从 RefCache 获取已缓存的 Tier 1 索引） ──
+        try:
+            from excelmanus.tools.reference_tools import get_cache as _get_ref_cache
+            _ref_notice = build_ref_graph_notice(_get_ref_cache())
+            if _ref_notice:
+                parts.append(_ref_notice)
+        except Exception:
+            pass
 
         # ── CoW 路径映射（始终实时追加，turn 内可增长） ──
         cow_registry: dict[str, str] = {}
