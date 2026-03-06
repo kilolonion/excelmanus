@@ -155,3 +155,59 @@ class FormulaRefExtractor:
                 seen.add(name)
                 found.append(name)
         return found
+
+
+_COL_RE = re.compile(r"^([A-Z]+)(\d+)$")
+
+
+def _parse_cell(addr: str) -> tuple[str, int] | None:
+    """解析 'A1' 为 ('A', 1)，失败返回 None。"""
+    m = _COL_RE.match(addr)
+    if m:
+        return m.group(1), int(m.group(2))
+    return None
+
+
+def _col_to_num(col: str) -> int:
+    """'A' → 1, 'Z' → 26, 'AA' → 27。"""
+    n = 0
+    for ch in col:
+        n = n * 26 + (ord(ch) - ord("A") + 1)
+    return n
+
+
+def address_in_ref(address: str, cell_or_range: str) -> bool:
+    """判断 address（如 'B5'）是否被 cell_or_range 覆盖。
+
+    支持：精确匹配、整列范围（A:C）、单元格区域（A1:C10）。
+    """
+    if address == cell_or_range:
+        return True
+
+    if ":" not in cell_or_range:
+        return False
+
+    left, right = cell_or_range.split(":", 1)
+
+    if left.isalpha() and right.isalpha():
+        parsed = _parse_cell(address)
+        if not parsed:
+            return False
+        col_num = _col_to_num(parsed[0])
+        return _col_to_num(left) <= col_num <= _col_to_num(right)
+
+    if left.isdigit() and right.isdigit():
+        parsed = _parse_cell(address)
+        if not parsed:
+            return False
+        return int(left) <= parsed[1] <= int(right)
+
+    p_left = _parse_cell(left)
+    p_right = _parse_cell(right)
+    p_addr = _parse_cell(address)
+    if p_left and p_right and p_addr:
+        col_ok = _col_to_num(p_left[0]) <= _col_to_num(p_addr[0]) <= _col_to_num(p_right[0])
+        row_ok = p_left[1] <= p_addr[1] <= p_right[1]
+        return col_ok and row_ok
+
+    return False

@@ -599,15 +599,14 @@ class FileRegistry:
         if ext not in (".xlsx", ".xlsm"):
             return
         try:
-            from excelmanus.reference_graph.cache import RefCache
             from excelmanus.reference_graph.scanner import Tier1Scanner
             from excelmanus.tools.reference_tools import get_cache
 
             cache = get_cache()
-            scanner = Tier1Scanner()
-            index = scanner.scan(canonical_path)
-            cache.put_tier1(canonical_path, index)
-            logger.info("Tier 1 reference scan completed for %s", canonical_path)
+            if cache.get_tier1(canonical_path) is None:
+                index = Tier1Scanner().scan(canonical_path)
+                cache.put_tier1(canonical_path, index)
+                logger.info("Tier 1 reference scan completed for %s", canonical_path)
         except Exception:
             logger.debug("Tier 1 reference scan skipped for %s", canonical_path, exc_info=True)
 

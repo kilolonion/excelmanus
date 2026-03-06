@@ -8,8 +8,6 @@ class CrossFileRefScanner:
     """检测两个 Excel 文件之间的关联关系。"""
 
     def scan_pair(self, file_path_a: str, file_path_b: str) -> dict[str, Any]:
-        from openpyxl import load_workbook
-
         headers_a = self._extract_headers(file_path_a)
         headers_b = self._extract_headers(file_path_b)
 

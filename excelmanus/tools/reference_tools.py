@@ -2,20 +2,19 @@
 from __future__ import annotations
 
 import json
-from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from excelmanus.reference_graph.cache import RefCache
-from excelmanus.reference_graph.formula_parser import FormulaRefExtractor
-from excelmanus.reference_graph.models import CellNode, CellRef, WorkbookRefIndex
-from excelmanus.reference_graph.scanner import Tier1Scanner
+from excelmanus.reference_graph.formula_parser import FormulaRefExtractor, address_in_ref
+from excelmanus.reference_graph.models import WorkbookRefIndex
+from excelmanus.reference_graph.scanner import Tier1Scanner, Tier2Resolver
 from excelmanus.tools.registry import ToolDef
 
 _workspace_root: str | None = None
 _cache = RefCache()
 _scanner = Tier1Scanner()
-_extractor = FormulaRefExtractor()
+_resolver = Tier2Resolver()
 
 
 def init_guard(workspace_root: str) -> None:
@@ -105,80 +104,38 @@ def trace_references(
         abs_path = _resolve_path(file_path)
         sheet_name, address = _parse_target(target)
 
-        from openpyxl import load_workbook
-        wb = load_workbook(abs_path, data_only=False, read_only=True)
-        try:
-            if sheet_name is None:
+        if sheet_name is None:
+            from openpyxl import load_workbook
+            wb = load_workbook(abs_path, data_only=False, read_only=True)
+            try:
                 sheet_name = wb.sheetnames[0]
-            ws = wb[sheet_name]
+            finally:
+                wb.close()
 
-            formula = None
-            for row in ws.iter_rows():
-                for cell in row:
-                    coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                    if coord == address:
-                        val = cell.value
-                        if isinstance(val, str) and val.startswith("="):
-                            formula = val
-                        break
+        node = _resolver.resolve(
+            abs_path, sheet_name, address,
+            direction=direction, depth=depth,
+        )
 
-            precedents: list[dict[str, Any]] = []
-            dependents: list[dict[str, Any]] = []
-
-            if formula and direction in ("both", "precedents"):
-                refs = _extractor.extract(formula)
-                for ref in refs:
-                    precedents.append({
-                        "cell_or_range": ref.cell_or_range,
-                        "sheet_name": ref.sheet_name or sheet_name,
-                        "display": ref.display(),
-                    })
-
-            if direction in ("both", "dependents"):
-                for row in ws.iter_rows():
-                    for cell in row:
-                        val = cell.value
-                        if not isinstance(val, str) or not val.startswith("="):
-                            continue
-                        refs = _extractor.extract(val)
-                        for ref in refs:
-                            ref_sheet = ref.sheet_name or sheet_name
-                            if ref_sheet == sheet_name and address in ref.cell_or_range:
-                                coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                                if coord and coord != address:
-                                    dependents.append({
-                                        "cell": coord,
-                                        "sheet": sheet_name,
-                                        "formula": val,
-                                    })
-
-            _ensure_index(file_path)
-            index = _cache.get_tier1(abs_path)
-            if index and direction in ("both", "dependents"):
-                for other_sheet in wb.sheetnames:
-                    if other_sheet == sheet_name:
-                        continue
-                    ws_other = wb[other_sheet]
-                    for row in ws_other.iter_rows():
-                        for cell in row:
-                            val = cell.value
-                            if not isinstance(val, str) or not val.startswith("="):
-                                continue
-                            refs = _extractor.extract(val)
-                            for ref in refs:
-                                if ref.sheet_name == sheet_name and address in ref.cell_or_range:
-                                    coord = cell.coordinate if hasattr(cell, "coordinate") else ""
-                                    dependents.append({
-                                        "cell": coord,
-                                        "sheet": other_sheet,
-                                        "formula": val,
-                                    })
-        finally:
-            wb.close()
+        precedents = [
+            {
+                "cell_or_range": r.cell_or_range,
+                "sheet_name": r.sheet_name or sheet_name,
+                "display": r.display(),
+            }
+            for r in node.precedents
+        ]
+        dependents = [
+            {
+                "cell": r.cell_or_range,
+                "sheet": r.sheet_name or sheet_name,
+            }
+            for r in node.dependents
+        ]
 
         return json.dumps({
             "target": target,
-            "formula": formula,
+            "formula": node.formula,
             "precedents": precedents,
             "dependents": dependents,
         }, ensure_ascii=False, indent=2)
@@ -202,6 +159,7 @@ def get_impact_analysis(
             if sheet_name is None:
                 sheet_name = wb.sheetnames[0]
 
+            extractor = FormulaRefExtractor()
             direct: list[dict[str, Any]] = []
             affected_sheets: set[str] = set()
 
@@ -212,10 +170,10 @@ def get_impact_analysis(
                         val = cell.value
                         if not isinstance(val, str) or not val.startswith("="):
                             continue
-                        refs = _extractor.extract(val)
+                        refs = extractor.extract(val)
                         for ref in refs:
                             ref_sheet = ref.sheet_name or ws_name
-                            if ref_sheet == sheet_name and address in ref.cell_or_range:
+                            if ref_sheet == sheet_name and address_in_ref(address, ref.cell_or_range):
                                 coord = cell.coordinate if hasattr(cell, "coordinate") else ""
                                 direct.append({
                                     "cell": coord,

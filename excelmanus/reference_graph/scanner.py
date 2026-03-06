@@ -5,7 +5,7 @@ import time
 from collections import Counter, defaultdict
 from typing import Any
 
-from .formula_parser import FormulaRefExtractor
+from .formula_parser import FormulaRefExtractor, address_in_ref
 from .models import (
     CellNode,
     CellRef,
@@ -162,13 +162,17 @@ class Tier2Resolver:
         ws = wb[sheet_name]
 
         formula: str | None = None
+        found = False
         for row in ws.iter_rows():
+            if found:
+                break
             for cell in row:
                 coord = cell.coordinate if hasattr(cell, "coordinate") else ""
                 if coord == address:
                     val = cell.value
                     if isinstance(val, str) and val.startswith("="):
                         formula = val
+                    found = True
                     break
 
         precedents: list[CellRef] = []
@@ -204,7 +208,7 @@ class Tier2Resolver:
                     refs = self._extractor.extract(val)
                     for ref in refs:
                         ref_sheet = ref.sheet_name or ws_name
-                        if ref_sheet == sheet_name and self._address_in_range(address, ref.cell_or_range):
+                        if ref_sheet == sheet_name and address_in_ref(address, ref.cell_or_range):
                             coord = cell.coordinate if hasattr(cell, "coordinate") else ""
                             key = f"{ws_name}!{coord}"
                             if coord and key not in seen:
@@ -214,18 +218,3 @@ class Tier2Resolver:
                                     cell_or_range=coord,
                                 ))
         return results
-
-    @staticmethod
-    def _address_in_range(address: str, cell_or_range: str) -> bool:
-        """检查单元格地址是否在引用范围内（简单匹配）。"""
-        if address == cell_or_range:
-            return True
-        if ":" in cell_or_range:
-            parts = cell_or_range.split(":")
-            if len(parts) == 2 and all(c.isalpha() for c in parts[0]) and all(c.isalpha() for c in parts[1]):
-                import re
-                col_match = re.match(r"([A-Z]+)", address)
-                if col_match:
-                    col = col_match.group(1)
-                    return parts[0] <= col <= parts[1]
-        return False
