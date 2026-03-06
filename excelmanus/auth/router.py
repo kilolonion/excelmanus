@@ -1839,7 +1839,13 @@ async def _sync_user_subscription_sessions(request: Request, user_id: str) -> No
     if session_mgr is None:
         return
 
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+    from excelmanus.auth.providers.registry import list_all as _list_all_providers
+
+    _prefixes = tuple(
+        getattr(p, "MODEL_NAME_PREFIX", "")
+        for p in _list_all_providers().values()
+        if getattr(p, "MODEL_NAME_PREFIX", "")
+    )
 
     try:
         sessions = await session_mgr.list_sessions(user_id=user_id)
@@ -1856,10 +1862,11 @@ async def _sync_user_subscription_sessions(request: Request, user_id: str) -> No
             current_name = engine.current_model_name
             if (
                 current_name
-                and OpenAICodexProvider.is_codex_profile_name(current_name)
+                and any(current_name.startswith(pfx) for pfx in _prefixes)
                 and all(p.name != current_name for p in engine._config.models)
             ):
-                engine.switch_model("default")
+                if engine._config.models:
+                    engine.switch_model(engine._config.models[0].name)
     except Exception:
         logger.debug("同步用户订阅模型失败", exc_info=True)
 
@@ -2324,6 +2331,295 @@ async def codex_oauth_exchange(
         "provider": "openai-codex",
         "account_id": credential.account_id,
         "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+    }
+
+
+# ── 通用 Provider 端点（支持所有已注册 provider） ──────────
+
+
+_PROVIDER_STATE_TTL = 900  # state token 有效期 15 分钟
+_PROVIDER_OAUTH_FALLBACK_PORT = 1455
+
+_PROVIDER_CALLBACK_PATHS: dict[str, str] = {
+    "google-gemini": "/auth/gemini/callback",
+}
+
+
+def _resolve_provider(provider_name: str):
+    from excelmanus.auth.providers.registry import get_provider
+    provider = get_provider(provider_name)
+    if provider is None:
+        raise HTTPException(404, f"不支持的提供商: {provider_name}")
+    return provider
+
+
+@router.get("/providers/descriptors")
+async def list_provider_descriptors(
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """列出所有可用的订阅提供商及其能力描述。"""
+    from excelmanus.auth.providers.registry import list_descriptors
+    return {"providers": [d.to_dict() for d in list_descriptors()]}
+
+
+@router.post("/providers/{provider_name}")
+async def generic_connect_provider(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """粘贴 token 接入订阅（通用）。"""
+    provider = _resolve_provider(provider_name)
+    body = await request.json()
+    token_data = body.get("token_data")
+    if not token_data or not isinstance(token_data, dict):
+        raise HTTPException(400, "请提供 token_data 字段")
+    try:
+        credential = provider.validate_token_data(token_data)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    store = _get_credential_store(request)
+    store.upsert_profile(user_id=user.id, provider=provider_name, profile_name="default", credential=credential)
+    await provider.on_connect_success(request, user.id, credential)
+    await _sync_user_subscription_sessions(request, user.id)
+    return {
+        "status": "connected", "provider": provider_name,
+        "account_id": credential.account_id, "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+    }
+
+
+@router.delete("/providers/{provider_name}")
+async def generic_disconnect_provider(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """断开订阅连接（通用）。"""
+    _resolve_provider(provider_name)
+    store = _get_credential_store(request)
+    deleted = store.delete_profile(user.id, provider_name, "default")
+    if not deleted:
+        raise HTTPException(404, f"未找到 {provider_name} 连接")
+    await _sync_user_subscription_sessions(request, user.id)
+    return {"status": "disconnected", "provider": provider_name}
+
+
+@router.get("/providers/{provider_name}/status")
+async def generic_provider_status(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """查询订阅连接状态（通用）。"""
+    _resolve_provider(provider_name)
+    store = _get_credential_store(request)
+    profile = store.get_active_profile(user.id, provider_name)
+    if not profile:
+        return {"status": "disconnected", "provider": provider_name}
+    from datetime import datetime as _dt, timezone as _tz
+    is_expired = False
+    if profile.expires_at:
+        try:
+            exp = _dt.fromisoformat(profile.expires_at)
+            if exp.tzinfo is None:
+                exp = exp.replace(tzinfo=_tz.utc)
+            is_expired = exp < _dt.now(tz=_tz.utc)
+        except (ValueError, TypeError):
+            pass
+    return {
+        "status": "expired" if is_expired else "connected",
+        "provider": provider_name,
+        "account_id": profile.account_id, "plan_type": profile.plan_type,
+        "expires_at": profile.expires_at, "is_active": profile.is_active,
+        "has_refresh_token": bool(profile.refresh_token),
+    }
+
+
+@router.post("/providers/{provider_name}/refresh")
+async def generic_refresh_provider_token(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """手动刷新 token（通用）。"""
+    provider = _resolve_provider(provider_name)
+    store = _get_credential_store(request)
+    profile = store.get_active_profile(user.id, provider_name)
+    if not profile:
+        raise HTTPException(404, f"未找到 {provider_name} 连接")
+    if not profile.refresh_token:
+        raise HTTPException(400, "无 refresh token，请重新登录")
+    try:
+        refreshed = await provider.refresh_token(profile.refresh_token)
+    except RuntimeError as e:
+        store.deactivate_profile(profile.id)
+        raise HTTPException(502, str(e))
+    store.update_tokens(profile.id, refreshed.access_token, refreshed.refresh_token, refreshed.expires_at)
+    await _sync_user_subscription_sessions(request, user.id)
+    return {"status": "refreshed", "provider": provider_name, "expires_at": refreshed.expires_at}
+
+
+@router.post("/providers/{provider_name}/oauth/start")
+async def generic_provider_oauth_start(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """发起 OAuth PKCE 浏览器流程（通用）。"""
+    from excelmanus.auth.providers.base import PKCECapable
+    provider = _resolve_provider(provider_name)
+    if not isinstance(provider, PKCECapable):
+        raise HTTPException(400, f"{provider_name} 不支持 OAuth PKCE 流程")
+    body = {}
+    try:
+        body = await request.json()
+    except Exception:
+        pass
+    client_redirect = (body.get("redirect_uri") or "").strip()
+    if client_redirect:
+        from urllib.parse import urlparse
+        parsed = urlparse(client_redirect)
+        if parsed.hostname not in ("localhost", "127.0.0.1"):
+            raise HTTPException(400, "redirect_uri 仅允许 localhost 或 127.0.0.1")
+        redirect_uri = client_redirect
+        mode = "popup"
+    else:
+        callback_path = _PROVIDER_CALLBACK_PATHS.get(provider_name, "/auth/callback")
+        redirect_uri = f"http://localhost:{_PROVIDER_OAUTH_FALLBACK_PORT}{callback_path}"
+        mode = "paste"
+    code_verifier, code_challenge = provider.generate_pkce()
+    state = _generate_oauth_state()
+    cred_store = _get_credential_store(request)
+    cred_store.save_oauth_state(state, {
+        "provider": provider_name,
+        "user_id": user.id,
+        "code_verifier": code_verifier,
+        "redirect_uri": redirect_uri,
+    }, ttl=_PROVIDER_STATE_TTL)
+    authorize_url = provider.build_authorize_url(
+        redirect_uri=redirect_uri, state=state, code_challenge=code_challenge,
+    )
+    return {"authorize_url": authorize_url, "state": state, "redirect_uri": redirect_uri, "mode": mode}
+
+
+@router.post("/providers/{provider_name}/oauth/exchange")
+async def generic_provider_oauth_exchange(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """用授权码交换 token（通用）。"""
+    from excelmanus.auth.providers.base import PKCECapable
+    provider = _resolve_provider(provider_name)
+    if not isinstance(provider, PKCECapable):
+        raise HTTPException(400, f"{provider_name} 不支持 OAuth PKCE 流程")
+    body = await request.json()
+    code = (body.get("code") or "").strip()
+    state = (body.get("state") or "").strip()
+    if not code:
+        raise HTTPException(400, "缺少 code 参数")
+    if not state:
+        raise HTTPException(400, "缺少 state 参数")
+    cred_store = _get_credential_store(request)
+    pending = cred_store.pop_oauth_state(state, ttl=_PROVIDER_STATE_TTL)
+    if not pending:
+        raise HTTPException(400, "state 无效或已过期，请重新发起授权")
+    if pending.get("user_id") != user.id:
+        raise HTTPException(403, "state 与当前用户不匹配")
+    code_verifier = pending.get("code_verifier", "")
+    redirect_uri = pending.get("redirect_uri", "")
+    if not code_verifier or not redirect_uri:
+        raise HTTPException(400, "state 数据不完整")
+    try:
+        credential = await provider.exchange_code(code=code, redirect_uri=redirect_uri, code_verifier=code_verifier)
+    except RuntimeError as e:
+        raise HTTPException(502, f"Token 交换失败: {e}")
+    store = _get_credential_store(request)
+    store.upsert_profile(user_id=user.id, provider=provider_name, profile_name="default", credential=credential)
+    await provider.on_connect_success(request, user.id, credential)
+    await _sync_user_subscription_sessions(request, user.id)
+    return {
+        "status": "connected", "provider": provider_name,
+        "account_id": credential.account_id, "plan_type": credential.plan_type,
+        "expires_at": credential.expires_at,
+    }
+
+
+@router.post("/providers/{provider_name}/device-code/start")
+async def generic_device_code_start(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """发起 Device Code 登录流程（通用）。"""
+    from excelmanus.auth.providers.base import DeviceCodeCapable
+    provider = _resolve_provider(provider_name)
+    if not isinstance(provider, DeviceCodeCapable):
+        raise HTTPException(400, f"{provider_name} 不支持 Device Code 登录")
+    try:
+        device_info = await provider.request_user_code()
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    state = _seal_oauth_state({
+        "provider": provider_name,
+        "user_id": user.id,
+        "device_auth_id": device_info["device_auth_id"],
+        "user_code": device_info["user_code"],
+        "ts": _time.time(),
+    })
+    return {
+        "user_code": device_info["user_code"],
+        "verification_url": device_info["verification_url"],
+        "interval": device_info["interval"],
+        "state": state,
+    }
+
+
+@router.post("/providers/{provider_name}/device-code/poll")
+async def generic_device_code_poll(
+    provider_name: str,
+    request: Request,
+    user: UserRecord = Depends(get_current_user),
+) -> Any:
+    """轮询 Device Code 授权状态（通用）。"""
+    from excelmanus.auth.providers.base import DeviceCodeCapable
+    provider = _resolve_provider(provider_name)
+    if not isinstance(provider, DeviceCodeCapable):
+        raise HTTPException(400, f"{provider_name} 不支持 Device Code 登录")
+    body = await request.json()
+    state = body.get("state", "")
+    if not state:
+        raise HTTPException(400, "缺少 state 参数")
+    pending = _unseal_oauth_state(state)
+    if not pending:
+        raise HTTPException(400, "state 无效或已过期，请重新发起登录")
+    if pending.get("user_id") != user.id:
+        raise HTTPException(403, "state 与当前用户不匹配")
+    try:
+        result = await provider.poll_device_auth(
+            device_auth_id=pending["device_auth_id"], user_code=pending["user_code"],
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, str(e))
+    if result is None:
+        return {"status": "pending"}
+    try:
+        credential = await provider.exchange_device_code(
+            authorization_code=result["authorization_code"],
+            code_verifier=result.get("code_verifier", ""),
+        )
+    except RuntimeError as e:
+        raise HTTPException(502, f"Token 交换失败: {e}")
+    store = _get_credential_store(request)
+    store.upsert_profile(user_id=user.id, provider=provider_name, profile_name="default", credential=credential)
+    await provider.on_connect_success(request, user.id, credential)
+    await _sync_user_subscription_sessions(request, user.id)
+    return {
+        "status": "connected", "provider": provider_name,
+        "account_id": credential.account_id, "plan_type": credential.plan_type,
         "expires_at": credential.expires_at,
     }
 

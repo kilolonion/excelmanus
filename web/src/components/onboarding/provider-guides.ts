@@ -264,5 +264,6 @@ export const PROVIDER_LOGO_SLUG: Record<string, string> = {
   qwen: "qwen",
   zhipu: "zhipu",
   "openai-codex": "openai",
+  "google-gemini": "gemini",
   openrouter: "openrouter",
 };
