@@ -1,4 +1,4 @@
-"""API 服务模块：基于 FastAPI 的 REST API 服务。
+﻿"""API 服务模块：基于 FastAPI 的 REST API 服务。
 
 端点：
 - POST   /api/v1/chat                        对话接口（完整 JSON）
@@ -102,6 +102,7 @@ from excelmanus.skillpacks.importer import SkillImportError
 from excelmanus.tools import ToolRegistry
 from excelmanus.api_sse import (
     SessionStreamState as _SessionStreamState,
+    inject_seq_into_sse as _inject_seq,
     sse_event_to_sse as _sse_event_to_sse_impl,
     sse_format as _sse_format,
 )
@@ -983,6 +984,61 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.debug("CredentialStore 初始化失败", exc_info=True)
                 app.state.credential_store = None
                 app.state.credential_resolver = None
+            # 初始化号池服务（PoolService）
+            try:
+                from excelmanus.pool.service import PoolService as _PoolService
+                _pool_service = _PoolService(
+                    conn=_database.conn,
+                    credential_store=getattr(app.state, "credential_store", None),
+                )
+                app.state.pool_service = _pool_service
+                # 注入 PoolService 到 CredentialResolver
+                _cr = getattr(app.state, "credential_resolver", None)
+                if _cr is not None:
+                    _cr._pool_service = _pool_service
+                    _cr._pool_enabled = getattr(_config, "pool_enabled", False)
+                logger.info("PoolService 已初始化")
+                # 初始化自动轮换服务
+                if getattr(_config, "pool_auto_enabled", False) and getattr(_config, "pool_enabled", False):
+                    try:
+                        from excelmanus.pool.breaker import BreakerManager as _BreakerMgr
+                        from excelmanus.pool.metrics import MetricsAggregator as _MetricsAgg
+                        from excelmanus.pool.auto_rotate import PoolAutoRotateService as _AutoRotateSvc
+                        _breaker_mgr = _BreakerMgr(
+                            conn=_database.conn,
+                            failure_threshold=getattr(
+                                _config, "pool_auto_breaker_threshold", 5,
+                            ),
+                            open_seconds=getattr(
+                                _config, "pool_auto_breaker_open_seconds", 120,
+                            ),
+                        )
+                        app.state.pool_breaker_manager = _breaker_mgr
+                        _metrics_agg = _MetricsAgg(conn=_database.conn)
+                        app.state.pool_metrics_aggregator = _metrics_agg
+                        _auto_rotate_svc = _AutoRotateSvc(
+                            conn=_database.conn,
+                            pool_service=_pool_service,
+                            default_cooldown_seconds=getattr(
+                                _config, "pool_auto_default_cooldown_seconds", 300,
+                            ),
+                            breaker=_breaker_mgr,
+                        )
+                        app.state.pool_auto_rotate_service = _auto_rotate_svc
+                        logger.info("PoolAutoRotateService + BreakerManager + MetricsAggregator 已初始化")
+                    except Exception:
+                        logger.debug("PoolAutoRotateService 初始化失败", exc_info=True)
+                        app.state.pool_auto_rotate_service = None
+                        app.state.pool_breaker_manager = None
+                        app.state.pool_metrics_aggregator = None
+                else:
+                    app.state.pool_auto_rotate_service = None
+                    app.state.pool_breaker_manager = None
+                    app.state.pool_metrics_aggregator = None
+            except Exception:
+                logger.debug("PoolService 初始化失败", exc_info=True)
+                app.state.pool_service = None
+                app.state.pool_auto_rotate_service = None
             if auth_enabled:
                 logger.info("认证系统已启用")
             else:
@@ -1124,9 +1180,89 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         else:
             logger.warning("渠道 %s 启动失败: %s", _ch_name, msg)
 
+    # ── 号池快照聚合后台任务（每 5 分钟） ──────────────────
+    _pool_snapshot_task: asyncio.Task | None = None
+    _pool_svc_bg = getattr(app.state, "pool_service", None)
+    if _pool_svc_bg is not None:
+        async def _pool_snapshot_loop() -> None:
+            while True:
+                await asyncio.sleep(300)  # 5 分钟
+                try:
+                    count = _pool_svc_bg.refresh_snapshots()
+                    if count:
+                        logger.debug("号池快照刷新: %d 个账号", count)
+                except Exception:
+                    logger.debug("号池快照刷新失败", exc_info=True)
+
+        _pool_snapshot_task = asyncio.create_task(_pool_snapshot_loop())
+        logger.info("号池快照聚合后台任务已启动（间隔 5 分钟）")
+
+    # ── 号池自动轮换后台任务 ──────────────────────────────────
+    _pool_auto_rotate_task: asyncio.Task | None = None
+    _auto_rotate_svc_bg = getattr(app.state, "pool_auto_rotate_service", None)
+    if _auto_rotate_svc_bg is not None:
+        _auto_interval = getattr(_config, "pool_auto_interval_seconds", 60)
+
+        async def _pool_auto_rotate_loop() -> None:
+            while True:
+                await asyncio.sleep(_auto_interval)
+                try:
+                    results = await _auto_rotate_svc_bg.evaluate_all_policies()
+                    actions = [r for r in results if r.get("action") != "none"]
+                    if actions:
+                        logger.info("号池自动轮换评估完成: %d 个操作", len(actions))
+                except Exception:
+                    logger.debug("号池自动轮换评估失败", exc_info=True)
+
+        _pool_auto_rotate_task = asyncio.create_task(_pool_auto_rotate_loop())
+        logger.info("号池自动轮换后台任务已启动（间隔 %ds）", _auto_interval)
+
+    # ── 号池指标聚合后台任务（60s）───────────────────
+    _pool_metrics_task: asyncio.Task | None = None
+    _metrics_agg_bg = getattr(app.state, "pool_metrics_aggregator", None)
+    if _metrics_agg_bg is not None and _auto_rotate_svc_bg is not None:
+        async def _pool_metrics_loop() -> None:
+            while True:
+                await asyncio.sleep(60)
+                try:
+                    policies = _auto_rotate_svc_bg.list_policies()
+                    count = _metrics_agg_bg.aggregate_all_scopes(policies)
+                    if count:
+                        logger.debug("号池指标聚合完成: %d 个 scope", count)
+                except Exception:
+                    logger.debug("号池指标聚合失败", exc_info=True)
+
+        _pool_metrics_task = asyncio.create_task(_pool_metrics_loop())
+        logger.info("号池指标聚合后台任务已启动（间隔 60s）")
+
     yield
 
-    # ── Graceful Shutdown: 标记 draining 并等待活跃连接排空 ──
+    # ── Graceful Shutdown ──────────────────────────────────────
+    # 取消号池指标聚合后台任务
+    if _pool_metrics_task is not None and not _pool_metrics_task.done():
+        _pool_metrics_task.cancel()
+        try:
+            await _pool_metrics_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        logger.debug("号池指标聚合后台任务已取消")
+    # 取消号池自动轮换后台任务
+    if _pool_auto_rotate_task is not None and not _pool_auto_rotate_task.done():
+        _pool_auto_rotate_task.cancel()
+        try:
+            await _pool_auto_rotate_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        logger.debug("号池自动轮换后台任务已取消")
+    # 取消号池快照后台任务
+    if _pool_snapshot_task is not None and not _pool_snapshot_task.done():
+        _pool_snapshot_task.cancel()
+        try:
+            await _pool_snapshot_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        logger.debug("号池快照后台任务已取消")
+
     global _draining
     _draining = True
     logger.info("API 服务进入 draining 状态，等待活跃连接排空...")
@@ -1434,6 +1570,8 @@ def create_app(
     application.include_router(rules_router)
     from excelmanus.api_routes_version import router as version_router
     application.include_router(version_router)
+    from excelmanus.pool.router import router as pool_router
+    application.include_router(pool_router)
 
     application.include_router(_router)
     return application
@@ -1588,10 +1726,72 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 channel=request.channel,
             )
         )
+    except Exception as _chat_exc:
+        # 非流式路径：池健康信号更新 + 即时评估
+        _pool_aid_err_json = getattr(engine, "_pool_account_id", None)
+        if _pool_aid_err_json:
+            try:
+                from excelmanus.pool.signals import update_pool_health_from_error
+                from excelmanus.error_guidance import _extract_status_code
+                _pool_svc_err_json = getattr(raw_request.app.state, "pool_service", None)
+                if _pool_svc_err_json is not None:
+                    update_pool_health_from_error(
+                        pool_service=_pool_svc_err_json,
+                        pool_account_id=_pool_aid_err_json,
+                        status_code=_extract_status_code(_chat_exc),
+                        error_message=str(_chat_exc)[:500],
+                        session_id=session_id or "",
+                        user_id=auth_user_id or "",
+                        model=getattr(engine, "_active_model", ""),
+                        breaker=getattr(raw_request.app.state, "pool_breaker_manager", None),
+                    )
+                # 即时触发自动轮换评估
+                _auto_rotate_err_json = getattr(raw_request.app.state, "pool_auto_rotate_service", None)
+                if _auto_rotate_err_json is not None:
+                    _fire_and_forget(
+                        _auto_rotate_err_json.evaluate_on_error("openai-codex", "*"),
+                        name="pool_auto_rotate_eval",
+                    )
+            except Exception:
+                logger.debug("非流式号池健康信号更新失败", exc_info=True)
+        raise
     finally:
         await _session_manager.release_for_chat(session_id)
 
     normalized_reply = guard_public_reply(chat_result.reply.strip())
+
+    # 号池台账写入（非流式路径）
+    _pool_aid_json = getattr(engine, "_pool_account_id", None)
+    if _pool_aid_json and chat_result.total_tokens > 0:
+        try:
+            _pool_svc_json = getattr(raw_request.app.state, "pool_service", None)
+            if _pool_svc_json is not None:
+                _pool_svc_json.log_usage(
+                    pool_account_id=_pool_aid_json,
+                    session_id=session_id or "",
+                    user_id=auth_user_id or "",
+                    model=getattr(engine, "_active_model", ""),
+                    prompt_tokens=chat_result.prompt_tokens,
+                    completion_tokens=chat_result.completion_tokens,
+                    total_tokens=chat_result.total_tokens,
+                    outcome="success",
+                )
+                from excelmanus.pool.signals import update_pool_health_on_success
+                update_pool_health_on_success(
+                    _pool_svc_json, _pool_aid_json,
+                    breaker=getattr(raw_request.app.state, "pool_breaker_manager", None),
+                )
+        except Exception:
+            logger.debug("非流式号池台账写入失败", exc_info=True)
+    # 记录已认证用户 token 使用量（非流式路径）
+    if auth_user_id and chat_result.total_tokens > 0:
+        try:
+            _user_store_json = getattr(raw_request.app.state, "user_store", None)
+            if _user_store_json is not None:
+                _user_store_json.record_token_usage(auth_user_id, chat_result.total_tokens)
+        except Exception:
+            logger.debug("记录用户 token 用量失败", exc_info=True)
+
     # ── 自动标题（仅首轮）：截取用户消息 + 后台 AI 生成 ──
     generated_title: str | None = None
     if engine.session_turn == 1:
@@ -1675,7 +1875,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
         acquired = False
         stream_state: _SessionStreamState | None = None
         chat_task: asyncio.Task[Any] | None = None
-        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = None
+        queue_get_task: asyncio.Task[Any] | None = None
 
         async def _cancel_task(task: asyncio.Task[Any] | None) -> None:
             if task is None or task.done():
@@ -1795,6 +1995,11 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             stream_state = _SessionStreamState()
             _session_stream_states[session_id] = stream_state
             event_queue = stream_state.attach()
+
+            yield _sse_format("stream_init", {
+                "stream_id": stream_state.stream_id,
+                "seq": 1,
+            })
 
             _sse_event_count = 0
 
@@ -1920,9 +2125,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 """后台 chat 任务完成后清理活跃任务映射与流状态。"""
                 if _active_chat_tasks.get(session_id) is done_task:
                     _active_chat_tasks.pop(session_id, None)
-                ss = _session_stream_states.get(session_id)
-                if ss is not None and ss.subscriber_queue is None:
-                    _session_stream_states.pop(session_id, None)
                 try:
                     done_task.result()
                 except asyncio.CancelledError:
@@ -1946,13 +2148,18 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 )
 
                 if queue_get_task in done:
-                    event = queue_get_task.result()
-                    if event is not None:
+                    seq_item = queue_get_task.result()
+                    if seq_item is not None:
+                        _seq, event = seq_item
                         if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                             _last_pipeline_stage = event.pipeline_stage
-                        sse = _sse_event_to_sse(event, safe_mode=safe_mode, is_channel=_is_channel_request)
+                        sse = _sse_event_to_sse(
+                            event,
+                            safe_mode=safe_mode,
+                            is_channel=_is_channel_request,
+                        )
                         if sse is not None:
-                            yield sse
+                            yield _inject_seq(sse, _seq, stream_state.stream_id)
                     if chat_task.done():
                         queue_get_task = None
                     else:
@@ -1962,15 +2169,20 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     # 排空队列中剩余事件
                     while True:
                         try:
-                            event = event_queue.get_nowait()
+                            seq_item = event_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if event is not None:
+                        if seq_item is not None:
+                            _seq, event = seq_item
                             if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                                 _last_pipeline_stage = event.pipeline_stage
-                            sse = _sse_event_to_sse(event, safe_mode=safe_mode, is_channel=_is_channel_request)
+                            sse = _sse_event_to_sse(
+                                event,
+                                safe_mode=safe_mode,
+                                is_channel=_is_channel_request,
+                            )
                             if sse is not None:
-                                yield sse
+                                yield _inject_seq(sse, _seq, stream_state.stream_id)
                     break
 
             # chat 任务完成：获取结果
@@ -1999,6 +2211,29 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         _user_store.record_token_usage(auth_user_id, chat_result.total_tokens)
                 except Exception:
                     logger.debug("记录用户 token 用量失败", exc_info=True)
+            # 号池台账写入：pool_oauth 来源时记录用量
+            _pool_aid = getattr(engine, "_pool_account_id", None)
+            if _pool_aid and chat_result.total_tokens > 0:
+                try:
+                    _pool_svc = getattr(raw_request.app.state, "pool_service", None)
+                    if _pool_svc is not None:
+                        _pool_svc.log_usage(
+                            pool_account_id=_pool_aid,
+                            session_id=session_id or "",
+                            user_id=auth_user_id or "",
+                            model=getattr(engine, "_active_model", ""),
+                            prompt_tokens=chat_result.prompt_tokens,
+                            completion_tokens=chat_result.completion_tokens,
+                            total_tokens=chat_result.total_tokens,
+                            outcome="success",
+                        )
+                        from excelmanus.pool.signals import update_pool_health_on_success
+                        update_pool_health_on_success(
+                            _pool_svc, _pool_aid,
+                            breaker=getattr(raw_request.app.state, "pool_breaker_manager", None),
+                        )
+                except Exception:
+                    logger.debug("号池台账写入失败", exc_info=True)
             # ── 自动标题（仅首轮）：立即截取用户消息，后台异步 AI 生成 ──
             if engine.session_turn == 1:
                 _instant_title = _truncate_user_message_as_title(display_text)
@@ -2050,6 +2285,33 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 engine=engine,
                 guidance=_top_guidance,
             )
+            # 号池健康信号：从错误中更新池账号状态
+            _pool_aid_err = getattr(engine, "_pool_account_id", None)
+            if _pool_aid_err:
+                try:
+                    from excelmanus.pool.signals import update_pool_health_from_error
+                    from excelmanus.error_guidance import _extract_status_code
+                    _pool_svc_err = getattr(raw_request.app.state, "pool_service", None)
+                    if _pool_svc_err is not None:
+                        update_pool_health_from_error(
+                            pool_service=_pool_svc_err,
+                            pool_account_id=_pool_aid_err,
+                            status_code=_extract_status_code(exc),
+                            error_message=str(exc)[:500],
+                            session_id=session_id or "",
+                            user_id=auth_user_id or "",
+                            model=_model_name or "",
+                            breaker=getattr(raw_request.app.state, "pool_breaker_manager", None),
+                        )
+                    # 即时触发自动轮换评估
+                    _auto_rotate_err = getattr(raw_request.app.state, "pool_auto_rotate_service", None)
+                    if _auto_rotate_err is not None:
+                        _fire_and_forget(
+                            _auto_rotate_err.evaluate_on_error("openai-codex", "*"),
+                            name="pool_auto_rotate_eval",
+                        )
+                except Exception:
+                    logger.debug("号池健康信号更新失败", exc_info=True)
             yield _failure_guidance_sse(_top_guidance)
             yield _sse_format("done", {})
             # 确保 chat 任务被取消
@@ -2488,37 +2750,46 @@ class _SubscribeRequest(BaseModel):
     session_id: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ]
+    stream_id: str | None = Field(
+        default=None,
+        description="目标流标识，用于校验流身份一致性。",
+    )
+    after_seq: int = Field(
+        default=0,
+        ge=0,
+        description="仅补发 seq > after_seq 的缓冲事件。0 表示全量重放。",
+    )
     skip_replay: bool = Field(
         default=False,
-        description="跳过缓冲事件重放，仅接收实时新事件。"
-        "前端已从后端加载了当前消息时使用，避免重复 block。",
+        description="跳过缓冲区重放，仅保留 thinking 类事件。",
     )
 
 
 @_router.post("/api/v1/chat/subscribe", responses=_error_responses)
 async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> StreamingResponse:
-    """SSE 重连端点：页面刷新后重新接入正在执行的聊天任务事件流。
-
-    先重放断连期间缓冲的事件，再实时推送后续事件，直到任务完成。
-    若任务已结束，返回 done 事件后关闭。
-    """
+    """SSE 重连端点：重放缓冲事件并接续实时流。"""
     session_id = request.session_id
+    skip_replay = request.skip_replay
+    safe_mode = _is_external_safe_mode()
+
+    # skip_replay 时仅保留的事件类型
+    _REPLAY_KEEP_TYPES = {
+        EventType.THINKING,
+        EventType.THINKING_DELTA,
+        EventType.ITERATION_START,
+        EventType.RETRACT_THINKING,
+    }
 
     if not await _has_session_access(session_id, raw_request):
         return _error_json_response(404, f"会话 '{session_id}' 不存在。")  # type: ignore[return-value]
 
     chat_task = _active_chat_tasks.get(session_id)
     stream_state = _session_stream_states.get(session_id)
+    after_seq = request.after_seq
 
-    # 没有活跃任务或 stream_state → 返回即时 done
-    if chat_task is None or chat_task.done() or stream_state is None:
-        async def _done_stream() -> AsyncIterator[str]:
-            yield _sse_format("session_init", {"session_id": session_id})
-            yield _sse_format("subscribe_resume", {"status": "completed"})
-            yield _sse_format("done", {})
-
+    def _streaming_response(gen: AsyncIterator[str]) -> StreamingResponse:
         return StreamingResponse(
-            _done_stream(),
+            gen,
             media_type="text/event-stream",
             headers={
                 "Cache-Control": "no-cache",
@@ -2527,37 +2798,73 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             },
         )
 
-    # 附着新的订阅者队列
-    event_queue = stream_state.attach()
-    # skip_replay=True 时仅保留 SSE-only 事件（thinking/iteration 等不进 SQLite，
-    # 前端无法从后端消息恢复），丢弃可从后端持久化消息恢复的事件。
-    _SSE_ONLY_EVENT_TYPES = {
-        EventType.THINKING, EventType.THINKING_DELTA,
-        EventType.ITERATION_START, EventType.RETRACT_THINKING,
-    }
-    if request.skip_replay:
-        all_buffered = stream_state.drain_buffer()
-        buffered_events = [e for e in all_buffered if e.event_type in _SSE_ONLY_EVENT_TYPES]
-    else:
-        buffered_events = stream_state.drain_buffer()
+    # ── 无活跃流状态：会话已完成或不存在 ──
+    if stream_state is None:
+        async def _done_stream() -> AsyncIterator[str]:
+            yield _sse_format("session_init", {"session_id": session_id})
+            yield _sse_format("subscribe_resume", {
+                "status": "completed",
+                "buffered_count": 0,
+            })
+            yield _sse_format("done", {})
 
-    safe_mode = _is_external_safe_mode()
+        _active_chat_tasks.pop(session_id, None)
+        return _streaming_response(_done_stream())
+
+    _sid = stream_state.stream_id
+
+    # ── 检测 gap：after_seq 精确补发 + 缓冲溢出检测 ──
+    # 当事件曾被丢弃且缓冲中最早 seq 大于客户端期望的下一个 seq 时，
+    # 说明存在不可恢复的事件缺口，需要通知前端走快照回源。
+    _has_gap = False
+    if stream_state.has_dropped:
+        first_buf = stream_state.first_buffered_seq
+        if first_buf is not None and first_buf > after_seq + 1:
+            _has_gap = True
+        elif first_buf is None:
+            # 缓冲区为空但有丢弃记录（零容量缓冲或全部溢出）
+            _has_gap = True
+
+    # ── chat 任务已完成：重放缓冲后结束 ──
+    if chat_task is None or chat_task.done():
+        replay_items = stream_state.drain_buffer(after_seq=after_seq)
+
+        async def _completed_stream() -> AsyncIterator[str]:
+            try:
+                yield _sse_format("session_init", {"session_id": session_id})
+                if _has_gap:
+                    yield _sse_format("resume_failed", {
+                        "reason": "buffer_overflow",
+                        "stream_id": _sid,
+                        "after_seq": after_seq,
+                        "available_from_seq": replay_items[0][0] if replay_items else None,
+                    })
+                    yield _sse_format("done", {})
+                    return
+                yield _sse_format("subscribe_resume", {
+                    "status": "completed",
+                    "stream_id": _sid,
+                    "buffered_count": len(replay_items),
+                })
+                for seq, event in replay_items:
+                    if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
+                        continue
+                    sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                    if sse is not None:
+                        yield _inject_seq(sse, seq, _sid)
+                yield _sse_format("done", {})
+            finally:
+                _active_chat_tasks.pop(session_id, None)
+                _session_stream_states.pop(session_id, None)
+
+        return _streaming_response(_completed_stream())
+
+    # ── chat 任务仍在运行：重放缓冲 + 接续实时流 ──
+    event_queue = stream_state.attach()
+    replay_items = stream_state.drain_buffer(after_seq=after_seq)
 
     async def _subscribe_generator() -> AsyncIterator[str]:
-        yield _sse_format("session_init", {"session_id": session_id})
-        yield _sse_format("subscribe_resume", {
-            "status": "reconnected",
-            "buffered_count": len(buffered_events),
-        })
-
-        # 重放缓冲事件（skip_replay 时为空）
-        for event in buffered_events:
-            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
-            if sse is not None:
-                yield sse
-
-        # 实时消费后续事件
-        queue_get_task: asyncio.Task[ToolCallEvent | None] | None = asyncio.create_task(
+        queue_get_task: asyncio.Task[Any] | None = asyncio.create_task(
             event_queue.get()
         )
 
@@ -2571,6 +2878,32 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 pass
 
         try:
+            yield _sse_format("session_init", {"session_id": session_id})
+
+            # gap 检测：缓冲溢出导致事件不连续
+            if _has_gap:
+                yield _sse_format("resume_failed", {
+                    "reason": "buffer_overflow",
+                    "stream_id": _sid,
+                    "after_seq": after_seq,
+                    "available_from_seq": replay_items[0][0] if replay_items else None,
+                })
+                yield _sse_format("done", {})
+                return
+
+            yield _sse_format("subscribe_resume", {
+                "status": "reconnected",
+                "stream_id": _sid,
+                "buffered_count": len(replay_items),
+            })
+
+            for seq, event in replay_items:
+                if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
+                    continue
+                sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                if sse is not None:
+                    yield _inject_seq(sse, seq, _sid)
+
             while True:
                 assert queue_get_task is not None
                 wait_set: set[asyncio.Task[Any]] = {queue_get_task}
@@ -2582,40 +2915,39 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 )
 
                 if queue_get_task in done_set:
-                    event = queue_get_task.result()
-                    if event is not None:
+                    seq_item = queue_get_task.result()
+                    if seq_item is not None:
+                        _seq, event = seq_item
                         sse = _sse_event_to_sse(event, safe_mode=safe_mode)
                         if sse is not None:
-                            yield sse
+                            yield _inject_seq(sse, _seq, _sid)
                     if chat_task.done():
                         queue_get_task = None
                     else:
                         queue_get_task = asyncio.create_task(event_queue.get())
 
                 if chat_task.done() and (queue_get_task is None or queue_get_task not in done_set):
-                    # 排空队列中剩余事件
                     while True:
                         try:
-                            event = event_queue.get_nowait()
+                            seq_item = event_queue.get_nowait()
                         except asyncio.QueueEmpty:
                             break
-                        if event is not None:
+                        if seq_item is not None:
+                            _seq, event = seq_item
                             sse = _sse_event_to_sse(event, safe_mode=safe_mode)
                             if sse is not None:
-                                yield sse
+                                yield _inject_seq(sse, _seq, _sid)
                     break
 
-            # chat 任务完成：获取结果并发送 reply + done
             if not chat_task.cancelled():
                 try:
                     chat_result = chat_task.result()
                     if _session_manager is None:
-                        return  # 服务未初始化，静默退出
+                        return
                     engine = _session_manager.get_engine(session_id)
                     if engine is not None:
                         normalized_reply = guard_public_reply((chat_result.reply or "").strip())
                         yield _build_reply_sse(chat_result, engine)
-                        # B2: 首轮标题（与 chat_stream 保持一致：截取 + 后台 AI）
                         if engine.session_turn == 1:
                             _user_msg = ""
                             for _m in engine.raw_messages:
@@ -2644,38 +2976,28 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 except Exception as exc:
                     logger.warning(
                         "subscribe 获取 chat 结果失败: %s",
-                        exc, exc_info=True,
+                        exc,
+                        exc_info=True,
                     )
                     _sub_guidance = classify_failure(exc, stage="subscribe_resume")
                     yield _failure_guidance_sse(_sub_guidance)
             yield _sse_format("done", {})
 
         except (asyncio.CancelledError, GeneratorExit):
-            stream_state.detach()
             logger.info("会话 %s 的重连流式连接再次断开", session_id)
         except Exception as exc:
-            logger.error(
-                "SSE subscribe 流异常: %s", exc, exc_info=True
-            )
+            logger.error("SSE subscribe 流异常: %s", exc, exc_info=True)
             _sub_top_guidance = classify_failure(exc, stage="subscribe_resume")
             yield _failure_guidance_sse(_sub_top_guidance)
             yield _sse_format("done", {})
         finally:
             stream_state.detach()
             if chat_task.done():
+                _active_chat_tasks.pop(session_id, None)
                 _session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
 
-    return StreamingResponse(
-        _subscribe_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "Connection": "keep-alive",
-            "X-Accel-Buffering": "no",
-        },
-    )
-
+    return _streaming_response(_subscribe_generator())
 
 @_router.post("/api/v1/chat/abort")
 async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONResponse:
@@ -5243,7 +5565,23 @@ async def get_session_messages(session_id: str, request: Request) -> JSONRespons
     messages = await _session_manager.get_session_messages(
         session_id, limit=limit, offset=offset, user_id=user_id
     )
-    return JSONResponse(content={"messages": messages, "session_id": session_id})
+    normalized_messages: list[dict[str, Any]] = []
+    for idx, message in enumerate(messages):
+        if isinstance(message, dict):
+            normalized = dict(message)
+        elif hasattr(message, "model_dump"):
+            normalized = message.model_dump()
+        else:
+            try:
+                normalized = dict(message)
+            except Exception:
+                normalized = {"role": "assistant", "content": str(message)}
+
+        if not normalized.get("message_id"):
+            normalized["message_id"] = f"volatile:{session_id}:{offset + idx}"
+        normalized_messages.append(normalized)
+
+    return JSONResponse(content={"messages": normalized_messages, "session_id": session_id})
 
 
 @_router.get("/api/v1/sessions/{session_id}/excel-events")
@@ -5623,7 +5961,7 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
             "pending_question": None,
             "last_route": None,
         })
-    return JSONResponse(content=detail)
+    return JSONResponse(content=dict(detail))
 
 
 class ModelSwitchRequest(BaseModel):
@@ -8979,3 +9317,8 @@ def main() -> None:
         port=args.port,
         log_level="info",
     )
+
+
+
+
+

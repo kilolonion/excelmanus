@@ -123,6 +123,24 @@ class CredentialStore:
             return None
         return self._row_to_record(row)
 
+    def get_profile_by_name(
+        self, user_id: str, provider: str, profile_name: str,
+    ) -> AuthProfileRecord | None:
+        """按 profile_name 精确获取活跃 profile（解密 token）。"""
+        row = self._conn.execute(
+            """SELECT id, user_id, provider, profile_name, credential_type,
+                      access_token, refresh_token, expires_at,
+                      account_id, plan_type, extra_data, is_active,
+                      created_at, updated_at
+               FROM auth_profiles
+               WHERE user_id = ? AND provider = ? AND profile_name = ? AND is_active = 1
+               LIMIT 1""",
+            (user_id, provider, profile_name),
+        ).fetchone()
+        if not row:
+            return None
+        return self._row_to_record(row)
+
     def list_profiles(self, user_id: str) -> list[AuthProfileSummary]:
         """列出用户所有 profile（不含明文 token）。"""
         rows = self._conn.execute(

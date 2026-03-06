@@ -59,6 +59,7 @@ import {
 import { resolveAvatarSrc } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import LoginConfigTab from "@/components/admin/LoginConfigTab";
+import PoolTab from "@/components/admin/PoolTab";
 
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
@@ -717,7 +718,7 @@ export default function AdminPage() {
   const [sortDir, setSortDir] = useState<SortDir>("desc");
   const [toasts, setToasts] = useState<Toast[]>([]);
   const [allModelNames, setAllModelNames] = useState<string[]>([]);
-  const [activeTab, setActiveTab] = useState<"users" | "login">("users");
+  const [activeTab, setActiveTab] = useState<"users" | "login" | "pool">("users");
   let toastIdRef = 0;
 
   const addToast = useCallback((type: "success" | "error", message: string) => {
@@ -944,7 +945,7 @@ export default function AdminPage() {
     <div className="h-full">
       <div className="px-5 py-5 space-y-4">
         {/* Tab navigation + refresh */}
-        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "users" | "login")}>
+        <Tabs value={activeTab} onValueChange={(v) => setActiveTab(v as "users" | "login" | "pool")}>
           <div className="flex items-center gap-2">
           <TabsList className="flex-1 sm:flex-none w-full sm:w-auto">
             <TabsTrigger value="users" className="gap-1.5 text-xs">
@@ -954,6 +955,10 @@ export default function AdminPage() {
             <TabsTrigger value="login" className="gap-1.5 text-xs">
               <LogIn className="h-3.5 w-3.5" />
               登录设置
+            </TabsTrigger>
+            <TabsTrigger value="pool" className="gap-1.5 text-xs">
+              <Database className="h-3.5 w-3.5" />
+              号池
             </TabsTrigger>
           </TabsList>
           {activeTab === "users" && (
@@ -978,6 +983,10 @@ export default function AdminPage() {
 
           <TabsContent value="login">
             <LoginConfigTab />
+          </TabsContent>
+
+          <TabsContent value="pool">
+            <PoolTab onToast={(msg, type) => addToast(type, msg)} />
           </TabsContent>
 
           <TabsContent value="users" className="space-y-4 sm:space-y-6">

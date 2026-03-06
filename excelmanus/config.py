@@ -422,11 +422,27 @@ class ExcelManusConfig:
         "http://localhost:5173",
     )
     mcp_shared_manager: bool = False
+    pool_enabled: bool = False  # 号池功能开关（默认关闭，灰度上线）
+    pool_auto_enabled: bool = False  # 号池自动轮换开关（需 pool_enabled=True）
+    pool_auto_interval_seconds: int = 60  # 自动轮换定时扫描间隔（秒）
+    pool_auto_default_cooldown_seconds: int = 300  # 自动轮换默认冷却时间（秒）
+    pool_auto_hysteresis_delta: float = 0.12  # 迟滞防抖阈值（分数差 < delta 不切换）
+    pool_auto_min_dwell_seconds: int = 180  # 最短驻留时间（秒，软触发受限）
+    pool_auto_breaker_open_seconds: int = 120  # 熔断器打开持续时间（秒）
+    pool_auto_breaker_threshold: int = 5  # 连续失败多少次触发熔断
     exa_search_enabled: bool = True  # 内置搜索引擎总开关（False 禁用全部内置搜索）
     search_default_provider: str = "exa"  # 默认搜索引擎：exa | tavily | brave
     exa_api_key: str | None = None  # Exa API 密钥（可选，提升搜索质量和速率限制）
     tavily_api_key: str | None = None  # Tavily API 密钥（配置后额外启用 Tavily 搜索）
     brave_api_key: str | None = None  # Brave API 密钥（配置后额外启用 Brave 搜索）
+    # ── 能力探测任务配置 ──
+    cap_probe_job_concurrency: int = 2  # 全局最大并发探测数
+    cap_probe_provider_concurrency: int = 1  # 同一 provider 最大并发（降低 429）
+    cap_probe_health_timeout: float = 8.0  # 健康检查超时（秒）
+    cap_probe_tool_timeout: float = 20.0  # tool calling 探测超时（秒）
+    cap_probe_vision_timeout: float = 20.0  # vision 探测超时（秒）
+    cap_probe_thinking_total_timeout: float = 30.0  # thinking 总预算（秒）
+    cap_probe_thinking_strategy_timeout: float = 8.0  # thinking 单策略上限（秒）
     # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
     aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
     aux_api_key: str | None = None
@@ -1331,6 +1347,34 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MCP_SHARED_MANAGER",
         False,
     )
+    pool_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_POOL_ENABLED"),
+        "EXCELMANUS_POOL_ENABLED",
+        False,
+    )
+    pool_auto_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_POOL_AUTO_ENABLED"),
+        "EXCELMANUS_POOL_AUTO_ENABLED",
+        False,
+    )
+    pool_auto_interval_seconds = int(
+        os.environ.get("EXCELMANUS_POOL_AUTO_INTERVAL", "60"),
+    )
+    pool_auto_default_cooldown_seconds = int(
+        os.environ.get("EXCELMANUS_POOL_AUTO_COOLDOWN", "300"),
+    )
+    pool_auto_hysteresis_delta = float(
+        os.environ.get("EXCELMANUS_POOL_AUTO_HYSTERESIS_DELTA", "0.12"),
+    )
+    pool_auto_min_dwell_seconds = int(
+        os.environ.get("EXCELMANUS_POOL_AUTO_MIN_DWELL", "180"),
+    )
+    pool_auto_breaker_open_seconds = int(
+        os.environ.get("EXCELMANUS_POOL_AUTO_BREAKER_OPEN", "120"),
+    )
+    pool_auto_breaker_threshold = int(
+        os.environ.get("EXCELMANUS_POOL_AUTO_BREAKER_THRESHOLD", "5"),
+    )
     exa_search_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_EXA_SEARCH"),
         "EXCELMANUS_EXA_SEARCH",
@@ -1349,6 +1393,15 @@ def load_config() -> ExcelManusConfig:
     exa_api_key = os.environ.get("EXCELMANUS_EXA_API_KEY") or None
     tavily_api_key = os.environ.get("EXCELMANUS_TAVILY_API_KEY") or None
     brave_api_key = os.environ.get("EXCELMANUS_BRAVE_API_KEY") or None
+
+    # 能力探测任务配置
+    cap_probe_job_concurrency = int(os.environ.get("CAP_PROBE_JOB_CONCURRENCY", "2"))
+    cap_probe_provider_concurrency = int(os.environ.get("CAP_PROBE_PROVIDER_CONCURRENCY", "1"))
+    cap_probe_health_timeout = float(os.environ.get("CAP_PROBE_HEALTH_TIMEOUT", "8"))
+    cap_probe_tool_timeout = float(os.environ.get("CAP_PROBE_TOOL_TIMEOUT", "20"))
+    cap_probe_vision_timeout = float(os.environ.get("CAP_PROBE_VISION_TIMEOUT", "20"))
+    cap_probe_thinking_total_timeout = float(os.environ.get("CAP_PROBE_THINKING_TOTAL_TIMEOUT", "30"))
+    cap_probe_thinking_strategy_timeout = float(os.environ.get("CAP_PROBE_THINKING_STRATEGY_TIMEOUT", "8"))
 
     # AUX 配置（统一配置）
     aux_enabled = _parse_bool(
@@ -1827,11 +1880,26 @@ def load_config() -> ExcelManusConfig:
         external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
+        pool_enabled=pool_enabled,
+        pool_auto_enabled=pool_auto_enabled,
+        pool_auto_interval_seconds=pool_auto_interval_seconds,
+        pool_auto_default_cooldown_seconds=pool_auto_default_cooldown_seconds,
+        pool_auto_hysteresis_delta=pool_auto_hysteresis_delta,
+        pool_auto_min_dwell_seconds=pool_auto_min_dwell_seconds,
+        pool_auto_breaker_open_seconds=pool_auto_breaker_open_seconds,
+        pool_auto_breaker_threshold=pool_auto_breaker_threshold,
         exa_search_enabled=exa_search_enabled,
         search_default_provider=search_default_provider,
         exa_api_key=exa_api_key,
         tavily_api_key=tavily_api_key,
         brave_api_key=brave_api_key,
+        cap_probe_job_concurrency=cap_probe_job_concurrency,
+        cap_probe_provider_concurrency=cap_probe_provider_concurrency,
+        cap_probe_health_timeout=cap_probe_health_timeout,
+        cap_probe_tool_timeout=cap_probe_tool_timeout,
+        cap_probe_vision_timeout=cap_probe_vision_timeout,
+        cap_probe_thinking_total_timeout=cap_probe_thinking_total_timeout,
+        cap_probe_thinking_strategy_timeout=cap_probe_thinking_strategy_timeout,
         aux_enabled=aux_enabled,
         aux_api_key=aux_api_key,
         aux_base_url=aux_base_url,
