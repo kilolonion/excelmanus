@@ -52,3 +52,27 @@ class TestBuildReferenceHints:
         )
         hints = _build_reference_hints("Sheet1", index)
         assert hints == ""
+
+
+class TestRefHintsInRender:
+    def test_render_sheet_includes_hints(self) -> None:
+        from excelmanus.window_perception.domain import SheetWindow
+        from excelmanus.window_perception.renderer import _render_sheet
+
+        w = SheetWindow.new(
+            id="sheet_1", title="test", file_path="f.xlsx", sheet_name="S1",
+        )
+        w.ref_hints = "refs-to: S2\nrefs-from: S3"
+        output = _render_sheet(w)
+        assert "refs-to: S2" in output
+        assert "refs-from: S3" in output
+
+    def test_render_sheet_no_hints(self) -> None:
+        from excelmanus.window_perception.domain import SheetWindow
+        from excelmanus.window_perception.renderer import _render_sheet
+
+        w = SheetWindow.new(
+            id="sheet_1", title="test", file_path="f.xlsx", sheet_name="S1",
+        )
+        output = _render_sheet(w)
+        assert "refs-to" not in output

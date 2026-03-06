@@ -538,6 +538,9 @@ def _render_sheet(window: SheetWindow) -> str:
     if window.summary:
         lines.append(f"summary: {window.summary}")
 
+    if window.ref_hints:
+        lines.append(window.ref_hints)
+
     return "\n".join(lines)
 
 
@@ -686,6 +689,10 @@ def render_window_wurm_full(
                         continue
                     pairs = ", ".join(f"{v}({c})" for v, c in ranked)
                     lines.append(f"  分布·{col_name}: {pairs}")
+
+    if window.ref_hints:
+        lines.append(window.ref_hints)
+
     return "\n".join(lines)
 
 

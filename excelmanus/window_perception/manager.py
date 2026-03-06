@@ -1582,10 +1582,32 @@ class WindowPerceptionManager:
         elif canonical_tool_name in {"list_sheets", "describe_sheets"}:
             self._set_window_field(window, "summary", "工作表元信息已更新")
 
+        self._try_inject_ref_hints(window)
+
         self._register_window_identity(window)
         self._touch(window)
         self._active_window_id = window.id
         return window
+
+    def _try_inject_ref_hints(self, window: SheetWindow) -> None:
+        """从 RefCache 获取引用提示并注入窗口。"""
+        try:
+            from excelmanus.tools.reference_tools import get_cache
+            from excelmanus.window_perception.renderer import _build_reference_hints
+
+            fp = window.file_path
+            sn = window.sheet_name
+            if not fp or not sn:
+                return
+            cache = get_cache()
+            index = cache.get_tier1(fp)
+            if index is None:
+                return
+            hints = _build_reference_hints(sn, index)
+            if hints and hints != window.ref_hints:
+                self._set_window_field(window, "ref_hints", hints)
+        except Exception:
+            pass
 
     def focus_window_action(
         self,
