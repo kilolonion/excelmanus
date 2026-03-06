@@ -308,6 +308,7 @@ class SheetData:
     total_rows: int = 0
     total_cols: int = 0
     sheet_dimensions: dict[str, tuple[int, int]] = field(default_factory=dict)
+    ref_hints: str = ""
 
 
 @dataclass
@@ -577,6 +578,14 @@ class SheetWindow(BaseWindow):
     @sheet_dimensions.setter
     def sheet_dimensions(self, value: dict[str, tuple[int, int]]) -> None:
         self.data.sheet_dimensions = dict(value) if isinstance(value, dict) else {}
+
+    @property
+    def ref_hints(self) -> str:
+        return self.data.ref_hints
+
+    @ref_hints.setter
+    def ref_hints(self, value: str) -> None:
+        self.data.ref_hints = str(value or "")
 
 
 Window = ExplorerWindow | SheetWindow
