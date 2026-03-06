@@ -7530,8 +7530,10 @@ async def create_probe_job(request: Request) -> JSONResponse:
     guard_error = await _require_admin_if_auth_enabled(request)
     if guard_error is not None:
         return guard_error
-    if _config is None or _cap_probe_job_manager is None:
+    if _config is None:
         return _error_json_response(503, "服务未初始化")
+
+    mgr = _get_probe_job_mgr()
 
     from excelmanus.capability_probe_jobs import ProbeTargetSpec
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
@@ -7595,7 +7597,7 @@ async def create_probe_job(request: Request) -> JSONResponse:
         for t in targets:
             delete_capabilities(db, t.cache_model, t.base_url)
 
-    result = await _cap_probe_job_manager.create_job(
+    result = await mgr.create_job(
         targets=targets,
         db=db,
         session_manager=_session_manager,
@@ -7609,9 +7611,8 @@ async def get_probe_job(request: Request, job_id: str) -> JSONResponse:
     guard_error = await _require_admin_if_auth_enabled(request)
     if guard_error is not None:
         return guard_error
-    if _cap_probe_job_manager is None:
-        return _error_json_response(503, "服务未初始化")
-    snapshot = await _cap_probe_job_manager.get_job_snapshot(job_id)
+    mgr = _get_probe_job_mgr()
+    snapshot = await mgr.get_job_snapshot(job_id)
     if snapshot is None:
         return _error_json_response(404, "探测任务不存在")
     return JSONResponse(content=snapshot)
@@ -7623,9 +7624,8 @@ async def cancel_probe_job(request: Request, job_id: str) -> JSONResponse:
     guard_error = await _require_admin_if_auth_enabled(request)
     if guard_error is not None:
         return guard_error
-    if _cap_probe_job_manager is None:
-        return _error_json_response(503, "服务未初始化")
-    state = await _cap_probe_job_manager.cancel_job(job_id)
+    mgr = _get_probe_job_mgr()
+    state = await mgr.cancel_job(job_id)
     if state is None:
         return _error_json_response(404, "探测任务不存在")
     return JSONResponse(content={"state": state})
@@ -7637,14 +7637,13 @@ async def probe_job_events(request: Request, job_id: str) -> StreamingResponse:
     guard_error = await _require_admin_if_auth_enabled(request)
     if guard_error is not None:
         return guard_error
-    if _cap_probe_job_manager is None:
-        return _error_json_response(503, "服务未初始化")
+    mgr = _get_probe_job_mgr()
 
-    queue = await _cap_probe_job_manager.subscribe(job_id)
+    queue = await mgr.subscribe(job_id)
     if queue is None:
         return _error_json_response(404, "探测任务不存在")
 
-    snapshot = await _cap_probe_job_manager.get_job_snapshot(job_id)
+    snapshot = await mgr.get_job_snapshot(job_id)
 
     async def _event_gen() -> AsyncIterator[str]:
         try:
@@ -7667,7 +7666,7 @@ async def probe_job_events(request: Request, job_id: str) -> StreamingResponse:
                 if state in ("succeeded", "partial", "failed", "cancelled"):
                     break
         finally:
-            await _cap_probe_job_manager.unsubscribe(job_id, queue)
+            await mgr.unsubscribe(job_id, queue)
 
     return StreamingResponse(
         _event_gen(),
