@@ -1,3 +1,7 @@
+const WORD_EXTENSIONS = new Set(["docx", "doc"]);
+
+const EXCEL_EXTENSIONS = new Set(["xlsx", "xls", "xlsm", "xlsb"]);
+
 const IMAGE_EXTENSIONS = new Set([
   "png",
   "jpg",
@@ -71,6 +75,14 @@ function getExtension(filename: string): string {
   const dotIndex = lower.lastIndexOf(".");
   if (dotIndex < 0) return "";
   return lower.slice(dotIndex + 1);
+}
+
+export function isWordFile(filename: string): boolean {
+  return WORD_EXTENSIONS.has(getExtension(filename));
+}
+
+export function isExcelFile(filename: string): boolean {
+  return EXCEL_EXTENSIONS.has(getExtension(filename));
 }
 
 export function isImageFile(filename: string): boolean {

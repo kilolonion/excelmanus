@@ -59,6 +59,7 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
     "excelmanus.tools.memory_tools",
     "excelmanus.tools.sleep_tools",
     "excelmanus.tools.reference_tools",
+    "excelmanus.tools.word_tools",
 )
 
 

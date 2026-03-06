@@ -26,6 +26,9 @@ logger = logging.getLogger(__name__)
 # Excel 扩展名集合（共享常量 + CSV）
 _EXCEL_EXTENSIONS = _EXCEL_EXTENSIONS_BASE | frozenset({".csv"})
 
+# Word 扩展名
+_WORD_EXTENSIONS = frozenset({".docx", ".doc"})
+
 # 图片扩展名
 _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"})
 
@@ -110,6 +113,8 @@ def _detect_file_type(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
     if ext in _EXCEL_EXTENSIONS:
         return "excel" if ext != ".csv" else "csv"
+    if ext in _WORD_EXTENSIONS:
+        return "word"
     if ext in _IMAGE_EXTENSIONS:
         return "image"
     if ext in (".txt", ".md", ".json", ".xml", ".yaml", ".yml", ".log"):
@@ -1104,6 +1109,17 @@ class FileRegistry:
                 cols = s.get("columns", 0)
                 parts.append(f"{name}({rows}×{cols})")
             return f"{len(e.sheet_meta)}表: " + ", ".join(parts)
+        if e.file_type == "word" and e.sheet_meta:
+            meta = e.sheet_meta[0] if e.sheet_meta else {}
+            paras = meta.get("paragraphs", 0)
+            tables = meta.get("tables", 0)
+            headings = meta.get("headings", 0)
+            parts_w: list[str] = [f"{paras}段"]
+            if headings:
+                parts_w.append(f"{headings}标题")
+            if tables:
+                parts_w.append(f"{tables}表")
+            return "文档: " + ", ".join(parts_w)
         if e.file_type == "image":
             return f"图片 {self._format_size(e.size_bytes)}"
         if e.size_bytes:
@@ -1169,7 +1185,6 @@ class FileRegistry:
                 result.cache_hits += 1
                 continue
 
-            # Excel 文件：扫描 sheet 元数据
             file_type = _detect_file_type(rel_path)
             sheet_meta: list[dict] = []
             if file_type in ("excel",):
@@ -1177,6 +1192,11 @@ class FileRegistry:
                     sheet_meta = self._scan_file_sheets(fp, header_scan_rows)
                 except Exception:
                     logger.debug("扫描文件 %s 失败", fp, exc_info=True)
+            elif file_type == "word":
+                try:
+                    sheet_meta = self._scan_word_meta(fp)
+                except Exception:
+                    logger.debug("扫描 Word 文件 %s 失败", fp, exc_info=True)
 
             if existing:
                 result.updated_files += 1
@@ -1311,6 +1331,26 @@ class FileRegistry:
 
         paths.sort(key=lambda p: str(p.relative_to(root)).lower())
         return paths
+
+    @staticmethod
+    def _scan_word_meta(fp: Path) -> list[dict]:
+        """扫描单个 Word 文件的结构元数据。"""
+        try:
+            from docx import Document
+        except ImportError:
+            return []
+        doc = Document(str(fp))
+        headings = 0
+        for para in doc.paragraphs:
+            style = para.style.name or "" if para.style else ""
+            if style.startswith("Heading") or style == "Title":
+                headings += 1
+        return [{
+            "paragraphs": len(doc.paragraphs),
+            "tables": len(doc.tables),
+            "headings": headings,
+            "sections": len(doc.sections),
+        }]
 
     @staticmethod
     def _scan_file_sheets(fp: Path, header_scan_rows: int) -> list[dict]:
