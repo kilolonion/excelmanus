@@ -1168,6 +1168,25 @@ export async function writeExcelCells(opts: {
   return res.json();
 }
 
+/**
+ * 从工作区下载文件并返回 Blob（不触发浏览器下载）。
+ * 用于重试时重新获取图片内容以编码 base64。
+ */
+export async function fetchFileBlob(path: string, sessionId?: string): Promise<Blob> {
+  const params = new URLSearchParams({ path: normalizeExcelPath(path) });
+  if (sessionId) params.set("session_id", sessionId);
+  const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
+  const res = await fetch(url, _withCredentials(url, {
+    headers: { ...getAuthHeaders() },
+    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
+  }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || `fetchFileBlob error: ${res.status}`);
+  }
+  return res.blob();
+}
+
 // 下载冷却时间配置（毫秒）—— 按路径独立冷却，不阻塞不同附件的并发下载
 const DOWNLOAD_COOLDOWN_MS = 1000;
 const _downloadCooldowns = new Map<string, number>();

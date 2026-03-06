@@ -951,14 +951,29 @@ export async function retryAssistantMessage(
   store.setMessages(truncated);
 
   // 保留原始用户消息的文件附件（已上传，无需重传）
+  // 对于图片附件，需要从工作区重新下载内容，以便 sendMessage 能编码 base64 发给 LLM
   let retainedAttached: AttachedFile[] | undefined;
   if (userMessage.role === "user" && userMessage.files && userMessage.files.length > 0) {
-    retainedAttached = userMessage.files.map((f, i) => ({
-      id: `retry-retained-${Date.now()}-${i}`,
-      file: new File([], f.filename),
-      status: "success" as const,
-      uploadResult: { filename: f.filename, path: f.path, size: f.size },
-    }));
+    const { fetchFileBlob } = await import("./api");
+    retainedAttached = await Promise.all(
+      userMessage.files.map(async (f, i): Promise<AttachedFile> => {
+        const id = `retry-retained-${Date.now()}-${i}`;
+        const isImage = _isImageFile(f.filename);
+
+        if (isImage) {
+          // 图片需要重新获取内容，否则 sendMessage 因 file.size===0 跳过 base64 编码
+          try {
+            const blob = await fetchFileBlob(f.path, effectiveSessionId ?? undefined);
+            const file = new File([blob], f.filename, { type: blob.type || "image/png" });
+            return { id, file, status: "success" as const, uploadResult: { filename: f.filename, path: f.path, size: f.size } };
+          } catch (err) {
+            console.warn("[retryAssistantMessage] 图片重新获取失败，回退到路径通知:", f.path, err);
+          }
+        }
+
+        return { id, file: new File([], f.filename), status: "success" as const, uploadResult: { filename: f.filename, path: f.path, size: f.size } };
+      })
+    );
   }
 
   // 重新发送（携带原始附件信息）

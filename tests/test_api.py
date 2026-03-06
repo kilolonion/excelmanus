@@ -150,6 +150,7 @@ def _setup_api_globals(config=None, *, chat_history=None):
     old_router = api_module._skill_router
     old_sk_manager = api_module._skillpack_manager
     old_manager = api_module._session_manager
+    old_probe_job_manager = getattr(api_module, "_cap_probe_job_manager", None)
 
     api_module._config = config
     api_module._tool_registry = registry
@@ -157,6 +158,8 @@ def _setup_api_globals(config=None, *, chat_history=None):
     api_module._skill_router = router
     api_module._skillpack_manager = sk_manager
     api_module._session_manager = manager
+    if hasattr(api_module, "_cap_probe_job_manager"):
+        api_module._cap_probe_job_manager = None
 
     try:
         yield {"config": config, "registry": registry, "manager": manager}
@@ -168,6 +171,8 @@ def _setup_api_globals(config=None, *, chat_history=None):
         api_module._skill_router = old_router
         api_module._skillpack_manager = old_sk_manager
         api_module._session_manager = old_manager
+        if hasattr(api_module, "_cap_probe_job_manager"):
+            api_module._cap_probe_job_manager = old_probe_job_manager
         # 恢复工具模块的 _guard 状态
         for _mod_name, _saved in _saved_guards.items():
             try:
@@ -324,14 +329,14 @@ class TestMemoryIsolation:
                 timestamp=datetime.now(timezone.utc),
             )
         ])
-        memory_tools.init_memory(pm)
+        memory_tools._persistent_memory = pm
         try:
             resp = await client.get("/api/v1/skills")
             assert resp.status_code == 200
             assert memory_tools._persistent_memory is pm
             assert "保持不变" in memory_tools.memory_read_topic("user_prefs")
         finally:
-            memory_tools.init_memory(None)
+            memory_tools._persistent_memory = None
 
 
 # ── 单元测试：Property 13 - API 会话复用 ─────────────────
@@ -3191,3 +3196,92 @@ class TestIsolationFlagSemantics:
             lambda _req: "u-1",
         )
         assert api_module._get_isolation_user_id(request) == "u-1"
+
+
+class TestCapabilityProbeJobs:
+    @pytest.mark.asyncio
+    async def test_create_probe_job_and_query_snapshot(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        fake_caps = SimpleNamespace(
+            to_dict=lambda: {
+                "model": "test-model",
+                "base_url": "https://test.example.com/v1",
+                "healthy": True,
+                "health_error": "",
+                "supports_tool_calling": True,
+                "supports_vision": True,
+                "supports_thinking": True,
+                "thinking_type": "openai_reasoning",
+                "detected_at": "2026-03-05T00:00:00+00:00",
+                "probe_errors": {},
+                "manual_override": False,
+            }
+        )
+        monkeypatch.setattr(
+            "excelmanus.providers.create_client",
+            MagicMock(return_value=object()),
+        )
+        monkeypatch.setattr(
+            "excelmanus.capability_probe_jobs.run_full_probe",
+            AsyncMock(return_value=fake_caps),
+        )
+
+        create_resp = await client.post(
+            "/api/v1/config/models/capabilities/jobs",
+            json={"model": "test-model", "base_url": "https://test.example.com/v1"},
+        )
+        assert create_resp.status_code == 202
+        job_id = create_resp.json().get("job_id")
+        assert job_id
+
+        final_snapshot = None
+        for _ in range(20):
+            snap_resp = await client.get(
+                f"/api/v1/config/models/capabilities/jobs/{job_id}"
+            )
+            assert snap_resp.status_code == 200
+            final_snapshot = snap_resp.json()
+            if final_snapshot.get("state") in {
+                "succeeded",
+                "partial",
+                "failed",
+                "cancelled",
+            }:
+                break
+            await asyncio.sleep(0.05)
+
+        assert final_snapshot is not None
+        assert final_snapshot.get("targets_total") == 1
+        assert final_snapshot.get("state") in {"succeeded", "partial"}
+
+    @pytest.mark.asyncio
+    async def test_cancel_probe_job(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def _slow_probe(**_: object):
+            await asyncio.sleep(1.0)
+            return SimpleNamespace(to_dict=lambda: {})
+
+        monkeypatch.setattr(
+            "excelmanus.providers.create_client",
+            MagicMock(return_value=object()),
+        )
+        monkeypatch.setattr(
+            "excelmanus.capability_probe_jobs.run_full_probe",
+            AsyncMock(side_effect=_slow_probe),
+        )
+
+        create_resp = await client.post(
+            "/api/v1/config/models/capabilities/jobs",
+            json={"model": "test-model", "base_url": "https://test.example.com/v1"},
+        )
+        assert create_resp.status_code == 202
+        job_id = create_resp.json().get("job_id")
+        assert job_id
+
+        cancel_resp = await client.delete(
+            f"/api/v1/config/models/capabilities/jobs/{job_id}"
+        )
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json().get("state") in {"cancelling", "cancelled"}
