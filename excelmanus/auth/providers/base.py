@@ -79,6 +79,52 @@ class AuthProfileRecord:
     updated_at: str
 
 
+@dataclass(frozen=True)
+class ProviderModelEntry:
+    """Provider 支持的模型条目。"""
+
+    model_id: str
+    display_name: str
+    public_id: str
+    profile_name: str
+    pro_only: bool = False
+
+
+@dataclass(frozen=True)
+class ProviderDescriptor:
+    """Provider 描述符，用于前端展示与 OAuth 流程选择。"""
+
+    id: str
+    label: str
+    protocol: str
+    base_url: str
+    supported_flows: tuple[str, ...]
+    models: tuple[ProviderModelEntry, ...]
+    default_model: str
+    thinking_mode: str = "auto"
+    model_family: str = ""
+
+
+class PKCECapable(ABC):
+    """支持 PKCE OAuth 流程的 Provider 混入。"""
+
+    @abstractmethod
+    def generate_pkce(self) -> tuple[str, str]:
+        """生成 code_verifier 和 code_challenge。"""
+
+    @abstractmethod
+    def build_authorize_url(
+        self, redirect_uri: str, state: str, code_challenge: str,
+    ) -> str:
+        """构建授权 URL。"""
+
+    @abstractmethod
+    async def exchange_code(
+        self, code: str, redirect_uri: str, code_verifier: str,
+    ) -> ValidatedCredential:
+        """用授权码交换 token。"""
+
+
 class AuthProvider(ABC):
     """认证提供商抽象基类。"""
 

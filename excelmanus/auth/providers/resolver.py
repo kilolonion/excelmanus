@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.auth.providers.base import AuthProfileRecord, ResolvedCredential
 from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+from excelmanus.auth.providers.google_gemini import GoogleGeminiProvider
 
 if TYPE_CHECKING:
     from excelmanus.auth.providers.credential_store import CredentialStore
@@ -16,9 +17,9 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# 注册所有支持的提供商
 _PROVIDERS = {
     "openai-codex": OpenAICodexProvider(),
+    "google-gemini": GoogleGeminiProvider(),
 }
 
 
