@@ -57,6 +57,47 @@ _DIR_LABELS: dict[str, str] = {
 }
 
 
+def _estimate_tokens(text: str) -> int:
+    """Fast approximate token count for mixed CJK / ASCII text.
+
+    CJK characters ≈ 1 token each; ASCII runs ≈ 1 token per 4 chars.
+    Deliberately conservative (over-estimates) so the budget guard errs on
+    the safe side.
+    """
+    if not text:
+        return 0
+    cjk = 0
+    other = 0
+    for ch in text:
+        if "\u2e80" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff":
+            cjk += 1
+        else:
+            other += 1
+    return cjk + max(other // 4, 1)
+
+
+def _truncate_to_tokens(text: str, max_tokens: int) -> str:
+    """Hard-truncate *text* at a line boundary to fit within *max_tokens*."""
+    if _estimate_tokens(text) <= max_tokens:
+        return text
+    notice = "\n\n(… 全景已截断，完整列表请查阅文件管理器)"
+    notice_tokens = _estimate_tokens(notice)
+    budget = max(max_tokens - notice_tokens, 0)
+
+    lines = text.split("\n")
+    kept: list[str] = []
+    running = 0
+    for ln in lines:
+        cost = _estimate_tokens(ln) + 1  # +1 for newline
+        if running + cost > budget:
+            break
+        kept.append(ln)
+        running += cost
+    if not kept:
+        kept.append(lines[0])
+    return "\n".join(kept) + notice
+
+
 def _dir_label(parent: str) -> str:
     normalized = parent.replace("\\", "/").strip("/")
     for prefix, label_ in _DIR_LABELS.items():
@@ -359,6 +400,10 @@ class FileRegistry:
             session_id=session_id, turn=turn,
             details={"original_name": original_name, "size_bytes": size_bytes},
         )
+
+        # Tier 1 引用图谱扫描（.xlsx/.xlsm）
+        self._try_tier1_scan(canonical_path)
+
         return entry
 
     def register_from_scan(
@@ -547,6 +592,24 @@ class FileRegistry:
             details={"parent": parent_canonical},
         )
         return entry
+
+    def _try_tier1_scan(self, canonical_path: str) -> None:
+        """对 Excel 文件尝试 Tier 1 引用图谱扫描。"""
+        ext = os.path.splitext(canonical_path)[1].lower()
+        if ext not in (".xlsx", ".xlsm"):
+            return
+        try:
+            from excelmanus.reference_graph.cache import RefCache
+            from excelmanus.reference_graph.scanner import Tier1Scanner
+            from excelmanus.tools.reference_tools import get_cache
+
+            cache = get_cache()
+            scanner = Tier1Scanner()
+            index = scanner.scan(canonical_path)
+            cache.put_tier1(canonical_path, index)
+            logger.info("Tier 1 reference scan completed for %s", canonical_path)
+        except Exception:
+            logger.debug("Tier 1 reference scan skipped for %s", canonical_path, exc_info=True)
 
     # ── 事件记录 ─────────────────────────────────────────────
 
@@ -851,8 +914,7 @@ class FileRegistry:
         """构建文件全景图文本，用于 system prompt 注入。
 
         统一覆盖文件全景、上传文件提示与 CoW 路径提示。
-
-        TODO: 使用 max_tokens 参数截断超长输出。
+        当输出超过 *max_tokens* 预算时，自动降级渲染模式或硬截断。
         """
         active = [
             e for e in self._path_cache.values()
@@ -875,16 +937,27 @@ class FileRegistry:
                 user_files.append(e)
 
         total = len(active)
-        lines: list[str] = ["## 工作区文件全景"]
 
         if total <= _PANORAMA_FULL_THRESHOLD:
-            self._panorama_full(lines, user_files, backups, agent_outputs)
+            modes = (self._panorama_full, self._panorama_compact, self._panorama_summary)
         elif total <= _PANORAMA_COMPACT_THRESHOLD:
-            self._panorama_compact(lines, user_files, backups, agent_outputs)
+            modes = (self._panorama_compact, self._panorama_summary)
         else:
-            self._panorama_summary(lines, user_files, backups, agent_outputs)
+            modes = (self._panorama_summary,)
 
-        # 文件组信息
+        text = ""
+        for mode_fn in modes:
+            lines: list[str] = ["## 工作区文件全景"]
+            mode_fn(lines, user_files, backups, agent_outputs)
+            self._panorama_append_tail(lines)
+            text = "\n".join(lines)
+            if _estimate_tokens(text) <= max_tokens:
+                return text
+
+        return _truncate_to_tokens(text, max_tokens)
+
+    def _panorama_append_tail(self, lines: list[str]) -> None:
+        """Append file-group info and footer notes to panorama *lines*."""
         try:
             groups = self.list_groups()
             if groups:
@@ -908,8 +981,6 @@ class FileRegistry:
         lines.append("")
         lines.append("⚠️ 路径规则：读写操作使用「位置」列路径。向用户展示使用「文件」列名称。")
         lines.append("备份副本不可直接修改，操作原始文件即可。")
-
-        return "\n".join(lines)
 
     def _panorama_full(
         self,
