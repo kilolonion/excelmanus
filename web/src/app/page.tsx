@@ -7,9 +7,11 @@ import { MessageStream } from "@/components/chat/MessageStream";
 import { CommandResultDialog, useCommandResult } from "@/components/modals/CommandResultDialog";
 import { ExcelFullView } from "@/components/excel/ExcelFullView";
 import { ExcelCompareView } from "@/components/excel/ExcelCompareView";
+import { WordFullView } from "@/components/word/WordFullView";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { useWordStore } from "@/stores/word-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import { uuid } from "@/lib/utils";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
@@ -24,6 +26,7 @@ export default function Home() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const compareMode = useExcelStore((s) => s.compareMode);
+  const wordFullViewPath = useWordStore((s) => s.fullViewPath);
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const cmdResult = useCommandResult();
@@ -55,7 +58,11 @@ export default function Home() {
   return (
     <div className="flex flex-col h-full">
       <AnimatePresence mode="wait" initial={false}>
-        {compareMode ? (
+        {wordFullViewPath ? (
+          <motion.div key="word" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
+            <WordFullView />
+          </motion.div>
+        ) : compareMode ? (
           <motion.div key="compare" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <ExcelCompareView />
           </motion.div>

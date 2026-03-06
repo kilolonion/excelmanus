@@ -112,7 +112,7 @@ function makeUserMsg(id: string, content = "hello"): Message {
   return { id, role: "user", content, timestamp: Date.now() };
 }
 
-function makeAssistantMsg(id: string, blocks: Message extends { blocks: infer B } ? B : never = []): Message {
+function makeAssistantMsg(id: string, blocks: any = []): Message {
   return { id, role: "assistant", blocks: blocks as any, timestamp: Date.now() };
 }
 

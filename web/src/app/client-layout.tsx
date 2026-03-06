@@ -20,9 +20,12 @@ import { useAuthStore } from "@/stores/auth-store";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
 import { prefetchUniverModules } from "@/components/excel/UniverSheet";
+import { WordSidePanel } from "@/components/word/WordSidePanel";
+import { prefetchUniverDocModules } from "@/components/word/UniverDoc";
 
 // 应用启动时后台预加载 Univer 库，避免首次打开面板时等待
 prefetchUniverModules();
+prefetchUniverDocModules();
 
 const ApprovalModal = dynamic(
   () => import("@/components/modals/ApprovalModal").then((m) => ({ default: m.ApprovalModal })),
@@ -91,6 +94,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
               {children}
             </div>
             <ExcelSidePanel />
+            <WordSidePanel />
           </div>
         </main>
         <ApprovalModal />

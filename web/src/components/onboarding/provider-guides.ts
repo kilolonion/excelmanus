@@ -22,7 +22,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
   {
     id: "gemini",
     label: "Google Gemini",
-    description: "Gemini 2.5 Flash — 速度快、性价比高，推荐新手首选",
+    description: "Gemini 2.5 Flash — 支持订阅 OAuth 或 API Key，速度快、性价比高",
     pricing: "按官方实时价格计费（请以控制台为准）",
     recommended: true,
     purchaseUrl: "https://aistudio.google.com/apikey",
@@ -35,7 +35,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
       {
         title: "1. 访问 Google AI Studio",
         description:
-          "打开 aistudio.google.com/apikey，使用 Google 账号登录。如果是首次使用，需要同意服务条款。",
+          "如需 API Key，请打开 aistudio.google.com/apikey；如需免 Key 的订阅登录，请前往设置中的 Google Gemini 订阅 OAuth 入口。",
       },
       {
         title: "2. 创建 API Key",

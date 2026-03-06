@@ -9,6 +9,7 @@ import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { VersionUpdateToast } from "@/components/VersionUpdateToast";
 import { GlobalRestartOverlay } from "@/components/GlobalRestartOverlay";
 import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
+import { pathnameStartsWith } from "@/lib/pathname";
 
 const AUTH_BYPASS_PATHS = ["/login", "/register", "/auth/callback", "/forgot-password", "/terms", "/privacy"];
 const STANDALONE_PATHS = ["/admin"];
@@ -16,7 +17,7 @@ const RETRY_INTERVAL_MS = 3000;
 
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
-  const isBypass = AUTH_BYPASS_PATHS.some((p) => pathname.startsWith(p));
+  const isBypass = pathnameStartsWith(pathname, AUTH_BYPASS_PATHS);
   const { authEnabled, checked, checkAuthEnabled } = useAuthConfigStore();
   const [ready, setReady] = useState(false);
   const [retryCount, setRetryCount] = useState(0);
@@ -76,7 +77,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
     return <LoadingScreen message={msg} />;
   }
 
-  const isStandalone = STANDALONE_PATHS.some((p) => pathname.startsWith(p));
+  const isStandalone = pathnameStartsWith(pathname, STANDALONE_PATHS);
 
   const versionToast = (
     <VersionUpdateToast
