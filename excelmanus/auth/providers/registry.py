@@ -27,7 +27,12 @@ def list_all() -> dict[str, "AuthProvider"]:
 
 def list_descriptors() -> list["ProviderDescriptor"]:
     """返回所有已注册 provider 的描述符列表。"""
-    return [p.get_descriptor() for p in _PROVIDERS.values()]
+    descriptors: list["ProviderDescriptor"] = []
+    for provider in _PROVIDERS.values():
+        get_descriptor = getattr(provider, "get_descriptor", None)
+        if callable(get_descriptor):
+            descriptors.append(get_descriptor())
+    return descriptors
 
 
 def match_provider(model: str) -> str | None:

@@ -1655,6 +1655,8 @@ _LOGIN_CREDENTIAL_KEYS: dict[str, str] = {
     "google_client_id":     "EXCELMANUS_GOOGLE_CLIENT_ID",
     "google_client_secret": "EXCELMANUS_GOOGLE_CLIENT_SECRET",
     "google_redirect_uri":  "EXCELMANUS_GOOGLE_REDIRECT_URI",
+    "gemini_oauth_client_id":     "EXCELMANUS_GEMINI_OAUTH_CLIENT_ID",
+    "gemini_oauth_client_secret": "EXCELMANUS_GEMINI_OAUTH_CLIENT_SECRET",
     "qq_client_id":         "EXCELMANUS_QQ_CLIENT_ID",
     "qq_client_secret":     "EXCELMANUS_QQ_CLIENT_SECRET",
     "qq_redirect_uri":      "EXCELMANUS_QQ_REDIRECT_URI",
@@ -1667,7 +1669,7 @@ _LOGIN_CREDENTIAL_KEYS: dict[str, str] = {
 }
 
 # 需要脱敏的 key（GET 时只返回 ****xxxx 格式）
-_SECRET_KEYS = {"github_client_secret", "google_client_secret", "qq_client_secret", "email_resend_api_key", "email_smtp_password"}
+_SECRET_KEYS = {"github_client_secret", "google_client_secret", "gemini_oauth_client_secret", "qq_client_secret", "email_resend_api_key", "email_smtp_password"}
 
 
 def _mask_secret(value: str) -> str:
@@ -2346,11 +2348,13 @@ _PROVIDER_CALLBACK_PATHS: dict[str, str] = {
 }
 
 
-def _resolve_provider(provider_name: str):
+def _resolve_provider(provider_name: str, request: Request | None = None):
     from excelmanus.auth.providers.registry import get_provider
     provider = get_provider(provider_name)
     if provider is None:
         raise HTTPException(404, f"不支持的提供商: {provider_name}")
+    if request is not None and hasattr(provider, "_config_store"):
+        setattr(provider, "_config_store", _get_config_store(request))
     return provider
 
 
@@ -2371,7 +2375,7 @@ async def generic_connect_provider(
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
     """粘贴 token 接入订阅（通用）。"""
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     body = await request.json()
     token_data = body.get("token_data")
     if not token_data or not isinstance(token_data, dict):
@@ -2398,7 +2402,7 @@ async def generic_disconnect_provider(
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
     """断开订阅连接（通用）。"""
-    _resolve_provider(provider_name)
+    _resolve_provider(provider_name, request)
     store = _get_credential_store(request)
     deleted = store.delete_profile(user.id, provider_name, "default")
     if not deleted:
@@ -2414,7 +2418,7 @@ async def generic_provider_status(
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
     """查询订阅连接状态（通用）。"""
-    _resolve_provider(provider_name)
+    _resolve_provider(provider_name, request)
     store = _get_credential_store(request)
     profile = store.get_active_profile(user.id, provider_name)
     if not profile:
@@ -2445,7 +2449,7 @@ async def generic_refresh_provider_token(
     user: UserRecord = Depends(get_current_user),
 ) -> Any:
     """手动刷新 token（通用）。"""
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     store = _get_credential_store(request)
     profile = store.get_active_profile(user.id, provider_name)
     if not profile:
@@ -2470,7 +2474,7 @@ async def generic_provider_oauth_start(
 ) -> Any:
     """发起 OAuth PKCE 浏览器流程（通用）。"""
     from excelmanus.auth.providers.base import PKCECapable
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     if not isinstance(provider, PKCECapable):
         raise HTTPException(400, f"{provider_name} 不支持 OAuth PKCE 流程")
     body = {}
@@ -2513,7 +2517,7 @@ async def generic_provider_oauth_exchange(
 ) -> Any:
     """用授权码交换 token（通用）。"""
     from excelmanus.auth.providers.base import PKCECapable
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     if not isinstance(provider, PKCECapable):
         raise HTTPException(400, f"{provider_name} 不支持 OAuth PKCE 流程")
     body = await request.json()
@@ -2556,7 +2560,7 @@ async def generic_device_code_start(
 ) -> Any:
     """发起 Device Code 登录流程（通用）。"""
     from excelmanus.auth.providers.base import DeviceCodeCapable
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     if not isinstance(provider, DeviceCodeCapable):
         raise HTTPException(400, f"{provider_name} 不支持 Device Code 登录")
     try:
@@ -2586,7 +2590,7 @@ async def generic_device_code_poll(
 ) -> Any:
     """轮询 Device Code 授权状态（通用）。"""
     from excelmanus.auth.providers.base import DeviceCodeCapable
-    provider = _resolve_provider(provider_name)
+    provider = _resolve_provider(provider_name, request)
     if not isinstance(provider, DeviceCodeCapable):
         raise HTTPException(400, f"{provider_name} 不支持 Device Code 登录")
     body = await request.json()
