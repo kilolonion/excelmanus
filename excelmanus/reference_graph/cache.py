@@ -1,7 +1,40 @@
-"""引用图谱缓存。"""
+"""引用图谱缓存 — 含 contextvar 多会话隔离。"""
 from __future__ import annotations
 
+import contextvars
+
 from .models import CellNode, WorkbookRefIndex
+
+_current_cache: contextvars.ContextVar["RefCache | None"] = contextvars.ContextVar(
+    "_current_ref_cache", default=None,
+)
+
+_fallback_cache: RefCache | None = None
+
+
+def get_session_cache() -> "RefCache":
+    """获取当前上下文的 RefCache 实例。
+
+    优先使用 contextvar（API/多会话场景），
+    回退到模块级单例（CLI 单会话场景）。
+    """
+    cache = _current_cache.get(None)
+    if cache is not None:
+        return cache
+    global _fallback_cache
+    if _fallback_cache is None:
+        _fallback_cache = RefCache()
+    return _fallback_cache
+
+
+def set_session_cache(cache: "RefCache") -> contextvars.Token:
+    """设置当前上下文的 RefCache，返回恢复 token。"""
+    return _current_cache.set(cache)
+
+
+def reset_session_cache(token: contextvars.Token) -> None:
+    """将 contextvar 恢复为先前值。"""
+    _current_cache.reset(token)
 
 
 class RefCache:

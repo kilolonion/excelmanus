@@ -57,3 +57,52 @@ class TestRefCache:
         cache.put_tier2("f.xlsx", "S1", "A1", node)
         cache.invalidate("f.xlsx")
         assert cache.get_tier2("f.xlsx", "S1", "A1") is None
+
+
+class TestSessionCacheIsolation:
+    """contextvar 多会话隔离测试。"""
+
+    def test_different_contexts_get_different_caches(self) -> None:
+        import contextvars
+        from excelmanus.reference_graph.cache import (
+            get_session_cache,
+            set_session_cache,
+            reset_session_cache,
+        )
+
+        cache_a = RefCache()
+        cache_b = RefCache()
+        cache_a.put_tier1("a.xlsx", _make_index("a.xlsx"))
+
+        token_a = set_session_cache(cache_a)
+        assert get_session_cache() is cache_a
+        assert get_session_cache().get_tier1("a.xlsx") is not None
+
+        reset_session_cache(token_a)
+
+        token_b = set_session_cache(cache_b)
+        assert get_session_cache() is cache_b
+        assert get_session_cache().get_tier1("a.xlsx") is None
+
+        reset_session_cache(token_b)
+
+    def test_fallback_to_module_singleton(self) -> None:
+        from excelmanus.reference_graph.cache import get_session_cache
+
+        c1 = get_session_cache()
+        c2 = get_session_cache()
+        assert c1 is c2
+
+    def test_set_and_reset(self) -> None:
+        from excelmanus.reference_graph.cache import (
+            get_session_cache,
+            set_session_cache,
+            reset_session_cache,
+        )
+
+        original = get_session_cache()
+        custom = RefCache()
+        token = set_session_cache(custom)
+        assert get_session_cache() is custom
+        reset_session_cache(token)
+        assert get_session_cache() is original
