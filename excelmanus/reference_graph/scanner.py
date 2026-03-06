@@ -126,3 +126,106 @@ class Tier1Scanner:
             named_ranges=named_ranges,
             built_at=time.time(),
         )
+
+
+class Tier2Resolver:
+    """单元格级深度引用解析（按需调用）。"""
+
+    def __init__(self) -> None:
+        self._extractor = FormulaRefExtractor()
+
+    def resolve(
+        self,
+        file_path: str,
+        sheet_name: str,
+        address: str,
+        *,
+        direction: str = "both",
+        depth: int = 1,
+    ) -> CellNode:
+        from openpyxl import load_workbook
+
+        wb = load_workbook(file_path, data_only=False, read_only=True)
+        try:
+            return self._resolve(wb, sheet_name, address, direction, depth)
+        finally:
+            wb.close()
+
+    def _resolve(
+        self,
+        wb: Any,
+        sheet_name: str,
+        address: str,
+        direction: str,
+        depth: int,
+    ) -> CellNode:
+        ws = wb[sheet_name]
+
+        formula: str | None = None
+        for row in ws.iter_rows():
+            for cell in row:
+                coord = cell.coordinate if hasattr(cell, "coordinate") else ""
+                if coord == address:
+                    val = cell.value
+                    if isinstance(val, str) and val.startswith("="):
+                        formula = val
+                    break
+
+        precedents: list[CellRef] = []
+        if formula and direction in ("both", "precedents"):
+            precedents = self._extractor.extract(formula)
+
+        dependents: list[CellRef] = []
+        if direction in ("both", "dependents"):
+            dependents = self._find_dependents(wb, sheet_name, address)
+
+        return CellNode(
+            sheet=sheet_name,
+            address=address,
+            formula=formula,
+            precedents=precedents,
+            dependents=dependents,
+        )
+
+    def _find_dependents(
+        self, wb: Any, sheet_name: str, address: str,
+    ) -> list[CellRef]:
+        """在工作簿中搜索引用了指定单元格的所有公式。"""
+        results: list[CellRef] = []
+        seen: set[str] = set()
+
+        for ws_name in wb.sheetnames:
+            ws = wb[ws_name]
+            for row in ws.iter_rows():
+                for cell in row:
+                    val = cell.value
+                    if not isinstance(val, str) or not val.startswith("="):
+                        continue
+                    refs = self._extractor.extract(val)
+                    for ref in refs:
+                        ref_sheet = ref.sheet_name or ws_name
+                        if ref_sheet == sheet_name and self._address_in_range(address, ref.cell_or_range):
+                            coord = cell.coordinate if hasattr(cell, "coordinate") else ""
+                            key = f"{ws_name}!{coord}"
+                            if coord and key not in seen:
+                                seen.add(key)
+                                results.append(CellRef(
+                                    sheet_name=ws_name if ws_name != sheet_name else None,
+                                    cell_or_range=coord,
+                                ))
+        return results
+
+    @staticmethod
+    def _address_in_range(address: str, cell_or_range: str) -> bool:
+        """检查单元格地址是否在引用范围内（简单匹配）。"""
+        if address == cell_or_range:
+            return True
+        if ":" in cell_or_range:
+            parts = cell_or_range.split(":")
+            if len(parts) == 2 and all(c.isalpha() for c in parts[0]) and all(c.isalpha() for c in parts[1]):
+                import re
+                col_match = re.match(r"([A-Z]+)", address)
+                if col_match:
+                    col = col_match.group(1)
+                    return parts[0] <= col <= parts[1]
+        return False
