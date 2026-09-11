@@ -64,9 +64,11 @@ class TestTokenCounter:
 class TestConversationMemory:
     """ConversationMemory 基本功能测试。"""
 
-    def test_default_system_prompt_contains_verification_principle(self) -> None:
-        assert "验证闭环" in _DEFAULT_SYSTEM_PROMPT
-        assert "善始善终" in _DEFAULT_SYSTEM_PROMPT
+    def test_default_system_prompt_contains_persona(self) -> None:
+        assert "你是 ExcelManus" in _DEFAULT_SYSTEM_PROMPT
+        assert "工具成功不等于业务正确" in _DEFAULT_SYSTEM_PROMPT
+        assert "VERSION_CONFLICT" in _DEFAULT_SYSTEM_PROMPT
+        assert "没有结束工具" in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
         """初始状态只有 system 消息。"""
@@ -79,7 +81,9 @@ class TestConversationMemory:
         memory.add_user_message("你好")
         msgs = memory.get_messages()
         assert len(msgs) == 2
-        assert msgs[1] == {"role": "user", "content": "你好"}
+        assert msgs[1]["role"] == "user"
+        assert msgs[1]["content"] == "你好"
+        assert "_ui_hidden" not in msgs[1]
 
     def test_add_assistant_message(self, memory: ConversationMemory) -> None:
         memory.add_assistant_message("你好，有什么可以帮你？")
@@ -268,6 +272,22 @@ class TestTruncation:
         total_tokens = sum(TokenCounter.count_message(m) for m in result)
         assert total_tokens <= int(2000 * 0.9)
 
+    def test_trim_for_request_puts_context_prompts_as_user_role(
+        self, config: ExcelManusConfig
+    ) -> None:
+        mem = ConversationMemory(config)
+        mem.add_user_message("你好")
+        msgs = mem.trim_for_request(
+            system_prompts=["系统提示"],
+            max_context_tokens=8000,
+            context_prompts=["## Hook 上下文\nnotice"],
+        )
+        assert msgs[0]["role"] == "system"
+        assert msgs[1]["role"] == "user"
+        assert msgs[1]["content"] == "## Hook 上下文\nnotice"
+        assert msgs[2]["role"] == "user"
+        assert msgs[2]["content"] == "你好"
+
     def test_trim_for_request_keeps_tool_call_and_result_consistency(
         self, config: ExcelManusConfig
     ) -> None:
@@ -304,7 +324,9 @@ class TestMultimodalMemory:
         mem = ConversationMemory(config)
         mem.add_user_message("hello")
         msgs = mem.get_messages()
-        assert msgs[-1] == {"role": "user", "content": "hello"}
+        assert msgs[-1]["role"] == "user"
+        assert msgs[-1]["content"] == "hello"
+        assert "_image_id" not in msgs[-1]
 
     def test_add_user_message_list_content(self, config: ExcelManusConfig) -> None:
         """多模态 content parts。"""
@@ -315,7 +337,9 @@ class TestMultimodalMemory:
         ]
         mem.add_user_message(parts)
         msgs = mem.get_messages()
-        assert msgs[-1] == {"role": "user", "content": parts}
+        assert msgs[-1]["role"] == "user"
+        assert msgs[-1]["content"] == parts
+        assert "_image_id" not in msgs[-1]
 
     def test_add_image_message(self, config: ExcelManusConfig) -> None:
         """便捷图片注入方法。"""

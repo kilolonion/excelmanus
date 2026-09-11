@@ -6,8 +6,9 @@ interface UIState {
   sidebarOpen: boolean;
   currentModel: string;
   fullAccessEnabled: boolean;
-  visionCapable: boolean;
+  visionCapable: boolean | null;
   chatMode: "write" | "read" | "plan";
+  presentAs: "native" | "code";
   thinkingEffort: string;
   settingsOpen: boolean;
   settingsTab: string;
@@ -22,8 +23,9 @@ interface UIState {
   setSidebarOpen: (open: boolean) => void;
   setCurrentModel: (model: string) => void;
   setFullAccessEnabled: (enabled: boolean) => void;
-  setVisionCapable: (capable: boolean) => void;
+  setVisionCapable: (capable: boolean | null) => void;
   setChatMode: (mode: "write" | "read" | "plan") => void;
+  setPresentAs: (mode: "native" | "code") => void;
   setThinkingEffort: (effort: string) => void;
   setSidebarTab: (tab: "chats" | "files") => void;
   openSettings: (tab?: string) => void;
@@ -53,8 +55,9 @@ export const useUIStore = create<UIState>()(
   sidebarOpen: !getIsMobile() && getIsDesktop(),
   currentModel: "",
   fullAccessEnabled: false,
-  visionCapable: false,
+  visionCapable: null,
   chatMode: "write" as const,
+  presentAs: "native" as const,
   thinkingEffort: "medium",
   settingsOpen: false,
   settingsTab: "model",
@@ -70,7 +73,12 @@ export const useUIStore = create<UIState>()(
   setCurrentModel: (model) => set({ currentModel: model }),
   setFullAccessEnabled: (enabled) => set({ fullAccessEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
-  setChatMode: (mode) => set({ chatMode: mode }),
+  setChatMode: (mode) =>
+    set((s) => ({
+      chatMode: mode,
+      presentAs: mode === "write" ? s.presentAs : "native",
+    })),
+  setPresentAs: (mode) => set({ presentAs: mode }),
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab || "model" }),

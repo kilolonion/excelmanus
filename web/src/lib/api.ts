@@ -2,6 +2,7 @@ import type { SessionDetail } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 
 const API_BASE_PATH = "/api/v1";
+const MANAGE_TOKEN_STORAGE_KEY = "excelmanus_manage_token";
 
 /** 普通 REST 请求的默认超时（毫秒）。上传/下载等大体积操作使用更长的超时。 */
 const _DEFAULT_TIMEOUT_MS = 30_000;
@@ -21,8 +22,29 @@ function _withTimeout(timeoutMs: number, existingSignal?: AbortSignal | null): A
   return existingSignal;
 }
 
+export function getManageToken(): string {
+  if (typeof window === "undefined") return "";
+  try {
+    return sessionStorage.getItem(MANAGE_TOKEN_STORAGE_KEY) || "";
+  } catch {
+    return "";
+  }
+}
+
+export function setManageToken(token: string): void {
+  if (typeof window === "undefined") return;
+  try {
+    if (token) sessionStorage.setItem(MANAGE_TOKEN_STORAGE_KEY, token);
+    else sessionStorage.removeItem(MANAGE_TOKEN_STORAGE_KEY);
+  } catch {
+    /* ignore quota / private mode */
+  }
+}
+
 export function getAuthHeaders(): Record<string, string> {
-  return {};
+  const token = getManageToken();
+  if (!token) return {};
+  return { Authorization: `Bearer ${token}` };
 }
 
 /**
@@ -196,17 +218,8 @@ export async function apiDelete(path: string, opts?: { direct?: boolean }): Prom
   if (!res.ok) return handleAuthError(res);
 }
 
-export async function fetchSessions(opts?: {
-  includeArchived?: boolean;
-}): Promise<unknown[]> {
-  const params = new URLSearchParams();
-  if (opts?.includeArchived) {
-    params.set("include_archived", "true");
-  }
-  const qs = params.toString();
-  const res: { sessions?: unknown[] } = await apiGet(
-    `/sessions${qs ? `?${qs}` : ""}`
-  );
+export async function fetchSessions(): Promise<unknown[]> {
+  const res: { sessions?: unknown[] } = await apiGet("/sessions");
   return res.sessions ?? [];
 }
 
@@ -262,9 +275,10 @@ export async function fetchSessionDetail(
     latestSeq: (data.latest_seq as number) ?? 0,
     fullAccessEnabled: (data.full_access_enabled as boolean) ?? false,
     chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
+    presentAs: data.present_as === "code" ? "code" : "native",
     currentModel: (data.current_model as string | null) ?? null,
     currentModelName: (data.current_model_name as string | null) ?? null,
-    visionCapable: (data.vision_capable as boolean) ?? false,
+    visionCapable: typeof data.vision_capable === "boolean" ? data.vision_capable : null,
     messages: Array.isArray(data.messages) ? (data.messages as unknown[]) : [],
     pendingApproval,
     pendingQuestion,
@@ -298,15 +312,6 @@ export async function clearAllSessions(): Promise<{
     throw new Error(data.detail || data.error || `API error: ${res.status}`);
   }
   return res.json();
-}
-
-export async function archiveSession(
-  sessionId: string,
-  archive: boolean
-): Promise<{ status: string; session_id: string; archived: boolean }> {
-  return apiPatch(`/sessions/${encodeURIComponent(sessionId)}/archive`, {
-    archive,
-  });
 }
 
 export async function updateSessionTitle(
@@ -548,13 +553,11 @@ export async function abortChat(sessionId: string): Promise<{ status: string }> 
 export async function rollbackChat(opts: {
   sessionId: string;
   turnIndex: number;
-  rollbackFiles?: boolean;
   newMessage?: string;
   resendMode?: boolean;
 }): Promise<{
   status: string;
   removed_messages: number;
-  file_rollback_results: string[];
   turn_index: number;
 }> {
   const rollbackUrl = buildApiUrl("/chat/rollback", { direct: true });
@@ -564,7 +567,6 @@ export async function rollbackChat(opts: {
     body: JSON.stringify({
       session_id: opts.sessionId,
       turn_index: opts.turnIndex,
-      rollback_files: opts.rollbackFiles ?? false,
       new_message: opts.newMessage ?? null,
       resend_mode: opts.resendMode ?? false,
     }),
@@ -734,12 +736,21 @@ export async function fetchWordSnapshot(
 export async function writeWordContent(
   path: string,
   operations: { action: string; index?: number; text?: string; style?: string }[],
-  sessionId?: string,
-): Promise<{ status: string; applied_count: number; errors?: string[] }> {
+  opts?: { sessionId?: string; expectedVersion: string },
+): Promise<{ status: string; applied_count: number; errors?: string[]; content_version?: string }> {
+  const expectedVersion = opts?.expectedVersion;
+  if (!expectedVersion) {
+    throw new Error("Word write 必须提供 expected_version");
+  }
   const res = await fetch(buildApiUrl("/files/word/write"), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path: normalizeExcelPath(path), operations, session_id: sessionId }),
+    body: JSON.stringify({
+      path: normalizeExcelPath(path),
+      operations,
+      session_id: opts?.sessionId,
+      expected_version: expectedVersion,
+    }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -787,8 +798,6 @@ export interface FileRegistryEntry {
   parent_file_id: string | null;
   sheet_meta: Record<string, unknown>[];
   content_hash: string;
-  staging_path: string | null;
-  is_active_cow: boolean;
   created_at: string;
   updated_at: string;
   deleted_at: string | null;
@@ -1256,113 +1265,6 @@ export async function uploadFileFromUrl(url: string): Promise<{
 
 // ── 工作区事务 API（原备份应用）────
 
-export interface BackupFileSummary {
-  cells_changed?: number;
-  cells_added?: number;
-  cells_removed?: number;
-  sheets_added?: string[];
-  sheets_removed?: string[];
-  size_delta_bytes?: number;
-}
-
-export interface BackupFile {
-  original_path: string;
-  backup_path: string;
-  exists: boolean;
-  modified_at: number | null;
-  summary?: BackupFileSummary;
-}
-
-export interface BackupListResponse {
-  files: BackupFile[];
-  backup_enabled: boolean;
-  in_flight?: boolean;
-}
-
-export async function fetchBackupList(
-  sessionId: string
-): Promise<BackupListResponse> {
-  const url = buildApiUrl(
-    `/workspace/staged?session_id=${encodeURIComponent(sessionId)}`
-  );
-  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
-  if (!res.ok) {
-    return { files: [], backup_enabled: false };
-  }
-  return res.json();
-}
-
-export interface AppliedFile {
-  original: string;
-  backup: string;
-  undo_path?: string;
-}
-
-export async function applyBackup(opts: {
-  sessionId: string;
-  files?: string[];
-}): Promise<{ status: string; applied: AppliedFile[]; count: number; pending_count: number }> {
-  const url = buildApiUrl("/workspace/commit");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({
-      session_id: opts.sessionId,
-      files: opts.files ?? null,
-    }),
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Commit error: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function discardBackup(opts: {
-  sessionId: string;
-  files?: string[];
-}): Promise<{ status: string; discarded: number | string; pending_count?: number }> {
-  const url = buildApiUrl("/workspace/rollback");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({
-      session_id: opts.sessionId,
-      files: opts.files ?? null,
-    }),
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Rollback error: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function undoBackup(opts: {
-  sessionId: string;
-  originalPath: string;
-  undoPath: string;
-}): Promise<{ status: string; undone: string }> {
-  const url = buildApiUrl("/backup/undo");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({
-      session_id: opts.sessionId,
-      original_path: opts.originalPath,
-      undo_path: opts.undoPath,
-    }),
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Undo error: ${res.status}`);
-  }
-  return res.json();
-}
-
 // ── 操作历史时间线 API ────────────────────────────────────
 
 export interface OperationChange {
@@ -1573,32 +1475,6 @@ export async function clawhubListInstalled(): Promise<{
   return apiGet("/clawhub/installed");
 }
 
-// ── Docker Sandbox / Session Isolation API ───────────────
-
-export interface DockerSandboxStatus {
-  docker_sandbox_enabled: boolean;
-  docker_available: boolean;
-  sandbox_image_ready: boolean;
-}
-
-export async function fetchDockerSandboxStatus(): Promise<DockerSandboxStatus> {
-  return apiGet<DockerSandboxStatus>("/settings/docker-sandbox");
-}
-
-export async function setDockerSandbox(enabled: boolean): Promise<{
-  status: string;
-  docker_sandbox_enabled: boolean;
-}> {
-  return apiPut("/settings/docker-sandbox", { enabled });
-}
-
-export async function buildDockerSandboxImage(force = false): Promise<{
-  status: string;
-  message: string;
-}> {
-  return apiPost("/settings/docker-sandbox/build", { force });
-}
-
 // ── Chat Turns API ───────────────────────────────────────
 
 export interface ChatTurn {
@@ -1616,41 +1492,42 @@ export async function fetchChatTurns(
   return res.turns ?? [];
 }
 
-// ── Checkpoint API ───────────────────────────────────────
-
-export interface CheckpointItem {
-  turn_number: number;
-  created_at: string;
-  files_modified: string[];
-  tool_names: string[];
-  version_count: number;
+export interface WorkbookRevisionItem {
+  revision_id: string;
+  content_version: string;
+  reason: string;
+  sequence: number;
+  transaction_id: string;
+  label: string;
+  parent_revision_id: string | null;
 }
 
-export interface CheckpointListResponse {
-  checkpoints: CheckpointItem[];
-  checkpoint_enabled: boolean;
-  error?: string;
+export interface RevisionListResponse {
+  path: string;
+  content_version: string | null;
+  revisions: WorkbookRevisionItem[];
 }
 
-export async function fetchCheckpoints(
-  sessionId: string,
-): Promise<CheckpointListResponse> {
-  try {
-    return await apiGet<CheckpointListResponse>(
-      `/checkpoint/list?session_id=${encodeURIComponent(sessionId)}`,
-    );
-  } catch {
-    return { checkpoints: [], checkpoint_enabled: false };
-  }
+export async function fetchRevisions(
+  path: string,
+  sessionId?: string,
+): Promise<RevisionListResponse> {
+  const params = new URLSearchParams({ path });
+  if (sessionId) params.set("session_id", sessionId);
+  return apiGet<RevisionListResponse>(`/revisions?${params.toString()}`);
 }
 
-export async function checkpointRollback(
-  sessionId: string,
-  turnNumber: number,
-): Promise<{ status: string; turn_number: number; restored_files: string[]; count: number }> {
-  return apiPost(`/checkpoint/rollback`, {
-    session_id: sessionId,
-    turn_number: turnNumber,
+export async function restoreRevision(opts: {
+  path: string;
+  revisionId: string;
+  expectedVersion: string;
+  sessionId?: string | null;
+}): Promise<{ status: string; path: string; content_version: string; restored_revision: string }> {
+  return apiPost("/revisions/restore", {
+    path: opts.path,
+    revision_id: opts.revisionId,
+    expected_version: opts.expectedVersion,
+    session_id: opts.sessionId ?? null,
   });
 }
 
@@ -1663,21 +1540,23 @@ export async function cleanupVersionBackups(
 }
 
 export interface UpdateApplyResult {
-  success: boolean;
-  old_version: string;
-  new_version: string;
-  backup_dir: string;
-  steps_completed: string[];
-  error: string | null;
-  needs_restart: boolean;
+  accepted?: boolean;
+  success?: boolean;
+  old_version?: string;
+  new_version?: string;
+  backup_dir?: string;
+  steps_completed?: string[];
+  error?: string | null;
+  needs_restart?: boolean;
+  message?: string;
 }
 
-export async function applyVersionUpdate(opts?: {
+export async function startVersionUpgrade(opts?: {
   skipBackup?: boolean;
   skipDeps?: boolean;
   useMirror?: boolean;
 }): Promise<UpdateApplyResult> {
-  return apiPost("/version/update/apply", {
+  return apiPost("/version/upgrade", {
     skip_backup: opts?.skipBackup ?? false,
     skip_deps: opts?.skipDeps ?? false,
     use_mirror: opts?.useMirror ?? false,
@@ -1703,120 +1582,24 @@ export interface VersionManifest {
   backend_version: string;
   api_schema_version: number;
   frontend_build_id: string | null;
+  version_fingerprint?: string | null;
   git_commit: string | null;
   deployed_at: string | null;
   deploy_mode: string | null;
   topology: string | null;
-  min_frontend_build_id: string | null;
-  min_backend_version: string | null;
+  last_upgrade?: {
+    ok?: boolean | null;
+    action?: string;
+    error?: string | null;
+    finished_at?: string;
+    old_version?: string;
+    new_version?: string;
+    already_latest?: boolean;
+  } | null;
 }
 
 export async function fetchVersionManifest(): Promise<VersionManifest> {
   return apiGet<VersionManifest>("/version/manifest");
-}
-
-// ── Streaming Update (SSE) ──────────────────────────────
-
-export interface UpdateProgressEvent {
-  message: string;
-  percent: number;
-}
-
-export type UpdateDoneEvent = UpdateApplyResult;
-
-/**
- * 以 SSE 流式执行更新，实时接收进度事件。
- * 返回一个 AbortController 供调用方取消。
- */
-export function streamVersionUpdate(
-  opts: {
-    skipBackup?: boolean;
-    skipDeps?: boolean;
-    useMirror?: boolean;
-  },
-  callbacks: {
-    onProgress: (ev: UpdateProgressEvent) => void;
-    onDone: (ev: UpdateDoneEvent) => void;
-    onError: (error: string) => void;
-  },
-): AbortController {
-  const controller = new AbortController();
-
-  (async () => {
-    try {
-      const resp = await directFetch(
-        `${API_BASE_PATH}/version/update/stream`,
-        {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            skip_backup: opts.skipBackup ?? false,
-            skip_deps: opts.skipDeps ?? false,
-            use_mirror: opts.useMirror ?? false,
-          }),
-          signal: controller.signal,
-        },
-      );
-
-      if (!resp.ok) {
-        const text = await resp.text().catch(() => "");
-        callbacks.onError(`HTTP ${resp.status}: ${text}`);
-        return;
-      }
-
-      const reader = resp.body?.getReader();
-      if (!reader) {
-        callbacks.onError("服务端未返回响应体");
-        return;
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() || "";
-
-        let currentEvent = "";
-        let currentData = "";
-
-        for (const line of lines) {
-          if (line.startsWith("event:")) {
-            currentEvent = line.slice(6).trim();
-          } else if (line.startsWith("data:")) {
-            currentData = line.slice(5).trim();
-          } else if (line === "" && currentEvent && currentData) {
-            try {
-              const parsed = JSON.parse(currentData);
-              if (currentEvent === "progress") {
-                callbacks.onProgress(parsed as UpdateProgressEvent);
-              } else if (currentEvent === "done") {
-                callbacks.onDone(parsed as UpdateDoneEvent);
-              } else if (currentEvent === "error") {
-                callbacks.onError(parsed.error || "未知错误");
-              }
-            } catch {
-              // malformed JSON, skip
-            }
-            currentEvent = "";
-            currentData = "";
-          }
-        }
-      }
-
-      reader.releaseLock();
-    } catch (err) {
-      if ((err as Error).name !== "AbortError") {
-        callbacks.onError((err as Error).message || "流式更新连接失败");
-      }
-    }
-  })();
-
-  return controller;
 }
 
 // ── Remote Deploy Operations ────────────────────────────
@@ -1915,118 +1698,7 @@ export async function executeRollback(opts: {
   });
 }
 
-/**
- * 以 SSE 流式执行回滚，实时接收进度事件。
- */
-export function streamRollback(
-  opts: {
-    target?: "full" | "backend" | "frontend";
-    releaseId?: string;
-    commit?: string;
-    skipDeps?: boolean;
-  },
-  handlers: {
-    onProgress?: (ev: { message: string; percent: number }) => void;
-    onDone?: (result: RollbackResult) => void;
-    onError?: (error: string) => void;
-  },
-): AbortController {
-  const controller = new AbortController();
-  const url = buildApiUrl("/deploy/rollback/stream");
 
-  fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      target: opts.target ?? "full",
-      release_id: opts.releaseId ?? "",
-      commit: opts.commit ?? "",
-      skip_deps: opts.skipDeps ?? false,
-    }),
-    signal: controller.signal,
-  })
-    .then(async (resp) => {
-      if (!resp.ok || !resp.body) {
-        handlers.onError?.(`HTTP ${resp.status}`);
-        return;
-      }
-      const reader = resp.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-
-        const lines = buf.split("\n");
-        buf = lines.pop() || "";
-
-        let eventType = "progress";
-        for (const line of lines) {
-          if (line.startsWith("event: ")) {
-            eventType = line.slice(7).trim();
-          } else if (line.startsWith("data: ")) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              if (eventType === "progress") handlers.onProgress?.(data);
-              else if (eventType === "done") handlers.onDone?.(data);
-              else if (eventType === "error") handlers.onError?.(data.error || "未知错误");
-            } catch { /* ignore parse errors */ }
-          }
-        }
-      }
-    })
-    .catch((err) => {
-      if (err.name !== "AbortError") handlers.onError?.(String(err));
-    });
-
-  return controller;
-}
-
-// ── Canary (灰度) Management ────────────────────────────
-
-export interface CanaryStatus {
-  active: boolean;
-  current_weight: number;
-  step: number;
-  total_steps: number;
-  started_at: string | null;
-  candidate_port: number | null;
-  observe_seconds: number | null;
-}
-
-export async function fetchCanaryStatus(): Promise<CanaryStatus> {
-  return apiGet<CanaryStatus>("/deploy/canary/status");
-}
-
-export async function promoteCanary(): Promise<{
-  success: boolean;
-  new_weight?: number;
-  step?: number;
-  total_steps?: number;
-  error?: string;
-}> {
-  return apiPost("/deploy/canary/promote", {});
-}
-
-export async function abortCanary(): Promise<{
-  success: boolean;
-  message?: string;
-  error?: string;
-}> {
-  return apiPost("/deploy/canary/abort", {});
-}
-
-export async function startCanary(opts?: {
-  target?: "full" | "backend";
-  observeSeconds?: number;
-}): Promise<{ success: boolean; message?: string; error?: string }> {
-  return apiPost("/deploy/canary/start", {
-    target: opts?.target ?? "full",
-    observe_seconds: opts?.observeSeconds ?? 60,
-  });
-}
 
 // ── Deploy Lock Status ──────────────────────────────────
 

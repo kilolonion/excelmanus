@@ -14,8 +14,6 @@ class TestSessionStateInit:
         assert state.last_success_count == 0
         assert state.last_failure_count == 0
         assert state.has_write_tool_call is False
-        assert state.execution_guard_fired is False
-        assert state.vba_exempt is False
         assert state.turn_diagnostics == []
         assert state.session_diagnostics == []
 
@@ -126,7 +124,12 @@ class TestAffectedFiles:
         state.record_affected_file("a.xlsx")
         state.record_affected_file("b.xlsx")
         state.record_affected_file("a.xlsx")
-        assert state.affected_files == ["a.xlsx", "b.xlsx"]
+        assert state.affected_files == ["./a.xlsx", "./b.xlsx"]
+
+    def test_record_affected_file_drops_backup_path(self):
+        state = SessionState()
+        state.record_affected_file("outputs/backups/foo_20260911T091344_abcd.xlsx")
+        assert state.affected_files == []
 
     def test_reset_loop_stats_clears_affected_files(self):
         state = SessionState()
@@ -146,8 +149,6 @@ class TestResetSession:
         state.last_success_count = 15
         state.last_failure_count = 5
         state.has_write_tool_call = True
-        state.execution_guard_fired = True
-        state.vba_exempt = True
         state.turn_diagnostics = [{"iteration": 1}]
         state.session_diagnostics = [{"route": "test"}]
 
@@ -159,8 +160,6 @@ class TestResetSession:
         assert state.last_success_count == 0
         assert state.last_failure_count == 0
         assert state.has_write_tool_call is False
-        assert state.execution_guard_fired is False
-        assert state.vba_exempt is False
         assert state.turn_diagnostics == []
         assert state.session_diagnostics == []
 
@@ -188,3 +187,13 @@ class TestLegacyCompat:
         assert state.session_turn == 3
         assert state.has_write_tool_call is True
         assert not hasattr(state, "current_write_hint")
+
+    def test_present_as_roundtrip_and_legacy_both(self):
+        state = SessionState()
+        state.present_as = "code"
+        restored = SessionState.from_dict(state.to_dict())
+        assert restored.present_as == "code"
+        legacy = SessionState.from_dict({"present_as": "both"})
+        assert legacy.present_as == "code"
+        missing = SessionState.from_dict({})
+        assert missing.present_as == "native"

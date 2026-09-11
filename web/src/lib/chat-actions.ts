@@ -20,6 +20,11 @@ import {
   type DeltaBatcher as DeltaBatcherInterface,
 } from "./sse-event-handler";
 
+function currentPresentAs(): "native" | "code" {
+  const { chatMode, presentAs } = useUIStore.getState();
+  return chatMode === "write" && presentAs === "code" ? "code" : "native";
+}
+
 const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
 function _isImageFile(name: string): boolean {
   const dot = name.lastIndexOf(".");
@@ -225,6 +230,66 @@ class DeltaBatcher {
   }
 }
 
+function applyTextDelta(messageId: string, textDelta: string) {
+  if (!textDelta) return;
+  const store = useChatStore.getState();
+  const msg = getLastAssistantMessage(store.messages, messageId);
+  const lastText = msg
+    ? [...msg.blocks].reverse().find((b) => b.type === "text")
+    : undefined;
+  if (lastText) {
+    store.updateBlockByType(messageId, "text", (b) => {
+      if (b.type === "text") return { ...b, content: b.content + textDelta };
+      return b;
+    });
+    return;
+  }
+  store.appendBlock(messageId, { type: "text", content: textDelta });
+}
+
+function applyThinkingDelta(messageId: string, thinkingDelta: string) {
+  if (!thinkingDelta) return;
+  useChatStore.getState().updateBlockByType(messageId, "thinking", (b) => {
+    if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
+    return b;
+  });
+}
+
+function makeDeltaBatcher(messageId: string) {
+  return new DeltaBatcher((textDelta, thinkingDelta) => {
+    if (textDelta) applyTextDelta(messageId, textDelta);
+    if (thinkingDelta) applyThinkingDelta(messageId, thinkingDelta);
+  });
+}
+
+function scheduleSessionResync(sessionId: string, delayMs: number) {
+  setTimeout(async () => {
+    try {
+      const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
+      const chat = useChatStore.getState();
+      if (chat.loadedSessionId === sessionId && !chat.isStreaming && !chat.abortController) {
+        await refreshSessionMessagesFromBackend(sessionId);
+      }
+    } catch {
+      // SessionSync 轮询最终会恢复
+    }
+  }, delayMs);
+}
+
+function shouldResyncAfterStream(ctx: SSEHandlerContext, assistantMsgId: string): boolean {
+  if (ctx.hadStreamError) return true;
+  const lastAssistant = getLastAssistantMessage(useChatStore.getState().messages, assistantMsgId);
+  const hasVisibleOutput = lastAssistant?.blocks.some((b) =>
+    (b.type === "text" && Boolean(b.content.trim()))
+    || b.type === "tool_call"
+    || b.type === "subagent"
+    || b.type === "failure_guidance"
+  );
+  if (!hasVisibleOutput) return true;
+  if (!ctx.hadPersistedToolWork) return false;
+  return !lastAssistant?.blocks.some((b) => b.type === "tool_call" || b.type === "subagent");
+}
+
 // 因延迟处理交互（askuser / approval）而累积的 Token 统计。
 // sendContinuation 会将这些细节到最终统计中。
 let _deferredTokenStats: {
@@ -258,7 +323,7 @@ export async function sendMessage(
     const items = uiState.configPlaceholderItems;
     store.appendBlock(assistantMsgId, {
       type: "config_error",
-      items: items.length > 0 ? items : [{ name: "main", field: "api_key", model: "" }],
+      items: items.length > 0 ? items : [{ name: "active", field: "api_key", model: "" }],
     });
     store.saveCurrentSession();
     return;
@@ -381,35 +446,12 @@ export async function sendMessage(
     messageContent = `${notices.join("\n")}\n\n${text}`;
   }
 
-  // 杈呭姪鍑芥暟锛氳幏鍙栨渶鏂扮殑 store 鐘舵€?
+  // 辅助函数：获取最新的 store 状态
   const S = () => useChatStore.getState();
 
-  // RAF 鎵归噺澧為噺鍒锋柊鍣細绱Н text_delta / thinking_delta锛?
-  // 姣忎釜鍔ㄧ敾甯ф渶澶氬簲鐢ㄤ竴娆″埌 store銆?
-  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
-    if (textDelta) {
-      const msg = getLastAssistantMessage(S().messages, assistantMsgId);
-      const lastBlock = msg?.blocks[msg.blocks.length - 1];
-      if (lastBlock && lastBlock.type === "text") {
-        S().updateLastBlock(assistantMsgId, (b) => {
-          if (b.type === "text") {
-            return { ...b, content: b.content + textDelta };
-          }
-          return b;
-        });
-      } else {
-        S().appendBlock(assistantMsgId, { type: "text", content: textDelta });
-      }
-    }
-    if (thinkingDelta) {
-      S().updateBlockByType(assistantMsgId, "thinking", (b) => {
-        if (b.type === "thinking") {
-          return { ...b, content: b.content + thinkingDelta };
-        }
-        return b;
-      });
-    }
-  });
+  // RAF 批量增量刷新器：累积 text_delta / thinking_delta，
+  // 每个动画帧最多应用到 store 一次。
+  const batcher = makeDeltaBatcher(assistantMsgId);
 
   // ── SSE 事件处理上下文 ───────────────────────────────────
   const sseCtx: SSEHandlerContext = {
@@ -464,6 +506,7 @@ export async function sendMessage(
         message: messageContent,
         session_id: effectiveSessionId,
         chat_mode: useUIStore.getState().chatMode,
+        present_as: currentPresentAs(),
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
@@ -543,19 +586,8 @@ export async function sendMessage(
     S().setStreaming(false);
     S().setAbortController(null);
 
-    if (sseCtx.hadStreamError && effectiveSessionId) {
-      const sid = effectiveSessionId;
-      setTimeout(async () => {
-        try {
-          const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
-          const chat = useChatStore.getState();
-          if (chat.loadedSessionId === sid && !chat.isStreaming && !chat.abortController) {
-            await refreshSessionMessagesFromBackend(sid);
-          }
-        } catch {
-          // 静默处理 —— SessionSync 轮询最终会恢复
-        }
-      }, 1500);
+    if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
+      scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
     }
   }
 }
@@ -597,26 +629,7 @@ export async function sendContinuation(
   const S = () => useChatStore.getState();
   const msgId = assistantMsgId;
 
-  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
-    if (textDelta) {
-      const msg = getLastAssistantMessage(S().messages, msgId);
-      const lastBlock = msg?.blocks[msg.blocks.length - 1];
-      if (lastBlock && lastBlock.type === "text") {
-        S().updateLastBlock(msgId, (b) => {
-          if (b.type === "text") return { ...b, content: b.content + textDelta };
-          return b;
-        });
-      } else {
-        S().appendBlock(msgId, { type: "text", content: textDelta });
-      }
-    }
-    if (thinkingDelta) {
-      S().updateBlockByType(msgId, "thinking", (b) => {
-        if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
-        return b;
-      });
-    }
-  });
+  const batcher = makeDeltaBatcher(msgId);
 
   const sseCtx: SSEHandlerContext = {
     assistantMsgId: msgId,
@@ -645,7 +658,7 @@ export async function sendContinuation(
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
-      { message: text, session_id: effectiveSessionId },
+      { message: text, session_id: effectiveSessionId, chat_mode: useUIStore.getState().chatMode, present_as: currentPresentAs() },
       (event) => {
         _resetContStall();
         const sseEvent = event as SSEEvent;
@@ -747,19 +760,8 @@ export async function sendContinuation(
     S().setStreaming(false);
     S().setAbortController(null);
 
-    if (sseCtx.hadStreamError && effectiveSessionId) {
-      const sid = effectiveSessionId;
-      setTimeout(async () => {
-        try {
-          const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
-          const chat = useChatStore.getState();
-          if (chat.loadedSessionId === sid && !chat.isStreaming && !chat.abortController) {
-            await refreshSessionMessagesFromBackend(sid);
-          }
-        } catch {
-          // 静默处理
-        }
-      }, 1500);
+    if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
+      scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
     }
   }
 }
@@ -773,7 +775,6 @@ export async function sendContinuation(
 export async function rollbackAndResend(
   messageId: string,
   newContent: string,
-  rollbackFiles: boolean,
   sessionId: string | null,
   files?: File[],
   retainedFiles?: FileAttachment[],
@@ -804,7 +805,6 @@ export async function rollbackAndResend(
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
-      rollbackFiles,
       resendMode: true,
     });
   } catch (err) {
@@ -872,7 +872,6 @@ export async function retryAssistantMessage(
   assistantMessageId: string,
   sessionId: string | null,
   switchToModel?: string,
-  rollbackFiles?: boolean,
 ) {
   const store = useChatStore.getState();
   if (store.isStreaming) return;
@@ -922,7 +921,6 @@ export async function retryAssistantMessage(
     await rollbackChat({
       sessionId: effectiveSessionId,
       turnIndex,
-      rollbackFiles: rollbackFiles ?? false,
       resendMode: true,
     });
   } catch (err) {
@@ -1074,26 +1072,7 @@ export async function subscribeToSession(sessionId: string) {
 
   const S = () => useChatStore.getState();
 
-  const batcher = new DeltaBatcher((textDelta, thinkingDelta) => {
-    if (textDelta) {
-      const msg = getLastAssistantMessage(S().messages, msgId);
-      const lastBlock = msg?.blocks[msg.blocks.length - 1];
-      if (lastBlock && lastBlock.type === "text") {
-        S().updateLastBlock(msgId, (b) => {
-          if (b.type === "text") return { ...b, content: b.content + textDelta };
-          return b;
-        });
-      } else {
-        S().appendBlock(msgId, { type: "text", content: textDelta });
-      }
-    }
-    if (thinkingDelta) {
-      S().updateBlockByType(msgId, "thinking", (b) => {
-        if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
-        return b;
-      });
-    }
-  });
+  const batcher = makeDeltaBatcher(msgId);
 
   const sseCtx: SSEHandlerContext = {
     assistantMsgId: msgId,

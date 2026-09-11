@@ -20,13 +20,8 @@ from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("code_mode")
 
-DOCKER_OFF_DISCLAIMER = (
-    "Docker 未启用：仅暴露宿主 SDK 绑定与受限 builtins，"
-    "不宣称任意代码已被隔离。"
-)
-DOCKER_ON_DISCLAIMER = (
-    "当前用户脚本在 Docker 容器中执行；工具副作用仍经宿主 ToolDispatcher。"
-)
+LOCAL_SANDBOX_DISCLAIMER = "本机受限子进程：禁网络、禁起进程、禁出工作区。"
+DOCKER_OFF_DISCLAIMER = LOCAL_SANDBOX_DISCLAIMER  # compat alias; Docker sandbox removed
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKIP_SDK_TOOLS = frozenset({"run_code"})
@@ -48,7 +43,6 @@ class CodeModeSession:
     bridge_dir: Path
     tool_defs: list[ToolDef] = field(default_factory=list)
     tool_scope: Sequence[str] | None = None
-    docker_sandbox: bool = False
     call_timeout: float = 120.0
     on_event: Any = None
     _calls: list[SdkCallRecord] = field(default_factory=list)
@@ -66,7 +60,7 @@ class CodeModeSession:
     def prepare(self) -> None:
         self.bridge_dir.mkdir(parents=True, exist_ok=True)
         self.sdk_path.write_text(
-            render_sdk_source(self.tool_defs, docker_sandbox=self.docker_sandbox),
+            render_sdk_source(self.tool_defs),
             encoding="utf-8",
         )
 
@@ -302,20 +296,12 @@ def build_session_for_run_code(
         except Exception:
             logger.debug("Code Mode 读取 registry 工具失败", exc_info=True)
             tool_defs = []
-    docker = False
-    try:
-        from excelmanus.tools.code_tools import _is_docker_sandbox
-
-        docker = bool(_is_docker_sandbox())
-    except Exception:
-        docker = False
     return CodeModeSession(
         dispatcher=dispatcher,
         root_call_id=root_call_id,
         bridge_dir=workspace / ".tmp" / "code_mode" / safe,
         tool_defs=tool_defs,
         tool_scope=tool_scope,
-        docker_sandbox=docker,
         on_event=on_event,
     )
 
@@ -329,28 +315,52 @@ def apply_sdk_calls_summary(result_json: str, session: CodeModeSession) -> str:
     if not isinstance(data, dict):
         return result_json
     data["sdk_calls"] = session.summary()
-    if not session.docker_sandbox:
-        data["sandbox_note"] = DOCKER_OFF_DISCLAIMER
+    data["sandbox_note"] = LOCAL_SANDBOX_DISCLAIMER
     return json.dumps(data, ensure_ascii=False, indent=2)
+
+
+def render_sdk_section(tool_defs: list[ToolDef]) -> str:
+    """生成 ``tools:sdk`` 段：当前可见绑定的 Python 签名，不是 em.py 教程。"""
+    lines: list[str] = ["在 `run_code` 程序内可调用的 SDK："]
+    for tool in tool_defs:
+        name = getattr(tool, "name", "") or ""
+        if name in _SKIP_SDK_TOOLS:
+            continue
+        line = _sdk_signature_line(tool)
+        if line:
+            lines.append(line)
+    if len(lines) == 1:
+        return ""
+    return "\n".join(lines)
+
+
+def _sdk_signature_line(tool: ToolDef) -> str:
+    schema = getattr(tool, "input_schema", None) or {}
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        properties = {}
+    required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
+    req_names = [name for name in properties if name in required]
+    opt_names = [name for name in properties if name not in required]
+    params: list[str] = []
+    for name in [*req_names, *opt_names]:
+        py_name = _py_name(str(name))
+        if name in required:
+            params.append(py_name)
+        else:
+            spec = properties.get(name) if isinstance(properties.get(name), dict) else {}
+            default = spec.get("default") if "default" in spec else None
+            params.append(f"{py_name}={default!r}")
+    return f"- {_py_name(str(tool.name))}({', '.join(params)})"
 
 
 def render_sdk_source(
     tool_defs: list[ToolDef],
-    *,
-    docker_sandbox: bool | None = None,
+    **_ignored: Any,
 ) -> str:
     """从 ToolDef 生成可执行 Python 模块文本（不在沙盒内直接调 func）。"""
-    if docker_sandbox is None:
-        try:
-            from excelmanus.tools.code_tools import _is_docker_sandbox
-
-            docker_sandbox = bool(_is_docker_sandbox())
-        except Exception:
-            docker_sandbox = False
-
-    disclaimer = DOCKER_ON_DISCLAIMER if docker_sandbox else DOCKER_OFF_DISCLAIMER
     parts: list[str] = [
-        _SDK_PREAMBLE.format(disclaimer=disclaimer),
+        _SDK_PREAMBLE.format(disclaimer=LOCAL_SANDBOX_DISCLAIMER),
     ]
     exported: list[str] = []
     for tool in tool_defs:

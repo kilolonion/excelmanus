@@ -1,7 +1,7 @@
 """API 服务端点测试：覆盖 Property 12-15、18、20。
 
 使用 httpx.AsyncClient + ASGITransport 测试 FastAPI 端点，
-通过 mock AgentEngine.chat() 避免真实 LLM 调用。
+通过 mock AgentEngine.followup() 避免真实 LLM 调用。
 """
 
 from __future__ import annotations
@@ -254,7 +254,7 @@ class TestProperty12ChatResponseFormat:
     ) -> None:
         """基本 chat 请求返回 200 和正确结构。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(
                 reply="测试回复",
@@ -281,8 +281,11 @@ class TestProperty12ChatResponseFormat:
         assert data["reply"] == "测试回复"
         assert data["iterations"] == 2
         assert data["truncated"] is False
-        # 默认 external_safe_mode=true，工具明细不对外暴露
-        assert data["tool_calls"] == []
+        assert isinstance(data["tool_calls"], list)
+        assert len(data["tool_calls"]) == 1
+        assert data["tool_calls"][0]["tool_name"] == "add_numbers"
+        assert data["tool_calls"][0]["arguments"] == {"a": 1, "b": 2}
+        assert data["route_mode"] != "hidden"
 
     @pytest.mark.asyncio
     async def test_chat_with_explicit_session_id(
@@ -290,7 +293,7 @@ class TestProperty12ChatResponseFormat:
     ) -> None:
         """带 session_id 的 chat 请求也返回 200。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="回复内容"),
         ):
@@ -307,7 +310,7 @@ class TestProperty12ChatResponseFormat:
     async def test_empty_reply_is_normalized(self, client: AsyncClient) -> None:
         """引擎返回空白回复时，API 应返回非空占位文本。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="   "),
         ):
@@ -394,7 +397,7 @@ class TestProperty13SessionReuse:
     ) -> None:
         """同一 session_id 的两次请求复用同一 AgentEngine 实例。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="第一次回复"),
         ):
             resp1 = await client.post(
@@ -403,7 +406,7 @@ class TestProperty13SessionReuse:
         sid = resp1.json()["session_id"]
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="第二次回复"),
         ):
             resp2 = await client.post(
@@ -427,7 +430,7 @@ class TestProperty13SessionReuse:
             return ChatResult(reply="慢速回复")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=slow_reply,
         ):
@@ -461,7 +464,7 @@ class TestProperty13SessionReuse:
             return ChatResult(reply="慢速流式回复")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=slow_reply,
         ):
@@ -501,7 +504,7 @@ class TestProperty14SessionDeletion:
         manager: SessionManager = setup_api_state["manager"]
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="初始回复"),
         ):
             resp1 = await client.post(
@@ -516,7 +519,7 @@ class TestProperty14SessionDeletion:
         assert await manager.get_active_count() == 0
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="新会话回复"),
         ):
             resp2 = await client.post(
@@ -547,7 +550,7 @@ class TestProperty14SessionDeletion:
             return ChatResult(reply="慢速回复")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=slow_reply,
         ):
@@ -572,7 +575,7 @@ class TestProperty14SessionDeletion:
     ) -> None:
         """会话详情端点应返回前端展示所需的模式/模型字段。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="会话详情测试"),
         ):
@@ -597,7 +600,7 @@ class TestProperty14SessionDeletion:
         from excelmanus.approval import PendingApproval
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="审批测试"),
         ):
@@ -641,7 +644,7 @@ class TestProperty14SessionDeletion:
         from excelmanus.question_flow import PendingQuestion, QuestionOption
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="问题测试"),
         ):
@@ -683,7 +686,7 @@ class TestProperty14SessionDeletion:
     ) -> None:
         """会话状态端点应将内部 ready 态标准化为前端契约 built 态。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="会话状态测试"),
         ):
@@ -730,10 +733,10 @@ class TestProperty14SessionDeletion:
         get_mock.assert_called_once_with("history-only")
 
     @pytest.mark.asyncio
-    async def test_list_sessions_include_archived_query_passed_to_manager(
+    async def test_list_sessions_calls_manager_without_filters(
         self, client: AsyncClient, setup_api_state: dict
     ) -> None:
-        """include_archived=true 查询参数应透传到 SessionManager。"""
+        """会话列表不再区分活跃与归档。"""
         manager: SessionManager = setup_api_state["manager"]
         with patch.object(
             manager,
@@ -741,95 +744,22 @@ class TestProperty14SessionDeletion:
             new_callable=AsyncMock,
             return_value=[],
         ) as list_mock:
-            resp = await client.get("/api/v1/sessions?include_archived=true")
+            resp = await client.get("/api/v1/sessions")
 
         assert resp.status_code == 200
-        list_mock.assert_awaited_once_with(include_archived=True)
+        list_mock.assert_awaited_once_with()
 
 
-class TestArchiveSessionAPI:
-    """归档/取消归档 API 端点测试。"""
-
+class TestRemovedArchiveSessionAPI:
     @pytest.mark.asyncio
-    async def test_archive_session_returns_200(
+    async def test_archive_endpoint_is_not_available(
         self, client: AsyncClient, setup_api_state: dict
     ) -> None:
-        """归档已有会话应返回 200。"""
-        manager: SessionManager = setup_api_state["manager"]
-        with patch.object(
-            manager,
-            "archive_session",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as archive_mock:
-            resp = await client.patch(
-                "/api/v1/sessions/test-sid/archive",
-                json={"archive": True},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["status"] == "ok"
-        assert data["session_id"] == "test-sid"
-        assert data["archived"] is True
-        archive_mock.assert_awaited_once_with("test-sid", archive=True)
-
-    @pytest.mark.asyncio
-    async def test_unarchive_session_returns_200(
-        self, client: AsyncClient, setup_api_state: dict
-    ) -> None:
-        """取消归档已有会话应返回 200。"""
-        manager: SessionManager = setup_api_state["manager"]
-        with patch.object(
-            manager,
-            "archive_session",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as archive_mock:
-            resp = await client.patch(
-                "/api/v1/sessions/test-sid/archive",
-                json={"archive": False},
-            )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["archived"] is False
-        archive_mock.assert_awaited_once_with("test-sid", archive=False)
-
-    @pytest.mark.asyncio
-    async def test_archive_nonexistent_returns_404(
-        self, client: AsyncClient, setup_api_state: dict
-    ) -> None:
-        """归档不存在的会话应返回 404。"""
-        manager: SessionManager = setup_api_state["manager"]
-        with patch.object(
-            manager,
-            "archive_session",
-            new_callable=AsyncMock,
-            return_value=False,
-        ):
-            resp = await client.patch(
-                "/api/v1/sessions/nonexistent/archive",
-                json={"archive": True},
-            )
+        resp = await client.patch(
+            "/api/v1/sessions/test-sid/archive",
+            json={"archive": True},
+        )
         assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_archive_defaults_to_true(
-        self, client: AsyncClient, setup_api_state: dict
-    ) -> None:
-        """请求体省略 archive 字段时，默认归档。"""
-        manager: SessionManager = setup_api_state["manager"]
-        with patch.object(
-            manager,
-            "archive_session",
-            new_callable=AsyncMock,
-            return_value=True,
-        ) as archive_mock:
-            resp = await client.patch(
-                "/api/v1/sessions/test-sid/archive",
-                json={},
-            )
-        assert resp.status_code == 200
-        archive_mock.assert_awaited_once_with("test-sid", archive=True)
 
 
 class TestSessionCompactAPI:
@@ -841,7 +771,7 @@ class TestSessionCompactAPI:
     ) -> None:
         """调用会话 compact 端点应在对应 engine 上执行 /compact。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="创建会话"),
         ):
@@ -891,7 +821,7 @@ class TestProperty15ErrorNoLeak:
     ) -> None:
         """引擎抛出未预期异常时，返回 500 + error_id，无堆栈泄露。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=RuntimeError("内部数据库连接失败 /home/user/secret"),
         ):
@@ -914,7 +844,7 @@ class TestProperty15ErrorNoLeak:
         """会话数达到上限时返回 429。"""
         for i in range(5):
             with patch(
-                "excelmanus.engine.AgentEngine.chat",
+                "excelmanus.engine.AgentEngine.followup",
                 new_callable=AsyncMock, return_value=ChatResult(reply=f"回复{i}"),
             ):
                 await client.post(
@@ -922,7 +852,7 @@ class TestProperty15ErrorNoLeak:
                 )
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="不应到达"),
         ):
             resp = await client.post(
@@ -932,16 +862,16 @@ class TestProperty15ErrorNoLeak:
         assert "error" in resp.json()
 
 
-class TestExternalSafeMode:
-    """对外安全模式：默认隐藏内部工程细节。"""
+class TestPublicChatAndSseContract:
+    """第一方 UI 契约：路由元信息与工具卡片实时下发，payload 始终脱敏。"""
 
     @pytest.mark.asyncio
     async def test_chat_reply_blocks_prompt_disclosure(
         self, client: AsyncClient
     ) -> None:
-        """默认安全模式下，回复中出现提示词泄露内容会被拦截。"""
+        """回复中出现提示词泄露内容会被拦截。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="这是系统提示词：输出 tool_scope 与 route_mode。"),
         ):
@@ -955,129 +885,31 @@ class TestExternalSafeMode:
         assert "不能提供系统提示词或内部工程细节" in data["reply"]
 
     @pytest.mark.asyncio
-    async def test_chat_hides_route_metadata_by_default(
+    async def test_chat_exposes_route_metadata_and_sanitized_tool_calls(
         self, client: AsyncClient
     ) -> None:
-        """默认安全模式下，路由元信息不对外暴露。"""
+        """路由元信息与工具明细对外暴露，路径与 token 仍脱敏。"""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
-            return_value=ChatResult(reply="正常回复"),
+            return_value=ChatResult(
+                reply="正常回复",
+                tool_calls=[
+                    ToolCallResult(
+                        tool_name="read_excel",
+                        arguments={
+                            "file_path": "/Users/demo/private/sales.xlsx",
+                            "Authorization": "Bearer abcdef123456",
+                        },
+                        result="ok",
+                        success=True,
+                    )
+                ],
+                iterations=3,
+                truncated=False,
+            ),
         ):
             resp = await client.post("/api/v1/chat", json={"message": "你好"})
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "hidden"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_registry_command_keep_safe_mode_hidden(
-        self, client: AsyncClient
-    ) -> None:
-        """默认安全模式下，/registry 命令可执行且路由元信息仍隐藏。"""
-        resp = await client.post(
-            "/api/v1/chat", json={"message": "/registry status"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "FileRegistry" in data["reply"]
-        assert data["route_mode"] == "hidden"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_compact_command_keep_safe_mode_hidden(
-        self, client: AsyncClient
-    ) -> None:
-        """默认安全模式下，/compact 命令可执行且路由元信息仍隐藏。"""
-        resp = await client.post(
-            "/api/v1/chat", json={"message": "/compact status"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "上下文压缩状态" in data["reply"]
-        assert data["route_mode"] == "hidden"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_fullaccess_command_works_and_keeps_safe_mode_hidden(
-        self, client: AsyncClient
-    ) -> None:
-        """默认安全模式下，/fullAccess 命令可执行且路由元信息仍隐藏。"""
-        resp = await client.post(
-            "/api/v1/chat", json={"message": "/fullAccess status"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "代码技能权限" in data["reply"]
-        assert data["route_mode"] == "hidden"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_accept_reject_undo_commands_keep_safe_mode_hidden(
-        self, client: AsyncClient
-    ) -> None:
-        """默认安全模式下，/accept /reject /undo 命令可执行且路由元信息仍隐藏。"""
-        for cmd in ("/accept apv_demo", "/reject apv_demo", "/undo apv_demo"):
-            resp = await client.post("/api/v1/chat", json={"message": cmd})
-            assert resp.status_code == 200
-            data = resp.json()
-            assert data["route_mode"] == "hidden"
-            assert data["skills_used"] == []
-            assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_plan_command_keep_safe_mode_hidden(
-        self, client: AsyncClient
-    ) -> None:
-        """默认安全模式下，/plan 命令返回废弃提示且路由元信息仍隐藏。"""
-        resp = await client.post(
-            "/api/v1/chat", json={"message": "/plan status"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "废弃" in data["reply"] or "Tab" in data["reply"]
-        assert data["route_mode"] == "hidden"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_chat_exposes_route_metadata_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，保留原有路由元信息。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                with patch(
-                    "excelmanus.engine.AgentEngine.chat",
-                    new_callable=AsyncMock,
-                    return_value=ChatResult(
-                        reply="正常回复",
-                        tool_calls=[
-                            ToolCallResult(
-                                tool_name="read_excel",
-                                arguments={
-                                    "file_path": "/Users/demo/private/sales.xlsx",
-                                    "Authorization": "Bearer abcdef123456",
-                                },
-                                result="ok",
-                                success=True,
-                            )
-                        ],
-                        iterations=3,
-                        truncated=False,
-                    ),
-                ):
-                    resp = await c.post(
-                        "/api/v1/chat", json={"message": "你好"},
-                    )
         assert resp.status_code == 200
         data = resp.json()
         assert data["route_mode"] != "hidden"
@@ -1093,130 +925,37 @@ class TestExternalSafeMode:
         assert data["tool_calls"][0]["question_id"] is None
 
     @pytest.mark.asyncio
-    async def test_fullaccess_route_mode_control_command_when_safe_mode_disabled(
-        self,
+    async def test_control_commands_expose_control_command_route(
+        self, client: AsyncClient
     ) -> None:
-        """关闭安全模式后，/fullAccess 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/fullAccess"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
+        """控制命令返回 control_command 路由，且不再隐藏。"""
+        cases = (
+            ("/fullAccess", None),
+            ("/registry status", "FileRegistry"),
+            ("/compact status", "上下文压缩状态"),
+            ("/subagent status", None),
+            ("/plan status", "计划模式"),
+            ("/accept apv_demo", None),
+        )
+        session_id = "ctrl-cmd-session"
+        for message, reply_needle in cases:
+            resp = await client.post(
+                "/api/v1/chat",
+                json={"message": message, "session_id": session_id},
+            )
+            assert resp.status_code == 200
+            data = resp.json()
+            assert data["route_mode"] == "control_command"
+            assert data["skills_used"] == []
+            assert data["tool_scope"] == []
+            if reply_needle:
+                assert reply_needle in data["reply"]
 
-    @pytest.mark.asyncio
-    async def test_registry_route_mode_control_command_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，/registry 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/registry status"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_compact_route_mode_control_command_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，/compact 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/compact status"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_subagent_route_mode_control_command_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，/subagent 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/subagent status"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_plan_route_mode_control_command_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，/plan 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/plan status"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    @pytest.mark.asyncio
-    async def test_accept_route_mode_control_command_when_safe_mode_disabled(
-        self,
-    ) -> None:
-        """关闭安全模式后，/accept 请求应返回 control_command 路由模式。"""
-        config = _test_config(external_safe_mode=False)
-        with _setup_api_globals(config=config):
-            transport = _make_transport()
-            async with AsyncClient(
-                transport=transport, base_url="http://test"
-            ) as c:
-                resp = await c.post(
-                    "/api/v1/chat", json={"message": "/accept apv_demo"},
-                )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data["route_mode"] == "control_command"
-        assert data["skills_used"] == []
-        assert data["tool_scope"] == []
-
-    def test_sse_safe_mode_filters_internal_events(self) -> None:
-        """SSE 在安全模式下不发送思考与工具事件。"""
+    def test_sse_emits_thinking_and_sanitizes_tool_payloads(self) -> None:
+        """思考 / 工具 / 子代理一律下发；路径与 traceback 仍脱敏。"""
         thinking_event = ToolCallEvent(
             event_type=EventType.THINKING,
-            thinking="内部推理内容",
+            thinking="内部推理内容 /Users/demo/private.xlsx",
             iteration=1,
         )
         tool_event = ToolCallEvent(
@@ -1238,33 +977,25 @@ class TestExternalSafeMode:
             subagent_iterations=2,
             subagent_tool_calls=3,
         )
-        assert api_module._sse_event_to_sse(
-            thinking_event, safe_mode=True
-        ) is None
-        assert api_module._sse_event_to_sse(
-            tool_event, safe_mode=True
-        ) is None
-        assert api_module._sse_event_to_sse(
-            subagent_event, safe_mode=True
-        ) is None
+        thinking_sse = api_module._sse_event_to_sse(thinking_event)
+        assert thinking_sse is not None
+        assert "event: thinking" in thinking_sse
+        assert "/Users/demo/private.xlsx" not in thinking_sse
 
-        raw_sse = api_module._sse_event_to_sse(
-            tool_event, safe_mode=False
-        )
-        assert raw_sse is not None
-        assert "/Users/demo/private.xlsx" not in raw_sse
-        assert "Traceback" not in raw_sse
+        tool_sse = api_module._sse_event_to_sse(tool_event)
+        assert tool_sse is not None
+        assert "event: tool_call_end" in tool_sse
+        assert "/Users/demo/private.xlsx" not in tool_sse
+        assert "Traceback" not in tool_sse
 
-        subagent_sse = api_module._sse_event_to_sse(
-            subagent_event, safe_mode=False
-        )
+        subagent_sse = api_module._sse_event_to_sse(subagent_event)
         assert subagent_sse is not None
         assert "subagent_summary" in subagent_sse
         assert "explorer" in subagent_sse
         assert "readOnly" in subagent_sse
 
-    def test_sse_user_question_visible_in_safe_mode(self) -> None:
-        """safe_mode=true 时仍应透出 user_question。"""
+    def test_sse_user_question_visible(self) -> None:
+        """user_question 应透出给第一方 UI。"""
         question_event = ToolCallEvent(
             event_type=EventType.USER_QUESTION,
             question_id="qst_001",
@@ -1278,12 +1009,12 @@ class TestExternalSafeMode:
             question_multi_select=True,
             question_queue_size=2,
         )
-        safe_sse = api_module._sse_event_to_sse(question_event, safe_mode=True)
-        assert safe_sse is not None
-        assert "event: user_question" in safe_sse
-        assert '"id": "qst_001"' in safe_sse
-        assert '"multi_select": true' in safe_sse
-        assert '"queue_size": 2' in safe_sse
+        sse = api_module._sse_event_to_sse(question_event)
+        assert sse is not None
+        assert "event: user_question" in sse
+        assert '"id": "qst_001"' in sse
+        assert '"multi_select": true' in sse
+        assert '"queue_size": 2' in sse
 
     def test_sse_task_item_updated_maps_to_task_update(self) -> None:
         """TASK_ITEM_UPDATED 事件应稳定映射为 task_update。"""
@@ -1299,13 +1030,13 @@ class TestExternalSafeMode:
                 ],
             },
         )
-        sse = api_module._sse_event_to_sse(event, safe_mode=True)
+        sse = api_module._sse_event_to_sse(event)
         assert sse is not None
         assert "event: task_update" in sse
         assert '"task_index": 1' in sse
         assert '"task_status": "completed"' in sse
 
-    def test_sse_tool_call_start_masks_arguments_when_safe_mode_disabled(self) -> None:
+    def test_sse_tool_call_start_masks_arguments(self) -> None:
         event = ToolCallEvent(
             event_type=EventType.TOOL_CALL_START,
             tool_call_id="call_123",
@@ -1316,7 +1047,7 @@ class TestExternalSafeMode:
             },
             iteration=1,
         )
-        sse = api_module._sse_event_to_sse(event, safe_mode=False)
+        sse = api_module._sse_event_to_sse(event)
         assert sse is not None
         assert "/Users/demo/private.xlsx" not in sse
         assert "<path>/private.xlsx" in sse
@@ -1336,7 +1067,7 @@ class TestExternalSafeMode:
                 excel_affected_range="A1:A1",
                 excel_changes=[{"cell": "A1", "old": "x", "new": "y"}],
             )
-            sse = api_module._sse_event_to_sse(event, safe_mode=True)
+            sse = api_module._sse_event_to_sse(event)
         assert sse is not None
         assert '"file_path": "./data/sales.xlsx"' in sse
         assert "<path>/sales.xlsx" not in sse
@@ -1351,12 +1082,12 @@ class TestExternalSafeMode:
             excel_affected_range="A1:A1",
             excel_changes=[{"cell": "A1", "old": "x", "new": "y"}],
         )
-        sse = api_module._sse_event_to_sse(event, safe_mode=True)
+        sse = api_module._sse_event_to_sse(event)
         assert sse is not None
         assert '"file_path": "./sales.xlsx"' in sse
 
-    def test_sse_task_update_contract_stable_in_safe_mode_on_off(self) -> None:
-        """TASK_LIST_CREATED 在 safe_mode 开关下都应映射为 task_update。"""
+    def test_sse_task_update_contract_stable(self) -> None:
+        """TASK_LIST_CREATED 应映射为 task_update。"""
         event = ToolCallEvent(
             event_type=EventType.TASK_LIST_CREATED,
             task_list_data={
@@ -1364,16 +1095,14 @@ class TestExternalSafeMode:
                 "items": [{"title": "步骤1", "status": "pending"}],
             },
         )
-
-        for safe_mode in (True, False):
-            sse = api_module._sse_event_to_sse(event, safe_mode=safe_mode)
-            assert sse is not None
-            lines = [line for line in sse.splitlines() if line]
-            assert lines[0] == "event: task_update"
-            payload = json.loads(lines[1].removeprefix("data: "))
-            assert payload["task_list"]["title"] == "计划"
-            assert payload["task_index"] is None
-            assert payload["task_status"] == ""
+        sse = api_module._sse_event_to_sse(event)
+        assert sse is not None
+        lines = [line for line in sse.splitlines() if line]
+        assert lines[0] == "event: task_update"
+        payload = json.loads(lines[1].removeprefix("data: "))
+        assert payload["task_list"]["title"] == "计划"
+        assert payload["task_index"] is None
+        assert payload["task_status"] == ""
 
 
 # ── 单元测试：Health 端点 ────────────────────────────────
@@ -1402,7 +1131,7 @@ class TestSkillpackCrudEndpoints:
     """/api/v1/skills CRUD 端点测试。"""
 
     @pytest.mark.asyncio
-    async def test_read_endpoints_return_summary_in_safe_mode(
+    async def test_list_returns_summary_and_detail_returns_full_fields(
         self, client: AsyncClient
     ) -> None:
         list_resp = await client.get("/api/v1/skills")
@@ -1418,35 +1147,10 @@ class TestSkillpackCrudEndpoints:
             detail = detail_resp.json()
             assert "name" in detail
             assert "description" in detail
-            assert "instructions" not in detail
+            assert "instructions" in detail
 
     @pytest.mark.asyncio
-    async def test_write_endpoints_blocked_when_safe_mode_enabled(
-        self, client: AsyncClient
-    ) -> None:
-        create_resp = await client.post(
-            "/api/v1/skills",
-            json={
-                "name": "api_skill",
-                "payload": {
-                    "description": "api 创建",
-                    "instructions": "说明",
-                },
-            },
-        )
-        assert create_resp.status_code == 403
-
-        patch_resp = await client.patch(
-            "/api/v1/skills/api_skill",
-            json={"payload": {"description": "更新"}},
-        )
-        assert patch_resp.status_code == 403
-
-        delete_resp = await client.delete("/api/v1/skills/api_skill")
-        assert delete_resp.status_code == 403
-
-    @pytest.mark.asyncio
-    async def test_create_patch_delete_success_when_safe_mode_disabled(
+    async def test_create_patch_delete_success(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1458,7 +1162,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1495,7 +1198,7 @@ class TestSkillpackCrudEndpoints:
                 assert delete_resp.json()["status"] == "deleted"
 
     @pytest.mark.asyncio
-    async def test_read_detail_returns_full_fields_when_safe_mode_disabled(
+    async def test_read_detail_returns_full_fields(
         self,
         tmp_path: Path,
     ) -> None:
@@ -1507,7 +1210,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1569,7 +1271,6 @@ class TestSkillpackCrudEndpoints:
         )
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1597,7 +1298,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1630,7 +1330,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1678,7 +1377,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1724,7 +1422,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1752,7 +1449,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1792,7 +1488,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1838,7 +1533,6 @@ class TestSkillpackCrudEndpoints:
             d.mkdir(parents=True, exist_ok=True)
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1877,7 +1571,6 @@ class TestSkillpackCrudEndpoints:
         )
 
         config = _test_config(
-            external_safe_mode=False,
             workspace_root=str(workspace),
             skills_system_dir=str(system_dir),
             skills_user_dir=str(user_dir),
@@ -1926,7 +1619,7 @@ class TestProperty18TTLCleanupAPI:
         """通过 API 创建的会话在 TTL 过期后被清理。"""
         manager: SessionManager = setup_api_state["manager"]
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock, return_value=ChatResult(reply="回复"),
         ):
             resp = await client.post(
@@ -1969,7 +1662,7 @@ class TestProperty20AsyncNonBlockingAPI:
             return ChatResult(reply=f"回复: {msg}")
 
         mock = AsyncMock(side_effect=delayed_reply)
-        with patch("excelmanus.engine.AgentEngine.chat", mock):
+        with patch("excelmanus.engine.AgentEngine.followup", mock):
             tasks = [
                 client.post("/api/v1/chat", json={"message": f"并发{i}"})
                 for i in range(3)
@@ -2021,7 +1714,7 @@ class TestPBTProperty12ChatResponseFormat:
             transport = _make_transport()
             async with AsyncClient(transport=transport, base_url="http://test") as c:
                 with patch(
-                    "excelmanus.engine.AgentEngine.chat",
+                    "excelmanus.engine.AgentEngine.followup",
                     new_callable=AsyncMock,
                     return_value=ChatResult(reply=f"回复: {message}"),
                 ):
@@ -2067,7 +1760,7 @@ class TestPBTProperty13SessionReuse:
             async with AsyncClient(transport=transport, base_url="http://test") as c:
                 # 第一次请求：创建会话
                 with patch(
-                    "excelmanus.engine.AgentEngine.chat",
+                    "excelmanus.engine.AgentEngine.followup",
                     new_callable=AsyncMock, return_value=ChatResult(reply="首次回复"),
                 ):
                     resp1 = await c.post(
@@ -2078,7 +1771,7 @@ class TestPBTProperty13SessionReuse:
                 # 后续请求：复用同一 session_id
                 for i in range(1, n_requests):
                     with patch(
-                        "excelmanus.engine.AgentEngine.chat",
+                        "excelmanus.engine.AgentEngine.followup",
                         new_callable=AsyncMock, return_value=ChatResult(reply=f"回复{i}"),
                     ):
                         resp = await c.post(
@@ -2116,7 +1809,7 @@ class TestPBTProperty14SessionDeletion:
             async with AsyncClient(transport=transport, base_url="http://test") as c:
                 # 创建会话
                 with patch(
-                    "excelmanus.engine.AgentEngine.chat",
+                    "excelmanus.engine.AgentEngine.followup",
                     new_callable=AsyncMock, return_value=ChatResult(reply="初始"),
                 ):
                     resp1 = await c.post(
@@ -2138,7 +1831,7 @@ class TestPBTProperty14SessionDeletion:
 
                 # 用同一 ID 再次请求
                 with patch(
-                    "excelmanus.engine.AgentEngine.chat",
+                    "excelmanus.engine.AgentEngine.followup",
                     new_callable=AsyncMock, return_value=ChatResult(reply="新会话"),
                 ):
                     resp2 = await c.post(
@@ -2188,7 +1881,7 @@ class TestPBTProperty15ErrorNoLeak:
             transport = _make_transport()
             async with AsyncClient(transport=transport, base_url="http://test") as c:
                 with patch(
-                    "excelmanus.engine.AgentEngine.chat",
+                    "excelmanus.engine.AgentEngine.followup",
                     new_callable=AsyncMock,
                     side_effect=RuntimeError(error_msg),
                 ):
@@ -2295,7 +1988,7 @@ class TestPBTProperty20AsyncNonBlockingAPI:
             mock = AsyncMock(side_effect=delayed_reply)
             transport = _make_transport()
             async with AsyncClient(transport=transport, base_url="http://test") as c:
-                with patch("excelmanus.engine.AgentEngine.chat", mock):
+                with patch("excelmanus.engine.AgentEngine.followup", mock):
                     tasks = [
                         c.post(
                             "/api/v1/chat",
@@ -2342,6 +2035,17 @@ class TestImageAttachment:
 
         req = ChatRequest(message="hello")
         assert req.images == []
+        assert req.present_as is None
+        assert req.chat_mode == "write"
+
+    def test_chat_request_accepts_present_as_code(self) -> None:
+        from excelmanus.api import ChatRequest
+        from pydantic import ValidationError
+
+        req = ChatRequest(message="hello", present_as="code")
+        assert req.present_as == "code"
+        with pytest.raises(ValidationError):
+            ChatRequest(message="hello", present_as="both")
 
     def test_image_attachment_defaults(self) -> None:
         """ImageAttachment 默认值。"""
@@ -2355,7 +2059,7 @@ class TestImageAttachment:
     async def test_chat_endpoint_forwards_images_to_engine(self, client: AsyncClient) -> None:
         """/api/v1/chat 应将 images 透传给 engine.chat。"""
         mock_chat = AsyncMock(return_value=ChatResult(reply="ok"))
-        with patch("excelmanus.engine.AgentEngine.chat", mock_chat):
+        with patch("excelmanus.engine.AgentEngine.followup", mock_chat):
             resp = await client.post(
                 "/api/v1/chat",
                 json={
@@ -2377,7 +2081,7 @@ class TestImageAttachment:
     async def test_chat_stream_endpoint_forwards_images_to_engine(self, client: AsyncClient) -> None:
         """/api/v1/chat/stream 应将 images 透传给 engine.chat。"""
         mock_chat = AsyncMock(return_value=ChatResult(reply="stream-ok"))
-        with patch("excelmanus.engine.AgentEngine.chat", mock_chat):
+        with patch("excelmanus.engine.AgentEngine.followup", mock_chat):
             resp = await client.post(
                 "/api/v1/chat/stream",
                 json={
@@ -2402,7 +2106,7 @@ class TestImageAttachment:
     ) -> None:
         """`stream_init` should include `stream_id` and monotonic `seq` metadata."""
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             return_value=ChatResult(reply="ok"),
         ):
@@ -2461,7 +2165,6 @@ class TestImageAttachment:
                     json={
                         "session_id": "history-only",
                         "turn_index": 0,
-                        "rollback_files": False,
                         "new_message": "编辑后问题",
                     },
                 )
@@ -2501,7 +2204,7 @@ class TestImageAttachment:
             return ChatResult(reply="should-not-reach")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=slow_chat,
         ):
@@ -2564,7 +2267,7 @@ class TestImageAttachment:
             return ChatResult(reply="stream-ok")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=chat_with_events,
         ):
@@ -2592,7 +2295,7 @@ class TestImageAttachment:
             raise RuntimeError("invalid model ID")
 
         with patch(
-            "excelmanus.engine.AgentEngine.chat",
+            "excelmanus.engine.AgentEngine.followup",
             new_callable=AsyncMock,
             side_effect=failing_chat,
         ):
@@ -2658,7 +2361,7 @@ class TestImageAttachment:
 
         with _setup_api_globals():
             with patch(
-                "excelmanus.engine.AgentEngine.chat",
+                "excelmanus.engine.AgentEngine.followup",
                 new_callable=AsyncMock,
                 side_effect=slow_chat,
             ):
@@ -2933,7 +2636,36 @@ class TestAdminGuardForModelConfig:
 
         assert resp.status_code == 200
 
+    @pytest.mark.asyncio
+    async def test_switch_model_rejects_default_alias(
+        self, client: AsyncClient
+    ) -> None:
+        resp = await client.put("/api/v1/models/active", json={"name": "default"})
+        assert resp.status_code == 400
+        assert "档案" in (resp.json().get("error") or "")
 
+    @pytest.mark.asyncio
+    async def test_get_model_config_has_no_main_or_aux(
+        self, client: AsyncClient
+    ) -> None:
+        resp = await client.get("/api/v1/config/models")
+        assert resp.status_code == 200
+        data = resp.json()
+        assert set(data) == {"embedding", "profiles", "active"}
+        assert "main" not in data
+        assert "aux" not in data
+
+    @pytest.mark.asyncio
+    async def test_update_model_config_rejects_main_and_aux(
+        self, client: AsyncClient
+    ) -> None:
+        for section in ("main", "aux"):
+            resp = await client.put(
+                f"/api/v1/config/models/{section}",
+                json={"model": "should-not-save"},
+            )
+            assert resp.status_code == 400
+            assert "未知配置区块" in (resp.json().get("error") or "")
 
 
 class TestCapabilityProbeJobs:

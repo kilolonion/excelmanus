@@ -6,6 +6,7 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import tiktoken
@@ -15,6 +16,47 @@ from excelmanus.config import ExcelManusConfig
 logger = logging.getLogger(__name__)
 
 IMAGE_TOKEN_ESTIMATE = 1500  # 图片 token 估算值（用于 memory 截断）
+
+_INJECTED_USER_PREFIXES = ("<available_skills>", "<skill-invocation")
+
+
+def plain_user_text(content: Any) -> str:
+    """取出 user 消息里的纯文本，供 UI / 回退轮次判断使用。"""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                text = part.get("text")
+                if isinstance(text, str) and text:
+                    parts.append(text)
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def is_visible_user_turn(msg: dict) -> bool:
+    """是否计入 UI / rollback 的用户轮次。
+
+    技能目录、skill-invocation 等后台注入的 user-role 消息仍发给模型，
+    但不应当成用户气泡，也不占用编辑重发的 turn_index。
+    """
+    if msg.get("role") != "user":
+        return False
+    if msg.get("_ui_hidden"):
+        return False
+    text = plain_user_text(msg.get("content")).strip()
+    return not text.startswith(_INJECTED_USER_PREFIXES)
+
+
+def _context_role_messages(context_prompts: list[str] | None) -> list[dict]:
+    """请求级 user-role 快照，不写入对话历史。"""
+    return [
+        {"role": "user", "content": prompt}
+        for prompt in (context_prompts or [])
+        if isinstance(prompt, str) and prompt.strip()
+    ]
+
 
 # ---------------------------------------------------------------------------
 # 消息清洗：发送到 LLM API 前剥离非标准字段
@@ -209,16 +251,12 @@ class ImageLifecycleManager:
 
 
 def _load_system_prompt() -> str:
-    """从 PromptComposer 加载系统提示词。
-
-    若 prompts/core/ 目录缺失或文件不全，PromptComposer 会自动补齐后加载。
-    """
-    from excelmanus.prompt_composer import PromptComposer, PromptContext
+    """从 PromptComposer 加载完整 system 前缀。变量稍后再插。"""
+    from excelmanus.prompt.load import PromptComposer, PromptContext
     prompts_dir = Path(__file__).resolve().parent / "prompts"
     composer = PromptComposer(prompts_dir)
     composer.load_all()
-    ctx = PromptContext()
-    return composer.compose_core_text(ctx)
+    return composer.compose_system_text(PromptContext(chat_mode="write"))
 
 
 _DEFAULT_SYSTEM_PROMPT = _load_system_prompt()
@@ -334,7 +372,13 @@ class ConversationMemory:
         """设置系统提示词。"""
         self._system_prompt = value
 
-    def add_user_message(self, content: str | list[dict]) -> None:
+    def add_user_message(
+        self,
+        content: str | list[dict],
+        *,
+        hidden: bool = False,
+        prompt_kind: str | None = None,
+    ) -> None:
         """添加用户消息。
 
         Args:
@@ -342,7 +386,15 @@ class ConversationMemory:
                      当 content 为列表且包含 image_url 类型的 part 时，
                      自动注册到图片追踪系统，使 mark_images_sent() 可以
                      在首轮 LLM 调用后将 base64 降级为文本引用。
+            hidden: 为 True 时仍进入模型上下文，但不计入 UI / rollback 用户轮次。
+            prompt_kind: 注入来源标记（如 skill_catalog），仅用于持久化与排查。
         """
+        extra: dict[str, Any] = {}
+        if hidden:
+            extra["_ui_hidden"] = True
+        if prompt_kind:
+            extra["_prompt_kind"] = prompt_kind
+
         # 检测多模态内容中的图片并注册追踪
         has_images = False
         if isinstance(content, list):
@@ -357,6 +409,7 @@ class ConversationMemory:
             self._messages.append({
                 "role": "user", "content": content, "_image_id": image_id,
                 "message_id": uuid4().hex,
+                **extra,
             })
             self._fresh_image_ids.add(image_id)
             # 注册到生命周期管理器（提取第一张图片的 base64/mime/detail）
@@ -375,7 +428,12 @@ class ConversationMemory:
                             )
                         break  # 只注册第一张
         else:
-            self._messages.append({"role": "user", "content": content, "message_id": uuid4().hex})
+            self._messages.append({
+                "role": "user",
+                "content": content,
+                "message_id": uuid4().hex,
+                **extra,
+            })
         self._truncate_if_needed()
 
     def add_image_message(
@@ -477,35 +535,42 @@ class ConversationMemory:
             system_msgs = [{"role": "system", "content": self._system_prompt}]
         return system_msgs
 
-    def get_messages(self, system_prompts: list[str] | None = None) -> list[dict]:
+    def get_messages(
+        self,
+        system_prompts: list[str] | None = None,
+        context_prompts: list[str] | None = None,
+    ) -> list[dict]:
         """获取完整消息列表（system prompt + 对话历史）。
 
-        对于图片消息，会过滤掉内部标记字段 ``_image_id`` / ``_image_downgraded``，
+        会过滤内部标记字段（``_image_id`` / ``_ui_hidden`` 等），
         确保不泄露到发送给 LLM 的消息中。
 
         Args:
             system_prompts:
                 可选的 system 消息列表；为空时使用默认 system prompt。
+            context_prompts:
+                请求级 user-role 快照（技能正文 / hook），不写入历史。
         """
         system_msgs = self.build_system_messages(system_prompts)
+        context_msgs = _context_role_messages(context_prompts)
         output: list[dict] = []
         for msg in self._messages:
-            if msg.get("_image_id") is not None:
-                clean = {k: v for k, v in msg.items() if not k.startswith("_image_")}
-                output.append(clean)
-            else:
-                output.append(msg)
-        return system_msgs + output
+            output.append({k: v for k, v in msg.items() if not str(k).startswith("_")})
+        return system_msgs + context_msgs + output
 
     def trim_for_request(
         self,
         system_prompts: list[str],
         max_context_tokens: int,
         reserve_ratio: float = 0.1,
+        context_prompts: list[str] | None = None,
     ) -> list[dict]:
         """按最终请求消息预算裁剪历史，返回可直接发送的消息列表。"""
         if max_context_tokens <= 0:
-            return self.get_messages(system_prompts=system_prompts)
+            return self.get_messages(
+                system_prompts=system_prompts,
+                context_prompts=context_prompts,
+            )
         ratio = reserve_ratio
         if ratio < 0:
             ratio = 0
@@ -513,25 +578,24 @@ class ConversationMemory:
             ratio = 0.99
         threshold = max(1, int(max_context_tokens * (1 - ratio)))
         system_msgs = self.build_system_messages(system_prompts)
-        self._truncate_history_to_threshold(threshold, system_msgs=system_msgs)
+        context_msgs = _context_role_messages(context_prompts)
+        self._truncate_history_to_threshold(
+            threshold, system_msgs=system_msgs + context_msgs,
+        )
         # 截断后修复消息序列：确保首条消息为 user 角色，
         # 避免部分 provider（Claude / GLM 等）因 assistant-first 拒绝请求。
         self._ensure_starts_with_user()
         # 过滤内部标记字段，与 get_messages 保持一致
         output: list[dict] = []
         for msg in self._messages:
-            if msg.get("_image_id") is not None:
-                clean = {k: v for k, v in msg.items() if not k.startswith("_image_")}
-                output.append(clean)
-            else:
-                output.append(msg)
+            output.append({k: v for k, v in msg.items() if not str(k).startswith("_")})
         # 对旧轮次的工具返回值做结构化遮蔽，节约上下文空间
         from excelmanus.engine_core.observation_masker import mask_messages
         output = mask_messages(output)
         # 剥离非标准字段（thinking/reasoning/reasoning_content 等），
         # 防止不同 LLM provider 因未知字段返回 400 错误
         output = _sanitize_messages_for_api(output)
-        return system_msgs + output
+        return system_msgs + context_msgs + output
 
     def repair_dangling_tool_calls(self) -> int:
         """修复尾部悬空的 tool_call：为缺失 result 的 tool_call 补占位 tool result。
@@ -604,7 +668,7 @@ class ConversationMemory:
             IndexError: turn_index 超出范围。
         """
         user_indices = [
-            i for i, m in enumerate(self._messages) if m.get("role") == "user"
+            i for i, m in enumerate(self._messages) if is_visible_user_turn(m)
         ]
         if not user_indices or turn_index < 0 or turn_index >= len(user_indices):
             raise IndexError(
@@ -624,7 +688,7 @@ class ConversationMemory:
         turns: list[dict] = []
         turn_idx = 0
         for i, m in enumerate(self._messages):
-            if m.get("role") == "user":
+            if is_visible_user_turn(m):
                 content = m.get("content", "")
                 if isinstance(content, list):
                     preview = "[多模态消息]"

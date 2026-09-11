@@ -20,7 +20,6 @@ from excelmanus.api_app_state import (
     get_database,
     get_session_manager,
     has_session_access as _has_session_access,
-    is_external_safe_mode as _is_external_safe_mode,
 )
 from excelmanus.logger import get_logger
 from excelmanus.output_guard import sanitize_external_data, sanitize_external_text
@@ -65,35 +64,6 @@ async def delete_session(session_id: str, request: Request) -> dict:
     if not deleted:
         raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
     return {"status": "ok", "session_id": session_id}
-
-
-@router.patch("/api/v1/sessions/{session_id}/archive", responses={
-    404: _error_responses[404],
-    500: _error_responses[500],
-})
-async def archive_session(session_id: str, request: Request) -> dict:
-    """归档或取消归档会话。
-
-    请求体: {"archive": true}  归档
-    请求体: {"archive": false} 取消归档
-    """
-    session_manager = get_session_manager()
-    if session_manager is None:
-        raise HTTPException(status_code=503, detail="服务未初始化")
-
-    body = await request.json()
-    archive = body.get("archive", True)
-
-    updated = await session_manager.archive_session(
-        session_id, archive=archive
-    )
-    if not updated:
-        raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
-    return {
-        "status": "ok",
-        "session_id": session_id,
-        "archived": archive,
-    }
 
 
 @router.patch("/api/v1/sessions/{session_id}/title", responses={
@@ -149,13 +119,12 @@ async def list_approvals(request: Request) -> JSONResponse:
             "execution_status": rec.execution_status,
             "undoable": rec.undoable,
             "result_preview": sanitize_external_text(rec.result_preview or "", max_len=200),
-        }
-        if not _is_external_safe_mode():
-            item["arguments"] = sanitize_external_data(rec.arguments)
-            item["changes"] = [
+            "arguments": sanitize_external_data(rec.arguments),
+            "changes": [
                 {"path": c.path, "before_exists": c.before_exists, "after_exists": c.after_exists}
                 for c in (rec.changes or [])
-            ]
+            ],
+        }
         items.append(item)
     return JSONResponse(content={"approvals": items})
 
@@ -216,7 +185,6 @@ async def list_operations(
     page = records[offset : offset + limit]
 
     items = []
-    safe_mode = _is_external_safe_mode()
     for rec in page:
         changes = []
         for c in rec.changes or []:
@@ -230,10 +198,7 @@ async def list_operations(
         item: dict[str, Any] = {
             "approval_id": rec.approval_id,
             "tool_name": rec.tool_name,
-            "arguments_summary": (
-                sanitize_approval_args_summary(rec.arguments)
-                if not safe_mode else {}
-            ),
+            "arguments_summary": sanitize_approval_args_summary(rec.arguments),
             "session_turn": rec.session_turn,
             "created_at_utc": rec.created_at_utc,
             "applied_at_utc": rec.applied_at_utc,
@@ -278,8 +243,6 @@ async def get_operation_detail(
 
     from excelmanus.tools.policy import sanitize_approval_args_summary
 
-    safe_mode = _is_external_safe_mode()
-
     changes = []
     for c in rec.changes or []:
         changes.append({
@@ -292,7 +255,7 @@ async def get_operation_detail(
 
     # 读取 patch 文件内容（如果存在）
     patch_content: str | None = None
-    if rec.patch_file and not safe_mode:
+    if rec.patch_file:
         patch_path = Path(engine._config.workspace_root) / rec.patch_file
         if patch_path.is_file():
             try:
@@ -303,13 +266,8 @@ async def get_operation_detail(
     result: dict[str, Any] = {
         "approval_id": rec.approval_id,
         "tool_name": rec.tool_name,
-        "arguments_summary": (
-            sanitize_approval_args_summary(rec.arguments)
-            if not safe_mode else {}
-        ),
-        "arguments": (
-            sanitize_external_data(rec.arguments) if not safe_mode else {}
-        ),
+        "arguments_summary": sanitize_approval_args_summary(rec.arguments),
+        "arguments": sanitize_external_data(rec.arguments),
         "session_turn": rec.session_turn,
         "created_at_utc": rec.created_at_utc,
         "applied_at_utc": rec.applied_at_utc,
@@ -361,39 +319,52 @@ async def undo_operation(
     })
 
 
-def _public_excel_path(path: str, *, safe_mode: bool) -> str:
+def _public_excel_path(path: str) -> str:
     """将 Excel 路径规范化为前端可直接回传的形式。
 
-    - 优先返回 workspace 相对路径（`./subdir/file.xlsx`），避免泄露绝对路径且保持可用。
-    - 已被脱敏为 `<path>/name.xlsx` 的历史值，降级为 `./name.xlsx` 以兼容旧数据。
-    - 对工作区外绝对路径，safe_mode 下仍保留脱敏行为。
+    公开身份只认 CanonicalPath（方案 P1）。overlay / backups 映射到正本，
+    映射不到则省略，不把 staging 路径当交付物。未知绝对路径脱敏，不泄露家目录。
     """
     raw = str(path or "").strip()
     if not raw:
+        return ""
+
+    from excelmanus.workspace.identity import (
+        is_overlay_leftover,
+        is_reserved_relative,
+        public_identity,
+    )
+
+    _config = get_config()
+    workspace = Path(_config.workspace_root).resolve() if _config is not None else None
+
+    ident = public_identity(raw, workspace)
+    if ident:
+        return ident
+
+    probe = raw.removeprefix("<path>/").strip() if raw.startswith("<path>/") else raw
+    if is_overlay_leftover(probe) or is_reserved_relative(probe.replace("\\", "/")):
         return ""
 
     if raw.startswith("<path>/"):
         basename = raw.removeprefix("<path>/").strip()
         return f"./{basename}" if basename else ""
 
-    _config = get_config()
-
-    if _config is not None:
-        workspace = Path(_config.workspace_root).resolve()
+    if workspace is not None:
         candidate = Path(raw)
         if candidate.is_absolute():
             try:
                 rel = candidate.resolve().relative_to(workspace)
-                return f"./{rel.as_posix()}"
+                return public_identity(rel.as_posix(), workspace)
             except Exception:
-                return sanitize_external_text(raw, max_len=500) if safe_mode else raw
+                return sanitize_external_text(raw, max_len=500)
 
     normalized = raw.replace("\\", "/")
     if normalized.startswith("./"):
-        return normalized
+        return public_identity(normalized, workspace) or ""
     if normalized.startswith("/"):
-        return sanitize_external_text(normalized, max_len=500) if safe_mode else normalized
-    return f"./{normalized}"
+        return sanitize_external_text(normalized, max_len=500)
+    return public_identity(normalized, workspace) or ""
 
 
 @router.get("/api/v1/sessions")
@@ -402,10 +373,7 @@ async def list_sessions(request: Request) -> JSONResponse:
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
-    include_archived = request.query_params.get("include_archived", "false").lower() == "true"
-    sessions = await session_manager.list_sessions(
-        include_archived=include_archived
-    )
+    sessions = await session_manager.list_sessions()
     return JSONResponse(content={"sessions": sessions})
 
 
@@ -468,12 +436,11 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
     diffs = ch.load_excel_diffs(session_id)
     affected_files = ch.load_affected_files(session_id)
     previews = ch.load_excel_previews(session_id)
-    safe_mode = _is_external_safe_mode()
     safe_diffs = []
     for d in diffs:
         safe_diffs.append({
             "tool_call_id": d["tool_call_id"],
-            "file_path": _public_excel_path(d["file_path"], safe_mode=safe_mode),
+            "file_path": _public_excel_path(d["file_path"]),
             "sheet": d["sheet"],
             "affected_range": d["affected_range"],
             "changes": d["changes"],
@@ -483,7 +450,7 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
     for p in previews:
         safe_previews.append({
             "tool_call_id": p["tool_call_id"],
-            "file_path": _public_excel_path(p["file_path"], safe_mode=safe_mode),
+            "file_path": _public_excel_path(p["file_path"]),
             "sheet": p["sheet"],
             "columns": p["columns"],
             "rows": p["rows"],
@@ -491,7 +458,7 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
             "truncated": p["truncated"],
         })
     safe_files = [
-        _public_excel_path(f, safe_mode=safe_mode)
+        _public_excel_path(f)
         for f in affected_files if f
     ]
     return JSONResponse(content={
@@ -824,9 +791,10 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
             "messages": [],
             "full_access_enabled": False,
             "chat_mode": "write",
+            "present_as": "native",
             "current_model": None,
             "current_model_name": None,
-            "vision_capable": False,
+            "vision_capable": None,
             "pending_approval": None,
             "pending_question": None,
             "last_route": None,

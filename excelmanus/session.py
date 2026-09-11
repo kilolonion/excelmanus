@@ -117,13 +117,7 @@ class SessionManager:
         self._lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
         self._cleanup_task_lock = asyncio.Lock()
-        # Docker 沙盒配置在启动时解析一次，注入到各工作区中。
-        self._sandbox_config = SandboxConfig(
-            docker_enabled=bool(
-                os.environ.get("EXCELMANUS_DOCKER_SANDBOX", "").strip().lower()
-                in ("1", "true", "yes")
-            ),
-        )
+        self._sandbox_config = SandboxConfig()
 
     @property
     def database(self) -> "Database | None":
@@ -198,24 +192,6 @@ class SessionManager:
                 if entry.engine.current_model == model:
                     entry.engine.set_model_capabilities(caps)
 
-    async def broadcast_aux_config(
-        self,
-        *,
-        aux_enabled: bool = True,
-        aux_model: str | None = None,
-        aux_api_key: str | None = None,
-        aux_base_url: str | None = None,
-    ) -> None:
-        """向所有活跃会话广播 AUX 配置变更（锁保护）。"""
-        async with self._lock:
-            for entry in self._sessions.values():
-                entry.engine.update_aux_config(
-                    aux_enabled=aux_enabled,
-                    aux_model=aux_model,
-                    aux_api_key=aux_api_key,
-                    aux_base_url=aux_base_url,
-                )
-
     async def broadcast_context_optimization(
         self,
         *,
@@ -242,23 +218,8 @@ class SessionManager:
                 entry.engine.sync_model_profiles(profiles)
                 self.sync_user_subscription_profiles(entry.engine)
 
-    async def set_sandbox_docker_enabled(self, enabled: bool) -> None:
-        """更新 Docker 沙盒开关（由 API lifespan 调用）。
-
-        同时同步到所有活跃会话，使已有会话无需重建即可生效。
-        """
-        self._sandbox_config = SandboxConfig(docker_enabled=enabled)
-        async with self._lock:
-            for entry in self._sessions.values():
-                engine = entry.engine
-                ws = engine.workspace
-                ws.sandbox_config = self._sandbox_config
-                engine.sandbox_env = ws.create_sandbox_env(
-                    transaction=engine.transaction,
-                )
-
     def notify_file_deleted(self, file_path: str) -> None:
-        """W4: 通知活跃 session 文件已被删除，清理 staging 条目。
+        """W4: 通知活跃 session 文件已被删除。
 
         ISO-4: 仅通知工作区包含目标文件的会话，避免跨用户干扰。
         """
@@ -268,9 +229,6 @@ class SessionManager:
                 ws_root = str(entry.engine.workspace.root_dir)
                 if not file_path.startswith(ws_root):
                     continue
-                _reg = entry.engine.file_registry
-                if _reg is not None and _reg.has_versions:
-                    _reg.remove_staging_for_path(file_path)
             except Exception:
                 logger.debug("notify_file_deleted 处理异常", exc_info=True)
 
@@ -292,9 +250,6 @@ class SessionManager:
                 ws_root = str(engine.workspace.root_dir)
                 if not old_path.startswith(ws_root):
                     continue
-                _reg = engine.file_registry
-                if _reg is not None and _reg.has_versions:
-                    _reg.rename_staging_path(old_path, new_path)
             except Exception:
                 logger.debug("notify_file_renamed 处理异常", exc_info=True)
 
@@ -307,6 +262,54 @@ class SessionManager:
             return UserConfigStore(self._database.conn)
         except Exception:
             return self._config_store
+
+    def _refresh_engine_model_profiles(self, engine: AgentEngine, *, force_db: bool = False) -> None:
+        """把运行时 / 数据库档案同步到引擎，避免新会话只用环境快照。"""
+        live_models = getattr(self._config, "models", ()) or ()
+        try:
+            from excelmanus.api_app_state import _sync_config_profiles_from_db, get_config
+
+            live = get_config()
+            if force_db or not getattr(live, "models", ()):
+                _sync_config_profiles_from_db()
+                live = get_config()
+            if live is not None and getattr(live, "models", ()):
+                live_models = live.models
+        except Exception:
+            logger.debug("同步运行时模型档案失败", exc_info=True)
+        if live_models:
+            engine.sync_model_profiles(live_models)
+
+    def _apply_persisted_active_model(self, engine: AgentEngine, user_config: Any | None = None) -> None:
+        """按已激活档案切换新会话，失败时先补档案再试一次。"""
+        self._refresh_engine_model_profiles(engine)
+        store = user_config if user_config is not None else self._resolve_user_config_store()
+        if store is None or not hasattr(store, "get_active_model"):
+            return
+        active_name = store.get_active_model()
+        if not active_name:
+            return
+        try:
+            from excelmanus.api_app_state import is_placeholder_model_profile
+
+            if is_placeholder_model_profile(active_name):
+                logger.warning("忽略占位激活模型 %s", active_name)
+                return
+        except Exception:
+            pass
+        try:
+            switched = engine.switch_model(active_name)
+            if isinstance(switched, str) and switched.startswith("未找到模型"):
+                self._refresh_engine_model_profiles(engine, force_db=True)
+                switched = engine.switch_model(active_name)
+            if isinstance(switched, str) and switched.startswith("未找到模型"):
+                logger.warning(
+                    "恢复激活模型失败，会话仍使用 %s: %s",
+                    engine.current_model,
+                    switched,
+                )
+        except Exception:
+            logger.debug("恢复激活模型 %s 失败", active_name, exc_info=True)
 
     @staticmethod
     def cleanup_interval_from_ttl(ttl_seconds: int) -> int:
@@ -421,7 +424,7 @@ class SessionManager:
         isolated_ws = IsolatedWorkspace.resolve(
             self._config.workspace_root,
             sandbox_config=self._sandbox_config,
-            transaction_enabled=self._config.backup_enabled,
+            transaction_enabled=False,
             data_root=self._config.data_root,
         )
         engine_config = self._config
@@ -469,15 +472,10 @@ class SessionManager:
         if history_messages:
             engine.inject_history(history_messages)
             engine._session_id = session_id
-            engine.restore_checkpoint()
+            engine.restore_session_snapshot()
         _user_config = self._resolve_user_config_store()
         if _user_config is not None:
-            active_name = _user_config.get_active_model()
-            if active_name:
-                try:
-                    engine.switch_model(active_name)
-                except Exception:
-                    logger.debug("恢复激活模型 %s 失败", active_name, exc_info=True)
+            self._apply_persisted_active_model(engine, _user_config)
             if hasattr(_user_config, "get_full_access"):
                 engine._full_access_enabled = _user_config.get_full_access()
         # 从数据库加载模型能力探测缓存
@@ -675,7 +673,7 @@ class SessionManager:
     def flush_messages_sync(self, session_id: str) -> None:
         """同步增量持久化会话消息（供 SSE 事件回调在流式传输中间调用）。
 
-        此方法直接读取 engine 可变状态，但由于 SSE 事件回调在 engine.chat()
+        此方法直接读取 engine 可变状态，但由于 SSE 事件回调在 engine.followup()
         内部同步触发，与 engine 的消息修改在同一协程内，不存在并发问题。
         """
         if self._conv_persistence is None:
@@ -808,41 +806,6 @@ class SessionManager:
             except Exception:
                 logger.warning("清空 SQLite 会话失败", exc_info=True)
         return sess_count, msg_count
-
-    async def archive_session(
-        self, session_id: str, archive: bool = True, *, user_id: str | None = None
-    ) -> bool:
-        """归档或取消归档会话。
-
-        对于内存中的活跃会话，仅更新 SQLite 状态（不影响运行中会话）。
-        对于仅存在于 SQLite 中的历史会话，直接更新状态。
-
-        Returns:
-            True 表示成功更新，False 表示会话不存在。
-        """
-        new_status = "archived" if archive else "active"
-
-        # R2: 在锁内完成活跃会话的持久化，避免锁释放后并发删除导致幽灵记录
-        async with self._lock:
-            in_memory = session_id in self._sessions
-            if in_memory:
-                entry = self._sessions[session_id]
-                if self._chat_history is not None:
-                    if self._conv_persistence is not None:
-                        self._conv_persistence.sync_new_messages(
-                            session_id, entry.engine
-                        )
-                    self._chat_history.update_session(session_id, status=new_status)
-                    return True
-                return False
-
-        if self._chat_history is not None:
-            if not self._chat_history.session_exists(session_id):
-                return False
-            self._chat_history.update_session(session_id, status=new_status)
-            return True
-
-        return False
 
     async def update_session_title(
         self, session_id: str, title: str, *, user_id: str | None = None
@@ -990,24 +953,15 @@ class SessionManager:
         if not messages:
             return
 
-        # 创建 summarizer（优先 aux 模型节省 token）
         from excelmanus.session_summarizer import SessionSummarizer
         from excelmanus.providers import create_client
 
-        mem_model = self._config.aux_model or self._config.model
-        mem_api_key = self._config.aux_api_key or self._config.api_key
-        mem_base_url = self._config.aux_base_url or self._config.base_url
-        _protocol = (
-            self._config.aux_protocol
-            if self._config.aux_enabled and self._config.aux_model
-            else self._config.protocol
-        )
         client = create_client(
-            api_key=mem_api_key,
-            base_url=mem_base_url,
-            protocol=_protocol,
+            api_key=self._config.api_key,
+            base_url=self._config.base_url,
+            protocol=self._config.protocol,
         )
-        summarizer = SessionSummarizer(client=client, model=mem_model)
+        summarizer = SessionSummarizer(client=client, model=self._config.model)
 
         result = await summarizer.summarize(messages)
         if result is None:
@@ -1060,7 +1014,7 @@ class SessionManager:
             return entry.in_flight if entry is not None else False
 
     async def enqueue_user_interrupt(self, session_id: str, message: str) -> bool:
-        """飞行中用户消息入插话队列。成功入队返回 True，否则 False。"""
+        """飞行中用户消息入 next-turn。成功入队返回 True，否则 False。"""
         text = str(message or "").strip()
         if not session_id or not text:
             return False
@@ -1154,7 +1108,7 @@ class SessionManager:
             return len(self._sessions)
 
     async def list_sessions(
-        self, include_archived: bool = False, *, user_id: str | None = None
+        self, *, user_id: str | None = None
     ) -> list[dict]:
         """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。"""
         in_memory_ids: set[str] = set()
@@ -1165,9 +1119,7 @@ class SessionManager:
         db_sessions_map: dict[str, dict] = {}
         if self._chat_history is not None:
             try:
-                for ds in self._chat_history.list_sessions(
-                    include_archived=include_archived,
-                ):
+                for ds in self._chat_history.list_sessions():
                     db_sessions_map[ds["id"]] = ds
             except Exception:
                 logger.warning("预取 SQLite 会话列表失败", exc_info=True)
@@ -1209,7 +1161,6 @@ class SessionManager:
                 "title": title,
                 "message_count": msg_count,
                 "in_flight": in_flight,
-                "status": "active",
                 "updated_at": updated_at_iso,
             })
 
@@ -1221,7 +1172,6 @@ class SessionManager:
                     "title": ds.get("title") or f"会话 {ds_id[:8]}",
                     "message_count": ds.get("message_count", 0),
                     "in_flight": False,
-                    "status": ds.get("status", "active"),
                     "updated_at": ds.get("updated_at", ""),
                 })
 
@@ -1309,6 +1259,7 @@ class SessionManager:
                 "messages": messages,
                 "full_access_enabled": engine.full_access_enabled,
                 "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
+                "present_as": getattr(engine, '_present_as', 'native'),
                 "current_model": engine.current_model,
                 "current_model_name": engine.current_model_name,
                 "vision_capable": engine.is_vision_capable,
@@ -1332,9 +1283,10 @@ class SessionManager:
                 "messages": messages,
                 "full_access_enabled": _fa,
                 "chat_mode": "write",
+                "present_as": "native",
                 "current_model": None,
                 "current_model_name": None,
-                "vision_capable": False,
+                "vision_capable": None,
                 "pending_approval": None,
                 "pending_question": None,
                 "last_route": None,
@@ -1346,7 +1298,6 @@ class SessionManager:
         session_id: str,
         turn_index: int,
         *,
-        rollback_files: bool = False,
         new_message: str | None = None,
         resend_mode: bool = False,
         user_id: str | None = None,
@@ -1369,7 +1320,6 @@ class SessionManager:
         try:
             result = engine.rollback_conversation(
                 turn_index,
-                rollback_files=rollback_files,
                 keep_target=not resend_mode,
             )
 
@@ -1488,6 +1438,7 @@ class SessionManager:
             config_snapshot = {
                 "model": engine.current_model,
                 "chat_mode": getattr(engine, "_current_chat_mode", "write"),
+                "present_as": getattr(engine, "_present_as", "native"),
                 "full_access_enabled": engine.full_access_enabled,
             }
             workspace_root = str(engine.workspace.root_dir)
@@ -1628,7 +1579,7 @@ class SessionManager:
             try:
                 from excelmanus.stores.session_state_store import SessionStateStore
                 store = SessionStateStore(self._database)
-                store.save_checkpoint(
+                store.save_session_snapshot(
                     session_id=new_session_id,
                     state_dict=session_state or {},
                     task_list_dict=task_list or {},

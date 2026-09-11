@@ -19,7 +19,7 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
 from excelmanus.logger import get_logger
-from excelmanus.memory import ConversationMemory, TokenCounter
+from excelmanus.memory import ConversationMemory, TokenCounter, is_visible_user_turn
 
 if TYPE_CHECKING:
     from excelmanus.config import ExcelManusConfig
@@ -277,10 +277,11 @@ class CompactionManager:
         # 从最近消息中提取任务上下文（user 消息拼接作为 query）
         recent_user_texts = []
         for msg in recent_messages:
-            if msg.get("role") == "user":
-                content = msg.get("content", "")
-                if isinstance(content, str) and content.strip():
-                    recent_user_texts.append(content.strip()[:300])
+            if not is_visible_user_turn(msg):
+                continue
+            content = msg.get("content", "")
+            if isinstance(content, str) and content.strip():
+                recent_user_texts.append(content.strip()[:300])
         if not recent_user_texts:
             return None
 
@@ -820,3 +821,88 @@ def _extract_rule_based_summary(
         _append_if_fits(section)
 
     return "\n".join(parts)
+
+
+# ── Wave D：挂在 pre_step / request-error 上 ─────────────────
+
+
+class RequestError(RuntimeError):
+    """模型请求溢出。仅当 surface 代数推进后才允许重试。"""
+
+    code = "request-error"
+
+
+def surface_fingerprint(memory: Any) -> tuple[int, int]:
+    """会话 surface 代数：条数 + 内容长度。摘要替换或剪枝都会推进。"""
+    messages = getattr(memory, "messages", None) or []
+    size = 0
+    for item in messages:
+        content = item.get("content") if isinstance(item, dict) else getattr(item, "content", "")
+        size += len(str(content or ""))
+    return (len(messages), size)
+
+
+async def compact_for_pre_step(engine: Any) -> str:
+    """pre_step 附件：先 prune 再 summarize。失败也 enter，不重跑工具。"""
+    manager = getattr(engine, "_compaction_manager", None)
+    memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    if manager is None or memory is None:
+        return "enter"
+    system_msgs = getattr(engine, "_last_system_msgs", None)
+    if system_msgs is None:
+        try:
+            from excelmanus.prompt.assemble import prepare_system_prompts_for_request
+
+            prompts, _err = prepare_system_prompts_for_request(engine)
+            system_only = [prompts[0]] if prompts else []
+            contexts = list(getattr(engine, "_prompt_user_contexts", None) or [])
+            system_msgs = memory.build_system_messages(system_only) if system_only else []
+            system_msgs = system_msgs + [
+                {"role": "user", "content": text}
+                for text in contexts
+                if isinstance(text, str) and text.strip()
+            ]
+            engine._last_system_msgs = system_msgs
+        except Exception:
+            system_msgs = []
+    if not manager.should_compact(memory, system_msgs):
+        return "enter"
+    client = getattr(engine, "_client", None)
+    if client is None:
+        return "enter"
+    config = getattr(engine, "_config", None) or getattr(engine, "config", None)
+    summary_model = getattr(engine, "_active_model", "") or getattr(config, "model", "") or "dummy"
+    before = surface_fingerprint(memory)
+    try:
+        result = await manager.auto_compact(
+            memory=memory,
+            system_msgs=system_msgs,
+            client=client,
+            summary_model=str(summary_model),
+        )
+    except Exception as exc:
+        logger.warning("pre_step 压缩失败，不重跑工具: %s", exc)
+        engine._last_compact_failed = True
+        return "enter"
+    engine._last_compact_failed = not bool(result.success)
+    if surface_fingerprint(memory) != before:
+        setattr(engine, "_history_snapshot_index", 0)
+    return "enter"
+
+
+async def recover_request_overflow(engine: Any, messages: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
+    """溢出走 request-error。只有 surface 推进才返回可重试消息，否则 None。"""
+    memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    if memory is None:
+        return None
+    before = surface_fingerprint(memory)
+    await compact_for_pre_step(engine)
+    if surface_fingerprint(memory) == before:
+        logger.warning("request-error：surface 未推进，不重试模型请求")
+        return None
+    if not isinstance(messages, list) or not messages:
+        return None
+    sys_msgs = [item for item in messages if isinstance(item, dict) and item.get("role") == "system"]
+    non_sys = [item for item in messages if not (isinstance(item, dict) and item.get("role") == "system")]
+    keep = max(2, len(non_sys) // 3)
+    return sys_msgs + non_sys[-keep:]

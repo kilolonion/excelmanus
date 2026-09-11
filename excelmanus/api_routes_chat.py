@@ -21,7 +21,6 @@ from excelmanus.api_app_state import (
     get_config_incomplete,
     get_session_manager,
     has_session_access as _has_session_access,
-    is_external_safe_mode as _is_external_safe_mode,
     resolve_workspace as _resolve_workspace,
 )
 from excelmanus.api_sse import (
@@ -46,6 +45,7 @@ from excelmanus.session import (
     SessionManager,
     SessionNotFoundError,
 )
+from excelmanus.session_title import SESSION_TITLE_MAX_LEN
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -85,6 +85,7 @@ class ChatRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
+    present_as: Literal["native", "code"] | None = None
     channel: str | None = None
     images: list[ImageAttachment] = Field(default_factory=list)
 
@@ -114,27 +115,15 @@ class ErrorResponse(BaseModel):
     error_id: str
 
 
-def _public_route_fields(route_mode: str, skills_used: list[str], tool_scope: list[str]) -> tuple[str, list[str], list[str]]:
-    """根据安全模式裁剪路由元信息。"""
-    if _is_external_safe_mode():
-        return "hidden", [], []
-    return route_mode, skills_used, tool_scope
-
-
 def _build_reply_sse(chat_result: Any, engine: Any) -> str:
     """构建 reply SSE 事件文本（chat_stream 与 chat_subscribe 共用）。"""
     normalized_reply = guard_public_reply((chat_result.reply or "").strip())
     route = engine.last_route_result
-    route_mode, skills_used, tool_scope = _public_route_fields(
-        route.route_mode,
-        route.skills_used,
-        route.tool_scope,
-    )
     return _sse_format("reply", {
         "content": normalized_reply,
-        "skills_used": skills_used,
-        "tool_scope": tool_scope,
-        "route_mode": route_mode,
+        "skills_used": route.skills_used,
+        "tool_scope": route.tool_scope,
+        "route_mode": route.route_mode,
         "iterations": chat_result.iterations,
         "truncated": chat_result.truncated,
         "prompt_tokens": chat_result.prompt_tokens,
@@ -143,39 +132,56 @@ def _build_reply_sse(chat_result: Any, engine: Any) -> str:
     })
 
 
-def _public_excel_path(path: str, *, safe_mode: bool) -> str:
+def _public_excel_path(path: str) -> str:
     """将 Excel 路径规范化为前端可直接回传的形式。
 
-    - 优先返回 workspace 相对路径（`./subdir/file.xlsx`），避免泄露绝对路径且保持可用。
-    - 已被脱敏为 `<path>/name.xlsx` 的历史值，降级为 `./name.xlsx` 以兼容旧数据。
-    - 对工作区外绝对路径，safe_mode 下仍保留脱敏行为。
+    公开身份只认 CanonicalPath（方案 P1）。overlay / backups 映射到正本，
+    映射不到则省略，不把 staging 路径当交付物。未知绝对路径脱敏，不泄露家目录。
     """
     raw = str(path or "").strip()
     if not raw:
+        return ""
+
+    from pathlib import Path
+
+    from excelmanus.workspace.identity import (
+        is_overlay_leftover,
+        is_reserved_relative,
+        public_identity,
+    )
+
+    workspace = None
+    if get_config() is not None:
+        workspace = Path(get_config().workspace_root).resolve()
+
+    ident = public_identity(raw, workspace)
+    if ident:
+        return ident
+
+    probe = raw.removeprefix("<path>/").strip() if raw.startswith("<path>/") else raw
+    if is_overlay_leftover(probe) or is_reserved_relative(probe.replace("\\", "/")):
         return ""
 
     if raw.startswith("<path>/"):
         basename = raw.removeprefix("<path>/").strip()
         return f"./{basename}" if basename else ""
 
-    from pathlib import Path
-
-    if get_config() is not None:
-        workspace = Path(get_config().workspace_root).resolve()
+    if workspace is not None:
         candidate = Path(raw)
         if candidate.is_absolute():
             try:
                 rel = candidate.resolve().relative_to(workspace)
-                return f"./{rel.as_posix()}"
+                ident = public_identity(rel.as_posix(), workspace)
+                return ident
             except Exception:
-                return sanitize_external_text(raw, max_len=500) if safe_mode else raw
+                return sanitize_external_text(raw, max_len=500)
 
     normalized = raw.replace("\\", "/")
     if normalized.startswith("./"):
-        return normalized
+        return public_identity(normalized, workspace) or ""
     if normalized.startswith("/"):
-        return sanitize_external_text(normalized, max_len=500) if safe_mode else normalized
-    return f"./{normalized}"
+        return sanitize_external_text(normalized, max_len=500)
+    return public_identity(normalized, workspace) or ""
 
 
 
@@ -187,7 +193,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
     ch = get_session_manager().chat_history
     try:
         if event.event_type == EventType.EXCEL_DIFF:
-            pub_path = _public_excel_path(event.excel_file_path, safe_mode=False)
+            pub_path = _public_excel_path(event.excel_file_path)
             ch.save_excel_diff(
                 session_id=session_id,
                 tool_call_id=event.tool_call_id or "",
@@ -198,7 +204,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
             )
             ch.save_affected_file(session_id, pub_path)
         elif event.event_type == EventType.EXCEL_PREVIEW:
-            pub_path = _public_excel_path(event.excel_file_path, safe_mode=False)
+            pub_path = _public_excel_path(event.excel_file_path)
             ch.save_excel_preview(
                 session_id=session_id,
                 tool_call_id=event.tool_call_id or "",
@@ -213,7 +219,7 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
             ch.save_affected_file(session_id, pub_path)
         elif event.event_type == EventType.FILES_CHANGED:
             for f in (event.changed_files or [])[:50]:
-                pub = _public_excel_path(f, safe_mode=False)
+                pub = _public_excel_path(f)
                 if pub:
                     ch.save_affected_file(session_id, pub)
     except Exception:
@@ -226,10 +232,7 @@ def _serialize_images(images: list[ImageAttachment]) -> list[dict[str, str]]:
 
 
 def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
-    """根据安全模式裁剪工具调用明细。"""
-    if _is_external_safe_mode():
-        return []
-
+    """将工具调用明细脱敏后返回。"""
     rows: list[dict] = []
     for item in tool_calls:
         rows.append({
@@ -424,7 +427,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         if queued:
             return ChatResponse(
                 session_id=request.session_id or "",
-                reply="已加入本会话下一步，当前步结束后再生效。",
+                reply="已加入下一轮，当前回合结束后再生效。",
                 skills_used=[],
                 route_mode="queued_interrupt",
             )
@@ -452,12 +455,13 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         def _on_event_sync(event: ToolCallEvent) -> None:
             _persist_excel_event(session_id, event)
 
-        chat_result = await engine.chat(
+        chat_result = await engine.followup(
                 display_text,
                 on_event=_on_event_sync,
                 mention_contexts=mention_contexts,
                 images=_serialize_images(request.images),
                 chat_mode=request.chat_mode,
+                present_as=request.present_as,
                 channel=request.channel,
             )
     except Exception as _chat_exc:
@@ -535,17 +539,12 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             assistant_reply=normalized_reply,
         ), name="session_title")
     route = engine.last_route_result
-    route_mode, skills_used, tool_scope = _public_route_fields(
-        route.route_mode,
-        route.skills_used,
-        route.tool_scope,
-    )
     return ChatResponse(
         session_id=session_id,
         reply=normalized_reply,
-        skills_used=skills_used,
-        tool_scope=tool_scope,
-        route_mode=route_mode,
+        skills_used=route.skills_used,
+        tool_scope=route.tool_scope,
+        route_mode=route.route_mode,
         iterations=chat_result.iterations,
         truncated=chat_result.truncated,
         tool_calls=_public_tool_calls(chat_result.tool_calls),
@@ -583,9 +582,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
         会话获取、@引用解析等阻塞操作在流内部执行，
         实现毫秒级首次视觉反馈。
         """
-        safe_mode = _is_external_safe_mode()
-        _is_channel_request = bool(request.channel)
-
         # ── 所有可能在 finally 中引用的变量预初始化 ──
         session_id: str | None = None
         engine: AgentEngine | None = None
@@ -626,7 +622,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                 if queued:
                     yield _sse_format("pipeline_progress", {
                         "stage": "queued",
-                        "message": "已加入本会话下一步，当前步结束后再生效。",
+                        "message": "已加入下一轮，当前回合结束后再生效。",
                     })
                     yield _sse_format("done", {"queued": True})
                     return
@@ -810,12 +806,13 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             async def _run_chat_inner() -> ChatResult:
                 """后台执行 engine.chat，完成后释放会话锁。"""
                 try:
-                    result = await engine.chat(
+                    result = await engine.followup(
                         display_text,
                         on_event=_on_event,
                         mention_contexts=mention_contexts,
                         images=_serialize_images(request.images),
                         chat_mode=request.chat_mode,
+                        present_as=request.present_as,
                         channel=request.channel,
                     )
                     return result
@@ -860,11 +857,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         _seq, event = seq_item
                         if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                             _last_pipeline_stage = event.pipeline_stage
-                        sse = _sse_event_to_sse(
-                            event,
-                            safe_mode=safe_mode,
-                            is_channel=_is_channel_request,
-                        )
+                        sse = _sse_event_to_sse(event)
                         if sse is not None:
                             yield _inject_seq(sse, _seq, stream_state.stream_id)
                     if chat_task.done():
@@ -883,11 +876,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                             _seq, event = seq_item
                             if event.event_type == EventType.PIPELINE_PROGRESS and event.pipeline_stage:
                                 _last_pipeline_stage = event.pipeline_stage
-                            sse = _sse_event_to_sse(
-                                event,
-                                safe_mode=safe_mode,
-                                is_channel=_is_channel_request,
-                            )
+                            sse = _sse_event_to_sse(event)
                             if sse is not None:
                                 yield _inject_seq(sse, _seq, stream_state.stream_id)
                     break
@@ -1098,7 +1087,6 @@ class RollbackRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ]
     turn_index: int = Field(..., ge=0, description="目标用户轮次索引（0-indexed）")
-    rollback_files: bool = Field(default=False, description="是否同时回滚文件变更")
     new_message: str | None = Field(default=None, description="替换该轮用户消息内容（可选）")
     resend_mode: bool = Field(default=False, description="重发模式：移除目标用户消息，调用方随后通过 /chat/stream 重新发送")
 
@@ -1131,7 +1119,7 @@ async def chat_rollback_preview(
 
 @router.post("/api/v1/chat/rollback")
 async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONResponse:
-    """回退对话到指定用户轮次，可选回滚文件变更。"""
+    """回退对话到指定用户轮次。不改磁盘文件。"""
     if get_session_manager() is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
 
@@ -1139,7 +1127,6 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
         result = await get_session_manager().rollback_session(
             request.session_id,
             request.turn_index,
-            rollback_files=request.rollback_files,
             new_message=request.new_message,
             resend_mode=request.resend_mode,
         )
@@ -1155,7 +1142,6 @@ async def chat_rollback(request: RollbackRequest, raw_request: Request) -> JSONR
         content={
             "status": "ok",
             "removed_messages": result["removed_messages"],
-            "file_rollback_results": result["file_rollback_results"],
             "turn_index": result["turn_index"],
         },
     )
@@ -1205,7 +1191,6 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
     """SSE 重连端点：重放缓冲事件并接续实时流。"""
     session_id = request.session_id
     skip_replay = request.skip_replay
-    safe_mode = _is_external_safe_mode()
 
     # skip_replay 时仅保留的事件类型
     _REPLAY_KEEP_TYPES = {
@@ -1284,7 +1269,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                 for seq, event in replay_items:
                     if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                         continue
-                    sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                    sse = _sse_event_to_sse(event)
                     if sse is not None:
                         yield _inject_seq(sse, seq, _sid)
                 yield _sse_format("done", {})
@@ -1335,7 +1320,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             for seq, event in replay_items:
                 if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                     continue
-                sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                sse = _sse_event_to_sse(event)
                 if sse is not None:
                     yield _inject_seq(sse, seq, _sid)
 
@@ -1353,7 +1338,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     seq_item = queue_get_task.result()
                     if seq_item is not None:
                         _seq, event = seq_item
-                        sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                        sse = _sse_event_to_sse(event)
                         if sse is not None:
                             yield _inject_seq(sse, _seq, _sid)
                     if chat_task.done():
@@ -1369,7 +1354,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                             break
                         if seq_item is not None:
                             _seq, event = seq_item
-                            sse = _sse_event_to_sse(event, safe_mode=safe_mode)
+                            sse = _sse_event_to_sse(event)
                             if sse is not None:
                                 yield _inject_seq(sse, _seq, _sid)
                     break
@@ -1565,7 +1550,9 @@ async def chat_approve(
 
 
 
-def _truncate_user_message_as_title(user_message: str, max_len: int = 60) -> str | None:
+def _truncate_user_message_as_title(
+    user_message: str, max_len: int = SESSION_TITLE_MAX_LEN
+) -> str | None:
     """从用户消息截取会话标题（去除文件通知前缀，取前 max_len 字符）。"""
     if not user_message:
         return None
@@ -1586,11 +1573,16 @@ async def _generate_session_title_background(
     user_message: str,
     assistant_reply: str,
 ) -> None:
-    """后台 fire-and-forget：用 AUX 模型生成更好的会话标题并更新 DB。
+    """后台 fire-and-forget：独立客户端润色标题，不进入主 Agent 循环。
 
     前端通过 SessionSync 的 list_sessions 轮询自动获取更新后的标题。
+    若用户已发起下一轮，跳过以免与主任务抢同一激活模型配额。
     """
     try:
+        sm = get_session_manager()
+        if sm is not None and await sm.is_session_in_flight(session_id):
+            logger.debug("会话 %s 主任务进行中，跳过后台标题生成", session_id)
+            return
         title = await _generate_session_title_with_timeout(
             session_id=session_id,
             user_message=user_message,
@@ -1610,15 +1602,17 @@ async def _generate_session_title_with_timeout(
     assistant_reply: str,
     timeout: float = 5.0,
 ) -> str | None:
-    """用 AUX 模型生成会话标题，超时返回 None。"""
+    """用独立客户端调用激活模型生成会话标题，超时返回 None。"""
     if get_config() is None or get_session_manager() is None:
         return None
-    ch = get_session_manager().chat_history
+    sm = get_session_manager()
+    if sm is not None and await sm.is_session_in_flight(session_id):
+        logger.debug("会话 %s 主任务进行中，跳过标题生成", session_id)
+        return None
+    ch = sm.chat_history if sm is not None else None
     if ch is None:
         return None
-
-    _aux_effective = get_config().aux_enabled and bool(get_config().aux_model)
-    if not _aux_effective:
+    if not get_config().model or not get_config().api_key:
         return None
 
     try:
@@ -1626,16 +1620,16 @@ async def _generate_session_title_with_timeout(
         from excelmanus.session_title import generate_session_title
 
         client = _create_client(
-            api_key=get_config().aux_api_key or get_config().api_key,
-            base_url=get_config().aux_base_url or get_config().base_url,
-            protocol=get_config().aux_protocol,
+            api_key=get_config().api_key,
+            base_url=get_config().base_url,
+            protocol=get_config().protocol,
         )
         title = await asyncio.wait_for(
             generate_session_title(
                 user_message=user_message,
                 assistant_reply=assistant_reply,
                 client=client,
-                model=get_config().aux_model,
+                model=get_config().model,
             ),
             timeout=timeout,
         )
@@ -1651,16 +1645,9 @@ async def _generate_session_title_with_timeout(
         return None
 
 
-def _sse_event_to_sse(
-    event: ToolCallEvent,
-    *,
-    safe_mode: bool,
-    is_channel: bool = False,
-) -> str | None:
+def _sse_event_to_sse(event: ToolCallEvent) -> str | None:
     """将 ToolCallEvent 转换为 SSE 文本（委托到 api/sse.py）。"""
     return _sse_event_to_sse_impl(
         event,
-        safe_mode=safe_mode,
-        is_channel=is_channel,
-        public_path_fn=lambda path, sm: _public_excel_path(path, safe_mode=sm),
+        public_path_fn=_public_excel_path,
     )

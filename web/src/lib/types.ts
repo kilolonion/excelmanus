@@ -21,7 +21,6 @@ export interface Session {
   messageCount: number;
   inFlight: boolean;
   updatedAt?: string;
-  status?: "active" | "archived";
   /** 本地创建时间戳（Date.now()），用于 mergeSessions 宽限期保护 */
   createdAt?: number;
 }
@@ -34,9 +33,10 @@ export interface SessionDetail {
   latestSeq: number;
   fullAccessEnabled: boolean;
   chatMode: "write" | "read" | "plan";
+  presentAs?: "native" | "code";
   currentModel: string | null;
   currentModelName: string | null;
-  visionCapable: boolean;
+  visionCapable: boolean | null;
   messages: unknown[];
   pendingApproval: Approval | null;
   pendingQuestion: Question | null;
@@ -206,4 +206,5 @@ export interface ModelInfo {
   base_url?: string;
   provider?: string;
   user_scoped?: boolean;
+  supports_vision?: boolean | null;
 }

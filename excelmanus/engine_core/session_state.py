@@ -33,11 +33,6 @@ class SessionState:
         # 会话级诊断累积
         self.session_diagnostics: list[dict[str, Any]] = []
 
-        # 执行守卫状态
-        self.execution_guard_fired: bool = False
-        self.last_text_reply: str | None = None  # 上一次文本回复（用于重复检测）
-        self.vba_exempt: bool = False
-
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
         # 本会话最近读到/写到的内容版本（path → sha256:...）
@@ -50,53 +45,32 @@ class SessionState:
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
 
-        # 备份沙盒：首次写入工具成功后是否已注入备份路径提示
-        self.backup_write_notice_shown: bool = False
-
         # 提示词注入快照（每轮完整文本，供 /save 导出）
         self.prompt_injection_snapshots: list[dict[str, Any]] = []
+        # Code Mode：native | code。随快照持久化，plan/read 由 present_as_of 强制 native。
+        self.present_as: str = "native"
+
         # 上次真正发给模型的动态快照指纹；相同则本步不再重注
         self.injected_context_fingerprint: str | None = None
-
-        # 待注入的系统级提示
-        self._pending_system_notices: list[str] = []
-
-        # ── Think-Act 推理检测 ─────────────────────────────────
-        self.silent_call_count: int = 0
-        self.reasoned_call_count: int = 0
-        self.reasoning_chars_total: int = 0
-        # 推理级别闭环追踪
-        self.recommended_reasoning_level: str = "standard"
-        self.reasoning_level_mismatch_count: int = 0
-        self.reasoning_upgrade_nudge_count: int = 0
 
     def increment_turn(self) -> None:
         """递增会话轮次。"""
         self.session_turn += 1
 
     def reset_loop_stats(self) -> None:
-        """重置单次 chat 调用的循环统计（每次 _tool_calling_loop 开始时调用）。"""
+        """重置单次 followup 的循环统计。"""
         self.last_iteration_count = 0
         self.last_tool_call_count = 0
         self.last_success_count = 0
         self.last_failure_count = 0
         self.has_write_tool_call = False
         self.turn_diagnostics = []
-        self._pending_system_notices.clear()
         self.affected_files = []
         self.write_operations_log = []
-        self.silent_call_count = 0
-        self.reasoned_call_count = 0
-        self.reasoning_chars_total = 0
-        self.recommended_reasoning_level = "standard"
-        self.reasoning_level_mismatch_count = 0
-        self.reasoning_upgrade_nudge_count = 0
 
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
         self.session_turn = 0
-        self.execution_guard_fired = False
-        self.vba_exempt = False
         self.has_write_tool_call = False
         self.last_iteration_count = 0
         self.last_tool_call_count = 0
@@ -104,29 +78,23 @@ class SessionState:
         self.last_failure_count = 0
         self.turn_diagnostics = []
         self.session_diagnostics = []
-        self.backup_write_notice_shown = False
         self.prompt_injection_snapshots = []
         self.injected_context_fingerprint = None
-        self._pending_system_notices.clear()
         self.affected_files = []
         self.file_content_versions = {}
         self.write_operations_log = []
-        self.silent_call_count = 0
-        self.reasoned_call_count = 0
-        self.reasoning_chars_total = 0
-        self.recommended_reasoning_level = "standard"
-        self.reasoning_level_mismatch_count = 0
-        self.reasoning_upgrade_nudge_count = 0
 
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
         self.has_write_tool_call = True
 
     def record_affected_file(self, path: str) -> None:
-        """记录被写入工具修改的文件路径。"""
-        normalized = path.strip()
-        if normalized and normalized not in self.affected_files:
-            self.affected_files.append(normalized)
+        """记录被写入工具修改的文件路径（canonical public identity）。"""
+        from excelmanus.workspace.identity import public_identity, workspace_root_of
+
+        public = public_identity(path, workspace_root_of(self))
+        if public and public not in self.affected_files:
+            self.affected_files.append(public)
 
     def remember_file_version(self, path: str, version: str) -> None:
         key = path.replace("\\", "/").lstrip("./").strip()
@@ -191,36 +159,6 @@ class SessionState:
         self.last_tool_call_count += 1
         self.last_failure_count += 1
 
-    # ── CoW 路径注册表 ──────────────────────────────────────
-
-    def register_cow_mappings(self, mapping: dict[str, str]) -> None:
-        """合并新的 CoW 路径映射到 FileRegistry。"""
-        if not mapping:
-            return
-        if self._file_registry is not None and self._file_registry.has_versions:
-            for src_rel, dst_rel in mapping.items():
-                self._file_registry.register_cow_mapping(src_rel, dst_rel)
-        
-    def get_cow_mappings(self) -> dict[str, str]:
-        """返回当前 CoW 映射（仅来自 FileRegistry）。"""
-        if self._file_registry is not None and self._file_registry.has_versions:
-            mappings = self._file_registry.get_cow_mappings()
-            if isinstance(mappings, dict):
-                return {
-                    str(k): str(v)
-                    for k, v in mappings.items()
-                    if isinstance(k, str) and isinstance(v, str)
-                }
-        return {}
-
-    def lookup_cow_redirect(self, rel_path: str) -> str | None:
-        """查找相对路径是否有 CoW 副本，返回副本路径或 None。"""
-        if self._file_registry is not None and self._file_registry.has_versions:
-            redirect = self._file_registry.lookup_cow_redirect(rel_path)
-            if isinstance(redirect, str):
-                return redirect
-        return None
-
     # ── 序列化 / 反序列化（状态持久化） ──────────────────────────
 
     def to_dict(self) -> dict[str, Any]:
@@ -236,11 +174,9 @@ class SessionState:
             "last_success_count": self.last_success_count,
             "last_failure_count": self.last_failure_count,
             "has_write_tool_call": self.has_write_tool_call,
-            "execution_guard_fired": self.execution_guard_fired,
-            "vba_exempt": self.vba_exempt,
             "affected_files": list(self.affected_files),
-            "backup_write_notice_shown": self.backup_write_notice_shown,
             "session_diagnostics": list(self.session_diagnostics),
+            "present_as": self.present_as if self.present_as in {"native", "code"} else "native",
         }
 
     @classmethod
@@ -254,9 +190,8 @@ class SessionState:
         state.last_failure_count = data.get("last_failure_count", 0)
         # 旧会话可能仍带 current_write_hint，P1 已删除该状态机，忽略即可。
         state.has_write_tool_call = data.get("has_write_tool_call", False)
-        state.execution_guard_fired = data.get("execution_guard_fired", False)
-        state.vba_exempt = data.get("vba_exempt", False)
         state.affected_files = data.get("affected_files", [])
-        state.backup_write_notice_shown = data.get("backup_write_notice_shown", False)
         state.session_diagnostics = data.get("session_diagnostics", [])
+        raw_present = data.get("present_as", "native")
+        state.present_as = "code" if raw_present in {"code", "both"} else "native"
         return state
