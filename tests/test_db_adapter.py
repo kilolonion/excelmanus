@@ -174,6 +174,34 @@ class TestConnectionAdapterSqlite:
         adapter.close()
 
 
+class TestConnectionAdapterMutex:
+    def test_concurrent_inserts_are_serialized(self, tmp_path: Path) -> None:
+        import threading
+
+        adapter = create_sqlite_adapter(str(tmp_path / "lock.db"))
+        adapter.execute("CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)")
+        adapter.commit()
+        errors: list[BaseException] = []
+
+        def _writer(tag: str) -> None:
+            try:
+                for i in range(20):
+                    adapter.execute("INSERT INTO t (val) VALUES (?)", (f"{tag}-{i}",))
+                    adapter.commit()
+            except BaseException as exc:  # noqa: BLE001
+                errors.append(exc)
+
+        threads = [threading.Thread(target=_writer, args=(name,)) for name in ("a", "b")]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        assert errors == []
+        row = adapter.execute("SELECT COUNT(*) as cnt FROM t").fetchone()
+        assert row["cnt"] == 40
+        adapter.close()
+
+
 class TestDatabaseWithAdapter:
     """Database 与 ConnectionAdapter 集成测试。"""
 

@@ -84,20 +84,9 @@ def test_delete_session_cascades(store):
 
 def test_update_session(store):
     store.create_session("s1", "旧标题")
-    store.update_session("s1", title="新标题", status="archived")
-    sessions = store.list_sessions(include_archived=True)
+    store.update_session("s1", title="新标题")
+    sessions = store.list_sessions()
     assert sessions[0]["title"] == "新标题"
-    assert sessions[0]["status"] == "archived"
-
-
-def test_list_sessions_excludes_archived_by_default(store):
-    store.create_session("s1", "活跃")
-    store.create_session("s2", "归档")
-    store.update_session("s2", status="archived")
-    active = store.list_sessions(include_archived=False)
-    assert len(active) == 1
-    all_sessions = store.list_sessions(include_archived=True)
-    assert len(all_sessions) == 2
 
 
 def test_message_count_updated(store):
@@ -146,6 +135,17 @@ def test_empty_messages_noop(store):
     store.create_session("s1", "测试")
     store.save_turn_messages("s1", [], turn_number=1)
     assert store.load_messages("s1") == []
+
+
+def test_save_turn_messages_dedupes_by_message_id(store):
+    store.create_session("s1", "测试")
+    msg = {"role": "user", "content": "hi", "message_id": "abc123"}
+    store.save_turn_messages("s1", [msg], turn_number=1)
+    store.save_turn_messages("s1", [msg, {"role": "assistant", "content": "ok", "message_id": "def456"}], turn_number=1)
+    loaded = store.load_messages("s1")
+    assert len(loaded) == 2
+    assert loaded[0]["content"] == "hi"
+    assert loaded[1]["content"] == "ok"
 
 
 def test_get_message_count(store):

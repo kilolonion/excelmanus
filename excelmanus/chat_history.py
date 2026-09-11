@@ -106,7 +106,7 @@ class ChatHistoryStore:
     def update_session(self, session_id: str, **kwargs: str) -> None:
         sets: list[str] = []
         vals: list[str] = []
-        for key in ("title", "status", "title_source"):
+        for key in ("title", "title_source"):
             if key in kwargs:
                 sets.append(f"{key} = ?")
                 vals.append(kwargs[key])
@@ -157,30 +157,58 @@ class ChatHistoryStore:
         self,
         limit: int = 100,
         offset: int = 0,
-        include_archived: bool = False,
         *,
         user_id: str | None = None,
     ) -> list[dict]:
-        conditions: list[str] = []
-        params: list[Any] = []
-
-        if not include_archived:
-            conditions.append("status = 'active'")
-
-        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = self._conn.execute(
-            f"SELECT * FROM sessions {where} "
-            "ORDER BY updated_at DESC LIMIT ? OFFSET ?",
-            (*params, limit, offset),
+            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            (limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
 
     # ── Message CRUD ──────────────────────────────────
 
+    def _existing_message_ids(self, session_id: str) -> set[str]:
+        ids: set[str] = set()
+        try:
+            rows = self._conn.execute(
+                "SELECT content FROM messages WHERE session_id = ?",
+                (session_id,),
+            ).fetchall()
+        except Exception:
+            return ids
+        for row in rows:
+            raw = row["content"]  # type: ignore[index]
+            try:
+                msg = json.loads(raw) if raw else {}
+            except (json.JSONDecodeError, TypeError):
+                continue
+            if not isinstance(msg, dict):
+                continue
+            mid = msg.get("message_id")
+            if mid:
+                ids.add(str(mid))
+        return ids
+
     def save_turn_messages(
         self, session_id: str, messages: list[dict], turn_number: int = 0
     ) -> None:
         if not messages:
+            return
+        existing = self._existing_message_ids(session_id)
+        filtered: list[dict] = []
+        for msg in messages:
+            if not isinstance(msg, dict):
+                filtered.append(msg)
+                continue
+            mid = msg.get("message_id")
+            if mid:
+                mid_s = str(mid)
+                if mid_s in existing:
+                    continue
+                existing.add(mid_s)
+            filtered.append(msg)
+        if not filtered:
             return
         now = self._now_iso()
         rows = [
@@ -191,7 +219,7 @@ class ChatHistoryStore:
                 turn_number,
                 now,
             )
-            for msg in messages
+            for msg in filtered
         ]
         self._conn.executemany(
             "INSERT INTO messages (session_id, role, content, turn_number, created_at) "

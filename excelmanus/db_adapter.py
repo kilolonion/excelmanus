@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+import threading
 from typing import Any, Iterator, Sequence
 
 __all__ = [
@@ -196,11 +197,12 @@ class CursorAdapter:
 class ConnectionAdapter:
     """统一连接接口：所有 Store 通过此对象执行 SQL。"""
 
-    __slots__ = ("_conn", "_backend")
+    __slots__ = ("_conn", "_backend", "_lock")
 
     def __init__(self, conn: Any, backend: str) -> None:
         self._conn = conn
         self._backend = backend
+        self._lock = threading.RLock()
 
     @property
     def backend(self) -> str:
@@ -223,52 +225,57 @@ class ConnectionAdapter:
         return 0
 
     def execute(self, sql: str, params: Any = None) -> CursorAdapter:
-        real_sql = sql if self._backend == Backend.SQLITE else _sqlite_to_pg(sql)
-        if self._backend == Backend.SQLITE:
-            if params is None:
-                cursor = self._conn.execute(real_sql)
+        with self._lock:
+            real_sql = sql if self._backend == Backend.SQLITE else _sqlite_to_pg(sql)
+            if self._backend == Backend.SQLITE:
+                if params is None:
+                    cursor = self._conn.execute(real_sql)
+                else:
+                    cursor = self._conn.execute(real_sql, params)
             else:
-                cursor = self._conn.execute(real_sql, params)
-        else:
-            try:
-                cursor = self._conn.cursor()
-                cursor.execute(real_sql, params or ())
-            except Exception:
-                self._conn.rollback()
-                raise
-        return CursorAdapter(cursor, self._backend)
+                try:
+                    cursor = self._conn.cursor()
+                    cursor.execute(real_sql, params or ())
+                except Exception:
+                    self._conn.rollback()
+                    raise
+            return CursorAdapter(cursor, self._backend)
 
     def executemany(self, sql: str, params_seq: Sequence) -> CursorAdapter:
-        real_sql = sql if self._backend == Backend.SQLITE else _sqlite_to_pg(sql)
-        if self._backend == Backend.SQLITE:
-            cursor = self._conn.executemany(real_sql, params_seq)
-        else:
-            try:
-                cursor = self._conn.cursor()
-                for params in params_seq:
-                    cursor.execute(real_sql, params)
-            except Exception:
-                self._conn.rollback()
-                raise
-        return CursorAdapter(cursor, self._backend)
+        with self._lock:
+            real_sql = sql if self._backend == Backend.SQLITE else _sqlite_to_pg(sql)
+            if self._backend == Backend.SQLITE:
+                cursor = self._conn.executemany(real_sql, params_seq)
+            else:
+                try:
+                    cursor = self._conn.cursor()
+                    for params in params_seq:
+                        cursor.execute(real_sql, params)
+                except Exception:
+                    self._conn.rollback()
+                    raise
+            return CursorAdapter(cursor, self._backend)
 
     def executescript(self, script: str) -> None:
         """执行多条 SQL 语句（仅 SQLite 使用，PG 用 execute 逐条）。"""
-        if self._backend == Backend.SQLITE:
-            self._conn.executescript(script)
-        else:
-            cursor = self._conn.cursor()
-            for stmt in script.split(";"):
-                stmt = stmt.strip()
-                if stmt:
-                    cursor.execute(stmt)
-            cursor.close()
+        with self._lock:
+            if self._backend == Backend.SQLITE:
+                self._conn.executescript(script)
+            else:
+                cursor = self._conn.cursor()
+                for stmt in script.split(";"):
+                    stmt = stmt.strip()
+                    if stmt:
+                        cursor.execute(stmt)
+                cursor.close()
 
     def commit(self) -> None:
-        self._conn.commit()
+        with self._lock:
+            self._conn.commit()
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     @property
     def row_factory(self) -> Any:
@@ -278,8 +285,9 @@ class ConnectionAdapter:
 
     @row_factory.setter
     def row_factory(self, value: Any) -> None:
-        if self._backend == Backend.SQLITE:
-            self._conn.row_factory = value
+        with self._lock:
+            if self._backend == Backend.SQLITE:
+                self._conn.row_factory = value
 
     def table_exists(self, table_name: str) -> bool:
         """跨后端检查表是否存在。"""

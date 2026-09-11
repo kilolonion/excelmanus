@@ -26,7 +26,6 @@ REPO_URL_GITHUB = "https://github.com/kilolonion/excelmanus.git"
 GITEE_API_TAGS = "https://gitee.com/api/v5/repos/kilolonion/excelmanus/tags?per_page=100"
 GITHUB_API_TAGS = "https://api.github.com/repos/kilolonion/excelmanus/tags?per_page=100"
 _BACKUP_DIR_NAME = "backups"
-_DATA_PATHS_TO_BACKUP = [".env", "users", "outputs", "uploads"]
 
 # ── 版本检查 TTL 缓存 ──────────────────────────────────
 _version_check_cache: VersionInfo | None = None
@@ -270,19 +269,6 @@ def check_for_updates(
             info.commits_behind = 0
         info.has_update = info.commits_behind > 0
         if info.has_update:
-            # 读取远程版本号做 semver 比较，统一与 API 路径的判断标准
-            _, remote_toml_pre, _ = _run_cmd(
-                ["git", "show", f"{git_remote}/{branch}:pyproject.toml"], cwd=project_root,
-            )
-            for line in remote_toml_pre.splitlines():
-                if line.strip().startswith("version") and "=" in line:
-                    _remote_ver = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    # 如果远程版本号并未大于当前版本（仅是非版本号 commit），仍然标记为无更新
-                    if _parse_version_tuple(_remote_ver) <= _parse_version_tuple(info.current):
-                        info.has_update = False
-                        info.commits_behind = 0
-                    break
-        if info.has_update:
             _, log_out, _ = _run_cmd(
                 ["git", "log", f"HEAD..{git_remote}/{branch}", "--oneline", "-20"], cwd=project_root,
             )
@@ -362,6 +348,55 @@ def check_for_updates(
     return info
 
 
+def _backup_sqlite_database(src: Path, dst: Path) -> None:
+    """Consistent SQLite copy via backup() + WAL checkpoint.
+
+    Non-SQLite ``*.db`` files fall back to a byte copy so tests and stray
+    files still round-trip.
+    """
+    import sqlite3
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
+        dst.unlink()
+    header = b""
+    try:
+        with src.open("rb") as fh:
+            header = fh.read(16)
+    except OSError:
+        header = b""
+    if not header.startswith(b"SQLite format 3"):
+        shutil.copy2(str(src), str(dst))
+        return
+    src_conn = sqlite3.connect(str(src), timeout=30.0)
+    try:
+        try:
+            src_conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+        except sqlite3.Error:
+            logger.debug("wal checkpoint skipped for %s", src, exc_info=True)
+        dst_conn = sqlite3.connect(str(dst))
+        try:
+            src_conn.backup(dst_conn)
+            dst_conn.commit()
+        finally:
+            dst_conn.close()
+    finally:
+        src_conn.close()
+
+
+def _atomic_restore_file(src: Path, dst: Path) -> None:
+    """Write to a sibling temp file, then replace the destination."""
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dst.with_name(dst.name + "._restore_tmp")
+    if tmp.exists() or tmp.is_symlink():
+        if tmp.is_dir():
+            shutil.rmtree(str(tmp))
+        else:
+            tmp.unlink()
+    shutil.copy2(str(src), str(tmp))
+    os.replace(str(tmp), str(dst))
+
+
 def backup_user_data(
     project_root: str | Path | None = None,
     progress_cb: Callable[[str], None] | None = None,
@@ -372,17 +407,10 @@ def backup_user_data(
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     version = get_current_version(project_root)
 
-    # 优先使用集中数据目录存放备份（服务器模式下项目目录可能只读）
-    backup_base: Path | None = None
-    try:
-        from excelmanus.data_home import get_data_home
-        data_home = get_data_home()
-        if data_home.is_dir() or data_home.parent.is_dir():
-            backup_base = data_home / _BACKUP_DIR_NAME
-    except Exception:
-        pass
-    if backup_base is None:
-        backup_base = project_root / _BACKUP_DIR_NAME
+    from excelmanus.data_home import get_excelmanus_home
+
+    home_root = get_excelmanus_home()
+    backup_base = home_root / _BACKUP_DIR_NAME
     backup_dir = backup_base / f"backup_{version}_{timestamp}"
     result = BackupResult()
 
@@ -393,27 +421,32 @@ def backup_user_data(
 
     try:
         backup_dir.mkdir(parents=True, exist_ok=True)
-        for rel_path in _DATA_PATHS_TO_BACKUP:
-            src = project_root / rel_path
-            dst = backup_dir / rel_path
-            if src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-                result.files_backed_up.append(rel_path)
-                _log(f"  备份文件: {rel_path}")
-            elif src.is_dir() and any(src.iterdir()):
-                shutil.copytree(str(src), str(dst), dirs_exist_ok=True)
-                result.files_backed_up.append(rel_path + "/")
-                _log(f"  备份目录: {rel_path}/")
+        home_dst = backup_dir / "excelmanus_home"
+        home_dst.mkdir(parents=True, exist_ok=True)
 
-        home_db = Path.home() / ".excelmanus"
-        if home_db.is_dir():
-            dst_db = backup_dir / ".excelmanus_home"
-            for db_file in home_db.glob("*.db*"):
-                dst_db.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(db_file), str(dst_db / db_file.name))
-                result.files_backed_up.append(f"~/.excelmanus/{db_file.name}")
-                _log(f"  备份数据库: ~/.excelmanus/{db_file.name}")
+        if home_root.is_dir():
+            for db_file in sorted(home_root.glob("*.db")):
+                if db_file.is_file():
+                    _backup_sqlite_database(db_file, home_dst / db_file.name)
+                    result.files_backed_up.append(db_file.name)
+                    _log(f"  备份数据库: {db_file.name}")
+            config_env = home_root / "config.env"
+            if config_env.is_file():
+                shutil.copy2(str(config_env), str(home_dst / "config.env"))
+                result.files_backed_up.append("config.env")
+                _log("  备份正式仓: config.env")
+            for sub in ("data", "memory", "skillpacks"):
+                src = home_root / sub
+                if src.is_dir() and any(src.iterdir()):
+                    shutil.copytree(str(src), str(home_dst / sub), dirs_exist_ok=True)
+                    result.files_backed_up.append(f"{sub}/")
+                    _log(f"  备份目录: {sub}/")
+
+        env_file = project_root / ".env"
+        if env_file.is_file():
+            shutil.copy2(str(env_file), str(backup_dir / ".env"))
+            result.files_backed_up.append(".env")
+            _log("  备份文件: .env")
 
         result.success = True
         result.backup_dir = str(backup_dir)
@@ -421,7 +454,6 @@ def backup_user_data(
     except Exception as e:
         result.error = str(e)
         logger.error("备份失败: %s", e, exc_info=True)
-        # 清理部分失败的备份目录，避免残留
         if backup_dir.is_dir():
             shutil.rmtree(str(backup_dir), ignore_errors=True)
     return result
@@ -443,22 +475,39 @@ def _get_backup_name_re():
 
 
 def _get_backup_bases(project_root: Path) -> list[Path]:
-    """返回所有可能的备份目录（集中数据目录 + 项目目录），去重。"""
+    """返回备份目录（优先 EXCELMANUS_HOME/backups，兼容旧的项目根 backups）。"""
     bases: list[Path] = []
+    seen: set[Path] = set()
     try:
-        from excelmanus.data_home import get_data_home
-        data_home = get_data_home()
-        dh_backup = data_home / _BACKUP_DIR_NAME
-        if dh_backup.is_dir():
-            bases.append(dh_backup)
+        from excelmanus.data_home import get_excelmanus_home
+        home_backup = get_excelmanus_home() / _BACKUP_DIR_NAME
+        if home_backup.is_dir():
+            resolved = home_backup.resolve()
+            bases.append(home_backup)
+            seen.add(resolved)
     except Exception:
         pass
     proj_backup = project_root / _BACKUP_DIR_NAME
     if proj_backup.is_dir():
-        # 避免重复（data_home 和 project_root 可能指向同一位置）
-        if not bases or bases[0].resolve() != proj_backup.resolve():
+        resolved = proj_backup.resolve()
+        if resolved not in seen:
             bases.append(proj_backup)
     return bases
+
+
+def find_backup_dir(backup_name: str, project_root: str | Path | None = None) -> Path | None:
+    """按备份目录名在所有备份根下查找。"""
+    if not backup_name or backup_name.startswith(".") or "/" in backup_name or "\\" in backup_name or ".." in backup_name:
+        return None
+    if not backup_name.startswith("backup_"):
+        return None
+    if project_root is None:
+        project_root = Path(__file__).resolve().parent.parent
+    for base in _get_backup_bases(Path(project_root)):
+        candidate = base / backup_name
+        if candidate.is_dir():
+            return candidate
+    return None
 
 
 def list_backups(project_root: str | Path | None = None) -> list[dict]:
@@ -534,41 +583,58 @@ def restore_from_backup(
     if not backup_dir.is_dir():
         logger.error("备份目录不存在: %s", backup_dir)
         return False
+
     def _log(msg: str) -> None:
         logger.info(msg)
         if progress_cb:
             progress_cb(msg)
+
+    def _restore_tree(src: Path, dst: Path) -> None:
+        dst_tmp = dst.with_name(dst.name + "._restore_tmp")
+        if dst_tmp.is_dir():
+            shutil.rmtree(str(dst_tmp))
+        shutil.copytree(str(src), str(dst_tmp))
+        if dst.is_dir():
+            shutil.rmtree(str(dst))
+        dst_tmp.rename(dst)
+
     try:
-        for rel_path in _DATA_PATHS_TO_BACKUP:
-            src, dst = backup_dir / rel_path, project_root / rel_path
-            if src.is_file():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(src), str(dst))
-                _log(f"  恢复文件: {rel_path}")
-            elif src.is_dir():
-                # 安全恢复：先复制到临时目录，成功后再替换，避免 copytree 失败导致数据丢失
-                dst_tmp = dst.with_name(dst.name + "._restore_tmp")
-                try:
-                    if dst_tmp.is_dir():
-                        shutil.rmtree(str(dst_tmp))
-                    shutil.copytree(str(src), str(dst_tmp))
-                    # 复制成功，替换原目录
-                    if dst.is_dir():
-                        shutil.rmtree(str(dst))
-                    dst_tmp.rename(dst)
-                except Exception:
-                    # 清理临时目录
-                    if dst_tmp.is_dir():
-                        shutil.rmtree(str(dst_tmp), ignore_errors=True)
-                    raise
+        from excelmanus.data_home import get_excelmanus_home
+
+        home_db = get_excelmanus_home()
+        home_src = backup_dir / "excelmanus_home"
+        if not home_src.is_dir():
+            home_src = backup_dir / ".excelmanus_home"
+        home_db.mkdir(parents=True, exist_ok=True)
+        if home_src.is_dir():
+            for db_file in home_src.glob("*.db*"):
+                if not db_file.is_file():
+                    continue
+                _atomic_restore_file(db_file, home_db / db_file.name)
+                _log(f"  恢复数据库: {db_file.name}")
+            config_src = home_src / "config.env"
+            if config_src.is_file():
+                _atomic_restore_file(config_src, home_db / "config.env")
+                _log("  恢复正式仓: config.env")
+            for sub in ("data", "memory", "skillpacks"):
+                src = home_src / sub
+                if src.is_dir():
+                    _restore_tree(src, home_db / sub)
+                    _log(f"  恢复目录: {sub}/")
+
+        env_src = backup_dir / ".env"
+        if env_src.is_file():
+            _atomic_restore_file(env_src, project_root / ".env")
+            _log("  恢复文件: .env")
+
+        # 兼容旧备份：项目根 users/outputs/uploads
+        for rel_path in ("users", "outputs", "uploads"):
+            src = backup_dir / rel_path
+            dst = project_root / rel_path
+            if src.is_dir():
+                _restore_tree(src, dst)
                 _log(f"  恢复目录: {rel_path}/")
-        home_db_backup = backup_dir / ".excelmanus_home"
-        if home_db_backup.is_dir():
-            home_db = Path.home() / ".excelmanus"
-            home_db.mkdir(parents=True, exist_ok=True)
-            for db_file in home_db_backup.glob("*.db*"):
-                shutil.copy2(str(db_file), str(home_db / db_file.name))
-                _log(f"  恢复数据库: ~/.excelmanus/{db_file.name}")
+
         _log("数据恢复完成")
         return True
     except Exception as e:
@@ -613,8 +679,8 @@ def verify_database_migration(
     except Exception:
         return True, "无法加载配置，跳过预验证"
 
-    if not config.chat_history_enabled:
-        return True, "数据库未启用，无需迁移"
+    if not config.database_url and not (config.chat_history_db_path or config.db_path):
+        return True, "数据库路径未配置，跳过预验证"
 
     import os
     resolved_db_path = os.path.expanduser(
@@ -646,19 +712,27 @@ def perform_update(
     use_mirror: bool = False,
     progress_cb: Callable[[str, int], None] | None = None,
 ) -> UpdateResult:
-    """执行完整更新流程。
-
-    使用互斥锁防止并发更新冲突。
-    更新失败时自动回滚到更新前的 commit。
-    """
+    """在已停机的工作树上执行更新。服务仍在监听时请走 upgrade helper。"""
     if not _update_lock.acquire(blocking=False):
-        return UpdateResult(
-            error="另一个更新正在进行中，请等待完成后再试",
-        )
+        return UpdateResult(error="另一个更新正在进行中，请等待完成后再试")
     try:
-        return _perform_update_impl(
+        if project_root is None:
+            project_root = Path(__file__).resolve().parent.parent
+        project_root = Path(project_root)
+        from excelmanus.upgrade.helper import api_is_running
+        from excelmanus.upgrade.apply import apply_on_stopped_tree
+
+        if api_is_running():
+            return UpdateResult(
+                error="API 仍在运行。请使用设置页升级，或先停止服务再执行 CLI 更新。",
+            )
+        if not skip_backup:
+            bk = backup_user_data(project_root)
+            if not bk.success:
+                return UpdateResult(error=f"备份失败: {bk.error}")
+            cleanup_old_backups(project_root, max_keep=2)
+        return apply_on_stopped_tree(
             project_root,
-            skip_backup=skip_backup,
             skip_deps=skip_deps,
             use_mirror=use_mirror,
             progress_cb=progress_cb,
@@ -666,267 +740,6 @@ def perform_update(
     finally:
         _update_lock.release()
 
-
-def _restart_frontend_process(
-    project_root: Path,
-    _p: Callable[[str, int], None],
-) -> None:
-    """尝试重启前端进程，使新构建产物生效。
-
-    依次尝试 pm2 → systemctl → 写入 restart signal 文件。
-    全部失败时仅记录提示，不阻断更新流程。
-    """
-    # 尝试 pm2
-    rc, _, _ = _run_cmd(["pm2", "restart", "excelmanus-web"], cwd=project_root, timeout=15)
-    if rc == 0:
-        _p("前端进程已通过 pm2 重启", 83)
-        return
-    # 尝试 systemctl（仅 Linux）
-    if platform.system() != "Windows":
-        for svc in ("excelmanus-web", "excelmanus-frontend"):
-            rc, _, _ = _run_cmd(["systemctl", "restart", svc], cwd=project_root, timeout=15)
-            if rc == 0:
-                _p(f"前端进程已通过 systemctl restart {svc} 重启", 83)
-                return
-    # 写入 restart signal 文件，供外部看门狗或脚本轮询
-    try:
-        signal_file = project_root / "web" / ".next" / ".restart_signal"
-        signal_file.parent.mkdir(parents=True, exist_ok=True)
-        signal_file.write_text(str(time.time()), encoding="utf-8")
-    except Exception:
-        pass
-    _p("前端已重新构建，但未检测到 pm2/systemctl 进程管理器。如前端独立运行，请手动重启前端服务。", 83)
-
-
-def _perform_update_impl(
-    project_root: str | Path | None = None, *,
-    skip_backup: bool = False, skip_deps: bool = False,
-    use_mirror: bool = False,
-    progress_cb: Callable[[str, int], None] | None = None,
-) -> UpdateResult:
-    """perform_update 的内部实现（已持有 _update_lock）。"""
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-    result = UpdateResult(old_version=get_current_version(project_root))
-
-    def _p(msg: str, pct: int) -> None:
-        logger.info("[%d%%] %s", pct, msg)
-        if progress_cb:
-            progress_cb(msg, pct)
-
-    # Step 1: 检查更新（强制跳过缓存，确保拿到最新状态）
-    _p("正在检查更新...", 5)
-    vi = check_for_updates(project_root, force=True)
-    if not vi.has_update:
-        result.success, result.new_version = True, vi.current
-        result.error = "已是最新版本"
-        _p("已是最新版本", 100)
-        return result
-    _p(f"发现新版本: {vi.current} → {vi.latest} ({vi.commits_behind} 个新提交)", 10)
-    result.steps_completed.append("version_check")
-
-    # Step 2: 备份
-    if not skip_backup:
-        _p("正在备份用户数据...", 15)
-        bk = backup_user_data(project_root)
-        if bk.success:
-            result.backup_dir = bk.backup_dir
-            result.steps_completed.append("backup")
-            _p(f"备份完成: {len(bk.files_backed_up)} 项", 25)
-        else:
-            result.error = f"备份失败: {bk.error}"
-            return result
-    else:
-        result.steps_completed.append("backup_skipped")
-
-    # Step 2b: 清理旧备份（保留最近 2 个）
-    removed = cleanup_old_backups(project_root, max_keep=2, progress_cb=lambda m: _p(m, 27))
-    if removed:
-        _p(f"已清理 {len(removed)} 个旧备份", 28)
-
-    # ── 探测网络环境与安装工具 ──
-    domestic = use_mirror or _is_domestic_network()
-    use_uv = _has_uv()
-    if domestic:
-        _p("检测到国内网络，将优先使用镜像加速", 28)
-
-    # Step 3: Git 合并（Step 1 的 check_for_updates 已做过 fetch，直接 merge 避免重复网络请求）
-    if not _is_git_repo(project_root):
-        result.error = "项目不是 Git 仓库，无法更新"
-        return result
-    _p("正在拉取最新代码...", 30)
-
-    # 记录更新前的 commit，用于失败时回滚
-    _, pre_update_commit, _ = _run_cmd(["git", "rev-parse", "HEAD"], cwd=project_root)
-
-    # 检测是否有本地修改需要暂存
-    _, status_out, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
-    has_stash = False
-    if status_out.strip():
-        rc_stash, _, stash_err = _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
-        if rc_stash == 0:
-            has_stash = True
-        else:
-            _p(f"警告: git stash 失败 ({stash_err})，跳过本地修改暂存", 31)
-    _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
-    branch = branch or "main"
-    # Step 1 的 check_for_updates(force=True) 已执行 git fetch，直接 merge 即可
-    rc, _, err = _run_cmd(
-        ["git", "merge", f"origin/{branch}", "--ff-only"], cwd=project_root,
-    )
-    if rc != 0:
-        _p("合并失败，尝试 GitHub 备用源...", 33)
-        _ensure_github_remote(project_root)
-        rc2, _, _ = _run_cmd(["git", "fetch", "github", branch], cwd=project_root, timeout=120)
-        if rc2 == 0:
-            rc, _, err = _run_cmd(
-                ["git", "merge", f"github/{branch}", "--ff-only"], cwd=project_root,
-            )
-    if rc != 0:
-        # 安全策略：不执行 git reset --hard，避免静默丢弃本地修改
-        result.error = (
-            f"fast-forward 合并失败: {err}\n"
-            "本地代码与远程存在冲突，无法自动更新。\n"
-            "请手动执行: git pull --rebase 或 git merge 解决冲突后重试。"
-        )
-        if has_stash:
-            _run_cmd(["git", "stash", "pop"], cwd=project_root)
-        return result
-    result.steps_completed.append("git_pull")
-    # 恢复暂存的本地修改（成功路径）
-    if has_stash:
-        rc_pop, _, _ = _run_cmd(["git", "stash", "pop"], cwd=project_root)
-        if rc_pop != 0:
-            _p("警告: git stash pop 失败，本地修改保留在 stash 中，请手动执行 git stash pop", 43)
-    _p("代码已更新", 45)
-
-    # Step 4: 安装依赖（pip + npm 并行，uv 优先，镜像加速）
-    if not skip_deps:
-        from concurrent.futures import ThreadPoolExecutor
-
-        installer_label = "uv" if use_uv else "pip"
-        _p(f"正在并行安装依赖 (安装器: {installer_label})...", 50)
-
-        def _install_backend() -> tuple[bool, str]:
-            rc, _, err = _run_cmd(
-                _build_pip_cmd(project_root, domestic, use_uv),
-                cwd=project_root, timeout=300,
-            )
-            if rc != 0 and not domestic:
-                rc, _, err = _run_cmd(
-                    _build_pip_cmd(project_root, True, use_uv),
-                    cwd=project_root, timeout=300,
-                )
-            return rc == 0, err
-
-        def _install_frontend() -> tuple[bool, str]:
-            web_dir = project_root / "web"
-            if not (web_dir.is_dir() and (web_dir / "package.json").exists()):
-                return True, ""
-            npm_args = ["npm", "install"]
-            if domestic:
-                npm_args.append("--registry=https://registry.npmmirror.com")
-            rc, _, err = _run_cmd(npm_args, cwd=web_dir, timeout=300)
-            if rc != 0 and not domestic:
-                # 首次未使用镜像，重试时加上镜像（用新的参数列表避免重复）
-                npm_args_mirror = ["npm", "install", "--registry=https://registry.npmmirror.com"]
-                rc, _, err = _run_cmd(npm_args_mirror, cwd=web_dir, timeout=300)
-            return rc == 0, err
-
-        with ThreadPoolExecutor(max_workers=2) as pool:
-            fut_be = pool.submit(_install_backend)
-            fut_fe = pool.submit(_install_frontend)
-            be_ok, be_err = fut_be.result(timeout=600)
-            fe_ok, _ = fut_fe.result(timeout=600)
-
-        if not be_ok:
-            # 依赖安装失败 → 自动回滚到更新前的 commit
-            _p("后端依赖安装失败，正在回滚代码...", 55)
-            # 回滚前先暂存本地修改（stash pop 已恢复的内容），避免 reset --hard 丢失
-            _, rollback_status, _ = _run_cmd(["git", "status", "--porcelain"], cwd=project_root)
-            rollback_stashed = False
-            if rollback_status.strip():
-                rc_rs, _, _ = _run_cmd(["git", "stash", "--include-untracked"], cwd=project_root)
-                rollback_stashed = rc_rs == 0
-            if pre_update_commit:
-                rc_rb, _, rb_err = _run_cmd(
-                    ["git", "reset", "--hard", pre_update_commit], cwd=project_root,
-                )
-                if rc_rb == 0:
-                    # 回滚成功后恢复暂存的本地修改
-                    if rollback_stashed:
-                        _run_cmd(["git", "stash", "pop"], cwd=project_root)
-                    result.error = (
-                        f"后端依赖更新失败: {be_err[-200:]}\n"
-                        f"代码已自动回滚到更新前版本 ({pre_update_commit[:8]})。"
-                    )
-                else:
-                    result.error = (
-                        f"后端依赖更新失败: {be_err[-200:]}\n"
-                        f"自动回滚也失败 ({rb_err})，请手动执行:\n"
-                        f"  git reset --hard {pre_update_commit}\n"
-                        f"  pip install -e ."
-                    )
-            else:
-                result.error = (
-                    f"后端依赖更新失败: {be_err[-200:]}\n"
-                    "无法自动回滚（未记录更新前 commit），请手动执行 pip install -e ."
-                )
-            return result
-        result.steps_completed.append("pip_install")
-        _p("后端依赖已更新", 65)
-
-        if fe_ok:
-            result.steps_completed.append("npm_install")
-            _p("前端依赖已更新", 70)
-        else:
-            _p("前端依赖更新失败（非致命）", 70)
-
-    # Step 5: 重新构建前端（生产模式必须，否则新代码不生效）
-    # 放宽条件：只要有 package.json 即可构建（.next 可能不存在于首次部署或清理后）
-    web_dir = project_root / "web"
-    if web_dir.is_dir() and (web_dir / "package.json").exists():
-        _p("正在重新构建前端...", 75)
-        rc_build, _, build_err = _run_cmd(
-            ["npm", "run", "build"], cwd=web_dir, timeout=600,
-        )
-        if rc_build != 0:
-            _p("默认构建失败，尝试 webpack 兜底...", 78)
-            rc_build, _, build_err = _run_cmd(
-                ["npm", "run", "build:webpack"], cwd=web_dir, timeout=600,
-            )
-        if rc_build == 0:
-            result.steps_completed.append("frontend_build")
-            _p("前端构建完成", 82)
-            # 尝试重启前端进程（pm2 / systemctl），失败则提示用户手动重启
-            _restart_frontend_process(project_root, _p)
-        else:
-            _p(f"前端构建失败（非致命）: {build_err[-200:] if build_err else '未知错误'}", 82)
-            _p("生产模式下请手动执行: cd web && npm run build", 82)
-
-    # Step 6: 预验证数据库迁移
-    _p("正在预验证数据库迁移...", 85)
-    db_ok, db_msg = verify_database_migration(project_root)
-    if db_ok:
-        result.steps_completed.append("db_migration_verified")
-        _p(f"数据库迁移验证通过: {db_msg}", 90)
-    else:
-        _p(f"数据库迁移预验证警告: {db_msg}（将在启动时自动重试）", 90)
-
-    # Step 7: 验证（从磁盘读取，绕过模块缓存以获取 git pull 后的真实版本）
-    _p("正在验证...", 95)
-    result.new_version = _read_version_from_disk(project_root)
-    result.success = True
-    result.needs_restart = True
-    result.steps_completed.append("verified")
-
-    # 清除版本检查 TTL 缓存，避免更新后仍显示 has_update=True
-    _invalidate_version_cache()
-
-    _p(f"更新成功！{result.old_version} → {result.new_version}", 100)
-    _p("请重启服务以应用更新（数据库迁移将在启动时自动执行）", 100)
-    return result
 
 
 # ═══════════════════════════════════════════════════════════
@@ -1303,7 +1116,7 @@ def check_remote_deploy_lock(
         return default
 
     # 构建 SSH 命令
-    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=no"]
+    ssh_cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "-o", "StrictHostKeyChecking=accept-new"]
     if ssh_key:
         ssh_cmd.extend(["-i", ssh_key])
     if ssh_port and ssh_port != "22":
@@ -1562,191 +1375,6 @@ def _perform_remote_rollback_impl(
     except Exception as exc:
         return {"success": False, "error": str(exc)}
 
-
-# ═══════════════════════════════════════════════════════════
-# 灰度（Canary）管理
-# ═══════════════════════════════════════════════════════════
-
-
-def get_canary_status(
-    project_root: str | Path | None = None,
-) -> dict:
-    """读取 .deploy_canary.json 返回当前灰度状态。"""
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-
-    canary_file = project_root / "deploy" / ".deploy_canary.json"
-    default = {
-        "active": False,
-        "current_weight": 0,
-        "step": 0,
-        "total_steps": 0,
-        "started_at": None,
-        "candidate_port": None,
-        "observe_seconds": None,
-    }
-    if not canary_file.is_file():
-        return default
-    try:
-        data = json.loads(canary_file.read_text(encoding="utf-8"))
-        return {**default, **data}
-    except Exception:
-        return default
-
-
-def canary_promote(
-    project_root: str | Path | None = None,
-) -> dict:
-    """手动提升灰度权重到下一阶梯（通过修改 canary 状态文件触发）。
-
-    注意：实际的 Nginx 权重切换由 deploy.sh 的灰度循环驱动，
-    此接口仅适用于手动模式（deploy.sh 暂停等待 API 信号）。
-    当前实现直接调用 deploy.sh 的 sed 逻辑。
-    """
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-
-    canary_file = project_root / "deploy" / ".deploy_canary.json"
-    if not canary_file.is_file():
-        return {"success": False, "error": "当前没有进行中的灰度部署"}
-
-    try:
-        data = json.loads(canary_file.read_text(encoding="utf-8"))
-    except Exception:
-        return {"success": False, "error": "无法读取灰度状态"}
-
-    if not data.get("active"):
-        return {"success": False, "error": "当前没有进行中的灰度部署"}
-
-    # 读取 CANARY_STEPS 配置
-    env_deploy = project_root / "deploy" / ".env.deploy"
-    steps_str = "10,50,100"
-    if env_deploy.is_file():
-        try:
-            for line in env_deploy.read_text(encoding="utf-8").splitlines():
-                if line.strip().startswith("CANARY_STEPS="):
-                    steps_str = line.split("=", 1)[1].strip().strip('"').strip("'")
-                    break
-        except Exception:
-            pass
-
-    steps = [int(s.strip()) for s in steps_str.split(",") if s.strip().isdigit()]
-    current_step = data.get("step", 0)
-    if current_step >= len(steps):
-        return {"success": False, "error": "已在最高权重阶梯"}
-
-    next_weight = steps[current_step]  # step 是 0-indexed 的下一步
-    data["current_weight"] = next_weight
-    data["step"] = current_step + 1
-
-    try:
-        canary_file.write_text(json.dumps(data, indent=2), encoding="utf-8")
-    except Exception as exc:
-        return {"success": False, "error": f"写入状态失败: {exc}"}
-
-    return {
-        "success": True,
-        "new_weight": next_weight,
-        "step": current_step + 1,
-        "total_steps": len(steps),
-    }
-
-
-def canary_abort(
-    project_root: str | Path | None = None,
-) -> dict:
-    """中止灰度，清除状态文件。"""
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-
-    canary_file = project_root / "deploy" / ".deploy_canary.json"
-    default_state = {
-        "active": False,
-        "current_weight": 0,
-        "step": 0,
-        "total_steps": 0,
-        "started_at": None,
-        "candidate_port": None,
-        "observe_seconds": None,
-    }
-    try:
-        canary_file.write_text(json.dumps(default_state, indent=2), encoding="utf-8")
-    except Exception as exc:
-        return {"success": False, "error": f"清除灰度状态失败: {exc}"}
-
-    # 尝试杀掉候选进程
-    try:
-        subprocess.run(
-            ["bash", "-c", "[[ -f /tmp/excelmanus-candidate.pid ]] && kill $(cat /tmp/excelmanus-candidate.pid) 2>/dev/null; rm -f /tmp/excelmanus-candidate.pid"],
-            timeout=10, capture_output=True, check=False,
-        )
-    except Exception:
-        pass
-
-    return {"success": True, "message": "灰度已中止"}
-
-
-def canary_start(
-    project_root: str | Path | None = None,
-    *,
-    target: str = "full",
-    observe_seconds: int = 60,
-) -> dict:
-    """发起灰度部署（通过 deploy.sh canary 子命令）。
-
-    前置条件：deploy.sh 存在且支持 canary 模式。
-    """
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-
-    script = _find_deploy_script(project_root)
-    if not script:
-        return {"success": False, "error": "未找到 deploy.sh"}
-
-    # 检查是否已有活跃灰度
-    canary_file = project_root / "deploy" / ".deploy_canary.json"
-    if canary_file.is_file():
-        try:
-            data = json.loads(canary_file.read_text(encoding="utf-8"))
-            if data.get("active"):
-                return {"success": False, "error": "已有灰度部署进行中，请先中止或等待完成"}
-        except Exception:
-            pass
-
-    # 构建命令
-    cmd = ["bash", str(script), "deploy", "--canary", "--force"]
-    if target == "backend":
-        cmd.append("--backend-only")
-    if observe_seconds > 0:
-        cmd.extend(["--canary-observe", str(observe_seconds)])
-
-    try:
-        r = subprocess.run(
-            cmd,
-            cwd=str(project_root),
-            capture_output=True, text=True,
-            timeout=30,  # 仅启动，不等待灰度完成
-            check=False,
-            env={**os.environ, "FORCE_COLOR": "0"},
-        )
-        if r.returncode != 0:
-            return {
-                "success": False,
-                "error": f"启动灰度失败 (exit {r.returncode}): {r.stderr[-500:]}",
-            }
-    except subprocess.TimeoutExpired:
-        # 灰度进入后台观察循环是正常的超时
-        pass
-    except FileNotFoundError:
-        return {"success": False, "error": "bash 未找到"}
-    except Exception as e:
-        return {"success": False, "error": str(e)[:200]}
-
-    return {"success": True, "message": "灰度部署已发起"}
 
 
 def get_deploy_log(

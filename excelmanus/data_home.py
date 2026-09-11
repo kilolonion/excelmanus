@@ -1,19 +1,27 @@
-"""集中式数据路径管理 — 跨版本数据发现与迁移。
+"""集中式数据路径与配置持久化。
 
-所有用户数据集中到 ``~/.excelmanus/`` 下，使得不同安装目录
-（例如从 GitHub 下载的新版本）能自动找到并复用已有数据。
+所有会跨重启 / 更新存活的状态都落在 ``get_excelmanus_home()`` 下
+（默认 ``~/.excelmanus/``，可用 ``EXCELMANUS_HOME`` 改到数据卷）。
 
 目录结构::
 
-    ~/.excelmanus/
-    ├── excelmanus.db          # 主数据库（已有）
-    ├── config.env             # 集中配置（API Key 等）
+    $EXCELMANUS_HOME/
+    ├── excelmanus.db          # 主数据库（模型档案、会话、渠道凭证）
+    ├── config.env             # 环境项正式仓（UI 填写的 Key / 运行时设置）
     ├── installations.json     # 安装注册表
-    ├── data/                  # 集中数据根
-    │   ├── uploads/           # 上传文件
-    │   └── outputs/           # 输出文件
-    ├── memory/                # 持久记忆（已有）
-    └── skillpacks/            # 技能包（已有）
+    ├── data/                  # EXCELMANUS_DATA_ROOT 可覆盖
+    │   ├── .secret_key        # Fernet 密钥（加密 DB 内 API Key）
+    │   ├── .jwt_secret        # 下载令牌 JWT
+    │   ├── uploads/
+    │   └── outputs/
+    ├── memory/
+    └── skillpacks/
+
+加载优先级（空字符串视为未设置，不会挡住正式仓里的真实 Key）::
+
+    非空进程环境 > cwd .env 非空值 > 项目根 .env 非空值 > config.env 非空值 > 默认值
+
+UI / API 保存环境项时只写入 ``config.env``（若当前工作目录已有 ``.env`` 则同步一份，方便本地编辑）。
 """
 from __future__ import annotations
 
@@ -87,36 +95,81 @@ def _normalize_path(p: str) -> str:
 
 # ── 路径常量 ──────────────────────────────────────────────
 
-_EXCELMANUS_HOME = Path.home() / ".excelmanus"
 _CONFIG_ENV_NAME = "config.env"
 _INSTALLATIONS_NAME = "installations.json"
 _INSTALLATIONS_LOCK = ".installations.lock"
 _DATA_DIR_NAME = "data"
+_PATH_BOOTSTRAP_KEYS = ("EXCELMANUS_HOME", "EXCELMANUS_DATA_ROOT", "EXCELMANUS_CONFIG_ENV")
 
 
 # ── 路径获取 ──────────────────────────────────────────────
 
 
+def get_package_root() -> Path:
+    """源码 / 安装包根目录（``excelmanus/`` 的上一级）。"""
+    return Path(__file__).resolve().parent.parent
+
+
+def get_excelmanus_home() -> Path:
+    """返回持久化根目录。
+
+    1. ``EXCELMANUS_HOME``
+    2. 默认 ``~/.excelmanus``
+    """
+    env = os.environ.get("EXCELMANUS_HOME", "").strip()
+    if env:
+        return Path(env).expanduser().resolve()
+    return Path.home() / ".excelmanus"
+
+
 def get_data_home() -> Path:
     """返回集中数据根目录。
 
-    优先使用环境变量 ``EXCELMANUS_DATA_ROOT``，
-    默认 ``~/.excelmanus/data``。
+    优先 ``EXCELMANUS_DATA_ROOT``，默认 ``{EXCELMANUS_HOME}/data``。
     """
     env = os.environ.get("EXCELMANUS_DATA_ROOT", "").strip()
     if env:
         return Path(env).expanduser().resolve()
-    return _EXCELMANUS_HOME / _DATA_DIR_NAME
+    return get_excelmanus_home() / _DATA_DIR_NAME
 
 
 def get_config_env_path() -> Path:
-    """返回集中配置文件路径: ``~/.excelmanus/config.env``。"""
-    return _EXCELMANUS_HOME / _CONFIG_ENV_NAME
+    """正式环境配置文件。可用 ``EXCELMANUS_CONFIG_ENV`` 覆盖。"""
+    explicit = os.environ.get("EXCELMANUS_CONFIG_ENV", "").strip()
+    if explicit:
+        return Path(explicit).expanduser().resolve()
+    return get_excelmanus_home() / _CONFIG_ENV_NAME
+
+
+def get_project_env_path(project_root: str | Path | None = None) -> Path:
+    """项目根目录 ``.env``（开发便利文件，不是正式仓）。"""
+    root = Path(project_root).expanduser().resolve() if project_root else get_package_root()
+    return root / ".env"
 
 
 def get_installations_path() -> Path:
-    """返回安装注册表路径: ``~/.excelmanus/installations.json``。"""
-    return _EXCELMANUS_HOME / _INSTALLATIONS_NAME
+    """返回安装注册表路径。"""
+    return get_excelmanus_home() / _INSTALLATIONS_NAME
+
+
+def get_secret_key_path() -> Path:
+    """Fernet 密钥文件，必须和数据库在同一持久卷上。"""
+    return get_data_home() / ".secret_key"
+
+
+def get_jwt_secret_path() -> Path:
+    """下载令牌 JWT 密钥文件。"""
+    return get_data_home() / ".jwt_secret"
+
+
+def get_default_db_path() -> Path:
+    """默认 SQLite 路径：``{EXCELMANUS_HOME}/excelmanus.db``。"""
+    return get_excelmanus_home() / "excelmanus.db"
+
+
+def get_legacy_secret_key_path() -> Path:
+    """旧路径 ``~/.excelmanus/data/.secret_key``（未设置 EXCELMANUS_HOME 时与正式路径相同）。"""
+    return Path.home() / ".excelmanus" / "data" / ".secret_key"
 
 
 # ── 目录初始化 ────────────────────────────────────────────
@@ -131,27 +184,29 @@ def ensure_data_dirs() -> Path:
 
 
 def ensure_config_home() -> Path:
-    """确保 ``~/.excelmanus`` 目录存在。"""
-    _EXCELMANUS_HOME.mkdir(parents=True, exist_ok=True)
-    return _EXCELMANUS_HOME
+    """确保持久化根目录存在。"""
+    home = get_excelmanus_home()
+    home.mkdir(parents=True, exist_ok=True)
+    return home
 
 
-# ── 集中配置加载 ──────────────────────────────────────────
+# ── env 文件读写 ──────────────────────────────────────────
 
 
-def load_centralized_config() -> dict[str, str]:
-    """加载 ``~/.excelmanus/config.env`` 中的键值对。
+def env_value_is_set(value: str | None) -> bool:
+    """空字符串视为未设置，避免模板里的 ``KEY=`` 挡住正式仓。"""
+    return bool(value) and bool(str(value).strip())
 
-    返回 dict（不修改 os.environ），调用者决定如何合并。
-    支持 ``KEY=VALUE`` 格式，忽略注释和空行。
-    """
-    config_path = get_config_env_path()
+
+def parse_env_file(path: str | Path) -> dict[str, str]:
+    """解析 ``KEY=VALUE`` 文件。注释和空行忽略；保留空值以便区分「写过但清空」。"""
+    config_path = Path(path)
     if not config_path.is_file():
         return {}
     result: dict[str, str] = {}
     try:
-        for line in config_path.read_text(encoding="utf-8").splitlines():
-            line = line.strip()
+        for raw in config_path.read_text(encoding="utf-8").splitlines():
+            line = raw.strip()
             if not line or line.startswith("#"):
                 continue
             if "=" not in line:
@@ -159,52 +214,194 @@ def load_centralized_config() -> dict[str, str]:
             key, _, value = line.partition("=")
             key = key.strip()
             value = value.strip()
-            # 去除引号
             if len(value) >= 2 and value[0] == value[-1] and value[0] in ('"', "'"):
                 value = value[1:-1]
             if key:
                 result[key] = value
     except Exception as e:
-        logger.warning("加载集中配置失败: %s", e)
+        logger.warning("加载环境文件失败 (%s): %s", config_path, e)
     return result
 
 
-def inject_centralized_config() -> int:
-    """将集中配置注入 ``os.environ``，不覆盖已有值。
+def _restrict_private_file(path: Path) -> None:
+    try:
+        from excelmanus.security.cipher import _restrict_file_permissions
 
-    返回注入的变量数量。
+        _restrict_file_permissions(path)
+    except Exception:
+        try:
+            path.chmod(0o600)
+        except OSError:
+            logger.debug("chmod 设置失败: %s", path, exc_info=True)
+
+
+def _atomic_write_text(path: Path, content: str, *, private: bool = False) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, tmp_path = tempfile.mkstemp(
+        dir=str(path.parent), suffix=".tmp", prefix=f".{path.name}_",
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(content)
+        os.replace(tmp_path, str(path))
+        if private:
+            _restrict_private_file(path)
+    except BaseException:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+        raise
+
+
+def read_env_lines(path: str | Path) -> list[str]:
+    file_path = Path(path)
+    if not file_path.is_file():
+        return []
+    return file_path.read_text(encoding="utf-8").splitlines(keepends=True)
+
+
+def update_env_lines(lines: list[str], key: str, value: str) -> list[str]:
+    """更新或追加环境变量行，保持注释和格式。空值写成注释掉的 KEY=。"""
+    new_lines: list[str] = []
+    found = False
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
+            if value:
+                new_lines.append(f"{key}={value}\n")
+            else:
+                new_lines.append(f"# {key}=\n")
+            found = True
+        else:
+            new_lines.append(line if line.endswith("\n") or line.endswith("\r") else line + "\n")
+    if not found and value:
+        if new_lines and not new_lines[-1].endswith("\n"):
+            new_lines[-1] = new_lines[-1] + "\n"
+        new_lines.append(f"{key}={value}\n")
+    return new_lines
+
+
+def upsert_env_file(path: str | Path, updates: dict[str, str], *, private: bool = False) -> None:
+    """把 updates 写进指定 env 文件（原子写入）。"""
+    file_path = Path(path)
+    lines = read_env_lines(file_path)
+    for key, value in updates.items():
+        lines = update_env_lines(lines, key, value)
+    _atomic_write_text(file_path, "".join(lines), private=private)
+
+
+def persist_env_updates(updates: dict[str, str]) -> Path:
+    """把环境项写入正式仓 ``config.env``，并同步当前工作目录已有的 ``.env``。
+
+    只同步 ``cwd/.env``，不写源码包根目录，避免测试把占位模型写进开发机配置。
+    返回正式仓路径。空值会从 ``os.environ`` 移除，避免下次启动被空字符串挡住。
     """
-    config = load_centralized_config()
-    count = 0
-    for key, value in config.items():
-        if key not in os.environ:
+    if not updates:
+        return get_config_env_path()
+    ensure_config_home()
+    canonical = get_config_env_path()
+    lock_path = canonical.parent / "config.env.lock"
+    cwd_env = Path.cwd() / ".env"
+    with _file_lock(lock_path):
+        upsert_env_file(canonical, updates, private=True)
+        try:
+            if cwd_env.is_file() and cwd_env.resolve() != canonical.resolve():
+                upsert_env_file(cwd_env, updates, private=False)
+        except OSError:
+            logger.debug("同步项目 .env 失败", exc_info=True)
+
+    for key, value in updates.items():
+        if env_value_is_set(value):
             os.environ[key] = value
+        else:
+            os.environ.pop(key, None)
+    return canonical
+
+
+def delete_env_keys(keys: list[str]) -> None:
+    """从正式仓和项目 .env 注释掉指定键，并从进程环境移除。"""
+    persist_env_updates({key: "" for key in keys})
+
+
+def _set_environ_if_empty(key: str, value: str) -> bool:
+    if not env_value_is_set(value):
+        return False
+    if env_value_is_set(os.environ.get(key)):
+        return False
+    os.environ[key] = value
+    return True
+
+
+def load_centralized_config() -> dict[str, str]:
+    """加载正式仓 ``config.env`` 中的键值对（不修改 os.environ）。"""
+    return parse_env_file(get_config_env_path())
+
+
+def inject_centralized_config() -> int:
+    """将正式仓注入 ``os.environ``。空的进程环境值会被正式仓里的非空值填上。"""
+    count = 0
+    for key, value in load_centralized_config().items():
+        if _set_environ_if_empty(key, value):
             count += 1
     return count
 
 
-def migrate_project_env(project_root: str | Path) -> bool:
-    """将项目目录内的 ``.env`` 复制到集中配置位置。
+def load_runtime_env() -> None:
+    """加载运行时环境。空值不视为已设置。
 
-    仅在集中配置不存在时执行。返回是否执行了迁移。
+    先读 cwd ``.env`` 里的非空键（含 HOME/DATA_ROOT），再用正式仓补洞。
+    项目根 ``.env`` 的历史 Key 由启动时 ``migrate_project_env`` 合并进正式仓。
     """
+    cwd_env_path = Path.cwd() / ".env"
+    mapping: dict[str, str] = {}
+    if cwd_env_path.is_file():
+        mapping = parse_env_file(cwd_env_path)
+
+    for key in _PATH_BOOTSTRAP_KEYS:
+        if key in mapping:
+            _set_environ_if_empty(key, mapping[key])
+    for key, value in mapping.items():
+        _set_environ_if_empty(key, value)
+
+    inject_centralized_config()
+
+
+def migrate_project_env(project_root: str | Path) -> bool:
+    """将项目 ``.env`` 合并进正式仓。已有非空正式仓键不覆盖。"""
+    return reconcile_project_env_into_canonical(project_root)
+
+
+def reconcile_project_env_into_canonical(project_root: str | Path) -> bool:
+    """把项目 ``.env`` 中正式仓缺失或为空的非空键写入正式仓。"""
     project_root = Path(project_root).expanduser().resolve()
     project_env = project_root / ".env"
-    config_env = get_config_env_path()
-
     if not project_env.is_file():
         return False
-    if config_env.is_file():
-        # 已有集中配置，不覆盖
+
+    project_values = parse_env_file(project_env)
+    if not project_values:
+        return False
+
+    canonical = get_config_env_path()
+    existing = parse_env_file(canonical) if canonical.is_file() else {}
+    gap: dict[str, str] = {}
+    for key, value in project_values.items():
+        if not env_value_is_set(value):
+            continue
+        if env_value_is_set(existing.get(key)):
+            continue
+        gap[key] = value
+    if not gap:
         return False
 
     ensure_config_home()
     try:
-        shutil.copy2(str(project_env), str(config_env))
-        logger.info("已将项目配置迁移到集中位置: %s → %s", project_env, config_env)
+        upsert_env_file(canonical, gap, private=True)
+        logger.info("已将 %d 个项目 .env 键同步到正式仓: %s", len(gap), canonical)
         return True
     except Exception as e:
-        logger.warning("配置迁移失败: %s", e)
+        logger.warning("同步项目 .env 到正式仓失败: %s", e)
         return False
 
 
@@ -280,7 +477,7 @@ def register_installation(
         except Exception:
             version = "unknown"
 
-    lock_path = _EXCELMANUS_HOME / _INSTALLATIONS_LOCK
+    lock_path = get_excelmanus_home() / _INSTALLATIONS_LOCK
     with _file_lock(lock_path):
         installations = _load_installations()
 
@@ -336,7 +533,7 @@ def _read_version_from_dir(directory: Path) -> str | None:
         try:
             for line in init_py.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith("__version__"):
-                    # __version__ = "1.7.2"
+                    # __version__ = "1.7.3"
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip("\"'")
@@ -514,12 +711,9 @@ def migrate_data_from_project(
     data_home = ensure_data_dirs()
     stats: dict[str, int] = {}
 
-    # 迁移 .env
-    if not force and get_config_env_path().is_file():
-        pass  # 已有集中配置
-    else:
-        if migrate_project_env(root):
-            stats["config"] = 1
+    # 迁移 / 合并 .env 到正式仓（已有非空键不覆盖）
+    if migrate_project_env(root):
+        stats["config"] = 1
 
     # 迁移目录
     for name in ("uploads", "outputs"):
