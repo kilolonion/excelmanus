@@ -341,8 +341,8 @@ echo.
 REM -- Start backend --
 if "%FRONTEND_ONLY%"=="1" goto :skip_backend
 
-echo [--] 启动 FastAPI 后端 [0.0.0.0:%BACKEND_PORT%]...
-start "" /b "%PYTHON_BIN%" -c "import uvicorn; uvicorn.run('excelmanus.api:app', host='0.0.0.0', port=%BACKEND_PORT%, log_level='info')"
+echo [--] 启动 FastAPI 后端 [127.0.0.1:%BACKEND_PORT%]...
+start "" /b "%PYTHON_BIN%" -c "import uvicorn; uvicorn.run('excelmanus.api:app', host='127.0.0.1', port=%BACKEND_PORT%, log_level='info')"
 
 REM Wait for backend ready
 set "BACKEND_READY=0"

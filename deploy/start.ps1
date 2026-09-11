@@ -13,7 +13,7 @@
       -FrontendOnly          仅启动前端
       -BackendPort PORT      后端端口（默认 8000）
       -FrontendPort PORT     前端端口（默认 3000）
-      -ListenHost HOST       后端监听地址（默认 0.0.0.0）
+      -ListenHost HOST       后端监听地址（默认 127.0.0.1）
       -Workers N             后端 uvicorn worker 数量（默认 1）
       -SkipDeps              跳过依赖检查与自动安装
       -NoOpen                不自动打开浏览器
@@ -79,18 +79,15 @@ if ($ShowVersion) {
 }
 
 if ($CheckUpdate) {
-    & "$($Script:SCRIPT_DIR)\update.ps1" -CheckOnly
-    exit $LASTEXITCODE
+    $Script:DeferredCheckUpdate = $true
+} else {
+    $Script:DeferredCheckUpdate = $false
 }
 
 if ($Update) {
-    & "$($Script:SCRIPT_DIR)\update.ps1" -Yes
-    if ($LASTEXITCODE -eq 0) {
-        Write-Host "[--] 更新完成，继续启动..." -ForegroundColor Cyan
-    } else {
-        Write-Host "[XX] 更新失败（退出码 $LASTEXITCODE），已停止启动。" -ForegroundColor Red
-        exit $LASTEXITCODE
-    }
+    $Script:DeferredUpdate = $true
+} else {
+    $Script:DeferredUpdate = $false
 }
 
 # ═══════════════════════════════════════════════════════════════
@@ -264,7 +261,7 @@ if ($FrontendPort -eq 0) {
     $envPort = [System.Environment]::GetEnvironmentVariable("EXCELMANUS_FRONTEND_PORT")
     $FrontendPort = if ($envPort) { [int]$envPort } else { 3000 }
 }
-if (-not $ListenHost) { $ListenHost = "0.0.0.0" }
+if (-not $ListenHost) { $ListenHost = "127.0.0.1" }
 if ($Workers -eq 0)   { $Workers = 1 }
 if ($HealthTimeout -eq 0) { $HealthTimeout = 30 }
 
@@ -536,6 +533,84 @@ if (-not $Script:PythonBin) {
     if (-not $Script:PythonBin) { $Script:PythonBin = "python" }
 }
 
+function Get-ExcelManusHome {
+    if ($env:EXCELMANUS_HOME) { return $env:EXCELMANUS_HOME }
+    return (Join-Path $env:USERPROFILE ".excelmanus")
+}
+
+function Test-ApiRunning {
+    $port = $BackendPort
+    $runtimeFile = Join-Path (Get-ExcelManusHome) "runtime.json"
+    if (Test-Path $runtimeFile) {
+        try {
+            $rt = Get-Content $runtimeFile -Raw | ConvertFrom-Json
+            if ($rt.backend_port) { $port = [int]$rt.backend_port }
+        } catch {}
+    }
+    try {
+        $null = Invoke-RestMethod -Uri "http://127.0.0.1:${port}/api/v1/health" -TimeoutSec 2 -ErrorAction Stop
+        return $true
+    } catch {
+        return $false
+    }
+}
+
+function Write-RuntimeJson {
+    $homeDir = Get-ExcelManusHome
+    New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
+    $backendPid = 0
+    $frontendPid = 0
+    if ($Script:BackendProcess -and -not $Script:BackendProcess.HasExited) { $backendPid = $Script:BackendProcess.Id }
+    if ($Script:FrontendProcess -and -not $Script:FrontendProcess.HasExited) { $frontendPid = $Script:FrontendProcess.Id }
+    $payload = [ordered]@{
+        supervisor_pid = $PID
+        pgid = $PID
+        backend_pid = $backendPid
+        frontend_pid = $frontendPid
+        backend_port = $BackendPort
+        frontend_port = $FrontendPort
+        backend_host = $ListenHost
+        production = [bool]$Production
+        backend_only = [bool]$BackendOnly
+        frontend_only = [bool]$FrontendOnly
+        workers = $Workers
+        project_root = $Script:PROJECT_ROOT
+        start_script = (Join-Path $Script:SCRIPT_DIR "start.ps1")
+    }
+    $json = $payload | ConvertTo-Json
+    Set-Content -Path (Join-Path $homeDir "runtime.json") -Value $json -Encoding UTF8
+}
+
+function Clear-RuntimeJson {
+    $runtimeFile = Join-Path (Get-ExcelManusHome) "runtime.json"
+    if (-not (Test-Path $runtimeFile)) { return }
+    try {
+        $rt = Get-Content $runtimeFile -Raw | ConvertFrom-Json
+        if ([string]$rt.supervisor_pid -eq [string]$PID) {
+            Remove-Item $runtimeFile -Force -ErrorAction SilentlyContinue
+        }
+    } catch {}
+}
+
+if ($Script:DeferredCheckUpdate) {
+    & $Script:PythonBin -m excelmanus.upgrade --check --project-root $Script:PROJECT_ROOT
+    exit $LASTEXITCODE
+}
+
+if ($Script:DeferredUpdate) {
+    if (Test-ApiRunning) {
+        Write-Err "API 仍在运行。请在设置页执行更新，或先停止服务再使用 -Update。"
+        exit 1
+    }
+    Write-Info "正在停机更新..."
+    & $Script:PythonBin -m excelmanus.upgrade --offline -y --project-root $Script:PROJECT_ROOT
+    if ($LASTEXITCODE -ne 0) {
+        Write-Err "更新失败（退出码 $LASTEXITCODE），已停止启动。"
+        exit $LASTEXITCODE
+    }
+    Write-Info "更新完成，继续启动..."
+}
+
 # ═══════════════════════════════════════════════════════════════
 #  启动信息
 # ═══════════════════════════════════════════════════════════════
@@ -728,6 +803,7 @@ function Start-Frontend {
 function Stop-AllServices {
     Write-Host ""
     Write-Host "[--] 正在关闭服务..." -ForegroundColor Cyan
+    Clear-RuntimeJson
 
     $processes = @()
     if ($Script:FrontendProcess -and -not $Script:FrontendProcess.HasExited) {
@@ -838,6 +914,8 @@ if ($LogDir)            { Write-Host "    日志: $LogDir" -ForegroundColor Gree
 Write-Host "    按 Ctrl+C 停止所有服务" -ForegroundColor Green
 Write-Host "  ========================================" -ForegroundColor Green
 Write-Host ""
+
+Write-RuntimeJson
 
 # ── 等待进程退出 ──
 try {

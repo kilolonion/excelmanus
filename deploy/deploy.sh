@@ -7,7 +7,6 @@ set -euo pipefail
 #  支持多种部署拓扑：
 #    • 单机部署（前后端同一台服务器）
 #    • 前后端分离（两台服务器）
-#    • Docker Compose 部署
 #    • 本地开发部署
 #
 #  配置优先级：命令行参数 > 环境变量 > deploy/.env.deploy > 内置默认值
@@ -17,6 +16,7 @@ set -euo pipefail
 #  命令:
 #    deploy               执行部署（默认，可省略）
 #    rollback             回滚到上一次部署
+#    rollback-to          回滚到指定 commit / release（checkout + 重启）
 #    status               查看当前部署状态
 #    check                检查部署环境依赖（含前后端互联检测）
 #    init-env             首次部署：推送 .env 模板到远程服务器
@@ -40,7 +40,6 @@ set -euo pipefail
 #  拓扑选项:
 #    --single-server      单机部署模式（前后端同一台服务器）
 #    --split-server       前后端分离模式（默认，需配置两台服务器）
-#    --docker             Docker Compose 部署
 #    --local              本地开发部署（不走 SSH）
 #
 #  服务器选项（覆盖配置文件）:
@@ -206,7 +205,7 @@ run() {
 
 # ── 默认值 ──
 COMMAND="deploy"         # deploy | rollback | status | check | init-env | history | logs
-TOPOLOGY="auto"          # auto | single | split | docker | local
+TOPOLOGY="auto"          # auto | single | split | local
 MODE="full"              # full | backend | frontend
 SKIP_BUILD=false
 SKIP_DEPS=false
@@ -386,7 +385,7 @@ _parse_args() {
       # 拓扑
       --single-server)   TOPOLOGY="single" ;;
       --split-server)    TOPOLOGY="split" ;;
-      --docker)          TOPOLOGY="docker" ;;
+      --docker)          error "Docker 安装轨已移除。请使用 --single-server / --split-server / --local。"; exit 1 ;;
       --local)           TOPOLOGY="local" ;;
 
       # 服务器
@@ -457,9 +456,6 @@ _show_help() {
   echo "  # 只更新后端，从本地同步"
   echo "  ./deploy/deploy.sh --backend-only --from-local"
   echo ""
-  echo "  # Docker 部署"
-  echo "  ./deploy/deploy.sh --docker"
-  echo ""
   echo "  # 本地开发部署"
   echo "  ./deploy/deploy.sh --local --skip-deps"
   echo ""
@@ -501,7 +497,7 @@ _show_help() {
 # ── SSH 执行封装 ──
 _ssh_opts() {
   local key_override="${1:-$SSH_KEY_PATH}"
-  local opts="-o StrictHostKeyChecking=no -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
+  local opts="-o StrictHostKeyChecking=accept-new -o ConnectTimeout=10 -o ServerAliveInterval=30 -o ServerAliveCountMax=6 -o TCPKeepAlive=yes"
   [[ -n "$key_override" ]] && opts="$opts -i $key_override" || true
   [[ "$SSH_PORT" != "22" ]] && opts="$opts -p $SSH_PORT" || true
   echo "$opts"
@@ -1020,340 +1016,6 @@ _sync_code() {
   log "${label} 代码同步完成"
 }
 
-# ── 后端 Blue/Green 部署（零中断，需 Nginx） ──
-# 使用方式：在 .env.deploy 中设置 BACKEND_BLUEGREEN=true 启用
-BACKEND_BLUEGREEN="${BACKEND_BLUEGREEN:-false}"
-BACKEND_CANDIDATE_PORT="${BACKEND_CANDIDATE_PORT:-8001}"
-BACKEND_DRAIN_SECONDS="${BACKEND_DRAIN_SECONDS:-30}"
-
-_deploy_backend_bluegreen() {
-  step "🐍 部署后端（Blue/Green 模式）..."
-
-  # 同步代码
-  _sync_code "$BACKEND_HOST" "$BACKEND_DIR" "后端"
-
-  # 安装依赖
-  if [[ "$SKIP_DEPS" != true ]]; then
-    info "安装 Python 依赖..."
-    _remote_backend "
-      cd '${BACKEND_DIR}' && \
-      if command -v uv &>/dev/null; then \
-        uv sync --all-extras -q && \
-        uv pip install 'httpx[socks]' -q 2>/dev/null || true; \
-      else \
-        source '${VENV_DIR}/bin/activate' && \
-        pip install -e '.[all]' -q && \
-        pip install 'httpx[socks]' -q 2>/dev/null || true; \
-      fi
-    "
-  fi
-
-  # 1. 启动候选实例在影子端口
-  info "启动候选实例 (port ${BACKEND_CANDIDATE_PORT})..."
-  _remote_backend "
-    cd '${BACKEND_DIR}'
-    # 启动候选实例
-    nohup ${VENV_DIR}/bin/python -m uvicorn excelmanus.api:app \
-      --host 0.0.0.0 --port ${BACKEND_CANDIDATE_PORT} --log-level info \
-      > /tmp/excelmanus-candidate.log 2>&1 &
-    echo \$! > /tmp/excelmanus-candidate.pid
-    sleep 3
-  "
-
-  # 2. 健康检查候选实例
-  info "检查候选实例健康状态..."
-  local candidate_ok=false
-  for _bg_i in $(seq 1 12); do
-    local status
-    status=$(_remote_backend "curl -s --max-time 5 http://localhost:${BACKEND_CANDIDATE_PORT}/api/v1/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || echo ''" 2>&1 || echo "")
-    if [[ "$status" == "ok" ]]; then
-      candidate_ok=true
-      break
-    fi
-    debug "候选实例尚未就绪 (尝试 ${_bg_i}/12)..."
-    sleep 5
-  done
-
-  if [[ "$candidate_ok" != true ]]; then
-    error "候选实例健康检查失败，中止 Blue/Green 部署"
-    _remote_backend "
-      [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-      rm -f /tmp/excelmanus-candidate.pid
-    " || true
-    return 1
-  fi
-  log "候选实例健康检查通过"
-
-  # 3. 切换 Nginx upstream 到候选端口
-  info "切换 Nginx upstream 到候选端口 ${BACKEND_CANDIDATE_PORT}..."
-  _remote_backend "
-    NGINX_CONF=\$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \\; 2>/dev/null | head -1)
-    if [[ -z \"\$NGINX_CONF\" ]]; then
-      echo '[WARN] 未找到包含 upstream backend 的 Nginx 配置'
-      exit 0
-    fi
-    # 将 active 行注释，将 candidate 行取消注释
-    sed -i 's|^\\(\\s*server.*:\\)${BACKEND_PORT}\\(.*# active\\)|# \\1${BACKEND_PORT}\\2|' \"\$NGINX_CONF\"
-    sed -i 's|^\\s*#\\s*\\(server.*:\\)${BACKEND_CANDIDATE_PORT}\\(.*# candidate\\)|    \\1${BACKEND_CANDIDATE_PORT}\\2|' \"\$NGINX_CONF\"
-    nginx -t 2>/dev/null && nginx -s reload
-  " || warn "Nginx 切流失败（非致命，已回退）"
-
-  # 4. 等待旧连接排空
-  info "等待旧连接排空 (${BACKEND_DRAIN_SECONDS}s)..."
-  sleep "${BACKEND_DRAIN_SECONDS}"
-
-  # 5. 下线旧实例
-  info "下线旧实例..."
-  if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
-    _remote_backend "sudo systemctl stop '${PM2_BACKEND}' 2>/dev/null || true"
-  else
-    _remote_backend "pm2 delete '${PM2_BACKEND}' 2>/dev/null || true"
-  fi
-
-  # 6. 将候选实例注册为正式实例
-  info "注册候选实例为正式服务..."
-  _remote_backend "
-    # 停止候选进程（由 nohup 启动）
-    [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-    rm -f /tmp/excelmanus-candidate.pid
-    sleep 2
-    # 以正式端口重启
-    if command -v pm2 >/dev/null 2>&1; then
-      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
-        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
-        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info
-      pm2 save
-    fi
-  "
-
-  # 7. 恢复 Nginx upstream 到正式端口
-  _remote_backend "
-    NGINX_CONF=\$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \\; 2>/dev/null | head -1)
-    if [[ -n \"\$NGINX_CONF\" ]]; then
-      sed -i 's|^\\s*#\\s*\\(server.*:\\)${BACKEND_PORT}\\(.*# active\\)|    \\1${BACKEND_PORT}\\2|' \"\$NGINX_CONF\"
-      sed -i 's|^\\(\\s*server.*:\\)${BACKEND_CANDIDATE_PORT}\\(.*# candidate\\)|# \\1${BACKEND_CANDIDATE_PORT}\\2|' \"\$NGINX_CONF\"
-      nginx -t 2>/dev/null && nginx -s reload
-    fi
-  " || true
-
-  log "后端 Blue/Green 部署完成"
-}
-
-# ── 后端 Canary 灰度部署（按权重逐步切流） ──
-# 使用方式：在 .env.deploy 中设置 BACKEND_CANARY=true 启用
-BACKEND_CANARY="${BACKEND_CANARY:-false}"
-CANARY_STEPS="${CANARY_STEPS:-10,50,100}"
-CANARY_OBSERVE_SECONDS="${CANARY_OBSERVE_SECONDS:-60}"
-
-_set_nginx_canary_weight() {
-  local active_port="$1" candidate_port="$2" weight="$3"
-  # weight: 0=全部走 active，100=全部走 candidate
-  # 中间值使用 Nginx weight 参数实现近似比例
-  _remote_backend "
-    NGINX_CONF=\$(find /etc/nginx -name '*.conf' -exec grep -l 'upstream backend' {} \\; 2>/dev/null | head -1)
-    if [[ -z \"\$NGINX_CONF\" ]]; then
-      echo '[WARN] 未找到包含 upstream backend 的 Nginx 配置'
-      exit 1
-    fi
-
-    if [[ ${weight} -eq 0 ]]; then
-      # 全部走 active
-      cat > /tmp/_upstream_backend.conf <<UPEOF
-upstream backend {
-    server 127.0.0.1:${active_port};          # active
-    # server 127.0.0.1:${candidate_port};     # candidate
-}
-UPEOF
-    elif [[ ${weight} -ge 100 ]]; then
-      # 全部走 candidate
-      cat > /tmp/_upstream_backend.conf <<UPEOF
-upstream backend {
-    # server 127.0.0.1:${active_port};        # active
-    server 127.0.0.1:${candidate_port};        # candidate
-}
-UPEOF
-    else
-      # 按权重分流：candidate weight = weight, active weight = 100 - weight
-      local aw=\$((100 - ${weight}))
-      cat > /tmp/_upstream_backend.conf <<UPEOF
-upstream backend {
-    server 127.0.0.1:${active_port} weight=\${aw};     # active
-    server 127.0.0.1:${candidate_port} weight=${weight};  # candidate (canary)
-}
-UPEOF
-    fi
-
-    # 替换 upstream backend 块
-    python3 -c \"
-import re
-with open('\$NGINX_CONF') as f: content = f.read()
-with open('/tmp/_upstream_backend.conf') as f: new_block = f.read()
-content = re.sub(r'upstream\s+backend\s*\{[^}]*\}', new_block.strip(), content)
-with open('\$NGINX_CONF', 'w') as f: f.write(content)
-\" && nginx -t 2>/dev/null && nginx -s reload
-    rm -f /tmp/_upstream_backend.conf
-  "
-}
-
-_write_canary_state() {
-  # 写入灰度状态文件供 API 读取
-  local state="$1" weight="$2" step_idx="$3" total="$4"
-  local canary_file="${SCRIPT_DIR}/.deploy_canary.json"
-  local ts
-  ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  cat > "$canary_file" <<CEOF
-{
-  "active": $([ "$state" == "active" ] && echo "true" || echo "false"),
-  "current_weight": ${weight},
-  "step": ${step_idx},
-  "total_steps": ${total},
-  "started_at": "${ts}",
-  "candidate_port": ${BACKEND_CANDIDATE_PORT},
-  "observe_seconds": ${CANARY_OBSERVE_SECONDS}
-}
-CEOF
-}
-
-_deploy_backend_canary() {
-  step "🐍 部署后端（Canary 灰度模式）..."
-
-  # 同步代码
-  _sync_code "$BACKEND_HOST" "$BACKEND_DIR" "后端"
-
-  # 安装依赖
-  if [[ "$SKIP_DEPS" != true ]]; then
-    info "安装 Python 依赖..."
-    _remote_backend "
-      cd '${BACKEND_DIR}' && \
-      if command -v uv &>/dev/null; then \
-        uv sync --all-extras -q && \
-        uv pip install 'httpx[socks]' -q 2>/dev/null || true; \
-      else \
-        source '${VENV_DIR}/bin/activate' && \
-        pip install -e '.[all]' -q && \
-        pip install 'httpx[socks]' -q 2>/dev/null || true; \
-      fi
-    "
-  fi
-
-  # 1. 启动候选实例在影子端口
-  info "启动候选实例 (port ${BACKEND_CANDIDATE_PORT})..."
-  _remote_backend "
-    cd '${BACKEND_DIR}'
-    nohup ${VENV_DIR}/bin/python -m uvicorn excelmanus.api:app \
-      --host 0.0.0.0 --port ${BACKEND_CANDIDATE_PORT} --log-level info \
-      > /tmp/excelmanus-candidate.log 2>&1 &
-    echo \$! > /tmp/excelmanus-candidate.pid
-    sleep 3
-  "
-
-  # 2. 健康检查候选实例
-  info "检查候选实例健康状态..."
-  local candidate_ok=false
-  for _ci in $(seq 1 12); do
-    local cstatus
-    cstatus=$(_remote_backend "curl -s --max-time 5 http://localhost:${BACKEND_CANDIDATE_PORT}/api/v1/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || echo ''" 2>&1 || echo "")
-    if [[ "$cstatus" == "ok" ]]; then
-      candidate_ok=true
-      break
-    fi
-    debug "候选实例尚未就绪 (尝试 ${_ci}/12)..."
-    sleep 5
-  done
-
-  if [[ "$candidate_ok" != true ]]; then
-    error "候选实例健康检查失败，中止灰度部署"
-    _remote_backend "
-      [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-      rm -f /tmp/excelmanus-candidate.pid
-    " || true
-    _write_canary_state "inactive" 0 0 0
-    return 1
-  fi
-  log "候选实例健康检查通过"
-
-  # 3. 按权重阶梯逐步切流
-  IFS=',' read -ra _canary_weights <<< "$CANARY_STEPS"
-  local total_steps=${#_canary_weights[@]}
-  local step_idx=0
-
-  for _cw in "${_canary_weights[@]}"; do
-    _cw=$(echo "$_cw" | tr -d '[:space:]')
-    step_idx=$((step_idx + 1))
-    info "灰度阶段 ${step_idx}/${total_steps}: 切流 ${_cw}% 到候选实例..."
-
-    _write_canary_state "active" "$_cw" "$step_idx" "$total_steps"
-
-    if ! _set_nginx_canary_weight "${BACKEND_PORT}" "${BACKEND_CANDIDATE_PORT}" "$_cw"; then
-      error "Nginx 灰度切流失败，回退到 0%"
-      _set_nginx_canary_weight "${BACKEND_PORT}" "${BACKEND_CANDIDATE_PORT}" 0 || true
-      _remote_backend "
-        [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-        rm -f /tmp/excelmanus-candidate.pid
-      " || true
-      _write_canary_state "inactive" 0 0 0
-      return 1
-    fi
-
-    # 观察期：每 10 秒检查一次候选健康
-    if [[ "$_cw" -lt 100 ]]; then
-      info "观察 ${CANARY_OBSERVE_SECONDS}s..."
-      local _obs_elapsed=0
-      while [[ $_obs_elapsed -lt $CANARY_OBSERVE_SECONDS ]]; do
-        sleep 10
-        _obs_elapsed=$((_obs_elapsed + 10))
-        local _hstatus
-        _hstatus=$(_remote_backend "curl -s --max-time 5 http://localhost:${BACKEND_CANDIDATE_PORT}/api/v1/health 2>/dev/null | python3 -c 'import sys,json; print(json.load(sys.stdin).get(\"status\",\"\"))' 2>/dev/null || echo ''" 2>&1 || echo "")
-        if [[ "$_hstatus" != "ok" ]]; then
-          error "灰度阶段 ${step_idx}: 候选实例健康检查失败 (${_obs_elapsed}s)，回退到 0%"
-          _set_nginx_canary_weight "${BACKEND_PORT}" "${BACKEND_CANDIDATE_PORT}" 0 || true
-          _remote_backend "
-            [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-            rm -f /tmp/excelmanus-candidate.pid
-          " || true
-          _write_canary_state "inactive" 0 0 0
-          return 1
-        fi
-        debug "候选健康 OK (${_obs_elapsed}/${CANARY_OBSERVE_SECONDS}s, weight=${_cw}%)"
-      done
-      log "灰度阶段 ${step_idx} 观察通过 (${_cw}%)"
-    fi
-  done
-
-  # 4. 100% 切流完成，候选转正式（与 Blue/Green 相同）
-  info "灰度完成，候选实例转为正式服务..."
-
-  # 等待旧连接排空
-  info "等待旧连接排空 (${BACKEND_DRAIN_SECONDS}s)..."
-  sleep "${BACKEND_DRAIN_SECONDS}"
-
-  # 下线旧实例
-  info "下线旧实例..."
-  if [[ "$SERVICE_MANAGER" == "systemd" ]]; then
-    _remote_backend "sudo systemctl stop '${PM2_BACKEND}' 2>/dev/null || true"
-  else
-    _remote_backend "pm2 delete '${PM2_BACKEND}' 2>/dev/null || true"
-  fi
-
-  # 注册候选为正式
-  _remote_backend "
-    [[ -f /tmp/excelmanus-candidate.pid ]] && kill \$(cat /tmp/excelmanus-candidate.pid) 2>/dev/null || true
-    rm -f /tmp/excelmanus-candidate.pid
-    sleep 2
-    if command -v pm2 >/dev/null 2>&1; then
-      pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
-        --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
-        -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info
-      pm2 save
-    fi
-  "
-
-  # 恢复 Nginx 到正式端口
-  _set_nginx_canary_weight "${BACKEND_PORT}" "${BACKEND_CANDIDATE_PORT}" 0 || true
-
-  _write_canary_state "inactive" 0 0 0
-  log "后端 Canary 灰度部署完成"
-}
 
 # ── 版本号同步（pyproject.toml → web/package.json） ──
 _sync_version() {
@@ -1466,7 +1128,7 @@ After=network.target
 Type=simple
 WorkingDirectory=${BACKEND_DIR}
 EnvironmentFile=-${BACKEND_DIR}/.env
-ExecStart=${BACKEND_DIR}/${VENV_DIR}/bin/python -c 'import uvicorn; uvicorn.run("excelmanus.api:app", host="0.0.0.0", port=${BACKEND_PORT}, log_level="info")'
+ExecStart=${BACKEND_DIR}/${VENV_DIR}/bin/python -c 'import uvicorn; uvicorn.run("excelmanus.api:app", host="127.0.0.1", port=${BACKEND_PORT}, log_level="info")'
 Restart=on-failure
 RestartSec=5
 
@@ -1483,7 +1145,7 @@ SVCEOF
       else
         pm2 start '${BACKEND_DIR}/${VENV_DIR}/bin/python' \
           --name '${PM2_BACKEND}' --cwd '${BACKEND_DIR}' \
-          -- -m uvicorn excelmanus.api:app --host 0.0.0.0 --port ${BACKEND_PORT} --log-level info
+          -- -m uvicorn excelmanus.api:app --host 127.0.0.1 --port ${BACKEND_PORT} --log-level info
       fi
       pm2 save
     "
@@ -1574,33 +1236,6 @@ _deploy_frontend() {
   log "前端部署完成"
 }
 
-# ── Docker 部署 ──
-_deploy_docker() {
-  step "🐳 Docker Compose 部署..."
-
-  if [[ "$FROM_LOCAL" != true && "$TOPOLOGY" != "local" ]]; then
-    _sync_code "${BACKEND_HOST:-localhost}" "$BACKEND_DIR" "Docker"
-  fi
-
-  local compose_cmd="docker compose"
-  # 兼容旧版 docker-compose
-  if ! command -v docker &>/dev/null || ! docker compose version &>/dev/null 2>&1; then
-    compose_cmd="docker-compose"
-  fi
-
-  local docker_cmd="
-    cd '${BACKEND_DIR}' && \
-    ${compose_cmd} pull 2>/dev/null || true && \
-    ${compose_cmd} up -d --build --remove-orphans
-  "
-
-  if [[ "$TOPOLOGY" == "local" || -z "$BACKEND_HOST" ]]; then
-    run "bash -c \"$docker_cmd\""
-  else
-    _remote_backend "$docker_cmd"
-  fi
-  log "Docker 部署完成"
-}
 
 # ── 健康检查 ──
 _verify() {
@@ -1668,9 +1303,6 @@ _print_summary() {
     single)
       echo -e "  服务器:   ${CYAN}${SSH_USER}@${BACKEND_HOST}:${BACKEND_DIR}${NC}"
       ;;
-    docker)
-      echo -e "  目录:     ${CYAN}${BACKEND_DIR}${NC}"
-      ;;
     local)
       echo -e "  目录:     ${CYAN}${BACKEND_DIR}${NC}"
       ;;
@@ -1708,7 +1340,7 @@ _preflight() {
   fi
 
   # SSH 密钥检查（非本地/Docker 模式）
-  if [[ "$TOPOLOGY" != "local" && "$TOPOLOGY" != "docker" ]]; then
+  if [[ "$TOPOLOGY" != "local" ]]; then
     for _key_path in "$BACKEND_SSH_KEY_PATH" "$FRONTEND_SSH_KEY_PATH"; do
       if [[ -n "$_key_path" && ! -f "$_key_path" ]]; then
         error "SSH 私钥不存在: $_key_path"
@@ -1957,7 +1589,7 @@ _check_cross_connectivity() {
   local conn_ok=true
 
   # 仅在有远程服务器时检测
-  if [[ "$TOPOLOGY" == "local" || "$TOPOLOGY" == "docker" ]]; then
+  if [[ "$TOPOLOGY" == "local" ]]; then
     return 0
   fi
 
@@ -2231,7 +1863,6 @@ _cmd_check() {
   _check_tool "curl"   curl   true  curl
   _check_tool "Python" python3 false python3
   _check_tool "Node"   node   false nodejs
-  _check_tool "Docker" docker false docker.io
   # Linux 上 lsof 非必需（有 ss 替代），macOS 原生自带
   if [[ "$OS_TYPE" == "linux" ]]; then
     if ! command -v lsof &>/dev/null && ! command -v ss &>/dev/null; then
@@ -2484,8 +2115,9 @@ print('')
     info "回滚后端到 commit ${target_commit}..."
     _remote_backend "
       cd '${BACKEND_DIR}'
+      git fetch --all --prune 2>/dev/null || true
       git log -1 --oneline
-      git reset --hard '${target_commit}'
+      git checkout --force '${target_commit}'
       echo '已回退到:' && git log -1 --oneline
     " || rollback_ok=false
 
@@ -2583,40 +2215,26 @@ main() {
   # 记录部署前 commit（供回滚精确回退）
   _record_pre_deploy_commit
 
-  case "$TOPOLOGY" in
-    docker)
-      _deploy_docker
-      ;;
-    *)
-      # 前端依赖预检（非 backend-only 模式）
-      if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
-        _check_frontend_deps
-      fi
+  if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
+    _check_frontend_deps
+  fi
 
-      if [[ "$MODE" == "full" || "$MODE" == "backend" ]]; then
-        if [[ "$BACKEND_CANARY" == true ]]; then
-          _deploy_backend_canary
-        elif [[ "$BACKEND_BLUEGREEN" == true ]]; then
-          _deploy_backend_bluegreen
-        else
-          _deploy_backend
-        fi
-      fi
+  if [[ "$MODE" == "full" || "$MODE" == "backend" ]]; then
+    _deploy_backend
+  fi
 
-      # 版本号同步（代码同步后、构建前）
-      if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
-        local _ver_host _ver_dir _ver_key
-        if [[ "$TOPOLOGY" == "split" ]]; then
-          _ver_host="$FRONTEND_HOST"; _ver_dir="$FRONTEND_DIR"; _ver_key="$FRONTEND_SSH_KEY_PATH"
-        else
-          _ver_host="$BACKEND_HOST"; _ver_dir="$BACKEND_DIR"; _ver_key="$BACKEND_SSH_KEY_PATH"
-        fi
-        _sync_version "$_ver_host" "$_ver_dir" "$_ver_key"
-      fi
+  # 版本号同步（代码同步后、构建前）
+  if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then
+    local _ver_host _ver_dir _ver_key
+    if [[ "$TOPOLOGY" == "split" ]]; then
+      _ver_host="$FRONTEND_HOST"; _ver_dir="$FRONTEND_DIR"; _ver_key="$FRONTEND_SSH_KEY_PATH"
+    else
+      _ver_host="$BACKEND_HOST"; _ver_dir="$BACKEND_DIR"; _ver_key="$BACKEND_SSH_KEY_PATH"
+    fi
+    _sync_version "$_ver_host" "$_ver_dir" "$_ver_key"
+  fi
 
-      if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then _deploy_frontend; fi
-      ;;
-  esac
+  if [[ "$MODE" == "full" || "$MODE" == "frontend" ]]; then _deploy_frontend; fi
 
   # 健康检查 + 失败自动回滚
   if ! _verify; then

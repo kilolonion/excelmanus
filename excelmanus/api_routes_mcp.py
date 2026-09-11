@@ -99,6 +99,18 @@ class MCPServerCreateRequest(BaseModel):
     autoApprove: list[str] = Field(default_factory=list)
 
 
+def _redact_mcp_config(entry: dict) -> dict:
+    """Return a copy with env/headers secret values masked."""
+    redacted = dict(entry)
+    env = redacted.get("env")
+    if isinstance(env, dict):
+        redacted["env"] = {str(k): "***" for k in env}
+    headers = redacted.get("headers")
+    if isinstance(headers, dict):
+        redacted["headers"] = {str(k): "***" for k in headers}
+    return redacted
+
+
 def _server_request_to_entry(req: MCPServerCreateRequest) -> dict:
     """将请求体转为 mcp.json 条目格式。"""
     entry: dict[str, Any] = {"transport": req.transport}
@@ -141,7 +153,7 @@ async def list_mcp_servers() -> JSONResponse:
         rt = runtime_info.get(name, {})
         result.append({
             "name": name,
-            "config": entry,
+            "config": _redact_mcp_config(entry) if isinstance(entry, dict) else entry,
             "status": rt.get("status", "not_connected"),
             "transport": entry.get("transport", "unknown"),
             "tool_count": rt.get("tool_count", 0),

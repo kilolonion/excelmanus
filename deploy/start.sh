@@ -11,7 +11,7 @@
 #    --frontend-only        仅启动前端
 #    --backend-port PORT    后端端口（默认 8000）
 #    --frontend-port PORT   前端端口（默认 3000）
-#    --host HOST            后端监听地址（默认 0.0.0.0）
+#    --host HOST            后端监听地址（默认 127.0.0.1）
 #    --workers N            后端 uvicorn worker 数量（默认 1）
 #    --skip-deps            跳过依赖检查与自动安装
 #    --no-open              不自动打开浏览器
@@ -94,7 +94,7 @@ BACKEND_ONLY=false
 FRONTEND_ONLY=false
 BACKEND_PORT=8000
 FRONTEND_PORT=3000
-BACKEND_HOST="0.0.0.0"
+BACKEND_HOST="127.0.0.1"
 WORKERS=1
 SKIP_DEPS=false
 AUTO_OPEN=true
@@ -102,6 +102,8 @@ LOG_DIR=""
 HEALTH_TIMEOUT=30
 NO_KILL_PORTS=false
 VERBOSE=false
+DO_UPDATE=false
+DO_CHECK_UPDATE=false
 
 # ── 日志函数 ──
 _log_file=""
@@ -139,8 +141,8 @@ while [[ $# -gt 0 ]]; do
     --log-dir)              LOG_DIR="$2"; shift ;;
     --health-timeout)       HEALTH_TIMEOUT="$2"; shift ;;
     --no-kill-ports)        NO_KILL_PORTS=true ;;
-    --update)               bash "${SCRIPT_DIR}/update.sh" --yes && info "更新完成，继续启动..." ;;
-    --check-update)         bash "${SCRIPT_DIR}/update.sh" --check; exit $? ;;
+    --update)               DO_UPDATE=true ;;
+    --check-update)         DO_CHECK_UPDATE=true ;;
     --create-shortcut)      python3 -c "from excelmanus.shortcuts import create_desktop_shortcut; r=create_desktop_shortcut('${PROJECT_ROOT}'); print(r or '创建失败')"; exit $? ;;
     -v|--verbose)           VERBOSE=true ;;
     -h|--help)              _show_help; exit 0 ;;
@@ -471,6 +473,114 @@ if [[ "$SKIP_DEPS" != true ]]; then
   _check_deps || exit 1
 fi
 
+_excelmanus_home() {
+  if [[ -n "${EXCELMANUS_HOME:-}" ]]; then
+    printf '%s\n' "${EXCELMANUS_HOME}"
+  else
+    printf '%s\n' "${HOME}/.excelmanus"
+  fi
+}
+
+_python_bin() {
+  if [[ -x "${PROJECT_ROOT}/.venv/bin/python" ]]; then
+    echo "${PROJECT_ROOT}/.venv/bin/python"
+  else
+    echo "python3"
+  fi
+}
+
+_write_runtime() {
+  SUPERVISOR_PID=$$ \
+  BACKEND_PID="${BACKEND_PID:-0}" \
+  FRONTEND_PID="${FRONTEND_PID:-0}" \
+  BACKEND_PORT="$BACKEND_PORT" \
+  FRONTEND_PORT="$FRONTEND_PORT" \
+  BACKEND_HOST="$BACKEND_HOST" \
+  PRODUCTION="$PRODUCTION" \
+  BACKEND_ONLY="$BACKEND_ONLY" \
+  FRONTEND_ONLY="$FRONTEND_ONLY" \
+  WORKERS="$WORKERS" \
+  PROJECT_ROOT="$PROJECT_ROOT" \
+  START_SCRIPT="${SCRIPT_DIR}/start.sh" \
+  "$(_python_bin)" - <<'PY'
+import json, os
+from pathlib import Path
+home = Path(os.environ.get("EXCELMANUS_HOME") or (Path.home() / ".excelmanus"))
+home.mkdir(parents=True, exist_ok=True)
+
+def flag(name: str) -> bool:
+    return os.environ.get(name, "").lower() == "true"
+
+def ipid(name: str) -> int:
+    try:
+        return int(os.environ.get(name) or 0)
+    except ValueError:
+        return 0
+
+supervisor = ipid("SUPERVISOR_PID")
+pgid = os.getpgid(supervisor) if supervisor and hasattr(os, "getpgid") else supervisor
+payload = {
+    "supervisor_pid": supervisor,
+    "pgid": pgid,
+    "backend_pid": ipid("BACKEND_PID"),
+    "frontend_pid": ipid("FRONTEND_PID"),
+    "backend_port": ipid("BACKEND_PORT") or 8000,
+    "frontend_port": ipid("FRONTEND_PORT") or 3000,
+    "backend_host": os.environ.get("BACKEND_HOST") or "127.0.0.1",
+    "production": flag("PRODUCTION"),
+    "backend_only": flag("BACKEND_ONLY"),
+    "frontend_only": flag("FRONTEND_ONLY"),
+    "workers": ipid("WORKERS") or 1,
+    "project_root": os.environ.get("PROJECT_ROOT") or "",
+    "start_script": os.environ.get("START_SCRIPT") or "",
+}
+(home / "runtime.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+PY
+}
+
+_clear_runtime() {
+  SUPERVISOR_PID=$$ "$(_python_bin)" - <<'PY'
+import json, os
+from pathlib import Path
+home = Path(os.environ.get("EXCELMANUS_HOME") or (Path.home() / ".excelmanus"))
+path = home / "runtime.json"
+if not path.is_file():
+    raise SystemExit
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    raise SystemExit
+if str(data.get("supervisor_pid", "")) == os.environ.get("SUPERVISOR_PID", ""):
+    path.unlink(missing_ok=True)
+PY
+}
+
+_api_is_running() {
+  local port="${BACKEND_PORT:-8000}"
+  local home rt_port
+  home="$(_excelmanus_home)"
+  if [[ -f "${home}/runtime.json" ]]; then
+    rt_port="$("$(_python_bin)" -c "import json; print(json.load(open('${home}/runtime.json')).get('backend_port') or '')" 2>/dev/null || true)"
+    [[ -n "$rt_port" ]] && port="$rt_port"
+  fi
+  curl -sf --max-time 2 "http://127.0.0.1:${port}/api/v1/health" >/dev/null 2>&1
+}
+
+if [[ "$DO_CHECK_UPDATE" == true ]]; then
+  "$(_python_bin)" -m excelmanus.upgrade --check --project-root "$PROJECT_ROOT"
+  exit $?
+fi
+
+if [[ "$DO_UPDATE" == true ]]; then
+  if _api_is_running; then
+    error "API 仍在运行。请在设置页执行更新，或先停止服务再使用 --update。"
+    exit 1
+  fi
+  info "正在停机更新..."
+  "$(_python_bin)" -m excelmanus.upgrade --offline -y --project-root "$PROJECT_ROOT" || exit $?
+  info "更新完成，继续启动..."
+fi
+
 echo -e "${GREEN}🚀 ExcelManus 启动中...${NC}"
 [[ "$PRODUCTION" == true ]] && echo -e "${BOLD}   模式: 生产${NC}" || echo -e "${BOLD}   模式: 开发${NC}"
 debug "OS: ${OS_TYPE} ($(uname -s) $(uname -m))${PKG_MANAGER:+ [pkg: $PKG_MANAGER]}"
@@ -526,6 +636,7 @@ FRONTEND_PID=""
 cleanup() {
   echo ""
   echo -e "${CYAN}🛑 正在关闭服务...${NC}"
+  _clear_runtime
   local pids=()
   [[ -n "$FRONTEND_PID" ]] && pids+=("$FRONTEND_PID")
   [[ -n "$BACKEND_PID" ]]  && pids+=("$BACKEND_PID")
@@ -664,5 +775,7 @@ echo -e "${GREEN}  ExcelManus 已启动！${NC}"
 echo -e "${GREEN}  按 Ctrl+C 停止所有服务${NC}"
 echo -e "${GREEN}════════════════════════════════════════${NC}"
 echo ""
+
+_write_runtime
 
 wait

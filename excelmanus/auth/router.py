@@ -62,9 +62,14 @@ def _auto_add_codex_default_model(request: Request) -> None:
             model_family="gpt",
         )
         # 同步到内存 config
-        from excelmanus.api_app_state import _sync_config_profiles_from_db
+        from excelmanus.api_app_state import _sync_config_profiles_from_db, _user_config_store
         try:
             _sync_config_profiles_from_db()
+            user_cfg = _user_config_store()
+            if user_cfg is not None and not user_cfg.get_active_model():
+                user_cfg.set_active_model(_CODEX_DEFAULT_PROFILE_NAME)
+                from excelmanus.api_app_state import apply_profile_to_config
+                apply_profile_to_config(_CODEX_DEFAULT_PROFILE_NAME)
         except Exception:
             pass
         logger.info("已自动添加 Codex 默认模型: %s (%s)", _CODEX_DEFAULT_PROFILE_NAME, _CODEX_DEFAULT_MODEL)

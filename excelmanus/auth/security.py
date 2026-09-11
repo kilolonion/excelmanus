@@ -14,26 +14,35 @@ JWT_ALGORITHM = "HS256"
 DOWNLOAD_TOKEN_EXPIRE_MINUTES = 30
 
 
+_JWT_SECRET_SOURCE: tuple[str, str] | None = None
+
+
 def _get_jwt_secret() -> str:
-    """延迟加载 JWT 密钥（仅用于文件下载令牌）。"""
-    global _JWT_SECRET_KEY
-    if _JWT_SECRET_KEY is not None:
-        return _JWT_SECRET_KEY
+    """延迟加载 JWT 密钥（仅用于文件下载令牌）。HOME 变更时重新读取。"""
+    global _JWT_SECRET_KEY, _JWT_SECRET_SOURCE
 
     env_secret = os.environ.get("EXCELMANUS_JWT_SECRET", "").strip()
     if env_secret:
+        source = ("env", env_secret)
+        if _JWT_SECRET_KEY is not None and _JWT_SECRET_SOURCE == source:
+            return _JWT_SECRET_KEY
         _JWT_SECRET_KEY = env_secret
+        _JWT_SECRET_SOURCE = source
         return _JWT_SECRET_KEY
 
-    from pathlib import Path
+    from excelmanus.data_home import get_jwt_secret_path
 
-    key_dir = Path.home() / ".excelmanus" / "data"
-    key_file = key_dir / ".jwt_secret"
+    key_file = get_jwt_secret_path()
+    source = ("file", str(key_file))
+    if _JWT_SECRET_KEY is not None and _JWT_SECRET_SOURCE == source:
+        return _JWT_SECRET_KEY
+
     if key_file.exists():
         try:
             stored = key_file.read_text(encoding="utf-8").strip()
             if stored:
                 _JWT_SECRET_KEY = stored
+                _JWT_SECRET_SOURCE = source
                 return _JWT_SECRET_KEY
         except OSError:
             pass
@@ -43,7 +52,7 @@ def _get_jwt_secret() -> str:
     _logger = logging.getLogger(__name__)
     new_secret = secrets.token_urlsafe(64)
     try:
-        key_dir.mkdir(parents=True, exist_ok=True)
+        key_file.parent.mkdir(parents=True, exist_ok=True)
         _fd = os.open(str(key_file), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         try:
             os.write(_fd, new_secret.encode("utf-8"))
@@ -61,12 +70,14 @@ def _get_jwt_secret() -> str:
             stored = key_file.read_text(encoding="utf-8").strip()
             if stored:
                 _JWT_SECRET_KEY = stored
+                _JWT_SECRET_SOURCE = source
                 return _JWT_SECRET_KEY
         except OSError:
             pass
     except OSError:
         _logger.warning("下载令牌密钥已生成但无法持久化，服务重启后下载链接将失效。")
     _JWT_SECRET_KEY = new_secret
+    _JWT_SECRET_SOURCE = source
     return _JWT_SECRET_KEY
 
 
@@ -88,7 +99,9 @@ def create_download_token(
     )
     payload = {
         "type": "download",
+        "purpose": "download",
         "file_path": file_path,
+        "jti": secrets.token_urlsafe(16),
         "exp": expire,
     }
     return jwt.encode(payload, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
@@ -98,6 +111,8 @@ def decode_download_token(token: str) -> dict[str, Any] | None:
     """解码并验证文件下载令牌。"""
     payload = decode_token(token)
     if payload is None or payload.get("type") != "download":
+        return None
+    if payload.get("purpose") not in {None, "download"}:
         return None
     if not payload.get("file_path"):
         return None

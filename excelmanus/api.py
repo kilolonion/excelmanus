@@ -183,22 +183,14 @@ def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
         return fallback, exc
 
 
-def _is_external_safe_mode() -> bool:
-    """是否启用对外安全模式（默认开启）。"""
-    if _config is None:
-        return True
-    return bool(_config.external_safe_mode)
-
-
 def _resolve_workspace(request: Request) -> "IsolatedWorkspace":
     """解析进程唯一工作区。"""
     assert _config is not None
     from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
-    docker_enabled = getattr(request.app.state, "docker_sandbox_enabled", False)
     return IsolatedWorkspace.resolve(
         _config.workspace_root,
-        sandbox_config=SandboxConfig(docker_enabled=docker_enabled),
-        transaction_enabled=_config.backup_enabled,
+        sandbox_config=SandboxConfig(),
+        transaction_enabled=False,
         data_root=_config.data_root,
     )
 
@@ -225,6 +217,7 @@ from excelmanus.api_app_state import (  # noqa: F401
     _get_probe_job_mgr,
     _list_available_model_names,
     _sync_config_profiles_from_db,
+    ensure_active_model,
     get_cap_probe_job_manager,
     get_channel_launcher,
     get_config_incomplete,
@@ -326,7 +319,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("部署模式: %s", _config.deploy_mode)
     try:
         register_installation(project_root)
-        # 服务器/Docker 模式跳过桌面目录扫描（无 GUI 环境）
         scan_once(skip_desktop_scan=_config.is_server)
         migrate_project_env(project_root)
         if _config.data_root:
@@ -355,31 +347,32 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_skillpack_loader(_skillpack_loader)
     set_skillpack_manager(_skillpack_manager)
 
-    # 初始化统一数据库
+    # 初始化统一数据库（配置档案必须落库，不能绑在聊天记录开关上）
     from excelmanus.database import Database
 
     _database = None
     chat_history = None
-    need_database = _config.chat_history_enabled
-    if need_database:
-        resolved_db_path = os.path.expanduser(
-            _config.chat_history_db_path or _config.db_path
-        )
-        if _config.database_url:
-            _database = Database(database_url=_config.database_url)
-            logger.info("统一数据库已启用 (PostgreSQL)")
-        else:
-            _database = Database(resolved_db_path)
-            logger.info("统一数据库已启用: %s", resolved_db_path)
-        if _config.chat_history_enabled:
-            from excelmanus.chat_history import ChatHistoryStore
-            chat_history = ChatHistoryStore(_database)
+    resolved_db_path = os.path.expanduser(
+        _config.chat_history_db_path or _config.db_path
+    )
+    if _config.database_url:
+        _database = Database(database_url=_config.database_url)
+        logger.info("统一数据库已启用 (PostgreSQL)")
+    else:
+        _database = Database(resolved_db_path)
+        logger.info("统一数据库已启用: %s", resolved_db_path)
+    if _config.chat_history_enabled:
+        from excelmanus.chat_history import ChatHistoryStore
+        chat_history = ChatHistoryStore(_database)
 
     # 初始化 GlobalConfigStore 并从 .env 迁移已有 profiles
     global _config_store
     if _database is not None:
         from excelmanus.stores.config_store import GlobalConfigStore
         _config_store = GlobalConfigStore(_database)
+        set_database(_database)
+        set_config_store(_config_store)
+        app.state.config_store = _config_store
         existing = _config_store.list_profiles()
         if not existing:
             env_models_raw = os.environ.get("EXCELMANUS_MODELS", "")
@@ -389,22 +382,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 )
                 if n:
                     logger.info("已从 EXCELMANUS_MODELS 迁移 %d 个模型 profile 到数据库", n)
-                    # 迁移完成后清除 .env 中的 EXCELMANUS_MODELS，避免双数据源
                     try:
-                        env_path = _find_env_file()
-                        lines = _read_env_file(env_path)
-                        cleaned = [
-                            ln for ln in lines
-                            if not ln.strip().startswith("EXCELMANUS_MODELS=")
-                        ]
-                        if len(cleaned) != len(lines):
-                            _write_env_file(env_path, cleaned)
-                            logger.info("已从 .env 清除 EXCELMANUS_MODELS（数据库为唯一来源）")
+                        from excelmanus.data_home import delete_env_keys
+
+                        delete_env_keys(["EXCELMANUS_MODELS"])
+                        logger.info("已从正式仓清除 EXCELMANUS_MODELS（数据库为唯一来源）")
                     except Exception:
-                        logger.debug("清除 .env 中 EXCELMANUS_MODELS 失败", exc_info=True)
+                        logger.debug("清除 EXCELMANUS_MODELS 失败", exc_info=True)
                     os.environ.pop("EXCELMANUS_MODELS", None)
         _sync_config_profiles_from_db()
-        app.state.config_store = _config_store
+        ensure_active_model()
         logger.info("GlobalConfigStore 已初始化")
     set_database(_database)
     set_config_store(_config_store)
@@ -558,33 +545,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             logger.debug("PoolService 初始化失败", exc_info=True)
             app.state.pool_service = None
             app.state.pool_auto_rotate_service = None
-
-    # Docker 沙盒开关：默认关闭，管理员可通过 config_kv 或环境变量开启
-    _docker_env = os.environ.get(
-        "EXCELMANUS_DOCKER_SANDBOX", ""
-    ).strip().lower() in ("1", "true", "yes")
-    if _config_store is not None:
-        _docker_db = _config_store.get("docker_sandbox_enabled")
-        if _docker_db:
-            _docker_env = _docker_db.lower() in ("1", "true", "yes")
-    if _docker_env:
-        from excelmanus.security.docker_sandbox import is_docker_available, is_sandbox_image_ready
-        if not is_docker_available():
-            logger.warning("Docker 沙盒已开启但 Docker daemon 不可用，已自动关闭")
-            _docker_env = False
-        elif not is_sandbox_image_ready():
-            logger.warning(
-                "Docker 沙盒已开启但镜像 excelmanus-sandbox:latest 未找到，"
-                "请运行 docker build -t excelmanus-sandbox:latest -f Dockerfile.sandbox ."
-            )
-        else:
-            logger.info("Docker 沙盒已启用")
-    app.state.docker_sandbox_enabled = _docker_env
-    from excelmanus.tools.code_tools import init_docker_sandbox
-    init_docker_sandbox(_docker_env)
-    # 将 Docker 沙盒状态传播到会话管理器，用于按工作区注入。
-    if _session_manager is not None:
-        await _session_manager.set_sandbox_docker_enabled(_docker_env)
 
     logger.info(
         "API 服务启动完成，已加载 %d 个工具、%d 个 Skillpack",
@@ -974,6 +934,8 @@ def create_app(
         for _fp in _frontend_ports:
             cors_origins.add(f"http://{ip}:{_fp}")
 
+    from excelmanus.auth.manage_token import ManageTokenMiddleware
+    application.add_middleware(ManageTokenMiddleware)
     application.add_middleware(
         CORSMiddleware,
         allow_origins=list(cors_origins),
@@ -985,6 +947,7 @@ def create_app(
             "Accept",
             "X-Requested-With",
             "Cache-Control",
+            "X-ExcelManus-Token",
         ],
         expose_headers=["X-Request-Id"],
     )
@@ -1075,7 +1038,6 @@ from excelmanus.api_routes_chat import (  # noqa: F401
     _persist_excel_event,
     _persist_failure_guidance_message,
     _public_excel_path,
-    _public_route_fields,
     _public_tool_calls,
     _resolve_mentions,
     _serialize_images,
@@ -1125,7 +1087,6 @@ from excelmanus.api_routes_files import (  # noqa: F401
 )
 from excelmanus.api_routes_sessions import (  # noqa: F401
     _change_type,
-    archive_session,
     clear_all_sessions,
     compact_session_context,
     delete_session,
@@ -1147,19 +1108,8 @@ from excelmanus.api_routes_sessions import (  # noqa: F401
     update_session_title_api,
 )
 from excelmanus.api_routes_workspace import (  # noqa: F401
-    BackupApplyRequest,
-    BackupDiscardRequest,
-    BackupUndoRequest,
-    CheckpointRollbackRequest,
-    backup_apply,
-    backup_discard,
-    backup_list,
-    backup_undo,
-    checkpoint_list,
-    checkpoint_rollback,
-    workspace_commit,
-    workspace_rollback,
-    workspace_staged,
+    list_revisions,
+    restore_revision,
 )
 from excelmanus.api_routes_config import (  # noqa: F401
     ConfigExportRequest,
@@ -1184,7 +1134,6 @@ from excelmanus.api_routes_config import (  # noqa: F401
     _update_env_var,
     _write_env_file,
     add_model_profile,
-    build_docker_sandbox_image,
     cancel_probe_job,
     check_model_placeholder,
     create_probe_job,
@@ -1192,7 +1141,6 @@ from excelmanus.api_routes_config import (  # noqa: F401
     detect_config_token,
     export_model_config,
     get_all_model_capabilities,
-    get_docker_sandbox,
     get_model_capabilities,
     get_model_config,
     get_probe_job,
@@ -1204,7 +1152,6 @@ from excelmanus.api_routes_config import (  # noqa: F401
     probe_all_model_capabilities,
     probe_job_events,
     probe_model_capabilities,
-    set_docker_sandbox,
     set_thinking_config,
     switch_model,
     test_model_connection,
@@ -1278,7 +1225,7 @@ def main() -> None:
         # 多渠道
         python -m excelmanus.api --channels qq,telegram
 
-        # 通过环境变量（适合 Docker / systemd）
+        # 通过环境变量（适合 systemd / 进程管理器）
         EXCELMANUS_CHANNELS=qq python -m excelmanus.api
     """
     import argparse
@@ -1293,15 +1240,20 @@ def main() -> None:
         default="",
         help="要协同启动的渠道 Bot，逗号分隔（如 qq,telegram）",
     )
-    parser.add_argument("--host", type=str, default="0.0.0.0")
+    parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args, _ = parser.parse_known_args()
 
     # 将 CLI 参数提升为环境变量，供 lifespan 读取
     # （模块级 app = create_app() 已在 import 时创建，lifespan 延迟读取环境变量）
     os.environ["EXCELMANUS_API_PORT"] = str(args.port)
+    os.environ["EXCELMANUS_API_HOST"] = args.host
     if args.channels:
         os.environ["EXCELMANUS_CHANNELS"] = args.channels
+
+    from excelmanus.auth.manage_token import require_manage_token_for_bind
+
+    require_manage_token_for_bind(args.host)
 
     uvicorn.run(
         "excelmanus.api:app",
@@ -1309,5 +1261,4 @@ def main() -> None:
         port=args.port,
         log_level="info",
     )
-
 
