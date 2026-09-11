@@ -59,10 +59,10 @@ class TestRunShellAllowed:
         assert result["status"] == "success"
         assert "hello world" in result["stdout_tail"]
 
-    def test_find(self, workspace: Path) -> None:
+    def test_find_blocked(self, workspace: Path) -> None:
         result = _payload(shell_tools.run_shell("find . -name '*.csv'"))
-        assert result["status"] == "success"
-        assert "sample.csv" in result["stdout_tail"]
+        assert result["status"] == "blocked"
+        assert "白名单" in result["reason"]
 
     def test_pwd(self, workspace: Path) -> None:
         result = _payload(shell_tools.run_shell("pwd"))
@@ -74,8 +74,8 @@ class TestRunShellAllowed:
         assert result["status"] == "success"
         assert "2" in result["stdout_tail"]
 
-    def test_pipe_find_head(self, workspace: Path) -> None:
-        result = _payload(shell_tools.run_shell("find . -type f | head -n 5"))
+    def test_pipe_ls_head(self, workspace: Path) -> None:
+        result = _payload(shell_tools.run_shell("ls | head -n 5"))
         assert result["status"] == "success"
 
     def test_pipe_grep(self, workspace: Path) -> None:
@@ -178,25 +178,28 @@ class TestRunShellInjection:
 
 
 class TestRunShellSubcommandRestriction:
-    """python/pip 子命令限制。"""
+    """python/pip/sed/awk 已移出白名单。"""
 
-    def test_python_version_allowed(self, workspace: Path) -> None:
-        valid, _ = shell_tools._validate_command("python3 --version")
-        assert valid is True
+    def test_python_blocked(self, workspace: Path) -> None:
+        valid, reason = shell_tools._validate_command("python3 --version")
+        assert valid is False
+        assert "白名单" in reason
 
     def test_python_script_blocked(self, workspace: Path) -> None:
         valid, reason = shell_tools._validate_command("python3 malicious.py")
         assert valid is False
-        assert "run_code" in reason
+        assert "白名单" in reason
 
-    def test_pip_list_allowed(self, workspace: Path) -> None:
-        valid, _ = shell_tools._validate_command("pip list")
-        assert valid is True
-
-    def test_pip_install_blocked(self, workspace: Path) -> None:
-        valid, reason = shell_tools._validate_command("pip install requests")
+    def test_pip_blocked(self, workspace: Path) -> None:
+        valid, reason = shell_tools._validate_command("pip list")
         assert valid is False
-        assert "list/show/freeze" in reason
+        assert "白名单" in reason
+
+    def test_awk_sed_blocked(self, workspace: Path) -> None:
+        valid, reason = shell_tools._validate_command("awk '{print}' hello.txt")
+        assert valid is False
+        valid2, reason2 = shell_tools._validate_command("sed s/a/b/ hello.txt")
+        assert valid2 is False
 
 
 class TestRunShellValidation:
@@ -251,7 +254,7 @@ class TestSensitivePathBlocking:
         """find ~/.excelmanus/ 被拦截。"""
         result = _payload(shell_tools.run_shell("find ~/.excelmanus/"))
         assert result["status"] == "blocked"
-        assert "敏感目录" in result["reason"]
+        assert "白名单" in result["reason"] or "敏感目录" in result["reason"]
 
     def test_grep_in_excelmanus_blocked(self, workspace: Path) -> None:
         """grep pattern ~/.excelmanus/config.env 被拦截。"""

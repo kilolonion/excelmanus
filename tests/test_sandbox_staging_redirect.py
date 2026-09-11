@@ -1,39 +1,25 @@
-"""sandbox_hook staging 映射重定向测试。
+"""STAGING_MAP is ignored. Sandbox writes stay on the user path."""
 
-验证 EXCELMANUS_STAGING_MAP 环境变量注入后，sandbox_hook 的
-_guarded_open 和 _patch_openpyxl_save 能正确将文件读写重定向到
-transaction staging 副本。
-"""
 from __future__ import annotations
 
 import json
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-import pytest
-
 from excelmanus.security.sandbox_hook import generate_wrapper_script
-
-
-@pytest.fixture()
-def workspace(tmp_path: Path) -> Path:
-    return tmp_path
 
 
 def _run_in_sandbox(
     workspace: Path,
     script_content: str,
-    tier: str,
     *,
     staging_map: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
-    """在沙盒 wrapper 中执行脚本，可选注入 staging 映射。"""
     script = workspace / "test_script.py"
     script.write_text(script_content, encoding="utf-8")
-    wrapper = generate_wrapper_script(tier, str(workspace))
+    wrapper = generate_wrapper_script("GREEN", str(workspace))
     wrapper_path = workspace / "_wrapper.py"
     wrapper_path.write_text(wrapper, encoding="utf-8")
     env = os.environ.copy()
@@ -48,192 +34,64 @@ def _run_in_sandbox(
     )
 
 
-class TestStagingRedirectOpen:
-    """open() 写入时自动重定向到 staging 副本。"""
+def test_staging_map_does_not_redirect_open(tmp_path: Path) -> None:
+    original = tmp_path / "data.txt"
+    original.write_text("original_content", encoding="utf-8")
+    staged = tmp_path / "outputs" / "backups" / "data_staged.txt"
+    staged.parent.mkdir(parents=True)
+    staged.write_text("staged_content", encoding="utf-8")
 
-    def test_write_redirected_to_staged_copy(self, workspace: Path) -> None:
-        """写模式下，原始路径被重定向到 staging 副本。"""
-        original = workspace / "data.txt"
-        original.write_text("original_content", encoding="utf-8")
-        staged = workspace / "outputs" / "backups" / "data_staged.txt"
-        staged.parent.mkdir(parents=True)
-        staged.write_text("staged_content", encoding="utf-8")
-
-        staging_map = {str(original): str(staged)}
-        code = (
-            f"with open(r'{original}', 'w') as f:\n"
-            f"    f.write('modified')\n"
-            f"print('done')\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN", staging_map=staging_map)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        # 原始文件未被修改
-        assert original.read_text() == "original_content"
-        # staging 副本被修改
-        assert staged.read_text() == "modified"
-
-    def test_read_redirected_to_staged_copy(self, workspace: Path) -> None:
-        """读模式下，有 staging 映射时也重定向，确保读到最新 staged 版本。"""
-        original = workspace / "data.txt"
-        original.write_text("original", encoding="utf-8")
-        staged = workspace / "outputs" / "backups" / "data_staged.txt"
-        staged.parent.mkdir(parents=True)
-        staged.write_text("staged_version", encoding="utf-8")
-
-        staging_map = {str(original): str(staged)}
-        code = (
-            f"with open(r'{original}', 'r') as f:\n"
-            f"    content = f.read()\n"
-            f"print(content)\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN", staging_map=staging_map)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "staged_version" in result.stdout
-
-    def test_no_staging_map_writes_normally(self, workspace: Path) -> None:
-        """无 staging 映射时正常写入。"""
-        target = workspace / "output.txt"
-        code = (
-            f"with open(r'{target}', 'w') as f:\n"
-            f"    f.write('hello')\n"
-            f"print('done')\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert target.read_text() == "hello"
-
-    def test_empty_staging_map_no_effect(self, workspace: Path) -> None:
-        """空 staging 映射不影响正常行为。"""
-        target = workspace / "output.txt"
-        code = (
-            f"with open(r'{target}', 'w') as f:\n"
-            f"    f.write('hello')\n"
-            f"print('done')\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN", staging_map={})
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert target.read_text() == "hello"
+    code = (
+        f"with open(r'{original}', 'w') as f:\n"
+        f"    f.write('modified')\n"
+        f"print('done')\n"
+    )
+    result = _run_in_sandbox(
+        tmp_path,
+        code,
+        staging_map={str(original): str(staged)},
+    )
+    assert result.returncode == 0, result.stderr
+    assert original.read_text(encoding="utf-8") == "modified"
+    assert staged.read_text(encoding="utf-8") == "staged_content"
 
 
-class TestStagingRedirectOpenpyxl:
-    """openpyxl wb.save() 写入时重定向到 staging 副本。
+def test_staging_map_does_not_redirect_openpyxl_save(tmp_path: Path) -> None:
+    from openpyxl import Workbook, load_workbook
 
-    沙盒 save 不做 expected_version 校验；冲突检测仍由宿主锁 / P4 SDK 负责。
-    """
+    original = tmp_path / "report.xlsx"
+    wb = Workbook()
+    wb.active["A1"] = "original_data"
+    wb.save(str(original))
+    wb.close()
 
-    def test_openpyxl_save_redirected(self, workspace: Path) -> None:
-        """wb.save() 调用被重定向到 staging 副本。"""
-        from openpyxl import Workbook, load_workbook
+    staged = tmp_path / "outputs" / "backups" / "report_staged.xlsx"
+    staged.parent.mkdir(parents=True)
+    staged.write_bytes(original.read_bytes())
 
-        original = workspace / "report.xlsx"
-        wb = Workbook()
-        wb.active["A1"] = "original_data"
-        wb.save(str(original))
-        wb.close()
+    code = (
+        "from openpyxl import load_workbook\n"
+        f"wb = load_workbook(r'{original}')\n"
+        "wb.active['A1'] = 'modified_data'\n"
+        f"wb.save(r'{original}')\n"
+        "print('saved')\n"
+    )
+    result = _run_in_sandbox(
+        tmp_path,
+        code,
+        staging_map={str(original): str(staged)},
+    )
+    assert result.returncode == 0, result.stderr
+    wb_orig = load_workbook(original)
+    assert wb_orig.active["A1"].value == "original_data"
+    wb_orig.close()
+    wb_staged = load_workbook(staged)
+    assert wb_staged.active["A1"].value == "original_data"
+    wb_staged.close()
 
-        staged = workspace / "outputs" / "backups" / "report_staged.xlsx"
-        staged.parent.mkdir(parents=True)
-        shutil.copy2(str(original), str(staged))
-
-        staging_map = {str(original): str(staged)}
-        code = (
-            "from openpyxl import load_workbook\n"
-            f"wb = load_workbook(r'{original}')\n"
-            "wb.active['A1'] = 'modified_data'\n"
-            f"wb.save(r'{original}')\n"
-            "print('saved')\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN", staging_map=staging_map)
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-
-        # 原始文件 A1 仍为 original_data
-        wb_orig = load_workbook(original)
-        assert wb_orig.active["A1"].value == "original_data"
-        wb_orig.close()
-
-        # staging 副本 A1 已更新
-        wb_staged = load_workbook(staged)
-        assert wb_staged.active["A1"].value == "modified_data"
-        wb_staged.close()
-
-        # content_version 应对准 staging 目标，而非原始路径
-        import hashlib
-
-        marker = "EXCELMANUS_SAVE_VERSION\t"
-        version_lines = [ln for ln in result.stderr.splitlines() if ln.startswith(marker)]
-        assert version_lines, result.stderr
-        _, saved_path, ver = version_lines[-1].split("\t")
-        assert saved_path == os.path.realpath(str(staged))
-        assert saved_path != os.path.realpath(str(original))
-        assert ver == "sha256:" + hashlib.sha256(staged.read_bytes()).hexdigest()
-
-    def test_openpyxl_save_no_staging_map(self, workspace: Path) -> None:
-        """无 staging 映射时 openpyxl 正常写入。"""
-        from openpyxl import Workbook, load_workbook
-
-        output_dir = workspace / "outputs"
-        output_dir.mkdir()
-        target = output_dir / "test.xlsx"
-
-        code = (
-            "from openpyxl import Workbook\n"
-            "wb = Workbook()\n"
-            "wb.active['A1'] = 'hello'\n"
-            f"wb.save(r'{target}')\n"
-            "print('saved')\n"
-        )
-        result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert target.exists()
-
-        wb = load_workbook(target)
-        assert wb.active["A1"].value == "hello"
-        wb.close()
-
-
-class TestStagingMapParsing:
-    """staging 映射 JSON 解析的边界情况。"""
-
-    def test_invalid_json_ignored(self, workspace: Path) -> None:
-        """无效 JSON 不影响正常执行。"""
-        target = workspace / "output.txt"
-        code = (
-            f"with open(r'{target}', 'w') as f:\n"
-            f"    f.write('ok')\n"
-            f"print('done')\n"
-        )
-        script = workspace / "test_script.py"
-        script.write_text(code, encoding="utf-8")
-        wrapper = generate_wrapper_script("GREEN", str(workspace))
-        wrapper_path = workspace / "_wrapper.py"
-        wrapper_path.write_text(wrapper, encoding="utf-8")
-        env = os.environ.copy()
-        env["EXCELMANUS_STAGING_MAP"] = "not-valid-json"
-        result = subprocess.run(
-            [sys.executable, str(wrapper_path), str(script)],
-            capture_output=True, text=True, timeout=15, env=env,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert target.read_text() == "ok"
-
-    def test_non_dict_json_ignored(self, workspace: Path) -> None:
-        """非 dict 类型 JSON 不影响正常执行。"""
-        target = workspace / "output.txt"
-        code = (
-            f"with open(r'{target}', 'w') as f:\n"
-            f"    f.write('ok')\n"
-            f"print('done')\n"
-        )
-        script = workspace / "test_script.py"
-        script.write_text(code, encoding="utf-8")
-        wrapper = generate_wrapper_script("GREEN", str(workspace))
-        wrapper_path = workspace / "_wrapper.py"
-        wrapper_path.write_text(wrapper, encoding="utf-8")
-        env = os.environ.copy()
-        env["EXCELMANUS_STAGING_MAP"] = "[1, 2, 3]"
-        result = subprocess.run(
-            [sys.executable, str(wrapper_path), str(script)],
-            capture_output=True, text=True, timeout=15, env=env,
-        )
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert target.read_text() == "ok"
+    pending_dir = tmp_path / ".excelmanus" / "pending"
+    pending_files = list(pending_dir.rglob("*.xlsx")) if pending_dir.is_dir() else []
+    assert pending_files, "xlsx save should land in .excelmanus/pending/{run_id}"
+    wb_pending = load_workbook(pending_files[0])
+    assert wb_pending.active["A1"].value == "modified_data"
+    wb_pending.close()

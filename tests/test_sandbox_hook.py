@@ -22,6 +22,17 @@ def _sha256_version(path: Path) -> str:
     return "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def _parse_pending_writes(stderr: str) -> list[tuple[str, str]]:
+    found: list[tuple[str, str]] = []
+    for line in stderr.splitlines():
+        if not line.startswith("EXCELMANUS_PENDING_WRITE\t"):
+            continue
+        parts = line.split("\t")
+        assert len(parts) == 3, line
+        found.append((parts[1], parts[2]))
+    return found
+
+
 def _parse_save_versions(stderr: str) -> dict[str, str]:
     versions: dict[str, str] = {}
     for line in stderr.splitlines():
@@ -217,55 +228,38 @@ class TestRedSandbox:
         assert "pid" in data
 
 
-class TestAutoCoW:
-    """自动 Copy-on-Write 行为测试。"""
+class TestBenchWriteRefused:
+    """受保护 bench 目录拒绝写入，不再 Copy-on-Write。"""
 
-    def test_auto_cow_on_protected_dir(self, workspace: Path) -> None:
-        import os
-        
+    def test_open_write_on_protected_dir_refused(self, workspace: Path) -> None:
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True, exist_ok=True)
         target = bench_dir / "protected.txt"
         target.write_text("original_data", encoding="utf-8")
-        
-        outputs_dir = workspace / "outputs"
-        
-        # 默认 EXCELMANUS_BENCH_PROTECTED_DIRS="bench/external"
+
         code = (
             "import os\n"
             f"with open(r'{target}', 'w') as f:\n"
             f"    f.write('new_data')\n"
-            f"with open(r'{target}', 'r') as f:\n"
-            f"    print('READ:', f.read())\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        assert "READ: new_data" in result.stdout
-        
-        # 原文件未被修改
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+        assert "bench" in result.stderr
         assert target.read_text(encoding="utf-8") == "original_data"
-        
-        # 副本已生成并被修改
-        cow_file = outputs_dir / "backups" / "protected.txt"
-        assert cow_file.exists()
-        assert cow_file.read_text(encoding="utf-8") == "new_data"
-        
-    def test_auto_cow_openpyxl_save(self, workspace: Path) -> None:
-        import os
-        
+        assert not (workspace / "outputs" / "backups").exists()
+
+    def test_openpyxl_save_on_protected_dir_refused(self, workspace: Path) -> None:
+        import openpyxl
+
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True, exist_ok=True)
         target = bench_dir / "protected.xlsx"
-        
-        # 创建一个合法的空 excel
-        import openpyxl
         wb = openpyxl.Workbook()
         ws = wb.active
         ws["A1"] = "original"
         wb.save(target)
-        
-        outputs_dir = workspace / "outputs"
-        
+
         code = (
             "import openpyxl\n"
             f"wb = openpyxl.load_workbook(r'{target}')\n"
@@ -274,17 +268,11 @@ class TestAutoCoW:
             f"wb.save(r'{target}')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        
-        # 原文件未被修改
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
         wb_orig = openpyxl.load_workbook(target)
         assert wb_orig.active["A1"].value == "original"
-        
-        # 副本已生成并被修改
-        cow_file = outputs_dir / "backups" / "protected.xlsx"
-        assert cow_file.exists()
-        wb_cow = openpyxl.load_workbook(cow_file)
-        assert wb_cow.active["A1"].value == "new_data"
+        assert not (workspace / "outputs" / "backups").exists()
 
 
 class TestWrapperPreservesSemantics:
@@ -330,9 +318,10 @@ class TestSaveContentVersion:
                 or ln.startswith("from excelmanus.workbook_commit")
                 for ln in code_lines
             )
-            assert "expected_version" in src
-            assert "EXCELMANUS_EXPECTED_VERSIONS" in src
-            assert "_check_expected_version" in src
+            assert "EXCELMANUS_PENDING_WRITE" in src
+            assert "manifest.jsonl" in src
+            assert "EXCELMANUS_PENDING_RUN_ID" in src
+            assert "_check_expected_version" not in src
 
     def test_existing_file_save_conflicts_when_expected_stale(self, workspace: Path) -> None:
         from openpyxl import Workbook
@@ -368,9 +357,10 @@ class TestSaveContentVersion:
                 ),
             },
         )
-        assert result.returncode != 0
-        assert "VERSION_CONFLICT" in result.stderr
-        assert _sha256_version(target) != seen
+        # CAS is host-only. Wrapper writes pending; live path stays outsider bytes.
+        assert result.returncode == 0
+        assert "EXCELMANUS_PENDING_WRITE" in result.stderr
+        assert "VERSION_CONFLICT" not in result.stderr
         from openpyxl import load_workbook
         wb2 = load_workbook(str(target))
         assert wb2.active["A1"].value == "external"
@@ -390,9 +380,15 @@ class TestSaveContentVersion:
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode == 0, result.stderr
         assert "saved" in result.stdout
+        assert not xlsx.exists()
+        pending = _parse_pending_writes(result.stderr)
+        assert len(pending) == 1
+        rel, pending_path = pending[0]
+        assert rel.replace("\\", "/") == "outputs/new.xlsx"
+        assert Path(pending_path).is_file()
         versions = _parse_save_versions(result.stderr)
         resolved = os.path.realpath(str(xlsx))
-        assert versions[resolved] == _sha256_version(xlsx)
+        assert versions[resolved] == _sha256_version(Path(pending_path))
 
     def test_existing_file_save_emits_sha256_on_stderr(self, workspace: Path) -> None:
         from openpyxl import Workbook
@@ -414,13 +410,21 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode == 0, result.stderr
+        from openpyxl import load_workbook
+        orig = load_workbook(str(target))
+        assert orig.active["A1"].value == "initial"
+        orig.close()
+        pending = _parse_pending_writes(result.stderr)
+        assert len(pending) == 1
+        pending_path = Path(pending[0][1])
+        assert pending_path.is_file()
         versions = _parse_save_versions(result.stderr)
         resolved = os.path.realpath(str(target))
-        assert versions[resolved] == _sha256_version(target)
+        assert versions[resolved] == _sha256_version(pending_path)
         assert versions[resolved].startswith("sha256:")
 
-    def test_cow_save_versions_the_copy(self, workspace: Path) -> None:
-        from openpyxl import Workbook
+    def test_bench_save_refused_no_copy(self, workspace: Path) -> None:
+        from openpyxl import Workbook, load_workbook
 
         bench_dir = workspace / "bench" / "external"
         bench_dir.mkdir(parents=True)
@@ -438,15 +442,15 @@ class TestSaveContentVersion:
             f"wb.save(r'{target}')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, result.stderr
-        cow_file = workspace / "outputs" / "backups" / "protected.xlsx"
-        assert cow_file.exists()
-        versions = _parse_save_versions(result.stderr)
-        cow_resolved = os.path.realpath(str(cow_file))
-        orig_resolved = os.path.realpath(str(target))
-        assert orig_resolved not in versions
-        assert versions[cow_resolved] == _sha256_version(cow_file)
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+        assert not (workspace / "outputs" / "backups").exists()
+        assert _parse_pending_writes(result.stderr) == []
+        assert _parse_save_versions(result.stderr) == {}
         assert _sha256_version(target) == orig_ver
+        wb2 = load_workbook(str(target))
+        assert wb2.active["A1"].value == "original"
+        wb2.close()
 
     def test_save_versions_log_when_env_set(self, workspace: Path) -> None:
         log = workspace / "save_versions.log"
@@ -465,14 +469,17 @@ class TestSaveContentVersion:
         )
         assert result.returncode == 0, result.stderr
         assert log.exists()
+        pending = _parse_pending_writes(result.stderr)
+        assert len(pending) == 1
+        pending_path = Path(pending[0][1])
         line = log.read_text(encoding="utf-8").strip()
         resolved = os.path.realpath(str(xlsx))
-        assert line == f"{resolved}\t{_sha256_version(xlsx)}"
+        assert line == f"{resolved}\t{_sha256_version(pending_path)}"
+        assert not xlsx.exists()
 
-    def test_failed_new_file_save_emits_no_version(self, workspace: Path) -> None:
-        """save 失败不得写出 content_version。"""
-        missing_dir = workspace / "no_such_dir"
-        target = missing_dir / "fail.xlsx"
+    def test_failed_outside_save_emits_no_version(self, workspace: Path) -> None:
+        """工作区外的 xlsx save 失败，不得写出 content_version。"""
+        target = Path("/tmp/_excelmanus_sandbox_should_not_exist/fail.xlsx")
         code = (
             "from openpyxl import Workbook\n"
             "wb = Workbook()\n"
@@ -481,4 +488,61 @@ class TestSaveContentVersion:
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
         assert _parse_save_versions(result.stderr) == {}
+        assert _parse_pending_writes(result.stderr) == []
         assert not target.exists()
+
+
+class TestYellowIoWrappers:
+    """os/shutil/pathlib 写入也必须走 pending / 工作区守卫。"""
+
+    def test_os_open_write_xlsx_does_not_touch_original(self, workspace: Path) -> None:
+        target = workspace / "book.xlsx"
+        target.write_bytes(b"original-xlsx")
+        code = (
+            "import os\n"
+            f"fd = os.open(r'{target}', os.O_WRONLY | os.O_TRUNC)\n"
+            "os.write(fd, b'pwned')\n"
+            "os.close(fd)\n"
+        )
+        result = _run_in_sandbox(workspace, code, "YELLOW")
+        assert result.returncode == 0, result.stderr
+        assert target.read_bytes() == b"original-xlsx"
+
+    def test_os_replace_xlsx_does_not_replace_original(self, workspace: Path) -> None:
+        src = workspace / "src.xlsx"
+        dest = workspace / "dest.xlsx"
+        src.write_bytes(b"src-bytes")
+        dest.write_bytes(b"dest-bytes")
+        code = (
+            "import os\n"
+            f"os.replace(r'{src}', r'{dest}')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "YELLOW")
+        assert result.returncode == 0, result.stderr
+        assert dest.read_bytes() == b"dest-bytes"
+        assert src.read_bytes() == b"src-bytes"
+
+    def test_path_write_bytes_xlsx_does_not_touch_original(self, workspace: Path) -> None:
+        target = workspace / "book.xlsx"
+        target.write_bytes(b"keep-me")
+        code = (
+            "from pathlib import Path\n"
+            f"Path(r'{target}').write_bytes(b'pwned')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "YELLOW")
+        assert result.returncode == 0, result.stderr
+        assert target.read_bytes() == b"keep-me"
+
+    def test_shutil_copy_xlsx_does_not_overwrite_original(self, workspace: Path) -> None:
+        src = workspace / "note.txt"
+        dest = workspace / "book.xlsx"
+        src.write_text("hello", encoding="utf-8")
+        dest.write_bytes(b"keep-xlsx")
+        code = (
+            "import shutil\n"
+            f"shutil.copy(r'{src}', r'{dest}')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "YELLOW")
+        assert result.returncode == 0, result.stderr
+        assert dest.read_bytes() == b"keep-xlsx"
+

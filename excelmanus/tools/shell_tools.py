@@ -43,10 +43,10 @@ ALLOWED_COMMANDS: frozenset[str] = frozenset({
     # 文件探查
     "ls", "cat", "head", "tail", "wc", "file", "du", "stat",
     # 搜索与文本处理
-    "find", "grep", "egrep", "fgrep", "sort", "uniq", "cut",
-    "awk", "sed", "tr", "diff", "comm",
+    "grep", "egrep", "fgrep", "sort", "uniq", "cut",
+    "tr", "diff", "comm",
     # 环境与信息
-    "python", "python3", "pip", "pip3", "which", "echo",
+    "which", "echo",
     "uname", "date", "whoami", "pwd",
     # 数据工具
     "jq", "csvtool", "xsv",
@@ -70,8 +70,8 @@ BLOCKED_COMMANDS: frozenset[str] = frozenset({
 # 可能接受文件路径参数的命令（需检查敏感路径）
 _FILE_ARG_COMMANDS: frozenset[str] = frozenset({
     "cat", "head", "tail", "wc", "file", "du", "stat",
-    "find", "grep", "egrep", "fgrep", "diff", "comm",
-    "sort", "uniq", "cut", "awk", "sed", "tr", "ls",
+    "grep", "egrep", "fgrep", "diff", "comm",
+    "sort", "uniq", "cut", "tr", "ls",
 })
 
 # 敏感目录名（相对于 HOME）
@@ -164,22 +164,6 @@ def _validate_single_command(segment: str) -> tuple[bool, str]:
     # 白名单检查
     if cmd_name not in ALLOWED_COMMANDS:
         return False, f"命令不在白名单中: {cmd_name}"
-
-    # python/pip 子命令限制
-    if cmd_name in ("python", "python3") and len(tokens) > 1:
-        sub = tokens[1]
-        if sub not in ("--version", "-V", "-c"):
-            return False, (
-                f"run_shell 仅允许 {cmd_name} --version / -V，"
-                "执行 Python 代码请使用 run_code 工具"
-            )
-
-    if cmd_name in ("pip", "pip3") and len(tokens) > 1:
-        sub = tokens[1]
-        if sub not in ("list", "show", "freeze", "--version", "-V"):
-            return False, (
-                f"run_shell 仅允许 {cmd_name} list/show/freeze/--version"
-            )
 
     return True, "ok"
 
@@ -373,6 +357,13 @@ def _check_sensitive_paths(
                     if not (resolved.startswith(ws_prefix + os.sep)
                             or resolved == ws_prefix):
                         return False, f"安全策略禁止访问工作区外的敏感文件: {token}"
+                from excelmanus.security.source_isolation import (
+                    PRODUCT_SOURCE_FORBIDDEN,
+                    is_product_source_path,
+                )
+
+                if is_product_source_path(resolved, workspace_root):
+                    return False, f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止访问产品源码 {token}"
 
     return True, "ok"
 
@@ -400,11 +391,25 @@ def run_shell(
     if not workdir_safe.exists() or not workdir_safe.is_dir():
         raise NotADirectoryError(f"工作目录不存在: {workdir_safe}")
 
+    from excelmanus.security.source_isolation import (
+        PRODUCT_SOURCE_FORBIDDEN,
+        command_touches_product_source,
+        is_product_source_path,
+    )
+
     # 安全校验
     valid, reason = _validate_command(command)
     if not valid:
         return from_payload(
             {"status": "blocked", "reason": reason, "command": command},
+        )
+    if command_touches_product_source(command):
+        return from_payload(
+            {
+                "status": "blocked",
+                "reason": f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止用 shell 读取产品源码",
+                "command": command,
+            },
         )
 
     # 敏感路径校验
@@ -578,7 +583,7 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="run_shell",
             description=(
-                "执行受限 shell 命令（仅白名单只读命令如 ls/cat/head/tail/grep/find/wc/file/du/stat）。"
+                "执行受限 shell 命令（仅白名单只读命令如 ls/cat/head/tail/grep/wc/file/du/stat）。"
                 "适用场景：文件探查、搜索、环境信息查询等只读操作。"
                 "不适用：写入操作和网络请求（严格禁止）。"
             ),
