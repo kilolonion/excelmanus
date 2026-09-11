@@ -26,7 +26,6 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "max_iterations": 20,
         "max_consecutive_failures": 3,
         "workspace_root": str(Path(__file__).resolve().parent),
-        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -120,6 +119,32 @@ class TestToolDispatcherExecute:
         assert result.result == "handler ok"
         dispatcher._dispatch_via_handlers.assert_awaited_once()
         dispatcher._dispatch_tool_execution.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_code_present_as_rejects_direct_edit_before_dispatch(self) -> None:
+        engine = _make_engine()
+        engine._present_as = "code"
+        dispatcher = engine._tool_dispatcher
+        dispatcher._dispatch_via_handlers = AsyncMock(
+            side_effect=AssertionError("code collapse must run before dispatch")
+        )
+        tc = SimpleNamespace(
+            id="call_edit",
+            function=SimpleNamespace(
+                name="edit_spreadsheet",
+                arguments=json.dumps({"file_path": "a.xlsx"}),
+            ),
+        )
+        result = await dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "UNKNOWN_TOOL"
+        dispatcher._dispatch_via_handlers.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_execute_post_tool_hook_deny_turns_success_to_failure(self) -> None:
@@ -286,3 +311,136 @@ class TestToolDispatcherExecute:
         assert result.success is True
         assert engine._has_write_tool_call is True
         assert engine._registry_refresh_needed is True
+
+    @pytest.mark.asyncio
+    async def test_read_mode_denies_workspace_write(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def boom(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "wrote"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="edit_spreadsheet",
+                description="edit",
+                input_schema={"type": "object", "properties": {}},
+                func=boom,
+                write_effect="workspace_write",
+            )
+        )
+        engine._current_chat_mode = "read"
+        tc = SimpleNamespace(
+            id="call_edit",
+            function=SimpleNamespace(name="edit_spreadsheet", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert ran["called"] is False
+        assert "只读模式" in result.result
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_denies_workspace_write(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def boom(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "wrote"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="edit_spreadsheet",
+                description="edit",
+                input_schema={"type": "object", "properties": {}},
+                func=boom,
+                write_effect="workspace_write",
+            )
+        )
+        engine._current_chat_mode = "plan"
+        tc = SimpleNamespace(
+            id="call_edit",
+            function=SimpleNamespace(name="edit_spreadsheet", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert ran["called"] is False
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_allows_write_plan(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def write_plan(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "planned"
+
+        existing = engine._registry.get_tool("write_plan")
+        assert existing is not None
+        existing.func = write_plan
+        engine._current_chat_mode = "plan"
+        tc = SimpleNamespace(
+            id="call_plan",
+            function=SimpleNamespace(
+                name="write_plan",
+                arguments=json.dumps({"title": "t", "content": "c"}),
+            ),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is True
+        assert ran["called"] is True
+
+    @pytest.mark.asyncio
+    async def test_read_mode_denies_unknown_write_effect(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def unknown_writer(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "ok"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="mystery",
+                description="unknown",
+                input_schema={"type": "object", "properties": {}},
+                func=unknown_writer,
+                write_effect="unknown",
+            )
+        )
+        engine._current_chat_mode = "read"
+        tc = SimpleNamespace(
+            id="call_mystery",
+            function=SimpleNamespace(name="mystery", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert ran["called"] is False

@@ -11,6 +11,7 @@ import httpx
 import pytest
 from excelmanus.auth.providers.base import ResolvedCredential
 from excelmanus.config import ExcelManusConfig, ModelProfile
+from excelmanus.agent.loop import run_tool_loop
 from excelmanus.engine import AgentEngine, ChatResult, DelegateSubagentOutcome, ToolCallResult
 from excelmanus.events import EventType
 from excelmanus.hooks import HookAgentAction, HookDecision, HookEvent, HookResult
@@ -18,14 +19,14 @@ from excelmanus.mcp.manager import add_tool_prefix
 from excelmanus.memory import TokenCounter
 from excelmanus.plan_mode import PendingPlanState, PlanDraft
 from excelmanus.skillpacks import SkillMatchResult, Skillpack
-from excelmanus.subagent import SubagentConfig, SubagentResult
+from excelmanus.subagent import SubagentResult
 from excelmanus.task_list import TaskStatus
 from excelmanus.tools import ToolRegistry, task_tools
 from excelmanus.tools.registry import ToolDef
 
 def _make_config(**overrides) -> ExcelManusConfig:
     """创建测试用配置。"""
-    defaults = {'api_key': 'test-key', 'base_url': 'https://test.example.com/v1', 'model': 'test-model', 'max_iterations': 20, 'max_consecutive_failures': 3, 'workspace_root': str(Path(__file__).resolve().parent), 'backup_enabled': False}
+    defaults = {'api_key': 'test-key', 'base_url': 'https://test.example.com/v1', 'model': 'test-model', 'max_iterations': 20, 'max_consecutive_failures': 3, 'workspace_root': str(Path(__file__).resolve().parent)}
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
 
@@ -95,7 +96,7 @@ class TestControlCommandFullAccess:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        result = await engine.chat('/fullaccess status')
+        result = await engine.followup('/fullaccess status')
         assert isinstance(result, ChatResult)
         assert 'restricted' in result.reply
         assert engine.full_access_enabled is False
@@ -106,11 +107,11 @@ class TestControlCommandFullAccess:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        on_result = await engine.chat('/fullaccess')
+        on_result = await engine.followup('/fullaccess')
         assert 'full_access' in on_result.reply
         assert engine.full_access_enabled is True
         assert engine.last_route_result.route_mode == 'control_command'
-        off_result = await engine.chat('/fullaccess off')
+        off_result = await engine.followup('/fullaccess off')
         assert 'restricted' in off_result.reply
         assert engine.full_access_enabled is False
         assert engine.last_route_result.route_mode == 'control_command'
@@ -123,7 +124,7 @@ class TestControlCommandFullAccess:
         mocked_create = AsyncMock(return_value=_make_text_response('不应被调用'))
         engine._client.chat.completions.create = mocked_create
         before_count = len(engine.memory.get_messages())
-        result = await engine.chat('/full_access status')
+        result = await engine.followup('/full_access status')
         assert 'restricted' in result.reply
         mocked_create.assert_not_called()
         after_count = len(engine.memory.get_messages())
@@ -136,17 +137,17 @@ class TestControlCommandFullAccess:
         engine = AgentEngine(config, registry)
         route_result = SkillMatchResult(skills_used=[], route_mode='llm_confirm', system_contexts=[])
         mock_router = MagicMock()
-        mock_router.route = AsyncMock(return_value=route_result)
+        mock_router.parse_slash_skill = AsyncMock(return_value=route_result)
         engine._skill_router = mock_router
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
-        await engine.chat('普通请求')
-        _, kwargs_default = mock_router.route.call_args
+        await engine.followup('普通请求')
+        _, kwargs_default = mock_router.parse_slash_skill.call_args
         assert kwargs_default['blocked_skillpacks'] == {'excel_code_runner'}
-        await engine.chat('/fullaccess on')
-        mock_router.route.reset_mock()
+        await engine.followup('/fullaccess on')
+        mock_router.parse_slash_skill.reset_mock()
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok2'))
-        await engine.chat('普通请求2')
-        _, kwargs_unlocked = mock_router.route.call_args
+        await engine.followup('普通请求2')
+        _, kwargs_unlocked = mock_router.parse_slash_skill.call_args
         assert kwargs_unlocked['blocked_skillpacks'] is None
 
 class TestControlCommandSubagent:
@@ -157,7 +158,7 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        result = await engine.chat('/subagent status')
+        result = await engine.followup('/subagent status')
         assert 'enabled' in result.reply
         assert engine.subagent_enabled is True
         assert engine.last_route_result.route_mode == 'control_command'
@@ -167,11 +168,11 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        off_result = await engine.chat('/subagent off')
+        off_result = await engine.followup('/subagent off')
         assert '已关闭' in off_result.reply
         assert engine.subagent_enabled is False
         assert engine.last_route_result.route_mode == 'control_command'
-        on_result = await engine.chat('/subagent on')
+        on_result = await engine.followup('/subagent on')
         assert '已开启' in on_result.reply
         assert engine.subagent_enabled is True
         assert engine.last_route_result.route_mode == 'control_command'
@@ -181,7 +182,7 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        result = await engine.chat('/subagent')
+        result = await engine.followup('/subagent')
         assert '当前 subagent 状态' in result.reply
         assert engine.subagent_enabled is True
 
@@ -190,7 +191,7 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        result = await engine.chat('/sub_agent off')
+        result = await engine.followup('/sub_agent off')
         assert '已关闭' in result.reply
         assert engine.subagent_enabled is False
 
@@ -202,7 +203,7 @@ class TestControlCommandSubagent:
         mocked_create = AsyncMock(return_value=_make_text_response('不应被调用'))
         engine._client.chat.completions.create = mocked_create
         before_count = len(engine.memory.get_messages())
-        result = await engine.chat('/subagent off')
+        result = await engine.followup('/subagent off')
         assert '已关闭' in result.reply
         mocked_create.assert_not_called()
         after_count = len(engine.memory.get_messages())
@@ -213,7 +214,7 @@ class TestControlCommandSubagent:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        result = await engine.chat('/subagent list')
+        result = await engine.followup('/subagent list')
         assert 'subagent' in result.reply
 
     @pytest.mark.asyncio
@@ -222,7 +223,7 @@ class TestControlCommandSubagent:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._delegate_to_subagent = AsyncMock(return_value=DelegateSubagentOutcome(reply='执行完成', success=True, picked_agent='explorer', task_text='分析这个文件', normalized_paths=[], subagent_result=None))
-        result = await engine.chat('/subagent run explorer -- 分析这个文件')
+        result = await engine.followup('/subagent run explorer -- 分析这个文件')
         assert result.reply == '执行完成'
         engine._delegate_to_subagent.assert_awaited_once_with(task='分析这个文件', agent_name='explorer', file_paths=None, on_event=None)
 
@@ -232,7 +233,7 @@ class TestControlCommandSubagent:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._delegate_to_subagent = AsyncMock(return_value=DelegateSubagentOutcome(reply='执行完成', success=True, picked_agent='explorer', task_text='分析这个文件', normalized_paths=[], subagent_result=None))
-        result = await engine.chat('/subagent run -- 分析这个文件')
+        result = await engine.followup('/subagent run -- 分析这个文件')
         assert result.reply == '执行完成'
         engine._delegate_to_subagent.assert_awaited_once_with(task='分析这个文件', agent_name=None, file_paths=None, on_event=None)
 
@@ -253,11 +254,10 @@ class TestRegistryScan:
             from excelmanus.file_registry import ScanResult
             return ScanResult(total_files=0)
         with patch.object(engine._file_registry, 'scan_workspace', side_effect=_slow_scan):
-            started = engine.start_registry_scan()
-            assert started is True
             t0 = time.monotonic()
-            notice = engine._context_builder._build_file_registry_notice()
+            started = engine.start_registry_scan()
             elapsed = time.monotonic() - t0
+            assert started is True
             assert elapsed < 0.1
             gate.set()
             assert engine._registry_scan_task is not None
@@ -277,44 +277,43 @@ class TestRegistryScan:
             from excelmanus.file_registry import ScanResult
             return ScanResult(total_files=3)
         with patch.object(engine._file_registry, 'scan_workspace', side_effect=_slow_scan):
-            build_reply = await engine.chat('/registry scan')
+            build_reply = await engine.followup('/registry scan')
             assert '后台开始 FileRegistry 扫描' in build_reply.reply
-            status_reply = await engine.chat('/registry status')
+            status_reply = await engine.followup('/registry status')
             assert '后台扫描中' in status_reply.reply
             gate.set()
             assert engine._registry_scan_task is not None
             await engine._registry_scan_task
-            final_status = await engine.chat('/registry status')
+            final_status = await engine.followup('/registry status')
             assert '已就绪' in final_status.reply
 
 class TestModelSwitchConsistency:
-    """模型切换与路由模型一致性测试。"""
+    """模型切换与激活客户端一致性测试。"""
 
-    def test_switch_model_syncs_router_when_router_model_not_configured(self) -> None:
+    def test_switch_model_updates_active_client(self) -> None:
         config = _make_config(model='main-a', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1', description='备选模型'),))
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        assert engine._router_follow_active_model is True
-        assert engine._router_model == 'main-a'
-        assert engine._router_client is engine._client
+        assert engine._active_model == 'main-a'
         msg = engine.switch_model('alt')
         assert '已切换到模型' in msg
         assert engine._active_model == 'main-b'
-        assert engine._router_model == 'main-b'
-        assert engine._router_client is engine._client
+        assert engine._active_model_name == 'alt'
+        assert engine._client is engine._llm_clients.client
 
-    def test_switch_model_keeps_router_when_aux_model_configured(self) -> None:
-        config = _make_config(model='main-a', aux_model='aux-fixed', aux_api_key='aux-key', aux_base_url='https://aux.example.com/v1', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1', description='备选模型'),))
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        old_router_client = engine._router_client
-        assert engine._router_follow_active_model is False
-        assert engine._router_model == 'aux-fixed'
-        engine.switch_model('alt')
-        assert engine._active_model == 'main-b'
-        assert engine._router_model == 'aux-fixed'
-        assert engine._router_client is old_router_client
-        assert engine._router_client is not engine._client
+    def test_switch_model_rejects_unknown_name(self) -> None:
+        config = _make_config(model='main-a', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1', description='备选'),))
+        engine = AgentEngine(config, _make_registry_with_tools())
+        msg = engine.switch_model('missing')
+        assert '未找到模型' in msg
+        assert engine._active_model == 'main-a'
+
+    def test_switch_model_rejects_default_alias(self) -> None:
+        config = _make_config(model='main-a', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1'),))
+        engine = AgentEngine(config, _make_registry_with_tools())
+        msg = engine.switch_model('default')
+        assert '未找到模型' in msg
+        assert engine._active_model == 'main-a'
 
     def test_switch_model_rejects_deprecated_model_id(self) -> None:
         config = _make_config(model='main-a', models=(ModelProfile(name='legacy', model='claude-3.5-sonnet', api_key='alt-key', base_url='https://alt.example.com/v1', description='legacy'),))
@@ -323,30 +322,6 @@ class TestModelSwitchConsistency:
         assert '已弃用' in msg
         assert 'claude-sonnet-5' in msg
         assert engine._active_model == 'main-a'
-
-    @pytest.mark.asyncio
-    async def test_run_subagent_uses_active_model_when_subroute_not_configured(self) -> None:
-        config = _make_config(model='main-a', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1', description='备选模型'),))
-        engine = AgentEngine(config, _make_registry_with_tools())
-        engine.switch_model('alt')
-        engine._subagent_registry = MagicMock()
-        engine._subagent_registry.get.return_value = SubagentConfig(name='explorer', description='只读探查', permission_mode='readOnly')
-        engine._subagent_executor.run = AsyncMock(return_value=SubagentResult(success=True, summary='完成', subagent_name='explorer', permission_mode='readOnly', conversation_id='conv-1'))
-        _ = await engine.run_subagent(agent_name='explorer', prompt='请分析')
-        kwargs = engine._subagent_executor.run.await_args.kwargs
-        assert kwargs['config'].model == 'main-b'
-
-    @pytest.mark.asyncio
-    async def test_run_subagent_keeps_global_subroute_model_when_configured(self) -> None:
-        config = _make_config(model='main-a', aux_model='sub-fixed', models=(ModelProfile(name='alt', model='main-b', api_key='alt-key', base_url='https://alt.example.com/v1', description='备选模型'),))
-        engine = AgentEngine(config, _make_registry_with_tools())
-        engine.switch_model('alt')
-        engine._subagent_registry = MagicMock()
-        engine._subagent_registry.get.return_value = SubagentConfig(name='explorer', description='只读探查', permission_mode='readOnly')
-        engine._subagent_executor.run = AsyncMock(return_value=SubagentResult(success=True, summary='完成', subagent_name='explorer', permission_mode='readOnly', conversation_id='conv-2'))
-        _ = await engine.run_subagent(agent_name='explorer', prompt='请分析')
-        kwargs = engine._subagent_executor.run.await_args.kwargs
-        assert kwargs['config'].model == 'sub-fixed'
 
     def test_extract_retry_after_seconds_from_nested_exception(self) -> None:
 
@@ -373,14 +348,14 @@ class TestSystemMessageMode:
     def test_prepare_system_prompts_replace_mode_splits_system_messages(self) -> None:
         config = _make_config(system_message_mode='replace')
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts, _ = engine._context_builder._prepare_system_prompts_for_request(['[Skillpack] data_basic\n描述：测试'])
+        prompts, _ = engine._prepare_system_prompts_for_request(['[Skillpack] data_basic\n描述：测试'])
         assert len(prompts) == 2
         assert '[Skillpack] data_basic' in prompts[1]
 
     def test_prepare_system_prompts_merge_mode_merges_into_single_message(self) -> None:
         config = _make_config(system_message_mode='merge')
         engine = AgentEngine(config, _make_registry_with_tools())
-        prompts, _ = engine._context_builder._prepare_system_prompts_for_request(['[Skillpack] data_basic\n描述：测试'])
+        prompts, _ = engine._prepare_system_prompts_for_request(['[Skillpack] data_basic\n描述：测试'])
         assert len(prompts) == 2
         assert '[Skillpack] data_basic' in prompts[1]
 
@@ -433,7 +408,7 @@ class TestStreamFallbackBehavior:
         mocked_call = AsyncMock(side_effect=auth_exc)
         engine._llm_caller.create_chat_completion_with_system_fallback = mocked_call
         with pytest.raises(_FakeAuthError):
-            await engine._tool_calling_loop(route_result, on_event=None)
+            await run_tool_loop(engine, route_result, on_event=None)
         assert mocked_call.await_count == 1
 
 class TestContextBudgetAndHardCap:
@@ -448,7 +423,7 @@ class TestContextBudgetAndHardCap:
         route_result = SkillMatchResult(skills_used=[], tool_scope=['add_numbers'], route_mode='fallback', system_contexts=['X' * 8000])
         mocked_create = AsyncMock(return_value=_make_text_response('ok'))
         engine._client.chat.completions.create = mocked_create
-        result = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await run_tool_loop(engine, route_result, on_event=None)
         assert result.reply == 'ok'
         assert mocked_create.call_count == 1
         _, kwargs = mocked_create.call_args
@@ -465,7 +440,7 @@ class TestContextBudgetAndHardCap:
         mocked_create = AsyncMock(return_value=_make_text_response('不应调用'))
         engine._client.chat.completions.create = mocked_create
         route_result = SkillMatchResult(skills_used=[], route_mode='fallback', system_contexts=[])
-        result = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await run_tool_loop(engine, route_result, on_event=None)
         assert '系统上下文过长' in result.reply
         mocked_create.assert_not_called()
 
@@ -481,7 +456,7 @@ class TestContextBudgetAndHardCap:
         tc = SimpleNamespace(id='call_long', function=SimpleNamespace(name='long_tool', arguments='{}'))
         result = await engine._execute_tool_call(tc, tool_scope=['long_tool'], on_event=None, iteration=1, route_result=None)
         assert result.success is True
-        assert '结果已全局截断' in result.result
+        assert '结果已截断' in result.result
         assert '上限: 80 字符' in result.result
 
 class TestTaskUpdateFailureSemantics:
@@ -502,32 +477,37 @@ class TestTaskUpdateFailureSemantics:
         assert engine._task_store.current is not None
         assert engine._task_store.current.items[0].status == TaskStatus.PENDING
 
-class TestChatModeDeprecatedPlanCommand:
-    """旧 /plan 命令已废弃，应返回提示信息。"""
+class TestPlanCommand:
+    """``/plan`` 是控制面命令，不进模型历史。"""
 
     @pytest.mark.asyncio
-    async def test_plan_command_returns_deprecation_notice(self) -> None:
+    async def test_plan_command_toggles_session_flag(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        for cmd in ('/plan status', '/plan on', '/plan off', '/plan approve'):
-            result = await engine.chat(cmd)
-            assert '废弃' in result.reply or 'Tab' in result.reply
+        result = await engine.followup('/plan on')
+        assert '计划模式' in result.reply
+        assert engine._plan_active is True
+        assert engine._current_chat_mode == 'plan'
+        status = await engine.followup('/plan status')
+        assert '开启' in status.reply
+        off = await engine.followup('/plan off')
+        assert '关闭' in off.reply
+        assert engine._plan_active is False
 
     @pytest.mark.asyncio
-    async def test_chat_mode_passed_to_route(self) -> None:
-        """chat_mode 参数应传递到 _route_skills。"""
+    async def test_chat_mode_not_passed_to_slash_parser(self) -> None:
+        """plan/read 不再改目录；chat_mode 不传给斜杠解析。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
         mock_router = MagicMock()
-        mock_router.route = AsyncMock(return_value=SkillMatchResult(skills_used=[], route_mode='all_tools', system_contexts=[]))
+        mock_router.parse_slash_skill = AsyncMock(return_value=SkillMatchResult(skills_used=[], route_mode='all_tools', system_contexts=[]))
         engine._skill_router = mock_router
-        await engine.chat('分析数据', chat_mode='read')
-        assert mock_router.route.call_count == 1
-        call_kwargs = mock_router.route.call_args[1]
-        assert call_kwargs.get('chat_mode') == 'read'
+        await engine.followup('分析数据', chat_mode='read')
+        assert mock_router.parse_slash_skill.call_count == 1
+        assert 'chat_mode' not in mock_router.parse_slash_skill.call_args.kwargs
 
 class TestManualSkillSlashCommand:
     """手动 Skill 斜杠命令解析与路由。"""
@@ -539,7 +519,7 @@ class TestManualSkillSlashCommand:
         engine = AgentEngine(config, registry)
         engine._skill_router = None
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
-        result = await engine.chat('请读取数据')
+        result = await engine.followup('请读取数据')
         assert result.reply == 'ok'
         assert engine.last_route_result.route_mode == 'all_tools'
 
@@ -553,13 +533,13 @@ class TestManualSkillSlashCommand:
         mock_loader.get_skillpacks.return_value = {'data_basic': MagicMock()}
         mock_router = MagicMock()
         mock_router._loader = mock_loader
-        mock_router.route = AsyncMock(return_value=route_result)
+        mock_router.parse_slash_skill = AsyncMock(return_value=route_result)
         engine._skill_router = mock_router
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
-        result = await engine.chat('/data_basic 请分析这个文件')
+        result = await engine.followup('/data_basic 请分析这个文件')
         assert result.reply == 'ok'
-        _, kwargs = mock_router.route.call_args
-        assert kwargs['slash_command'] == 'data_basic'
+        args, kwargs = mock_router.parse_slash_skill.call_args
+        assert args[0] == 'data_basic'
         assert kwargs['raw_args'] == '请分析这个文件'
 
     @pytest.mark.asyncio
@@ -572,13 +552,13 @@ class TestManualSkillSlashCommand:
         mock_loader.get_skillpacks.return_value = {'verification-before-completion': MagicMock()}
         mock_router = MagicMock()
         mock_router._loader = mock_loader
-        mock_router.route = AsyncMock(return_value=route_result)
+        mock_router.parse_slash_skill = AsyncMock(return_value=route_result)
         engine._skill_router = mock_router
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
-        result = await engine.chat('查看文件夹下 /verification-before-completion 查看哪个表格行数最多')
+        result = await engine.followup('查看文件夹下 /verification-before-completion 查看哪个表格行数最多')
         assert result.reply == 'ok'
-        _, kwargs = mock_router.route.call_args
-        assert kwargs['slash_command'] == 'verification-before-completion'
+        args, kwargs = mock_router.parse_slash_skill.call_args
+        assert args[0] == 'verification-before-completion'
         assert kwargs['raw_args'] == '查看哪个表格行数最多'
 
     @pytest.mark.asyncio
@@ -591,13 +571,13 @@ class TestManualSkillSlashCommand:
         mock_loader.get_skillpacks.return_value = {'data_basic': MagicMock()}
         mock_router = MagicMock()
         mock_router._loader = mock_loader
-        mock_router.route = AsyncMock(return_value=route_result)
+        mock_router.parse_slash_skill = AsyncMock(return_value=route_result)
         engine._skill_router = mock_router
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('ok'))
-        await engine.chat('执行技能', slash_command='data_basic', raw_args='"sales data.xlsx" bar')
-        first_call = mock_router.route.call_args_list[0]
-        _, kwargs = first_call
-        assert kwargs['slash_command'] == 'data_basic'
+        await engine.followup('执行技能', slash_command='data_basic', raw_args='"sales data.xlsx" bar')
+        first_call = mock_router.parse_slash_skill.call_args_list[0]
+        args, kwargs = first_call
+        assert args[0] == 'data_basic'
         assert kwargs['raw_args'] == '"sales data.xlsx" bar'
 
     def test_resolve_skill_command_normalizes_dash_and_underscore(self) -> None:
@@ -665,7 +645,7 @@ class TestManualSkillSlashCommand:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._route_skills = AsyncMock(return_value=SkillMatchResult(skills_used=[], route_mode='slash_not_user_invocable', system_contexts=[]))
-        result = await engine.chat('/private_skill do', slash_command='private_skill', raw_args='do')
+        result = await engine.followup('/private_skill do', slash_command='private_skill', raw_args='do')
         assert isinstance(result, ChatResult)
         assert '不允许手动调用' in result.reply
 
@@ -683,19 +663,21 @@ class TestManualSkillSlashCommand:
         engine._skill_router = mock_router
         slash_route = SkillMatchResult(skills_used=['guidance_only'], route_mode='slash_direct', system_contexts=['[Skillpack] guidance_only'], parameterized=True)
         engine._route_skills = AsyncMock(return_value=slash_route)
-        engine._tool_calling_loop = AsyncMock(return_value=ChatResult(reply='ok'))
-        result = await engine.chat('/guidance_only 查看哪个表格最大', slash_command='guidance_only', raw_args='查看哪个表格最大')
+        with patch('excelmanus.agent.loop.run_tool_loop', new_callable=AsyncMock, return_value=ChatResult(reply='ok')) as loop_mock:
+            result = await engine.followup('/guidance_only 查看哪个表格最大', slash_command='guidance_only', raw_args='查看哪个表格最大')
         assert result.reply == 'ok'
         assert engine._route_skills.await_count == 1
         first_call = engine._route_skills.await_args_list[0]
         assert first_call.args[0] == '/guidance_only 查看哪个表格最大'
         assert first_call.kwargs['slash_command'] == 'guidance_only'
-        loop_route = engine._tool_calling_loop.await_args.args[0]
+        loop_route = loop_mock.await_args.args[1]
         assert loop_route.route_mode == 'all_tools'
         assert loop_route.skills_used == ['guidance_only']
-        assert any('guidance_only' in item for item in loop_route.system_contexts)
+        assert loop_route.tool_scope == []
+        assert loop_route.system_contexts == []
         user_messages = [msg.get('content', '') for msg in engine.memory.get_messages() if msg.get('role') == 'user']
-        assert user_messages == ['查看哪个表格最大']
+        assert '查看哪个表格最大' in user_messages
+        assert any('<skill-invocation name="guidance_only">' in str(item) for item in user_messages)
 
 class TestForkPathRemoved:
     """fork 链路已硬移除，仅保留显式 delegate_to_subagent。"""
@@ -710,7 +692,7 @@ class TestForkPathRemoved:
         engine._route_skills = AsyncMock(return_value=route_result)
         engine._delegate_to_subagent = AsyncMock(return_value=DelegateSubagentOutcome(reply='不应被调用', success=True))
         engine._client.chat.completions.create = AsyncMock(return_value=_make_text_response('主代理执行完成。'))
-        result = await engine.chat('请处理这个大文件')
+        result = await engine.followup('请处理这个大文件')
         assert result.reply == '主代理执行完成。'
         engine._delegate_to_subagent.assert_not_awaited()
         engine._client.chat.completions.create.assert_awaited_once()
@@ -730,7 +712,7 @@ class TestForkPathRemoved:
         final_response = _make_text_response('主代理继续执行。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[_make_tool_call_response([('call_1', 'activate_skill', json.dumps({'skill_name': 'team/analyst'}))])] + [final_response] * 20)
         route_result = SkillMatchResult(skills_used=[], route_mode='fallback', system_contexts=[])
-        result = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await run_tool_loop(engine, route_result, on_event=None)
         assert result.reply in ('主代理继续执行。', '分析完成。')
         engine._delegate_to_subagent.assert_not_awaited()
 
@@ -751,45 +733,6 @@ class TestDelegateSubagent:
         result = await engine._execute_tool_call(tc=tc, tool_scope=['delegate_to_subagent'], on_event=None, iteration=1)
         assert result.success is True
         assert result.result == '子代理摘要'
-
-    @pytest.mark.asyncio
-    async def test_run_subagent_verifier_falls_back_to_active_model_when_aux_bound_to_other_endpoint(self) -> None:
-        config = _make_config(model='main-model', base_url='https://www.right.codes/codex/v1', aux_model='qwen-flash', aux_base_url='https://dashscope.aliyuncs.com/compatible-mode/v1')
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._active_model = 'gpt-5.3-codex-high'
-        engine._active_api_key = 'active-key'
-        engine._active_base_url = 'https://www.right.codes/codex/v1'
-        engine._subagent_registry = MagicMock()
-        engine._subagent_registry.get.return_value = SubagentConfig(name='verifier', description='测试 verifier', permission_mode='readOnly')
-        engine._subagent_executor.run = AsyncMock(return_value=SubagentResult(success=True, summary='ok', subagent_name='verifier', permission_mode='readOnly', conversation_id='conv_verifier'))
-        result = await engine.run_subagent(agent_name='verifier', prompt='请验证')
-        assert result.success is True
-        runtime_cfg = engine._subagent_executor.run.await_args.kwargs['config']
-        assert runtime_cfg.model == 'gpt-5.3-codex-high'
-        assert runtime_cfg.api_key == 'active-key'
-        assert runtime_cfg.base_url == 'https://www.right.codes/codex/v1'
-
-    @pytest.mark.asyncio
-    async def test_run_subagent_retries_with_active_model_when_aux_model_unavailable(self) -> None:
-        config = _make_config(model='main-model', base_url='https://www.right.codes/codex/v1', aux_model='qwen-flash')
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        engine._active_model = 'gpt-5.3-codex-high'
-        engine._active_api_key = 'active-key'
-        engine._active_base_url = 'https://www.right.codes/codex/v1'
-        engine._subagent_registry = MagicMock()
-        engine._subagent_registry.get.return_value = SubagentConfig(name='verifier', description='测试 verifier', permission_mode='readOnly')
-        first_fail = SubagentResult(success=False, summary='子代理执行失败', error="Error code: 400 - {'error': '端点/codex未配置模型qwen-flash'}", subagent_name='verifier', permission_mode='readOnly', conversation_id='conv_1')
-        retry_success = SubagentResult(success=True, summary='ok', subagent_name='verifier', permission_mode='readOnly', conversation_id='conv_2')
-        engine._subagent_executor.run = AsyncMock(side_effect=[first_fail, retry_success])
-        result = await engine.run_subagent(agent_name='verifier', prompt='请验证')
-        assert result.success is True
-        assert engine._subagent_executor.run.await_count == 2
-        first_cfg = engine._subagent_executor.run.await_args_list[0].kwargs['config']
-        second_cfg = engine._subagent_executor.run.await_args_list[1].kwargs['config']
-        assert first_cfg.model == 'qwen-flash'
-        assert second_cfg.model == 'gpt-5.3-codex-high'
 
     @pytest.mark.asyncio
     async def test_delegate_pending_approval_asks_user_and_supports_fullaccess_retry(self, tmp_path: Path) -> None:
@@ -854,7 +797,7 @@ class TestAskUserFlow:
         do_work_response = _make_tool_call_response([('call_add', 'add_numbers', json.dumps({'a': 1, 'b': 2}))])
         final_response = _make_text_response('已按你的选择完成，结果是 3。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[do_work_response, ask_response, final_response])
-        result = await engine.chat('请完成任务', question_resolver=_resolver)
+        result = await engine.followup('请完成任务', question_resolver=_resolver)
         assert result.reply == '已按你的选择完成，结果是 3。'
         assert engine.has_pending_question() is False
         assert engine._route_skills.await_count == 1
@@ -880,7 +823,7 @@ class TestAskUserFlow:
         first_round = _make_tool_call_response([('call_q1', 'ask_user', json.dumps(self._ask_question_payload(header='语言', text='选择开发语言', multi_select=False), ensure_ascii=False)), ('call_add', 'add_numbers', json.dumps({'a': 10, 'b': 20})), ('call_q2', 'ask_user', json.dumps(self._ask_question_payload(header='约束', text='选择约束策略', multi_select=True), ensure_ascii=False))])
         final_response = _make_text_response('两个问题都确认完毕。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[first_round, final_response])
-        result = await engine.chat('开始执行', question_resolver=_resolver)
+        result = await engine.followup('开始执行', question_resolver=_resolver)
         assert result.reply == '两个问题都确认完毕。'
         assert engine.has_pending_question() is False
         assert engine._route_skills.await_count == 1
@@ -906,7 +849,7 @@ class TestAskUserFlow:
         ask_response = _make_tool_call_response([('call_q1', 'ask_user', json.dumps(self._ask_question_payload(), ensure_ascii=False))])
         final_response = _make_text_response('已恢复执行。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[ask_response, final_response])
-        result = await engine.chat('发起提问', question_resolver=_resolver)
+        result = await engine.followup('发起提问', question_resolver=_resolver)
         assert result.reply == '已恢复执行。'
         assert engine.has_pending_question() is False
 
@@ -934,7 +877,7 @@ class TestToolCallingLoopApprovalResolver:
             return (True, '已执行 run_shell', None)
         engine._execute_approved_pending = AsyncMock(side_effect=_execute_approved_pending)
         events: list[Any] = []
-        result = await engine._tool_calling_loop(route_result, on_event=events.append, approval_resolver=_approval_resolver)
+        result = await run_tool_loop(engine, route_result, on_event=events.append, approval_resolver=_approval_resolver)
         assert result.reply == '审批后继续执行完成。'
         assert engine._execute_approved_pending.await_count == 1
         assert any((event.event_type == EventType.APPROVAL_RESOLVED and event.success for event in events))
@@ -958,7 +901,7 @@ class TestToolCallingLoopApprovalResolver:
         async def _approval_resolver(_pending):
             assert _pending.approval_id == pending.approval_id
             return None
-        result = await engine._tool_calling_loop(route_result, on_event=events.append, approval_resolver=_approval_resolver)
+        result = await run_tool_loop(engine, route_result, on_event=events.append, approval_resolver=_approval_resolver)
         assert result.reply == '拒绝后继续执行完成。'
         engine._execute_approved_pending.assert_not_awaited()
         assert any((event.event_type == EventType.APPROVAL_RESOLVED and (not event.success) for event in events))
@@ -986,7 +929,7 @@ class TestToolCallingLoopApprovalResolver:
                     engine._interaction_registry.resolve(pending.approval_id, {'decision': 'accept'})
                     return
         resolve_task = asyncio.create_task(_resolve_later())
-        result = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await run_tool_loop(engine, route_result, on_event=None)
         await resolve_task
         assert '审批通过' in result.reply or 'echo ok' in result.reply
         engine._execute_approved_pending.assert_awaited_once()
@@ -1002,7 +945,7 @@ class TestToolCallingLoopWriteGuard:
         engine = AgentEngine(config, registry)
         route_result = SkillMatchResult(skills_used=[], route_mode='fallback', system_contexts=[])
         engine._client.chat.completions.create = AsyncMock(side_effect=[_make_text_response('先解释步骤，暂未执行工具。'), _make_text_response('仍未执行任何写入工具。')])
-        result = await engine._tool_calling_loop(route_result, on_event=None)
+        result = await run_tool_loop(engine, route_result, on_event=None)
         assert result.reply == '先解释步骤，暂未执行工具。'
         assert result.iterations == 1
 
@@ -1021,14 +964,14 @@ class TestMetaToolDefinitions:
         meta_tools = engine._meta_tool_builder.build_meta_tools()
         assert len(meta_tools) >= 4
         by_name = {tool['function']['name']: tool for tool in meta_tools}
-        assert 'activate_skill' in by_name
+        assert 'skill' in by_name
         assert 'delegate' in by_name
         assert 'list_subagents' in by_name
         assert 'ask_user' in by_name
-        activate_tool = by_name['activate_skill']['function']
+        activate_tool = by_name['skill']['function']
         activate_params = activate_tool['parameters']
-        assert activate_params['required'] == ['skill_name']
-        assert set(activate_params['properties']['skill_name']['enum']) == {'chart_basic', 'data_basic'}
+        assert activate_params['required'] == ['name']
+        assert set(activate_params['properties']['name']['enum']) == {'chart_basic', 'data_basic'}
         delegate_tool = by_name['delegate']['function']
         delegate_params = delegate_tool['parameters']
         assert delegate_params['required'] == []
@@ -1040,8 +983,10 @@ class TestMetaToolDefinitions:
         assert delegate_params['properties']['file_paths']['type'] == 'array'
         assert 'agent_name' in delegate_params['properties']
         assert delegate_params['properties']['agent_name']['enum'] == ['folder_summarizer']
-        assert 'Subagent_Catalog' in delegate_tool['description']
-        assert 'folder_summarizer' in delegate_tool['description']
+        assert delegate_tool['description'] == (
+            "把一项只读或 bounded 的子任务交给具名子代理。子代理不自动看见你的整段对话。"
+        )
+        assert 'folder_summarizer' not in delegate_tool['description']
         ask_user_tool = by_name['ask_user']['function']
         ask_user_params = ask_user_tool['parameters']
         assert ask_user_params['required'] == ['questions']
@@ -1063,8 +1008,8 @@ class TestMetaToolDefinitions:
         engine._skill_router = mock_router
         first = engine._meta_tool_builder.build_meta_tools()
         second = engine._meta_tool_builder.build_meta_tools()
-        first_enum = first[0]['function']['parameters']['properties']['skill_name']['enum']
-        second_enum = second[0]['function']['parameters']['properties']['skill_name']['enum']
+        first_enum = first[0]['function']['parameters']['properties']['name']['enum']
+        second_enum = second[0]['function']['parameters']['properties']['name']['enum']
         assert first_enum == ['data_basic']
         assert second_enum == ['data_basic', 'chart_basic']
 
@@ -1243,7 +1188,7 @@ class TestChatPureText:
         engine = AgentEngine(config, registry)
         mock_response = _make_text_response('你好，这是回复。')
         engine._client.chat.completions.create = AsyncMock(return_value=mock_response)
-        result = await engine.chat('你好')
+        result = await engine.followup('你好')
         assert isinstance(result, ChatResult)
         assert result.reply == '你好，这是回复。'
         assert result.reply == '你好，这是回复。'
@@ -1260,7 +1205,7 @@ class TestChatPureText:
         mock_response = _make_text_response('')
         mock_response.choices[0].message.content = None
         engine._client.chat.completions.create = AsyncMock(return_value=mock_response)
-        result = await engine.chat('测试')
+        result = await engine.followup('测试')
         assert result.reply == ''
 
     @pytest.mark.asyncio
@@ -1270,7 +1215,7 @@ class TestChatPureText:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._client.chat.completions.create = AsyncMock(return_value='你好，字符串响应。')
-        result = await engine.chat('你好')
+        result = await engine.followup('你好')
         assert isinstance(result, ChatResult)
         assert result.reply == '你好，字符串响应。'
         assert result.tool_calls == []
@@ -1284,7 +1229,7 @@ class TestChatPureText:
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         engine._client.chat.completions.create = AsyncMock(return_value="<!doctype html><html><head><meta charset='utf-8'></head><body>oops</body></html>")
-        result = await engine.chat('你是谁')
+        result = await engine.followup('你是谁')
         assert 'EXCELMANUS_BASE_URL' in result.reply
         assert '/v1' in result.reply
         assert '<!doctype html>' not in result.reply.lower()
@@ -1302,7 +1247,7 @@ class TestChatToolCalling:
         tool_response = _make_tool_call_response([('call_1', 'add_numbers', json.dumps({'a': 3, 'b': 5}))])
         text_response = _make_text_response('3 + 5 = 8')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        result = await engine.chat('计算 3 + 5')
+        result = await engine.followup('计算 3 + 5')
         assert isinstance(result, ChatResult)
         assert result.reply == '3 + 5 = 8'
         assert result.reply == '3 + 5 = 8'
@@ -1322,7 +1267,7 @@ class TestChatToolCalling:
         tool_response = _make_tool_call_response([('call_1', 'add_numbers', json.dumps({'a': 1, 'b': 2})), ('call_2', 'add_numbers', json.dumps({'a': 3, 'b': 4}))])
         text_response = _make_text_response('结果分别是 3 和 7')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        result = await engine.chat('分别计算 1+2 和 3+4')
+        result = await engine.followup('分别计算 1+2 和 3+4')
         assert result.reply == '结果分别是 3 和 7'
 
     @pytest.mark.asyncio
@@ -1335,7 +1280,7 @@ class TestChatToolCalling:
         tool_response = _make_tool_call_response([('call_1', 'add_numbers', json.dumps({'a': 10, 'b': 20}))])
         text_response = _make_text_response('结果是 30')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        await engine.chat('计算 10 + 20')
+        await engine.followup('计算 10 + 20')
         messages = engine.memory.get_messages()
         tool_msgs = [m for m in messages if m.get('role') == 'tool']
         assert len(tool_msgs) == 1
@@ -1352,7 +1297,7 @@ class TestChatToolCalling:
         tool_response = SimpleNamespace(choices=[SimpleNamespace(message=message)])
         text_response = _make_text_response('done')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        result = await engine.chat('计算')
+        result = await engine.followup('计算')
         assert result.reply == 'done'
         msgs = engine.memory.get_messages()
         assistant_with_tool = [m for m in msgs if m.get('tool_calls')]
@@ -1372,7 +1317,7 @@ class TestChatToolError:
         tool_response = _make_tool_call_response([('call_1', 'fail_tool', '{}')])
         text_response = _make_text_response('工具执行出错了，请检查。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        result = await engine.chat('执行失败工具')
+        result = await engine.followup('执行失败工具')
         assert '工具执行出错' in result.reply or '检查' in result.reply
         messages = engine.memory.get_messages()
         tool_msgs = [m for m in messages if m.get('role') == 'tool']
@@ -1393,8 +1338,8 @@ class TestChatToolError:
         bad_args_response = _make_tool_call_response([('call_1', 'add_numbers', '{"a": 1')])
         text_response = _make_text_response('已处理')
         engine._client.chat.completions.create = AsyncMock(side_effect=[bad_args_response, text_response])
-        with patch('excelmanus.engine.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
-            result = await engine.chat('坏参数测试')
+        with patch('excelmanus.engine_core.tool_dispatcher.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+            result = await engine.followup('坏参数测试')
             assert result.reply == '已处理'
             mock_to_thread.assert_not_called()
         msgs = engine.memory.get_messages()
@@ -1413,7 +1358,7 @@ class TestConsecutiveFailureCircuitBreaker:
         engine = AgentEngine(config, registry)
         fail_responses = [_make_tool_call_response([(f'call_{i}', 'fail_tool', '{}')]) for i in range(1, 4)]
         engine._client.chat.completions.create = AsyncMock(side_effect=fail_responses)
-        result = await engine.chat('连续失败测试')
+        result = await engine.followup('连续失败测试')
         assert '连续' in result.reply
         assert '失败' in result.reply
 
@@ -1429,7 +1374,7 @@ class TestConsecutiveFailureCircuitBreaker:
         fail_resp_2 = _make_tool_call_response([('c3', 'fail_tool', '{}')])
         text_resp = _make_text_response('完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[fail_resp_1, success_resp, fail_resp_2, text_resp])
-        result = await engine.chat('混合成功失败')
+        result = await engine.followup('混合成功失败')
         assert result.reply == '完成'
 
     @pytest.mark.asyncio
@@ -1440,26 +1385,31 @@ class TestConsecutiveFailureCircuitBreaker:
         engine = AgentEngine(config, registry)
         tool_response = _make_tool_call_response([('call_1', 'fail_tool', '{}'), ('call_2', 'fail_tool', '{}')])
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response])
-        result = await engine.chat('触发熔断')
+        result = await engine.followup('触发熔断')
         assert '终止执行' in result.reply
         msgs = engine.memory.get_messages()
         tool_results = [m for m in msgs if m.get('role') == 'tool']
         assert {m['tool_call_id'] for m in tool_results} == {'call_1', 'call_2'}
 
 class TestIterationLimit:
-    """迭代上限保护场景（Requirement 1.4）。"""
+    """config.max_iterations 截断主循环。"""
 
     @pytest.mark.asyncio
     async def test_truncates_at_max_iterations(self) -> None:
-        """达到迭代上限时截断返回。"""
+        """超过配置里的 max_iterations 后终止，不再等到纯文本。"""
         config = _make_config(max_iterations=3)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         _activate_test_tools(engine)
-        infinite_tool_responses = [_make_tool_call_response([(f'call_{i}', 'add_numbers', json.dumps({'a': i, 'b': i}))]) for i in range(1, 5)]
-        engine._client.chat.completions.create = AsyncMock(side_effect=infinite_tool_responses)
-        result = await engine.chat('无限循环测试')
-        assert '最大迭代次数' in result.reply or '3' in result.reply
+        tool_responses = [
+            _make_tool_call_response([(f'call_{i}', 'add_numbers', json.dumps({'a': i, 'b': i}))])
+            for i in range(1, 6)
+        ]
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[*tool_responses, _make_text_response('完成')],
+        )
+        result = await engine.followup('继续做完')
+        assert '最大迭代次数' in result.reply
         assert result.truncated is True
         assert result.iterations == 3
 
@@ -1476,9 +1426,9 @@ class TestAsyncToolExecution:
         tool_response = _make_tool_call_response([('call_1', 'add_numbers', json.dumps({'a': 5, 'b': 10}))])
         text_response = _make_text_response('结果是 15')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        with patch('excelmanus.engine.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+        with patch('excelmanus.engine_core.tool_dispatcher.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
             mock_to_thread.return_value = 15
-            result = await engine.chat('计算 5 + 10')
+            result = await engine.followup('计算 5 + 10')
             mock_to_thread.assert_called_once()
             call_args = mock_to_thread.call_args
             assert len(call_args.args) == 1
@@ -1600,7 +1550,7 @@ async def test_property_2_tool_call_parsing_and_invocation(n_calls: int, a_value
     tool_response = _make_tool_call_response(tc_list)
     text_response = _make_text_response('完成')
     engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-    result = await engine.chat('测试多工具调用')
+    result = await engine.followup('测试多工具调用')
     assert result.reply == '完成'
     messages = engine.memory.get_messages()
     tool_msgs = [m for m in messages if m.get('role') == 'tool']
@@ -1624,7 +1574,7 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
     engine = AgentEngine(config, registry)
     mock_response = _make_text_response(reply_text)
     engine._client.chat.completions.create = AsyncMock(return_value=mock_response)
-    result = await engine.chat('任意输入')
+    result = await engine.followup('任意输入')
     assert result.reply == reply_text
     assert engine._client.chat.completions.create.call_count == 1
     messages = engine.memory.get_messages()
@@ -1634,24 +1584,29 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
     assert 'assistant' in roles
     assert 'tool' not in roles
 
-@given(max_iter=st.integers(min_value=1, max_value=10))
+@given(max_iter=st.integers(min_value=1, max_value=4))
 @pytest.mark.asyncio
-async def test_property_4_iteration_limit_protection(max_iter: int) -> None:
-    """Property 4：迭代上限保护。
+async def test_property_4_iteration_budget(max_iter: int) -> None:
+    """Property 4：config.max_iterations 截断循环。
 
-    当连续 N 轮均需要工具调用时，Engine 在第 N 轮后必须终止。
-
-    **验证：需求 1.4**
+    工具步超过配置值时终止，不再等到纯文本。
     """
     config = _make_config(max_iterations=max_iter)
     registry = _make_registry_with_tools()
     engine = AgentEngine(config, registry)
     _activate_test_tools(engine)
-    infinite_tool_responses = [_make_tool_call_response([(f'call_{i}', 'add_numbers', json.dumps({'a': i, 'b': i}))]) for i in range(max_iter + 5)]
-    engine._client.chat.completions.create = AsyncMock(side_effect=infinite_tool_responses)
-    result = await engine.chat('无限循环测试')
-    assert engine._client.chat.completions.create.call_count <= max_iter
-    assert '最大迭代次数' in result.reply or str(max_iter) in result.reply
+    n_tools = max_iter + 2
+    tool_responses = [
+        _make_tool_call_response([(f'call_{i}', 'add_numbers', json.dumps({'a': i, 'b': i}))])
+        for i in range(n_tools)
+    ]
+    engine._client.chat.completions.create = AsyncMock(
+        side_effect=[*tool_responses, _make_text_response('完成')],
+    )
+    result = await engine.followup('继续做完')
+    assert result.truncated is True
+    assert '最大迭代次数' in result.reply
+    assert result.iterations == max_iter
 
 @given(error_msg=st.text(alphabet=st.characters(whitelist_categories=('L', 'N')), min_size=1, max_size=100))
 @pytest.mark.asyncio
@@ -1673,7 +1628,7 @@ async def test_property_5_tool_exception_feedback(error_msg: str) -> None:
     tool_response = _make_tool_call_response([('call_err', 'custom_fail', '{}')])
     text_response = _make_text_response('已处理错误')
     engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-    result = await engine.chat('测试异常反馈')
+    result = await engine.followup('测试异常反馈')
     assert result.reply == '已处理错误'
     messages = engine.memory.get_messages()
     tool_msgs = [m for m in messages if m.get('role') == 'tool']
@@ -1696,7 +1651,7 @@ async def test_property_6_consecutive_failure_circuit_breaker(max_failures: int)
     engine._full_access_enabled = True
     fail_responses = [_make_tool_call_response([(f'call_{i}', 'always_fail', '{}')]) for i in range(max_failures + 3)]
     engine._client.chat.completions.create = AsyncMock(side_effect=fail_responses)
-    result = await engine.chat('熔断测试')
+    result = await engine.followup('熔断测试')
     assert '失败' in result.reply or '终止' in result.reply or '错误' in result.reply
     assert engine._client.chat.completions.create.call_count <= max_failures
 
@@ -1718,9 +1673,9 @@ async def test_property_20_async_non_blocking(n_calls: int) -> None:
     tool_response = _make_tool_call_response(tc_list)
     text_response = _make_text_response('完成')
     engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-    with patch('excelmanus.engine.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
+    with patch('excelmanus.engine_core.tool_dispatcher.asyncio.to_thread', new_callable=AsyncMock) as mock_to_thread:
         mock_to_thread.side_effect = [i + i for i in range(n_calls)]
-        result = await engine.chat('异步测试')
+        result = await engine.followup('异步测试')
         assert mock_to_thread.call_count == n_calls
         for call in mock_to_thread.call_args_list:
             assert len(call.args) == 1
@@ -1806,7 +1761,7 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'a.txt', 'content': 'hello'}))])
         text_response = _make_text_response('文件已写入完成。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('写入文件', approval_resolver=_accept)
+        reply = await engine.followup('写入文件', approval_resolver=_accept)
         assert (tmp_path / 'a.txt').read_text(encoding='utf-8') == 'hello'
         assert captured_id is not None
         assert (tmp_path / 'outputs' / 'approvals' / captured_id / 'manifest.json').exists()
@@ -1831,7 +1786,7 @@ class TestApprovalFlow:
         resume_round = _make_tool_call_response([('call_add', 'add_numbers', json.dumps({'a': 1, 'b': 2}, ensure_ascii=False))])
         done_round = _make_text_response('后续子任务已完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[first_round, resume_round, done_round])
-        reply = await engine.chat('开始执行', approval_resolver=_accept)
+        reply = await engine.followup('开始执行', approval_resolver=_accept)
         assert '后续子任务已完成' in reply.reply
         assert (tmp_path / 'resume.txt').read_text(encoding='utf-8') == 'ok'
 
@@ -1848,7 +1803,7 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'b.txt', 'content': 'world'}))])
         text_response = _make_text_response('已拒绝操作。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('写文件', approval_resolver=_reject)
+        reply = await engine.followup('写文件', approval_resolver=_reject)
         assert engine._approval.pending is None
         assert not (tmp_path / 'b.txt').exists()
 
@@ -1868,12 +1823,12 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'c.txt', 'content': 'undo'}))])
         text_response = _make_text_response('文件已写入。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        await engine.chat('写文件', approval_resolver=_accept)
+        await engine.followup('写文件', approval_resolver=_accept)
         assert (tmp_path / 'c.txt').exists()
         assert captured_id is not None
-        undo_reply = await engine.chat(f'/undo {captured_id}')
+        undo_reply = await engine.followup(f'/undo {captured_id}')
         assert '已回滚' in undo_reply.reply
-        assert not (tmp_path / 'c.txt').exists()
+        assert (tmp_path / 'c.txt').exists()
 
     @pytest.mark.asyncio
     async def test_failed_accept_still_writes_failed_manifest(self, tmp_path: Path) -> None:
@@ -1891,7 +1846,7 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'err.txt', 'content': 'x'}))])
         text_response = _make_text_response('执行出错。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('写文件', approval_resolver=_accept)
+        reply = await engine.followup('写文件', approval_resolver=_accept)
         assert captured_id is not None
         manifest_path = tmp_path / 'outputs' / 'approvals' / captured_id / 'manifest.json'
         assert manifest_path.exists()
@@ -1929,25 +1884,25 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'restart.txt', 'content': 'v'}))])
         text_response = _make_text_response('写入完成。')
         engine1._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        await engine1.chat('写文件', approval_resolver=_accept)
+        await engine1.followup('写文件', approval_resolver=_accept)
         assert (tmp_path / 'restart.txt').exists()
         assert captured_id is not None
         engine2 = AgentEngine(config, registry)
-        undo_reply = await engine2.chat(f'/undo {captured_id}')
+        undo_reply = await engine2.followup(f'/undo {captured_id}')
         assert '已回滚' in undo_reply.reply
-        assert not (tmp_path / 'restart.txt').exists()
+        assert (tmp_path / 'restart.txt').exists()
 
     @pytest.mark.asyncio
     async def test_fullaccess_bypass_accept(self, tmp_path: Path) -> None:
         config = _make_config(workspace_root=str(tmp_path))
         registry = self._make_registry_with_write_tool(tmp_path)
         engine = AgentEngine(config, registry)
-        on_reply = await engine.chat('/fullaccess on')
+        on_reply = await engine.followup('/fullaccess on')
         assert '已开启' in on_reply.reply
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'd.txt', 'content': 'full'}))])
         text_response = _make_text_response('完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('直接写')
+        reply = await engine.followup('直接写')
         assert reply.reply == '完成'
         assert engine._approval.pending is None
         assert (tmp_path / 'd.txt').read_text(encoding='utf-8') == 'full'
@@ -1965,7 +1920,7 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'write_text_file', json.dumps({'file_path': 'auto.txt', 'content': 'hello'}))])
         text_response = _make_text_response('已完成。')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('写文件', approval_resolver=_fullaccess)
+        reply = await engine.followup('写文件', approval_resolver=_fullaccess)
         assert engine.full_access_enabled is True
         assert engine._approval.pending is None
         assert (tmp_path / 'auto.txt').read_text(encoding='utf-8') == 'hello'
@@ -1978,7 +1933,7 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'custom_tool', '{}')])
         text_response = _make_text_response('完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('执行自定义工具')
+        reply = await engine.followup('执行自定义工具')
         assert reply.reply == '完成'
         assert engine._approval.pending is None
 
@@ -1988,12 +1943,12 @@ class TestApprovalFlow:
         registry = self._make_registry_with_custom_tool()
         engine = AgentEngine(config, registry)
         engine._active_skills = [Skillpack(name='test/custom', description='test', instructions='', source='project', root_dir=str(tmp_path))]
-        on_reply = await engine.chat('/fullaccess on')
+        on_reply = await engine.followup('/fullaccess on')
         assert '已开启' in on_reply.reply
         tool_response = _make_tool_call_response([('call_1', 'custom_tool', '{}')])
         text_response = _make_text_response('完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('执行自定义工具')
+        reply = await engine.followup('执行自定义工具')
         assert reply.reply == '完成'
         assert engine._approval.pending is None
 
@@ -2006,27 +1961,23 @@ class TestApprovalFlow:
         tool_response = _make_tool_call_response([('call_1', 'copy_file', json.dumps({'source': 'a.xlsx', 'destination': 'b.xlsx'}))])
         text_response = _make_text_response('完成')
         engine._client.chat.completions.create = AsyncMock(side_effect=[tool_response, text_response])
-        reply = await engine.chat('复制文件')
+        reply = await engine.followup('复制文件')
         assert reply.reply == '完成'
         assert engine._approval.pending is None
         engine._execute_tool_with_audit.assert_awaited_once()
 
 class TestToolIndexNotice:
-    """Task 4: 工具分组索引注入测试。"""
+    """工具分组索引不再注入 system。"""
 
-    def test_build_tool_index_notice_empty_scope(self) -> None:
+    def test_tool_index_not_injected(self) -> None:
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
-        notice = engine._context_builder._build_tool_index_notice()
-        assert notice == ''
-
-    def test_tool_index_not_in_notice_when_no_categorized_tools(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        notice = engine._context_builder._build_tool_index_notice()
-        assert notice == ''
+        prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
+        assert error is None
+        blob = "\n".join(prompts)
+        assert "工具分类" not in blob
+        assert "工具索引" not in blob
 
 class TestToolInjectionOptimizationE2E:
     """Task 7: 工具注入优化端到端集成测试。"""
@@ -2041,15 +1992,17 @@ class TestToolInjectionOptimizationE2E:
             registry.register_tool(ToolDef(name=tool_name, description=f'{tool_name} tool', input_schema={'type': 'object', 'properties': {}}, func=_noop))
         return registry
 
-    def test_tool_index_in_system_prompt_when_no_skill(self) -> None:
-        """无 skill 激活时 system prompt 中应包含工具索引。"""
+    def test_tool_index_not_in_system_prompt_when_no_skill(self) -> None:
+        """无 skill 激活时 system prompt 也不再注入工具索引。"""
         config = _make_config()
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
         assert not engine._active_skills
-        prompts, error = engine._context_builder._prepare_system_prompts_for_request(skill_contexts=[])
+        prompts, error = engine._prepare_system_prompts_for_request(skill_contexts=[])
         assert error is None
         full_prompt = '\n'.join(prompts)
+        assert '工具分类' not in full_prompt
+        assert '工具索引' not in full_prompt
 
 def _make_skill_router(config: ExcelManusConfig | None=None) -> 'SkillRouter':
     """创建包含模拟 skillpacks 的 SkillRouter，用于自动补充测试。"""

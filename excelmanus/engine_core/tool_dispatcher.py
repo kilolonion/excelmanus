@@ -33,7 +33,9 @@ from excelmanus.engine_core.workspace_probe import (
 )
 from excelmanus.hooks import HookDecision, HookEvent
 from excelmanus.logger import get_logger, log_tool_call
+from excelmanus.security.policy import writes_denied
 from excelmanus.tools.registry import ToolNotAllowedError
+from excelmanus.workspace.identity import IdentityError
 
 
 class _SyntheticToolCall:
@@ -79,140 +81,8 @@ if TYPE_CHECKING:
 
 logger = get_logger("tool_dispatcher")
 
-
-# finish_task 完成程度：完成 / 部分完成 / 停止但未完成
-_FINISH_STATUS_LABELS = {
-    "completed": "任务已完成",
-    "partial": "任务部分完成",
-    "stopped": "任务已停止，尚未完成",
-}
-
-
-def _as_str_list(value: Any) -> list[str]:
-    """将 warnings / incomplete 规范为去空字符串列表。"""
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip() for item in value if str(item).strip()]
-
-
-def _lookup_content_version(engine: Any, path: str) -> str:
-    """若 FileRegistry 有该路径的内容哈希，则作为 content_version 返回。"""
-    if not path or engine is None:
-        return ""
-    registry = getattr(engine, "_file_registry", None) or getattr(engine, "file_registry", None)
-    if registry is None:
-        return ""
-    getter = getattr(registry, "get_by_path", None)
-    if not callable(getter):
-        return ""
-    try:
-        entry = getter(path)
-        if entry is None:
-            resolve = getattr(registry, "resolve_canonical", None) or getattr(registry, "resolve_path", None)
-            if callable(resolve):
-                canon = resolve(path)
-                if canon:
-                    entry = getter(str(canon))
-        if entry is None:
-            return ""
-        return str(getattr(entry, "content_hash", "") or "")
-    except Exception:
-        return ""
-
-
-def _coerce_finish_outputs(arguments: dict[str, Any], engine: Any = None) -> list[dict[str, Any]]:
-    """规范化 finish_task.outputs。"""
-    result: list[dict[str, Any]] = []
-    raw_outputs = arguments.get("outputs")
-    if isinstance(raw_outputs, list):
-        for item in raw_outputs:
-            if isinstance(item, str) and item.strip():
-                result.append({"path": item.strip(), "changed_ranges": []})
-            elif isinstance(item, dict):
-                path = str(item.get("path") or "").strip()
-                if not path:
-                    continue
-                ranges = item.get("changed_ranges")
-                entry: dict[str, Any] = {
-                    "path": path,
-                    "changed_ranges": [
-                        str(r).strip() for r in ranges if str(r).strip()
-                    ] if isinstance(ranges, list) else [],
-                }
-                version = item.get("content_version") or item.get("content_hash")
-                if version:
-                    entry["content_version"] = str(version)
-                result.append(entry)
-
-    if engine is not None:
-        for entry in result:
-            if entry.get("content_version"):
-                continue
-            version = _lookup_content_version(engine, entry["path"])
-            if version:
-                entry["content_version"] = version
-    return result
-
-
-def _infer_finish_status(arguments: dict[str, Any], incomplete: list[str]) -> str:
-    """显式 status 优先；否则有未完成项视为部分完成。"""
-    raw = str(arguments.get("status") or "").strip().lower()
-    if raw in _FINISH_STATUS_LABELS:
-        return raw
-    if incomplete:
-        return "partial"
-    return "completed"
-
-
-def _render_finish_task_report(
-    report: dict[str, Any] | None,
-    summary: str,
-    *,
-    status: str = "completed",
-    outputs: list[dict[str, Any]] | None = None,
-    warnings: list[str] | None = None,
-    incomplete: list[str] | None = None,
-) -> str:
-    """将 finish_task 参数渲染为区分完成程度的报告。
-
-    兼容旧会话：仍接受 report dict（operations/key_findings 等）与 summary。
-    不再返回笼统的「✅ 任务完成」。
-    """
-    parts: list[str] = [_FINISH_STATUS_LABELS.get(status, _FINISH_STATUS_LABELS["completed"])]
-
-    if isinstance(report, dict):
-        for key in ("operations", "key_findings", "explanation", "suggestions"):
-            text = (report.get(key) or "").strip()
-            if text:
-                parts.append(text)
-
-    summary_text = (summary or "").strip()
-    if summary_text:
-        parts.append(summary_text)
-
-    if outputs:
-        lines: list[str] = []
-        for item in outputs:
-            path = str(item.get("path") or "").strip()
-            if not path:
-                continue
-            line = path
-            ranges = item.get("changed_ranges") or []
-            if ranges:
-                line += f"（{', '.join(str(r) for r in ranges)}）"
-            version = item.get("content_version")
-            if version:
-                line += f" version={version}"
-            lines.append(f"- {line}")
-        if lines:
-            parts.append("产出：\n" + "\n".join(lines))
-
-    if warnings:
-        parts.append("警告：\n" + "\n".join(f"- {w}" for w in warnings))
-    if incomplete:
-        parts.append("未完成：\n" + "\n".join(f"- {item}" for item in incomplete))
-
-    return "\n\n".join(parts)
+# 单次 run_code 内的嵌套 SDK 调用上限；与回合步数无关。
+_CODE_MODE_NESTED_CALL_BUDGET = 64
 
 
 def _image_content_hash(raw_bytes: bytes) -> str:
@@ -254,6 +124,7 @@ class ToolDispatcher:
         # Code Mode 子调用与父 run_code 共用的调用次数预算；None 表示不限制
         self._call_budget: int | None = None
         self._call_count: int = 0
+        self._runtime: Any = None
         # 最近一次工具调用的截断前 model_text
         self._last_call_raw_result: str = ""
         self._last_call_structured: ToolResult | None = None
@@ -274,24 +145,21 @@ class ToolDispatcher:
             CodePolicyHandler,
             DefaultToolHandler,
             DelegationHandler,
-            FinishTaskHandler,
             HighRiskApprovalHandler,
             SkillActivationHandler,
             SkillManagementHandler,
-            SuggestModeSwitchHandler,
         )
         # T2: 按工具名建立 O(1) 索引，跳过需动态判断的 handler
         # 每个 handler 只实例化一次，specific 和 generic 复用同一对象
         _specific: dict[str, Any] = {}
         _skill = SkillActivationHandler(engine, self)
+        _specific["skill"] = _skill
         _specific["activate_skill"] = _skill
         _specific["manage_skills"] = SkillManagementHandler(engine, self)
         _deleg = DelegationHandler(engine, self)
         for _dn in ("delegate", "delegate_to_subagent", "list_subagents", "parallel_delegate"):
             _specific[_dn] = _deleg
-        _specific["finish_task"] = FinishTaskHandler(engine, self)
         _specific["ask_user"] = AskUserHandler(engine, self)
-        _specific["suggest_mode_switch"] = SuggestModeSwitchHandler(engine, self)
         self._specific_handlers: dict[str, Any] = _specific
         # 动态/条件 handler + 兜底（保持原有顺序）
         _code_policy = CodePolicyHandler(engine, self)
@@ -385,12 +253,6 @@ class ToolDispatcher:
         """唯一消费边界：任意工具返回值 → ToolResult。"""
         return coerce_legacy_result(result_value)
 
-    def _register_cow_mapping(self, cow_mapping: dict[str, str]) -> None:
-        self._engine.state.register_cow_mappings(cow_mapping)
-        tx = self._engine.transaction
-        if tx is not None:
-            tx.register_cow_mappings(cow_mapping)
-
     def _schedule_image_injection(self, injection: dict[str, Any]) -> None:
         e = self._engine
         base64_data = injection.get("base64")
@@ -414,12 +276,10 @@ class ToolDispatcher:
                     injection.get("mime_type"),
                 )
         else:
-            logger.info("主模型无视觉能力，跳过图片注入")
+            logger.info("当前模型无视觉能力，跳过图片注入")
 
     def _apply_ui_meta_effects(self, tool_result: ToolResult) -> None:
         ui = tool_result.ui_meta
-        if ui.cow_mapping:
-            self._register_cow_mapping(ui.cow_mapping)
         if ui.image:
             self._schedule_image_injection(ui.image)
 
@@ -447,82 +307,6 @@ class ToolDispatcher:
             logger.info("已注入 %d 张延迟图片到 memory", count)
         self._deferred_image_injections.clear()
         return count
-
-    def _redirect_cow_paths(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-    ) -> tuple[dict[str, Any], list[str]]:
-        """检查工具参数中的文件路径是否命中 CoW 注册表，自动重定向。
-
-        返回 (可能修改过的 arguments, 重定向提醒消息列表)。
-        """
-        from excelmanus.tools.policy import (
-            AUDIT_TARGET_ARG_RULES_ALL,
-            AUDIT_TARGET_ARG_RULES_FIRST,
-            READ_ONLY_SAFE_TOOLS,
-        )
-
-        # 仅从 FileRegistry 查询 CoW 重定向
-        _file_reg = self._engine.file_registry
-        _use_file_reg = bool(
-            _file_reg is not None
-            and getattr(_file_reg, "has_versions", False)
-            and hasattr(_file_reg, "lookup_cow_redirect")
-        )
-        if not _use_file_reg:
-            return arguments, []
-
-        path_fields: list[str] = []
-        all_fields = AUDIT_TARGET_ARG_RULES_ALL.get(tool_name)
-        if all_fields is not None:
-            path_fields.extend(all_fields)
-        else:
-            first_fields = AUDIT_TARGET_ARG_RULES_FIRST.get(tool_name)
-            if first_fields is not None:
-                path_fields.extend(first_fields)
-
-        if tool_name in READ_ONLY_SAFE_TOOLS:
-            for key in ("file_path", "path", "directory"):
-                if key in arguments and key not in path_fields:
-                    path_fields.append(key)
-
-        # run_code 的 code 参数中的路径由沙盒层 sandbox_hook 处理，此处不拦截
-        if not path_fields:
-            return arguments, []
-
-        workspace_root = self._engine.config.workspace_root
-        redirected = dict(arguments)
-        reminders: list[str] = []
-        for field_name in path_fields:
-            raw = arguments.get(field_name)
-            if raw is None:
-                continue
-            raw_str = str(raw).strip()
-            if not raw_str:
-                continue
-            # 尝试匹配：直接匹配相对路径，或去掉 workspace_root 前缀后匹配
-            rel_path = raw_str
-            if workspace_root and raw_str.startswith(workspace_root):
-                rel_path = raw_str[len(workspace_root):].lstrip("/")
-            redirect = _file_reg.lookup_cow_redirect(rel_path)
-            if isinstance(redirect, str):
-                # 保持原始路径格式（绝对/相对）
-                if raw_str.startswith(workspace_root):
-                    new_path = f"{workspace_root}/{redirect}"
-                else:
-                    new_path = redirect
-                redirected[field_name] = new_path
-                reminders.append(
-                    f"⚠️ 路径 `{raw_str}` 是受保护的原始文件，"
-                    f"已自动重定向到副本 `{new_path}`。"
-                    f"请在后续操作中直接使用副本路径。"
-                )
-                logger.info(
-                    "CoW 路径拦截: tool=%s field=%s %s → %s",
-                    tool_name, field_name, raw_str, new_path,
-                )
-        return redirected, reminders
 
     def parse_arguments(self, raw_args: Any) -> tuple[dict[str, Any], str | None]:
         """解析工具调用参数，返回 (arguments, error)。
@@ -599,6 +383,32 @@ class ToolDispatcher:
             error=code,
             structured=structured,
         )
+
+    _PLAN_MODE_ALLOWED = frozenset({"write_plan", "exit_plan_mode"})
+    _READ_MODE_DENIED_BY_NAME = frozenset({"write_plan", "exit_plan_mode"})
+
+    def _direct_call_allowed(self, tc: Any, tool_name: str) -> bool:
+        from excelmanus.tools.runtime import is_direct_call_allowed, present_as_of
+
+        parent = getattr(tc, "parent_call_id", None) or None
+        if isinstance(parent, str) and not parent.strip():
+            parent = None
+        return is_direct_call_allowed(
+            tool_name,
+            present_as=present_as_of(self._engine),
+            parent=parent,
+        )
+
+    def _denied_in_read_mode(self, tool_name: str) -> bool:
+        """read/plan 目录仍完整；执行器拒绝写入。plan 仅放行写计划/退出计划。"""
+        chat = str(getattr(self._engine, "_current_chat_mode", "write") or "write")
+        if chat == "plan" and tool_name in self._PLAN_MODE_ALLOWED:
+            return False
+        if tool_name in self._READ_MODE_DENIED_BY_NAME:
+            return True
+        getter = getattr(self._engine, "get_tool_write_effect", None)
+        effect = getter(tool_name) if callable(getter) else "unknown"
+        return effect in ("workspace_write", "external_write", "dynamic", "unknown")
 
     async def call_registry_tool(
         self,
@@ -694,7 +504,7 @@ class ToolDispatcher:
             return self._blocked_tool_result("CANCELLED", "任务已取消")
         if not self.consume_call_budget():
             return self._blocked_tool_result(
-                "BUDGET_EXCEEDED", "嵌套工具调用已达本轮预算"
+                "BUDGET_EXCEEDED", "本次 run_code 内嵌套调用达上限"
             )
         self._seed_seen_versions()
         if not call_id:
@@ -709,7 +519,9 @@ class ToolDispatcher:
         )
         if on_event is None:
             on_event = getattr(self, "_current_on_event", None)
-        tcr = await self.execute(tc, tool_scope, on_event, 0)
+        runtime = getattr(self, "_runtime", None)
+        execute = runtime.execute if runtime is not None else self.execute
+        tcr = await execute(tc, tool_scope, on_event, 0)
         if isinstance(tcr, ToolResult):
             return tcr
         if isinstance(tcr, ToolCallResult):
@@ -723,7 +535,19 @@ class ToolDispatcher:
                     ),
                 )
             if tcr.structured is not None:
-                return tcr.structured
+                if tcr.success or not tcr.structured.success:
+                    return tcr.structured
+                return ToolResult(
+                    success=False,
+                    model_text=tcr.result,
+                    value=tcr.structured.value,
+                    error=tcr.structured.error
+                    or ToolError(
+                        code=str(tcr.error or "TOOL_ERROR"),
+                        message=tcr.error or tcr.result,
+                    ),
+                    ui_meta=tcr.structured.ui_meta,
+                )
             return ToolResult.from_text(tcr.result, success=bool(tcr.success))
         return self._coerce_tool_result(tcr)
 
@@ -842,13 +666,24 @@ class ToolDispatcher:
                 {"_raw_arguments": raw_args},
                 error=error,
             )
+        elif not self._direct_call_allowed(tc, tool_name):
+            from excelmanus.tools.runtime import UNKNOWN_TOOL, unknown_tool_message
+
+            result_str = unknown_tool_message(tool_name)
+            success = False
+            error = UNKNOWN_TOOL
+            structured = self._blocked_tool_result(UNKNOWN_TOOL, result_str)
+            log_tool_call(logger, tool_name, arguments, error=error)
+        elif (
+            writes_denied(e)
+            and self._denied_in_read_mode(tool_name)
+        ):
+            result_str = "当前是只读模式，写入被拒绝。"
+            success = False
+            error = "PERMISSION_DENIED"
+            structured = self._blocked_tool_result("PERMISSION_DENIED", result_str)
+            log_tool_call(logger, tool_name, arguments, error=error)
         else:
-            # ── 备份沙盒模式：重定向文件路径 ──
-            arguments = e.redirect_backup_paths(tool_name, arguments)
-
-            # ── CoW 路径拦截：将原始保护路径重定向到 outputs/ 副本 ──
-            arguments, _cow_reminders = self._redirect_cow_paths(tool_name, arguments)
-
             pre_hook_raw = e.run_skill_hook(
                 skill=hook_skill,
                 event=HookEvent.PRE_TOOL_USE,
@@ -1028,6 +863,7 @@ class ToolDispatcher:
         """
         session = None
         session_token = None
+        nested_prev: tuple[int | None, int] | None = None
         if tool_name == "run_code":
             from excelmanus.code_mode import (
                 build_session_for_run_code,
@@ -1045,14 +881,8 @@ class ToolDispatcher:
                     )
                     session_token = set_code_mode_session(session)
                     session.start()
-                    engine = getattr(self, "_engine", None)
-                    config = getattr(engine, "config", None)
-                    limit = int(getattr(config, "max_iterations", 50) or 50)
-                    used = int(
-                        getattr(getattr(engine, "state", None), "last_tool_call_count", 0)
-                        or 0
-                    )
-                    self.begin_call_budget(max(0, limit - used))
+                    nested_prev = (self._call_budget, self._call_count)
+                    self.begin_call_budget(_CODE_MODE_NESTED_CALL_BUDGET)
                 except Exception:
                     logger.debug("Code Mode 桥启动失败，继续无 SDK", exc_info=True)
                     session = None
@@ -1074,7 +904,10 @@ class ToolDispatcher:
                     session.stop()
                 except Exception:
                     logger.debug("Code Mode 桥停止失败", exc_info=True)
-                self.begin_call_budget(None)
+                if nested_prev is not None:
+                    self._call_budget, self._call_count = nested_prev
+                else:
+                    self.begin_call_budget(None)
             if session_token is not None:
                 from excelmanus.code_mode import reset_code_mode_session as _reset_cm
 
@@ -1220,11 +1053,24 @@ class ToolDispatcher:
                 arguments,
                 **handler_kwargs,
             )
+        except IdentityError as exc:
+            from excelmanus.engine_core.tool_result import error_result
+
+            structured = error_result(str(exc), code="PATH_INVALID")
+            log_tool_call(logger, tool_name, arguments, error=str(exc))
+            return _ToolExecOutcome(
+                result_str=structured.model_text,
+                success=False,
+                error=str(exc),
+                structured=structured,
+            )
         except ValueError as exc:
             result_str = str(exc)
             log_tool_call(logger, tool_name, arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
         except ToolNotAllowedError:
+            from excelmanus.engine_core.tool_result import error_result
+
             permission_error = {
                 "error_code": "TOOL_NOT_ALLOWED",
                 "tool": tool_name,
@@ -1232,7 +1078,17 @@ class ToolDispatcher:
             }
             result_str = json.dumps(permission_error, ensure_ascii=False)
             log_tool_call(logger, tool_name, arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+            structured = error_result(
+                permission_error["message"],
+                code="TOOL_NOT_ALLOWED",
+                fields=permission_error,
+            )
+            return _ToolExecOutcome(
+                result_str=result_str,
+                success=False,
+                error=result_str,
+                structured=structured,
+            )
         except Exception as exc:
             root_exc: Exception = exc
             audit_record = None
@@ -1279,47 +1135,23 @@ class ToolDispatcher:
             structured = self._coerce_tool_result(result_str)
             if not structured.success:
                 success = False
-                error = structured.error.message if structured.error else structured.model_text
+                if not error:
+                    error = structured.error.message if structured.error else structured.model_text
+        if structured is not None and not success and structured.success:
+            structured = ToolResult(
+                success=False,
+                model_text=result_str,
+                value=structured.value,
+                error=structured.error
+                or ToolError(code="TOOL_ERROR", message=error or result_str),
+                ui_meta=structured.ui_meta,
+            )
         if structured is not None:
             self._remember_tool_versions(structured)
 
         # ── CoW 路径拦截提醒：追加到 model_text ──
         if cow_reminders:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
-
-        # ── 备份沙盒提醒：首次写入成功后追加备份文件路径 ──
-        tx = e.transaction
-        if (
-            success
-            and e.workspace.transaction_enabled
-            and tx is not None
-            and not e.state.backup_write_notice_shown
-        ):
-            from pathlib import Path as _Path
-
-            from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS as _RO_TOOLS
-
-            if tool_name not in _RO_TOOLS:
-                backups = tx.list_staged()
-                if backups:
-                    backup_dir = str(tx.staging_dir)
-                    file_names = [
-                        _Path(b["backup"]).name
-                        for b in backups
-                        if b.get("exists") == "True"
-                    ]
-                    files_str = "、".join(file_names) if file_names else ""
-                    notice_parts = [
-                        f"\n[备份提示] 修改已保存到备份副本目录 `{backup_dir}/`",
-                    ]
-                    if files_str:
-                        notice_parts.append(f"（当前备份文件：{files_str}）")
-                    notice_parts.append(
-                        "。请在回复中告知用户备份文件位置，"
-                        "用户可通过 `/backup apply` 将修改应用到原文件。"
-                    )
-                    result_str = result_str + "".join(notice_parts)
-                    e.state.backup_write_notice_shown = True
 
         # ── Post-Write Inline Checkpoint（零 LLM 调用回读验证）──
         if success and (
@@ -1425,36 +1257,6 @@ class ToolDispatcher:
                 iteration,
             )
 
-        # 写入类工具 → files_changed 事件（补充 _excel_diff / _text_diff 未覆盖的场景）
-        if success and on_event is not None:
-            _emit_fc = False
-            _fc_files: list[str] = []
-            if (
-                tool_name in self._EXCEL_WRITE_TOOLS
-                or tool_name in self._WORD_WRITE_TOOLS
-            ):
-                _fp = (arguments.get("file_path") or "").strip()
-                if _fp:
-                    _fc_files.append(_fp)
-                    _emit_fc = True
-            elif e.get_tool_write_effect(tool_name) == "workspace_write":
-                for _pk_fc in ("file_path", "output_path", "path", "target_path"):
-                    _pv_fc = (arguments.get(_pk_fc) or "").strip()
-                    if _pv_fc:
-                        _fc_files.append(_pv_fc)
-                        _emit_fc = True
-            if _emit_fc and _fc_files:
-                from excelmanus.events import EventType, ToolCallEvent
-                e.emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.FILES_CHANGED,
-                        tool_call_id=tool_call_id,
-                        iteration=iteration,
-                        changed_files=_fc_files,
-                    ),
-                )
-
         # ── 自动追踪 affected_files + write_operations_log ──
         if success:
             _state = getattr(e, "_state", None)
@@ -1476,22 +1278,22 @@ class ToolDispatcher:
                     )
                 elif tool_name == "run_code":
                     try:
-                        _cow = (
-                            structured.ui_meta.cow_mapping
-                            if structured is not None
-                            else None
-                        )
-                        _cow_paths = ""
-                        if isinstance(_cow, dict):
-                            for _v in _cow.values():
-                                if isinstance(_v, str) and _v.strip():
-                                    _state.record_affected_file(_v)
-                            _cow_paths = ", ".join(
-                                str(v) for v in _cow.values() if isinstance(v, str) and v.strip()
-                            )
-                        # 即使无 cow_mapping，只要 has_write_tool_call 已被标记
-                        # （由 CodePolicyHandler 或 legacy 路径设置），也应记录
-                        if _cow_paths or _state.has_write_tool_call:
+                        _published_paths = ""
+                        if structured is not None and isinstance(structured.value, dict):
+                            _items = structured.value.get("published") or []
+                            if isinstance(_items, list):
+                                for _item in _items:
+                                    if not isinstance(_item, dict):
+                                        continue
+                                    if _item.get("status") != "committed":
+                                        continue
+                                    _p = str(_item.get("path") or "").strip()
+                                    if _p:
+                                        _state.record_affected_file(_p)
+                                        _published_paths = (
+                                            f"{_published_paths}, {_p}" if _published_paths else _p
+                                        )
+                        if _published_paths or _state.has_write_tool_call:
                             _already_logged = any(
                                 e.get("tool_name") == "run_code"
                                 for e in _state.write_operations_log
@@ -1499,7 +1301,7 @@ class ToolDispatcher:
                             if not _already_logged:
                                 _state.record_write_operation(
                                     tool_name="run_code",
-                                    file_path=_cow_paths,
+                                    file_path=_published_paths,
                                     summary=self._extract_run_code_write_summary(result_str),
                                 )
                     except Exception:
@@ -1615,6 +1417,7 @@ class ToolDispatcher:
             _plan_path = e._task_store.plan_file_path or ""
             if _plan_content and _plan_path and on_event is not None:
                 from excelmanus.tools.code_tools import _generate_text_diff
+                from excelmanus.workspace.identity import public_identity, workspace_root_of
                 _td = _generate_text_diff("", _plan_content, _plan_path)
                 if _td is not None:
                     e.emit(
@@ -1622,7 +1425,10 @@ class ToolDispatcher:
                         ToolCallEvent(
                             event_type=EventType.TEXT_DIFF,
                             tool_call_id=tool_call_id,
-                            text_diff_file_path=_td.get("file_path", ""),
+                            text_diff_file_path=public_identity(
+                                _td.get("file_path", ""),
+                                workspace_root_of(e),
+                            ),
                             text_diff_hunks=_td.get("hunks", [])[:300],
                             text_diff_additions=_td.get("additions", 0),
                             text_diff_deletions=_td.get("deletions", 0),
@@ -1674,7 +1480,8 @@ class ToolDispatcher:
                         continue
                     full = os.path.join(root, fname)
                     try:
-                        snap[os.path.relpath(full, uploads)] = os.path.getmtime(full)
+                        rel = _P("uploads") / os.path.relpath(full, uploads)
+                        snap[rel.as_posix()] = os.path.getmtime(full)
                     except OSError:
                         continue
         except OSError:
@@ -1899,111 +1706,16 @@ class ToolDispatcher:
         finally:
             wb.close()
 
-    @staticmethod
-    def _snapshot_excel_for_diff(
-        file_paths: list[str], workspace_root: str,
-    ) -> dict[str, list[tuple[str, list[dict], list[dict]]]]:
-        """对指定 Excel 文件做轻量快照，返回 {file_path: [(sheet, cells, merges)]}。
+    def _record_public_identities(self, e: Any, paths: list[str]) -> list[str]:
+        """Normalize to CanonicalPath and remember for the loop-end MutationEvent."""
+        from excelmanus.workspace.identity import collect_public_identities, workspace_root_of
 
-        文件不存在时记录空列表（tombstone），以便 diff 能检测"从无到有"的新建场景。
-        """
-        from pathlib import Path
-        snapshots: dict[str, list[tuple[str, list[dict], list[dict]]]] = {}
-        for fp in file_paths:
-            try:
-                abs_path = Path(fp) if Path(fp).is_absolute() else Path(workspace_root) / fp
-                abs_path = abs_path.resolve()
-                if not abs_path.is_file():
-                    # 文件不存在 → 记录空快照（tombstone），支持新建文件 diff
-                    snapshots[fp] = []
-                    continue
-                from openpyxl import load_workbook
-                from openpyxl.utils import get_column_letter
-                from excelmanus.tools._style_extract import extract_cell_style, extract_merge_ranges
-                # .xls/.xlsb → 透明转换为 xlsx
-                from excelmanus.tools._helpers import ensure_openpyxl_compatible
-                abs_path = ensure_openpyxl_compatible(abs_path)
-                wb = load_workbook(str(abs_path), data_only=False, read_only=False)
-                file_snaps: list[tuple[str, list[dict], list[dict]]] = []
-                for sheet_name in wb.sheetnames:
-                    ws = wb[sheet_name]
-                    cells: list[dict] = []
-                    for row in ws.iter_rows(min_row=1, max_row=min(ws.max_row or 0, 500),
-                                            max_col=min(ws.max_column or 0, 50)):
-                        for cell in row:
-                            if cell.value is not None:
-                                ref = f"{get_column_letter(cell.column)}{cell.row}"
-                                val = cell.value
-                                if isinstance(val, (int, float, bool, str)):
-                                    entry: dict = {"cell": ref, "value": val}
-                                else:
-                                    entry = {"cell": ref, "value": str(val)}
-                                style = extract_cell_style(cell)
-                                if style:
-                                    entry["style"] = style
-                                cells.append(entry)
-                    merges = extract_merge_ranges(ws)
-                    file_snaps.append((sheet_name, cells, merges))
-                wb.close()
-                snapshots[fp] = file_snaps
-            except Exception:
-                pass
-        return snapshots
-
-    @staticmethod
-    def _compute_snapshot_diffs(
-        before: dict[str, list[tuple[str, list[dict], list[dict]]]],
-        after: dict[str, list[tuple[str, list[dict], list[dict]]]],
-    ) -> list[dict]:
-        """对比前后快照，返回 [{file_path, sheet, affected_range, changes, old_merge_ranges, new_merge_ranges}]。"""
-        results: list[dict] = []
-        all_files = set(before) | set(after)
-        for fp in sorted(all_files):
-            # 兼容 2-tuple (旧格式) 和 3-tuple (新格式含 merges)
-            def _unpack(items: list) -> dict[str, tuple[list[dict], list[dict]]]:
-                out: dict[str, tuple[list[dict], list[dict]]] = {}
-                for item in items:
-                    if len(item) >= 3:
-                        out[item[0]] = (item[1], item[2])
-                    else:
-                        out[item[0]] = (item[1], [])
-                return out
-
-            before_sheets = _unpack(before.get(fp, []))
-            after_sheets = _unpack(after.get(fp, []))
-            all_sheets = set(before_sheets) | set(after_sheets)
-            for sheet in sorted(all_sheets):
-                b_data, b_merges = before_sheets.get(sheet, ([], []))
-                a_data, a_merges = after_sheets.get(sheet, ([], []))
-                from excelmanus.workbook.cells import _compute_cell_diff
-                changes = _compute_cell_diff(b_data, a_data)
-                if changes:
-                    from openpyxl.utils import get_column_letter as _gcl
-                    from openpyxl.utils.cell import coordinate_to_tuple as _ctt
-                    min_r = min_c = float("inf")
-                    max_r = max_c = 0
-                    for ch in changes:
-                        try:
-                            r, c = _ctt(ch["cell"].upper())
-                            if r < min_r: min_r = r
-                            if r > max_r: max_r = r
-                            if c < min_c: min_c = c
-                            if c > max_c: max_c = c
-                        except Exception:
-                            pass
-                    if min_r != float("inf"):
-                        _range = f"{_gcl(min_c)}{min_r}:{_gcl(max_c)}{max_r}" if (min_r, min_c) != (max_r, max_c) else f"{_gcl(min_c)}{min_r}"
-                    else:
-                        _range = changes[0]["cell"]
-                    results.append({
-                        "file_path": fp,
-                        "sheet": sheet,
-                        "affected_range": _range,
-                        "changes": changes[:200],
-                        "old_merge_ranges": b_merges,
-                        "new_merge_ranges": a_merges,
-                    })
-        return results
+        changed = collect_public_identities(paths, workspace_root_of(e))
+        state = getattr(e, "_state", None)
+        if state is not None:
+            for ident in changed:
+                state.record_affected_file(ident)
+        return changed
 
     def _emit_ui_meta_events(
         self,
@@ -2030,10 +1742,13 @@ class ToolDispatcher:
                     elif isinstance(record, list):
                         rows_data.append(record)
             if columns and rows_data:
-                file_path = (
+                from excelmanus.workspace.identity import public_identity, workspace_root_of
+                _ws_root = workspace_root_of(e)
+                file_path = public_identity(
                     ui_meta.files[0]
                     if ui_meta.files
-                    else arguments.get("file_path", "")
+                    else arguments.get("file_path", ""),
+                    _ws_root,
                 )
                 sheet_name = preview_data.get("sheet") or arguments.get("sheet_name", "")
                 cell_styles: list[list] = []
@@ -2078,6 +1793,8 @@ class ToolDispatcher:
         if isinstance(diff_data, dict):
             changes = diff_data.get("sample_diffs") or diff_data.get("changes") or []
             if changes:
+                from excelmanus.workspace.identity import public_identity, workspace_root_of
+                _ws_root = workspace_root_of(e)
                 diff_mode = diff_data.get("diff_mode", "")
                 if diff_mode:
                     e.emit(
@@ -2085,11 +1802,17 @@ class ToolDispatcher:
                         ToolCallEvent(
                             event_type=EventType.EXCEL_DIFF,
                             tool_call_id=tool_call_id,
-                            excel_file_path=diff_data.get("file_a") or arguments.get("file_a", ""),
+                            excel_file_path=public_identity(
+                                diff_data.get("file_a") or arguments.get("file_a", ""),
+                                _ws_root,
+                            ),
                             excel_sheet=diff_data.get("sheet_a") or arguments.get("sheet_a", ""),
                             excel_changes=changes[:200],
                             excel_diff_mode=diff_mode,
-                            excel_file_b=diff_data.get("file_b") or arguments.get("file_b", ""),
+                            excel_file_b=public_identity(
+                                diff_data.get("file_b") or arguments.get("file_b", ""),
+                                _ws_root,
+                            ),
                             excel_sheet_b=diff_data.get("sheet_b") or arguments.get("sheet_b", ""),
                             excel_diff_summary=diff_data.get("summary"),
                         ),
@@ -2100,7 +1823,10 @@ class ToolDispatcher:
                         ToolCallEvent(
                             event_type=EventType.EXCEL_DIFF,
                             tool_call_id=tool_call_id,
-                            excel_file_path=diff_data.get("file_path", ""),
+                            excel_file_path=public_identity(
+                                diff_data.get("file_path", ""),
+                                _ws_root,
+                            ),
                             excel_sheet=diff_data.get("sheet", ""),
                             excel_affected_range=diff_data.get("affected_range", ""),
                             excel_changes=changes[:200],
@@ -2124,12 +1850,16 @@ class ToolDispatcher:
 
         td_data = ui_meta.text_diff
         if isinstance(td_data, dict) and td_data.get("hunks"):
+            from excelmanus.workspace.identity import public_identity, workspace_root_of
             e.emit(
                 on_event,
                 ToolCallEvent(
                     event_type=EventType.TEXT_DIFF,
                     tool_call_id=tool_call_id,
-                    text_diff_file_path=td_data.get("file_path", ""),
+                    text_diff_file_path=public_identity(
+                        td_data.get("file_path", ""),
+                        workspace_root_of(e),
+                    ),
                     text_diff_hunks=(td_data.get("hunks") or [])[:300],
                     text_diff_additions=int(td_data.get("additions") or 0),
                     text_diff_deletions=int(td_data.get("deletions") or 0),
@@ -2137,96 +1867,14 @@ class ToolDispatcher:
                 ),
             )
 
-    def _emit_files_changed_from_report(
+    def _record_files_from_run_code(
         self,
         e: Any,
-        on_event: Any,
-        tool_call_id: str,
-        report: dict | None,
-        iteration: int,
-    ) -> None:
-        """finish_task 完成后，从 outputs 提取受影响文件并发射 FILES_CHANGED 事件。"""
-        if not report or on_event is None:
-            return
-        from excelmanus.events import EventType, ToolCallEvent
-        from excelmanus.engine_utils import is_excel_path, normalize_path
-
-        affected: set[str] = set()
-        for item in report.get("outputs", []):
-            path = item.get("path") if isinstance(item, dict) else item
-            if isinstance(path, str) and path:
-                norm = normalize_path(path)
-                if norm and is_excel_path(norm):
-                    affected.add(norm)
-        if not affected:
-            return
-        e.emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.FILES_CHANGED,
-                tool_call_id=tool_call_id,
-                iteration=iteration,
-                changed_files=sorted(affected),
-            ),
-        )
-
-    def _emit_files_changed_from_audit(
-        self,
-        e: Any,
-        on_event: Any,
-        tool_call_id: str,
-        code: str,
-        audit_changes: list[Any] | None,
-        iteration: int,
         extra_changed_paths: list[str] | None = None,
-        cow_mapping: dict[str, str] | None = None,
     ) -> None:
-        """run_code 执行后，从审计、AST、cow_mapping 和 mtime 探针中提取受影响文件并发射 FILES_CHANGED 事件。"""
-        from excelmanus.events import EventType, ToolCallEvent
-        from excelmanus.security.code_policy import extract_excel_targets
-        from excelmanus.engine_utils import is_excel_path, normalize_path
-
-        affected: set[str] = set()
-
-        if audit_changes:
-            for change in audit_changes:
-                path = getattr(change, "path", None) or ""
-                if path:
-                    norm = normalize_path(path)
-                    if norm and is_excel_path(norm):
-                        affected.add(norm)
-
-        for target in extract_excel_targets(code or ""):
-            if target.operation in ("write", "unknown") and target.file_path != "<variable>":
-                norm = normalize_path(target.file_path)
-                if norm and is_excel_path(norm):
-                    affected.add(norm)
-
-        # cow_mapping 中的实际路径（AST 无法解析变量时的可靠回退）
-        if cow_mapping:
-            for orig, copy_path in cow_mapping.items():
-                for cp in (orig, copy_path):
-                    if isinstance(cp, str) and cp.strip():
-                        norm = normalize_path(cp)
-                        if norm and is_excel_path(norm):
-                            affected.add(norm)
-
-        # mtime 探针检测到的新建/变更文件（不限文件类型）
+        """Remember Runtime-published / mtime identities. No AST guess, no cow_mapping."""
+        raw_paths: list[str] = []
         if extra_changed_paths:
-            for p in extra_changed_paths:
-                if p:
-                    affected.add(p)
-
-        if not affected or on_event is None:
-            return
-
-        e.emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.FILES_CHANGED,
-                tool_call_id=tool_call_id,
-                iteration=iteration,
-                changed_files=sorted(affected),
-            ),
-        )
+            raw_paths.extend(p for p in extra_changed_paths if p)
+        self._record_public_identities(e, raw_paths)
 

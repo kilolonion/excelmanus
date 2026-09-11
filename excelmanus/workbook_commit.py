@@ -18,7 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Literal
 
+from excelmanus.logger import get_logger
 from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+
+logger = get_logger("workbook_commit")
 
 _seen_versions: contextvars.ContextVar[dict[str, str] | None] = contextvars.ContextVar(
     "excelmanus_seen_content_versions",
@@ -144,12 +147,32 @@ def _atomic_replace(src_tmp: Path, dest: Path) -> None:
     os.replace(str(src_tmp), str(dest))
 
 
+def _record_revision_pair(
+    workspace_root: Path,
+    rel: str,
+    before_bytes: bytes | None,
+    after_bytes: bytes,
+) -> None:
+    """Hidden history after a successful AtomicPublish. Never fail the user commit."""
+    try:
+        from excelmanus.workspace.revisions import RevisionStore
+
+        RevisionStore(workspace_root).capture_edit_pair(
+            rel,
+            before_bytes=before_bytes,
+            after_bytes=after_bytes,
+        )
+    except Exception:
+        logger.debug("revision capture failed for %s", rel, exc_info=True)
+
+
 def commit_bytes(
     *,
     guard: FileAccessGuard,
     file_path: str,
     data: bytes,
     expected_version: str | None = None,
+    record_history: bool = True,
 ) -> CommitResult:
     """把 ``data`` 原子写入工作区内路径。
 
@@ -161,12 +184,17 @@ def commit_bytes(
     except SecurityViolationError as exc:
         raise CommitError("PATH_INVALID", str(exc)) from exc
 
-    rel = str(dest.relative_to(guard.workspace_root))
+    rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+    from excelmanus.workspace.identity import is_reserved_relative
+
+    if is_reserved_relative(rel):
+        raise CommitError("PATH_INVALID", f"reserved namespace: {rel}", fields={"path": rel})
     lock_path = lock_path_for(dest)
     fh = _acquire_lock(lock_path)
     tmp_path: Path | None = None
     try:
-        current = content_version_of_file(dest)
+        before_bytes = dest.read_bytes() if dest.is_file() else None
+        current = content_version_of(before_bytes) if before_bytes is not None else None
         if expected_version is None:
             if current is not None:
                 raise CommitError(
@@ -199,6 +227,8 @@ def commit_bytes(
         _atomic_replace(tmp_path, dest)
         tmp_path = None
         new_ver = content_version_of(data)
+        if record_history:
+            _record_revision_pair(guard.workspace_root, rel, before_bytes, data)
         return CommitResult(
             path=rel,
             content_version=new_ver,
@@ -223,6 +253,7 @@ def commit_workbook(
     mutate_fn: Callable[[Any], None],
     expected_version: str | None = None,
     create: bool = False,
+    record_history: bool = True,
 ) -> CommitResult:
     """加载（或新建）openpyxl Workbook，执行 ``mutate_fn``，再原子提交。
 
@@ -238,9 +269,15 @@ def commit_workbook(
     lock_path = lock_path_for(dest)
     fh = _acquire_lock(lock_path)
     tmp_path: Path | None = None
-    rel = str(dest.relative_to(guard.workspace_root))
+    rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+    from excelmanus.workspace.identity import is_reserved_relative
+
+    if is_reserved_relative(rel):
+        _release_lock(fh)
+        raise CommitError("PATH_INVALID", f"reserved namespace: {rel}", fields={"path": rel})
     try:
-        current = content_version_of_file(dest)
+        before_bytes = dest.read_bytes() if dest.is_file() else None
+        current = content_version_of(before_bytes) if before_bytes is not None else None
         if dest.is_file():
             if expected_version is None:
                 raise CommitError(
@@ -275,6 +312,8 @@ def commit_workbook(
         data = tmp_path.read_bytes()
         _atomic_replace(tmp_path, dest)
         tmp_path = None
+        if record_history:
+            _record_revision_pair(guard.workspace_root, rel, before_bytes, data)
         return CommitResult(
             path=rel,
             content_version=content_version_of(data),

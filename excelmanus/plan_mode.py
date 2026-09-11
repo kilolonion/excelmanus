@@ -192,3 +192,72 @@ def _safe_str(value: object) -> str:
         return ""
     text = str(value).strip()
     return text
+
+
+def set_plan_active(engine: object, active: bool) -> None:
+    engine._plan_active = bool(active)  # type: ignore[attr-defined]
+    engine._current_chat_mode = "plan" if active else "write"  # type: ignore[attr-defined]
+    engine._tools_cache = None  # type: ignore[attr-defined]
+    if not active:
+        engine._pending_plan_exit = None  # type: ignore[attr-defined]
+
+
+def handle_plan_command(engine: object, action: str) -> str:
+    """``/plan`` ``/plan off`` 控制面命令，不进模型历史。"""
+    key = (action or "").strip().lower()
+    if key in {"", "on"}:
+        set_plan_active(engine, True)
+        return "已开启计划模式。先探查并写计划；改表须批准 exit_plan_mode，或使用 /plan off。"
+    if key == "off":
+        set_plan_active(engine, False)
+        return "已关闭计划模式，回到写入模式。"
+    if key == "status":
+        active = bool(getattr(engine, "_plan_active", False) or getattr(engine, "_current_chat_mode", "") == "plan")
+        pending = getattr(engine, "_pending_plan_exit", None)
+        line = "计划模式: **开启**" if active else "计划模式: **关闭**"
+        if pending:
+            line += "\n有一份待批准的退出请求。使用 `/plan approve` 退出，或 `/plan off` 直接关闭。"
+        return line
+    if key == "approve":
+        if not getattr(engine, "_pending_plan_exit", None) and getattr(engine, "_current_chat_mode", "") != "plan":
+            return "没有待批准的计划退出。"
+        set_plan_active(engine, False)
+        return "已批准计划并退出计划模式。"
+    if key == "reject":
+        engine._pending_plan_exit = None  # type: ignore[attr-defined]
+        return "已拒绝退出，仍留在计划模式。"
+    return "无效参数。用法：/plan [on|off|status|approve|reject]。"
+
+
+def request_exit_plan_approval(engine: object, plan: str, *, tool_call_id: str = "exit_plan_mode") -> None:
+    """exit_plan_mode → ask_user 批准。"""
+    from excelmanus.engine_utils import _SYSTEM_Q_PLAN_EXIT
+
+    engine._pending_plan_exit = plan  # type: ignore[attr-defined]
+    flow = getattr(engine, "_question_flow", None)
+    enqueue = getattr(flow, "enqueue", None)
+    if not callable(enqueue):
+        return
+    pending = enqueue(
+        {
+            "header": "退出计划",
+            "text": "是否批准该计划并退出计划模式？",
+            "options": [
+                {"label": "批准并退出", "description": "关闭计划模式并按计划执行"},
+                {"label": "继续留在计划模式", "description": "不退出，继续修改计划"},
+            ],
+        },
+        tool_call_id,
+    )
+    actions = getattr(engine, "_system_question_actions", None)
+    if isinstance(actions, dict) and pending is not None:
+        actions[getattr(pending, "question_id", "")] = {"type": _SYSTEM_Q_PLAN_EXIT}
+    handler = getattr(engine, "_interaction_handler", None)
+    emit = getattr(handler, "emit_user_question_event", None)
+    if callable(emit) and pending is not None:
+        driver = getattr(engine, "_driver", None)
+        emit(
+            question=pending,
+            on_event=getattr(driver, "_on_event", None),
+            iteration=0,
+        )

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels } from "@/lib/api";
+import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels, getManageToken } from "@/lib/api";
 import type { RemoteModelItem } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
@@ -48,11 +48,7 @@ export function useAdminModelSettings() {
   const [probingAll, setProbingAll] = useState(false);
   const [probeJob, setProbeJob] = useState<ProbeJobSnapshot | null>(null);
   const probeEsRef = useRef<EventSource | null>(null);
-  // 快速应用 profile 到角色
-  const [applyingProfile, setApplyingProfile] = useState<string | null>(null);
-  const [applyMenuOpen, setApplyMenuOpen] = useState<string | null>(null);
-  const applyMenuRef = useRef<HTMLDivElement>(null);
-  const [applyMenuDropUp, setApplyMenuDropUp] = useState(false);
+  const [activatingProfile, setActivatingProfile] = useState<string | null>(null);
   const [saveToast, setSaveToast] = useState<{ msg: string; type: "success" | "error" } | null>(null);
 
   // 折叠/展开状态
@@ -72,16 +68,13 @@ export function useAdminModelSettings() {
   const [thinkingSaving, setThinkingSaving] = useState(false);
   const [thinkingSaved, setThinkingSaved] = useState(false);
 
-  // 排序 profiles: 主模型排在最前面
   const sortedProfiles = useMemo(() => {
     if (!config?.profiles) return [];
-    const mainModel = config.main?.model;
-    if (!mainModel) return config.profiles;
+    const active = config.active;
+    if (!active) return config.profiles;
     return [...config.profiles].sort((a, b) => {
-      const aIsMain = a.model === mainModel;
-      const bIsMain = b.model === mainModel;
-      if (aIsMain && !bIsMain) return -1;
-      if (!aIsMain && bIsMain) return 1;
+      if (a.name === active && b.name !== active) return -1;
+      if (a.name !== active && b.name === active) return 1;
       return 0;
     });
   }, [config]);
@@ -191,7 +184,13 @@ export function useAdminModelSettings() {
   const subscribeToProbeJob = useCallback((jobId: string) => {
     probeEsRef.current?.close();
     const origin = typeof window !== "undefined" ? window.location.origin : "";
-    const esUrl = origin + "/api/v1/config/models/capabilities/jobs/" + jobId + "/events";
+    const token = getManageToken();
+    const esUrl =
+      origin +
+      "/api/v1/config/models/capabilities/jobs/" +
+      jobId +
+      "/events" +
+      (token ? `?manage_token=${encodeURIComponent(token)}` : "");
     const es = new EventSource(esUrl);
     probeEsRef.current = es;
 
@@ -300,18 +299,6 @@ export function useAdminModelSettings() {
     return () => document.removeEventListener("mousedown", handler);
   }, [modelDropdownTarget]);
 
-  // 点击外部关闭"应用到角色"下拉（不使用 fixed overlay，避免阻塞滚动）
-  useEffect(() => {
-    if (!applyMenuOpen) return;
-    const handler = (e: MouseEvent) => {
-      if (applyMenuRef.current && !applyMenuRef.current.contains(e.target as Node)) {
-        setApplyMenuOpen(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [applyMenuOpen]);
-
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
     try {
       const data = await apiPut<{ capabilities: ModelCapabilities | null }>("/config/models/capabilities", {
@@ -344,7 +331,6 @@ export function useAdminModelSettings() {
     }
     setEditDrafts(drafts);
     setEnabledDrafts({
-      aux: data.aux?.enabled !== false,
       embedding: data.embedding?.enabled === true,
     });
   }, []);
@@ -381,33 +367,18 @@ export function useAdminModelSettings() {
     return () => clearTimeout(t);
   }, [saveToast]);
 
-  const handleApplyProfileToRole = useCallback(async (profile: ProfileEntry, role: "main" | "aux") => {
-    const roleLabel = role === "main" ? "主模型" : "辅助模型";
-    setApplyingProfile(profile.name);
-    setApplyMenuOpen(null);
-
+  const handleActivateProfile = useCallback(async (profile: ProfileEntry) => {
+    setActivatingProfile(profile.name);
     try {
-      const body: Record<string, unknown> = {
-        model: profile.model,
-        base_url: profile.base_url || undefined,
-        api_key: profile.api_key || undefined,
-        protocol: profile.protocol || "auto",
-      };
-      if (role === "aux") {
-        body.enabled = true;
-      }
-      await apiPut(`/config/models/${role}`, body, { direct: true });
-      setSaveToast({ msg: `已将 "${profile.name}" 应用为${roleLabel}`, type: "success" });
+      await apiPut("/models/active", { name: profile.name }, { direct: true });
+      setSaveToast({ msg: `已激活「${profile.name}」`, type: "success" });
       fetchConfig(true);
       fetchAllCapabilities(true);
-      // 应用为主模型时，模型选择器中的 "default" 条目会变化
-      if (role === "main") {
-        useUIStore.getState().bumpModelProfiles();
-      }
+      useUIStore.getState().bumpModelProfiles();
     } catch (e) {
-      setSaveToast({ msg: e instanceof Error ? e.message : `应用为${roleLabel}失败`, type: "error" });
+      setSaveToast({ msg: e instanceof Error ? e.message : "激活失败", type: "error" });
     } finally {
-      setApplyingProfile(null);
+      setActivatingProfile(null);
     }
   }, [fetchConfig, fetchAllCapabilities]);
 
@@ -422,8 +393,7 @@ export function useAdminModelSettings() {
         if (field === "protocol" && sectionKey === "embedding") continue;
         body[field] = value;
       }
-      // aux/embedding 保存时一并提交 enabled 开关
-      if ((sectionKey === "aux" || sectionKey === "embedding") && enabledDrafts[sectionKey] !== undefined) {
+      if (sectionKey === "embedding" && enabledDrafts[sectionKey] !== undefined) {
         body.enabled = enabledDrafts[sectionKey];
       }
       await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
@@ -431,10 +401,6 @@ export function useAdminModelSettings() {
       setTimeout(() => setSaved(null), 2000);
       setSaveToast({ msg: `${sectionLabel} 配置已保存`, type: "success" });
       fetchConfig(true);
-      // 主模型配置变更会影响模型选择器中的 "default" 条目
-      if (sectionKey === "main") {
-        useUIStore.getState().bumpModelProfiles();
-      }
     } catch (e) {
       setSaveToast({ msg: e instanceof Error ? e.message : `${sectionLabel} 保存失败`, type: "error" });
     } finally {
@@ -522,10 +488,11 @@ export function useAdminModelSettings() {
 
     // 乐观更新：先在前端列表替换，避免等待网络请求。
     const prevProfiles = config?.profiles || [];
+    const previous = prevProfiles.find((p) => p.name === originalName);
     const optimisticEntry: ProfileEntry = {
       name: draftSnapshot.name,
       model: draftSnapshot.model,
-      api_key: draftSnapshot.api_key,
+      api_key: draftSnapshot.api_key || previous?.api_key || "",
       base_url: draftSnapshot.base_url,
       description: draftSnapshot.description,
       protocol: draftSnapshot.protocol || "auto",
@@ -584,7 +551,6 @@ export function useAdminModelSettings() {
         settingsCache.set("/config/models", next);
         return next;
       });
-      setApplyMenuOpen((prev) => (prev === name ? null : prev));
       useUIStore.getState().bumpModelProfiles();
     }
 
@@ -660,12 +626,7 @@ export function useAdminModelSettings() {
     capsMap,
     probingKey,
     probingAll,
-    applyingProfile,
-    applyMenuOpen,
-    setApplyMenuOpen,
-    applyMenuRef,
-    applyMenuDropUp,
-    setApplyMenuDropUp,
+    activatingProfile,
     saveToast,
     setSaveToast,
     expandedSections,
@@ -692,7 +653,7 @@ export function useAdminModelSettings() {
     handleFetchRemoteModels,
     handleCapToggle,
     fetchConfig,
-    handleApplyProfileToRole,
+    handleActivateProfile,
     handleSaveSection,
     handleToggleEnabled,
     handleAddProfile,

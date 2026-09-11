@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import time
 from collections.abc import Sequence
 from types import SimpleNamespace
@@ -602,9 +603,10 @@ class LLMCaller:
                     retry_kwargs = {k: v for k, v in kwargs.items() if k not in stripped}
                     return await e._client.chat.completions.create(**retry_kwargs)
 
-            # 上下文超长自动恢复：自适应缩减预算 + 紧急截断对话历史后重试一次
+            # 溢出走 request-error：只有 surface 代数推进才重试。
             if _is_context_length_error(exc):
-                # 自适应缩减：当前预算可能偏大，缩减 20% 防止后续轮次再次超限
+                from excelmanus.compaction import recover_request_overflow
+
                 _ctx_budget = getattr(e, "_context_budget", None)
                 if _ctx_budget is not None and not _ctx_budget.is_user_overridden:
                     _old_budget = _ctx_budget.max_tokens
@@ -614,7 +616,6 @@ class LLMCaller:
                         "上下文超限，自动缩减预算 %d → %d tokens（-20%%）",
                         _old_budget, _new_budget,
                     )
-                    # 同步更新 memory 和 compaction 的阈值
                     if hasattr(e, "_memory"):
                         e._memory.update_context_window(_new_budget)
                     _cm = getattr(e, "_compaction_manager", None)
@@ -622,20 +623,20 @@ class LLMCaller:
                         _cm.max_context_tokens = _new_budget
 
                 source_messages = kwargs.get("messages")
-                if isinstance(source_messages, list) and len(source_messages) > 3:
-                    logger.warning(
-                        "检测到上下文超长错误（%d 条消息），紧急截断后重试",
-                        len(source_messages),
-                    )
-                    # 保留 system 消息 + 最后 ~1/3 的非 system 消息
-                    sys_msgs = [m for m in source_messages if m.get("role") == "system"]
-                    non_sys = [m for m in source_messages if m.get("role") != "system"]
-                    keep = max(2, len(non_sys) // 3)
-                    trimmed = sys_msgs + non_sys[-keep:]
-                    retry_kwargs = dict(kwargs)
-                    retry_kwargs["messages"] = trimmed
-                    retry_kwargs.pop("prompt_cache_key", None)
-                    return await e._client.chat.completions.create(**retry_kwargs)
+                trimmed = await recover_request_overflow(
+                    e,
+                    source_messages if isinstance(source_messages, list) else None,
+                )
+                if trimmed is None:
+                    raise
+                logger.warning(
+                    "request-error：surface 已推进，使用压缩后的 %d 条消息重试",
+                    len(trimmed),
+                )
+                retry_kwargs = dict(kwargs)
+                retry_kwargs["messages"] = trimmed
+                retry_kwargs.pop("prompt_cache_key", None)
+                return await e._client.chat.completions.create(**retry_kwargs)
 
             if (
                 e._config.system_message_mode == "auto"

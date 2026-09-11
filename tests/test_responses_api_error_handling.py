@@ -170,7 +170,7 @@ class TestClassifyFailure:
         """ResponsesAPIError 的常见 HTTP 状态码都能被正确分类。"""
         known_codes = {
             401: "model_auth_failed",
-            403: "model_auth_failed",
+            403: "model_forbidden",
             429: "rate_limited",
             500: "provider_internal_error",
             502: "provider_internal_error",
@@ -182,3 +182,14 @@ class TestClassifyFailure:
             assert guidance.code == expected, (
                 f"HTTP {code} should be classified as {expected}, got {guidance.code}"
             )
+
+
+def test_compute_retry_delay_uses_random_jitter(monkeypatch: pytest.MonkeyPatch) -> None:
+    from excelmanus.engine_core.llm_caller import compute_retry_delay
+
+    monkeypatch.setattr(
+        "excelmanus.engine_core.llm_caller.random.uniform",
+        lambda _a, _b: 0.5,
+    )
+    delay = compute_retry_delay(1, 1.0, 10.0, Exception("x"))
+    assert delay == 1.5
