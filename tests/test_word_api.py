@@ -10,6 +10,7 @@ from docx import Document
 from httpx import AsyncClient
 
 from tests.test_api import _make_transport, _setup_api_globals, _test_config
+from excelmanus.workbook_commit import content_version_of_file
 
 
 pytestmark = pytest.mark.asyncio
@@ -86,7 +87,11 @@ class TestWordWrite:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/files/word/write",
-                    json={"path": "report.docx", "operations": [{"action": "replace", "index": 0, "text": "Updated"}]},
+                    json={
+                        "path": "report.docx",
+                        "expected_version": content_version_of_file(path),
+                        "operations": [{"action": "replace", "index": 0, "text": "Updated"}],
+                    },
                 )
 
         assert response.status_code == 200
@@ -100,7 +105,11 @@ class TestWordWrite:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/files/word/write",
-                    json={"path": "insert.docx", "operations": [{"action": "insert_after", "index": 0, "text": "Inserted"}]},
+                    json={
+                        "path": "insert.docx",
+                        "expected_version": content_version_of_file(path),
+                        "operations": [{"action": "insert_after", "index": 0, "text": "Inserted"}],
+                    },
                 )
 
         assert response.status_code == 200
@@ -114,7 +123,11 @@ class TestWordWrite:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/files/word/write",
-                    json={"path": "bounds.docx", "operations": [{"action": "replace", "index": 9, "text": "Never"}]},
+                    json={
+                        "path": "bounds.docx",
+                        "expected_version": content_version_of_file(path),
+                        "operations": [{"action": "replace", "index": 9, "text": "Never"}],
+                    },
                 )
 
         data = response.json()
@@ -130,12 +143,28 @@ class TestWordWrite:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
                 response = await client.post(
                     "/api/v1/files/word/write",
-                    json={"path": "legacy.doc", "operations": [{"action": "append", "text": "Never"}]},
+                    json={
+                        "path": "legacy.doc",
+                        "expected_version": "sha256:unused",
+                        "operations": [{"action": "append", "text": "Never"}],
+                    },
                 )
 
         data = response.json()
         assert response.status_code == 404
         assert "docx" in data["error"].lower()
+
+    async def test_write_requires_expected_version(self, tmp_path: Path) -> None:
+        _make_test_doc(tmp_path / "need_ver.docx")
+
+        with _api_transport(tmp_path) as transport:
+            async with AsyncClient(transport=transport, base_url="http://test") as client:
+                response = await client.post(
+                    "/api/v1/files/word/write",
+                    json={"path": "need_ver.docx", "operations": [{"action": "append", "text": "Nope"}]},
+                )
+
+        assert response.status_code == 422
 
 
 class TestWordFile:

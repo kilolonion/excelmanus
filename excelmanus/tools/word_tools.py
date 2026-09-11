@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import os
 import re
+from io import BytesIO
 from pathlib import Path
 from typing import Any
 
@@ -13,8 +14,13 @@ from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.logger import get_logger
 from excelmanus.security import SecurityViolationError
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
-from excelmanus.tools._helpers import check_file_exists
+from excelmanus.tools._helpers import check_file_exists, commit_error_result, workspace_relpath
 from excelmanus.tools.registry import ToolDef
+from excelmanus.workbook_commit import (
+    CommitError,
+    commit_bytes,
+    peek_seen_content_version,
+)
 
 logger = get_logger("tools.word")
 
@@ -209,31 +215,15 @@ def read_word(
 # ---------------------------------------------------------------------------
 
 
-def write_word(
-    file_path: str,
-    *,
-    operations: list[dict[str, Any]],
-) -> ToolResult:
-    """对 Word 文档执行写入操作。
+def _docx_bytes(doc: Any) -> bytes:
+    buf = BytesIO()
+    doc.save(buf)
+    return buf.getvalue()
 
-    operations 列表中每个操作支持:
-      - {"action": "replace", "index": 段落索引, "text": "新内容"}
-      - {"action": "insert_after", "index": 段落索引, "text": "新内容", "style": "Normal"}
-      - {"action": "append", "text": "新内容", "style": "Normal"}
-      - {"action": "delete", "index": 段落索引}
-    """
-    fmt_err = _ensure_docx(file_path)
-    if fmt_err:
-        return fmt_err
 
-    safe_path, err = _resolve_path(file_path)
-    if err:
-        return err
-
-    try:
-        doc = _open_docx(safe_path)
-    except Exception as exc:
-        return from_payload({"error": f"无法打开文档: {exc}"})
+def apply_word_operations(doc: Any, operations: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    """对已打开的 Document 应用操作。返回 (applied, errors)，不落盘。"""
+    from docx.oxml.ns import qn
 
     applied: list[str] = []
     errors: list[str] = []
@@ -261,7 +251,6 @@ def write_word(
                     errors.append(f"insert_after: 段落索引 {idx} 超出范围")
                     continue
                 ref_para = doc.paragraphs[idx]
-                from docx.oxml.ns import qn
                 new_p = ref_para._element.makeelement(qn("w:p"), {})
                 ref_para._element.addnext(new_p)
                 from docx.text.paragraph import Paragraph
@@ -272,7 +261,7 @@ def write_word(
                 applied.append(f"insert_after paragraph {idx}")
 
             elif action == "append":
-                para = doc.add_paragraph(text, style=style)
+                doc.add_paragraph(text, style=style)
                 applied.append("append paragraph")
 
             elif action == "delete":
@@ -288,19 +277,69 @@ def write_word(
         except Exception as exc:
             errors.append(f"{action} index={idx}: {exc}")
 
-    try:
-        doc.save(str(safe_path))
-    except Exception as exc:
-        return from_payload({"error": f"保存文档失败: {exc}"})
+    return applied, errors
 
-    result: dict[str, Any] = {
-        "file": file_path,
+
+def write_word(
+    file_path: str,
+    *,
+    operations: list[dict[str, Any]],
+    expected_version: str | None = None,
+) -> ToolResult:
+    """对 Word 文档执行写入操作。任一操作失败则不落盘。"""
+    fmt_err = _ensure_docx(file_path)
+    if fmt_err:
+        return fmt_err
+
+    safe_path, err = _resolve_path(file_path)
+    if err:
+        return err
+
+    guard = _get_ctx_guard()
+    if guard is None:
+        return from_payload({"error": "文件访问守卫未初始化", "file_path": file_path})
+
+    try:
+        doc = _open_docx(safe_path)
+    except Exception as exc:
+        return from_payload({"error": f"无法打开文档: {exc}"})
+
+    applied, errors = apply_word_operations(doc, operations)
+    if errors:
+        return from_payload({
+            "file": file_path,
+            "applied": applied,
+            "applied_count": len(applied),
+            "errors": errors,
+            "status": "error",
+        })
+
+    rel = workspace_relpath(guard, safe_path).replace("\\", "/")
+    seen = (expected_version or "").strip() or peek_seen_content_version(rel)
+    if not seen:
+        return from_payload({
+            "error": "write_word 必须提供 expected_version",
+            "code": "VERSION_CONFLICT",
+            "file": rel,
+        })
+
+    try:
+        cr = commit_bytes(
+            guard=guard,
+            file_path=rel,
+            data=_docx_bytes(doc),
+            expected_version=seen,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
+
+    return from_payload({
+        "file": cr.path,
         "applied": applied,
         "applied_count": len(applied),
-    }
-    if errors:
-        result["errors"] = errors
-    return from_payload(result)
+        "content_version": cr.content_version,
+        "status": "success",
+    })
 
 
 # ---------------------------------------------------------------------------
@@ -583,6 +622,10 @@ def get_tools() -> list[ToolDef]:
                             "required": ["action"],
                         },
                         "description": "写入操作列表",
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "当前 content_version；缺省使用本轮已读到的版本",
                     },
                 },
                 "required": ["file_path", "operations"],

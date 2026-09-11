@@ -260,4 +260,34 @@ describe("enqueueExcelCellEdit", () => {
     await flushExcelCellEditsForTests("./book.xlsx");
     expect(persist).toHaveBeenCalledTimes(1);
   });
+
+  it("serializes overlapping flushes for the same path", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    let calls = 0;
+    const persist = vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) await gate;
+      return { kind: "ok" as const, contentVersion: `sha256:${calls}` };
+    });
+    setPersistExcelCellEditsForTests(persist);
+
+    enqueueExcelCellEdit({ path: "./book.xlsx", cell: "A1", value: 1 });
+    const first = flushExcelCellEditsForTests("./book.xlsx");
+    await vi.waitFor(() => expect(persist).toHaveBeenCalledTimes(1));
+
+    enqueueExcelCellEdit({ path: "./book.xlsx", cell: "B1", value: 2 });
+    const second = flushExcelCellEditsForTests("./book.xlsx");
+    await Promise.resolve();
+    expect(persist).toHaveBeenCalledTimes(1);
+
+    release();
+    await Promise.all([first, second]);
+    expect(persist).toHaveBeenCalledTimes(2);
+    expect(persist.mock.calls[1]?.[0]).toMatchObject({
+      changes: [{ cell: "B1", value: 2 }],
+    });
+  });
 });

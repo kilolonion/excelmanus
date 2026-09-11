@@ -345,13 +345,17 @@ async function flushPath(key: string): Promise<void> {
     }
   };
 
+  let releaseInFlight!: () => void;
+  const held = new Promise<void>((resolve) => {
+    releaseInFlight = resolve;
+  });
   const prev = inFlightByPath.get(key) ?? Promise.resolve();
-  const next = prev.then(run, run);
-  inFlightByPath.set(key, next);
+  inFlightByPath.set(key, held);
+  const next = prev.then(run, run).finally(releaseInFlight);
   try {
     await next;
   } finally {
-    if (inFlightByPath.get(key) === next) inFlightByPath.delete(key);
+    if (inFlightByPath.get(key) === held) inFlightByPath.delete(key);
   }
 }
 

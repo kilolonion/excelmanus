@@ -13,6 +13,7 @@ from excelmanus.file_registry import FileRegistry
 from excelmanus.security.guard import FileAccessGuard
 from excelmanus.tools._guard_ctx import reset_guard, set_guard
 from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.workbook_commit import content_version_of_file
 from excelmanus.tools.word_tools import (
     _ensure_docx,
     _heading_level,
@@ -50,6 +51,16 @@ def _make_test_doc(path, paragraphs=None):
 
 def _paragraph_texts(path: Path) -> list[str]:
     return [paragraph.text for paragraph in Document(path).paragraphs]
+
+
+def _write(path: Path, operations: list[dict]) -> dict:
+    return _payload(
+        write_word(
+            path.name,
+            operations=operations,
+            expected_version=content_version_of_file(path),
+        )
+    )
 
 
 class TestReadWord:
@@ -131,9 +142,7 @@ class TestWriteWord:
     def test_replace(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "replace.docx")
 
-        result = _payload(
-            write_word(path.name, operations=[{"action": "replace", "index": 0, "text": "Updated"}])
-        )
+        result = _write(path, [{"action": "replace", "index": 0, "text": "Updated"}])
 
         assert result["applied"] == ["replace paragraph 0"]
         assert _paragraph_texts(path) == ["Updated", "World"]
@@ -141,9 +150,7 @@ class TestWriteWord:
     def test_insert_after_regression(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "insert.docx")
 
-        result = _payload(
-            write_word(path.name, operations=[{"action": "insert_after", "index": 0, "text": "Inserted"}])
-        )
+        result = _write(path, [{"action": "insert_after", "index": 0, "text": "Inserted"}])
 
         assert result["applied_count"] == 1
         assert "errors" not in result
@@ -152,7 +159,7 @@ class TestWriteWord:
     def test_append(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "append.docx")
 
-        result = _payload(write_word(path.name, operations=[{"action": "append", "text": "Tail"}]))
+        result = _write(path, [{"action": "append", "text": "Tail"}])
 
         assert result["applied"] == ["append paragraph"]
         assert _paragraph_texts(path) == ["Hello", "World", "Tail"]
@@ -160,7 +167,7 @@ class TestWriteWord:
     def test_delete(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "delete.docx")
 
-        result = _payload(write_word(path.name, operations=[{"action": "delete", "index": 0}]))
+        result = _write(path, [{"action": "delete", "index": 0}])
 
         assert result["applied"] == ["delete paragraph 0"]
         assert _paragraph_texts(path) == ["World"]
@@ -168,9 +175,7 @@ class TestWriteWord:
     def test_out_of_range_index_returns_error(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "bounds.docx")
 
-        result = _payload(
-            write_word(path.name, operations=[{"action": "replace", "index": 9, "text": "Never"}])
-        )
+        result = _write(path, [{"action": "replace", "index": 9, "text": "Never"}])
 
         assert result["applied_count"] == 0
         assert "超出范围" in result["errors"][0]
@@ -179,20 +184,38 @@ class TestWriteWord:
     def test_multiple_operations_batch(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "batch.docx", ["A", "B"])
 
-        result = _payload(
-            write_word(
-                path.name,
-                operations=[
-                    {"action": "replace", "index": 0, "text": "A1"},
-                    {"action": "insert_after", "index": 0, "text": "A2"},
-                    {"action": "delete", "index": 2},
-                    {"action": "append", "text": "C"},
-                ],
-            )
+        result = _write(
+            path,
+            [
+                {"action": "replace", "index": 0, "text": "A1"},
+                {"action": "insert_after", "index": 0, "text": "A2"},
+                {"action": "delete", "index": 2},
+                {"action": "append", "text": "C"},
+            ],
         )
 
         assert result["applied_count"] == 4
         assert _paragraph_texts(path) == ["A1", "A2", "C"]
+
+    def test_write_requires_expected_version(self, tmp_path: Path) -> None:
+        path = _make_test_doc(tmp_path / "need_ver.docx")
+        result = _payload(
+            write_word(path.name, operations=[{"action": "append", "text": "Nope"}])
+        )
+        assert result.get("code") == "VERSION_CONFLICT"
+        assert _paragraph_texts(path) == ["Hello", "World"]
+
+    def test_partial_errors_do_not_save(self, tmp_path: Path) -> None:
+        path = _make_test_doc(tmp_path / "partial.docx")
+        result = _write(
+            path,
+            [
+                {"action": "replace", "index": 0, "text": "Changed"},
+                {"action": "replace", "index": 9, "text": "Never"},
+            ],
+        )
+        assert "errors" in result
+        assert _paragraph_texts(path) == ["Hello", "World"]
 
 
 class TestInspectWord:
