@@ -45,12 +45,21 @@ class TestRenderSdkSource:
     def test_schema_emits_read_excel_without_eval(self) -> None:
         from excelmanus.code_mode import render_sdk_source
 
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         assert "def read_excel(" in source
         assert "file_path" in source
         assert "sheet_name=None" in source
         assert "读取 Excel 摘要。" in source
         assert "eval(" not in source
+
+    def test_sdk_section_lists_signatures_not_bridge(self) -> None:
+        from excelmanus.code_mode import render_sdk_section
+
+        section = render_sdk_section([_read_excel_def()])
+        assert "read_excel(file_path, sheet_name=None, max_rows=None)" in section
+        assert "- run_code" not in section
+        assert "_call_host" not in section
+        assert "from em import" not in section
 
 
 class TestCodeModeBridge:
@@ -72,7 +81,7 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_1")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
@@ -119,7 +128,7 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_2")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
@@ -168,7 +177,7 @@ class TestCodeModeBridge:
             bridge_dir=tmp_path / "bridge",
             call_timeout=8.0,
         )
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_3")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
@@ -210,7 +219,7 @@ class TestCodeModeBridge:
             call_timeout=8.0,
             on_event=on_event,
         )
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_BRIDGE", str(session.bridge_dir))
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_ROOT_CALL_ID", "call_parent_4")
         monkeypatch.setenv("EXCELMANUS_CODE_MODE_TIMEOUT", "8")
@@ -233,13 +242,13 @@ class TestDockerOffWording:
     def test_sdk_docstring_omits_strong_isolation_when_docker_off(self) -> None:
         from excelmanus.code_mode import render_sdk_source
 
-        source = render_sdk_source([_read_excel_def()], docker_sandbox=False)
+        source = render_sdk_source([_read_excel_def()])
         assert "强隔离" not in source
-        assert "受限 builtins" in source or "SDK" in source
+        assert "本机受限子进程" in source or "SDK" in source
 
     def test_run_code_result_note_omits_strong_isolation(self, tmp_path: Path) -> None:
         from excelmanus.code_mode import (
-            DOCKER_OFF_DISCLAIMER,
+            LOCAL_SANDBOX_DISCLAIMER,
             apply_sdk_calls_summary,
         )
         from excelmanus.code_mode import CodeModeSession
@@ -249,14 +258,13 @@ class TestDockerOffWording:
             dispatcher=dispatcher,
             root_call_id="call_note",
             bridge_dir=tmp_path / "bridge",
-            docker_sandbox=False,
         )
         raw = json.dumps({"status": "success", "stdout_tail": "ok"})
         merged = apply_sdk_calls_summary(raw, session)
         payload = json.loads(merged)
         assert "强隔离" not in merged
-        assert "强隔离" not in DOCKER_OFF_DISCLAIMER
-        assert payload.get("sandbox_note") == DOCKER_OFF_DISCLAIMER
+        assert "强隔离" not in LOCAL_SANDBOX_DISCLAIMER
+        assert payload.get("sandbox_note") == LOCAL_SANDBOX_DISCLAIMER
 
 
 class TestWrapperSdkInject:
@@ -265,7 +273,7 @@ class TestWrapperSdkInject:
 
         sdk_path = tmp_path / "em.py"
         sdk_path.write_text(
-            render_sdk_source([_read_excel_def()], docker_sandbox=False),
+            render_sdk_source([_read_excel_def()]),
             encoding="utf-8",
         )
         script = tmp_path / "user.py"

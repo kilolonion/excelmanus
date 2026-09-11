@@ -23,6 +23,7 @@ from excelmanus.engine_core.tool_result import (
     ok_result,
 )
 from excelmanus.security import FileAccessGuard
+from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
 
@@ -48,23 +49,11 @@ def init_guard(workspace_root: str) -> None:
     _guard = FileAccessGuard(workspace_root)
 
 
-# ── Docker 沙盒开关 ──────────────────────────────────────
-# 全局标志为部署级设置（非用户级）。
-# 每会话 SandboxEnv contextvar 在工具调度器设置后优先生效。
-
 import contextvars as _contextvars
-
-_docker_sandbox_enabled: bool = False
 
 _current_sandbox_env: _contextvars.ContextVar[Any] = _contextvars.ContextVar(
     "_current_sandbox_env", default=None,
 )
-
-
-def init_docker_sandbox(enabled: bool) -> None:
-    """设置 Docker 沙盒模式开关（由 API 层在 lifespan 中调用）。"""
-    global _docker_sandbox_enabled
-    _docker_sandbox_enabled = enabled
 
 
 def set_sandbox_env(env: Any) -> _contextvars.Token:
@@ -80,19 +69,10 @@ def _get_active_sandbox_env() -> Any:
     return _current_sandbox_env.get(None)
 
 
-def _is_docker_sandbox() -> bool:
-    """检查是否启用 Docker 沙盒，优先使用每会话环境。"""
-    env = _get_active_sandbox_env()
-    if env is not None:
-        return getattr(env, "docker_enabled", False)
-    return _docker_sandbox_enabled
-
-
 def _apply_code_mode_env(
     env: dict[str, str],
     *,
     workspace_root: Path,
-    to_container: bool = False,
 ) -> None:
     """把 Code Mode 文件桥路径注入子进程环境。"""
     try:
@@ -108,23 +88,24 @@ def _apply_code_mode_env(
         return
     bridge = Path(session.bridge_dir)
     sdk = Path(session.sdk_path)
-    if to_container:
-        from excelmanus.security.docker_sandbox import host_to_container_path
-
-        env["EXCELMANUS_CODE_MODE_BRIDGE"] = host_to_container_path(bridge, workspace_root)
-        env["EXCELMANUS_CODE_MODE_SDK"] = host_to_container_path(sdk, workspace_root)
-    else:
-        env["EXCELMANUS_CODE_MODE_BRIDGE"] = str(bridge)
-        env["EXCELMANUS_CODE_MODE_SDK"] = str(sdk)
+    env["EXCELMANUS_CODE_MODE_BRIDGE"] = str(bridge)
+    env["EXCELMANUS_CODE_MODE_SDK"] = str(sdk)
     env["EXCELMANUS_CODE_MODE_ROOT_CALL_ID"] = session.root_call_id
     env["EXCELMANUS_CODE_MODE_TIMEOUT"] = str(int(session.call_timeout))
 
 
-def _ingest_sandbox_save_versions(stderr: str, workspace_root: Path) -> dict[str, str]:
+def _ingest_sandbox_save_versions(
+    stderr: str,
+    workspace_root: Path,
+    *,
+    skip_rels: set[str] | None = None,
+) -> dict[str, str]:
     """解析沙盒 EXCELMANUS_SAVE_VERSION 行，记入本轮 seen。"""
     from excelmanus.workbook_commit import normalize_version_path, remember_content_version
+    from excelmanus.workspace.identity import is_reserved_relative
 
     found: dict[str, str] = {}
+    skipped = {p.replace("\\", "/").lstrip("./") for p in (skip_rels or set())}
     root = workspace_root.resolve()
     for line in (stderr or "").splitlines():
         if not line.startswith("EXCELMANUS_SAVE_VERSION\t"):
@@ -141,22 +122,23 @@ def _ingest_sandbox_save_versions(stderr: str, workspace_root: Path) -> dict[str
             marker = "/workspace/"
             if marker in posix:
                 rel = posix.split(marker, 1)[-1]
-        if rel and version:
-            remember_content_version(rel, version)
-            found[rel] = version
+        rel_key = rel.replace("\\", "/").lstrip("./")
+        if not rel or not version or is_reserved_relative(rel_key) or rel_key in skipped:
+            continue
+        remember_content_version(rel, version)
+        found[rel] = version
     return found
 
 
 def _apply_expected_versions_env(env: dict[str, str]) -> None:
-    """把本轮已读到的 content_version 传给沙盒，供 save 前哈希比较。"""
+    """把本轮已读到的 content_version 传给宿主 publish 做 CAS。"""
     try:
         from excelmanus.workbook_commit import export_seen_versions
 
         mapping = export_seen_versions()
     except Exception:
         mapping = {}
-    if mapping:
-        env["EXCELMANUS_EXPECTED_VERSIONS"] = json.dumps(mapping, ensure_ascii=False)
+    env["EXCELMANUS_EXPECTED_VERSIONS"] = json.dumps(mapping, ensure_ascii=False)
 
 
 # ── 解释器探测 ───────────────────────────────────────────
@@ -528,10 +510,22 @@ def _generate_text_diff(
 
 
 def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
-    cow = payload.get("cow_mapping")
+    payload.pop("cow_mapping", None)
+    payload.pop("cow_hint", None)
     ui = ToolUiMeta()
-    if isinstance(cow, dict) and cow:
-        ui.cow_mapping = {str(k): str(v) for k, v in cow.items()}
+    published = payload.get("published")
+    if isinstance(published, list):
+        for item in published:
+            if not isinstance(item, dict):
+                continue
+            if item.get("status") != "committed":
+                continue
+            path = str(item.get("path") or "").strip()
+            if path and path not in ui.files:
+                ui.files.append(path)
+            version = item.get("content_version")
+            if isinstance(version, str) and version and not ui.content_version:
+                ui.content_version = version
     model_text = json.dumps(payload, ensure_ascii=False, indent=2)
     status = str(payload.get("status") or "")
     if status.lower() in {"failed", "error", "fail"}:
@@ -571,15 +565,7 @@ def write_text_file(
         except Exception:
             pass
 
-    # staging 重定向：有活跃事务时写入到 staged 副本
     write_path = safe_path
-    _env = _get_active_sandbox_env()
-    if _env is not None and getattr(_env, "transaction", None) is not None:
-        _staged = _env.transaction.stage_for_write(str(safe_path))
-        _staged_p = Path(_staged)
-        if _staged_p != safe_path:
-            write_path = _staged_p
-
     write_path.parent.mkdir(parents=True, exist_ok=True)
     write_path.write_text(content, encoding=encoding)
 
@@ -646,15 +632,7 @@ def edit_text_file(
         new_text = old_text.replace(old_string, new_string, 1)
         match_count = 1
 
-    # staging 重定向：有活跃事务时写入到 staged 副本
     write_path = safe_path
-    _env = _get_active_sandbox_env()
-    if _env is not None and getattr(_env, "transaction", None) is not None:
-        _staged = _env.transaction.stage_for_write(str(safe_path))
-        _staged_p = Path(_staged)
-        if _staged_p != safe_path:
-            write_path = _staged_p
-
     write_path.parent.mkdir(parents=True, exist_ok=True)
     write_path.write_text(new_text, encoding=encoding)
 
@@ -771,13 +749,12 @@ def run_code(
     if truncation_warnings:
         payload["truncation_warning"] = " ".join(truncation_warnings)
     try:
-        from excelmanus.code_mode import DOCKER_OFF_DISCLAIMER, get_code_mode_session
+        from excelmanus.code_mode import LOCAL_SANDBOX_DISCLAIMER, get_code_mode_session
 
         _cm_session = get_code_mode_session()
         if _cm_session is not None:
             payload["sdk_calls"] = _cm_session.summary()
-            if not _cm_session.docker_sandbox:
-                payload["sandbox_note"] = DOCKER_OFF_DISCLAIMER
+            payload["sandbox_note"] = LOCAL_SANDBOX_DISCLAIMER
     except Exception:
         pass
     if payload != result.value:
@@ -787,244 +764,6 @@ def run_code(
             model_text=json.dumps(payload, ensure_ascii=False, indent=2),
         )
     return result
-
-
-def _execute_script_docker(
-    *,
-    guard: FileAccessGuard,
-    script_safe: Path,
-    workdir_safe: Path,
-    args: list[str] | None,
-    timeout_seconds: int,
-    tail_lines: int,
-    stdout_file: str | None,
-    stderr_file: str | None,
-    inline_mode: bool,
-    sandbox_tier: str = "RED",
-) -> ToolResult:
-    """Docker 容器内执行脚本（OS 级隔离）。"""
-    from excelmanus.security.docker_sandbox import (
-        CONTAINER_WORKSPACE,
-        host_to_container_path,
-        run_in_container,
-    )
-
-    workspace_root = guard.workspace_root
-    safe_args = [str(item) for item in (args or [])]
-    sandbox_warnings: list[str] = []
-
-    _sandbox_env_obj = _get_active_sandbox_env()
-    if _sandbox_env_obj is not None:
-        sandbox_tmpdir = _sandbox_env_obj.get_tmp_dir()
-        cow_log_path = _sandbox_env_obj.get_cow_log_path()
-    else:
-        sandbox_tmpdir = workspace_root / ".tmp"
-        sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
-        cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
-    container_tmpdir = f"{CONTAINER_WORKSPACE}/.tmp"
-
-    env_vars = {
-        "PYTHONDONTWRITEBYTECODE": "1",
-        "PYTHONNOUSERSITE": "1",
-        "TMPDIR": container_tmpdir,
-        "TMP": container_tmpdir,
-        "TEMP": container_tmpdir,
-        "HOME": "/tmp",
-        "MPLCONFIGDIR": "/tmp/mpl",
-        "EXCELMANUS_COW_LOG": host_to_container_path(cow_log_path, workspace_root),
-        # 路径上下文：帮助Agent理解sandbox中的工作目录
-        "EXCELMANUS_WORKSPACE_ROOT": CONTAINER_WORKSPACE,  # 容器内的工作区根目录
-        "EXCELMANUS_WORKDIR": host_to_container_path(workdir_safe, workspace_root),  # 当前工作目录
-    }
-
-    # ── staging 映射注入（Docker 路径转换） ──
-    _sandbox_env_obj = _get_active_sandbox_env()
-    if _sandbox_env_obj is not None:
-        _staging_json = getattr(_sandbox_env_obj, "get_staging_map_json", lambda: "{}")()
-        if _staging_json and _staging_json != "{}":
-            try:
-                _host_map = json.loads(_staging_json)
-                _container_map = {}
-                for _hk, _hv in _host_map.items():
-                    try:
-                        _ck = host_to_container_path(Path(_hk), workspace_root)
-                        _cv = host_to_container_path(Path(_hv), workspace_root)
-                        _container_map[_ck] = _cv
-                    except ValueError:
-                        pass
-                if _container_map:
-                    env_vars["EXCELMANUS_STAGING_MAP"] = json.dumps(
-                        _container_map, ensure_ascii=False,
-                    )
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-    _apply_code_mode_env(env_vars, workspace_root=workspace_root, to_container=True)
-    _apply_expected_versions_env(env_vars)
-
-    container_script = host_to_container_path(script_safe, workspace_root)
-
-    # Docker 模式下所有 tier 都注入 wrapper（RED 使用最小 filesystem guard）
-    from excelmanus.security.sandbox_hook import generate_wrapper_script
-
-    wrapper_src = generate_wrapper_script(
-        sandbox_tier, CONTAINER_WORKSPACE, docker_mode=True,
-    )
-    temp_dir = workspace_root / "scripts" / "temp"
-    temp_dir.mkdir(parents=True, exist_ok=True)
-    temp_wrapper: Path | None = temp_dir / f"_sw_{uuid.uuid4().hex[:12]}.py"
-    temp_wrapper.write_text(wrapper_src, encoding="utf-8")
-    container_wrapper = host_to_container_path(temp_wrapper, workspace_root)
-    command_parts = ["python", "-I", container_wrapper, container_script, *safe_args]
-
-    try:
-        docker_result = run_in_container(
-            command_parts=command_parts,
-            workspace_root=workspace_root,
-            workdir=workdir_safe,
-            env_vars=env_vars,
-            timeout_seconds=timeout_seconds,
-        )
-    except Exception as exc:
-        sandbox_warnings.append(f"Docker 执行异常: {exc}")
-        docker_result = {
-            "return_code": 1,
-            "timed_out": False,
-            "stdout": "",
-            "stderr": str(exc),
-            "duration_seconds": 0.0,
-        }
-    finally:
-        if temp_wrapper is not None and temp_wrapper.exists():
-            try:
-                temp_wrapper.unlink()
-            except OSError:
-                pass
-
-    return_code = docker_result["return_code"]
-    timed_out = docker_result["timed_out"]
-    stdout = docker_result["stdout"]
-    stderr = docker_result["stderr"]
-
-    stdout_saved: str | None = None
-    stderr_saved: str | None = None
-    if stdout_file:
-        stdout_safe = guard.resolve_and_validate(stdout_file)
-        stdout_safe.parent.mkdir(parents=True, exist_ok=True)
-        stdout_safe.write_text(stdout, encoding="utf-8")
-        stdout_saved = str(stdout_safe.relative_to(workspace_root))
-    if stderr_file:
-        stderr_safe = guard.resolve_and_validate(stderr_file)
-        stderr_safe.parent.mkdir(parents=True, exist_ok=True)
-        stderr_safe.write_text(stderr, encoding="utf-8")
-        stderr_saved = str(stderr_safe.relative_to(workspace_root))
-
-    if timed_out:
-        status = "timed_out"
-    elif return_code == 0:
-        status = "success"
-    else:
-        status = "failed"
-
-    cow_mapping: dict[str, str] = {}
-    if cow_log_path.exists():
-        try:
-            for line in cow_log_path.read_text(encoding="utf-8").splitlines():
-                if "\t" in line:
-                    src, dst = line.split("\t", 1)
-                    try:
-                        src_rel = src.replace(CONTAINER_WORKSPACE + "/", "", 1)
-                        dst_rel = dst.replace(CONTAINER_WORKSPACE + "/", "", 1)
-                        cow_mapping[src_rel] = dst_rel
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-        finally:
-            try:
-                cow_log_path.unlink()
-            except OSError:
-                pass
-
-    result: dict[str, Any] = {
-        "stdout_tail": _tail(stdout, tail_lines),
-        "stderr_tail": _tail(stderr, tail_lines),
-        "status": status,
-        "return_code": return_code,
-        "duration_seconds": docker_result["duration_seconds"],
-        "mode": "inline" if inline_mode else "file",
-        "script": str(script_safe.relative_to(workspace_root)),
-        "workdir": str(workdir_safe.relative_to(workspace_root)),
-        "timed_out": timed_out,
-        "stdout_file": stdout_saved,
-        "stderr_file": stderr_saved,
-        "cow_mapping": cow_mapping,
-        "sandbox_tier": sandbox_tier,
-        "save_versions": _ingest_sandbox_save_versions(stderr, workspace_root),
-    }
-
-    if cow_mapping:
-        _cow_lines = [f"  {src} → {dst}" for src, dst in cow_mapping.items()]
-        result["cow_hint"] = (
-            "⚠️ 原始文件受保护，已自动复制到 outputs/ 目录。"
-            "后续对该文件的读取和写入请使用副本路径：\n"
-            + "\n".join(_cow_lines)
-        )
-
-    if status == "failed":
-        stderr_text = stderr or ""
-        hints: list[str] = []
-        if "安全策略禁止" in stderr_text:
-            if "路径不在工作区内" in stderr_text:
-                hints.append(
-                    "库内部临时文件写入被拦截。"
-                    "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
-                )
-            if "敏感目录" in stderr_text or "禁止访问工作区外的 .env" in stderr_text:
-                hints.append(
-                    "安全沙盒拦截：禁止访问系统敏感目录或配置文件。请仅操作工作区内的文件。"
-                )
-        if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
-            if any(
-                m in stderr_text
-                for m in [
-                    "requests", "urllib", "http", "socket",
-                    "os", "sys", "subprocess", "No module named",
-                ]
-            ):
-                hints.append(
-                    "安全沙盒拦截：系统禁止在 run_code 中使用网络或系统级模块。"
-                    "请放弃尝试网络请求，改用预装的数据处理库（pandas/numpy/sklearn/matplotlib/seaborn/plotly/scipy/openpyxl）。"
-                )
-        if hints:
-            result["recovery_hint"] = " ".join(hints)
-
-    # ── 空输出诊断（Docker 路径） ──
-    if not stdout.strip() and not stderr.strip():
-        diag_parts: list[str] = []
-        if status == "success":
-            diag_parts.append(
-                "代码返回成功(exit 0)但无任何输出。"
-                "可能原因：(1) 代码中的 print 语句被 try/except 吞掉或未执行；"
-                "(2) 代码包含 `...`(Ellipsis) 占位符导致实际逻辑被跳过；"
-                "(3) 所有输出逻辑在异常后的代码路径中。"
-            )
-        elif status == "failed":
-            diag_parts.append(
-                f"代码执行失败(exit {return_code})且无错误输出。"
-                "可能原因：(1) 依赖未安装(如 sklearn)导致 ImportError 被 try/except 静默捕获；"
-                "(2) 容器环境缺少必要依赖；"
-                "(3) 代码语法不完整(被截断)导致 SyntaxError。"
-            )
-        if diag_parts:
-            diag_parts.append(
-                "建议：确保代码顶层有 print 输出验证，"
-                "except 块中使用 traceback.print_exc() 而非 pass，"
-                "并检查所有依赖是否已安装。"
-            )
-            result["empty_output_diagnostic"] = " ".join(diag_parts)
-
-    return _pack_run_code_result(result)
 
 
 def _execute_script(
@@ -1042,21 +781,7 @@ def _execute_script(
     inline_mode: bool,
     sandbox_tier: str = "RED",
 ) -> ToolResult:
-    """内部执行脚本核心逻辑（供 run_code 调用）。"""
-    if _is_docker_sandbox():
-        return _execute_script_docker(
-            guard=guard,
-            script_safe=script_safe,
-            workdir_safe=workdir_safe,
-            args=args,
-            timeout_seconds=timeout_seconds,
-            tail_lines=tail_lines,
-            stdout_file=stdout_file,
-            stderr_file=stderr_file,
-            inline_mode=inline_mode,
-            sandbox_tier=sandbox_tier,
-        )
-
+    """内部执行脚本核心逻辑（供 run_code 调用）。始终走本机子进程围栏。"""
     python_cmd, probes, mode = _resolve_python_command(
         python_command,
         require_excel_deps=require_excel_deps,
@@ -1074,31 +799,23 @@ def _execute_script(
     _sandbox_env_obj = _get_active_sandbox_env()
     if _sandbox_env_obj is not None:
         sandbox_tmpdir = _sandbox_env_obj.get_tmp_dir()
-        cow_log_path = _sandbox_env_obj.get_cow_log_path()
     else:
         sandbox_tmpdir = guard.workspace_root / ".tmp"
         sandbox_tmpdir.mkdir(parents=True, exist_ok=True)
-        cow_log_path = sandbox_tmpdir / f"_cow_{uuid.uuid4().hex[:12]}.log"
     sandbox_env["TMPDIR"] = str(sandbox_tmpdir)
     sandbox_env["TMP"] = str(sandbox_tmpdir)
     sandbox_env["TEMP"] = str(sandbox_tmpdir)
-
-    # ── CoW 日志 ──
-    sandbox_env["EXCELMANUS_COW_LOG"] = str(cow_log_path)
 
     # ── 路径上下文：帮助Agent理解sandbox中的工作目录 ──
     sandbox_env["EXCELMANUS_WORKSPACE_ROOT"] = str(guard.workspace_root)
     sandbox_env["EXCELMANUS_WORKDIR"] = str(workdir_safe)
 
-    # ── staging 映射注入（transaction 感知） ──
-    _sandbox_env_obj = _get_active_sandbox_env()
-    if _sandbox_env_obj is not None:
-        _staging_json = getattr(_sandbox_env_obj, "get_staging_map_json", lambda: "{}")()
-        if _staging_json and _staging_json != "{}":
-            sandbox_env["EXCELMANUS_STAGING_MAP"] = _staging_json
-
-    _apply_code_mode_env(sandbox_env, workspace_root=guard.workspace_root, to_container=False)
+    _apply_code_mode_env(sandbox_env, workspace_root=guard.workspace_root)
     _apply_expected_versions_env(sandbox_env)
+    from excelmanus.workspace.runtime import PENDING_RUN_ID_ENV, allocate_pending_run_id
+
+    pending_run_id = allocate_pending_run_id()
+    sandbox_env[PENDING_RUN_ID_ENV] = pending_run_id
 
     # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
@@ -1172,26 +889,34 @@ def _execute_script(
         status = "success"
     else:
         status = "failed"
-        
-    cow_mapping = {}
-    if cow_log_path.exists():
-        try:
-            for line in cow_log_path.read_text(encoding="utf-8").splitlines():
-                if "\t" in line:
-                    src, dst = line.split("\t", 1)
-                    try:
-                        rel_src = str(Path(src).relative_to(guard.workspace_root))
-                        rel_dst = str(Path(dst).relative_to(guard.workspace_root))
-                        cow_mapping[rel_src] = rel_dst
-                    except ValueError:
-                        pass
-        except Exception:
-            pass
-        finally:
-            try:
-                cow_log_path.unlink()
-            except OSError:
-                pass
+
+    from excelmanus.workbook_commit import remember_content_version
+    from excelmanus.workspace.runtime import publish_pending_writes
+
+    published = publish_pending_writes(
+        guard.workspace_root,
+        stderr,
+        run_id=pending_run_id,
+    )
+    save_versions: dict[str, str] = {}
+    pending_rels: set[str] = set()
+    for line in (stderr or "").splitlines():
+        if not line.startswith("EXCELMANUS_PENDING_WRITE\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) >= 2:
+            pending_rels.add(parts[1].replace("\\", "/").lstrip("./"))
+    for item in published:
+        path = str(item.get("path") or "").strip()
+        version = item.get("content_version")
+        if item.get("status") == "committed" and path and isinstance(version, str):
+            remember_content_version(path, version)
+            save_versions[path] = version
+    ingested = _ingest_sandbox_save_versions(
+        stderr, guard.workspace_root, skip_rels=pending_rels,
+    )
+    for rel, version in ingested.items():
+        save_versions.setdefault(rel, version)
 
     result: dict[str, Any] = {
         "stdout_tail": _tail(stdout, tail_lines),
@@ -1205,18 +930,10 @@ def _execute_script(
         "timed_out": timed_out,
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
-        "cow_mapping": cow_mapping,
         "sandbox_tier": sandbox_tier,
-        "save_versions": _ingest_sandbox_save_versions(stderr, guard.workspace_root),
+        "save_versions": save_versions,
+        "published": published,
     }
-    # CoW 路径提示：bench/external 文件被保护时，提醒使用副本路径
-    if cow_mapping:
-        _cow_lines = [f"  {src} → {dst}" for src, dst in cow_mapping.items()]
-        result["cow_hint"] = (
-            "⚠️ 原始文件受保护，已自动复制到 outputs/ 目录。"
-            "后续对该文件的读取和写入请使用副本路径：\n"
-            + "\n".join(_cow_lines)
-        )
 
     # 检测沙盒权限错误，追加恢复提示
     if status == "failed":
@@ -1341,20 +1058,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="run_code",
-            description=(
-                "必须：代码包含顶层 try/except（错误 print 到 stderr）；禁止 sys.exit()/exec()/eval()；"
-                "写入后在 stdout 打印关键验证数据（行数、列名、抽样值）。"
-                "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
-                "适用场景：多步读+规约、领域工具尚未覆盖的批量变换；单格/格式/图表不要写落盘脚本。"
-                "预装库：pandas, openpyxl, numpy, scikit-learn(sklearn), matplotlib, seaborn, plotly, scipy, xlsxwriter, xlrd, pyxlsb。"
-                "不适用：简单数据查看（改用 inspect_spreadsheet）、简单筛选（改用 analyze_spreadsheet）。"
-                "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
-                "相关工具：write_text_file（先写脚本再用 script_path 执行）、inspect_spreadsheet（执行前了解数据结构）。"
-                "路径说明：代码中的路径相对于沙盒工作目录，可通过 os.environ.get('EXCELMANUS_WORKDIR') 获取当前目录，"
-                "os.environ.get('EXCELMANUS_WORKSPACE_ROOT') 获取工作区根目录。"
-                "脚本可通过 from em import inspect_spreadsheet, edit_spreadsheet 调用宿主已注册工具（经 ToolDispatcher，子调用带 root_call_id）。"
-                "Docker 未启用时仅注入 SDK 与受限 builtins，不宣称任意代码已被隔离。"
-            ),
+            description=TOOL_DESCRIPTIONS["run_code"],
             input_schema={
                 "type": "object",
                 "properties": {

@@ -41,7 +41,6 @@ def _make_engine_with_state(*, code_policy_enabled: bool = True):
     e.approval = MagicMock()
     e.approval.new_approval_id.return_value = "ap-1"
     e.approval.utc_now.return_value = "2026-01-01T00:00:00Z"
-    e._context_builder = MagicMock()
     e.emit = MagicMock()
     return e, state
 
@@ -56,10 +55,9 @@ class TestCodePolicyHandlerWriteLog:
 
         e, state = _make_engine_with_state()
         dispatcher = MagicMock()
-        dispatcher._snapshot_excel_for_diff.return_value = {}
         dispatcher._snapshot_uploads_dir.return_value = {}
         dispatcher._diff_uploads_snapshots.return_value = []
-        dispatcher._emit_files_changed_from_audit.return_value = None
+        dispatcher._record_files_from_run_code.return_value = None
         dispatcher._extract_run_code_write_summary.return_value = "写入数据到 output.xlsx"
 
         handler = CodePolicyHandler(engine=e, dispatcher=dispatcher)
@@ -103,28 +101,27 @@ class TestCodePolicyHandlerWriteLog:
         assert "output.xlsx" in entry.get("file_path", "")
 
     @pytest.mark.asyncio
-    async def test_cow_mapping_records_to_write_operations_log(self):
-        """CoW 映射存在时，write_operations_log 应有 run_code 条目。"""
+    async def test_published_records_to_write_operations_log(self):
+        """宿主 pending 发布成功时，write_operations_log 应有 run_code 条目。"""
         from excelmanus.engine_core.tool_handlers import CodePolicyHandler
 
         e, state = _make_engine_with_state()
         dispatcher = MagicMock()
-        dispatcher._snapshot_excel_for_diff.return_value = {}
         dispatcher._snapshot_uploads_dir.return_value = {}
         dispatcher._diff_uploads_snapshots.return_value = []
-        dispatcher._emit_files_changed_from_audit.return_value = None
+        dispatcher._record_files_from_run_code.return_value = None
         dispatcher._extract_run_code_write_summary.return_value = "run_code 写入"
 
         handler = CodePolicyHandler(engine=e, dispatcher=dispatcher)
 
-        cow_result = json.dumps({
+        published_result = json.dumps({
             "status": "ok",
-            "cow_mapping": {"/tmp/test_ws/data.xlsx": "/tmp/test_ws/.cow/data_abc.xlsx"},
+            "published": [{"path": "data.xlsx", "status": "committed", "content_version": "sha256:abc"}],
             "stdout_tail": "",
         })
         audit_rec = MagicMock()
         audit_rec.changes = []
-        e.execute_tool_with_audit = AsyncMock(return_value=(cow_result, audit_rec))
+        e.execute_tool_with_audit = AsyncMock(return_value=(published_result, audit_rec))
 
         from excelmanus.security.code_policy import CodeRiskTier
         mock_analysis = MagicMock()
@@ -150,6 +147,6 @@ class TestCodePolicyHandlerWriteLog:
         assert len(state.write_operations_log) >= 1
         entry = state.write_operations_log[0]
         assert entry["tool_name"] == "run_code"
-        assert ".cow/data_abc.xlsx" in entry.get("file_path", "")
+        assert "data.xlsx" in entry.get("file_path", "")
 
 
