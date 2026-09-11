@@ -75,42 +75,20 @@ class TestUploadFromUrl:
         assert resp.status_code == 400
         assert "扩展名" in resp.json().get("error", "") or "推断" in resp.json().get("error", "")
 
-    @patch("httpx.AsyncClient")
-    def test_any_extension_allowed(self, mock_httpx_cls, client, tmp_path):
+    @patch("excelmanus.security.url_fetch.fetch_public_http", new_callable=AsyncMock)
+    def test_any_extension_allowed(self, mock_fetch, client, tmp_path):
         """扩展名不再受限 — 任意格式都能上传（仅做大小限制）。"""
-        fake_content = b"# Hello\nworld"
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = fake_content
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client_instance = AsyncMock()
-        mock_client_instance.get = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_httpx_cls.return_value = mock_client_instance
+        mock_fetch.return_value = b"# Hello\nworld"
 
         resp = client.post("/api/v1/upload-from-url", json={"url": "https://example.com/doc.pdf"})
         assert resp.status_code == 200
         assert resp.json()["filename"] == "doc.pdf"
 
-    @patch("httpx.AsyncClient")
-    def test_success_xlsx(self, mock_httpx_cls, client, tmp_path):
+    @patch("excelmanus.security.url_fetch.fetch_public_http", new_callable=AsyncMock)
+    def test_success_xlsx(self, mock_fetch, client, tmp_path):
         """模拟成功下载 xlsx 文件。"""
-        import httpx
-
-        fake_content = b"PK\x03\x04" + b"\x00" * 100  # 假 xlsx 内容
-
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = fake_content
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client_instance = AsyncMock()
-        mock_client_instance.get = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_httpx_cls.return_value = mock_client_instance
+        fake_content = b"PK\x03\x04" + b"\x00" * 100
+        mock_fetch.return_value = fake_content
 
         resp = client.post(
             "/api/v1/upload-from-url",
@@ -122,20 +100,16 @@ class TestUploadFromUrl:
         assert body["size"] == len(fake_content)
         assert "uploads" in body["path"]
 
-    @patch("httpx.AsyncClient")
-    def test_remote_error_502(self, mock_httpx_cls, client):
+    @patch("excelmanus.security.url_fetch.fetch_public_http", new_callable=AsyncMock)
+    def test_remote_error_502(self, mock_fetch, client):
         """远程服务器返回 404 时应返回 502。"""
         import httpx
 
         mock_response = MagicMock()
         mock_response.status_code = 404
-        exc = httpx.HTTPStatusError("Not Found", request=MagicMock(), response=mock_response)
-
-        mock_client_instance = AsyncMock()
-        mock_client_instance.get = AsyncMock(side_effect=exc)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_httpx_cls.return_value = mock_client_instance
+        mock_fetch.side_effect = httpx.HTTPStatusError(
+            "Not Found", request=MagicMock(), response=mock_response
+        )
 
         resp = client.post(
             "/api/v1/upload-from-url",
@@ -143,19 +117,10 @@ class TestUploadFromUrl:
         )
         assert resp.status_code == 502
 
-    @patch("httpx.AsyncClient")
-    def test_empty_download(self, mock_httpx_cls, client):
+    @patch("excelmanus.security.url_fetch.fetch_public_http", new_callable=AsyncMock)
+    def test_empty_download(self, mock_fetch, client):
         """下载到空内容应返回 400。"""
-        mock_response = MagicMock()
-        mock_response.status_code = 200
-        mock_response.content = b""
-        mock_response.raise_for_status = MagicMock()
-
-        mock_client_instance = AsyncMock()
-        mock_client_instance.get = AsyncMock(return_value=mock_response)
-        mock_client_instance.__aenter__ = AsyncMock(return_value=mock_client_instance)
-        mock_client_instance.__aexit__ = AsyncMock(return_value=False)
-        mock_httpx_cls.return_value = mock_client_instance
+        mock_fetch.return_value = b""
 
         resp = client.post(
             "/api/v1/upload-from-url",
@@ -163,3 +128,10 @@ class TestUploadFromUrl:
         )
         assert resp.status_code == 400
         assert "空" in resp.json().get("error", "")
+
+    def test_rejects_loopback(self, client):
+        resp = client.post(
+            "/api/v1/upload-from-url",
+            json={"url": "http://127.0.0.1/secret.xlsx"},
+        )
+        assert resp.status_code == 400

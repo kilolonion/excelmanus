@@ -63,23 +63,9 @@ def _apply_cell_write(ws: Any, cell_ref: str, value: Any) -> None:
 
 
 def _record_commit_history(session_id: str | None, user_id: str | None, rel_path: str, content_version: str) -> None:
-    """人工写入成功后记入 FileVersionManager（无会话/未启用版本时跳过）。"""
-    if not session_id:
-        return
-    session_manager = get_session_manager()
-    if session_manager is None:
-        return
-    engine = session_manager.get_engine(session_id)
-    if engine is None:
-        return
-    registry = getattr(engine, "file_registry", None)
-    checkpoint = getattr(registry, "checkpoint_file", None)
-    if not callable(checkpoint):
-        return
-    try:
-        checkpoint(rel_path, reason="manual", ref_id=content_version)
-    except Exception:
-        logger.debug("写入后记录版本历史失败: %s", rel_path, exc_info=True)
+    """History is recorded by AtomicPublish / RevisionStore. This is a no-op."""
+    _ = (session_id, user_id, rel_path, content_version)
+    return
 
 
 @router.get("/api/v1/files/excel")
@@ -385,31 +371,15 @@ class ExcelWriteRequest(BaseModel):
 
 @router.post("/api/v1/files/excel/write")
 async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) -> JSONResponse:
-    """侧边面板编辑回写：将单元格变更写入文件。
-
-    当备份模式启用时，写操作会自动重定向到备份副本（通过 ensure_backup
-    确保备份存在），避免直接修改原始文件。
-    """
+    """侧边面板编辑回写：将单元格变更写入文件。"""
     assert get_config() is not None, "服务未初始化"
 
     ws_root = _resolve_workspace_root(raw_request)
 
-    # 先解析原始路径（不经过 backup 重定向），用于 ensure_backup
+    # 先解析工作区路径
     resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
-
-    # 备份模式下，写操作需要 ensure_backup（创建备份副本如果尚不存在），
-    # 然后写入备份副本而非原始文件
-    if request.session_id and get_session_manager() is not None:
-        engine = get_session_manager().get_engine(request.session_id)
-        if engine is not None and engine.backup_enabled:
-            tx = engine.transaction
-            if tx is not None:
-                try:
-                    resolved = tx.stage_for_write(resolved)
-                except ValueError:
-                    pass
 
     from pathlib import Path as _Path
 
@@ -837,15 +807,19 @@ async def get_spec_file(request: Request) -> JSONResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
-    from pathlib import Path as _Path
+    from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 
     ws_root = _resolve_workspace_root(request)
-    file_path = _Path(path)
-    if not file_path.is_absolute():
-        file_path = _Path(ws_root) / file_path
+    try:
+        file_path = FileAccessGuard(ws_root).resolve_and_validate(path)
+    except SecurityViolationError:
+        return _error_json_response(404, f"Spec 文件不存在: {path}")  # type: ignore[return-value]
 
     if not file_path.is_file() or file_path.suffix.lower() != ".json":
         return _error_json_response(404, f"Spec 文件不存在: {path}")  # type: ignore[return-value]
+
+    if file_path.stat().st_size > 2 * 1024 * 1024:
+        return _error_json_response(400, "Spec 文件过大")  # type: ignore[return-value]
 
     import json as _json
 
@@ -854,6 +828,8 @@ async def get_spec_file(request: Request) -> JSONResponse:
         data = _json.loads(content)
     except Exception as exc:
         return _error_json_response(500, f"读取 spec 失败: {exc}")  # type: ignore[return-value]
+    if not isinstance(data, (dict, list)):
+        return _error_json_response(400, "Spec 必须是 JSON 对象或数组")  # type: ignore[return-value]
 
     return JSONResponse(content=data)
 
@@ -992,7 +968,7 @@ async def download_file_by_token(token: str) -> StreamingResponse:
     from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
     ws = IsolatedWorkspace.resolve(
         get_config().workspace_root,
-        sandbox_config=SandboxConfig(docker_enabled=False),
+        sandbox_config=SandboxConfig(),
         data_root=get_config().data_root,
     )
     ws_root = str(ws.root_dir)
@@ -1036,7 +1012,7 @@ async def create_download_link(request: Request) -> JSONResponse:
     from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
     ws = IsolatedWorkspace.resolve(
         get_config().workspace_root,
-        sandbox_config=SandboxConfig(docker_enabled=False),
+        sandbox_config=SandboxConfig(),
         data_root=get_config().data_root,
     )
     ws_root = str(ws.root_dir)
@@ -1046,8 +1022,13 @@ async def create_download_link(request: Request) -> JSONResponse:
         return _error_json_response(404, f"文件不存在或路径非法: {file_path_str}")
 
     from excelmanus.auth.security import create_download_token, DOWNLOAD_TOKEN_EXPIRE_MINUTES
+    from pathlib import Path as _Path
 
-    token = create_download_token(file_path_str)
+    try:
+        canon = str(_Path(resolved).resolve().relative_to(_Path(ws_root).resolve())).replace("\\", "/")
+    except ValueError:
+        return _error_json_response(404, f"文件不存在或路径非法: {file_path_str}")
+    token = create_download_token(canon)
 
     # 构建公开 URL（优先级：env > config_kv > 请求 Host 推断）
     public_url = get_config().public_url
@@ -1455,11 +1436,16 @@ class WordWriteRequest(BaseModel):
     session_id: str | None = None
     path: str
     operations: list[dict[str, Any]]
+    expected_version: str
+
 
 @router.post("/api/v1/files/word/write")
 async def write_word_content(request: WordWriteRequest, raw_request: Request) -> JSONResponse:
     """前端编辑回写：将内容变更写入 Word 文件。"""
     assert get_config() is not None, "服务未初始化"
+
+    if not request.expected_version.strip():
+        return _error_json_response(400, "write 必须提供 expected_version")
 
     ws_root = _resolve_workspace_root(raw_request)
     resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root)
@@ -1467,97 +1453,75 @@ async def write_word_content(request: WordWriteRequest, raw_request: Request) ->
     if error_response is not None:
         return error_response
 
-    if request.session_id and get_session_manager() is not None:
-        engine = get_session_manager().get_engine(request.session_id)
-        if engine is not None and engine.backup_enabled:
-            tx = engine.transaction
-            if tx is not None:
-                try:
-                    resolved = tx.stage_for_write(resolved)
-                except ValueError:
-                    pass
-
-    file_path, error_response = _resolve_supported_word_file(request.path, resolved)
-    if error_response is not None:
-        return error_response
-
     try:
         import asyncio
-        result = await asyncio.to_thread(_apply_word_write, str(file_path), request.operations)
-        return JSONResponse(content=result)
+        result = await asyncio.to_thread(
+            _apply_word_write,
+            str(file_path),
+            request.operations,
+            request.expected_version,
+            str(ws_root),
+        )
+        status = 200
+        if isinstance(result, dict) and result.get("code") == "VERSION_CONFLICT":
+            status = 409
+        elif isinstance(result, dict) and result.get("status") == "error" and result.get("code"):
+            status = 400
+        return JSONResponse(status_code=status, content=result)
     except Exception as exc:
         logger.error("Word write 失败: %s", exc, exc_info=True)
         return _error_json_response(500, f"写入失败: {exc}")
 
 
-def _apply_word_write(file_path: str, operations: list[dict[str, Any]]) -> dict[str, Any]:
-    """执行 Word 文档写入操作。"""
+def _apply_word_write(
+    file_path: str,
+    operations: list[dict[str, Any]],
+    expected_version: str,
+    workspace_root: str,
+) -> dict[str, Any]:
+    """执行 Word 文档写入：任一操作失败则不落盘。"""
     from docx import Document
-    from docx.oxml.ns import qn
+
+    from excelmanus.security.guard import FileAccessGuard
+    from excelmanus.tools.word_tools import apply_word_operations, _docx_bytes
+    from excelmanus.workbook_commit import CommitError, commit_bytes
 
     doc = Document(file_path)
-    applied: list[str] = []
-    errors: list[str] = []
+    applied, errors = apply_word_operations(doc, operations)
+    if errors:
+        return {
+            "status": "error",
+            "applied": applied,
+            "applied_count": len(applied),
+            "errors": errors,
+        }
 
-    for op in operations:
-        action = op.get("action", "")
-        idx = op.get("index")
-        text = op.get("text", "")
-        style = op.get("style")
-
-        try:
-            if action == "replace":
-                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
-                    errors.append(f"replace: 段落索引 {idx} 超出范围 (0-{len(doc.paragraphs)-1})")
-                    continue
-                para = doc.paragraphs[idx]
-                para.clear()
-                para.add_run(text)
-                if style:
-                    para.style = doc.styles[style]
-                applied.append(f"replace paragraph {idx}")
-
-            elif action == "insert_after":
-                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
-                    errors.append(f"insert_after: 段落索引 {idx} 超出范围")
-                    continue
-                ref_para = doc.paragraphs[idx]
-                new_p = ref_para._element.makeelement(qn("w:p"), {})
-                ref_para._element.addnext(new_p)
-                from docx.text.paragraph import Paragraph
-                new_para = Paragraph(new_p, ref_para._parent)
-                new_para.add_run(text)
-                if style:
-                    new_para.style = doc.styles[style]
-                applied.append(f"insert_after paragraph {idx}")
-
-            elif action == "append":
-                doc.add_paragraph(text, style=style)
-                applied.append("append paragraph")
-
-            elif action == "delete":
-                if idx is None or idx < 0 or idx >= len(doc.paragraphs):
-                    errors.append(f"delete: 段落索引 {idx} 超出范围")
-                    continue
-                p_element = doc.paragraphs[idx]._element
-                p_element.getparent().remove(p_element)
-                applied.append(f"delete paragraph {idx}")
-
-            else:
-                errors.append(f"未知操作: {action}")
-        except Exception as exc:
-            errors.append(f"{action} index={idx}: {exc}")
-
-    doc.save(file_path)
-
-    result: dict[str, Any] = {
+    guard = FileAccessGuard(workspace_root)
+    from pathlib import Path as _Path
+    dest = _Path(file_path).resolve()
+    rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+    try:
+        cr = commit_bytes(
+            guard=guard,
+            file_path=rel,
+            data=_docx_bytes(doc),
+            expected_version=expected_version,
+        )
+    except CommitError as exc:
+        return {
+            "status": "error",
+            "code": exc.code,
+            "error": exc.message,
+            "message": exc.message,
+            "fields": exc.fields,
+        }
+    return {
         "status": "success",
         "applied": applied,
         "applied_count": len(applied),
+        "content_version": cr.content_version,
+        "path": cr.path,
     }
-    if errors:
-        result["errors"] = errors
-    return result
 
 # ── 文件管理 API ─────────────────────────────────────
 
@@ -1675,12 +1639,17 @@ async def reveal_file(request: Request) -> JSONResponse:
     if not file_path:
         return _error_json_response(400, "缺少 path 参数")
 
-    target = os.path.abspath(file_path)
-    # 安全校验：限制在工作区范围内，防止路径遍历
+    target_raw = os.path.abspath(file_path)
     if get_config() is not None:
-        ws_root = os.path.abspath(get_config().workspace_root)
-        if not (target == ws_root or target.startswith(ws_root + os.sep)):
+        from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+
+        try:
+            target_path = FileAccessGuard(get_config().workspace_root).resolve_and_validate(file_path)
+        except SecurityViolationError:
             return _error_json_response(403, "路径不在工作区范围内")
+        target = str(target_path)
+    else:
+        target = target_raw
     if not os.path.exists(target):
         return _error_json_response(404, f"路径不存在: {target}")
 

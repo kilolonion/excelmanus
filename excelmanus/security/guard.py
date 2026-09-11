@@ -94,10 +94,40 @@ class FileAccessGuard:
 
         # 校验路径是否在工作目录内
         try:
-            resolved.relative_to(self._root)
+            rel = resolved.relative_to(self._root).as_posix()
         except ValueError:
             raise SecurityViolationError(
                 f"路径越界：{user_path!r} 解析后位于工作目录之外"
             )
 
+        from excelmanus.workspace.identity import is_reserved_relative
+
+        if is_reserved_relative(rel):
+            raise SecurityViolationError(
+                f"保留命名空间禁止访问：{user_path!r}"
+            )
+
+        from excelmanus.security.source_isolation import (
+            PRODUCT_SOURCE_FORBIDDEN,
+            is_product_source_relative,
+        )
+
+        if is_product_source_relative(rel):
+            raise SecurityViolationError(
+                f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止读取产品源码 {user_path!r}"
+            )
+
         return resolved
+
+
+def contained_in(root: Path, candidate: Path) -> Path:
+    """Resolve candidate and require it stay under root via Path.relative_to."""
+    resolved_root = Path(root).resolve()
+    resolved = Path(candidate).resolve()
+    try:
+        resolved.relative_to(resolved_root)
+    except ValueError as exc:
+        raise SecurityViolationError(
+            f"路径越界：{str(candidate)!r} 解析后位于 {resolved_root} 之外"
+        ) from exc
+    return resolved

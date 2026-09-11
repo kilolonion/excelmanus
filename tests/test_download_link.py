@@ -31,7 +31,9 @@ class TestDownloadToken:
         claims = decode_download_token(token)
         assert claims is not None
         assert claims["type"] == "download"
+        assert claims["purpose"] == "download"
         assert claims["file_path"] == "outputs/report.xlsx"
+        assert claims.get("jti")
         assert "sub" not in claims
         assert "exp" in claims
 
@@ -141,7 +143,6 @@ class TestMessageHandlerFileDownloadFallback:
         api = MagicMock()
         api.download_file = AsyncMock(return_value=(b"data", "test.xlsx"))
         api.generate_download_link = AsyncMock(return_value="http://example.com/api/v1/files/dl/tok")
-        api.list_staged = AsyncMock(return_value={"files": []})
 
         sessions = SessionStore()
         handler = MessageHandler(adapter=adapter, api_client=api, session_store=sessions)
@@ -286,14 +287,16 @@ class TestDownloadLinkPublicUrlResolution:
         return req
 
     @pytest.mark.asyncio
-    async def test_env_public_url_takes_priority(self):
+    async def test_env_public_url_takes_priority(self, tmp_path: Path):
         """EXCELMANUS_PUBLIC_URL 环境变量优先于 config_kv。"""
         import excelmanus.api as api_mod
 
+        target = tmp_path / "test.xlsx"
+        target.write_bytes(b"xl")
         mock_config = MagicMock()
         mock_config.public_url = "https://env.example.com"
-        mock_config.workspace_root = "."
-        mock_config.data_root = ""
+        mock_config.workspace_root = str(tmp_path)
+        mock_config.data_root = str(tmp_path)
 
         mock_store = MagicMock()
         mock_store.get.return_value = "https://db.example.com"
@@ -304,7 +307,7 @@ class TestDownloadLinkPublicUrlResolution:
         with (
             patch.object(app_state, "_config", mock_config),
             patch.object(app_state, "_config_store", mock_store),
-            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(files_mod, "_resolve_excel_path", return_value=str(target)),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
@@ -312,18 +315,19 @@ class TestDownloadLinkPublicUrlResolution:
             import json
             data = json.loads(body)
             assert data["url"].startswith("https://env.example.com/")
-            # config_kv 不应被查询（env 已生效）
             mock_store.get.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_config_kv_public_url_used_when_env_empty(self):
+    async def test_config_kv_public_url_used_when_env_empty(self, tmp_path: Path):
         """环境变量为空时回退到 config_kv 中的 channel_public_url。"""
         import excelmanus.api as api_mod
 
+        target = tmp_path / "test.xlsx"
+        target.write_bytes(b"xl")
         mock_config = MagicMock()
-        mock_config.public_url = ""  # env 未设置
-        mock_config.workspace_root = "."
-        mock_config.data_root = ""
+        mock_config.public_url = ""
+        mock_config.workspace_root = str(tmp_path)
+        mock_config.data_root = str(tmp_path)
 
         mock_store = MagicMock()
         mock_store.get.return_value = "https://db.example.com"
@@ -334,7 +338,7 @@ class TestDownloadLinkPublicUrlResolution:
         with (
             patch.object(app_state, "_config", mock_config),
             patch.object(app_state, "_config_store", mock_store),
-            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(files_mod, "_resolve_excel_path", return_value=str(target)),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
@@ -345,17 +349,19 @@ class TestDownloadLinkPublicUrlResolution:
             mock_store.get.assert_called_once_with("channel_public_url", "")
 
     @pytest.mark.asyncio
-    async def test_host_fallback_when_both_empty(self):
+    async def test_host_fallback_when_both_empty(self, tmp_path: Path):
         """环境变量和 config_kv 都为空时回退到请求 Host。"""
         import excelmanus.api as api_mod
 
+        target = tmp_path / "test.xlsx"
+        target.write_bytes(b"xl")
         mock_config = MagicMock()
         mock_config.public_url = ""
-        mock_config.workspace_root = "."
-        mock_config.data_root = ""
+        mock_config.workspace_root = str(tmp_path)
+        mock_config.data_root = str(tmp_path)
 
         mock_store = MagicMock()
-        mock_store.get.return_value = ""  # config_kv 也为空
+        mock_store.get.return_value = ""
 
         import excelmanus.api_app_state as app_state
         import excelmanus.api_routes_files as files_mod
@@ -363,7 +369,7 @@ class TestDownloadLinkPublicUrlResolution:
         with (
             patch.object(app_state, "_config", mock_config),
             patch.object(app_state, "_config_store", mock_store),
-            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(files_mod, "_resolve_excel_path", return_value=str(target)),
         ):
             req = self._make_request(host="myserver.com:8000", scheme="https")
             resp = await api_mod.create_download_link(req)
@@ -373,17 +379,19 @@ class TestDownloadLinkPublicUrlResolution:
             assert data["url"].startswith("https://myserver.com:8000/")
 
     @pytest.mark.asyncio
-    async def test_config_kv_trailing_slash_stripped(self):
+    async def test_config_kv_trailing_slash_stripped(self, tmp_path: Path):
         """config_kv 中的 public_url 尾部斜杠应被清理。"""
         import excelmanus.api as api_mod
 
+        target = tmp_path / "test.xlsx"
+        target.write_bytes(b"xl")
         mock_config = MagicMock()
         mock_config.public_url = ""
-        mock_config.workspace_root = "."
-        mock_config.data_root = ""
+        mock_config.workspace_root = str(tmp_path)
+        mock_config.data_root = str(tmp_path)
 
         mock_store = MagicMock()
-        mock_store.get.return_value = "https://db.example.com/"  # 带尾部斜杠
+        mock_store.get.return_value = "https://db.example.com/"
 
         import excelmanus.api_app_state as app_state
         import excelmanus.api_routes_files as files_mod
@@ -391,14 +399,13 @@ class TestDownloadLinkPublicUrlResolution:
         with (
             patch.object(app_state, "_config", mock_config),
             patch.object(app_state, "_config_store", mock_store),
-            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(files_mod, "_resolve_excel_path", return_value=str(target)),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
             body = resp.body.decode()
             import json
             data = json.loads(body)
-            # URL 不应包含双斜杠
             assert "/api/v1/files/dl/" in data["url"]
             assert "//api" not in data["url"]
 

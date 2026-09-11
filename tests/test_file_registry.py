@@ -84,8 +84,8 @@ class TestFileEntry:
         )
         assert entry.file_type == "other"
         assert entry.origin == "scan"
-        assert entry.staging_path is None
-        assert entry.is_active_cow is False
+        assert not hasattr(entry, "staging_path")
+        assert not hasattr(entry, "is_active_cow")
         assert entry.deleted_at is None
 
 
@@ -294,37 +294,11 @@ class TestFileRegistryStore:
         events = store.get_events_by_session("session_A")
         assert len(events) == 1
 
-    def test_staging_update(self, store: FileRegistryStore):
-        store.upsert_file({
-            "id": "fs",
-            "workspace": "/ws",
-            "canonical_path": "stg.xlsx",
-            "original_name": "stg.xlsx",
-            "origin": "scan",
-        })
-        assert store.update_staging("/ws", "stg.xlsx", "/tmp/staged.xlsx") is True
-        staged = store.list_staged("/ws")
-        assert len(staged) == 1
-        assert staged[0]["staging_path"] == "/tmp/staged.xlsx"
-
-        # 清除 staging
-        store.update_staging("/ws", "stg.xlsx", None)
-        assert len(store.list_staged("/ws")) == 0
-
-    def test_cow_status(self, store: FileRegistryStore):
-        store.upsert_file({
-            "id": "fc",
-            "workspace": "/ws",
-            "canonical_path": "cow.xlsx",
-            "original_name": "cow.xlsx",
-            "origin": "cow_copy",
-            "is_active_cow": True,
-        })
-        cows = store.list_active_cow("/ws")
-        assert len(cows) == 1
-
-        store.update_cow_status("/ws", "cow.xlsx", False)
-        assert len(store.list_active_cow("/ws")) == 0
+    def test_staging_and_cow_methods_removed(self, store: FileRegistryStore):
+        assert not hasattr(store, "update_staging")
+        assert not hasattr(store, "update_cow_status")
+        assert not hasattr(store, "list_active_cow")
+        assert not hasattr(store, "list_staged")
 
     def test_children(self, store: FileRegistryStore):
         store.upsert_file({
@@ -432,41 +406,9 @@ class TestFileRegistry:
         assert output.parent_file_id == parent.id
         assert output.size_bytes == 50
 
-    def test_register_backup(self, registry: FileRegistry):
-        parent = registry.register_upload(
-            canonical_path="sales.xlsx",
-            original_name="sales.xlsx",
-        )
-        backup = registry.register_backup(
-            backup_path="outputs/backups/sales_20260226.xlsx",
-            parent_canonical="sales.xlsx",
-            reason="staging",
-            session_id="s1",
-            turn=2,
-        )
-        assert backup.origin == "backup"
-        assert backup.parent_file_id == parent.id
-
-        # lineage 查询
-        lineage = registry.get_lineage(backup.id)
-        assert len(lineage) == 2
-        assert lineage[0].id == backup.id
-        assert lineage[1].id == parent.id
-
-    def test_register_cow(self, registry: FileRegistry):
-        parent = registry.register_upload(
-            canonical_path="sales.xlsx",
-            original_name="sales.xlsx",
-        )
-        cow = registry.register_cow(
-            cow_path="outputs/sales_cow_abc.xlsx",
-            parent_canonical="sales.xlsx",
-            session_id="s1",
-            turn=3,
-        )
-        assert cow.origin == "cow_copy"
-        assert cow.is_active_cow is True
-        assert cow.parent_file_id == parent.id
+    def test_register_backup_removed(self, registry: FileRegistry):
+        assert not hasattr(registry, "register_backup")
+        assert not hasattr(registry, "register_cow")
 
     def test_resolve_for_tool(self, registry: FileRegistry):
         registry.register_upload(
@@ -520,13 +462,13 @@ class TestFileRegistry:
             canonical_path="parent.xlsx",
             original_name="parent.xlsx",
         )
-        registry.register_backup(
-            backup_path="backup1.xlsx",
-            parent_canonical="parent.xlsx",
+        (registry.workspace_root / "child1.xlsx").write_bytes(b"a")
+        (registry.workspace_root / "child2.xlsx").write_bytes(b"b")
+        registry.register_agent_output(
+            "child1.xlsx", "child1.xlsx", parent_canonical="parent.xlsx",
         )
-        registry.register_backup(
-            backup_path="backup2.xlsx",
-            parent_canonical="parent.xlsx",
+        registry.register_agent_output(
+            "child2.xlsx", "child2.xlsx", parent_canonical="parent.xlsx",
         )
         children = registry.get_children(parent.id)
         assert len(children) == 2
@@ -582,72 +524,6 @@ class TestFileRegistry:
 
 
 # ── Panorama 构建测试 ────────────────────────────────────────
-
-
-class TestPanorama:
-    def test_empty_panorama(self, registry: FileRegistry):
-        assert registry.build_panorama() == ""
-
-    def test_full_mode(self, registry: FileRegistry):
-        registry.register_upload(
-            canonical_path="sales.xlsx",
-            original_name="sales.xlsx",
-            file_type="excel",
-            size_bytes=2048,
-            session_id="s1",
-            turn=1,
-            sheet_meta=[
-                {"name": "订单", "rows": 1200, "columns": 8},
-                {"name": "客户", "rows": 500, "columns": 5},
-            ],
-        )
-        registry.register_upload(
-            canonical_path="uploads/chart.png",
-            original_name="chart.png",
-            file_type="image",
-            size_bytes=345000,
-            session_id="s1",
-            turn=2,
-        )
-        registry.register_backup(
-            backup_path="outputs/backups/sales_bk.xlsx",
-            parent_canonical="sales.xlsx",
-            session_id="s1",
-            turn=2,
-            tool_name="write_cells",
-        )
-
-        text = registry.build_panorama()
-        assert "## 工作区文件全景" in text
-        assert "用户文件" in text
-        assert "sales.xlsx" in text
-        assert "chart.png" in text
-        assert "备份与副本" in text
-        assert "⚠️" in text
-
-    def test_compact_mode(self, registry: FileRegistry):
-        # 注册 > 20 文件触发紧凑模式
-        for i in range(25):
-            registry.register_from_scan(
-                canonical_path=f"data/file{i:03d}.xlsx",
-                original_name=f"file{i:03d}.xlsx",
-            )
-        text = registry.build_panorama()
-        assert "用户文件 (25)" in text
-
-    def test_summary_mode(self, registry: FileRegistry):
-        # 注册 > 100 文件触发摘要模式
-        for i in range(105):
-            registry.register_from_scan(
-                canonical_path=f"data/file{i:03d}.xlsx",
-                original_name=f"file{i:03d}.xlsx",
-            )
-        text = registry.build_panorama()
-        assert "105 个用户文件" in text
-        assert "热点目录" in text
-
-
-# ── DB Migration 测试 ────────────────────────────────────────
 
 
 class TestDBMigration:
@@ -799,6 +675,14 @@ class TestCacheConsistency:
         assert found.canonical_path == "uploads/abc_report.xlsx"
 
 
+def test_shared_registry_same_instance(tmp_db: Database, workspace: Path):
+    from excelmanus.file_registry import get_shared_file_registry
+
+    r1 = get_shared_file_registry(tmp_db, workspace)
+    r2 = get_shared_file_registry(tmp_db, str(workspace))
+    assert r1 is r2
+
+
 # ── 全文件类型扫描测试 ──────────────────────────────────────
 
 
@@ -900,6 +784,28 @@ class TestFullFileTypeScan:
         result = registry.scan_workspace()
         assert result.total_files == 1
 
+    def test_scan_skips_reserved_namespaces(self, registry: FileRegistry, workspace: Path):
+        """scan 不得走进 .excelmanus / outputs/backups / .versions / outputs/audits。"""
+        (workspace / "keep.xlsx").write_text("ok", encoding="utf-8")
+        for rel in (
+            ".excelmanus/revisions/x.xlsx",
+            "outputs/backups/foo_20260911T091344_abcd.xlsx",
+            "outputs/.versions/rev.xlsx",
+            "outputs/audits/log.xlsx",
+            ".versions/old.xlsx",
+        ):
+            dest = workspace / rel
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_text("hidden", encoding="utf-8")
+        (workspace / "outputs" / "report.xlsx").write_text("visible", encoding="utf-8")
+
+        result = registry.scan_workspace()
+        paths = {e.canonical_path for e in registry.list_all()}
+        assert "keep.xlsx" in paths
+        assert "outputs/report.xlsx" in paths
+        assert not any("backups" in p or ".excelmanus" in p or ".versions" in p or "audits" in p for p in paths)
+        assert result.total_files == 2
+
 
 class TestScanUploads:
     """scan_uploads 专门扫描 uploads/ 目录。"""
@@ -970,227 +876,51 @@ class TestScanUploads:
         assert entry.size_bytes == csv_path.stat().st_size
 
 
-# ── Staging / CoW / Checkpoint 委托层测试 ────────────────
+# ── Overlay 已删除 ────────────────
 
 
-@pytest.fixture
-def versioned_registry(tmp_db: Database, workspace: Path) -> FileRegistry:
-    """启用版本管理的 FileRegistry。"""
-    return FileRegistry(tmp_db, workspace, enable_versions=True)
+def test_enable_versions_ignored(tmp_db: Database, workspace: Path) -> None:
+    reg = FileRegistry(tmp_db, workspace, enable_versions=True)
+    assert reg.has_versions is False
+    assert not hasattr(reg, "stage_for_write")
+    assert not hasattr(reg, "create_turn_checkpoint")
+    assert not hasattr(reg, "fvm") or getattr(reg, "fvm", None) is None
 
 
-class TestVersionedRegistry:
-    """enable_versions=True 时的版本管理委托层。"""
-
-    def test_has_versions(self, versioned_registry: FileRegistry):
-        assert versioned_registry.has_versions is True
-        assert versioned_registry.fvm is not None
-
-    def test_no_versions_by_default(self, registry: FileRegistry):
-        assert registry.has_versions is False
-        assert registry.fvm is None
-
-    def test_stage_for_write(self, versioned_registry: FileRegistry, workspace: Path):
-        """staging 写入并返回副本路径。"""
-        orig = workspace / "data.txt"
-        orig.write_text("hello", encoding="utf-8")
-
-        staged_path = versioned_registry.stage_for_write("data.txt")
-        assert staged_path != str(orig)
-        assert Path(staged_path).exists()
-
-    def test_stage_for_write_no_versions(self, registry: FileRegistry, workspace: Path):
-        """无版本管理时返回原始路径。"""
-        orig = workspace / "data.txt"
-        orig.write_text("hello", encoding="utf-8")
-
-        result = registry.stage_for_write("data.txt")
-        assert result == str(orig.resolve())
-
-    def test_commit_staged(self, versioned_registry: FileRegistry, workspace: Path):
-        """提交 staged 文件回原位。"""
-        orig = workspace / "data.txt"
-        orig.write_text("original", encoding="utf-8")
-
-        staged = versioned_registry.stage_for_write("data.txt")
-        Path(staged).write_text("modified", encoding="utf-8")
-
-        result = versioned_registry.commit_staged("data.txt")
-        assert result is not None
-        assert orig.read_text(encoding="utf-8") == "modified"
-
-    def test_discard_staged(self, versioned_registry: FileRegistry, workspace: Path):
-        """丢弃 staged 文件。"""
-        orig = workspace / "data.txt"
-        orig.write_text("original", encoding="utf-8")
-
-        staged = versioned_registry.stage_for_write("data.txt")
-        Path(staged).write_text("modified", encoding="utf-8")
-
-        ok = versioned_registry.discard_staged("data.txt")
-        assert ok is True
-        assert not Path(staged).exists()
-
-    def test_staged_file_map(self, versioned_registry: FileRegistry, workspace: Path):
-        """staged_file_map 返回映射。"""
-        orig = workspace / "data.txt"
-        orig.write_text("hello", encoding="utf-8")
-        versioned_registry.stage_for_write("data.txt")
-
-        fmap = versioned_registry.staged_file_map()
-        assert len(fmap) == 1
-
-    def test_cow_mapping(self, versioned_registry: FileRegistry, workspace: Path):
-        """CoW 映射注册和查找。"""
-        orig = workspace / "src.xlsx"
-        orig.write_text("data", encoding="utf-8")
-        dst = workspace / "outputs" / "src_cow.xlsx"
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        dst.write_text("copy", encoding="utf-8")
-
-        versioned_registry.register_cow_mapping("src.xlsx", "outputs/src_cow.xlsx")
-        redirect = versioned_registry.lookup_cow_redirect("src.xlsx")
-        assert redirect is not None
-
-    def test_checkpoint_and_restore(self, versioned_registry: FileRegistry, workspace: Path):
-        """checkpoint 快照 + restore_to_original。"""
-        f = workspace / "target.txt"
-        f.write_text("v1", encoding="utf-8")
-
-        ver = versioned_registry.checkpoint_file("target.txt", reason="staging")
-        assert ver is not None
-
-        f.write_text("v2", encoding="utf-8")
-        ok = versioned_registry.restore_to_original("target.txt")
-        assert ok is False
-        assert f.read_text(encoding="utf-8") == "v2"
-
-        from excelmanus.workbook_commit import content_version_of
-
-        ok = versioned_registry.restore_to_original(
-            "target.txt",
-            expected_version=content_version_of(f.read_bytes()),
-        )
-        assert ok is True
-        assert f.read_text(encoding="utf-8") == "v1"
-
-    def test_turn_checkpoint_and_rollback(self, versioned_registry: FileRegistry, workspace: Path):
-        """轮次 checkpoint + rollback。"""
-        f = workspace / "sheet.xlsx"
-        f.write_text("original", encoding="utf-8")
-
-        versioned_registry.checkpoint_file("sheet.xlsx", reason="staging")
-        f.write_text("turn1_modified", encoding="utf-8")
-        cp = versioned_registry.create_turn_checkpoint(1, ["sheet.xlsx"], ["write_cell"])
-        assert cp is not None
-
-        cps = versioned_registry.list_turn_checkpoints()
-        assert len(cps) == 1
-
-        restored = versioned_registry.rollback_to_turn(1)
-        assert "sheet.xlsx" in restored
-
-    def test_invalidate_undo(self, versioned_registry: FileRegistry, workspace: Path):
-        """invalidate_undo 标记版本不可恢复。"""
-        f = workspace / "a.txt"
-        f.write_text("v1", encoding="utf-8")
-        versioned_registry.checkpoint_file("a.txt", reason="staging")
-
-        count = versioned_registry.invalidate_undo({"a.txt"})
-        assert count >= 1
-
-    def test_gc_versions(self, versioned_registry: FileRegistry, workspace: Path):
-        """gc_versions 不报错。"""
-        result = versioned_registry.gc_versions(max_age_seconds=0)
-        assert result >= 0
+# ── System Prompt 不再注入文件清单 ──────────────────────
 
 
-# ── System Prompt 统一 + 写后事件记录 ──────────────────────
 
+def test_file_registry_not_injected_into_system(tmp_path):
+    from unittest.mock import MagicMock
 
-class _CowMappingFake:
-    """最小桩：仅提供 CoW 映射，供 _build_file_registry_notice 的 state.get_cow_mappings() 使用。"""
+    from excelmanus.prompt.assemble import prepare_system_prompts_for_request
 
-    def __init__(self, mapping: dict[str, str]) -> None:
-        self._mapping = dict(mapping)
-        self.has_versions = True
+    db = Database(str(tmp_path / "test.db"))
+    reg = FileRegistry(db, tmp_path)
+    f = tmp_path / "demo.xlsx"
+    f.write_text("x", encoding="utf-8")
+    reg.register_upload("demo.xlsx", "demo.xlsx", file_type="excel")
 
-    def register_cow_mapping(self, src_rel: str, dst_rel: str) -> None:
-        self._mapping[src_rel] = dst_rel
-
-    def get_cow_mappings(self) -> dict[str, str]:
-        return dict(self._mapping)
-
-
-class TestBuildFileRegistryNotice:
-    """_build_file_registry_notice 统一测试。"""
-
-    def _make_builder(self, *, registry=None, file_registry=None):
-        from unittest.mock import MagicMock
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        from excelmanus.engine_core.session_state import SessionState
-
-        engine = MagicMock()
-        _state = SessionState()
-        engine._state = _state
-        engine.state = _state
-        engine.file_registry = file_registry
-        engine._relevant_file_summary = ""
-        if registry:
-            # SessionState 的 get_cow_mappings() 仅从 state._file_registry 读取且要求 has_versions
-            _state._file_registry = _CowMappingFake(registry)
-        builder = ContextBuilder(engine)
-        return builder
-
-    def test_empty_returns_empty(self):
-        builder = self._make_builder()
-        assert builder._build_file_registry_notice() == ""
-
-    def test_panorama_from_file_registry(self, tmp_path):
-        """FileRegistry 可用时使用 build_panorama()。"""
-        db = Database(str(tmp_path / "test.db"))
-        reg = FileRegistry(db, tmp_path)
-        f = tmp_path / "demo.xlsx"
-        f.write_text("x", encoding="utf-8")
-        reg.register_upload("demo.xlsx", "demo.xlsx", file_type="excel")
-
-        builder = self._make_builder(file_registry=reg)
-        notice = builder._build_file_registry_notice()
-        assert "demo.xlsx" in notice
-        assert "工作区文件" in notice
-
-    def test_panorama_with_cow_mapping(self, tmp_path):
-        """文件全景 + CoW 映射同时存在。"""
-        db = Database(str(tmp_path / "test.db"))
-        reg = FileRegistry(db, tmp_path)
-        f = tmp_path / "a.xlsx"
-        f.write_text("x", encoding="utf-8")
-        reg.register_upload("a.xlsx", "a.xlsx", file_type="excel")
-
-        builder = self._make_builder(
-            file_registry=reg,
-            registry={"a.xlsx": "outputs/a.xlsx"},
-        )
-        notice = builder._build_file_registry_notice()
-        assert "工作区文件" in notice
-        # CoW 部分
-        assert "⚠️ 文件保护路径映射（CoW）" in notice
-        assert "outputs/a.xlsx" in notice
-
-    def test_no_registry_returns_empty(self):
-        """无 FileRegistry 时返回空。"""
-        builder = self._make_builder()
-        notice = builder._build_file_registry_notice()
-        assert notice == ""
-
-    def test_cow_only_no_panorama(self):
-        """仅 CoW 映射、无文件全景。"""
-        builder = self._make_builder(
-            registry={"src.xlsx": "outputs/src.xlsx"},
-        )
-        notice = builder._build_file_registry_notice()
-        assert "⚠️ 文件保护路径映射（CoW）" in notice
-        assert "src.xlsx" in notice
+    engine = MagicMock()
+    engine.memory.system_prompt = "You are ExcelManus."
+    engine._prompt_composer = None
+    engine._transient_hook_contexts = []
+    engine.full_access_enabled = False
+    engine.max_context_tokens = 100000
+    engine._effective_system_mode.return_value = "multi"
+    engine.state.prompt_injection_snapshots = []
+    engine.state.injected_context_fingerprint = None
+    engine.file_registry = reg
+    engine._current_chat_mode = "write"
+    engine._present_as = "native"
+    engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
+    prompts, error = prepare_system_prompts_for_request(engine, [])
+    assert error is None
+    blob = "\n".join(prompts)
+    assert "工作区文件" not in blob
+    assert "demo.xlsx" not in blob
+    assert "文件保护路径映射" not in blob
 
 
 class TestToolDispatcherWriteEvent:

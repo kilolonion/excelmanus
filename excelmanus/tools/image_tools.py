@@ -6,6 +6,7 @@ import base64
 from pathlib import Path
 
 from excelmanus.engine_core.tool_result import ImageInjection, ToolResult, error_result
+from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.security import FileAccessGuard, SecurityViolationError
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
@@ -84,11 +85,7 @@ def get_tools() -> list[ToolDef]:
     return [
         ToolDef(
             name="read_image",
-            description=(
-                "读取本地图片文件并加载到视觉上下文（png/jpg/gif/bmp/webp）。"
-                "适用场景：查看图片内容、分析截图中的文字或数据、确认图表样式。"
-                "不适用：需要将图片中的表格还原为 Excel（主模型阅读后产出 WorkbookSpec，再用 edit_spreadsheet(workbook_spec=) 编译）。"
-            ),
+            description=TOOL_DESCRIPTIONS["read_image"],
             input_schema={
                 "type": "object",
                 "properties": {

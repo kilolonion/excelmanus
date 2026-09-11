@@ -10,6 +10,7 @@ from typing import Any
 
 from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, from_payload, ok_result
 from excelmanus.logger import get_logger
+from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
@@ -726,6 +727,20 @@ def copy_file(source: str, destination: str) -> ToolResult:
     Returns:
         操作结果描述。
     """
+    from excelmanus.security.source_isolation import (
+        PROBE_FILE_FORBIDDEN,
+        is_probe_path,
+        probe_error_message,
+    )
+
+    if is_probe_path(destination):
+        return from_payload(
+            {
+                "error": probe_error_message(destination),
+                "code": PROBE_FILE_FORBIDDEN,
+            },
+        )
+
     guard = _get_guard()
     src_path = guard.resolve_and_validate(source)
     dst_path = guard.resolve_and_validate(destination)
@@ -886,8 +901,8 @@ def get_tools() -> list[ToolDef]:
                 "列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式。"
                 "适用场景：浏览工作区文件结构、确认文件是否存在、了解目录布局。"
                 "不适用：已知确切文件路径时直接操作，无需先浏览目录。"
-                "工作区特殊目录：uploads/（用户上传的附件）、outputs/（agent 产出物）、"
-                "outputs/backups/（备份工作副本）。"
+                "工作区特殊目录：uploads/（用户上传的附件）、outputs/（agent 产出物）。"
+                "文件历史在 .excelmanus/revisions/，不是用户目录。"
                 "浏览子目录时指定 directory 参数（如 directory=\"uploads\"）。"
             ),
             input_schema={
@@ -1071,12 +1086,7 @@ def get_tools() -> list[ToolDef]:
         ),
         ToolDef(
             name="offer_download",
-            description=(
-                "向用户提供工作区内文件的可下载链接。"
-                "当你完成文件生成/处理后，使用此工具让用户能够直接下载结果文件。"
-                "前端会渲染为醒目的下载卡片。"
-                "适用场景：生成报告、导出数据、处理完成后提供结果文件。"
-            ),
+            description=TOOL_DESCRIPTIONS["offer_download"],
             input_schema={
                 "type": "object",
                 "properties": {
