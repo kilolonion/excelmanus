@@ -29,7 +29,6 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "base_url": "https://test.example.com/v1",
         "model": "test-model",
         "workspace_root": str(Path(__file__).resolve().parent),
-        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -369,6 +368,27 @@ class TestExcelMCPPathAdaptation:
         assert isinstance(called_args, dict)
         assert called_args["fileAbsolutePath"] == str(workbook.resolve())
 
+    def test_excel_existing_outside_file_not_passed_through(self, tmp_path):
+        """工作区外已存在的文件不得原样交给 Excel MCP。"""
+        from excelmanus.security.guard import SecurityViolationError
+
+        outside = tmp_path.parent / "excel_mcp_escape.xlsx"
+        outside.write_bytes(b"secret")
+        captured: dict[str, object] = {}
+        client = self._make_call_tool_client(captured)
+        tool_def = make_tool_def(
+            "excel",
+            client,
+            self._make_excel_tool("excel_read_sheet"),
+            workspace_root=str(tmp_path),
+        )
+        try:
+            with pytest.raises(SecurityViolationError):
+                tool_def.func(fileAbsolutePath=str(outside.resolve()))
+        finally:
+            outside.unlink(missing_ok=True)
+        assert "arguments" not in captured
+
     def test_non_excel_server_keeps_arguments_unchanged(self, tmp_path):
         """非 Excel MCP 工具不应改写参数。"""
         captured: dict[str, object] = {}
@@ -391,3 +411,27 @@ class TestExcelMCPPathAdaptation:
         called_args = captured["arguments"]
         assert isinstance(called_args, dict)
         assert called_args["fileAbsolutePath"] == "examples/demo/demo_sales_data.xlsx"
+
+
+class TestMakeToolDefSchemaCompat:
+    """当前 MCP SDK 使用 input_schema，旧对象仍可能只有 inputSchema。"""
+
+    def test_reads_snake_case_input_schema(self, tmp_path):
+        schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+        tool_def = make_tool_def(
+            "exa",
+            SimpleNamespace(_config=SimpleNamespace(timeout=5)),
+            SimpleNamespace(name="search", description="搜", input_schema=schema),
+            workspace_root=str(tmp_path),
+        )
+        assert tool_def.input_schema == schema
+
+    def test_falls_back_to_camel_case_input_schema(self, tmp_path):
+        schema = {"type": "object", "properties": {"q": {"type": "string"}}}
+        tool_def = make_tool_def(
+            "exa",
+            SimpleNamespace(_config=SimpleNamespace(timeout=5)),
+            SimpleNamespace(name="search", description="搜", inputSchema=schema),
+            workspace_root=str(tmp_path),
+        )
+        assert tool_def.input_schema == schema

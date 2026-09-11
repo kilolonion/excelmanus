@@ -12,9 +12,11 @@ from excelmanus.tools.policy import (
     MUTATING_ALL_TOOLS,
     MUTATING_AUDIT_ONLY_TOOLS,
     MUTATING_CONFIRM_TOOLS,
+    PARALLELIZABLE_READONLY_TOOLS,
     WORKSPACE_SCAN_EXCLUDE_PREFIXES,
     WORKSPACE_SCAN_MAX_FILES,
     WORKSPACE_SCAN_MAX_HASH_BYTES,
+    is_concurrency_safe,
 )
 
 
@@ -37,6 +39,14 @@ EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "manage_spreadsheet_objects",
     "manage_spreadsheet_versions",
 }
+
+
+def test_is_concurrency_safe_matches_readonly_set() -> None:
+    for name in PARALLELIZABLE_READONLY_TOOLS:
+        assert is_concurrency_safe(name, {}) is True
+    for name in MUTATING_ALL_TOOLS:
+        assert is_concurrency_safe(name, {}) is False
+    assert is_concurrency_safe("run_code", {"code": ""}) is False
 
 
 def test_mutating_tool_tiers_match_expected_contract() -> None:

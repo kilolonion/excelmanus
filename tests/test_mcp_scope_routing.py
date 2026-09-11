@@ -161,98 +161,30 @@ class TestMCPManagerToolScopes:
         assert "mcp_extra" not in mgr._tool_scopes
 
 
-# ── 10. _build_mcp_context_notice 场景注解 ────────────────────
+# ── MCP 指南不再注入 system ─────────────────────────────────
 
 
-class TestMCPContextNotice:
-    """_build_mcp_context_notice 场景注解与搜索指南。"""
+def test_mcp_guide_not_injected_into_system():
+    from unittest.mock import MagicMock
 
-    def _make_engine_for_notice(self, servers, tool_scopes=None):
-        engine = MagicMock()
-        engine._mcp_manager.get_server_info.return_value = servers
-        engine._mcp_manager.tool_scopes = tool_scopes or {}
-        return engine
+    from excelmanus.prompt.assemble import prepare_system_prompts_for_request
 
-    def test_exa_usage_hint_in_notice(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-        ]
-        engine = self._make_engine_for_notice(servers, {"mcp_exa_web_search_exa": "search"})
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "通用网页搜索" in notice
-
-    def test_context7_usage_hint_in_notice(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [
-            {"name": "context7", "status": "ready", "tool_count": 2, "tools": ["resolve_library_id", "query_docs"]},
-        ]
-        engine = self._make_engine_for_notice(servers, {"mcp_context7_resolve_library_id": "dev_docs"})
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "编程库/框架" in notice
-
-    def test_search_guide_when_both_exa_and_context7(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-            {"name": "context7", "status": "ready", "tool_count": 2, "tools": ["resolve_library_id"]},
-        ]
-        scopes = {
-            "mcp_exa_web_search_exa": "search",
-            "mcp_context7_resolve_library_id": "dev_docs",
-        }
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "搜索工具选择指南" in notice
-        assert "exa" in notice.lower()
-        assert "context7" in notice.lower()
-
-    def test_search_guide_only_exa(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-        ]
-        scopes = {"mcp_exa_web_search_exa": "search"}
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "搜索指南" in notice
-        # 不应出现 "搜索工具选择指南"（无 context7 无需对比）
-        assert "搜索工具选择指南" not in notice
-
-    def test_no_guide_without_search_tools(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [
-            {"name": "excel", "status": "ready", "tool_count": 3, "tools": ["read_sheet"]},
-        ]
-        scopes = {"mcp_excel_read_sheet": "always"}
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "搜索指南" not in notice
-        assert "搜索工具选择指南" not in notice
-
-    def test_empty_servers_returns_empty(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = self._make_engine_for_notice([])
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        assert cb._build_mcp_context_notice() == ""
-
-    def test_no_ready_servers_returns_empty(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        servers = [{"name": "exa", "status": "connect_failed", "tool_count": 0, "tools": []}]
-        engine = self._make_engine_for_notice(servers)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        assert cb._build_mcp_context_notice() == ""
+    engine = MagicMock()
+    engine.memory.system_prompt = "You are ExcelManus."
+    engine._prompt_composer = None
+    engine._transient_hook_contexts = []
+    engine.full_access_enabled = False
+    engine.max_context_tokens = 100000
+    engine._effective_system_mode.return_value = "multi"
+    engine.state.prompt_injection_snapshots = []
+    engine.state.injected_context_fingerprint = None
+    engine._current_chat_mode = "write"
+    engine._present_as = "native"
+    engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
+    prompts, error = prepare_system_prompts_for_request(engine, [])
+    assert error is None
+    blob = "\n".join(prompts)
+    assert "搜索工具选择指南" not in blob
+    assert "通用网页搜索" not in blob
 
 

@@ -19,6 +19,7 @@ from excelmanus.mcp.processes import (
     snapshot_workspace_mcp_pids,
     terminate_workspace_mcp_processes,
 )
+from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 from excelmanus.tools.registry import ToolDef
 
 if TYPE_CHECKING:
@@ -183,12 +184,10 @@ _EXCEL_ABSOLUTE_PATH_ARG = "fileAbsolutePath"
 
 
 def _normalize_excel_mcp_absolute_path(path_value: Any, *, workspace_root: str) -> Any:
-    """规范化 Excel MCP 的绝对路径参数。
+    """把 Excel MCP 路径收到工作区 FileAccessGuard 内。
 
-    规则：
-    1. 相对路径 → 基于 workspace_root 转绝对路径；
-    2. 绝对路径但文件不存在 → 若工作区存在同名文件，则回退到该文件；
-    3. 其他情况保持原值。
+    相对路径基于 workspace 解析。工作区外绝对路径一律拒绝，不因文件已存在而放行。
+    仅当越界路径的 basename 能通过 Guard 且工作区已有同名文件时，才回落到该文件。
     """
     if not isinstance(path_value, str):
         return path_value
@@ -197,32 +196,22 @@ def _normalize_excel_mcp_absolute_path(path_value: Any, *, workspace_root: str) 
     if not raw:
         return path_value
 
+    guard = FileAccessGuard(workspace_root)
     try:
-        workspace = Path(workspace_root).expanduser()
-        if not workspace.is_absolute():
-            workspace = Path.cwd() / workspace
-        workspace = workspace.resolve(strict=False)
-
-        candidate = Path(raw).expanduser()
-        if not candidate.is_absolute():
-            return str((workspace / candidate).resolve(strict=False))
-
-        resolved = candidate.resolve(strict=False)
-        if resolved.is_file():
-            return str(resolved)
-
-        # 某些模型会拼出不存在的临时目录绝对路径，尝试按文件名回落到工作区。
-        fallback = (workspace / resolved.name).resolve(strict=False)
+        return str(guard.resolve_and_validate(raw))
+    except SecurityViolationError:
+        name = Path(raw.replace("\\", "/")).name
+        if not name or name in {".", ".."}:
+            raise
+        fallback = guard.resolve_and_validate(name)
         if fallback.is_file():
             logger.warning(
-                "检测到不可用 Excel 绝对路径，已回落到工作区同名文件: %s -> %s",
-                resolved,
+                "检测到工作区外 Excel 路径，已回落到工作区同名文件: %s -> %s",
+                raw,
                 fallback,
             )
             return str(fallback)
-        return str(resolved)
-    except OSError:
-        return path_value
+        raise
 
 
 def _adapt_mcp_call_arguments(
@@ -359,7 +348,8 @@ def make_tool_def(
         server_name: MCP Server 名称（原始，可含 ``-``）。
         client: 对应的 MCPClientWrapper 实例。
         mcp_tool: MCP 工具定义对象（duck typing），需具有
-            ``name``、``description``、``inputSchema`` 属性。
+            ``name``、``description``，以及 ``input_schema`` 或
+            ``inputSchema`` 属性。
         workspace_root: 当前工作区根目录。
 
     Returns:
@@ -367,7 +357,10 @@ def make_tool_def(
     """
     original_name: str = mcp_tool.name
     description: str = mcp_tool.description or ""
-    input_schema: dict[str, Any] = mcp_tool.inputSchema or {}
+    raw_schema = getattr(mcp_tool, "input_schema", None) or getattr(
+        mcp_tool, "inputSchema", None,
+    )
+    input_schema: dict[str, Any] = raw_schema if isinstance(raw_schema, dict) else {}
 
     # 获取超时配置（从 client 的 config 中读取，默认 30 秒）
     timeout: int = getattr(getattr(client, "_config", None), "timeout", 30)

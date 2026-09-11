@@ -359,64 +359,31 @@ class TestPolicyIntegration:
         assert PARALLELIZABLE_READONLY_TOOLS <= READ_ONLY_SAFE_TOOLS
 
 
-# ── 9. Prompt 指南增强 ──────────────────────────────────────
+# ── 9. Prompt 指南不再注入 ──────────────────────────────────
 
 
-class TestPromptEnhancement:
-    def _make_engine_for_notice(self, servers, scopes):
-        engine = MagicMock()
-        engine._mcp_manager.get_server_info.return_value = servers
-        engine._mcp_manager.tool_scopes = scopes
-        return engine
+def test_mcp_search_guide_not_injected():
+    from unittest.mock import MagicMock
 
-    def test_search_guide_mentions_parallel_search(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
+    from excelmanus.prompt.assemble import prepare_system_prompts_for_request
 
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-            {"name": "context7", "status": "ready", "tool_count": 2, "tools": ["resolve_library_id"]},
-        ]
-        scopes = {
-            "mcp_exa_web_search_exa": "search",
-            "mcp_context7_resolve_library_id": "dev_docs",
-        }
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "parallel_search" in notice
-
-    def test_search_only_guide_mentions_parallel_search(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-        ]
-        scopes = {"mcp_exa_web_search_exa": "search"}
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "parallel_search" in notice
-
-    def test_guide_mentions_parallel_execution(self):
-        """当同时有搜索和文档工具时，应提示可并行调用。"""
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        servers = [
-            {"name": "exa", "status": "ready", "tool_count": 1, "tools": ["web_search_exa"]},
-            {"name": "context7", "status": "ready", "tool_count": 2, "tools": ["resolve_library_id"]},
-        ]
-        scopes = {
-            "mcp_exa_web_search_exa": "search",
-            "mcp_context7_resolve_library_id": "dev_docs",
-        }
-        engine = self._make_engine_for_notice(servers, scopes)
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        notice = cb._build_mcp_context_notice()
-        assert "并行" in notice
-
+    engine = MagicMock()
+    engine.memory.system_prompt = "You are ExcelManus."
+    engine._prompt_composer = None
+    engine._transient_hook_contexts = []
+    engine.full_access_enabled = False
+    engine.max_context_tokens = 100000
+    engine._effective_system_mode.return_value = "multi"
+    engine.state.prompt_injection_snapshots = []
+    engine.state.injected_context_fingerprint = None
+    engine._current_chat_mode = "write"
+    engine._present_as = "native"
+    engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
+    prompts, error = prepare_system_prompts_for_request(engine, [])
+    assert error is None
+    blob = "\n".join(prompts)
+    assert "parallel_search" not in blob
+    assert "搜索指南" not in blob
 
 # ── 10. Engine 注册集成 ──────────────────────────────────────
 

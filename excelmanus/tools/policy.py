@@ -116,6 +116,30 @@ AUDIT_TARGET_ARG_RULES_FIRST: dict[str, tuple[str, ...]] = {}
 # run_code 使用动态策略引擎分级，不在静态 CONFIRM/AUDIT 集合中
 CODE_POLICY_DYNAMIC_TOOLS: frozenset[str] = frozenset({"run_code"})
 
+
+def is_concurrency_safe(
+    tool_name: str,
+    args: dict[str, object] | None = None,
+    *,
+    extra_safe: frozenset[str] | None = None,
+) -> bool:
+    """滚动池分类器。只有确切 True 才可并行；缺省 / 抛错 / False → 独占。
+
+    写入与 ``run_code`` 永远独占，含 Code Mode 子调用。
+    ``args`` 预留给按参数重分类；当前与工具名集合一致。
+    """
+    try:
+        if not tool_name:
+            return False
+        if tool_name in MUTATING_ALL_TOOLS or tool_name in CODE_POLICY_DYNAMIC_TOOLS:
+            return False
+        if extra_safe and tool_name in extra_safe:
+            return True
+        return tool_name in PARALLELIZABLE_READONLY_TOOLS
+    except Exception:
+        return False
+
+
 _PATH_RULED_TOOLS = set(AUDIT_TARGET_ARG_RULES_ALL) | set(AUDIT_TARGET_ARG_RULES_FIRST)
 _EXPECTED_PATH_RULED_TOOLS = set(MUTATING_ALL_TOOLS) - {"run_code", "run_shell"}
 if _PATH_RULED_TOOLS != _EXPECTED_PATH_RULED_TOOLS:
@@ -193,7 +217,7 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "edit_text_file": "精准编辑文本文件：查找替换指定片段，无需重写整个文件",
     "run_code": "组合已注册 SDK 或处理领域工具盖不住的批量变换；不要用它默认写 Excel",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
-    "read_image": "读取本地图片并加载到视觉上下文；复刻后用 edit_spreadsheet(workbook_spec=) 编译",
+    "read_image": "把工作区图片加载到当前视觉上下文。不要做 OCR，不要另开视觉模型。",
 }
 
 

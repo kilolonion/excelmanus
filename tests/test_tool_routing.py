@@ -65,7 +65,7 @@ class TestBuildV5ToolsReadOnly:
         assert "run_code" in names
         assert "write_text_file" in names
 
-    def test_read_only_hides_write_tools(self):
+    def test_read_only_restrict_hides_write_tools(self):
         self.engine._current_chat_mode = "read"
         names = _extract_tool_names(
             self.builder.build_v5_tools_impl(tool_access="read_only"),
@@ -75,3 +75,14 @@ class TestBuildV5ToolsReadOnly:
         assert "edit_spreadsheet" not in names
         assert "write_text_file" not in names
         assert "inspect_spreadsheet" in READ_ONLY_SAFE_TOOLS
+
+    def test_read_mode_catalog_keeps_write_tools(self):
+        self.engine._current_chat_mode = "read"
+        names = _extract_tool_names(self.builder.build_v5_tools_impl())
+        assert "edit_spreadsheet" in names
+        assert "write_text_file" in names
+
+    def test_code_present_as_catalog_only_run_code(self):
+        self.engine._present_as = "code"
+        names = _extract_tool_names(self.builder.build_v5_tools_impl())
+        assert names == {"run_code"}
