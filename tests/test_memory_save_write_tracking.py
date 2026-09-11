@@ -33,7 +33,6 @@ class TestMemorySaveWriteDetection:
         assert effect == "external_write"
         state.record_write_action()
         assert state.has_write_tool_call is True
-        assert state.current_write_hint == "may_write"
 
 
 class TestMemoryReadTopicNoWriteDetection:

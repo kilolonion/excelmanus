@@ -351,7 +351,7 @@ class ApprovalManager:
         code_policy_info: dict[str, Any] | None = None,
         session_turn: int | None = None,
         session_id: str | None = None,
-    ) -> tuple[str, AppliedApprovalRecord]:
+    ) -> tuple[Any, AppliedApprovalRecord]:
         audit_dir = self.audit_root / approval_id
         audit_dir.mkdir(parents=True, exist_ok=True)
         snapshots_dir = audit_dir / "snapshots"
@@ -369,12 +369,31 @@ class ApprovalManager:
 
         repo_diff_before = self._git_diff_text()
 
+        result_payload: Any = ""
         result_text = ""
         execute_error: Exception | None = None
         error_type: str | None = None
         error_message: str | None = None
         try:
-            result_text = str(execute(tool_name, arguments, tool_scope))
+            result_payload = execute(tool_name, arguments, tool_scope)
+            from excelmanus.engine_core.tool_result import ToolResult as _ToolResult
+
+            if isinstance(result_payload, _ToolResult):
+                result_text = result_payload.model_text
+                if not result_payload.success:
+                    error_message = (
+                        result_payload.error.message
+                        if result_payload.error is not None
+                        else result_payload.model_text
+                    )
+                    error_type = (
+                        result_payload.error.code
+                        if result_payload.error is not None
+                        else "TOOL_ERROR"
+                    )
+            else:
+                result_text = str(result_payload)
+                result_payload = result_text
         except Exception as exc:  # noqa: BLE001
             execute_error = exc
             error_type = type(exc).__name__
@@ -430,7 +449,10 @@ class ApprovalManager:
         repo_before_file.write_text(repo_diff_before, encoding="utf-8")
         repo_after_file.write_text(repo_diff_after, encoding="utf-8")
 
-        execution_status = "failed" if execute_error is not None else "success"
+        from excelmanus.engine_core.tool_result import ToolResult as _ToolResultStatus
+
+        structured_failed = isinstance(result_payload, _ToolResultStatus) and not result_payload.success
+        execution_status = "failed" if execute_error is not None or structured_failed else "success"
         preview_src = result_text
         if execute_error is not None:
             preview_src = f"{error_type}: {error_message}" if error_type else (error_message or "")
@@ -477,7 +499,7 @@ class ApprovalManager:
 
         if execute_error is not None:
             raise execute_error
-        return result_text, record
+        return result_payload, record
 
     def mark_non_undoable_for_paths(self, rel_paths: set[str]) -> int:
         """将涉及指定路径的审批记录标记为不可回滚。
@@ -530,38 +552,6 @@ class ApprovalManager:
         if not record.changes:
             return f"记录 `{approval_id}` 没有可回滚的文件变更。"
 
-        # ── 使用 FileRegistry 恢复到原始版本 ──
-        _ver_source = (
-            self._file_registry
-            if self._file_registry is not None and self._file_registry.has_versions
-            else None
-        )
-        if _ver_source is not None:
-            restored = 0
-            failed: list[str] = []
-            for change in record.changes:
-                if change.before_exists:
-                    ok = _ver_source.restore_to_original(change.path)
-                    if ok:
-                        restored += 1
-                    else:
-                        # 回退到旧的快照恢复
-                        if not self._legacy_restore_change(change):
-                            failed.append(change.path)
-                        else:
-                            restored += 1
-                else:
-                    path = self.workspace_root / change.path
-                    if path.exists():
-                        path.unlink()
-                        restored += 1
-            record.undoable = False
-            self._persist_undoable_flag(record)
-            if failed:
-                return f"回滚 `{approval_id}` 部分失败：{', '.join(failed)}"
-            return f"已回滚 `{approval_id}`：恢复 {restored} 个文件。"
-
-        # ── 旧路径：从 approval snapshots 恢复 ──
         conflicts: list[str] = []
         for change in record.changes:
             path = self.workspace_root / change.path
@@ -588,7 +578,14 @@ class ApprovalManager:
                 if not snapshot.exists():
                     return f"回滚失败：快照文件不存在 `{change.before_snapshot_file}`。"
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_bytes(snapshot.read_bytes())
+                try:
+                    self._restore_workspace_bytes(
+                        change.path,
+                        snapshot.read_bytes(),
+                        expected_hex=change.after_hash,
+                    )
+                except Exception as exc:
+                    return f"回滚失败：写入 `{change.path}` 失败：{exc}"
                 restored += 1
             elif path.exists():
                 path.unlink()
@@ -597,17 +594,26 @@ class ApprovalManager:
         self._persist_undoable_flag(record)
         return f"已回滚 `{approval_id}`：恢复 {restored} 个文件，删除 {deleted} 个新增文件。"
 
-    def _legacy_restore_change(self, change: FileChangeRecord) -> bool:
-        """旧路径恢复：从 approval snapshots 目录读取 before 快照。"""
-        if not change.before_snapshot_file:
-            return False
-        snapshot = self.workspace_root / change.before_snapshot_file
-        if not snapshot.exists():
-            return False
-        path = self.workspace_root / change.path
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_bytes(snapshot.read_bytes())
-        return True
+    def _restore_workspace_bytes(
+        self,
+        rel_path: str,
+        data: bytes,
+        expected_hex: str | None,
+    ) -> None:
+        """把快照字节经 workbook_commit 写回工作区，expected 为当前 after 哈希。"""
+        from excelmanus.security.guard import FileAccessGuard
+        from excelmanus.workbook_commit import commit_bytes, content_version_of_file
+
+        dest = self.workspace_root / rel_path
+        expected = f"sha256:{expected_hex}" if expected_hex else None
+        if expected is None and dest.is_file():
+            expected = content_version_of_file(dest)
+        commit_bytes(
+            guard=FileAccessGuard(str(self.workspace_root)),
+            file_path=rel_path,
+            data=data,
+            expected_version=expected,
+        )
 
     def _new_approval_id(self) -> str:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")

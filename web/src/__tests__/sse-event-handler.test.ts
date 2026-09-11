@@ -33,9 +33,9 @@ const chatActions: Record<string, ReturnType<typeof vi.fn>> = {
   setToolProgress: vi.fn(),
   clearToolProgress: vi.fn(),
   setBatchProgress: vi.fn(),
-  pushVlmPhase: vi.fn(),
   addAffectedFiles: vi.fn(),
   saveCurrentSession: vi.fn(),
+  bindLoadedSession: vi.fn(),
   retractLastThinking: vi.fn(),
 };
 
@@ -50,13 +50,16 @@ function resetChatState() {
     activeStreamId: null,
     latestSeq: 0,
     resumeFailedReason: null,
-    currentSessionId: null,
+    loadedSessionId: null,
     pendingApproval: null,
     pendingQuestion: null,
     ...chatActions,
   };
   // 重置所有 mock 调用记录
   for (const fn of Object.values(chatActions)) {
+    fn.mockClear();
+  }
+  for (const fn of Object.values(excelActions)) {
     fn.mockClear();
   }
 }
@@ -70,13 +73,20 @@ vi.mock("@/stores/chat-store", () => ({
   },
 }));
 
+const sessionMock = vi.hoisted(() => {
+  const state = {
+    activeSessionId: "test-session" as string | null,
+    setActiveSession: vi.fn((id: string | null) => {
+      state.activeSessionId = id;
+    }),
+    updateSessionTitle: vi.fn(),
+  };
+  return state;
+});
+
 vi.mock("@/stores/session-store", () => ({
   useSessionStore: {
-    getState: () => ({
-      activeSessionId: "test-session",
-      setActiveSession: vi.fn(),
-      updateSessionTitle: vi.fn(),
-    }),
+    getState: () => sessionMock,
   },
 }));
 
@@ -89,29 +99,34 @@ vi.mock("@/stores/ui-store", () => ({
   },
 }));
 
+const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
+  addPreview: vi.fn(),
+  addDiff: vi.fn(),
+  addTextDiff: vi.fn(),
+  addTextPreview: vi.fn(),
+  addRecentFileIfNotDismissed: vi.fn(),
+  appendStreamingArgs: vi.fn(),
+  clearStreamingArgs: vi.fn(),
+  setMergeResult: vi.fn(),
+  fetchOperationHistory: vi.fn(),
+  fetchBackups: vi.fn(),
+  handleStagingUpdated: vi.fn(),
+  bumpWorkspaceFilesVersion: vi.fn(),
+  openCompare: vi.fn(),
+  openPanel: vi.fn(),
+};
+
 vi.mock("@/stores/excel-store", () => ({
   useExcelStore: {
     getState: () => ({
-      addPreview: vi.fn(),
-      addDiff: vi.fn(),
-      addTextDiff: vi.fn(),
-      addTextPreview: vi.fn(),
-      addRecentFileIfNotDismissed: vi.fn(),
-      appendStreamingArgs: vi.fn(),
-      clearStreamingArgs: vi.fn(),
-      setMergeResult: vi.fn(),
-      fetchOperationHistory: vi.fn(),
-      fetchBackups: vi.fn(),
-      handleStagingUpdated: vi.fn(),
-      bumpWorkspaceFilesVersion: vi.fn(),
+      ...excelActions,
       compareMode: false,
       panelOpen: false,
-      openCompare: vi.fn(),
-      openPanel: vi.fn(),
     }),
   },
 }));
 
+import { useChatStore } from "@/stores/chat-store";
 import {
   dispatchSSEEvent,
   finalizeThinking,
@@ -160,6 +175,10 @@ function makeEvent(event: string, data: Record<string, unknown> = {}): SSEEvent 
 describe("sse-event-handler", () => {
   beforeEach(() => {
     resetChatState();
+    sessionMock.activeSessionId = "test-session";
+    sessionMock.setActiveSession.mockClear();
+    sessionMock.updateSessionTitle.mockClear();
+    vi.mocked(useChatStore.setState).mockClear();
   });
 
   // ── stream_init ─────────────────────────────────────────────
@@ -196,6 +215,34 @@ describe("sse-event-handler", () => {
       );
 
       expect(chatActions.setStreamState).toHaveBeenCalledWith("str-0", 0);
+    });
+  });
+
+  describe("session_init", () => {
+    it("无 activeSessionId 时只写入 session-store，不写 chat.currentSessionId", () => {
+      sessionMock.activeSessionId = null;
+      dispatchSSEEvent(
+        makeEvent("session_init", { session_id: "sid-from-sse" }),
+        makeCtx(),
+      );
+
+      expect(sessionMock.setActiveSession).toHaveBeenCalledWith("sid-from-sse");
+      expect(useChatStore.setState).not.toHaveBeenCalledWith(
+        expect.objectContaining({ currentSessionId: expect.anything() }),
+      );
+      expect(mockChatState).not.toHaveProperty("currentSessionId");
+    });
+
+    it("activeSessionId 已存在时仍不向 chat-store 写入 currentSessionId", () => {
+      sessionMock.activeSessionId = "test-session";
+      dispatchSSEEvent(
+        makeEvent("session_init", { session_id: "sid-from-sse" }),
+        makeCtx(),
+      );
+
+      expect(useChatStore.setState).not.toHaveBeenCalledWith(
+        expect.objectContaining({ currentSessionId: expect.anything() }),
+      );
     });
   });
 
@@ -528,6 +575,55 @@ describe("sse-event-handler", () => {
     });
   });
 
+  // ── tool_call_end ui.merge ─────────────────────────────────
+
+  describe("tool_call_end", () => {
+    it("从 data.ui.merge 投影合并结果，不解析 result 字符串", () => {
+      mockChatState.messagesById = {
+        a1: {
+          id: "a1",
+          role: "assistant",
+          blocks: [{
+            type: "tool_call",
+            id: "tc-merge",
+            name: "run_code",
+            status: "running",
+          }],
+        },
+      };
+      const ctx = makeCtx();
+      dispatchSSEEvent(
+        makeEvent("tool_call_end", {
+          tool_call_id: "tc-merge",
+          tool_name: "run_code",
+          success: true,
+          result: '{"rows_matched":999}',
+          ui: {
+            merge: {
+              source_files: ["a.xlsx", "b.xlsx"],
+              output_file: "out.xlsx",
+              rows_matched: 12,
+              rows_added: 3,
+              rows_unmatched: 1,
+              key_columns: ["id"],
+              join_type: "inner",
+            },
+          },
+        }),
+        ctx,
+      );
+
+      expect(excelActions.setMergeResult).toHaveBeenCalledWith(
+        expect.objectContaining({
+          sourceFiles: ["a.xlsx", "b.xlsx"],
+          outputFile: "out.xlsx",
+          rowsMatched: 12,
+          toolCallId: "tc-merge",
+        }),
+      );
+    });
+  });
+
   // ── user_question ───────────────────────────────────────────
 
   describe("user_question", () => {
@@ -564,7 +660,7 @@ describe("sse-event-handler", () => {
         makeEvent("pending_approval", {
           tool_call_id: "tc1",
           approval_id: "ap1",
-          approval_tool_name: "write_cells",
+          approval_tool_name: "edit_spreadsheet",
           risk_level: "high",
           args_summary: { cells: "A1:B5" },
         }),
@@ -579,7 +675,7 @@ describe("sse-event-handler", () => {
       expect(chatActions.setPendingApproval).toHaveBeenCalledWith(
         expect.objectContaining({
           id: "ap1",
-          toolName: "write_cells",
+          toolName: "edit_spreadsheet",
           riskLevel: "high",
         }),
       );

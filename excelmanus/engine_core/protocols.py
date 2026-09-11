@@ -74,9 +74,6 @@ class ToolExecutionContext(Protocol):
     @property
     def full_access_enabled(self) -> bool: ...
 
-    @property
-    def window_perception(self) -> Any: ...
-
     def emit(self, on_event: EventCallback | None, event: Any) -> None: ...
 
     def record_write_action(self) -> None: ...
@@ -118,24 +115,15 @@ class ToolExecutionContext(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# VLM 上下文（VLMContext）— VLM/视觉相关能力
+# 视觉上下文（VisionContext）— 主模型是否收图
 # ---------------------------------------------------------------------------
 
 @runtime_checkable
-class VLMContext(Protocol):
-    """VLM/视觉相关能力接口。"""
+class VisionContext(Protocol):
+    """主模型视觉能力。"""
 
     @property
     def is_vision_capable(self) -> bool: ...
-
-    @property
-    def vlm_enhance_available(self) -> bool: ...
-
-    @property
-    def vlm_client(self) -> Any: ...
-
-    @property
-    def vlm_model(self) -> str: ...
 
 
 # ---------------------------------------------------------------------------

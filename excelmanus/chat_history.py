@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, overload
 
-from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
+from excelmanus.db_adapter import ConnectionAdapter
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -37,8 +37,6 @@ class ChatHistoryStore:
             # Database 实例
             self._db_path = conn.db_path
             self._conn = conn.conn
-        self._user_id = user_id
-        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @classmethod
     def from_database(cls, database: "Database") -> "ChatHistoryStore":
@@ -71,36 +69,20 @@ class ChatHistoryStore:
             "INSERT OR IGNORE INTO sessions "
             "(id, title, created_at, updated_at, user_id, title_source) "
             "VALUES (?, ?, ?, ?, ?, 'fallback')",
-            (session_id, title, now, now, user_id),
+            (session_id, title, now, now, None),
         )
         self._conn.commit()
 
     def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """检查会话是否存在。若提供 user_id，则同时校验归属（仅 user_id 一致时通过）。
-
-        user_id 为 None 时（如 CLI 单用户模式）：仅检查 id 存在。
-        user_id 非空时：要求 DB 中 user_id 非空且一致，否则视为不存在（legacy 无主会话不可访问）。
-
-        注意：此方法接受显式 user_id 参数以支持跨用户校验场景（如 ConversationPersistence）。
-        若不传 user_id，则使用构造时绑定的 self._user_id。
-        """
-        effective_uid = user_id if user_id is not None else self._user_id
-        if effective_uid is None:
-            row = self._conn.execute(
-                "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
-            ).fetchone()
-            return row is not None
+        """检查会话是否存在。不再按 user_id 过滤。"""
         row = self._conn.execute(
-            "SELECT user_id FROM sessions WHERE id = ?", (session_id,)
+            "SELECT 1 FROM sessions WHERE id = ?", (session_id,)
         ).fetchone()
-        if row is None:
-            return False
-        db_user_id = row["user_id"] if hasattr(row, "__getitem__") else row[0]
-        return db_user_id is not None and db_user_id == effective_uid
+        return row is not None
 
     def session_owned_by(self, session_id: str, user_id: str) -> bool:
-        """检查会话是否属于指定用户。"""
-        return self.session_exists(session_id, user_id=user_id)
+        """兼容旧调用：单用户架构下等价于 session_exists。"""
+        return self.session_exists(session_id)
 
     def get_session_meta(self, session_id: str) -> dict | None:
         """返回会话元数据（id, title, created_at, updated_at），不存在时返回 None。"""
@@ -146,32 +128,6 @@ class ChatHistoryStore:
         return cur.rowcount > 0
 
     def delete_all_sessions(self, *, user_id: str | None = None) -> tuple[int, int]:
-        effective_uid = user_id if user_id is not None else self._user_id
-        if effective_uid is not None:
-            sess_ids = [
-                r[0] for r in self._conn.execute(
-                    "SELECT id FROM sessions WHERE user_id = ?", (effective_uid,)
-                ).fetchall()
-            ]
-            if not sess_ids:
-                return 0, 0
-            placeholders = ",".join("?" * len(sess_ids))
-            cur_msg = self._conn.execute(
-                f"SELECT COUNT(*) FROM messages WHERE session_id IN ({placeholders})",
-                sess_ids,
-            )
-            msg_count = (cur_msg.fetchone() or (0,))[0]  # type: ignore[index]
-            self._conn.execute(
-                f"DELETE FROM messages WHERE session_id IN ({placeholders})",
-                sess_ids,
-            )
-            self._conn.execute(
-                f"DELETE FROM sessions WHERE id IN ({placeholders})",
-                sess_ids,
-            )
-            self._conn.commit()
-            return len(sess_ids), msg_count
-
         cur_msg = self._conn.execute("SELECT COUNT(*) FROM messages")
         msg_row = cur_msg.fetchone()
         msg_count = msg_row[0] if msg_row else 0  # type: ignore[index]
@@ -205,14 +161,8 @@ class ChatHistoryStore:
         *,
         user_id: str | None = None,
     ) -> list[dict]:
-        effective_uid = user_id if user_id is not None else self._user_id
         conditions: list[str] = []
         params: list[Any] = []
-
-        if effective_uid is not None:
-            uid_clause, uid_params = user_filter_clause("user_id", effective_uid)
-            conditions.append(uid_clause)
-            params.extend(uid_params)
 
         if not include_archived:
             conditions.append("status = 'active'")

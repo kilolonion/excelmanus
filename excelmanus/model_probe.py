@@ -699,6 +699,7 @@ _PROVIDER_URL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("ai21", re.compile(r"api\.ai21\.", re.IGNORECASE)),
     ("minimax", re.compile(r"api\.minimax", re.IGNORECASE)),
     ("moonshot", re.compile(r"api\.moonshot\.cn|kimi", re.IGNORECASE)),
+    ("volcengine", re.compile(r"volces\.com|volcengine|ark\.cn-beijing", re.IGNORECASE)),
     ("bedrock", re.compile(r"bedrock.*\.amazonaws\.com", re.IGNORECASE)),
 ]
 
@@ -756,7 +757,7 @@ def _get_thinking_strategies(
             "enable_thinking",
         ))
     elif provider == "deepseek":
-        # DeepSeek: reasoner 自动输出, V3+ 可用 enable_thinking
+        # DeepSeek: reasoner 自动输出；V3/V4 可用 extra_body.enable_thinking
         strategies.append(("plain", {}, "deepseek"))
         strategies.append((
             "ds_enable",
@@ -773,21 +774,20 @@ def _get_thinking_strategies(
         strategies.append(("plain", {}, "deepseek"))
     elif provider == "openai":
         # OpenAI o1/o3/GPT-5 系列: reasoning_effort 等级制
-        if any(model_lower.startswith(p) for p in ("o1", "o3", "o4", "gpt-5")):
+        if any(model_lower.startswith(p) for p in ("o1", "o3", "o4", "gpt-5", "gpt-6")):
             strategies.append((
                 "openai_reasoning",
                 {"reasoning_effort": "low"},
                 "openai_reasoning",
             ))
     elif provider == "xai":
-        # xAI Grok: grok-3-mini 支持 reasoning_effort（low/high 两档）
-        if "mini" in model_lower:
-            strategies.append((
-                "xai_reasoning",
-                {"reasoning_effort": "low"},
-                "openai_reasoning",
-            ))
-            strategies.append(("plain", {}, "deepseek"))
+        # xAI Grok 4+ 支持 reasoning_effort（含 grok-4.6）
+        strategies.append((
+            "xai_reasoning",
+            {"reasoning_effort": "low"},
+            "openai_reasoning",
+        ))
+        strategies.append(("plain", {}, "deepseek"))
 
     # ── 通用兜底策略 ──────────────────────────────────────
     # 1) 纯流式检查（捕获自动输出推理的模型，如 DeepSeek-R1、QwQ）

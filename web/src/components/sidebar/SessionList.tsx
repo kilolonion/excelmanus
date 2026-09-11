@@ -229,11 +229,11 @@ export function SessionList() {
     setBusySessionId(sessionId);
 
     const chatState = useChatStore.getState();
-    const isDeletingCurrent = chatState.currentSessionId === sessionId;
     const sessionStore = useSessionStore.getState();
     const prevSessions = sessionStore.sessions;
     const prevActiveSessionId = sessionStore.activeSessionId;
-    const isDeletingActive = sessionId === prevActiveSessionId;
+    const isDeletingCurrent = sessionId === prevActiveSessionId;
+    const isDeletingActive = isDeletingCurrent;
     const sessionSnapshot = prevSessions.find((s) => s.id === sessionId) ?? null;
     const nextActive = prevSessions.find(
       (s) => s.id !== sessionId && (s.status ?? "active") !== "archived"

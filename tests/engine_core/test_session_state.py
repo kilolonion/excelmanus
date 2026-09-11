@@ -13,7 +13,6 @@ class TestSessionStateInit:
         assert state.last_tool_call_count == 0
         assert state.last_success_count == 0
         assert state.last_failure_count == 0
-        assert state.current_write_hint == "unknown"
         assert state.has_write_tool_call is False
         assert state.execution_guard_fired is False
         assert state.vba_exempt is False
@@ -21,26 +20,19 @@ class TestSessionStateInit:
         assert state.session_diagnostics == []
 
 
-class TestWriteHintTracking:
-    """write_hint 状态追踪。"""
+class TestWriteTracking:
+    """真实写入追踪（不是 write_hint 猜测）。"""
 
-    def test_record_write_action_sets_may_write(self):
+    def test_record_write_action_sets_flag(self):
         state = SessionState()
         state.record_write_action()
         assert state.has_write_tool_call is True
-        assert state.current_write_hint == "may_write"
-
-    def test_set_write_hint_valid(self):
-        state = SessionState()
-        state.current_write_hint = "read_only"
-        assert state.current_write_hint == "read_only"
 
     def test_record_write_action_idempotent(self):
         state = SessionState()
         state.record_write_action()
         state.record_write_action()
         assert state.has_write_tool_call is True
-        assert state.current_write_hint == "may_write"
 
 
 class TestTurnManagement:
@@ -61,6 +53,7 @@ class TestTurnManagement:
         state.last_failure_count = 2
         state.has_write_tool_call = True
         state.turn_diagnostics = [{"iteration": 1}]
+        state.injected_context_fingerprint = "abc123"
 
         state.reset_loop_stats()
 
@@ -70,6 +63,13 @@ class TestTurnManagement:
         assert state.last_failure_count == 0
         assert state.has_write_tool_call is False
         assert state.turn_diagnostics == []
+        assert state.injected_context_fingerprint == "abc123"
+
+    def test_reset_session_clears_injected_fingerprint(self):
+        state = SessionState()
+        state.injected_context_fingerprint = "abc123"
+        state.reset_session()
+        assert state.injected_context_fingerprint is None
 
 
 class TestToolCallStats:
@@ -97,6 +97,21 @@ class TestToolCallStats:
         assert state.last_tool_call_count == 3
         assert state.last_success_count == 2
         assert state.last_failure_count == 1
+
+
+class TestFileContentVersions:
+    def test_remember_and_peek_path_aliases(self):
+        state = SessionState()
+        state.remember_file_version("uploads/sales.xlsx", "sha256:abc")
+        assert state.peek_file_version("uploads/sales.xlsx") == "sha256:abc"
+        assert state.peek_file_version("./uploads/sales.xlsx") == "sha256:abc"
+        assert state.peek_file_version("sales.xlsx") is None
+
+    def test_reset_session_clears_versions(self):
+        state = SessionState()
+        state.remember_file_version("book.xlsx", "sha256:abc")
+        state.reset_session()
+        assert state.file_content_versions == {}
 
 
 class TestAffectedFiles:
@@ -130,7 +145,6 @@ class TestResetSession:
         state.last_tool_call_count = 20
         state.last_success_count = 15
         state.last_failure_count = 5
-        state.current_write_hint = "may_write"
         state.has_write_tool_call = True
         state.execution_guard_fired = True
         state.vba_exempt = True
@@ -144,7 +158,6 @@ class TestResetSession:
         assert state.last_tool_call_count == 0
         assert state.last_success_count == 0
         assert state.last_failure_count == 0
-        assert state.current_write_hint == "unknown"
         assert state.has_write_tool_call is False
         assert state.execution_guard_fired is False
         assert state.vba_exempt is False
@@ -160,3 +173,18 @@ class TestDiagnostics:
         state.session_diagnostics.append({"route": "test", "iterations": 3})
         assert len(state.session_diagnostics) == 1
         assert state.session_diagnostics[0]["route"] == "test"
+
+
+class TestLegacyCompat:
+    """旧会话字段可反序列化，write_hint 状态机已忽略。"""
+
+    def test_from_dict_ignores_current_write_hint(self):
+        state = SessionState.from_dict({
+            "session_turn": 3,
+            "has_write_tool_call": True,
+            "current_write_hint": "may_write",
+            "stuck_warning_fired": True,
+        })
+        assert state.session_turn == 3
+        assert state.has_write_tool_call is True
+        assert not hasattr(state, "current_write_hint")

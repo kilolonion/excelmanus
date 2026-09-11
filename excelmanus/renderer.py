@@ -133,26 +133,24 @@ class StreamRenderer:
     def _render_route_start(self, event: ToolCallEvent) -> None:
         self._console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.DIM}]正在匹配技能包…[/{THEME.DIM}]"
+            f" [{THEME.DIM}]正在准备本轮…[/{THEME.DIM}]"
         )
 
     def _render_route_end(self, event: ToolCallEvent) -> None:
         if not event.skills_used:
             self._console.print(
                 f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
-                f" [{THEME.DIM}]路由完成[/{THEME.DIM}] {THEME.SEPARATOR}"
-                f" [{THEME.GOLD}]通用模式[/{THEME.GOLD}]"
+                f" [{THEME.DIM}]准备就绪[/{THEME.DIM}]"
             )
             return
         skills_str = " ".join(
             f"[{THEME.BOLD} {THEME.CYAN}]{s}[/{THEME.BOLD} {THEME.CYAN}]"
             for s in event.skills_used
         )
-        mode_label = event.route_mode.replace("_", " ")
         self._console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.DIM}]路由完成[/{THEME.DIM}] {THEME.SEPARATOR}"
-            f" {skills_str} [{THEME.DIM}]({mode_label})[/{THEME.DIM}]"
+            f" [{THEME.DIM}]已加载技能[/{THEME.DIM}] {THEME.SEPARATOR}"
+            f" {skills_str}"
         )
 
     # ------------------------------------------------------------------
@@ -815,16 +813,10 @@ class StreamRenderer:
         """渲染流水线阶段进度。"""
         stage = event.pipeline_stage or ""
         message = event.pipeline_message or stage
-        phase = event.pipeline_phase_index
-        total = event.pipeline_total_phases or 0
-
-        progress = ""
-        if phase >= 0 and total > 0:
-            progress = f" [{THEME.DIM}]({phase + 1}/{total})[/{THEME.DIM}]"
 
         self._console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.CYAN}]{rich_escape(message)}[/{THEME.CYAN}]{progress}"
+            f" [{THEME.CYAN}]{rich_escape(message)}[/{THEME.CYAN}]"
         )
 
     def _render_memory_extracted(self, event: ToolCallEvent) -> None:

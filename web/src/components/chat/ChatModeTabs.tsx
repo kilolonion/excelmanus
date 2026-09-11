@@ -20,12 +20,12 @@ export function ChatModeTabs() {
   const chatMode = useUIStore((s) => s.chatMode);
   const setChatMode = useUIStore((s) => s.setChatMode);
   return (
-    <div className="flex items-center gap-0.5 px-3 pt-1.5 pb-0">
+    <div className="flex items-center gap-0.5 px-3 pt-1 pb-0">
       {CHAT_MODES.map(({ key, label, icon: Icon }) => (
         <button
           key={key}
           onClick={() => setChatMode(key)}
-          className={`relative inline-flex items-center gap-1 px-2.5 sm:py-1 py-1.5 min-h-[44px] sm:min-h-0 rounded-lg text-xs font-medium transition-colors ${
+          className={`relative inline-flex items-center gap-1 px-2.5 h-7 rounded-lg text-xs font-medium transition-colors ${
             chatMode === key
               ? ""
               : "text-muted-foreground hover:text-foreground hover:bg-accent/40"

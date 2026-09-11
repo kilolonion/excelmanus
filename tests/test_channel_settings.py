@@ -70,14 +70,11 @@ def handler(mock_adapter, config_store):
     api_client = MagicMock()
     api_client.stream_chat = AsyncMock(return_value=iter([]))
     store = SessionStore()
-    bind_manager = MagicMock()
-    bind_manager.check_bind_status = MagicMock(return_value=None)
 
     h = MessageHandler(
         adapter=mock_adapter,
         api_client=api_client,
         session_store=store,
-        bind_manager=bind_manager,
         config_store=config_store,
     )
     return h

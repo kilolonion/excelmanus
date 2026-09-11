@@ -97,23 +97,15 @@ class TestComputeReasoningLevel:
     """推理分级信号计算测试。"""
 
     def test_read_only_is_lightweight(self):
-        route = SimpleNamespace(write_hint="read_only", task_tags=[])
+        route = SimpleNamespace(chat_mode="read", task_tags=[])
         assert ContextBuilder._compute_reasoning_level_static(route) == "lightweight"
 
-    def test_may_write_simple_is_standard(self):
-        route = SimpleNamespace(write_hint="may_write", task_tags=["formatting"])
+    def test_write_mode_is_standard(self):
+        route = SimpleNamespace(chat_mode="write")
         assert ContextBuilder._compute_reasoning_level_static(route) == "standard"
 
-    def test_cross_sheet_is_complete(self):
-        route = SimpleNamespace(write_hint="may_write", task_tags=["cross_sheet"])
-        assert ContextBuilder._compute_reasoning_level_static(route) == "complete"
-
-    def test_large_data_is_complete(self):
-        route = SimpleNamespace(write_hint="may_write", task_tags=["large_data"])
-        assert ContextBuilder._compute_reasoning_level_static(route) == "complete"
-
-    def test_unknown_hint_is_lightweight(self):
-        route = SimpleNamespace(write_hint="unknown", task_tags=[])
+    def test_unknown_mode_is_lightweight(self):
+        route = SimpleNamespace(chat_mode=None, task_tags=[])
         assert ContextBuilder._compute_reasoning_level_static(route) == "lightweight"
 
     def test_none_route_is_standard(self):
@@ -185,12 +177,12 @@ class TestComputeReasoningLevelStatic:
     """静态推理级别计算的回归测试（确保向后兼容）。"""
 
     def test_read_only_lightweight(self):
-        route = SimpleNamespace(write_hint="read_only", task_tags=[])
+        route = SimpleNamespace(chat_mode="read", task_tags=[])
         assert ContextBuilder._compute_reasoning_level_static(route) == "lightweight"
 
-    def test_cross_sheet_complete(self):
-        route = SimpleNamespace(write_hint="may_write", task_tags=["cross_sheet"])
-        assert ContextBuilder._compute_reasoning_level_static(route) == "complete"
+    def test_write_mode_standard(self):
+        route = SimpleNamespace(chat_mode="write")
+        assert ContextBuilder._compute_reasoning_level_static(route) == "standard"
 
     def test_none_route_standard(self):
         assert ContextBuilder._compute_reasoning_level_static(None) == "standard"

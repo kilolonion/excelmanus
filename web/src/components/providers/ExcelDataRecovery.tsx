@@ -11,31 +11,31 @@ import { useChatStore } from "@/stores/chat-store";
  * 在页面加载时主动从后端恢复 Excel 相关数据。
  */
 export function ExcelDataRecovery() {
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const prevSessionRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (!currentSessionId) return;
+    if (!loadedSessionId) return;
 
     // 会话切换时先清理旧会话的瞬态数据，防止跨会话 diff 泄漏
-    if (prevSessionRef.current && prevSessionRef.current !== currentSessionId) {
+    if (prevSessionRef.current && prevSessionRef.current !== loadedSessionId) {
       useExcelStore.getState().clearSession();
     }
-    prevSessionRef.current = currentSessionId;
+    prevSessionRef.current = loadedSessionId;
 
     const recoverExcelData = async () => {
       try {
         // 动态导入以避免循环依赖
         const { fetchSessionExcelEvents } = await import("@/lib/api");
         const { diffs: recoveredDiffs, previews: recoveredPreviews, affected_files } = 
-          await fetchSessionExcelEvents(currentSessionId);
+          await fetchSessionExcelEvents(loadedSessionId);
 
         if (recoveredDiffs.length === 0 && recoveredPreviews.length === 0 && affected_files.length === 0) {
           return;
         }
 
         // 恢复期间会话可能已切换
-        if (useChatStore.getState().currentSessionId !== currentSessionId) return;
+        if (useChatStore.getState().loadedSessionId !== loadedSessionId) return;
 
         const excelStore = useExcelStore.getState();
 
@@ -105,7 +105,7 @@ export function ExcelDataRecovery() {
     // 延迟执行，确保其他组件已经初始化
     const timeoutId = setTimeout(recoverExcelData, 100);
     return () => clearTimeout(timeoutId);
-  }, [currentSessionId]);
+  }, [loadedSessionId]);
 
   return null; // 这是一个纯逻辑组件，不渲染任何内容
 }

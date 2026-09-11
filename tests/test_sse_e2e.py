@@ -18,6 +18,8 @@ from excelmanus.engine import ChatResult
 from excelmanus.events import EventType, ToolCallEvent
 
 import excelmanus.api as api_module
+import excelmanus.api_app_state as app_state
+import excelmanus.api_routes_chat as chat_module
 from excelmanus.api import _SessionStreamState, app
 
 
@@ -48,18 +50,23 @@ def _parse_sse_events(raw: str) -> list[tuple[str, dict]]:
 
 def _setup_api_globals(session_manager: Any) -> None:
     api_module._session_manager = session_manager
+    app_state.set_session_manager(session_manager)
     api_module._config = MagicMock()
     api_module._config.workspace_root = "/tmp/test"
+    app_state.set_config(api_module._config)
     api_module._config_incomplete = False
-    api_module._active_chat_tasks = {}
-    api_module._session_stream_states = {}
+    app_state.set_config_incomplete(False)
+    app_state._active_chat_tasks.clear()
+    app_state._session_stream_states.clear()
 
 
 def _cleanup_api_globals() -> None:
     api_module._session_manager = None
+    app_state.set_session_manager(None)
     api_module._config = None
-    api_module._active_chat_tasks = {}
-    api_module._session_stream_states = {}
+    app_state.set_config(None)
+    app_state._active_chat_tasks.clear()
+    app_state._session_stream_states.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -125,8 +132,8 @@ class TestChatStreamEmitsSeqEvents:
         sm = _make_session_manager(engine)
         _setup_api_globals(sm)
 
-        with patch.object(api_module, "_is_external_safe_mode", return_value=False), \
-             patch.object(api_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
+        with patch.object(chat_module, "_is_external_safe_mode", return_value=False), \
+             patch.object(chat_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
              patch.object(api_module, "_config_incomplete", False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
@@ -157,8 +164,8 @@ class TestChatStreamEmitsSeqEvents:
         sm = _make_session_manager(engine)
         _setup_api_globals(sm)
 
-        with patch.object(api_module, "_is_external_safe_mode", return_value=False), \
-             patch.object(api_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
+        with patch.object(chat_module, "_is_external_safe_mode", return_value=False), \
+             patch.object(chat_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
              patch.object(api_module, "_config_incomplete", False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
@@ -211,12 +218,12 @@ class TestDisconnectBufferSubscribe:
 
         sm = MagicMock()
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
         # Subscribe with after_seq=2 → should get only seq 3,4,5
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
                     "/api/v1/chat/subscribe",
@@ -246,21 +253,21 @@ class TestDisconnectBufferSubscribe:
         contents = ["alpha", "beta", "gamma", "delta", "epsilon"]
 
         stream_state = _SessionStreamState()
-        api_module._session_stream_states[session_id] = stream_state
+        app_state._session_stream_states[session_id] = stream_state
         for c in contents:
             stream_state.deliver(ToolCallEvent(event_type=EventType.TEXT_DELTA, text_delta=c))
 
         done_future: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
         done_future.set_result(ChatResult(reply="done", iterations=1))
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
         sm = MagicMock()
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
                     "/api/v1/chat/subscribe",
@@ -300,11 +307,11 @@ class TestBufferOverflowResumeFailed:
 
         sm = MagicMock()
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 # Client says after_seq=0 (expects from seq=1), but buffer starts at seq=4
                 resp = await client.post(
@@ -342,11 +349,11 @@ class TestBufferOverflowResumeFailed:
 
         sm = MagicMock()
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
                     "/api/v1/chat/subscribe",
@@ -392,11 +399,11 @@ class TestSubscribeActiveTaskStreamsRealtime:
         engine.session_turn = 2
         sm.get_engine.return_value = engine
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = chat_task
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = chat_task
 
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test", timeout=10.0) as client:
                 resp = await client.post(
                     "/api/v1/chat/subscribe",
@@ -461,8 +468,8 @@ class TestMixedEventTypes:
         sm = _make_session_manager(engine)
         _setup_api_globals(sm)
 
-        with patch.object(api_module, "_is_external_safe_mode", return_value=False), \
-             patch.object(api_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
+        with patch.object(chat_module, "_is_external_safe_mode", return_value=False), \
+             patch.object(chat_module, "_resolve_mentions", new_callable=AsyncMock, return_value=("hi", [])), \
              patch.object(api_module, "_config_incomplete", False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 resp = await client.post(
@@ -510,11 +517,11 @@ class TestMixedEventTypes:
 
         sm = MagicMock()
         _setup_api_globals(sm)
-        api_module._session_stream_states[session_id] = stream_state
-        api_module._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
+        app_state._session_stream_states[session_id] = stream_state
+        app_state._active_chat_tasks[session_id] = done_future  # type: ignore[assignment]
 
-        with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-             patch.object(api_module, "_is_external_safe_mode", return_value=False):
+        with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+             patch.object(chat_module, "_is_external_safe_mode", return_value=False):
             async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
                 # Subscribe from seq=0 → replay all 3
                 resp = await client.post(
@@ -536,7 +543,7 @@ class TestMixedEventTypes:
                 # Subscribe from seq=1 → only seq 2,3
                 # Need to re-setup since stream_state was drained
                 stream_state2 = _SessionStreamState()
-                api_module._session_stream_states[session_id] = stream_state2
+                app_state._session_stream_states[session_id] = stream_state2
                 stream_state2.deliver(ToolCallEvent(
                     event_type=EventType.TOOL_CALL_START,
                     tool_call_id="tc1", tool_name="write_cell",
@@ -552,7 +559,7 @@ class TestMixedEventTypes:
                 ))
                 done_future2: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
                 done_future2.set_result(ChatResult(reply="done", iterations=1))
-                api_module._active_chat_tasks[session_id] = done_future2  # type: ignore[assignment]
+                app_state._active_chat_tasks[session_id] = done_future2  # type: ignore[assignment]
 
                 resp2 = await client.post(
                     "/api/v1/chat/subscribe",

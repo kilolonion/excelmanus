@@ -258,7 +258,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "这里是 AI 的核心配置。可以设置主模型、辅助模型 (Aux) 和视觉模型 (VLM) 的 API Key、Base URL 和 Model ID，还能创建多个模型配置档案并快速切换",
+    description: "这里是 AI 的核心配置。可以设置主模型和辅助模型 (Aux) 的 API Key、Base URL 和 Model ID，还能创建多个模型配置档案并快速切换",
     icon: "Server",
     placement: "left",
     onEnter: "openSettings_model",
@@ -348,7 +348,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-tab-runtime",
     title: "系统运行时",
-    description: "高级系统配置，包括会话管理、执行安全、上下文控制、子代理、窗口感知等深度参数",
+    description: "高级系统配置，包括会话管理、执行安全、上下文控制、子代理等深度参数",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到系统页面", autoAdvanceMs: 1000 },
@@ -364,7 +364,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-advanced-toggle",
     title: "高级设置",
-    description: "点击展开高级设置区域，包含推理配置、子代理、压缩策略、窗口感知细参等深度参数。建议保持默认值",
+    description: "点击展开高级设置区域，包含推理配置、子代理、压缩策略等深度参数。建议保持默认值",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击展开高级设置", autoAdvanceMs: 1000 },
@@ -401,7 +401,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "配置主模型、辅助模型和视觉模型的 API Key 和参数",
+    description: "配置主模型和辅助模型的 API Key 和参数",
     icon: "Server",
     placement: "top",
     onEnter: "openSettings_model",
@@ -451,7 +451,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-tab-runtime",
     title: "系统设置",
-    description: "高级运行时参数：安全、子代理、上下文、窗口感知等",
+    description: "高级运行时参数：安全、子代理、上下文等",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到系统", autoAdvanceMs: 1000 },

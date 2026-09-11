@@ -5,7 +5,7 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, overload
 
-from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
+from excelmanus.db_adapter import ConnectionAdapter
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -17,17 +17,15 @@ class LLMCallStore:
     """LLM 调用审计日志（支持 SQLite / PostgreSQL）。"""
 
     @overload
-    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    def __init__(self, conn: ConnectionAdapter) -> None: ...
     @overload
-    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+    def __init__(self, conn: "Database") -> None: ...
 
-    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+    def __init__(self, conn: Any) -> None:
         if isinstance(conn, ConnectionAdapter):
             self._conn = conn
         else:
             self._conn = conn.conn
-        self._user_id = user_id
-        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     @staticmethod
     def _now_iso() -> str:
@@ -81,7 +79,7 @@ class LLMCallStore:
                     cache_read_tokens,
                     (error or "")[:500] if error else None,
                     self._now_iso(),
-                    self._user_id,
+                    None,
                 ),
             )
             self._conn.commit()
@@ -97,8 +95,8 @@ class LLMCallStore:
         offset: int = 0,
     ) -> list[dict[str, Any]]:
         """查询 LLM 调用记录。"""
-        conditions: list[str] = [self._uid_clause]
-        params: list[Any] = list(self._uid_params)
+        conditions: list[str] = []
+        params: list[Any] = []
 
         if session_id is not None:
             conditions.append("session_id = ?")
@@ -107,7 +105,7 @@ class LLMCallStore:
             conditions.append("model = ?")
             params.append(model)
 
-        where = f"WHERE {' AND '.join(conditions)}"
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         sql = (
             f"SELECT * FROM llm_call_log {where} "
             f"ORDER BY created_at DESC LIMIT ? OFFSET ?"
@@ -118,12 +116,12 @@ class LLMCallStore:
 
     def stats(self, session_id: str | None = None) -> dict[str, Any]:
         """聚合统计：调用次数、总 token、平均延迟、按模型分组。"""
-        conditions: list[str] = [self._uid_clause]
-        params: list[Any] = list(self._uid_params)
+        conditions: list[str] = []
+        params: list[Any] = []
         if session_id:
             conditions.append("session_id = ?")
             params.append(session_id)
-        where = f"WHERE {' AND '.join(conditions)}"
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
 
         row = self._conn.execute(
             f"SELECT "

@@ -43,8 +43,8 @@ export function ensureDemoSession() {
     inFlight: false,
   });
   sessionStore.setActiveSession(id);
+  useChatStore.getState().bindLoadedSession(id);
   useChatStore.setState({
-    currentSessionId: id,
     messages: [],
     isLoadingMessages: false,
   });
@@ -129,20 +129,20 @@ export function injectMockStreaming() {
     startedAt: ts,
   });
 
-  // Phase 2: Route status + read_excel tool call
+  // Phase 2: 准备本轮 + inspect_spreadsheet
   schedule(() => {
     store.appendBlock(assistantMsgId, {
       type: "status" as const,
-      label: "智能路由",
-      detail: "read_excel,run_code",
+      label: "正在准备本轮",
+      detail: "inspect_spreadsheet,edit_spreadsheet",
       variant: "route",
     });
 
     store.appendBlock(assistantMsgId, {
       type: "tool_call" as const,
       toolCallId: readToolCallId,
-      name: "read_excel",
-      args: { file_path: "销售数据.xlsx", sheet: "Sheet1", range: "A1:D7" },
+      name: "inspect_spreadsheet",
+      args: { mode: "range", file_path: "销售数据.xlsx", sheet: "Sheet1", range: "A1:D7" },
       status: "success" as const,
       result: "成功读取 6 行 × 4 列数据",
     });
@@ -301,7 +301,6 @@ export function cleanupDemoSession() {
       isStreaming: false,
       abortController: null,
       pipelineStatus: null,
-      currentSessionId: null,
     });
     useSessionStore.getState().removeSession(demoId);
     useChatStore.getState().removeSessionCache(demoId);

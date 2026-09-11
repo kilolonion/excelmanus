@@ -12,12 +12,9 @@ import { SessionSync } from "@/components/providers/SessionSync";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
-import { ProfilePanel } from "@/components/profile/ProfilePanel";
 import { ChannelsPanel } from "@/components/channels/ChannelsPanel";
 import { AdminPanel } from "@/components/admin/AdminPanel";
 import { useOnboardingStore } from "@/stores/onboarding-store";
-import { useAuthStore } from "@/stores/auth-store";
-import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
 import { prefetchUniverModules } from "@/components/excel/UniverSheet";
 import { WordSidePanel } from "@/components/word/WordSidePanel";
@@ -49,16 +46,7 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
   const settingsGuideCompleted = useOnboardingStore((s) => s.settingsGuideCompleted);
   const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
   const userSynced = useOnboardingStore((s) => s._userSynced);
-  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
-  const user = useAuthStore((s) => s.user);
-  // In standalone mode or when user is admin, they can fix server config;
-  // non-admin users can only set personal keys and should not be re-forced.
-  const isAdmin = !authEnabled || !user || user.role === "admin";
-  // Block onboarding UI until the store has re-hydrated with the correct per-user key.
-  // Only force the wizard for unconfigured backends when the current user is an admin
-  // (non-admin users already saved their personal API key via profile and cannot fix
-  // the server-level config).
-  const showWizard = userSynced && (!wizardCompleted || (backendConfigured === false && isAdmin));
+  const showWizard = userSynced && (!wizardCompleted || backendConfigured === false);
   const showCoachMarks = userSynced && wizardCompleted && backendConfigured !== false && (!coachMarksCompleted || !advancedGuideCompleted || !settingsGuideCompleted);
 
   return (
@@ -102,7 +90,6 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
         <ExcelDataRecovery />
         <PlaceholderAlert />
         <SettingsDialog />
-        <ProfilePanel />
         <ChannelsPanel />
         <AdminPanel />
       </div>

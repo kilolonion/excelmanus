@@ -42,7 +42,6 @@ const STAGE_LABELS: Record<string, string> = {
   tool_execution: "工具执行",
   context_building: "上下文构建",
   session_init: "会话初始化",
-  quota_check: "配额检查",
   file_processing: "文件处理",
   sandbox_exec: "沙箱执行",
   mcp_call: "MCP 调用",

@@ -22,7 +22,7 @@ function BudgetBar({label,used,total,remaining}:{label:string;used:number;total:
 function HDot({s}:{s:string}) { const c=H_CFG[s]||H_CFG.ok; return (<span className="relative inline-flex h-2.5 w-2.5">{s==="ok"&&<span className={`absolute inline-flex h-full w-full rounded-full ${c.d} opacity-75 animate-ping`}/>}<span className={`relative inline-flex rounded-full h-2.5 w-2.5 ${c.d}`}/></span>); }
 function CopyBtn({text}:{text:string}) { const [ok,setOk]=useState(false); return (<button className="text-muted-foreground hover:text-foreground transition-colors" onClick={()=>{navigator.clipboard.writeText(text);setOk(true);setTimeout(()=>setOk(false),1500);}}>{ok?<Check className="h-3 w-3 text-green-500"/>:<Copy className="h-3 w-3"/>}</button>); }
 
-const _PROVIDER_LABELS: Record<string, string> = { "openai-codex": "OpenAI Codex", "google-gemini": "Google Gemini" };
+const _PROVIDER_LABELS: Record<string, string> = { "openai-codex": "OpenAI Codex" };
 
 function ImportDlg({open,onClose,onDone}:{open:boolean;onClose:()=>void;onDone:()=>void}) {
   const [tab,setTab]=useState<"subscription"|"manual">("subscription");
@@ -47,7 +47,7 @@ function ImportDlg({open,onClose,onDone}:{open:boolean;onClose:()=>void;onDone:(
 
     <div className="px-5 py-4 space-y-4 overflow-y-auto flex-1">
       {tab==="subscription"&&(<>
-        {subsLoading?(<div className="flex items-center justify-center py-6"><Loader2 className="h-4 w-4 animate-spin text-muted-foreground"/></div>):subs.length===0?(<div className="text-center py-6 space-y-2"><p className="text-xs text-muted-foreground">暂无已连接的订阅</p><p className="text-[11px] text-muted-foreground">请先在「模型配置」中连接 OpenAI Codex 或 Google Gemini 订阅</p></div>):(<div className="space-y-2">
+        {subsLoading?(<div className="flex items-center justify-center py-6"><Loader2 className="h-4 w-4 animate-spin text-muted-foreground"/></div>):subs.length===0?(<div className="text-center py-6 space-y-2"><p className="text-xs text-muted-foreground">暂无已连接的订阅</p><p className="text-[11px] text-muted-foreground">请先在「模型配置」中连接 OpenAI Codex 订阅</p></div>):(<div className="space-y-2">
           <label className="block text-xs text-muted-foreground mb-1">选择已连接的订阅</label>
           {subs.map(s=>(<button key={s.provider} type="button" className={`w-full flex items-center gap-3 rounded-lg border px-3 py-2.5 text-left transition-all ${selectedProvider===s.provider?"border-[var(--em-primary)] bg-[var(--em-primary-alpha-06)] shadow-sm":"border-border hover:border-border/80 hover:bg-muted/30"}`} onClick={()=>setSelectedProvider(s.provider)}>
             <div className={`h-8 w-8 rounded-lg flex items-center justify-center shrink-0 ${selectedProvider===s.provider?"bg-[var(--em-primary-alpha-10)]":"bg-muted"}`}><Database className="h-4 w-4" style={selectedProvider===s.provider?{color:"var(--em-primary)"}:undefined}/></div>

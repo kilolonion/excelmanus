@@ -15,7 +15,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from excelmanus.mcp.client import MCPClientWrapper, _extract_error_text
+from excelmanus.mcp.client import (
+    MCPClientWrapper,
+    _extract_error_text,
+    _unpack_transport_streams,
+)
 from excelmanus.mcp.config import MCPServerConfig
 
 
@@ -616,25 +620,20 @@ class TestSSEConnect:
 class TestStreamableHTTPConnect:
     """测试 Streamable HTTP 传输方式的连接。"""
 
-    @pytest.mark.asyncio
-    async def test_streamable_http_connect_uses_streamable_client(self):
-        """Streamable 配置应使用 streamable_http_client 建立连接。"""
-        config = _streamable_config(
-            headers={"Authorization": "Bearer token"},
-            timeout=9,
-        )
+    async def _connect_with_streams(self, streams, **config_overrides):
+        config = _streamable_config(**config_overrides)
         client = MCPClientWrapper(config)
         mock_session = _make_mock_session()
         fake_http_client = MagicMock()
 
         with (
             patch(
-                "excelmanus.mcp.client.httpx.AsyncClient",
+                "excelmanus.mcp.client._new_streamable_httpx_client",
                 return_value=_ReturnAsyncCM(fake_http_client),
-            ) as mock_async_client,
+            ) as mock_http_factory,
             patch(
                 "excelmanus.mcp.client.streamable_http_client",
-                return_value=_ReturnAsyncCM((MagicMock(), MagicMock(), MagicMock())),
+                return_value=_ReturnAsyncCM(streams),
             ) as mock_streamable,
             patch(
                 "excelmanus.mcp.client.ClientSession",
@@ -642,8 +641,8 @@ class TestStreamableHTTPConnect:
             ),
         ):
             await client.connect()
-            mock_async_client.assert_called_once_with(
-                headers=config.headers,
+            mock_http_factory.assert_called_once_with(
+                headers=config.headers or None,
                 timeout=config.timeout,
             )
             mock_streamable.assert_called_once_with(
@@ -655,6 +654,19 @@ class TestStreamableHTTPConnect:
         await client.close()
 
     @pytest.mark.asyncio
+    async def test_streamable_http_connect_uses_streamable_client(self):
+        """MCP SDK 2.x 返回 (read, write) 两元组时应能建立连接。"""
+        await self._connect_with_streams(
+            (MagicMock(), MagicMock()),
+            headers={"Authorization": "Bearer token"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_streamable_http_connect_accepts_legacy_three_tuple(self):
+        """MCP SDK 1.x 返回 (read, write, get_session_id) 时仍应能连接。"""
+        await self._connect_with_streams((MagicMock(), MagicMock(), MagicMock()))
+
+    @pytest.mark.asyncio
     async def test_streamable_http_unsupported_raises_runtime_error(self):
         """SDK 不支持 streamable_http 时应抛出可读错误。"""
         config = _streamable_config()
@@ -662,6 +674,22 @@ class TestStreamableHTTPConnect:
         with patch("excelmanus.mcp.client.streamable_http_client", None):
             with pytest.raises(RuntimeError, match="不支持 streamable_http"):
                 await client.connect()
+
+
+class TestUnpackTransportStreams:
+    """测试 MCP SDK 1.x / 2.x 传输流解包兼容。"""
+
+    def test_two_tuple(self):
+        read, write = object(), object()
+        assert _unpack_transport_streams((read, write)) == (read, write)
+
+    def test_three_tuple_ignores_session_id(self):
+        read, write, session_id = object(), object(), object()
+        assert _unpack_transport_streams((read, write, session_id)) == (read, write)
+
+    def test_invalid_value_raises(self):
+        with pytest.raises(RuntimeError, match="返回值异常"):
+            _unpack_transport_streams((object(),))
 
 
 # ── _extract_error_text 辅助函数测试 ─────────────────────────────

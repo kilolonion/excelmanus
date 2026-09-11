@@ -5,38 +5,21 @@ import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen,
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useAuthStore } from "@/stores/auth-store";
 import { useIsMobile } from "@/hooks/use-mobile";
+import { formatFileMention } from "./chat-input-insert";
 import { MentionHighlighter } from "./MentionHighlighter";
-import { downloadFile, buildApiUrl, resolveAvatarSrc, getAuthHeaders } from "@/lib/api";
+import { downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import type { FileAttachment } from "@/lib/types";
 
 function UserAvatar() {
-  const [failed, setFailed] = useState(false);
-  const user = useAuthStore((s) => s.user);
-  const accessToken = useAuthStore((s) => s.accessToken);
-  const src = resolveAvatarSrc(user?.avatarUrl, accessToken);
-  const initial = (user?.displayName || user?.email || "U")[0]?.toUpperCase() || "U";
-
-  if (src && !failed) {
-    return (
-      <img
-        src={src}
-        alt=""
-        className="flex-shrink-0 h-6 w-6 rounded-full object-cover"
-        referrerPolicy="no-referrer"
-        onError={() => setFailed(true)}
-      />
-    );
-  }
   return (
     <span
       className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px] font-medium"
       style={{ backgroundColor: "var(--em-primary)" }}
     >
-      {initial}
+      U
     </span>
   );
 }
@@ -125,7 +108,8 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
     const { filePath, sheet, range } = pendingSelection;
     const filename = filePath.split("/").pop() || filePath;
-    const token = `@file:${filename}[${sheet}!${range}]`;
+    const version = useExcelStore.getState().getContentVersion(filePath);
+    const token = formatFileMention({ path: filePath, sheet, range, version });
 
     const textarea = textareaRef.current;
     // 使用 textarea 的当前值，而不是 editText 状态（避免闭包问题）

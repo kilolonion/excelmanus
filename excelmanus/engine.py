@@ -1,4 +1,4 @@
-"""Agent 核心引擎：Skillpack 路由 + Tool Calling 循环。"""
+"""Agent 核心引擎：入口处理后进入 Tool Calling 步循环。"""
 
 from __future__ import annotations
 
@@ -7,7 +7,6 @@ import time
 from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
-import json
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
@@ -27,7 +26,7 @@ from excelmanus.hooks import (
     SkillHookRunner,
 )
 from excelmanus.logger import get_logger
-from excelmanus.memory import ConversationMemory, TokenCounter
+from excelmanus.memory import ConversationMemory
 from excelmanus.interaction import InteractionRegistry, DEFAULT_INTERACTION_TIMEOUT
 from excelmanus.question_flow import PendingQuestion, QuestionFlowManager
 from excelmanus.skillpacks import (
@@ -38,7 +37,7 @@ from excelmanus.skillpacks import (
 )
 from excelmanus.subagent import SubagentExecutor, SubagentRegistry, SubagentResult
 from excelmanus.task_list import TaskStore
-from excelmanus.tools import focus_tools, task_tools
+from excelmanus.tools import task_tools
 from excelmanus.tools.introspection_tools import register_introspection_tools
 from excelmanus.engine_core.command_handler import CommandHandler
 from excelmanus.engine_core.context_builder import ContextBuilder
@@ -59,11 +58,7 @@ from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
 from excelmanus.mentions.parser import MentionParser, ResolvedMention
 from excelmanus.mcp.manager import MCPManager, parse_tool_prefix
 from excelmanus.tools.registry import ToolNotAllowedError
-from excelmanus.window_perception import (
-    PerceptionBudget,
-    WindowPerceptionManager,
-)
-from excelmanus.engine_types import (  # noqa: F401 — re-export for backwards compat
+from excelmanus.engine_types import (
     ThinkingConfig,
     ToolCallResult,
     TurnDiagnostic,
@@ -74,58 +69,22 @@ from excelmanus.engine_types import (  # noqa: F401 — re-export for backwards 
     ApprovalResolver,
     QuestionResolver,
     _EFFORT_RATIOS,
-    _EFFORT_TO_GEMINI_LEVEL,
-    _EFFORT_TO_OPENAI,
 )
-from excelmanus.engine_utils import (  # noqa: F401 — re-export for backwards compat
-    _ALWAYS_AVAILABLE_TOOLS_READONLY,
-    _ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY,
-    _ALWAYS_AVAILABLE_TOOLS_SET,
-    _ALWAYS_AVAILABLE_TOOLS_READONLY_SET,
-    _SYSTEM_Q_SUBAGENT_APPROVAL,
-    _SUBAGENT_APPROVAL_OPTION_ACCEPT,
-    _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
-    _SUBAGENT_APPROVAL_OPTION_REJECT,
-    _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
-    _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
-    _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS,
-    _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS,
-    _VALID_WRITE_HINTS,
-    _MID_DISCUSSION_MAX_LEN,
-    _SKILL_AGENT_ALIASES,
+from excelmanus.engine_utils import (
     _WRITE_EFFECT_VALUES,
-    _MENTION_XML_TAG_MAP,
-    _normalize_write_hint,
-    _merge_write_hint,
-    _merge_write_hint_with_override,
-    build_mention_context_block,
     _message_content_to_text,
     _normalize_tool_calls,
-    _coerce_completion_message,
     _extract_completion_message,
     _usage_token,
     _extract_cached_tokens,
     _extract_anthropic_cache_tokens,
     _extract_ttft_ms,
     _looks_like_html_document,
-    _CLARIFICATION_PATTERNS,
-    _MIN_QUESTION_MARKS_FOR_CLARIFICATION,
-    _looks_like_clarification,
-    _WAITING_FOR_USER_ACTION_PATTERNS,
-    _looks_like_waiting_for_user_action,
-    _FORMULA_ADVICE_PATTERN,
-    _FORMULA_ADVICE_FALLBACK_PATTERN,
-    _VBA_MACRO_ADVICE_PATTERN,
-    _USER_VBA_REQUEST_PATTERN,
     _user_requests_vba,
-    _contains_formula_advice,
-    _WRITE_ACTION_VERBS,
-    _FILE_REFERENCE_PATTERN,
-    _detect_write_intent,
     _summarize_text,
     _split_tool_call_batches,
     _extract_text_tool_calls,
-    fire_and_forget,
+    build_mention_context_block,
 )
 
 if TYPE_CHECKING:
@@ -137,6 +96,13 @@ if TYPE_CHECKING:
 logger = get_logger("engine")
 
 from excelmanus.message_serialization import to_plain as _to_plain, assistant_message_to_dict as _assistant_message_to_dict  # noqa: E402
+
+
+def _tool_access_from_chat_mode(chat_mode: str) -> str:
+    """用户选定的对话模式 → 工具可见性。不是对写入意图的猜测。"""
+    if chat_mode in ("read", "plan"):
+        return "read_only"
+    return "may_write"
 
 
 def _failure_guidance_event(guidance: _FailureGuidance) -> ToolCallEvent:
@@ -176,47 +142,24 @@ class AgentEngine:
         database: "Database | None" = None,
         shared_backup_path_map: dict[str, str] | None = None,
         workspace: IsolatedWorkspace | None = None,
-        user_id: str | None = None,
     ) -> None:
         # ── 核心组件初始化（必须在所有 property 代理字段赋值之前）──
-        self._user_id = user_id
         self._session_id: str | None = None
         self._history_snapshot_index: int = 0
         self._state = SessionState()
-        # ── LLM 客户端统一管理（main/aux/vlm/advisor 四套） ──
+        # ── LLM 客户端统一管理（main / AUX） ──
         from excelmanus.engine_core.llm_client_manager import LLMClientManager
         self._llm_clients = LLMClientManager(config)
         self._client = self._llm_clients.main_client
         self._router_client = self._llm_clients.router_client
         self._router_model = self._llm_clients.router_model
         self._router_follow_active_model = self._llm_clients.router_follow_active_model
-        self._advisor_client = self._llm_clients.advisor_client
-        self._advisor_model = self._llm_clients.advisor_model
-        self._advisor_follow_active_model = self._llm_clients.advisor_follow_active_model
-        self._vlm_client = self._llm_clients.vlm_client
-        self._vlm_model = self._llm_clients.vlm_model
         self._config = config
-        # ── 视觉能力推断 ──
+        # ── 视觉能力推断：图片只交给主模型 ──
         self._is_vision_capable = self._infer_vision_capable(config, database)
-        # B 通道可用条件：
-        #   1. vlm_enhance 总开关开启
-        #   2. 有独立 VLM 端点（vlm_base_url 且 vlm_enabled），或主模型本身有视觉能力可兼作 VLM
-        _has_independent_vlm = bool(config.vlm_enabled and config.vlm_base_url)
-        self._vlm_enhance_available = (
-            config.vlm_enhance
-            and (_has_independent_vlm or self._is_vision_capable)
-        )
-        if config.vlm_enhance and not self._vlm_enhance_available:
-            logger.info("VLM 增强已开启但未配置独立 VLM 且主模型无视觉能力，B 通道不可用")
-        if config.vlm_model and not config.vlm_base_url:
-            logger.warning(
-                "已设置 vlm_model=%s 但未设置 vlm_base_url，"
-                "VLM 调用将回退到主模型端点（模型名可能不兼容）",
-                config.vlm_model,
-            )
         logger.info(
-            "视觉模式: main_vision=%s, vlm_enhance=%s",
-            self._is_vision_capable, self._vlm_enhance_available,
+            "视觉模式: main_vision=%s",
+            self._is_vision_capable,
         )
         # ── 首次使用关键词推断时，自动触发后台 probe 以获取 ground truth ──
         if config.main_model_vision == "auto" and database is not None:
@@ -256,22 +199,10 @@ class AgentEngine:
         }
         for _var_key, _var_val in self._runtime_vars.items():
             self._memory.system_prompt = self._memory.system_prompt.replace(
+                f"{{{{{_var_key}}}}}", _var_val
+            )
+            self._memory.system_prompt = self._memory.system_prompt.replace(
                 f"{{{_var_key}}}", _var_val
-            )
-        # ── 动态能力图谱注入 ──────────────────────────────────
-        try:
-            from excelmanus.introspection.capability_map import CapabilityMapGenerator
-            _cap_gen = CapabilityMapGenerator(registry=self._registry)
-            self._capability_map_text = _cap_gen.generate()
-            self._memory.system_prompt = self._memory.system_prompt.replace(
-                "{auto_generated_capability_map}", self._capability_map_text
-            )
-        except Exception:
-            logger.debug("能力图谱生成失败，使用占位符", exc_info=True)
-            self._capability_map_text = ""
-            # 移除未替换的占位符，避免 LLM 看到原始模板标记
-            self._memory.system_prompt = self._memory.system_prompt.replace(
-                "{auto_generated_capability_map}", ""
             )
         self._last_route_result = SkillMatchResult(
             skills_used=[],
@@ -298,7 +229,7 @@ class AgentEngine:
         self._loaded_skill_names: dict[str, int] = {}
         # 当前激活技能列表：末尾为主 skill，空列表表示未激活
         self._active_skills: list[Skillpack] = []
-        # ── 工具 schema 缓存（同 turn 内 write_hint/skill 集合不变则复用）──
+        # ── 工具 schema 缓存（同 turn 内 chat_mode/skill 集合不变则复用）──
         self._tools_cache: list[dict[str, Any]] | None = None
         self._tools_cache_key: tuple[str, str, frozenset[str], bool] | None = None
         _cache_key = (config.model, config.base_url)
@@ -307,7 +238,7 @@ class AgentEngine:
         # ── 状态变量由 self._state 统一管理 ──
         # self._state 在 __init__ 顶部初始化，以下属性通过 @property 代理访问：
         # _session_turn, _last_iteration_count, _last_tool_call_count,
-        # _last_success_count, _last_failure_count, _current_write_hint,
+        # _last_success_count, _last_failure_count,
         # _has_write_tool_call, _turn_diagnostics, _session_diagnostics,
         # _execution_guard_fired, _vba_exempt
         self._credential_resolver: Any = None  # CredentialResolver，由 SessionManager 注入
@@ -376,53 +307,12 @@ class AgentEngine:
         self._bench_mode: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
         self._current_chat_mode: str = "write"
-        self._window_perception = WindowPerceptionManager(
-            enabled=config.window_perception_enabled,
-            budget=PerceptionBudget(
-                system_budget_tokens=config.window_perception_system_budget_tokens,
-                tool_append_tokens=config.window_perception_tool_append_tokens,
-                max_windows=config.window_perception_max_windows,
-                default_rows=config.window_perception_default_rows,
-                default_cols=config.window_perception_default_cols,
-                minimized_tokens=config.window_perception_minimized_tokens,
-                background_after_idle=config.window_perception_background_after_idle,
-                suspend_after_idle=config.window_perception_suspend_after_idle,
-                terminate_after_idle=config.window_perception_terminate_after_idle,
-                window_full_max_rows=config.window_full_max_rows,
-                window_full_total_budget_tokens=config.window_full_total_budget_tokens,
-                window_data_buffer_max_rows=config.window_data_buffer_max_rows,
-            ),
-            adaptive_model_mode_overrides=dict(config.adaptive_model_mode_overrides or {}),
-            advisor_mode=(
-                "rules"
-                if config.window_perception_advisor_mode == "rules"
-                else "hybrid"
-            ),
-            advisor_trigger_window_count=config.window_perception_advisor_trigger_window_count,
-            advisor_trigger_turn=config.window_perception_advisor_trigger_turn,
-            advisor_plan_ttl_turns=config.window_perception_advisor_plan_ttl_turns,
-            intent_enabled=config.window_intent_enabled,
-            intent_sticky_turns=config.window_intent_sticky_turns,
-            intent_repeat_warn_threshold=config.window_intent_repeat_warn_threshold,
-            intent_repeat_trip_threshold=config.window_intent_repeat_trip_threshold,
-        )
-        self._window_perception.bind_async_advisor_runner(
-            lambda *a, **kw: self._llm_caller.run_window_perception_advisor_async(*a, **kw)
-        )
-        focus_tools.init_focus_manager(
-            manager=self._window_perception,
-            refill_reader=lambda **kw: self._context_builder._focus_window_refill_reader(**kw),
-        )
 
         # ── 上下文自动压缩（Compaction）──────────────────────
         self._compaction_manager = CompactionManager(config)
         # 缓存最近一次 _tool_calling_loop 中构建的 system_msgs，
         # 供 get_compaction_status / /compact 命令使用更准确的 token 计数。
         self._last_system_msgs: list[dict] | None = None
-
-        # ── 验证门控（Verification Gate）──────────────────────
-        from excelmanus.engine_core.verification_gate import VerificationGate
-        self._verification_gate = VerificationGate(self)
 
         # ── PromptComposer 集成 ─────────────────────────────
         self._prompt_composer: Any = None
@@ -442,7 +332,7 @@ class AgentEngine:
         if database is not None:
             try:
                 from excelmanus.stores.llm_call_store import LLMCallStore as _LCS
-                self._llm_call_store = _LCS(database, user_id=user_id)
+                self._llm_call_store = _LCS(database)
             except Exception:
                 logger.debug("LLM 调用日志初始化失败", exc_info=True)
             try:
@@ -493,19 +383,6 @@ class AgentEngine:
             except Exception:
                 logger.debug("语义记忆初始化失败，回退到传统加载", exc_info=True)
                 self._semantic_memory = None
-        # 语义文件注册表增强层：按用户查询语义匹配最相关的 Excel 文件
-        self._semantic_registry: Any = None  # 类型：SemanticRegistry | None
-        if self._file_registry is not None and self._embedding_client is not None:
-            try:
-                from excelmanus.embedding.semantic_registry import SemanticRegistry
-                self._semantic_registry = SemanticRegistry(
-                    embedding_client=self._embedding_client,
-                    top_k=5,
-                    threshold=0.25,
-                )
-            except Exception:
-                logger.debug("语义文件注册表初始化失败", exc_info=True)
-                self._semantic_registry = None
         # 错误解决方案语义存储：历史错误→解决方案对的向量索引
         self._error_solution_store: Any = None  # 类型：ErrorSolutionStore | None
         if self._embedding_client is not None:
@@ -519,21 +396,6 @@ class AgentEngine:
             except Exception:
                 logger.debug("错误解决方案存储初始化失败", exc_info=True)
                 self._error_solution_store = None
-        # 语义技能路由增强层：按用户查询语义匹配最相关的 Skillpack
-        self._semantic_skill_router: Any = None  # 类型：SemanticSkillRouter | None
-        if self._embedding_client is not None:
-            try:
-                from excelmanus.embedding.semantic_skill_router import SemanticSkillRouter
-                self._semantic_skill_router = SemanticSkillRouter(
-                    embedding_client=self._embedding_client,
-                    top_k=3,
-                    threshold=0.3,
-                )
-            except Exception:
-                logger.debug("语义技能路由初始化失败", exc_info=True)
-                self._semantic_skill_router = None
-        # 缓存语义技能匹配结果，供 context_builder 使用
-        self._relevant_skill_hints: str = ""
         # 将 embedding 客户端注入 CompactionManager（延迟注入，因为 compaction 先于 embedding 初始化）
         if self._embedding_client is not None:
             self._compaction_manager._embedding_client = self._embedding_client
@@ -548,28 +410,13 @@ class AgentEngine:
             except Exception:
                 logger.debug("记忆过期清理失败，已跳过", exc_info=True)
         # 会话启动时加载核心记忆到 system prompt
-        # 语义记忆可用时：不在此处静态注入，改为 chat() 中按用户消息动态注入
-        self._memory_injection_mode = "static"  # "static" | "semantic"
         if persistent_memory is not None:
-            if self._semantic_memory is not None:
-                # 语义记忆可用：延迟到 chat() 按相关性注入
-                self._memory_injection_mode = "semantic"
-            else:
-                core_memory = persistent_memory.load_core()
-                if core_memory:
-                    original = self._memory.system_prompt
-                    self._memory.system_prompt = (
-                        f"{original}\n\n## 持久记忆\n{core_memory}"
-                    )
-        # 缓存语义记忆检索结果，供 context_builder 使用
-        self._relevant_memory_text: str = ""
-        # 缓存语义文件注册表检索结果，供 context_builder 使用
-        self._relevant_file_summary: str = ""
-        # 缓存 Playbook 语义检索结果，供 context_builder 使用
-        self._relevant_playbook_text: str = ""
-        self._injected_playbook_ids: list[str] = []
-        # 缓存历史会话摘要检索结果，供 context_builder 使用
-        self._relevant_session_history: str = ""
+            core_memory = persistent_memory.load_core()
+            if core_memory:
+                original = self._memory.system_prompt
+                self._memory.system_prompt = (
+                    f"{original}\n\n## 持久记忆\n{core_memory}"
+                )
         self._session_summary_store: Any = None  # 由 SessionManager 注入
 
         # ── 用户自定义规则 ─────────────────────────────────
@@ -582,24 +429,16 @@ class AgentEngine:
         except Exception:
             logger.debug("RulesManager 初始化失败", exc_info=True)
 
-        # ── Playbook（自进化战术手册）──────────────────────
-        self._playbook_store: Any = None   # 类型：PlaybookStore | None
-        self._task_reflector: Any = None   # 类型：TaskReflector | None
-        self._playbook_curator: Any = None # 类型：PlaybookCurator | None
+        # ── Playbook 存储（仅供 /playbook 命令查阅，默认路径不再自动注入）──
+        self._playbook_store: Any = None
         if config.playbook_enabled:
             try:
-                from excelmanus.playbook import PlaybookCurator, PlaybookStore, TaskReflector
+                from excelmanus.playbook import PlaybookStore
                 _pb_db_path = config.playbook_db_path
                 if not _pb_db_path:
                     _pb_db_path = str(Path(config.workspace_root) / ".excelmanus" / "playbook.db")
                 Path(_pb_db_path).parent.mkdir(parents=True, exist_ok=True)
                 self._playbook_store = PlaybookStore(_pb_db_path)
-                self._task_reflector = TaskReflector(config)
-                self._playbook_curator = PlaybookCurator(
-                    store=self._playbook_store,
-                    embedding_client=self._embedding_client,
-                    max_bullets=config.playbook_max_bullets,
-                )
                 logger.info(
                     "Playbook 已启用: db=%s, bullets=%d",
                     _pb_db_path, self._playbook_store.count(),
@@ -607,8 +446,6 @@ class AgentEngine:
             except Exception:
                 logger.debug("Playbook 初始化失败", exc_info=True)
                 self._playbook_store = None
-                self._task_reflector = None
-                self._playbook_curator = None
 
         # ── MCP Client 集成 ──────────────────────────────────
         self._mcp_manager = mcp_manager or MCPManager(
@@ -626,15 +463,19 @@ class AgentEngine:
 
         # ── 上下文预算管理（切换模型时自动更新） ──
         # base_tokens（锁定值，不随模型切换变化）仅在用户显式指定时设置。
-        # 判断方式：config 值与模型推断值不同 → 说明用户通过环境变量或编程方式显式指定了。
-        # 若未显式指定，则由 model_tokens（模型推断）驱动，切换模型时自动更新。
-        from excelmanus.config import _infer_context_tokens_for_model as _infer_ctx
-        _inferred = _infer_ctx(config.model)
-        _user_pinned = config.max_context_tokens != _inferred
+        # 环境变量存在即锁定；否则用「配置值 ≠ 模型推断值」兼容编程传入。
+        # 未锁定时由 model_tokens 驱动，切换模型时自动更新。
+        from excelmanus.config import is_context_window_user_pinned
+        _user_pinned = is_context_window_user_pinned(
+            config.max_context_tokens, config.model,
+        )
         self._context_budget = ContextBudget(
             base_tokens=config.max_context_tokens if _user_pinned else 0,
             model=config.model,
         )
+        # CompactionManager / Memory 在 ContextBudget 之前用 config 快照初始化，
+        # 必须立刻对齐，否则对话页会显示设置页以外的窗口。
+        self._sync_context_window_consumers()
 
         # ── 模型能力探测结果（由 API 层或启动时注入） ──
         from excelmanus.model_probe import ModelCapabilities
@@ -644,8 +485,9 @@ class AgentEngine:
             budget_tokens=config.thinking_budget,
         )
 
-        # ── Guide 消息队列（渠道 guide 模式注入追加指令） ──
+        # ── Guide / 插话队列：当前步不读，下一步开始时并入 user 消息 ──
         self._guide_messages: list[str] = []
+        self._interrupt_queue: list[str] = []
         # ── 渠道上下文（Bot 渠道提示词注入） ──
         self._channel_context: str | None = None
 
@@ -656,7 +498,6 @@ class AgentEngine:
         # ── 解耦组件延迟初始化 ──────────────────────────────
         self._tool_dispatcher = ToolDispatcher(self)
         self._subagent_orchestrator = SubagentOrchestrator(self)
-        self._pending_verifier_task: asyncio.Task[str | None] | None = None  # advisory 模式后台验证任务
         self._command_handler = CommandHandler(self)
         self._context_builder = ContextBuilder(self)
         self._llm_caller = LLMCaller(self)
@@ -731,16 +572,28 @@ class AgentEngine:
         _VISION_KEYWORDS = (
             "gpt-4o", "gpt-4.1",
             "gpt-5",
+            "gpt-6",
             "gpt-image-1",
             "o1", "o3", "o4",
             "grok-2-vision", "grok-4",
             "claude-opus-", "claude-sonnet-", "claude-haiku-",
             "claude-opus-4", "claude-sonnet-4", "claude-haiku-4",
+            "claude-fable", "claude-mythos",
             "gemini",
             "amazon.nova", "nova-lite", "nova-pro", "nova-premier",
             "-vl", "-vision", "-multimodal",
             "qwen-vl", "qwen2-vl", "qwen2.5-vl", "qwen3-vl", "qwen3.5-vl",
             "qwen-omni", "qwen2.5-omni", "qwen3-omni",
+            # Qwen 3.5+ 旗舰已是原生多模态（不再依赖 -vl 后缀）
+            "qwen3.8",
+            "qwen3.7-plus", "qwen3.7-flash", "qwen3.7-max",
+            "qwen3.6-plus", "qwen3.6-flash",
+            "qwen3.5-plus", "qwen3.5-flash",
+            "qvq-",
+            # DeepSeek V4.1 Flash（deepseek-flash）原生视觉；V3/chat/reasoner/v4-pro 仍为文本
+            "deepseek-flash",
+            "deepseek-v4-flash",
+            "deepseek-v4.1",
             "deepseek-vl",
             "janus-pro",
             "llama-3.2-", "llama3.2-vision",
@@ -749,18 +602,19 @@ class AgentEngine:
             "ministral-3b", "ministral-8b", "ministral-14b",
             "mistral-small-3", "mistral-medium-3", "mistral-large-3",
             "phi-3-vision", "phi-3.5-vision", "phi-4-multimodal",
-            "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v",
+            "glm-4v", "glm-4.1v", "glm-4.5v", "glm-4.6v", "glm-5",
             "internvl",
             "minicpm-v",
             "minicpm-o",
             "ernie-4.5-vl", "ernie-vl",
             "command-a-vision",
             "aya-vision",
-            "moonshot-v1-vision", "kimi-vl",
+            "moonshot-v1-vision", "kimi-vl", "kimi-k3", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7",
             "yi-vl",
             "doubao-1.5-vision", "doubao-1.6-vision", "doubao-vision", "seed1.5-vl", "seed-vl",
+            "doubao-seed-2",
             "hunyuan-vision",
-            "minimax-vl",
+            "minimax-vl", "minimax-m3",
             "step-1v", "step-1.5v", "step-3",
             "step-r1-v-mini", "step-1o-vision", "step-1o-turbo-vision",
             "llava",
@@ -849,14 +703,6 @@ class AgentEngine:
         self._state.last_failure_count = value
 
     @property
-    def _current_write_hint(self) -> str:
-        return self._state.current_write_hint
-
-    @_current_write_hint.setter
-    def _current_write_hint(self, value: str) -> None:
-        self._state.current_write_hint = value
-
-    @property
     def _has_write_tool_call(self) -> bool:
         return self._state.has_write_tool_call
 
@@ -888,21 +734,6 @@ class AgentEngine:
     def _execution_guard_fired(self, value: bool) -> None:
         self._state.execution_guard_fired = value
 
-    @property
-    def _finish_task_warned(self) -> bool:
-        return self._state.finish_task_warned
-
-    @_finish_task_warned.setter
-    def _finish_task_warned(self, value: bool) -> None:
-        self._state.finish_task_warned = value
-
-    @property
-    def _verification_attempt_count(self) -> int:
-        return self._state.verification_attempt_count
-
-    @_verification_attempt_count.setter
-    def _verification_attempt_count(self, value: int) -> None:
-        self._state.verification_attempt_count = value
 
     @property
     def _vba_exempt(self) -> bool:
@@ -927,7 +758,6 @@ class AgentEngine:
         """记录工作区写入：写入态 + registry 刷新标记 + panorama 脏标记。"""
         self._state.record_write_action()
         self._registry_refresh_needed = True
-        self._context_builder.mark_panorama_dirty()
 
     def _record_external_write_action(self) -> None:
         """记录工作区外写入：仅写入态，不触发 registry 刷新。"""
@@ -1070,7 +900,6 @@ class AgentEngine:
         # 重置 session turn 到目标轮次
         self._state.session_turn = turn_index
         self._state.has_write_tool_call = False
-        self._state.current_write_hint = "unknown"
 
         # 清理所有 pending 状态，避免 rollback 后 chat() 误入旧的
         # pending question/approval/plan 处理路径，导致孤立 tool_call_id 400 错误
@@ -1085,21 +914,13 @@ class AgentEngine:
         # ── rollback 额外状态清理（与 clear_memory 对齐） ──
         # 任务清单：任务在被回退的轮次中创建，已无效
         self._task_store.clear()
-        # 窗口感知：保留了已回退轮次的窗口数据，需重置
-        self._window_perception.reset()
         # 工具 schema 缓存失效
         self._tools_cache = None
         # SessionState 中与已回退轮次相关的累积状态
         self._state.affected_files.clear()
         self._state.write_operations_log.clear()
         self._state.execution_guard_fired = False
-        self._state.finish_task_warned = False
-        self._state.verification_attempt_count = 0
-        self._state.stuck_warning_fired = False
-        self._state._recent_tool_calls.clear()
         if rollback_files:
-            # 文件已回滚，explorer 缓存与实际文件不一致
-            self._state.explorer_reports.clear()
             self._state.backup_write_notice_shown = False
         # 图片追踪：清理已移除消息相关的图片状态
         self._memory.reset_image_tracking()
@@ -1111,11 +932,13 @@ class AgentEngine:
         }
 
     async def _run_registry_scan(self) -> None:
-        """后台执行 FileRegistry 全量扫描 + 自动数据探索。"""
+        """后台登记工作区文件。不打开 xlsx 抽表结构——概况由模型调 inspect。"""
         if self._file_registry is None:
             return
         try:
-            await asyncio.to_thread(self._file_registry.scan_workspace)
+            await asyncio.to_thread(
+                lambda: self._file_registry.scan_workspace(extract_sheet_meta=False)
+            )
             self._registry_scan_done = True
             self._registry_scan_error = None
         except asyncio.CancelledError:
@@ -1125,118 +948,6 @@ class AgentEngine:
             self._registry_scan_error = str(exc) or exc.__class__.__name__
             logger.debug("FileRegistry 后台扫描失败", exc_info=True)
             return
-
-        # R8: 扫描成功后自动执行 Level 0 数据探索
-        try:
-            await self._auto_explore_after_scan()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            logger.debug("自动数据探索失败，不影响正常使用", exc_info=True)
-
-    async def _auto_explore_after_scan(self) -> None:
-        """Registry 扫描完成后，自动调用 inspect_excel_files 生成数据概览。
-
-        条件：FileRegistry 中存在 Excel 文件且尚无 explorer_reports 缓存。
-        结果以 EXPLORER_REPORT 格式缓存到 session_state，供 context_builder 注入。
-        """
-        # 已有缓存或 prescan 已在主线程中启动则跳过（防止 TOCTOU 竞态重复注入）
-        if getattr(self._state, "explorer_reports", None):
-            return
-        if getattr(self._state, "_explore_in_progress", False):
-            return
-        self._state._explore_in_progress = True  # type: ignore[attr-defined]
-
-        # 检查是否有 Excel 文件
-        if self._file_registry is None:
-            return
-        try:
-            all_files = self._file_registry.list_all()
-        except Exception:
-            return
-        excel_files = [
-            f for f in all_files
-            if any(str(getattr(f, "path", f)).lower().endswith(ext)
-                   for ext in (".xlsx", ".xlsm", ".xlsb", ".xls", ".csv"))
-        ]
-        if not excel_files:
-            return
-
-        # 调用 inspect_excel_files 工具（同步工具，在线程中执行）
-        if not hasattr(self, "registry") or not hasattr(self.registry, "call_tool"):
-            return
-        tool_names = self.registry.get_tool_names()
-        if "inspect_excel_files" not in tool_names:
-            return
-
-        try:
-            raw_result = await asyncio.to_thread(
-                self.registry.call_tool,
-                "inspect_excel_files",
-                {"directory": ".", "max_files": 10, "preview_rows": 0},
-            )
-            result_text = str(raw_result)
-        except Exception:
-            logger.debug("自动 inspect_excel_files 调用失败", exc_info=True)
-            return
-
-        # 将 inspect 结果转为 EXPLORER_REPORT 格式
-        report = self._convert_inspect_to_explorer_report(result_text)
-        if report is None:
-            return
-
-        if not hasattr(self._state, "explorer_reports") or self._state.explorer_reports is None:
-            self._state.explorer_reports = []  # type: ignore[attr-defined]
-        self._state.explorer_reports.append(report)  # type: ignore[attr-defined]
-        logger.info(
-            "R8 自动数据探索完成: %d 个文件, %d 个发现",
-            len(report.get("files", [])),
-            len(report.get("findings", [])),
-        )
-
-    @staticmethod
-    def _convert_inspect_to_explorer_report(inspect_result: str) -> dict[str, Any] | None:
-        """将 inspect_excel_files 的 JSON 输出转为 EXPLORER_REPORT 格式。"""
-        try:
-            data = json.loads(inspect_result)
-        except (ValueError, json.JSONDecodeError):
-            return None
-
-        if not isinstance(data, dict):
-            return None
-
-        raw_files = data.get("files", [])
-        if not raw_files:
-            return None
-
-        report_files: list[dict[str, Any]] = []
-        total_rows = 0
-        total_sheets = 0
-        for f in raw_files:
-            path = f.get("path", "")
-            sheets_raw = f.get("sheets", [])
-            sheets: list[dict[str, Any]] = []
-            for s in sheets_raw:
-                _rows = s.get("rows") or 0
-                _cols = s.get("cols") or 0
-                sheet_info: dict[str, Any] = {
-                    "name": s.get("name", "?"),
-                    "rows": _rows,
-                    "cols": _cols,
-                    "has_header": bool(s.get("header")),
-                }
-                sheets.append(sheet_info)
-                total_rows += _rows
-                total_sheets += 1
-            report_files.append({"path": path, "sheets": sheets})
-
-        return {
-            "summary": f"工作区共 {len(report_files)} 个 Excel 文件，{total_sheets} 个工作表，约 {total_rows} 行数据",
-            "files": report_files,
-            "findings": [],
-            "recommendation": "",
-            "_source": "auto_explore",
-        }
 
     def start_registry_scan(self, *, force: bool = False) -> bool:
         """启动 FileRegistry 后台扫描。"""
@@ -1329,24 +1040,58 @@ class AgentEngine:
             if self._registry_scan_task is task:
                 self._registry_scan_task = None
 
+    def _ensure_memory_extractor(self) -> Any:
+        """仅在显式 extract 时构造；默认引擎路径不创建 aux LLM 客户端。"""
+        if self._memory_extractor is not None:
+            return self._memory_extractor
+        if self._persistent_memory is None or not self._config.memory_enabled:
+            return None
+        try:
+            from excelmanus.memory_extractor import MemoryExtractor
+            from excelmanus.providers import create_client
+
+            mem_model = self._config.aux_model or self._config.model
+            mem_api_key = self._config.aux_api_key or self._config.api_key
+            mem_base_url = self._config.aux_base_url or self._config.base_url
+            mem_protocol = (
+                self._config.aux_protocol
+                if self._config.aux_enabled and self._config.aux_model
+                else self._config.protocol
+            )
+            client = create_client(
+                api_key=mem_api_key,
+                base_url=mem_base_url,
+                protocol=mem_protocol,
+            )
+            extractor = MemoryExtractor(client=client, model=mem_model)
+            if self._embedding_client is not None and self._semantic_memory is not None:
+                extractor._embedding_client = self._embedding_client
+                extractor._semantic_memory = self._semantic_memory
+            self._memory_extractor = extractor
+            return extractor
+        except Exception:
+            logger.debug("MemoryExtractor 延迟创建失败", exc_info=True)
+            return None
+
     async def extract_and_save_memory(
         self,
         *,
-        trigger: str = "session_end",
+        trigger: str = "manual",
         on_event: EventCallback | None = None,
     ) -> list:
-        """从对话历史中提取记忆并持久化。
+        """从对话历史中提取记忆并持久化。仅由显式触发调用。
 
-        trigger: "session_end" | "periodic" | "pre_compaction"
-        若 MemoryExtractor 或 PersistentMemory 未配置则静默跳过。
-        所有异常均被捕获并记录日志，不影响会话正常结束。
+        trigger: "manual" | "periodic" | "pre_compaction"
+        若 PersistentMemory 未配置则静默跳过。
+        所有异常均被捕获并记录日志。
         返回提取到的 MemoryEntry 列表（可能为空）。
         """
-        if self._memory_extractor is None or self._persistent_memory is None:
+        extractor = self._ensure_memory_extractor()
+        if extractor is None or self._persistent_memory is None:
             return []
         try:
             messages = self._memory.get_messages()
-            entries = await self._memory_extractor.extract(messages)
+            entries = await extractor.extract(messages)
             if entries:
                 self._persistent_memory.save_entries(entries)
                 logger.info("持久记忆提取完成 (trigger=%s)，保存了 %d 条记忆条目", trigger, len(entries))
@@ -1544,16 +1289,24 @@ class AgentEngine:
         self._memory.inject_messages(messages)
 
     def push_guide_message(self, message: str) -> None:
-        """外部注入引导消息，将在下次 LLM 迭代时被 agent 看到。
-
-        用于渠道 guide 并发模式：用户在 agent 执行中追加指令，
-        不打断工具执行，下次迭代自动注入为 system context。
-        """
-        self._guide_messages.append(message)
+        """外部注入引导消息，当前步不读，下一步开始时并入 user 消息。"""
+        text = str(message or "").strip()
+        if text:
+            self._guide_messages.append(text)
 
     def drain_guide_messages(self) -> list[str]:
         """取出并清空引导消息队列。"""
         msgs, self._guide_messages = self._guide_messages, []
+        return msgs
+
+    def push_interrupt_message(self, message: str) -> None:
+        """飞行中的用户插话：当前步不重组提示词，下一步并入 user 消息。"""
+        text = str(message or "").strip()
+        if text:
+            self._interrupt_queue.append(text)
+
+    def drain_interrupt_messages(self) -> list[str]:
+        msgs, self._interrupt_queue = self._interrupt_queue, []
         return msgs
 
     @property
@@ -1647,7 +1400,7 @@ class AgentEngine:
         aux_api_key: str | None = None,
         aux_base_url: str | None = None,
     ) -> None:
-        """热更新 AUX 配置（路由 + 子代理默认模型 + 窗口感知顾问）。
+        """热更新 AUX 配置（子代理默认模型、上下文压缩等附属任务）。
 
         当前端通过 API 修改 AUX 配置时，由 SessionManager 广播调用，
         确保已存活的引擎实例不会使用过时的 AUX 快照。
@@ -1671,15 +1424,54 @@ class AgentEngine:
         self._router_client = self._llm_clients.router_client
         self._router_model = self._llm_clients.router_model
         self._router_follow_active_model = self._llm_clients.router_follow_active_model
-        self._advisor_client = self._llm_clients.advisor_client
-        self._advisor_model = self._llm_clients.advisor_model
-        self._advisor_follow_active_model = self._llm_clients.advisor_follow_active_model
 
     def get_compaction_status(self) -> dict[str, Any]:
-        """返回上下文压缩状态，供 API 层查询。"""
-        return self._compaction_manager.get_status(
+        """返回上下文压缩状态，供 API 层查询。
+
+        max_tokens / usage_ratio 以 ContextBudget 为准，避免 CompactionManager
+        持有的 config 快照与设置页、当前模型窗口脱节。
+        """
+        status = self._compaction_manager.get_status(
             self._memory, self._last_system_msgs,
         )
+        max_tokens = self.max_context_tokens
+        status["max_tokens"] = max_tokens
+        current = int(status.get("current_tokens") or 0)
+        status["usage_ratio"] = (
+            round(current / max_tokens, 3) if max_tokens > 0 else 0.0
+        )
+        return status
+
+    def _sync_context_window_consumers(self) -> None:
+        """将 ContextBudget 的有效窗口同步到 memory / compaction。"""
+        tokens = self.max_context_tokens
+        self._memory.update_context_window(tokens)
+        self._compaction_manager.max_context_tokens = tokens
+
+    def apply_context_optimization(
+        self,
+        *,
+        max_context_tokens: int | None = None,
+        compaction_enabled: bool | None = None,
+        compaction_threshold_ratio: float | None = None,
+    ) -> None:
+        """热更新上下文窗口 / 压缩配置（由 SessionManager 广播调用）。
+
+        引擎持有 config 的 replace() 副本，设置页只改全局 get_config()
+        不会自动传到已打开的对话，必须显式同步。
+        """
+        if max_context_tokens is not None:
+            tokens = max(1, int(max_context_tokens))
+            object.__setattr__(self._config, "max_context_tokens", tokens)
+            self._context_budget.set_base_tokens(tokens)
+            self._sync_context_window_consumers()
+        if compaction_enabled is not None:
+            object.__setattr__(self._config, "compaction_enabled", compaction_enabled)
+            self._compaction_manager.enabled = compaction_enabled
+        if compaction_threshold_ratio is not None:
+            object.__setattr__(
+                self._config, "compaction_threshold_ratio", compaction_threshold_ratio,
+            )
 
     @property
     def last_route_result(self) -> SkillMatchResult:
@@ -1707,7 +1499,7 @@ class AgentEngine:
             return False
         try:
             from excelmanus.stores.config_store import UserConfigStore
-            store = UserConfigStore(database.conn, user_id=self._user_id)
+            store = UserConfigStore(database.conn)
             return store.get_full_access()
         except Exception:
             logger.debug("读取持久化 full_access 失败", exc_info=True)
@@ -1719,7 +1511,7 @@ class AgentEngine:
             return
         try:
             from excelmanus.stores.config_store import UserConfigStore
-            store = UserConfigStore(self._database.conn, user_id=self._user_id)
+            store = UserConfigStore(self._database.conn)
             store.set_full_access(enabled)
         except Exception:
             logger.debug("持久化 full_access 失败", exc_info=True)
@@ -1802,34 +1594,14 @@ class AgentEngine:
         return self._file_access_guard
 
     @property
-    def window_perception(self) -> Any:
-        """窗口感知管理器（Protocol: ToolExecutionContext）。"""
-        return self._window_perception
-
-    @property
     def active_model(self) -> str:
         """当前活跃模型标识符（Protocol: EngineConfig）。"""
         return self._active_model
 
     @property
     def is_vision_capable(self) -> bool:
-        """主模型是否支持视觉（Protocol: VLMContext）。"""
+        """主模型是否支持视觉（Protocol: VisionContext）。"""
         return self._is_vision_capable
-
-    @property
-    def vlm_enhance_available(self) -> bool:
-        """VLM 增强是否可用（Protocol: VLMContext）。"""
-        return self._vlm_enhance_available
-
-    @property
-    def vlm_client(self) -> Any:
-        """VLM 客户端（Protocol: VLMContext）。"""
-        return self._vlm_client
-
-    @property
-    def vlm_model(self) -> str:
-        """VLM 模型标识符（Protocol: VLMContext）。"""
-        return self._vlm_model
 
     def emit(self, on_event: Any, event: Any) -> None:
         """发出事件（Protocol: ToolExecutionContext）。"""
@@ -2074,6 +1846,22 @@ class AgentEngine:
             raise RuntimeError("skillpack 管理器不可用。")
         return self._skillpack_manager
 
+    def _ingest_mention_versions(self, mention_contexts: list[ResolvedMention] | None) -> None:
+        """把 @file 提及携带的 content_version 写入本轮 seen / session。"""
+        from excelmanus.workbook_commit import export_seen_versions, remember_content_version
+
+        if mention_contexts:
+            for rm in mention_contexts:
+                mention = getattr(rm, "mention", None)
+                if mention is None or getattr(mention, "kind", None) != "file":
+                    continue
+                version = getattr(mention, "content_version", None)
+                if version:
+                    remember_content_version(mention.value, version)
+                    self.state.remember_file_version(mention.value, version)
+        for path, version in export_seen_versions().items():
+            self.state.remember_file_version(path, version)
+
     def _emit(self, on_event: EventCallback | None, event: ToolCallEvent) -> None:
         """安全地发出事件，捕获回调异常。"""
         if on_event is None:
@@ -2096,7 +1884,7 @@ class AgentEngine:
         chat_mode: str = "write",
         channel: str | None = None,
     ) -> ChatResult:
-        """编排层：路由 → 消息管理 → 调用循环 → 返回结果。"""
+        """入口：斜杠与待答处理后进入步循环。不在这里探查工作簿或分析任务意图。"""
         self._question_resolver = question_resolver
         self._channel_context = channel
         normalized_images: list[dict[str, str]] = []
@@ -2123,25 +1911,22 @@ class AgentEngine:
                 [len(img["data"]) for img in normalized_images],
             )
             # 前端附件图片 hash 注册到 dispatcher，
-            # 后续 read_image 同一文件时可跳过 C 通道重复注入
+            # 后续 read_image 同一文件时可跳过重复注入
             from excelmanus.engine_core.tool_dispatcher import _image_content_hash_b64
             for img in normalized_images:
                 _h = _image_content_hash_b64(img["data"])
                 self._tool_dispatcher._injected_image_hashes.add(_h)
                 logger.debug("前端附件 hash 已注册: %s", _h)
 
-        # ── 视觉能力前置检查：主模型不支持视觉且无 VLM 时直接拒绝 ──
-        if normalized_images and not self._is_vision_capable and not self._vlm_enhance_available:
+        # ── 视觉能力前置检查：附件只交给主模型阅读 ──
+        if normalized_images and not self._is_vision_capable:
             reject_msg = (
-                "当前主模型不支持图片识别，且未配置视觉模型（VLM），无法处理图片附件。\n\n"
-                "请通过以下任一方式启用图片支持：\n"
-                "1. 切换到支持视觉的主模型（如 GPT-5、Claude Sonnet、Qwen-VL 等），"
-                "或设置 `EXCELMANUS_MAIN_MODEL_VISION=true`\n"
-                "2. 配置独立视觉模型：设置 `EXCELMANUS_VLM_BASE_URL` 和 `EXCELMANUS_VLM_MODEL`"
+                "当前主模型不支持图片识别，无法处理图片附件。\n\n"
+                "请切换到支持视觉的主模型，或设置 `EXCELMANUS_MAIN_MODEL_VISION=true`。"
             )
             logger.warning(
-                "拒绝图片请求: main_vision=%s, vlm_enhance=%s",
-                self._is_vision_capable, self._vlm_enhance_available,
+                "拒绝图片请求: main_vision=%s",
+                self._is_vision_capable,
             )
             return ChatResult(reply=reject_msg)
 
@@ -2157,21 +1942,13 @@ class AgentEngine:
             if text:
                 parts.append({"type": "text", "text": text})
 
-            if self._is_vision_capable:
-                # 主模型支持视觉：直接注入 image_url
-                for image in normalized_images:
-                    parts.append({
-                        "type": "image_url",
-                        "image_url": {
-                            "url": f"data:{image['media_type']};base64,{image['data']}",
-                            "detail": image["detail"],
-                        },
-                    })
-            else:
-                # 主模型不支持视觉：用文本占位，VLM B 通道会单独处理图片描述
+            for image in normalized_images:
                 parts.append({
-                    "type": "text",
-                    "text": f"[已上传 {len(normalized_images)} 张图片，将由视觉模型分析]",
+                    "type": "image_url",
+                    "image_url": {
+                        "url": f"data:{image['media_type']};base64,{image['data']}",
+                        "detail": image["detail"],
+                    },
                 })
 
             self._memory.add_user_message(parts if parts else text)
@@ -2180,22 +1957,6 @@ class AgentEngine:
         _repaired = self._memory.repair_dangling_tool_calls()
         if _repaired:
             logger.info("修复了 %d 个中断遗留的悬空 tool_call", _repaired)
-
-        # W6: 用户追问已降级图片时自动重注入
-        _IMAGE_REF_KEYWORDS = (
-            "图片", "图", "image", "img", "照片", "截图", "screenshot",
-            "picture", "photo", "看看", "这张", "那张", "上面的",
-        )
-        _msg_lower = user_message.lower()
-        if any(kw in _msg_lower for kw in _IMAGE_REF_KEYWORDS):
-            _degraded_ids = self._memory._lifecycle.get_degraded_image_ids()
-            if _degraded_ids:
-                _reinjected = 0
-                for _img_id in _degraded_ids:
-                    if self._memory.reinject_image(_img_id):
-                        _reinjected += 1
-                if _reinjected:
-                    logger.info("自动重注入 %d 张已降级图片", _reinjected)
 
         if self._question_flow.has_pending():
             pending_chat_start = time.monotonic()
@@ -2227,94 +1988,31 @@ class AgentEngine:
             logger.info("控制命令执行: %s", _summarize_text(user_message))
             return ChatResult(reply=control_reply)
 
-        if self._approval.has_pending():
-            self._last_route_result = SkillMatchResult(
-                skills_used=[],
-                route_mode="control_command",
-                system_contexts=[],
-            )
-            block_msg = self._approval.pending_block_message()
-            logger.info("存在待确认项，已阻塞普通请求")
-            return ChatResult(reply=block_msg)
+        # 待审批只卡住同一 tool_call_id 的回执路径，不阻塞无关的新用户回合。
 
         chat_start = time.monotonic()
         # 每次真正的 chat 调用递增轮次计数器
         self._state.increment_turn()
-        # 新任务默认重置 write_hint；续跑路径会在 _tool_calling_loop 中恢复。
-        self._current_write_hint = "unknown"
         self._current_chat_mode = chat_mode
         self._tools_cache = None  # 新 turn → 失效工具 schema 缓存
-
-        # 发出路由开始事件
-        self._emit(
-            on_event,
-            ToolCallEvent(event_type=EventType.ROUTE_START),
-        )
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.PIPELINE_PROGRESS,
-                pipeline_stage="routing",
-                pipeline_message="正在分析任务意图...",
-            ),
-        )
 
         effective_slash_command = slash_command
         effective_raw_args = raw_args or ""
 
-        # 兼容直接调用 engine.chat("/skill ...") 的旧路径：
-        # 若调用方未显式传 slash_command，自动从用户输入中解析。
+        # 显式斜杠 / 直接 chat("/skill")；不是词法任务路由。
         if effective_slash_command is None:
             manual_skill_with_args = self._skill_resolver.resolve_skill_command_with_args(user_message)
             if manual_skill_with_args is not None:
                 effective_slash_command, effective_raw_args = manual_skill_with_args
 
-        # ── @skill:name 路由：当无斜杠命令时，检测 mention 中的 skill 引用 ──
         if effective_slash_command is None and mention_contexts:
             for rm in mention_contexts:
                 if rm.mention.kind == "skill" and not rm.error:
                     effective_slash_command = rm.mention.value
-                    # raw_args: 从 clean_text 中提取（即移除所有 @ 标记后的文本）
                     parse_result = MentionParser.parse(user_message)
                     effective_raw_args = parse_result.clean_text
                     break
 
-        # ── D2 优化: 查询向量预计算 + 语义检索并行 ──
-        # 所有语义检索共享同一个 user_message 的 embedding 向量，
-        # 预计算一次后传递给各模块，避免 5 次冗余 HTTP 调用。
-        # P1 优化: embedding 不再阻塞 routing 阶段——各 semantic task 内部
-        # 并行 await 同一个 _query_vec_task，embedding 完成后全部继续。
-        # P2 门控: 词法已确定明确 task_tags 时跳过 embedding（增量价值低）。
-        self._relevant_memory_text = ""
-        self._relevant_file_summary = ""
-        self._relevant_skill_hints = ""
-        self._relevant_playbook_text = ""
-        self._injected_playbook_ids = []
-        self._relevant_session_history = ""
-        _semantic_tasks: list[tuple[str, asyncio.Task[Any]]] = []
-        _sem_launch_ts = time.monotonic()
-        _query_vec_task: asyncio.Task[Any] | None = None
-
-        def _sem_task_done_cb(t: asyncio.Task[Any]) -> None:
-            """防止孤儿 task 的 'exception was never retrieved' 日志噪音。"""
-            if not t.cancelled() and t.exception() is not None:
-                logger.debug("语义检索后台任务异常（已忽略）: %s", t.exception())
-
-        async def _safe_await_query_vec(
-            vec_task: "asyncio.Task[Any] | None",
-        ) -> Any:
-            """安全收割预计算向量 task，失败时返回 None（降级到无 embedding）。"""
-            if vec_task is None:
-                return None
-            try:
-                return await vec_task
-            except Exception:
-                logger.debug("查询向量预计算失败，语义检索降级为无 embedding", exc_info=True)
-                return None
-
-        # ── 路由（斜杠命令 + chat_mode 映射） ──
-        _route_elapsed_ms = 0.0
-        _route_start = time.monotonic()
         route_result = await self._route_skills(
             user_message,
             slash_command=effective_slash_command,
@@ -2323,11 +2021,6 @@ class AgentEngine:
             on_event=on_event,
             images=normalized_images if normalized_images else None,
         )
-        _route_elapsed_ms = (time.monotonic() - _route_start) * 1000
-        if _route_elapsed_ms > 500:
-            logger.info("perf.chat: routing %.0fms (含文件结构扫描)", _route_elapsed_ms)
-        else:
-            logger.debug("perf.chat: routing %.0fms", _route_elapsed_ms)
 
         route_result, user_message = await self._adapt_guidance_only_slash_route(
             route_result=route_result,
@@ -2336,121 +2029,7 @@ class AgentEngine:
             raw_args=effective_raw_args,
         )
 
-        # ── P2 智能门控: 词法已确定任务类型时跳过 embedding ──
-        # 这些 tag 对应的任务足够明确，语义检索增量价值低
-        _SKIP_SEMANTIC_TAGS = frozenset({
-            "cross_sheet",    # VLOOKUP/INDEX-MATCH，任务意图明确
-            "formatting",     # 格式化，不需要记忆/技能匹配
-            "chart",          # 图表生成，任务类型固定
-            "image_replica",  # 图片复刻，有专门流程
-        })
-        _route_tags = set(getattr(route_result, "task_tags", ()) or ())
-        _need_semantic = (
-            effective_slash_command is None
-            and self._embedding_client is not None
-            and not (_route_tags & _SKIP_SEMANTIC_TAGS)
-        )
-
-        # P1: embedding 预计算移到路由之后（受 P2 门控），
-        # 不再串行 await——改由各 semantic task 内部并行 await 同一个 task。
-        if _need_semantic:
-            _query_vec_task = asyncio.create_task(
-                self._embedding_client.embed_single(user_message)
-            )
-            _query_vec_task.add_done_callback(_sem_task_done_cb)
-        elif _route_tags & _SKIP_SEMANTIC_TAGS:
-            logger.debug(
-                "perf.chat: 智能门控跳过 embedding (命中 tags: %s)",
-                _route_tags & _SKIP_SEMANTIC_TAGS,
-            )
-
-        # P3 门控: 仅非斜杠 + 非 chitchat（chitchat 后续可能降级，先启动任务）
-        # P1: 每个 semantic task 内部 await _query_vec_task（并行等待，不阻塞路由）
-        if effective_slash_command is None and _need_semantic:
-            if self._memory_injection_mode == "semantic" and self._semantic_memory is not None:
-                async def _sem_memory_search() -> str:
-                    _vec = await _safe_await_query_vec(_query_vec_task)
-                    return await self._semantic_memory.search(user_message, query_vec=_vec)
-                _t = asyncio.create_task(_sem_memory_search())
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("memory", _t))
-            if self._semantic_registry is not None and self._file_registry is not None:
-                _file_reg = self._file_registry  # 避免闭包捕获 self 属性变化
-                async def _sem_registry_search() -> str:
-                    _vec = await _safe_await_query_vec(_query_vec_task)
-                    return await self._semantic_registry.get_relevant_summary(
-                        user_message, _file_reg, query_vec=_vec,
-                    )
-                _t = asyncio.create_task(_sem_registry_search())
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("file_registry", _t))
-            if self._semantic_skill_router is not None and self._skill_router is not None:
-                _skillpacks = self._skill_router._loader.get_skillpacks() or {}
-                if _skillpacks:
-                    async def _sem_skill_search() -> str:
-                        _vec = await _safe_await_query_vec(_query_vec_task)
-                        return await self._semantic_skill_router.get_relevant_skill_hints(
-                            user_message, _skillpacks, query_vec=_vec,
-                        )
-                    _t = asyncio.create_task(_sem_skill_search())
-                    _t.add_done_callback(_sem_task_done_cb)
-                    _semantic_tasks.append(("skill_router", _t))
-            if self._playbook_store is not None and getattr(self._config, "playbook_enabled", False):
-                async def _sem_playbook_search() -> str:
-                    _vec = await _safe_await_query_vec(_query_vec_task)
-                    return await self._search_playbook(user_message, query_vec=_vec)
-                _t = asyncio.create_task(_sem_playbook_search())
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("playbook", _t))
-            if self._session_summary_store is not None and self._session_turn <= 1:
-                async def _sem_session_search() -> str:
-                    _vec = await _safe_await_query_vec(_query_vec_task)
-                    return await self._search_session_history(user_message, query_vec=_vec)
-                _t = asyncio.create_task(_sem_session_search())
-                _t.add_done_callback(_sem_task_done_cb)
-                _semantic_tasks.append(("session_history", _t))
-
-        # ── 分层路由安全降级：chitchat 在多轮任务上下文中保守回退 ──
-        # 宁可多花 token 也不误判任务续接消息为闲聊
-        _chitchat_downgrade_reason = ""
-        if route_result.route_mode == "chitchat":
-            if self._active_skills:
-                _chitchat_downgrade_reason = "active_skills"
-            elif self._question_flow.has_pending():
-                _chitchat_downgrade_reason = "pending_question"
-            elif self._approval.has_pending():
-                _chitchat_downgrade_reason = "pending_approval"
-            elif any(
-                m.get("role") == "tool"
-                for m in self._memory.messages[-6:]
-                if isinstance(m, dict)
-            ):
-                _chitchat_downgrade_reason = "recent_tool_calls"
-
-            if _chitchat_downgrade_reason:
-                logger.info(
-                    "chitchat 安全降级 → all_tools (原因: %s)", _chitchat_downgrade_reason,
-                )
-                route_result = SkillMatchResult(
-                    skills_used=route_result.skills_used,
-                    route_mode="all_tools",
-                    system_contexts=route_result.system_contexts,
-                    parameterized=route_result.parameterized,
-                    write_hint="unknown",
-                    task_tags=route_result.task_tags,
-                    route_tool_tags=route_result.route_tool_tags,
-                )
-            else:
-                # 确认走 chitchat 快速通道：取消不必要的语义检索
-                for _, _t in _semantic_tasks:
-                    _t.cancel()
-                _semantic_tasks.clear()
-                logger.debug("chitchat 快速通道确认，已取消语义检索")
-
-        # 合并已激活 skill 的 system_contexts
-        # 使用 instructions_only 渲染：完整 resource_contents 已在
-        # activate_skill 的 tool result 中返回给 LLM，后续迭代仅需
-        # instructions 提醒，避免 resource_contents 在每轮重复注入。
+        # 已激活 skill 只注入 instructions，完整资源在 activate_skill 的 tool result 里。
         final_skills_used = list(route_result.skills_used)
         final_system_contexts = list(route_result.system_contexts)
         if self._active_skills:
@@ -2467,31 +2046,10 @@ class AgentEngine:
             route_mode=getattr(route_result, "route_mode", "all_tools"),
             system_contexts=final_system_contexts,
             parameterized=route_result.parameterized,
-            write_hint=_merge_write_hint(
-                getattr(route_result, "write_hint", None),
-                self._current_write_hint,
-            ),
-            sheet_count=getattr(route_result, "sheet_count", 0),
-            max_total_rows=getattr(route_result, "max_total_rows", 0),
-            task_tags=tuple(getattr(route_result, "task_tags", ()) or ()),
-            route_tool_tags=tuple(getattr(route_result, "route_tool_tags", ()) or ()),
         )
         self._last_route_result = route_result
 
-        # 发出路由结束事件（含匹配结果）
-        self._emit(
-            on_event,
-            ToolCallEvent(
-                event_type=EventType.ROUTE_END,
-                route_mode=route_result.route_mode,
-                skills_used=list(route_result.skills_used),
-                tool_scope=list(route_result.tool_scope) if route_result.tool_scope else [],
-            ),
-        )
-
         if effective_slash_command and route_result.route_mode == "slash_not_user_invocable":
-            for _, _t in _semantic_tasks:
-                _t.cancel()
             reply = f"技能 `{effective_slash_command}` 不允许手动调用。"
             _add_user_turn_to_memory(user_message)
             self._memory.add_assistant_message(reply)
@@ -2522,8 +2080,6 @@ class AgentEngine:
             )
 
         if effective_slash_command and route_result.route_mode == "slash_not_found":
-            for _, _t in _semantic_tasks:
-                _t.cancel()
             # 区分"技能被权限限制"与"技能真的不存在"，给出精确反馈
             normalized_cmd = SkillResolver.normalize_skill_command_name(effective_slash_command)
             blocked = self._skill_resolver.blocked_skillpacks()
@@ -2588,8 +2144,6 @@ class AgentEngine:
                 if isinstance(updated_message, str) and updated_message.strip():
                     user_message = updated_message.strip()
             if user_prompt_hook is not None and user_prompt_hook.decision == HookDecision.DENY:
-                for _, _t in _semantic_tasks:
-                    _t.cancel()
                 reason = user_prompt_hook.reason or "Hook 拒绝了当前请求。"
                 reply = f"请求已被 Hook 拦截：{reason}"
                 _add_user_turn_to_memory(user_message)
@@ -2620,156 +2174,40 @@ class AgentEngine:
                     truncated=False,
                 )
 
-        if (
-            effective_slash_command
-            and route_result.route_mode == "slash_direct"
-            and selected_skill is not None
-            and selected_skill.command_dispatch == "tool"
-            and selected_skill.command_tool
-        ):
-            for _, _t in _semantic_tasks:
-                _t.cancel()
-            _add_user_turn_to_memory(user_message)
-            chat_result = await self._run_command_dispatch_skill(
-                skill=selected_skill,
-                raw_args=effective_raw_args,
-                route_result=route_result,
-                on_event=on_event,
-            )
-            elapsed = time.monotonic() - chat_start
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.CHAT_SUMMARY,
-                    total_iterations=self._last_iteration_count,
-                    total_tool_calls=self._last_tool_call_count,
-                    success_count=self._last_success_count,
-                    failure_count=self._last_failure_count,
-                    elapsed_seconds=round(elapsed, 2),
-                    prompt_tokens=chat_result.prompt_tokens,
-                    completion_tokens=chat_result.completion_tokens,
-                    total_tokens=chat_result.total_tokens,
-                ),
-            )
-            return chat_result
-
         # 追加用户消息
         _add_user_turn_to_memory(user_message)
         logger.info(
-            "用户指令摘要: %s | route_mode=%s | skills=%s",
+            "用户指令摘要: %s | skills=%s",
             _summarize_text(user_message),
-            route_result.route_mode,
             route_result.skills_used,
         )
 
-        self._context_builder._set_window_perception_turn_hints(
-            user_message=user_message,
-            is_new_task=True,
-            task_tags=route_result.task_tags,
-        )
         # 仅新任务重置执行守卫；同任务续跑需保留状态，避免重复注入提示。
         self._execution_guard_fired = False
         self._vba_exempt = _user_requests_vba(user_message)
         # 存储 mention 上下文供 _tool_calling_loop 注入系统提示词
         self._mention_contexts = mention_contexts
-
-
-        # D2: 收割语义检索结果（P1: 非阻塞——用已完成的，跳过未完成的）
-        # 有了 P2 预计算向量，任务多数为纯 CPU cosine 搜索，应秒完。
-        # 超时仅作安全网（如首次建索引需额外 embedding 调用）。
-        _SEM_GATHER_TIMEOUT = 2.0  # 秒
-        if _semantic_tasks:
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.PIPELINE_PROGRESS,
-                    pipeline_stage="prefetching",
-                    pipeline_message="正在预取上下文...",
-                ),
-            )
-            _all_task_set = {t for _, t in _semantic_tasks}
-            _done, _pending = await asyncio.wait(
-                _all_task_set, timeout=_SEM_GATHER_TIMEOUT,
-            )
-            # 取消仍在跑的任务，避免泄漏
-            for _pt in _pending:
-                _pt.cancel()
-            if _pending:
-                _pending_labels = [
-                    _l for _l, _t in _semantic_tasks if _t in _pending
-                ]
-                logger.info(
-                    "perf.chat: 语义检索超时跳过 %s (%.1fs)",
-                    _pending_labels, _SEM_GATHER_TIMEOUT,
-                )
-            # 收割已完成任务的结果
-            for _label, _task in _semantic_tasks:
-                if _task not in _done:
-                    continue
-                try:
-                    _res = _task.result()
-                except Exception as _exc:
-                    logger.debug("语义检索 %s 失败: %s", _label, _exc)
-                    if _label == "memory" and self._persistent_memory is not None:
-                        self._relevant_memory_text = self._persistent_memory.load_core()
-                    continue
-                if _label == "memory":
-                    self._relevant_memory_text = _res
-                elif _label == "file_registry":
-                    self._relevant_file_summary = _res
-                elif _label == "skill_router":
-                    self._relevant_skill_hints = _res
-                elif _label == "playbook":
-                    self._relevant_playbook_text = _res if isinstance(_res, str) else ""
-                elif _label == "session_history":
-                    self._relevant_session_history = _res if isinstance(_res, str) else ""
-            _sem_elapsed = (time.monotonic() - _sem_launch_ts) * 1000
-            if _sem_elapsed > 50:
-                logger.debug(
-                    "perf.chat: semantic_search %.0fms (done=%d, skipped=%d)",
-                    _sem_elapsed, len(_done), len(_pending),
-                )
+        self._ingest_mention_versions(mention_contexts)
 
         _pre_loop_ms = (time.monotonic() - chat_start) * 1000
         if _pre_loop_ms > 1000:
-            logger.info(
-                "perf.chat: pre-loop %.0fms (route=%.0fms) — 建议检查 embedding/文件扫描耗时",
-                _pre_loop_ms, _route_elapsed_ms,
-            )
+            logger.info("perf.chat: pre-loop %.0fms", _pre_loop_ms)
         else:
             logger.debug("perf.chat: pre-loop total %.0fms", _pre_loop_ms)
 
-        self._pending_verifier_task = None
+        chat_result = await self._tool_calling_loop(
+            route_result, on_event,
+            approval_resolver=approval_resolver,
+            question_resolver=question_resolver,
+        )
 
-        try:
-            chat_result = await self._tool_calling_loop(
-                route_result, on_event,
-                approval_resolver=approval_resolver,
-                question_resolver=question_resolver,
-            )
-        except BaseException:
-            # 取消可能泄漏的后台任务
-            if self._pending_verifier_task is not None and not self._pending_verifier_task.done():
-                self._pending_verifier_task.cancel()
-            self._pending_verifier_task = None
-            raise
-
-        # ── F: 等待后台 advisory verifier 完成（不阻塞 finish_task 回复） ──
-        _vt = self._pending_verifier_task
-        if _vt is not None:
-            self._pending_verifier_task = None
-            try:
-                advisory_text = await _vt
-                if advisory_text and not advisory_text.startswith("BLOCK:"):
-                    chat_result.reply = (chat_result.reply or "") + advisory_text
-            except Exception:  # noqa: BLE001
-                logger.debug("后台 advisory verifier 异常，fail-open", exc_info=True)
-
-        # 注入路由诊断信息到 ChatResult
-        chat_result.write_hint = self._current_write_hint
+        # 注入路由诊断信息到 ChatResult。
+        # tool_access 仅回显用户选定的 chat_mode 对应的工具可见性，不猜测写入意图。
+        chat_result.tool_access = _tool_access_from_chat_mode(
+            getattr(self, "_current_chat_mode", "write"),
+        )
         chat_result.route_mode = route_result.route_mode
         chat_result.skills_used = list(route_result.skills_used)
-        chat_result.task_tags = route_result.task_tags
         chat_result.turn_diagnostics = list(self._turn_diagnostics)
 
         # 累积到会话级诊断
@@ -2781,11 +2219,9 @@ class AgentEngine:
                 _injection_summary_for_diag = _latest.get("summary", [])
         _session_diag: dict[str, Any] = {
             "session_turn": self._session_turn,
-            "write_hint": self._current_write_hint,
+            "tool_access": chat_result.tool_access,
             "route_mode": route_result.route_mode,
             "skills_used": list(route_result.skills_used),
-            "task_tags": list(route_result.task_tags),
-            "route_tool_tags": list(route_result.route_tool_tags),
             "iterations": chat_result.iterations,
             "prompt_tokens": chat_result.prompt_tokens,
             "completion_tokens": chat_result.completion_tokens,
@@ -2794,75 +2230,7 @@ class AgentEngine:
             "turn_diagnostics": [d.to_dict() for d in self._turn_diagnostics],
             "prompt_injection_summary": _injection_summary_for_diag,
         }
-        if _chitchat_downgrade_reason:
-            _session_diag["chitchat_downgrade_reason"] = _chitchat_downgrade_reason
-        elif route_result.route_mode == "chitchat":
-            _session_diag["chitchat_fast_path"] = True
         self._session_diagnostics.append(_session_diag)
-
-        # 周期性后台记忆提取：每 N 轮静默提取一次
-        _extract_interval = self._config.memory_auto_extract_interval
-        if (
-            _extract_interval > 0
-            and self._session_turn > 0
-            and self._session_turn % _extract_interval == 0
-        ):
-            try:
-                await self.extract_and_save_memory(
-                    trigger="periodic", on_event=on_event,
-                )
-            except Exception:
-                logger.debug("周期性记忆提取失败，已跳过", exc_info=True)
-
-        # Playbook 反馈闭环：根据任务结果对本轮注入的 bullet 做评分
-        if self._playbook_store is not None and self._injected_playbook_ids:
-            try:
-                if self._last_failure_count == 0:
-                    for _bid in self._injected_playbook_ids:
-                        self._playbook_store.mark_helpful(_bid)
-                elif self._last_failure_count > self._last_success_count:
-                    for _bid in self._injected_playbook_ids:
-                        self._playbook_store.mark_harmful(_bid)
-            except Exception:
-                logger.debug("Playbook 反馈评分失败", exc_info=True)
-            self._injected_playbook_ids = []
-
-        # Playbook 后台反思：任务完成后异步提取策略教训
-        # 触发条件：有写入操作，或交互 ≥3 轮（说明任务有一定复杂度值得学习）
-        if (
-            self._task_reflector is not None
-            and self._playbook_curator is not None
-            and (self._state.has_write_tool_call or chat_result.iterations >= 3)
-        ):
-            try:
-                _trajectory = self._memory.get_messages()
-                _task_outcome = "success" if self._last_failure_count == 0 else "partial"
-                _write_ops = list(self._state.write_operations_log)
-                _task_tags = tuple(route_result.task_tags) if route_result.task_tags else ()
-
-                async def _reflect_and_curate() -> None:
-                    try:
-                        deltas = await self._task_reflector.reflect(
-                            trajectory=_trajectory,
-                            task_outcome=_task_outcome,
-                            task_tags=_task_tags,
-                            write_ops_log=_write_ops,
-                        )
-                        if deltas:
-                            report = await self._playbook_curator.integrate(
-                                deltas, session_id=self._session_id or "",
-                                task_tags=_task_tags,
-                            )
-                            logger.info(
-                                "Playbook 反思完成: new=%d, merged=%d, total=%d",
-                                report.new_count, report.merged_count, report.total_bullets,
-                            )
-                    except Exception:
-                        logger.debug("Playbook 反思失败", exc_info=True)
-
-                fire_and_forget(_reflect_and_curate(), name="playbook_reflect")
-            except Exception:
-                logger.debug("Playbook 反思调度失败", exc_info=True)
 
         # 发出执行摘要事件
         elapsed = time.monotonic() - chat_start
@@ -3034,155 +2402,6 @@ class AgentEngine:
         from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
         return SubagentOrchestrator.normalize_file_paths(file_paths)
 
-    async def _search_playbook(self, query: str, *, query_vec: Any = None) -> str:
-        """语义检索 playbook，返回格式化文本。无 embedding 时降级为 list_all。"""
-        if self._playbook_store is None:
-            return ""
-        if not getattr(self._config, "playbook_enabled", False):
-            return ""
-
-        top_k = getattr(self._config, "playbook_inject_top_k", 5)
-        bullets = []
-
-        # 优先语义检索（使用预计算向量或现场计算）
-        _vec = query_vec
-        if _vec is None and self._embedding_client is not None and query.strip():
-            try:
-                emb = await self._embedding_client.embed([query])
-                _vec = emb[0]
-            except Exception:
-                logger.debug("Playbook 查询向量化失败", exc_info=True)
-        if _vec is not None:
-            try:
-                bullets = self._playbook_store.search(_vec, top_k=top_k)
-            except Exception:
-                logger.debug("Playbook 语义检索失败，降级为 list_all", exc_info=True)
-                bullets = []
-
-        # 降级：无 embedding 或语义检索无结果
-        if not bullets:
-            try:
-                bullets = self._playbook_store.list_all(limit=top_k)
-            except Exception:
-                return ""
-
-        if not bullets:
-            return ""
-
-        ids = [b.id for b in bullets]
-        self._injected_playbook_ids = ids
-
-        lines = ["## 历史经验参考（基于过往成功经验自动检索）"]
-        for b in bullets:
-            lines.append(f"- **[{b.category}]** {b.content}")
-        return "\n".join(lines)
-
-    async def _search_session_history(self, query: str, *, query_vec: Any = None) -> str:
-        """语义检索历史会话摘要，返回格式化文本注入 system prompt。
-
-        混合策略：embedding 语义检索 + 文件名匹配 + 时间序兜底。
-        仅首轮/第二轮调用（由 chat() 门控），后续轮次零开销。
-        """
-        store = self._session_summary_store
-        if store is None:
-            return ""
-
-        top_k = self._config.session_summary_inject_top_k
-        max_tokens = self._config.session_summary_max_tokens
-        user_id = self._user_id
-
-        matched: list[Any] = []
-        current_session_id = self._session_id
-
-        # 路径 A：embedding 语义检索（使用预计算向量或现场计算）
-        q_vec = query_vec
-        if q_vec is None and self._embedding_client is not None and query.strip():
-            try:
-                q_vec = await self._embedding_client.embed_single(query)
-            except Exception:
-                logger.debug("历史会话查询向量化失败", exc_info=True)
-        if q_vec is not None:
-            try:
-                results = store.search_by_embedding(
-                    q_vec, user_id=user_id, top_k=top_k,
-                )
-                matched = [
-                    s for s, _ in results
-                    if s.session_id != current_session_id
-                ]
-            except Exception:
-                logger.debug("历史会话语义检索失败，降级", exc_info=True)
-
-        # 路径 B：文件名匹配（补充语义检索可能遗漏的同文件场景）
-        if len(matched) < top_k:
-            try:
-                _reg = self._file_registry
-                if _reg is not None:
-                    _all_files = _reg.list_all()
-                    _paths = [f.get("canonical_path", "") for f in _all_files if isinstance(f, dict)]
-                    if _paths:
-                        file_matched = store.search_by_files(
-                            _paths, user_id=user_id, limit=top_k + 1,
-                        )
-                        _existing_ids = {s.session_id for s in matched}
-                        for s in file_matched:
-                            if s.session_id == current_session_id:
-                                continue
-                            if s.session_id not in _existing_ids and len(matched) < top_k:
-                                matched.append(s)
-                                _existing_ids.add(s.session_id)
-            except Exception:
-                logger.debug("历史会话文件匹配失败", exc_info=True)
-
-        # 路径 C：时间序兜底
-        if not matched:
-            try:
-                recent = store.list_recent(user_id=user_id, limit=top_k + 1)
-                matched = [s for s in recent if s.session_id != current_session_id][:top_k]
-            except Exception:
-                return ""
-
-        if not matched:
-            return ""
-
-        # 格式化输出（控制 token 预算）
-        lines = ["## 历史会话参考"]
-        total_tokens = 0
-        for s in matched:
-            # 计算相对时间描述
-            _time_desc = s.updated_at[:10] if s.updated_at else "未知时间"
-            goal_text = s.task_goal or "（未记录目标）"
-            outcome_icon = {"completed": "✅", "partial": "⚠️", "failed": "❌"}.get(
-                s.outcome, "❓"
-            )
-
-            entry_lines = [f"### {_time_desc} — {goal_text}"]
-            if s.files_involved:
-                files_str = ", ".join(
-                    f.rsplit("/", 1)[-1].rsplit("\\", 1)[-1]
-                    for f in s.files_involved[:5]
-                )
-                entry_lines.append(f"- **文件**: {files_str}")
-            entry_lines.append(f"- **结果**: {outcome_icon} {s.outcome}")
-            if s.unfinished:
-                entry_lines.append(f"- **未完成**: {s.unfinished}")
-            if s.summary_text:
-                # 截断过长摘要
-                _summary = s.summary_text if len(s.summary_text) <= 200 else s.summary_text[:200] + "..."
-                entry_lines.append(f"- **摘要**: {_summary}")
-
-            entry_text = "\n".join(entry_lines)
-            entry_tokens = TokenCounter.count(entry_text)
-            if total_tokens + entry_tokens > max_tokens:
-                break
-            lines.append(entry_text)
-            total_tokens += entry_tokens
-
-        if len(lines) <= 1:
-            return ""
-
-        return "\n\n".join(lines)
-
     def _build_parent_context_summary(self) -> str:
         """构建主会话上下文摘要。"""
         messages = self._memory.get_messages()
@@ -3197,17 +2416,6 @@ class AgentEngine:
             elif role == "assistant":
                 lines.append(f"助手: {content[:200]}")
         return "\n".join(lines)
-
-    async def _auto_select_subagent(
-        self,
-        *,
-        task: str,
-        file_paths: list[str],
-    ) -> str:
-        """基于关键词规则选择子代理。委托给 SubagentOrchestrator。"""
-        return await self._subagent_orchestrator.auto_select_subagent(
-            task=task, file_paths=file_paths,
-        )
 
     async def run_subagent(
         self,
@@ -3259,9 +2467,6 @@ class AgentEngine:
         parent_summary = self._build_parent_context_summary()
         if parent_summary:
             parent_context_parts.append(parent_summary)
-        window_context = self._context_builder._build_window_perception_notice()
-        if window_context:
-            parent_context_parts.append(window_context)
         # full 模式：构建主代理级别的丰富上下文
         enriched_contexts: list[str] | None = None
         if runtime_config.capability_mode == "full":
@@ -3283,7 +2488,7 @@ class AgentEngine:
             parent_context="\n\n".join(parent_context_parts),
             on_event=on_event,
             full_access_enabled=self._full_access_enabled,
-            tool_result_enricher=self._enrich_subagent_tool_result_with_window_perception,
+            tool_result_enricher=None,
             enriched_contexts=enriched_contexts,
             session_turn=self._state.session_turn,
             workspace_context=workspace_context,
@@ -3354,282 +2559,6 @@ class AgentEngine:
             if part
         )
         return self._is_model_unavailable_error(error_text)
-
-    async def _run_finish_verifier_advisory(
-        self,
-        *,
-        report: dict[str, Any] | None,
-        summary: str,
-        on_event: EventCallback | None = None,
-        blocking: bool = False,
-    ) -> str | None:
-        """任务完成前运行 verifier 子代理。
-
-        blocking=False（advisory）：返回附加提示文本，不阻塞 finish_accepted。
-        blocking=True：verdict=fail + confidence=high 时返回以 "BLOCK:" 开头的字符串，
-        调用方据此翻转 finish_accepted；其余情况同 advisory。
-        任何异常 / verifier 失败均 fail-open（返回 None）。
-        """
-        if not self._subagent_enabled:
-            return None
-        if not getattr(self._config, "verifier_enabled", False):
-            return None
-
-        verifier_config = self._subagent_registry.get("verifier")
-        if verifier_config is None:
-            return None
-
-        # 构建验证提示词：包含任务摘要 + 报告内容
-        parts: list[str] = ["请验证以下任务是否真正完成："]
-        if report and isinstance(report, dict):
-            operations = (report.get("operations") or "").strip()
-            if operations:
-                parts.append(f"操作：{operations}")
-            key_findings = (report.get("key_findings") or "").strip()
-            if key_findings:
-                parts.append(f"关键发现：{key_findings}")
-            affected_files = report.get("affected_files")
-            if isinstance(affected_files, list) and affected_files:
-                parts.append(f"涉及文件：{', '.join(str(f) for f in affected_files)}")
-        elif summary.strip():
-            parts.append(f"完成摘要：{summary}")
-        else:
-            return None
-
-        # 注入写入操作日志（最高验证价值，精准定位变更）
-        _state = getattr(self, "_state", None)
-        if _state is not None:
-            write_log = _state.render_write_operations_log()
-            if write_log:
-                parts.append(write_log)
-            # 根据写入操作类型注入针对性验证清单
-            playbook = AgentEngine._select_verification_playbook(_state.write_operations_log)
-            if playbook:
-                parts.append(playbook)
-
-        # 精简注入会话上下文（仅用于补充任务目标理解，截短以减少 prompt token）
-        recent_context = self._build_parent_context_summary()
-        if recent_context:
-            parts.append(f"会话上下文：{recent_context[:400]}")
-
-        # 注入任务清单状态（截短，仅含验证条件摘要）
-        task_list_notice = self._context_builder._build_task_list_status_notice()
-        if task_list_notice:
-            parts.append(f"任务清单：\n{task_list_notice[:600]}")
-
-        # 注入 VerificationGate 已通过的自动检查结果
-        gate_summary = self._build_gate_results_for_verifier()
-        if gate_summary:
-            parts.append(gate_summary)
-
-        prompt = "\n".join(parts)
-
-        try:
-            result = await self.run_subagent(
-                agent_name="verifier",
-                prompt=prompt,
-                on_event=on_event,
-            )
-        except Exception:  # noqa: BLE001
-            logger.debug("verifier advisory 执行异常，fail-open", exc_info=True)
-            return None
-
-        if not result.success:
-            logger.info("verifier advisory 执行失败: %s", result.error)
-            return None
-
-        # 解析 verdict
-        verdict_text = result.summary.strip()
-        verdict = "unknown"
-        confidence = "unknown"
-        issues: list[str] = []
-        checks: list[str] = []
-
-        try:
-            parsed = json.loads(verdict_text)
-            if isinstance(parsed, dict):
-                verdict = str(parsed.get("verdict", "unknown")).lower()
-                confidence = str(parsed.get("confidence", "unknown")).lower()
-                issues = parsed.get("issues", [])
-                checks = parsed.get("checks", [])
-        except (json.JSONDecodeError, TypeError):
-            # verifier 未按格式输出，视为 unknown
-            pass
-
-        # 发射结构化 VERIFICATION_REPORT 事件（供前端渲染验证卡片）
-        if on_event is not None:
-            try:
-                self.emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.VERIFICATION_REPORT,
-                        verification_verdict=verdict,
-                        verification_confidence=confidence,
-                        verification_checks=[str(c) for c in checks[:10]],
-                        verification_issues=[str(i) for i in issues[:10]],
-                        verification_mode="blocking" if blocking else "advisory",
-                    ),
-                )
-            except Exception:  # noqa: BLE001
-                pass
-
-        if verdict == "pass":
-            check_str = "、".join(str(c) for c in checks[:3]) if checks else "基本检查"
-            return f"\n\n✅ **验证通过**（{check_str}）"
-        elif verdict == "fail":
-            issue_str = "、".join(str(i) for i in issues[:3]) if issues else "未知问题"
-            if blocking and confidence == "high":
-                return f"BLOCK:⚠️ 验证未通过：{issue_str}。请修正后再次调用 finish_task。"
-            return f"\n\n⚠️ **验证发现问题**（advisory）：{issue_str}（任务仍标记完成，建议复查）"
-        else:
-            return f"\n\n🔍 **验证结果不确定**：{verdict_text[:200]}"
-
-    @staticmethod
-    def _select_verification_playbook(
-        write_ops: list[dict[str, str]],
-    ) -> str:
-        """根据写入操作日志中的工具类型，选择针对性验证清单注入 verifier prompt。
-
-        返回空字符串表示无需额外清单（verifier.md 中已有通用清单）。
-        """
-        if not write_ops:
-            return ""
-
-        tool_names = {entry.get("tool_name", "") for entry in write_ops}
-        has_run_code = "run_code" in tool_names
-        has_write_cells = "write_cells" in tool_names
-        has_create_sheet = "create_sheet" in tool_names
-        has_delete_sheet = "delete_sheet" in tool_names
-        has_insert = bool(tool_names & {"insert_rows", "insert_columns"})
-
-        # 检测公式写入（values 中含 = 开头的字符串）
-        has_formula = False
-        for entry in write_ops:
-            summary = entry.get("summary", "")
-            if "公式" in summary or "VLOOKUP" in summary.upper() or "formula" in summary.lower():
-                has_formula = True
-                break
-
-        # 检测跨 sheet 操作（涉及多个不同 sheet）
-        sheets = {entry.get("sheet", "") for entry in write_ops if entry.get("sheet")}
-        is_cross_sheet = len(sheets) > 1 or has_create_sheet
-
-        sections: list[str] = ["## 针对性验证清单（根据本轮操作自动生成）"]
-
-        if has_formula:
-            sections.append(
-                "### 公式验证\n"
-                "- 用 `run_code` + openpyxl(data_only=False) 回读公式文本，确认公式语法正确\n"
-                "- 检查公式引用的 sheet 和范围是否有效（不指向空区域）\n"
-                "- 抽样 2-3 个公式单元格，用 data_only=True 读取计算值，判断是否合理"
-            )
-
-        if is_cross_sheet:
-            sections.append(
-                "### 跨表一致性\n"
-                "- 验证源表和目标表的行数关系是否符合预期\n"
-                "- 对比关键列的值域（如 ID 列）是否一致\n"
-                "- 检查新建的 sheet 是否存在且列头正确"
-            )
-
-        if has_run_code:
-            sections.append(
-                "### run_code 写入验证\n"
-                "- 用 `read_excel` 或 `run_code`(只读) 检查目标文件的行数和列数\n"
-                "- 抽样首行和末行数据，确认写入内容正确\n"
-                "- 验证数据类型（数字未变为字符串、日期格式正确）"
-            )
-
-        if has_write_cells and not has_formula:
-            sections.append(
-                "### 数据写入验证\n"
-                "- 用 `read_excel` 读取写入范围，确认行列数匹配\n"
-                "- 抽检首行和末行的值是否与预期一致\n"
-                "- 检查是否有意外的空值或类型错误"
-            )
-
-        if has_delete_sheet:
-            sections.append(
-                "### 删除验证\n"
-                "- 用 `list_sheets` 确认目标 sheet 已不存在\n"
-                "- 确认其他 sheet 未受影响"
-            )
-
-        if has_insert:
-            sections.append(
-                "### 插入行/列验证\n"
-                "- 验证插入后总行数/列数是否正确\n"
-                "- 检查插入位置附近的数据是否正确偏移（无覆盖）"
-            )
-
-        # 只有标题没有具体清单时返回空
-        if len(sections) <= 1:
-            return ""
-
-        return "\n\n".join(sections)
-
-    def _build_gate_results_for_verifier(self) -> str:
-        """汇总 VerificationGate 结果 + 待 verifier 手动验证的条件，注入 verifier prompt。
-
-        分三层：
-        1. Gate 已自动通过的条件 → 告知 verifier 无需重复
-        2. Gate 自动检查失败的条件 → 告知 verifier 重点关注
-        3. custom 类型 / 未被 Gate 处理的条件 → 明确列出，让 verifier 按清单执行
-        """
-        task_list = self._task_store.current
-        if task_list is None:
-            return ""
-
-        auto_passed: list[str] = []
-        auto_failed: list[str] = []
-        needs_manual: list[str] = []
-
-        for item in task_list.items:
-            vc = item.verification_criteria
-            if vc is None:
-                continue
-
-            detail = f"{vc.check_type}"
-            if vc.target_file:
-                detail += f" @ {vc.target_file}"
-            if vc.target_sheet:
-                detail += f"/{vc.target_sheet}"
-            if vc.expected:
-                detail += f" (期望: {vc.expected}"
-                if vc.actual:
-                    detail += f", 实际: {vc.actual}"
-                detail += ")"
-
-            if vc.check_type == "custom" or vc.passed is None:
-                # custom 类型或未被 Gate 处理 → 需要 verifier 手动验证
-                label = vc.expected or detail
-                needs_manual.append(f"- 🔍 {item.title}: {label}")
-            elif vc.passed:
-                auto_passed.append(f"- ✅ {detail}")
-            else:
-                auto_failed.append(f"- ❌ {detail}")
-
-        if not auto_passed and not auto_failed and not needs_manual:
-            return ""
-
-        sections: list[str] = ["## 验证条件协作清单"]
-
-        if auto_passed:
-            sections.append(
-                "**已自动通过（无需重复）**：\n" + "\n".join(auto_passed)
-            )
-        if auto_failed:
-            sections.append(
-                "**自动检查失败（重点关注）**：\n" + "\n".join(auto_failed)
-            )
-        if needs_manual:
-            sections.append(
-                "**需要你验证（Gate 无法覆盖）**：\n" + "\n".join(needs_manual)
-                + "\n请用 scan_excel_snapshot / search_excel_values / read_excel 逐条验证以上条件。"
-            )
-
-        sections.append("此外，请聚焦于任何自动检查未覆盖的语义验证（数据正确性、业务逻辑）。")
-        return "\n\n".join(sections)
 
     def _build_full_mode_contexts(self) -> list[str]:
         """为 full 模式子代理构建主代理级别的丰富上下文。"""
@@ -3830,7 +2759,7 @@ class AgentEngine:
                         changed_files=list(self._state.affected_files),
                     ),
                 )
-            # 注入 Think-Act 推理指标（含闭环追踪）
+            # 注入 Think-Act 推理指标
             _s = self._state
             _total_calls = _s.silent_call_count + _s.reasoned_call_count
             kwargs.setdefault("reasoning_metrics", {
@@ -3884,9 +2813,6 @@ class AgentEngine:
             )
 
         max_iter = self._config.max_iterations
-        # chitchat 快速通道：最多 1 轮迭代，无需工具循环
-        if route_result.route_mode == "chitchat":
-            max_iter = 1
         max_failures = self._config.max_consecutive_failures
         consecutive_failures = 0
         all_tool_results: list[ToolCallResult] = []
@@ -3894,13 +2820,12 @@ class AgentEngine:
         # 恢复执行时保留之前的统计，仅首次调用时重置
         if start_iteration <= 1:
             self._state.reset_loop_stats()
-        consecutive_text_only: int = 0
-        write_hint = _merge_write_hint(
-            getattr(current_route_result, "write_hint", None),
-            self._current_write_hint,
+            if self._tool_dispatcher is not None:
+                self._tool_dispatcher.reset_cancel()
+                self._tool_dispatcher.begin_call_budget(None)
+        tool_access = _tool_access_from_chat_mode(
+            getattr(self, "_current_chat_mode", "write"),
         )
-        # 设置实例属性供 _build_meta_tools 读取
-        self._current_write_hint = write_hint
         # token 使用累计
         total_prompt_tokens = 0
         total_completion_tokens = 0
@@ -3916,32 +2841,24 @@ class AgentEngine:
                 ),
             )
 
-            # ── OAuth token 预检刷新 + FileRegistry 扫描（首轮并行化） ──
-            # chitchat 快速通道：跳过 FileRegistry 扫描，仅做凭证刷新
-            _is_chitchat_route = current_route_result.route_mode == "chitchat"
-            if iteration == start_iteration:
-                _reg_start = time.monotonic()
-                await asyncio.sleep(0)
-                if _is_chitchat_route:
-                    await self._refresh_credential_if_needed(on_event=on_event)
-                else:
-                    await asyncio.gather(
-                        self._refresh_credential_if_needed(on_event=on_event),
-                        self.await_registry_scan(timeout=0.5),
-                    )
-                logger.debug("perf.loop: cred+registry %.0fms", (time.monotonic() - _reg_start) * 1000)
-            else:
-                await self._refresh_credential_if_needed(on_event=on_event)
-
-            # ── 后台 LLM 分类已内化到 router 同步流程，无需收割 ──
+            await self._refresh_credential_if_needed(on_event=on_event)
 
             if iteration == start_iteration:
                 self._emit(
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.PIPELINE_PROGRESS,
-                        pipeline_stage="preparing_context",
-                        pipeline_message="正在准备上下文...",
+                        pipeline_stage="preparing",
+                        pipeline_message="正在准备本轮",
+                    ),
+                )
+            else:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="calling_model",
+                        pipeline_message="正在调用模型",
                     ),
                 )
 
@@ -3974,11 +2891,11 @@ class AgentEngine:
             if mention_block:
                 system_prompts.append(mention_block)
 
-            # 上下文自动压缩（Compaction）：超阈值时后台静默压缩早期对话，
-            # 使用增强的 ExcelManus 场景化摘要提示词，避免硬截断导致重要上下文丢失。
-            if iteration > 1:
+            # 步前压缩：只在下一步模型调用前判断 pressure。
+            # 先剪过长 tool 结果，再摘要；摘要没替换 surface 不当成功，也不重跑本步。
+            if iteration > start_iteration:
                 _sys_msgs = self._memory.build_system_messages(system_prompts)
-                self._last_system_msgs = _sys_msgs  # 缓存供 status/manual compact 使用
+                self._last_system_msgs = _sys_msgs
                 if self._compaction_manager.should_compact(self._memory, _sys_msgs):
                     self._emit(
                         on_event,
@@ -3988,71 +2905,29 @@ class AgentEngine:
                             pipeline_message="正在压缩上下文...",
                         ),
                     )
-                    # 压缩前先提取记忆，避免早期对话被丢弃后信息丢失
-                    try:
-                        await self.extract_and_save_memory(
-                            trigger="pre_compaction", on_event=on_event,
-                        )
-                    except Exception:
-                        logger.debug("压缩前记忆提取失败，继续压缩", exc_info=True)
                     _summary_model = self._config.aux_model or self._active_model
                     _msgs_before_compact = len(self._memory.messages)
-                    try:
-                        await self._compaction_manager.auto_compact(
-                            memory=self._memory,
-                            system_msgs=_sys_msgs,
-                            client=self._client,
-                            summary_model=_summary_model,
+                    _compact_result = await self._compaction_manager.auto_compact(
+                        memory=self._memory,
+                        system_msgs=_sys_msgs,
+                        client=self._client,
+                        summary_model=_summary_model,
+                    )
+                    if not _compact_result.success:
+                        logger.warning(
+                            "步前压缩未替换摘要: %s",
+                            _compact_result.error or "unknown",
                         )
-                    except Exception as _compact_exc:
-                        logger.debug("自动 Compaction 异常，跳过: %s", _compact_exc)
-                    # 压缩/截断可能替换 _messages，重置快照索引以触发持久化全量重写
                     if len(self._memory.messages) != _msgs_before_compact:
                         self._history_snapshot_index = 0
-                # summarization 作为 compaction 的次级兜底
-                elif (
-                    self._config.summarization_enabled
-                    and self._config.aux_model
-                ):
-                    _cur_tokens = self._memory._total_tokens_with_system_messages(_sys_msgs)
-                    _threshold_ratio = self._config.summarization_threshold_ratio
-                    if _cur_tokens > self.max_context_tokens * _threshold_ratio:
-                        _msgs_before_sum = len(self._memory.messages)
-                        try:
-                            await self._memory.summarize_and_trim(
-                                threshold=int(self.max_context_tokens * (_threshold_ratio - 0.1)),
-                                system_msgs=_sys_msgs,
-                                client=self._client,
-                                summary_model=self._config.aux_model,
-                                keep_recent_turns=self._config.summarization_keep_recent_turns,
-                            )
-                        except Exception as _sum_exc:
-                            logger.debug("对话摘要异常，跳过: %s", _sum_exc)
-                        if len(self._memory.messages) != _msgs_before_sum:
-                            self._history_snapshot_index = 0
 
-            # Guide 消息注入：排空外部追加指令队列，注入为 system context
-            _guide_msgs = self.drain_guide_messages()
-            if _guide_msgs:
-                _guide_block = "\n".join(
-                    f"[用户追加指令 #{i+1}] {m}" for i, m in enumerate(_guide_msgs)
-                )
-                system_prompts.append(
-                    f"<user_guidance>\n{_guide_block}\n"
-                    "请在继续当前任务时考虑以上用户追加指令。\n"
-                    "</user_guidance>"
-                )
-                logger.info("注入 %d 条 guide 消息到本轮迭代", len(_guide_msgs))
-
-            # 系统级通知注入：以 system prompt 注入，避免泄露到用户消息气泡
-            # 包括：stuck detection 警告、auto-continue 指令、fix-verify 修复指令等
-            if self._state._pending_system_notices:
-                _notices = self._state._pending_system_notices[:]
-                self._state._pending_system_notices.clear()
-                for _notice in _notices:
-                    system_prompts.append(
-                        f"<system_notice>\n{_notice}\n</system_notice>"
-                    )
+            # 步边界才并入插话 / guide，不在模型生成中途插 system。
+            _queued_user = self.drain_interrupt_messages()
+            _queued_user.extend(self.drain_guide_messages())
+            for _queued in _queued_user:
+                self._memory.add_user_message(_queued)
+            if _queued_user:
+                logger.info("下一步并入 %d 条插话/guide", len(_queued_user))
 
             messages = self._memory.trim_for_request(
                 system_prompts=system_prompts,
@@ -4060,15 +2935,9 @@ class AgentEngine:
             )
 
             # 分层 schema（core=完整, extended=摘要/已展开=完整）
-            # chitchat 快速通道：不传 tools 参数，节省 ~3K-8K schema tokens
-            if _is_chitchat_route:
-                tools = []
-            else:
-                _route_tool_tags = tuple(getattr(current_route_result, "route_tool_tags", ()) or ())
-                tools = self._meta_tool_builder.build_v5_tools(
-                    write_hint=write_hint,
-                    route_tool_tags=_route_tool_tags,
-                )
+            tools = self._meta_tool_builder.build_v5_tools(
+                tool_access=tool_access,
+            )
             tool_scope = None
 
             # 安全网：确保发送到 API 的 model 是实际模型 ID，不含 provider 前缀
@@ -4098,14 +2967,20 @@ class AgentEngine:
             else:
                 _effective_ttype = ""
 
-            if _effective_ttype and not tc.is_disabled:
-                budget = tc.effective_budget()
-                if _effective_ttype == "claude":
-                    kwargs["_thinking_enabled"] = True
-                    kwargs["_thinking_budget"] = budget
-                elif _effective_ttype == "claude_compat":
+            budget = tc.effective_budget()
+            if _effective_ttype == "claude":
+                kwargs["_thinking_enabled"] = not tc.is_disabled
+                kwargs["_thinking_budget"] = budget if not tc.is_disabled else 0
+                kwargs["_thinking_effort"] = tc.claude_effort
+            elif not tc.is_disabled:
+                if _effective_ttype == "claude_compat":
                     extra = kwargs.get("extra_body", {})
-                    extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                    from excelmanus.providers.claude import uses_adaptive_thinking
+                    if uses_adaptive_thinking(str(_api_model)):
+                        extra["thinking"] = {"type": "adaptive"}
+                        extra["output_config"] = {"effort": tc.claude_effort}
+                    else:
+                        extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
                     kwargs["extra_body"] = extra
                 elif _effective_ttype == "gemini":
                     kwargs["_thinking_budget"] = budget
@@ -4121,6 +2996,7 @@ class AgentEngine:
                 elif _effective_ttype == "glm_thinking":
                     extra = kwargs.get("extra_body", {})
                     extra["thinking"] = {"type": "enabled"}
+                    extra["reasoning_effort"] = tc.openai_effort
                     kwargs["extra_body"] = extra
                 elif _effective_ttype == "openrouter":
                     extra = kwargs.get("extra_body", {})
@@ -4173,8 +3049,8 @@ class AgentEngine:
                     on_event,
                     ToolCallEvent(
                         event_type=EventType.PIPELINE_PROGRESS,
-                        pipeline_stage="calling_llm",
-                        pipeline_message=f"正在与模型通信（第 {iteration} 轮）...",
+                        pipeline_stage="calling_model",
+                        pipeline_message="正在调用模型",
                     ),
                 )
             _llm_start_ts = time.monotonic()
@@ -4250,10 +3126,9 @@ class AgentEngine:
                         _key_preview = (self._active_api_key or "")[:20]
                         logger.warning(
                             "401 诊断: model=%s, base_url=%s, api_key_prefix=%s..., "
-                            "has_resolver=%s, user_id=%s",
+                            "has_resolver=%s",
                             self._active_model, self._active_base_url,
                             _key_preview, self._credential_resolver is not None,
-                            self._user_id,
                         )
                         _old_key = self._active_api_key
                         try:
@@ -4373,46 +3248,29 @@ class AgentEngine:
                 )
                 if _recovered_calls:
                     _text_tc_recovered = True
-                    if _is_chitchat_route:
-                        # chitchat 模式：不执行工具，仅剥离 JSON 文本
-                        logger.info(
-                            "chitchat 文本工具调用剥离: %s",
-                            [tc.function.name for tc in _recovered_calls],
-                        )
-                        message = SimpleNamespace(
-                            content=_cleaned_content or "你好！有什么可以帮你的吗？",
-                            tool_calls=None,
-                            thinking=getattr(message, "thinking", None),
-                            reasoning=getattr(message, "reasoning", None),
-                            reasoning_content=getattr(message, "reasoning_content", None),
-                            _thinking_streamed=getattr(message, "_thinking_streamed", False),
-                            _stream_truncated=getattr(message, "_stream_truncated", False),
-                        )
-                    else:
-                        # 正常模式：恢复为真实工具调用并执行
-                        logger.info(
-                            "文本工具调用恢复: %d 个 [%s]",
-                            len(_recovered_calls),
-                            ", ".join(tc.function.name for tc in _recovered_calls),
-                        )
-                        tool_calls = _recovered_calls
-                        message = SimpleNamespace(
-                            content=_cleaned_content,
-                            tool_calls=_recovered_calls,
-                            thinking=getattr(message, "thinking", None),
-                            reasoning=getattr(message, "reasoning", None),
-                            reasoning_content=getattr(message, "reasoning_content", None),
-                            _thinking_streamed=getattr(message, "_thinking_streamed", False),
-                            _stream_truncated=getattr(message, "_stream_truncated", False),
-                        )
-                        self._emit(
-                            on_event,
-                            ToolCallEvent(
-                                event_type=EventType.PIPELINE_PROGRESS,
-                                pipeline_stage="text_tool_recovery",
-                                pipeline_message="检测到文本格式工具调用，正在恢复执行...",
-                            ),
-                        )
+                    logger.info(
+                        "文本工具调用恢复: %d 个 [%s]",
+                        len(_recovered_calls),
+                        ", ".join(tc.function.name for tc in _recovered_calls),
+                    )
+                    tool_calls = _recovered_calls
+                    message = SimpleNamespace(
+                        content=_cleaned_content,
+                        tool_calls=_recovered_calls,
+                        thinking=getattr(message, "thinking", None),
+                        reasoning=getattr(message, "reasoning", None),
+                        reasoning_content=getattr(message, "reasoning_content", None),
+                        _thinking_streamed=getattr(message, "_thinking_streamed", False),
+                        _stream_truncated=getattr(message, "_stream_truncated", False),
+                    )
+                    self._emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.PIPELINE_PROGRESS,
+                            pipeline_stage="text_tool_recovery",
+                            pipeline_message="检测到文本格式工具调用，正在恢复执行...",
+                        ),
+                    )
 
             _llm_elapsed_ms = (time.monotonic() - _llm_start_ts) * 1000
             _tc_names = [getattr(getattr(tc, "function", None), "name", "?") for tc in (tool_calls or [])]
@@ -4532,16 +3390,11 @@ class AgentEngine:
                     iteration, iter_ttft, iter_prompt, _llm_latency,
                 )
 
-            # 无工具调用 → 纯文本回复处理（含 HTML 检测、执行守卫、写入门禁）
+            # 无工具调用 → 纯文本回复处理（仅 HTML 端点错误检测）
             if not tool_calls:
                 text_action, text_result = self._handle_text_reply(
                     message=message,
                     iteration=iteration,
-                    start_iteration=start_iteration,
-                    max_iter=max_iter,
-                    write_hint=write_hint,
-                    consecutive_text_only=consecutive_text_only,
-                    diag=diag,
                     all_tool_results=all_tool_results,
                     total_prompt_tokens=total_prompt_tokens,
                     total_completion_tokens=total_completion_tokens,
@@ -4549,10 +3402,6 @@ class AgentEngine:
                 )
                 if text_action == "return":
                     return text_result
-                if text_action == "continue":
-                    consecutive_text_only = text_result  # 回传更新后的计数
-                    continue
-                # text_action == "impossible" — 不应到达这里
 
             assistant_msg = _assistant_message_to_dict(message)
             if tool_calls:
@@ -4648,17 +3497,7 @@ class AgentEngine:
                         tool_name = getattr(function, "name", "")
                         tool_call_id = getattr(tc, "id", "")
 
-                        consecutive_text_only = 0
                         all_tool_results.append(tc_result)
-
-                        # 卡死检测
-                        try:
-                            _tc_args, _ = self._tool_dispatcher.parse_arguments(
-                                getattr(function, "arguments", None)
-                            )
-                        except Exception:
-                            _tc_args = {}
-                        self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
 
                         # finish_task 成功接受时退出循环
                         _finish_result = _handle_finish_exit(tc_result, tool_call_id, iteration)
@@ -4716,17 +3555,7 @@ class AgentEngine:
                             route_result=current_route_result,
                         )
 
-                        consecutive_text_only = 0
                         all_tool_results.append(tc_result)
-
-                        # 卡死检测：记录工具调用到滑动窗口
-                        try:
-                            _tc_args, _ = self._tool_dispatcher.parse_arguments(
-                                getattr(function, "arguments", None)
-                            )
-                        except Exception:
-                            _tc_args = {}
-                        self._state.record_tool_call_for_stuck_detection(tool_name, _tc_args)
 
                         # finish_task 成功接受时退出循环
                         _finish_result = _handle_finish_exit(tc_result, tool_call_id, iteration)
@@ -4753,8 +3582,6 @@ class AgentEngine:
                                     tool_call_id, on_event, iteration, "内联审批",
                                 )
                                 tc_result = replace(tc_result, **updates)
-                                if _wrote and self._has_write_tool_call and write_hint != "may_write":
-                                    write_hint = "may_write"
                                 # 内联审批完成，不退出循环，继续处理后续工具调用
                             else:
                                 # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
@@ -4794,8 +3621,6 @@ class AgentEngine:
                                         tool_call_id, on_event, iteration, "Web 审批",
                                     )
                                     tc_result = replace(tc_result, **updates)
-                                    if _wrote and self._has_write_tool_call and write_hint != "may_write":
-                                        write_hint = "may_write"
 
                         # 更新统计
                         self._last_tool_call_count += 1
@@ -4805,21 +3630,8 @@ class AgentEngine:
                             _write_effect = self._get_tool_write_effect(tc_result.tool_name)
                             if _write_effect == "workspace_write":
                                 self._record_workspace_write_action()
-                                self._window_perception.observe_write_tool_call(
-                                    tool_name=tc_result.tool_name,
-                                    arguments=tc_result.arguments,
-                                )
-                                self._context_builder.mark_window_notice_dirty()
-                                if write_hint != "may_write":
-                                    write_hint = "may_write"
                             elif _write_effect == "external_write":
                                 self._record_external_write_action()
-                                if write_hint != "may_write":
-                                    write_hint = "may_write"
-                            # Batch 1 精简: run_code / delegate_to_subagent 等可在 _execute_tool_call 内
-                            # 通过 _record_write_action 传播写入；此处只负责同步局部 hint。
-                            if self._has_write_tool_call and write_hint != "may_write":
-                                write_hint = "may_write"
                         else:
                             self._last_failure_count += 1
                             # 已在 ToolDispatcher 中自动重试过的 retryable 错误
@@ -4844,19 +3656,6 @@ class AgentEngine:
             # 如果在 tool_result 之前注入，会破坏 assistant(tool_calls) → tool(responses)
             # 的消息序列，导致 OpenAI 兼容 API 返回 400 错误。
             self._tool_dispatcher.flush_deferred_images()
-
-            # ── Stuck Detection：检测重复/冗余工具调用模式 ──
-            _stuck_tags = tuple(getattr(self._last_route_result, "task_tags", ()) or ())
-            stuck_warning = self._state.detect_stuck_pattern(task_tags=_stuck_tags)
-            if stuck_warning:
-                self._state._pending_system_notices.append(stuck_warning)
-                if diag:
-                    diag.guard_events.append("stuck_detection")
-                logger.warning("Stuck Detection 触发: %s", stuck_warning[:100])
-                try:
-                    self._window_perception.notify_repeat_tripwire()
-                except Exception:
-                    pass
 
             # ── Turn Checkpoint：每轮结束后对被修改文件做快照 ──
             if self._checkpoint_enabled and self._has_write_tool_call:
@@ -4923,11 +3722,6 @@ class AgentEngine:
         *,
         message: Any,
         iteration: int,
-        start_iteration: int,
-        max_iter: int,
-        write_hint: str,
-        consecutive_text_only: int,
-        diag: Any,
         all_tool_results: list,
         total_prompt_tokens: int,
         total_completion_tokens: int,
@@ -4935,15 +3729,13 @@ class AgentEngine:
     ) -> tuple[str, Any]:
         """处理 LLM 返回纯文本（无 tool_calls）的情况。
 
-        返回 (action, payload):
-        - ("return", ChatResult) — 调用方应 return 该结果
-        - ("continue", updated_consecutive_text_only) — 调用方应 continue 迭代
+        纯文本一律结束本轮。仅保留 HTML 整页响应检测：那是 LLM 客户端
+        配置错误（base_url 指到了网页），不是对回复内容的行为判断。
         """
         reply_text = _message_content_to_text(getattr(message, "content", None))
 
-        # HTML 页面检测
         if _looks_like_html_document(reply_text):
-            error_reply = self._format_html_endpoint_error(reply_text)  # kept on engine for _handle_text_reply
+            error_reply = self._format_html_endpoint_error(reply_text)
             self._memory.add_assistant_message(error_reply)
             self._last_iteration_count = iteration
             logger.error(
@@ -4962,67 +3754,6 @@ class AgentEngine:
             )
 
         self._memory.add_assistant_message(reply_text)
-
-        # ── 澄清放行：agent 返回澄清性文本，直接放行 ──
-        if _looks_like_clarification(reply_text):
-            self._last_iteration_count = iteration
-            logger.info("澄清放行：检测到澄清性文本回复")
-            return "return", _finalize_result(
-                reply=reply_text,
-                tool_calls=list(all_tool_results),
-                iterations=iteration,
-                truncated=False,
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-            )
-
-        # ── 等待用户操作放行：agent 需要用户上传/提供素材时，不应被门禁强制继续 ──
-        if _looks_like_waiting_for_user_action(reply_text):
-            self._last_iteration_count = iteration
-            if diag:
-                diag.guard_events.append("waiting_for_user_passthrough")
-            logger.info("等待用户操作放行：检测到 agent 正在等待用户提供素材")
-            return "return", _finalize_result(
-                reply=reply_text,
-                tool_calls=list(all_tool_results),
-                iterations=iteration,
-                truncated=False,
-                prompt_tokens=total_prompt_tokens,
-                completion_tokens=total_completion_tokens,
-                total_tokens=total_prompt_tokens + total_completion_tokens,
-            )
-
-        # ── guard_mode 控制：执行守卫 & 写入门禁 ──
-        _guard_mode = getattr(self._config, "guard_mode", "off")
-
-        if _guard_mode == "soft":
-            # ── soft 模式：执行守卫 — 仅记录诊断，不强制继续 ──
-            if (
-                write_hint != "may_write"
-                and not self._active_skills
-                and _contains_formula_advice(reply_text, vba_exempt=self._vba_exempt)
-                and not self._execution_guard_fired
-                and not all_tool_results
-            ):
-                self._execution_guard_fired = True
-                if diag:
-                    diag.guard_events.append("execution_guard_soft")
-                logger.info("执行守卫(soft)：检测到公式建议未写入（仅记录，不强制继续）")
-
-            # ── soft 模式：写入门禁 — 仅记录诊断，不强制继续 ──
-            if write_hint == "may_write" and not self._has_write_tool_call:
-                if diag:
-                    diag.guard_events.append("write_guard_soft")
-                logger.info("写入门禁(soft)：无写入工具调用（仅记录，不强制继续）")
-
-        elif _guard_mode == "off":
-            # ── off 模式：完全跳过所有门禁，agent 自然停止 ──
-            pass
-
-        else:
-            logger.warning("未知 guard_mode=%r，按 off 处理", _guard_mode)
-
         self._last_iteration_count = iteration
         logger.info("最终结果摘要: %s", _summarize_text(reply_text))
         return "return", _finalize_result(
@@ -5141,86 +3872,6 @@ class AgentEngine:
                 ordered.append(r)
         return ordered
 
-    def _enrich_tool_result_with_window_perception(
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result_text: str,
-        success: bool,
-        raw_result_text: str | None = None,
-    ) -> str:
-        """在工具返回中附加窗口感知信息。
-
-        Args:
-            raw_result_text: 截断前的原始工具结果，供窗口感知解析 JSON 使用。
-                当工具结果被截断后 JSON 可能损坏，此参数确保窗口感知
-                始终能访问有效的 JSON 结构进行状态更新。
-        """
-        requested_mode = self._requested_window_return_mode()
-        try:
-            return self._window_perception.enrich_tool_result(
-                tool_name=tool_name,
-                arguments=arguments,
-                result_text=result_text,
-                success=success,
-                mode=requested_mode,
-                model_id=self._active_model,
-                raw_result_text=raw_result_text,
-            )
-        except Exception:
-            logger.warning(
-                "窗口感知增强失败，已回退 enriched 模式: tool=%s",
-                tool_name,
-                exc_info=True,
-            )
-            try:
-                return self._window_perception.enrich_tool_result(
-                    tool_name=tool_name,
-                    arguments=arguments,
-                    result_text=result_text,
-                    success=success,
-                    mode="enriched",
-                    model_id=self._active_model,
-                    raw_result_text=raw_result_text,
-                )
-            except Exception:
-                return result_text
-
-    def _enrich_subagent_tool_result_with_window_perception(
-        self,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result_text: str,
-        success: bool,
-    ) -> str:
-        """子代理工具结果复用主会话窗口感知增强逻辑。"""
-        return self._enrich_tool_result_with_window_perception(
-            tool_name=tool_name,
-            arguments=arguments,
-            result_text=result_text,
-            success=success,
-        )
-
-    def _requested_window_return_mode(self) -> str:
-        """读取配置中的请求模式（含 adaptive）。"""
-        raw_mode = str(
-            getattr(self._config, "window_return_mode", "adaptive") or "adaptive"
-        ).strip().lower()
-        if raw_mode in {"unified", "anchored", "enriched", "adaptive"}:
-            return raw_mode
-        return "enriched"
-
-    def _effective_window_return_mode(self) -> str:
-        """返回当前会话有效模式（只会是 unified/anchored/enriched）。"""
-        if not self._window_perception.enabled:
-            return "enriched"
-        requested_mode = self._requested_window_return_mode()
-        return self._window_perception.resolve_effective_mode(
-            requested_mode=requested_mode,
-            model_id=self._active_model,
-        )
-
     def _apply_tool_result_hard_cap(self, text: str) -> str:
         """对工具结果应用全局硬截断，避免超长输出撑爆上下文。"""
         normalized = str(text or "")
@@ -5284,7 +3935,7 @@ class AgentEngine:
         created_at_utc: str,
         undoable: bool,
         force_delete_confirm: bool = False,
-    ) -> tuple[str, AppliedApprovalRecord]:
+    ) -> tuple[Any, AppliedApprovalRecord]:
         """执行高风险工具并保存审计记录。"""
         audited_arguments = self._prepare_approval_arguments(
             tool_name,
@@ -5423,7 +4074,7 @@ class AgentEngine:
         共享逻辑：同时被 _handle_accept_command 和 _tool_calling_loop 内联审批使用。
         """
         try:
-            _, record = await self._execute_tool_with_audit(
+            payload, record = await self._execute_tool_with_audit(
                 tool_name=pending.tool_name,
                 arguments=pending.arguments,
                 tool_scope=None,
@@ -5440,101 +4091,61 @@ class AgentEngine:
             self._approval.clear_pending()
             return False, f"accept 执行失败：{exc}", None
 
-        # ── run_code RED 路径 → 写入追踪 ──
+        from excelmanus.engine_core.tool_result import coerce_legacy_result
+
+        structured = coerce_legacy_result(payload)
+        self._tool_dispatcher._apply_ui_meta_effects(structured)
+        if on_event is not None:
+            self._tool_dispatcher._emit_ui_meta_events(
+                self,
+                on_event,
+                tool_call_id or pending.approval_id,
+                pending.tool_name,
+                pending.arguments,
+                structured.ui_meta,
+                0,
+            )
+            changed: list[str] = list(structured.ui_meta.files or [])
+            if structured.ui_meta.text_diff:
+                fp = structured.ui_meta.text_diff.get("file_path")
+                if isinstance(fp, str) and fp and fp not in changed:
+                    changed.append(fp)
+            if structured.ui_meta.cow_mapping:
+                for dst in structured.ui_meta.cow_mapping.values():
+                    if dst and dst not in changed:
+                        changed.append(dst)
+            if changed:
+                self._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.FILES_CHANGED,
+                        tool_call_id=tool_call_id or pending.approval_id,
+                        iteration=0,
+                        changed_files=changed,
+                    ),
+                )
+
         if pending.tool_name == "run_code":
             from excelmanus.security.code_policy import extract_excel_targets
             _rc_code = pending.arguments.get("code") or ""
-            _rc_result_json: dict | None = None
-            try:
-                _rc_result_json = json.loads(record.result_preview or "")
-                if not isinstance(_rc_result_json, dict):
-                    _rc_result_json = None
-            except (json.JSONDecodeError, TypeError):
-                pass
-            _has_cow = bool(_rc_result_json and _rc_result_json.get("cow_mapping"))
+            _has_cow = bool(structured.ui_meta.cow_mapping)
             _has_ast_write = any(
                 t.operation == "write"
                 for t in extract_excel_targets(_rc_code)
             )
             if record.changes or _has_cow or _has_ast_write:
                 self._record_workspace_write_action()
-        # ── run_code RED 路径 → window 感知桥接 ──
-        if pending.tool_name == "run_code" and self._window_perception is not None:
-            _rc_code = pending.arguments.get("code") or ""
-            _rc_stdout = ""
-            try:
-                _rc_result_json2 = json.loads(record.result_preview or "")
-                _rc_stdout = _rc_result_json2.get("stdout_tail", "") if isinstance(_rc_result_json2, dict) else ""
-            except (json.JSONDecodeError, TypeError):
-                pass
-            self._window_perception.observe_code_execution(
-                code=_rc_code,
-                audit_changes=record.changes,
-                stdout_tail=_rc_stdout,
-                iteration=0,
-            )
-            self._context_builder.mark_window_notice_dirty()
-        # ── run_code RED 路径 → files_changed 事件 ──
-        if pending.tool_name == "run_code" and on_event is not None:
-            self._tool_dispatcher._emit_files_changed_from_audit(
-                self, on_event, pending.approval_id,
-                pending.arguments.get("code") or "",
-                record.changes,
-                0,
-            )
-
-        # ── write_text_file / edit_text_file → TEXT_DIFF + FILES_CHANGED 事件 ──
-        _TEXT_DIFF_TOOLS = {"write_text_file", "edit_text_file"}
-        if pending.tool_name in _TEXT_DIFF_TOOLS and on_event is not None and record.result_preview:
-            try:
-                _td_result = json.loads(record.result_preview)
-                if isinstance(_td_result, dict):
-                    _td_data = _td_result.get("_text_diff")
-                    if isinstance(_td_data, dict) and _td_data.get("hunks"):
-                        self._emit(
-                            on_event,
-                            ToolCallEvent(
-                                event_type=EventType.TEXT_DIFF,
-                                tool_call_id=tool_call_id or pending.approval_id,
-                                text_diff_file_path=_td_data.get("file_path", ""),
-                                text_diff_hunks=_td_data.get("hunks", [])[:300],
-                                text_diff_additions=_td_data.get("additions", 0),
-                                text_diff_deletions=_td_data.get("deletions", 0),
-                                text_diff_truncated=_td_data.get("truncated", False),
-                            ),
-                        )
-                    # FILES_CHANGED 事件
-                    _td_file = _td_result.get("file") or ""
-                    if _td_file:
-                        self._emit(
-                            on_event,
-                            ToolCallEvent(
-                                event_type=EventType.FILES_CHANGED,
-                                tool_call_id=tool_call_id or pending.approval_id,
-                                iteration=0,
-                                changed_files=[_td_file],
-                            ),
-                        )
-            except (json.JSONDecodeError, TypeError):
-                pass
-
-        # ── 通用 CoW 映射提取 ──
-        if record.result_preview:
-            try:
-                _accept_result = json.loads(record.result_preview)
-                if isinstance(_accept_result, dict):
-                    _accept_cow = _accept_result.get("cow_mapping")
-                    if _accept_cow and isinstance(_accept_cow, dict):
-                        self._state.register_cow_mappings(_accept_cow)
-                        logger.info(
-                            "审批 CoW 映射已注册: tool=%s mappings=%s",
-                            pending.tool_name, _accept_cow,
-                        )
-            except (json.JSONDecodeError, TypeError):
-                pass
+            if on_event is not None:
+                self._tool_dispatcher._emit_files_changed_from_audit(
+                    self, on_event, pending.approval_id,
+                    pending.arguments.get("code") or "",
+                    record.changes,
+                    0,
+                    cow_mapping=structured.ui_meta.cow_mapping,
+                )
 
         self._approval.clear_pending()
-        result_text = record.result_preview or f"已执行 `{pending.tool_name}`。"
+        result_text = structured.model_text or record.result_preview or f"已执行 `{pending.tool_name}`。"
         return True, result_text, record
 
     def clear_memory(self) -> None:
@@ -5564,7 +4175,6 @@ class AgentEngine:
         self._pending_approval_tool_call_id = None
         self._task_store.clear()
         self._approval.clear_pending()
-        self._window_perception.reset()
         # 重置轮级状态变量，防止跨对话污染
         self._state.reset_session()
         self._system_mode_fallback = type(self)._system_mode_fallback_cache.get(self._system_mode_cache_key)
@@ -5729,8 +4339,8 @@ class AgentEngine:
         此时热更新 _client 和相关字段，确保后续 LLM 调用使用新凭证。
         同时通过 SSE 通知前端 token 状态变化。
         """
-        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-5.2-codex），
-        # 先剥离为实际模型 ID（gpt-5.2-codex），避免发送无效 model 到 API。
+        # 安全解析：如果 _active_model 含 provider 前缀（如 openai-codex/gpt-6-astra），
+        # 先剥离为实际模型 ID（gpt-6-astra），避免发送无效 model 到 API。
         from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
         if OpenAICodexProvider.is_codex_profile_name(self._active_model):
             _real_model = OpenAICodexProvider.model_from_profile_name(self._active_model)
@@ -5742,10 +4352,10 @@ class AgentEngine:
                 self._active_model = _real_model
 
         resolver = self._credential_resolver
-        if resolver is None or not self._user_id:
+        if resolver is None:
             return
         try:
-            resolved = await resolver.resolve(self._user_id, self._active_model)
+            resolved = await resolver.resolve(self._active_model)
         except Exception:
             logger.debug("OAuth 凭证刷新检查失败", exc_info=True)
             # 刷新失败，通知前端
@@ -5833,8 +4443,7 @@ class AgentEngine:
             self._sync_router_model_runtime()
             self._model_capabilities = None
             self._context_budget.update_for_model(self._config.model)
-            self._memory.update_context_window(self.max_context_tokens)
-            self._compaction_manager.max_context_tokens = self.max_context_tokens
+            self._sync_context_window_consumers()
             return f"已切换到默认模型：{self._config.model}"
 
         # 在 profiles 中查找：精确匹配 > 前缀匹配 > 包含匹配
@@ -5879,8 +4488,7 @@ class AgentEngine:
         self._sync_router_model_runtime()
         self._model_capabilities = None
         self._context_budget.update_for_model(matched.model)
-        self._memory.update_context_window(self.max_context_tokens)
-        self._compaction_manager.max_context_tokens = self.max_context_tokens
+        self._sync_context_window_consumers()
         desc = f"（{matched.description}）" if matched.description else ""
         return f"已切换到模型：{matched.name} → {matched.model}{desc}"
 
@@ -5899,10 +4507,6 @@ class AgentEngine:
             return
         self._router_client = self._client
         self._router_model = self._active_model
-        # adviser 也跟随主模型（仅当 adviser 未配置独立模型时）
-        if self._advisor_follow_active_model:
-            self._advisor_client = self._client
-            self._advisor_model = self._active_model
 
     async def _adapt_guidance_only_slash_route(
         self,
@@ -5912,13 +4516,7 @@ class AgentEngine:
         slash_command: str | None,
         raw_args: str,
     ) -> tuple[SkillMatchResult, str]:
-        """将仅指导型 slash 技能回落为任务执行路由，避免“只讲不做”。
-
-        触发条件：
-        - 手动 slash 命令命中（route_mode=slash_direct）
-        - 命中的 skill 不是 command_dispatch=tool
-        - slash 参数中包含可执行任务文本
-        """
+        """斜杠命中且带任务文本时：保留技能说明，使用全量工具目录进入循环。"""
         if not slash_command or route_result.route_mode != "slash_direct":
             return route_result, user_message
 
@@ -5926,35 +4524,15 @@ class AgentEngine:
         if not task_text:
             return route_result, user_message
 
-        skill = self._skill_resolver.pick_route_skill(route_result)
-        if skill is None:
-            return route_result, user_message
-        if skill.command_dispatch == "tool":
-            return route_result, user_message
-
-        # 先尝试词法分类，避免重复触发 write_hint LLM 调用
-        pre_hint: str | None = None
-        if self._skill_router is not None:
-            pre_hint = self._skill_router._classify_write_hint_lexical(task_text) or None
-        fallback = await self._route_skills(task_text, write_hint=pre_hint)
-        guidance_context = (
-            f"[Slash Guidance] 已启用技能 `{skill.name}` 的方法论约束。\n"
-            "该技能仅用于补充执行规范，不改变用户任务目标。\n"
-            "请优先调用工具完成任务，不要只输出「我先…」「我将…」等计划性文字。"
-        )
-        fallback_contexts = list(fallback.system_contexts)
-        fallback_contexts.append(guidance_context)
         adapted = SkillMatchResult(
-            skills_used=list(fallback.skills_used),
-            route_mode=fallback.route_mode,
-            system_contexts=fallback_contexts,
-            parameterized=fallback.parameterized,
-            write_hint=fallback.write_hint,
-            route_tool_tags=tuple(getattr(fallback, "route_tool_tags", ()) or ()),
+            skills_used=list(route_result.skills_used),
+            route_mode="all_tools",
+            system_contexts=list(route_result.system_contexts),
+            parameterized=route_result.parameterized,
         )
         logger.info(
-            "斜杠技能 %s 为 guidance-only，已回落到任务路由: %s",
-            skill.name,
+            "斜杠技能 %s 带任务文本，注入技能说明后进入循环: %s",
+            slash_command,
             _summarize_text(task_text),
         )
         return adapted, task_text
@@ -5965,7 +4543,6 @@ class AgentEngine:
         *,
         slash_command: str | None = None,
         raw_args: str | None = None,
-        write_hint: str | None = None,
         chat_mode: str = "write",
         on_event: EventCallback | None = None,
         images: list[dict[str, Any]] | None = None,
@@ -5987,133 +4564,10 @@ class AgentEngine:
             slash_command=slash_command,
             raw_args=raw_args,
             blocked_skillpacks=blocked_skillpacks,
-            write_hint=write_hint,
             chat_mode=chat_mode,
             on_event=on_event,
             images=images,
         )
-
-    @staticmethod
-    def _schema_accepts_string(schema: Any) -> bool:
-        if not isinstance(schema, dict):
-            return False
-        type_value = schema.get("type")
-        if type_value == "string":
-            return True
-        if isinstance(type_value, list) and "string" in type_value:
-            return True
-        return False
-
-    def _map_command_dispatch_arguments(
-        self,
-        *,
-        tool_name: str,
-        raw_args: str,
-    ) -> tuple[dict[str, Any] | None, str | None]:
-        normalized_raw = raw_args.strip()
-        if not normalized_raw:
-            return {}, None
-
-        try:
-            parsed = json.loads(normalized_raw)
-        except Exception:  # noqa: BLE001
-            parsed = None
-
-        if isinstance(parsed, dict):
-            return parsed, None
-
-        tool_def = getattr(self._registry, "get_tool", lambda _: None)(tool_name)
-        if tool_def is None:
-            return None, f"未找到命令分发目标工具：{tool_name}"
-
-        schema = getattr(tool_def, "input_schema", {}) or {}
-        properties = schema.get("properties", {})
-        if not isinstance(properties, dict):
-            return None, "命令分发失败：目标工具参数 schema 非法。"
-
-        if len(properties) == 1:
-            key, val = next(iter(properties.items()))
-            if self._schema_accepts_string(val):
-                return {key: normalized_raw}, None
-
-        for candidate in ("input", "query", "text", "path"):
-            if candidate in properties and self._schema_accepts_string(properties[candidate]):
-                return {candidate: normalized_raw}, None
-
-        return (
-            None,
-            "命令分发失败：无法将参数自动映射到工具入参。请使用 JSON 对象参数。",
-        )
-
-    async def _run_command_dispatch_skill(
-        self,
-        *,
-        skill: Skillpack,
-        raw_args: str,
-        route_result: SkillMatchResult,
-        on_event: EventCallback | None,
-    ) -> ChatResult:
-        tool_name = skill.command_tool or ""
-        arguments, error_message = self._map_command_dispatch_arguments(
-            tool_name=tool_name,
-            raw_args=raw_args,
-        )
-        if arguments is None:
-            reply = error_message or "命令分发失败。"
-            self._memory.add_assistant_message(reply)
-            self._last_iteration_count = 1
-            self._last_tool_call_count = 0
-            self._last_success_count = 0
-            self._last_failure_count = 1
-            return ChatResult(
-                reply=reply,
-                tool_calls=[],
-                iterations=1,
-                truncated=False,
-            )
-
-        tool_call_id = f"dispatch_{int(time.time() * 1000)}"
-        tc = SimpleNamespace(
-            id=tool_call_id,
-            function=SimpleNamespace(
-                name=tool_name,
-                arguments=json.dumps(arguments, ensure_ascii=False),
-            ),
-        )
-        tc_result = await self._execute_tool_call(
-            tc,
-            None,
-            on_event,
-            iteration=1,
-            route_result=route_result,
-        )
-
-        if not tc_result.defer_tool_result:
-            self._memory.add_tool_result(tool_call_id, tc_result.result)
-
-        if tc_result.pending_question and self._pending_question_route_result is None:
-            self._pending_question_route_result = route_result
-        if tc_result.pending_approval:
-            self._pending_approval_route_result = route_result
-            self._pending_approval_tool_call_id = tool_call_id
-
-        if self._question_flow.has_pending():
-            reply = self._question_flow.format_prompt()
-        else:
-            reply = tc_result.result
-
-        self._memory.add_assistant_message(reply)
-        self._last_iteration_count = 1
-        self._last_tool_call_count = 1
-        self._last_success_count = 1 if tc_result.success else 0
-        self._last_failure_count = 0 if tc_result.success else 1
-        return ChatResult(
-            reply=reply,
-            tool_calls=[tc_result],
-            iterations=1,
-            truncated=False,
-        )
-
 
     def _effective_system_mode(self) -> str:
         configured = self._config.system_message_mode

@@ -12,8 +12,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 
 from excelmanus.tools.registry import ToolDef, ToolRegistry
@@ -124,7 +122,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert payload["status"] == "error"
         assert payload["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
         assert any("file_path" in v for v in payload["violations"])
@@ -137,7 +135,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("类型不匹配" in v for v in payload["violations"])
 
     def test_enforce_catches_enum_violation(self) -> None:
@@ -148,7 +146,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("枚举" in v for v in payload["violations"])
 
     def test_enforce_catches_minimum_violation(self) -> None:
@@ -159,7 +157,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("不能小于" in v for v in payload["violations"])
 
     def test_enforce_catches_maximum_violation(self) -> None:
@@ -170,7 +168,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("不能超过" in v for v in payload["violations"])
 
     def test_enforce_catches_additional_properties(self) -> None:
@@ -181,7 +179,7 @@ class TestSchemaValidationEnforce:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("非法字段" in v for v in payload["violations"])
 
     def test_enforce_catches_array_min_items(self) -> None:
@@ -198,7 +196,7 @@ class TestSchemaValidationEnforce:
             schema=schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("列表长度不能小于" in v for v in payload["violations"])
 
     def test_enforce_passes_one_of_match(self) -> None:
@@ -238,7 +236,7 @@ class TestSchemaValidationEnforce:
             tool_name="t", arguments={"value": [1, 2]}, schema=schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("oneOf" in v for v in payload["violations"])
 
 
@@ -256,7 +254,7 @@ class TestStrictPath:
             },
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any("相对路径" in v for v in payload["violations"])
 
     def test_strict_path_rejects_parent_traversal(self) -> None:
@@ -270,7 +268,7 @@ class TestStrictPath:
             },
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert any(".." in v for v in payload["violations"])
 
     def test_strict_path_allows_relative_path(self) -> None:
@@ -350,7 +348,7 @@ class TestCallToolIntegration:
             "test_tool",
             {"file_path": "a.xlsx", "mode": "invalid_mode"},
         )
-        parsed = json.loads(result)
+        parsed = result.value
         assert parsed["status"] == "error"
         assert parsed["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
 
@@ -369,7 +367,7 @@ class TestCallToolIntegration:
             )
         )
         result = registry.call_tool("echo", {"msg": "hello"})
-        assert result == "echo: hello"
+        assert result.model_text == "echo: hello"
 
 
 class TestErrorPayloadFormat:
@@ -383,7 +381,7 @@ class TestErrorPayloadFormat:
             schema=_tool_with_schema().input_schema,
         )
         assert result is not None
-        payload = json.loads(result)
+        payload = result.value
         assert set(payload.keys()) >= {
             "status", "error_code", "tool", "message",
             "detail", "violations", "required_fields",

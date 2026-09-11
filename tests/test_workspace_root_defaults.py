@@ -18,9 +18,6 @@ import pytest
         ("tests.test_engine", "_make_config"),
         ("tests.test_engine_events", "_make_config"),
         ("tests.test_mcp_integration", "_make_config"),
-        ("tests.test_write_guard", "_make_config"),
-        ("tests.test_verifier_advisory", "_make_config"),
-        ("tests.test_subagent_auto_select", "_make_config"),
         ("tests.test_pbt_unauthorized_tool", "_make_config"),
     ],
 )

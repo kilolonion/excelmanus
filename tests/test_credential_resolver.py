@@ -91,7 +91,7 @@ def test_is_expiring_soon_within_margin():
 @pytest.mark.asyncio
 async def test_resolve_returns_none_for_no_user():
     resolver = CredentialResolver()
-    result = await resolver.resolve(None, "gpt-5.3-codex")
+    result = await resolver.resolve("gpt-5.3-codex")
     assert result is None
 
 
@@ -99,7 +99,7 @@ async def test_resolve_returns_none_for_no_user():
 async def test_resolve_returns_none_for_unknown_model():
     store = MagicMock()
     resolver = CredentialResolver(credential_store=store)
-    result = await resolver.resolve("u1", "unknown-model-xyz")
+    result = await resolver.resolve("unknown-model-xyz")
     assert result is None
     store.get_active_profile.assert_not_called()
 
@@ -119,7 +119,7 @@ async def test_resolve_returns_credential_for_fresh_token():
 
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
-        result = await resolver.resolve("u1", "gpt-5.3-codex")
+        result = await resolver.resolve("gpt-5.3-codex")
 
     assert result is not None
     assert result.api_key == "fresh_token"
@@ -139,7 +139,7 @@ async def test_resolve_refreshes_expired_token():
 
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
-        result = await resolver.resolve("u1", "gpt-5.3-codex")
+        result = await resolver.resolve("gpt-5.3-codex")
 
     assert result is not None
     assert result.api_key == "refreshed_token"
@@ -161,7 +161,7 @@ async def test_resolve_deactivates_on_refresh_failure():
 
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
-        result = await resolver.resolve("u1", "gpt-5.3-codex")
+        result = await resolver.resolve("gpt-5.3-codex")
 
     assert result is None
     store.deactivate_profile.assert_called_once_with("prof-1")
@@ -178,7 +178,7 @@ async def test_concurrent_refresh_serialized_by_lock():
     fresh_profile = _make_profile(expired=False, access="new_token")
     call_count = 0
 
-    def get_active_side_effect(uid, provider):
+    def get_active_side_effect(provider, user_id=None):
         nonlocal call_count
         call_count += 1
         # 第一次返回过期（触发 refresh），之后返回新鲜（double-check 跳过）
@@ -194,8 +194,8 @@ async def test_concurrent_refresh_serialized_by_lock():
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
         results = await asyncio.gather(
-            resolver.resolve("u1", "gpt-5.3-codex"),
-            resolver.resolve("u1", "gpt-5.3-codex"),
+            resolver.resolve("gpt-5.3-codex"),
+            resolver.resolve("gpt-5.3-codex"),
         )
 
     # 两个结果都应该成功
@@ -206,16 +206,21 @@ async def test_concurrent_refresh_serialized_by_lock():
 
 
 @pytest.mark.asyncio
-async def test_different_users_refresh_independently():
-    """不同用户的 refresh 互不阻塞。"""
+async def test_process_level_refresh_is_shared():
+    """进程级凭证共享一把锁，并发 refresh 不会按用户分叉。"""
     store = MagicMock()
-    expired_u1 = _make_profile(expired=True, user_id="u1")
-    expired_u2 = _make_profile(expired=True, user_id="u2")
+    expired = _make_profile(expired=True)
+    fresh = _make_profile(expired=False, access="new_token")
+    call_count = 0
 
-    def get_profile(uid, provider):
-        return expired_u1 if uid == "u1" else expired_u2
+    def get_active_side_effect(provider, user_id=None):
+        nonlocal call_count
+        call_count += 1
+        if call_count <= 1:
+            return expired
+        return fresh
 
-    store.get_active_profile = MagicMock(side_effect=get_profile)
+    store.get_active_profile = MagicMock(side_effect=get_active_side_effect)
     store.update_tokens = MagicMock()
 
     provider_mock = _make_provider_mock()
@@ -223,13 +228,13 @@ async def test_different_users_refresh_independently():
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
         results = await asyncio.gather(
-            resolver.resolve("u1", "gpt-5.3-codex"),
-            resolver.resolve("u2", "gpt-5.3-codex"),
+            resolver.resolve("gpt-5.3-codex"),
+            resolver.resolve("gpt-5.3-codex"),
         )
 
     assert all(r is not None for r in results)
-    # 两个用户各自触发一次 refresh
-    assert provider_mock.refresh_token.call_count == 2
+    assert provider_mock.refresh_token.call_count <= 1
+    assert list(resolver._refresh_locks.keys()) == ["openai-codex"]
 
 
 # ── resolve_sync ─────────────────────────────────────────
@@ -248,7 +253,7 @@ def test_resolve_sync_returns_credential_for_fresh_token():
 
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
-        result = resolver.resolve_sync("u1", "gpt-5.3-codex")
+        result = resolver.resolve_sync("gpt-5.3-codex")
 
     assert result is not None
     assert result.api_key == "sync_token"
@@ -258,7 +263,7 @@ def test_resolve_sync_returns_credential_for_fresh_token():
 
 def test_resolve_sync_returns_none_for_no_store():
     resolver = CredentialResolver()
-    result = resolver.resolve_sync("u1", "gpt-5.3-codex")
+    result = resolver.resolve_sync("gpt-5.3-codex")
     assert result is None
 
 
@@ -268,5 +273,5 @@ def test_resolve_sync_returns_none_for_no_profile():
     provider_mock = _make_provider_mock()
     with patch("excelmanus.auth.providers.resolver._PROVIDERS", {"openai-codex": provider_mock}):
         resolver = CredentialResolver(credential_store=store)
-        result = resolver.resolve_sync("u1", "gpt-5.3-codex")
+        result = resolver.resolve_sync("gpt-5.3-codex")
     assert result is None

@@ -1,6 +1,6 @@
 # Skillpack 协议规范（SSOT）
 
-> 最后更新：2026-03-03  
+> 最后更新：2026-09-11  
 > 适用范围：`excelmanus/skillpacks`、README、测试与任务文档
 
 ## 1. 目标
@@ -26,9 +26,7 @@
 
 ## 4. 路由语义
 - 斜杠命令：`/<skill_name> args...` 直连技能（`slash_direct`）。
-- 非斜杠消息：进入 `fallback`，所有工具始终可见（core 完整 schema，extended 摘要 schema）。
-- LLM 通过 `activate_skill` 注入领域知识，通过 `expand_tools` 展开指定类别的扩展工具获取完整参数。
-- **语义技能路由**：启用 Embedding 后，`SemanticSkillRouter` 对 Skillpack 描述建立向量索引，`chat()` 中并行检索自动匹配最优技能包，并将匹配提示注入 system prompt。未启用 Embedding 时降级为无操作。
+- 非斜杠消息：进入步循环，所有工具始终可见。斜杠与 `@skill` 是显式控制面，不是词法任务路由。
 
 ## 5. 内置 system Skillpacks（权威清单）
 - `data_basic`
@@ -38,6 +36,8 @@
 - `sheet_ops`
 - `excel_code_runner`
 - `run_code_templates`
+- `word_basic`
+- `word_code_runner`
 
 ## 6. 变更治理要求
 - 协议变更必须同时更新：实现、README、测试、本文档。

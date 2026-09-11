@@ -16,18 +16,13 @@ from excelmanus.engine import AgentEngine
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import MCPManager
 from excelmanus.skillpacks import SkillRouter
-from excelmanus.skillpacks.user_skill_service import UserSkillService
-from excelmanus.user_context import UserContext
-from excelmanus.user_scope import UserScope
 from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
 
 from excelmanus.conversation_persistence import ConversationPersistence
 
 if __import__("typing").TYPE_CHECKING:
-    from excelmanus.auth.store import UserStore
     from excelmanus.chat_history import ChatHistoryStore
     from excelmanus.database import Database
-    from excelmanus.memory_extractor import MemoryExtractor
     from excelmanus.persistent_memory import PersistentMemory
 
 logger = get_logger("session")
@@ -58,7 +53,6 @@ class _PersistenceSnapshot:
     messages: list[dict]
     snapshot_index: int
     turn: int
-    user_id: str | None
     new_snapshot_index: int = 0  # 持久化后应设置的新 snapshot index
 
 
@@ -69,9 +63,6 @@ class _SessionEntry:
     engine: AgentEngine
     last_access: float
     in_flight: bool = field(default=False)
-    user_id: str | None = field(default=None)
-    user_ctx: UserContext | None = field(default=None)
-    scope: UserScope | None = field(default=None)
     restored_readonly: bool = field(default=False)  # B4: 懒恢复会话标记，使用更短 TTL
 
 
@@ -96,16 +87,12 @@ class SessionManager:
         chat_history: ChatHistoryStore | None = None,
         database: "Database | None" = None,
         config_store: Any = None,
-        user_store: "UserStore | None" = None,
-        user_skill_service: UserSkillService | None = None,
     ) -> None:
         self._max_sessions = max_sessions
-        self._max_sessions_per_user = config.max_sessions_per_user
         self._ttl_seconds = ttl_seconds
         self._config = config
         self._registry = registry
         self._skill_router = skill_router
-        self._user_skill_service = user_skill_service
         self._shared_mcp_manager = shared_mcp_manager
         self._chat_history = chat_history
         self._conv_persistence: ConversationPersistence | None = (
@@ -113,7 +100,6 @@ class SessionManager:
         )
         self._database = database
         self._config_store = config_store
-        self._user_store = user_store
         self._credential_store = None  # CredentialStore，由 lifespan 注入
         self._credential_resolver = None  # CredentialResolver，由 lifespan 注入
         # 历史会话摘要存储
@@ -149,10 +135,6 @@ class SessionManager:
         """底层 ChatHistoryStore 实例（只读）。"""
         return self._chat_history
 
-    def set_user_store(self, user_store: Any) -> None:
-        """注入 UserStore 实例（用于延迟初始化场景）。"""
-        self._user_store = user_store
-
     def set_credential_store(self, credential_store: Any) -> None:
         """注入 CredentialStore 实例（订阅凭证管理）。"""
         self._credential_store = credential_store
@@ -164,23 +146,21 @@ class SessionManager:
     def sync_user_subscription_profiles(
         self,
         engine: AgentEngine,
-        user_id: str | None,
     ) -> None:
-        """为已有 DB profile 注入用户的订阅 OAuth 凭证。
+        """为已有 DB profile 注入进程级订阅 OAuth 凭证。
 
-        统一架构：DB profile 是唯一来源，此方法仅填充运行时 OAuth token。
         对 name 以 ``openai-codex/`` 开头的 profile，用 CredentialStore 中的
         access_token 替换空 api_key，并更新 base_url。
         """
         from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
 
-        if user_id is None or self._credential_store is None:
+        if self._credential_store is None:
             return
 
         try:
-            active_cred = self._credential_store.get_active_profile(user_id, "openai-codex")
+            active_cred = self._credential_store.get_active_profile("openai-codex")
         except Exception:
-            logger.debug("读取用户 Codex 凭证失败", exc_info=True)
+            logger.debug("读取进程级 Codex 凭证失败", exc_info=True)
             return
 
         if active_cred is None or not active_cred.access_token:
@@ -192,7 +172,12 @@ class SessionManager:
         changed = False
         for p in engine._config.models:
             if OpenAICodexProvider.is_codex_profile_name(p.name):
-                augmented.append(replace(p, api_key=api_key, base_url=base_url))
+                augmented.append(replace(
+                    p,
+                    api_key=api_key,
+                    base_url=base_url,
+                    protocol=OpenAICodexProvider.PROTOCOL,
+                ))
                 changed = True
             else:
                 augmented.append(p)
@@ -231,11 +216,31 @@ class SessionManager:
                     aux_base_url=aux_base_url,
                 )
 
+    async def broadcast_context_optimization(
+        self,
+        *,
+        max_context_tokens: int | None = None,
+        compaction_enabled: bool | None = None,
+        compaction_threshold_ratio: float | None = None,
+    ) -> None:
+        """向所有活跃会话广播上下文窗口 / 压缩配置（锁保护）。"""
+        async with self._lock:
+            for entry in self._sessions.values():
+                entry.engine.apply_context_optimization(
+                    max_context_tokens=max_context_tokens,
+                    compaction_enabled=compaction_enabled,
+                    compaction_threshold_ratio=compaction_threshold_ratio,
+                )
+
     async def broadcast_model_profiles(self, profiles: tuple) -> None:
-        """向所有活跃会话广播模型档案列表变更（锁保护）。"""
+        """向所有活跃会话广播模型档案列表变更（锁保护）。
+
+        广播全局档案后立刻按会话归属重新注入订阅 OAuth，避免冲掉用户凭证。
+        """
         async with self._lock:
             for entry in self._sessions.values():
                 entry.engine.sync_model_profiles(profiles)
+                self.sync_user_subscription_profiles(entry.engine)
 
     async def set_sandbox_docker_enabled(self, enabled: bool) -> None:
         """更新 Docker 沙盒开关（由 API lifespan 调用）。
@@ -293,13 +298,13 @@ class SessionManager:
             except Exception:
                 logger.debug("notify_file_renamed 处理异常", exc_info=True)
 
-    def _resolve_user_config_store(self, user_id: str | None) -> Any:
-        """返回用户级 ConfigStore（用于 active_model 等偏好）。"""
+    def _resolve_user_config_store(self, user_id: str | None = None) -> Any:
+        """返回进程级 UserConfigStore（用于 active_model 等偏好）。"""
         if self._database is None:
             return self._config_store
         try:
             from excelmanus.stores.config_store import UserConfigStore
-            return UserConfigStore(self._database.conn, user_id=user_id)
+            return UserConfigStore(self._database.conn)
         except Exception:
             return self._config_store
 
@@ -371,32 +376,16 @@ class SessionManager:
         except Exception:
             logger.warning("停止会话定期清理任务时发生异常", exc_info=True)
 
-    def _create_memory_components(
-        self,
-        *,
-        user_id: str | None = None,
-        scope: UserScope | None = None,
-    ) -> tuple["PersistentMemory | None", "MemoryExtractor | None"]:
-        """根据 config.memory_enabled 创建持久记忆组件。
-
-        memory_enabled 为 False 时返回 (None, None)，跳过所有记忆操作。
-        使用局部导入避免循环依赖。
-
-        优先使用 scope（UserScope）创建 MemoryStore，回退到裸 user_id。
-        """
+    def _create_memory_components(self) -> "PersistentMemory | None":
+        """根据 config.memory_enabled 创建持久记忆存储。提取器不在默认路径构造。"""
         if not self._config.memory_enabled:
-            return None, None
+            return None
 
         from excelmanus.persistent_memory import PersistentMemory
-        from excelmanus.memory_extractor import MemoryExtractor
-        from excelmanus.providers import create_client
 
         if self._database is not None:
-            if scope is not None:
-                backend: Any = scope.memory_store()
-            else:
-                from excelmanus.stores.memory_store import MemoryStore
-                backend = MemoryStore(self._database, user_id=user_id)
+            from excelmanus.stores.memory_store import MemoryStore
+            backend: Any = MemoryStore(self._database)
         else:
             from excelmanus.stores.file_memory_backend import FileMemoryBackend
             backend = FileMemoryBackend(
@@ -404,29 +393,10 @@ class SessionManager:
                 auto_load_lines=self._config.memory_auto_load_lines,
             )
 
-        persistent_memory = PersistentMemory(
+        return PersistentMemory(
             backend=backend,
             auto_load_lines=self._config.memory_auto_load_lines,
         )
-        # 记忆提取优先使用 aux 模型，节省主模型 token
-        mem_model = self._config.aux_model or self._config.model
-        mem_api_key = self._config.aux_api_key or self._config.api_key
-        mem_base_url = self._config.aux_base_url or self._config.base_url
-        _mem_protocol = (
-            self._config.aux_protocol
-            if self._config.aux_enabled and self._config.aux_model
-            else self._config.protocol
-        )
-        client = create_client(
-            api_key=mem_api_key,
-            base_url=mem_base_url,
-            protocol=_mem_protocol,
-        )
-        memory_extractor = MemoryExtractor(
-            client=client,
-            model=mem_model,
-        )
-        return persistent_memory, memory_extractor
 
     async def ensure_mcp_initialized(self) -> None:
         """初始化共享 MCP 管理器（仅执行一次）。"""
@@ -444,95 +414,63 @@ class SessionManager:
         history_messages: list[dict] | None = None,
         *,
         user_id: str | None = None,
-        user_ctx: UserContext | None = None,
-        scope: UserScope | None = None,
+        user_ctx: Any = None,
+        scope: Any = None,
     ) -> AgentEngine:
-        """创建 AgentEngine 并可选地注入历史消息。"""
-        # 解析工作区：认证启用时按用户隔离，否则共享。
-        auth_enabled = user_id is not None
+        """创建 AgentEngine 并可选地注入历史消息。始终使用进程唯一工作区。"""
         isolated_ws = IsolatedWorkspace.resolve(
             self._config.workspace_root,
-            user_id=user_id,
-            auth_enabled=auth_enabled,
             sandbox_config=self._sandbox_config,
             transaction_enabled=self._config.backup_enabled,
             data_root=self._config.data_root,
         )
         engine_config = self._config
-        if user_id is not None:
-            overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
-            # 用户自定义 LLM 配置覆盖全局默认值
-            if self._user_store is not None:
-                user_rec = self._user_store.get_by_id(user_id)
-                if user_rec is not None:
-                    if user_rec.llm_api_key:
-                        overrides["api_key"] = user_rec.llm_api_key
-                    if user_rec.llm_base_url:
-                        overrides["base_url"] = user_rec.llm_base_url
-                    if user_rec.llm_model:
-                        overrides["model"] = user_rec.llm_model
-                    if any(k in overrides for k in ("api_key", "base_url", "model")):
-                        logger.info(
-                            "用户 %s 使用自定义 LLM 配置 (model=%s, base_url=%s)",
-                            user_id,
-                            overrides.get("model", "<inherited>"),
-                            overrides.get("base_url", "<inherited>"),
-                        )
-            # 订阅凭证覆盖：通过 CredentialResolver 通用框架解析 OAuth token
-            if self._credential_resolver is not None:
-                _target_model = overrides.get("model", self._config.model)
-                try:
-                    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-                    if isinstance(_target_model, str) and OpenAICodexProvider.is_codex_profile_name(_target_model):
-                        _resolved_model = OpenAICodexProvider.model_from_profile_name(_target_model)
-                        if _resolved_model:
-                            _target_model = _resolved_model
-                            overrides["model"] = _resolved_model
-                    _resolved_cred = self._credential_resolver.resolve_sync(user_id, _target_model)
-                    if _resolved_cred:
-                        overrides["api_key"] = _resolved_cred.api_key
-                        if _resolved_cred.base_url:
-                            overrides["base_url"] = _resolved_cred.base_url
-                        if _resolved_cred.protocol and _resolved_cred.protocol != "openai":
-                            overrides["protocol"] = _resolved_cred.protocol
-                        logger.info(
-                            "用户 %s 使用 %s 订阅凭证 (source=%s)",
-                            user_id, _resolved_cred.provider or "unknown", _resolved_cred.source,
-                        )
-                except Exception:
-                    logger.debug("订阅凭证解析失败", exc_info=True)
-            engine_config = replace(self._config, **overrides)
-        persistent_memory, memory_extractor = self._create_memory_components(
-            user_id=user_id, scope=scope,
-        )
-        # 技能隔离：优先使用 per-user router，回退到全局 router
-        if self._user_skill_service is not None:
-            _user_skill_router = self._user_skill_service.get_router(user_id)
-        else:
-            _user_skill_router = self._skill_router
+        overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
+        _target_model = self._config.model
+        try:
+            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+            if isinstance(_target_model, str) and OpenAICodexProvider.is_codex_profile_name(_target_model):
+                _resolved_model = OpenAICodexProvider.model_from_profile_name(_target_model)
+                if _resolved_model:
+                    _target_model = _resolved_model
+                    overrides["model"] = _resolved_model
+        except Exception:
+            logger.debug("Codex 模型前缀解析失败", exc_info=True)
+        if self._credential_resolver is not None:
+            try:
+                _resolved_cred = self._credential_resolver.resolve_sync(_target_model)
+                if _resolved_cred:
+                    overrides["api_key"] = _resolved_cred.api_key
+                    if _resolved_cred.base_url:
+                        overrides["base_url"] = _resolved_cred.base_url
+                    if _resolved_cred.protocol and _resolved_cred.protocol != "openai":
+                        overrides["protocol"] = _resolved_cred.protocol
+                    logger.info(
+                        "使用 %s 订阅凭证 (source=%s)",
+                        _resolved_cred.provider or "unknown", _resolved_cred.source,
+                    )
+            except Exception:
+                logger.debug("订阅凭证解析失败", exc_info=True)
+        engine_config = replace(self._config, **overrides)
+        persistent_memory = self._create_memory_components()
         engine = AgentEngine(
             config=engine_config,
             registry=self._registry,
-            skill_router=_user_skill_router,
+            skill_router=self._skill_router,
             persistent_memory=persistent_memory,
-            memory_extractor=memory_extractor,
             mcp_manager=self._shared_mcp_manager,
             own_mcp_manager=self._shared_mcp_manager is None,
             database=self._database,
             workspace=isolated_ws,
-            user_id=user_id,
         )
-        self.sync_user_subscription_profiles(engine, user_id)
-        # 注入 CredentialResolver 到引擎，支持 LLM 调用前自动刷新 OAuth token
+        self.sync_user_subscription_profiles(engine)
         if self._credential_resolver is not None:
             engine._credential_resolver = self._credential_resolver
         if history_messages:
             engine.inject_history(history_messages)
-            # 恢复 checkpoint（SessionState + TaskStore）
             engine._session_id = session_id
             engine.restore_checkpoint()
-        # 从用户级配置恢复激活模型（隔离：每个用户独立的 active_model）
-        _user_config = self._resolve_user_config_store(user_id)
+        _user_config = self._resolve_user_config_store()
         if _user_config is not None:
             active_name = _user_config.get_active_model()
             if active_name:
@@ -540,7 +478,6 @@ class SessionManager:
                     engine.switch_model(active_name)
                 except Exception:
                     logger.debug("恢复激活模型 %s 失败", active_name, exc_info=True)
-            # 从用户级配置恢复 full_access 开关（跨会话持久化）
             if hasattr(_user_config, "get_full_access"):
                 engine._full_access_enabled = _user_config.get_full_access()
         # 从数据库加载模型能力探测缓存
@@ -571,7 +508,6 @@ class SessionManager:
 
         同一会话在同一时刻仅允许一个请求执行。
         支持从 SQLite 历史记录按需恢复会话。
-        当 user_id 不为 None 时，会验证会话归属并记录用户 ID。
 
         B2 优化：引擎创建和历史消息加载在锁外执行，避免阻塞并发请求。
         锁内仅做快速路径判断和 slot 预留。
@@ -588,10 +524,6 @@ class SessionManager:
             # 快速路径：内存中已有会话
             if session_id is not None and session_id in self._sessions:
                 entry = self._sessions[session_id]
-                if user_id is not None and entry.user_id != user_id:
-                    raise SessionNotFoundError(
-                        f"会话 '{session_id}' 不属于当前用户。"
-                    )
                 if entry.in_flight:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，请稍后重试。"
@@ -615,21 +547,6 @@ class SessionManager:
                     f"会话数量已达上限（{self._max_sessions}），请稍后重试。"
                 )
 
-            # W8: 每用户会话上限检查
-            if (
-                not _skip_limit_check
-                and user_id is not None
-                and self._max_sessions_per_user > 0
-            ):
-                _user_count = sum(
-                    1 for e in self._sessions.values() if e.user_id == user_id
-                )
-                if _user_count >= self._max_sessions_per_user:
-                    raise SessionLimitExceededError(
-                        f"用户会话数量已达上限（{self._max_sessions_per_user}），"
-                        f"请关闭部分会话后重试。"
-                    )
-
             # 预留 slot
             new_id = session_id if session_id is not None else str(uuid.uuid4())
             self._pending_creates.add(new_id)
@@ -637,38 +554,20 @@ class SessionManager:
 
         # ── Phase 2: 锁外执行重量级操作 ────────────────────────
         engine: AgentEngine | None = None
-        scope: UserScope | None = None
         restored = False
         try:
-            # SQLite 历史检查 & 消息加载
             history_messages: list[dict] | None = None
             if (
                 session_id is not None
                 and self._chat_history is not None
+                and self._chat_history.session_exists(session_id)
             ):
-                if user_id is not None:
-                    if not self._chat_history.session_owned_by(session_id, user_id):
-                        # 会话存在但不属于当前用户，视为不存在（不泄露）
-                        pass
-                    else:
-                        history_messages = self._chat_history.load_messages(session_id)
-                        restored = True
-                elif self._chat_history.session_exists(session_id):
-                    history_messages = self._chat_history.load_messages(session_id)
-                    restored = True
+                history_messages = self._chat_history.load_messages(session_id)
+                restored = True
 
-            # 创建 UserScope（统一的用户作用域）
-            if self._database is not None:
-                scope = UserScope.create(
-                    user_id, self._database, self._config.workspace_root,
-                    data_root=self._config.data_root,
-                )
-            # 引擎创建（耗时操作：文件系统、DB、LLM client 等）
             engine = self._create_engine_with_history(
                 new_id,
                 history_messages,
-                user_id=user_id,
-                scope=scope,
             )
             engine._session_id = new_id
             engine._approval.set_session_id(new_id)
@@ -688,8 +587,6 @@ class SessionManager:
                 engine=engine,
                 last_access=time.monotonic(),
                 in_flight=True,
-                user_id=user_id,
-                scope=scope,
             )
             if restored:
                 logger.info(
@@ -701,8 +598,8 @@ class SessionManager:
                 # F2: 新建（非恢复）会话立即写入 SQLite，防止 TTL 清理或进程重启导致会话丢失
                 if self._chat_history is not None:
                     try:
-                        if not self._chat_history.session_exists(new_id, user_id=user_id):
-                            self._chat_history.create_session(new_id, "", user_id=user_id)
+                        if not self._chat_history.session_exists(new_id):
+                            self._chat_history.create_session(new_id, "")
                     except Exception:
                         logger.warning("新建会话 %s 立即持久化失败", new_id, exc_info=True)
 
@@ -756,7 +653,6 @@ class SessionManager:
                     messages=list(entry.engine.raw_messages),
                     snapshot_index=entry.engine.message_snapshot_index,
                     turn=entry.engine.session_turn,
-                    user_id=entry.user_id,
                     new_snapshot_index=len(entry.engine.raw_messages),
                 )
                 # B1-fix: 在锁内立即更新 snapshot_index，防止并发
@@ -788,31 +684,16 @@ class SessionManager:
         if entry is None:
             return
         try:
-            self._conv_persistence.sync_new_messages(
-                session_id, entry.engine, user_id=entry.user_id,
-            )
+            self._conv_persistence.sync_new_messages(session_id, entry.engine)
         except Exception:
             logger.debug("会话 %s 中间持久化失败", session_id, exc_info=True)
 
     async def delete(self, session_id: str, *, user_id: str | None = None) -> bool:
-        """删除指定会话。
-
-        删除前会提取会话记忆并持久化（在锁外执行，避免长时间持有锁）。
-        当 user_id 非空时，会校验会话归属，非归属用户视为不存在。
-
-        Args:
-            session_id: 要删除的会话 ID。
-            user_id: 当前用户 ID，用于归属校验（多租户场景）。
-
-        Returns:
-            True 表示成功删除，False 表示会话不存在或无权访问。
-        """
+        """删除指定会话。"""
         engine: AgentEngine | None = None
         async with self._lock:
             if session_id in self._sessions:
                 entry = self._sessions[session_id]
-                if user_id is not None and entry.user_id != user_id:
-                    return False  # 不属于当前用户，视为不存在
                 if entry.in_flight:
                     raise SessionBusyError(
                         f"会话 '{session_id}' 正在处理中，暂无法删除。"
@@ -822,10 +703,6 @@ class SessionManager:
                 logger.info("已删除会话 %s", session_id)
 
         if engine is not None:
-            try:
-                await engine.extract_and_save_memory()
-            except Exception:
-                logger.warning("会话 %s 记忆提取失败", session_id, exc_info=True)
             try:
                 await self._generate_session_summary(
                     session_id, engine, user_id=user_id,
@@ -845,12 +722,8 @@ class SessionManager:
                     logger.warning("会话 %s SQLite 删除失败", session_id, exc_info=True)
             return True
 
-        # 仅存在于 SQLite 中的历史会话（需校验归属）
         if self._chat_history is not None:
-            if user_id is not None:
-                if not self._chat_history.session_owned_by(session_id, user_id):
-                    return False
-            elif not self._chat_history.session_exists(session_id):
+            if not self._chat_history.session_exists(session_id):
                 return False
             self._chat_history.delete_session(session_id)
             return True
@@ -900,19 +773,14 @@ class SessionManager:
         return False
 
     async def clear_all_sessions(self, *, user_id: str | None = None) -> tuple[int, int]:
-        """清空会话及消息。若有会话正在处理中则抛出 SessionBusyError。
-
-        当 user_id 非空时，仅清空该用户的会话；否则清空全部。
+        """清空全部会话及消息。若有会话正在处理中则抛出 SessionBusyError。
 
         Returns:
             (删除的会话数, 删除的消息数)
         """
         active_engines: list[tuple[str, AgentEngine]] = []
         async with self._lock:
-            targets = {
-                sid: entry for sid, entry in self._sessions.items()
-                if user_id is None or entry.user_id == user_id
-            }
+            targets = dict(self._sessions)
             for sid, entry in targets.items():
                 if entry.in_flight:
                     raise SessionBusyError(
@@ -923,10 +791,6 @@ class SessionManager:
                 del self._sessions[sid]
 
         for sid, engine in active_engines:
-            try:
-                await engine.extract_and_save_memory()
-            except Exception:
-                logger.warning("会话 %s 记忆提取失败", sid, exc_info=True)
             try:
                 await self._generate_session_summary(sid, engine, user_id=user_id)
             except Exception:
@@ -940,9 +804,7 @@ class SessionManager:
         sess_count, msg_count = 0, 0
         if self._chat_history is not None:
             try:
-                sess_count, msg_count = self._chat_history.delete_all_sessions(
-                    user_id=user_id,
-                )
+                sess_count, msg_count = self._chat_history.delete_all_sessions()
             except Exception:
                 logger.warning("清空 SQLite 会话失败", exc_info=True)
         return sess_count, msg_count
@@ -954,15 +816,9 @@ class SessionManager:
 
         对于内存中的活跃会话，仅更新 SQLite 状态（不影响运行中会话）。
         对于仅存在于 SQLite 中的历史会话，直接更新状态。
-        当 user_id 非空时，会校验会话归属。
-
-        Args:
-            session_id: 要归档/取消归档的会话 ID。
-            archive: True 表示归档，False 表示取消归档。
-            user_id: 当前用户 ID，用于归属校验。
 
         Returns:
-            True 表示成功更新，False 表示会话不存在或无权访问。
+            True 表示成功更新，False 表示会话不存在。
         """
         new_status = "archived" if archive else "active"
 
@@ -971,24 +827,17 @@ class SessionManager:
             in_memory = session_id in self._sessions
             if in_memory:
                 entry = self._sessions[session_id]
-                if user_id is not None and entry.user_id != user_id:
-                    return False  # 不属于当前用户
-                # 活跃会话：在锁内持久化到 SQLite，再更新状态
                 if self._chat_history is not None:
                     if self._conv_persistence is not None:
                         self._conv_persistence.sync_new_messages(
-                            session_id, entry.engine, user_id=entry.user_id
+                            session_id, entry.engine
                         )
                     self._chat_history.update_session(session_id, status=new_status)
                     return True
                 return False
 
-        # 仅存在于 SQLite 中的历史会话（需校验归属）
         if self._chat_history is not None:
-            if user_id is not None:
-                if not self._chat_history.session_owned_by(session_id, user_id):
-                    return False
-            elif not self._chat_history.session_exists(session_id):
+            if not self._chat_history.session_exists(session_id):
                 return False
             self._chat_history.update_session(session_id, status=new_status)
             return True
@@ -1001,10 +850,7 @@ class SessionManager:
         """更新会话标题（用户手动设置），返回是否成功。"""
         if self._chat_history is None:
             return False
-        if user_id is not None:
-            if not self._chat_history.session_owned_by(session_id, user_id):
-                return False
-        elif not self._chat_history.session_exists(session_id):
+        if not self._chat_history.session_exists(session_id):
             return False
         self._chat_history.update_session(
             session_id, title=title, title_source="user"
@@ -1046,16 +892,10 @@ class SessionManager:
                 logger.info("已清理 %d 个过期会话", len(expired_ids))
             count = len(expired_ids)
 
-        # 在锁外逐个提取记忆并关闭 MCP，避免长时间持有锁
+        # 在锁外生成摘要并关闭 MCP，避免长时间持有锁
         for sid, engine in expired_engines:
             try:
-                await engine.extract_and_save_memory()
-            except Exception:
-                logger.warning("过期会话 %s 记忆提取失败", sid, exc_info=True)
-            try:
-                await self._generate_session_summary(
-                    sid, engine, user_id=getattr(engine, "_user_id", None),
-                )
+                await self._generate_session_summary(sid, engine)
             except Exception:
                 logger.debug("过期会话 %s 摘要生成失败", sid, exc_info=True)
             if self._shared_mcp_manager is None:
@@ -1080,13 +920,7 @@ class SessionManager:
 
         for sid, engine in active_engines:
             try:
-                await engine.extract_and_save_memory()
-            except Exception:
-                logger.warning("会话 %s 关闭时记忆提取失败", sid, exc_info=True)
-            try:
-                await self._generate_session_summary(
-                    sid, engine, user_id=getattr(engine, "_user_id", None),
-                )
+                await self._generate_session_summary(sid, engine)
             except Exception:
                 logger.debug("会话 %s 关闭时摘要生成失败", sid, exc_info=True)
             if self._shared_mcp_manager is None:
@@ -1104,14 +938,9 @@ class SessionManager:
                 self._mcp_initialized = False
 
     def get_engine(self, session_id: str, *, user_id: str | None = None) -> "AgentEngine | None":
-        """同步获取指定会话的 AgentEngine（无锁，仅用于只读查询）。
-
-        当 user_id 非空时，校验会话归属；不匹配则返回 None。
-        """
+        """同步获取指定会话的 AgentEngine（无锁，仅用于只读查询）。"""
         entry = self._sessions.get(session_id)
         if entry is None:
-            return None
-        if user_id is not None and entry.user_id != user_id:
             return None
         return entry.engine
 
@@ -1230,6 +1059,19 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             return entry.in_flight if entry is not None else False
 
+    async def enqueue_user_interrupt(self, session_id: str, message: str) -> bool:
+        """飞行中用户消息入插话队列。成功入队返回 True，否则 False。"""
+        text = str(message or "").strip()
+        if not session_id or not text:
+            return False
+        async with self._lock:
+            entry = self._sessions.get(session_id)
+            if entry is None or not entry.in_flight:
+                return False
+            entry.engine.push_interrupt_message(text)
+            logger.info("会话 %s 插话已入队（%d 字）", session_id[:8], len(text))
+            return True
+
     async def get_engine_if_idle(
         self, session_id: str, *, user_id: str | None = None
     ) -> AgentEngine | None:
@@ -1249,8 +1091,6 @@ class SessionManager:
             entry = self._sessions.get(session_id)
             if entry is None:
                 return None
-            if user_id is not None and entry.user_id != user_id:
-                return None
             if entry.in_flight:
                 raise SessionBusyError(
                     f"会话 '{session_id}' 正在处理中，请等待完成后再操作。"
@@ -1269,10 +1109,6 @@ class SessionManager:
         self, session_id: str, *, user_id: str | None = None
     ) -> bool:
         """检查会话是否可从 SQLite 恢复（内存中不存在时）。"""
-        if session_id in self._sessions:
-            return True
-        if user_id is not None and self._chat_history is not None:
-            return self._chat_history.session_owned_by(session_id, user_id)
         return self.session_exists(session_id)
 
     async def get_or_restore_engine(
@@ -1317,18 +1153,10 @@ class SessionManager:
         async with self._lock:
             return len(self._sessions)
 
-    async def get_user_active_count(self, user_id: str) -> int:
-        """获取指定用户的活跃会话数量。"""
-        async with self._lock:
-            return sum(1 for e in self._sessions.values() if e.user_id == user_id)
-
     async def list_sessions(
         self, include_archived: bool = False, *, user_id: str | None = None
     ) -> list[dict]:
-        """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。
-
-        当 user_id 非空时，仅返回该用户的会话（内存 + DB 均按 user_id 过滤）。
-        """
+        """列出所有会话的摘要信息（内存活跃 + SQLite 历史合并）。"""
         in_memory_ids: set[str] = set()
         results: list[dict] = []
         now = time.monotonic()
@@ -1339,7 +1167,6 @@ class SessionManager:
             try:
                 for ds in self._chat_history.list_sessions(
                     include_archived=include_archived,
-                    user_id=user_id,
                 ):
                     db_sessions_map[ds["id"]] = ds
             except Exception:
@@ -1350,8 +1177,6 @@ class SessionManager:
         wall_now = time.time()
         async with self._lock:
             for sid, entry in self._sessions.items():
-                if user_id is not None and entry.user_id != user_id:
-                    continue
                 in_memory_ids.add(sid)
                 engine = entry.engine
                 msg_count = len(engine.raw_messages) if hasattr(engine, "raw_messages") else 0
@@ -1407,7 +1232,7 @@ class SessionManager:
     async def get_session_detail(
         self, session_id: str, *, user_id: str | None = None
     ) -> dict:
-        """获取会话详情含消息历史。当 user_id 非空时，会校验会话归属。
+        """获取会话详情含消息历史。
 
         性能优化：锁内仅做快速引用捕获（微秒级），
         所有序列化工作在锁外执行，避免阻塞并发 acquire/release。
@@ -1419,8 +1244,6 @@ class SessionManager:
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
-                if user_id is not None and entry.user_id != user_id:
-                    raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
                 engine = entry.engine
                 in_flight = entry.in_flight
 
@@ -1488,23 +1311,18 @@ class SessionManager:
                 "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
                 "current_model": engine.current_model,
                 "current_model_name": engine.current_model_name,
-                "vision_capable": engine.is_vision_capable or engine.vlm_enhance_available,
+                "vision_capable": engine.is_vision_capable,
                 "pending_approval": pending_approval_data,
                 "pending_question": pending_question_data,
                 "last_route": last_route_data,
             }
 
-        # 回退到 SQLite 历史（需校验归属）
         if self._chat_history is not None:
-            if user_id is not None:
-                if not self._chat_history.session_owned_by(session_id, user_id):
-                    raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
-            elif not self._chat_history.session_exists(session_id):
+            if not self._chat_history.session_exists(session_id):
                 raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
             messages = self._chat_history.load_messages(session_id)
-            # 从持久化配置读取 full_access 开关
             _fa = False
-            _uc = self._resolve_user_config_store(user_id)
+            _uc = self._resolve_user_config_store()
             if _uc is not None and hasattr(_uc, "get_full_access"):
                 _fa = _uc.get_full_access()
             return {
@@ -1540,11 +1358,7 @@ class SessionManager:
                 调用方应随后通过 /chat/stream 发送新消息。此时 new_message
                 参数被忽略。
         """
-        exists = (
-            self._chat_history.session_owned_by(session_id, user_id)
-            if user_id is not None and self._chat_history is not None
-            else self.session_exists(session_id)
-        )
+        exists = self.session_exists(session_id)
         if not exists:
             raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
 
@@ -1585,12 +1399,10 @@ class SessionManager:
         *,
         user_id: str | None = None,
     ) -> list[dict]:
-        """分页获取会话消息（优先内存，回退 SQLite）。当 user_id 非空时，会校验会话归属。"""
+        """分页获取会话消息（优先内存，回退 SQLite）。"""
         async with self._lock:
             entry = self._sessions.get(session_id)
             if entry is not None:
-                if user_id is not None and entry.user_id != user_id:
-                    return []  # 不属于当前用户，返回空
                 engine = entry.engine
                 raw_messages = list(engine.raw_messages)
                 page = raw_messages[offset: offset + limit]
@@ -1605,12 +1417,8 @@ class SessionManager:
                     normalized.append(item)
                 return normalized
 
-        # 回退到 SQLite（需校验归属）
         if self._chat_history is not None:
-            if user_id is not None:
-                if not self._chat_history.session_owned_by(session_id, user_id):
-                    return []
-            elif not self._chat_history.session_exists(session_id):
+            if not self._chat_history.session_exists(session_id):
                 return []
             return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
         return []
@@ -1699,8 +1507,6 @@ class SessionManager:
             try:
                 ws = IsolatedWorkspace.resolve(
                     self._config.workspace_root,
-                    user_id=user_id,
-                    auth_enabled=user_id is not None,
                     data_root=self._config.data_root,
                 )
                 workspace_root = str(ws.root_dir)
@@ -1712,7 +1518,7 @@ class SessionManager:
         if self._database is not None:
             try:
                 from excelmanus.stores.memory_store import MemoryStore
-                mem_store = MemoryStore(self._database, user_id=user_id)
+                mem_store = MemoryStore(self._database)
                 entries = mem_store.load_all()
                 if entries:
                     memories_list = [
@@ -1841,7 +1647,7 @@ class SessionManager:
                 from excelmanus.memory_models import MemoryCategory, MemoryEntry
                 from excelmanus.stores.memory_store import MemoryStore
 
-                mem_store = MemoryStore(self._database, user_id=user_id)
+                mem_store = MemoryStore(self._database)
                 entries: list[MemoryEntry] = []
                 for m in memories:
                     try:
@@ -1872,8 +1678,6 @@ class SessionManager:
             try:
                 ws = IsolatedWorkspace.resolve(
                     self._config.workspace_root,
-                    user_id=user_id,
-                    auth_enabled=user_id is not None,
                     data_root=self._config.data_root,
                 )
                 ws_root = str(ws.root_dir)

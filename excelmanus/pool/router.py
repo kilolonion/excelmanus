@@ -5,10 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, Request
-
-from excelmanus.auth.dependencies import require_admin
-from excelmanus.auth.store import UserRecord
+from fastapi import APIRouter, HTTPException, Request
 
 logger = logging.getLogger(__name__)
 
@@ -37,14 +34,13 @@ def _get_credential_store(request: Request):
 @router.get("/importable-subscriptions")
 async def list_importable_subscriptions(
     request: Request,
-    admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """列出管理员已连接的订阅提供商凭证，可一键导入号池。"""
     cred_store = getattr(request.app.state, "credential_store", None)
     if cred_store is None:
         return {"subscriptions": []}
 
-    profiles = cred_store.list_profiles(admin.id)
+    profiles = cred_store.list_profiles()
     result: list[dict[str, Any]] = []
     for p in profiles:
         result.append({
@@ -64,7 +60,6 @@ async def list_importable_subscriptions(
 @router.post("/accounts/from-subscription")
 async def create_pool_account_from_subscription(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """将管理员自己的订阅凭证复制到号池。
 
@@ -88,7 +83,7 @@ async def create_pool_account_from_subscription(
     if cred_store is None:
         raise HTTPException(503, "凭证存储未初始化")
 
-    profile = cred_store.get_active_profile(_admin.id, provider_name)
+    profile = cred_store.get_active_profile(provider_name)
     if profile is None:
         raise HTTPException(404, f"未找到已连接的 {provider_name} 订阅，请先在模型配置中完成连接")
 
@@ -118,8 +113,8 @@ async def create_pool_account_from_subscription(
     svc.store_oauth_credential(account.id, credential)
 
     logger.info(
-        "管理员 %s 从订阅导入池账号: id=%s, provider=%s, account_id=%s",
-        _admin.id, account.id, provider_name, credential.account_id,
+        "从订阅导入池账号: id=%s, provider=%s, account_id=%s",
+        account.id, provider_name, credential.account_id,
     )
     return {"status": "ok", "account": account.to_dict()}
 
@@ -130,7 +125,6 @@ async def create_pool_account_from_subscription(
 @router.post("/accounts/oauth")
 async def create_pool_account_oauth(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """导入池账号（粘贴 OAuth token JSON）。
 
@@ -174,7 +168,7 @@ async def create_pool_account_oauth(
 
     logger.info(
         "管理员 %s 导入池账号: id=%s, account_id=%s, plan=%s",
-        _admin.id, account.id, credential.account_id, credential.plan_type,
+        account.id, credential.account_id, credential.plan_type,
     )
     return {"status": "ok", "account": account.to_dict()}
 
@@ -185,7 +179,6 @@ async def create_pool_account_oauth(
 @router.get("/accounts")
 async def list_pool_accounts(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """列出所有池账号。"""
     svc = _get_pool_service(request)
@@ -200,7 +193,6 @@ async def list_pool_accounts(
 async def update_pool_account(
     account_id: str,
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """更新池账号字段（label/status/budget/timezone）。"""
     svc = _get_pool_service(request)
@@ -214,7 +206,7 @@ async def update_pool_account(
     if updated is None:
         raise HTTPException(404, "池账号不存在")
 
-    logger.info("管理员 %s 更新池账号 %s: %s", _admin.id, account_id, body)
+    logger.info("更新池账号 %s: %s", account_id, body)
     return {"status": "ok", "account": updated.to_dict()}
 
 
@@ -225,7 +217,6 @@ async def update_pool_account(
 async def probe_pool_account(
     account_id: str,
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """探测池账号连通性。"""
     svc = _get_pool_service(request)
@@ -244,7 +235,6 @@ async def probe_pool_account(
 @router.post("/manual-active")
 async def set_manual_active(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """设置人工激活映射。
 
@@ -275,12 +265,12 @@ async def set_manual_active(
         provider=provider,
         model_pattern=model_pattern,
         pool_account_id=pool_account_id,
-        activated_by=_admin.id,
+        activated_by="process",
     )
 
     logger.info(
         "管理员 %s 设置人工激活: provider=%s, pattern=%s, account=%s",
-        _admin.id, provider, model_pattern, pool_account_id,
+        provider, model_pattern, pool_account_id,
     )
     return {"status": "ok", "mapping": mapping.to_dict()}
 
@@ -291,7 +281,6 @@ async def set_manual_active(
 @router.get("/manual-active")
 async def list_manual_active(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """查看所有人工激活映射。"""
     svc = _get_pool_service(request)
@@ -305,7 +294,6 @@ async def list_manual_active(
 @router.get("/summary")
 async def pool_summary(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """号池总览（所有账号 + 预算快照 + 激活状态）。"""
     svc = _get_pool_service(request)
@@ -335,7 +323,6 @@ def _get_auto_rotate_service(request: Request):
 @router.post("/auto/policies")
 async def upsert_auto_policy(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """创建或更新自动轮换策略。
 
@@ -378,7 +365,7 @@ async def upsert_auto_policy(
 
     logger.info(
         "管理员 %s 更新自动轮换策略: provider=%s, pattern=%s",
-        _admin.id, policy.provider, policy.model_pattern,
+        policy.provider, policy.model_pattern,
     )
     return {"status": "ok", "policy": policy.to_dict()}
 
@@ -389,7 +376,6 @@ async def upsert_auto_policy(
 @router.get("/auto/policies")
 async def list_auto_policies(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """列出所有自动轮换策略。"""
     auto_svc = _get_auto_rotate_service(request)
@@ -403,12 +389,11 @@ async def list_auto_policies(
 @router.post("/auto/run")
 async def run_auto_evaluate(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """手动触发一次自动轮换评估。"""
     auto_svc = _get_auto_rotate_service(request)
     results = await auto_svc.evaluate_all_policies()
-    logger.info("管理员 %s 手动触发自动轮换评估: %d 个策略", _admin.id, len(results))
+    logger.info("手动触发自动轮换评估: %d 个策略", len(results))
     return {"status": "ok", "results": results}
 
 
@@ -418,7 +403,6 @@ async def run_auto_evaluate(
 @router.get("/auto/events")
 async def list_rotation_events(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
     limit: int = 50,
     provider: str | None = None,
     model_pattern: str | None = None,
@@ -446,7 +430,6 @@ async def set_scope_mode(
     provider: str,
     model_pattern: str,
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """切换 scope 运行模式。
 
@@ -460,7 +443,7 @@ async def set_scope_mode(
     state = auto_svc.set_scope_mode(provider, model_pattern, mode)
     logger.info(
         "管理员 %s 切换 scope 模式: %s/%s → %s",
-        _admin.id, provider, model_pattern, mode,
+        provider, model_pattern, mode,
     )
     return {"status": "ok", "state": state.to_dict()}
 
@@ -473,7 +456,6 @@ async def get_scope_state(
     provider: str,
     model_pattern: str,
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """查看 scope 当前运行状态。"""
     auto_svc = _get_auto_rotate_service(request)
@@ -491,7 +473,6 @@ async def dry_run_evaluate(
     provider: str,
     model_pattern: str,
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """执行评估但不执行，返回 would-be 决策结果。"""
     auto_svc = _get_auto_rotate_service(request)
@@ -515,7 +496,6 @@ def _get_metrics_aggregator(request: Request):
 @router.get("/auto/metrics")
 async def list_rotation_metrics(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
     provider: str | None = None,
     model_pattern: str | None = None,
     minutes: int = 60,
@@ -544,7 +524,6 @@ def _get_breaker_manager(request: Request):
 @router.get("/auto/breakers")
 async def list_breakers(
     request: Request,
-    _admin: UserRecord = Depends(require_admin),
 ) -> Any:
     """列出所有非 closed 的熔断器。"""
     mgr = _get_breaker_manager(request)

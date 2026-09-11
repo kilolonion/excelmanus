@@ -241,7 +241,7 @@ class ChannelRateLimiter:
     """渠道专用速率限制器。
 
     按消息类型分桶限流，支持自动封禁升级和非白名单冷却。
-    与 auth/rate_limit.py 的 RateLimiter 算法相同，但不依赖 FastAPI。
+    使用内存滑动窗口，不依赖 FastAPI。
     """
 
     def __init__(self, config: RateLimitConfig | None = None) -> None:

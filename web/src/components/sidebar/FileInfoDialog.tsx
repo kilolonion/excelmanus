@@ -15,12 +15,10 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+  OverlayCard,
+  OverlayCardBody,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 import { Badge } from "@/components/ui/badge";
 import {
   fetchFileRegistry,
@@ -128,17 +126,14 @@ export function FileInfoDialog({ open, onOpenChange, filePath }: FileInfoDialogP
   const OriginIcon = originInfo?.icon ?? FileText;
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="sm:max-w-md max-h-[90dvh] sm:max-h-[80vh] overflow-y-auto p-4 sm:p-6">
-        <DialogHeader>
-          <DialogTitle className="flex items-center gap-2 text-base">
-            <Info className="h-4 w-4 text-muted-foreground" />
-            文件信息
-          </DialogTitle>
-          <DialogDescription className="text-xs font-mono break-all line-clamp-2 sm:truncate sm:line-clamp-none" title={filePath}>
-            {filePath}
-          </DialogDescription>
-        </DialogHeader>
+    <OverlayCard open={open} onOpenChange={onOpenChange} size="md" tone="muted">
+      <OverlayCardHeader
+        icon={<Info className="h-5 w-5" />}
+        title="文件信息"
+        description={<span className="font-mono text-xs break-all line-clamp-2 sm:truncate sm:line-clamp-none" title={filePath}>{filePath}</span>}
+        onClose={() => onOpenChange(false)}
+      />
+      <OverlayCardBody className="pb-5">
 
         {loading && (
           <div className="flex items-center justify-center py-8">
@@ -350,7 +345,7 @@ export function FileInfoDialog({ open, onOpenChange, filePath }: FileInfoDialogP
             )}
           </div>
         )}
-      </DialogContent>
-    </Dialog>
+      </OverlayCardBody>
+    </OverlayCard>
   );
 }

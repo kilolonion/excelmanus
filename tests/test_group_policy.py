@@ -70,14 +70,11 @@ def handler(mock_adapter, config_store):
     api_client = MagicMock()
     api_client.stream_chat = AsyncMock(return_value=iter([]))
     store = SessionStore()
-    bind_manager = MagicMock()
-    bind_manager.check_bind_status = MagicMock(return_value=None)
 
     h = MessageHandler(
         adapter=mock_adapter,
         api_client=api_client,
         session_store=store,
-        bind_manager=bind_manager,
         config_store=config_store,
     )
     return h
@@ -133,14 +130,8 @@ class TestChatTypePlumbing:
 class TestGroupPolicyProperty:
     """_group_policy 属性优先级和动态切换。"""
 
-    def test_default_allow_without_require_bind(self, handler):
-        """非绑定模式默认 allow。"""
+    def test_default_allow(self, handler):
         assert handler._group_policy == "allow"
-
-    def test_default_deny_with_require_bind(self, handler, config_store):
-        """绑定模式默认 deny。"""
-        config_store.set("channel_require_bind", "true")
-        assert handler._group_policy == "deny"
 
     @patch.dict(os.environ, {"EXCELMANUS_CHANNEL_GROUP_POLICY": "whitelist"})
     def test_env_var_override(self, handler, config_store):

@@ -3,7 +3,7 @@
 覆盖：
 1. builtin.py — 配置生成与开关
 2. MCPManager._merge_builtin_configs — 合并逻辑与用户覆盖
-3. meta_tools — MCP 工具绕过 ROUTE_TOOL_SCOPE 过滤
+3. Exa 内置 MCP 配置与开关
 4. config.py — exa_search_enabled 环境变量解析
 """
 
@@ -75,11 +75,6 @@ class TestSdkFallback:
         """_sdk_supports_streamable_http 返回布尔值。"""
         result = _sdk_supports_streamable_http()
         assert isinstance(result, bool)
-
-    def test_current_sdk_no_streamable_http(self):
-        """当前 SDK 1.3.0 不支持 streamable_http。"""
-        # 如果安装了新版 SDK 这个测试会失败，可以更新
-        assert _sdk_supports_streamable_http() is False
 
     def test_fallback_uses_sse_transport(self):
         """SDK 不支持 streamable_http 时降级为 SSE。"""
@@ -173,88 +168,6 @@ class TestMergeBuiltinConfigs:
         result = mgr._merge_builtin_configs([])
         assert len(result) == 1
         assert result[0].name == "exa"
-
-
-# ── MCP 工具绕过 ROUTE_TOOL_SCOPE 过滤 ─────────────────────
-
-
-class TestMcpToolRouteBypass:
-    """测试 MCP 工具（mcp_ 前缀）绕过 ROUTE_TOOL_SCOPE 过滤。"""
-
-    def test_mcp_tools_survive_route_filtering(self):
-        """模拟 build_v5_tools_impl 中的过滤逻辑：mcp_ 工具不被裁剪。"""
-        from excelmanus.tools.policy import ROUTE_TOOL_SCOPE
-
-        # 构造模拟的 domain schemas
-        domain_schemas = [
-            {"type": "function", "function": {"name": "read_excel"}},
-            {"type": "function", "function": {"name": "run_code"}},
-            {"type": "function", "function": {"name": "mcp_exa_web_search_exa"}},
-            {"type": "function", "function": {"name": "mcp_exa_get_code_context_exa"}},
-            {"type": "function", "function": {"name": "mcp_custom_do_something"}},
-        ]
-
-        # 使用 "data_read" 路由标签过滤
-        route_tool_tags = ("data_read",)
-        allowed: set[str] = set()
-        _has_all = False
-        for tag in route_tool_tags:
-            scope = ROUTE_TOOL_SCOPE.get(tag)
-            if scope is not None:
-                allowed |= scope
-            else:
-                _has_all = True
-                break
-
-        if not _has_all and allowed:
-            filtered = [
-                s for s in domain_schemas
-                if s.get("function", {}).get("name", "") in allowed
-                or s.get("function", {}).get("name", "").startswith("mcp_")
-            ]
-        else:
-            filtered = domain_schemas
-
-        names = [s["function"]["name"] for s in filtered]
-        # read_excel 应保留（在 data_read scope 中）
-        assert "read_excel" in names
-        # run_code 应被过滤（不在 data_read scope 中）
-        assert "run_code" not in names
-        # 所有 mcp_ 工具应保留
-        assert "mcp_exa_web_search_exa" in names
-        assert "mcp_exa_get_code_context_exa" in names
-        assert "mcp_custom_do_something" in names
-
-    def test_all_tools_tag_no_filtering(self):
-        """all_tools 标签不做过滤，所有工具保留。"""
-        from excelmanus.tools.policy import ROUTE_TOOL_SCOPE
-
-        domain_schemas = [
-            {"type": "function", "function": {"name": "run_code"}},
-            {"type": "function", "function": {"name": "mcp_exa_web_search_exa"}},
-        ]
-
-        route_tool_tags = ("all_tools",)
-        allowed: set[str] = set()
-        _has_all = False
-        for tag in route_tool_tags:
-            scope = ROUTE_TOOL_SCOPE.get(tag)
-            if scope is not None:
-                allowed |= scope
-            else:
-                _has_all = True
-                break
-
-        if not _has_all and allowed:
-            filtered = [
-                s for s in domain_schemas
-                if s.get("function", {}).get("name", "") in allowed
-                or s.get("function", {}).get("name", "").startswith("mcp_")
-            ]
-        else:
-            filtered = domain_schemas
-
-        assert len(filtered) == 2
 
 
 # ── config 环境变量解析 ──────────────────────────────────────

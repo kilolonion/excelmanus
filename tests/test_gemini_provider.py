@@ -34,3 +34,11 @@ def test_text_only_message_unchanged():
     _, contents = _openai_messages_to_gemini(messages)
     assert len(contents) == 1
     assert contents[0]["parts"] == [{"text": "hello"}]
+
+
+def test_normalize_thinking_level_clamps_minimal_on_gemini_38():
+    from excelmanus.providers.gemini import _normalize_gemini_thinking_level
+
+    assert _normalize_gemini_thinking_level("gemini-3.8-flash", "minimal") == "low"
+    assert _normalize_gemini_thinking_level("gemini-3.8-flash", "high") == "high"
+    assert _normalize_gemini_thinking_level("gemini-2.5-flash", "minimal") == "minimal"

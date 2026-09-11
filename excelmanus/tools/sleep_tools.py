@@ -11,6 +11,7 @@ from __future__ import annotations
 import contextvars
 import threading
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.logger import get_logger
 from excelmanus.tools.registry import ToolDef
 
@@ -40,37 +41,40 @@ def reset_cancel_event(token: contextvars.Token) -> None:
     _cancel_event_var.reset(token)
 
 
-def sleep(seconds: int | float, reason: str | None = None) -> str:
+def sleep(seconds: int | float, reason: str | None = None) -> ToolResult:
     """暂停执行指定秒数，用于等待外部操作完成。"""
     if seconds <= 0:
-        return "⚠️ 等待时间必须大于 0 秒。"
+        return ToolResult.from_text("⚠️ 等待时间必须大于 0 秒。", success=False)
     if seconds > _MAX_SLEEP_SECONDS:
-        return f"⚠️ 等待时间不能超过 {_MAX_SLEEP_SECONDS} 秒（{_MAX_SLEEP_SECONDS // 60} 分钟）。"
+        return ToolResult.from_text(
+            f"⚠️ 等待时间不能超过 {_MAX_SLEEP_SECONDS} 秒（{_MAX_SLEEP_SECONDS // 60} 分钟）。",
+            success=False,
+        )
 
     label = f"（原因: {reason}）" if reason else ""
     logger.info("sleep 开始: %.1f 秒%s", seconds, label)
 
-    # 获取当前会话的取消事件（无则创建本地 event，CLI 模式回退）
     event = _cancel_event_var.get(None)
     if event is None:
         event = threading.Event()
 
-    # 若进入时已被标记取消，立即返回
     if event.is_set():
         event.clear()
         logger.info("sleep 在启动前已被取消%s", label)
-        return f"⏹️ 等待已取消{label}，未实际等待。"
+        return ToolResult.from_text(f"⏹️ 等待已取消{label}，未实际等待。", success=False)
 
     elapsed = 0.0
     remaining = float(seconds)
 
     while remaining > 0:
         chunk = min(_TICK, remaining)
-        # wait 返回 True 表示事件已被 set（即取消）
         if event.wait(timeout=chunk):
             event.clear()
             logger.info("sleep 被取消: 已等待 %.1f/%.1f 秒", elapsed, seconds)
-            return f"⏹️ 等待已取消{label}，已等待 {elapsed:.0f}/{seconds} 秒。"
+            return ToolResult.from_text(
+                f"⏹️ 等待已取消{label}，已等待 {elapsed:.0f}/{seconds} 秒。",
+                success=False,
+            )
 
         elapsed += chunk
         remaining -= chunk
@@ -79,7 +83,7 @@ def sleep(seconds: int | float, reason: str | None = None) -> str:
             logger.debug("sleep 进度: %.0f/%.0f 秒", elapsed, seconds)
 
     logger.info("sleep 完成: %.1f 秒%s", seconds, label)
-    return f"✅ 已等待 {seconds} 秒{label}，继续执行。"
+    return ToolResult.from_text(f"✅ 已等待 {seconds} 秒{label}，继续执行。")
 
 
 def get_tools() -> list[ToolDef]:

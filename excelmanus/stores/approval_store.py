@@ -5,7 +5,7 @@ import json
 import logging
 from typing import TYPE_CHECKING, Any, overload
 
-from excelmanus.db_adapter import ConnectionAdapter, user_filter_clause
+from excelmanus.db_adapter import ConnectionAdapter
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -21,17 +21,15 @@ class ApprovalStore:
     """
 
     @overload
-    def __init__(self, conn: ConnectionAdapter, *, user_id: str | None = None) -> None: ...
+    def __init__(self, conn: ConnectionAdapter) -> None: ...
     @overload
-    def __init__(self, conn: "Database", *, user_id: str | None = None) -> None: ...
+    def __init__(self, conn: "Database") -> None: ...
 
-    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+    def __init__(self, conn: Any) -> None:
         if isinstance(conn, ConnectionAdapter):
             self._conn = conn
         else:
             self._conn = conn.conn
-        self._user_id = user_id
-        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
 
     def save(self, record: dict[str, Any]) -> None:
         """保存或更新审批记录（upsert）。"""
@@ -64,7 +62,7 @@ class ApprovalStore:
                 record.get("repo_diff_after"),
                 json.dumps(record.get("changes", []), ensure_ascii=False),
                 json.dumps(record.get("binary_snapshots", []), ensure_ascii=False),
-                self._user_id,
+                None,
                 record.get("session_id"),
             ),
         )
@@ -73,8 +71,8 @@ class ApprovalStore:
     def get(self, approval_id: str) -> dict[str, Any] | None:
         """按 ID 获取审批记录。"""
         row = self._conn.execute(
-            f"SELECT * FROM approvals WHERE id = ? AND {self._uid_clause}",
-            (approval_id, *self._uid_params),
+            "SELECT * FROM approvals WHERE id = ?",
+            (approval_id,),
         ).fetchone()
         if row is None:
             return None
@@ -88,17 +86,17 @@ class ApprovalStore:
         session_id: str | None = None,
     ) -> list[dict[str, Any]]:
         """列出审批记录，可按状态和 session_id 过滤。"""
-        conditions = [self._uid_clause]
-        params: list[Any] = list(self._uid_params)
+        conditions: list[str] = []
+        params: list[Any] = []
         if status:
             conditions.append("execution_status = ?")
             params.append(status)
         if session_id is not None:
             conditions.append("session_id = ?")
             params.append(session_id)
-        where = " AND ".join(conditions)
+        where = f"WHERE {' AND '.join(conditions)}" if conditions else ""
         rows = self._conn.execute(
-            f"SELECT * FROM approvals WHERE {where} "
+            f"SELECT * FROM approvals {where} "
             "ORDER BY created_at_utc DESC LIMIT ? OFFSET ?",
             (*params, limit, offset),
         ).fetchall()
@@ -107,8 +105,8 @@ class ApprovalStore:
     def delete(self, approval_id: str) -> bool:
         """删除审批记录。返回是否成功。"""
         cur = self._conn.execute(
-            f"DELETE FROM approvals WHERE id = ? AND {self._uid_clause}",
-            (approval_id, *self._uid_params),
+            "DELETE FROM approvals WHERE id = ?",
+            (approval_id,),
         )
         self._conn.commit()
         return cur.rowcount > 0
@@ -116,8 +114,8 @@ class ApprovalStore:
     def update_undoable(self, approval_id: str, undoable: bool) -> bool:
         """更新审批记录的 undoable 标记。返回是否成功。"""
         cur = self._conn.execute(
-            f"UPDATE approvals SET undoable = ? WHERE id = ? AND {self._uid_clause}",
-            (1 if undoable else 0, approval_id, *self._uid_params),
+            "UPDATE approvals SET undoable = ? WHERE id = ?",
+            (1 if undoable else 0, approval_id,),
         )
         self._conn.commit()
         return cur.rowcount > 0

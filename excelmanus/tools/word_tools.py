@@ -9,7 +9,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.logger import get_logger
+from excelmanus.security import SecurityViolationError
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools._helpers import check_file_exists
 from excelmanus.tools.registry import ToolDef
@@ -23,23 +25,47 @@ _WORD_SUFFIXES: frozenset[str] = frozenset({".docx"})
 # ---------------------------------------------------------------------------
 
 
-def _resolve_path(file_path: str) -> tuple[Path, str | None]:
-    """解析并校验文件路径，返回 (safe_path, error_json)。"""
+def _error_dict(err: ToolResult | str) -> dict[str, Any]:
+    if isinstance(err, ToolResult) and isinstance(err.value, dict):
+        return err.value
+    if isinstance(err, str) and err.strip().startswith("{"):
+        try:
+            parsed = json.loads(err)
+        except (json.JSONDecodeError, TypeError):
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    return {"error": str(err)}
+
+
+def _resolve_path(file_path: str) -> tuple[Path, ToolResult | None]:
+    """解析并校验文件路径，返回 (safe_path, error_result)。"""
     guard = _get_ctx_guard()
     if guard is None:
-        return Path(file_path), None
-    safe = guard.resolve_and_validate(file_path)
+        return Path(), from_payload({
+            "error": "文件访问守卫未初始化",
+            "file_path": file_path,
+        })
+    try:
+        safe = guard.resolve_and_validate(file_path)
+    except SecurityViolationError as exc:
+        return Path(), from_payload({
+            "error": f"路径校验失败: {exc}",
+            "file_path": file_path,
+        })
     err = check_file_exists(safe, file_path, guard)
-    return safe, err
+    if err:
+        return Path(), err
+    return safe, None
 
 
-def _ensure_docx(file_path: str) -> str | None:
-    """如果文件不是 .docx 返回错误 JSON，否则返回 None。"""
+def _ensure_docx(file_path: str) -> ToolResult | None:
+    """如果文件不是 .docx 返回错误结果，否则返回 None。"""
     if not file_path.lower().endswith(".docx"):
-        return json.dumps({
+        return from_payload({
             "error": "仅支持 .docx 格式文件，当前文件不是 .docx",
             "file_path": file_path,
-        }, ensure_ascii=False)
+        })
     return None
 
 
@@ -114,7 +140,7 @@ def read_word(
     max_paragraphs: int = 100,
     include_format: bool = False,
     include_tables: bool = True,
-) -> str:
+) -> ToolResult:
     """读取 Word 文档段落和表格。
 
     Args:
@@ -135,7 +161,7 @@ def read_word(
     try:
         doc = _open_docx(safe_path)
     except Exception as exc:
-        return json.dumps({"error": f"无法打开文档: {exc}"}, ensure_ascii=False)
+        return from_payload({"error": f"无法打开文档: {exc}"})
 
     total = len(doc.paragraphs)
     end = min(offset + max_paragraphs, total)
@@ -175,7 +201,7 @@ def read_word(
         result["tables"] = tables
         result["total_tables"] = len(doc.tables)
 
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return from_payload(result)
 
 
 # ---------------------------------------------------------------------------
@@ -187,7 +213,7 @@ def write_word(
     file_path: str,
     *,
     operations: list[dict[str, Any]],
-) -> str:
+) -> ToolResult:
     """对 Word 文档执行写入操作。
 
     operations 列表中每个操作支持:
@@ -207,7 +233,7 @@ def write_word(
     try:
         doc = _open_docx(safe_path)
     except Exception as exc:
-        return json.dumps({"error": f"无法打开文档: {exc}"}, ensure_ascii=False)
+        return from_payload({"error": f"无法打开文档: {exc}"})
 
     applied: list[str] = []
     errors: list[str] = []
@@ -265,7 +291,7 @@ def write_word(
     try:
         doc.save(str(safe_path))
     except Exception as exc:
-        return json.dumps({"error": f"保存文档失败: {exc}"}, ensure_ascii=False)
+        return from_payload({"error": f"保存文档失败: {exc}"})
 
     result: dict[str, Any] = {
         "file": file_path,
@@ -274,7 +300,7 @@ def write_word(
     }
     if errors:
         result["errors"] = errors
-    return json.dumps(result, ensure_ascii=False)
+    return from_payload(result)
 
 
 # ---------------------------------------------------------------------------
@@ -287,7 +313,7 @@ def inspect_word(
     *,
     file_paths: list[str] | None = None,
     directory: str = ".",
-) -> str:
+) -> ToolResult:
     """检查 Word 文档的结构概览。
 
     可传单个 file_path 或多个 file_paths；若都为空则扫描 directory。
@@ -312,7 +338,7 @@ def inspect_word(
                     except ValueError:
                         paths.append(f.name)
         if not paths:
-            return json.dumps({"error": f"目录 '{directory}' 下未找到 Word 文件"}, ensure_ascii=False)
+            return from_payload({"error": f"目录 '{directory}' 下未找到 Word 文件"})
 
     results: list[dict[str, Any]] = []
 
@@ -323,7 +349,7 @@ def inspect_word(
 
         safe_path, err = _resolve_path(fp)
         if err:
-            results.append({"file": fp, "error": json.loads(err).get("error", err)})
+            results.append({"file": fp, "error": _error_dict(err).get("error", str(err))})
             continue
 
         try:
@@ -366,8 +392,8 @@ def inspect_word(
         results.append(info)
 
     if len(results) == 1:
-        return json.dumps(results[0], ensure_ascii=False, default=str)
-    return json.dumps({"files": results}, ensure_ascii=False, default=str)
+        return from_payload(results[0])
+    return from_payload({"files": results})
 
 
 # ---------------------------------------------------------------------------
@@ -383,7 +409,7 @@ def search_word(
     match_mode: str = "contains",
     case_sensitive: bool = False,
     max_results: int = 50,
-) -> str:
+) -> ToolResult:
     """在 Word 文档中搜索文本。
 
     match_mode: contains | exact | regex | startswith
@@ -394,7 +420,7 @@ def search_word(
     elif file_path:
         paths = [file_path]
     else:
-        return json.dumps({"error": "必须提供 file_path 或 file_paths"}, ensure_ascii=False)
+        return from_payload({"error": "必须提供 file_path 或 file_paths"})
 
     flags = 0 if case_sensitive else re.IGNORECASE
     matches: list[dict[str, Any]] = []
@@ -404,12 +430,12 @@ def search_word(
     for fp in paths[:10]:
         fmt_err = _ensure_docx(fp)
         if fmt_err:
-            errors.append(json.loads(fmt_err))
+            errors.append(_error_dict(fmt_err))
             continue
 
         safe_path, err = _resolve_path(fp)
         if err:
-            errors.append(json.loads(err))
+            errors.append(_error_dict(err))
             continue
 
         try:
@@ -453,7 +479,7 @@ def search_word(
             break
 
     if len(paths[:10]) == 1 and inspected_files == 0 and errors:
-        return json.dumps(errors[0], ensure_ascii=False, default=str)
+        return from_payload(errors[0])
 
     result: dict[str, Any] = {
         "query": query,
@@ -463,7 +489,7 @@ def search_word(
     }
     if errors:
         result["errors"] = errors
-    return json.dumps(result, ensure_ascii=False, default=str)
+    return from_payload(result)
 
 
 # ---------------------------------------------------------------------------

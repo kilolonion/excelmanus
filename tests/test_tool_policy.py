@@ -27,16 +27,15 @@ EXPECTED_MUTATING_CONFIRM_TOOLS = {
 }
 
 EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
-    # 文本文件操作（沙盒守卫，低风险）
     "write_text_file",
     "edit_text_file",
     "rename_file",
     "copy_file",
-    # 图表工具
-    "create_excel_chart",
-    # Vision 工具
-    "rebuild_excel_from_spec",
-    "verify_excel_replica",
+    "write_word",
+    "edit_spreadsheet",
+    "format_spreadsheet",
+    "manage_spreadsheet_objects",
+    "manage_spreadsheet_versions",
 }
 
 
@@ -78,7 +77,12 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
     mutating_like = {
         name
         for name in registered
-        if name in {"run_code", "run_shell", "rebuild_excel_from_spec", "verify_excel_replica"}
+        if name in {
+            "run_code",
+            "run_shell",
+            "manage_spreadsheet_objects",
+            "manage_spreadsheet_versions",
+        }
         or name.startswith(prefixes)
     }
     from excelmanus.tools.policy import CODE_POLICY_DYNAMIC_TOOLS

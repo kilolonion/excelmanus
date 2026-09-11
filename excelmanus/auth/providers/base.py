@@ -79,32 +79,6 @@ class AuthProfileRecord:
     updated_at: str
 
 
-@dataclass(frozen=True)
-class ProviderModelEntry:
-    """Provider 支持的模型条目。"""
-
-    model_id: str
-    display_name: str
-    public_id: str
-    profile_name: str
-    pro_only: bool = False
-
-
-@dataclass(frozen=True)
-class ProviderDescriptor:
-    """Provider 描述符，用于前端展示与 OAuth 流程选择。"""
-
-    id: str
-    label: str
-    protocol: str
-    base_url: str
-    supported_flows: tuple[str, ...]
-    models: tuple[ProviderModelEntry, ...]
-    default_model: str
-    thinking_mode: str = "auto"
-    model_family: str = ""
-
-
 class PKCECapable(ABC):
     """支持 PKCE OAuth 流程的 Provider 混入。"""
 
@@ -123,6 +97,26 @@ class PKCECapable(ABC):
         self, code: str, redirect_uri: str, code_verifier: str,
     ) -> ValidatedCredential:
         """用授权码交换 token。"""
+
+
+class DeviceCodeCapable(ABC):
+    """支持设备码登录的 Provider 混入。"""
+
+    @abstractmethod
+    async def request_user_code(self) -> dict[str, Any]:
+        """向认证服务申请设备码。"""
+
+    @abstractmethod
+    async def poll_device_auth(
+        self, device_auth_id: str, user_code: str,
+    ) -> dict[str, Any] | None:
+        """轮询设备授权；仍在等待时返回 None。"""
+
+    @abstractmethod
+    async def exchange_device_code(
+        self, authorization_code: str, code_verifier: str,
+    ) -> ValidatedCredential:
+        """用设备授权码交换 token。"""
 
 
 class AuthProvider(ABC):

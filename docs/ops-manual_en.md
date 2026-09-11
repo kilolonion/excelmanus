@@ -250,7 +250,7 @@ curl https://<YOUR_DOMAIN>/api/v1/health
 curl http://<BACKEND_IP>:8000/api/v1/health
 
 # Check frontend reachability
-curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/login
+curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/
 ```
 
 ---
@@ -351,19 +351,14 @@ The backend `.env` is located at `/opt/excelmanus/.env`. Key configurations:
 | `EXCELMANUS_MODEL` | Primary model name | Required |
 | `EXCELMANUS_PROTOCOL` | Primary model protocol type | `auto` |
 | `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`/`docker`) | `auto` |
-| `EXCELMANUS_AUX_*` | Auxiliary small model (routing/subagent/window advisor) | |
-| `EXCELMANUS_VLM_*` | Vision model (image extraction/enhanced description) | |
+| `EXCELMANUS_AUX_*` | Auxiliary model (subagent default, compaction, etc.) | |
+| `EXCELMANUS_MAIN_MODEL_VISION` | Whether the main model accepts image attachments (`auto`/`true`/`false`) | `auto` |
 | `EXCELMANUS_EMBEDDING_*` | Embedding model (semantic search/skill routing/error solutions) | |
 | `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Auto-generated if empty |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
-| `EXCELMANUS_VERIFIER_ENABLED` | Enable verification gate | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Must include frontend domain |
 | `EXCELMANUS_DATABASE_URL` | PostgreSQL connection URL (takes priority over SQLite) | Empty (uses SQLite) |
-| `EXCELMANUS_AUTH_ENABLED` | Whether to enable authentication | `true` |
-| `EXCELMANUS_JWT_SECRET` | JWT signing secret | Must be fixed in production |
-| `EXCELMANUS_GITHUB_*` | GitHub OAuth | |
-| `EXCELMANUS_GOOGLE_*` | Google OAuth | |
-| `EXCELMANUS_OAUTH_PROXY` | OAuth proxy | Required for China servers to access Google |
+| `EXCELMANUS_JWT_SECRET` | Optional JWT secret for download tokens | Auto-generated if unset |
 
 ---
 
@@ -542,7 +537,6 @@ Project Root/
 │       ├── client.py               # Embedding API client
 │       ├── semantic_memory.py      # Semantic memory retrieval
 │       ├── semantic_registry.py    # Semantic file registry
-│       ├── semantic_skill_router.py # Semantic skill routing
 │       └── error_solution_store.py  # Error→solution vector index
 ├── .env                   # Local development environment variables
 ├── mcp.json               # MCP server configuration

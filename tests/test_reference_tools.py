@@ -1,13 +1,19 @@
 """reference_tools 工具测试。"""
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.tools import reference_tools
+
+
+def _payload(result: ToolResult) -> dict:
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.value, dict)
+    return result.value
 
 
 @pytest.fixture()
@@ -45,18 +51,18 @@ def workspace(tmp_path: Path) -> Path:
 class TestGetReferenceMap:
     def test_returns_valid_json(self, workspace: Path) -> None:
         result = reference_tools.get_reference_map("test.xlsx")
-        data = json.loads(result)
+        data = _payload(result)
         assert "sheets" in data
         assert "cross_sheet_edges" in data
 
     def test_detects_sheets(self, workspace: Path) -> None:
-        data = json.loads(reference_tools.get_reference_map("test.xlsx"))
+        data = _payload(reference_tools.get_reference_map("test.xlsx"))
         assert "订单表" in data["sheets"]
         assert "产品表" in data["sheets"]
         assert "汇总表" in data["sheets"]
 
     def test_detects_cross_sheet_edges(self, workspace: Path) -> None:
-        data = json.loads(reference_tools.get_reference_map("test.xlsx"))
+        data = _payload(reference_tools.get_reference_map("test.xlsx"))
         edges = data["cross_sheet_edges"]
         assert len(edges) >= 1
         targets = {e["target_sheet"] for e in edges}
@@ -66,29 +72,27 @@ class TestGetReferenceMap:
 class TestTraceReferences:
     def test_precedents(self, workspace: Path) -> None:
         result = reference_tools.trace_references("test.xlsx", "订单表!C2", direction="precedents")
-        data = json.loads(result)
+        data = _payload(result)
         assert data["target"] == "订单表!C2"
         assert len(data["precedents"]) >= 1
 
     def test_dependents(self, workspace: Path) -> None:
         result = reference_tools.trace_references("test.xlsx", "订单表!D2", direction="dependents")
-        data = json.loads(result)
+        data = _payload(result)
         assert "dependents" in data
 
 
 class TestGetImpactAnalysis:
     def test_basic(self, workspace: Path) -> None:
         result = reference_tools.get_impact_analysis("test.xlsx", "产品表!B2")
-        data = json.loads(result)
+        data = _payload(result)
         assert "direct_impact" in data
         assert data["total_affected_cells"] >= 0
 
 
 class TestGetTools:
-    def test_returns_tools(self) -> None:
-        tools = reference_tools.get_tools()
-        assert len(tools) >= 3
-        names = {t.name for t in tools}
-        assert "get_reference_map" in names
-        assert "trace_references" in names
-        assert "get_impact_analysis" in names
+    def test_not_registered_on_model_surface(self) -> None:
+        from excelmanus.tools.intent_tools import get_tools
+        names = {tool.name for tool in get_tools()}
+        assert "get_reference_map" not in names
+        assert "trace_spreadsheet_formulas" in names

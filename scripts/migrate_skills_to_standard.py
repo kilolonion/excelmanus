@@ -116,14 +116,6 @@ def _extract_skillpack(frontmatter: dict[str, Any], body: str, skill_file: Path)
     metadata = raw_metadata if isinstance(raw_metadata, dict) else {}
     model = _as_optional_str(_pick(frontmatter, "model"))
 
-    command_dispatch = _as_str(
-        _pick(frontmatter, "command_dispatch", "command-dispatch"),
-        default="none",
-    )
-    if command_dispatch not in {"none", "tool"}:
-        command_dispatch = "none"
-    command_tool = _as_optional_str(_pick(frontmatter, "command_tool", "command-tool"))
-
     required_mcp_servers = _as_str_list(
         _pick(frontmatter, "required_mcp_servers", "required-mcp-servers")
     )
@@ -149,10 +141,6 @@ def _extract_skillpack(frontmatter: dict[str, Any], body: str, skill_file: Path)
         "hooks",
         "model",
         "metadata",
-        "command_dispatch",
-        "command-dispatch",
-        "command_tool",
-        "command-tool",
         "required_mcp_servers",
         "required-mcp-servers",
         "required_mcp_tools",
@@ -179,8 +167,6 @@ def _extract_skillpack(frontmatter: dict[str, Any], body: str, skill_file: Path)
         hooks=hooks,
         model=model,
         metadata=metadata,
-        command_dispatch=command_dispatch,
-        command_tool=command_tool,
         required_mcp_servers=required_mcp_servers,
         required_mcp_tools=required_mcp_tools,
         extensions=extensions,
@@ -208,10 +194,6 @@ def _build_frontmatter(skill: Skillpack, inject_defaults: bool) -> dict[str, Any
         payload["user-invocable"] = bool(skill.user_invocable)
     if inject_defaults or skill.argument_hint:
         payload["argument-hint"] = skill.argument_hint
-    if inject_defaults or skill.command_dispatch != "none":
-        payload["command-dispatch"] = skill.command_dispatch
-    if skill.command_tool:
-        payload["command-tool"] = skill.command_tool
     if skill.hooks:
         payload["hooks"] = skill.hooks
     if skill.model is not None:

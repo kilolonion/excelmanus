@@ -1,8 +1,9 @@
-"""模块化提示词组装引擎。
+"""有序提示词段组装，对齐 dsh-excel 的 system-prompt 约定。
 
-将 memory.py 中硬编码的系统提示词迁移为独立 .md 文件，
-通过 YAML frontmatter 声明元数据（优先级、版本、匹配条件），
-由 PromptComposer 负责加载、条件匹配和预算裁剪。
+段用 ``name`` + ``order`` 注册：``harness:identity``（-100）、
+``deployment:persona``（0）、工具/工作流引导（100–199）。
+字段细节在工具 schema，不在全局段里展开。
+``{{variable}}`` 在渲染时插值。不搬 Cordis / waterfall。
 """
 
 from __future__ import annotations
@@ -30,6 +31,7 @@ class PromptSegment:
     priority: int
     layer: str  # "core" | "strategy" | "subagent"
     content: str
+    order: int = 0
     max_tokens: int = 0  # 0 表示不限
     min_tokens: int = 0
     conditions: dict[str, Any] = field(default_factory=dict)
@@ -40,12 +42,6 @@ class PromptContext:
     """当前请求的上下文信号，用于策略匹配。"""
 
     chat_mode: str = "write"  # 取值："write" | "read" | "plan"
-    write_hint: str = "unknown"
-    sheet_count: int = 0
-    total_rows: int = 0
-    file_count: int = 0
-    task_tags: list[str] = field(default_factory=list)
-    user_message: str = ""
     full_access: bool = False
 
 
@@ -71,12 +67,15 @@ def parse_prompt_file(path: Path) -> PromptSegment:
         if f not in meta:
             raise ValueError(f"缺少必填字段 {f!r}: {path}")
     content = raw[m.end():].strip()
+    priority = int(meta["priority"])
+    order = int(meta["order"]) if "order" in meta else priority
     return PromptSegment(
         name=str(meta["name"]),
         version=str(meta.get("version", "0.0.0")),
-        priority=int(meta["priority"]),
+        priority=priority,
         layer=str(meta["layer"]),
         content=content,
+        order=order,
         max_tokens=int(meta.get("max_tokens", 0)),
         min_tokens=int(meta.get("min_tokens", 0)),
         conditions=dict(meta.get("conditions", {}) or {}),
@@ -149,45 +148,68 @@ class PromptComposer:
         self,
         ctx: PromptContext,
         token_budget: int = 0,
+        *,
+        include_strategies: bool = False,
     ) -> list[PromptSegment]:
         """根据上下文匹配并组装提示词段。
 
         流程:
         1. 始终包含所有 core/ 段
-        2. 对 strategies/ 段做条件匹配
+        2. （可选）对 strategies/ 段做条件匹配
         3. 按 priority 排序
         4. 按 token_budget 裁剪（低优先级先丢弃）
+
+        默认 ``include_strategies=False``：稳定前缀只含 core；策略由
+        ``compose_strategies_text`` 在请求动态段注入一次。
         """
         selected: list[PromptSegment] = list(self.core_segments)
-        for strat in self.strategy_segments:
-            if self._match_conditions(strat.conditions, ctx):
-                selected.append(strat)
-        selected.sort(key=lambda s: s.priority)
+        if include_strategies:
+            for strat in self.strategy_segments:
+                if self._match_conditions(strat.conditions, ctx):
+                    selected.append(strat)
+        selected.sort(key=lambda s: (s.order, s.priority, s.name))
         if token_budget > 0:
             selected = self._apply_budget(selected, token_budget)
         return selected
+
+    def compose_core_text(
+        self,
+        ctx: PromptContext,
+        token_budget: int = 0,
+        variables: dict[str, str] | None = None,
+    ) -> str:
+        """仅返回 core 层文本（身份 + 原则），用于稳定系统前缀。"""
+        segments = self.compose(ctx, token_budget, include_strategies=False)
+        text = "\n\n".join(seg.content for seg in segments)
+        return self._substitute(text, variables)
 
     def compose_text(
         self,
         ctx: PromptContext,
         token_budget: int = 0,
         variables: dict[str, str] | None = None,
+        *,
+        include_strategies: bool = False,
     ) -> str:
         """compose() 的便捷版本，直接返回拼接后的文本。
+
+        默认 ``include_strategies=False``（仅 core）。任务策略请用
+        ``compose_strategies_text``，避免与稳定前缀双注入。
 
         Args:
             variables: 运行时变量字典，键值对会替换文本中的 ``{key}`` 占位符。
         """
-        segments = self.compose(ctx, token_budget)
+        segments = self.compose(ctx, token_budget, include_strategies=include_strategies)
         text = "\n\n".join(seg.content for seg in segments)
         return self._substitute(text, variables)
 
     @staticmethod
     def _substitute(text: str, variables: dict[str, str] | None) -> str:
-        """统一占位符替换：将文本中的 ``{key}`` 替换为 *variables* 中的对应值。"""
+        """插值 ``{{key}}``（dsh-excel）与 ``{key}``。"""
         if not variables or not text:
             return text
         for key, value in variables.items():
+            text = text.replace(f"{{{{{key}}}}}", value)
             text = text.replace(f"{{{key}}}", value)
         return text
 
@@ -208,7 +230,7 @@ class PromptComposer:
         ]
         if not matched:
             return ""
-        matched.sort(key=lambda s: s.priority)
+        matched.sort(key=lambda s: (s.order, s.priority, s.name))
         text = "\n\n".join(seg.content for seg in matched)
         return self._substitute(text, variables)
 
@@ -229,7 +251,7 @@ class PromptComposer:
             inherit_strategies: 要继承的策略名称列表。特殊值：
                 ``"__universal__"`` — 所有无条件策略（conditions 为空）；
                 ``"__all__"`` — 所有策略。
-                也可指定具体名称如 ``["error_recovery", "sandbox_awareness"]``。
+                也可指定具体名称如 ``["spreadsheet:workflow", "tool:run_code"]``。
             variables: 运行时变量字典，键值对会替换文本中的 ``{key}`` 占位符。
 
         Returns:
@@ -310,7 +332,7 @@ class PromptComposer:
 
         if not selected:
             return ""
-        selected.sort(key=lambda s: s.priority)
+        selected.sort(key=lambda s: (s.order, s.priority, s.name))
         return "\n\n".join(seg.content for seg in selected)
 
     @staticmethod
@@ -340,20 +362,7 @@ class PromptComposer:
         if not conditions:
             return True
         for key, value in conditions.items():
-            if key == "write_hint":
-                if ctx.write_hint != value:
-                    return False
-            elif key == "sheet_count_gte":
-                if ctx.sheet_count < int(value):
-                    return False
-            elif key == "total_rows_gte":
-                if ctx.total_rows < int(value):
-                    return False
-            elif key == "task_tags":
-                expected = set(value) if isinstance(value, list) else {value}
-                if not expected & set(ctx.task_tags):
-                    return False
-            elif key == "chat_mode":
+            if key == "chat_mode":
                 expected_modes = {value} if isinstance(value, str) else set(value)
                 if ctx.chat_mode not in expected_modes:
                     return False
@@ -361,7 +370,8 @@ class PromptComposer:
                 expected_val = bool(value)
                 if ctx.full_access != expected_val:
                     return False
-            # 未知条件键：忽略（宽松匹配，便于扩展）
+            else:
+                return False
         return True
 
     @staticmethod

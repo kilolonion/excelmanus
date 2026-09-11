@@ -99,6 +99,18 @@ class MentionResolver:
                 )
         return results
 
+    def _remember_file_version(self, mention: Mention, path: Path) -> None:
+        from excelmanus.workbook_commit import content_version_of_file, remember_content_version
+
+        version = mention.content_version or content_version_of_file(path)
+        if version:
+            remember_content_version(mention.value, version)
+            try:
+                rel = str(path.resolve().relative_to(Path(self._workspace_root).resolve()))
+                remember_content_version(rel.replace("\\", "/"), version)
+            except ValueError:
+                pass
+
     # ── file 解析 ─────────────────────────────────────────
 
     def _resolve_file(self, mention: Mention) -> ResolvedMention:
@@ -123,10 +135,14 @@ class MentionResolver:
         suffix = resolved_path.suffix.lower()
         if suffix in _EXCEL_EXTENSIONS:
             if mention.range_spec:
-                return self._resolve_excel_range(mention, resolved_path)
-            return self._resolve_excel_file(mention, resolved_path)
+                resolved = self._resolve_excel_range(mention, resolved_path)
+            else:
+                resolved = self._resolve_excel_file(mention, resolved_path)
         else:
-            return self._resolve_text_file(mention, resolved_path)
+            resolved = self._resolve_text_file(mention, resolved_path)
+        if not resolved.error:
+            self._remember_file_version(mention, resolved_path)
+        return resolved
 
     def _resolve_excel_file(
         self, mention: Mention, path: Path

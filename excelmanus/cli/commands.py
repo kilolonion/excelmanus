@@ -374,8 +374,6 @@ def to_standard_skill_detail(detail: dict) -> dict:
         ("disable_model_invocation", "disable-model-invocation"),
         ("user_invocable", "user-invocable"),
         ("argument_hint", "argument-hint"),
-        ("command_dispatch", "command-dispatch"),
-        ("command_tool", "command-tool"),
         ("required_mcp_servers", "required-mcp-servers"),
         ("required_mcp_tools", "required-mcp-tools"),
     )
@@ -984,7 +982,7 @@ def _handle_config_export(
     user_input: str,
     workspace_root: str = ".",
 ) -> bool:
-    """处理 /config export [--simple] [--sections main,aux,vlm,profiles]。"""
+    """处理 /config export [--simple] [--sections main,aux,profiles]。"""
     from getpass import getpass
 
     from excelmanus.config import load_config
@@ -992,7 +990,7 @@ def _handle_config_export(
 
     parts = user_input.split()
     mode = "password"
-    section_names = ["main", "aux", "vlm", "profiles"]
+    section_names = ["main", "aux", "profiles"]
 
     idx = 2  # 跳过 "/config export"
     while idx < len(parts):
@@ -1014,8 +1012,6 @@ def _handle_config_export(
         sections["main"] = {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model, "protocol": cfg.protocol}
     if "aux" in section_names:
         sections["aux"] = {"api_key": cfg.aux_api_key or "", "base_url": cfg.aux_base_url or "", "model": cfg.aux_model or "", "protocol": cfg.aux_protocol}
-    if "vlm" in section_names:
-        sections["vlm"] = {"api_key": cfg.vlm_api_key or "", "base_url": cfg.vlm_base_url or "", "model": cfg.vlm_model or "", "protocol": cfg.vlm_protocol}
     if "profiles" in section_names:
         profiles = [
             {"name": p.name, "model": p.model, "api_key": p.api_key, "base_url": p.base_url, "description": p.description, "protocol": p.protocol}
@@ -1103,10 +1099,9 @@ def _handle_config_import(
     _ENV_KEY_MAP = {
         "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL", "protocol": "EXCELMANUS_PROTOCOL"},
         "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "protocol": "EXCELMANUS_AUX_PROTOCOL"},
-        "vlm": {"api_key": "EXCELMANUS_VLM_API_KEY", "base_url": "EXCELMANUS_VLM_BASE_URL", "model": "EXCELMANUS_VLM_MODEL", "protocol": "EXCELMANUS_VLM_PROTOCOL"},
     }
 
-    for section_key in ("main", "aux", "vlm"):
+    for section_key in ("main", "aux"):
         data = sections.get(section_key)
         if not isinstance(data, dict):
             continue

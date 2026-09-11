@@ -11,8 +11,6 @@ import {
   BookOpen,
 } from "lucide-react";
 import { useUIStore } from "@/stores/ui-store";
-import { useAuthStore } from "@/stores/auth-store";
-import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { SlidePanel } from "@/components/ui/slide-panel";
 import {
   ChannelOverviewTab,
@@ -139,8 +137,6 @@ function TabBar({
 export function ChannelsPanel() {
   const channelsOpen = useUIStore((s) => s.channelsOpen);
   const closeChannels = useUIStore((s) => s.closeChannels);
-  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
-  const user = useAuthStore((s) => s.user);
 
   const [activeTab, setActiveTab] = useState("channels");
   const [status, setStatus] = useState<ChannelStatusInfo | null>(null);
@@ -175,7 +171,7 @@ export function ChannelsPanel() {
   }, []);
 
   const runningCount = status?.channels?.length || 0;
-  const showBind = authEnabled && !!user;
+  const showBind = false;
 
   return (
     <SlidePanel

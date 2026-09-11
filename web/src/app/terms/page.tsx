@@ -10,14 +10,14 @@ export default function TermsPage() {
         {/* Header */}
         <div className="mb-8">
           <Link
-            href="/register"
+            href="/"
             className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors mb-6"
           >
             <ArrowLeft className="h-4 w-4" />
-            返回注册
+            返回首页
           </Link>
           <h1 className="text-3xl font-bold tracking-tight">用户服务协议</h1>
-          <p className="text-muted-foreground text-sm mt-2">版本 v1.0.0 · 最近更新日期：2026 年 2 月 28 日</p>
+          <p className="text-muted-foreground text-sm mt-2">版本 v1.0.0 · 最近更新日期：2026 年 9 月 11 日</p>
         </div>
 
         {/* Content */}
@@ -25,7 +25,7 @@ export default function TermsPage() {
           <p>
             欢迎使用 ExcelManus（以下简称「本产品」）。本产品由 kilolonion（以下简称「我们」）基于 Apache License 2.0
             开源协议开发并运营。请您在使用本产品前仔细阅读本协议的全部内容。
-            <strong>一旦您注册、登录或以任何方式使用本产品，即视为您已充分理解并同意本协议。</strong>
+            <strong>一旦您使用本产品，即视为您已充分理解并同意本协议。</strong>
           </p>
 
           <hr className="border-border" />
@@ -44,12 +44,12 @@ export default function TermsPage() {
             <li>本产品为开源项目，用户可自行部署。我们提供的在线演示服务仅供体验和测试用途。</li>
           </ol>
 
-          <h2>三、账号注册与管理</h2>
+          <h2>三、使用与部署</h2>
           <ol>
-            <li>您在注册时应提供真实、准确的信息，并妥善保管账号及密码。因账号信息泄露导致的一切后果由您自行承担。</li>
-            <li>每位用户仅可注册一个账号，不得通过批量注册、机器人注册等方式滥用服务资源。</li>
-            <li>您有权随时注销账号。注销后，我们将在合理期限内删除您的个人信息（法律法规要求保留的除外）。</li>
-            <li>我们有权对异常账号（包括但不限于长期未使用、违规使用、批量注册等）进行清理或停用。</li>
+            <li>本产品为单用户自托管软件，不提供产品级账号注册或登录。</li>
+            <li>您自行保管部署环境、工作区文件与模型凭证（API Key 或第三方订阅 OAuth 令牌）。因凭证泄露导致的后果由您自行承担。</li>
+            <li>ChatGPT/Codex 等第三方订阅登录由对应服务商提供，受其服务条款约束，不构成本产品账号。</li>
+            <li>我们有权对公开演示环境中的滥用行为采取限制访问或暂停服务等措施。</li>
           </ol>
 
           <h2>四、用户行为规范</h2>
@@ -105,7 +105,7 @@ export default function TermsPage() {
           <ol>
             <li>如您发现本产品中存在违法违规内容或行为，可通过邮箱 kilolonion@gmail.com 或 GitHub Issues 举报。</li>
             <li>我们将在收到举报后尽快核实处理，并反馈结果。</li>
-            <li>对违规用户，我们将视情节轻重采取警示、限制功能、暂停服务或终止账号等措施。</li>
+            <li>对违规使用，我们将视情节轻重采取警示、限制功能或暂停服务等措施。</li>
           </ol>
 
           <h2>十一、协议变更</h2>
@@ -127,7 +127,7 @@ export default function TermsPage() {
 
           <p className="text-center">
             <strong>kilolonion</strong><br />
-            2026 年 2 月 28 日
+            2026 年 9 月 11 日
           </p>
         </article>
 
@@ -136,8 +136,8 @@ export default function TermsPage() {
           <Link href="/privacy" className="hover:text-foreground transition-colors">
             隐私政策 →
           </Link>
-          <Link href="/register" className="hover:text-foreground transition-colors">
-            返回注册
+          <Link href="/" className="hover:text-foreground transition-colors">
+            返回首页
           </Link>
         </div>
       </div>

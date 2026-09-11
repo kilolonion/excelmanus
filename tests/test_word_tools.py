@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
@@ -13,9 +12,11 @@ from excelmanus.database import Database
 from excelmanus.file_registry import FileRegistry
 from excelmanus.security.guard import FileAccessGuard
 from excelmanus.tools._guard_ctx import reset_guard, set_guard
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.tools.word_tools import (
     _ensure_docx,
     _heading_level,
+    _resolve_path,
     _run_to_dict,
     inspect_word,
     read_word,
@@ -23,6 +24,12 @@ from excelmanus.tools.word_tools import (
     write_word,
 )
 
+
+
+def _payload(result: ToolResult) -> dict:
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.value, dict)
+    return result.value
 
 @pytest.fixture(autouse=True)
 def _set_guard(tmp_path: Path):
@@ -56,7 +63,7 @@ class TestReadWord:
         table.cell(1, 1).text = "42"
         doc.save(path)
 
-        result = json.loads(read_word(path.name))
+        result = _payload(read_word(path.name))
 
         assert result["file"] == path.name
         assert result["total_paragraphs"] == 2
@@ -68,7 +75,7 @@ class TestReadWord:
     def test_offset_pagination(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "paged.docx", ["A", "B", "C"])
 
-        result = json.loads(read_word(path.name, offset=1, max_paragraphs=1))
+        result = _payload(read_word(path.name, offset=1, max_paragraphs=1))
 
         assert result["offset"] == 1
         assert result["returned"] == 1
@@ -87,7 +94,7 @@ class TestReadWord:
         run.font.color.rgb = RGBColor(0x11, 0x22, 0x33)
         doc.save(path)
 
-        result = json.loads(read_word(path.name, include_format=True))
+        result = _payload(read_word(path.name, include_format=True))
 
         run_data = result["paragraphs"][0]["runs"][0]
         assert run_data["text"] == "Styled"
@@ -103,7 +110,7 @@ class TestReadWord:
         doc.add_table(rows=1, cols=1).cell(0, 0).text = "hidden"
         doc.save(path)
 
-        result = json.loads(read_word(path.name, include_tables=False))
+        result = _payload(read_word(path.name, include_tables=False))
 
         assert "tables" not in result
         assert "total_tables" not in result
@@ -112,7 +119,7 @@ class TestReadWord:
         path = tmp_path / "empty.docx"
         Document().save(path)
 
-        result = json.loads(read_word(path.name))
+        result = _payload(read_word(path.name))
 
         assert result["total_paragraphs"] == 0
         assert result["returned"] == 0
@@ -124,7 +131,7 @@ class TestWriteWord:
     def test_replace(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "replace.docx")
 
-        result = json.loads(
+        result = _payload(
             write_word(path.name, operations=[{"action": "replace", "index": 0, "text": "Updated"}])
         )
 
@@ -134,7 +141,7 @@ class TestWriteWord:
     def test_insert_after_regression(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "insert.docx")
 
-        result = json.loads(
+        result = _payload(
             write_word(path.name, operations=[{"action": "insert_after", "index": 0, "text": "Inserted"}])
         )
 
@@ -145,7 +152,7 @@ class TestWriteWord:
     def test_append(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "append.docx")
 
-        result = json.loads(write_word(path.name, operations=[{"action": "append", "text": "Tail"}]))
+        result = _payload(write_word(path.name, operations=[{"action": "append", "text": "Tail"}]))
 
         assert result["applied"] == ["append paragraph"]
         assert _paragraph_texts(path) == ["Hello", "World", "Tail"]
@@ -153,7 +160,7 @@ class TestWriteWord:
     def test_delete(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "delete.docx")
 
-        result = json.loads(write_word(path.name, operations=[{"action": "delete", "index": 0}]))
+        result = _payload(write_word(path.name, operations=[{"action": "delete", "index": 0}]))
 
         assert result["applied"] == ["delete paragraph 0"]
         assert _paragraph_texts(path) == ["World"]
@@ -161,7 +168,7 @@ class TestWriteWord:
     def test_out_of_range_index_returns_error(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "bounds.docx")
 
-        result = json.loads(
+        result = _payload(
             write_word(path.name, operations=[{"action": "replace", "index": 9, "text": "Never"}])
         )
 
@@ -172,7 +179,7 @@ class TestWriteWord:
     def test_multiple_operations_batch(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "batch.docx", ["A", "B"])
 
-        result = json.loads(
+        result = _payload(
             write_word(
                 path.name,
                 operations=[
@@ -198,7 +205,7 @@ class TestInspectWord:
         doc.add_table(rows=1, cols=2)
         doc.save(path)
 
-        result = json.loads(inspect_word(file_path=path.name))
+        result = _payload(inspect_word(file_path=path.name))
 
         assert result["file"] == path.name
         assert result["title"] == "Quarterly Review"
@@ -210,7 +217,7 @@ class TestInspectWord:
         first = _make_test_doc(tmp_path / "first.docx", ["One"])
         second = _make_test_doc(tmp_path / "second.docx", ["Two"])
 
-        result = json.loads(inspect_word(file_paths=[first.name, second.name]))
+        result = _payload(inspect_word(file_paths=[first.name, second.name]))
 
         files = {entry["file"] for entry in result["files"]}
         assert files == {first.name, second.name}
@@ -220,7 +227,7 @@ class TestInspectWord:
         _make_test_doc(tmp_path / "b.docx")
         (tmp_path / "notes.txt").write_text("skip me", encoding="utf-8")
 
-        result = json.loads(inspect_word(directory="."))
+        result = _payload(inspect_word(directory="."))
 
         files = {entry["file"] for entry in result["files"]}
         assert files == {"a.docx", "b.docx"}
@@ -229,14 +236,14 @@ class TestInspectWord:
         _make_test_doc(tmp_path / "current.docx", ["Current"])
         (tmp_path / "legacy.doc").write_bytes(b"legacy-doc")
 
-        result = json.loads(inspect_word(directory="."))
+        result = _payload(inspect_word(directory="."))
 
         assert result["file"] == "current.docx"
 
     def test_non_docx_file_returns_error(self, tmp_path: Path) -> None:
         (tmp_path / "notes.txt").write_text("plain text", encoding="utf-8")
 
-        result = json.loads(inspect_word(file_paths=["notes.txt"]))
+        result = _payload(inspect_word(file_paths=["notes.txt"]))
 
         assert result["file"] == "notes.txt"
         assert "docx" in result["error"].lower()
@@ -246,7 +253,7 @@ class TestSearchWord:
     def test_contains(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "contains.docx", ["Hello world", "Bye"])
 
-        result = json.loads(search_word("world", file_path=path.name))
+        result = _payload(search_word("world", file_path=path.name))
 
         assert result["match_mode"] == "contains"
         assert result["total_matches"] == 1
@@ -255,7 +262,7 @@ class TestSearchWord:
     def test_exact(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "exact.docx", ["world", "worldwide"])
 
-        result = json.loads(search_word("world", file_path=path.name, match_mode="exact"))
+        result = _payload(search_word("world", file_path=path.name, match_mode="exact"))
 
         assert result["total_matches"] == 1
         assert result["matches"][0]["text"] == "world"
@@ -263,7 +270,7 @@ class TestSearchWord:
     def test_regex(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "regex.docx", ["Item 42", "Other"])
 
-        result = json.loads(search_word(r"Item \d+", file_path=path.name, match_mode="regex"))
+        result = _payload(search_word(r"Item \d+", file_path=path.name, match_mode="regex"))
 
         assert result["total_matches"] == 1
         assert result["matches"][0]["text"] == "Item 42"
@@ -271,7 +278,7 @@ class TestSearchWord:
     def test_startswith(self, tmp_path: Path) -> None:
         path = _make_test_doc(tmp_path / "startswith.docx", ["Intro line", "Tail"])
 
-        result = json.loads(search_word("Intro", file_path=path.name, match_mode="startswith"))
+        result = _payload(search_word("Intro", file_path=path.name, match_mode="startswith"))
 
         assert result["total_matches"] == 1
         assert result["matches"][0]["text"] == "Intro line"
@@ -280,7 +287,7 @@ class TestSearchWord:
         first = _make_test_doc(tmp_path / "first.docx", ["alpha"])
         second = _make_test_doc(tmp_path / "second.docx", ["beta alpha"])
 
-        result = json.loads(search_word("alpha", file_paths=[first.name, second.name]))
+        result = _payload(search_word("alpha", file_paths=[first.name, second.name]))
 
         assert result["total_matches"] == 2
         files = {match["file"] for match in result["matches"]}
@@ -289,7 +296,7 @@ class TestSearchWord:
     def test_doc_file_returns_error(self, tmp_path: Path) -> None:
         (tmp_path / "legacy.doc").write_bytes(b"legacy-doc")
 
-        result = json.loads(search_word("legacy", file_path="legacy.doc"))
+        result = _payload(search_word("legacy", file_path="legacy.doc"))
 
         assert result["file_path"] == "legacy.doc"
         assert "docx" in result["error"].lower()
@@ -313,7 +320,7 @@ class TestFileRegistryWordPolicy:
 class TestHelpers:
     def test_ensure_docx_validation(self) -> None:
         assert _ensure_docx("report.docx") is None
-        error = json.loads(_ensure_docx("report.txt"))
+        error = _payload(_ensure_docx("report.txt"))
         assert error["file_path"] == "report.txt"
 
     def test_heading_level_parsing(self) -> None:
@@ -349,3 +356,40 @@ class TestHelpers:
                 "color": "AABBCC",
             },
         }
+
+
+class TestGuardRequired:
+    """未初始化 FileAccessGuard 时不得读写任意路径。"""
+
+    def test_resolve_path_without_guard_returns_error_json(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr("excelmanus.tools.word_tools._get_ctx_guard", lambda: None)
+
+        _safe, err = _resolve_path("/tmp/outside.docx")
+
+        assert err is not None
+        payload = _payload(err)
+        assert "error" in payload
+        assert payload.get("file_path") == "/tmp/outside.docx"
+
+    def test_write_word_without_guard_cannot_write_outside_workspace(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        outside = tmp_path.parent / "excelmanus_unguarded_escape.docx"
+        _make_test_doc(outside, ["original"])
+        monkeypatch.setattr("excelmanus.tools.word_tools._get_ctx_guard", lambda: None)
+
+        try:
+            result = _payload(
+                write_word(
+                    str(outside),
+                    operations=[{"action": "append", "text": "pwned"}],
+                )
+            )
+
+            assert "error" in result
+            assert _paragraph_texts(outside) == ["original"]
+        finally:
+            if outside.exists():
+                outside.unlink()

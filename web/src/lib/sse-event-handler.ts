@@ -5,7 +5,7 @@
  * 调用方只需构建 `SSEHandlerContext` 并在 consumeSSE 回调中传递给该函数。
  */
 
-import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
+import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
@@ -129,6 +129,8 @@ export function getLastAssistantMessage(
   messages: ReturnType<typeof useChatStore.getState>["messages"],
   id: string,
 ) {
+  const byId = useChatStore.getState().messagesById[id];
+  if (byId && byId.role === "assistant") return byId;
   const msg = messages.find((m) => m.id === id);
   if (msg && msg.role === "assistant") return msg;
   return null;
@@ -191,15 +193,12 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (!ctx.isFirstSend) break; // continuation / subscribe 跳过
       const sid = data.session_id as string;
       const ss = useSessionStore.getState();
-      if (!ss.activeSessionId) {
+      if (ss.activeSessionId !== sid) {
         ss.setActiveSession(sid);
       }
       const chatState = S();
-      if (chatState.currentSessionId !== sid) {
-        if (chatState.currentSessionId && chatState.messages.length > 0) {
-          chatState.saveCurrentSession();
-        }
-        useChatStore.setState({ currentSessionId: sid });
+      if (chatState.loadedSessionId !== sid) {
+        chatState.bindLoadedSession(sid);
       }
       if (ctx.userText) {
         ss.updateSessionTitle(ss.activeSessionId || sid, ctx.userText.slice(0, 20));
@@ -255,45 +254,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
 
     // --- 流水线进度 ---
     case "pipeline_progress": {
-      const stage = (data.stage as string) || "";
-      const pipelineMsg = (data.message as string) || "";
-      const progressToolCallId = (data.tool_call_id as string) || "";
       S().setPipelineStatus({
-        stage,
-        message: pipelineMsg,
+        stage: (data.stage as string) || "working",
+        message: (data.message as string) || "",
         startedAt: Date.now(),
-        phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-        totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-        specPath: (data.spec_path as string) || undefined,
-        diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
-        checkpoint: (data.checkpoint as Record<string, unknown>) ?? undefined,
-        batchIndex: typeof data.batch_index === "number" ? data.batch_index : undefined,
-        batchTotal: typeof data.batch_total === "number" ? data.batch_total : undefined,
       });
-      if (progressToolCallId) {
-        S().setToolProgress(progressToolCallId, {
-          stage,
-          message: pipelineMsg,
-          phaseIndex: typeof data.phase_index === "number" ? data.phase_index : undefined,
-          totalPhases: typeof data.total_phases === "number" ? data.total_phases : undefined,
-        });
-      }
-      // 兼容 VLM 图片提取用于时间线卡片（无需异步提交）
-      if (ctx.isFirstSend) {
-        const phaseIndex = typeof data.phase_index === "number" ? data.phase_index : undefined;
-        const totalPhases = typeof data.total_phases === "number" ? data.total_phases : undefined;
-        if ((stage.startsWith("vlm_extract_") || stage.startsWith("single_pass")) && phaseIndex != null && totalPhases != null) {
-          S().pushVlmPhase({
-            stage,
-            message: pipelineMsg,
-            startedAt: Date.now(),
-            diff: (data.diff as PipelineStatus["diff"]) ?? undefined,
-            specPath: (data.spec_path as string) || undefined,
-            phaseIndex,
-            totalPhases,
-          });
-        }
-      }
       break;
     }
 
@@ -473,27 +438,26 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         }
         return b;
       });
-      // 从 run_code 等工具结果中提取合并结果到 store
-      if (data.success) {
-        const toolName = (data.tool_name as string) || "";
-        const resultStr = (data.result as string) || "";
-        if (["run_code", "discover_file_relationships", "compare_excel"].includes(toolName) && resultStr.trimStart().startsWith("{")) {
-          try {
-            const parsed = JSON.parse(resultStr.trim());
-            if (parsed && typeof parsed === "object" && (typeof parsed.rows_matched === "number" || typeof parsed.matched_count === "number" || typeof parsed.output_file === "string")) {
-              const src = parsed.merge_result ?? parsed;
-              useExcelStore.getState().setMergeResult({
-                sourceFiles: Array.isArray(src.source_files) ? src.source_files : [],
-                outputFile: src.output_file ?? src.output ?? "",
-                rowsMatched: src.rows_matched ?? src.matched_count ?? 0,
-                rowsAdded: src.rows_added ?? src.added_count ?? 0,
-                rowsUnmatched: src.rows_unmatched ?? src.unmatched_count ?? 0,
-                keyColumns: Array.isArray(src.key_columns) ? src.key_columns : [],
-                joinType: src.join_type ?? src.how ?? "",
-                toolCallId: toolCallId ?? "",
-              });
-            }
-          } catch { /* not JSON or no merge fields */ }
+      if (data.success && data.ui && typeof data.ui === "object") {
+        const merge = (data.ui as Record<string, unknown>).merge;
+        if (merge && typeof merge === "object") {
+          const src = merge as Record<string, unknown>;
+          if (
+            typeof src.rows_matched === "number"
+            || typeof src.matched_count === "number"
+            || typeof src.output_file === "string"
+          ) {
+            useExcelStore.getState().setMergeResult({
+              sourceFiles: Array.isArray(src.source_files) ? src.source_files as string[] : [],
+              outputFile: (src.output_file ?? src.output ?? "") as string,
+              rowsMatched: (src.rows_matched ?? src.matched_count ?? 0) as number,
+              rowsAdded: (src.rows_added ?? src.added_count ?? 0) as number,
+              rowsUnmatched: (src.rows_unmatched ?? src.unmatched_count ?? 0) as number,
+              keyColumns: Array.isArray(src.key_columns) ? src.key_columns as string[] : [],
+              joinType: (src.join_type ?? src.how ?? "") as string,
+              toolCallId: toolCallId ?? "",
+            });
+          }
         }
       }
       break;
@@ -791,18 +755,6 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         content: (data.content as string) || "",
         lineCount: (data.line_count as number) || 0,
         truncated: !!data.truncated,
-      });
-      break;
-    }
-
-    case "verification_report": {
-      S().appendBlock(msgId, {
-        type: "verification_report",
-        verdict: (data.verdict as "pass" | "fail" | "unknown") || "unknown",
-        confidence: (data.confidence as "high" | "medium" | "low") || "low",
-        checks: (data.checks as string[]) || [],
-        issues: (data.issues as string[]) || [],
-        mode: (data.mode as "advisory" | "blocking") || "advisory",
       });
       break;
     }

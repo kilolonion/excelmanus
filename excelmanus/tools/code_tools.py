@@ -15,6 +15,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from excelmanus.engine_core.tool_result import (
+    ToolError,
+    ToolResult,
+    ToolUiMeta,
+    error_result,
+    ok_result,
+)
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
@@ -79,6 +86,77 @@ def _is_docker_sandbox() -> bool:
     if env is not None:
         return getattr(env, "docker_enabled", False)
     return _docker_sandbox_enabled
+
+
+def _apply_code_mode_env(
+    env: dict[str, str],
+    *,
+    workspace_root: Path,
+    to_container: bool = False,
+) -> None:
+    """把 Code Mode 文件桥路径注入子进程环境。"""
+    try:
+        from excelmanus.code_mode import get_code_mode_session
+    except Exception:
+        return
+    session = get_code_mode_session()
+    if session is None:
+        return
+    try:
+        session.prepare()
+    except Exception:
+        return
+    bridge = Path(session.bridge_dir)
+    sdk = Path(session.sdk_path)
+    if to_container:
+        from excelmanus.security.docker_sandbox import host_to_container_path
+
+        env["EXCELMANUS_CODE_MODE_BRIDGE"] = host_to_container_path(bridge, workspace_root)
+        env["EXCELMANUS_CODE_MODE_SDK"] = host_to_container_path(sdk, workspace_root)
+    else:
+        env["EXCELMANUS_CODE_MODE_BRIDGE"] = str(bridge)
+        env["EXCELMANUS_CODE_MODE_SDK"] = str(sdk)
+    env["EXCELMANUS_CODE_MODE_ROOT_CALL_ID"] = session.root_call_id
+    env["EXCELMANUS_CODE_MODE_TIMEOUT"] = str(int(session.call_timeout))
+
+
+def _ingest_sandbox_save_versions(stderr: str, workspace_root: Path) -> dict[str, str]:
+    """解析沙盒 EXCELMANUS_SAVE_VERSION 行，记入本轮 seen。"""
+    from excelmanus.workbook_commit import normalize_version_path, remember_content_version
+
+    found: dict[str, str] = {}
+    root = workspace_root.resolve()
+    for line in (stderr or "").splitlines():
+        if not line.startswith("EXCELMANUS_SAVE_VERSION\t"):
+            continue
+        parts = line.split("\t")
+        if len(parts) < 3:
+            continue
+        raw_path, version = parts[1], parts[2]
+        rel = normalize_version_path(raw_path)
+        try:
+            rel = str(Path(raw_path).resolve().relative_to(root)).replace("\\", "/")
+        except ValueError:
+            posix = raw_path.replace("\\", "/")
+            marker = "/workspace/"
+            if marker in posix:
+                rel = posix.split(marker, 1)[-1]
+        if rel and version:
+            remember_content_version(rel, version)
+            found[rel] = version
+    return found
+
+
+def _apply_expected_versions_env(env: dict[str, str]) -> None:
+    """把本轮已读到的 content_version 传给沙盒，供 save 前哈希比较。"""
+    try:
+        from excelmanus.workbook_commit import export_seen_versions
+
+        mapping = export_seen_versions()
+    except Exception:
+        mapping = {}
+    if mapping:
+        env["EXCELMANUS_EXPECTED_VERSIONS"] = json.dumps(mapping, ensure_ascii=False)
 
 
 # ── 解释器探测 ───────────────────────────────────────────
@@ -449,24 +527,40 @@ def _generate_text_diff(
     }
 
 
+def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
+    cow = payload.get("cow_mapping")
+    ui = ToolUiMeta()
+    if isinstance(cow, dict) and cow:
+        ui.cow_mapping = {str(k): str(v) for k, v in cow.items()}
+    model_text = json.dumps(payload, ensure_ascii=False, indent=2)
+    status = str(payload.get("status") or "")
+    if status.lower() in {"failed", "error", "fail"}:
+        message = str(payload.get("recovery_hint") or payload.get("stderr_tail") or status)
+        return ToolResult(
+            success=False,
+            model_text=model_text,
+            value=payload,
+            ui_meta=ui,
+            error=ToolError(code="RUN_CODE_FAILED", message=message, fields=payload),
+        )
+    return ok_result(payload, ui_meta=ui, model_text=model_text)
+
+
 def write_text_file(
     file_path: str,
     content: str,
     overwrite: bool = True,
     encoding: str = "utf-8",
-) -> str:
+) -> ToolResult:
     """写入文本文件（默认覆盖）。"""
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
     existed_before = safe_path.exists()
 
     if existed_before and not overwrite:
-        return json.dumps(
-            {
-                "status": "error",
-                "error": f"文件已存在且 overwrite=false: {safe_path.name}",
-            },
-            ensure_ascii=False,
+        return error_result(
+            f"文件已存在且 overwrite=false: {safe_path.name}",
+            code="FILE_EXISTS",
         )
 
     # 读取旧内容用于生成 diff
@@ -498,12 +592,12 @@ def write_text_file(
         "overwritten": existed_before,
     }
 
-    # 生成 text diff
+    # 生成 text diff，只放 ui_meta，不塞回模型 JSON
     diff_data = _generate_text_diff(old_text, content, rel_path)
+    ui = ToolUiMeta(files=[rel_path])
     if diff_data is not None:
-        result["_text_diff"] = diff_data
-
-    return json.dumps(result, ensure_ascii=False)
+        ui.text_diff = diff_data
+    return ok_result(result, ui_meta=ui)
 
 
 def edit_text_file(
@@ -512,7 +606,7 @@ def edit_text_file(
     new_string: str,
     encoding: str = "utf-8",
     replace_all: bool = False,
-) -> str:
+) -> ToolResult:
     """精准编辑文本文件：查找 old_string 并替换为 new_string。
 
     类似于 IDE 的查找替换功能。支持单次替换或全部替换。
@@ -521,40 +615,28 @@ def edit_text_file(
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.is_file():
-        return json.dumps(
-            {"status": "error", "error": f"文件不存在: {file_path}"},
-            ensure_ascii=False,
-        )
+        return error_result(f"文件不存在: {file_path}", code="PATH_INVALID")
 
     try:
         old_text = safe_path.read_text(encoding=encoding)
     except UnicodeDecodeError:
-        return json.dumps(
-            {"status": "error", "error": f"无法以 {encoding} 编码读取文件"},
-            ensure_ascii=False,
-        )
+        return error_result(f"无法以 {encoding} 编码读取文件", code="DECODE_ERROR")
 
     if old_string not in old_text:
-        return json.dumps(
-            {"status": "error", "error": "old_string 未在文件中找到，请检查内容是否精确匹配"},
-            ensure_ascii=False,
+        return error_result(
+            "old_string 未在文件中找到，请检查内容是否精确匹配",
+            code="NOT_FOUND",
         )
 
     if old_string == new_string:
-        return json.dumps(
-            {"status": "error", "error": "old_string 与 new_string 相同，无需修改"},
-            ensure_ascii=False,
-        )
+        return error_result("old_string 与 new_string 相同，无需修改", code="NOOP")
 
     # 非 replace_all 时检查唯一性
     if not replace_all and old_text.count(old_string) > 1:
-        return json.dumps(
-            {
-                "status": "error",
-                "error": f"old_string 在文件中出现 {old_text.count(old_string)} 次，"
-                         "请提供更多上下文使其唯一，或设置 replace_all=true",
-            },
-            ensure_ascii=False,
+        return error_result(
+            f"old_string 在文件中出现 {old_text.count(old_string)} 次，"
+            "请提供更多上下文使其唯一，或设置 replace_all=true",
+            code="AMBIGUOUS_MATCH",
         )
 
     if replace_all:
@@ -584,12 +666,12 @@ def edit_text_file(
         "bytes": len(new_text.encode(encoding, errors="ignore")),
     }
 
-    # 生成 text diff
+    # 生成 text diff，只放 ui_meta
     diff_data = _generate_text_diff(old_text, new_text, rel_path)
+    ui = ToolUiMeta(files=[rel_path])
     if diff_data is not None:
-        result["_text_diff"] = diff_data
-
-    return json.dumps(result, ensure_ascii=False)
+        ui.text_diff = diff_data
+    return ok_result(result, ui_meta=ui)
 
 
 def run_code(
@@ -604,7 +686,7 @@ def run_code(
     stdout_file: str | None = None,
     stderr_file: str | None = None,
     sandbox_tier: str = "RED",
-) -> str:
+) -> ToolResult:
     """执行 Python 代码。支持内联代码片段或磁盘脚本文件。
 
     两种模式（互斥，必须且只能指定其一）：
@@ -661,8 +743,10 @@ def run_code(
         if script_safe.suffix.lower() != ".py":
             raise ValueError(f"仅允许运行 .py 文件: {script_safe}")
 
+    from dataclasses import replace as _dc_replace
+
     try:
-        result_json = _execute_script(
+        result = _execute_script(
             guard=guard,
             script_safe=script_safe,
             workdir_safe=workdir_safe,
@@ -683,16 +767,26 @@ def run_code(
             except OSError:
                 pass
 
-    # ── 注入截断警告和空输出诊断 ──
+    payload = dict(result.value) if isinstance(result.value, dict) else {}
     if truncation_warnings:
-        try:
-            result_dict = json.loads(result_json)
-            result_dict["truncation_warning"] = " ".join(truncation_warnings)
-            result_json = json.dumps(result_dict, ensure_ascii=False, indent=2)
-        except (json.JSONDecodeError, TypeError):
-            pass
+        payload["truncation_warning"] = " ".join(truncation_warnings)
+    try:
+        from excelmanus.code_mode import DOCKER_OFF_DISCLAIMER, get_code_mode_session
 
-    return result_json
+        _cm_session = get_code_mode_session()
+        if _cm_session is not None:
+            payload["sdk_calls"] = _cm_session.summary()
+            if not _cm_session.docker_sandbox:
+                payload["sandbox_note"] = DOCKER_OFF_DISCLAIMER
+    except Exception:
+        pass
+    if payload != result.value:
+        return _dc_replace(
+            result,
+            value=payload,
+            model_text=json.dumps(payload, ensure_ascii=False, indent=2),
+        )
+    return result
 
 
 def _execute_script_docker(
@@ -707,7 +801,7 @@ def _execute_script_docker(
     stderr_file: str | None,
     inline_mode: bool,
     sandbox_tier: str = "RED",
-) -> str:
+) -> ToolResult:
     """Docker 容器内执行脚本（OS 级隔离）。"""
     from excelmanus.security.docker_sandbox import (
         CONTAINER_WORKSPACE,
@@ -764,6 +858,9 @@ def _execute_script_docker(
                     )
             except (json.JSONDecodeError, TypeError):
                 pass
+
+    _apply_code_mode_env(env_vars, workspace_root=workspace_root, to_container=True)
+    _apply_expected_versions_env(env_vars)
 
     container_script = host_to_container_path(script_safe, workspace_root)
 
@@ -863,6 +960,7 @@ def _execute_script_docker(
         "stderr_file": stderr_saved,
         "cow_mapping": cow_mapping,
         "sandbox_tier": sandbox_tier,
+        "save_versions": _ingest_sandbox_save_versions(stderr, workspace_root),
     }
 
     if cow_mapping:
@@ -926,7 +1024,7 @@ def _execute_script_docker(
             )
             result["empty_output_diagnostic"] = " ".join(diag_parts)
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _pack_run_code_result(result)
 
 
 def _execute_script(
@@ -943,7 +1041,7 @@ def _execute_script(
     stderr_file: str | None,
     inline_mode: bool,
     sandbox_tier: str = "RED",
-) -> str:
+) -> ToolResult:
     """内部执行脚本核心逻辑（供 run_code 调用）。"""
     if _is_docker_sandbox():
         return _execute_script_docker(
@@ -998,6 +1096,9 @@ def _execute_script(
         _staging_json = getattr(_sandbox_env_obj, "get_staging_map_json", lambda: "{}")()
         if _staging_json and _staging_json != "{}":
             sandbox_env["EXCELMANUS_STAGING_MAP"] = _staging_json
+
+    _apply_code_mode_env(sandbox_env, workspace_root=guard.workspace_root, to_container=False)
+    _apply_expected_versions_env(sandbox_env)
 
     # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
@@ -1106,6 +1207,7 @@ def _execute_script(
         "stderr_file": stderr_saved,
         "cow_mapping": cow_mapping,
         "sandbox_tier": sandbox_tier,
+        "save_versions": _ingest_sandbox_save_versions(stderr, guard.workspace_root),
     }
     # CoW 路径提示：bench/external 文件被保护时，提醒使用副本路径
     if cow_mapping:
@@ -1172,7 +1274,7 @@ def _execute_script(
         except OSError:
             pass
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return _pack_run_code_result(result)
 
 
 def get_tools() -> list[ToolDef]:
@@ -1243,13 +1345,15 @@ def get_tools() -> list[ToolDef]:
                 "必须：代码包含顶层 try/except（错误 print 到 stderr）；禁止 sys.exit()/exec()/eval()；"
                 "写入后在 stdout 打印关键验证数据（行数、列名、抽样值）。"
                 "执行 Python 代码（内联片段或磁盘脚本二选一），适用于复杂数据变换、批量计算等多步逻辑。"
-                "适用场景：所有数据写入、格式修改、跨表操作、批量计算、任何需要 openpyxl/pandas 的操作。"
+                "适用场景：多步读+规约、领域工具尚未覆盖的批量变换；单格/格式/图表不要写落盘脚本。"
                 "预装库：pandas, openpyxl, numpy, scikit-learn(sklearn), matplotlib, seaborn, plotly, scipy, xlsxwriter, xlrd, pyxlsb。"
-                "不适用：简单数据查看（改用 read_excel）、简单筛选（改用 filter_data）。"
+                "不适用：简单数据查看（改用 inspect_spreadsheet）、简单筛选（改用 analyze_spreadsheet）。"
                 "参数模式：code 与 script_path 二选一，同时传时优先 script_path。"
-                "相关工具：write_text_file（先写脚本再用 script_path 执行）、read_excel（执行前了解数据结构）。"
+                "相关工具：write_text_file（先写脚本再用 script_path 执行）、inspect_spreadsheet（执行前了解数据结构）。"
                 "路径说明：代码中的路径相对于沙盒工作目录，可通过 os.environ.get('EXCELMANUS_WORKDIR') 获取当前目录，"
                 "os.environ.get('EXCELMANUS_WORKSPACE_ROOT') 获取工作区根目录。"
+                "脚本可通过 from em import inspect_spreadsheet, edit_spreadsheet 调用宿主已注册工具（经 ToolDispatcher，子调用带 root_call_id）。"
+                "Docker 未启用时仅注入 SDK 与受限 builtins，不宣称任意代码已被隔离。"
             ),
             input_schema={
                 "type": "object",

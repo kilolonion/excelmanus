@@ -67,6 +67,7 @@ class _StagingEntry:
     original_abs: str
     staged_abs: str
     rel_path: str
+    original_version: str | None = None
 
 
 class FileVersionManager:
@@ -129,6 +130,7 @@ class FileVersionManager:
                 "rel_path": e.rel_path,
                 "original_abs": e.original_abs,
                 "staged_abs": e.staged_abs,
+                "original_version": e.original_version,
             }
             for e in self._staging.values()
         ]
@@ -154,6 +156,7 @@ class FileVersionManager:
                     original_abs=item["original_abs"],
                     staged_abs=item["staged_abs"],
                     rel_path=item["rel_path"],
+                    original_version=item.get("original_version"),
                 )
             logger.debug("从磁盘恢复 %d 条 staging 映射", len(self._staging))
         except Exception:
@@ -304,8 +307,18 @@ class FileVersionManager:
 
     # ── 版本恢复 ────────────────────────────────────────────────
 
-    def restore(self, file_path: str, version_id: str) -> bool:
-        """将文件恢复到指定版本。"""
+    def restore(
+        self,
+        file_path: str,
+        version_id: str,
+        *,
+        expected_version: str | None = None,
+    ) -> bool:
+        """将文件恢复到指定版本。
+
+        ``expected_version`` 必须是恢复前磁盘应仍保持的版本（原操作提交后）。
+        未传入时用版本链最新快照的 hash，而不是撤销当下新读的磁盘 hash。
+        """
         resolved = self._resolve(file_path)
         rel = self._to_rel(resolved)
         chain = self._chains.get(rel, [])
@@ -321,9 +334,19 @@ class FileVersionManager:
             logger.warning("版本 %s 已失效，无法恢复", version_id)
             return False
 
+        if expected_version is None:
+            latest = self.get_latest(rel)
+            if latest is not None and latest.content_hash:
+                expected_version = "sha256:" + latest.content_hash
+
         if not target.original_existed:
-            # tombstone → 删除当前文件
+            from excelmanus.workbook_commit import content_version_of_file
+
             if resolved.exists():
+                current = content_version_of_file(resolved)
+                if expected_version is None or current != expected_version:
+                    logger.warning("恢复墓碑被拒绝：%s 在原操作后已被改写", rel)
+                    return False
                 resolved.unlink()
             return True
 
@@ -332,19 +355,40 @@ class FileVersionManager:
             logger.warning("快照文件不存在: %s", target.snapshot_path)
             return False
 
-        resolved.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(snapshot), str(resolved))
+        from excelmanus.security.guard import FileAccessGuard
+        from excelmanus.workbook_commit import CommitError, commit_bytes, content_version_of_file
+
+        if expected_version is None and resolved.exists():
+            expected_version = content_version_of_file(resolved)
+
+        try:
+            commit_bytes(
+                guard=FileAccessGuard(str(self._workspace_root)),
+                file_path=rel,
+                data=snapshot.read_bytes(),
+                expected_version=expected_version,
+            )
+        except CommitError:
+            logger.warning("恢复 %s 失败：版本冲突或写入失败", rel, exc_info=True)
+            return False
 
         # 记录 restore 操作本身为新版本
         self.checkpoint(file_path, reason="restore", ref_id=version_id)
         return True
 
-    def restore_to_original(self, file_path: str) -> bool:
+    def restore_to_original(
+        self,
+        file_path: str,
+        *,
+        expected_version: str | None = None,
+    ) -> bool:
         """将文件恢复到最早的原始版本。"""
         original = self.get_original(file_path)
         if original is None:
             return False
-        return self.restore(file_path, original.version_id)
+        return self.restore(
+            file_path, original.version_id, expected_version=expected_version
+        )
 
     # ── Staging 兼容层 ──────────────────────────────────────────
 
@@ -388,10 +432,13 @@ class FileVersionManager:
         staged_path = staging_dir / staged_name
         shutil.copy2(str(resolved), str(staged_path))
 
+        from excelmanus.workbook_commit import content_version_of_file
+
         entry = _StagingEntry(
             original_abs=str(resolved),
             staged_abs=str(staged_path),
             rel_path=rel,
+            original_version=content_version_of_file(resolved),
         )
         self._staging[rel] = entry
         self._save_staging()
@@ -404,10 +451,62 @@ class FileVersionManager:
         entry = self._staging.get(rel)
         return entry.staged_abs if entry else None
 
+    def _backup_original_for_undo(self, original: Path) -> str:
+        if not (original.exists() and original.is_file()):
+            return ""
+        undo_dir = self._versions_dir / "_undo"
+        undo_dir.mkdir(parents=True, exist_ok=True)
+        undo_name = f"{original.stem}_{secrets.token_hex(3)}{original.suffix}"
+        undo_path = undo_dir / undo_name
+        shutil.copy2(str(original), str(undo_path))
+        return str(undo_path)
+
+    def _apply_staged_commit(self, entry: _StagingEntry) -> dict[str, str]:
+        """把 staged 字节经 workbook_commit 写回原始路径。"""
+        from excelmanus.security.guard import FileAccessGuard
+        from excelmanus.workbook_commit import commit_bytes, content_version_of_file
+
+        staged = Path(entry.staged_abs)
+        original = Path(entry.original_abs)
+        undo_path_str = self._backup_original_for_undo(original)
+
+        committed_version = ""
+        previous_version = entry.original_version or ""
+        if staged.exists():
+            expected = entry.original_version
+            if expected is None and original.exists():
+                expected = content_version_of_file(original)
+            cr = commit_bytes(
+                guard=FileAccessGuard(str(self._workspace_root)),
+                file_path=entry.rel_path,
+                data=staged.read_bytes(),
+                expected_version=expected,
+            )
+            committed_version = cr.content_version
+            previous_version = cr.previous_version or expected or ""
+
+        result: dict[str, str] = {
+            "original": entry.original_abs,
+            "backup": entry.staged_abs,
+        }
+        if undo_path_str:
+            result["undo_path"] = undo_path_str
+            self._write_undo_meta(
+                undo_path_str,
+                committed_version=committed_version,
+                previous_version=previous_version,
+            )
+        if committed_version:
+            result["committed_version"] = committed_version
+        if previous_version:
+            result["previous_version"] = previous_version
+        return result
+
     def commit_staged(self, file_path: str) -> dict[str, str] | None:
         """将 staged 文件提交回原始位置。返回 {original, backup, undo_path?} 或 None。
 
         提交前将原始文件备份到 undo 目录，支持后续撤销。
+        原始文件在 staging 后被改过则 ``commit_bytes`` 抛版本冲突，staging 保留。
         """
         resolved = self._resolve(file_path)
         rel = self._to_rel(resolved)
@@ -415,63 +514,21 @@ class FileVersionManager:
         if entry is None:
             return None
 
-        staged = Path(entry.staged_abs)
-        original = Path(entry.original_abs)
-        undo_path_str = ""
-
-        # 提交前备份原始文件（支持 undo）
-        if original.exists() and original.is_file():
-            undo_dir = self._versions_dir / "_undo"
-            undo_dir.mkdir(parents=True, exist_ok=True)
-            undo_name = f"{original.stem}_{secrets.token_hex(3)}{original.suffix}"
-            undo_path = undo_dir / undo_name
-            shutil.copy2(str(original), str(undo_path))
-            undo_path_str = str(undo_path)
-
-        if staged.exists():
-            original.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(str(staged), str(original))
-
+        result = self._apply_staged_commit(entry)
         del self._staging[rel]
         self._save_staging()
-        result: dict[str, str] = {
-            "original": entry.original_abs,
-            "backup": entry.staged_abs,
-        }
-        if undo_path_str:
-            result["undo_path"] = undo_path_str
         return result
 
     def commit_all_staged(self) -> list[dict[str, str]]:
-        """提交所有 staged 文件。"""
+        """提交所有 staged 文件。中途冲突时已成功的保留，失败条目仍在 staging。"""
         results: list[dict[str, str]] = []
-        undo_dir = self._versions_dir / "_undo"
-        for rel in list(self._staging.keys()):
-            entry = self._staging[rel]
-            staged = Path(entry.staged_abs)
-            original = Path(entry.original_abs)
-            undo_path_str = ""
-
-            # 提交前备份原始文件
-            if original.exists() and original.is_file():
-                undo_dir.mkdir(parents=True, exist_ok=True)
-                undo_name = f"{original.stem}_{secrets.token_hex(3)}{original.suffix}"
-                undo_path = undo_dir / undo_name
-                shutil.copy2(str(original), str(undo_path))
-                undo_path_str = str(undo_path)
-
-            if staged.exists():
-                original.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(str(staged), str(original))
-            result: dict[str, str] = {
-                "original": entry.original_abs,
-                "backup": entry.staged_abs,
-            }
-            if undo_path_str:
-                result["undo_path"] = undo_path_str
-            results.append(result)
-        self._staging.clear()
-        self._save_staging()
+        try:
+            for rel in list(self._staging.keys()):
+                entry = self._staging[rel]
+                results.append(self._apply_staged_commit(entry))
+                del self._staging[rel]
+        finally:
+            self._save_staging()
         return results
 
     def discard_staged(self, file_path: str) -> bool:
@@ -501,16 +558,75 @@ class FileVersionManager:
         self._save_staging()
         return count
 
-    def undo_commit(self, original_path: str, undo_path: str) -> bool:
-        """撤销一次 commit：将 undo 备份恢复回原始位置。"""
+    @staticmethod
+    def _undo_meta_path(undo_path: str) -> Path:
+        return Path(str(undo_path) + ".meta.json")
+
+    def _write_undo_meta(
+        self,
+        undo_path: str,
+        *,
+        committed_version: str,
+        previous_version: str,
+    ) -> None:
+        payload = {
+            "committed_version": committed_version,
+            "previous_version": previous_version,
+        }
+        try:
+            self._undo_meta_path(undo_path).write_text(
+                json.dumps(payload, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.debug("写入 undo meta 失败: %s", undo_path, exc_info=True)
+
+    def _read_undo_meta(self, undo_path: str) -> dict[str, str]:
+        meta_path = self._undo_meta_path(undo_path)
+        if not meta_path.exists():
+            return {}
+        try:
+            data = json.loads(meta_path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+        return data if isinstance(data, dict) else {}
+
+    def undo_commit(
+        self,
+        original_path: str,
+        undo_path: str,
+        *,
+        expected_version: str | None = None,
+    ) -> bool:
+        """撤销一次 commit：恢复该次提交对应的 before 字节。
+
+        前置条件必须是该次提交后的版本，不能用撤销当下新读的磁盘 hash。
+        """
         undo = Path(undo_path)
         original = Path(original_path)
         if not undo.exists():
             logger.warning("undo 文件不存在: %s", undo_path)
             return False
-        original.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(str(undo), str(original))
+        meta = self._read_undo_meta(undo_path)
+        expected = expected_version or meta.get("committed_version")
+        if not expected:
+            logger.warning("undo 缺少提交后版本，拒绝用当前磁盘 hash 代替: %s", original_path)
+            return False
+        from excelmanus.security.guard import FileAccessGuard
+        from excelmanus.workbook_commit import CommitError, commit_bytes
+
+        try:
+            commit_bytes(
+                guard=FileAccessGuard(str(self._workspace_root)),
+                file_path=self._to_rel(original),
+                data=undo.read_bytes(),
+                expected_version=expected,
+            )
+        except CommitError:
+            logger.warning("undo 写回失败: %s", original_path, exc_info=True)
+            return False
         undo.unlink(missing_ok=True)
+        self._undo_meta_path(undo_path).unlink(missing_ok=True)
         return True
 
     def diff_staged_summary(self, file_path: str) -> dict | None:
@@ -651,10 +767,14 @@ class FileVersionManager:
         # 记录原始版本
         self.checkpoint(src_rel, reason="cow", ref_id=dst_rel)
 
+        from excelmanus.workbook_commit import content_version_of_file
+
+        src_path = Path(src_abs)
         entry = _StagingEntry(
             original_abs=src_abs,
             staged_abs=dst_abs,
             rel_path=rel,
+            original_version=content_version_of_file(src_path),
         )
         self._staging[rel] = entry
         self._save_staging()
@@ -699,6 +819,7 @@ class FileVersionManager:
             original_abs=str(new_resolved),
             staged_abs=entry.staged_abs,
             rel_path=new_rel,
+            original_version=entry.original_version,
         )
         self._save_staging()
         return True

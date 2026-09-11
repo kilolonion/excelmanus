@@ -520,11 +520,6 @@ class CommandHandler:
             return exec_result
 
         resume_iteration = e._last_iteration_count + 1
-        has_tasks = e._has_incomplete_tasks()
-        e._set_window_perception_turn_hints(
-            user_message="审批已通过，继续执行" + ("剩余子任务" if has_tasks else ""),
-            is_new_task=False,
-        )
         try:
             resumed = await e._tool_calling_loop(
                 route_to_resume,

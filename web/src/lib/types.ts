@@ -117,6 +117,7 @@ export type AssistantBlock =
       description: string;
     }
   | {
+      // 仅用于读取历史消息；自动验收已删除，不再产生新块
       type: "verification_report";
       verdict: "pass" | "fail" | "unknown";
       confidence: "high" | "medium" | "low";

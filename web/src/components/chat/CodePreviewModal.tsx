@@ -10,7 +10,6 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { buildApiUrl } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
-import { useAuthStore } from "@/stores/auth-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { ensureHljs, highlightCode } from "@/lib/hljs-utils";
 
@@ -154,12 +153,8 @@ export function CodePreviewModal({
     setError("");
     try {
       const sessionParam = activeSessionId ? `&session_id=${activeSessionId}` : "";
-      const token = useAuthStore.getState().accessToken;
-      const headers: Record<string, string> = {};
-      if (token) headers["Authorization"] = `Bearer ${token}`;
       const response = await fetch(
         buildApiUrl(`/files/read?path=${encodeURIComponent(path)}${sessionParam}`),
-        { headers },
       );
       if (!response.ok) throw new Error("无法读取文件");
       const data = await response.json();

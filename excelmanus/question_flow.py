@@ -240,6 +240,71 @@ class QuestionFlowManager:
             raw_input=original,
         )
 
+    def try_parse_explicit_answer(
+        self,
+        raw_text: str,
+        question: PendingQuestion | None = None,
+    ) -> ParsedAnswer | None:
+        """只接受编号、精确选项标签、或显式「其他」。自由文本不算回答。"""
+        q = question or self.current()
+        if q is None or not isinstance(raw_text, str):
+            return None
+        original = raw_text.strip()
+        if not original:
+            return None
+
+        tokens = self._tokenize(original, multi_select=q.multi_select)
+        matched_indices: list[int] = []
+        other_parts: list[str] = []
+        for token in tokens:
+            matched = self._match_option_explicit(token, q.options)
+            if matched is None:
+                other_parts.append(token)
+            else:
+                matched_indices.append(matched)
+
+        deduped_indices: list[int] = []
+        seen: set[int] = set()
+        for idx in matched_indices:
+            if idx not in seen:
+                seen.add(idx)
+                deduped_indices.append(idx)
+
+        if not deduped_indices:
+            return None
+
+        other_index = self._other_index(q.options)
+        if q.multi_select:
+            final_indices, other_text = self._resolve_multi_select(
+                q=q,
+                selected_indices=deduped_indices,
+                other_parts=other_parts,
+                other_index=other_index,
+            )
+        else:
+            try:
+                final_indices, other_text = self._resolve_single_select(
+                    q=q,
+                    selected_indices=deduped_indices,
+                    other_parts=other_parts,
+                    other_index=other_index,
+                    raw_input=original,
+                )
+            except ValueError:
+                return None
+
+        selected_options = [
+            {"index": idx + 1, "label": q.options[idx].label}
+            for idx in final_indices
+        ]
+        return ParsedAnswer(
+            question_id=q.question_id,
+            multi_select=q.multi_select,
+            selected_options=selected_options,
+            other_text=other_text if other_text else None,
+            raw_input=original,
+        )
+
     def _build_pending(self, question_payload: dict[str, Any], tool_call_id: str) -> PendingQuestion:
         if not isinstance(question_payload, dict):
             raise ValueError("question 必须是对象。")
@@ -363,6 +428,28 @@ class QuestionFlowManager:
         deduped_candidates = list(dict.fromkeys(fuzzy_candidates))
         if len(deduped_candidates) == 1:
             return deduped_candidates[0]
+
+        if normalized in {_normalize_text("other"), _normalize_text("其他")}:
+            for i, opt in enumerate(options):
+                if opt.is_other:
+                    return i
+        return None
+
+    @staticmethod
+    def _match_option_explicit(token: str, options: list[QuestionOption]) -> int | None:
+        """编号、精确标签/值、显式 Other。不做模糊包含匹配。"""
+        index_match = _INDEX_PATTERN.match(token)
+        if index_match:
+            idx = int(index_match.group(1))
+            if 1 <= idx <= len(options):
+                return idx - 1
+
+        normalized = _normalize_text(token)
+        for i, opt in enumerate(options):
+            if normalized == _normalize_text(opt.label):
+                return i
+            if normalized == _normalize_text(opt.value):
+                return i
 
         if normalized in {_normalize_text("other"), _normalize_text("其他")}:
             for i, opt in enumerate(options):

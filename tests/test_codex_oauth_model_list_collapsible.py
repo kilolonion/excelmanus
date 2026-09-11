@@ -3,7 +3,7 @@ import unittest
 
 
 def _model_tab_source() -> str:
-    return Path("web/src/components/settings/ModelTab.tsx").read_text(encoding="utf-8")
+    return Path("web/src/components/settings/model/CodexOAuthCard.tsx").read_text(encoding="utf-8")
 
 
 class TestCodexOAuthModelListCollapsible(unittest.TestCase):

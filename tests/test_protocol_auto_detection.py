@@ -259,6 +259,14 @@ class TestNormalizeBaseUrlMultiSignal:
         )
         assert result == "https://proxy.example.com/api/v1"
 
+    def test_volcengine_api_v3_not_appended_with_v1(self) -> None:
+        result = _normalize_base_url(
+            "https://ark.cn-beijing.volces.com/api/v3",
+            protocol="openai",
+            model="doubao-seed-2.1-pro",
+        )
+        assert result == "https://ark.cn-beijing.volces.com/api/v3"
+
 
 # ══════════════════════════════════════════════════════════
 # create_client 模型推断

@@ -5,11 +5,11 @@ import json
 from pathlib import Path
 from typing import Any
 
+from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, error_result, ok_result
 from excelmanus.reference_graph.cache import RefCache, get_session_cache
 from excelmanus.reference_graph.formula_parser import FormulaRefExtractor, address_in_ref
 from excelmanus.reference_graph.models import WorkbookRefIndex
 from excelmanus.reference_graph.scanner import Tier1Scanner, Tier2Resolver
-from excelmanus.tools.registry import ToolDef
 
 _workspace_root: str | None = None
 _scanner = Tier1Scanner()
@@ -41,8 +41,8 @@ def _ensure_index(file_path: str) -> WorkbookRefIndex:
     return index
 
 
-def _error_json(message: str) -> str:
-    return json.dumps({"status": "error", "message": message}, ensure_ascii=False)
+def _error_json(message: str) -> ToolResult:
+    return error_result(message, code="EXECUTION_FAILED")
 
 
 def _parse_target(target: str) -> tuple[str | None, str]:
@@ -53,7 +53,7 @@ def _parse_target(target: str) -> tuple[str | None, str]:
     return None, target
 
 
-def get_reference_map(file_path: str, detail: str = "summary") -> str:
+def get_reference_map(file_path: str, detail: str = "summary") -> ToolResult:
     """获取工作簿引用全景图。"""
     try:
         index = _ensure_index(file_path)
@@ -85,12 +85,17 @@ def get_reference_map(file_path: str, detail: str = "summary") -> str:
             "sample_formulas": edge.sample_formulas,
         })
 
+    summary_text = ""
     if detail == "summary":
-        summary_text = index.render_summary()
+        summary_text = index.render_summary() or ""
         if summary_text:
             result["summary_text"] = summary_text
 
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return ok_result(
+        result,
+        model_text=summary_text or json.dumps(result, ensure_ascii=False, default=str),
+        ui_meta=ToolUiMeta(files=[file_path]),
+    )
 
 
 def trace_references(
@@ -98,7 +103,7 @@ def trace_references(
     target: str,
     direction: str = "both",
     depth: int = 2,
-) -> str:
+) -> ToolResult:
     """追踪单元格引用链。"""
     try:
         abs_path = _resolve_path(file_path)
@@ -133,12 +138,19 @@ def trace_references(
             for r in node.dependents
         ]
 
-        return json.dumps({
+        payload = {
             "target": target,
+            "file_path": file_path,
             "formula": node.formula,
             "precedents": precedents,
             "dependents": dependents,
-        }, ensure_ascii=False, indent=2)
+        }
+        return ok_result(
+            payload,
+            model_text=(
+                f"{target}: precedents={len(precedents)}, dependents={len(dependents)}"
+            ),
+        )
     except Exception as e:
         return _error_json(f"追踪引用失败: {e}")
 
@@ -147,7 +159,7 @@ def get_impact_analysis(
     file_path: str,
     target: str,
     scope: str = "all",
-) -> str:
+) -> ToolResult:
     """分析修改影响范围。"""
     try:
         abs_path = _resolve_path(file_path)
@@ -184,12 +196,19 @@ def get_impact_analysis(
         finally:
             wb.close()
 
-        return json.dumps({
+        payload = {
             "target": target,
+            "file_path": file_path,
             "direct_impact": direct,
             "total_affected_cells": len(direct),
             "affected_sheets": sorted(affected_sheets),
-        }, ensure_ascii=False, indent=2)
+        }
+        return ok_result(
+            payload,
+            model_text=(
+                f"{target}: {len(direct)} cells across {len(affected_sheets)} sheets"
+            ),
+        )
     except Exception as e:
         return _error_json(f"影响分析失败: {e}")
 
@@ -197,98 +216,3 @@ def get_impact_analysis(
 def get_cache() -> RefCache:
     """返回当前会话的缓存实例（供集成使用）。"""
     return get_session_cache()
-
-
-def get_tools() -> list[ToolDef]:
-    """返回引用关系图的所有工具定义。"""
-    return [
-        ToolDef(
-            name="get_reference_map",
-            description=(
-                "获取工作簿的引用关系全景图：工作表间公式引用、外部引用、命名范围等。"
-                "适用场景：理解工作簿结构、了解表间数据流动、发现隐藏的依赖关系。"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "detail": {
-                        "type": "string",
-                        "enum": ["summary", "full"],
-                        "description": "详细程度：summary（默认）或 full",
-                        "default": "summary",
-                    },
-                },
-                "required": ["file_path"],
-            },
-            func=get_reference_map,
-            write_effect="none",
-        ),
-        ToolDef(
-            name="trace_references",
-            description=(
-                "追踪单元格的引用链：查看某个单元格引用了哪些源（precedents）"
-                "以及被哪些单元格依赖（dependents）。"
-                "适用场景：公式追踪、数据血缘分析、理解计算逻辑。"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "目标单元格，格式：Sheet!Cell（如 订单表!C2）",
-                    },
-                    "direction": {
-                        "type": "string",
-                        "enum": ["precedents", "dependents", "both"],
-                        "description": "追踪方向",
-                        "default": "both",
-                    },
-                    "depth": {
-                        "type": "integer",
-                        "description": "递归深度（默认 2）",
-                        "default": 2,
-                    },
-                },
-                "required": ["file_path", "target"],
-            },
-            func=trace_references,
-            write_effect="none",
-        ),
-        ToolDef(
-            name="get_impact_analysis",
-            description=(
-                "分析修改某个单元格/区域后的影响范围：哪些单元格会受到影响。"
-                "适用场景：修改数据前的风险评估、理解数据变更的传播路径。"
-            ),
-            input_schema={
-                "type": "object",
-                "properties": {
-                    "file_path": {
-                        "type": "string",
-                        "description": "Excel 文件路径",
-                    },
-                    "target": {
-                        "type": "string",
-                        "description": "目标单元格/区域，格式：Sheet!Cell（如 产品表!B2）",
-                    },
-                    "scope": {
-                        "type": "string",
-                        "enum": ["all", "direct"],
-                        "description": "分析范围：all（全部影响）或 direct（仅直接引用）",
-                        "default": "all",
-                    },
-                },
-                "required": ["file_path", "target"],
-            },
-            func=get_impact_analysis,
-            write_effect="none",
-        ),
-    ]

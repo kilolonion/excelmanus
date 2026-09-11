@@ -5,12 +5,10 @@
 - _detect_cross_file_relationships 核心算法
 - discover_file_relationships 完整工具（含文件 I/O）
 - 边界：单文件、空目录、CSV 文件
-- context_builder _try_auto_prescan 跨文件关系注入
 """
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
@@ -27,7 +25,7 @@ class TestNormalizeColumnName:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from excelmanus.tools.data_tools import _normalize_column_name
+        from excelmanus.workbook.data import _normalize_column_name
         self.normalize = _normalize_column_name
 
     def test_exact_synonym_match(self):
@@ -75,7 +73,7 @@ class TestDetectCrossFileRelationships:
 
     @pytest.fixture(autouse=True)
     def _import(self):
-        from excelmanus.tools.data_tools import _detect_cross_file_relationships
+        from excelmanus.workbook.data import _detect_cross_file_relationships
         self.detect = _detect_cross_file_relationships
 
     def test_exact_column_match_with_overlap(self):
@@ -308,21 +306,20 @@ class TestDiscoverFileRelationships:
     @pytest.fixture
     def _init_guard(self, workspace: Path):
         """初始化 FileAccessGuard。"""
-        from excelmanus.tools.data_tools import init_guard
+        from excelmanus.workbook.data import init_guard
         init_guard(str(workspace))
         yield
         # conftest 的 _reset_tool_guards 会清理
 
     def test_with_file_paths(self, workspace: Path, _init_guard):
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[
                 str(workspace / "sales.xlsx"),
                 str(workspace / "clients.xlsx"),
             ],
-        )
-        result = json.loads(result_str)
+        ).value
         assert result["files_analyzed"] == 2
         assert len(result["file_pairs"]) >= 1
 
@@ -333,32 +330,29 @@ class TestDiscoverFileRelationships:
         assert len(client_cols) >= 1
 
     def test_with_directory(self, workspace: Path, _init_guard):
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(directory=str(workspace))
-        result = json.loads(result_str)
+        result = discover_file_relationships(directory=str(workspace)).value
         assert result["files_analyzed"] >= 2
 
     def test_single_file_returns_empty(self, workspace: Path, _init_guard):
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[str(workspace / "sales.xlsx")],
-        )
-        result = json.loads(result_str)
+        ).value
         assert result["files_analyzed"] <= 1
         assert result["file_pairs"] == []
 
     def test_summary_generated(self, workspace: Path, _init_guard):
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[
                 str(workspace / "sales.xlsx"),
                 str(workspace / "clients.xlsx"),
             ],
-        )
-        result = json.loads(result_str)
+        ).value
         assert "summary" in result
         assert len(result["summary"]) > 0
 
@@ -373,30 +367,28 @@ class TestDiscoverFileRelationships:
             writer.writerow(["C001", "ORD001"])
             writer.writerow(["C002", "ORD002"])
 
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[
                 str(workspace / "sales.xlsx"),
                 str(csv_path),
             ],
-        )
-        result = json.loads(result_str)
+        ).value
         assert result["files_analyzed"] == 2
         # 应发现 客户ID 关联
         assert len(result["file_pairs"]) >= 1
 
     def test_merge_hints_and_suggested_groups(self, workspace: Path, _init_guard):
         """验证 merge_hints 和 suggested_groups 字段存在。"""
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[
                 str(workspace / "sales.xlsx"),
                 str(workspace / "clients.xlsx"),
             ],
-        )
-        result = json.loads(result_str)
+        ).value
         assert result["files_analyzed"] == 2
 
         # merge_hints 应包含可操作的合并建议
@@ -438,103 +430,17 @@ class TestDiscoverFileRelationships:
             ws2.append([f"C{(i % 5) + 1:03d}", f"ORD{i:03d}"])
         wb_orders.save(workspace / "orders.xlsx")
 
-        from excelmanus.tools.data_tools import discover_file_relationships
+        from excelmanus.workbook.data import discover_file_relationships
 
-        result_str = discover_file_relationships(
+        result = discover_file_relationships(
             file_paths=[
                 str(workspace / "master.xlsx"),
                 str(workspace / "orders.xlsx"),
             ],
-        )
-        result = json.loads(result_str)
+        ).value
         assert len(result["file_pairs"]) >= 1
         col = result["file_pairs"][0]["shared_columns"][0]
         # master 侧 unique_ratio 应接近 1.0（主键），orders 侧较低（多端）
         assert col["unique_ratio_a"] >= 0.9  # master 表 ID 唯一
         assert col["unique_ratio_b"] < 0.9   # orders 表 ID 有重复
         assert col["relationship"] == "one_to_many"
-
-
-# ── context_builder 自动注入测试 ────────────────────────────
-
-
-class TestAutoPrescanCrossFileInjection:
-    """验证 _try_auto_prescan 在 ≥2 文件时注入跨文件关系。"""
-
-    @pytest.fixture
-    def workspace(self, tmp_path: Path) -> Path:
-        from openpyxl import Workbook
-
-        wb_a = Workbook()
-        ws_a = wb_a.active
-        ws_a.append(["ID", "Value"])
-        ws_a.append(["001", 10])
-        ws_a.append(["002", 20])
-        wb_a.save(tmp_path / "file_a.xlsx")
-
-        wb_b = Workbook()
-        ws_b = wb_b.active
-        ws_b.append(["ID", "Name"])
-        ws_b.append(["001", "Alice"])
-        ws_b.append(["002", "Bob"])
-        wb_b.save(tmp_path / "file_b.xlsx")
-
-        return tmp_path
-
-    @pytest.fixture
-    def _init_guard(self, workspace: Path):
-        from excelmanus.tools.data_tools import init_guard
-        init_guard(str(workspace))
-        yield
-
-    def test_prescan_injects_cross_file_relationships(self, workspace: Path, _init_guard):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        state = MagicMock()
-        state.explorer_reports = []
-
-        excel_paths = [
-            str(workspace / "file_a.xlsx"),
-            str(workspace / "file_b.xlsx"),
-        ]
-
-        result = ContextBuilder._try_auto_prescan(excel_paths, state)
-        assert result is True
-
-        # 应该有 ≥3 个 report：2 个文件扫描 + 1 个跨文件关系
-        reports = state.explorer_reports
-        assert len(reports) >= 2
-
-        # 检查是否有跨文件关系报告
-        rel_reports = [
-            r for r in reports
-            if any(
-                f.get("type") == "cross_file_relationship"
-                for f in r.get("findings", [])
-            )
-        ]
-        assert len(rel_reports) >= 1
-        rel_report = rel_reports[0]
-        assert "recommendation" in rel_report
-        assert any("ID" in f["detail"] for f in rel_report["findings"])
-
-    def test_prescan_single_file_no_cross_file_report(self, workspace: Path, _init_guard):
-        """单文件时不应有跨文件关系报告。"""
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        state = MagicMock()
-        state.explorer_reports = []
-
-        excel_paths = [str(workspace / "file_a.xlsx")]
-
-        ContextBuilder._try_auto_prescan(excel_paths, state)
-
-        # 只有 1 个文件扫描报告，无跨文件关系
-        rel_reports = [
-            r for r in state.explorer_reports
-            if any(
-                f.get("type") == "cross_file_relationship"
-                for f in r.get("findings", [])
-            )
-        ]
-        assert len(rel_reports) == 0

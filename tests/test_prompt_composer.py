@@ -36,13 +36,13 @@ class TestParsePromptFile:
         md = tmp_path / "strat.md"
         md.write_text(
             '---\nname: cross_sheet\nversion: "1.0.0"\npriority: 50\nlayer: strategy\n'
-            'max_tokens: 300\nconditions:\n  write_hint: "may_write"\n  sheet_count_gte: 2\n---\n'
+            'max_tokens: 300\nconditions:\n  chat_mode: "write"\n  full_access: true\n---\n'
             "跨 Sheet 策略正文。\n",
             encoding="utf-8",
         )
         seg = parse_prompt_file(md)
         assert seg.layer == "strategy"
-        assert seg.conditions == {"write_hint": "may_write", "sheet_count_gte": 2}
+        assert seg.conditions == {"chat_mode": "write", "full_access": True}
         assert seg.max_tokens == 300
 
     def test_missing_required_field_raises(self, tmp_path: Path) -> None:
@@ -89,12 +89,12 @@ def _make_prompts_dir(tmp_path: Path) -> Path:
     strats.mkdir()
     (strats / "cross_sheet.md").write_text(
         '---\nname: cross_sheet\nversion: "1.0"\npriority: 50\nlayer: strategy\n'
-        'conditions:\n  sheet_count_gte: 2\n  write_hint: "may_write"\n---\n跨表策略。',
+        'conditions:\n  full_access: true\n  chat_mode: "write"\n---\n跨表策略。',
         encoding="utf-8",
     )
     (strats / "formula.md").write_text(
         '---\nname: formula\nversion: "1.0"\npriority: 45\nlayer: strategy\n'
-        'conditions:\n  write_hint: "may_write"\n---\n公式策略。',
+        'conditions:\n  chat_mode: "write"\n---\n公式策略。',
         encoding="utf-8",
     )
     return tmp_path
@@ -132,28 +132,38 @@ class TestPromptComposerCompose:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="read_only")
+        ctx = PromptContext(chat_mode="read")
         text = composer.compose_text(ctx)
         assert "身份。" in text
         assert "规则。" in text
         assert "跨表策略。" not in text
         assert "公式策略。" not in text
 
-    def test_strategy_match_write_hint(self, tmp_path: Path) -> None:
+    def test_compose_text_default_excludes_strategies(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=1)
+        ctx = PromptContext(chat_mode="write")
         text = composer.compose_text(ctx)
-        assert "公式策略。" in text  # write_hint 满足
-        assert "跨表策略。" not in text  # sheet_count < 2
+        assert "身份。" in text
+        assert "跨表策略。" not in text
+        assert "公式策略。" not in text
+
+    def test_strategy_match_write_mode(self, tmp_path: Path) -> None:
+        d = _make_prompts_dir(tmp_path)
+        composer = PromptComposer(d)
+        composer.load_all(auto_repair=False)
+        ctx = PromptContext(chat_mode="write")
+        text = composer.compose_strategies_text(ctx)
+        assert "公式策略。" in text
+        assert "跨表策略。" not in text  # 需要 full_access
 
     def test_strategy_match_cross_sheet(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
-        text = composer.compose_text(ctx)
+        ctx = PromptContext(chat_mode="write", full_access=True)
+        text = composer.compose_strategies_text(ctx)
         assert "跨表策略。" in text
         assert "公式策略。" in text
 
@@ -161,7 +171,7 @@ class TestPromptComposerCompose:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
+        ctx = PromptContext(chat_mode="write", full_access=True)
         text = composer.compose_strategies_text(ctx)
         assert "跨表策略。" in text
         assert "公式策略。" in text
@@ -171,7 +181,7 @@ class TestPromptComposerCompose:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="read_only")
+        ctx = PromptContext(chat_mode="read")
         text = composer.compose_strategies_text(ctx)
         assert text == ""
 
@@ -179,7 +189,7 @@ class TestPromptComposerCompose:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
+        ctx = PromptContext(chat_mode="write")
         segments = composer.compose(ctx)
         priorities = [s.priority for s in segments]
         assert priorities == sorted(priorities)
@@ -190,9 +200,9 @@ class TestPromptComposerBudget:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
+        ctx = PromptContext(chat_mode="write")
         # 非常小的 budget 应该丢弃策略段但保留 core
-        segments = composer.compose(ctx, token_budget=10)
+        segments = composer.compose(ctx, token_budget=10, include_strategies=True)
         names = [s.name for s in segments]
         assert "id" in names  # priority=0, 永不丢弃
         # 策略段应该被丢弃
@@ -202,8 +212,8 @@ class TestPromptComposerBudget:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
-        segments = composer.compose(ctx, token_budget=999999)
+        ctx = PromptContext(chat_mode="write", full_access=True)
+        segments = composer.compose(ctx, token_budget=999999, include_strategies=True)
         assert len(segments) == 4  # 2 core + 2 strategies
 
 
@@ -211,38 +221,24 @@ class TestMatchConditions:
     def test_empty_conditions_always_match(self) -> None:
         assert PromptComposer._match_conditions({}, PromptContext()) is True
 
-    def test_write_hint_match(self) -> None:
-        ctx = PromptContext(write_hint="may_write")
-        assert PromptComposer._match_conditions({"write_hint": "may_write"}, ctx)
-        assert not PromptComposer._match_conditions({"write_hint": "read_only"}, ctx)
+    def test_chat_mode_match(self) -> None:
+        ctx = PromptContext(chat_mode="write")
+        assert PromptComposer._match_conditions({"chat_mode": "write"}, ctx)
+        assert not PromptComposer._match_conditions({"chat_mode": "read"}, ctx)
 
-    def test_sheet_count_gte(self) -> None:
-        ctx = PromptContext(sheet_count=3)
-        assert PromptComposer._match_conditions({"sheet_count_gte": 2}, ctx)
-        assert PromptComposer._match_conditions({"sheet_count_gte": 3}, ctx)
-        assert not PromptComposer._match_conditions({"sheet_count_gte": 4}, ctx)
-
-    def test_total_rows_gte(self) -> None:
-        ctx = PromptContext(total_rows=200)
-        assert PromptComposer._match_conditions({"total_rows_gte": 100}, ctx)
-        assert not PromptComposer._match_conditions({"total_rows_gte": 500}, ctx)
-
-    def test_task_tags_match(self) -> None:
-        ctx = PromptContext(task_tags=["cross_sheet", "data_fill"])
-        assert PromptComposer._match_conditions(
-            {"task_tags": ["cross_sheet"]}, ctx,
-        )
-        assert not PromptComposer._match_conditions(
-            {"task_tags": ["chart"]}, ctx,
-        )
+    def test_unknown_condition_does_not_match(self) -> None:
+        ctx = PromptContext(chat_mode="write")
+        assert not PromptComposer._match_conditions({"sheet_count_gte": 2}, ctx)
+        assert not PromptComposer._match_conditions({"total_rows_gte": 100}, ctx)
+        assert not PromptComposer._match_conditions({"task_tags": ["chart"]}, ctx)
 
     def test_combined_conditions_and_logic(self) -> None:
-        ctx = PromptContext(write_hint="may_write", sheet_count=3)
+        ctx = PromptContext(chat_mode="write", full_access=True)
         assert PromptComposer._match_conditions(
-            {"write_hint": "may_write", "sheet_count_gte": 2}, ctx,
+            {"chat_mode": "write", "full_access": True}, ctx,
         )
         assert not PromptComposer._match_conditions(
-            {"write_hint": "may_write", "sheet_count_gte": 5}, ctx,
+            {"chat_mode": "write", "full_access": False}, ctx,
         )
 
     def test_full_access_false_match(self) -> None:
@@ -258,11 +254,11 @@ class TestMatchConditions:
         assert not PromptComposer._match_conditions({"full_access": True}, ctx_off)
 
 
-class TestSandboxAwarenessStrategy:
-    """sandbox_awareness 策略文件加载与条件匹配测试。"""
+class TestAlwaysOnStrategy:
+    """always_on 合并策略文件加载与无条件注入测试。"""
 
     @staticmethod
-    def _make_dir_with_sandbox(tmp_path: Path) -> Path:
+    def _make_dir_with_always_on(tmp_path: Path) -> Path:
         core = tmp_path / "core"
         core.mkdir()
         (core / "00_id.md").write_text(
@@ -271,41 +267,41 @@ class TestSandboxAwarenessStrategy:
         )
         strats = tmp_path / "strategies"
         strats.mkdir()
-        (strats / "20_sandbox_awareness.md").write_text(
-            '---\nname: sandbox_awareness\nversion: "1.0.0"\npriority: 20\nlayer: strategy\n'
+        (strats / "20_always_on.md").write_text(
+            '---\nname: always_on\nversion: "1.0.0"\npriority: 15\nlayer: strategy\n'
             'conditions: {}\n---\n沙箱安全机制内容。',
             encoding="utf-8",
         )
         return tmp_path
 
-    def test_sandbox_included_when_full_access_off(self, tmp_path: Path) -> None:
-        d = self._make_dir_with_sandbox(tmp_path)
+    def test_always_on_included_when_full_access_off(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_always_on(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         ctx = PromptContext(full_access=False)
         text = composer.compose_strategies_text(ctx)
         assert "沙箱安全机制内容。" in text
 
-    def test_sandbox_included_when_full_access_on(self, tmp_path: Path) -> None:
-        """sandbox_awareness 现为无条件注入，full_access=True 时也应包含。"""
-        d = self._make_dir_with_sandbox(tmp_path)
+    def test_always_on_included_when_full_access_on(self, tmp_path: Path) -> None:
+        d = self._make_dir_with_always_on(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         ctx = PromptContext(full_access=True)
         text = composer.compose_strategies_text(ctx)
         assert "沙箱安全机制内容。" in text
 
-    def test_real_sandbox_awareness_file(self) -> None:
-        """验证实际 prompts/strategies/20_sandbox_awareness.md 文件可正确加载。"""
+    def test_real_always_on_file(self) -> None:
+        """验证实际 prompts/strategies/20_always_on.md 可正确加载并含沙盒约束。"""
         prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
-        strat_file = prompts_dir / "strategies" / "20_sandbox_awareness.md"
+        strat_file = prompts_dir / "strategies" / "20_always_on.md"
         if not strat_file.exists():
-            pytest.skip("20_sandbox_awareness.md 不存在")
+            pytest.skip("20_always_on.md 不存在")
         seg = parse_prompt_file(strat_file)
-        assert seg.name == "sandbox_awareness"
+        assert seg.name == "spreadsheet:workflow"
         assert seg.conditions == {}
-        assert "GREEN" in seg.content
-        assert "RED" in seg.content
+        assert "inspect_spreadsheet" in seg.content
+        assert "edit_spreadsheet" in seg.content
+        assert "WorkbookSpec" in seg.content
 
 
 # ── 回归测试：core 文件与 legacy prompt 一致性 ───────────
@@ -367,68 +363,20 @@ class TestComposeForSubagent:
             assert "直接行动" in result, f"{name} 缺少共享约束"
 
 
-class TestTaskTagsLexical:
-    """词法 task_tags 分类测试。"""
+class TestErrorRecoveryInAlwaysOn:
+    """合并后的 always_on 策略含错误恢复硬约束。"""
 
-    def test_cross_sheet_detected(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("从Sheet2查找数据填入Sheet1")
-        assert "cross_sheet" in tags
-
-    def test_formatting_detected(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("把A列加粗并标红")
-        assert "formatting" in tags
-
-    def test_chart_detected(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("生成一个柱状图")
-        assert "chart" in tags
-
-    def test_data_fill_detected(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("填充B列的空白单元格")
-        assert "data_fill" in tags
-
-    def test_large_data_detected(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("批量处理所有行的数据")
-        assert "large_data" in tags
-
-    def test_multiple_tags(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("从Sheet2批量填充数据到Sheet1")
-        assert "cross_sheet" in tags
-        assert "data_fill" in tags
-
-    def test_empty_message(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        assert SkillRouter._classify_task_tags_lexical("") == []
-
-    def test_no_tags(self) -> None:
-        from excelmanus.skillpacks.router import SkillRouter
-        tags = SkillRouter._classify_task_tags_lexical("读取A1单元格的值")
-        assert tags == []
-
-
-class TestErrorRecoveryStrategy:
-    """error_recovery 策略文件加载与无条件注入测试。"""
-
-    def test_real_error_recovery_file(self) -> None:
-        """验证实际 prompts/strategies/error_recovery.md 文件可正确加载。"""
+    def test_always_on_contains_error_recovery(self) -> None:
         prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
-        strat_file = prompts_dir / "strategies" / "error_recovery.md"
+        strat_file = prompts_dir / "strategies" / "20_always_on.md"
         if not strat_file.exists():
-            pytest.skip("error_recovery.md 不存在")
+            pytest.skip("20_always_on.md 不存在")
         seg = parse_prompt_file(strat_file)
-        assert seg.name == "error_recovery"
-        assert seg.priority == 25
-        assert seg.conditions == {}
-        assert "分级处理" in seg.content
-        assert "重试上限" in seg.content
+        assert "inspect_spreadsheet" in seg.content
+        assert "edit_spreadsheet" in seg.content
+        assert "WorkbookSpec" in seg.content
 
-    def test_error_recovery_included_unconditionally(self, tmp_path: Path) -> None:
-        """error_recovery 无条件注入，read_only 和 may_write 均应包含。"""
+    def test_always_on_included_unconditionally(self, tmp_path: Path) -> None:
         core = tmp_path / "core"
         core.mkdir()
         (core / "00_id.md").write_text(
@@ -437,17 +385,17 @@ class TestErrorRecoveryStrategy:
         )
         strats = tmp_path / "strategies"
         strats.mkdir()
-        (strats / "error_recovery.md").write_text(
-            '---\nname: error_recovery\nversion: "1.0.0"\npriority: 25\nlayer: strategy\n'
+        (strats / "20_always_on.md").write_text(
+            '---\nname: always_on\nversion: "1.0.0"\npriority: 15\nlayer: strategy\n'
             'conditions: {}\n---\n错误恢复策略内容。',
             encoding="utf-8",
         )
         composer = PromptComposer(tmp_path)
         composer.load_all(auto_repair=False)
-        for hint in ("read_only", "may_write", "unknown"):
-            ctx = PromptContext(write_hint=hint)
+        for mode in ("read", "write", "plan"):
+            ctx = PromptContext(chat_mode=mode)
             text = composer.compose_strategies_text(ctx)
-            assert "错误恢复策略内容。" in text, f"write_hint={hint} 时未注入 error_recovery"
+            assert "错误恢复策略内容。" in text, f"chat_mode={mode} 时未注入 always_on"
 
 
 class TestInheritStrategies:
@@ -464,14 +412,9 @@ class TestInheritStrategies:
         )
         strats = tmp_path / "strategies"
         strats.mkdir()
-        (strats / "error_recovery.md").write_text(
-            '---\nname: error_recovery\nversion: "1.0"\npriority: 25\nlayer: strategy\n'
-            'conditions: {}\n---\n错误恢复内容。',
-            encoding="utf-8",
-        )
-        (strats / "sandbox_awareness.md").write_text(
-            '---\nname: sandbox_awareness\nversion: "1.0"\npriority: 20\nlayer: strategy\n'
-            'conditions: {}\n---\n沙盒感知内容。',
+        (strats / "20_always_on.md").write_text(
+            '---\nname: always_on\nversion: "1.0"\npriority: 15\nlayer: strategy\n'
+            'conditions: {}\n---\n默认约束内容。',
             encoding="utf-8",
         )
         (strats / "run_code_patterns.md").write_text(
@@ -501,19 +444,17 @@ class TestInheritStrategies:
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent("explorer")
         assert result is not None
-        assert "错误恢复内容。" not in result
-        assert "沙盒感知内容。" not in result
+        assert "默认约束内容。" not in result
 
     def test_explicit_strategy_names(self, tmp_path: Path) -> None:
         d = self._make_full_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent(
-            "explorer", inherit_strategies=["error_recovery", "sandbox_awareness"]
+            "explorer", inherit_strategies=["always_on"]
         )
         assert result is not None
-        assert "错误恢复内容。" in result
-        assert "沙盒感知内容。" in result
+        assert "默认约束内容。" in result
         assert "run_code 模板。" not in result  # 未指定，不应包含
 
     def test_universal_inherits_unconditional_only(self, tmp_path: Path) -> None:
@@ -524,8 +465,7 @@ class TestInheritStrategies:
             "worker", inherit_strategies=["__universal__"]
         )
         assert result is not None
-        assert "错误恢复内容。" in result  # conditions: {}
-        assert "沙盒感知内容。" in result  # conditions: {}
+        assert "默认约束内容。" in result  # conditions: {}
         assert "run_code 模板。" not in result  # has conditions → excluded
 
     def test_all_inherits_everything(self, tmp_path: Path) -> None:
@@ -536,8 +476,7 @@ class TestInheritStrategies:
             "worker", inherit_strategies=["__all__"]
         )
         assert result is not None
-        assert "错误恢复内容。" in result
-        assert "沙盒感知内容。" in result
+        assert "默认约束内容。" in result
         assert "run_code 模板。" in result  # __all__ includes conditional too
 
     def test_mixed_universal_and_explicit(self, tmp_path: Path) -> None:
@@ -549,8 +488,7 @@ class TestInheritStrategies:
             inherit_strategies=["__universal__", "run_code_patterns"],
         )
         assert result is not None
-        assert "错误恢复内容。" in result
-        assert "沙盒感知内容。" in result
+        assert "默认约束内容。" in result
         assert "run_code 模板。" in result  # explicitly named
 
     def test_inherited_strategies_sorted_by_priority(self, tmp_path: Path) -> None:
@@ -561,12 +499,9 @@ class TestInheritStrategies:
             "worker", inherit_strategies=["__all__"]
         )
         assert result is not None
-        # sandbox(priority=20) should come before error_recovery(priority=25)
-        # which should come before run_code_patterns(priority=35)
-        sandbox_pos = result.index("沙盒感知内容。")
-        error_pos = result.index("错误恢复内容。")
+        always_on_pos = result.index("默认约束内容。")
         run_code_pos = result.index("run_code 模板。")
-        assert sandbox_pos < error_pos < run_code_pos
+        assert always_on_pos < run_code_pos
 
     def test_empty_inherit_strategies_list(self, tmp_path: Path) -> None:
         d = self._make_full_dir(tmp_path)
@@ -574,7 +509,7 @@ class TestInheritStrategies:
         composer.load_all(auto_repair=False)
         result = composer.compose_for_subagent("explorer", inherit_strategies=[])
         assert result is not None
-        assert "错误恢复内容。" not in result
+        assert "默认约束内容。" not in result
 
     def test_real_subagent_files_with_strategy_inheritance(self) -> None:
         """验证实际 prompts/ 文件：子代理可继承策略。"""
@@ -587,19 +522,19 @@ class TestInheritStrategies:
         result = composer.compose_for_subagent("subagent", inherit_strategies=["__all__"])
         assert result is not None
         assert "继承策略" in result
-        # explorer 应继承 error_recovery 和 sandbox_awareness
         result = composer.compose_for_subagent(
-            "explorer", inherit_strategies=["error_recovery", "sandbox_awareness"]
+            "explorer", inherit_strategies=["spreadsheet:workflow"]
         )
         assert result is not None
-        assert "错误恢复策略" in result
-        assert "沙盒安全机制" in result
+        assert "继承策略" in result
+        assert "inspect_spreadsheet" in result
+        assert "WorkbookSpec" in result
 
 
-class TestPlanModeStrategyRouting:
-    """plan 模式策略分流测试。"""
+class TestPromptArchitectureNoTagStrategies:
+    """全局段无条件注入；不再按 task_tags 补偿规划/复刻策略。"""
 
-    def test_plan_strategy_only_applies_for_plan_worthy(self) -> None:
+    def test_plan_tags_do_not_inject_legacy_plan_sections(self) -> None:
         prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
         if not prompts_dir.is_dir():
             pytest.skip("prompts/ 目录不存在")
@@ -607,37 +542,46 @@ class TestPlanModeStrategyRouting:
         composer = PromptComposer(prompts_dir)
         composer.load_all()
 
-        worthy_ctx = PromptContext(
-            chat_mode="plan",
-            write_hint="read_only",
-            task_tags=["plan_worthy"],
+        worthy_text = composer.compose_strategies_text(
+            PromptContext(chat_mode="plan")
         )
-        worthy_text = composer.compose_strategies_text(worthy_ctx)
-        assert "## 规划模式策略" in worthy_text
-
-        not_needed_ctx = PromptContext(
-            chat_mode="plan",
-            write_hint="read_only",
-            task_tags=["plan_not_needed"],
+        not_needed_text = composer.compose_strategies_text(
+            PromptContext(chat_mode="plan")
         )
-        not_needed_text = composer.compose_strategies_text(not_needed_ctx)
-        assert "## 规划模式策略" not in not_needed_text
+        write_text = composer.compose_strategies_text(PromptContext(chat_mode="write"))
+        assert "## Spreadsheet agent" in worthy_text
+        assert "## Spreadsheet agent" in not_needed_text
+        assert "## Plan mode" in worthy_text
+        assert "## Plan mode" in not_needed_text
+        assert "## Plan mode" not in write_text
+        assert "## 规划模式策略" not in worthy_text
+        assert "## 规划模式轻量分流" not in not_needed_text
+        assert worthy_text == not_needed_text
 
-    def test_plan_mode_fallback_strategy_applies_for_plan_not_needed(self) -> None:
+    def test_workflow_and_run_code_are_unconditional(self) -> None:
         prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
         if not prompts_dir.is_dir():
             pytest.skip("prompts/ 目录不存在")
 
         composer = PromptComposer(prompts_dir)
         composer.load_all()
+        text = composer.compose_strategies_text(PromptContext(chat_mode="plan"))
+        assert "inspect_spreadsheet" in text
+        assert "Code Mode" in text
+        assert "## Plan mode" in text
+        assert "快速模式" not in text
 
-        ctx = PromptContext(
-            chat_mode="plan",
-            write_hint="read_only",
-            task_tags=["plan_not_needed"],
-        )
-        text = composer.compose_strategies_text(ctx)
-        assert "## 规划模式轻量分流" in text
+    def test_plan_policy_segment_order(self) -> None:
+        prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
+        if not prompts_dir.is_dir():
+            pytest.skip("prompts/ 目录不存在")
+
+        composer = PromptComposer(prompts_dir)
+        composer.load_all()
+        names = {seg.name: seg.order for seg in composer.strategy_segments}
+        assert names["plan:policy"] == 50
+        assert names["spreadsheet:workflow"] == 125
+        assert names["tool:run_code"] == 150
 
 
 class TestVariableSubstitution:
@@ -675,7 +619,7 @@ class TestVariableSubstitution:
         d = self._make_dir_with_placeholders(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="unknown")
+        ctx = PromptContext()
         text = composer.compose_text(ctx, variables={"workspace_root": "/data/user1"})
         assert "/data/user1" in text
         assert "{workspace_root}" not in text
@@ -684,7 +628,7 @@ class TestVariableSubstitution:
         d = self._make_dir_with_placeholders(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(write_hint="unknown")
+        ctx = PromptContext()
         text = composer.compose_text(ctx)
         assert "{workspace_root}" in text
 
@@ -736,6 +680,7 @@ class TestVariableSubstitution:
 
     def test_substitute_static_method(self) -> None:
         assert PromptComposer._substitute("hello {x}", {"x": "world"}) == "hello world"
+        assert PromptComposer._substitute("root {{workspace_root}}", {"workspace_root": "/ws"}) == "root /ws"
         assert PromptComposer._substitute("no placeholder", {"x": "v"}) == "no placeholder"
         assert PromptComposer._substitute("", {"x": "v"}) == ""
         assert PromptComposer._substitute("keep {x}", None) == "keep {x}"
@@ -750,9 +695,9 @@ class TestVariableSubstitution:
         variables = {"workspace_root": "/test/workspace", "auto_generated_capability_map": ""}
         # core + 无条件策略
         ctx = PromptContext()
-        full_text = composer.compose_text(ctx, variables=variables)
-        assert "{workspace_root}" not in full_text
-        assert "{auto_generated_capability_map}" not in full_text
+        core_text = composer.compose_core_text(ctx, variables=variables)
+        assert "{workspace_root}" not in core_text
+        assert "{auto_generated_capability_map}" not in core_text
         # 策略文本
         strat_text = composer.compose_strategies_text(ctx, variables=variables)
         assert "{workspace_root}" not in strat_text
@@ -769,10 +714,15 @@ class TestCoreSegmentsMatchLegacy:
         composer.load_all()
         if not composer.core_segments:
             pytest.skip("无 core 段可加载")
-        # write_hint="unknown" 与 _load_system_prompt 一致，只匹配 core 段
-        ctx = PromptContext(write_hint="unknown")
-        core_text = composer.compose_text(ctx)
+        ctx = PromptContext()
+        core_text = composer.compose_core_text(ctx)
         assert core_text == _DEFAULT_SYSTEM_PROMPT, (
             "core/ 文件拼接结果与 _DEFAULT_SYSTEM_PROMPT 不一致！\n"
             f"长度: core={len(core_text)} vs legacy={len(_DEFAULT_SYSTEM_PROMPT)}"
         )
+        # compose_text 默认不含策略，避免与 context_builder 双注入
+        full_default = composer.compose_text(ctx)
+        assert full_default == core_text
+        strat_only = composer.compose_strategies_text(ctx)
+        if strat_only:
+            assert strat_only not in full_default

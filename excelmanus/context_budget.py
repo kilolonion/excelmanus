@@ -100,6 +100,16 @@ class ContextBudget:
         self._override_tokens = max(0, tokens)
         self._override_is_adaptive = adaptive
 
+    def set_base_tokens(self, tokens: int) -> int:
+        """用户显式锁定上下文窗口（设置页 / 环境变量）。
+
+        清除运行时 override（含自适应缩减），使设置值立即成为有效上限。
+        """
+        self._base_tokens = max(0, tokens)
+        self._override_tokens = 0
+        self._override_is_adaptive = False
+        return self.max_tokens
+
     def clear_override(self) -> None:
         self._override_tokens = 0
         self._override_is_adaptive = False

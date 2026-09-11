@@ -41,7 +41,6 @@ def _make_engine_with_state(*, code_policy_enabled: bool = True):
     e.approval = MagicMock()
     e.approval.new_approval_id.return_value = "ap-1"
     e.approval.utc_now.return_value = "2026-01-01T00:00:00Z"
-    e.window_perception = None
     e._context_builder = MagicMock()
     e.emit = MagicMock()
     return e, state
@@ -154,23 +153,3 @@ class TestCodePolicyHandlerWriteLog:
         assert ".cow/data_abc.xlsx" in entry.get("file_path", "")
 
 
-class TestVerifierPlaybookRunCode:
-    """验证 _select_verification_playbook 能正确识别 run_code。"""
-
-    def test_playbook_includes_run_code_section(self):
-        """write_operations_log 含 run_code 时，playbook 应包含 run_code 验证清单。"""
-        from excelmanus.engine import AgentEngine
-
-        write_ops = [
-            {"tool_name": "run_code", "file_path": "output.xlsx", "summary": "写入数据"},
-        ]
-        playbook = AgentEngine._select_verification_playbook(write_ops)
-        assert "run_code" in playbook
-        assert "验证" in playbook
-
-    def test_playbook_empty_without_run_code(self):
-        """write_operations_log 为空时，playbook 应为空。"""
-        from excelmanus.engine import AgentEngine
-
-        playbook = AgentEngine._select_verification_playbook([])
-        assert playbook == ""

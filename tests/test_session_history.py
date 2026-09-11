@@ -3,20 +3,14 @@
 覆盖：
 - SessionSummaryStore CRUD + 去重 + user_id 隔离
 - SessionSummarizer 解析逻辑
-- ContextBuilder._build_session_history_notice 门控
-- Engine._search_session_history 混合检索
 """
 
 from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime, timezone
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import numpy as np
-import pytest
 
 # ── SessionSummaryStore 测试 ──────────────────────────────────
 
@@ -247,50 +241,3 @@ class TestSessionSummarizer:
         result = SessionSummarizer._parse_response(raw)
         assert result is not None
         assert result["outcome"] == "partial"
-
-
-# ── ContextBuilder 门控测试 ───────────────────────────────────
-
-
-class TestBuildSessionHistoryNotice:
-    def test_returns_empty_after_turn_1(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = MagicMock()
-        engine._session_turn = 5
-        engine._relevant_session_history = "## 历史会话参考\n..."
-        cb = ContextBuilder(engine)
-        assert cb._build_session_history_notice() == ""
-
-    def test_returns_text_on_turn_0(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = MagicMock()
-        engine._session_turn = 0
-        engine._relevant_session_history = "## 历史会话参考\nsome history"
-        cb = ContextBuilder(engine)
-        result = cb._build_session_history_notice()
-        assert "历史会话参考" in result
-
-    def test_returns_text_on_turn_1(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = MagicMock()
-        engine._session_turn = 1
-        engine._relevant_session_history = "## 历史会话参考\nsome history"
-        cb = ContextBuilder(engine)
-        result = cb._build_session_history_notice()
-        assert "历史会话参考" in result
-
-    def test_returns_empty_when_no_history(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = MagicMock()
-        engine._session_turn = 0
-        engine._relevant_session_history = ""
-        cb = ContextBuilder(engine)
-        assert cb._build_session_history_notice() == ""
-
-    def test_returns_empty_when_whitespace_only(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        engine = MagicMock()
-        engine._session_turn = 0
-        engine._relevant_session_history = "   \n  "
-        cb = ContextBuilder(engine)
-        assert cb._build_session_history_notice() == ""

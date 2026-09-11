@@ -13,7 +13,6 @@ import {
   Zap,
   FolderOpen,
   Shield,
-  Link2,
   MessageSquare,
   Settings2,
   Info,
@@ -42,7 +41,6 @@ import {
   type ChannelSettings,
 } from "@/lib/api";
 import { ChannelIcon, CHANNEL_META } from "@/components/ui/ChannelIcons";
-import { ChannelBindSection } from "@/components/channels/ChannelBindSection";
 
 // ── Shared Props ──────────────────────────────────────────
 
@@ -789,16 +787,6 @@ const COMMAND_GROUPS: CommandGroup[] = [
       { name: "/undoapply", desc: "撤销最近一次 apply 操作" },
     ],
   },
-  {
-    title: "配额与绑定",
-    icon: Shield,
-    commands: [
-      { name: "/quota", desc: "查看 token 用量和配额" },
-      { name: "/bind", desc: "生成 6 位绑定码，在 Web 前端绑定账号" },
-      { name: "/bindstatus", desc: "查询当前渠道账号的绑定状态" },
-      { name: "/unbind", desc: "解除当前渠道账号的绑定" },
-    ],
-  },
 ];
 
 function CommandReference() {
@@ -1151,45 +1139,6 @@ function RateLimitSettings({
       <p className="text-[10px] text-muted-foreground">
         修改后立即对运行中的渠道 Bot 生效，无需重启。
       </p>
-    </div>
-  );
-}
-
-// ── Bind Flow Overview ────────────────────────────────────
-
-function BindFlowOverview() {
-  const steps = [
-    { num: "1", label: "Bot 中 /bind", desc: "在 Bot 对话中发送 /bind 命令获取 6 位绑定码" },
-    { num: "2", label: "Web 输入码", desc: '在"个人中心 > 渠道绑定"中输入绑定码' },
-    { num: "3", label: "确认绑定", desc: "预览信息无误后点击确认，即可跨渠道共享会话和工作区" },
-  ];
-
-  return (
-    <div className="space-y-2 mt-3">
-      <p className="text-xs font-medium text-muted-foreground flex items-center gap-1.5">
-        <Link2 className="h-3 w-3" />
-        账号绑定流程
-      </p>
-      <div className="flex items-start gap-0">
-        {steps.map((step, i) => (
-          <div key={step.num} className="flex-1 min-w-0 flex flex-col items-center text-center relative">
-            {/* Connector line */}
-            {i < steps.length - 1 && (
-              <div
-                className="absolute top-3 left-[calc(50%+14px)] right-[calc(-50%+14px)] h-px bg-border"
-              />
-            )}
-            <div
-              className="h-6 w-6 rounded-full flex items-center justify-center text-xs font-bold text-white relative z-10 shrink-0"
-              style={{ backgroundColor: "var(--em-primary)" }}
-            >
-              {step.num}
-            </div>
-            <p className="text-[11px] font-medium mt-1.5 leading-tight">{step.label}</p>
-            <p className="text-[10px] text-muted-foreground mt-0.5 leading-snug px-1">{step.desc}</p>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }
@@ -1815,17 +1764,7 @@ export function ChannelOverviewTab({
   error,
   onRefresh,
   onToast,
-  showBind,
 }: TabProps) {
-  const [savingBind, setSavingBind] = useState(false);
-  const [bindToast, setBindToast] = useState<{ message: string; type: "success" | "error" } | null>(null);
-  const showBindToast = useCallback(
-    (message: string, type: "success" | "error") => {
-      setBindToast({ message, type });
-      setTimeout(() => setBindToast(null), 3000);
-    },
-    [],
-  );
 
   return (
     <>
@@ -1843,70 +1782,6 @@ export function ChannelOverviewTab({
           <RotateCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
         </button>
       </div>
-
-      {/* ── 渠道绑定 ── */}
-      {showBind && (
-        <>
-          <div>
-            <div className="flex items-center gap-2 mb-2.5">
-              <div
-                className="h-6 w-6 rounded-md flex items-center justify-center"
-                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-              >
-                <Link2 className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
-              </div>
-              <h3 className="text-sm font-semibold">渠道绑定</h3>
-            </div>
-            <ChannelBindSection showToast={showBindToast} />
-          </div>
-
-          {/* Bind toast */}
-          <AnimatePresence>
-            {bindToast && (
-              <motion.div
-                initial={{ opacity: 0, y: -8 }}
-                animate={{ opacity: 1, y: 0 }}
-                exit={{ opacity: 0, y: -8 }}
-                className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-xs backdrop-blur-xl shadow-sm ${
-                  bindToast.type === "success"
-                    ? "bg-green-50/80 dark:bg-green-950/70 text-green-700 dark:text-green-400 border-green-500/30"
-                    : "bg-red-50/80 dark:bg-red-950/70 text-red-700 dark:text-red-400 border-red-500/30"
-                }`}
-              >
-                {bindToast.type === "success" ? (
-                  <Check className="h-3.5 w-3.5 shrink-0" />
-                ) : (
-                  <AlertCircle className="h-3.5 w-3.5 shrink-0" />
-                )}
-                <span className="flex-1">{bindToast.message}</span>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          <div className="h-px bg-gradient-to-r from-transparent via-border to-transparent" />
-        </>
-      )}
-
-      {/* Require Bind Toggle */}
-      {status && (
-        <RequireBindToggle
-          checked={status.require_bind}
-          source={status.require_bind_source}
-          saving={savingBind}
-          onToggle={async (val) => {
-            setSavingBind(true);
-            try {
-              await updateChannelSettings({ require_bind: val });
-              onToast(val ? "已开启强制绑定" : "已关闭强制绑定", "success");
-              onRefresh();
-            } catch (e: unknown) {
-              onToast(`设置失败: ${e instanceof Error ? e.message : String(e)}`, "error");
-            } finally {
-              setSavingBind(false);
-            }
-          }}
-        />
-      )}
 
       {/* Channel Cards */}
       {loading && !status ? (
@@ -2086,11 +1961,6 @@ export function ChannelReferenceTab(_props: TabProps) {
         <ConcurrencyModesInfo />
       </Section>
 
-      {/* Bind Flow Overview — moved from 命令参考 to here */}
-      <Section title="账号绑定流程" icon={Link2} defaultOpen={false}>
-        <BindFlowOverview />
-      </Section>
-
       {/* Env Var Guide */}
       <Section title="环境变量配置（高级）" icon={Terminal} defaultOpen={false}>
         <EnvFallbackGuide />
@@ -2099,8 +1969,3 @@ export function ChannelReferenceTab(_props: TabProps) {
   );
 }
 
-// ── Legacy export for backward compatibility ──────────────
-
-export function ChannelsTab() {
-  return null;
-}

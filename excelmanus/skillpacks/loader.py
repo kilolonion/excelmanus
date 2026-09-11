@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.logger import get_logger
@@ -14,8 +14,10 @@ from excelmanus.skillpacks.frontmatter import (
     parse_scalar as parse_frontmatter_scalar,
     serialize_frontmatter as serialize_frontmatter_text,
 )
-from excelmanus.skillpacks.models import SkillCommandDispatchMode, Skillpack
-from excelmanus.tools import ToolRegistry
+from excelmanus.skillpacks.models import Skillpack
+
+if TYPE_CHECKING:
+    from excelmanus.tools.registry import ToolRegistry
 
 logger = get_logger("skillpacks.loader")
 
@@ -47,8 +49,6 @@ _CANONICAL_FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "hooks": ("hooks",),
     "model": ("model",),
     "metadata": ("metadata",),
-    "command_dispatch": ("command_dispatch", "command-dispatch"),
-    "command_tool": ("command_tool", "command-tool"),
     "required_mcp_servers": ("required_mcp_servers", "required-mcp-servers"),
     "required_mcp_tools": ("required_mcp_tools", "required-mcp-tools"),
 }
@@ -279,12 +279,15 @@ class SkillpackLoader:
             "allowed-tools": "allowed-tools",
             "triggers": "triggers",
             "priority": "priority",
+            "command_dispatch": "command-dispatch",
+            "command-dispatch": "command-dispatch",
+            "command_tool": "command-tool",
+            "command-tool": "command-tool",
         }
         for raw_key, display_key in _DEPRECATED_FIELDS.items():
             if raw_key in frontmatter:
                 self._append_warning(
-                    f"{skill_file}: frontmatter 字段 '{display_key}' 已移除"
-                    "（Skill 不再控制工具授权），该字段将被忽略。"
+                    f"{skill_file}: frontmatter 字段 '{display_key}' 已移除，该字段将被忽略。"
                 )
                 frontmatter.pop(raw_key, None)
 
@@ -292,15 +295,6 @@ class SkillpackLoader:
         model = self._get_optional_str_or_none(frontmatter, "model")
         metadata = self._get_optional_dict(frontmatter, "metadata")
 
-        command_dispatch = self._get_optional_command_dispatch(
-            frontmatter,
-            default="none",
-        )
-        command_tool = self._get_optional_str_or_none(frontmatter, "command_tool")
-        if command_dispatch == "tool" and not command_tool:
-            raise SkillpackValidationError(
-                "frontmatter 字段 'command_dispatch=tool' 时，'command_tool' 必填"
-            )
         required_mcp_servers = self._normalize_required_mcp_servers(
             self._get_optional_str_list(frontmatter, "required_mcp_servers")
         )
@@ -335,8 +329,6 @@ class SkillpackLoader:
             hooks=hooks,
             model=model,
             metadata=metadata,
-            command_dispatch=command_dispatch,
-            command_tool=command_tool,
             required_mcp_servers=required_mcp_servers,
             required_mcp_tools=required_mcp_tools,
             extensions=extensions,
@@ -613,18 +605,3 @@ class SkillpackLoader:
             f"frontmatter 字段 '{key}' 仅支持 normal"
         )
 
-    @staticmethod
-    def _get_optional_command_dispatch(
-        payload: dict[str, Any],
-        key: str = "command_dispatch",
-        default: SkillCommandDispatchMode = "none",
-    ) -> SkillCommandDispatchMode:
-        raw = payload.get(key, default)
-        if not isinstance(raw, str):
-            raise SkillpackValidationError(f"frontmatter 字段 '{key}' 必须是字符串")
-        normalized = raw.strip().lower()
-        if normalized in {"none", "tool"}:
-            return normalized  # type: ignore[return-value]
-        raise SkillpackValidationError(
-            f"frontmatter 字段 '{key}' 必须是 none/tool"
-        )

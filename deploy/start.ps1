@@ -481,6 +481,13 @@ function Test-Dependencies {
         if (Get-Command node -ErrorAction SilentlyContinue) {
             $nodeVer = & node --version 2>&1
             Write-Dbg "Node.js: $nodeVer"
+            if ($nodeVer -match '^v(\d+)') {
+                $nodeMajor = [int]$Matches[1]
+                if ($nodeMajor -lt 20) {
+                    Write-Err "Node.js $nodeVer 过低，Web UI 需要 ≥ 20.9（Next.js 16）: https://nodejs.org/"
+                    $ok = $false
+                }
+            }
         }
 
         # web/node_modules

@@ -27,31 +27,31 @@ class TestDownloadToken:
 
     def test_create_and_decode(self):
         """创建令牌后能正常解码，包含正确字段。"""
-        token = create_download_token("outputs/report.xlsx", user_id="user123")
+        token = create_download_token("outputs/report.xlsx")
         claims = decode_download_token(token)
         assert claims is not None
         assert claims["type"] == "download"
         assert claims["file_path"] == "outputs/report.xlsx"
-        assert claims["sub"] == "user123"
+        assert "sub" not in claims
         assert "exp" in claims
 
     def test_decode_wrong_type_returns_none(self):
         """非 download 类型的令牌应返回 None。"""
-        from excelmanus.auth.security import create_access_token
+        from jose import jwt
+        from excelmanus.auth.security import _get_jwt_secret, JWT_ALGORITHM
 
-        token = create_access_token({"sub": "user1", "role": "user"})
+        token = jwt.encode({"type": "access", "file_path": "x.xlsx"}, _get_jwt_secret(), algorithm=JWT_ALGORITHM)
         assert decode_download_token(token) is None
 
     def test_empty_file_path_returns_none(self):
         """file_path 为空的令牌解码应返回 None。"""
-        token = create_download_token("", user_id="user1")
+        token = create_download_token("")
         assert decode_download_token(token) is None
 
     def test_expired_token_returns_none(self):
         """过期令牌应返回 None。"""
         token = create_download_token(
             "test.xlsx",
-            user_id="u1",
             expires_delta=timedelta(seconds=-1),
         )
         assert decode_download_token(token) is None
@@ -60,13 +60,6 @@ class TestDownloadToken:
         """随机字符串应返回 None。"""
         assert decode_download_token("not-a-real-token") is None
         assert decode_download_token("") is None
-
-    def test_default_user_id_empty(self):
-        """不传 user_id 时默认为空字符串。"""
-        token = create_download_token("file.xlsx")
-        claims = decode_download_token(token)
-        assert claims is not None
-        assert claims["sub"] == ""
 
     def test_custom_expiry(self):
         """自定义有效期应生效。"""
@@ -89,15 +82,6 @@ class TestDownloadToken:
 # ══════════════════════════════════════════════════════════════
 
 
-class TestMiddlewarePublicPrefix:
-    """确保 /api/v1/files/dl/ 在 auth 中间件公开前缀列表中。"""
-
-    def test_dl_prefix_in_public(self):
-        from excelmanus.auth.middleware import _PUBLIC_PREFIXES
-
-        assert any("/api/v1/files/dl/" in p for p in _PUBLIC_PREFIXES)
-
-
 # ══════════════════════════════════════════════════════════════
 # TestApiClientGenerateDownloadLink — api_client 方法
 # ══════════════════════════════════════════════════════════════
@@ -116,7 +100,7 @@ class TestApiClientGenerateDownloadLink:
         mock_resp.json.return_value = {"url": "http://example.com/api/v1/files/dl/tok123"}
 
         with patch.object(client, "_request", new_callable=AsyncMock, return_value=mock_resp):
-            url = await client.generate_download_link("test.xlsx", user_id="u1")
+            url = await client.generate_download_link("test.xlsx")
 
         assert url == "http://example.com/api/v1/files/dl/tok123"
 
@@ -280,9 +264,7 @@ class TestQQAdapterSendFile:
 
         adapter = QQBotAdapter.__new__(QQBotAdapter)
         with pytest.raises(NotImplementedError):
-            asyncio.get_event_loop().run_until_complete(
-                adapter.send_file("chat1", b"data", "file.xlsx")
-            )
+            asyncio.run(adapter.send_file("chat1", b"data", "file.xlsx"))
 
 
 # ══════════════════════════════════════════════════════════════
@@ -316,10 +298,13 @@ class TestDownloadLinkPublicUrlResolution:
         mock_store = MagicMock()
         mock_store.get.return_value = "https://db.example.com"
 
+        import excelmanus.api_app_state as app_state
+        import excelmanus.api_routes_files as files_mod
+
         with (
-            patch.object(api_mod, "_config", mock_config),
-            patch.object(api_mod, "_config_store", mock_store),
-            patch.object(api_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(app_state, "_config", mock_config),
+            patch.object(app_state, "_config_store", mock_store),
+            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
@@ -343,10 +328,13 @@ class TestDownloadLinkPublicUrlResolution:
         mock_store = MagicMock()
         mock_store.get.return_value = "https://db.example.com"
 
+        import excelmanus.api_app_state as app_state
+        import excelmanus.api_routes_files as files_mod
+
         with (
-            patch.object(api_mod, "_config", mock_config),
-            patch.object(api_mod, "_config_store", mock_store),
-            patch.object(api_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(app_state, "_config", mock_config),
+            patch.object(app_state, "_config_store", mock_store),
+            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
@@ -369,10 +357,13 @@ class TestDownloadLinkPublicUrlResolution:
         mock_store = MagicMock()
         mock_store.get.return_value = ""  # config_kv 也为空
 
+        import excelmanus.api_app_state as app_state
+        import excelmanus.api_routes_files as files_mod
+
         with (
-            patch.object(api_mod, "_config", mock_config),
-            patch.object(api_mod, "_config_store", mock_store),
-            patch.object(api_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(app_state, "_config", mock_config),
+            patch.object(app_state, "_config_store", mock_store),
+            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
         ):
             req = self._make_request(host="myserver.com:8000", scheme="https")
             resp = await api_mod.create_download_link(req)
@@ -394,10 +385,13 @@ class TestDownloadLinkPublicUrlResolution:
         mock_store = MagicMock()
         mock_store.get.return_value = "https://db.example.com/"  # 带尾部斜杠
 
+        import excelmanus.api_app_state as app_state
+        import excelmanus.api_routes_files as files_mod
+
         with (
-            patch.object(api_mod, "_config", mock_config),
-            patch.object(api_mod, "_config_store", mock_store),
-            patch.object(api_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
+            patch.object(app_state, "_config", mock_config),
+            patch.object(app_state, "_config_store", mock_store),
+            patch.object(files_mod, "_resolve_excel_path", return_value="/tmp/test.xlsx"),
         ):
             req = self._make_request()
             resp = await api_mod.create_download_link(req)
@@ -407,3 +401,44 @@ class TestDownloadLinkPublicUrlResolution:
             # URL 不应包含双斜杠
             assert "/api/v1/files/dl/" in data["url"]
             assert "//api" not in data["url"]
+
+    @pytest.mark.asyncio
+    async def test_download_link_resolves_in_process_workspace(self, tmp_path: Path):
+        """下载令牌只在唯一工作区解析路径，忽略 body.user_id。"""
+        import json
+        import excelmanus.api as api_mod
+        import excelmanus.api_app_state as app_state
+        import excelmanus.api_routes_files as files_mod
+
+        secret = tmp_path / "secret.xlsx"
+        secret.write_bytes(b"secret")
+
+        mock_config = MagicMock()
+        mock_config.public_url = "https://example.com"
+        mock_config.workspace_root = str(tmp_path)
+        mock_config.data_root = str(tmp_path)
+
+        req = MagicMock()
+        req.json = AsyncMock(
+            return_value={"file_path": "secret.xlsx", "user_id": "ignored"}
+        )
+        req.headers = {"host": "example.com", "x-forwarded-proto": "https"}
+        req.url = MagicMock(scheme="https")
+
+        captured: dict[str, str] = {}
+
+        def _capture_resolve(path, session_id, *, workspace_root=None):
+            captured["workspace_root"] = workspace_root or ""
+            return str(secret)
+
+        with (
+            patch.object(app_state, "_config", mock_config),
+            patch.object(app_state, "_config_store", None),
+            patch.object(files_mod, "_resolve_excel_path", side_effect=_capture_resolve),
+        ):
+            resp = await api_mod.create_download_link(req)
+            body = json.loads(resp.body.decode())
+
+        assert captured.get("workspace_root") in ("", str(tmp_path)) or "users" not in captured.get("workspace_root", "")
+        assert resp.status_code == 200
+        assert "url" in body

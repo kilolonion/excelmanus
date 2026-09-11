@@ -1,11 +1,14 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { Undo2, CheckCircle2, XCircle, Loader2, History, RefreshCw } from "lucide-react";
-import { Button } from "@/components/ui/button";
 import { fetchApprovals, undoApproval, type ApprovalRecord } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
-import { motion, AnimatePresence } from "framer-motion";
+import {
+  OverlayCard,
+  OverlayCardBody,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 
 interface UndoPanelProps {
   open: boolean;
@@ -20,7 +23,7 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
   const [optimisticUndoneIds, setOptimisticUndoneIds] = useState<Set<string>>(new Set());
   const [undoResults, setUndoResults] = useState<Record<string, { ok: boolean; msg: string }>>({});
 
-  const loadRecords = async () => {
+  const loadRecords = useCallback(async () => {
     setLoading(true);
     try {
       const data = await fetchApprovals({
@@ -33,13 +36,13 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [activeSessionId]);
 
   useEffect(() => {
     if (open) {
-      loadRecords();
+      void loadRecords();
     }
-  }, [open, activeSessionId]);
+  }, [open, loadRecords]);
 
   const handleUndo = async (id: string) => {
     if (!activeSessionId) {
@@ -67,7 +70,6 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
       const ok = res.status === "ok";
       setUndoResults((prev) => ({ ...prev, [id]: { ok, msg: res.message } }));
       if (ok) {
-        // 后台刷新列表做最终校准
         void loadRecords();
       } else {
         setOptimisticUndoneIds((prev) => {
@@ -91,129 +93,107 @@ export function UndoPanel({ open, onClose }: UndoPanelProps) {
     }
   };
 
-  if (!open) return null;
-
   return (
-    <AnimatePresence>
-      <motion.div
-        initial={{ y: 100, opacity: 0 }}
-        animate={{ y: 0, opacity: 1 }}
-        exit={{ y: 100, opacity: 0 }}
-        className="fixed bottom-24 left-1/2 -translate-x-1/2 z-50 w-[560px] max-w-[calc(100vw-2rem)]"
-      >
-        <div className="bg-card border border-border rounded-2xl shadow-lg" style={{ paddingBottom: "max(0px, var(--sab, 0px))" }}>
-          {/* Header */}
-          <div className="flex items-center justify-between px-4 pt-4 pb-2">
-            <div className="flex items-center gap-2">
-              <History className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
-              <span className="font-semibold text-sm">操作历史</span>
-            </div>
-            <div className="flex items-center gap-1">
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0"
-                onClick={loadRecords}
-                disabled={loading}
-              >
-                <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-              </Button>
-              <Button
-                size="sm"
-                variant="ghost"
-                className="h-7 w-7 p-0"
-                onClick={onClose}
-              >
-                ✕
-              </Button>
-            </div>
-          </div>
+    <OverlayCard open={open} onOpenChange={(v) => !v && onClose()} size="lg" tone="primary">
+      <OverlayCardHeader
+        icon={<History className="h-5 w-5" />}
+        title="操作历史"
+        description="查看并撤销本会话已执行的工具操作"
+        actions={
+          <button
+            type="button"
+            onClick={() => void loadRecords()}
+            disabled={loading}
+            className="text-muted-foreground/50 hover:text-foreground transition-colors p-2 sm:p-1.5 rounded-xl hover:bg-muted/80 disabled:opacity-40"
+            title="刷新"
+          >
+            <RefreshCw className={`h-4 w-4 ${loading ? "animate-spin" : ""}`} />
+          </button>
+        }
+        onClose={onClose}
+      />
 
-          {/* Body */}
-          <div className="px-4 pb-4 max-h-[400px] overflow-y-auto">
-            {loading && records.length === 0 ? (
-              <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
-                <Loader2 className="h-4 w-4 animate-spin mr-2" />
-                加载中...
-              </div>
-            ) : records.length === 0 ? (
-              <div className="text-center py-8 text-sm text-muted-foreground">
-                没有操作记录
-              </div>
-            ) : (
-              <div className="space-y-2">
-                {records.map((rec) => {
-                  const result = undoResults[rec.id];
-                  const isUndoing = undoing === rec.id;
-                  const isOptimisticallyUndone = optimisticUndoneIds.has(rec.id);
-                  const isUndone = isOptimisticallyUndone || result?.ok === true;
-                  return (
-                    <div
-                      key={rec.id}
-                      className="flex items-center gap-3 px-3 py-2 rounded-lg border border-border text-sm"
-                    >
-                      {rec.execution_status === "success" ? (
-                        <CheckCircle2
-                          className="h-4 w-4 flex-shrink-0"
-                          style={{ color: "var(--em-primary)" }}
-                        />
-                      ) : (
-                        <XCircle
-                          className="h-4 w-4 flex-shrink-0"
-                          style={{ color: "var(--em-error)" }}
-                        />
-                      )}
-                      <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
-                          <span className="font-mono text-xs truncate">
-                            {rec.tool_name}
-                          </span>
-                          <span className="text-[10px] text-muted-foreground">
-                            {formatTime(rec.applied_at_utc)}
-                          </span>
-                        </div>
-                        {rec.result_preview && (
-                          <p className="text-xs text-muted-foreground truncate mt-0.5">
-                            {rec.result_preview}
-                          </p>
-                        )}
-                        {result && !result.ok && (
-                          <p className="text-xs mt-0.5" style={{ color: "var(--em-error)" }}>
-                            {result.msg}
-                          </p>
-                        )}
-                      </div>
-                      {rec.undoable && rec.execution_status === "success" && !isUndone && (
-                        <Button
-                          size="sm"
-                          variant="outline"
-                          className="gap-1 h-7 text-xs flex-shrink-0"
-                          disabled={isUndoing}
-                          onClick={() => handleUndo(rec.id)}
-                        >
-                          {isUndoing ? (
-                            <Loader2 className="h-3 w-3 animate-spin" />
-                          ) : (
-                            <Undo2 className="h-3 w-3" />
-                          )}
-                          撤销
-                        </Button>
-                      )}
-                      {isUndone && (
-                        <span className="text-xs text-muted-foreground flex items-center gap-1 flex-shrink-0">
-                          <Undo2 className="h-3 w-3" />
-                          {isUndoing ? "撤销中..." : "已撤销"}
-                        </span>
-                      )}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
+      <OverlayCardBody className="pb-5">
+        {loading && records.length === 0 ? (
+          <div className="flex items-center justify-center py-10 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin mr-2" />
+            加载中...
           </div>
-        </div>
-      </motion.div>
-    </AnimatePresence>
+        ) : records.length === 0 ? (
+          <div className="text-center py-10 text-sm text-muted-foreground">
+            没有操作记录
+          </div>
+        ) : (
+          <div className="space-y-2">
+            {records.map((rec) => {
+              const result = undoResults[rec.id];
+              const isUndoing = undoing === rec.id;
+              const isOptimisticallyUndone = optimisticUndoneIds.has(rec.id);
+              const isUndone = isOptimisticallyUndone || result?.ok === true;
+              return (
+                <div
+                  key={rec.id}
+                  className="flex items-center gap-3 px-3 py-2.5 rounded-2xl border border-border/60 text-sm bg-background/40"
+                >
+                  {rec.execution_status === "success" ? (
+                    <CheckCircle2
+                      className="h-4 w-4 flex-shrink-0"
+                      style={{ color: "var(--em-primary)" }}
+                    />
+                  ) : (
+                    <XCircle
+                      className="h-4 w-4 flex-shrink-0"
+                      style={{ color: "var(--em-error)" }}
+                    />
+                  )}
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2">
+                      <span className="font-mono text-xs truncate">
+                        {rec.tool_name}
+                      </span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {formatTime(rec.applied_at_utc)}
+                      </span>
+                    </div>
+                    {rec.result_preview && (
+                      <p className="text-xs text-muted-foreground truncate mt-0.5">
+                        {rec.result_preview}
+                      </p>
+                    )}
+                    {result && !result.ok && (
+                      <p className="text-xs mt-0.5" style={{ color: "var(--em-error)" }}>
+                        {result.msg}
+                      </p>
+                    )}
+                  </div>
+                  {rec.undoable && rec.execution_status === "success" && !isUndone && (
+                    <button
+                      type="button"
+                      className="inline-flex items-center gap-1 h-8 px-2.5 rounded-xl text-xs font-medium border border-border/70 text-muted-foreground hover:text-foreground hover:bg-muted/50 transition-colors flex-shrink-0 disabled:opacity-40"
+                      disabled={isUndoing}
+                      onClick={() => handleUndo(rec.id)}
+                    >
+                      {isUndoing ? (
+                        <Loader2 className="h-3 w-3 animate-spin" />
+                      ) : (
+                        <Undo2 className="h-3 w-3" />
+                      )}
+                      撤销
+                    </button>
+                  )}
+                  {isUndone && (
+                    <span className="text-xs text-muted-foreground flex items-center gap-1 flex-shrink-0">
+                      <Undo2 className="h-3 w-3" />
+                      {isUndoing ? "撤销中..." : "已撤销"}
+                    </span>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+        )}
+      </OverlayCardBody>
+    </OverlayCard>
   );
 }
 

@@ -15,34 +15,20 @@ from __future__ import annotations
 # 默认模式下的确认/审计行为由写入分层（Tier A/Tier B）决定。
 READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
     {
-        "read_excel",
-        "compare_excel",
-        # Word 文档工具：只读
+        "inspect_spreadsheet",
+        "analyze_spreadsheet",
+        "compare_spreadsheets",
+        "trace_spreadsheet_formulas",
         "read_word",
         "inspect_word",
         "search_word",
-        # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
-        "filter_data",
-        "list_sheets",
-        # get_file_info, find_files: Batch 5 精简
         "read_text_file",
         "list_directory",
-        # read_cell_styles: Batch 2 精简
-        "inspect_excel_files",
-        "scan_excel_snapshot",
-        "search_excel_values",
-        "discover_file_relationships",
         "memory_read_topic",
-        # 任务工具仅修改会话内存态，不触达工作区文件。
         "task_create",
         "task_update",
-        # 自省工具：纯查询，无副作用
         "introspect_capability",
-        # Vision 工具：读取图片，只读
         "read_image",
-        # 窗口聚焦工具：切换视口/滚动/展开，纯状态操作无文件写入
-        "focus_window",
-        # 并发搜索：只读搜索聚合，无副作用
         "parallel_search",
     }
 )
@@ -53,19 +39,15 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
 # 同一轮次中相邻的可并行工具将通过 asyncio.gather 并发执行。
 PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
-        "read_excel",
-        "compare_excel",
+        "inspect_spreadsheet",
+        "analyze_spreadsheet",
+        "compare_spreadsheets",
+        "trace_spreadsheet_formulas",
         "read_word",
         "inspect_word",
         "search_word",
-        "filter_data",
-        "list_sheets",
         "read_text_file",
         "list_directory",
-        "inspect_excel_files",
-        "scan_excel_snapshot",
-        "search_excel_values",
-        "discover_file_relationships",
         "memory_read_topic",
         "read_image",
         "introspect_capability",
@@ -83,9 +65,6 @@ MUTATING_CONFIRM_TOOLS: frozenset[str] = frozenset(
     {
         "run_shell",
         "delete_file",
-        # write_text_file, edit_text_file, rename_file: 降级到 Tier B（沙盒守卫 + 审计即可）
-        # write_excel, transform_data: Batch 1 精简
-        # create_sheet, copy_sheet, rename_sheet, delete_sheet, copy_range_between_sheets: Batch 3 精简
     }
 )
 
@@ -97,14 +76,11 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         "edit_text_file",
         "rename_file",
         "copy_file",
-        # Word 文档写入（沙盒守卫，低风险）
         "write_word",
-        # 图表工具（写 Excel，低风险）
-        "create_excel_chart",
-        # Vision 工具（写文件，自动审批）
-        "rebuild_excel_from_spec",
-        "verify_excel_replica",
-        # extract_table_from_image 已废弃（B+C 混合架构）
+        "edit_spreadsheet",
+        "format_spreadsheet",
+        "manage_spreadsheet_objects",
+        "manage_spreadsheet_versions",
     }
 )
 
@@ -128,16 +104,14 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "rename_file": ("source", "destination"),
     "write_word": ("file_path",),
     "delete_file": ("file_path",),
-    "create_excel_chart": ("file_path",),
-    "rebuild_excel_from_spec": ("output_path",),
-    "verify_excel_replica": ("report_path",),
+    "edit_spreadsheet": ("file_path",),
+    "format_spreadsheet": ("file_path",),
+    "manage_spreadsheet_objects": ("file_path",),
+    "manage_spreadsheet_versions": ("file_path",),
 }
 
 # mode=first：按字段优先级提取第一个非空路径
-AUDIT_TARGET_ARG_RULES_FIRST: dict[str, tuple[str, ...]] = {
-    # transform_data: Batch 1 精简
-    # copy_range_between_sheets: Batch 3 精简
-}
+AUDIT_TARGET_ARG_RULES_FIRST: dict[str, tuple[str, ...]] = {}
 
 # run_code 使用动态策略引擎分级，不在静态 CONFIRM/AUDIT 集合中
 CODE_POLICY_DYNAMIC_TOOLS: frozenset[str] = frozenset({"run_code"})
@@ -178,128 +152,48 @@ WORKSPACE_SCAN_EXCLUDE_PREFIXES: tuple[str, ...] = (
 # ── 工具分类映射（用于工具索引） ────
 
 TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
-    "data_read": (
-        "read_excel", "inspect_excel_files", "filter_data", "compare_excel",
-        "scan_excel_snapshot",
-        "search_excel_values",
-        # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
-    ),
-    # data_write: Batch 1 精简
-    # format: Batch 2 精简
-    # advanced_format + chart + sheet写入: Batch 3 精简
+    "inspect": ("inspect_spreadsheet",),
+    "analyze": ("analyze_spreadsheet",),
+    "compare": ("compare_spreadsheets",),
+    "edit": ("edit_spreadsheet",),
+    "format": ("format_spreadsheet",),
+    "objects": ("manage_spreadsheet_objects",),
+    "formula_trace": ("trace_spreadsheet_formulas",),
+    "versions": ("manage_spreadsheet_versions",),
     "word": ("read_word", "inspect_word", "search_word", "write_word"),
-    "sheet": ("list_sheets", "focus_window"),  # list_sheets 保留为只读结构发现
-    "chart": ("create_excel_chart",),
     "file": (
         "read_text_file", "list_directory", "copy_file", "rename_file", "delete_file",
-        # get_file_info, find_files: Batch 5 精简
     ),
     "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
-    "vision": ("read_image", "rebuild_excel_from_spec", "verify_excel_replica", "extract_table_spec"),
+    "vision": ("read_image",),
 }
 
 
 # ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
-    # 数据读取
-    "read_excel": "读取 Excel/CSV 数据摘要与首尾预览，支持 range 精确读取、分页、采样，可按需附加样式/图表/公式/数据概要等维度",
-    "inspect_excel_files": "批量扫描目录下所有 Excel 文件概况，快速了解工作区全貌",
-    "scan_excel_snapshot": "一次性扫描 Excel 文件全貌（schema/统计/质量信号/跨 Sheet 关联），替代多次 read_excel + run_code",
-    "search_excel_values": "跨 Sheet 搜索 Excel 单元格值（类似 ripgrep），支持包含/精确/正则/前缀匹配，返回匹配位置和上下文",
-    # analyze_data, group_aggregate, analyze_sheet_mapping: Batch 4 精简
-    "filter_data": "按条件筛选 Excel/CSV 数据行，支持 14 种运算符、多条件组合、排序和 Top-N",
-    "compare_excel": "对比两个 Excel 文件或同一文件的两个工作表，返回结构化差异报告（新增/删除/修改行和单元格）",
+    "inspect_spreadsheet": "只读探查 Excel 数据：overview 看结构，range 读取区域，search 搜值，capabilities 查能力",
+    "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，relationships 跨文件关联，files 扫目录",
+    "compare_spreadsheets": "只读对比两个工作簿或同簿两表，position 按坐标，key 按关键列",
+    "edit_spreadsheet": "原子编辑：写值/公式、插行列、改表结构，或编译 WorkbookSpec",
+    "format_spreadsheet": "原子改外观：字体/填充/边框/对齐、合并、行列尺寸",
+    "manage_spreadsheet_objects": "富对象：插入原生 Excel 图表",
+    "trace_spreadsheet_formulas": "只读公式分析：map 全景、trace 单元格、impact 影响面",
+    "manage_spreadsheet_versions": "列出当前版本与检查点、打快照、按 revision 恢复",
     "read_word": "读取 Word (.docx) 文档的段落内容和表格，支持分页和行内格式",
     "inspect_word": "检查 Word 文档的结构概览（标题树、段落数、表格数、节数、页面设置）",
     "search_word": "在 Word 文档中全文搜索，支持包含/精确/正则/前缀匹配",
     "write_word": "对 Word 文档执行段落写入操作（替换/插入/追加/删除）",
-    # 数据写入
-    # write_excel, write_cells, transform_data, insert_rows, insert_columns: Batch 1 精简
-    # Batch 2 精简（format 全部）
-    # Batch 3 精简（advanced_format + chart + sheet写入）
-    # sheet（list_sheets 保留）
-    "list_sheets": "列出 Excel 文件中所有工作表的名称、行列数等概况信息",
-    # 文件操作
     "read_text_file": "读取文本文件内容（md/txt/py/json/csv/yaml 等），查看脚本源码、配置、文档、日志",
     "list_directory": "列出指定目录下的文件和子目录，返回名称、类型和大小",
-    # get_file_info, find_files: Batch 5 精简
     "copy_file": "复制文件到工作区内的新位置",
     "rename_file": "重命名或移动文件到工作区内的新位置",
     "delete_file": "安全删除文件（需二次确认），仅限文件不删目录",
-    # 代码执行
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
     "edit_text_file": "精准编辑文本文件：查找替换指定片段，无需重写整个文件",
-    "run_code": "执行 Python 代码或脚本，适用于批量数据处理、复杂变换、跨表操作等场景（已配备安全沙盒）",
+    "run_code": "组合已注册 SDK 或处理领域工具盖不住的批量变换；不要用它默认写 Excel",
     "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
-    # 视觉工具
-    "read_image": "读取本地图片文件并加载到视觉上下文，支持 png/jpg/gif/bmp/webp",
-    # 窗口聚焦
-    "focus_window": "切换数据窗口视口：滚动到指定区域/向下展开更多行/清除筛选/恢复全量视图，window_id 见窗口感知上下文",
-    "rebuild_excel_from_spec": "从 ReplicaSpec JSON 确定性编译为 Excel 文件",
-    "verify_excel_replica": "验证 Excel 文件与 ReplicaSpec 的一致性，生成差异报告",
-    "extract_table_spec": "从图片自动提取表格结构和样式，生成 ReplicaSpec JSON，支持多表格",
-    # 图表
-    "create_excel_chart": "在 Excel 工作表中插入原生图表（bar/line/pie/scatter/area），支持数据范围、分类轴、标题和放置位置",
-}
-
-
-# ── 基于 LLM 路由标签的工具域白名单映射 ────────────────────────
-# route_tag → 该路由下允许暴露的域工具白名单。
-# 不在白名单中的域工具将被隐藏（元工具不受影响）。
-# "all_tools" 标签不在此映射中 → 不做过滤。
-# introspect_capability 在所有标签中保留，作为 LLM 发现隐藏工具的安全阀。
-
-_DATA_READ_TOOLS: frozenset[str] = frozenset({
-    "read_excel", "inspect_excel_files", "filter_data", "compare_excel",
-    "scan_excel_snapshot", "search_excel_values",
-    "read_word", "inspect_word", "search_word",
-    "list_sheets", "focus_window",
-    "discover_file_relationships", "memory_read_topic",
-    "introspect_capability",
-})
-
-ROUTE_TOOL_SCOPE: dict[str, frozenset[str]] = {
-    "data_read": _DATA_READ_TOOLS,
-    "data_write": _DATA_READ_TOOLS | frozenset({
-        "run_code", "write_text_file", "edit_text_file",
-        "copy_file", "rename_file", "write_word",
-    }),
-    "chart": _DATA_READ_TOOLS | frozenset({
-        "create_excel_chart", "run_code",
-    }),
-    "vision": _DATA_READ_TOOLS | frozenset({
-        "read_image", "rebuild_excel_from_spec",
-        "verify_excel_replica", "extract_table_spec", "run_code",
-    }),
-    "code": frozenset({
-        "run_code", "run_shell",
-        "write_text_file", "edit_text_file", "read_text_file",
-        "list_directory", "copy_file", "rename_file", "delete_file",
-        "introspect_capability",
-    }),
-    # "all_tools" 不在此映射中 → 不做过滤
-    "search": frozenset({
-        "memory_read_topic",
-        "read_text_file",
-        "list_directory",
-        "introspect_capability",
-        "parallel_search",
-    }),
-}
-
-# ── MCP scope 激活映射 ──────────────────────────────────────────
-# route_tag → 该路由下可见的 MCP Server scope 集合。
-# MCP 工具的 scope 来自 MCPServerConfig.scope 字段。
-# scope == "always" 始终可见；其他 scope 仅在对应路由标签激活时可见。
-# "all_tools" 不在此映射中 → 所有 MCP scope 可见。
-MCP_SCOPE_ACTIVATION: dict[str, frozenset[str]] = {
-    "data_read": frozenset({"always"}),
-    "data_write": frozenset({"always"}),
-    "chart": frozenset({"always"}),
-    "vision": frozenset({"always"}),
-    "code": frozenset({"always", "dev_docs"}),
-    "search": frozenset({"always", "search"}),
+    "read_image": "读取本地图片并加载到视觉上下文；复刻后用 edit_spreadsheet(workbook_spec=) 编译",
 }
 
 

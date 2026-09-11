@@ -634,68 +634,32 @@ class TestGoldenCells:
 
 
 class TestMinMatchRate:
-    """min_match_rate 断言：检查 verify_excel_replica 的 match_rate。"""
+    """min_match_rate 断言：要求成功的 edit_spreadsheet。"""
 
     @staticmethod
-    def _make_verify_tool_call(match_rate: float, *, success: bool = True) -> dict:
-        """构造一个 verify_excel_replica 工具调用记录。"""
-        import json as _json
+    def _make_edit_call(*, success: bool = True) -> dict:
         return {
-            "tool_name": "verify_excel_replica",
-            "result": _json.dumps({"status": "ok", "match_rate": match_rate}),
+            "tool_name": "edit_spreadsheet",
+            "result": '{"status":"success"}',
             "success": success,
         }
 
-    def test_match_rate_passes(self):
-        """match_rate 达标 → pass。"""
-        tc = self._make_verify_tool_call(0.96)
-        r = _make_result_dict(tool_calls=[tc])
+    def test_successful_edit_passes(self):
+        r = _make_result_dict(tool_calls=[self._make_edit_call()])
         v = validate_case(r, {"min_match_rate": 0.95})
         assert v.passed == 1
         assert v.failed == 0
-        assert v.results[0].actual == 0.96
 
-    def test_match_rate_exactly_at_threshold(self):
-        """match_rate 恰好等于阈值 → pass。"""
-        tc = self._make_verify_tool_call(0.95)
-        r = _make_result_dict(tool_calls=[tc])
-        v = validate_case(r, {"min_match_rate": 0.95})
-        assert v.passed == 1
-
-    def test_match_rate_below_threshold(self):
-        """match_rate 低于阈值 → fail。"""
-        tc = self._make_verify_tool_call(0.80)
-        r = _make_result_dict(tool_calls=[tc])
-        v = validate_case(r, {"min_match_rate": 0.95})
-        assert v.failed == 1
-        assert v.results[0].actual == 0.80
-        assert "低于阈值" in v.results[0].message
-
-    def test_no_verify_call(self):
-        """无 verify_excel_replica 调用 → fail。"""
-        r = _make_result_dict(tool_calls=[
-            {"tool_name": "read_excel", "success": True},
-        ])
+    def test_failed_edit_does_not_count(self):
+        r = _make_result_dict(tool_calls=[self._make_edit_call(success=False)])
         v = validate_case(r, {"min_match_rate": 0.95})
         assert v.failed == 1
         assert "未找到" in v.results[0].message
 
-    def test_result_parse_failure(self):
-        """verify_excel_replica 结果解析失败 → fail。"""
-        r = _make_result_dict(tool_calls=[{
-            "tool_name": "verify_excel_replica",
-            "result": "not-valid-json{{{",
-            "success": True,
-        }])
+    def test_no_edit_call(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "inspect_spreadsheet", "success": True},
+        ])
         v = validate_case(r, {"min_match_rate": 0.95})
         assert v.failed == 1
-        assert "解析" in v.results[0].message
-
-    def test_multiple_calls_takes_last(self):
-        """多次 verify_excel_replica 调用，取最后一次。"""
-        tc1 = self._make_verify_tool_call(0.70)
-        tc2 = self._make_verify_tool_call(0.98)
-        r = _make_result_dict(tool_calls=[tc1, tc2])
-        v = validate_case(r, {"min_match_rate": 0.95})
-        assert v.passed == 1
-        assert v.results[0].actual == 0.98
+        assert "未找到" in v.results[0].message

@@ -421,3 +421,44 @@ def test_responses_output_to_openai_reasoning_summary_block():
     assert msg.thinking is not None
     assert "比较方案" in msg.thinking
     assert msg.content == "已完成。"
+
+
+def test_uses_adaptive_thinking_for_claude_5_family():
+    from excelmanus.providers.claude import uses_adaptive_thinking
+
+    assert uses_adaptive_thinking("claude-sonnet-5")
+    assert uses_adaptive_thinking("claude-opus-5")
+    assert uses_adaptive_thinking("claude-fable-5-1")
+    assert uses_adaptive_thinking("claude-opus-4.8")
+    assert not uses_adaptive_thinking("claude-sonnet-4-6")
+    assert not uses_adaptive_thinking("claude-haiku-4-5")
+
+
+def test_apply_thinking_to_body_uses_adaptive_for_sonnet_5():
+    from excelmanus.providers.claude import _apply_thinking_to_body
+
+    body: dict = {"model": "claude-sonnet-5", "max_tokens": 8192}
+    _apply_thinking_to_body(
+        body,
+        "claude-sonnet-5",
+        thinking_enabled=True,
+        thinking_budget=32000,
+        thinking_effort="high",
+    )
+    assert body["thinking"] == {"type": "adaptive"}
+    assert body["output_config"] == {"effort": "high"}
+    assert "budget_tokens" not in body.get("thinking", {})
+
+
+def test_apply_thinking_to_body_keeps_budget_for_haiku():
+    from excelmanus.providers.claude import _apply_thinking_to_body
+
+    body: dict = {"model": "claude-haiku-4-5", "max_tokens": 8192}
+    _apply_thinking_to_body(
+        body,
+        "claude-haiku-4-5",
+        thinking_enabled=True,
+        thinking_budget=2048,
+        thinking_effort="high",
+    )
+    assert body["thinking"] == {"type": "enabled", "budget_tokens": 2048}

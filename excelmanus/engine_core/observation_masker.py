@@ -23,18 +23,6 @@ FRESH_ITERATIONS = 8
 # 遮蔽后的最大字符数
 _MASKED_MAX_CHARS = 200
 
-# 工具结果遮蔽模板
-_MASK_TEMPLATES: dict[str, str] = {
-    "read_excel": "[已读取 {file}/{sheet}, {summary}]",
-    "inspect_excel_files": "[已探查 {n} 个文件: {files}]",
-    "list_sheets": "[{file} 含 {n} 个 sheet: {sheets}]",
-    "write_cells": "[已写入 {file}/{sheet}/{range}]",
-    "write_excel": "[已写入 {file}/{sheet}]",
-    "advanced_format": "[已格式化 {file}/{sheet}/{range}]",
-    "create_sheet": "[已创建 sheet: {sheet}]",
-    "delete_sheet": "[已删除 sheet: {sheet}]",
-}
-
 
 def _build_tool_call_name_map(messages: list[dict[str, Any]]) -> dict[str, str]:
     """从 assistant 的 tool_calls 中构建 tool_call_id → tool_name 映射。
@@ -178,14 +166,9 @@ def _apply_mask(tool_name: str, content: str) -> str:
     """根据工具名应用遮蔽模板。"""
     if tool_name == "run_code":
         return _mask_run_code(content)
-    elif tool_name == "read_excel":
-        return _mask_read_excel(content)
-    elif tool_name == "inspect_excel_files":
+    elif tool_name == "inspect_spreadsheet":
         return _mask_inspect(content)
-    elif tool_name == "list_sheets":
-        return _mask_list_sheets(content)
-    elif tool_name in ("write_cells", "write_excel", "advanced_format",
-                       "create_sheet", "delete_sheet"):
+    elif tool_name in ("edit_spreadsheet", "format_spreadsheet", "manage_spreadsheet_objects"):
         return _mask_write_tool(tool_name, content)
     else:
         return _mask_generic(content)
@@ -210,8 +193,8 @@ def _mask_run_code(content: str) -> str:
     return f"{truncated}" + (" [输出已截断]" if len(content) > 200 else "")
 
 
-def _mask_read_excel(content: str) -> str:
-    """read_excel 结果：提取文件/sheet/行列信息。"""
+def _mask_inspect(content: str) -> str:
+    """inspect_spreadsheet 结果：提取文件/sheet/行列信息。"""
     # 尝试提取行数
     row_match = re.search(r"(\d+)\s*(?:行|rows?)", content, re.IGNORECASE)
     col_match = re.search(r"(\d+)\s*(?:列|columns?)", content, re.IGNORECASE)
@@ -227,27 +210,6 @@ def _mask_read_excel(content: str) -> str:
         summary += f", 列: [{header}]"
 
     return f"[已读取数据, {summary}]"
-
-
-def _mask_inspect(content: str) -> str:
-    """inspect_excel_files 结果：提取文件列表。"""
-    # 简单计算文件数（注意 .xls 是 .xlsx/.xlsm/.xlsb 的子串，需用 regex 精确匹配）
-    import re as _re
-    file_count = len(_re.findall(r"\.(?:xlsx|xlsm|xlsb|xls|csv)\b", content, _re.IGNORECASE))
-    if file_count == 0:
-        file_count = 1
-    truncated = content[:150]
-    return f"[已探查 {file_count} 个文件] {truncated}" + (
-        " [已截断]" if len(content) > 150 else ""
-    )
-
-
-def _mask_list_sheets(content: str) -> str:
-    """list_sheets 结果：提取 sheet 列表。"""
-    truncated = content[:150]
-    return f"[sheet 列表] {truncated}" + (
-        " [已截断]" if len(content) > 150 else ""
-    )
 
 
 def _mask_write_tool(tool_name: str, content: str) -> str:

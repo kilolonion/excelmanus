@@ -271,7 +271,6 @@ def build_feishu_handler(
     api_url: str | None = None,
     session_store: SessionStore | None = None,
     rate_limit_config: RateLimitConfig | None = None,
-    bind_manager: object | None = None,
     service_token: str | None = None,
     event_bridge: object | None = None,
     config_store: object | None = None,
@@ -292,7 +291,6 @@ def build_feishu_handler(
         api_client=api_client,
         session_store=store,
         rate_limit_config=rate_limit_config,
-        bind_manager=bind_manager,
         event_bridge=event_bridge,
         config_store=config_store,
     )

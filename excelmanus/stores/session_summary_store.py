@@ -91,13 +91,11 @@ class SessionSummaryStore:
     通过 Database 实例或 ConnectionAdapter 创建——表结构由 Database 迁移管理。
     """
 
-    def __init__(self, conn: Any, *, user_id: str | None = None) -> None:
+    def __init__(self, conn: Any) -> None:
         if isinstance(conn, ConnectionAdapter):
             self._conn = conn
         else:
-            # Database 实例
             self._conn = conn.conn
-        self._user_id = user_id
 
     def _has_table(self) -> bool:
         return self._conn.table_exists("session_summaries")
@@ -175,18 +173,10 @@ class SessionSummaryStore:
         """按时间倒序列出最近的会话摘要。"""
         if not self._has_table():
             return []
-        effective_uid = user_id if user_id is not None else self._user_id
-        if effective_uid is not None:
-            rows = self._conn.execute(
-                "SELECT * FROM session_summaries WHERE user_id = ? "
-                "ORDER BY updated_at DESC LIMIT ?",
-                (effective_uid, limit),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM session_summaries ORDER BY updated_at DESC LIMIT ?",
-                (limit,),
-            ).fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM session_summaries ORDER BY updated_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         return [self._row_to_summary(r) for r in rows]
 
     def search_by_files(
@@ -199,13 +189,10 @@ class SessionSummaryStore:
         """按文件路径匹配历史摘要（files_involved 中包含任意一个目标文件名）。"""
         if not self._has_table() or not file_paths:
             return []
-        effective_uid = user_id if user_id is not None else self._user_id
-        # 提取文件名（不含路径前缀）用于模糊匹配
         basenames = {os.path.basename(p).lower() for p in file_paths if p}
         if not basenames:
             return []
-        # 加载候选摘要后在 Python 侧筛选（避免复杂 SQL JSON 查询）
-        candidates = self.list_recent(user_id=effective_uid, limit=50)
+        candidates = self.list_recent(limit=50)
         matched: list[SessionSummary] = []
         for s in candidates:
             for f in s.files_involved:
@@ -229,20 +216,11 @@ class SessionSummaryStore:
             return []
         from excelmanus.embedding.search import cosine_top_k
 
-        effective_uid = user_id if user_id is not None else self._user_id
-        if effective_uid is not None:
-            rows = self._conn.execute(
-                "SELECT * FROM session_summaries "
-                "WHERE user_id = ? AND embedding IS NOT NULL "
-                "ORDER BY updated_at DESC LIMIT 50",
-                (effective_uid,),
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                "SELECT * FROM session_summaries "
-                "WHERE embedding IS NOT NULL "
-                "ORDER BY updated_at DESC LIMIT 50",
-            ).fetchall()
+        rows = self._conn.execute(
+            "SELECT * FROM session_summaries "
+            "WHERE embedding IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 50",
+        ).fetchall()
 
         if not rows:
             return []
@@ -266,16 +244,9 @@ class SessionSummaryStore:
         """返回摘要总数。"""
         if not self._has_table():
             return 0
-        effective_uid = user_id if user_id is not None else self._user_id
-        if effective_uid is not None:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM session_summaries WHERE user_id = ?",
-                (effective_uid,),
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                "SELECT COUNT(*) FROM session_summaries",
-            ).fetchone()
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM session_summaries",
+        ).fetchone()
         return row[0] if row else 0
 
     # ── 辅助 ─────────────────────────────────────────────

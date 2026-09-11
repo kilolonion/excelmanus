@@ -1,43 +1,25 @@
-"""LLM 通信层 — 流式消费、兜底重试、窗口顾问调用。
+"""LLM 通信层 — 流式消费、兜底重试。
 
 从 AgentEngine 提取的 LLM API 交互逻辑，包括：
 - 流式响应消费与事件发射
 - 系统消息兼容性兜底（replace → merge 自动回退）
-- 窗口感知小模型顾问调用与瞬时错误重试
 - 异常链遍历与 Retry-After 提取
 """
 
 from __future__ import annotations
 
 import asyncio
-import random
 import time
 from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
-from excelmanus.engine_utils import (
-    _AUX_NO_THINKING_EXTRA_BODY,
-    _WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS,
-    _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
-    _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
-    _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS,
-    _extract_completion_message,
-    _message_content_to_text,
-)
 from excelmanus.logger import get_logger
 from excelmanus.providers.stream_types import InlineThinkingStateMachine
-from excelmanus.window_perception.small_model import build_advisor_messages, parse_small_model_plan
 
 if TYPE_CHECKING:
     from excelmanus.events import EventCallback
     from excelmanus.engine import AgentEngine
-    from excelmanus.window_perception import (
-        AdvisorContext,
-        LifecyclePlan,
-        PerceptionBudget,
-    )
-    from excelmanus.window_perception.domain import Window
 
 logger = get_logger("llm_caller")
 
@@ -72,8 +54,8 @@ def iter_exception_chain(exc: Exception) -> list[Exception]:
     return chain
 
 
-def is_transient_window_advisor_exception(exc: Exception) -> bool:
-    """判断顾问调用异常是否可进行一次轻量重试。"""
+def is_retryable_llm_error(exc: Exception) -> bool:
+    """判断 LLM 调用异常是否可安全重试（5xx / 429 / 网络错误）。"""
     transient_keywords = (
         "429",
         "too many requests",
@@ -160,40 +142,6 @@ def extract_retry_after_seconds(exc: Exception) -> float | None:
             continue
         return retry_after_seconds
     return None
-
-
-def window_advisor_retry_delay_seconds(exc: Exception) -> float:
-    """计算轻量重试等待时间。"""
-    retry_after = extract_retry_after_seconds(exc)
-    if retry_after is not None:
-        return max(
-            _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
-            min(_WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS, retry_after),
-        )
-    return random.uniform(
-        _WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS,
-        _WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS,
-    )
-
-
-def window_advisor_retry_timeout_seconds(primary_timeout_seconds: float) -> float:
-    """计算二次快速重试超时，确保短于首轮。"""
-    retry_timeout = min(
-        _WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS,
-        max(0.1, float(primary_timeout_seconds) * 0.4),
-    )
-    if retry_timeout >= primary_timeout_seconds:
-        retry_timeout = max(0.1, primary_timeout_seconds - 0.1)
-    return retry_timeout
-
-
-def is_retryable_llm_error(exc: Exception) -> bool:
-    """判断 LLM 调用异常是否可安全重试（5xx / 429 / 网络错误）。
-
-    复用 ``is_transient_window_advisor_exception`` 的判定逻辑，
-    作为主 LLM 调用重试的公共入口。
-    """
-    return is_transient_window_advisor_exception(exc)
 
 
 def is_nonretryable_auth_error(exc: Exception) -> bool:
@@ -356,83 +304,13 @@ def is_system_compatibility_error(exc: Exception) -> bool:
 
 
 class LLMCaller:
-    """LLM 通信层：流式消费、兜底重试、窗口顾问。
+    """LLM 通信层：流式消费、兜底重试。
 
     通过 ``self._engine`` 引用访问 AgentEngine 的客户端和配置。
     """
 
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
-
-    # ── 窗口感知顾问 ──────────────────────────────────────
-
-    async def run_window_perception_advisor_async(
-        self,
-        windows: list["Window"],
-        active_window_id: str | None,
-        budget: "PerceptionBudget",
-        context: "AdvisorContext",
-    ) -> "LifecyclePlan | None":
-        """异步调用小模型生成窗口生命周期建议。"""
-        e = self._engine
-        messages = build_advisor_messages(
-            windows=windows,
-            active_window_id=active_window_id,
-            budget=budget,
-            context=context,
-        )
-        timeout_seconds = max(
-            0.1,
-            int(e._config.window_perception_advisor_timeout_ms) / 1000,
-        )
-
-        async def _invoke(timeout: float) -> Any:
-            return await asyncio.wait_for(
-                e._advisor_client.chat.completions.create(
-                    model=e._advisor_model,
-                    messages=messages,
-                    extra_body=_AUX_NO_THINKING_EXTRA_BODY,
-                ),
-                timeout=timeout,
-            )
-
-        try:
-            response = await _invoke(timeout_seconds)
-        except asyncio.TimeoutError:
-            logger.info("窗口感知小模型调用超时（%.2fs）", timeout_seconds)
-            return None
-        except Exception as exc:
-            if not is_transient_window_advisor_exception(exc):
-                logger.warning("窗口感知小模型调用失败，已回退规则顾问", exc_info=True)
-                return None
-
-            retry_delay = window_advisor_retry_delay_seconds(exc)
-            retry_timeout = window_advisor_retry_timeout_seconds(timeout_seconds)
-            logger.info(
-                "窗口感知小模型触发瞬时错误，%.2fs 后执行一次快速重试（%.2fs）：%s",
-                retry_delay,
-                retry_timeout,
-                exc.__class__.__name__,
-            )
-            await asyncio.sleep(retry_delay)
-            try:
-                response = await _invoke(retry_timeout)
-            except asyncio.TimeoutError:
-                logger.info("窗口感知小模型快速重试超时（%.2fs）", retry_timeout)
-                return None
-            except Exception:
-                logger.warning("窗口感知小模型快速重试失败，已回退规则顾问", exc_info=True)
-                return None
-
-        message, _ = _extract_completion_message(response)
-        content = _message_content_to_text(getattr(message, "content", None)).strip()
-        if not content:
-            return None
-        plan = parse_small_model_plan(content)
-        if plan is None:
-            logger.info("窗口感知小模型输出解析失败，已回退规则顾问")
-            return None
-        return plan
 
     # ── 流式消费 ──────────────────────────────────────────
 

@@ -1,5 +1,4 @@
 import type { SessionDetail } from "@/lib/types";
-import { useAuthStore } from "@/stores/auth-store";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 
 const API_BASE_PATH = "/api/v1";
@@ -23,8 +22,7 @@ function _withTimeout(timeoutMs: number, existingSignal?: AbortSignal | null): A
 }
 
 export function getAuthHeaders(): Record<string, string> {
-  const token = useAuthStore.getState().accessToken;
-  return token ? { Authorization: `Bearer ${token}` } : {};
+  return {};
 }
 
 /**
@@ -56,59 +54,6 @@ function resolveApiBase(opts?: { direct?: boolean }): string {
 export function buildApiUrl(path: string, opts?: { direct?: boolean }): string {
   const normalizedPath = path.startsWith("/") ? path : `/${path}`;
   return `${resolveApiBase(opts)}${normalizedPath}`;
-}
-
-/**
- * 将外部头像 URL 转换为后端代理 URL，解决浏览器直连被 GFW 屏蔽的问题。
- * 仅对已知外部域名（Google/GitHub/QQ）进行代理，其他 URL 原样返回。
- */
-const _PROXY_AVATAR_DOMAINS = [
-  "lh3.googleusercontent.com",
-  "avatars.githubusercontent.com",
-  "thirdqq.qlogo.cn",
-  "q.qlogo.cn",
-];
-
-export function proxyAvatarUrl(url: string | null | undefined): string | null {
-  if (!url) return null;
-  try {
-    const hostname = new URL(url).hostname;
-    if (_PROXY_AVATAR_DOMAINS.includes(hostname)) {
-      return `${API_BASE_PATH}/auth/avatar-proxy?url=${encodeURIComponent(url)}`;
-    }
-  } catch {
-    // invalid URL, return as-is
-  }
-  return url;
-}
-
-/**
- * 解析头像 URL 为可直接用于 <img src> 的完整地址。
- * - 外部域名（Google/GitHub/QQ）→ 走代理
- * - 本地 /avatar-file 端点 → 追加 token query param（<img> 无法发送 Authorization header）
- * - 管理员查看其他用户头像 → 改写为 admin 端点
- */
-export function resolveAvatarSrc(
-  url: string | null | undefined,
-  accessToken: string | null | undefined,
-  opts?: { userId?: string; isAdmin?: boolean },
-): string | null {
-  if (!url) return null;
-
-  // 管理员查看其他用户的本地头像：改写为 admin 端点
-  if (opts?.isAdmin && opts?.userId && url.includes("/avatar-file")) {
-    const base = `${API_BASE_PATH}/auth/admin/users/${opts.userId}/avatar-file`;
-    return accessToken ? `${base}?token=${accessToken}` : base;
-  }
-
-  const base = proxyAvatarUrl(url);
-  if (!base || !accessToken) return base;
-  // 本地头像端点追加 token
-  if (base.includes("/avatar-file")) {
-    const sep = base.includes("?") ? "&" : "?";
-    return `${base}${sep}token=${accessToken}`;
-  }
-  return base;
 }
 
 /**
@@ -156,13 +101,7 @@ export async function directFetch(
 ): Promise<Response> {
   const doFetch = async () => {
     const headers = new Headers(init?.headers);
-    const token = useAuthStore.getState().accessToken;
-    if (token && !headers.has("Authorization")) {
-      headers.set("Authorization", `Bearer ${token}`);
-    }
-    // 如果调用方未提供 signal，注入默认超时；SSE 调用方自带 AbortController 的 signal 不受影响
     const signal = init?.signal ?? _withTimeout(_DEFAULT_TIMEOUT_MS);
-    // 跨域请求自动携带 credentials，确保 cookie 随请求发送（匹配后端 allow_credentials=True）
     const credentials: RequestCredentials | undefined = _isCrossOrigin(input) ? "include" : undefined;
     return fetch(input, { ...init, headers, signal, credentials: init?.credentials ?? credentials });
   };
@@ -186,36 +125,10 @@ export async function directFetch(
     res = await doFetch();
   }
 
-  if (res.status === 401) {
-    const { refreshToken } = useAuthStore.getState();
-    if (refreshToken) {
-      const { refreshAccessToken } = await import("./auth-api");
-      const ok = await refreshAccessToken();
-      if (ok) {
-        res = await doFetch();
-      }
-      // refreshAccessToken 内部已处理：认证错误→logout，网络错误→仅返回 false。
-      // 此处不再重复 logout/redirect，避免网络波动踢出用户。
-    } else {
-      useAuthStore.getState().logout();
-      if (typeof window !== "undefined") window.location.href = "/login";
-    }
-  }
   return res;
 }
 
 async function handleAuthError(res: Response): Promise<never> {
-  if (res.status === 401) {
-    const { refreshToken, logout } = useAuthStore.getState();
-    if (refreshToken) {
-      const { refreshAccessToken } = await import("./auth-api");
-      await refreshAccessToken();
-      // refreshAccessToken 内部已处理：认证错误→logout+清 cookie，网络错误→仅返回 false。
-    } else {
-      logout();
-      if (typeof window !== "undefined") window.location.href = "/login";
-    }
-  }
   const data = await res.json().catch(() => ({}));
   throw new Error(data.error || data.detail || `API error: ${res.status}`);
 }
@@ -858,31 +771,6 @@ export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
   return data.files ?? [];
 }
 
-export interface WorkspaceStorage {
-  total_bytes: number;
-  size_mb: number;
-  max_bytes: number;
-  max_size_mb: number;
-  file_count: number;
-  max_files: number;
-  over_size: boolean;
-  over_files: boolean;
-}
-
-export async function fetchWorkspaceStorage(): Promise<WorkspaceStorage | null> {
-  const url = buildApiUrl("/files/workspace/storage");
-  try {
-    const res = await fetch(url, {
-      headers: { ...getAuthHeaders() },
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return null;
-    return res.json();
-  } catch {
-    return null;
-  }
-}
-
 // ── FileRegistry API ─────────────────────────────────────
 
 export interface FileRegistryEntry {
@@ -1151,6 +1039,7 @@ export interface AllSheetsSnapshotResponse {
   file: string;
   sheets: string[];
   all_snapshots: ExcelSnapshot[];
+  content_version?: string;
 }
 
 // ── Snapshot 缓存（TTL 30s，避免重复请求同一文件） ──
@@ -1225,12 +1114,20 @@ export async function fetchExcelSnapshot(
   return res.json();
 }
 
+export interface ExcelWriteResponse {
+  status: string;
+  cells_written: number;
+  content_version?: string;
+  code?: string;
+}
+
 export async function writeExcelCells(opts: {
   path: string;
   sheet?: string;
-  changes: { cell: string; value: unknown }[];
+  changes: { cell: string; value: unknown; sheet?: string }[];
   sessionId?: string;
-}): Promise<{ status: string; cells_written: number }> {
+  expectedVersion?: string | null;
+}): Promise<ExcelWriteResponse> {
   const url = buildApiUrl("/files/excel/write");
   const res = await fetch(url, {
     method: "POST",
@@ -1240,14 +1137,30 @@ export async function writeExcelCells(opts: {
       sheet: opts.sheet ?? null,
       changes: opts.changes,
       session_id: opts.sessionId ?? null,
+      expected_version: opts.expectedVersion ?? null,
     }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Write error: ${res.status}`);
+  const data = await res.json().catch(() => ({} as Record<string, unknown>));
+  if (res.status === 409) {
+    return {
+      status: "conflict",
+      cells_written: 0,
+      code: typeof data.code === "string" ? data.code : "VERSION_CONFLICT",
+      content_version: typeof data.content_version === "string" ? data.content_version : undefined,
+    };
   }
-  return res.json();
+  if (!res.ok) {
+    throw new Error(
+      (typeof data.error === "string" && data.error) || `Write error: ${res.status}`,
+    );
+  }
+  return {
+    status: typeof data.status === "string" ? data.status : "success",
+    cells_written: typeof data.cells_written === "number" ? data.cells_written : 0,
+    content_version: typeof data.content_version === "string" ? data.content_version : undefined,
+    code: typeof data.code === "string" ? data.code : undefined,
+  };
 }
 
 /**
@@ -1684,14 +1597,6 @@ export async function buildDockerSandboxImage(force = false): Promise<{
   message: string;
 }> {
   return apiPost("/settings/docker-sandbox/build", { force });
-}
-
-export interface SessionIsolationStatus {
-  session_isolation_enabled: boolean;
-}
-
-export async function fetchSessionIsolationStatus(): Promise<SessionIsolationStatus> {
-  return apiGet<SessionIsolationStatus>("/settings/session-isolation");
 }
 
 // ── Chat Turns API ───────────────────────────────────────

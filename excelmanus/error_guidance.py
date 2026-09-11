@@ -590,21 +590,3 @@ def classify_failure(
         provider=provider,
         model=model,
     )
-
-
-def classify_workspace_full(
-    *,
-    stage: str = "",
-    detail: str = "",
-) -> FailureGuidance:
-    """工作区配额超限的专用构造（不依赖异常对象）。"""
-    return FailureGuidance(
-        category="quota",
-        code="workspace_full",
-        title="工作区已满",
-        message=f"工作区配额超限（{detail}），请先清理文件后再试。" if detail else "工作区配额超限，请先清理文件后再试。",
-        stage=stage,
-        retryable=False,
-        diagnostic_id=str(uuid.uuid4()),
-        actions=[_ACTION_OPEN_SETTINGS],
-    )

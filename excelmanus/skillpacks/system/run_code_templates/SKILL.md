@@ -18,7 +18,7 @@ run_code 代码模板库。按场景分为四个参考文档，激活后自动�
 1. 从参考文档中找到最匹配的模板
 2. 复制模板，替换文件名、列名、参数
 3. 添加顶层 try/except 异常处理
-4. 写入后用 read_excel 独立回读验证
+4. 写入后用 inspect_spreadsheet 独立回读验证
 
 关键约束：
 - 禁止 sys.exit()/exit()/os._exit()

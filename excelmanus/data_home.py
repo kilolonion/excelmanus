@@ -10,11 +10,10 @@
     ├── config.env             # 集中配置（API Key 等）
     ├── installations.json     # 安装注册表
     ├── data/                  # 集中数据根
-    │   ├── users/             # 多用户工作区
     │   ├── uploads/           # 上传文件
     │   └── outputs/           # 输出文件
     ├── memory/                # 持久记忆（已有）
-    └── skillpacks/            # 用户技能包（已有）
+    └── skillpacks/            # 技能包（已有）
 """
 from __future__ import annotations
 
@@ -126,7 +125,7 @@ def get_installations_path() -> Path:
 def ensure_data_dirs() -> Path:
     """确保集中数据目录结构存在，返回 data_home 路径。"""
     data_home = get_data_home()
-    for sub in ("users", "uploads", "outputs"):
+    for sub in ("uploads", "outputs"):
         (data_home / sub).mkdir(parents=True, exist_ok=True)
     return data_home
 
@@ -337,7 +336,7 @@ def _read_version_from_dir(directory: Path) -> str | None:
         try:
             for line in init_py.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith("__version__"):
-                    # __version__ = "1.6.1"
+                    # __version__ = "1.7.2"
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip("\"'")
@@ -483,9 +482,9 @@ def scan_once(*, skip_desktop_scan: bool = False) -> list[dict[str, Any]]:
 
 
 def has_project_local_data(project_root: str | Path) -> bool:
-    """检测项目目录内是否存在本地数据（users/uploads/outputs/.env）。"""
+    """检测项目目录内是否存在本地数据（uploads/outputs/.env）。"""
     root = Path(project_root).expanduser().resolve()
-    for name in ("users", "uploads", "outputs"):
+    for name in ("uploads", "outputs"):
         d = root / name
         try:
             if d.is_dir() and any(d.iterdir()):
@@ -506,7 +505,6 @@ def migrate_data_from_project(
     """从旧的项目内数据迁移到集中数据目录。
 
     - ``.env`` → ``~/.excelmanus/config.env``
-    - ``users/`` → ``~/.excelmanus/data/users/``
     - ``uploads/`` → ``~/.excelmanus/data/uploads/``
     - ``outputs/`` → ``~/.excelmanus/data/outputs/``
 
@@ -524,7 +522,7 @@ def migrate_data_from_project(
             stats["config"] = 1
 
     # 迁移目录
-    for name in ("users", "uploads", "outputs"):
+    for name in ("uploads", "outputs"):
         src = root / name
         if not src.is_dir():
             continue
@@ -551,7 +549,7 @@ def is_data_centralized() -> bool:
     data_home = get_data_home()
     if not data_home.is_dir():
         return False
-    for sub in ("users", "uploads", "outputs"):
+    for sub in ("uploads", "outputs"):
         d = data_home / sub
         if d.is_dir() and any(d.iterdir()):
             return True

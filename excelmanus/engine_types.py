@@ -7,25 +7,32 @@ from typing import TYPE_CHECKING, Any, Awaitable, Callable
 
 if TYPE_CHECKING:
     from excelmanus.approval import AppliedApprovalRecord, PendingApproval
+    from excelmanus.engine_core.tool_result import ToolResult
     from excelmanus.question_flow import PendingQuestion
     from excelmanus.subagent import SubagentResult
 
 # ── Thinking 配置 ──────────────────────────────────────────────
 _EFFORT_RATIOS: dict[str, float] = {
     "none": 0.0, "minimal": 0.10, "low": 0.20,
-    "medium": 0.50, "high": 0.80, "xhigh": 0.95,
+    "medium": 0.50, "high": 0.80, "xhigh": 0.95, "max": 1.0,
 }
 
 # effort → Gemini thinkingLevel 映射
 _EFFORT_TO_GEMINI_LEVEL: dict[str, str] = {
     "none": "minimal", "minimal": "minimal", "low": "low",
-    "medium": "medium", "high": "high", "xhigh": "high",
+    "medium": "medium", "high": "high", "xhigh": "high", "max": "high",
 }
 
-# effort → OpenAI reasoning_effort 映射
+# effort → OpenAI / xAI / GLM reasoning_effort 映射
 _EFFORT_TO_OPENAI: dict[str, str] = {
     "none": "none", "minimal": "minimal", "low": "low",
-    "medium": "medium", "high": "high", "xhigh": "high",
+    "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
+}
+
+# effort → Claude output_config.effort 映射
+_EFFORT_TO_CLAUDE: dict[str, str] = {
+    "none": "low", "minimal": "low", "low": "low",
+    "medium": "medium", "high": "high", "xhigh": "xhigh", "max": "max",
 }
 
 
@@ -33,7 +40,7 @@ _EFFORT_TO_OPENAI: dict[str, str] = {
 class ThinkingConfig:
     """Thinking（推理深度）统一配置，支持等级制和预算制。"""
 
-    effort: str = "medium"  # none|minimal|low|medium|high|xhigh
+    effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
     budget_tokens: int = 0  # >0 时覆盖 effort 换算值
 
     @property
@@ -50,6 +57,10 @@ class ThinkingConfig:
     @property
     def openai_effort(self) -> str:
         return _EFFORT_TO_OPENAI.get(self.effort, "medium")
+
+    @property
+    def claude_effort(self) -> str:
+        return _EFFORT_TO_CLAUDE.get(self.effort, "high")
 
     @property
     def gemini_level(self) -> str:
@@ -74,6 +85,7 @@ class ToolCallResult:
     # pending_plan 和 plan_id 已废弃（Chat Mode Tabs 重构）
     defer_tool_result: bool = False
     finish_accepted: bool = False
+    structured: "ToolResult | None" = None
 
 
 class _AuditedExecutionError(Exception):
@@ -168,48 +180,11 @@ class ChatResult:
     # 诊断数据：每轮迭代的快照
     turn_diagnostics: list[TurnDiagnostic] = field(default_factory=list)
     # 路由诊断
-    write_hint: str = ""
+    tool_access: str = ""
     route_mode: str = ""
     skills_used: list[str] = field(default_factory=list)
-    task_tags: tuple[str, ...] = ()
     # Think-Act 推理质量指标
     reasoning_metrics: dict[str, Any] = field(default_factory=dict)
-
-    def __str__(self) -> str:
-        """兼容旧调用方将 chat 结果当作字符串直接使用。"""
-        return self.reply
-
-    def __hash__(self) -> int:
-        """自定义 __eq__ 后必须显式定义 __hash__，否则实例不可哈希。"""
-        return hash(self.reply)
-
-    def __eq__(self, other: object) -> bool:
-        """兼容与 str 比较，同时保留 ChatResult 间的结构化比较。"""
-        if isinstance(other, str):
-            return self.reply == other
-        if isinstance(other, ChatResult):
-            return (
-                self.reply == other.reply
-                and self.tool_calls == other.tool_calls
-                and self.iterations == other.iterations
-                and self.truncated == other.truncated
-            )
-        return NotImplemented
-
-    def __contains__(self, item: str) -> bool:
-        """兼容 `'xx' in result` 形式。"""
-        return item in self.reply
-
-    def __getattr__(self, name: str) -> Any:
-        """兼容 result.strip()/startswith() 等字符串方法。
-
-        使用 object.__getattribute__ 避免 self.reply 未初始化时无限递归。
-        """
-        try:
-            reply = object.__getattribute__(self, "reply")
-        except AttributeError:
-            raise AttributeError(name) from None
-        return getattr(reply, name)
 
 
 @dataclass

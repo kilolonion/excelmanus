@@ -23,6 +23,7 @@ from rich.console import Console as RealConsole
 
 from excelmanus.config import ConfigError
 from excelmanus.cli.question import InteractiveSelectResult
+from excelmanus.engine_types import ChatResult
 from excelmanus.cli.question import build_answer_from_select
 from excelmanus.cli.repl import LiveStatusTicker, chat_with_feedback, repl_loop, run_chat_turn
 from excelmanus.cli.prompt import compute_inline_suggestion
@@ -45,7 +46,7 @@ from excelmanus.events import EventType, ToolCallEvent
 def _make_engine() -> MagicMock:
     """创建模拟的 AgentEngine 实例。"""
     engine = MagicMock()
-    engine.chat = AsyncMock(return_value="模拟回复")
+    engine.chat = AsyncMock(return_value=ChatResult(reply="模拟回复"))
     engine.clear_memory = MagicMock()
     engine.memory = MagicMock()
     engine.memory.get_messages.return_value = []

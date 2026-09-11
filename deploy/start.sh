@@ -394,9 +394,14 @@ _check_deps() {
     _check_command npm "npm" "$node_hint" || ok=false
 
     if command -v node &>/dev/null; then
-      local node_ver
+      local node_ver node_major
       node_ver=$(node --version 2>/dev/null)
       debug "Node.js 版本: $node_ver"
+      node_major=$(printf '%s' "$node_ver" | sed -E 's/^v([0-9]+).*/\1/')
+      if [[ -n "$node_major" && "$node_major" -lt 20 ]]; then
+        error "Node.js $node_ver 过低，Web UI 需要 ≥ 20.9（Next.js 16）。安装: $node_hint"
+        ok=false
+      fi
     fi
 
     # web/node_modules

@@ -19,6 +19,7 @@ from httpx import ASGITransport, AsyncClient
 
 from excelmanus.approval import AppliedApprovalRecord, FileChangeRecord
 from excelmanus.config import ExcelManusConfig
+import excelmanus.api_routes_sessions as sessions_mod
 
 # excelmanus/api.py 被 excelmanus/api/ 包遮蔽，直接从文件加载
 _api_py = Path(__file__).resolve().parent.parent / "excelmanus" / "api.py"
@@ -125,19 +126,32 @@ def tmp_workspace(tmp_path: Path):
 @pytest.fixture
 def api_state(tmp_workspace):
     """注入 API 全局状态。"""
+    from excelmanus.api_app_state import (
+        get_config as _get_app_config,
+        get_session_manager as _get_app_sm,
+        set_config as _set_app_config,
+        set_session_manager as _set_app_sm,
+    )
+
     config = _test_config(tmp_workspace)
     manager = MagicMock()
 
     old_config = api_module._config
     old_manager = api_module._session_manager
+    old_app_config = _get_app_config()
+    old_app_sm = _get_app_sm()
 
     api_module._config = config
     api_module._session_manager = manager
+    _set_app_config(config)
+    _set_app_sm(manager)
 
     yield {"config": config, "manager": manager, "workspace": tmp_workspace}
 
     api_module._config = old_config
     api_module._session_manager = old_manager
+    _set_app_config(old_app_config)
+    _set_app_sm(old_app_sm)
 
 
 @pytest.fixture
@@ -155,7 +169,7 @@ class TestListOperations:
         """无活跃引擎时返回空列表。"""
         api_state["manager"].get_engine.return_value = None
         # 需要 _has_session_access 通过
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.get("/api/v1/sessions/sess-1/operations")
         assert resp.status_code == 200
         data = resp.json()
@@ -170,7 +184,7 @@ class TestListOperations:
         engine = _make_engine_mock(records)
         api_state["manager"].get_engine.return_value = engine
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.get("/api/v1/sessions/sess-1/operations")
         assert resp.status_code == 200
         data = resp.json()
@@ -188,7 +202,7 @@ class TestListOperations:
     @pytest.mark.asyncio
     async def test_session_not_found(self, client, api_state):
         """会话不存在返回 404。"""
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=False)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=False)):
             resp = await client.get("/api/v1/sessions/nonexistent/operations")
         assert resp.status_code == 404
 
@@ -199,7 +213,7 @@ class TestListOperations:
         engine = _make_engine_mock(records)
         api_state["manager"].get_engine.return_value = engine
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.get("/api/v1/sessions/sess-1/operations?limit=2&offset=0")
         assert resp.status_code == 200
         data = resp.json()
@@ -225,8 +239,8 @@ class TestGetOperationDetail:
         api_state["manager"].get_engine.return_value = engine
 
         with (
-            patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)),
-            patch.object(api_module, "_is_external_safe_mode", return_value=False),
+            patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)),
+            patch.object(sessions_mod, "_is_external_safe_mode", return_value=False),
         ):
             resp = await client.get("/api/v1/sessions/sess-1/operations/apv_test_001")
         assert resp.status_code == 200
@@ -243,7 +257,7 @@ class TestGetOperationDetail:
         engine = _make_engine_mock([])
         api_state["manager"].get_engine.return_value = engine
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.get("/api/v1/sessions/sess-1/operations/nonexistent")
         assert resp.status_code == 404
 
@@ -254,7 +268,7 @@ class TestGetOperationDetail:
         engine = _make_engine_mock([rec])
         api_state["manager"].get_engine.return_value = engine
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.get("/api/v1/sessions/sess-1/operations/apv_test_001")
         assert resp.status_code == 404
 
@@ -270,7 +284,7 @@ class TestUndoOperation:
         engine = _make_engine_mock([rec])
         api_state["manager"].get_or_restore_engine = AsyncMock(return_value=engine)
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.post("/api/v1/sessions/sess-1/operations/apv_test_001/undo")
         assert resp.status_code == 200
         data = resp.json()
@@ -283,7 +297,7 @@ class TestUndoOperation:
         engine = _make_engine_mock([])
         api_state["manager"].get_or_restore_engine = AsyncMock(return_value=engine)
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.post("/api/v1/sessions/sess-1/operations/nonexistent/undo")
         assert resp.status_code == 404
 
@@ -294,7 +308,7 @@ class TestUndoOperation:
         engine = _make_engine_mock([rec])
         api_state["manager"].get_or_restore_engine = AsyncMock(return_value=engine)
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.post("/api/v1/sessions/sess-1/operations/apv_test_001/undo")
         assert resp.status_code == 404
 
@@ -306,7 +320,7 @@ class TestUndoOperation:
         engine._approval.undo.return_value = "记录 `apv_test_001` 不支持自动回滚（工具：write_cells）。"
         api_state["manager"].get_or_restore_engine = AsyncMock(return_value=engine)
 
-        with patch.object(api_module, "_has_session_access", new=AsyncMock(return_value=True)):
+        with patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)):
             resp = await client.post("/api/v1/sessions/sess-1/operations/apv_test_001/undo")
         assert resp.status_code == 200
         data = resp.json()

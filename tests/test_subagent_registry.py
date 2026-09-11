@@ -87,7 +87,7 @@ def test_builtin_explorer_is_readonly_restricted(tmp_path: Path) -> None:
     explorer = loaded["explorer"]
     assert explorer.permission_mode == "readOnly"
     assert explorer.capability_mode == "restricted"
-    assert "read_excel" in explorer.allowed_tools
+    assert "inspect_spreadsheet" in explorer.allowed_tools
     assert explorer.source == "builtin"
 
 
@@ -102,7 +102,7 @@ def test_builtin_verifier_is_readonly_restricted(tmp_path: Path) -> None:
     verifier = loaded["verifier"]
     assert verifier.permission_mode == "readOnly"
     assert verifier.capability_mode == "restricted"
-    assert "read_excel" in verifier.allowed_tools
+    assert "inspect_spreadsheet" in verifier.allowed_tools
     assert verifier.source == "builtin"
     assert "verdict" in verifier.system_prompt
 
@@ -189,6 +189,11 @@ def test_build_catalog_contains_agent_names(tmp_path: Path) -> None:
     catalog, names = registry.build_catalog()
     assert "finance_checker" in catalog
     assert "finance_checker" in names
+    assert "explorer" in names
+    assert "verifier" not in names
+    assert "verifier" not in catalog
+    assert registry.get("verifier") is not None
+    assert registry.get("verifier").name == "verifier"
 
 
 def test_get_supports_ecosystem_aliases(tmp_path: Path) -> None:

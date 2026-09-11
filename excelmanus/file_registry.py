@@ -36,6 +36,8 @@ _IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp",
 _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".venv", "node_modules", "__pycache__",
     ".worktrees", "dist", "build",
+    # 旧版隔离目录：扫描不得走进归档残骸
+    "users", "channel_anonymous",
 })
 
 # 全文件扫描时跳过的二进制/编译文件扩展名
@@ -1155,16 +1157,13 @@ class FileRegistry:
         max_files: int = 1000,
         header_scan_rows: int = 5,
         excel_only: bool = False,
+        extract_sheet_meta: bool = True,
     ) -> ScanResult:
         """递归扫描工作区，注册/更新文件到 registry。
 
         扫描范围：工作区根目录 + uploads/ + outputs/ 下的所有文件。
-        Excel 文件额外提取 sheet 元数据（表名、行列数、表头）。
-
-        Args:
-            max_files: 最大文件数量限制。
-            header_scan_rows: Excel 文件表头探测的行数。
-            excel_only: 仅扫描 Excel 文件（兼容旧 manifest 行为）。
+        ``extract_sheet_meta=True`` 时 Excel 额外提取 sheet 元数据。
+        Agent 首轮扫描应关此项，避免在模型请求前打开 xlsx。
         """
         start_ts = time.monotonic()
         result = ScanResult()
@@ -1189,12 +1188,12 @@ class FileRegistry:
 
             file_type = _detect_file_type(rel_path)
             sheet_meta: list[dict] = []
-            if file_type in ("excel",):
+            if extract_sheet_meta and file_type in ("excel",):
                 try:
                     sheet_meta = self._scan_file_sheets(fp, header_scan_rows)
                 except Exception:
                     logger.debug("扫描文件 %s 失败", fp, exc_info=True)
-            elif file_type == "word":
+            elif extract_sheet_meta and file_type == "word":
                 try:
                     sheet_meta = self._scan_word_meta(fp)
                 except Exception:
@@ -1682,11 +1681,19 @@ class FileRegistry:
             return False
         return self._fvm.has_staging(file_path)
 
-    def undo_commit(self, original_path: str, undo_path: str) -> bool:
+    def undo_commit(
+        self,
+        original_path: str,
+        undo_path: str,
+        *,
+        expected_version: str | None = None,
+    ) -> bool:
         """撤销一次 commit。"""
         if self._fvm is None:
             return False
-        return self._fvm.undo_commit(original_path, undo_path)
+        return self._fvm.undo_commit(
+            original_path, undo_path, expected_version=expected_version
+        )
 
     def diff_staged_summary(self, file_path: str) -> dict | None:
         """返回 staged vs original 的轻量变更摘要。"""
@@ -1782,11 +1789,16 @@ class FileRegistry:
             return []
         return self._fvm.list_turn_checkpoints()
 
-    def restore_to_original(self, file_path: str) -> bool:
+    def restore_to_original(
+        self,
+        file_path: str,
+        *,
+        expected_version: str | None = None,
+    ) -> bool:
         """将文件恢复到最早的原始版本。"""
         if self._fvm is None:
             return False
-        return self._fvm.restore_to_original(file_path)
+        return self._fvm.restore_to_original(file_path, expected_version=expected_version)
 
     def invalidate_undo(self, rel_paths: set[str]) -> int:
         """标记指定文件的版本链为不可恢复。"""

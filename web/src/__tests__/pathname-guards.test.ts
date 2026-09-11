@@ -15,15 +15,11 @@ vi.mock("@/app/client-layout", () => ({
   ClientLayout: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
 }));
 
-vi.mock("@/components/providers/AuthProvider", () => ({
-  AuthProvider: ({ children }: { children: React.ReactNode }) => React.createElement(React.Fragment, null, children),
-}));
-
 vi.mock("@/stores/auth-config-store", () => ({
   useAuthConfigStore: () => ({
-    authEnabled: true,
+    deployMode: "standalone",
     checked: true,
-    checkAuthEnabled: vi.fn().mockResolvedValue(true),
+    checkBackendHealth: vi.fn().mockResolvedValue(true),
   }),
 }));
 
@@ -75,6 +71,6 @@ describe("pathname guards", () => {
   });
 
   it("pathnameStartsWith treats null pathnames as non-matches", () => {
-    expect(pathnameStartsWith(null, ["/login", "/register"])).toBe(false);
+    expect(pathnameStartsWith(null, ["/privacy", "/admin"])).toBe(false);
   });
 });

@@ -11,6 +11,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import format_tool_result
 from excelmanus.tools.registry import ToolDef
@@ -173,21 +174,18 @@ async def _parallel_search_impl(
     mcp_manager: "MCPManager",
     query: str,
     num_queries: int = 3,
-) -> str:
-    """并发搜索的核心实现。"""
+) -> ToolResult:
     num_queries = max(1, min(num_queries, 5))
     client = mcp_manager._clients.get(_EXA_SERVER_NAME)
     if client is None:
-        return json.dumps(
+        return from_payload(
             {"error": "Exa 搜索服务不可用，请稍后重试或使用其他搜索工具"},
-            ensure_ascii=False,
         )
 
     search_tool = _find_exa_search_tool(mcp_manager)
     if search_tool is None:
-        return json.dumps(
+        return from_payload(
             {"error": "未找到 Exa 搜索工具，Exa 可能尚未完成初始化"},
-            ensure_ascii=False,
         )
 
     # 生成查询变体
@@ -242,7 +240,7 @@ async def _parallel_search_impl(
         "results": unique_items,
     }
 
-    result_json = json.dumps(output, ensure_ascii=False, default=str)
+    result_json = from_payload(output)
     logger.info(
         "并发搜索完成: %d 个变体, %d 条原始结果, %d 条去重后",
         len(variants), len(all_items), len(unique_items),
@@ -263,7 +261,7 @@ def get_tools(mcp_manager: "MCPManager") -> list[ToolDef]:
     def _sync_parallel_search(
         query: str,
         num_queries: int = 3,
-    ) -> str:
+    ) -> ToolResult:
         """并发搜索（同步包装）。"""
         import concurrent.futures
 
@@ -286,7 +284,7 @@ def get_tools(mcp_manager: "MCPManager") -> list[ToolDef]:
     async def _async_parallel_search(
         query: str,
         num_queries: int = 3,
-    ) -> str:
+    ) -> ToolResult:
         """并发搜索（异步版本，优先使用）。"""
         return await _parallel_search_impl(mcp_manager, query, num_queries)
 

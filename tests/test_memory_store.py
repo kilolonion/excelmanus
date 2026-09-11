@@ -123,21 +123,21 @@ class TestMemoryStoreCount:
         assert store.count_by_category(MemoryCategory.ERROR_SOLUTION) == 0
 
 
-class TestMemoryStoreUserIsolation:
-    def test_isolates_entries_by_user_id(self, tmp_path: Path) -> None:
+class TestMemoryStoreProcessShared:
+    def test_two_stores_share_process_memory(self, tmp_path: Path) -> None:
+        """记忆是进程级一份，两个 store 实例读写同一库。"""
         db = Database(str(tmp_path / "shared.db"))
-        user_a = MemoryStore(db, user_id="user-a")
-        user_b = MemoryStore(db, user_id="user-b")
+        store_a = MemoryStore(db)
+        store_b = MemoryStore(db)
 
-        user_a.save_entries([_entry("only-a")])
-        user_b.save_entries([_entry("only-b")])
+        store_a.save_entries([_entry("only-a")])
+        store_b.save_entries([_entry("only-b")])
 
-        assert user_a.count() == 1
-        assert user_b.count() == 1
-        assert "only-a" in user_a.load_core(limit=10)
-        assert "only-b" not in user_a.load_core(limit=10)
-        assert "only-b" in user_b.load_core(limit=10)
-        assert "only-a" not in user_b.load_core(limit=10)
+        assert store_a.count() == 2
+        assert store_b.count() == 2
+        core = store_a.load_core(limit=10)
+        assert "only-a" in core
+        assert "only-b" in core
 
 
 class TestMemoryStoreLocking:

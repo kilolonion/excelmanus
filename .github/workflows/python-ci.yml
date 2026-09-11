@@ -15,10 +15,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10
         with:
           version: "latest"
 
@@ -40,12 +40,12 @@ jobs:
     # PR 时只检查变更文件；push 到 main 时全量检查
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v4
+        uses: astral-sh/setup-uv@v10
         with:
           version: "latest"
 
@@ -88,10 +88,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "22"
           cache: "npm"
@@ -100,6 +100,14 @@ jobs:
       - name: Install dependencies
         working-directory: web
         run: npm ci
+
+      - name: Typecheck
+        working-directory: web
+        run: npx tsc --noEmit -p .
+
+      - name: Unit tests
+        working-directory: web
+        run: npx vitest run
 
       - name: Build frontend
         working-directory: web

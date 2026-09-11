@@ -20,6 +20,8 @@ def _make_app():
     # 确保 _config 不为 None
     api_mod._config = MagicMock()
     api_mod._config.cors_allow_origins = ["*"]
+    from excelmanus.api_app_state import set_config
+    set_config(api_mod._config)
 
     app = api_mod._app if hasattr(api_mod, "_app") else None
     if app is None:
@@ -43,10 +45,11 @@ def client(tmp_path):
     upload_dir = tmp_path / "uploads"
     upload_dir.mkdir()
     ws_mock.get_upload_dir.return_value = upload_dir
-    ws_mock.check_upload_allowed.return_value = (True, "")
 
     with patch.object(api_mod, "_resolve_workspace", return_value=ws_mock), \
-         patch.object(api_mod, "_get_file_registry", return_value=None):
+         patch.object(api_mod, "_get_file_registry", return_value=None), \
+         patch("excelmanus.api_routes_system._resolve_workspace", return_value=ws_mock), \
+         patch("excelmanus.api_routes_system._get_file_registry", return_value=None):
         yield TestClient(app, raise_server_exceptions=False)
 
 

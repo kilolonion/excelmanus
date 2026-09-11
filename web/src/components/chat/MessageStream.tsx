@@ -76,13 +76,25 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   // 定位期间屏蔽 handleScroll，防止 scroll 事件触发 setState 风暴
   const positioningRef = useRef(false);
 
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const messageOrder = useChatStore((s) => s.messageOrder);
+  const streamTick = useChatStore((s) => {
+    if (!isStreaming) return 0;
+    const id = s.messageOrder[s.messageOrder.length - 1];
+    const msg = id ? s.messagesById[id] : undefined;
+    if (!msg || msg.role !== "assistant") return s.messageOrder.length;
+    const last = msg.blocks[msg.blocks.length - 1];
+    const lastLen =
+      last && (last.type === "text" || last.type === "thinking")
+        ? last.content.length
+        : 0;
+    return s.messageOrder.length * 1_000_000 + msg.blocks.length * 10_000 + lastLen;
+  });
 
   // 会话切换时清空动画去重集合，防止长期只增不减导致内存泄漏
   useEffect(() => {
     renderedIdsRef.current = new Set<string>();
-  }, [currentSessionId]);
+  }, [loadedSessionId]);
 
   const [rollbackDialog, setRollbackDialog] = useState<{
     open: boolean;
@@ -211,6 +223,12 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     }
     prevMessageCountRef.current = currentMessageCount;
   }, [messageOrder.length, scrollToBottom]);
+
+  useIsomorphicLayoutEffect(() => {
+    if (!isStreaming || !autoScroll || messageOrder.length === 0) return;
+    virtualizer.measure();
+    virtualizer.scrollToIndex(messageOrder.length - 1, { align: "end" });
+  }, [streamTick, isStreaming, autoScroll, virtualizer, messageOrder.length]);
 
   const handleScroll = useCallback((event: React.UIEvent<HTMLDivElement>) => {
     // 定位期间屏蔽，防止 scroll 事件触发 setAutoScroll → re-render 风暴
@@ -467,7 +485,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
 
       <RollbackConfirmDialog
         open={rollbackDialog.open}
-        sessionId={currentSessionId}
+        sessionId={loadedSessionId}
         turnIndex={rollbackDialog.turnIndex}
         onConfirm={handleRollbackConfirm}
         onCancel={handleRollbackCancel}

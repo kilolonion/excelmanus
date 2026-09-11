@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import shlex
 import subprocess
@@ -10,6 +9,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
@@ -382,7 +382,7 @@ def run_shell(
     workdir: str = ".",
     timeout_seconds: int = 30,
     tail_lines: int = 80,
-) -> str:
+) -> ToolResult:
     """执行受限 shell 命令（仅允许白名单内命令）。
 
     适用于文件探查、搜索、环境信息查询等只读场景。
@@ -403,10 +403,8 @@ def run_shell(
     # 安全校验
     valid, reason = _validate_command(command)
     if not valid:
-        return json.dumps(
+        return from_payload(
             {"status": "blocked", "reason": reason, "command": command},
-            ensure_ascii=False,
-            indent=2,
         )
 
     # 敏感路径校验
@@ -414,10 +412,8 @@ def run_shell(
         command, workdir_safe, guard.workspace_root,
     )
     if not path_ok:
-        return json.dumps(
+        return from_payload(
             {"status": "blocked", "reason": path_reason, "command": command},
-            ensure_ascii=False,
-            indent=2,
         )
 
     # 构建最小环境
@@ -535,14 +531,12 @@ def run_shell(
         )
     except FileNotFoundError:
         seg0 = _split_pipeline(chain_segments[0][0].strip())
-        return json.dumps(
+        return from_payload(
             {
                 "status": "error",
                 "error": f"命令未找到: {shlex.split(seg0[0].strip())[0]}",
                 "command": command,
             },
-            ensure_ascii=False,
-            indent=2,
         )
 
     if timed_out:
@@ -562,7 +556,7 @@ def run_shell(
         "stdout_tail": _tail(stdout, tail_lines),
         "stderr_tail": _tail(stderr, tail_lines),
     }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return from_payload(result)
 
 
 def _build_shell_env() -> dict[str, str]:

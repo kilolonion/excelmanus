@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.task_list import TaskStatus, TaskStore
 from excelmanus.tools.registry import ToolDef
 
@@ -20,19 +21,26 @@ def _resolve_store(store: TaskStore | None = None) -> TaskStore:
     return _store
 
 
+def init_store(store: TaskStore) -> None:
+    """绑定模块级 TaskStore（测试与会话注入）。"""
+    _resolve_store(store)
+
+
 def task_create(
     title: str,
     subtasks: list[str],
     replace_existing: bool = False,
     *,
     store: TaskStore | None = None,
-) -> str:
-    """创建任务清单（兼容旧接口，同时支持显式 store 注入）。"""
+) -> ToolResult:
+    """创建任务清单（支持显式 store 注入）。"""
     active_store = _resolve_store(store)
     if not isinstance(replace_existing, bool):
         raise ValueError("replace_existing 必须为布尔值。")
     task_list = active_store.create(title, subtasks, replace_existing=replace_existing)
-    return f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
+    return ToolResult.from_text(
+        f"已创建任务清单「{task_list.title}」，共 {len(task_list.items)} 个子任务。"
+    )
 
 
 def task_update(
@@ -41,8 +49,8 @@ def task_update(
     result: str | None = None,
     *,
     store: TaskStore | None = None,
-) -> str:
-    """更新任务项状态（兼容旧接口，同时支持显式 store 注入）。"""
+) -> ToolResult:
+    """更新任务项状态（支持显式 store 注入）。"""
     active_store = _resolve_store(store)
     try:
         new_status = TaskStatus(status)
@@ -50,7 +58,9 @@ def task_update(
         valid = ", ".join(s.value for s in TaskStatus)
         raise ValueError(f"无效状态 '{status}'，合法值: {valid}") from None
     item = active_store.update_item(task_index, new_status, result)
-    return f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
+    return ToolResult.from_text(
+        f"任务 #{task_index}「{item.title}」已更新为 {item.status.value}。"
+    )
 
 
 def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
@@ -61,7 +71,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
         title: str,
         subtasks: list,
         replace_existing: bool = False,
-    ) -> str:
+    ) -> ToolResult:
         return globals()["task_create"](
             title=title,
             subtasks=subtasks,
@@ -69,7 +79,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
             store=active_store,
         )
 
-    def task_update(task_index: int, status: str, result: str | None = None) -> str:
+    def task_update(task_index: int, status: str, result: str | None = None) -> ToolResult:
         return globals()["task_update"](
             task_index=task_index,
             status=status,
@@ -88,7 +98,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                 "(3) 用户一次提出多个相关任务。"
                 "不需要使用的场景（直接执行即可）："
                 "(a) 单一简单操作（仅读取、回答问题）；"
-                "(b) 标准三步模式（探查→操作→验证），这是最常见的工作流，无需额外规划；"
+                "(b) 已有明确目标与充分证据的直接操作，无需额外规划；"
                 "(c) 少于 5 步的简单任务。"
                 "原则：优先直接行动，只在步骤多且有数据依赖时才创建任务清单。"
             ),
@@ -127,7 +137,7 @@ def get_tools(store: TaskStore | None = None) -> list[ToolDef]:
                                                     "required": ["check_type"],
                                                 },
                                             ],
-                                            "description": "验证条件：字符串或结构化对象",
+                                            "description": "可选检查目标，由主 Agent 按任务检查；不是自动验收门。字符串或结构化对象",
                                         },
                                     },
                                     "required": ["title"],

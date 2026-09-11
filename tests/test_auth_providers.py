@@ -39,6 +39,8 @@ class TestOpenAICodexProvider:
         assert self.provider.matches_model("codex-mini-latest")
         assert self.provider.matches_model("gpt-5.2")
         assert self.provider.matches_model("gpt-5.1")
+        assert self.provider.matches_model("gpt-6-astra")
+        assert self.provider.matches_model("gpt-5.6-terra")
 
     def test_does_not_match_non_codex_models(self):
         assert not self.provider.matches_model("claude-3-opus")
@@ -135,6 +137,83 @@ class TestOpenAICodexProvider:
             with pytest.raises(RuntimeError, match="Token 刷新失败"):
                 await self.provider.refresh_token("rt_expired")
 
+    def test_generate_pkce_s256_pair(self):
+        verifier, challenge = self.provider.generate_pkce()
+        assert verifier
+        assert challenge
+        assert verifier != challenge
+        digest = __import__("hashlib").sha256(verifier.encode()).digest()
+        expected = __import__("base64").urlsafe_b64encode(digest).rstrip(b"=").decode()
+        assert challenge == expected
+
+    def test_build_authorize_url_is_openai_origin(self):
+        url = self.provider.build_authorize_url(
+            redirect_uri="http://localhost:3000/auth/codex/callback",
+            state="abc",
+            code_challenge="challenge",
+        )
+        assert url.startswith("https://auth.openai.com/oauth/authorize?")
+        assert "code_challenge=challenge" in url
+        assert "scope=openid+profile+email+offline_access" in url or "offline_access" in url
+        assert self.provider.assert_auth_url(url) == url
+
+    def test_assert_auth_url_rejects_other_hosts(self):
+        from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+        with pytest.raises(RuntimeError, match="OpenAI"):
+            OpenAICodexProvider.assert_auth_url("https://evil.example/oauth/authorize")
+        with pytest.raises(RuntimeError, match="HTTPS"):
+            OpenAICodexProvider.assert_auth_url("http://auth.openai.com/oauth/authorize")
+
+    def test_validate_extracts_email_from_profile_claim(self):
+        token = _make_jwt({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-mail",
+                "chatgpt_plan_type": "plus",
+            },
+            "https://api.openai.com/profile": {"email": "plus@example.com"},
+        })
+        cred = self.provider.validate_token_data({"access_token": token, "refresh_token": "rt"})
+        assert cred.extra_data is not None
+        assert cred.extra_data["email"] == "plus@example.com"
+
+    @pytest.mark.asyncio
+    async def test_exchange_code_requires_refresh_token(self):
+        import httpx
+        token = _make_jwt({"exp": int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp())})
+        mock_resp = httpx.Response(
+            200,
+            json={"access_token": token},
+            request=httpx.Request("POST", "https://auth.openai.com/oauth/token"),
+        )
+        with patch("httpx.AsyncClient.post", return_value=mock_resp):
+            with pytest.raises(RuntimeError, match="refresh_token"):
+                await self.provider.exchange_code("code", "http://localhost/cb", "verifier")
+
+    @pytest.mark.asyncio
+    async def test_exchange_code_success_stores_email(self):
+        import httpx
+        exp = int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp())
+        token = _make_jwt({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc-1", "chatgpt_plan_type": "pro"},
+            "https://api.openai.com/profile": {"email": "pro@example.com"},
+        }, exp=exp)
+        mock_resp = httpx.Response(
+            200,
+            json={"access_token": token, "refresh_token": "rt_new", "scope": "openid profile email offline_access"},
+            request=httpx.Request("POST", "https://auth.openai.com/oauth/token"),
+        )
+        with patch("httpx.AsyncClient.post", return_value=mock_resp):
+            cred = await self.provider.exchange_code("code", "http://localhost/cb", "verifier")
+        assert cred.refresh_token == "rt_new"
+        assert cred.account_id == "acc-1"
+        assert cred.extra_data is not None
+        assert cred.extra_data["email"] == "pro@example.com"
+
+    def test_implements_oauth_contracts(self):
+        from excelmanus.auth.providers.base import DeviceCodeCapable, PKCECapable
+        assert isinstance(self.provider, PKCECapable)
+        assert isinstance(self.provider, DeviceCodeCapable)
+
 
 # ── CredentialStore 测试 ─────────────────────────────────────
 
@@ -204,7 +283,7 @@ class TestCredentialStore:
         cred2 = self._make_credential(account_id="new", plan_type="pro")
         self.store.upsert_profile("user-1", "openai-codex", "default", cred2)
 
-        profile = self.store.get_active_profile("user-1", "openai-codex")
+        profile = self.store.get_active_profile("openai-codex", user_id="user-1")
         assert profile is not None
         assert profile.account_id == "new"
         assert profile.plan_type == "pro"
@@ -213,13 +292,13 @@ class TestCredentialStore:
         cred = self._make_credential()
         self.store.upsert_profile("user-1", "openai-codex", "default", cred)
 
-        profile = self.store.get_active_profile("user-1", "openai-codex")
+        profile = self.store.get_active_profile("openai-codex", user_id="user-1")
         assert profile is not None
         assert profile.access_token is not None
         assert profile.refresh_token is not None
 
     def test_get_active_profile_not_found(self):
-        assert self.store.get_active_profile("user-1", "openai-codex") is None
+        assert self.store.get_active_profile("openai-codex", user_id="user-1") is None
 
     def test_list_profiles(self):
         cred = self._make_credential()
@@ -232,7 +311,7 @@ class TestCredentialStore:
         cred = self._make_credential()
         self.store.upsert_profile("user-1", "openai-codex", "default", cred)
         assert self.store.delete_profile("user-1", "openai-codex") is True
-        assert self.store.get_active_profile("user-1", "openai-codex") is None
+        assert self.store.get_active_profile("openai-codex", user_id="user-1") is None
 
     def test_delete_nonexistent(self):
         assert self.store.delete_profile("user-1", "openai-codex") is False
@@ -244,7 +323,7 @@ class TestCredentialStore:
         new_expires = (datetime.now(tz=timezone.utc) + timedelta(hours=2)).isoformat()
         self.store.update_tokens(summary.id, "new_access", "new_refresh", new_expires)
 
-        profile = self.store.get_active_profile("user-1", "openai-codex")
+        profile = self.store.get_active_profile("openai-codex", user_id="user-1")
         assert profile is not None
         assert profile.expires_at == new_expires
 
@@ -253,20 +332,17 @@ class TestCredentialStore:
         summary = self.store.upsert_profile("user-1", "openai-codex", "default", cred)
         self.store.deactivate_profile(summary.id)
 
-        profile = self.store.get_active_profile("user-1", "openai-codex")
+        profile = self.store.get_active_profile("openai-codex", user_id="user-1")
         assert profile is None  # inactive profiles not returned
 
-    def test_user_isolation(self):
-        """不同用户的 profile 互相隔离。"""
-        cred1 = self._make_credential(account_id="user1-acc")
-        cred2 = self._make_credential(account_id="user2-acc")
-        self.store.upsert_profile("user-1", "openai-codex", "default", cred1)
-        self.store.upsert_profile("user-2", "openai-codex", "default", cred2)
+    def test_process_profile_is_default(self):
+        from excelmanus.auth.providers.credential_store import PROCESS_USER_ID
 
-        p1 = self.store.get_active_profile("user-1", "openai-codex")
-        p2 = self.store.get_active_profile("user-2", "openai-codex")
-        assert p1 is not None and p1.account_id == "user1-acc"
-        assert p2 is not None and p2.account_id == "user2-acc"
+        cred = self._make_credential(account_id="proc-acc")
+        self.store.upsert_profile(PROCESS_USER_ID, "openai-codex", "default", cred)
+        profile = self.store.get_active_profile("openai-codex")
+        assert profile is not None
+        assert profile.account_id == "proc-acc"
 
 
 # ── CredentialResolver 测试 ──────────────────────────────────
@@ -286,18 +362,13 @@ class TestCredentialResolver:
         self.conn.close()
 
     @pytest.mark.asyncio
-    async def test_no_user_returns_none(self):
-        result = await self.resolver.resolve(None, "gpt-5.2-codex")
-        assert result is None
-
-    @pytest.mark.asyncio
     async def test_no_profile_returns_none(self):
-        result = await self.resolver.resolve("user-1", "gpt-5.2-codex")
+        result = await self.resolver.resolve("gpt-5.2-codex")
         assert result is None
 
     @pytest.mark.asyncio
     async def test_non_matching_model_returns_none(self):
-        result = await self.resolver.resolve("user-1", "claude-3-opus")
+        result = await self.resolver.resolve("claude-3-opus")
         assert result is None
 
     @pytest.mark.asyncio
@@ -311,9 +382,10 @@ class TestCredentialResolver:
             account_id="acc",
             plan_type="plus",
         )
-        self.cred_store.upsert_profile("user-1", "openai-codex", "default", cred)
+        from excelmanus.auth.providers.credential_store import PROCESS_USER_ID
+        self.cred_store.upsert_profile(PROCESS_USER_ID, "openai-codex", "default", cred)
 
-        result = await self.resolver.resolve("user-1", "gpt-5.2-codex")
+        result = await self.resolver.resolve("gpt-5.2-codex")
         assert result is not None
         assert result.source == "oauth"
         assert result.provider == "openai-codex"
@@ -327,6 +399,22 @@ class TestCredentialResolver:
         assert CredentialResolver._match_provider("gpt-5.1") == "openai-codex"
         assert CredentialResolver._match_provider("claude-3-opus") is None
         assert CredentialResolver._match_provider("gpt-4o") is None
+        assert CredentialResolver._match_provider("gemini-2.5-pro") is None
+
+
+class TestCodexOnlyRegistry:
+    def test_registry_only_registers_openai_codex(self):
+        from excelmanus.auth.providers.registry import list_all
+        names = set(list_all())
+        assert names == {"openai-codex"}
+
+    def test_codex_profile_email_from_extra_data(self):
+        from excelmanus.auth.router import _codex_profile_email
+        profile = SimpleNamespace(
+            extra_data=json.dumps({"email": "plus@example.com"}),
+            access_token=None,
+        )
+        assert _codex_profile_email(profile) == "plus@example.com"
 
 
 # ── OAuth State Token 加密测试 ────────────────────────────────

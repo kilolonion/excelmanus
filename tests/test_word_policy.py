@@ -9,7 +9,6 @@ from excelmanus.tools.policy import (
     AUDIT_TARGET_ARG_RULES_ALL,
     MUTATING_AUDIT_ONLY_TOOLS,
     READ_ONLY_SAFE_TOOLS,
-    ROUTE_TOOL_SCOPE,
     TOOL_CATEGORIES,
     TOOL_SHORT_DESCRIPTIONS,
 )
@@ -35,17 +34,6 @@ class TestPolicyIntegration:
 
     def test_import_policy_assertions_pass(self) -> None:
         assert importlib.reload(policy) is policy
-
-
-class TestRouteToolScope:
-    def test_data_read_includes_word_read_tools(self) -> None:
-        assert {"read_word", "inspect_word", "search_word"} <= ROUTE_TOOL_SCOPE["data_read"]
-
-    def test_data_write_includes_write_word(self) -> None:
-        assert "write_word" in ROUTE_TOOL_SCOPE["data_write"]
-
-    def test_all_tools_not_in_mapping(self) -> None:
-        assert "all_tools" not in ROUTE_TOOL_SCOPE
 
 
 class TestToolDescriptions:

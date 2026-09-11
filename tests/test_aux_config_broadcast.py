@@ -77,7 +77,7 @@ class TestUpdateAuxConfig:
 
     @pytest.mark.asyncio
     async def test_router_model_follows_aux(self, manager: SessionManager) -> None:
-        """更新 AUX 后路由模型应同步切换。"""
+        """更新 AUX 后附属任务默认模型应同步切换。"""
         sid, engine = await manager.acquire_for_chat(None)
         await manager.release_for_chat(sid)
 
@@ -92,23 +92,6 @@ class TestUpdateAuxConfig:
 
         assert engine._router_model == "gpt-4o-mini"
         assert engine._router_follow_active_model is False
-
-    @pytest.mark.asyncio
-    async def test_advisor_model_follows_aux(self, manager: SessionManager) -> None:
-        """更新 AUX 后窗口感知顾问模型应同步切换。"""
-        sid, engine = await manager.acquire_for_chat(None)
-        await manager.release_for_chat(sid)
-
-        assert engine._advisor_model == "qwen-flash-old"
-
-        engine.update_aux_config(
-            aux_model="gpt-4o-mini",
-            aux_api_key=None,
-            aux_base_url=None,
-        )
-
-        assert engine._advisor_model == "gpt-4o-mini"
-        assert engine._advisor_follow_active_model is False
 
     @pytest.mark.asyncio
     async def test_clear_aux_falls_back_to_active_model(
@@ -126,8 +109,6 @@ class TestUpdateAuxConfig:
 
         assert engine._router_model == engine._active_model
         assert engine._router_follow_active_model is True
-        assert engine._advisor_model == engine._active_model
-        assert engine._advisor_follow_active_model is True
 
 
 class TestBroadcastAuxConfig:
@@ -161,10 +142,9 @@ class TestBroadcastAuxConfig:
     async def test_auth_mode_copy_also_updated(
         self, config: ExcelManusConfig, registry: ToolRegistry
     ) -> None:
-        """认证模式下 replace() 创建的 config 副本也应被广播更新。
+        """config 副本（replace 创建）也应被广播更新。
 
-        这是 bug 的核心场景：认证用户的 engine 持有 config 副本，
-        全局 _config 更新不会自动传播，必须依赖广播。
+        引擎可能持有 config 副本，全局 _config 更新不会自动传播，必须依赖广播。
         """
         # 模拟认证场景：engine 持有 replace() 副本
         copied_config = replace(config, workspace_root="/tmp/user-workspace")

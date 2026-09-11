@@ -9,7 +9,7 @@ from datetime import date, datetime
 import pandas as pd
 import pytest
 
-from excelmanus.tools.data_tools import (
+from excelmanus.workbook.data import (
     _build_null_info,
     _df_to_compact_records,
     _trim_trailing_nulls_generic,

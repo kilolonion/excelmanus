@@ -229,43 +229,6 @@ class TestCrossVersionUpgrade:
         db.close()
 
 
-class TestScopedDatabaseMigration:
-    """ScopedDatabase 用户级 DB 迁移安全性。"""
-
-    def test_user_db_gets_latest_schema(self, tmp_path: Path) -> None:
-        """用户级 SQLite DB 也应迁移到最新版本。"""
-        from excelmanus.scoped_database import ScopedDatabase
-        from excelmanus.user_context import UserContext
-
-        # 创建共享 Database
-        shared_db = Database(str(tmp_path / "shared.db"))
-
-        # 创建用户上下文
-        user_root = tmp_path / "users" / "test-user-123"
-        user_root.mkdir(parents=True)
-        ctx = UserContext.create(
-            "test-user-123",
-            global_workspace_root=str(tmp_path),
-            data_root=str(tmp_path),
-        )
-
-        scoped = ScopedDatabase(ctx, shared_db)
-
-        # 验证用户 DB 也到了最新版本
-        user_db_path = ctx.workspace_root / "data.db"
-        if user_db_path.exists():
-            conn = sqlite3.connect(str(user_db_path))
-            conn.row_factory = sqlite3.Row
-            row = conn.execute(
-                "SELECT MAX(version) as v FROM schema_version"
-            ).fetchone()
-            assert row["v"] == _LATEST_VERSION
-            conn.close()
-
-        scoped.close()
-        shared_db.close()
-
-
 # ── SQLite / PG 迁移一致性守护 ────────────────────────────────────
 
 

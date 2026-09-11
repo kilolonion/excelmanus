@@ -1367,7 +1367,7 @@ class SubagentExecutor:
         success: bool,
         tool_result_enricher: ToolResultEnricher | None,
     ) -> str:
-        """对工具返回执行外部增强（如窗口感知），失败时回退原文。"""
+        """对工具返回执行外部增强，失败时回退原文。"""
         if tool_result_enricher is None:
             return text
         try:
@@ -1428,17 +1428,6 @@ class SubagentExecutor:
         paths: list[str] = []
         if isinstance(payload, dict):
             paths.extend(cls._collect_excel_paths_from_mapping(payload))
-            if tool_name == "inspect_excel_files":
-                files = payload.get("files")
-                if isinstance(files, list):
-                    for item in files:
-                        if not isinstance(item, dict):
-                            continue
-                        path = item.get("path") or item.get("file")
-                        if isinstance(path, str):
-                            normalized = cls._normalize_path(path)
-                            if cls._is_excel_path(normalized):
-                                paths.append(normalized)
         elif isinstance(payload, list):
             for item in payload:
                 if isinstance(item, dict):

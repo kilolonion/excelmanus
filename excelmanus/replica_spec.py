@@ -1,10 +1,15 @@
-"""ReplicaSpec 数据协议：图片→Excel 复刻的结构化中间格式。"""
+"""ReplicaSpec / WorkbookSpec 数据协议：图片→Excel 复刻的结构化中间格式。"""
 
 from __future__ import annotations
 
+import json
+from datetime import datetime, timezone
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
+
+_EXCEL_MAX_ROWS = 1_048_576
+_EXCEL_MAX_COLS = 16_384
 
 
 class Provenance(BaseModel):
@@ -112,12 +117,36 @@ class ObjectsSpec(BaseModel):
     shapes: list[Any] = Field(default_factory=list)
 
 
+class ValueBlock(BaseModel):
+    """矩形值块：从 start 锚点展开的二维网格。"""
+
+    start: str
+    values: list[list[Any]] = Field(default_factory=list)
+
+
+class FormulaBlock(BaseModel):
+    """矩形公式块：从 start 锚点展开的二维公式网格。"""
+
+    start: str
+    formulas: list[list[str]] = Field(default_factory=list)
+
+
+class StyleRegion(BaseModel):
+    """将具名样式应用到矩形区域。"""
+
+    range: str
+    style_id: str
+
+
 class SheetSpec(BaseModel):
     name: str
     dimensions: dict[str, int]  # {"rows": N, "cols": M}
     freeze_panes: str | None = None
     print_layout: Any | None = None
     cells: list[CellSpec] = Field(default_factory=list)
+    value_blocks: list[ValueBlock] = Field(default_factory=list)
+    formula_blocks: list[FormulaBlock] = Field(default_factory=list)
+    style_regions: list[StyleRegion] = Field(default_factory=list)
     merged_ranges: list[MergedRange] = Field(default_factory=list)
     styles: dict[str, StyleClass] = Field(default_factory=dict)
     column_widths: list[float] = Field(default_factory=list)
@@ -127,7 +156,9 @@ class SheetSpec(BaseModel):
     semantic_hints: SemanticHints = Field(default_factory=SemanticHints)
 
 
-class WorkbookSpec(BaseModel):
+class WorkbookMeta(BaseModel):
+    """ReplicaSpec 内嵌的工作簿元数据（名称/字体）。"""
+
     name: str = "replica"
     locale: str | None = None
     default_font: FontSpec | None = None
@@ -141,9 +172,470 @@ class Uncertainty(BaseModel):
     confidence: float = 0.5
 
 
+class WorkbookSpec(BaseModel):
+    """P5 最小工作簿规格：主模型直接产出，经校验后编译。
+
+    ``uncertainties`` 必填（可为空列表，但不能缺字段）。
+    """
+
+    version: str = "1.0"
+    name: str = "replica"
+    locale: str | None = None
+    default_font: FontSpec | None = None
+    theme_hint: str | None = None
+    sheets: list[SheetSpec]
+    uncertainties: list[Uncertainty]
+
+
 class ReplicaSpec(BaseModel):
     version: str = "1.0"
     provenance: Provenance
-    workbook: WorkbookSpec = Field(default_factory=WorkbookSpec)
+    workbook: WorkbookMeta = Field(default_factory=WorkbookMeta)
     sheets: list[SheetSpec]
     uncertainties: list[Uncertainty] = Field(default_factory=list)
+
+
+class SpecValidationError(ValueError):
+    """带字段路径的 WorkbookSpec 校验失败。"""
+
+    def __init__(self, errors: list[dict[str, str]]):
+        self.errors = errors
+        summary = "; ".join(f"{item['path']}: {item['message']}" for item in errors) or "WorkbookSpec 校验失败"
+        super().__init__(summary)
+
+    def to_payload(self) -> dict[str, Any]:
+        return {
+            "status": "error",
+            "error_code": "SPEC_VALIDATION_FAILED",
+            "message": "WorkbookSpec 校验失败，请按字段路径修正后重试。",
+            "errors": self.errors,
+        }
+
+
+def format_error_path(loc: tuple[Any, ...]) -> str:
+    if not loc:
+        return "$"
+    return ".".join(str(part) for part in loc)
+
+
+def _pydantic_errors(exc: ValidationError) -> list[dict[str, str]]:
+    return [
+        {
+            "path": format_error_path(tuple(err.get("loc") or ())),
+            "message": str(err.get("msg") or "校验失败"),
+        }
+        for err in exc.errors()
+    ]
+
+
+def _parse_a1(address: str) -> tuple[int, int]:
+    """返回 1-indexed (row, col)。"""
+    from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
+
+    col_letter, row = coordinate_from_string(address)
+    return int(row), int(column_index_from_string(col_letter))
+
+
+def _range_bounds(range_str: str) -> tuple[int, int, int, int]:
+    """返回 (min_col, min_row, max_col, max_row)，均为 1-indexed。"""
+    from openpyxl.utils import range_boundaries
+
+    return range_boundaries(range_str)
+
+
+def _sheet_dimensions(sheet: SheetSpec, sheet_index: int) -> tuple[int, int] | dict[str, str]:
+    raw = sheet.dimensions or {}
+    try:
+        rows = int(raw["rows"])
+        cols = int(raw["cols"])
+    except (KeyError, TypeError, ValueError):
+        return {
+            "path": f"sheets.{sheet_index}.dimensions",
+            "message": "dimensions 必须包含正整数 rows 与 cols",
+        }
+    if rows < 1 or cols < 1:
+        return {
+            "path": f"sheets.{sheet_index}.dimensions",
+            "message": f"dimensions 越界: rows={rows}, cols={cols}（须 ≥ 1）",
+        }
+    if rows > _EXCEL_MAX_ROWS or cols > _EXCEL_MAX_COLS:
+        return {
+            "path": f"sheets.{sheet_index}.dimensions",
+            "message": (
+                f"dimensions 超出 Excel 上限: rows={rows}, cols={cols} "
+                f"（最大 {_EXCEL_MAX_ROWS}×{_EXCEL_MAX_COLS}）"
+            ),
+        }
+    return rows, cols
+
+
+def _rect_fits(
+    *,
+    start_row: int,
+    start_col: int,
+    height: int,
+    width: int,
+    rows: int,
+    cols: int,
+) -> str | None:
+    if start_row < 1 or start_col < 1:
+        return f"锚点越界: row={start_row}, col={start_col}"
+    if height <= 0 or width <= 0:
+        return None
+    end_row = start_row + height - 1
+    end_col = start_col + width - 1
+    if end_row > rows or end_col > cols:
+        return (
+            f"矩形超出 dimensions {rows}×{cols}: "
+            f"覆盖 ({start_row},{start_col})–({end_row},{end_col})"
+        )
+    return None
+
+
+def collect_layout_errors(spec: WorkbookSpec) -> list[dict[str, str]]:
+    """矩形越界、坏样式引用等语义错误（带字段路径）。"""
+    errors: list[dict[str, str]] = []
+    for i, sheet in enumerate(spec.sheets):
+        dims = _sheet_dimensions(sheet, i)
+        if isinstance(dims, dict):
+            errors.append(dims)
+            continue
+        rows, cols = dims
+        prefix = f"sheets.{i}"
+
+        for j, block in enumerate(sheet.value_blocks):
+            path = f"{prefix}.value_blocks.{j}"
+            try:
+                start_row, start_col = _parse_a1(block.start)
+            except Exception as exc:
+                errors.append({"path": f"{path}.start", "message": f"无效锚点 {block.start!r}: {exc}"})
+                continue
+            height = len(block.values)
+            width = max((len(row) for row in block.values), default=0)
+            msg = _rect_fits(
+                start_row=start_row, start_col=start_col,
+                height=height, width=width, rows=rows, cols=cols,
+            )
+            if msg:
+                errors.append({"path": path, "message": msg})
+
+        for j, block in enumerate(sheet.formula_blocks):
+            path = f"{prefix}.formula_blocks.{j}"
+            try:
+                start_row, start_col = _parse_a1(block.start)
+            except Exception as exc:
+                errors.append({"path": f"{path}.start", "message": f"无效锚点 {block.start!r}: {exc}"})
+                continue
+            height = len(block.formulas)
+            width = max((len(row) for row in block.formulas), default=0)
+            msg = _rect_fits(
+                start_row=start_row, start_col=start_col,
+                height=height, width=width, rows=rows, cols=cols,
+            )
+            if msg:
+                errors.append({"path": path, "message": msg})
+
+        for j, region in enumerate(sheet.style_regions):
+            path = f"{prefix}.style_regions.{j}"
+            if region.style_id not in sheet.styles:
+                errors.append({
+                    "path": f"{path}.style_id",
+                    "message": f"未知样式引用: {region.style_id!r}",
+                })
+            try:
+                min_col, min_row, max_col, max_row = _range_bounds(region.range)
+            except Exception as exc:
+                errors.append({"path": f"{path}.range", "message": f"无效区域 {region.range!r}: {exc}"})
+                continue
+            if min_row < 1 or min_col < 1 or max_row > rows or max_col > cols:
+                errors.append({
+                    "path": f"{path}.range",
+                    "message": (
+                        f"样式区域 {region.range} 超出 dimensions {rows}×{cols}"
+                    ),
+                })
+
+        for j, merged in enumerate(sheet.merged_ranges):
+            path = f"{prefix}.merged_ranges.{j}"
+            try:
+                min_col, min_row, max_col, max_row = _range_bounds(merged.range)
+            except Exception as exc:
+                errors.append({"path": f"{path}.range", "message": f"无效合并区 {merged.range!r}: {exc}"})
+                continue
+            if min_row < 1 or min_col < 1 or max_row > rows or max_col > cols:
+                errors.append({
+                    "path": f"{path}.range",
+                    "message": f"合并区 {merged.range} 超出 dimensions {rows}×{cols}",
+                })
+
+        for j, cell in enumerate(sheet.cells):
+            path = f"{prefix}.cells.{j}"
+            try:
+                row, col = _parse_a1(cell.address)
+            except Exception as exc:
+                errors.append({"path": f"{path}.address", "message": f"无效地址 {cell.address!r}: {exc}"})
+                continue
+            if row > rows or col > cols or row < 1 or col < 1:
+                errors.append({
+                    "path": f"{path}.address",
+                    "message": f"单元格 {cell.address} 超出 dimensions {rows}×{cols}",
+                })
+            if cell.style_id and cell.style_id not in sheet.styles:
+                errors.append({
+                    "path": f"{path}.style_id",
+                    "message": f"未知样式引用: {cell.style_id!r}",
+                })
+    return errors
+
+
+def validate_workbook_spec(data: Any) -> WorkbookSpec:
+    """校验最小 WorkbookSpec；失败时抛出带字段路径的 SpecValidationError。不静默 patch。"""
+    if isinstance(data, str):
+        try:
+            data = json.loads(data)
+        except json.JSONDecodeError as exc:
+            raise SpecValidationError([{
+                "path": "spec",
+                "message": f"不是合法 JSON: {exc}",
+            }]) from exc
+    if not isinstance(data, dict):
+        raise SpecValidationError([{
+            "path": "spec",
+            "message": "WorkbookSpec 必须是 JSON 对象",
+        }])
+    try:
+        spec = WorkbookSpec.model_validate(data)
+    except ValidationError as exc:
+        raise SpecValidationError(_pydantic_errors(exc)) from exc
+    layout_errors = collect_layout_errors(spec)
+    if layout_errors:
+        raise SpecValidationError(layout_errors)
+    return spec
+
+
+def iter_block_cells(start: str, grid: list[list[Any]]) -> list[tuple[str, Any]]:
+    from openpyxl.utils import get_column_letter
+
+    start_row, start_col = _parse_a1(start)
+    out: list[tuple[str, Any]] = []
+    for r_off, row_vals in enumerate(grid):
+        if not isinstance(row_vals, list):
+            continue
+        for c_off, value in enumerate(row_vals):
+            addr = f"{get_column_letter(start_col + c_off)}{start_row + r_off}"
+            out.append((addr, value))
+    return out
+
+
+def iter_range_addresses(range_str: str) -> list[str]:
+    from openpyxl.utils import get_column_letter
+
+    min_col, min_row, max_col, max_row = _range_bounds(range_str)
+    addrs: list[str] = []
+    for row in range(min_row, max_row + 1):
+        for col in range(min_col, max_col + 1):
+            addrs.append(f"{get_column_letter(col)}{row}")
+    return addrs
+
+
+def materialize_sheet_cells(sheet: SheetSpec) -> list[CellSpec]:
+    """把矩形值/公式块与样式区域展开为单元格列表，供 rebuild 编译。"""
+    by_addr: dict[str, CellSpec] = {}
+    for cell in sheet.cells:
+        by_addr[cell.address.upper()] = cell.model_copy(deep=True)
+
+    for block in sheet.value_blocks:
+        for addr, value in iter_block_cells(block.start, block.values):
+            key = addr.upper()
+            existing = by_addr.get(key)
+            value_type: Literal["string", "number", "date", "boolean", "formula", "empty"]
+            if value is None:
+                value_type = "empty"
+            elif isinstance(value, bool):
+                value_type = "boolean"
+            elif isinstance(value, (int, float)) and not isinstance(value, bool):
+                value_type = "number"
+            elif isinstance(value, str) and value.startswith("="):
+                value_type = "formula"
+            else:
+                value_type = "string"
+            if existing is None:
+                by_addr[key] = CellSpec(address=addr, value=value, value_type=value_type)
+            else:
+                existing.value = value
+                existing.value_type = value_type
+
+    for block in sheet.formula_blocks:
+        for addr, formula in iter_block_cells(block.start, list(block.formulas)):
+            key = addr.upper()
+            text = str(formula) if formula is not None else ""
+            existing = by_addr.get(key)
+            if existing is None:
+                by_addr[key] = CellSpec(address=addr, value=text, value_type="formula")
+            else:
+                existing.value = text
+                existing.value_type = "formula"
+
+    for region in sheet.style_regions:
+        try:
+            addrs = iter_range_addresses(region.range)
+        except Exception:
+            continue
+        for addr in addrs:
+            key = addr.upper()
+            existing = by_addr.get(key)
+            if existing is None:
+                by_addr[key] = CellSpec(
+                    address=addr, value=None, value_type="empty", style_id=region.style_id,
+                )
+            else:
+                existing.style_id = region.style_id
+
+    return list(by_addr.values())
+
+
+def workbook_spec_to_replica(spec: WorkbookSpec, provenance: Provenance | None = None) -> ReplicaSpec:
+    sheets: list[SheetSpec] = []
+    for sheet in spec.sheets:
+        dumped = sheet.model_copy(deep=True)
+        dumped.cells = materialize_sheet_cells(sheet)
+        sheets.append(dumped)
+    if provenance is None:
+        provenance = Provenance(
+            source_image_hash="",
+            model="workbook-spec",
+            timestamp=datetime.now(timezone.utc).isoformat(),
+        )
+    return ReplicaSpec(
+        version=spec.version,
+        provenance=provenance,
+        workbook=WorkbookMeta(
+            name=spec.name,
+            locale=spec.locale,
+            default_font=spec.default_font,
+            theme_hint=spec.theme_hint,
+        ),
+        sheets=sheets,
+        uncertainties=list(spec.uncertainties),
+    )
+
+
+def looks_like_replica_spec(data: dict[str, Any]) -> bool:
+    return "provenance" in data or (
+        isinstance(data.get("workbook"), dict) and "sheets" in data
+    )
+
+
+def load_spec_document(text: str) -> ReplicaSpec:
+    """加载 ReplicaSpec 或最小 WorkbookSpec，统一为 ReplicaSpec 供编译。"""
+    try:
+        data = json.loads(text)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Spec 不是合法 JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise ValueError("Spec 必须是 JSON 对象")
+    if looks_like_replica_spec(data):
+        return ReplicaSpec.model_validate(data)
+    wb = validate_workbook_spec(data)
+    return workbook_spec_to_replica(wb)
+
+
+def compile_replica_to_bytes(replica: ReplicaSpec) -> tuple[bytes, dict[str, Any]]:
+    """把 ReplicaSpec 编译为 xlsx 字节。WorkbookSpec 先转 replica 再走这里。"""
+    import io
+
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Font, PatternFill
+    from openpyxl.utils import get_column_letter
+
+    wb = Workbook()
+    if wb.sheetnames:
+        del wb[wb.sheetnames[0]]
+    cells_written = 0
+    formulas_written = 0
+    merges_applied = 0
+    for sheet in replica.sheets:
+        ws = wb.create_sheet(title=sheet.name)
+        for cell in materialize_sheet_cells(sheet):
+            target = ws[cell.address]
+            if cell.value_type == "formula" and cell.value:
+                target.value = str(cell.value)
+                formulas_written += 1
+            elif cell.value_type == "number" and cell.value is not None:
+                try:
+                    target.value = float(cell.value) if "." in str(cell.value) else int(cell.value)
+                except (TypeError, ValueError):
+                    target.value = cell.value
+            elif cell.value_type == "empty":
+                target.value = None
+            else:
+                target.value = cell.value
+            if cell.number_format:
+                target.number_format = cell.number_format
+            style = sheet.styles.get(cell.style_id) if cell.style_id else None
+            if style is not None and style.font is not None:
+                target.font = Font(
+                    name=style.font.name,
+                    size=style.font.size,
+                    bold=style.font.bold,
+                    italic=style.font.italic,
+                    color=style.font.color.lstrip("#") if style.font.color else None,
+                )
+            if style is not None and style.fill is not None and style.fill.color:
+                target.fill = PatternFill(
+                    patternType="solid",
+                    fgColor=style.fill.color.lstrip("#"),
+                )
+            if style is not None and style.alignment is not None:
+                target.alignment = Alignment(
+                    horizontal=style.alignment.horizontal,
+                    vertical=style.alignment.vertical,
+                    wrap_text=style.alignment.wrap_text,
+                )
+            cells_written += 1
+        for merged in sheet.merged_ranges:
+            try:
+                ws.merge_cells(merged.range)
+                merges_applied += 1
+            except Exception:
+                continue
+        for index, width in enumerate(sheet.column_widths or []):
+            if isinstance(width, (int, float)) and width > 0:
+                ws.column_dimensions[get_column_letter(index + 1)].width = float(width)
+        for row_key, height in (sheet.row_heights or {}).items():
+            try:
+                ws.row_dimensions[int(row_key)].height = float(height)
+            except (TypeError, ValueError):
+                continue
+        if sheet.freeze_panes:
+            ws.freeze_panes = sheet.freeze_panes
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue(), {
+        "cells_written": cells_written,
+        "formulas_written": formulas_written,
+        "merges_applied": merges_applied,
+    }
+
+
+def compile_workbook_spec_to_bytes(spec: WorkbookSpec) -> tuple[bytes, dict[str, Any]]:
+    """把已校验的 WorkbookSpec 编译为 xlsx 字节，供同一道 commit_* 提交。"""
+    return compile_replica_to_bytes(workbook_spec_to_replica(spec))
+
+
+def compile_spec_text_to_bytes(text: str) -> tuple[bytes, dict[str, Any]]:
+    """从 ReplicaSpec / WorkbookSpec JSON 文本编译为 xlsx 字节。"""
+    return compile_replica_to_bytes(load_spec_document(text))
+
+
+WORKBOOK_SPEC_EXTRACT_PROMPT = """根据图片中的表格，输出一份 WorkbookSpec JSON 对象（不要 markdown 围栏，不要解释）。
+必填：
+- sheets: 每个表含 name、dimensions{rows,cols}、
+  value_blocks[{start, values:二维数组}]、
+  formula_blocks[{start, formulas:二维数组}]、
+  styles{具名样式}、style_regions[{range, style_id}]、
+  merged_ranges[{range}]、column_widths、row_heights
+- uncertainties: 数组，必须出现；没有不确定项时为 []
+可选：name、locale、default_font
+规则：矩形块与样式区域不得超出 dimensions；style_id 必须在 styles 中存在；看不清的内容写入 uncertainties，不要编造或静默猜测。
+"""

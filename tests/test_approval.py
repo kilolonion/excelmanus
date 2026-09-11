@@ -63,6 +63,31 @@ def test_text_file_audit_and_undo(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "old\n"
 
 
+def test_undo_rejects_human_edit_after_approved_write(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    target = tmp_path / "demo.txt"
+    target.write_text("old\n", encoding="utf-8")
+    approval_id = manager.new_approval_id()
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+        target.write_text("new\n", encoding="utf-8")
+        return '{"status":"success"}'
+
+    manager.execute_and_audit(
+        approval_id=approval_id,
+        tool_name="write_text_file",
+        arguments={"file_path": "demo.txt", "content": "new\n"},
+        tool_scope=["write_text_file"],
+        execute=execute,
+        undoable=True,
+        created_at_utc=manager.utc_now(),
+    )
+    target.write_text("human\n", encoding="utf-8")
+    undo_msg = manager.undo(approval_id)
+    assert "回滚被拒绝" in undo_msg or "冲突" in undo_msg
+    assert target.read_text(encoding="utf-8") == "human\n"
+
+
 def test_binary_snapshot_and_undo(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     target = tmp_path / "demo.xlsx"

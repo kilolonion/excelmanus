@@ -3,34 +3,30 @@
 import { useEffect, useState, useCallback } from "react";
 import {
   Upload,
-  X,
   Check,
   Trash2,
   Loader2,
   AlertTriangle,
   FileSpreadsheet,
-  Download,
   Undo2,
-  Eye,
   ChevronDown,
-  ChevronRight,
   Activity,
   ArrowUpFromLine,
   PackageCheck,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
+  OverlayCard,
+  OverlayCardAction,
+  OverlayCardBody,
+  OverlayCardFooter,
+  OverlayCardHeader,
+  OverlayCardInset,
+} from "@/components/ui/overlay-card";
 import { Button } from "@/components/ui/button";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import {
-  buildBackupDownloadUrl,
   normalizeExcelPath,
   type BackupFile,
   type AppliedFile,
@@ -161,60 +157,26 @@ export function ApplyPanel({
     [openPanel, onOpenChange]
   );
 
-  const handleDownload = useCallback(
-    (backupPath: string) => {
-      if (!activeSessionId) return;
-      const url = buildBackupDownloadUrl(activeSessionId, backupPath);
-      window.open(url, "_blank");
-    },
-    [activeSessionId]
-  );
-
   const fileName = (p: string) => p.split("/").pop() || p;
 
   return (
     <>
-      <Dialog open={open} onOpenChange={onOpenChange}>
-        <DialogContent className="sm:max-w-[560px] max-h-[80vh] flex flex-col !rounded-3xl !p-0 overflow-hidden border-0 shadow-2xl" showCloseButton={false}>
-          {/* 顶部品牌色条 */}
-          <div className="h-1.5 w-full rounded-t-3xl" style={{ backgroundColor: "var(--em-primary)" }} />
-          {/* 顶部光晕 */}
-          <div className="absolute top-0 inset-x-0 h-24 bg-gradient-to-b from-[var(--em-primary-alpha-10)] via-[var(--em-primary-alpha-06)] to-transparent pointer-events-none" />
+      <OverlayCard open={open} onOpenChange={onOpenChange} size="lg" tone="primary">
+        <OverlayCardHeader
+          icon={<ArrowUpFromLine className="h-5 w-5" />}
+          title="应用到原文件"
+          description="将沙盒中修改过的文件覆盖回原始位置。应用后支持撤销。"
+          onClose={() => onOpenChange(false)}
+        />
 
-          <div className="relative px-6 pt-5 pb-0">
-            <div className="flex items-start gap-4">
-              {/* 图标 */}
-              <div className="relative flex-shrink-0 mt-0.5">
-                <div className="absolute inset-0 rounded-full opacity-20" style={{ backgroundColor: "var(--em-primary)" }} />
-                <div className="relative flex items-center justify-center w-11 h-11 rounded-full border" style={{ backgroundColor: "var(--em-primary-alpha-10)", borderColor: "var(--em-primary-alpha-25)" }}>
-                  <ArrowUpFromLine className="h-5 w-5" style={{ color: "var(--em-primary)" }} />
-                </div>
-              </div>
-              <div className="flex-1 min-w-0">
-                <h3 className="font-semibold text-base text-foreground">应用到原文件</h3>
-                <p className="text-sm text-muted-foreground mt-1">
-                  将沙盒中修改过的文件覆盖回原始位置。应用后支持撤销。
-                </p>
-              </div>
-              {/* 关闭按钮 */}
-              <button
-                onClick={() => onOpenChange(false)}
-                className="flex-shrink-0 text-muted-foreground/50 hover:text-foreground transition-colors p-1.5 rounded-xl hover:bg-muted/80"
-              >
-                <X className="h-4.5 w-4.5" />
-              </button>
-            </div>
+        {backupInFlight && (
+          <div className="mx-5 sm:mx-6 mt-4 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/40 text-amber-700 dark:text-amber-300 text-xs">
+            <Activity className="h-4 w-4 flex-shrink-0 animate-pulse" />
+            <span>Agent 正在处理中，建议等待完成后再应用修改。</span>
           </div>
+        )}
 
-          {/* In-flight warning banner */}
-          {backupInFlight && (
-            <div className="mx-6 mt-4 flex items-center gap-2.5 px-4 py-2.5 rounded-2xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200/60 dark:border-amber-800/40 text-amber-700 dark:text-amber-300 text-xs">
-              <Activity className="h-4 w-4 flex-shrink-0 animate-pulse" />
-              <span>Agent 正在处理中，建议等待完成后再应用修改。</span>
-            </div>
-          )}
-
-          <div className="flex-1 min-h-0 overflow-y-auto px-6 pt-4 pb-2">
+        <OverlayCardBody className="flex-1">
             {backupLoading ? (
               <div className="flex flex-col items-center justify-center py-16 text-muted-foreground text-sm gap-3">
                 <div className="relative">
@@ -398,20 +360,20 @@ export function ApplyPanel({
                 </AnimatePresence>
               </div>
             )}
-          </div>
+        </OverlayCardBody>
 
-          {/* Footer actions */}
           {pendingBackups.length > 0 && (
-            <div className="flex items-center justify-between px-6 py-4 border-t border-border/40 bg-muted/15">
+            <OverlayCardFooter className="sm:justify-between">
               <button
+                type="button"
                 onClick={handleDiscardAll}
                 className="text-xs font-medium text-muted-foreground/70 hover:text-destructive transition-colors px-2 py-1 rounded-lg hover:bg-destructive/5"
               >
                 丢弃全部
               </button>
-              <Button
-                className="text-white h-10 px-5 rounded-xl font-semibold text-sm gap-2 shadow-md hover:shadow-lg transition-all"
-                style={{ backgroundColor: "var(--em-primary)" }}
+              <OverlayCardAction
+                action="primary"
+                className="flex-none"
                 disabled={applyingAll || backupInFlight}
                 onClick={() => setConfirmAllOpen(true)}
               >
@@ -426,74 +388,53 @@ export function ApplyPanel({
                     全部应用 ({pendingBackups.length} 文件)
                   </>
                 )}
-              </Button>
-            </div>
+              </OverlayCardAction>
+            </OverlayCardFooter>
           )}
-        </DialogContent>
-      </Dialog>
+      </OverlayCard>
 
-      {/* Confirm-all dialog */}
-      <Dialog open={confirmAllOpen} onOpenChange={setConfirmAllOpen}>
-        <DialogContent className="sm:max-w-[440px] !rounded-3xl !p-0 overflow-hidden border-0 shadow-2xl" showCloseButton={false} onOpenAutoFocus={(e) => e.preventDefault()}>
-          {/* 顶部警告色条 */}
-          <div className="h-1.5 w-full rounded-t-3xl bg-amber-500" />
-          <div className="absolute top-0 inset-x-0 h-20 bg-gradient-to-b from-amber-500/15 via-amber-500/5 to-transparent pointer-events-none" />
+      <OverlayCard
+        open={confirmAllOpen}
+        onOpenChange={setConfirmAllOpen}
+        size="sm"
+        tone="warning"
+        onOpenAutoFocus={(e) => e.preventDefault()}
+      >
+        <OverlayCardHeader
+          icon={<AlertTriangle className="h-5 w-5" />}
+          title="确认全部应用"
+          description={`将覆盖以下 ${pendingBackups.length} 个原始文件：`}
+          onClose={() => setConfirmAllOpen(false)}
+        />
 
-          <div className="relative px-6 pt-5 pb-0">
-            <div className="flex items-start gap-4">
-              <div className="relative flex-shrink-0">
-                <div className="flex items-center justify-center w-11 h-11 rounded-full bg-amber-500/10 border border-amber-500/20">
-                  <AlertTriangle className="h-5 w-5 text-amber-500" />
-                </div>
+        <OverlayCardBody>
+          <OverlayCardInset padded={false} bodyClassName="max-h-[200px] overflow-y-auto space-y-1.5 p-3">
+            {pendingBackups.map((b) => (
+              <div key={b.original_path} className="flex items-center gap-2 text-xs py-1">
+                <FileSpreadsheet className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+                <span className="font-medium truncate">{fileName(b.original_path)}</span>
+                <span className="text-muted-foreground/40 truncate text-[10px] font-mono">({b.original_path})</span>
               </div>
-              <div className="flex-1 min-w-0">
-                <h3 className="font-semibold text-base text-foreground">确认全部应用</h3>
-                <p className="text-sm text-muted-foreground mt-1">
-                  将覆盖以下 {pendingBackups.length} 个原始文件：
-                </p>
-              </div>
-            </div>
-          </div>
+            ))}
+          </OverlayCardInset>
 
-          <div className="px-6 py-3">
-            <div className="max-h-[200px] overflow-y-auto space-y-1.5 rounded-2xl border border-border/40 bg-muted/15 p-3">
-              {pendingBackups.map((b) => (
-                <div key={b.original_path} className="flex items-center gap-2 text-xs py-1">
-                  <FileSpreadsheet className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
-                  <span className="font-medium truncate">{fileName(b.original_path)}</span>
-                  <span className="text-muted-foreground/40 truncate text-[10px] font-mono">({b.original_path})</span>
-                </div>
-              ))}
-            </div>
-
-            <div className="flex items-center gap-2 mt-3 px-3 py-2.5 rounded-xl bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/40 dark:border-amber-800/30">
-              <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-amber-500" />
-              <p className="text-[11px] text-amber-600 dark:text-amber-400">
-                此操作将覆盖原始文件，应用后可在面板中撤销。
-              </p>
-            </div>
+          <div className="flex items-center gap-2 mt-3 px-3 py-2.5 rounded-xl bg-amber-50/80 dark:bg-amber-950/20 border border-amber-200/40 dark:border-amber-800/30">
+            <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0 text-amber-500" />
+            <p className="text-[11px] text-amber-600 dark:text-amber-400">
+              此操作将覆盖原始文件，应用后可在面板中撤销。
+            </p>
           </div>
+        </OverlayCardBody>
 
-          <div className="flex items-center justify-end gap-2.5 px-6 py-4 border-t border-border/40 bg-muted/15">
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => setConfirmAllOpen(false)}
-              className="text-muted-foreground rounded-xl h-9 px-4"
-            >
-              取消
-            </Button>
-            <Button
-              size="sm"
-              className="text-white rounded-xl h-9 px-5 font-semibold shadow-sm"
-              style={{ backgroundColor: "var(--em-primary)" }}
-              onClick={handleApplyAll}
-            >
-              确认应用全部
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+        <OverlayCardFooter>
+          <OverlayCardAction action="ghost" onClick={() => setConfirmAllOpen(false)}>
+            取消
+          </OverlayCardAction>
+          <OverlayCardAction action="primary" onClick={handleApplyAll}>
+            确认应用全部
+          </OverlayCardAction>
+        </OverlayCardFooter>
+      </OverlayCard>
     </>
   );
 }

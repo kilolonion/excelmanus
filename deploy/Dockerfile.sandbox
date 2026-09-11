@@ -1,5 +1,6 @@
 # ExcelManus 代码沙盒镜像
-# 预装 pandas / openpyxl / numpy / matplotlib，用于 run_code 工具的 Docker 隔离模式。
+# 预装 pandas / openpyxl / numpy / matplotlib，以及 pyproject `analysis` extra
+#（scikit-learn / seaborn / plotly / scipy），用于 run_code 的 Docker 隔离模式。
 #
 # 构建：
 #   docker build -t excelmanus-sandbox:latest -f Dockerfile.sandbox .

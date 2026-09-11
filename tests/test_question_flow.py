@@ -261,3 +261,35 @@ class TestBatchEnqueue:
         q2 = manager.pop_current()
         assert q2.text == "第二个"
         assert not manager.has_pending()
+
+
+class TestExplicitChatAnswer:
+    """chat() 路径只接受显式选项；自由文本不算回答。"""
+
+    def test_index_is_explicit(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        parsed = manager.try_parse_explicit_answer("1", question=pending)
+        assert parsed is not None
+        assert parsed.selected_options[0]["label"] == "方案A"
+
+    def test_exact_label_is_explicit(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        parsed = manager.try_parse_explicit_answer("方案B", question=pending)
+        assert parsed is not None
+        assert parsed.selected_options[0]["label"] == "方案B"
+
+    def test_other_keyword_is_explicit(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        parsed = manager.try_parse_explicit_answer("其他", question=pending)
+        assert parsed is not None
+        assert parsed.selected_options[0]["label"] == "Other"
+
+    def test_free_text_is_not_an_answer(self) -> None:
+        manager = QuestionFlowManager()
+        pending = manager.enqueue(_payload(), tool_call_id="call_1")
+        assert manager.try_parse_explicit_answer("请继续改这个表", question=pending) is None
+        assert manager.try_parse_explicit_answer("方案", question=pending) is None
+        assert manager.try_parse_explicit_answer("我选方案A", question=pending) is None

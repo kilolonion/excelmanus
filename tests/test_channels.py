@@ -417,7 +417,7 @@ class TestMessageHandler:
             callback_data="approve:a1",
         )
         await handler.handle_message(msg)
-        api.approve.assert_called_once_with("s1", "a1", "approve", on_behalf_of="channel_anon:mock:1")
+        api.approve.assert_called_once_with("s1", "a1", "approve")
 
     @pytest.mark.asyncio
     async def test_answer_callback(self, mock_handler):
@@ -432,7 +432,7 @@ class TestMessageHandler:
             callback_data="answer:q1:是",
         )
         await handler.handle_message(msg)
-        api.answer_question.assert_called_once_with("s1", "q1", "是", on_behalf_of="channel_anon:mock:1")
+        api.answer_question.assert_called_once_with("s1", "q1", "是")
 
     @pytest.mark.asyncio
     async def test_unknown_command(self, mock_handler):
@@ -473,7 +473,7 @@ class TestMessageHandler:
             command="abort",
         )
         await handler.handle_message(msg)
-        api.abort.assert_called_once_with("s1", on_behalf_of="channel_anon:mock:1")
+        api.abort.assert_called_once_with("s1")
         assert "终止" in adapter.sent_texts[0][1]
 
     @pytest.mark.asyncio
@@ -535,7 +535,7 @@ class TestMessageHandler:
         await handler.handle_message(msg)
 
         # 应调用 answer_question 而非 stream_chat
-        api.answer_question.assert_called_once_with("s1", "q1", "我选择方案A", on_behalf_of="channel_anon:mock:1")
+        api.answer_question.assert_called_once_with("s1", "q1", "我选择方案A")
         api.stream_chat_events.assert_not_called()
         # pending 应被清除
         assert "100:1" not in handler._pending
@@ -770,7 +770,7 @@ class TestConcurrencyLock:
 
         # /abort 应立即执行，不被锁阻塞
         await asyncio.wait_for(handler.handle_message(msg_abort), timeout=1.0)
-        api.abort.assert_called_once_with("s1", on_behalf_of="channel_anon:mock:1")
+        api.abort.assert_called_once_with("s1")
 
         gate.set()
         await task_chat
@@ -1011,7 +1011,7 @@ class TestChatModeSwitch:
             is_command=True, command="rollback", command_args=["1"],
         )
         await handler.handle_message(msg)
-        api.rollback.assert_called_once_with("s1", 1, on_behalf_of="channel_anon:mock:1")
+        api.rollback.assert_called_once_with("s1", 1)
         text = adapter.sent_texts[0][1]
         assert "回退" in text
         assert "3" in text
@@ -1065,7 +1065,7 @@ class TestChatModeSwitch:
             is_command=True, command="undo", command_args=[],
         )
         await handler.handle_message(msg)
-        api.undo_operation.assert_called_once_with("s1", "a2", on_behalf_of="channel_anon:mock:1")
+        api.undo_operation.assert_called_once_with("s1", "a2")
         text = adapter.sent_texts[0][1]
         assert "撤销" in text
         assert "create_file" in text
@@ -1649,7 +1649,7 @@ class TestSendFileViaDownload:
         )
         await handler.handle_message(msg)
         # download_file 应被调用
-        api.download_file.assert_called_once_with("/workspace/result.xlsx", on_behalf_of="channel_anon:mock:1")
+        api.download_file.assert_called_once_with("/workspace/result.xlsx")
         # adapter.send_file 应收到字节数据
         assert len(adapter.sent_files) == 1
         assert adapter.sent_files[0] == ("100", file_content, "result.xlsx")
@@ -1732,7 +1732,7 @@ class TestPendingTTL:
         await handler.handle_message(msg)
 
         # 未过期的 pending 应正常路由到 answer_question
-        api.answer_question.assert_called_once_with("s1", "q1", "回答问题", on_behalf_of="channel_anon:mock:1")
+        api.answer_question.assert_called_once_with("s1", "q1", "回答问题")
 
 
 class TestPendingCreatedAt:
@@ -1924,7 +1924,7 @@ class TestGuideMode:
             )
             await handler.handle_message(msg)
 
-            api.guide_message.assert_called_once_with("s1", "追加指令", on_behalf_of="channel_anon:mock:1")
+            api.guide_message.assert_called_once_with("s1", "追加指令")
             assert any("已送达" in t[1] for t in adapter.sent_texts)
         finally:
             lock.release()
@@ -1969,11 +1969,11 @@ class TestGuideMode:
             lock.release()
 
 
-# ── Plan A: 模型与配额统一测试 ──
+# ── 模型命令 ──
 
 
-class TestModelQuotaUnification:
-    """Plan A: 模型/配额命令携带 on_behalf_of + 权限拦截 + /quota 命令。"""
+class TestModelCommands:
+    """模型命令：list/switch/add/delete 与权限拦截。"""
 
     @pytest.fixture
     def mock_handler(self, tmp_path):
@@ -1997,7 +1997,7 @@ class TestModelQuotaUnification:
             chat_id="100", is_command=True, command="model", command_args=[],
         )
         await handler.handle_message(msg)
-        api.list_models.assert_called_once_with(on_behalf_of="channel_anon:mock:1")
+        api.list_models.assert_called_once_with()
         assert any("可用模型" in t[1] for t in adapter.sent_texts)
 
     # ── /model <name> 携带 on_behalf_of ──
@@ -2012,7 +2012,7 @@ class TestModelQuotaUnification:
             chat_id="100", is_command=True, command="model", command_args=["gpt4"],
         )
         await handler.handle_message(msg)
-        api.switch_model.assert_called_once_with("gpt4", on_behalf_of="channel_anon:mock:1")
+        api.switch_model.assert_called_once_with("gpt4")
         assert any("已切换" in t[1] for t in adapter.sent_texts)
 
     # ── /addmodel 携带 on_behalf_of ──
@@ -2030,7 +2030,6 @@ class TestModelQuotaUnification:
         await handler.handle_message(msg)
         api.add_model.assert_called_once_with(
             "gpt4", "gpt-4o", "https://api.openai.com/v1", "sk-xxx", "desc",
-            on_behalf_of="channel_anon:mock:1",
         )
         assert any("已添加" in t[1] for t in adapter.sent_texts)
 
@@ -2065,7 +2064,7 @@ class TestModelQuotaUnification:
             command_args=["gpt4"],
         )
         await handler.handle_message(msg)
-        api.delete_model.assert_called_once_with("gpt4", on_behalf_of="channel_anon:mock:1")
+        api.delete_model.assert_called_once_with("gpt4")
         assert any("已删除" in t[1] for t in adapter.sent_texts)
 
     # ── /delmodel 403 → 友好提示 ──
@@ -2085,84 +2084,6 @@ class TestModelQuotaUnification:
         await handler.handle_message(msg)
         text = adapter.sent_texts[0][1]
         assert "管理员权限" in text
-
-    # ── /quota 正常输出 ──
-
-    @pytest.mark.asyncio
-    async def test_quota_shows_usage(self, mock_handler):
-        """/quota 应展示 token 用量和配额。"""
-        handler, adapter, api, store = mock_handler
-        api.get_usage = AsyncMock(return_value={
-            "daily_tokens": 1500,
-            "monthly_tokens": 30000,
-            "daily_limit": 10000,
-            "monthly_limit": 200000,
-            "daily_remaining": 8500,
-            "monthly_remaining": 170000,
-        })
-        msg = ChannelMessage(
-            channel="mock", user=ChannelUser(user_id="1"),
-            chat_id="100", is_command=True, command="quota", command_args=[],
-        )
-        await handler.handle_message(msg)
-        api.get_usage.assert_called_once_with(on_behalf_of="channel_anon:mock:1")
-        text = adapter.sent_texts[0][1]
-        assert "Token 用量" in text
-        assert "1,500" in text
-        assert "10,000" in text
-
-    # ── /quota 无上限 ──
-
-    @pytest.mark.asyncio
-    async def test_quota_no_limit(self, mock_handler):
-        """配额无上限时应显示（无上限）。"""
-        handler, adapter, api, store = mock_handler
-        api.get_usage = AsyncMock(return_value={
-            "daily_tokens": 500,
-            "monthly_tokens": 2000,
-            "daily_limit": 0,
-            "monthly_limit": 0,
-            "daily_remaining": -1,
-            "monthly_remaining": -1,
-        })
-        msg = ChannelMessage(
-            channel="mock", user=ChannelUser(user_id="1"),
-            chat_id="100", is_command=True, command="quota", command_args=[],
-        )
-        await handler.handle_message(msg)
-        text = adapter.sent_texts[0][1]
-        assert "无上限" in text
-
-    # ── /quota 未绑定用户 → 提示绑定 ──
-
-    @pytest.mark.asyncio
-    async def test_quota_unbound_user_hint(self, mock_handler):
-        """未绑定用户查询配额失败时应提示绑定。"""
-        handler, adapter, api, store = mock_handler
-        api.get_usage = AsyncMock(
-            side_effect=Exception("Client error '401 Unauthorized'"),
-        )
-        msg = ChannelMessage(
-            channel="mock", user=ChannelUser(user_id="1"),
-            chat_id="100", is_command=True, command="quota", command_args=[],
-        )
-        await handler.handle_message(msg)
-        text = adapter.sent_texts[0][1]
-        assert "绑定" in text
-
-    # ── /help 包含 /quota ──
-
-    @pytest.mark.asyncio
-    async def test_help_includes_quota(self, mock_handler):
-        """/help 输出应包含 /quota 命令说明。"""
-        handler, adapter, api, store = mock_handler
-        msg = ChannelMessage(
-            channel="mock", user=ChannelUser(user_id="1"),
-            chat_id="100", is_command=True, command="help",
-        )
-        await handler.handle_message(msg)
-        text = adapter.sent_texts[0][1]
-        assert "/quota" in text
 
 
 # ── 纯压缩照片上传到工作区测试 ──

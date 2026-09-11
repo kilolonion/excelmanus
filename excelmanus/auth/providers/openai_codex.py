@@ -3,23 +3,28 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
 from excelmanus.auth.providers.base import (
     AuthProvider,
+    DeviceCodeCapable,
+    PKCECapable,
     RefreshedCredential,
     ValidatedCredential,
 )
 
 logger = logging.getLogger(__name__)
 
-_CODEX_MODEL_PATTERN = re.compile(r"(codex|gpt-5)", re.IGNORECASE)
+_CODEX_MODEL_PATTERN = re.compile(r"(codex|gpt-5|gpt-6)", re.IGNORECASE)
 
 
 def _parse_jwt_claims(token: str) -> dict[str, Any] | None:
@@ -46,10 +51,57 @@ def _extract_account_info(claims: dict[str, Any] | None) -> tuple[str, str]:
     return (account_id, plan_type)
 
 
-class OpenAICodexProvider(AuthProvider):
+def _extract_email(claims: dict[str, Any] | None) -> str:
+    """从 JWT claims 提取可展示的账号邮箱。"""
+    if not claims:
+        return ""
+    profile = claims.get("https://api.openai.com/profile") or {}
+    email = ""
+    if isinstance(profile, dict):
+        email = str(profile.get("email") or "")
+    if not email:
+        email = str(claims.get("email") or "")
+    email = email.strip()
+    if email and "@" in email and len(email) <= 254:
+        return email
+    return ""
+
+
+def _oauth_proxy() -> str | None:
+    """读取进程环境中的 HTTPS 代理，供 ChatGPT 授权请求使用。"""
+    for key in (
+        "EXCELMANUS_OAUTH_PROXY",
+        "HTTPS_PROXY",
+        "https_proxy",
+        "ALL_PROXY",
+        "all_proxy",
+    ):
+        value = os.environ.get(key, "").strip()
+        if value:
+            return value
+    return None
+
+
+def _http_client() -> httpx.AsyncClient:
+    return httpx.AsyncClient(timeout=30.0, proxy=_oauth_proxy())
+
+
+def _credential_extra(
+    claims: dict[str, Any] | None, email: str = "",
+) -> dict[str, Any] | None:
+    extra: dict[str, Any] = {}
+    if claims:
+        extra["claims"] = claims
+    if email:
+        extra["email"] = email
+    return extra or None
+
+
+class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
     """OpenAI Codex OAuth 提供商。"""
 
     provider_name = "openai-codex"
+    AUTH_ORIGIN = "https://auth.openai.com"
     AUTH_ENDPOINT = "https://auth.openai.com/oauth/authorize"
     TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
     CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
@@ -58,18 +110,24 @@ class OpenAICodexProvider(AuthProvider):
     PROTOCOL = "openai_responses"
     REFRESH_MARGIN_SECONDS = 300
     MODEL_NAME_PREFIX = "openai-codex/"
+    CALLBACK_PATH = "/auth/codex/callback"
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
     # model: 真实模型 ID；display_name: 前端展示友好别名。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
-        ("gpt-5.2-codex", "Codex 5.2"),
-        ("gpt-5.1-codex", "Codex 5.1"),
-        ("gpt-5.1-codex-mini", "Codex Mini"),
-        ("gpt-5.1-codex-max", "Codex Max"),
+        ("gpt-6-astra", "GPT-6 Astra"),
+        ("gpt-5.6-sol", "GPT-5.6 Sol"),
+        ("gpt-5.6", "GPT-5.6"),
+        ("gpt-5.6-terra", "GPT-5.6 Terra"),
+        ("gpt-5.6-luna", "GPT-5.6 Luna"),
+        ("gpt-5.2-codex", "Codex 5.2 (Legacy)"),
+        ("gpt-5.1-codex", "Codex 5.1 (Legacy)"),
+        ("gpt-5.1-codex-mini", "Codex Mini (Legacy)"),
+        ("gpt-5.1-codex-max", "Codex Max (Legacy)"),
         ("gpt-5-codex-mini", "Codex Mini (GPT-5)"),
-        ("gpt-5-codex", "Codex 5"),
-        ("gpt-5.2", "GPT-5.2 (Codex)"),
-        ("gpt-5.1", "GPT-5.1 (Codex)"),
-        ("gpt-5", "GPT-5 (Codex)"),
+        ("gpt-5-codex", "Codex 5 (Legacy)"),
+        ("gpt-5.2", "GPT-5.2 (Legacy)"),
+        ("gpt-5.1", "GPT-5.1 (Legacy)"),
+        ("gpt-5", "GPT-5 (Legacy)"),
         # Legacy entries kept for backward compatibility.
         ("gpt-5.3-codex", "Codex 5.3 (Legacy)"),
         ("gpt-5.3-codex-spark", "Codex Spark (Legacy)"),
@@ -82,9 +140,22 @@ class OpenAICodexProvider(AuthProvider):
     DEVICE_VERIFY_URL = "https://auth.openai.com/codex/device"
 
     @classmethod
+    def assert_auth_url(cls, value: str) -> str:
+        """只允许打开 OpenAI 认证源上的 HTTPS 授权地址。"""
+        try:
+            parsed = urlparse(value)
+        except Exception as exc:
+            raise RuntimeError("授权地址无效") from exc
+        if parsed.scheme != "https":
+            raise RuntimeError("授权地址必须使用 HTTPS")
+        if parsed.netloc != "auth.openai.com" or parsed.username or parsed.password:
+            raise RuntimeError("授权地址必须来自 OpenAI 认证域名")
+        return value
+
+    @classmethod
     async def request_user_code(cls) -> dict[str, Any]:
         """向 OpenAI 请求设备码，返回 {device_auth_id, user_code, interval, verification_url}。"""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _http_client() as client:
             resp = await client.post(
                 cls.DEVICE_USERCODE_URL,
                 json={"client_id": cls.CLIENT_ID, "scope": cls.SCOPE},
@@ -104,12 +175,16 @@ class OpenAICodexProvider(AuthProvider):
                 raise RuntimeError(f"请求设备码失败 (HTTP {resp.status_code})")
             data = resp.json()
         user_code = data.get("user_code") or data.get("usercode") or ""
-        return {
+        expires_in = data.get("expires_in")
+        result = {
             "device_auth_id": data["device_auth_id"],
             "user_code": user_code,
             "interval": int(data.get("interval", 5)),
-            "verification_url": cls.DEVICE_VERIFY_URL,
+            "verification_url": cls.assert_auth_url(cls.DEVICE_VERIFY_URL),
         }
+        if isinstance(expires_in, (int, float)) and expires_in > 0:
+            result["expires_in"] = int(expires_in)
+        return result
 
     @classmethod
     async def poll_device_auth(cls, device_auth_id: str, user_code: str) -> dict[str, Any] | None:
@@ -118,7 +193,7 @@ class OpenAICodexProvider(AuthProvider):
         返回 {authorization_code, code_verifier} 或 None（仍在等待）。
         Raises RuntimeError 表示永久失败。
         """
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _http_client() as client:
             resp = await client.post(
                 cls.DEVICE_TOKEN_URL,
                 json={
@@ -156,8 +231,6 @@ class OpenAICodexProvider(AuthProvider):
     @staticmethod
     def generate_pkce() -> tuple[str, str]:
         """生成 PKCE code_verifier 和 code_challenge (S256)。"""
-        import hashlib
-        import os
         verifier_bytes = os.urandom(32)
         code_verifier = base64.urlsafe_b64encode(verifier_bytes).rstrip(b"=").decode()
         digest = hashlib.sha256(code_verifier.encode()).digest()
@@ -182,13 +255,13 @@ class OpenAICodexProvider(AuthProvider):
             "codex_cli_simplified_flow": "true",
             "originator": "codex_cli_rs",
         }
-        return f"{cls.AUTH_ENDPOINT}?{urlencode(params)}"
+        return cls.assert_auth_url(f"{cls.AUTH_ENDPOINT}?{urlencode(params)}")
 
     async def exchange_code(
         self, code: str, redirect_uri: str, code_verifier: str,
     ) -> ValidatedCredential:
         """用授权码交换 token 并返回验证后的凭证。"""
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _http_client() as client:
             try:
                 resp = await client.post(
                     self.TOKEN_ENDPOINT,
@@ -207,6 +280,10 @@ class OpenAICodexProvider(AuthProvider):
             if resp.status_code != 200:
                 body = resp.text[:500]
                 logger.warning("Codex token 交换失败: %d %s", resp.status_code, body)
+                if resp.status_code in (400, 401):
+                    raise RuntimeError(
+                        f"授权码无效或已过期 (HTTP {resp.status_code})"
+                    )
                 raise RuntimeError(f"Token 交换失败 (HTTP {resp.status_code})")
 
             data = resp.json()
@@ -214,25 +291,32 @@ class OpenAICodexProvider(AuthProvider):
         access_token = data.get("access_token", "")
         refresh_token = data.get("refresh_token")
         id_token = data.get("id_token", "")
-        # 诊断日志：记录 token 响应中的 scope 字段
         _resp_scope = data.get("scope", "")
-        logger.info("Codex token exchange response: scope=%r, token_type=%r, has_refresh=%s",
-                     _resp_scope, data.get("token_type", ""), bool(refresh_token))
+        logger.info(
+            "Codex token exchange response: scope=%r, token_type=%r, has_refresh=%s",
+            _resp_scope, data.get("token_type", ""), bool(refresh_token),
+        )
 
         if not access_token:
             raise RuntimeError("Token 交换响应中缺少 access_token")
+        if not refresh_token:
+            raise RuntimeError("Token 交换响应中缺少 refresh_token，请重新登录")
 
         claims = _parse_jwt_claims(access_token)
-        # 诊断日志：记录 JWT claims 中的 scope
         if claims:
             _jwt_scope = claims.get("scope", claims.get("scp", ""))
-            logger.info("Codex JWT claims: scope=%r, aud=%r, iss=%r",
-                         _jwt_scope, claims.get("aud", ""), claims.get("iss", ""))
+            logger.info(
+                "Codex JWT claims: scope=%r, aud=%r, iss=%r",
+                _jwt_scope, claims.get("aud", ""), claims.get("iss", ""),
+            )
         account_id, plan_type = _extract_account_info(claims)
-        # 也尝试从 id_token 提取（某些情况下 access_token 中没有）
-        if not account_id and id_token:
+        email = _extract_email(claims)
+        if id_token:
             id_claims = _parse_jwt_claims(id_token)
-            account_id, plan_type = _extract_account_info(id_claims)
+            if not account_id:
+                account_id, plan_type = _extract_account_info(id_claims)
+            if not email:
+                email = _extract_email(id_claims)
 
         exp = claims.get("exp") if claims else None
         if exp:
@@ -248,7 +332,7 @@ class OpenAICodexProvider(AuthProvider):
             account_id=account_id,
             plan_type=plan_type,
             credential_type="oauth",
-            extra_data={"claims": claims} if claims else None,
+            extra_data=_credential_extra(claims, email),
         )
 
     def validate_token_data(self, raw_data: dict[str, Any]) -> ValidatedCredential:
@@ -270,6 +354,7 @@ class OpenAICodexProvider(AuthProvider):
         expires_at = self._parse_expires(raw_data)
         claims = _parse_jwt_claims(access_token)
         account_id, plan_type = _extract_account_info(claims)
+        email = _extract_email(claims)
 
         return ValidatedCredential(
             access_token=access_token,
@@ -278,15 +363,15 @@ class OpenAICodexProvider(AuthProvider):
             account_id=account_id,
             plan_type=plan_type,
             credential_type="oauth",
-            extra_data={"claims": claims} if claims else None,
+            extra_data=_credential_extra(claims, email),
         )
 
     async def refresh_token(self, refresh_token: str) -> RefreshedCredential:
         """通过 OpenAI token endpoint 刷新 access token。"""
         if not refresh_token:
-            raise RuntimeError("无 refresh token，无法刷新。请重新运行 codex login。")
+            raise RuntimeError("无 refresh token，无法刷新。请重新登录 ChatGPT 订阅。")
 
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with _http_client() as client:
             try:
                 resp = await client.post(
                     self.TOKEN_ENDPOINT,
@@ -305,7 +390,7 @@ class OpenAICodexProvider(AuthProvider):
                 logger.warning("Codex token 刷新失败: %d %s", resp.status_code, body)
                 raise RuntimeError(
                     f"Token 刷新失败 (HTTP {resp.status_code})。"
-                    "请重新运行 codex login 获取新令牌。"
+                    "请重新登录 ChatGPT 订阅获取新令牌。"
                 )
 
             data = resp.json()

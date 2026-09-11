@@ -271,15 +271,10 @@ class _MockEngineWithAllAttrs:
     def __init__(self):
         self._client = _MockClient()
         self._context_builder = _MockContextBuilder()
-        self._enrich_tool_result_with_window_perception = self._mock_enrich
 
     @staticmethod
     def _mock_prepare(skill_contexts, **kwargs):
         return (["system prompt"], None)
-
-    @staticmethod
-    def _mock_enrich(*, tool_name, arguments, result_text, success):
-        return result_text
 
 
 class TestPreservation:
@@ -426,16 +421,13 @@ class TestPreservation:
 
         engine = _MockEngineWithAllAttrs()
         original_prepare = engine._context_builder._prepare_system_prompts_for_request
-        original_enrich = engine._enrich_tool_result_with_window_perception
 
         # 初始化应成功
         tracer = _EngineTracer(engine)
 
         # monkey-patch 后方法应被替换
         assert engine._context_builder._prepare_system_prompts_for_request is not original_prepare
-        assert engine._enrich_tool_result_with_window_perception is not original_enrich
 
         # restore 后应恢复原始方法
         tracer.restore()
         assert engine._context_builder._prepare_system_prompts_for_request is original_prepare
-        assert engine._enrich_tool_result_with_window_perception is original_enrich

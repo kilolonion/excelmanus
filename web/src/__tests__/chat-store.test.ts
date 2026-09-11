@@ -72,7 +72,7 @@ function resetStore() {
     messageOrder: [],
     messagesById: {},
     messageIndexById: {},
-    currentSessionId: null,
+    loadedSessionId: null,
     activeStreamId: null,
     latestSeq: 0,
     resumeFailedReason: null,
@@ -82,7 +82,6 @@ function resetStore() {
     pendingQuestion: null,
     abortController: null,
     pipelineStatus: null,
-    vlmPhases: [],
     batchProgress: null,
     toolProgress: {},
     isLoadingMessages: false,
@@ -264,7 +263,7 @@ describe("chat-store", () => {
       useChatStore.getState().appendBlock("a1", { type: "text", content: "2" });
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
-        name: "read_excel",
+        name: "inspect_spreadsheet",
         args: {},
         status: "running",
       });
@@ -340,14 +339,14 @@ describe("chat-store", () => {
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
         toolCallId: "tc1",
-        name: "read_excel",
+        name: "inspect_spreadsheet",
         args: {},
         status: "running",
       });
       useChatStore.getState().appendBlock("a1", {
         type: "tool_call",
         toolCallId: "tc2",
-        name: "write_cells",
+        name: "edit_spreadsheet",
         args: {},
         status: "running",
       });

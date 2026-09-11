@@ -217,8 +217,8 @@ def _load_system_prompt() -> str:
     prompts_dir = Path(__file__).resolve().parent / "prompts"
     composer = PromptComposer(prompts_dir)
     composer.load_all()
-    ctx = PromptContext(write_hint="unknown")
-    return composer.compose_text(ctx)
+    ctx = PromptContext()
+    return composer.compose_core_text(ctx)
 
 
 _DEFAULT_SYSTEM_PROMPT = _load_system_prompt()
@@ -716,35 +716,6 @@ class ConversationMemory:
                     cached = self._lifecycle._cache.get(image_id)
                     age = self._current_round - cached.inject_round if cached else 0
                     logger.info("图片生命周期: 降级图片 #%d (age=%d rounds)", image_id, age)
-
-    def reinject_image(self, image_id: int) -> bool:
-        """重注入已降级的图片（从本地缓存恢复）。
-
-        适用于用户追问图片细节时，图片已从上下文中降级的场景。
-
-        Returns:
-            True 如果成功重注入，False 如果缓存中无该图片。
-        """
-        entry = self._lifecycle.get_reinject_data(image_id)
-        if entry is None:
-            return False
-        # 重新注入（不分配新 ID，复用原 ID）
-        part = {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{entry.mime_type};base64,{entry.raw_base64}",
-                "detail": entry.detail,
-            },
-        }
-        msg = {"role": "user", "content": [part], "_image_id": image_id}
-        self._messages.append(msg)
-        self._fresh_image_ids.add(image_id)
-        entry.degraded = False
-        entry.inject_round = self._current_round  # 重置注入轮次，避免立即被再次降级
-        entry.last_referenced_round = self._current_round
-        logger.info("图片生命周期: 重注入图片 #%d", image_id)
-        self._truncate_if_needed()
-        return True
 
     def _degrade_image_message(self, msg_index: int, image_id: int) -> None:
         """将指定消息中的图片降级为文本引用。"""

@@ -42,14 +42,14 @@ import { MergeResultCard } from "./MergeResultCard";
 
 // 工具分类 → 图标映射
 const TOOL_ICON_MAP: Record<string, LucideIcon> = {
-  read_excel: BookOpen,
-  compare_excel: Search,
-  list_sheets: Search,
-  write_cells: PenLine,
-  insert_rows: Table2,
-  insert_columns: Table2,
-  create_sheet: Table2,
-  delete_sheet: Table2,
+  inspect_spreadsheet: BookOpen,
+  analyze_spreadsheet: Search,
+  compare_spreadsheets: Search,
+  edit_spreadsheet: PenLine,
+  format_spreadsheet: Table2,
+  manage_spreadsheet_objects: Table2,
+  trace_spreadsheet_formulas: Search,
+  manage_spreadsheet_versions: FileText,
   run_code: Code,
   finish_task: ListChecks,
   read_text_file: FileText,
@@ -221,8 +221,8 @@ function getToolDisplayName(name: string): string {
 
 function getToolCategory(name: string): string {
   if (isSearchMcpTool(name)) return "search";
-  if (["read_excel", "list_sheets", "read_text_file"].includes(name)) return "read";
-  if (["write_cells", "insert_rows", "insert_columns", "create_sheet", "delete_sheet"].includes(name)) return "write";
+  if (["inspect_spreadsheet", "analyze_spreadsheet", "compare_spreadsheets", "trace_spreadsheet_formulas", "read_text_file"].includes(name)) return "read";
+  if (["edit_spreadsheet", "format_spreadsheet", "manage_spreadsheet_objects", "manage_spreadsheet_versions"].includes(name)) return "write";
   if (name === "run_code") return "code";
   if (name === "finish_task") return "finish";
   if (name === "sleep") return "sleep";
@@ -268,14 +268,19 @@ function parseMergeResult(toolName: string, resultStr: string | undefined): {
   }
 }
 
-const EXCEL_READ_TOOLS = new Set(["read_excel", "rebuild_excel_from_spec"]);
+const EXCEL_READ_TOOLS = new Set([
+  "inspect_spreadsheet",
+  "analyze_spreadsheet",
+  "compare_spreadsheets",
+]);
 const EXCEL_WRITE_TOOLS = new Set([
-  "write_cells", "insert_rows", "insert_columns",
-  "create_sheet", "delete_sheet",
+  "edit_spreadsheet",
+  "format_spreadsheet",
+  "manage_spreadsheet_objects",
 ]);
 const EXCEL_DIFF_TOOLS = new Set([
   ...EXCEL_WRITE_TOOLS,
-  "run_code", "finish_task", "compare_excel",
+  "run_code", "finish_task", "compare_spreadsheets",
 ]);
 const TEXT_DIFF_TOOLS = new Set([
   "write_text_file", "edit_text_file", "run_code", "write_plan",
@@ -319,7 +324,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
       : null
   );
 
-  // 工具级进度（VLM 管线 / B 通道等长耗时操作）
+  // 工具级进度（长耗时操作）
   const toolProgress = useChatStore((s) =>
     toolCallId ? s.toolProgress[toolCallId] ?? null : null
   );
@@ -472,11 +477,6 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
               {isRunning && toolProgress && (
                 <span className="flex items-center gap-1 max-w-[140px] sm:max-w-[200px]">
                   <span className="text-[10px] text-[var(--em-cyan)] truncate">{toolProgress.message}</span>
-                  {toolProgress.phaseIndex != null && toolProgress.totalPhases != null && (
-                    <span className="text-[9px] text-muted-foreground/60 tabular-nums flex-shrink-0">
-                      {toolProgress.phaseIndex + 1}/{toolProgress.totalPhases}
-                    </span>
-                  )}
                 </span>
               )}
               {isRunning && !(name === "sleep" && typeof args.seconds === "number") && elapsed > 0 && (

@@ -1,27 +1,36 @@
-"""Excel 内嵌图表工具测试：create_excel_chart。"""
+"""图表写入走 manage_spreadsheet_objects，不再把 create_excel_chart 当模型面入口。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook, load_workbook
 
-from excelmanus.tools.chart_tools import (
-    create_excel_chart,
-    init_guard,
-)
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import set_guard
+from excelmanus.workbook.charts import init_guard as init_chart_guard
+from excelmanus.tools.intent_tools import init_guard, manage_spreadsheet_objects
+from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
+
+
+def _payload(result: ToolResult) -> dict:
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.value, dict)
+    return result.value
 
 
 @pytest.fixture(autouse=True)
-def _init_guard(tmp_path: Path) -> None:
-    """初始化 FileAccessGuard 为测试目录。"""
-    init_guard(str(tmp_path))
+def _bind_workspace(tmp_path: Path) -> None:
+    workspace = str(tmp_path)
+    set_guard(FileAccessGuard(workspace))
+    init_guard(workspace)
+    init_chart_guard(workspace)
+    seed_seen_versions({})
 
 
 def _make_chart_data(tmp_path: Path, name: str = "chart_data.xlsx") -> Path:
-    """创建含图表数据的示例 Excel 文件。"""
     wb = Workbook()
     ws = wb.active
     ws.title = "数据"
@@ -41,15 +50,20 @@ def _make_chart_data(tmp_path: Path, name: str = "chart_data.xlsx") -> Path:
     return fp
 
 
-class TestCreateExcelChart:
-    """create_excel_chart 工具测试套件。"""
+def _chart(path: Path, **fields: object) -> ToolResult:
+    return manage_spreadsheet_objects(
+        file_path=str(path),
+        operations=[{"kind": "chart", **fields}],
+        expected_version=content_version_of_file(path),
+    )
 
+
+class TestCreateExcelChart:
     def test_bar_chart(self, tmp_path: Path) -> None:
-        """创建柱状图。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="bar",
                 data_range="B1:C7",
                 categories_range="A2:A7",
@@ -58,18 +72,15 @@ class TestCreateExcelChart:
         )
         assert result["status"] == "success"
         assert result["chart_type"] == "bar"
-
         wb = load_workbook(fp)
-        ws = wb["数据"]
-        assert len(ws._charts) == 1
+        assert len(wb["数据"]._charts) == 1
         wb.close()
 
     def test_line_chart(self, tmp_path: Path) -> None:
-        """创建折线图。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="line",
                 data_range="B1:B7",
                 categories_range="A2:A7",
@@ -80,11 +91,10 @@ class TestCreateExcelChart:
         assert result["target_cell"] == "E1"
 
     def test_pie_chart(self, tmp_path: Path) -> None:
-        """创建饼图。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="pie",
                 data_range="B1:B7",
                 categories_range="A2:A7",
@@ -94,24 +104,17 @@ class TestCreateExcelChart:
         assert result["status"] == "success"
 
     def test_area_chart(self, tmp_path: Path) -> None:
-        """创建面积图。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
-                chart_type="area",
-                data_range="B1:C7",
-                categories_range="A2:A7",
-            )
+        result = _payload(
+            _chart(fp, chart_type="area", data_range="B1:C7", categories_range="A2:A7")
         )
         assert result["status"] == "success"
 
     def test_scatter_chart(self, tmp_path: Path) -> None:
-        """创建散点图。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="scatter",
                 data_range="B1:C7",
                 categories_range="B2:B7",
@@ -120,11 +123,10 @@ class TestCreateExcelChart:
         assert result["status"] == "success"
 
     def test_chart_on_new_target_sheet(self, tmp_path: Path) -> None:
-        """图表放置到新建的目标工作表。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="bar",
                 data_range="B1:B7",
                 target_sheet="图表汇总",
@@ -133,18 +135,16 @@ class TestCreateExcelChart:
         )
         assert result["status"] == "success"
         assert result["target_sheet"] == "图表汇总"
-
         wb = load_workbook(fp)
         assert "图表汇总" in wb.sheetnames
         assert len(wb["图表汇总"]._charts) == 1
         wb.close()
 
     def test_chart_with_style_and_size(self, tmp_path: Path) -> None:
-        """自定义图表样式和尺寸。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
+        result = _payload(
+            _chart(
+                fp,
                 chart_type="line",
                 data_range="B1:C7",
                 style=10,
@@ -157,22 +157,13 @@ class TestCreateExcelChart:
         assert result["status"] == "success"
 
     def test_invalid_chart_type(self, tmp_path: Path) -> None:
-        """无效图表类型报错。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(str(fp), chart_type="radar", data_range="B1:B7")
-        )
-        assert result["status"] == "error"
+        result = _chart(fp, chart_type="radar", data_range="B1:B7")
+        assert result.success is False
 
     def test_from_rows_mode(self, tmp_path: Path) -> None:
-        """按行读取数据系列。"""
         fp = _make_chart_data(tmp_path)
-        result = json.loads(
-            create_excel_chart(
-                str(fp),
-                chart_type="bar",
-                data_range="A1:G3",
-                from_rows=True,
-            )
+        result = _payload(
+            _chart(fp, chart_type="bar", data_range="A1:G3", from_rows=True)
         )
         assert result["status"] == "success"

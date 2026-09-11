@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Any, Sequence
+
+from excelmanus.engine_core.tool_result import ToolResult, from_payload
 
 _logger = logging.getLogger(__name__)
 
@@ -15,17 +16,8 @@ _MAX_SUGGESTION_FILES = 15
 _EXCEL_SUFFIXES: frozenset[str] = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb"})
 
 
-def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> str | None:
-    """检查文件是否存在，不存在时返回结构化错误 JSON（含可用文件提示）。
-
-    Args:
-        safe_path: 经 guard.resolve_and_validate 后的绝对路径。
-        user_path: 用户/LLM 原始传入的 file_path 字符串。
-        guard: FileAccessGuard 实例（用于获取 workspace_root）。
-
-    Returns:
-        文件存在返回 None；不存在返回 JSON 错误字符串。
-    """
+def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> ToolResult | None:
+    """文件不存在时返回 ToolResult 错误，存在时返回 None。"""
     if safe_path.is_file():
         return None
 
@@ -72,12 +64,13 @@ def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> str | None
 
     payload: dict[str, Any] = {
         "error": f"文件不存在: {user_path}",
-        "hint": "请检查文件路径是否正确，或使用 inspect_excel_files / list_directory 确认可用文件。",
+        "code": "PATH_INVALID",
+        "hint": "请检查文件路径是否正确，或使用 inspect_spreadsheet / list_directory 确认可用文件。",
     }
     if suggestions:
         payload["available_excel_files"] = suggestions[:_MAX_SUGGESTION_FILES]
 
-    return json.dumps(payload, ensure_ascii=False)
+    return from_payload(payload)
 
 
 # fuzzy matching 相似度阈值：≥ 此值时自动纠正
@@ -177,21 +170,8 @@ def get_worksheet(wb: Any, sheet_name: str | None) -> Any:
     )
 
 
-def check_sheet_name(safe_path: Path, sheet_name: str | None) -> tuple[str | None, str | None]:
-    """验证 sheet_name 是否存在于 Excel 文件中，不存在时返回结构化错误。
-
-    优先精确匹配，然后 case-insensitive 回退。
-    匹配成功返回 (resolved_name, None)；
-    匹配失败返回 (None, error_json_str)。
-    sheet_name 为 None 时直接返回 (None, None)（使用默认 sheet）。
-
-    Args:
-        safe_path: 经 guard.resolve_and_validate 后的绝对路径。
-        sheet_name: LLM / 用户传入的 sheet 名。
-
-    Returns:
-        (resolved_sheet_name, error_json_or_none) 元组。
-    """
+def check_sheet_name(safe_path: Path, sheet_name: str | None) -> tuple[str | None, ToolResult | None]:
+    """验证 sheet 名。成功返回 (resolved_name, None)；失败返回 (None, ToolResult)。"""
     if sheet_name is None:
         return None, None
 
@@ -225,7 +205,8 @@ def check_sheet_name(safe_path: Path, sheet_name: str | None) -> tuple[str | Non
                 )
             else:
                 payload["hint"] = f"该文件包含以下工作表: {available}。请使用正确的工作表名称重试。"
-            return None, json.dumps(payload, ensure_ascii=False)
+            payload["code"] = "RANGE_INVALID"
+            return None, from_payload(payload)
         finally:
             wb.close()
     except Exception as exc:
@@ -259,3 +240,115 @@ def ensure_openpyxl_compatible(safe_path: Path) -> Path:
     except Exception as exc:
         _logger.warning("工具层 xls 转换失败，返回原路径: %s (%s)", safe_path.name, exc)
         return safe_path
+
+
+class MutationAborted(Exception):
+    """mutate_fn 内取消提交（不写盘）。``commit_workbook`` 会把它包成 SAVE_FAILED。"""
+
+    def __init__(self, result: ToolResult | dict[str, Any]) -> None:
+        if isinstance(result, dict):
+            result = from_payload(result)
+        self.result = result
+        super().__init__(result.model_text)
+
+
+def workspace_relpath(guard: Any, path: Path | str) -> str:
+    """把已校验的绝对路径转成工作区相对路径，供 ``commit_*`` 使用。"""
+    dest = path if isinstance(path, Path) else Path(path)
+    return str(dest.relative_to(guard.workspace_root))
+
+
+def prepare_excel_commit_path(guard: Any, file_path: str) -> tuple[Path, str]:
+    """解析用户路径、必要时转 xlsx，返回 (绝对路径, 工作区相对路径)。"""
+    safe_path = ensure_openpyxl_compatible(guard.resolve_and_validate(file_path))
+    return safe_path, workspace_relpath(guard, safe_path)
+
+
+def commit_workbook_tool(
+    *,
+    guard: Any,
+    file_path: str,
+    mutate_fn: Any,
+    expected_version: str | None = None,
+    create: bool = False,
+) -> Any:
+    """工具写入入口：优先使用本轮已读到的 content_version，再原子提交。"""
+    from excelmanus.workbook_commit import (
+        commit_workbook,
+        peek_seen_content_version,
+        remember_content_version,
+    )
+
+    seen = expected_version
+    try:
+        dest = Path(guard.resolve_and_validate(file_path))
+    except Exception:
+        dest = None
+    if dest is not None and dest.is_file():
+        seen = expected_version or peek_seen_content_version(file_path)
+    result = commit_workbook(
+        guard=guard,
+        file_path=file_path,
+        mutate_fn=mutate_fn,
+        expected_version=seen,
+        create=create,
+    )
+    remember_content_version(file_path, result.content_version)
+    remember_content_version(result.path, result.content_version)
+    return result
+
+
+def commit_bytes_tool(
+    *,
+    guard: Any,
+    file_path: str,
+    data: bytes,
+    expected_version: str | None = None,
+) -> Any:
+    """字节写入入口：同样优先使用已读版本。"""
+    from excelmanus.workbook_commit import (
+        commit_bytes,
+        peek_seen_content_version,
+        remember_content_version,
+    )
+
+    seen = expected_version
+    try:
+        dest = Path(guard.resolve_and_validate(file_path))
+    except Exception:
+        dest = None
+    if dest is not None and dest.is_file():
+        seen = expected_version or peek_seen_content_version(file_path)
+    result = commit_bytes(
+        guard=guard,
+        file_path=file_path,
+        data=data,
+        expected_version=seen,
+    )
+    remember_content_version(file_path, result.content_version)
+    remember_content_version(result.path, result.content_version)
+    return result
+
+
+def commit_error_result(exc: Any) -> ToolResult:
+    """把 ``CommitError`` 映射为工具层错误结果。"""
+    payload: dict[str, Any] = {
+        "status": "error",
+        "code": getattr(exc, "code", "SAVE_FAILED"),
+        "message": getattr(exc, "message", str(exc)),
+    }
+    fields = getattr(exc, "fields", None)
+    if isinstance(fields, dict):
+        for key, value in fields.items():
+            payload.setdefault(key, value)
+    return from_payload(payload)
+
+
+def unwrap_mutation_abort(exc: BaseException) -> MutationAborted | None:
+    """从 ``CommitError`` 中取出 mutate_fn 抛出的 ``MutationAborted``。"""
+    if isinstance(exc, MutationAborted):
+        return exc
+    cause = getattr(exc, "__cause__", None)
+    if isinstance(cause, MutationAborted):
+        return cause
+    return None

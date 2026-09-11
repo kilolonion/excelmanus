@@ -9,7 +9,6 @@ import pytest
 from excelmanus.error_guidance import (
     FailureGuidance,
     classify_failure,
-    classify_workspace_full,
 )
 
 
@@ -394,23 +393,6 @@ class TestOutputShape:
         assert d["category"] == "quota"
         assert d["code"] == "rate_limited"
         assert isinstance(d["actions"], list)
-
-
-# ── classify_workspace_full ──────────────────────────────────
-
-
-class TestClassifyWorkspaceFull:
-    def test_basic(self):
-        g = classify_workspace_full(stage="initializing", detail="文件数 50/50")
-        assert g.category == "quota"
-        assert g.code == "workspace_full"
-        assert g.retryable is False
-        assert "50/50" in g.message
-
-    def test_no_detail(self):
-        g = classify_workspace_full()
-        assert g.code == "workspace_full"
-        assert g.diagnostic_id  # 非空
 
 
 # ── 会话相关错误分类 ─────────────────────────────────────────

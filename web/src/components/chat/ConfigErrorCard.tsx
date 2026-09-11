@@ -14,7 +14,7 @@ export function ConfigErrorCard({ items }: { items: { name: string; field: strin
 
   const friendlyName = (name: string) => {
     if (name === "main") return "主模型";
-    if (name === "vision" || name === "vlm") return "视觉模型";
+    if (name === "vision") return "视觉模型";
     return name;
   };
 

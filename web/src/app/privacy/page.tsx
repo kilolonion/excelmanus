@@ -10,14 +10,14 @@ export default function PrivacyPage() {
         {/* Header */}
         <div className="mb-8">
           <Link
-            href="/register"
+            href="/"
             className="inline-flex items-center gap-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors mb-6"
           >
             <ArrowLeft className="h-4 w-4" />
-            返回注册
+            返回首页
           </Link>
           <h1 className="text-3xl font-bold tracking-tight">隐私政策</h1>
-          <p className="text-muted-foreground text-sm mt-2">版本 v1.0.0 · 最近更新日期：2026 年 2 月 28 日</p>
+          <p className="text-muted-foreground text-sm mt-2">版本 v1.0.0 · 最近更新日期：2026 年 9 月 11 日</p>
         </div>
 
         {/* Content */}
@@ -34,9 +34,8 @@ export default function PrivacyPage() {
 
           <h3>1.1 您主动提供的信息</h3>
           <ul>
-            <li><strong>账号信息</strong>：注册时提供的邮箱地址、昵称、密码（加密存储）。</li>
-            <li><strong>第三方登录信息</strong>：通过 GitHub、Google、QQ 等方式登录时，我们会获取对应平台授权的基本信息（如用户名、头像、邮箱）。</li>
             <li><strong>上传的文件</strong>：您主动上传至本产品的 Excel 文件及相关数据。</li>
+            <li><strong>模型凭证</strong>：您在设置中配置的 API Key，或连接 ChatGPT/Codex 订阅时产生的 OAuth 令牌（仅保存在本机进程）。</li>
           </ul>
 
           <h3>1.2 自动收集的信息</h3>
@@ -57,7 +56,6 @@ export default function PrivacyPage() {
           <p>我们收集的信息仅用于以下目的：</p>
           <ol>
             <li><strong>提供核心服务</strong>：处理您的 Excel 文件、执行数据分析、生成图表等。</li>
-            <li><strong>账号管理</strong>：验证身份、维护账号安全。</li>
             <li><strong>会话管理</strong>：保存对话历史、支持会话恢复和上下文延续。</li>
             <li><strong>安全保障</strong>：操作审计、异常行为检测、代码执行安全审查。</li>
             <li><strong>产品改进</strong>：匿名化的使用统计（如功能使用频率），用于优化用户体验。</li>
@@ -67,8 +65,7 @@ export default function PrivacyPage() {
           <ol>
             <li><strong>自行部署</strong>：所有数据存储在您自己的服务器上，包括 SQLite 数据库、工作区文件和配置信息。我们无法也不会访问。</li>
             <li><strong>在线服务</strong>（如有）：数据存储于中华人民共和国境内的服务器。我们采取合理的技术和管理措施保护数据安全。</li>
-            <li><strong>存储期限</strong>：账号信息（邮箱、昵称、密码哈希）在账号存续期间保存，注销后 30 日内删除；对话记录和操作日志随会话生命周期保存，您可随时手动删除；浏览器/设备信息不持久化存储。</li>
-            <li><strong>密码安全</strong>：用户密码经不可逆哈希处理后存储，我们无法获知您的明文密码。</li>
+            <li><strong>存储期限</strong>：对话记录和操作日志随会话生命周期保存，您可随时手动删除；浏览器/设备信息不持久化存储。</li>
           </ol>
 
           <h2>四、信息的共享与披露</h2>
@@ -87,8 +84,7 @@ export default function PrivacyPage() {
             <li><strong>路径沙盒</strong>：文件访问限制在工作区目录内，防止路径穿越。</li>
             <li><strong>代码审查</strong>：用户代码执行前经过静态安全分析。</li>
             <li><strong>操作审批</strong>：高风险操作需用户确认后方可执行。</li>
-            <li><strong>用户隔离</strong>：多用户模式下，各用户数据物理隔离。</li>
-            <li><strong>密码保护</strong>：密码经加盐哈希处理，不可逆存储。</li>
+            <li><strong>工作区边界</strong>：进程内一份工作区，文件访问限制在该根目录。</li>
           </ol>
           <p>
             尽管我们尽力保护您的信息安全，但受限于技术水平，无法保证信息百分之百安全。如发生安全事件，我们将及时通知受影响的用户。
@@ -97,11 +93,9 @@ export default function PrivacyPage() {
           <h2>六、您的权利及行使方式</h2>
           <p>您对个人信息享有以下权利：</p>
           <ol>
-            <li><strong>查阅与导出</strong>：您可以通过 Web UI 个人资料页或 CLI <code>/config export</code> 命令查看和导出您的数据。</li>
-            <li><strong>更正</strong>：您可以在个人资料页面修改昵称、密码等信息。</li>
+            <li><strong>查阅与导出</strong>：您可以通过设置页或 CLI <code>/config export</code> 命令查看和导出配置与数据。</li>
             <li><strong>删除</strong>：您可以通过侧边栏删除会话记录，或使用 CLI <code>/clear</code> 命令清除对话历史。</li>
-            <li><strong>注销账号</strong>：您可以在个人资料页点击「注销账号」，或发邮件至 kilolonion@gmail.com 申请注销。注销后 30 日内我们将删除您的个人信息。</li>
-            <li><strong>撤回同意</strong>：您可以在设置中关闭特定功能（如对话历史记录），或注销账号以全面撤回同意。</li>
+            <li><strong>撤回同意</strong>：您可以在设置中关闭特定功能（如对话历史记录）。</li>
             <li><strong>投诉与反馈</strong>：如您认为我们的个人信息处理侵害了您的权益，可发邮件至 kilolonion@gmail.com，或向网信部门投诉举报。</li>
           </ol>
           <p>我们将在收到您的请求后尽快处理并反馈。作为开源小项目，我们的响应速度可能不及商业服务，但我们会认真对待每一条请求。</p>
@@ -115,7 +109,7 @@ export default function PrivacyPage() {
           <h2>八、Cookie 与本地存储</h2>
           <ol>
             <li>本产品使用浏览器本地存储（localStorage / IndexedDB）保存会话状态和用户偏好设置。</li>
-            <li>使用 JWT Token 维持登录状态。</li>
+            <li>本产品不提供账号登录；本地存储仅用于会话与界面偏好。</li>
             <li>上述数据存储在您的浏览器中，清除浏览器数据即可移除。</li>
           </ol>
 
@@ -141,7 +135,7 @@ export default function PrivacyPage() {
 
           <p className="text-center">
             <strong>kilolonion</strong><br />
-            2026 年 2 月 28 日
+            2026 年 9 月 11 日
           </p>
         </article>
 
@@ -150,8 +144,8 @@ export default function PrivacyPage() {
           <Link href="/terms" className="hover:text-foreground transition-colors">
             ← 用户服务协议
           </Link>
-          <Link href="/register" className="hover:text-foreground transition-colors">
-            返回注册
+          <Link href="/" className="hover:text-foreground transition-colors">
+            返回首页
           </Link>
         </div>
       </div>

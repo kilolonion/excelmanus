@@ -23,7 +23,8 @@ const EFFORT_LEVELS = [
   { key: "low", label: "低", desc: "轻度推理" },
   { key: "medium", label: "中", desc: "平衡模式" },
   { key: "high", label: "高", desc: "深度推理" },
-  { key: "xhigh", label: "极高", desc: "最深推理" },
+  { key: "xhigh", label: "极高", desc: "更强推理" },
+  { key: "max", label: "最深", desc: "最深推理" },
 ] as const;
 
 const EFFORT_LABEL_MAP: Record<string, string> = Object.fromEntries(

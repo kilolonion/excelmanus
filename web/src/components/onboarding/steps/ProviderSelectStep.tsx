@@ -156,9 +156,6 @@ export function ProviderSelectStep({
               <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed line-clamp-2">
                 {provider.description}
               </p>
-              <p className="text-[11px] text-muted-foreground/70 mt-1.5">
-                {provider.pricing}
-              </p>
             </div>
           </motion.button>
         ))}

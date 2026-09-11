@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 from openpyxl import Workbook
 
-from excelmanus.tools import data_tools
+from excelmanus.workbook import data as data_tools
 
 
 @pytest.fixture()
@@ -73,7 +72,7 @@ def workspace(tmp_path: Path) -> Path:
 class TestInspectExcelFiles:
     def test_basic_scan(self, workspace: Path) -> None:
         """recursive=True 默认，应找到根目录 + 子目录的文件。"""
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         assert result["excel_files_found"] == 4
         names = [f["file"] for f in result["files"]]
         assert "sales.xlsx" in names
@@ -83,19 +82,19 @@ class TestInspectExcelFiles:
 
     def test_non_recursive_scan(self, workspace: Path) -> None:
         """recursive=False 时仅扫描当前目录层级。"""
-        result = json.loads(data_tools.inspect_excel_files(recursive=False))
+        result = data_tools.inspect_excel_files(recursive=False).value
         assert result["excel_files_found"] == 3
         names = [f["file"] for f in result["files"]]
         assert "迎新活动排班表.xlsx" not in names
 
     def test_hidden_and_temp_skipped(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         names = [f["file"] for f in result["files"]]
         assert ".hidden.xlsx" not in names
         assert "~$temp.xlsx" not in names
 
     def test_sheet_info(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         sales = next(f for f in result["files"] if f["file"] == "sales.xlsx")
         assert len(sales["sheets"]) == 1
         sheet = sales["sheets"][0]
@@ -107,7 +106,7 @@ class TestInspectExcelFiles:
         assert sheet["header"] == ["姓名", "金额", "日期"]
 
     def test_multi_sheet(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         products = next(f for f in result["files"] if f["file"] == "products.xlsx")
         assert len(products["sheets"]) == 2
         sheet_names = [s["name"] for s in products["sheets"]]
@@ -115,30 +114,30 @@ class TestInspectExcelFiles:
         assert "Sheet2" in sheet_names
 
     def test_preview_rows(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files(preview_rows=2))
+        result = data_tools.inspect_excel_files(preview_rows=2).value
         sales = next(f for f in result["files"] if f["file"] == "sales.xlsx")
         sheet = sales["sheets"][0]
         # preview_rows=2 → 最多 2 行数据预览
         assert len(sheet["preview"]) == 2
 
     def test_max_files_limit(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files(max_files=1))
+        result = data_tools.inspect_excel_files(max_files=1).value
         assert result["excel_files_found"] == 1
         assert result["truncated"] is True
 
     def test_scan_subdirectory(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files(directory="subdir"))
+        result = data_tools.inspect_excel_files(directory="subdir").value
         assert result["excel_files_found"] == 1
         assert result["files"][0]["file"] == "迎新活动排班表.xlsx"
 
     def test_invalid_directory(self, workspace: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files(directory="nonexistent"))
+        result = data_tools.inspect_excel_files(directory="nonexistent").value
         assert "error" in result
 
     def test_empty_directory(self, workspace: Path) -> None:
         empty_dir = workspace / "empty_dir"
         empty_dir.mkdir()
-        result = json.loads(data_tools.inspect_excel_files(directory="empty_dir"))
+        result = data_tools.inspect_excel_files(directory="empty_dir").value
         assert result["excel_files_found"] == 0
         assert result["files"] == []
 
@@ -154,7 +153,7 @@ class TestInspectExcelFiles:
         ws.append(["张三", "销售部", 100, "2025-01", None])
         wb.save(workspace / "merged_header.xlsx")
 
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         merged = next(f for f in result["files"] if f["file"] == "merged_header.xlsx")
         sheet = merged["sheets"][0]
         assert sheet["header_row_hint"] == 1
@@ -174,7 +173,7 @@ class TestInspectExcelFiles:
         ws.append(list(range(20)))
         wb.save(workspace / "wide.xlsx")
 
-        result = json.loads(data_tools.inspect_excel_files(max_columns=5))
+        result = data_tools.inspect_excel_files(max_columns=5).value
         wide = next(f for f in result["files"] if f["file"] == "wide.xlsx")
         sheet = wide["sheets"][0]
         # header 不截断，完整保留 20 列名
@@ -186,20 +185,15 @@ class TestInspectExcelFiles:
 
     def test_narrow_table_no_truncation(self, workspace: Path) -> None:
         """窄表不触发截断。"""
-        result = json.loads(data_tools.inspect_excel_files(max_columns=10))
+        result = data_tools.inspect_excel_files(max_columns=10).value
         sales = next(f for f in result["files"] if f["file"] == "sales.xlsx")
         sheet = sales["sheets"][0]
         assert "preview_columns_truncated" not in sheet
         assert sheet["header"] == ["姓名", "金额", "日期"]
 
-    def test_tool_registered(self) -> None:
-        """确认 inspect_excel_files 已注册到 get_tools()。"""
-        names = {t.name for t in data_tools.get_tools()}
-        assert "inspect_excel_files" in names
-
     def test_file_list_summary_present(self, workspace: Path) -> None:
         """结果中应包含紧凑的 file_list 摘要，列出所有文件名和大小。"""
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         assert "file_list" in result
         file_list = result["file_list"]
         assert len(file_list) == result["excel_files_found"]
@@ -214,55 +208,49 @@ class TestInspectExcelFiles:
 
     def test_deterministic_order_with_max_files(self, workspace: Path) -> None:
         """最大文件数截断时，应按相对路径字母序取前 N 个（确定性）。"""
-        result = json.loads(data_tools.inspect_excel_files(max_files=2))
+        result = data_tools.inspect_excel_files(max_files=2).value
         assert result["excel_files_found"] == 2
         assert result["truncated"] is True
-
-    def test_max_result_chars_unlimited(self) -> None:
-        """inspect_excel_files 的 ToolDef 应设置 max_result_chars=0（不截断）。"""
-        tools = {t.name: t for t in data_tools.get_tools()}
-        tool = tools["inspect_excel_files"]
-        assert tool.max_result_chars == 0
 
     # ── 搜索功能测试 ──
 
     def test_search_by_filename(self, workspace: Path) -> None:
         """按文件名搜索应快速命中，无需打开文件。"""
-        result = json.loads(data_tools.inspect_excel_files(search="sales"))
+        result = data_tools.inspect_excel_files(search="sales").value
         assert result["excel_files_found"] == 1
         assert result["files"][0]["file"] == "sales.xlsx"
 
     def test_search_by_sheet_name(self, workspace: Path) -> None:
         """按 sheet 名搜索应找到包含该 sheet 的文件。"""
-        result = json.loads(data_tools.inspect_excel_files(search="学生花名册"))
+        result = data_tools.inspect_excel_files(search="学生花名册").value
         assert result["excel_files_found"] == 1
         assert result["files"][0]["file"] == "迎新活动排班表.xlsx"
 
     def test_search_by_sheet_name_param(self, workspace: Path) -> None:
         """用 sheet_name 参数精确搜索。"""
-        result = json.loads(data_tools.inspect_excel_files(sheet_name="学生花名册"))
+        result = data_tools.inspect_excel_files(sheet_name="学生花名册").value
         assert result["excel_files_found"] == 1
         assert result["files"][0]["file"] == "迎新活动排班表.xlsx"
 
     def test_search_no_match(self, workspace: Path) -> None:
         """搜索无结果时返回 0 文件。"""
-        result = json.loads(data_tools.inspect_excel_files(search="不存在的关键词"))
+        result = data_tools.inspect_excel_files(search="不存在的关键词").value
         assert result["excel_files_found"] == 0
 
     def test_search_case_insensitive(self, workspace: Path) -> None:
         """搜索不区分大小写。"""
-        result = json.loads(data_tools.inspect_excel_files(search="SALES"))
+        result = data_tools.inspect_excel_files(search="SALES").value
         assert result["excel_files_found"] == 1
 
     def test_recursive_skips_noise_dirs(self, workspace: Path) -> None:
         """递归扫描应跳过 .git/.venv 等噪音目录。"""
-        result = json.loads(data_tools.inspect_excel_files())
+        result = data_tools.inspect_excel_files().value
         names = [f["file"] for f in result["files"]]
         assert "noise.xlsx" not in names
 
     def test_search_with_recursive(self, workspace: Path) -> None:
         """搜索应能找到子目录中的文件。"""
-        result = json.loads(data_tools.inspect_excel_files(search="排班表"))
+        result = data_tools.inspect_excel_files(search="排班表").value
         assert result["excel_files_found"] == 1
         assert result["files"][0]["file"] == "迎新活动排班表.xlsx"
         # path 应包含子目录

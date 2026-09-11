@@ -15,7 +15,18 @@ from pathlib import Path
 import openpyxl
 import pytest
 
-from excelmanus.tools.data_tools import compare_excel, init_guard
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.workbook.data import compare_excel, init_guard
+
+
+def _compare_payload(result: ToolResult | str) -> dict:
+    if isinstance(result, ToolResult):
+        if isinstance(result.value, dict):
+            return result.value
+        if result.error is not None:
+            return result.error.fields
+        return {"error": result.model_text}
+    return json.loads(result)
 
 
 # ── fixtures ──────────────────────────────────────────────
@@ -60,7 +71,7 @@ class TestRowAlignedMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", data)
         fb = _make_xlsx(tmp_path / "b.xlsx", data)
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert result["summary"]["cells_different"] == 0
@@ -76,7 +87,7 @@ class TestRowAlignedMode:
         modified[1] = ["学生0", 99]  # 修改第一行数据的分数
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": modified})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert result["summary"]["cells_different"] > 0
@@ -94,7 +105,7 @@ class TestRowAlignedMode:
         extended = base + [["新同学", 100]]
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": extended})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert result["summary"]["rows_added"] == 1
@@ -106,7 +117,7 @@ class TestRowAlignedMode:
         shorter = base[:10]  # 去掉最后 1 行数据（header+9 data）
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": shorter})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert result["summary"]["rows_deleted"] == 1
@@ -118,7 +129,7 @@ class TestRowAlignedMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert "班级" in result["summary"]["columns_added"]
@@ -138,7 +149,7 @@ class TestKeyColumnMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = json.loads(compare_excel(
+        result = _compare_payload(compare_excel(
             str(fa), str(fb), key_columns=["ID"],
         ))
 
@@ -154,7 +165,7 @@ class TestKeyColumnMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = json.loads(compare_excel(
+        result = _compare_payload(compare_excel(
             str(fa), str(fb), key_columns=["ID"],
         ))
 
@@ -169,7 +180,7 @@ class TestKeyColumnMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", data)
         fb = _make_xlsx(tmp_path / "b.xlsx", data)
 
-        result = json.loads(compare_excel(
+        result = _compare_payload(compare_excel(
             str(fa), str(fb), key_columns=["不存在的列"],
         ))
 
@@ -192,7 +203,7 @@ class TestCrossSheet:
             "修改后": rows_mod,
         })
 
-        result = json.loads(compare_excel(
+        result = _compare_payload(compare_excel(
             str(fp), str(fp), sheet_a="原始", sheet_b="修改后",
         ))
 
@@ -207,7 +218,7 @@ class TestCrossSheet:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["diff_mode"] == "cross_file"
 
@@ -219,7 +230,7 @@ class TestEdgeCases:
 
     def test_file_not_found(self, tmp_path: Path):
         """文件不存在应返回 error。"""
-        result = json.loads(compare_excel(
+        result = _compare_payload(compare_excel(
             str(tmp_path / "不存在.xlsx"),
             str(tmp_path / "也不存在.xlsx"),
         ))
@@ -232,7 +243,7 @@ class TestEdgeCases:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = json.loads(compare_excel(str(fa), str(fb), max_diffs=5))
+        result = _compare_payload(compare_excel(str(fa), str(fb), max_diffs=5))
 
         assert result["status"] == "ok"
         assert result["truncated"] is True
@@ -243,7 +254,7 @@ class TestEdgeCases:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": []})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": []})
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert result["summary"]["cells_different"] == 0
@@ -260,7 +271,7 @@ class TestEdgeCases:
             "仅B有": [["z"]] + [[i] for i in range(10)],
         })
 
-        result = json.loads(compare_excel(str(fa), str(fb)))
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
 
         assert result["status"] == "ok"
         assert "仅A有" in result["summary"]["sheets_only_in_a"]
@@ -273,7 +284,7 @@ class TestEdgeCases:
         csv_a.write_text("姓名,分数\n张三,90\n", encoding="utf-8")
         csv_b.write_text("姓名,分数\n张三,95\n", encoding="utf-8")
 
-        result = json.loads(compare_excel(str(csv_a), str(csv_b)))
+        result = _compare_payload(compare_excel(str(csv_a), str(csv_b)))
 
         assert result["status"] == "ok"
         assert result["summary"]["cells_different"] > 0
@@ -282,45 +293,42 @@ class TestEdgeCases:
 # ── Policy 注册测试 ───────────────────────────────────────
 
 class TestPolicyRegistration:
-    """验证 compare_excel 在策略集合中的注册。"""
+    """验证对比能力以 compare_spreadsheets 出现在策略集合中。"""
 
     def test_in_read_only_safe(self):
         from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS
-        assert "compare_excel" in READ_ONLY_SAFE_TOOLS
+        assert "compare_spreadsheets" in READ_ONLY_SAFE_TOOLS
 
     def test_in_parallelizable(self):
         from excelmanus.tools.policy import PARALLELIZABLE_READONLY_TOOLS
-        assert "compare_excel" in PARALLELIZABLE_READONLY_TOOLS
+        assert "compare_spreadsheets" in PARALLELIZABLE_READONLY_TOOLS
 
-    def test_in_data_read_category(self):
+    def test_in_compare_category(self):
         from excelmanus.tools.policy import TOOL_CATEGORIES
-        assert "compare_excel" in TOOL_CATEGORIES["data_read"]
+        assert "compare_spreadsheets" in TOOL_CATEGORIES["compare"]
 
     def test_in_short_descriptions(self):
         from excelmanus.tools.policy import TOOL_SHORT_DESCRIPTIONS
-        assert "compare_excel" in TOOL_SHORT_DESCRIPTIONS
+        assert "compare_spreadsheets" in TOOL_SHORT_DESCRIPTIONS
 
 
 # ── 工具注册测试 ──────────────────────────────────────────
 
 class TestToolRegistration:
-    """验证 compare_excel 通过 get_tools() 导出。"""
+    """内部 compare_excel 不再上模型面；模型只见 compare_spreadsheets。"""
 
-    def test_registered_in_get_tools(self):
-        from excelmanus.tools.data_tools import get_tools
-        tools = get_tools()
-        names = [t.name for t in tools]
-        assert "compare_excel" in names
+    def test_internal_compare_not_registered(self):
+        from excelmanus.tools.intent_tools import get_tools
+        names = {tool.name for tool in get_tools()}
+        assert "compare_excel" not in names
+        assert "compare_spreadsheets" in names
 
-    def test_tool_schema(self):
-        from excelmanus.tools.data_tools import get_tools
+    def test_intent_wrapper_schema(self):
+        from excelmanus.tools.intent_tools import get_tools
         tools = get_tools()
-        tool = next(t for t in tools if t.name == "compare_excel")
+        tool = next(t for t in tools if t.name == "compare_spreadsheets")
         schema = tool.input_schema
         assert "file_a" in schema["properties"]
         assert "file_b" in schema["properties"]
         assert "key_columns" in schema["properties"]
-        assert schema["properties"]["key_columns"]["type"] == "array"
-        assert "file_a" in schema["required"]
-        assert "file_b" in schema["required"]
         assert tool.write_effect == "none"

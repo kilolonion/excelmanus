@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import pytest_asyncio
 
-from excelmanus.config import ExcelManusConfig
+from excelmanus.config import ExcelManusConfig, ModelProfile
 from excelmanus.engine import AgentEngine
 from excelmanus.session import (
     SessionBusyError,
@@ -203,34 +203,49 @@ class TestAcquireForChat:
         assert manager._sessions[sid].in_flight is False
 
     @pytest.mark.asyncio
-    async def test_user_session_uses_user_workspace(
+    async def test_session_uses_process_workspace(
         self, manager: SessionManager, config: ExcelManusConfig
     ) -> None:
-        """认证场景下传入 user_id 时，engine 应绑定该用户工作区。"""
-        sid, engine = await manager.acquire_for_chat(None, user_id="user-abc")
+        """引擎工作区始终是 data_root 或 workspace_root，不再按用户分目录。"""
+        sid, engine = await manager.acquire_for_chat(None)
         await manager.release_for_chat(sid)
 
-        assert str(engine._config.workspace_root).endswith("/users/user-abc")
-        assert engine._config.workspace_root != config.workspace_root
+        from pathlib import Path
+        expected = Path(config.data_root or config.workspace_root).expanduser().resolve()
+        assert Path(engine._config.workspace_root).resolve() == expected
+        assert "/users/" not in str(engine._config.workspace_root)
+
+    @pytest.mark.asyncio
+    async def test_same_session_id_is_reused(
+        self, manager: SessionManager,
+    ) -> None:
+        """同一 session_id 可恢复，不再做跨用户归属拒绝。"""
+        sid1, engine1 = await manager.acquire_for_chat("shared-session")
+        await manager.release_for_chat(sid1)
+        sid2, engine2 = await manager.acquire_for_chat("shared-session")
+        await manager.release_for_chat(sid2)
+        assert sid1 == sid2 == "shared-session"
+        assert engine1 is engine2
 
     @pytest.mark.asyncio
     async def test_user_prefixed_codex_model_resolves_to_real_model(
         self, config: ExcelManusConfig, registry: ToolRegistry
     ) -> None:
-        """用户配置 openai-codex 前缀模型名时，会话内应解析为真实 model ID。"""
-        user_store = MagicMock()
-        user_store.get_by_id.return_value = SimpleNamespace(
-            llm_api_key=None,
-            llm_base_url=None,
-            llm_model="openai-codex/gpt-5.3-codex-spark",
+        """进程级 Codex 前缀模型名应解析为真实 model ID。"""
+        config = ExcelManusConfig(
+            api_key="test-key",
+            base_url="https://test.example.com/v1",
+            model="openai-codex/gpt-5.3-codex-spark",
+            session_ttl_seconds=config.session_ttl_seconds,
+            max_sessions=config.max_sessions,
+            memory_enabled=False,
+            workspace_root=config.workspace_root,
         )
-
         manager = SessionManager(
             max_sessions=config.max_sessions,
             ttl_seconds=config.session_ttl_seconds,
             config=config,
             registry=registry,
-            user_store=user_store,
         )
 
         credential_store = MagicMock()
@@ -241,19 +256,15 @@ class TestAcquireForChat:
         )
         manager.set_credential_store(credential_store)
 
-        sid, engine = await manager.acquire_for_chat(None, user_id="user-abc")
+        sid, engine = await manager.acquire_for_chat(None)
         await manager.release_for_chat(sid)
 
         assert engine.current_model == "gpt-5.3-codex-spark"
-        assert any(
-            p.name == "openai-codex/gpt-5.3-codex-spark"
-            for p in engine._config.models
-        )
 
     def test_sync_user_subscription_profiles_sets_responses_protocol(
         self, config: ExcelManusConfig, registry: ToolRegistry
     ) -> None:
-        """同步用户 Codex 私有模型时，应标记为 openai_responses 协议。"""
+        """进程级 Codex profile 注入订阅凭证后应使用 openai_responses 协议。"""
         manager = SessionManager(
             max_sessions=config.max_sessions,
             ttl_seconds=config.session_ttl_seconds,
@@ -270,14 +281,23 @@ class TestAcquireForChat:
         manager.set_credential_store(credential_store)
 
         engine = MagicMock()
-        engine._config.models = ()
+        engine._config.models = (
+            ModelProfile(
+                name="openai-codex/gpt-5.3-codex-spark",
+                model="gpt-5.3-codex-spark",
+                api_key="",
+                base_url="",
+                protocol="auto",
+            ),
+        )
 
-        manager.sync_user_subscription_profiles(engine, user_id="user-1")
+        manager.sync_user_subscription_profiles(engine)
 
         profiles = engine.sync_model_profiles.call_args.args[0]
         codex_profiles = [p for p in profiles if p.name.startswith("openai-codex/")]
         assert codex_profiles
         assert all(p.protocol == "openai_responses" for p in codex_profiles)
+        assert all(p.api_key == "eyJcodex" for p in codex_profiles)
 
 
 class TestSessionDetail:
@@ -422,26 +442,14 @@ class TestDelete:
         assert result is True
 
     @pytest.mark.asyncio
-    async def test_delete_triggers_memory_extraction(self, manager: SessionManager) -> None:
-        """删除会话应触发 extract_and_save_memory。"""
+    async def test_delete_does_not_extract_memory(self, manager: SessionManager) -> None:
+        """删除会话不再自动提取记忆。"""
         sid, engine = await _create_session(manager)
         engine.extract_and_save_memory = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
         result = await manager.delete(sid)
         assert result is True
-        engine.extract_and_save_memory.assert_awaited_once()  # type: ignore[attr-defined]
-
-    @pytest.mark.asyncio
-    async def test_delete_memory_extraction_error_is_ignored(
-        self, manager: SessionManager
-    ) -> None:
-        """记忆提取失败应被吞掉，不影响删除结果。"""
-        sid, engine = await _create_session(manager)
-        engine.extract_and_save_memory = AsyncMock(side_effect=RuntimeError("boom"))  # type: ignore[method-assign]
-
-        result = await manager.delete(sid)
-        assert result is True
-        engine.extract_and_save_memory.assert_awaited_once()  # type: ignore[attr-defined]
+        engine.extract_and_save_memory.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 class TestCleanupExpired:
@@ -527,17 +535,17 @@ class TestCleanupExpired:
         assert await manager.get_active_count() == 1
 
     @pytest.mark.asyncio
-    async def test_cleanup_triggers_memory_extraction_for_expired_sessions(
+    async def test_cleanup_does_not_extract_memory_for_expired_sessions(
         self, manager: SessionManager
     ) -> None:
-        """清理过期会话时应触发 extract_and_save_memory。"""
+        """TTL 清理不再自动提取记忆。"""
         sid, engine = await _create_session(manager)
         engine.extract_and_save_memory = AsyncMock(return_value=None)  # type: ignore[method-assign]
         manager._sessions[sid].last_access = 0.0
 
         removed = await manager.cleanup_expired(now=61.0)
         assert removed == 1
-        engine.extract_and_save_memory.assert_awaited_once()  # type: ignore[attr-defined]
+        engine.extract_and_save_memory.assert_not_awaited()  # type: ignore[attr-defined]
 
 
 class TestBackgroundCleanupLifecycle:

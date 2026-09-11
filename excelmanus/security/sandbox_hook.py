@@ -54,6 +54,7 @@ def generate_wrapper_script(
     if tier == "RED":
         return _RED_FS_GUARD_TEMPLATE.format(
             workspace_root=repr(workspace_root),
+            code_mode_inject=_CODE_MODE_INJECT,
         )
 
     blocked = _GREEN_BLOCKED if tier == "GREEN" else _YELLOW_BLOCKED
@@ -70,7 +71,35 @@ def generate_wrapper_script(
         socket_constructor_names=socket_ctor_repr,
         socket_module_blocked_calls=socket_blocked_calls_repr,
         raw_socket_module_blocked_calls=raw_socket_blocked_calls_repr,
+        code_mode_inject=_CODE_MODE_INJECT,
     )
+
+
+_CODE_MODE_INJECT = """
+# ── Code Mode SDK 注入（无桥环境变量时为 no-op）──
+_em_mod = None
+_sdk_file = os.environ.get("EXCELMANUS_CODE_MODE_SDK")
+if _sdk_file:
+    import types as _types_cm
+    _sdk_ns = {
+        "__name__": "em",
+        "__file__": _sdk_file,
+        "__builtins__": globals().get("_restricted_builtins", __builtins__),
+    }
+    with _original_open(_sdk_file, encoding="utf-8") as _sf_cm:
+        _sdk_src = _sf_cm.read()
+    _sdk_exec = globals().get("_real_exec", exec)
+    _sdk_exec(compile(_sdk_src, _sdk_file, "exec"), _sdk_ns)
+    _em_mod = _types_cm.ModuleType("em")
+    for _sk, _sv in _sdk_ns.items():
+        if _sk == "__builtins__":
+            continue
+        setattr(_em_mod, _sk, _sv)
+    _em_mod.__name__ = "em"
+    _em_mod.__file__ = _sdk_file
+    sys.modules["em"] = _em_mod
+    sys.modules["excelmanus_sdk"] = _em_mod
+"""
 
 
 _RED_FS_GUARD_TEMPLATE = '''\
@@ -118,6 +147,101 @@ _BENCH_PROTECTED_DIRS = [
 ]
 
 _COW_MAPPING = {{}}
+# save 后的 content_version：_SAVE_VERSIONS[resolved] = "sha256:" + hex
+# 不导入宿主 workbook_commit。可选 EXCELMANUS_EXPECTED_VERSIONS JSON
+# （realpath 或工作区相对路径 → sha256:...）在覆盖已有文件前做哈希比较。
+# 宿主 code_tools 只从 EXCELMANUS_COW_LOG 解析两列 path 映射，不会把
+# content_version 提升进 run_code JSON；版本经 stderr 结构化行过重。
+_SAVE_VERSIONS = {{}}
+_EXPECTED_VERSIONS_RAW = os.environ.get("EXCELMANUS_EXPECTED_VERSIONS", "{{}}")
+try:
+    _EXPECTED_VERSIONS = _json_mod.loads(_EXPECTED_VERSIONS_RAW)
+    if not isinstance(_EXPECTED_VERSIONS, dict):
+        _EXPECTED_VERSIONS = {{}}
+except (ValueError, TypeError):
+    _EXPECTED_VERSIONS = {{}}
+
+def _lookup_expected_version(resolved):
+    if resolved in _EXPECTED_VERSIONS:
+        return _EXPECTED_VERSIONS[resolved]
+    ws = _WORKSPACE_ROOT + os.sep
+    if resolved.startswith(ws):
+        rel = resolved[len(ws):].replace("\\\\", "/")
+        if rel in _EXPECTED_VERSIONS:
+            return _EXPECTED_VERSIONS[rel]
+    return None
+
+def _remember_expected_after_save(resolved):
+    ver = _SAVE_VERSIONS.get(resolved)
+    if not ver:
+        return
+    _EXPECTED_VERSIONS[resolved] = ver
+    ws = _WORKSPACE_ROOT + os.sep
+    if resolved.startswith(ws):
+        rel = resolved[len(ws):].replace("\\\\", "/")
+        _EXPECTED_VERSIONS[rel] = ver
+
+def _acquire_em_lock(resolved):
+    lock_path = resolved + ".em-lock"
+    fh = _original_open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        fh.close()
+        raise
+    return fh
+
+def _release_em_lock(fh):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        fh.close()
+    except Exception:
+        pass
+
+def _check_expected_version(resolved):
+    expected = _lookup_expected_version(resolved)
+    if not expected or not os.path.exists(resolved):
+        return
+    import hashlib as _hl
+    with _original_open(resolved, "rb") as _vf:
+        current = "sha256:" + _hl.sha256(_vf.read()).hexdigest()
+    if current != expected:
+        raise RuntimeError(
+            "VERSION_CONFLICT: expected_version mismatch for " + resolved
+        )
+
+def _record_save_version(resolved):
+    try:
+        import hashlib as _hl
+        with _original_open(resolved, "rb") as _vf:
+            _digest = _hl.sha256(_vf.read()).hexdigest()
+        _ver = "sha256:" + _digest
+        _SAVE_VERSIONS[resolved] = _ver
+        print("EXCELMANUS_SAVE_VERSION\\t" + resolved + "\\t" + _ver, file=sys.stderr)
+        _ver_log = os.environ.get("EXCELMANUS_SAVE_VERSIONS_LOG")
+        if _ver_log:
+            try:
+                with _original_open(_ver_log, "a", encoding="utf-8") as _lf:
+                    _lf.write(resolved + "\\t" + _ver + "\\n")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def _apply_cow(resolved):
     if resolved in _COW_MAPPING:
@@ -188,6 +312,7 @@ def _guarded_open(file, mode="r", *args, **kwargs):
 builtins.open = _guarded_open
 
 # ── openpyxl 保存原子写入保护 ──
+# 覆盖已有文件前按 EXCELMANUS_EXPECTED_VERSIONS 比较哈希；不走宿主 commit 模块。
 def _patch_openpyxl_save():
     try:
         from openpyxl.workbook import Workbook as _Wb
@@ -209,22 +334,34 @@ def _patch_openpyxl_save():
                 resolved = _apply_cow(resolved)
                 filename = resolved
                 break
-        if not os.path.exists(resolved):
-            return _original_save(self, filename)
-        dir_name = os.path.dirname(resolved)
-        fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=dir_name)
-        os.close(fd)
+        fh = _acquire_em_lock(resolved)
         try:
-            _original_save(self, tmp_path)
-            os.replace(tmp_path, resolved)
-        except BaseException:
+            _check_expected_version(resolved)
+            if not os.path.exists(resolved):
+                _ret = _original_save(self, filename)
+                _record_save_version(resolved)
+                _remember_expected_after_save(resolved)
+                return _ret
+            dir_name = os.path.dirname(resolved)
+            fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=dir_name)
+            os.close(fd)
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+                _original_save(self, tmp_path)
+                os.replace(tmp_path, resolved)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            _record_save_version(resolved)
+            _remember_expected_after_save(resolved)
+        finally:
+            _release_em_lock(fh)
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
+
+{code_mode_inject}
 
 # ── 执行用户脚本 ──
 if len(sys.argv) < 2:
@@ -237,11 +374,14 @@ sys.argv = sys.argv[1:]
 with _original_open(_script, encoding="utf-8") as _f:
     _code = _f.read()
 
-exec(compile(_code, _script, "exec"), {{
+_user_ns = {{
     "__name__": "__main__",
     "__file__": _script,
     "__builtins__": __builtins__,
-}})
+}}
+if _em_mod is not None:
+    _user_ns["em"] = _em_mod
+exec(compile(_code, _script, "exec"), _user_ns)
 '''
 
 _SANDBOX_WRAPPER_TEMPLATE = '''\
@@ -306,6 +446,101 @@ _BENCH_PROTECTED_DIRS = [
 ]
 
 _COW_MAPPING = {{}}
+# save 后的 content_version：_SAVE_VERSIONS[resolved] = "sha256:" + hex
+# 不导入宿主 workbook_commit。可选 EXCELMANUS_EXPECTED_VERSIONS JSON
+# （realpath 或工作区相对路径 → sha256:...）在覆盖已有文件前做哈希比较。
+# 宿主 code_tools 只从 EXCELMANUS_COW_LOG 解析两列 path 映射，不会把
+# content_version 提升进 run_code JSON；版本经 stderr 结构化行过重。
+_SAVE_VERSIONS = {{}}
+_EXPECTED_VERSIONS_RAW = os.environ.get("EXCELMANUS_EXPECTED_VERSIONS", "{{}}")
+try:
+    _EXPECTED_VERSIONS = _json_mod.loads(_EXPECTED_VERSIONS_RAW)
+    if not isinstance(_EXPECTED_VERSIONS, dict):
+        _EXPECTED_VERSIONS = {{}}
+except (ValueError, TypeError):
+    _EXPECTED_VERSIONS = {{}}
+
+def _lookup_expected_version(resolved):
+    if resolved in _EXPECTED_VERSIONS:
+        return _EXPECTED_VERSIONS[resolved]
+    ws = _WORKSPACE_ROOT + os.sep
+    if resolved.startswith(ws):
+        rel = resolved[len(ws):].replace("\\\\", "/")
+        if rel in _EXPECTED_VERSIONS:
+            return _EXPECTED_VERSIONS[rel]
+    return None
+
+def _remember_expected_after_save(resolved):
+    ver = _SAVE_VERSIONS.get(resolved)
+    if not ver:
+        return
+    _EXPECTED_VERSIONS[resolved] = ver
+    ws = _WORKSPACE_ROOT + os.sep
+    if resolved.startswith(ws):
+        rel = resolved[len(ws):].replace("\\\\", "/")
+        _EXPECTED_VERSIONS[rel] = ver
+
+def _acquire_em_lock(resolved):
+    lock_path = resolved + ".em-lock"
+    fh = _original_open(lock_path, "a+b")
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+    except Exception:
+        fh.close()
+        raise
+    return fh
+
+def _release_em_lock(fh):
+    try:
+        if os.name == "nt":
+            import msvcrt
+            fh.seek(0)
+            msvcrt.locking(fh.fileno(), msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+    except Exception:
+        pass
+    try:
+        fh.close()
+    except Exception:
+        pass
+
+def _check_expected_version(resolved):
+    expected = _lookup_expected_version(resolved)
+    if not expected or not os.path.exists(resolved):
+        return
+    import hashlib as _hl
+    with _original_open(resolved, "rb") as _vf:
+        current = "sha256:" + _hl.sha256(_vf.read()).hexdigest()
+    if current != expected:
+        raise RuntimeError(
+            "VERSION_CONFLICT: expected_version mismatch for " + resolved
+        )
+
+def _record_save_version(resolved):
+    try:
+        import hashlib as _hl
+        with _original_open(resolved, "rb") as _vf:
+            _digest = _hl.sha256(_vf.read()).hexdigest()
+        _ver = "sha256:" + _digest
+        _SAVE_VERSIONS[resolved] = _ver
+        print("EXCELMANUS_SAVE_VERSION\\t" + resolved + "\\t" + _ver, file=sys.stderr)
+        _ver_log = os.environ.get("EXCELMANUS_SAVE_VERSIONS_LOG")
+        if _ver_log:
+            try:
+                with _original_open(_ver_log, "a", encoding="utf-8") as _lf:
+                    _lf.write(resolved + "\\t" + _ver + "\\n")
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 def _apply_cow(resolved):
     if resolved in _COW_MAPPING:
@@ -408,6 +643,7 @@ _restricted_builtins["open"] = _guarded_open
 _restricted_builtins["compile"] = _real_compile
 
 # ── Layer 5: openpyxl save 原子写入保护 ──
+# 覆盖已有文件前按 EXCELMANUS_EXPECTED_VERSIONS 比较哈希；不走 workbook_commit。
 def _patch_openpyxl_save():
     try:
         from openpyxl.workbook import Workbook as _Wb
@@ -436,20 +672,30 @@ def _patch_openpyxl_save():
                 filename = resolved
                 break
                 
-        if not os.path.exists(resolved):
-            return _original_save(self, filename)
-        dir_name = os.path.dirname(resolved)
-        fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=dir_name)
-        os.close(fd)
+        fh = _acquire_em_lock(resolved)
         try:
-            _original_save(self, tmp_path)
-            os.replace(tmp_path, resolved)
-        except BaseException:
+            _check_expected_version(resolved)
+            if not os.path.exists(resolved):
+                _ret = _original_save(self, filename)
+                _record_save_version(resolved)
+                _remember_expected_after_save(resolved)
+                return _ret
+            dir_name = os.path.dirname(resolved)
+            fd, tmp_path = tempfile.mkstemp(suffix=".xlsx", dir=dir_name)
+            os.close(fd)
             try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-            raise
+                _original_save(self, tmp_path)
+                os.replace(tmp_path, resolved)
+            except BaseException:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+            _record_save_version(resolved)
+            _remember_expected_after_save(resolved)
+        finally:
+            _release_em_lock(fh)
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
 
@@ -533,6 +779,8 @@ try:
 except ImportError:
     pass
 
+{code_mode_inject}
+
 # ── 执行用户脚本 ──
 if len(sys.argv) < 2:
     print("Usage: wrapper.py <script.py> [args...]", file=sys.stderr)
@@ -545,9 +793,12 @@ with _original_open(_script, encoding="utf-8") as _f:
     _code = _f.read()
 
 _compiled = _real_compile(_code, _script, "exec")
-_real_exec(_compiled, {{
+_user_ns = {{
     "__name__": "__main__",
     "__file__": _script,
     "__builtins__": _restricted_builtins,
-}})
+}}
+if _em_mod is not None:
+    _user_ns["em"] = _em_mod
+_real_exec(_compiled, _user_ns)
 '''

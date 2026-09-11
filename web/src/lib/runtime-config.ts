@@ -17,8 +17,6 @@
 export interface ExcelManusRuntimeConfig {
   /** 后端直连地址（运行时）。等效于 NEXT_PUBLIC_BACKEND_ORIGIN。 */
   backendOrigin?: string;
-  /** 认证是否启用（运行时）。等效于 NEXT_PUBLIC_AUTH_ENABLED。 */
-  authEnabled?: string;
 }
 
 declare global {

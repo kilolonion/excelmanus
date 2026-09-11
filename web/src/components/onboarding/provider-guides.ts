@@ -20,75 +20,16 @@ export interface ProviderGuide {
 
 export const PROVIDER_GUIDES: ProviderGuide[] = [
   {
-    id: "gemini",
-    label: "Google Gemini",
-    description: "Gemini 2.5 Flash — 支持订阅 OAuth 或 API Key，速度快、性价比高",
-    pricing: "按官方实时价格计费（请以控制台为准）",
-    recommended: true,
-    purchaseUrl: "https://aistudio.google.com/apikey",
-    model: "gemini-2.5-flash",
-    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
-    protocol: "openai",
-    thinking_mode: "auto",
-    model_family: "gemini",
-    steps: [
-      {
-        title: "1. 访问 Google AI Studio",
-        description:
-          "如需 API Key，请打开 aistudio.google.com/apikey；如需免 Key 的订阅登录，请前往设置中的 Google Gemini 订阅 OAuth 入口。",
-      },
-      {
-        title: "2. 创建 API Key",
-        description:
-          '点击页面中的「Create API Key」按钮，选择一个 Google Cloud 项目（或创建新项目），即可生成 API Key。',
-      },
-      {
-        title: "3. 复制 Key 并粘贴",
-        description:
-          "点击复制按钮将 API Key 复制到剪贴板，然后回到本页面粘贴到下方输入框中。Gemini 提供免费额度，无需预充值。",
-      },
-    ],
-  },
-  {
-    id: "deepseek",
-    label: "DeepSeek",
-    description: "DeepSeek-V3 — 中文理解出色，性价比极高",
-    pricing: "按官方实时价格计费（新用户通常有试用额度）",
-    recommended: true,
-    purchaseUrl: "https://platform.deepseek.com/api_keys",
-    model: "deepseek-chat",
-    base_url: "https://api.deepseek.com/v1",
-    protocol: "openai",
-    thinking_mode: "deepseek",
-    model_family: "deepseek",
-    steps: [
-      {
-        title: "1. 注册 DeepSeek 账号",
-        description:
-          "打开 platform.deepseek.com，使用手机号或邮箱注册。新用户注册可获赠免费 token 额度。",
-      },
-      {
-        title: "2. 创建 API Key",
-        description:
-          '登录后进入「API Keys」页面，点击「创建 API Key」，为 Key 取一个名称后确认。',
-      },
-      {
-        title: "3. 复制并充值（可选）",
-        description:
-          "复制生成的 API Key 并粘贴到下方。免费额度用完后可在「充值」页面充值，最低 ¥10 起。",
-      },
-    ],
-  },
-  {
     id: "openai",
     label: "OpenAI",
-    description: "GPT-5.2 — 通用能力强、生态完善",
+    description: "GPT-6 Astra — 通用能力强、生态完善",
     pricing: "按官方实时价格计费（请以 OpenAI 控制台为准）",
+    recommended: true,
     purchaseUrl: "https://platform.openai.com/api-keys",
-    model: "gpt-5.2",
+    model: "gpt-6-astra",
     base_url: "https://api.openai.com/v1",
     protocol: "openai",
-    thinking_mode: "auto",
+    thinking_mode: "openai_reasoning",
     model_family: "gpt",
     steps: [
       {
@@ -111,10 +52,11 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
   {
     id: "anthropic",
     label: "Anthropic",
-    description: "Claude Sonnet 4.6 — 代码与推理能力一流",
+    description: "Claude Sonnet 5 — 代码与推理能力一流",
     pricing: "按官方实时价格计费（请以 Anthropic 控制台为准）",
+    recommended: true,
     purchaseUrl: "https://console.anthropic.com/settings/keys",
-    model: "claude-sonnet-4-6",
+    model: "claude-sonnet-5",
     base_url: "https://api.anthropic.com",
     protocol: "anthropic",
     thinking_mode: "claude",
@@ -138,42 +80,100 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     ],
   },
   {
-    id: "qwen",
-    label: "阿里云百炼",
-    description: "通义千问 Qwen — 国内直连、中文优化",
+    id: "deepseek",
+    label: "DeepSeek",
+    description: "DeepSeek-V4.1 Flash — 原生多模态，中文理解出色，性价比极高",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     recommended: true,
-    purchaseUrl: "https://dashscope.console.aliyun.com/apiKey",
-    model: "qwen-plus",
-    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    purchaseUrl: "https://platform.deepseek.com/api_keys",
+    model: "deepseek-flash",
+    base_url: "https://api.deepseek.com/v1",
     protocol: "openai",
     thinking_mode: "enable_thinking",
-    model_family: "qwen",
+    model_family: "deepseek",
     steps: [
       {
-        title: "1. 注册阿里云账号",
+        title: "1. 注册 DeepSeek 账号",
         description:
-          "打开 aliyun.com，使用手机号注册阿里云账号（或用已有账号登录）。首次使用需开通「百炼」服务。",
+          "打开 platform.deepseek.com，使用手机号或邮箱注册。新用户注册可获赠免费 token 额度。",
       },
       {
-        title: "2. 获取 API Key",
+        title: "2. 创建 API Key",
         description:
-          '进入百炼控制台 → API Key 管理页面，点击「创建 API Key」即可生成。',
+          '登录后进入「API Keys」页面，点击「创建 API Key」，为 Key 取一个名称后确认。',
+      },
+      {
+        title: "3. 复制并充值（可选）",
+        description:
+          "复制生成的 API Key 并粘贴到下方。免费额度用完后可在「充值」页面充值，最低 ¥10 起。",
+      },
+    ],
+  },
+  {
+    id: "gemini",
+    label: "Google Gemini",
+    description: "Gemini 3.8 Flash — 速度快、性价比高",
+    pricing: "按官方实时价格计费（请以控制台为准）",
+    purchaseUrl: "https://aistudio.google.com/apikey",
+    model: "gemini-3.8-flash",
+    base_url: "https://generativelanguage.googleapis.com/v1beta/openai",
+    protocol: "openai",
+    thinking_mode: "gemini_level",
+    model_family: "gemini",
+    steps: [
+      {
+        title: "1. 访问 Google AI Studio",
+        description:
+          "打开 aistudio.google.com/apikey，用 Google 账号登录后创建 API Key。Gemini 提供免费额度，无需预充值。",
+      },
+      {
+        title: "2. 创建 API Key",
+        description:
+          '点击页面中的「Create API Key」按钮，选择一个 Google Cloud 项目（或创建新项目），即可生成 API Key。',
+      },
+      {
+        title: "3. 复制 Key 并粘贴",
+        description:
+          "点击复制按钮将 API Key 复制到剪贴板，然后回到本页面粘贴到下方输入框中。Gemini 提供免费额度，无需预充值。",
+      },
+    ],
+  },
+  {
+    id: "kimi",
+    label: "Kimi (月之暗面)",
+    description: "Kimi K3 — 超长上下文、中文理解出色",
+    pricing: "按官方实时价格计费（新用户通常有试用额度）",
+    purchaseUrl: "https://platform.moonshot.cn/console/api-keys",
+    model: "kimi-k3",
+    base_url: "https://api.moonshot.cn/v1",
+    protocol: "openai",
+    thinking_mode: "openai_reasoning",
+    model_family: "moonshot",
+    steps: [
+      {
+        title: "1. 注册 Moonshot 账号",
+        description:
+          "打开 platform.moonshot.cn，使用手机号注册并完成验证。",
+      },
+      {
+        title: "2. 创建 API Key",
+        description:
+          '进入控制台 → API Key 管理页面，点击「新建 API Key」即可生成。',
       },
       {
         title: "3. 复制并使用",
         description:
-          "复制 API Key 粘贴到下方。阿里云百炼在国内直连无需代理，延迟低且稳定。新用户有免费额度可用。",
+          "复制 Key 粘贴到下方。Kimi 国内直连，新注册用户有免费 token 额度。",
       },
     ],
   },
   {
     id: "zhipu",
     label: "智谱 AI",
-    description: "GLM-4 Plus — 国产大模型，国内直连",
+    description: "GLM-5.3 — 国产大模型，国内直连",
     pricing: "按官方实时价格计费（新用户通常有试用额度）",
     purchaseUrl: "https://open.bigmodel.cn/usercenter/apikeys",
-    model: "glm-4-plus",
+    model: "glm-5.3",
     base_url: "https://open.bigmodel.cn/api/paas/v4",
     protocol: "openai",
     thinking_mode: "glm_thinking",
@@ -197,31 +197,31 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     ],
   },
   {
-    id: "openai-codex",
-    label: "OpenAI Codex",
-    description: "ChatGPT Plus/Pro 订阅模型（支持 Codex 登录）",
-    pricing: "使用 ChatGPT Plus/Pro 订阅，无需单独 API 充值",
-    purchaseUrl: "https://chatgpt.com",
-    model: "openai-codex/gpt-5.2-codex",
-    base_url: "https://api.openai.com/v1",
+    id: "qwen",
+    label: "阿里云百炼",
+    description: "通义千问 Qwen3.7 Plus — 原生多模态，国内直连",
+    pricing: "按官方实时价格计费（新用户通常有试用额度）",
+    purchaseUrl: "https://dashscope.console.aliyun.com/apiKey",
+    model: "qwen3.7-plus",
+    base_url: "https://dashscope.aliyuncs.com/compatible-mode/v1",
     protocol: "openai",
-    thinking_mode: "openai_reasoning",
-    model_family: "gpt",
+    thinking_mode: "enable_thinking",
+    model_family: "qwen",
     steps: [
       {
-        title: "1. 登录 ChatGPT",
+        title: "1. 注册阿里云账号",
         description:
-          "确保你的账号已开通 ChatGPT Plus/Pro（Codex 订阅能力）。",
+          "打开 aliyun.com，使用手机号注册阿里云账号（或用已有账号登录）。首次使用需开通「百炼」服务。",
       },
       {
-        title: "2. 在模型设置中完成 Codex 授权",
+        title: "2. 获取 API Key",
         description:
-          "进入「设置 → 模型配置」，使用 OpenAI Codex 区域的「浏览器授权」或粘贴 auth.json 完成连接。",
+          '进入百炼控制台 → API Key 管理页面，点击「创建 API Key」即可生成。',
       },
       {
-        title: "3. 预填并保存模型",
+        title: "3. 复制并使用",
         description:
-          "将 Model ID 设置为 openai-codex/gpt-5.2-codex 并保存，即可在模型选择器中使用 Codex。",
+          "复制 API Key 粘贴到下方。阿里云百炼在国内直连无需代理，延迟低且稳定。新用户有免费额度可用。",
       },
     ],
   },
@@ -231,7 +231,7 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
     description: "全球模型聚合路由 — 一个 Key 用遍全球模型",
     pricing: "按模型计费，支持多种支付方式",
     purchaseUrl: "https://openrouter.ai/keys",
-    model: "anthropic/claude-sonnet-4-6",
+    model: "anthropic/claude-sonnet-5",
     base_url: "https://openrouter.ai/api/v1",
     protocol: "openai",
     thinking_mode: "openrouter",
@@ -254,6 +254,35 @@ export const PROVIDER_GUIDES: ProviderGuide[] = [
       },
     ],
   },
+  {
+    id: "openai-codex",
+    label: "OpenAI Codex",
+    description: "ChatGPT Plus/Pro 订阅模型（支持 Codex 登录）",
+    pricing: "使用 ChatGPT Plus/Pro 订阅，无需单独 API 充值",
+    purchaseUrl: "https://chatgpt.com",
+    model: "openai-codex/gpt-6-astra",
+    base_url: "https://api.openai.com/v1",
+    protocol: "openai",
+    thinking_mode: "openai_reasoning",
+    model_family: "gpt",
+    steps: [
+      {
+        title: "1. 登录 ChatGPT",
+        description:
+          "确保你的账号已开通 ChatGPT Plus/Pro（Codex 订阅能力）。",
+      },
+      {
+        title: "2. 在模型设置中完成 Codex 授权",
+        description:
+          "进入「设置 → 模型配置」，使用 OpenAI Codex 区域的「浏览器授权」或粘贴 auth.json 完成连接。",
+      },
+      {
+        title: "3. 预填并保存模型",
+        description:
+          "将 Model ID 设置为 openai-codex/gpt-6-astra 并保存，即可在模型选择器中使用 Codex。",
+      },
+    ],
+  },
 ];
 
 export const PROVIDER_LOGO_SLUG: Record<string, string> = {
@@ -261,9 +290,9 @@ export const PROVIDER_LOGO_SLUG: Record<string, string> = {
   anthropic: "anthropic",
   gemini: "gemini",
   deepseek: "deepseek",
+  kimi: "moonshot",
   qwen: "qwen",
   zhipu: "zhipu",
   "openai-codex": "openai",
-  "google-gemini": "gemini",
   openrouter: "openrouter",
 };

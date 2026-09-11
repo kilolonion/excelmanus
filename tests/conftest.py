@@ -26,22 +26,6 @@ hyp_settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture(autouse=True)
-def _disable_mid_discussion_passthrough(monkeypatch: pytest.MonkeyPatch) -> None:
-    """禁用引擎的"中间讨论放行"机制，防止测试中 mock 响应列表被额外迭代耗尽。
-
-    引擎在工具调用后收到短文本回复时会触发"中间讨论放行"继续迭代，
-    导致测试中预设的有限 mock 响应被耗尽。此 fixture 通过 monkeypatch
-    将 excelmanus.engine 模块中的 _MID_DISCUSSION_MAX_LEN 阈值设为 0，
-    使该分支条件 `len(reply_text) < 0` 永远不成立。
-    """
-    try:
-        import excelmanus.engine as engine_mod
-        monkeypatch.setattr(engine_mod, "_MID_DISCUSSION_MAX_LEN", 0)
-    except Exception:
-        pass
-
-
-@pytest.fixture(autouse=True)
 def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """每个测试用例自动隔离环境变量，避免测试间互相污染。
 
@@ -60,17 +44,17 @@ def _reset_tool_guards() -> None:
     """
     yield
     _TOOL_MODULES_WITH_GUARD = [
-        "excelmanus.tools.worksheet_tools",
-        "excelmanus.tools.cell_tools",
-        "excelmanus.tools.data_tools",
-        "excelmanus.tools.format_tools",
-        "excelmanus.tools.advanced_format_tools",
-        "excelmanus.tools.chart_tools",
-        "excelmanus.tools.sheet_tools",
+        "excelmanus.workbook.cells",
+        "excelmanus.workbook.data",
+        "excelmanus.workbook.styles",
+        "excelmanus.workbook.charts",
+        "excelmanus.workbook.sheets",
         "excelmanus.tools.file_tools",
         "excelmanus.tools.image_tools",
         "excelmanus.tools.code_tools",
         "excelmanus.tools.shell_tools",
+        "excelmanus.tools.intent_tools",
+        "excelmanus.tools.reference_tools",
     ]
     import sys
     for mod_name in _TOOL_MODULES_WITH_GUARD:

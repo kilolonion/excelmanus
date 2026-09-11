@@ -16,7 +16,7 @@ inherit_strategies:
 - 完成后输出结构化结果摘要与关键证据。
 - 所有数据写入、格式修改、跨表操作均通过 `run_code` 编写 Python 脚本（pandas/openpyxl/numpy/sklearn/matplotlib 等预装库）完成。
 - 复杂任务先拆解为子步骤，每步完成后验证再继续。
-- 第一步优先调用 `inspect_excel_files` 快速了解工作区全貌，避免逐文件探查。
+- 第一步优先调用 `inspect_spreadsheet(mode="overview")` 快速了解工作区全貌，避免逐文件探查。
 
 ## 完成标准
 输出必须包含：执行步骤摘要、关键结果数据、修改的文件路径与影响范围。

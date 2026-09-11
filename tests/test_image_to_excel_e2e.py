@@ -65,43 +65,29 @@ _FULL_SPEC = {
 
 
 class TestImageToExcelPipeline:
-    """端到端集成测试：spec → rebuild → verify 完整闭环。"""
+    """端到端：spec 文本编译为 xlsx，再用 openpyxl 核对格子。"""
 
     def test_spec_roundtrip(self, tmp_path: Path) -> None:
-        """ReplicaSpec → rebuild → verify 完整闭环，match_rate 应为 1.0。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, verify_excel_replica, init_guard
+        from openpyxl import load_workbook
 
-        init_guard(str(tmp_path))
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_FULL_SPEC), encoding="utf-8")
+        from excelmanus.replica_spec import compile_spec_text_to_bytes
+
         excel_path = tmp_path / "draft.xlsx"
-        report_path = tmp_path / "diff_report.md"
-
-        # rebuild
-        rebuild_result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(spec_path), output_path=str(excel_path),
-        ))
-        assert rebuild_result["status"] == "ok"
+        data, summary = compile_spec_text_to_bytes(json.dumps(_FULL_SPEC))
+        excel_path.write_bytes(data)
         assert excel_path.exists()
-        assert rebuild_result["build_summary"]["cells_written"] == 9
-        assert rebuild_result["build_summary"]["styles_applied"] == 3
+        assert summary["cells_written"] == 9
 
-        # verify
-        verify_result = json.loads(verify_excel_replica(
-            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
-        ))
-        assert verify_result["status"] == "ok"
-        assert verify_result["match_rate"] == 1.0
-        assert verify_result["issues"]["low_confidence"] == 1  # 来自 uncertainties
-        assert report_path.exists()
-
-        # 报告内容检查
-        report_content = report_path.read_text(encoding="utf-8")
-        assert "100.0%" in report_content
-        assert "低置信项" in report_content
+        wb = load_workbook(str(excel_path))
+        ws = wb["Sheet1"]
+        assert ws["A1"].value == "产品"
+        assert ws["B2"].value == 100
+        assert ws["C2"].value == 500.5
+        assert ws["A1"].font.bold is True
+        assert ws.freeze_panes == "A2"
 
     def test_read_image_returns_injection(self, tmp_path: Path) -> None:
-        """read_image → __tool_result_image__ 结构正确。"""
+        """read_image → ui_meta.image，不把 base64 写进 model_text。"""
         from excelmanus.tools.image_tools import read_image, init_guard
 
         png_data = base64.b64decode(_MINIMAL_PNG_B64)
@@ -109,21 +95,20 @@ class TestImageToExcelPipeline:
         img_path.write_bytes(png_data)
         init_guard(str(tmp_path))
 
-        result = json.loads(read_image(file_path=str(img_path)))
-        assert result["status"] == "ok"
-        injection = result["__tool_result_image__"]
+        out = read_image(file_path=str(img_path))
+        assert out.success
+        injection = out.ui_meta.image
         assert injection["mime_type"] == "image/png"
-        # base64 应能解码回原始数据
         decoded = base64.b64decode(injection["base64"])
         assert decoded == png_data
+        assert "__tool_result_image__" not in out.model_text
 
     def test_rebuild_with_merged_cells_and_styles(self, tmp_path: Path) -> None:
         """复杂 spec（合并+样式+freeze）编译正确。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
         from openpyxl import load_workbook
 
-        init_guard(str(tmp_path))
-        # 构建合并友好的 spec：只有锚点 A1 有值，B1/C1 无值，合并不会丢数据
+        from excelmanus.replica_spec import compile_spec_text_to_bytes
+
         merge_spec = {
             **_FULL_SPEC,
             "sheets": [{
@@ -146,11 +131,9 @@ class TestImageToExcelPipeline:
         spec_path.write_text(json.dumps(merge_spec), encoding="utf-8")
         excel_path = tmp_path / "complex.xlsx"
 
-        result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(spec_path), output_path=str(excel_path),
-        ))
-        assert result["status"] == "ok"
-        assert result["build_summary"]["merges_applied"] == 1
+        data, summary = compile_spec_text_to_bytes(json.dumps(merge_spec))
+        excel_path.write_bytes(data)
+        assert summary["merges_applied"] == 1
 
         # 验证 openpyxl 结构
         wb = load_workbook(str(excel_path))

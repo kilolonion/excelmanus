@@ -47,7 +47,6 @@ def test_all_tools_modules_importable() -> None:
 
 def test_image_to_excel_pipeline_modules_importable() -> None:
     for module_name in (
-        "excelmanus.vision_extractor",
         "excelmanus.replica_spec",
         "excelmanus.tools.image_tools",
     ):

@@ -183,7 +183,6 @@ def build_qq_app(
     allowed_users: set[str] | None = None,
     session_store: SessionStore | None = None,
     rate_limit_config: RateLimitConfig | None = None,
-    bind_manager: object | None = None,
     service_token: str | None = None,
     is_sandbox: bool = False,
     config_store: object | None = None,
@@ -214,7 +213,6 @@ def build_qq_app(
         session_store=store,
         allowed_users=allowed_users,
         rate_limit_config=rate_limit_config,
-        bind_manager=bind_manager,
         event_bridge=event_bridge,
         config_store=config_store,
     )

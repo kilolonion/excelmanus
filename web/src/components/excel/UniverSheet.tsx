@@ -5,6 +5,11 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useTouchGesture } from "@/hooks/use-touch-gesture";
 import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
+import {
+  colIndexToLetter,
+  extractCellEditsFromSheetValueChanged,
+  isDemoExcelPath,
+} from "@/lib/excel-cell-edit";
 
 // ── Univer 模块预加载缓存（全局单例，只加载一次） ──
 let _univerModuleCache: Promise<{
@@ -45,11 +50,13 @@ export function prefetchUniverModules() {
 interface UniverSheetProps {
   fileUrl: string;
   highlightCells?: string[];
-  onCellEdit?: (cell: string, value: unknown) => void;
+  onCellEdit?: (cell: string, value: unknown, sheet?: string) => void;
   initialSheet?: string;
   selectionMode?: boolean;
   onRangeSelected?: (range: string, sheet: string) => void;
   withStyles?: boolean;
+  /** 对比视图等只读场景：禁止编辑且不写回 */
+  readOnly?: boolean;
 }
 
 function createPreviewWorkbookId(): string {
@@ -76,7 +83,7 @@ function extractPathFromUrl(url: string): string {
 
 /** Check whether a path refers to the onboarding demo file. */
 function isDemoPath(path: string): boolean {
-  return path.startsWith("__demo__") || path.startsWith("./__demo__");
+  return isDemoExcelPath(path);
 }
 
 /** Generate mock snapshot data for the onboarding demo file. */
@@ -208,25 +215,65 @@ function snapshotToWorkbookData(
   };
 }
 
-/**
- * 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。
- */
-function colIndexToLetter(index: number): string {
-  let result = "";
-  let n = index;
-  while (n >= 0) {
-    result = String.fromCharCode((n % 26) + 65) + result;
-    n = Math.floor(n / 26) - 1;
+function rememberSnapshotVersion(filePath: string, version: unknown) {
+  if (!filePath || isDemoPath(filePath)) return;
+  if (typeof version === "string" && version) {
+    useExcelStore.getState().setContentVersion(filePath, version);
   }
-  return result;
 }
 
-export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true }: UniverSheetProps) {
+function applyWorkbookEditable(api: any, readOnly: boolean) {
+  try {
+    api.getActiveWorkbook?.()?.setEditable?.(!readOnly);
+  } catch {
+    // 忽略权限 API 差异
+  }
+}
+
+function subscribeSheetValueChanged(api: any, onEvent: (params: unknown) => void): (() => void) | null {
+  const eventName = api?.Event?.SheetValueChanged ?? "SheetValueChanged";
+  if (typeof api?.addEvent === "function") {
+    try {
+      const sub = api.addEvent(eventName, onEvent);
+      if (sub && typeof sub.dispose === "function") {
+        return () => {
+          try { sub.dispose(); } catch { /* 忽略 */ }
+        };
+      }
+    } catch {
+      // 回退到 workbook.onCellDataChange
+    }
+  }
+  try {
+    const wb = api?.getActiveWorkbook?.();
+    if (wb && typeof wb.onCellDataChange === "function") {
+      const sub = wb.onCellDataChange(() => {
+        onEvent({ payload: { id: "sheet.mutation.set-range-values" }, effectedRanges: [] });
+      });
+      if (sub && typeof sub.dispose === "function") {
+        return () => {
+          try { sub.dispose(); } catch { /* 忽略 */ }
+        };
+      }
+    }
+  } catch {
+    // 该版本 Univer 无可用监听 API
+  }
+  return null;
+}
+
+export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false }: UniverSheetProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<any>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
   const loadVersionRef = useRef(0);
+  const onCellEditRef = useRef(onCellEdit);
+  const readOnlyRef = useRef(readOnly);
+  const suppressEditsRef = useRef(false);
+  const filePathRef = useRef("");
   const refreshCounter = useExcelStore((s) => s.refreshCounter);
+  onCellEditRef.current = onCellEdit;
+  readOnlyRef.current = readOnly;
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -372,6 +419,30 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   }, [isMobile, selectionMode]);
 
   const filePath = extractPathFromUrl(fileUrl);
+  filePathRef.current = filePath;
+
+  const beginSuppressEdits = () => {
+    suppressEditsRef.current = true;
+  };
+  const endSuppressEdits = () => {
+    const release = () => { suppressEditsRef.current = false; };
+    if (typeof window !== "undefined") {
+      window.setTimeout(release, 50);
+    } else {
+      release();
+    }
+  };
+
+  const emitCellEdits = (params: unknown) => {
+    if (suppressEditsRef.current || readOnlyRef.current) return;
+    const cb = onCellEditRef.current;
+    if (!cb) return;
+    if (isDemoPath(filePathRef.current)) return;
+    const edits = extractCellEditsFromSheetValueChanged(params as Parameters<typeof extractCellEditsFromSheetValueChanged>[0]);
+    for (const edit of edits) {
+      cb(edit.cell, edit.value, edit.sheet || undefined);
+    }
+  };
 
   const loadData = useCallback(
     async (api: any) => {
@@ -382,6 +453,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
       }
 
       const loadVersion = ++loadVersionRef.current;
+      beginSuppressEdits();
       try {
         setLoading(true);
         setError(null);
@@ -391,6 +463,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           ? { file: filePath, sheets: ["Sheet1"], all_snapshots: buildDemoSnapshots() }
           : await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
         if (loadVersion !== loadVersionRef.current) return;
+
+        rememberSnapshotVersion(filePath, (resp as { content_version?: string }).content_version);
 
         const allSnapshots: ExcelSnapshot[] = resp.all_snapshots;
         if (!allSnapshots.length) {
@@ -426,6 +500,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         }
         if (loadVersion !== loadVersionRef.current) return;
 
+        applyWorkbookEditable(api, readOnlyRef.current);
+
         // 若指定了初始 sheet 则切换过去
         if (initialSheet) {
           try {
@@ -450,6 +526,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         console.error("Error loading Excel data:", err);
         setError(err.message || "加载失败");
         setLoading(false);
+      } finally {
+        if (loadVersion === loadVersionRef.current) endSuppressEdits();
       }
     },
     [filePath, initialSheet, withStyles]
@@ -460,6 +538,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
     let disposed = false;
     let api: any = null;
+    let unsubscribeValueChanged: (() => void) | null = null;
 
     const init = async () => {
       try {
@@ -500,6 +579,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         api = univerAPI;
         univerRef.current = univerAPI;
+        unsubscribeValueChanged = subscribeSheetValueChanged(univerAPI, emitCellEdits);
 
         // 注意：此处只初始化 Univer 实例；工作簿创建与交互策略在后续流程处理。
 
@@ -508,7 +588,9 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         if (prefetchedData && prefetchedData.all_snapshots?.length) {
           // 直接注入预取数据
           const loadVersion = ++loadVersionRef.current;
+          beginSuppressEdits();
           try {
+            rememberSnapshotVersion(filePath, (prefetchedData as { content_version?: string }).content_version);
             const allSnapshots = prefetchedData.all_snapshots;
             let workbookId = createPreviewWorkbookId();
             workbookIdRef.current = workbookId;
@@ -522,6 +604,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
               workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
               univerAPI.createWorkbook(workbookData);
             }
+            applyWorkbookEditable(univerAPI, readOnlyRef.current);
             if (initialSheet) {
               try {
                 const wb = univerAPI.getActiveWorkbook();
@@ -536,6 +619,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           } catch {
             // 预取失败，回退到正常 loadData
             await loadData(univerAPI);
+          } finally {
+            if (loadVersion === loadVersionRef.current) endSuppressEdits();
           }
         } else {
           await loadData(univerAPI);
@@ -552,6 +637,7 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     return () => {
       disposed = true;
       loadVersionRef.current += 1;
+      unsubscribeValueChanged?.();
       if (api) {
         try {
           api.dispose();
@@ -569,6 +655,11 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
       loadData(univerRef.current);
     }
   }, [refreshCounter, loadData]);
+
+  useEffect(() => {
+    if (loading || !univerRef.current) return;
+    applyWorkbookEditable(univerRef.current, readOnly);
+  }, [readOnly, loading]);
 
   // highlightCells 变化时高亮单元格
   useEffect(() => {

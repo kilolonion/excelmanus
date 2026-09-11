@@ -21,6 +21,8 @@ _VALID_PERMISSION_MODES: set[str] = {"default", "acceptEdits", "readOnly", "dont
 _VALID_CAPABILITY_MODES: set[str] = {"restricted", "full"}
 _VALID_MEMORY_SCOPES: set[str] = {"user", "project"}
 _MEMORY_SCOPE_KEYS: tuple[str, ...] = ("memory_scope", "memory-scope", "memory")
+# 仍可 get("verifier") 显式调用；不出现在 delegate 默认目录。
+_CATALOG_HIDDEN: frozenset[str] = frozenset({"verifier"})
 _SUBAGENT_NAME_ALIASES: dict[str, str] = {
     # explorer/verifier 是独立内置子代理，不回退到 subagent
     "explore": "explorer",
@@ -83,6 +85,8 @@ class SubagentRegistry:
         lines = ["可用子代理：\n"]
         names: list[str] = []
         for agent in agents:
+            if agent.name in _CATALOG_HIDDEN:
+                continue
             names.append(agent.name)
             lines.append(f"- {agent.name}：{agent.description}")
         return ("\n".join(lines), names)

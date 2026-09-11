@@ -42,11 +42,6 @@ vi.mock("@/stores/session-store", () => ({
     selector({ activeSessionId: null }),
 }));
 
-vi.mock("@/stores/auth-store", () => ({
-  useAuthStore: (selector: (state: { user: { id: string } | null }) => unknown) =>
-    selector({ user: { id: "user-1" } }),
-}));
-
 vi.mock("@/stores/word-store", () => ({
   useWordStore: (selector: (state: Record<string, ReturnType<typeof vi.fn>>) => unknown) =>
     selector({
@@ -112,10 +107,6 @@ vi.mock("@/components/sidebar/FileGroupListView", () => ({
 vi.mock("@/components/sidebar/ExcelFilesDialogs", () => ({
   ExcelFilesDialog: () => null,
   RemoveConfirmDialog: () => null,
-}));
-
-vi.mock("@/components/sidebar/StorageBar", () => ({
-  StorageBar: () => null,
 }));
 
 vi.mock("@/components/sidebar/FileRelationshipGraph", () => ({

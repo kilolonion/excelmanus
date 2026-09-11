@@ -7,7 +7,7 @@ from excelmanus.engine_core.observation_masker import (
     _build_tool_call_name_map,
     mask_messages,
     _mask_run_code,
-    _mask_read_excel,
+    _mask_inspect,
     _mask_generic,
     _mask_tool_result,
 )
@@ -34,7 +34,7 @@ class TestMaskMessages:
         msgs = [
             _msg("user", "q1"),
             _msg("assistant", "a1"),
-            _tool_msg("read_excel", "x" * 500),
+            _tool_msg("inspect_spreadsheet", "x" * 500),
             _msg("user", "q2"),
             _msg("assistant", "a2"),
         ]
@@ -48,7 +48,7 @@ class TestMaskMessages:
         for i in range(6):
             msgs.append(_msg("user", f"问题{i}"))
             msgs.append(_msg("assistant", f"回答{i}"))
-            msgs.append(_tool_msg("read_excel", "x" * 500))
+            msgs.append(_tool_msg("inspect_spreadsheet", "x" * 500))
 
         result = mask_messages(msgs, fresh_window=2)
 
@@ -63,7 +63,7 @@ class TestMaskMessages:
         msgs = []
         for i in range(6):
             msgs.append(_msg("user", f"长消息{'x' * 500}"))
-            msgs.append(_tool_msg("read_excel", "y" * 500))
+            msgs.append(_tool_msg("inspect_spreadsheet", "y" * 500))
 
         result = mask_messages(msgs, fresh_window=2)
         user_msgs = [m for m in result if m.get("role") == "user"]
@@ -76,7 +76,7 @@ class TestMaskMessages:
         for i in range(6):
             msgs.append(_msg("user", f"q{i}"))
             msgs.append(_msg("assistant", f"长回答{'x' * 500}"))
-            msgs.append(_tool_msg("read_excel", "y" * 500))
+            msgs.append(_tool_msg("inspect_spreadsheet", "y" * 500))
 
         result = mask_messages(msgs, fresh_window=2)
         asst_msgs = [m for m in result if m.get("role") == "assistant"]
@@ -88,7 +88,7 @@ class TestMaskMessages:
         msgs = []
         for i in range(6):
             msgs.append(_msg("user", f"q{i}"))
-            msgs.append(_tool_msg("read_excel", "short result"))
+            msgs.append(_tool_msg("inspect_spreadsheet", "short result"))
 
         result = mask_messages(msgs, fresh_window=2)
         tool_msgs = [m for m in result if m.get("role") == "tool"]
@@ -100,7 +100,7 @@ class TestMaskMessages:
         original_content = "x" * 500
         msgs = [
             _msg("user", "q1"),
-            _tool_msg("read_excel", original_content),
+            _tool_msg("inspect_spreadsheet", original_content),
             _msg("user", "q2"),
             _msg("user", "q3"),
             _msg("user", "q4"),
@@ -118,13 +118,13 @@ class TestBuildToolCallNameMap:
     def test_extracts_from_assistant_tool_calls(self) -> None:
         msgs = [
             {"role": "assistant", "content": None, "tool_calls": [
-                {"id": "tc_1", "type": "function", "function": {"name": "read_excel", "arguments": "{}"}},
+                {"id": "tc_1", "type": "function", "function": {"name": "inspect_spreadsheet", "arguments": "{}"}},
                 {"id": "tc_2", "type": "function", "function": {"name": "run_code", "arguments": "{}"}},
             ]},
             {"role": "tool", "tool_call_id": "tc_1", "content": "data..."},
         ]
         name_map = _build_tool_call_name_map(msgs)
-        assert name_map["tc_1"] == "read_excel"
+        assert name_map["tc_1"] == "inspect_spreadsheet"
         assert name_map["tc_2"] == "run_code"
 
     def test_empty_messages(self) -> None:
@@ -144,9 +144,9 @@ class TestMaskToolResultWithNameMap:
         result = _mask_tool_result(msg, name_map)
         assert "[run_code" in result["content"] or "输出已截断" in result["content"]
 
-    def test_routes_to_read_excel_mask(self) -> None:
+    def test_routes_to_inspect_mask(self) -> None:
         msg = {"role": "tool", "tool_call_id": "tc_2", "content": "共 500 行, 12 列" + "x" * 300}
-        name_map = {"tc_2": "read_excel"}
+        name_map = {"tc_2": "inspect_spreadsheet"}
         result = _mask_tool_result(msg, name_map)
         assert "已读取" in result["content"]
 
@@ -180,18 +180,18 @@ class TestMaskRunCode:
         assert "输出已截断" in masked
 
 
-class TestMaskReadExcel:
-    """read_excel 遮蔽逻辑。"""
+class TestMaskInspect:
+    """inspect_spreadsheet 遮蔽逻辑。"""
 
     def test_with_row_count(self) -> None:
         content = "Sheet1: 共 500 行, 12 列, columns: [A, B, C] " + "x" * 300
-        masked = _mask_read_excel(content)
+        masked = _mask_inspect(content)
         assert "500" in masked
         assert "已读取" in masked
 
     def test_without_metadata(self) -> None:
         content = "some data " + "x" * 300
-        masked = _mask_read_excel(content)
+        masked = _mask_inspect(content)
         assert "已读取" in masked
 
 

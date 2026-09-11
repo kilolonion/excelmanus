@@ -1,4 +1,4 @@
-"""ExcelManus — 窗口感知层 + Tools + Skillpacks 架构。"""
+"""ExcelManus — Tools + Skillpacks 架构。"""
 
 
 def _read_version() -> str:

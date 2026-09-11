@@ -42,7 +42,7 @@ class EventType(Enum):
     MEMORY_EXTRACTED = "memory_extracted"
     FILE_DOWNLOAD = "file_download"
     PLAN_CREATED = "plan_created"
-    VERIFICATION_REPORT = "verification_report"
+    VERIFICATION_REPORT = "verification_report"  # 仅用于读取历史，不再产生
     RETRACT_THINKING = "retract_thinking"
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
     STAGING_UPDATED = "staging_updated"  # staging 文件列表变化（apply/discard/新增）
@@ -158,11 +158,6 @@ class ToolCallEvent:
     # pipeline_progress 事件字段
     pipeline_stage: str = ""
     pipeline_message: str = ""
-    pipeline_phase_index: int = -1  # 当前阶段序号 (0-3)
-    pipeline_total_phases: int = 4
-    pipeline_spec_path: str = ""  # 当前阶段产出的 spec 文件路径
-    pipeline_diff: Optional[Dict[str, Any]] = None  # 阶段间 diff 数据
-    pipeline_checkpoint: Optional[Dict[str, Any]] = None  # 断点续跑信息
     # batch_progress 事件字段（批量任务进度）
     batch_index: int = 0           # 当前任务序号 (0-based)
     batch_total: int = 1           # 总任务数
@@ -180,12 +175,6 @@ class ToolCallEvent:
     plan_file_path: str = ""
     plan_title: str = ""
     plan_task_count: int = 0
-    # verification_report 事件字段
-    verification_verdict: str = ""       # pass / fail / unknown
-    verification_confidence: str = ""    # high / medium / low
-    verification_checks: List[str] = field(default_factory=list)
-    verification_issues: List[str] = field(default_factory=list)
-    verification_mode: str = ""          # advisory / blocking
     # staging_updated 事件字段
     staging_action: str = ""             # "applied" | "discarded" | "undone" | "new"
     staging_files: List[Dict[str, Any]] = field(default_factory=list)  # 变化的文件列表
@@ -207,6 +196,10 @@ class ToolCallEvent:
     fg_actions: List[Dict[str, str]] = field(default_factory=list)
     fg_provider: str = ""                # provider 标识
     fg_model: str = ""                   # 模型名
+    # tool_call_end 可选 UI 投影（merge/files 等小型事实）
+    ui: Optional[Dict[str, Any]] = None
+    # Code Mode 子调用：父 run_code 的 call id
+    parent_call_id: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""

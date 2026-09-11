@@ -1,6 +1,6 @@
 # ExcelManus Web
 
-ExcelManus 的前端项目，基于 Next.js 16 + React 19 + Tailwind CSS 4 + shadcn/ui 构建。
+ExcelManus 的前端项目，基于 Next.js 16 + React 19 + Tailwind CSS 4 + shadcn/ui 构建。需要 Node.js ≥ 20.9。
 
 ## 技术栈
 

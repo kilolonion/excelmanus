@@ -63,7 +63,7 @@ _HEARTBEAT_INTERVALS: list[float] = [15.0, 30.0, 60.0]
 def _brief_tool_args(tool_name: str, arguments: dict[str, Any] | None) -> str:
     """将工具参数格式化为简洁摘要（轻量版，避免导入 api_sse）。
 
-    示例: read_excel(path="data.xlsx", sheet="Sheet1")
+    示例: inspect_spreadsheet(file_path="data.xlsx", sheet="Sheet1")
     """
     if not isinstance(arguments, dict) or not arguments:
         return f"{tool_name}()"
@@ -143,7 +143,7 @@ class OutputStrategy(ABC):
 
     @abstractmethod
     async def on_tool_start(self, tool_name: str, *, args_summary: str = "") -> None:
-        """工具开始执行。args_summary 为参数摘要如 read_excel(path="x.xlsx")。"""
+        """工具开始执行。args_summary 为参数摘要如 inspect_spreadsheet(file_path="x.xlsx")。"""
 
     @abstractmethod
     async def on_tool_end(self, tool_name: str, success: bool, *, error: str = "") -> None:
@@ -1223,7 +1223,7 @@ class ChunkedOutputManager:
             "error_is_reply": error_is_reply,
         }
 
-    # Web 端语言 → Bot 端替换映射（与 MessageHandler._ERROR_REWRITES 保持一致）
+    # Web 端语言 → Bot 端替换映射（与 MessageHandler._ERROR_REWRITES 对齐）
     _BOT_ERROR_REWRITES: list[tuple[str, str]] = [
         ("请刷新页面开始新对话", "请使用 /new 开始新对话"),
         ("请刷新页面重新开始", "请使用 /new 重新开始"),
@@ -1231,7 +1231,7 @@ class ChunkedOutputManager:
         ("请刷新页面", "请使用 /new"),
         ("请在模型设置中更新", "请使用 /addmodel 添加有效模型，或联系管理员检查 API Key"),
         ("请在设置中确认 Model ID", "请使用 /model 查看可用模型"),
-        ("请重新登录", "请使用 /bind 绑定账号"),
+        ("请重新登录", "请检查模型配置或 Codex 订阅"),
         ("请检查服务商账户余额", "请检查服务商账户余额，或使用 /model 切换到其他模型"),
         ("请检查服务商账户", "请检查服务商账户，或使用 /model 切换模型"),
         ("请检查模型配置", "请使用 /model 检查模型配置"),

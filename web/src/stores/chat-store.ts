@@ -9,6 +9,7 @@ import {
   deriveSessionTitleFromMessages,
   isFallbackSessionTitle,
 } from "@/lib/session-title";
+import { extractFileAttachmentsFromContent, stripImageSentPlaceholder } from "@/lib/upload-notice";
 
 // 内存快速缓存（扩展 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
@@ -91,8 +92,11 @@ interface LoadMessagesOptions {
  * 将连续的 assistant/tool 消息合并为带 blocks 的单个 assistant 消息。
  */
 const _EXCEL_WRITE_TOOL_NAMES = new Set([
-  "write_cells", "insert_rows", "insert_columns",
-  "create_sheet", "delete_sheet", "run_code",
+  "edit_spreadsheet",
+  "format_spreadsheet",
+  "manage_spreadsheet_objects",
+  "manage_spreadsheet_versions",
+  "run_code",
 ]);
 
 // 所有会修改工作区文件的工具（包括 Excel 写入 + 文本写入），用于恢复 affected files
@@ -109,6 +113,7 @@ const _MAX_DIFFS_IN_STORE = 500;
 // 从后端刷新时，必须从已有缓存消息中带出，避免视觉数据丢失（如 SessionSync 检测到 inFlight→false 时 thinking 块消失）。
 const _SSE_ONLY_BLOCK_TYPES = new Set([
   "thinking", "iteration", "approval_action", "subagent",
+  // verification_report 仅出现在历史缓存中，保留以便刷新时不丢旧卡片
   "token_stats", "status", "verification_report", "staging_hint", "memory_extracted",
   "llm_retry", "failure_guidance",
   "tool_notice", "reasoning_notice",
@@ -394,32 +399,10 @@ function _isToolResultError(content: string): boolean {
   }
 }
 
-// 鍖归厤 sendMessage 娉ㄥ叆鐨勬枃浠朵笂浼犻€氱煡鐨勬鍒?
-// "[宸蹭笂浼犳枃浠? ./path/to/file.xlsx]" or "[宸蹭笂浼犲浘鐗? ./path/to/image.png]"
-const _UPLOAD_NOTICE_RE = /\[[^\]\n]*:\s*([^\]\n]+)\]/g;
-
-/**
- * 浠庣敤鎴锋秷鎭唴瀹逛腑鐨勪笂浼犻€氱煡琛屾彁鍙?FileAttachment[]锛?
- * 杩斿洖鍘婚櫎閫氱煡鍚庣殑鍐呭鍙婇檮浠跺垪琛ㄣ€?
- */
 function _extractFileAttachmentsFromContent(
   rawContent: string,
 ): { content: string; files: FileAttachment[] } {
-  const files: FileAttachment[] = [];
-  _UPLOAD_NOTICE_RE.lastIndex = 0;
-  let match: RegExpExecArray | null;
-  while ((match = _UPLOAD_NOTICE_RE.exec(rawContent)) !== null) {
-    const filePath = match[1].trim();
-    if (!filePath) continue;
-    const filename = filePath.split("/").pop() || filePath;
-    files.push({ filename, path: filePath, size: 0 });
-  }
-  // 涓哄睍绀哄幓鎺夊唴瀹逛腑鎵€鏈夐€氱煡琛岋紱閫氱煡鍦ㄥ紑澶达紝姣忚涓€鏉★紝鍚庢帴 \n\n銆?
-  const cleaned = rawContent
-    .replace(/\[[^\]\n]*:\s*[^\]\n]+\]\n?/g, "")
-    .replace(/^\n+/, "")
-    .trim();
-  return { content: cleaned || (files.length > 0 ? "" : rawContent.trim()), files };
+  return extractFileAttachmentsFromContent(rawContent);
 }
 
 function _resolveBackendMessageId(msg: Record<string, unknown>): string {
@@ -460,8 +443,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     if (role === "user") {
       let content: string;
       if (typeof msg.content === "string") {
-        // 鍘绘帀 mark_images_sent() 娉ㄥ叆鐨勫熬閮ㄩ檷绾у浘鐗囧崰浣嶇锛堝 "\n[鍥剧墖 #1 宸插湪涔嬪墠鐨勫璇濅腑鍙戦€乚"锛夈€?
-        content = msg.content.replace(/\n?\[鍥剧墖 #\d+ 宸插湪涔嬪墠鐨勫璇濅腑鍙戦€乗]\s*$/g, "").trim();
+        content = stripImageSentPlaceholder(msg.content);
         // 璺宠繃浠呭寘鍚郴缁熸敞鍏ュ浘鐗囩殑娑堟伅锛圕 閫氶亾闄嶇骇锛夛紝鍏舵暣鏉″唴瀹逛粎涓哄崰浣嶇鏃惰烦杩囥€?
         if (!content) continue;
       } else if (Array.isArray(msg.content)) {
@@ -482,7 +464,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
         if (imageCount > 0 && !hasText) {
           continue;
         }
-        content = textParts.join("\n").trim() || "(澶氭ā鎬佹秷鎭?";
+        content = textParts.join("\n").trim() || "(多模态消息)";
       } else {
         content = JSON.stringify(msg.content ?? "");
       }
@@ -520,20 +502,32 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
           });
-          // 浠?offer_download 宸ュ叿缁撴灉涓仮澶?file_download 鍧?
+          // 从 offer_download 结果恢复 file_download 块（兼容旧 _file_download 与提升后的顶层字段）
           if (toolName === "offer_download" && hasResult && tcId) {
             const dlResultText = toolResultByCallId.get(tcId);
             if (dlResultText) {
               try {
-                const dlParsed = JSON.parse(dlResultText);
-                const dlData = dlParsed?._file_download;
-                if (dlData && dlData.file_path) {
+                const dlParsed = JSON.parse(dlResultText) as Record<string, unknown> | null;
+                const magic = dlParsed?._file_download as Record<string, unknown> | undefined;
+                const filePath =
+                  (typeof magic?.file_path === "string" && magic.file_path) ||
+                  (typeof dlParsed?.file_path === "string" ? dlParsed.file_path : "");
+                if (filePath) {
+                  const filename =
+                    (typeof magic?.filename === "string" && magic.filename) ||
+                    (typeof dlParsed?.filename === "string" ? dlParsed.filename : "") ||
+                    filePath.split("/").pop() ||
+                    "download";
+                  const description =
+                    (typeof magic?.description === "string" && magic.description) ||
+                    (typeof dlParsed?.description === "string" ? dlParsed.description : "") ||
+                    "";
                   blocks.push({
                     type: "file_download",
                     toolCallId: tcId,
-                    filePath: dlData.file_path,
-                    filename: dlData.filename || dlData.file_path.split("/").pop() || "download",
-                    description: dlData.description || "",
+                    filePath,
+                    filename,
+                    description,
                   });
                 }
               } catch { /* ignore parse errors */ }
@@ -646,7 +640,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
   try {
     const { diffs, previews, affected_files } = await fetchSessionExcelEvents(sessionId);
     if (diffs.length === 0 && previews.length === 0 && affected_files.length === 0) return;
-    if (useChatStore.getState().currentSessionId !== sessionId) return;
+    if (useChatStore.getState().loadedSessionId !== sessionId) return;
 
     const excelStore = useExcelStore.getState();
     for (const fp of affected_files) {
@@ -702,7 +696,7 @@ function _restoreAffectedFilesOnMessages(
   allAffectedFiles: string[],
   sessionId: string,
 ): void {
-  const current = useChatStore.getState().currentSessionId;
+  const current = useChatStore.getState().loadedSessionId;
   if (current !== sessionId) return;
 
   const toolCallFileMap = new Map<string, Set<string>>();
@@ -741,12 +735,12 @@ function _restoreAffectedFilesOnMessages(
 
   if (changed) {
     // 寮傛鎭㈠鏈熼棿浼氳瘽鍙兘宸插垏鎹€?
-    const latest = useChatStore.getState().currentSessionId;
+    const latest = useChatStore.getState().loadedSessionId;
     if (latest !== sessionId) return;
 
     useChatStore.getState().setMessages(updated);
     const store = useChatStore.getState();
-    if (store.currentSessionId === sessionId) {
+    if (store.loadedSessionId === sessionId) {
       saveCachedMessages(sessionId, updated).catch(() => {});
     }
   }
@@ -787,7 +781,7 @@ async function _loadMessagesAsyncWithOptions(
       maybeBackfillTitle(cached);
       const store = useChatStore.getState();
       if (
-        store.currentSessionId === sessionId
+        store.loadedSessionId === sessionId
         && !store.isStreaming
         && !store.abortController
         && (store.messages.length === 0 || shouldReplaceVisibleMessages)
@@ -814,7 +808,7 @@ async function _loadMessagesAsyncWithOptions(
     // 閬垮厤鍚庣鍒锋柊鏃惰涓㈠純銆?
     const store = useChatStore.getState();
     const shouldReplace =
-      store.currentSessionId === sessionId
+      store.loadedSessionId === sessionId
       && !store.isStreaming
       && !store.abortController
       && (store.messages.length === 0 || shouldReplaceVisibleMessages);
@@ -874,44 +868,10 @@ export async function refreshSessionMessagesFromBackend(
   });
 }
 
-export interface VlmPhaseEntry {
-  stage: string;
-  message: string;
-  startedAt: number;
-  duration?: number;
-  diff?: PipelineStatus["diff"];
-  specPath?: string;
-  phaseIndex: number;
-  totalPhases: number;
-}
-
 export interface PipelineStatus {
   stage: string;
   message: string;
   startedAt: number;
-  phaseIndex?: number;
-  totalPhases?: number;
-  specPath?: string;
-  diff?: {
-    changes: Array<{
-      type: string;
-      sheet?: string;
-      cells_added?: number;
-      cells_modified?: number;
-      modified_details?: Array<{
-        cell: string;
-        old_value: unknown;
-        new_value: unknown;
-      }>;
-      merges_added?: number;
-      styles_added?: number;
-    }>;
-    summary: string;
-  };
-  checkpoint?: Record<string, unknown>;
-  // 鎵归噺浠诲姟鐩稿叧瀛楁
-  batchIndex?: number;
-  batchTotal?: number;
 }
 
 export interface BatchProgress {
@@ -928,7 +888,8 @@ interface ChatState {
   messageOrder: string[];
   messagesById: Record<string, Message>;
   messageIndexById: Record<string, number>;
-  currentSessionId: string | null;
+  /** 当前 messages 绑定的会话。不是选中态事实源；选中态见 session-store.activeSessionId。 */
+  loadedSessionId: string | null;
   activeStreamId: string | null;
   latestSeq: number;
   resumeFailedReason: string | null;
@@ -938,9 +899,8 @@ interface ChatState {
   pendingQuestion: Question | null;
   abortController: AbortController | null;
   pipelineStatus: PipelineStatus | null;
-  vlmPhases: VlmPhaseEntry[];
   batchProgress: BatchProgress | null;
-  toolProgress: Record<string, { stage: string; message: string; phaseIndex?: number; totalPhases?: number }>;
+  toolProgress: Record<string, { stage: string; message: string }>;
   isLoadingMessages: boolean;
 
   setMessages: (messages: Message[]) => void;
@@ -976,15 +936,14 @@ interface ChatState {
   markResumeFailed: (reason: string) => void;
   clearResumeFailed: () => void;
   setBatchProgress: (progress: BatchProgress | null) => void;
-  setToolProgress: (toolCallId: string, progress: { stage: string; message: string; phaseIndex?: number; totalPhases?: number }) => void;
+  setToolProgress: (toolCallId: string, progress: { stage: string; message: string }) => void;
   clearToolProgress: (toolCallId: string) => void;
-  pushVlmPhase: (entry: VlmPhaseEntry) => void;
-  clearVlmPhases: () => void;
   clearMessages: () => void;
   removeSessionCache: (sessionId: string) => void;
   switchSession: (sessionId: string | null) => void;
   clearAllHistory: () => Promise<void>;
   saveCurrentSession: () => void;
+  bindLoadedSession: (sessionId: string | null) => void;
 }
 
 export const useChatStore = create<ChatState>((set, get) => ({
@@ -992,7 +951,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   messageOrder: [],
   messagesById: {},
   messageIndexById: {},
-  currentSessionId: null,
+  loadedSessionId: null,
   activeStreamId: null,
   latestSeq: 0,
   resumeFailedReason: null,
@@ -1002,7 +961,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
   pendingQuestion: null,
   abortController: null,
   pipelineStatus: null,
-  vlmPhases: [],
   batchProgress: null,
   toolProgress: {},
   isLoadingMessages: false,
@@ -1209,18 +1167,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       const { [toolCallId]: _, ...rest } = state.toolProgress;
       return { toolProgress: rest };
     }),
-  pushVlmPhase: (entry) =>
-    set((state) => ({
-      vlmPhases: [...state.vlmPhases.filter((p) => p.stage !== entry.stage), entry],
-    })),
-  clearVlmPhases: () => set({ vlmPhases: [] }),
   clearMessages: () => {
-    const { currentSessionId } = get();
-    // 清除内存缓存
-    if (currentSessionId) {
-      _sessionMessages.delete(currentSessionId);
-      // 娓呴櫎 IndexedDB 缂撳瓨
-      deleteCachedMessages(currentSessionId).catch(() => {});
+    const { loadedSessionId } = get();
+    if (loadedSessionId) {
+      _sessionMessages.delete(loadedSessionId);
+      deleteCachedMessages(loadedSessionId).catch(() => {});
     }
     set({
       ..._setMessagesSnapshot([]),
@@ -1239,9 +1190,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
     deleteCachedMessages(sessionId).catch(() => {});
 
     const state = get();
-    if (state.currentSessionId === sessionId) {
+    if (state.loadedSessionId === sessionId) {
       set({
-        currentSessionId: null,
+        loadedSessionId: null,
         ..._setMessagesSnapshot([]),
         isLoadingMessages: false,
         pendingApproval: null,
@@ -1254,7 +1205,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     }
   },
 
-  /** 娓呯┖鎵€鏈変細璇濆巻鍙诧細鍚庣 + IndexedDB + 鍐呭瓨 + 鏈湴 session 鍒楄〃銆?*/
+  /** 清空所有会话历史：后端 + IndexedDB + 内存 + 本地 session 列表。 */
   clearAllHistory: async () => {
     const { stopGeneration } = await import("@/lib/chat-actions");
     if (get().abortController) {
@@ -1266,7 +1217,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
     useSessionStore.getState().setSessions([]);
     useSessionStore.getState().setActiveSession(null);
     set({
-      currentSessionId: null,
+      loadedSessionId: null,
       ..._setMessagesSnapshot([]),
       isLoadingMessages: false,
       pendingApproval: null,
@@ -1278,36 +1229,42 @@ export const useChatStore = create<ChatState>((set, get) => ({
   },
 
   saveCurrentSession: () => {
-    const { currentSessionId, messages } = get();
-    if (currentSessionId && messages.length > 0) {
-      _sessionMessages.set(currentSessionId, [...messages]);
-      saveCachedMessages(currentSessionId, messages).catch(() => {});
+    const { loadedSessionId, messages } = get();
+    if (loadedSessionId && messages.length > 0) {
+      _sessionMessages.set(loadedSessionId, [...messages]);
+      saveCachedMessages(loadedSessionId, messages).catch(() => {});
     }
+  },
+
+  bindLoadedSession: (sessionId) => {
+    const state = get();
+    if (state.loadedSessionId === sessionId) return;
+    if (state.loadedSessionId && state.messages.length > 0) {
+      _sessionMessages.set(state.loadedSessionId, [...state.messages]);
+      saveCachedMessages(state.loadedSessionId, state.messages).catch(() => {});
+    }
+    set({ loadedSessionId: sessionId });
   },
 
   switchSession: (sessionId) => {
     const state = get();
 
-    // 浠呭綋澶勪簬褰撳墠浼氳瘽涓旀鍦ㄦ祦寮忚緭鍑烘椂璺宠繃銆傛鍓嶅湪 messages.length > 0 鏃朵篃浼氳烦杩囷紝瀵艰嚧寮傛鍔犺浇鍚庣偣鍑昏闈欓粯蹇界暐銆?
-    if (sessionId && sessionId === state.currentSessionId) {
+    // 已绑定该会话：流式输出中跳过；已有消息则无需重拉。
+    if (sessionId === state.loadedSessionId) {
       if (state.abortController) return;
-      // 宸插姞杞斤紝鏃犻渶閲嶆柊鎷夊彇
-      if (state.messages.length > 0) return;
+      if (!sessionId || state.messages.length > 0) return;
     }
 
-    // 灏嗗綋鍓嶄細璇濇秷鎭啓鍏ヤ袱澶勭紦瀛?
-    if (state.currentSessionId && state.messages.length > 0) {
-      _sessionMessages.set(state.currentSessionId, [...state.messages]);
-      saveCachedMessages(state.currentSessionId, state.messages).catch(() => {});
+    if (state.loadedSessionId && state.messages.length > 0) {
+      _sessionMessages.set(state.loadedSessionId, [...state.messages]);
+      saveCachedMessages(state.loadedSessionId, state.messages).catch(() => {});
     }
 
-    // 鍏堜粠鍐呭瓨缂撳瓨鍔犺浇鐩爣浼氳瘽娑堟伅
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {
-      // F5锛氬嵆浣垮懡涓悓姝ョ紦瀛樹篃閫掑鐗堟湰锛屼互鍙栨秷鏈畬鎴愮殑寮傛鍔犺浇
       ++_switchSessionVersion;
       set({
-        currentSessionId: sessionId,
+        loadedSessionId: sessionId,
         ..._setMessagesSnapshot(memCached),
         isLoadingMessages: false,
         pendingApproval: null,
@@ -1318,15 +1275,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // F5: 閫掑鐗堟湰鍙凤紝鍙栨秷涔嬪墠鐨?loadAndSwitch 寮傛鎿嶄綔
     const myVersion = ++_switchSessionVersion;
 
-    // 鏀硅繘锛氫笉绔嬪嵆娓呯┖娑堟伅锛岃€屾槸鍏堝皾璇曚粠 IndexedDB 鍔犺浇
-    // 鍙湁鍦ㄧ‘瀹炴病鏈夌紦瀛樻椂鎵嶆竻绌猴紝鍑忓皯娑堟伅闂儊
     const loadAndSwitch = async () => {
       if (!sessionId) {
         set({
-          currentSessionId: null,
+          loadedSessionId: null,
           ..._setMessagesSnapshot([]),
           isLoadingMessages: false,
           pendingApproval: null,
@@ -1339,17 +1293,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return;
       }
 
-      // 鍏堝皾璇曚粠 IndexedDB 蹇€熷姞杞?
       try {
         const cached = await loadCachedMessages(sessionId);
         if (cached && cached.length > 0) {
-          // F5: 妫€鏌ョ増鏈彿 鈥?鑻ュ凡琚洿鏂扮殑 switchSession 璋冪敤鍙栦唬鍒欐斁寮?
           if (_switchSessionVersion !== myVersion) return;
-          // 鑻?sendMessage 宸插湪姝ゆ湡闂村惎鍔ㄦ祦寮忚緭鍑猴紝涓嶈瑕嗙洊鍏朵箰瑙傛坊鍔犵殑娑堟伅
           if (get().abortController) return;
           _sessionMessages.set(sessionId, cached);
           set({
-            currentSessionId: sessionId,
+            loadedSessionId: sessionId,
             ..._setMessagesSnapshot(cached),
             isLoadingMessages: false,
             pendingApproval: null,
@@ -1357,22 +1308,18 @@ export const useChatStore = create<ChatState>((set, get) => ({
             pipelineStatus: null,
             resumeFailedReason: null,
           });
-          // 绔嬪嵆鎭㈠ Excel 浜嬩欢锛岀‘淇?diff 鏁版嵁鍙婃椂鏄剧ず
           _loadPersistedExcelEvents(sessionId).catch(() => {});
           return;
         }
       } catch {
-        // IndexedDB 澶辫触锛岀户缁悗缁祦绋?
+        // IndexedDB 失败，继续后续流程
       }
 
-      // F5: 鍐嶆妫€鏌ョ増鏈彿
       if (_switchSessionVersion !== myVersion) return;
-      // 鍚屼笂锛氳嫢娴佸紡杈撳嚭宸插惎鍔ㄥ垯鏀惧純瑕嗙洊
       if (get().abortController) return;
 
-      // IndexedDB 娌℃湁缂撳瓨锛岀幇鍦ㄦ墠娓呯┖骞跺紓姝ュ姞杞?
       set({
-        currentSessionId: sessionId,
+        loadedSessionId: sessionId,
         ..._setMessagesSnapshot([]),
         pendingApproval: null,
         pendingQuestion: null,
@@ -1388,9 +1335,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
       });
     };
 
-    // 绔嬪嵆鏇存柊 currentSessionId锛屼絾淇濇寔褰撳墠娑堟伅鐩村埌鏂版秷鎭姞杞藉畬鎴?
+    // 立即绑定 loadedSessionId，但保持当前消息直到新消息加载完成。
+    // 不写 session-store：选中态由 setActiveSession 单源更新。
     set({
-      currentSessionId: sessionId,
+      loadedSessionId: sessionId,
       isLoadingMessages: true,
       pendingApproval: null,
       pendingQuestion: null,

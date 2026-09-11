@@ -1,6 +1,6 @@
 ---
 name: excel_code_runner
-description: 通过生成并运行 Python 脚本处理大体量 Excel 文件，适用于 read_excel 全量读取成本高、需要分批处理或复杂计算的任务。
+description: 通过生成并运行 Python 脚本处理大体量 Excel 文件，适用于 inspect_spreadsheet 全量读取成本高、需要分批处理或复杂计算的任务。
 file_patterns:
   - "*.xlsx"
   - "*.xlsm"
@@ -13,8 +13,8 @@ version: "1.0.0"
 
 1. 探查阶段
 - 先确认目标文件路径和 sheet 信息，避免盲目全量读取。
-- 先用 `get_file_info` 查看 `size_bytes`，超过阈值时保持“子上下文只读探索 + 摘要返回”。
-- 必要时用 `read_excel(max_rows=200)` 获取列名与样本数据。
+- 先用 `inspect_spreadsheet(mode="overview")` 看文件规模，超过阈值时保持“子上下文只读探索 + 摘要返回”。
+- 必要时用 `inspect_spreadsheet(mode="range", max_rows=200)` 获取列名与样本数据。
 
 2. 写脚本阶段
 - 使用 `write_text_file` 生成 `scripts/temp/*.py` 脚本。

@@ -143,6 +143,15 @@ class TestRestore:
         assert (workspace / "report.xlsx").read_bytes() == b"modified"
 
         ok = fvm.restore_to_original("report.xlsx")
+        assert ok is False
+        assert (workspace / "report.xlsx").read_bytes() == b"modified"
+
+        from excelmanus.workbook_commit import content_version_of
+
+        ok = fvm.restore_to_original(
+            "report.xlsx",
+            expected_version=content_version_of(b"modified"),
+        )
         assert ok is True
         assert (workspace / "report.xlsx").read_bytes() == b"excel-content-v1"
 
@@ -153,6 +162,16 @@ class TestRestore:
         (workspace / "report.xlsx").write_bytes(b"v3")
 
         ok = fvm.restore("report.xlsx", v2.version_id)
+        assert ok is False
+        assert (workspace / "report.xlsx").read_bytes() == b"v3"
+
+        from excelmanus.workbook_commit import content_version_of
+
+        ok = fvm.restore(
+            "report.xlsx",
+            v2.version_id,
+            expected_version=content_version_of(b"v3"),
+        )
         assert ok is True
         assert (workspace / "report.xlsx").read_bytes() == b"v2"
 
@@ -162,8 +181,17 @@ class TestRestore:
         assert ver is not None
         # 然后创建文件
         (workspace / "new_file.txt").write_text("created", encoding="utf-8")
-        # 恢复到 tombstone → 删除文件
         ok = fvm.restore("new_file.txt", ver.version_id)
+        assert ok is False
+        assert (workspace / "new_file.txt").exists()
+
+        from excelmanus.workbook_commit import content_version_of
+
+        ok = fvm.restore(
+            "new_file.txt",
+            ver.version_id,
+            expected_version=content_version_of(b"created"),
+        )
         assert ok is True
         assert not (workspace / "new_file.txt").exists()
 
@@ -222,6 +250,36 @@ class TestStaging:
         assert (workspace / "report.xlsx").read_bytes() == b"modified-in-staging"
         # staging 条目应被清除
         assert fvm.has_staging("report.xlsx") is False
+        assert result.get("committed_version", "").startswith("sha256:")
+        ok = fvm.undo_commit(result["original"], result["undo_path"])
+        assert ok is True
+        assert (workspace / "report.xlsx").read_bytes() == b"excel-content-v1"
+
+    def test_undo_commit_rejects_human_edit_after_apply(
+        self, fvm: FileVersionManager, workspace: Path
+    ) -> None:
+        staged = fvm.stage_for_write("report.xlsx")
+        Path(staged).write_bytes(b"modified-in-staging")
+        result = fvm.commit_staged("report.xlsx")
+        assert result is not None
+        (workspace / "report.xlsx").write_bytes(b"human-edit")
+        ok = fvm.undo_commit(result["original"], result["undo_path"])
+        assert ok is False
+        assert (workspace / "report.xlsx").read_bytes() == b"human-edit"
+
+    def test_commit_staged_conflicts_when_original_changed(
+        self, fvm: FileVersionManager, workspace: Path
+    ) -> None:
+        from excelmanus.workbook_commit import CommitError
+
+        staged = fvm.stage_for_write("report.xlsx")
+        Path(staged).write_bytes(b"modified-in-staging")
+        (workspace / "report.xlsx").write_bytes(b"external-change")
+        with pytest.raises(CommitError) as ei:
+            fvm.commit_staged("report.xlsx")
+        assert ei.value.code == "VERSION_CONFLICT"
+        assert (workspace / "report.xlsx").read_bytes() == b"external-change"
+        assert fvm.has_staging("report.xlsx") is True
 
     def test_commit_all_staged(self, fvm: FileVersionManager, workspace: Path) -> None:
         fvm.stage_for_write("report.xlsx")

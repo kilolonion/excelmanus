@@ -26,7 +26,6 @@ import {
 } from "@/components/ui/tooltip";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useAuthStore } from "@/stores/auth-store";
 import {
   uploadFile,
   uploadFileToFolder,
@@ -52,7 +51,6 @@ import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
 import { FileGroupListView } from "./FileGroupListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
-import { StorageBar } from "./StorageBar";
 import { FileRelationshipGraph } from "./FileRelationshipGraph";
 
 const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx";
@@ -128,7 +126,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     [workspaceFiles, showSystemFiles],
   );
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const currentUserId = useAuthStore((s) => s.user?.id ?? "__anonymous__");
+  const currentUserId = "process";
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputId = useId();
   const scannedUserIdRef = useRef<string | null>(null);
@@ -697,9 +695,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           </div>
         </TooltipProvider>
       )}
-
-      {/* Storage progress bar */}
-      {embedded && <StorageBar />}
 
       {/* Onboarding demo file (injected during coach marks, auto-removed after) */}
       {embedded && demoFile && (

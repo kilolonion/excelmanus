@@ -4,7 +4,6 @@
 - system prompt 拆分为稳定前缀 + 动态后缀
 - 稳定前缀在同一 session 内保持一致
 - Claude cache_control breakpoint 放在第一个 system block
-- chitchat 路由跳过工具 schema
 - cache 预热仅对 ClaudeClient 触发
 """
 
@@ -27,8 +26,8 @@ def _make_mock_engine():
     engine.full_access_enabled = False
     engine.max_context_tokens = 100000
     engine._effective_system_mode.return_value = "multi"
-    engine._effective_window_return_mode.return_value = "enriched"
     engine.state.prompt_injection_snapshots = []
+    engine.state.injected_context_fingerprint = None
     engine._task_store.current = None
     engine.state.last_iteration_count = 0
     engine.state.last_failure_count = 0
@@ -41,6 +40,7 @@ def _make_mock_engine():
     engine.config.max_iterations = 20
     engine._active_skills = []
     engine._last_route_result = None
+    engine._current_chat_mode = "write"
     return engine
 
 
@@ -51,86 +51,127 @@ def _make_mock_cb(engine):
     for name in (
         "_build_rules_notice", "_build_channel_notice", "_build_access_notice",
         "_build_backup_notice", "_build_mcp_context_notice",
-        "_build_file_registry_notice", "_build_memory_notice",
-        "_build_playbook_notice", "_build_skill_hints_notice",
-        "_build_meta_cognition_notice", "_build_verification_fix_notice",
-        "_build_post_write_verification_hint", "_build_scan_tool_hint",
-        "_build_explorer_report_notice", "_build_window_perception_notice",
+        "_build_file_registry_notice",
     ):
         setattr(cb, name, lambda: "")
     return cb
 
 
-def test_system_prompt_returns_multiple_blocks():
-    """_prepare_system_prompts_for_request 应返回至少 2 个 system prompt
-    （稳定前缀 + 动态后缀），以支持分层 cache。"""
+def _route():
     from unittest.mock import MagicMock
-
-    from excelmanus.engine_core.context_builder import ContextBuilder
-
-    engine = _make_mock_engine()
-
-    cb = _make_mock_cb(engine)
-
-    route_result = MagicMock()
-    route_result.route_mode = "all_tools"
-    route_result.system_contexts = []
-    route_result.write_hint = "unknown"
-    route_result.sheet_count = 0
-    route_result.max_total_rows = 0
-    route_result.task_tags = []
-
-    prompts, error = cb._prepare_system_prompts_for_request(
-        [], route_result=route_result,
-    )
-    assert error is None
-    # 至少 2 个：stable_prompt + dynamic_prompt（含 runtime_metadata）
-    assert len(prompts) >= 2, f"Expected >=2 prompts, got {len(prompts)}"
-    # 第一个应包含 identity
-    assert "ExcelManus" in prompts[0]
-    # 第二个应包含 runtime metadata
-    assert "Runtime:" in prompts[1]
-
-
-def test_stable_prompt_consistency():
-    """同一 session 连续两次调用，stable_prompt（第一个 block）内容完全相同。"""
-    from unittest.mock import MagicMock
-
-    engine = _make_mock_engine()
-    cb = _make_mock_cb(engine)
 
     route = MagicMock()
     route.route_mode = "all_tools"
     route.system_contexts = []
-    route.write_hint = "unknown"
-    route.sheet_count = 0
-    route.max_total_rows = 0
-    route.task_tags = []
+    return route
 
-    prompts1, _ = cb._prepare_system_prompts_for_request([], route_result=route)
-    # 模拟 session_turn 变化使 runtime_metadata 变化
+
+def test_system_prompt_stable_only_when_snapshot_empty():
+    """没有动态快照时只发稳定前缀，不再每步塞 Runtime 行。"""
+    engine = _make_mock_engine()
+    cb = _make_mock_cb(engine)
+
+    prompts, error = cb._prepare_system_prompts_for_request([], route_result=_route())
+    assert error is None
+    assert len(prompts) == 1
+    assert "ExcelManus" in prompts[0]
+    assert "Runtime:" not in prompts[0]
+
+
+def test_stable_prompt_consistency():
+    """同一 session 连续两次调用，稳定前缀不变；快照未变则不再追加动态块。"""
+    engine = _make_mock_engine()
+    cb = _make_mock_cb(engine)
+    panorama = "## 文件全景\nsales.xlsx | 1 sheet"
+    cb._build_file_registry_notice = lambda: panorama
+
+    prompts1, _ = cb._prepare_system_prompts_for_request([], route_result=_route())
     engine._session_turn = 2
     cb._turn_notice_cache.clear()
     cb._turn_notice_cache_key = -1
-    prompts2, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    prompts2, _ = cb._prepare_system_prompts_for_request([], route_result=_route())
 
-    # 稳定前缀应完全相同
-    assert prompts1[0] == prompts2[0], "Stable prefix should be identical across turns"
-    # 动态部分应不同（runtime_metadata 含 turn 号）
-    assert prompts1[1] != prompts2[1], "Dynamic part should differ across turns"
+    assert prompts1[0] == prompts2[0]
+    assert len(prompts1) == 2
+    assert panorama in prompts1[1]
+    assert len(prompts2) == 1
+    assert all(panorama not in block for block in prompts2)
 
 
 def test_dynamic_prompt_independence():
-    """修改 runtime_metadata 后，stable_prompt 不受影响。"""
+    """改 iteration 不影响稳定前缀。"""
     engine = _make_mock_engine()
     cb = _make_mock_cb(engine)
 
     stable1 = cb._build_stable_system_prompt()
-    # 改变 iteration count（影响 runtime_metadata）
     engine.state.last_iteration_count = 5
     stable2 = cb._build_stable_system_prompt()
 
-    assert stable1 == stable2, "Stable prompt must not change when runtime state changes"
+    assert stable1 == stable2
+
+
+def test_unchanged_panorama_not_reinjected():
+    """连续两步文件全景未变时，第二步请求不再重复那一段。"""
+    engine = _make_mock_engine()
+    cb = _make_mock_cb(engine)
+    panorama = "## 文件全景\nworkbook.xlsx | sheets=3 | rows=1200"
+    cb._build_file_registry_notice = lambda: panorama
+    route = _route()
+
+    first, err1 = cb._prepare_system_prompts_for_request([], route_result=route)
+    second, err2 = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert err1 is None and err2 is None
+    assert any(panorama in block for block in first)
+    assert all(panorama not in block for block in second)
+    assert engine.state.injected_context_fingerprint
+
+    cb._build_file_registry_notice = lambda: panorama + "\n# changed"
+    third, err3 = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert err3 is None
+    assert any("changed" in block for block in third)
+
+
+def test_plan_mode_injects_policy_then_skips():
+    """plan 只靠策略段，不靠路由标签；同一 plan 快照第二步不再重注。"""
+    from pathlib import Path
+
+    from excelmanus.prompt_composer import PromptComposer
+
+    engine = _make_mock_engine()
+    composer = PromptComposer(Path("excelmanus/prompts"))
+    composer.load_all()
+    engine._prompt_composer = composer
+    engine._current_chat_mode = "write"
+    cb = _make_mock_cb(engine)
+    route = _route()
+
+    write_prompts, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert all("## Plan mode" not in block for block in write_prompts)
+
+    engine._current_chat_mode = "plan"
+    plan_prompts, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert any("## Plan mode" in block for block in plan_prompts)
+    assert any("write_plan" in block for block in plan_prompts)
+
+    again, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert all("## Plan mode" not in block for block in again)
+
+
+def test_hook_injects_without_repeating_panorama():
+    """一次性 hook 只追加 hook 段，不把未变的全景再发一遍。"""
+    engine = _make_mock_engine()
+    cb = _make_mock_cb(engine)
+    panorama = "## 文件全景\nledger.xlsx"
+    cb._build_file_registry_notice = lambda: panorama
+    route = _route()
+
+    first, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert panorama in first[1]
+    engine._transient_hook_contexts = ["审批已通过"]
+    second, _ = cb._prepare_system_prompts_for_request([], route_result=route)
+    assert len(second) == 2
+    assert panorama not in second[1]
+    assert "审批已通过" in second[1]
 
 
 # ── B. Claude cache_control breakpoint 位置 ─────────────────
@@ -173,50 +214,6 @@ def test_claude_single_block_has_cache_control():
     assert len(system) == 1
     assert "cache_control" in system[0]
     assert system[0]["cache_control"] == {"type": "ephemeral"}
-
-
-# ── C. Chitchat 路由 ────────────────────────────────────────
-
-
-def test_chitchat_regex_matches_greetings():
-    """_CHITCHAT_RE 应匹配常见问候语。"""
-    from excelmanus.skillpacks.router import _CHITCHAT_RE
-
-    greetings = ["你好", "hello", "Hi", "嗨", "在吗", "你是谁", "帮助", "怎么用"]
-    for g in greetings:
-        assert _CHITCHAT_RE.match(g), f"Should match: {g!r}"
-
-
-def test_chitchat_regex_no_match_for_tasks():
-    """_CHITCHAT_RE 不应匹配任务型消息。"""
-    from excelmanus.skillpacks.router import _CHITCHAT_RE
-
-    tasks = [
-        "帮我读取 A1 单元格",
-        "创建一个新的工作表",
-        "把第一列的数据排序",
-    ]
-    for t in tasks:
-        assert not _CHITCHAT_RE.match(t), f"Should NOT match: {t!r}"
-
-
-def test_chitchat_route_returns_no_tools_prompt():
-    """chitchat route_mode 时，_prepare_system_prompts_for_request 仅返回 1 个 prompt。"""
-    from unittest.mock import MagicMock
-
-    engine = _make_mock_engine()
-    cb = _make_mock_cb(engine)
-
-    route = MagicMock()
-    route.route_mode = "chitchat"
-
-    prompts, error = cb._prepare_system_prompts_for_request([], route_result=route)
-    assert error is None
-    # chitchat 仅返回 stable_prompt
-    assert len(prompts) == 1
-    assert "ExcelManus" in prompts[0]
-    # 不应包含 runtime metadata
-    assert "Runtime:" not in prompts[0]
 
 
 # ── D. Cache 预热 ───────────────────────────────────────────

@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from excelmanus.auth.providers.base import AuthProvider, ProviderDescriptor
+    from excelmanus.auth.providers.base import AuthProvider
 
 _PROVIDERS: dict[str, "AuthProvider"] = {}
 
@@ -23,16 +23,6 @@ def get_provider(name: str) -> "AuthProvider | None":
 def list_all() -> dict[str, "AuthProvider"]:
     """返回所有已注册 provider 的副本。"""
     return dict(_PROVIDERS)
-
-
-def list_descriptors() -> list["ProviderDescriptor"]:
-    """返回所有已注册 provider 的描述符列表。"""
-    descriptors: list["ProviderDescriptor"] = []
-    for provider in _PROVIDERS.values():
-        get_descriptor = getattr(provider, "get_descriptor", None)
-        if callable(get_descriptor):
-            descriptors.append(get_descriptor())
-    return descriptors
 
 
 def match_provider(model: str) -> str | None:
@@ -55,9 +45,7 @@ def match_provider(model: str) -> str | None:
 
 def _register_builtins() -> None:
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-    from excelmanus.auth.providers.google_gemini import GoogleGeminiProvider
     register(OpenAICodexProvider())
-    register(GoogleGeminiProvider())
 
 
 _register_builtins()

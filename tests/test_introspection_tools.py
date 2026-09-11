@@ -43,10 +43,10 @@ def registry() -> ToolRegistry:
     reg = ToolRegistry()
     # 注册一些代表性工具
     for name in (
-        "read_excel", "write_text_file", "copy_file", "analyze_data",
-        "filter_data", "list_sheets", "run_code",
-        "list_directory", "get_file_info", "run_shell",
-        "delete_file", "rename_file",
+        "inspect_spreadsheet", "analyze_spreadsheet", "compare_spreadsheets",
+        "edit_spreadsheet", "write_text_file", "copy_file", "run_code",
+        "list_directory", "run_shell", "delete_file", "rename_file",
+        "read_word", "inspect_word",
     ):
         desc = TOOL_SHORT_DESCRIPTIONS.get(name, f"desc of {name}")
         reg.register_tool(
@@ -80,7 +80,7 @@ class TestBatchQuery:
     def test_batch_query_mode(self, registry: ToolRegistry) -> None:
         """批量查询应返回多个结果。"""
         queries = [
-            {"query_type": "tool_detail", "query": "read_excel"},
+            {"query_type": "tool_detail", "query": "inspect_spreadsheet"},
             {"query_type": "can_i_do", "query": "读取数据"},
         ]
         result = introspect_capability(queries=queries)
@@ -88,8 +88,8 @@ class TestBatchQuery:
         # 应包含两个查询的结果
         assert "[1]" in result
         assert "[2]" in result
-        assert "read_excel" in result
-        assert "tool_detail(read_excel)" in result
+        assert "inspect_spreadsheet" in result
+        assert "tool_detail(inspect_spreadsheet)" in result
 
     def test_batch_query_empty(self, registry: ToolRegistry) -> None:
         """空的批量查询应返回提示信息。"""
@@ -153,22 +153,21 @@ class TestToolDetail:
 
     def test_existing_tool(self, registry: ToolRegistry) -> None:
         """查询已注册工具应返回 schema 和权限信息。"""
-        result = introspect_capability("tool_detail", "read_excel")
-        assert "read_excel" in result
-        assert "file_path" in result  # schema 中的参数
-        assert "🟢" in result  # read_excel 是只读安全
+        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        assert "inspect_spreadsheet" in result
+        assert "file_path" in result
+        assert "🟢" in result
 
     def test_schema_consistency(self, registry: ToolRegistry) -> None:
         """返回的 schema 应与 ToolDef.input_schema 一致。"""
-        result = introspect_capability("tool_detail", "read_excel")
-        tool_def = registry.get_tool("read_excel")
+        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        tool_def = registry.get_tool("inspect_spreadsheet")
         assert tool_def is not None
-        # 验证 schema 内容出现在结果中
         assert '"file_path"' in result
 
     def test_permission_read_only(self, registry: ToolRegistry) -> None:
         """只读工具应标注为 🟢。"""
-        result = introspect_capability("tool_detail", "read_excel")
+        result = introspect_capability("tool_detail", "inspect_spreadsheet")
         assert "🟢" in result
 
     def test_permission_confirm(self, registry: ToolRegistry) -> None:
@@ -183,8 +182,8 @@ class TestToolDetail:
 
     def test_category_shown(self, registry: ToolRegistry) -> None:
         """应显示工具所属分类。"""
-        result = introspect_capability("tool_detail", "read_excel")
-        assert "data_read" in result
+        result = introspect_capability("tool_detail", "inspect_spreadsheet")
+        assert "inspect" in result
 
     def test_nonexistent_tool(self, registry: ToolRegistry) -> None:
         """查询不存在的工具应返回提示信息。"""
@@ -201,17 +200,16 @@ class TestCategoryTools:
 
     def test_valid_category(self, registry: ToolRegistry) -> None:
         """查询有效分类应返回该分类下所有工具。"""
-        result = introspect_capability("category_tools", "data_read")
-        for tool_name in TOOL_CATEGORIES["data_read"]:
+        result = introspect_capability("category_tools", "inspect")
+        for tool_name in TOOL_CATEGORIES["inspect"]:
             if registry.get_tool(tool_name) is not None or tool_name in TOOL_SHORT_DESCRIPTIONS:
                 assert tool_name in result
 
     def test_tools_with_descriptions(self, registry: ToolRegistry) -> None:
         """返回的工具应附带描述。"""
-        result = introspect_capability("category_tools", "data_read")
-        assert "read_excel" in result
-        # 描述应出现
-        desc = TOOL_SHORT_DESCRIPTIONS.get("read_excel", "")
+        result = introspect_capability("category_tools", "inspect")
+        assert "inspect_spreadsheet" in result
+        desc = TOOL_SHORT_DESCRIPTIONS.get("inspect_spreadsheet", "")
         if desc:
             assert desc in result
 
@@ -233,13 +231,13 @@ class TestCanIDo:
         """使用工具描述关键词应匹配到对应工具。"""
         result = introspect_capability("can_i_do", "读取 Excel 数据")
         assert "支持" in result
-        assert "read_excel" in result
+        assert "inspect_spreadsheet" in result
 
     def test_self_match(self, registry: ToolRegistry) -> None:
         """使用工具完整描述作为查询应匹配到该工具。"""
-        desc = TOOL_SHORT_DESCRIPTIONS["read_excel"]
+        desc = TOOL_SHORT_DESCRIPTIONS["inspect_spreadsheet"]
         result = introspect_capability("can_i_do", desc)
-        assert "read_excel" in result
+        assert "inspect_spreadsheet" in result
 
     def test_no_match(self, registry: ToolRegistry) -> None:
         """无匹配时应返回"无直接工具支持"。"""
@@ -282,13 +280,12 @@ class TestRelatedTools:
 
     def test_same_category(self, registry: ToolRegistry) -> None:
         """应返回同分类的其他工具。"""
-        result = introspect_capability("related_tools", "read_excel")
-        # read_excel 在 data_read 分类，应包含 filter_data
-        assert "filter_data" in result
+        result = introspect_capability("related_tools", "write_text_file")
+        assert "run_code" in result
 
     def test_no_predefined_combinations_section(self, registry: ToolRegistry) -> None:
         """related_tools 结果中不应出现预定义组合段落。"""
-        result = introspect_capability("related_tools", "read_excel")
+        result = introspect_capability("related_tools", "write_text_file")
         assert "预定义组合" not in result
 
     def test_no_related(self, registry: ToolRegistry) -> None:
@@ -336,7 +333,12 @@ class TestExtendedCapabilitiesConstants:
         for key, desc in _EXTENDED_CAPABILITIES.items():
             assert isinstance(key, str) and key
             assert isinstance(desc, str) and desc
-            assert "run_code" in desc, f"扩展能力 {key} 应提及 run_code"
+            assert (
+                "run_code" in desc
+                or "edit_spreadsheet" in desc
+                or "format_spreadsheet" in desc
+                or "manage_spreadsheet_objects" in desc
+            ), f"扩展能力 {key} 应指向意图工具或 run_code"
 
     def test_subagent_capabilities_match_builtin(self) -> None:
         """子代理能力描述应与 builtin.py 中定义的子代理一致。"""
@@ -353,10 +355,10 @@ class TestNoSideEffects:
     def test_registry_unchanged(self, registry: ToolRegistry) -> None:
         """调用后 ToolRegistry 状态不变。"""
         tools_before = set(registry.get_tool_names())
-        introspect_capability("tool_detail", "read_excel")
-        introspect_capability("category_tools", "data_read")
+        introspect_capability("tool_detail", "inspect_spreadsheet")
+        introspect_capability("category_tools", "inspect")
         introspect_capability("can_i_do", "读取数据")
-        introspect_capability("related_tools", "write_excel")
+        introspect_capability("related_tools", "edit_spreadsheet")
         tools_after = set(registry.get_tool_names())
         assert tools_before == tools_after
 
@@ -376,5 +378,5 @@ class TestRegistryNotInitialized:
 
     def test_returns_error(self, empty_registry: ToolRegistry) -> None:
         """未初始化时应返回错误提示。"""
-        result = introspect_capability("tool_detail", "read_excel")
+        result = introspect_capability("tool_detail", "inspect_spreadsheet")
         assert "工具注册表尚未初始化" in result

@@ -300,13 +300,7 @@ class SkillResolver:
                 message=message,
             )
 
-        picked_agent = self.normalize_skill_agent_name(action.agent_name)
-        if not picked_agent:
-            picked_agent = await e._auto_select_subagent(
-                task=task_text,
-                file_paths=[],
-            )
-        picked_agent = self.normalize_skill_agent_name(picked_agent) or "subagent"
+        picked_agent = self.normalize_skill_agent_name(action.agent_name) or "subagent"
 
         logger.info(
             "执行 hook agent action：event=%s agent=%s",

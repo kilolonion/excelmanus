@@ -50,7 +50,6 @@ function ProviderLogo({ id, size = 5 }: { id: string; size?: number }) {
 
 interface ProviderGuideStepProps {
   provider: ProviderGuide;
-  isAdmin: boolean;
   onBack: () => void;
   onComplete: () => void;
   onSkip?: () => void;
@@ -58,7 +57,6 @@ interface ProviderGuideStepProps {
 
 export function ProviderGuideStep({
   provider,
-  isAdmin,
   onBack,
   onComplete,
   onSkip,
@@ -101,30 +99,17 @@ export function ProviderGuideStep({
     if (!apiKey.trim()) return;
     setSaving(true);
     try {
-      if (isAdmin) {
-        await apiPut(
-          "/config/models/main",
-          {
-            model,
-            base_url: baseUrl,
-            api_key: apiKey,
-            protocol: provider.protocol,
-          },
-          { direct: true }
-        );
-        // Config saved successfully — clear degraded mode flag
-        useOnboardingStore.getState().setBackendConfigured(true);
-      } else {
-        const { updateProfile } = await import("@/lib/auth-api");
-        await updateProfile({
-          llm_api_key: apiKey,
-          llm_base_url: baseUrl,
-          llm_model: model,
-        });
-        // Non-admin users save to their profile — also mark configured so the
-        // wizard won't re-appear during the current session.
-        useOnboardingStore.getState().setBackendConfigured(true);
-      }
+      await apiPut(
+        "/config/models/main",
+        {
+          model,
+          base_url: baseUrl,
+          api_key: apiKey,
+          protocol: provider.protocol,
+        },
+        { direct: true }
+      );
+      useOnboardingStore.getState().setBackendConfigured(true);
       onComplete();
     } catch (e) {
       setTestResult({
@@ -134,7 +119,7 @@ export function ProviderGuideStep({
     } finally {
       setSaving(false);
     }
-  }, [apiKey, baseUrl, model, provider.protocol, isAdmin, onComplete]);
+  }, [apiKey, baseUrl, model, provider.protocol, onComplete]);
 
   const handleCopyUrl = useCallback(() => {
     navigator.clipboard.writeText(provider.purchaseUrl).catch(() => {});
@@ -384,12 +369,9 @@ export function ProviderGuideStep({
           </div>
         </div>
 
-        {/* Note for admin */}
-        {isAdmin && (
-          <p className="text-[11px] text-muted-foreground mt-4 text-center">
-            此配置将作为系统主模型。你可以稍后在设置中配置辅助模型和视觉模型。
-          </p>
-        )}
+        <p className="text-[11px] text-muted-foreground mt-4 text-center">
+          此配置将作为系统主模型。你可以稍后在设置中配置辅助模型。
+        </p>
       </div>
     </div>
   );

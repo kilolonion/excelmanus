@@ -14,6 +14,8 @@ from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.api_sse import inject_seq_into_sse, sse_format
 
 import excelmanus.api as api_module
+import excelmanus.api_app_state as app_state
+import excelmanus.api_routes_chat as chat_module
 from excelmanus.api import _SessionStreamState, app
 
 
@@ -44,16 +46,20 @@ def _parse_sse_events(raw: str) -> list[tuple[str, dict]]:
 
 def _setup_api_globals(session_manager):
     api_module._session_manager = session_manager
+    app_state.set_session_manager(session_manager)
     api_module._config = MagicMock()
-    api_module._active_chat_tasks = {}
-    api_module._session_stream_states = {}
+    app_state.set_config(api_module._config)
+    app_state._active_chat_tasks.clear()
+    app_state._session_stream_states.clear()
 
 
 def _cleanup_api_globals():
     api_module._session_manager = None
+    app_state.set_session_manager(None)
     api_module._config = None
-    api_module._active_chat_tasks = {}
-    api_module._session_stream_states = {}
+    app_state.set_config(None)
+    app_state._active_chat_tasks.clear()
+    app_state._session_stream_states.clear()
 
 
 @pytest.fixture(autouse=True)
@@ -220,7 +226,7 @@ async def test_subscribe_no_active_task_returns_done():
     sm = MagicMock()
     _setup_api_globals(sm)
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -240,15 +246,15 @@ async def test_subscribe_completed_task_replays_buffered_with_seq():
 
     session_id = "completed-session"
     stream_state = _SessionStreamState()
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="buffered"))
 
     done_task: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
     done_task.set_result(ChatResult(reply="done", iterations=1))
-    api_module._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
+    app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -271,7 +277,7 @@ async def test_subscribe_completed_task_replays_buffered_with_seq():
             assert "seq" in td
             assert td["seq"] == 1
 
-    assert session_id not in api_module._session_stream_states
+    assert session_id not in app_state._session_stream_states
 
 
 @pytest.mark.asyncio
@@ -281,17 +287,17 @@ async def test_subscribe_after_seq_skips_already_received():
 
     session_id = "after-seq-session"
     stream_state = _SessionStreamState()
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="first"))   # seq=1
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="second"))  # seq=2
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="third"))   # seq=3
 
     done_task: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
     done_task.set_result(ChatResult(reply="done", iterations=1))
-    api_module._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
+    app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -313,7 +319,7 @@ async def test_subscribe_resume_failed_on_buffer_overflow():
 
     session_id = "overflow-session"
     stream_state = _SessionStreamState(buffer_limit=2)
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     # Deliver 4 events with buffer_limit=2 → 2 dropped
     for i in range(4):
         stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta=str(i)))
@@ -321,10 +327,10 @@ async def test_subscribe_resume_failed_on_buffer_overflow():
 
     done_task: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
     done_task.set_result(ChatResult(reply="done", iterations=1))
-    api_module._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
+    app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             # Client says it last received seq=0 (expecting seq=1), but buffer starts at seq=3
             resp = await client.post(
@@ -350,17 +356,17 @@ async def test_subscribe_no_gap_when_after_seq_matches():
 
     session_id = "no-gap-session"
     stream_state = _SessionStreamState(buffer_limit=3)
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="a"))  # seq=1
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="b"))  # seq=2
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="c"))  # seq=3
 
     done_task: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
     done_task.set_result(ChatResult(reply="done", iterations=1))
-    api_module._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
+    app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             # Client received up to seq=2, expects seq=3 → first_buf=1, after_seq+1=3
             # But buffer starts at 1, so 1 <= 3 → no gap
@@ -385,15 +391,15 @@ async def test_subscribe_skip_replay_omits_buffered():
 
     session_id = "skip-session"
     stream_state = _SessionStreamState()
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="should-skip"))
 
     done_task: asyncio.Future[ChatResult] = asyncio.get_running_loop().create_future()
     done_task.set_result(ChatResult(reply="done", iterations=1))
-    api_module._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
+    app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -412,7 +418,7 @@ async def test_subscribe_active_task_replays_then_streams():
 
     session_id = "active-session"
     stream_state = _SessionStreamState()
-    api_module._session_stream_states[session_id] = stream_state
+    app_state._session_stream_states[session_id] = stream_state
     stream_state.deliver(_make_event(EventType.TEXT_DELTA, text_delta="buffered"))
 
     async def _fake_chat():
@@ -420,14 +426,14 @@ async def test_subscribe_active_task_replays_then_streams():
         return ChatResult(reply="done", iterations=1)
 
     chat_task = asyncio.create_task(_fake_chat())
-    api_module._active_chat_tasks[session_id] = chat_task
+    app_state._active_chat_tasks[session_id] = chat_task
 
     mock_engine = MagicMock()
     mock_engine.last_route_result = MagicMock(route_mode="write", skills_used=[], tool_scope=[])
     sm.get_engine.return_value = mock_engine
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(api_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
+         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -456,7 +462,7 @@ async def test_subscribe_accepts_stream_id_and_after_seq_fields():
     sm = MagicMock()
     _setup_api_globals(sm)
 
-    with patch.object(api_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",

@@ -178,8 +178,8 @@ class TestTaskCreateEmptySubtasks:
     def test_empty_subtasks_returns_success(self) -> None:
         """空子任务列表应返回成功描述字符串。"""
         result = task_tools.task_create("空清单", [])
-        assert "已创建任务清单" in result
-        assert "空清单" in result
+        assert "已创建任务清单" in result.model_text
+        assert "空清单" in result.model_text
 
     def test_empty_subtasks_store_has_zero_items(self) -> None:
         """空子任务列表创建后，TaskStore.current 应有 0 个 items。"""
@@ -195,7 +195,7 @@ class TestTaskCreateEmptySubtasks:
     def test_create_existing_list_with_replace_existing_true(self) -> None:
         task_tools.task_create("旧清单", ["任务1"])
         result = task_tools.task_create("新清单", ["任务2"], replace_existing=True)
-        assert "已创建任务清单" in result
+        assert "已创建任务清单" in result.model_text
         assert self.store.current is not None
         assert self.store.current.title == "新清单"
 

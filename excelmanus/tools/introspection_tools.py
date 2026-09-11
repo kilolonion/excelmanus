@@ -76,32 +76,30 @@ _TOKEN_RE = re.compile(r"[\u4e00-\u9fff]+|[a-zA-Z_][a-zA-Z0-9_]*")
 
 _EXTENDED_CAPABILITIES: dict[str, str] = {
     "pivot_table": "数据透视表：通过 run_code + pandas pivot_table() 计算并写入新 sheet（非原生 PivotTable 对象）",
-    "chart": "图表生成：通过 run_code + openpyxl.chart 或 matplotlib 创建图表",
+    "chart": "图表：manage_spreadsheet_objects operations.kind=chart",
     "conditional_format": "条件格式：通过 run_code + openpyxl.formatting 设置条件格式规则",
     "data_validation": "数据验证：通过 run_code + openpyxl.worksheet.datavalidation 设置下拉列表/范围限制",
-    "merge_cells": "合并单元格：通过 run_code + openpyxl ws.merge_cells() 实现",
+    "merge_cells": "合并单元格：format_spreadsheet operations.kind=merge",
     "named_range": "命名范围：通过 run_code + openpyxl DefinedName 创建和管理",
     "freeze_panes": "冻结窗格：通过 run_code + openpyxl ws.freeze_panes 设置",
     "auto_filter": "自动筛选：通过 run_code + openpyxl ws.auto_filter 设置",
     "page_setup": "页面设置/打印区域：通过 run_code + openpyxl ws.page_setup 配置",
-    "cell_style": "单元格样式：通过 run_code + openpyxl 设置字体/边框/填充/对齐/数字格式",
-    "batch_write": "批量写入：通过 run_code + openpyxl/pandas 批量写入大量数据",
-    "formula": "公式写入：通过 run_code + openpyxl 写入任意 Excel 公式",
+    "cell_style": "单元格样式：format_spreadsheet operations.kind=format",
+    "batch_write": "批量写入：edit_spreadsheet operations.kind=write；大表规约再用 run_code 调 SDK",
+    "formula": "公式写入：edit_spreadsheet operations.kind=write",
     "dataframe": "数据分析：通过 run_code + pandas DataFrame 做复杂数据变换/统计/透视",
     "regex": "正则匹配/文本提取：通过 run_code + re 模块实现",
     "image_insert": "插入图片到 Excel：通过 run_code + openpyxl.drawing.image 实现",
     "csv_json_convert": "CSV/JSON 转换：通过 run_code + pandas read_csv/to_csv/read_json/to_json",
     "multi_sheet_copy": "跨表复制/移动：通过 run_code + openpyxl wb.copy_worksheet() 实现",
-    "create_sheet": "创建/删除/重命名工作表：通过 run_code + openpyxl wb.create_sheet/remove/title",
-    "write_cells": "写入单元格：通过 run_code + openpyxl ws.cell() 或 ws.append() 写入数据",
-    "insert_rows_cols": "插入/删除行列：通过 run_code + openpyxl ws.insert_rows/insert_cols/delete_rows/delete_cols",
+    "insert_rows_cols": "插入行列：edit_spreadsheet operations.kind=insert",
 }
 
 # ── 子代理能力描述 ──────────────────────────────────────
 
 _SUBAGENT_CAPABILITIES: dict[str, str] = {
     "explorer": "只读探索子代理：文件结构分析、数据预览与统计，不做任何写入",
-    "verifier": "完成前验证子代理：校验任务是否真正完成，检查文件存在性和数据正确性",
+    "verifier": "只读检查子代理：仅在显式 delegate(agent_name=verifier) 时运行，结论供参考，不是自动门",
     "subagent": "通用全能力子代理：工具域与主代理一致，适用于需要独立上下文的长任务",
 }
 
@@ -109,10 +107,14 @@ _SUBAGENT_CAPABILITIES: dict[str, str] = {
 # ── 工具常见错误与调用示例（按需查询，不注入每轮 schema） ───
 
 _TOOL_COMMON_ERRORS: dict[str, list[str]] = {
-    "read_excel": [
-        "文件不存在：确认路径拼写，用 inspect_excel_files 或 list_directory 查找可用文件",
-        "sheet_name 不存在：先用 list_sheets 确认实际 sheet 名称（注意大小写）",
-        "range 格式错误：必须为 Excel 坐标格式如 'A1:F20'，不支持 CSV",
+    "inspect_spreadsheet": [
+        "文件不存在：确认相对路径，用 mode=overview 或 list_directory 查找",
+        "sheet 不存在：先 overview 确认实际 sheet 名称",
+        "range 格式错误：必须为 Excel 坐标格式如 'A1:F20'",
+    ],
+    "analyze_spreadsheet": [
+        "filter 需要 column/operator/value 或 conditions",
+        "profile/quality 需要 file_path",
     ],
     "run_code": [
         "缺少 try/except：代码必须包含顶层 try/except，错误 print 到 stderr",
@@ -120,25 +122,21 @@ _TOOL_COMMON_ERRORS: dict[str, list[str]] = {
         "ModuleNotFoundError：仅支持沙箱内的库（openpyxl/pandas/numpy 等），不支持 pip install",
         "禁止调用：sys.exit()/exec()/eval()/os.system()",
     ],
-    "filter_data": [
-        "单条件与多条件互斥：column/operator/value 与 conditions 二者不可同时使用",
-        "operator 拼写错误：支持 eq/ne/gt/ge/lt/le/contains/in/not_in/between/isnull/notnull/startswith/endswith",
-    ],
     "write_text_file": [
         "文件已存在且 overwrite=false：默认 overwrite=true，显式传 false 时文件已存在会报错",
     ],
-    "create_excel_chart": [
-        "data_range 为空：必须指定数值数据范围（如 'B1:B20'）",
-        "图表类型不支持：仅支持 bar/line/pie/scatter/area",
+    "manage_spreadsheet_objects": [
+        "chart 需要 chart_type 与 data_range",
+        "图表类型仅支持 bar/line/pie/scatter/area",
     ],
 }
 
 _TOOL_USAGE_EXAMPLES: dict[str, str] = {
-    "read_excel": '{"file_path": "data.xlsx", "sheet_name": "Sheet1", "max_rows": 50}',
-    "filter_data": '{"file_path": "data.xlsx", "column": "部门", "operator": "eq", "value": "销售部", "max_rows": 20}',
-    "run_code": '{"code": "import openpyxl\\ntry:\\n    wb = openpyxl.load_workbook(\'data.xlsx\')\\n    ws = wb.active\\n    print(f\'rows={ws.max_row}, cols={ws.max_column}\')\\nexcept Exception as e:\\n    import sys; print(e, file=sys.stderr)"}',
-    "create_excel_chart": '{"file_path": "data.xlsx", "chart_type": "bar", "data_range": "B1:B20", "categories_range": "A2:A20", "title": "销售额分布"}',
-    "focus_window": '{"window_id": "sheet_1", "action": "scroll", "range": "A50:F80"}',
+    "inspect_spreadsheet": '{"mode": "range", "file_path": "data.xlsx", "sheet_name": "Sheet1", "max_rows": 50}',
+    "analyze_spreadsheet": '{"mode": "filter", "file_path": "data.xlsx", "column": "部门", "operator": "eq", "value": "销售部"}',
+    "edit_spreadsheet": '{"file_path": "data.xlsx", "operations": [{"kind": "write", "sheet": "Sheet1", "start_cell": "B2", "values": [[100]]}]}',
+    "run_code": '{"code": "from em import inspect_spreadsheet\\ntry:\\n    print(inspect_spreadsheet(mode=\\"overview\\", file_path=\\"data.xlsx\\"))\\nexcept Exception as e:\\n    import sys; print(e, file=sys.stderr)"}',
+    "manage_spreadsheet_objects": '{"file_path": "data.xlsx", "operations": [{"kind": "chart", "chart_type": "bar", "data_range": "B1:B20", "categories_range": "A2:A20"}]}',
 }
 
 

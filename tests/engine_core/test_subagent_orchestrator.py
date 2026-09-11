@@ -32,10 +32,7 @@ def _make_orchestrator(
     engine_mock._skill_resolver.run_skill_hook = MagicMock(return_value=None)
     engine_mock._skill_resolver.resolve_hook_result = AsyncMock(return_value=None)
     engine_mock._run_skill_hook = MagicMock(return_value=None)
-    engine_mock._resolve_hook_result = AsyncMock(return_value=None)
-    engine_mock._auto_select_subagent = AsyncMock(return_value="subagent")
     engine_mock.run_subagent = AsyncMock()
-    engine_mock._window_perception = MagicMock()
     engine_mock._context_builder = MagicMock()
     engine_mock._normalize_subagent_file_paths = MagicMock(return_value=[])
     # E4: orchestrator 现在直接访问 _subagent_registry
@@ -89,8 +86,6 @@ class TestSuccessfulDelegation:
         assert outcome.reply == "任务完成"
         assert outcome.picked_agent == "subagent"
         assert outcome.subagent_result is mock_result
-        orch._engine._window_perception.observe_subagent_context.assert_called_once()
-        orch._engine._context_builder.mark_window_notice_dirty.assert_called_once()
 
     async def test_failed_subagent_run(self):
         orch = _make_orchestrator()
@@ -110,11 +105,36 @@ class TestSuccessfulDelegation:
         assert outcome.subagent_result is mock_result
 
 
-class TestExplorerFastExit:
-    """explorer 对简单任务应快速退出。"""
+class TestDelegateAgentName:
+    """未指定 agent 时使用通用 subagent；显式 explorer 必须真正执行。"""
 
-    async def test_skips_explorer_for_lightweight_question_without_context(self):
+    async def test_unnamed_delegate_uses_subagent(self):
         orch = _make_orchestrator()
+        mock_result = SubagentResult(
+            success=True,
+            summary="done",
+            subagent_name="subagent",
+            permission_mode="default",
+            conversation_id="c1",
+        )
+        orch._engine.run_subagent = AsyncMock(return_value=mock_result)
+
+        outcome = await orch.delegate(task="分析这个表格")
+
+        assert outcome.success is True
+        assert outcome.picked_agent == "subagent"
+        orch._engine.run_subagent.assert_awaited_once()
+
+    async def test_named_explorer_always_runs(self):
+        orch = _make_orchestrator()
+        mock_result = SubagentResult(
+            success=True,
+            summary="已分析",
+            subagent_name="explorer",
+            permission_mode="readOnly",
+            conversation_id="explore-1",
+        )
+        orch._engine.run_subagent = AsyncMock(return_value=mock_result)
 
         outcome = await orch.delegate(
             task="请解释一下这个思路为什么可行？",
@@ -122,10 +142,10 @@ class TestExplorerFastExit:
         )
 
         assert outcome.success is True
-        assert "已跳过 explorer" in outcome.reply
-        orch._engine.run_subagent.assert_not_awaited()
+        assert "已跳过 explorer" not in outcome.reply
+        orch._engine.run_subagent.assert_awaited_once()
 
-    async def test_keeps_explorer_when_file_paths_present(self):
+    async def test_named_explorer_with_files_runs(self):
         orch = _make_orchestrator()
         mock_result = SubagentResult(
             success=True,
@@ -144,74 +164,6 @@ class TestExplorerFastExit:
         )
 
         assert outcome.success is True
-        orch._engine.run_subagent.assert_awaited_once()
-
-    # ── Layer 1: 纯对话模式 ──
-
-    @pytest.mark.parametrize("task", ["你好", "谢谢！", "ok", "thanks", "好的。", "hi"])
-    async def test_trivial_greeting_fast_exits(self, task: str):
-        """Layer 1: 问候/确认/感谢等纯对话应无条件退出。"""
-        orch = _make_orchestrator()
-        outcome = await orch.delegate(task=task, agent_name="explorer")
-        assert outcome.success is True
-        assert "已跳过 explorer" in outcome.reply
-        orch._engine.run_subagent.assert_not_awaited()
-
-    # ── Layer 2: 短任务 + 无数据线索 ──
-
-    async def test_short_task_without_data_cues_fast_exits(self):
-        """Layer 2: 短任务（≠60 chars）且无数据线索应快速退出。"""
-        orch = _make_orchestrator()
-        outcome = await orch.delegate(
-            task="这个办法怎么样",  # 6 chars, no data cues
-            agent_name="explorer",
-        )
-        assert outcome.success is True
-        assert "已跳过 explorer" in outcome.reply
-
-    async def test_short_task_with_data_cues_does_not_fast_exit(self):
-        """Layer 2 例外：短任务但含数据线索不应退出。"""
-        orch = _make_orchestrator()
-        mock_result = SubagentResult(
-            success=True, summary="done",
-            subagent_name="explorer", permission_mode="readOnly",
-            conversation_id="c1",
-        )
-        orch._engine.run_subagent = AsyncMock(return_value=mock_result)
-        outcome = await orch.delegate(
-            task="读取数据",  # 含 "data" cue
-            agent_name="explorer",
-        )
-        orch._engine.run_subagent.assert_awaited_once()
-
-    async def test_short_task_with_excel_file_does_not_fast_exit(self):
-        """Layer 2 例外：含 Excel 文件名不应退出。"""
-        orch = _make_orchestrator()
-        mock_result = SubagentResult(
-            success=True, summary="done",
-            subagent_name="explorer", permission_mode="readOnly",
-            conversation_id="c2",
-        )
-        orch._engine.run_subagent = AsyncMock(return_value=mock_result)
-        outcome = await orch.delegate(
-            task="看 test.xlsx",
-            agent_name="explorer",
-        )
-        orch._engine.run_subagent.assert_awaited_once()
-
-    # ── Layer 3: 长任务不退出 ──
-
-    async def test_long_task_without_skip_keywords_does_not_fast_exit(self):
-        """超过 120 chars 的任务不应快速退出，即使无数据线索。"""
-        orch = _make_orchestrator()
-        mock_result = SubagentResult(
-            success=True, summary="done",
-            subagent_name="explorer", permission_mode="readOnly",
-            conversation_id="c3",
-        )
-        orch._engine.run_subagent = AsyncMock(return_value=mock_result)
-        long_task = "请帮我检查一下这个项目的整体情况，" * 5  # >120 chars
-        outcome = await orch.delegate(task=long_task, agent_name="explorer")
         orch._engine.run_subagent.assert_awaited_once()
 
 
@@ -237,9 +189,6 @@ class TestFailurePartialArtifacts:
 
         assert outcome.success is False
         assert "已保留部分产出" in outcome.reply
-        orch._engine._window_perception.observe_subagent_context.assert_called_once()
-        orch._engine._window_perception.observe_subagent_writes.assert_called_once()
-        orch._engine._context_builder.mark_window_notice_dirty.assert_called_once()
 
 
 class TestCategorySignature:
@@ -463,110 +412,6 @@ class TestFailureReplyDedup:
 
         assert outcome.success is False
         assert "已保留部分产出" in outcome.reply
-
-
-class TestExplorerReportParsing:
-    """R3: EXPLORER_REPORT 结构化报告解析。"""
-
-    def test_extracts_valid_report(self):
-        summary = (
-            "数据概览如下...\n"
-            "<!-- EXPLORER_REPORT_START -->\n"
-            '{"summary": "2 files, 3 sheets", "files": [{"path": "a.xlsx", "sheets": []}], "findings": []}\n'
-            "<!-- EXPLORER_REPORT_END -->"
-        )
-        report = SubagentOrchestrator._extract_explorer_report(summary)
-        assert report is not None
-        assert report["summary"] == "2 files, 3 sheets"
-        assert len(report["files"]) == 1
-        assert report["files"][0]["path"] == "a.xlsx"
-
-    def test_returns_none_when_no_markers(self):
-        report = SubagentOrchestrator._extract_explorer_report("普通文本摘要")
-        assert report is None
-
-    def test_returns_none_for_invalid_json(self):
-        summary = (
-            "<!-- EXPLORER_REPORT_START -->\n"
-            "{invalid json}\n"
-            "<!-- EXPLORER_REPORT_END -->"
-        )
-        report = SubagentOrchestrator._extract_explorer_report(summary)
-        assert report is None
-
-    def test_returns_none_for_missing_end_marker(self):
-        summary = '<!-- EXPLORER_REPORT_START -->\n{"summary": "test"}'
-        report = SubagentOrchestrator._extract_explorer_report(summary)
-        assert report is None
-
-    def test_returns_none_for_non_dict_json(self):
-        summary = (
-            "<!-- EXPLORER_REPORT_START -->\n"
-            "[1, 2, 3]\n"
-            "<!-- EXPLORER_REPORT_END -->"
-        )
-        report = SubagentOrchestrator._extract_explorer_report(summary)
-        assert report is None
-
-    def test_caches_report_to_session_state(self):
-        orch = _make_orchestrator()
-        orch._engine._state = MagicMock()
-        orch._engine._state.explorer_reports = []  # 初始空列表
-        summary_with_report = (
-            "概览\n"
-            "<!-- EXPLORER_REPORT_START -->\n"
-            '{"summary": "ok", "files": [], "findings": [{"type": "anomaly", "detail": "test"}]}\n'
-            "<!-- EXPLORER_REPORT_END -->"
-        )
-        result = orch._parse_and_cache_explorer_report(summary_with_report)
-        assert result is not None
-        assert result["summary"] == "ok"
-        assert len(orch._engine._state.explorer_reports) == 1
-
-    def test_cache_limit_5(self):
-        orch = _make_orchestrator()
-        orch._engine._state = MagicMock()
-        orch._engine._state.explorer_reports = [{"summary": f"r{i}"} for i in range(5)]
-        summary = (
-            "<!-- EXPLORER_REPORT_START -->\n"
-            '{"summary": "r5"}\n'
-            "<!-- EXPLORER_REPORT_END -->"
-        )
-        orch._parse_and_cache_explorer_report(summary)
-        assert len(orch._engine._state.explorer_reports) == 5
-        assert orch._engine._state.explorer_reports[-1]["summary"] == "r5"
-
-
-class TestExplorationDepthEstimation:
-    """R5: 探索深度估算。"""
-
-    def test_deep_keywords_return_depth_4(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="检查数据质量", file_paths=[]) == 4
-        assert orch._estimate_exploration_depth(task="找出重复行", file_paths=[]) == 4
-        assert orch._estimate_exploration_depth(task="公式依赖分析", file_paths=[]) == 4
-
-    def test_profile_keywords_return_depth_3(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="统计各列空值", file_paths=[]) == 3
-        assert orch._estimate_exploration_depth(task="数据类型概况", file_paths=[]) == 3
-
-    def test_schema_keywords_return_depth_2(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="有哪些列", file_paths=[]) == 2
-        assert orch._estimate_exploration_depth(task="表结构是什么", file_paths=[]) == 2
-
-    def test_file_path_returns_depth_1(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="看看", file_paths=["a.xlsx"]) == 1
-
-    def test_excel_filename_in_task_returns_depth_1(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="打开 report.xlsx", file_paths=[]) == 1
-
-    def test_default_depth_is_2(self):
-        orch = _make_orchestrator()
-        assert orch._estimate_exploration_depth(task="帮我看看这个", file_paths=[]) == 2
 
 
 class TestOutcomeStructure:

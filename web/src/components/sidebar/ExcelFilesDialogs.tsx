@@ -5,15 +5,15 @@ import {
   FileSpreadsheet,
   X,
   Download,
+  Trash2,
 } from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+  OverlayCard,
+  OverlayCardAction,
+  OverlayCardBody,
+  OverlayCardFooter,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 import { downloadFile } from "@/lib/api";
 
 /* ── ExcelFilesDialog ── */
@@ -44,38 +44,24 @@ export function ExcelFilesDialog({
     : files;
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-center justify-center bg-black/40"
-      onClick={onClose}
-    >
-      <div
-        className="bg-background border border-border rounded-xl shadow-xl w-[440px] max-h-[520px] flex flex-col overflow-hidden"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <span className="text-sm font-semibold">
-            工作区文件 ({files.length})
-          </span>
-          <button
-            onClick={onClose}
-            className="p-1 rounded hover:bg-muted text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <X className="h-4 w-4" />
-          </button>
-        </div>
+    <OverlayCard open onOpenChange={(v) => !v && onClose()} size="sm" tone="primary">
+      <OverlayCardHeader
+        icon={<FileSpreadsheet className="h-5 w-5" />}
+        title={`工作区文件 (${files.length})`}
+        onClose={onClose}
+      />
 
-        <div className="px-4 py-2 border-b border-border">
-          <input
-            type="text"
-            placeholder="搜索文件..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full px-3 py-1.5 text-sm rounded-md border border-border bg-muted/30 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)]"
-            autoFocus
-          />
-        </div>
+      <OverlayCardBody className="pt-3 pb-4">
+        <input
+          type="text"
+          placeholder="搜索文件..."
+          value={search}
+          onChange={(e) => setSearch(e.target.value)}
+          className="w-full mb-3 px-3 py-2 text-sm rounded-xl border border-border bg-muted/30 placeholder:text-muted-foreground focus:outline-none focus:ring-2 focus:ring-[var(--em-primary)]"
+          autoFocus
+        />
 
-        <div className="flex-1 overflow-y-auto px-2 py-1">
+        <div className="max-h-[min(50vh,360px)] overflow-y-auto -mx-1">
           {filtered.length === 0 ? (
             <div className="flex items-center justify-center py-8 text-sm text-muted-foreground">
               未找到匹配文件
@@ -94,7 +80,7 @@ export function ExcelFilesDialog({
               return (
                 <div
                   key={file.path}
-                  className="group flex items-center gap-2 px-3 py-2 rounded-md hover:bg-muted/50 cursor-pointer text-sm transition-colors"
+                  className="group flex items-center gap-2 px-3 py-2 rounded-xl hover:bg-muted/50 cursor-pointer text-sm transition-colors"
                   onClick={() => {
                     onClickFile(file.path);
                     onClose();
@@ -145,8 +131,8 @@ export function ExcelFilesDialog({
             })
           )}
         </div>
-      </div>
-    </div>
+      </OverlayCardBody>
+    </OverlayCard>
   );
 }
 
@@ -191,37 +177,29 @@ export function RemoveConfirmDialog({
     : "此操作将永久删除所选文件，且无法撤销。";
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
-      <DialogContent className="sm:max-w-[420px]" onOpenAutoFocus={(e) => e.preventDefault()}>
-        <DialogHeader>
-          <DialogTitle className="text-base font-semibold">{title}</DialogTitle>
-          <DialogDescription className="text-sm text-muted-foreground mt-1">
-            {description}
-          </DialogDescription>
-        </DialogHeader>
-
-        <div className="flex items-center justify-end gap-2 pt-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            className="text-muted-foreground"
-            disabled={deleting}
-          >
-            取消
-            <kbd className="ml-1.5 text-[10px] text-muted-foreground/60 font-normal">esc</kbd>
-          </Button>
-          <Button
-            variant="destructive"
-            size="sm"
-            onClick={onConfirm}
-            disabled={deleting}
-          >
-            {deleting ? "删除中…" : isDeleteAll ? "全部删除" : "确认删除"}
-            <kbd className="ml-1.5 text-[10px] opacity-60 font-normal">↵</kbd>
-          </Button>
-        </div>
-      </DialogContent>
-    </Dialog>
+    <OverlayCard
+      open={open}
+      onOpenChange={(v) => !v && onCancel()}
+      size="sm"
+      tone="danger"
+      onOpenAutoFocus={(e) => e.preventDefault()}
+    >
+      <OverlayCardHeader
+        icon={<Trash2 className="h-5 w-5" />}
+        title={title}
+        description={description}
+        onClose={onCancel}
+      />
+      <OverlayCardFooter>
+        <OverlayCardAction action="ghost" onClick={onCancel} disabled={deleting}>
+          取消
+          <kbd className="ml-0.5 text-[10px] text-muted-foreground/60 font-normal hidden sm:inline">esc</kbd>
+        </OverlayCardAction>
+        <OverlayCardAction action="destructive" onClick={onConfirm} disabled={deleting}>
+          {deleting ? "删除中…" : isDeleteAll ? "全部删除" : "确认删除"}
+          <kbd className="ml-0.5 text-[10px] opacity-60 font-normal hidden sm:inline">↵</kbd>
+        </OverlayCardAction>
+      </OverlayCardFooter>
+    </OverlayCard>
   );
 }

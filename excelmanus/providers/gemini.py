@@ -6,7 +6,7 @@
 支持的 base_url 格式示例：
   - https://generativelanguage.googleapis.com/v1beta
   - https://right.codes/gemini/v1beta
-  - https://right.codes/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse
+  - https://right.codes/gemini/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse
 """
 
 from __future__ import annotations
@@ -38,6 +38,16 @@ _NON_GEMINI_EXTRA_KEYS = frozenset({
 def _strip_non_gemini_extra_body(extra_body: dict[str, Any]) -> dict[str, Any]:
     """过滤 extra_body 中非 Gemini 原生字段，避免 generationConfig 中出现未知参数导致 API 错误。"""
     return {k: v for k, v in extra_body.items() if k not in _NON_GEMINI_EXTRA_KEYS}
+
+
+def _normalize_gemini_thinking_level(model: str, level: str) -> str:
+    """Gemini 3.7/3.8 Flash 不接受 minimal，回退到 low。"""
+    if not level:
+        return level
+    lowered = (model or "").lower()
+    if ("gemini-3.8" in lowered or "gemini-3.7" in lowered) and level in ("minimal", "none"):
+        return "low"
+    return level
 
 
 # ── 响应数据结构（模拟 OpenAI SDK 对象） ─────────────────────────
@@ -441,8 +451,8 @@ def _extract_model_from_url(base_url: str) -> str | None:
     """从 Gemini 完整 URL 中提取模型名（如果有的话）。
 
     例如：
-      https://right.codes/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse
-      → "gemini-2.5-flash"
+      https://right.codes/gemini/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse
+      → "gemini-3.8-flash"
 
       https://right.codes/gemini/v1beta
       → None
@@ -457,7 +467,7 @@ def _normalize_gemini_base_url(base_url: str) -> str:
     """从用户提供的 base_url 中提取 Gemini API 基础路径。
 
     支持的输入格式：
-      - https://right.codes/gemini/v1beta/models/gemini-2.5-flash:streamGenerateContent?alt=sse
+      - https://right.codes/gemini/v1beta/models/gemini-3.8-flash:streamGenerateContent?alt=sse
       - https://right.codes/gemini/v1beta
       - https://generativelanguage.googleapis.com/v1beta
 
@@ -535,7 +545,7 @@ class GeminiClient:
     用法与 openai.AsyncOpenAI 完全一致：
         client = GeminiClient(api_key="...", base_url="...")
         response = await client.chat.completions.create(
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             messages=[...],
             tools=[...],
         )
@@ -582,7 +592,9 @@ class GeminiClient:
         # 注入 thinking 配置（与 _generate_stream 保持一致）
         if thinking_level:
             gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+            gen_config["thinkingConfig"] = {
+                "thinkingLevel": _normalize_gemini_thinking_level(effective_model, thinking_level),
+            }
             body["generationConfig"] = gen_config
         elif thinking_budget > 0:
             gen_config = body.get("generationConfig", {})
@@ -680,7 +692,9 @@ class GeminiClient:
             body["toolConfig"] = mapped_tool_config
         if thinking_level:
             gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {"thinkingLevel": thinking_level}
+            gen_config["thinkingConfig"] = {
+                "thinkingLevel": _normalize_gemini_thinking_level(effective_model, thinking_level),
+            }
             body["generationConfig"] = gen_config
         elif thinking_budget > 0:
             gen_config = body.get("generationConfig", {})

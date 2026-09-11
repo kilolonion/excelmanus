@@ -1,61 +1,24 @@
 ---
-name: run_code_patterns
-version: "3.1.0"
-priority: 35
+name: tool:run_code
+version: "6.0.0"
+priority: 150
+order: 150
 layer: strategy
-max_tokens: 500
-conditions:
-  chat_mode: "write"
+max_tokens: 400
+conditions: {}
 ---
-## run_code 使用原则
+## Code Mode
 
-`run_code` 是主力写入工具。遵循以下原则：
+`run_code` 用来组合已注册 SDK，或处理领域工具盖不住的批量变换。单格修改、加粗、增删工作表不要写 pandas / openpyxl 落盘脚本。
 
-1. **所有写入操作通过 run_code 完成**（pandas/openpyxl）
-2. **包含顶层 try/except 异常处理**，print 到 stderr
-3. 仅使用数据处理代码（pandas/openpyxl/numpy/sklearn/matplotlib/seaborn/plotly/scipy）
-4. **写入后在 stdout 打印关键验证数据**（行数、列名、抽样值），作为核心法则 2（验证闭环）的验证依据。**注意**：创建新文件时 stdout 不足以验证——必须在 `run_code` 之后额外调用 `read_excel` 或 `scan_excel_snapshot` 回读确认
-
-### 核心代码模板
-
-**读→改→写回（保留其他 sheet）**：
 ```python
-import sys
-try:
-    import pandas as pd
-    df = pd.read_excel("file.xlsx", sheet_name="Sheet1")
-    df["新列"] = df["金额"] * 0.3
-    with pd.ExcelWriter("file.xlsx", engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-        df.to_excel(w, sheet_name="Sheet1", index=False)
-    print(f"写入完成: {len(df)} 行, 列: {list(df.columns)}")
-except Exception as e:
-    print(f"错误：{type(e).__name__}: {e}", file=sys.stderr)
+from em import inspect_spreadsheet, edit_spreadsheet, format_spreadsheet
+inspect_spreadsheet(mode="range", file_path="book.xlsx", sheet_name="Sheet1")
+edit_spreadsheet(file_path="book.xlsx", operations=[
+    {"kind": "write", "sheet": "Sheet1", "start_cell": "B2", "values": [[100]]},
+])
 ```
 
-**跨表匹配写回（VLOOKUP 等价）**：
-```python
-src = pd.read_excel("file.xlsx", sheet_name="源表")
-tgt = pd.read_excel("file.xlsx", sheet_name="目标表")
-merged = tgt.merge(src[["键列","值列"]], on="键列", how="left")
-with pd.ExcelWriter("file.xlsx", engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-    merged.to_excel(w, sheet_name="目标表", index=False)
-```
+写入必须串行。脚本含顶层 try/except，证据 print 到 stdout/stderr。stdout 和成功退出码不证明业务正确。
 
-### 更多模板
-
-格式化、图表、条件格式、VBA 替代、文件恢复等高级场景，激活 `run_code_templates` 技能获取完整代码：
-
-| 类别 | 覆盖模板 |
-|------|---------|
-| 格式样式 | 字体/填充/边框/对齐、批量格式化、合并单元格、条件格式 |
-| 图表与布局 | 图表创建、打印设置、数据验证（下拉列表） |
-| 分析统计 | 描述性统计、分组聚合、跨表键匹配 |
-| VBA 替代 | 遍历条件写入、按区块填充、openpyxl 不支持的操作说明 |
-| 恢复与复刻 | 文件损坏恢复流程、图片表格复刻工作流 |
-
-### 文件损坏快速恢复
-
-当 openpyxl 打开失败（`KeyError`/`BadZipFile` 等）：
-1. 用 `copy_file` 从参考文件复制工作副本到 `outputs/`
-2. 在副本上清除目标区域，恢复初始状态
-3. 在副本上执行写入逻辑
+AST：**GREEN**（pandas/openpyxl/numpy）自动执行；**YELLOW** 网络被拦截；**RED**（subprocess/exec/eval）需 `/accept`。工作区外写入、socket、os.system 被禁止。复制文件用 `copy_file`。

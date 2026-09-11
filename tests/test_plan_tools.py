@@ -86,9 +86,9 @@ class TestWritePlan:
         assert store.plan_file_path.endswith(".md")
 
         # 返回摘要包含关键信息
-        assert "✅" in result
-        assert "数据汇总报告" in result
-        assert "4 个子任务" in result
+        assert "✅" in result.model_text
+        assert "数据汇总报告" in result.model_text
+        assert "4 个子任务" in result.model_text
 
     def test_json_format_with_verification(self, tmp_path: Path) -> None:
         """tasklist-json 格式支持验证条件。"""
@@ -132,8 +132,8 @@ class TestWritePlan:
         assert store.plan_file_path is None
 
         # 返回包含错误提示
-        assert "⚠️" in result
-        assert "解析失败" in result
+        assert "⚠️" in result.model_text
+        assert "解析失败" in result.model_text
 
     def test_empty_title_raises(self, tmp_path: Path) -> None:
         """空标题抛出 ValueError。"""

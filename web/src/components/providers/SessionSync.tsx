@@ -87,7 +87,6 @@ function _markLastToolCallPending(chat: ReturnType<typeof useChatStore.getState>
 export function SessionSync() {
   const mergeSessions = useSessionStore((s) => s.mergeSessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
   const abortController = useChatStore((s) => s.abortController);
   const switchSession = useChatStore((s) => s.switchSession);
   const setStreaming = useChatStore((s) => s.setStreaming);
@@ -168,23 +167,16 @@ export function SessionSync() {
   }, [mergeSessions, setActiveSession]);
 
   useEffect(() => {
-    // 鏈湴 SSE 娴佹椿璺冩椂涓嶈嚜鍔ㄥ垏鎹細璇濓紱绛夋祦缁撴潫鍐嶅垏鎹紝閬垮厤娓呮帀涔愯杩涜涓殑娑堟伅銆?
+    // 本地 SSE 流活跃时不自动切换会话；等流结束再切换，避免清空乐观进行中的消息。
     if (abortController) return;
 
-    // Demo sessions are fully managed by CoachMarks 鈥?skip async switchSession
+    // Demo sessions are fully managed by CoachMarks — skip async switchSession
     // which would wipe mock messages by trying to load from IDB/backend.
     if (activeSessionId?.startsWith(DEMO_SESSION_PREFIX)) return;
 
-    if (!activeSessionId) {
-      if (currentSessionId !== null) {
-        switchSession(null);
-      }
-      return;
-    }
-    if (currentSessionId !== activeSessionId) {
-      switchSession(activeSessionId);
-    }
-  }, [activeSessionId, currentSessionId, abortController, switchSession]);
+    // 单向：URL/session-store → 加载 chat 消息。switchSession 不回写 session id。
+    switchSession(activeSessionId);
+  }, [activeSessionId, abortController, switchSession]);
 
   useEffect(() => {
     if (!activeSessionId) {

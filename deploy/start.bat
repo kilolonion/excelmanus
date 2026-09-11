@@ -280,6 +280,14 @@ if errorlevel 1 (
     goto :exit_with_pause
 )
 
+REM Next.js 16 requires Node.js >= 20.9
+for /f "tokens=1 delims=." %%A in ('node -v 2^>nul') do set NODE_MAJOR=%%A
+set NODE_MAJOR=%NODE_MAJOR:v=%
+if %NODE_MAJOR% LSS 20 (
+    echo [XX] Node.js 版本过低，Web UI 需要 Node.js 20.9 或更高（Next.js 16）: https://nodejs.org/
+    goto :exit_with_pause
+)
+
 REM Check web/node_modules
 if not exist "%PROJECT_ROOT%\web\node_modules" (
     echo [--] 首次启动，安装前端依赖...

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import re
 import threading
 import time
 from collections.abc import Sequence
@@ -23,6 +22,11 @@ from excelmanus.engine_core.tool_errors import (
     classify_tool_error,
     compact_error,
 )
+from excelmanus.engine_core.tool_result import (
+    ToolError,
+    ToolResult,
+    coerce_legacy_result,
+)
 from excelmanus.engine_core.workspace_probe import (
     collect_workspace_mtime_index,
     has_workspace_mtime_changes,
@@ -30,6 +34,22 @@ from excelmanus.engine_core.workspace_probe import (
 from excelmanus.hooks import HookDecision, HookEvent
 from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.tools.registry import ToolNotAllowedError
+
+
+class _SyntheticToolCall:
+    """Code Mode 子调用用的最小 ToolCall 形状。"""
+
+    def __init__(
+        self,
+        *,
+        call_id: str,
+        name: str,
+        arguments: dict[str, Any],
+        parent_call_id: str | None = None,
+    ) -> None:
+        self.id = call_id
+        self.parent_call_id = parent_call_id
+        self.function = type("_Fn", (), {"name": name, "arguments": arguments})()
 
 
 @dataclass
@@ -47,7 +67,8 @@ class _ToolExecOutcome:
     question_id: str | None = None
     defer_tool_result: bool = False
     finish_accepted: bool = False
-    raw_result_str: str | None = None  # 截断前的原始结果，供窗口感知解析使用
+    raw_result_str: str | None = None  # 截断前的 model_text，供兼容路径使用
+    structured: ToolResult | None = None
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -59,178 +80,145 @@ if TYPE_CHECKING:
 logger = get_logger("tool_dispatcher")
 
 
+# finish_task 完成程度：完成 / 部分完成 / 停止但未完成
+_FINISH_STATUS_LABELS = {
+    "completed": "任务已完成",
+    "partial": "任务部分完成",
+    "stopped": "任务已停止，尚未完成",
+}
+
+
+def _as_str_list(value: Any) -> list[str]:
+    """将 warnings / incomplete 规范为去空字符串列表。"""
+    if not isinstance(value, list):
+        return []
+    return [str(item).strip() for item in value if str(item).strip()]
+
+
+def _lookup_content_version(engine: Any, path: str) -> str:
+    """若 FileRegistry 有该路径的内容哈希，则作为 content_version 返回。"""
+    if not path or engine is None:
+        return ""
+    registry = getattr(engine, "_file_registry", None) or getattr(engine, "file_registry", None)
+    if registry is None:
+        return ""
+    getter = getattr(registry, "get_by_path", None)
+    if not callable(getter):
+        return ""
+    try:
+        entry = getter(path)
+        if entry is None:
+            resolve = getattr(registry, "resolve_canonical", None) or getattr(registry, "resolve_path", None)
+            if callable(resolve):
+                canon = resolve(path)
+                if canon:
+                    entry = getter(str(canon))
+        if entry is None:
+            return ""
+        return str(getattr(entry, "content_hash", "") or "")
+    except Exception:
+        return ""
+
+
+def _coerce_finish_outputs(arguments: dict[str, Any], engine: Any = None) -> list[dict[str, Any]]:
+    """规范化 finish_task.outputs。"""
+    result: list[dict[str, Any]] = []
+    raw_outputs = arguments.get("outputs")
+    if isinstance(raw_outputs, list):
+        for item in raw_outputs:
+            if isinstance(item, str) and item.strip():
+                result.append({"path": item.strip(), "changed_ranges": []})
+            elif isinstance(item, dict):
+                path = str(item.get("path") or "").strip()
+                if not path:
+                    continue
+                ranges = item.get("changed_ranges")
+                entry: dict[str, Any] = {
+                    "path": path,
+                    "changed_ranges": [
+                        str(r).strip() for r in ranges if str(r).strip()
+                    ] if isinstance(ranges, list) else [],
+                }
+                version = item.get("content_version") or item.get("content_hash")
+                if version:
+                    entry["content_version"] = str(version)
+                result.append(entry)
+
+    if engine is not None:
+        for entry in result:
+            if entry.get("content_version"):
+                continue
+            version = _lookup_content_version(engine, entry["path"])
+            if version:
+                entry["content_version"] = version
+    return result
+
+
+def _infer_finish_status(arguments: dict[str, Any], incomplete: list[str]) -> str:
+    """显式 status 优先；否则有未完成项视为部分完成。"""
+    raw = str(arguments.get("status") or "").strip().lower()
+    if raw in _FINISH_STATUS_LABELS:
+        return raw
+    if incomplete:
+        return "partial"
+    return "completed"
+
+
 def _render_finish_task_report(
     report: dict[str, Any] | None,
     summary: str,
+    *,
+    status: str = "completed",
+    outputs: list[dict[str, Any]] | None = None,
+    warnings: list[str] | None = None,
+    incomplete: list[str] | None = None,
 ) -> str:
-    """将 finish_task 的参数渲染为用户可读文本。
+    """将 finish_task 参数渲染为区分完成程度的报告。
 
-    新格式只有 summary + affected_files；兼容旧格式的 report dict。
+    兼容旧会话：仍接受 report dict（operations/key_findings 等）与 summary。
+    不再返回笼统的「✅ 任务完成」。
     """
-    # 新格式：直接使用 summary 自然语言
-    if not report or not isinstance(report, dict):
-        return summary.strip() if summary else ""
+    parts: list[str] = [_FINISH_STATUS_LABELS.get(status, _FINISH_STATUS_LABELS["completed"])]
 
-    # 旧格式兼容：将 report dict 的各字段拼接为自然段落
-    parts: list[str] = []
-    for key in ("operations", "key_findings", "explanation", "suggestions"):
-        text = (report.get(key) or "").strip()
-        if text:
-            parts.append(text)
+    if isinstance(report, dict):
+        for key in ("operations", "key_findings", "explanation", "suggestions"):
+            text = (report.get(key) or "").strip()
+            if text:
+                parts.append(text)
 
-    affected_files = report.get("affected_files")
-    if affected_files and isinstance(affected_files, list):
-        file_lines = [f"- {f}" for f in affected_files if isinstance(f, str) and f.strip()]
-        if file_lines:
-            parts.append("涉及文件：\n" + "\n".join(file_lines))
+    summary_text = (summary or "").strip()
+    if summary_text:
+        parts.append(summary_text)
 
-    if not parts:
-        return summary.strip() if summary else ""
+    if outputs:
+        lines: list[str] = []
+        for item in outputs:
+            path = str(item.get("path") or "").strip()
+            if not path:
+                continue
+            line = path
+            ranges = item.get("changed_ranges") or []
+            if ranges:
+                line += f"（{', '.join(str(r) for r in ranges)}）"
+            version = item.get("content_version")
+            if version:
+                line += f" version={version}"
+            lines.append(f"- {line}")
+        if lines:
+            parts.append("产出：\n" + "\n".join(lines))
+
+    if warnings:
+        parts.append("警告：\n" + "\n".join(f"- {w}" for w in warnings))
+    if incomplete:
+        parts.append("未完成：\n" + "\n".join(f"- {item}" for item in incomplete))
 
     return "\n\n".join(parts)
-
-
-# JSON 代码块提取用正则（复用 small_model 的逻辑，避免跨模块依赖）
-_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL | re.IGNORECASE)
-
-# 被视为"输出被截断"的 finish_reason 集合（覆盖不同 VLM 提供商的命名差异）
-_TRUNCATION_FINISH_REASONS = {"length", "max_tokens"}
-
-
-def _is_likely_truncated(raw_text: str, finish_reason: str | None) -> bool:
-    """启发式检测 VLM 输出是否被截断。
-
-    检测信号：
-    1. finish_reason 明确指示截断
-    2. 文本包含 JSON 开头 '{' 但不以 '}' 结尾（启发式）
-    """
-    if finish_reason and finish_reason.lower() in _TRUNCATION_FINISH_REASONS:
-        return True
-    stripped = (raw_text or "").rstrip()
-    if stripped and '{' in stripped and not stripped.endswith('}'):
-        return True
-    return False
-
-
-def _parse_vlm_json(text: str, *, try_repair: bool = False) -> dict[str, Any] | None:
-    """从 VLM 输出中提取 JSON dict，支持 fence 包裹、前后缀污染和截断修复。
-
-    Args:
-        text: VLM 原始输出文本。
-        try_repair: 为 True 时表示已知输出可能被截断（如 finish_reason=length），
-                    用于日志提示。无论此参数为何值，解析失败时都会尝试修复。
-    """
-    content = (text or "").strip()
-    if not content:
-        return None
-    candidates = [content]
-    for match in _JSON_FENCE_RE.finditer(content):
-        body = (match.group(1) or "").strip()
-        if body:
-            candidates.append(body)
-    left = content.find("{")
-    right = content.rfind("}")
-    if left >= 0 and right > left:
-        candidates.append(content[left: right + 1].strip())
-    for candidate in candidates:
-        try:
-            data = json.loads(candidate)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(data, dict):
-            return data
-    # ── 截断修复：解析失败时始终尝试，try_repair 仅影响日志级别 ──
-    if left >= 0:
-        log_fn = logger.info if try_repair else logger.debug
-        log_fn(
-            "JSON 直接解析失败（%d 字符），尝试截断修复",
-            len(content),
-        )
-        return _repair_truncated_json(content[left:])
-    return None
-
-
-def _repair_truncated_json(fragment: str) -> dict[str, Any] | None:
-    """尝试修复被截断的 JSON（如 VLM 输出因 max_tokens 被截断）。
-
-    策略：
-    1. 收集所有可能的回退切点（逆序扫描，跳过字符串内部）
-    2. 从最靠近末尾的切点开始尝试：截断 → 补全未闭合括号 → json.loads
-    3. 某个切点修复成功则返回，全部失败返回 None
-    """
-    if not fragment or fragment[0] != '{':
-        return None
-
-    # ── 收集候选切点（从后往前，字符串外的分隔符位置）──
-    cut_points: list[int] = []
-    in_str = False
-    esc = False
-    for i, ch in enumerate(fragment):
-        if esc:
-            esc = False
-            continue
-        if ch == '\\' and in_str:
-            esc = True
-            continue
-        if ch == '"':
-            in_str = not in_str
-            continue
-        if in_str:
-            continue
-        if ch in (',', '[', '{', '}', ']'):
-            # , → 截到它之前（移除尾部不完整元素）
-            # 其它 → 截到它之后（保留该括号）
-            cut_points.append(i if ch == ',' else i + 1)
-
-    # 从最靠近末尾的切点开始尝试（优先保留更多数据）
-    for cut in reversed(cut_points):
-        trimmed = fragment[:cut]
-        # 统计未闭合括号
-        stack: list[str] = []
-        s_in_str = False
-        s_esc = False
-        for ch in trimmed:
-            if s_esc:
-                s_esc = False
-                continue
-            if ch == '\\' and s_in_str:
-                s_esc = True
-                continue
-            if ch == '"':
-                s_in_str = not s_in_str
-                continue
-            if s_in_str:
-                continue
-            if ch in ('{', '['):
-                stack.append(ch)
-            elif ch == '}' and stack and stack[-1] == '{':
-                stack.pop()
-            elif ch == ']' and stack and stack[-1] == '[':
-                stack.pop()
-        # 如果仍在字符串内，说明切点在引号中间——跳过
-        if s_in_str:
-            continue
-        closers = {'[': ']', '{': '}'}
-        suffix = ''.join(closers.get(b, '') for b in reversed(stack))
-        repaired = trimmed + suffix
-        try:
-            data = json.loads(repaired)
-            if isinstance(data, dict):
-                lost = len(fragment) - cut
-                logger.info(
-                    "截断 JSON 修复成功（回退 %d 字符，补全 %d 个括号）",
-                    lost, len(stack),
-                )
-                return data
-        except json.JSONDecodeError:
-            continue
-    return None
 
 
 def _image_content_hash(raw_bytes: bytes) -> str:
     """计算图片内容的稳定 hash（全文 sha256，截取前 16 hex）。
 
-    所有图片去重 / B 通道缓存 / provenance 均应使用此函数，
+    所有图片去重均应使用此函数，
     确保同一张图片在不同代码路径产生相同 hash。
     """
     import hashlib
@@ -256,17 +244,19 @@ class ToolDispatcher:
 
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
-        self._pending_vlm_image: dict | None = None
         self._deferred_image_injections: list[dict[str, Any]] = []
         # 已注入图片的 hash 集合（用于去重）
         self._injected_image_hashes: set[str] = set()
-        # B 通道最后一次 VLM 描述缓存（供 Pipeline 结构阶段复用）
-        self._last_vlm_description: str | None = None
-        self._last_vlm_description_image_hash: str | None = None
         # 每会话 sleep 取消事件（abort 时中断正在执行的 sleep 工具）
         self._sleep_cancel_event = threading.Event()
-        # 最近一次工具调用的截断前原始结果（供窗口感知解析）
+        # 任务级取消：abort 后拒绝新的 execute / 子调用
+        self._cancel_event = threading.Event()
+        # Code Mode 子调用与父 run_code 共用的调用次数预算；None 表示不限制
+        self._call_budget: int | None = None
+        self._call_count: int = 0
+        # 最近一次工具调用的截断前 model_text
         self._last_call_raw_result: str = ""
+        self._last_call_structured: ToolResult | None = None
 
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
@@ -284,7 +274,6 @@ class ToolDispatcher:
             CodePolicyHandler,
             DefaultToolHandler,
             DelegationHandler,
-            ExtractTableSpecHandler,
             FinishTaskHandler,
             HighRiskApprovalHandler,
             SkillActivationHandler,
@@ -303,7 +292,6 @@ class ToolDispatcher:
         _specific["finish_task"] = FinishTaskHandler(engine, self)
         _specific["ask_user"] = AskUserHandler(engine, self)
         _specific["suggest_mode_switch"] = SuggestModeSwitchHandler(engine, self)
-        _specific["extract_table_spec"] = ExtractTableSpecHandler(engine, self)
         self._specific_handlers: dict[str, Any] = _specific
         # 动态/条件 handler + 兜底（保持原有顺序）
         _code_policy = CodePolicyHandler(engine, self)
@@ -357,76 +345,83 @@ class ToolDispatcher:
                 after_partial,
             )
 
-    # ── 结构化结果提取（统一 JSON 解析） ──────────────────────
+    def _seed_seen_versions(self) -> None:
+        from excelmanus.workbook_commit import seed_seen_versions
 
-    def _extract_structured_result(self, result_str: str) -> tuple[str, dict[str, str] | None]:
-        """从工具结果 JSON 中统一提取结构化字段（单次 json.loads）。
+        state = getattr(self._engine, "state", None)
+        mapping = getattr(state, "file_content_versions", None) if state is not None else None
+        seed_seen_versions(mapping if isinstance(mapping, dict) else {})
 
-        处理：
-        - ``__tool_result_image__``: 图片注入（B+C 通道路由）
-        - ``cow_mapping``: CoW 路径映射注册
+    def _remember_tool_versions(self, result: ToolResult) -> None:
+        from excelmanus.workbook_commit import (
+            export_seen_versions,
+            remember_content_version,
+        )
 
-        Returns:
-            (cleaned_result_str, cow_mapping_or_none)
-        """
-        try:
-            parsed = json.loads(result_str)
-            if not isinstance(parsed, dict):
-                return result_str, None
-        except (json.JSONDecodeError, TypeError):
-            return result_str, None
+        version = getattr(result.ui_meta, "content_version", None)
+        for path in result.ui_meta.files or []:
+            remember_content_version(path, version)
+        value = result.value
+        if isinstance(value, dict):
+            nested = value.get("content_version")
+            path = value.get("file_path")
+            if nested and path:
+                remember_content_version(str(path), str(nested))
+            saves = value.get("save_versions")
+            if isinstance(saves, dict):
+                for save_path, save_ver in saves.items():
+                    if save_path and save_ver:
+                        remember_content_version(str(save_path), str(save_ver))
+        state = getattr(self._engine, "state", None)
+        remember = getattr(state, "remember_file_version", None)
+        if callable(remember):
+            for path, ver in export_seen_versions().items():
+                remember(path, ver)
 
-        mutated = False
+    # ── ToolResult 归一化与 ui_meta 副作用 ──────────────────────
 
-        # ── CoW 映射提取 ──
-        cow_mapping: dict[str, str] | None = None
-        raw_cow = parsed.get("cow_mapping")
-        if raw_cow and isinstance(raw_cow, dict):
-            cow_mapping = raw_cow
-            self._engine.state.register_cow_mappings(cow_mapping)
-            tx = self._engine.transaction
-            if tx is not None:
-                tx.register_cow_mappings(cow_mapping)
+    @staticmethod
+    def _coerce_tool_result(result_value: Any) -> ToolResult:
+        """唯一消费边界：任意工具返回值 → ToolResult。"""
+        return coerce_legacy_result(result_value)
 
-        # ── 图片注入提取（延迟注入，避免破坏 tool_calls→tool_responses 序列） ──
-        if "__tool_result_image__" in parsed:
-            injection = parsed.pop("__tool_result_image__")
-            mutated = True
-            e = self._engine
+    def _register_cow_mapping(self, cow_mapping: dict[str, str]) -> None:
+        self._engine.state.register_cow_mappings(cow_mapping)
+        tx = self._engine.transaction
+        if tx is not None:
+            tx.register_cow_mappings(cow_mapping)
 
-            # C 通道：主模型支持视觉 → 延迟注入图片到对话 memory
-            # 不能在此处直接调用 add_image_message，否则会在 assistant(tool_calls)
-            # 和 tool(responses) 之间插入 user 消息，导致 API 400 错误。
-            if e.is_vision_capable:
-                # 图片去重：检测同一图片是否已注入过
-                _img_hash = _image_content_hash_b64(injection["base64"])
-                if _img_hash in self._injected_image_hashes:
-                    logger.info("C 通道: 图片已在上下文中 (hash=%s)，跳过重复注入", _img_hash)
-                    parsed["hint"] = "图片已在视觉上下文中，无需重复注入。"
-                else:
-                    self._deferred_image_injections.append({
-                        "base64": injection["base64"],
-                        "mime_type": injection.get("mime_type", "image/png"),
-                        "detail": injection.get("detail", "auto"),
-                    })
-                    self._injected_image_hashes.add(_img_hash)
-                    logger.info("C 通道: 图片已缓存待注入 (hash=%s, mime=%s)", _img_hash, injection.get("mime_type"))
-                    parsed["hint"] = "图片已加载到视觉上下文，你现在可以看到这张图片。"
+    def _schedule_image_injection(self, injection: dict[str, Any]) -> None:
+        e = self._engine
+        base64_data = injection.get("base64")
+        if not base64_data:
+            return
+
+        if e.is_vision_capable:
+            _img_hash = _image_content_hash_b64(base64_data)
+            if _img_hash in self._injected_image_hashes:
+                logger.info("图片已在上下文中 (hash=%s)，跳过重复注入", _img_hash)
             else:
-                logger.info("主模型无视觉能力，跳过图片注入")
-                parsed["hint"] = "当前主模型不支持视觉输入，图片未注入。"
+                self._deferred_image_injections.append({
+                    "base64": base64_data,
+                    "mime_type": injection.get("mime_type", "image/png"),
+                    "detail": injection.get("detail", "auto"),
+                })
+                self._injected_image_hashes.add(_img_hash)
+                logger.info(
+                    "图片已缓存待注入 (hash=%s, mime=%s)",
+                    _img_hash,
+                    injection.get("mime_type"),
+                )
+        else:
+            logger.info("主模型无视觉能力，跳过图片注入")
 
-            # B 通道：缓存图片数据供异步 VLM 描述
-            # 当主模型有视觉能力时，C 通道已直接注入图片，跳过 B 通道以避免
-            # 额外的 VLM API 调用延迟（10-30s），主模型直接看图效果已足够。
-            if e.vlm_enhance_available and not e.is_vision_capable:
-                self._pending_vlm_image = injection
-                parsed["vlm_enhance"] = "VLM 增强描述将自动生成并追加到下方。"
-            elif not e.is_vision_capable and not e.vlm_enhance_available:
-                parsed["hint"] += "且未配置 VLM 增强，无法分析图片内容。建议配置 EXCELMANUS_VLM_* 环境变量。"
-
-        cleaned = json.dumps(parsed, ensure_ascii=False) if mutated else result_str
-        return cleaned, cow_mapping
+    def _apply_ui_meta_effects(self, tool_result: ToolResult) -> None:
+        ui = tool_result.ui_meta
+        if ui.cow_mapping:
+            self._register_cow_mapping(ui.cow_mapping)
+        if ui.image:
+            self._schedule_image_injection(ui.image)
 
     def flush_deferred_images(self) -> int:
         """将延迟的图片注入实际写入 memory。
@@ -449,321 +444,9 @@ class ToolDispatcher:
                 detail=inj.get("detail", "auto"),
             )
             count += 1
-        logger.info("C 通道: 已注入 %d 张延迟图片到 memory", count)
+            logger.info("已注入 %d 张延迟图片到 memory", count)
         self._deferred_image_injections.clear()
         return count
-
-    # 向后兼容别名（测试中可能直接调用）
-    def _try_inject_image(self, result_str: str) -> str:
-        """向后兼容：提取图片注入，返回清理后的 result_str。"""
-        cleaned, _ = self._extract_structured_result(result_str)
-        return cleaned
-
-    def _extract_and_register_cow_mapping(self, result_str: str) -> dict[str, str] | None:
-        """向后兼容：提取 cow_mapping。"""
-        _, cow = self._extract_structured_result(result_str)
-        return cow
-
-    async def _run_vlm_describe(self) -> str | None:
-        """B 通道：调用小 VLM 生成图片的 Markdown 描述。
-
-        读取 _pending_vlm_image 中缓存的图片数据，调用 VLM，返回描述文本。
-        调用后清除缓存。返回 None 表示失败或无待处理图片。
-        """
-        import base64
-
-        from excelmanus.vision_extractor import build_describe_prompt
-
-        injection = self._pending_vlm_image
-        if injection is None:
-            return None
-        self._pending_vlm_image = None
-
-        e = self._engine
-        vlm_client = e.vlm_client
-        vlm_model = e.vlm_model
-
-        # 预处理图片（data 模式：增强文字可读性）
-        raw_bytes = base64.b64decode(injection["base64"])
-        compressed, mime = self._prepare_image_for_vlm(
-            raw_bytes,
-            max_long_edge=e.config.vlm_image_max_long_edge,
-            jpeg_quality=e.config.vlm_image_jpeg_quality,
-            mode="data",
-        )
-        b64 = base64.b64encode(compressed).decode("ascii")
-        image_content = {
-            "type": "image_url",
-            "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"},
-        }
-
-        prompt = build_describe_prompt()
-        messages = [
-            {"role": "user", "content": [
-                image_content,
-                {"type": "text", "text": prompt},
-            ]},
-        ]
-
-        raw_text, last_error, _fr = await self._call_vlm_with_retry(
-            messages=messages,
-            vlm_client=vlm_client,
-            vlm_model=vlm_model,
-            vlm_timeout=e.config.vlm_timeout_seconds,
-            vlm_max_retries=e.config.vlm_max_retries,
-            vlm_base_delay=e.config.vlm_retry_base_delay_seconds,
-            phase_label="B通道描述",
-        )
-
-        if raw_text is None:
-            sanitized = self._sanitize_vlm_error(last_error) if last_error else "未知错误"
-            logger.warning("B 通道 VLM 描述失败: %s", sanitized)
-            return None
-
-        logger.info("B 通道 VLM 描述完成: %d 字符", len(raw_text))
-        # 缓存 B 通道描述，供 Pipeline 结构阶段复用
-        self._last_vlm_description = raw_text
-        _b64_str = injection.get("base64", "")
-        self._last_vlm_description_image_hash = (
-            _image_content_hash_b64(_b64_str) if _b64_str else None
-        )
-        return raw_text
-
-    async def _call_vlm_with_retry(
-        self,
-        *,
-        messages: list[dict],
-        vlm_client: Any,
-        vlm_model: str,
-        vlm_timeout: int,
-        vlm_max_retries: int,
-        vlm_base_delay: float,
-        phase_label: str = "",
-        response_format: dict | None = None,
-        max_tokens: int | None = None,
-    ) -> tuple[str | None, Exception | None, str | None]:
-        """共享的 VLM 调用逻辑（带超时+网络错误重试）。
-
-        返回 (raw_text, last_error, finish_reason)。raw_text 为 None 表示全部失败。
-        """
-        import asyncio
-
-        raw_text: str | None = None
-        last_error: Exception | None = None
-        finish_reason: str | None = None
-        label = f" [{phase_label}]" if phase_label else ""
-
-        create_kwargs: dict[str, Any] = {
-            "model": vlm_model,
-            "messages": messages,
-            "temperature": 0.0,
-        }
-        if response_format is not None:
-            create_kwargs["response_format"] = response_format
-        if max_tokens is not None:
-            create_kwargs["max_tokens"] = max_tokens
-
-        for attempt in range(vlm_max_retries + 1):
-            try:
-                response = await asyncio.wait_for(
-                    vlm_client.chat.completions.create(**create_kwargs),
-                    timeout=vlm_timeout,
-                )
-                raw_text = response.choices[0].message.content or ""
-                finish_reason = getattr(response.choices[0], "finish_reason", None)
-                if finish_reason == "length":
-                    logger.warning(
-                        "VLM%s 输出被截断（finish_reason=length），"
-                        "输出长度 %d 字符，考虑增大 EXCELMANUS_VLM_MAX_TOKENS",
-                        label, len(raw_text),
-                    )
-                break
-            except asyncio.TimeoutError:
-                last_error = TimeoutError(f"VLM 调用超时（{vlm_timeout}s）")
-                logger.warning("VLM%s 超时（%ds），不重试", label, vlm_timeout)
-                break
-            except Exception as exc:
-                last_error = exc
-                sanitized = self._sanitize_vlm_error(exc)
-                logger.warning(
-                    "VLM%s 失败（attempt %d/%d）: %s",
-                    label, attempt + 1, vlm_max_retries + 1, sanitized,
-                )
-                if attempt < vlm_max_retries:
-                    delay = vlm_base_delay * (2 ** attempt)
-                    await asyncio.sleep(delay)
-
-        return raw_text, last_error, finish_reason
-
-    @staticmethod
-    def _prepare_image_for_vlm(
-        raw: bytes,
-        *,
-        max_long_edge: int = 2048,
-        jpeg_quality: int = 92,
-        mode: str = "data",  # "data" | "style"
-    ) -> tuple[bytes, str]:
-        """自适应预处理图片以提升 VLM 表格识别质量。
-
-        根据图片特征自动选择处理策略：
-        1. 长边超限时等比缩放（保留文字细节）
-        2. 灰色背景检测 → 白底替换（消除表格灰底干扰）
-        3. 自适应对比度增强（低对比度图片加强，高对比度跳过）
-        4. 扫描件/复印件自动二值化（基于直方图双峰检测）
-        5. 智能锐化（仅对模糊图片应用，避免过度锐化）
-        6. 转为高质量 JPEG
-        - 返回 (processed_bytes, mime_type)
-        """
-        import io
-
-        try:
-            from PIL import Image, ImageFilter, ImageOps, ImageStat
-        except ImportError:
-            return raw, "image/png"
-
-        try:
-            img = Image.open(io.BytesIO(raw))
-        except Exception:
-            return raw, "image/png"
-
-        # ── 1. 缩放（仅在超限时） ──
-        w, h = img.size
-        long_edge = max(w, h)
-        if long_edge > max_long_edge:
-            scale = max_long_edge / long_edge
-            new_w, new_h = int(w * scale), int(h * scale)
-            img = img.resize((new_w, new_h), Image.LANCZOS)
-
-        # ── 2. 转 RGB ──
-        if img.mode in ("RGBA", "LA", "P"):
-            background = Image.new("RGB", img.size, (255, 255, 255))
-            if img.mode == "P":
-                img = img.convert("RGBA")
-            background.paste(img, mask=img.split()[-1] if img.mode == "RGBA" else None)
-            img = background
-        elif img.mode != "RGB":
-            img = img.convert("RGB")
-
-        # ── style 模式：仅缩放+RGB转换，保留原始颜色 ──
-        if mode == "style":
-            buf = io.BytesIO()
-            img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-            compressed = buf.getvalue()
-            if len(compressed) < len(raw):
-                return compressed, "image/jpeg"
-            return raw, "image/png"
-
-        # ── 3. 分析图片特征 ──
-        try:
-            gray = img.convert("L")
-            stat = ImageStat.Stat(gray)
-            mean_brightness = stat.mean[0]  # 0-255
-            stddev = stat.stddev[0]
-            hist = gray.histogram()  # 256 bins
-        except Exception:
-            mean_brightness, stddev, hist = 128.0, 50.0, [0] * 256
-
-        # ── 4. 灰色背景检测与去除 ──
-        # 如果背景偏灰（中值亮度在 180-230 之间），将灰底白化
-        try:
-            if 180 <= mean_brightness <= 230 and stddev < 60:
-                # 用灰度图判断哪些像素属于背景，生成 mask，
-                # 再对 RGB 图统一白化，避免逐通道独立比较导致颜色失真
-                thresh = int(mean_brightness - 20)
-                bg_mask = gray.point(lambda p: 255 if p > thresh else 0, "1")
-                white = Image.new("RGB", img.size, (255, 255, 255))
-                img = Image.composite(white, img, bg_mask)
-                logger.debug("图片预处理: 检测到灰色背景，已白化")
-        except (ValueError, OSError, RuntimeError):
-            logger.debug("图片预处理: 灰色背景白化失败", exc_info=True)
-
-        # ── 5. 自适应对比度增强 ──
-        try:
-            if stddev < 40:
-                # 低对比度：强力增强
-                img = ImageOps.autocontrast(img, cutoff=1)
-                logger.debug("图片预处理: 低对比度(stddev=%.1f)，强力增强", stddev)
-            elif stddev < 70:
-                # 中等对比度：适度增强
-                img = ImageOps.autocontrast(img, cutoff=0.5)
-            # stddev >= 70：高对比度图片，跳过对比度增强
-        except (ValueError, OSError, RuntimeError):
-            logger.debug("图片预处理: 对比度增强失败", exc_info=True)
-
-        # ── 6. 扫描件二值化检测 ──
-        # 通过直方图分析：如果亮度分布呈双峰（文字+背景），适用二值化
-        try:
-            if stddev > 30:
-                # 计算直方图暗区(0-128)和亮区(128-255)的占比
-                dark_ratio = sum(hist[:128]) / max(sum(hist), 1)
-                light_ratio = sum(hist[128:]) / max(sum(hist), 1)
-                # 双峰特征：暗区和亮区各占 10-90%
-                is_bimodal = 0.05 < dark_ratio < 0.50 and 0.50 < light_ratio < 0.95
-                # 对于扫描件（高对比度双峰），应用轻度阈值化增强
-                if is_bimodal and stddev > 80:
-                    gray_for_thresh = img.convert("L")
-                    # 类 Otsu 简化：用均值作为阈值
-                    threshold = int(mean_brightness * 0.85)
-                    binary = gray_for_thresh.point(lambda p: 255 if p > threshold else 0, "L")
-                    img = binary.convert("RGB")
-                    logger.debug("图片预处理: 扫描件特征，已二值化(阈值=%d)", threshold)
-        except (ValueError, OSError, RuntimeError):
-            logger.debug("图片预处理: 扫描件二值化失败", exc_info=True)
-
-        # ── 7. 智能锐化（仅对模糊图片） ──
-        try:
-            # 通过边缘检测评估清晰度
-            edges = gray.filter(ImageFilter.FIND_EDGES)
-            edge_stat = ImageStat.Stat(edges)
-            edge_mean = edge_stat.mean[0]
-            if edge_mean < 15:
-                # 模糊图片：应用锐化
-                img = img.filter(ImageFilter.SHARPEN)
-                logger.debug("图片预处理: 模糊图片(edge_mean=%.1f)，已锐化", edge_mean)
-            elif edge_mean < 30:
-                # 中等清晰度：轻度锐化
-                img = img.filter(ImageFilter.DETAIL)
-        except (ValueError, OSError, RuntimeError):
-            logger.debug("图片预处理: 智能锐化失败", exc_info=True)
-
-        # ── 8. 输出 JPEG ──
-        buf = io.BytesIO()
-        img.save(buf, format="JPEG", quality=jpeg_quality, optimize=True)
-        compressed = buf.getvalue()
-        if len(compressed) < len(raw):
-            return compressed, "image/jpeg"
-        return raw, "image/png"
-
-    @staticmethod
-    def _sanitize_vlm_error(exc: Exception) -> str:
-        """净化 VLM 错误消息：移除 HTML 响应体，提取关键信息。"""
-        import re as _re
-        msg = str(exc)
-        if "<html" in msg.lower() or "<!doctype" in msg.lower():
-            code_match = _re.search(r"(\d{3})[:\s]", msg)
-            code = code_match.group(1) if code_match else "unknown"
-            title_match = _re.search(r"<title[^>]*>(.*?)</title>", msg, _re.IGNORECASE)
-            title = title_match.group(1).strip() if title_match else "Gateway error"
-            return f"HTTP {code}: {title}"
-        return msg[:500]
-
-    @staticmethod
-    def _build_vlm_failure_result(
-        exc: Exception | None, attempts: int, file_path: str,
-    ) -> str:
-        """构建 VLM 失败时的结构化降级引导结果。"""
-        error_msg = ToolDispatcher._sanitize_vlm_error(exc) if exc else "未知错误"
-        return json.dumps({
-            "status": "error",
-            "error_code": "VLM_CALL_FAILED",
-            "message": f"VLM 提取在 {attempts} 次尝试后失败: {error_msg}",
-            "fallback_hint": (
-                "建议降级方案：1) 使用 read_image 查看图片，由主模型直接描述表格内容；"
-                "2) 用 run_code + openpyxl 根据描述手动构建 Excel 文件。"
-                "VLM 上游 API 可能暂时不可用。"
-            ),
-            "file_path": file_path,
-        }, ensure_ascii=False)
 
     def _redirect_cow_paths(
         self,
@@ -864,18 +547,79 @@ class ToolDispatcher:
         """中断当前会话正在执行的 sleep 工具调用。"""
         self._sleep_cancel_event.set()
 
+    def request_cancel(self) -> None:
+        """取消当前任务：打断 sleep，并拒绝后续 execute / 子调用。"""
+        self._cancel_event.set()
+        self._sleep_cancel_event.set()
+
+    def reset_cancel(self) -> None:
+        self._cancel_event.clear()
+        self._sleep_cancel_event.clear()
+
+    def is_cancelled(self) -> bool:
+        return self._cancel_event.is_set()
+
+    def begin_call_budget(self, max_calls: int | None) -> None:
+        """开始一段共享调用预算。``None`` 表示不限制。"""
+        self._call_budget = max_calls
+        self._call_count = 0
+
+    def consume_call_budget(self) -> bool:
+        """消耗一次调用额度。超预算返回 False。"""
+        if self._call_budget is None:
+            return True
+        if self._call_count >= self._call_budget:
+            return False
+        self._call_count += 1
+        return True
+
+    @staticmethod
+    def _blocked_tool_result(code: str, message: str) -> ToolResult:
+        return ToolResult(
+            success=False,
+            model_text=message,
+            error=ToolError(code=code, message=message),
+        )
+
+    def _blocked_call_result(
+        self, tc: Any, *, code: str, message: str
+    ) -> Any:
+        from excelmanus.engine_types import ToolCallResult
+
+        function = getattr(tc, "function", None)
+        arguments = getattr(function, "arguments", None)
+        if not isinstance(arguments, dict):
+            arguments = {}
+        structured = self._blocked_tool_result(code, message)
+        return ToolCallResult(
+            tool_name=getattr(function, "name", "") or "",
+            arguments=arguments,
+            result=message,
+            success=False,
+            error=code,
+            structured=structured,
+        )
+
     async def call_registry_tool(
         self,
         *,
         tool_name: str,
         arguments: dict[str, Any],
         tool_scope: Sequence[str] | None = None,
-    ) -> str:
-        """调用工具，返回截断后的结果字符串。
+        root_call_id: str | None = None,
+    ) -> ToolResult:
+        """调用工具，返回归一化后的 ToolResult（截断仅作用于 model_text）。
 
         MCP 工具（具有 async_func）直接 await，避免线程池 + asyncio.run 开销。
         普通工具仍走 asyncio.to_thread 线程池路径。
+        ``root_call_id`` 为 Code Mode 子调用挂到父 ``run_code`` 的 tool_call_id。
         """
+        if root_call_id:
+            logger.debug(
+                "code_mode subcall tool=%s root_call_id=%s",
+                tool_name,
+                root_call_id,
+            )
         from excelmanus.tools import memory_tools
         from excelmanus.tools.sleep_tools import set_cancel_event, reset_cancel_event
 
@@ -889,6 +633,7 @@ class ToolDispatcher:
             and callable(tool_def.async_func)
             and asyncio.iscoroutinefunction(tool_def.async_func)
         )
+        self._seed_seen_versions()
         if _has_async:
             # MCP 异步快速路径：直接 await，不经线程池
             result_value = await registry.call_tool_async(
@@ -918,22 +663,69 @@ class ToolDispatcher:
             finally:
                 reset_cancel_event(_sleep_token)
 
-        result_str = str(result_value)
+        tool_result = self._coerce_tool_result(result_value)
+        self._remember_tool_versions(tool_result)
+        self._apply_ui_meta_effects(tool_result)
+        self._last_call_structured = tool_result
+        self._last_call_raw_result = tool_result.model_text
 
-        # 先处理图片注入（移除 base64 载荷），再做截断，
-        # 避免截断破坏 JSON 导致注入失败。
-        if result_str:
-            result_str = self._try_inject_image(result_str)
-
-        # 保存截断前的原始结果，供窗口感知解析使用
-        self._last_call_raw_result: str = result_str
-
-        # 工具结果截断
         tool_def = getattr(registry, "get_tool", lambda _: None)(tool_name)
         if tool_def is not None:
-            result_str = tool_def.truncate_result(result_str)
+            tool_result = tool_result.with_model_text(
+                tool_def.truncate_result(tool_result.model_text)
+            )
 
-        return result_str
+        return tool_result
+
+    async def execute_subcall(
+        self,
+        *,
+        tool_name: str,
+        arguments: dict[str, Any],
+        tool_scope: Sequence[str] | None = None,
+        root_call_id: str | None = None,
+        call_id: str | None = None,
+        on_event: "EventCallback | None" = None,
+    ) -> ToolResult:
+        """Code Mode 子调用：走完整 ``execute()``（审批、hooks、事件），再投影为 ToolResult。"""
+        from excelmanus.engine_types import ToolCallResult
+
+        if self.is_cancelled():
+            return self._blocked_tool_result("CANCELLED", "任务已取消")
+        if not self.consume_call_budget():
+            return self._blocked_tool_result(
+                "BUDGET_EXCEEDED", "嵌套工具调用已达本轮预算"
+            )
+        self._seed_seen_versions()
+        if not call_id:
+            self._subcall_seq = getattr(self, "_subcall_seq", 0) + 1
+            prefix = root_call_id or "sub"
+            call_id = f"{prefix}:{tool_name}:{self._subcall_seq}"
+        tc = _SyntheticToolCall(
+            call_id=call_id,
+            name=tool_name,
+            arguments=arguments,
+            parent_call_id=root_call_id,
+        )
+        if on_event is None:
+            on_event = getattr(self, "_current_on_event", None)
+        tcr = await self.execute(tc, tool_scope, on_event, 0)
+        if isinstance(tcr, ToolResult):
+            return tcr
+        if isinstance(tcr, ToolCallResult):
+            if tcr.pending_approval:
+                return ToolResult(
+                    success=False,
+                    model_text=tcr.result,
+                    error=ToolError(
+                        code="PENDING_APPROVAL",
+                        message=tcr.result or "工具等待审批",
+                    ),
+                )
+            if tcr.structured is not None:
+                return tcr.structured
+            return ToolResult.from_text(tcr.result, success=bool(tcr.success))
+        return self._coerce_tool_result(tcr)
 
     # ── 核心执行方法：从 AgentEngine._execute_tool_call 搬迁 ──
 
@@ -956,15 +748,21 @@ class ToolDispatcher:
 
         e = self._engine  # 引擎快捷引用
 
+        if self.is_cancelled():
+            return self._blocked_call_result(tc, code="CANCELLED", message="任务已取消")
+
         # 注入每会话的沙盒环境和 FileAccessGuard 到 contextvars。
         _sandbox_token = _set_sandbox_env(e.sandbox_env)
         _guard_token = _set_guard(e.file_access_guard)
+        prev_event = getattr(self, "_current_on_event", None)
+        self._current_on_event = on_event
         try:
             return await self._execute_inner(
                 tc, tool_scope, on_event, iteration, route_result, skip_start_event,
                 _sandbox_token,
             )
         finally:
+            self._current_on_event = prev_event
             from excelmanus.tools.code_tools import _current_sandbox_env
             _current_sandbox_env.reset(_sandbox_token)
             _reset_guard(_guard_token)
@@ -1003,6 +801,7 @@ class ToolDispatcher:
                     tool_name=tool_name,
                     arguments=arguments,
                     iteration=iteration,
+                    parent_call_id=getattr(tc, "parent_call_id", "") or "",
                 ),
             )
 
@@ -1029,6 +828,7 @@ class ToolDispatcher:
         error_kind: str | None = None
         _cow_reminders: list[str] = []
         _raw_result_str: str | None = None
+        structured: ToolResult | None = None
 
         # 执行工具调用
         hook_skill = e.pick_route_skill(route_result)
@@ -1127,9 +927,18 @@ class ToolDispatcher:
                 defer_tool_result = outcome.defer_tool_result
                 finish_accepted = outcome.finish_accepted
                 _raw_result_str = outcome.raw_result_str
+                structured = outcome.structured
 
             # ── 检测 registry 层返回的结构化错误 JSON ──
-            if success and e.registry.is_error_result(result_str):
+            if success and structured is not None and not structured.success:
+                success = False
+                error = (
+                    structured.error.message
+                    if structured.error is not None
+                    else structured.model_text
+                )
+                result_str = structured.model_text
+            elif success and e.registry.is_error_result(result_str):
                 success = False
                 try:
                     _err = json.loads(result_str)
@@ -1166,7 +975,7 @@ class ToolDispatcher:
                     result_str = f"{result_str}\n[Hook 拒绝] {reason}"
 
         # ── 后处理流水线 ──
-        result_str, success, error = await self._postprocess_result(
+        result_str, success, error, structured = await self._postprocess_result(
             tool_name=tool_name,
             tool_call_id=tool_call_id,
             arguments=arguments,
@@ -1179,6 +988,8 @@ class ToolDispatcher:
             start_time=_t0,
             raw_result_str=_raw_result_str,
             error_kind=error_kind,
+            structured=structured,
+            parent_call_id=getattr(tc, "parent_call_id", "") or "",
         )
 
         return ToolCallResult(
@@ -1195,6 +1006,7 @@ class ToolDispatcher:
             question_id=question_id,
             defer_tool_result=defer_tool_result,
             finish_accepted=finish_accepted,
+            structured=structured,
         )
 
     async def _dispatch_via_handlers(
@@ -1214,6 +1026,73 @@ class ToolDispatcher:
         先查 _specific_handlers O(1) 索引，未命中则遍历 _generic_handlers。
         对 RETRYABLE 错误自动重试（指数退避，不消耗 Agent 迭代预算）。
         """
+        session = None
+        session_token = None
+        if tool_name == "run_code":
+            from excelmanus.code_mode import (
+                build_session_for_run_code,
+                get_code_mode_session,
+                set_code_mode_session,
+            )
+
+            if get_code_mode_session() is None:
+                try:
+                    session = build_session_for_run_code(
+                        self,
+                        root_call_id=tool_call_id,
+                        tool_scope=tool_scope,
+                        on_event=on_event,
+                    )
+                    session_token = set_code_mode_session(session)
+                    session.start()
+                    engine = getattr(self, "_engine", None)
+                    config = getattr(engine, "config", None)
+                    limit = int(getattr(config, "max_iterations", 50) or 50)
+                    used = int(
+                        getattr(getattr(engine, "state", None), "last_tool_call_count", 0)
+                        or 0
+                    )
+                    self.begin_call_budget(max(0, limit - used))
+                except Exception:
+                    logger.debug("Code Mode 桥启动失败，继续无 SDK", exc_info=True)
+                    session = None
+                    session_token = None
+        try:
+            return await self._dispatch_via_handlers_loop(
+                tool_name=tool_name,
+                tool_call_id=tool_call_id,
+                arguments=arguments,
+                tool_scope=tool_scope,
+                on_event=on_event,
+                iteration=iteration,
+                route_result=route_result,
+                skip_high_risk_approval_by_hook=skip_high_risk_approval_by_hook,
+            )
+        finally:
+            if session is not None:
+                try:
+                    session.stop()
+                except Exception:
+                    logger.debug("Code Mode 桥停止失败", exc_info=True)
+                self.begin_call_budget(None)
+            if session_token is not None:
+                from excelmanus.code_mode import reset_code_mode_session as _reset_cm
+
+                _reset_cm(session_token)
+
+    async def _dispatch_via_handlers_loop(
+        self,
+        tool_name: str,
+        tool_call_id: str,
+        arguments: dict[str, Any],
+        *,
+        tool_scope: Sequence[str] | None = None,
+        on_event: "EventCallback | None" = None,
+        iteration: int = 0,
+        route_result: Any = None,
+        skip_high_risk_approval_by_hook: bool = False,
+    ) -> "_ToolExecOutcome":
+        """通过策略处理器表分发工具执行（含可重试循环）。"""
         policy = DEFAULT_RETRY_POLICY
         last_outcome: _ToolExecOutcome | None = None
 
@@ -1238,8 +1117,17 @@ class ToolDispatcher:
                 tool_name=tool_name,
             )
 
-            # 非可重试错误：压缩后直接返回
+            # 非可重试错误：压缩后直接返回。
+            # 工具已给出契约错误码（版本冲突、越权等）时不要改写成 generic compact JSON。
             if not tool_error.retryable:
+                structured = outcome.structured
+                code = (
+                    structured.error.code
+                    if structured is not None and structured.error is not None
+                    else ""
+                )
+                if code and code not in {"TOOL_ERROR", "TOOL_EXECUTION_ERROR"}:
+                    return outcome
                 compacted = compact_error(outcome.error, tool_error=tool_error)
                 return _ToolExecOutcome(
                     result_str=compacted,
@@ -1247,6 +1135,7 @@ class ToolDispatcher:
                     error=compacted,
                     error_kind=tool_error.kind.value,
                     audit_record=outcome.audit_record,
+                    structured=structured,
                 )
 
             last_outcome = outcome
@@ -1268,6 +1157,14 @@ class ToolDispatcher:
             last_outcome.error or last_outcome.result_str if last_outcome else "unknown",
             tool_name=tool_name,
         )
+        last_structured = last_outcome.structured if last_outcome else None
+        last_code = (
+            last_structured.error.code
+            if last_structured is not None and last_structured.error is not None
+            else ""
+        )
+        if last_code and last_code not in {"TOOL_ERROR", "TOOL_EXECUTION_ERROR"}:
+            return last_outcome
         compacted = compact_error(
             last_outcome.error if last_outcome else "unknown",
             tool_error=final_error,
@@ -1279,6 +1176,7 @@ class ToolDispatcher:
             error=retried_msg,
             error_kind=final_error.kind.value,
             audit_record=last_outcome.audit_record if last_outcome else None,
+            structured=last_structured,
         )
 
     async def _dispatch_single_attempt(
@@ -1365,31 +1263,27 @@ class ToolDispatcher:
         start_time: float = 0.0,
         raw_result_str: str | None = None,
         error_kind: str | None = None,
-    ) -> tuple[str, bool, str | None]:
-        """后处理流水线：CoW/备份/图片/VLM/窗口感知/硬截断/事件/审计/任务清单。
+        structured: ToolResult | None = None,
+        parent_call_id: str = "",
+    ) -> tuple[str, bool, str | None, ToolResult | None]:
+        """后处理流水线：CoW/备份/VLM/硬截断/事件/审计/任务清单。
 
-        返回 (result_str, success, error)，其中 success/error 可能被
+        返回 (result_str, success, error, structured)，其中 success/error 可能被
         结构化错误检测修改。
         """
         from excelmanus.events import EventType, ToolCallEvent
 
         e = self._engine
 
-        # ── 保留原始 JSON 结果用于 Excel 事件提取 ──
-        # 后续 enrichment 步骤会在 result_str 上追加非 JSON 文本（CoW 提醒、
-        # 备份通知、VLM 描述、窗口感知等），导致 json.loads 失败。
-        # 必须在 enrichment 之前保存原始结果供 _emit_excel_events 使用。
-        _raw_result_for_excel_events = result_str
+        if structured is None and result_str:
+            structured = self._coerce_tool_result(result_str)
+            if not structured.success:
+                success = False
+                error = structured.error.message if structured.error else structured.model_text
+        if structured is not None:
+            self._remember_tool_versions(structured)
 
-        # ── 通用结构化字段提取（CoW 映射 + 图片注入，单次 JSON 解析） ──
-        if success and result_str:
-            result_str, _cow_extracted = self._extract_structured_result(result_str)
-            if _cow_extracted:
-                logger.info(
-                    "CoW 映射已注册: tool=%s mappings=%s", tool_name, _cow_extracted,
-                )
-
-        # ── CoW 路径拦截提醒：追加到工具结果中 ──
+        # ── CoW 路径拦截提醒：追加到 model_text ──
         if cow_reminders:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
 
@@ -1437,42 +1331,13 @@ class ToolDispatcher:
             if _ckpt:
                 result_str = result_str + _ckpt
 
-        # ── B 通道：异步 VLM 描述追加 ──
-        # 当主模型有视觉能力时跳过（C 通道已直接注入图片，无需额外 VLM 描述）
-        if success and self._pending_vlm_image is not None and not e.is_vision_capable:
-            e.emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.PIPELINE_PROGRESS,
-                    tool_call_id=tool_call_id,
-                    pipeline_stage="vlm_describe",
-                    pipeline_message="正在调用 VLM 生成图片描述...",
-                ),
-            )
-            vlm_desc = await self._run_vlm_describe()
-            if vlm_desc:
-                result_str = (
-                    result_str
-                    + "\n\n--- VLM 增强描述（B 通道） ---\n"
-                    + vlm_desc
-                )
-                logger.info("B 通道描述已追加到 tool result")
-            else:
-                result_str = (
-                    result_str
-                    + "\n\n[VLM 增强描述失败，请直接基于图片或已有信息操作]"
-                )
-
-        result_str = e._enrich_tool_result_with_window_perception(
-            tool_name=tool_name,
-            arguments=arguments,
-            result_text=result_str,
-            success=success,
-            raw_result_text=raw_result_str,
-        )
         result_str = e._apply_tool_result_hard_cap(result_str)
+        if structured is not None:
+            structured = structured.with_model_text(result_str)
         if error:
             error = e._apply_tool_result_hard_cap(str(error))
+
+        ui_payload = structured.ui_meta.to_sse_ui() if structured is not None else None
 
         # 发射 TOOL_CALL_END 事件
         e.emit(
@@ -1486,6 +1351,8 @@ class ToolDispatcher:
                 success=success,
                 error=error,
                 iteration=iteration,
+                ui=ui_payload,
+                parent_call_id=parent_call_id,
             ),
         )
 
@@ -1546,11 +1413,16 @@ class ToolDispatcher:
             except Exception:
                 pass
 
-        # Excel 预览/Diff 事件（使用 enrichment 之前的原始结果，确保 JSON 可解析）
-        if success and _raw_result_for_excel_events:
-            self._emit_excel_events(
-                e, on_event, tool_call_id, tool_name, arguments,
-                _raw_result_for_excel_events, iteration,
+        # Excel/Text/Download 事件：从 ui_meta 投影，不再解析 result 字符串
+        if success and structured is not None:
+            self._emit_ui_meta_events(
+                e,
+                on_event,
+                tool_call_id,
+                tool_name,
+                arguments,
+                structured.ui_meta,
+                iteration,
             )
 
         # 写入类工具 → files_changed 事件（补充 _excel_diff / _text_diff 未覆盖的场景）
@@ -1594,7 +1466,7 @@ class ToolDispatcher:
                     _afp = (arguments.get("file_path") or "").strip()
                     if _afp:
                         _state.record_affected_file(_afp)
-                    # 写入操作日志（供 verifier delta 注入）
+                    # 写入操作日志（供 Playbook 反思注入）
                     _state.record_write_operation(
                         tool_name=tool_name,
                         file_path=_afp,
@@ -1602,34 +1474,34 @@ class ToolDispatcher:
                         cell_range=(arguments.get("range") or "").strip(),
                         summary=self._extract_write_summary(tool_name, arguments, result_str),
                     )
-                elif tool_name == "run_code" and _raw_result_for_excel_events:
+                elif tool_name == "run_code":
                     try:
-                        import json as _json
-                        _parsed = _json.loads(_raw_result_for_excel_events.strip())
-                        if isinstance(_parsed, dict):
-                            _cow = _parsed.get("cow_mapping")
-                            _cow_paths = ""
-                            if isinstance(_cow, dict):
-                                for _v in _cow.values():
-                                    if isinstance(_v, str) and _v.strip():
-                                        _state.record_affected_file(_v)
-                                _cow_paths = ", ".join(
-                                    str(v) for v in _cow.values() if isinstance(v, str) and v.strip()
+                        _cow = (
+                            structured.ui_meta.cow_mapping
+                            if structured is not None
+                            else None
+                        )
+                        _cow_paths = ""
+                        if isinstance(_cow, dict):
+                            for _v in _cow.values():
+                                if isinstance(_v, str) and _v.strip():
+                                    _state.record_affected_file(_v)
+                            _cow_paths = ", ".join(
+                                str(v) for v in _cow.values() if isinstance(v, str) and v.strip()
+                            )
+                        # 即使无 cow_mapping，只要 has_write_tool_call 已被标记
+                        # （由 CodePolicyHandler 或 legacy 路径设置），也应记录
+                        if _cow_paths or _state.has_write_tool_call:
+                            _already_logged = any(
+                                e.get("tool_name") == "run_code"
+                                for e in _state.write_operations_log
+                            )
+                            if not _already_logged:
+                                _state.record_write_operation(
+                                    tool_name="run_code",
+                                    file_path=_cow_paths,
+                                    summary=self._extract_run_code_write_summary(result_str),
                                 )
-                            # 即使无 cow_mapping，只要 has_write_tool_call 已被标记
-                            # （由 CodePolicyHandler 或 legacy 路径设置），也应记录
-                            if _cow_paths or _state.has_write_tool_call:
-                                # 避免与 CodePolicyHandler 重复记录
-                                _already_logged = any(
-                                    e.get("tool_name") == "run_code"
-                                    for e in _state.write_operations_log
-                                )
-                                if not _already_logged:
-                                    _state.record_write_operation(
-                                        tool_name="run_code",
-                                        file_path=_cow_paths,
-                                        summary=self._extract_run_code_write_summary(result_str),
-                                    )
                     except Exception:
                         pass
                 elif e.get_tool_write_effect(tool_name) == "workspace_write":
@@ -1781,7 +1653,7 @@ class ToolDispatcher:
                     ),
                 )
 
-        return result_str, success, error
+        return result_str, success, error, structured
 
     # ── uploads 目录快照（检测 run_code 新建/变更文件）────────
 
@@ -1856,98 +1728,36 @@ class ToolDispatcher:
             from excelmanus.tools._helpers import ensure_openpyxl_compatible
             abs_path = ensure_openpyxl_compatible(abs_path)
 
-            if tool_name == "write_cells":
-                return ToolDispatcher._checkpoint_write_cells(abs_path, arguments)
-            elif tool_name == "create_sheet":
-                return ToolDispatcher._checkpoint_create_sheet(abs_path, arguments)
-            elif tool_name == "delete_sheet":
-                return ToolDispatcher._checkpoint_delete_sheet(abs_path, arguments)
-            elif tool_name in ("insert_rows", "insert_columns"):
+            if tool_name == "edit_spreadsheet":
+                return ToolDispatcher._checkpoint_edit_spreadsheet(abs_path, arguments)
+            if tool_name in {"format_spreadsheet", "manage_spreadsheet_objects"}:
                 return ToolDispatcher._checkpoint_insert(abs_path, arguments, tool_name)
         except Exception:
             return ""
         return ""
 
     @staticmethod
-    def _checkpoint_write_cells(abs_path: "Path", arguments: dict) -> str:
-        """write_cells 后回读验证：检查写入范围的行列数。"""
+    def _checkpoint_edit_spreadsheet(abs_path: "Path", arguments: dict) -> str:
+        """edit_spreadsheet 后回读：报告当前 sheet 维度。"""
         import openpyxl as _opx
 
+        ops = arguments.get("operations")
         sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
-        cell = arguments.get("cell")
-        cell_range = arguments.get("cell_range")
-        values = arguments.get("values")
+        if not sheet_name and isinstance(ops, list) and ops and isinstance(ops[0], dict):
+            sheet_name = ops[0].get("sheet") or ops[0].get("sheet_name")
 
-        # read_only=False 必须：ws[cell] 随机访问在 read_only 模式下不支持
-        wb = _opx.load_workbook(str(abs_path), read_only=False, data_only=True)
+        wb = _opx.load_workbook(str(abs_path), read_only=True)
         try:
             ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
             if ws is None:
                 return ""
-
-            # 单元格模式
-            if cell and not cell_range:
-                val = ws[cell].value
-                display = repr(val)[:60] if val is not None else "None"
-                return f"\n✓ 回读确认: {ws.title}!{cell} = {display}"
-
-            # 范围模式：检查写入区域行列数
-            if values and isinstance(values, list):
-                expected_rows = len(values)
-                expected_cols = max((len(r) if isinstance(r, list) else 1) for r in values)
-                # 读取实际写入区域的行列范围
-                start_ref = (cell_range or "A1").split(":")[0]
-                # 简单验证：读取目标区域的第一个和最后一个单元格
-                first_val = ws[start_ref].value
-                actual_rows = ws.max_row
-                return (
-                    f"\n✓ 回读确认: {ws.title}, "
-                    f"写入 {expected_rows}行×{expected_cols}列, "
-                    f"首格={repr(first_val)[:40]}, "
-                    f"sheet总行数={actual_rows}"
-                )
-
-            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}"
-        finally:
-            wb.close()
-
-    @staticmethod
-    def _checkpoint_create_sheet(abs_path: "Path", arguments: dict) -> str:
-        """create_sheet 后验证：确认 sheet 存在。"""
-        import openpyxl as _opx
-
-        target = arguments.get("sheet_name") or arguments.get("name", "")
-        if not target:
-            return ""
-        wb = _opx.load_workbook(str(abs_path), read_only=True)
-        try:
-            if target in wb.sheetnames:
-                return f"\n✓ 回读确认: sheet「{target}」已创建"
-            else:
-                return f"\n⚠ 回读异常: sheet「{target}」未找到"
-        finally:
-            wb.close()
-
-    @staticmethod
-    def _checkpoint_delete_sheet(abs_path: "Path", arguments: dict) -> str:
-        """delete_sheet 后验证：确认 sheet 已删除。"""
-        import openpyxl as _opx
-
-        target = arguments.get("sheet_name") or arguments.get("name", "")
-        if not target:
-            return ""
-        wb = _opx.load_workbook(str(abs_path), read_only=True)
-        try:
-            if target not in wb.sheetnames:
-                return f"\n✓ 回读确认: sheet「{target}」已删除"
-            else:
-                return f"\n⚠ 回读异常: sheet「{target}」仍存在"
+            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}, max_col={ws.max_column}"
         finally:
             wb.close()
 
     @staticmethod
     def _checkpoint_insert(abs_path: "Path", arguments: dict, tool_name: str) -> str:
-        """insert_rows/insert_columns 后验证：报告当前维度。"""
+        """format_spreadsheet / manage_spreadsheet_objects 后回读：报告当前维度。"""
         import openpyxl as _opx
 
         sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
@@ -1956,10 +1766,7 @@ class ToolDispatcher:
             ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
             if ws is None:
                 return ""
-            if tool_name == "insert_rows":
-                return f"\n✓ 回读确认: {ws.title}, 当前总行数={ws.max_row}"
-            else:
-                return f"\n✓ 回读确认: {ws.title}, 当前总列数={ws.max_column}"
+            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}, max_col={ws.max_column}"
         finally:
             wb.close()
 
@@ -1974,31 +1781,23 @@ class ToolDispatcher:
             f"当前段落数={len(doc.paragraphs)}，表格数={len(doc.tables)}"
         )
 
-    # ── 写入操作日志辅助（供 verifier delta 注入）────────────
+    # ── 写入操作日志辅助（供 Playbook 反思注入）────────────
 
     @staticmethod
     def _extract_write_summary(tool_name: str, arguments: dict, result_str: str) -> str:
         """从写入工具的参数/结果中提取简洁摘要。"""
-        if tool_name == "write_cells":
-            values = arguments.get("values")
-            if isinstance(values, list):
-                row_count = len(values)
-                col_count = len(values[0]) if values and isinstance(values[0], list) else 1
-                return f"写入 {row_count} 行 × {col_count} 列"
-            return "写入数据"
-        elif tool_name == "create_sheet":
-            name = arguments.get("sheet_name") or arguments.get("name", "")
-            return f"创建 sheet「{name}」" if name else "创建 sheet"
-        elif tool_name == "delete_sheet":
-            name = arguments.get("sheet_name") or arguments.get("name", "")
-            return f"删除 sheet「{name}」" if name else "删除 sheet"
-        elif tool_name == "insert_rows":
-            count = arguments.get("count", 1)
-            return f"插入 {count} 行"
-        elif tool_name == "insert_columns":
-            count = arguments.get("count", 1)
-            return f"插入 {count} 列"
-        elif tool_name == "write_word":
+        if tool_name == "edit_spreadsheet":
+            ops = arguments.get("operations") or []
+            return f"edit_spreadsheet {len(ops)} 项操作" if ops else "edit_spreadsheet"
+        if tool_name == "format_spreadsheet":
+            ops = arguments.get("operations") or []
+            return f"format_spreadsheet {len(ops)} 项操作"
+        if tool_name == "manage_spreadsheet_objects":
+            ops = arguments.get("operations") or []
+            return f"manage_spreadsheet_objects {len(ops)} 项操作"
+        if tool_name == "manage_spreadsheet_versions":
+            return f"manage_spreadsheet_versions {arguments.get('action') or ''}".strip()
+        if tool_name == "write_word":
             ops = arguments.get("operations", [])
             return f"Word 文档写入 {len(ops)} 项操作"
         return ""
@@ -2016,8 +1815,18 @@ class ToolDispatcher:
 
     # ── Excel 预览/Diff 事件辅助 ────────────────────────────
 
-    _EXCEL_READ_TOOLS = {"read_excel"}
-    _EXCEL_WRITE_TOOLS = {"write_to_sheet", "format_range"}
+    _EXCEL_READ_TOOLS = {
+        "inspect_spreadsheet",
+        "analyze_spreadsheet",
+        "compare_spreadsheets",
+        "trace_spreadsheet_formulas",
+    }
+    _EXCEL_WRITE_TOOLS = {
+        "edit_spreadsheet",
+        "format_spreadsheet",
+        "manage_spreadsheet_objects",
+        "manage_spreadsheet_versions",
+    }
     _WORD_WRITE_TOOLS = {"write_word"}
 
     @staticmethod
@@ -2089,53 +1898,6 @@ class ToolDispatcher:
             return extract_merge_ranges(ws), extract_worksheet_hints(ws)
         finally:
             wb.close()
-
-    @staticmethod
-    def _collect_actual_excel_paths(
-        ast_targets: list[str],
-        result_json: dict | None,
-        audit_changes: list | None,
-        workspace_root: str,
-    ) -> list[str]:
-        """从 AST 目标、cow_mapping、audit_changes 中收集实际 Excel 文件路径。
-
-        过滤掉 AST 无法解析的 ``<variable>`` 占位符，并从执行结果中
-        补充实际被修改的文件路径，确保 diff 快照能正确工作。
-        """
-        from excelmanus.window_perception.extractor import is_excel_path, normalize_path
-
-        seen: set[str] = set()
-        result: list[str] = []
-
-        # 1. AST 提取的字面量路径（过滤 <variable> 占位符）
-        for p in ast_targets:
-            if p and p != "<variable>" and p not in seen:
-                seen.add(p)
-                result.append(p)
-
-        # 2. cow_mapping 中的实际路径（CoW 模式下最可靠）
-        if result_json:
-            cow = result_json.get("cow_mapping")
-            if isinstance(cow, dict):
-                for orig, copy_path in cow.items():
-                    for cp in (orig, copy_path):
-                        if isinstance(cp, str) and cp.strip():
-                            norm = normalize_path(cp)
-                            if norm and is_excel_path(norm) and norm not in seen:
-                                seen.add(norm)
-                                result.append(norm)
-
-        # 3. audit_changes 中记录的实际文件变更
-        if audit_changes:
-            for change in audit_changes:
-                path = getattr(change, "path", None) or ""
-                if path:
-                    norm = normalize_path(path)
-                    if norm and is_excel_path(norm) and norm not in seen:
-                        seen.add(norm)
-                        result.append(norm)
-
-        return result
 
     @staticmethod
     def _snapshot_excel_for_diff(
@@ -2213,7 +1975,7 @@ class ToolDispatcher:
             for sheet in sorted(all_sheets):
                 b_data, b_merges = before_sheets.get(sheet, ([], []))
                 a_data, a_merges = after_sheets.get(sheet, ([], []))
-                from excelmanus.tools.cell_tools import _compute_cell_diff
+                from excelmanus.workbook.cells import _compute_cell_diff
                 changes = _compute_cell_diff(b_data, a_data)
                 if changes:
                     from openpyxl.utils import get_column_letter as _gcl
@@ -2243,57 +2005,54 @@ class ToolDispatcher:
                     })
         return results
 
-    def _emit_excel_events(
+    def _emit_ui_meta_events(
         self,
         e: Any,
         on_event: Any,
         tool_call_id: str,
         tool_name: str,
         arguments: dict,
-        result_str: str,
+        ui_meta: ToolUiMeta,
         iteration: int,
     ) -> None:
-        """在工具调用成功后，检测 Excel 相关结果并发射预览/Diff 事件。"""
-        import json as _json
+        """从 ToolResult.ui_meta 投影 SSE 预览/Diff/Download 事件。"""
         from excelmanus.events import EventType, ToolCallEvent
 
-        try:
-            parsed = _json.loads(result_str)
-        except (ValueError, TypeError):
-            return
-        if not isinstance(parsed, dict):
-            return
-
-        # 工具 read_excel 对应事件 EXCEL_PREVIEW
-        if tool_name in self._EXCEL_READ_TOOLS:
-            columns = parsed.get("columns", [])
-            preview = parsed.get("preview", [])
-            if columns and preview:
-                rows_data = []
-                for record in preview[:50]:
+        preview_data = ui_meta.preview
+        if isinstance(preview_data, dict):
+            columns = preview_data.get("columns") or []
+            rows_data = preview_data.get("rows") or []
+            if not rows_data:
+                preview_records = preview_data.get("preview") or []
+                for record in preview_records[:50]:
                     if isinstance(record, dict):
                         rows_data.append([record.get(c) for c in columns])
                     elif isinstance(record, list):
                         rows_data.append(record)
-                total_rows = parsed.get("total_rows_in_sheet") or parsed.get("shape", {}).get("rows", 0)
-                # Best-effort: 提取预览单元格样式
+            if columns and rows_data:
+                file_path = (
+                    ui_meta.files[0]
+                    if ui_meta.files
+                    else arguments.get("file_path", "")
+                )
+                sheet_name = preview_data.get("sheet") or arguments.get("sheet_name", "")
                 cell_styles: list[list] = []
+                merge_ranges: list[dict[str, int]] = []
+                metadata_hints: list[str] = []
                 try:
                     cell_styles = self._extract_preview_styles(
-                        arguments.get("file_path", ""),
-                        arguments.get("sheet_name") or None,
+                        file_path,
+                        sheet_name or None,
                         len(rows_data),
                         len(columns),
                         e.config.workspace_root,
                     )
                 except Exception:
                     logger.debug("提取预览单元格样式失败", exc_info=True)
-                merge_ranges: list[dict[str, int]] = []
-                metadata_hints: list[str] = []
                 try:
                     merge_ranges, metadata_hints = self._extract_sheet_metadata(
-                        arguments.get("file_path", ""),
-                        arguments.get("sheet_name") or None,
+                        file_path,
+                        sheet_name or None,
                         e.config.workspace_root,
                     )
                 except Exception:
@@ -2303,125 +2062,54 @@ class ToolDispatcher:
                     ToolCallEvent(
                         event_type=EventType.EXCEL_PREVIEW,
                         tool_call_id=tool_call_id,
-                        excel_file_path=arguments.get("file_path", ""),
-                        excel_sheet=arguments.get("sheet_name", ""),
+                        excel_file_path=file_path,
+                        excel_sheet=sheet_name,
                         excel_columns=columns[:100],
                         excel_rows=rows_data[:50],
-                        excel_total_rows=int(total_rows) if total_rows else 0,
-                        excel_truncated=bool(parsed.get("is_truncated", False)),
+                        excel_total_rows=int(preview_data.get("total_rows") or 0),
+                        excel_truncated=bool(preview_data.get("truncated", False)),
                         excel_cell_styles=cell_styles,
                         excel_merge_ranges=merge_ranges,
                         excel_metadata_hints=metadata_hints,
                     ),
                 )
 
-        # _excel_diff 对应 EXCEL_DIFF（写入工具在结果中附带）
-        diff_data = parsed.get("_excel_diff")
+        diff_data = ui_meta.diff
         if isinstance(diff_data, dict):
-            changes = diff_data.get("changes", [])
+            changes = diff_data.get("sample_diffs") or diff_data.get("changes") or []
             if changes:
-                # 优先使用 diff_data 自带的 merge ranges（写入前后各自捕获）
-                diff_old_merges: list[dict[str, int]] = diff_data.get("old_merge_ranges", [])
-                diff_new_merges: list[dict[str, int]] = diff_data.get("new_merge_ranges", [])
-                diff_hints: list[str] = []
-                if not diff_new_merges:
-                    try:
-                        diff_new_merges, diff_hints = self._extract_sheet_metadata(
-                            diff_data.get("file_path", ""),
-                            diff_data.get("sheet") or None,
-                            e.config.workspace_root,
-                        )
-                    except Exception:
-                        logger.debug("提取 diff 工作表元数据失败", exc_info=True)
+                diff_mode = diff_data.get("diff_mode", "")
+                if diff_mode:
+                    e.emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.EXCEL_DIFF,
+                            tool_call_id=tool_call_id,
+                            excel_file_path=diff_data.get("file_a") or arguments.get("file_a", ""),
+                            excel_sheet=diff_data.get("sheet_a") or arguments.get("sheet_a", ""),
+                            excel_changes=changes[:200],
+                            excel_diff_mode=diff_mode,
+                            excel_file_b=diff_data.get("file_b") or arguments.get("file_b", ""),
+                            excel_sheet_b=diff_data.get("sheet_b") or arguments.get("sheet_b", ""),
+                            excel_diff_summary=diff_data.get("summary"),
+                        ),
+                    )
                 else:
-                    try:
-                        _, diff_hints = self._extract_sheet_metadata(
-                            diff_data.get("file_path", ""),
-                            diff_data.get("sheet") or None,
-                            e.config.workspace_root,
-                        )
-                    except Exception:
-                        pass
-                e.emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.EXCEL_DIFF,
-                        tool_call_id=tool_call_id,
-                        excel_file_path=diff_data.get("file_path", ""),
-                        excel_sheet=diff_data.get("sheet", ""),
-                        excel_affected_range=diff_data.get("affected_range", ""),
-                        excel_changes=changes[:200],
-                        excel_merge_ranges=diff_new_merges,
-                        excel_old_merge_ranges=diff_old_merges,
-                        excel_metadata_hints=diff_hints,
-                    ),
-                )
+                    e.emit(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.EXCEL_DIFF,
+                            tool_call_id=tool_call_id,
+                            excel_file_path=diff_data.get("file_path", ""),
+                            excel_sheet=diff_data.get("sheet", ""),
+                            excel_affected_range=diff_data.get("affected_range", ""),
+                            excel_changes=changes[:200],
+                            excel_merge_ranges=diff_data.get("new_merge_ranges", []),
+                            excel_old_merge_ranges=diff_data.get("old_merge_ranges", []),
+                        ),
+                    )
 
-        # compare_excel 跨文件/跨 Sheet 对比 → EXCEL_DIFF（带扩展字段）
-        if tool_name == "compare_excel" and parsed.get("status") == "ok":
-            diff_mode = parsed.get("diff_mode", "cross_file")
-            sample_diffs = parsed.get("sample_diffs", [])
-            # 将 sample_diffs 转为 excel_changes 格式
-            cross_changes: list[dict] = []
-            for sd in sample_diffs[:200]:
-                cross_changes.append({
-                    "cell": sd.get("cell", sd.get("column", "")),
-                    "key": sd.get("key", ""),
-                    "old": sd.get("old"),
-                    "new": sd.get("new"),
-                })
-            e.emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.EXCEL_DIFF,
-                    tool_call_id=tool_call_id,
-                    excel_file_path=arguments.get("file_a", ""),
-                    excel_sheet=arguments.get("sheet_a", ""),
-                    excel_changes=cross_changes,
-                    excel_diff_mode=diff_mode,
-                    excel_file_b=arguments.get("file_b", ""),
-                    excel_sheet_b=arguments.get("sheet_b", ""),
-                    excel_diff_summary=parsed.get("summary"),
-                ),
-            )
-
-        # _text_diff 对应 TEXT_DIFF（write_text_file / edit_text_file 在结果中附带）
-        text_diff_data = parsed.get("_text_diff")
-        if isinstance(text_diff_data, dict):
-            hunks = text_diff_data.get("hunks", [])
-            if hunks:
-                e.emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.TEXT_DIFF,
-                        tool_call_id=tool_call_id,
-                        text_diff_file_path=text_diff_data.get("file_path", ""),
-                        text_diff_hunks=hunks[:300],
-                        text_diff_additions=text_diff_data.get("additions", 0),
-                        text_diff_deletions=text_diff_data.get("deletions", 0),
-                        text_diff_truncated=text_diff_data.get("truncated", False),
-                    ),
-                )
-
-        # _text_preview 对应 TEXT_PREVIEW（read_text_file 在结果中附带）
-        text_preview_data = parsed.get("_text_preview")
-        if isinstance(text_preview_data, dict):
-            preview_content = text_preview_data.get("content", "")
-            if preview_content:
-                e.emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.TEXT_PREVIEW,
-                        tool_call_id=tool_call_id,
-                        text_preview_file_path=text_preview_data.get("file_path", ""),
-                        text_preview_content=preview_content[:20000],
-                        text_preview_line_count=text_preview_data.get("line_count", 0),
-                        text_preview_truncated=text_preview_data.get("truncated", False),
-                    ),
-                )
-
-        # _file_download 对应 FILE_DOWNLOAD（offer_download 工具在结果中附带）
-        dl_data = parsed.get("_file_download")
+        dl_data = ui_meta.download
         if isinstance(dl_data, dict) and dl_data.get("file_path"):
             e.emit(
                 on_event,
@@ -2434,6 +2122,21 @@ class ToolDispatcher:
                 ),
             )
 
+        td_data = ui_meta.text_diff
+        if isinstance(td_data, dict) and td_data.get("hunks"):
+            e.emit(
+                on_event,
+                ToolCallEvent(
+                    event_type=EventType.TEXT_DIFF,
+                    tool_call_id=tool_call_id,
+                    text_diff_file_path=td_data.get("file_path", ""),
+                    text_diff_hunks=(td_data.get("hunks") or [])[:300],
+                    text_diff_additions=int(td_data.get("additions") or 0),
+                    text_diff_deletions=int(td_data.get("deletions") or 0),
+                    text_diff_truncated=bool(td_data.get("truncated", False)),
+                ),
+            )
+
     def _emit_files_changed_from_report(
         self,
         e: Any,
@@ -2442,16 +2145,17 @@ class ToolDispatcher:
         report: dict | None,
         iteration: int,
     ) -> None:
-        """finish_task 完成后，从 report['affected_files'] 提取受影响文件并发射 FILES_CHANGED 事件。"""
+        """finish_task 完成后，从 outputs 提取受影响文件并发射 FILES_CHANGED 事件。"""
         if not report or on_event is None:
             return
         from excelmanus.events import EventType, ToolCallEvent
-        from excelmanus.window_perception.extractor import is_excel_path, normalize_path
+        from excelmanus.engine_utils import is_excel_path, normalize_path
 
         affected: set[str] = set()
-        for f in report.get("affected_files", []):
-            if isinstance(f, str) and f:
-                norm = normalize_path(f)
+        for item in report.get("outputs", []):
+            path = item.get("path") if isinstance(item, dict) else item
+            if isinstance(path, str) and path:
+                norm = normalize_path(path)
                 if norm and is_excel_path(norm):
                     affected.add(norm)
         if not affected:
@@ -2480,7 +2184,7 @@ class ToolDispatcher:
         """run_code 执行后，从审计、AST、cow_mapping 和 mtime 探针中提取受影响文件并发射 FILES_CHANGED 事件。"""
         from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.security.code_policy import extract_excel_targets
-        from excelmanus.window_perception.extractor import is_excel_path, normalize_path
+        from excelmanus.engine_utils import is_excel_path, normalize_path
 
         affected: set[str] = set()
 

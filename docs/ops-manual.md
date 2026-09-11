@@ -294,7 +294,7 @@ curl https://<YOUR_DOMAIN>/api/v1/health
 curl http://<BACKEND_IP>:8000/api/v1/health
 
 # 检查前端可达性
-curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/login
+curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/
 ```
 
 ---
@@ -395,19 +395,14 @@ systemctl restart nginx  # 完全重启
 | `EXCELMANUS_MODEL` | 主模型名称 | 必填 |
 | `EXCELMANUS_PROTOCOL` | 主模型协议类型 | `auto` |
 | `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`/`docker`） | `auto` |
-| `EXCELMANUS_AUX_*` | 辅助小模型（路由/子代理/窗口顾问） | |
-| `EXCELMANUS_VLM_*` | 视觉模型（图片提取/增强描述） | |
+| `EXCELMANUS_AUX_*` | 辅助模型（子代理默认模型、上下文压缩等） | |
+| `EXCELMANUS_MAIN_MODEL_VISION` | 主模型是否接受图片附件（`auto`/`true`/`false`） | `auto` |
 | `EXCELMANUS_EMBEDDING_*` | Embedding 模型（语义检索/技能路由/错误方案） | |
 | `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 留空自动生成 |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
-| `EXCELMANUS_VERIFIER_ENABLED` | 启用验证门控 | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 必须包含前端域名 |
 | `EXCELMANUS_DATABASE_URL` | PostgreSQL 连接 URL（设置后优先使用 PG） | 空（用 SQLite） |
-| `EXCELMANUS_AUTH_ENABLED` | 是否启用认证 | `true` |
-| `EXCELMANUS_JWT_SECRET` | JWT 签名密钥 | 生产环境必须固定 |
-| `EXCELMANUS_GITHUB_*` | GitHub OAuth | |
-| `EXCELMANUS_GOOGLE_*` | Google OAuth | |
-| `EXCELMANUS_OAUTH_PROXY` | OAuth 代理 | 国内服务器访问 Google 需要 |
+| `EXCELMANUS_JWT_SECRET` | 下载令牌 JWT 密钥（可选） | 未设置则自动生成 |
 
 ---
 
@@ -588,7 +583,6 @@ firewall-cmd --reload
 │       ├── client.py               # Embedding API 客户端
 │       ├── semantic_memory.py      # 语义记忆检索
 │       ├── semantic_registry.py    # 语义文件注册
-│       ├── semantic_skill_router.py # 语义技能路由
 │       └── error_solution_store.py  # 错误→解决方案向量索引
 ├── .env                   # 本地开发环境变量
 ├── mcp.json               # MCP 服务器配置

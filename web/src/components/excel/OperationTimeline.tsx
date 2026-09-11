@@ -27,12 +27,14 @@ const TOOL_ICON_MAP: Record<string, React.ElementType> = {
   run_code: Terminal,
   run_shell: Terminal,
   write_text_file: FileText,
-  write_cells: FileSpreadsheet,
-  update_cells: FileSpreadsheet,
-  create_excel: FileSpreadsheet,
-  read_excel: FileSpreadsheet,
-  create_chart: FileSpreadsheet,
-  compare_excel: FileSpreadsheet,
+  inspect_spreadsheet: FileSpreadsheet,
+  analyze_spreadsheet: FileSpreadsheet,
+  compare_spreadsheets: FileSpreadsheet,
+  edit_spreadsheet: FileSpreadsheet,
+  format_spreadsheet: FileSpreadsheet,
+  manage_spreadsheet_objects: FileSpreadsheet,
+  trace_spreadsheet_formulas: FileSpreadsheet,
+  manage_spreadsheet_versions: FileSpreadsheet,
 };
 
 function getToolIcon(toolName: string): React.ElementType {
@@ -53,12 +55,14 @@ function friendlyToolName(toolName: string): string {
     run_code: "运行代码",
     run_shell: "运行命令",
     write_text_file: "写入文件",
-    write_cells: "写入单元格",
-    update_cells: "更新单元格",
-    create_excel: "创建表格",
-    read_excel: "读取表格",
-    create_chart: "创建图表",
-    compare_excel: "对比表格",
+    inspect_spreadsheet: "探查表格",
+    analyze_spreadsheet: "分析表格",
+    compare_spreadsheets: "对比表格",
+    edit_spreadsheet: "编辑表格",
+    format_spreadsheet: "格式化表格",
+    manage_spreadsheet_objects: "管理对象",
+    trace_spreadsheet_formulas: "追踪公式",
+    manage_spreadsheet_versions: "版本",
   };
   return map[toolName] || toolName;
 }

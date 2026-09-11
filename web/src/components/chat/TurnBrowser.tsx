@@ -13,13 +13,11 @@ import {
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  OverlayCard,
+  OverlayCardAction,
+  OverlayCardFooter,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 import {
   Tooltip,
   TooltipContent,
@@ -328,15 +326,12 @@ export function TurnBrowser() {
         </div>
       </SlidePanel>
 
-      {/* Rollback confirmation dialog */}
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle className="flex items-center gap-2">
-              <AlertTriangle className="h-4 w-4 text-amber-500" />
-              确认回退到轮次 {rollbackTarget != null ? rollbackTarget + 1 : ""}
-            </DialogTitle>
-            <DialogDescription>
+      <OverlayCard open={confirmOpen} onOpenChange={setConfirmOpen} size="sm" tone="warning">
+        <OverlayCardHeader
+          icon={<AlertTriangle className="h-5 w-5" />}
+          title={`确认回退到轮次 ${rollbackTarget != null ? rollbackTarget + 1 : ""}`}
+          description={
+            <>
               将回退对话到轮次{" "}
               {rollbackTarget != null ? rollbackTarget + 1 : ""}{" "}
               之后的位置，清除之后的所有对话消息。
@@ -349,29 +344,30 @@ export function TurnBrowser() {
                 preview.file_changes.length > 0 &&
                 ` 涉及 ${preview.file_changes.length} 个文件变更（将一并回退）。`}
               {" "}此操作无法撤销。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-              取消
-            </Button>
-            <Button
-              variant="destructive"
-              onClick={handleConfirmRollback}
-              disabled={rolling}
-            >
-              {rolling ? (
-                <>
-                  <Loader2 className="h-3.5 w-3.5 mr-1.5 animate-spin" />
-                  回退中…
-                </>
-              ) : (
-                "确认回退"
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+            </>
+          }
+          onClose={() => setConfirmOpen(false)}
+        />
+        <OverlayCardFooter>
+          <OverlayCardAction action="ghost" onClick={() => setConfirmOpen(false)}>
+            取消
+          </OverlayCardAction>
+          <OverlayCardAction
+            action="destructive"
+            onClick={handleConfirmRollback}
+            disabled={rolling}
+          >
+            {rolling ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                回退中…
+              </>
+            ) : (
+              "确认回退"
+            )}
+          </OverlayCardAction>
+        </OverlayCardFooter>
+      </OverlayCard>
     </>
   );
 }

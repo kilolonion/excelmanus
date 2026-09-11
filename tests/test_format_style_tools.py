@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
-from openpyxl import Workbook
+from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
 
-from excelmanus.tools.format_tools import (
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.security import FileAccessGuard
+from excelmanus.tools._guard_ctx import set_guard
+from excelmanus.workbook.styles import (
     COLOR_NAME_MAP,
     _resolve_color,
     _build_font,
@@ -21,15 +23,12 @@ from excelmanus.tools.format_tools import (
     _extract_border,
     _extract_alignment,
     _color_to_hex,
-    format_cells,
     read_cell_styles,
-    adjust_row_height,
-    merge_cells_tool,
-    unmerge_cells_tool,
-    adjust_column_width,
     init_guard,
-    get_tools,
 )
+from excelmanus.tools.intent_tools import format_spreadsheet
+from excelmanus.tools.intent_tools import init_guard as init_intent_guard
+from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 
 @pytest.fixture()
@@ -69,8 +68,19 @@ def sample_xlsx(tmp_path: Path) -> Path:
 
 @pytest.fixture(autouse=True)
 def _init_guard(tmp_path: Path) -> None:
-    """初始化 FileAccessGuard 为 tmp_path。"""
-    init_guard(str(tmp_path))
+    workspace = str(tmp_path)
+    set_guard(FileAccessGuard(workspace))
+    init_guard(workspace)
+    init_intent_guard(workspace)
+    seed_seen_versions({})
+
+
+def _format(path: Path, operations: list[dict]) -> ToolResult:
+    return format_spreadsheet(
+        file_path=str(path),
+        operations=operations,
+        expected_version=content_version_of_file(path),
+    )
 
 
 # ── _resolve_color 测试 ──────────────────────────────────
@@ -219,7 +229,7 @@ class TestExtractFunctions:
 
 class TestReadCellStyles:
     def test_reads_styled_cells(self, sample_xlsx: Path) -> None:
-        result = json.loads(read_cell_styles(str(sample_xlsx), "A1:B3"))
+        result = read_cell_styles(str(sample_xlsx), "A1:B3").value
         assert result["status"] == "success"
         assert result["total_cells"] == 6
         # A1 应该被检测到有样式
@@ -234,7 +244,7 @@ class TestReadCellStyles:
         assert "alignment" in a1
 
     def test_summary_only(self, sample_xlsx: Path) -> None:
-        result = json.loads(read_cell_styles(str(sample_xlsx), "A1:B3", summary_only=True))
+        result = read_cell_styles(str(sample_xlsx), "A1:B3", summary_only=True).value
         assert result["status"] == "success"
         assert "styled_cells" not in result
         assert "summary" in result
@@ -242,7 +252,7 @@ class TestReadCellStyles:
         assert "A3:B3" in result["summary"]["merged_ranges"]
 
     def test_detects_merged_cells(self, sample_xlsx: Path) -> None:
-        result = json.loads(read_cell_styles(str(sample_xlsx), "A1:B3"))
+        result = read_cell_styles(str(sample_xlsx), "A1:B3").value
         # A3 是合并区域的一部分
         a3_entries = [c for c in result["styled_cells"] if c["cell"] == "A3"]
         assert any(e.get("merged") for e in a3_entries)
@@ -261,21 +271,13 @@ class TestMergeCells:
         wb.save(file_path)
         wb.close()
 
-        # 合并
-        result = json.loads(merge_cells_tool(str(file_path), "A1:B1"))
-        assert result["status"] == "success"
-        assert result["merged_range"] == "A1:B1"
-
-        # 验证合并状态
-        styles = json.loads(read_cell_styles(str(file_path), "A1:B1"))
+        result = _format(file_path, [{"kind": "merge", "range": "A1:B1"}])
+        assert result.success
+        styles = read_cell_styles(str(file_path), "A1:B1").value
         assert styles["summary"]["has_merged_cells"] is True
 
-        # 取消合并
-        result = json.loads(unmerge_cells_tool(str(file_path), "A1:B1"))
-        assert result["status"] == "success"
-
-
-# ── adjust_row_height 测试 ───────────────────────────────
+        result = _format(file_path, [{"kind": "unmerge", "range": "A1:B1"}])
+        assert result.success
 
 
 class TestAdjustRowHeight:
@@ -287,10 +289,12 @@ class TestAdjustRowHeight:
         wb.save(file_path)
         wb.close()
 
-        result = json.loads(adjust_row_height(str(file_path), rows={"1": 30.0, "2": 25.0}))
-        assert result["status"] == "success"
-        assert result["rows_adjusted"]["1"] == 30.0
-        assert result["rows_adjusted"]["2"] == 25.0
+        result = _format(file_path, [{"kind": "size", "rows": {"1": 30.0, "2": 25.0}}])
+        assert result.success
+        wb = load_workbook(file_path)
+        assert wb.active.row_dimensions[1].height == 30.0
+        assert wb.active.row_dimensions[2].height == 25.0
+        wb.close()
 
     def test_auto_fit_row_height(self, tmp_path: Path) -> None:
         wb = Workbook()
@@ -300,12 +304,11 @@ class TestAdjustRowHeight:
         wb.save(file_path)
         wb.close()
 
-        result = json.loads(adjust_row_height(str(file_path), auto_fit=True))
-        assert result["status"] == "success"
-        assert len(result["rows_adjusted"]) > 0
-
-
-# ── format_cells 颜色名集成测试 ──────────────────────────
+        result = _format(file_path, [{"kind": "size", "auto_fit": True, "axis": "row"}])
+        assert result.success
+        wb = load_workbook(file_path)
+        assert wb.active.row_dimensions[1].height is not None
+        wb.close()
 
 
 class TestFormatCellsColorName:
@@ -317,31 +320,17 @@ class TestFormatCellsColorName:
         wb.save(file_path)
         wb.close()
 
-        result = json.loads(format_cells(
-            str(file_path), "A1",
-            font={"color": "红色", "bold": True},
-            fill={"color": "浅黄色"},
-        ))
-        assert result["status"] == "success"
-
-        # 验证样式已应用
-        styles = json.loads(read_cell_styles(str(file_path), "A1"))
+        result = _format(
+            file_path,
+            [{
+                "kind": "format",
+                "range": "A1",
+                "font": {"color": "红色", "bold": True},
+                "fill": {"color": "浅黄色"},
+            }],
+        )
+        assert result.success
+        styles = read_cell_styles(str(file_path), "A1").value
         a1 = styles["styled_cells"][0]
         assert a1["font"]["bold"] is True
         assert a1["font"]["color"] == "FF0000"
-
-
-# ── get_tools 完整性测试 ─────────────────────────────────
-
-
-class TestGetTools:
-    def test_all_new_tools_registered(self) -> None:
-        """Batch 2 精简：get_tools() 返回空列表。"""
-        tools = get_tools()
-        assert len(tools) == 0
-
-    def test_format_cells_schema_has_underline(self) -> None:
-        """Batch 2 精简：format_cells 已删除，跳过。"""
-
-    def test_border_schema_has_sides(self) -> None:
-        """Batch 2 精简：format_cells 已删除，跳过。"""

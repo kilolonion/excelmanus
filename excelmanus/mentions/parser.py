@@ -22,6 +22,7 @@ class Mention:
     start: int  # 在原始输入中的起始位置（字符索引）
     end: int    # 在原始输入中的结束位置（字符索引）
     range_spec: str | None = None  # Excel 区域选取（如 "Sheet1!A1:C10"）
+    content_version: str | None = None  # sha256:...，与所见文件绑定
 
 
 @dataclass(frozen=True)
@@ -45,10 +46,10 @@ class ResolvedMention:
 
 # ── 正则常量 ──────────────────────────────────────────────
 
-# 统一匹配 @type:value 格式，可选 [range_spec] 后缀
-# 示例：@file:sales.xlsx  或  @file:sales.xlsx[Sheet1!A1:C10]
+# 统一匹配 @type:value 格式，可选 [range_spec] 与 @sha256: 版本
+# 示例：@file:sales.xlsx  或  @file:dir/sales.xlsx[Sheet1!A1:C10]@sha256:abcd
 _MENTION_PATTERN = re.compile(
-    r"@(file|folder|skill|mcp):([^\s,;!?\[\]]+)(?:\[([^\]]+)\])?",
+    r"@(file|folder|skill|mcp):([^\s,;!?\[\]@]+)(?:\[([^\]]+)\])?(?:@(sha256:[0-9a-fA-F]+))?",
     re.IGNORECASE,
 )
 
@@ -81,6 +82,7 @@ class MentionParser:
             kind = m.group(1).lower()
             value = m.group(2)
             range_spec = m.group(3)  # 无 [range] 后缀时为 None
+            content_version = m.group(4)
             mentions.append(
                 Mention(
                     kind=kind,
@@ -89,6 +91,7 @@ class MentionParser:
                     start=m.start(),
                     end=m.end(),
                     range_spec=range_spec,
+                    content_version=content_version,
                 )
             )
 

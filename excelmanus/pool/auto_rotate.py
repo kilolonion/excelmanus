@@ -429,7 +429,7 @@ class PoolAutoRotateService:
             profile = _get_by_name(POOL_USER_ID, provider, profile_name)
         else:
             profile = self._pool._cred_store.get_active_profile(
-                POOL_USER_ID, provider,
+                provider, user_id=POOL_USER_ID,
             )
             if profile is not None and profile.profile_name != profile_name:
                 profile = None

@@ -80,6 +80,7 @@ image/RELEASE_*/
 *.csv
 *.xlsx
 *.log
+*.em-lock
 .tmp/
 
 
@@ -90,7 +91,8 @@ tasks/
 dev-docs/
 docs/plans/
 docs/research/
-docs/audit_*.md
+# 改造期审计文档需入库（仅推送私有仓库；合并回公开仓库前请重新忽略）
+# docs/audit_*.md
 docs/agent-architecture-review.md
 RELEASE_*.md
 !README.md
@@ -99,7 +101,8 @@ RELEASE_*.md
 # ==============================
 # 锁文件
 # ==============================
-uv.lock
+# uv.lock 必须入库：deploy/Dockerfile 通过 `COPY uv.lock` + `uv sync --frozen`
+# 复现生产依赖；忽略它会导致干净 clone 构建失败。
 
 # ==============================
 # Benchmark 数据与脚本

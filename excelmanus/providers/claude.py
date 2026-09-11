@@ -34,8 +34,50 @@ logger = get_logger("claude_provider")
 _CLAUDE_NATIVE_BODY_KEYS = frozenset({
     "model", "messages", "max_tokens", "system", "tools", "tool_choice",
     "thinking", "stream", "temperature", "top_p", "top_k", "stop_sequences",
-    "metadata", "service_tier",
+    "metadata", "service_tier", "output_config",
 })
+
+# Claude 5 / Fable / Mythos / Opus 4.7+：extended thinking 的 budget_tokens 会 400，需用 adaptive。
+_ADAPTIVE_THINKING_MARKERS = (
+    "claude-sonnet-5",
+    "claude-opus-5",
+    "claude-fable",
+    "claude-mythos",
+    "claude-opus-4.7",
+    "claude-opus-4-7",
+    "claude-opus-4.8",
+    "claude-opus-4-8",
+)
+
+
+def uses_adaptive_thinking(model: str) -> bool:
+    """判断模型是否必须使用 adaptive thinking（不能再传 budget_tokens）。"""
+    lowered = (model or "").strip().lower()
+    return any(marker in lowered for marker in _ADAPTIVE_THINKING_MARKERS)
+
+
+def _apply_thinking_to_body(
+    body: dict[str, Any],
+    model: str,
+    *,
+    thinking_enabled: bool,
+    thinking_budget: int,
+    thinking_effort: str = "",
+) -> None:
+    """按模型代际写入 thinking / output_config。"""
+    if uses_adaptive_thinking(model):
+        if thinking_enabled:
+            body["thinking"] = {"type": "adaptive"}
+            effort = (thinking_effort or "high").strip().lower()
+            if effort and effort != "none":
+                body["output_config"] = {"effort": effort}
+            body["max_tokens"] = max(body.get("max_tokens", 0), 64_000)
+        else:
+            body["thinking"] = {"type": "disabled"}
+        return
+    if thinking_enabled and thinking_budget > 0:
+        body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
+        body["max_tokens"] = max(body.get("max_tokens", 0), thinking_budget + 4096)
 
 
 def _strip_non_claude_extra_body(extra_body: dict[str, Any]) -> dict[str, Any]:
@@ -478,6 +520,7 @@ class _ClaudeChatCompletions:
     ) -> _ChatCompletion | Any:
         thinking_enabled = kwargs.pop("_thinking_enabled", False)
         thinking_budget = kwargs.pop("_thinking_budget", 0)
+        thinking_effort = kwargs.pop("_thinking_effort", "")
         extra_body = kwargs.pop("extra_body", None)
         extra_headers = kwargs.pop("extra_headers", None)
         if stream:
@@ -486,6 +529,7 @@ class _ClaudeChatCompletions:
                 tool_choice=kwargs.get("tool_choice"),
                 thinking_enabled=thinking_enabled,
                 thinking_budget=thinking_budget,
+                thinking_effort=thinking_effort,
                 extra_body=extra_body,
                 extra_headers=extra_headers,
             )
@@ -496,6 +540,7 @@ class _ClaudeChatCompletions:
             tool_choice=kwargs.get("tool_choice"),
             thinking_enabled=thinking_enabled,
             thinking_budget=thinking_budget,
+            thinking_effort=thinking_effort,
             extra_body=extra_body,
             extra_headers=extra_headers,
         )
@@ -514,7 +559,7 @@ class ClaudeClient:
     用法：
         client = ClaudeClient(api_key="...", base_url="https://api.anthropic.com")
         response = await client.chat.completions.create(
-            model="claude-sonnet-4-6",
+            model="claude-sonnet-5",
             messages=[...],
             tools=[...],
         )
@@ -534,6 +579,7 @@ class ClaudeClient:
         tool_choice: Any = None,
         thinking_enabled: bool = False,
         thinking_budget: int = 0,
+        thinking_effort: str = "",
         extra_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> _ChatCompletion:
@@ -545,9 +591,13 @@ class ClaudeClient:
             "messages": claude_messages,
             "max_tokens": _DEFAULT_MAX_TOKENS,
         }
-        if thinking_enabled and thinking_budget > 0:
-            body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-            body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
+        _apply_thinking_to_body(
+            body,
+            model,
+            thinking_enabled=thinking_enabled,
+            thinking_budget=thinking_budget,
+            thinking_effort=thinking_effort,
+        )
         if system:
             body["system"] = system
 
@@ -617,6 +667,7 @@ class ClaudeClient:
         tool_choice: Any = None,
         thinking_enabled: bool = False,
         thinking_budget: int = 0,
+        thinking_effort: str = "",
         extra_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
@@ -628,9 +679,13 @@ class ClaudeClient:
             "max_tokens": _DEFAULT_MAX_TOKENS,
             "stream": True,
         }
-        if thinking_enabled and thinking_budget > 0:
-            body["thinking"] = {"type": "enabled", "budget_tokens": thinking_budget}
-            body["max_tokens"] = max(_DEFAULT_MAX_TOKENS, thinking_budget + 4096)
+        _apply_thinking_to_body(
+            body,
+            model,
+            thinking_enabled=thinking_enabled,
+            thinking_budget=thinking_budget,
+            thinking_effort=thinking_effort,
+        )
         if system:
             body["system"] = system
         tools_list = tools if isinstance(tools, list) else None

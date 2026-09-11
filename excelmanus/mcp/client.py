@@ -126,17 +126,16 @@ class MCPClientWrapper:
         if streamable_http_client is None:
             raise RuntimeError("当前 mcp SDK 不支持 streamable_http 传输")
 
-        client_headers = self._config.headers or None
         http_client = await self._exit_stack.enter_async_context(
-            httpx.AsyncClient(
-                headers=client_headers,
+            _new_streamable_httpx_client(
+                headers=self._config.headers or None,
                 timeout=self._config.timeout,
             )
         )
-        read_stream, write_stream, _ = await self._exit_stack.enter_async_context(
+        streams = await self._exit_stack.enter_async_context(
             streamable_http_client(self._config.url, http_client=http_client)
         )
-        return read_stream, write_stream
+        return _unpack_transport_streams(streams)
 
     async def discover_tools(
         self,
@@ -287,6 +286,43 @@ class MCPClientWrapper:
 # ---------------------------------------------------------------------------
 # 辅助函数
 # ---------------------------------------------------------------------------
+
+
+def _unpack_transport_streams(streams: Any) -> tuple[Any, Any]:
+    """兼容 MCP SDK 1.x / 2.x 的 Streamable HTTP 返回值。
+
+    SDK 1.x 的 ``streamablehttp_client`` 返回
+    ``(read_stream, write_stream, get_session_id)``；
+    SDK 2.x 的 ``streamable_http_client`` 只返回
+    ``(read_stream, write_stream)``。
+    """
+    if isinstance(streams, (tuple, list)) and len(streams) >= 2:
+        return streams[0], streams[1]
+    raise RuntimeError(
+        "MCP streamable HTTP 传输返回值异常: "
+        "期望 (read_stream, write_stream[, get_session_id])，"
+        f"实际为 {type(streams).__name__}"
+    )
+
+
+def _new_streamable_httpx_client(
+    *,
+    headers: dict[str, str] | None,
+    timeout: float,
+) -> Any:
+    """创建 Streamable HTTP 传输使用的 AsyncClient。
+
+    MCP SDK 2.x 内部使用 ``httpx2``，必须传入 ``httpx2.AsyncClient``；
+    旧版 SDK 仍使用 ``httpx.AsyncClient``。
+    """
+    try:
+        import httpx2 as http_mod
+    except ImportError:  # pragma: no cover - 兼容未安装 httpx2 的旧 SDK
+        http_mod = httpx
+    return http_mod.AsyncClient(
+        headers=headers,
+        timeout=http_mod.Timeout(timeout, read=timeout * 10),
+    )
 
 
 def _truncate_args(arguments: dict[str, Any], max_len: int = 200) -> str:

@@ -1,7 +1,7 @@
 """datetime 序列化 Bug 回归测试。
 
 验证当 header_row 猜错导致 datetime 值成为列名时，
-read_excel / filter_data / analyze_data 不会崩溃。
+read_excel / filter_data 不会崩溃。
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from excelmanus.tools import data_tools
+from excelmanus.workbook import data as data_tools
 
 
 @pytest.fixture()
@@ -73,7 +73,7 @@ class TestReadExcelDatetimeSafe:
             sheet_name="员工花名册",
             header_row=2,
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "columns" in parsed
         # 所有列名应为字符串
         for col in parsed["columns"]:
@@ -85,7 +85,7 @@ class TestReadExcelDatetimeSafe:
             str(excel_with_datetime_header),
             sheet_name="员工花名册",
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         # 自动检测 header_row=1 后，列名应为中文字段名
         assert "工号" in parsed["columns"]
         assert "姓名" in parsed["columns"]
@@ -98,7 +98,7 @@ class TestReadExcelDatetimeSafe:
             sheet_name="员工花名册",
             header_row=0,
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "columns" in parsed
         # header_row=0 时第一列是"员工花名册（机密）"
         assert any("员工花名册" in col for col in parsed["columns"])
@@ -117,7 +117,7 @@ class TestFilterDataDatetimeSafe:
             sheet_name="员工花名册",
             header_row=2,
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "error" in parsed
         # 错误消息中的列名应为字符串
         assert isinstance(parsed["error"], str)
@@ -131,25 +131,11 @@ class TestFilterDataDatetimeSafe:
             value="技术部",
             sheet_name="员工花名册",
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "error" not in parsed
         assert parsed["filtered_rows"] == 1
         assert parsed["data"][0]["姓名"] == "张三"
 
-
-class TestAnalyzeDataDatetimeSafe:
-    """analyze_data 在 datetime 列名场景下不崩溃。"""
-
-    def test_wrong_header_no_crash(self, excel_with_datetime_header: Path) -> None:
-        result = data_tools.analyze_data(
-            str(excel_with_datetime_header),
-            sheet_name="员工花名册",
-            header_row=2,
-        )
-        parsed = json.loads(result)
-        assert "columns" in parsed
-        for col in parsed["columns"]:
-            assert isinstance(col, str)
 
 
 class TestDetectHeaderRow:
@@ -246,7 +232,7 @@ class TestDeepHeaderRead:
             sheet_name="KPI",
             max_rows=5,
         )
-        parsed = json.loads(result)
+        parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert parsed.get("detected_header_row") == 7
         assert parsed["columns"][:3] == ["月份", "营收", "成本"]
 
@@ -282,7 +268,7 @@ class TestUnnamedFallback:
         fp = tmp_path / "unnamed_fallback.xlsx"
         wb.save(fp)
 
-        from excelmanus.tools.data_tools import _read_df
+        from excelmanus.workbook.data import _read_df
         df, effective_header = _read_df(fp, None)
         # 列名不应包含 Unnamed
         unnamed_count = sum(1 for c in df.columns if str(c).startswith("Unnamed"))
@@ -304,7 +290,8 @@ class TestUnnamedWarning:
         wb.save(fp)
 
         data_tools.init_guard(str(tmp_path))
-        result_json = json.loads(data_tools.read_excel(str(fp)))
+        tr = data_tools.read_excel(str(fp))
+        result_json = tr.value if hasattr(tr, "value") and isinstance(tr.value, dict) else json.loads(tr.model_text if hasattr(tr, "model_text") else tr)
         # 应该有 unnamed_columns_warning 字段
         assert "unnamed_columns_warning" in result_json
 
@@ -318,6 +305,7 @@ class TestUnnamedWarning:
         wb.save(fp)
 
         data_tools.init_guard(str(tmp_path))
-        result_json = json.loads(data_tools.read_excel(str(fp)))
+        tr = data_tools.read_excel(str(fp))
+        result_json = tr.value if hasattr(tr, "value") and isinstance(tr.value, dict) else json.loads(tr.model_text if hasattr(tr, "model_text") else tr)
         assert "unnamed_columns_warning" not in result_json
 

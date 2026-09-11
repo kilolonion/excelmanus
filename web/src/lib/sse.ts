@@ -28,9 +28,14 @@ export async function consumeSSE(
 ): Promise<void> {
   const response = await directFetch(url, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      "Cache-Control": "no-cache",
+    },
     body: JSON.stringify(body),
     signal,
+    cache: "no-store",
   });
 
   if (!response.ok) {

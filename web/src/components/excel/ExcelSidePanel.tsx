@@ -19,6 +19,8 @@ import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl, downloadFile, normalizeExcelPath, invalidateSnapshotCache } from "@/lib/api";
+import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
+import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -34,7 +36,7 @@ export function ExcelSidePanel() {
   const {
     panelOpen, activeFilePath, activeSheet, diffs, closePanel,
     openFullView, selectionMode, enterSelectionMode,
-    exitSelectionMode, confirmSelection, pendingBackups, applyFile,
+    exitSelectionMode, confirmSelection, draftRange, setDraftRange, pendingBackups, applyFile,
     recentFiles, openPanel, removeRecentFile,
   } = useExcelStore(useShallow((s) => ({
     panelOpen: s.panelOpen,
@@ -47,6 +49,8 @@ export function ExcelSidePanel() {
     enterSelectionMode: s.enterSelectionMode,
     exitSelectionMode: s.exitSelectionMode,
     confirmSelection: s.confirmSelection,
+    draftRange: s.draftRange,
+    setDraftRange: s.setDraftRange,
     pendingBackups: s.pendingBackups,
     applyFile: s.applyFile,
     recentFiles: s.recentFiles,
@@ -55,6 +59,12 @@ export function ExcelSidePanel() {
   })));
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const {
+    handleCellEdit,
+    conflict: writeConflict,
+    writeError,
+    reloadAfterConflict,
+  } = useExcelCellEdit(activeFilePath);
 
   // ── 桌面端拖拽调宽 ──
   const {
@@ -132,8 +142,6 @@ export function ExcelSidePanel() {
     };
   }, []);
 
-  // 来自 Univer 选区的待确认范围（尚未确认）
-  const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
   const [withStyles, setWithStyles] = useState(true);
   const [activeTab, setActiveTab] = useState<"sheet" | "timeline">("sheet");
 
@@ -154,23 +162,25 @@ export function ExcelSidePanel() {
   }, [isMobile, closePanel]);
 
   const handleRangeSelected = useCallback((range: string, sheet: string) => {
-    setPendingRange({ range, sheet });
-  }, []);
+    const path = activeFilePath || undefined;
+    const contentVersion = path
+      ? useExcelStore.getState().getContentVersion(path) ?? undefined
+      : undefined;
+    setDraftRange({ range, sheet, path, contentVersion });
+  }, [setDraftRange, activeFilePath]);
 
   const handleConfirmRange = useCallback(() => {
-    if (pendingRange && activeFilePath) {
+    if (draftRange && activeFilePath) {
       confirmSelection({
         filePath: activeFilePath,
-        sheet: pendingRange.sheet,
-        range: pendingRange.range,
+        sheet: draftRange.sheet,
+        range: draftRange.range,
       });
-      setPendingRange(null);
     }
-  }, [pendingRange, activeFilePath, confirmSelection]);
+  }, [draftRange, activeFilePath, confirmSelection]);
 
   const handleCancelRange = useCallback(() => {
     exitSelectionMode();
-    setPendingRange(null);
   }, [exitSelectionMode]);
 
   const toggleSelectionMode = useCallback(() => {
@@ -178,7 +188,6 @@ export function ExcelSidePanel() {
       handleCancelRange();
     } else {
       enterSelectionMode();
-      setPendingRange(null);
     }
   }, [selectionMode, enterSelectionMode, handleCancelRange]);
 
@@ -469,6 +478,7 @@ export function ExcelSidePanel() {
                 selectionMode={selectionMode}
                 onRangeSelected={handleRangeSelected}
                 withStyles={withStyles}
+                onCellEdit={handleCellEdit}
               />
             </div>
           ) : (
@@ -477,11 +487,18 @@ export function ExcelSidePanel() {
             </div>
           )}
 
+          {(writeConflict || writeError) && (
+            <ExcelWriteConflictBar
+              onReload={reloadAfterConflict}
+              error={writeConflict ? null : writeError}
+            />
+          )}
+
           {/* 选区确认栏 */}
-          {selectionMode && pendingRange && (
+          {selectionMode && draftRange && (
             <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2">
               <span className="text-xs font-mono flex-1 truncate" style={{ color: "var(--em-primary)" }}>
-                {pendingRange.sheet}!{pendingRange.range}
+                {draftRange.sheet}!{draftRange.range}
               </span>
               <button
                 onClick={handleConfirmRange}

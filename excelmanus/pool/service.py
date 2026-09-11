@@ -443,7 +443,9 @@ class PoolService:
         if _get_by_name is not None:
             profile = _get_by_name(POOL_USER_ID, account.provider, profile_name)
         else:
-            profile = self._cred_store.get_active_profile(POOL_USER_ID, account.provider)
+            profile = self._cred_store.get_active_profile(
+                account.provider, user_id=POOL_USER_ID,
+            )
             if profile is not None and profile.profile_name != profile_name:
                 profile = None
         if profile is None:

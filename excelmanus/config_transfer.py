@@ -67,7 +67,7 @@ def export_config(
     """将配置加密为令牌字符串。
 
     Args:
-        sections: 要导出的配置区块，键可为 "main", "aux", "vlm", "profiles"。
+        sections: 要导出的配置区块，键可为 "main", "aux", "embedding", "profiles"。
         password: 口令模式必填。
         mode: "password" 或 "simple"。
 

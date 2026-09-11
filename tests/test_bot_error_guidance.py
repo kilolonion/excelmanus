@@ -76,7 +76,7 @@ class TestRewriteErrorForBot:
     def test_rewrite_login(self):
         error = "认证失败，请重新登录。"
         result = MessageHandler._rewrite_error_for_bot(error)
-        assert "/bind" in result
+        assert "/addmodel" in result or "OAuth" in result
         assert "重新登录" not in result
 
     def test_no_rewrite_when_no_match(self):
@@ -132,7 +132,7 @@ class TestBotErrorGuidance:
 
     def test_permission_error(self, handler):
         guidance = handler._bot_error_guidance("权限不足，无法执行")
-        assert "/bind" in guidance
+        assert "权限不足" in guidance
 
     def test_default_fallback(self, handler):
         """未匹配任何模式时，返回通用引导。"""
@@ -140,36 +140,13 @@ class TestBotErrorGuidance:
         assert "/abort" in guidance
         assert "/undo" in guidance
 
-    def test_auth_error_unbound_user_suggests_bind(self, handler):
-        """未绑定用户遇到模型认证错误时，优先提示 /bind。"""
-        handler._bind_manager = MagicMock()
-        handler._resolve_auth_user_id = MagicMock(return_value=None)
-        guidance = handler._bot_error_guidance(
-            "模型认证失败: API Key 无效", platform_user_id="tg_user_1",
-        )
-        assert "/bind" in guidance
-        assert "OAuth" in guidance
-        assert "/addmodel" in guidance
-
-    def test_auth_error_bound_user_no_bind_hint(self, handler):
-        """已绑定用户遇到模型认证错误时，不提示 /bind，而是通用引导。"""
-        handler._bind_manager = MagicMock()
-        handler._resolve_auth_user_id = MagicMock(return_value="auth-user-123")
+    def test_auth_error_suggests_model_commands(self, handler):
         guidance = handler._bot_error_guidance(
             "模型认证失败: API Key 无效", platform_user_id="tg_user_1",
         )
         assert "/model" in guidance
         assert "/addmodel" in guidance
-        assert "OAuth" not in guidance
-
-    def test_auth_error_no_bind_manager_no_bind_hint(self, handler):
-        """无 bind_manager 时（认证未启用），不提示 /bind。"""
-        handler._bind_manager = None
-        guidance = handler._bot_error_guidance(
-            "模型认证失败: API Key 无效", platform_user_id="tg_user_1",
-        )
-        assert "/model" in guidance
-        assert "OAuth" not in guidance
+        assert "/bind" not in guidance
 
     # ── 新增: 覆盖所有 error_guidance.py 错误类型 ──
 
@@ -229,10 +206,6 @@ class TestBotErrorGuidance:
     def test_stream_interrupted(self, handler):
         guidance = handler._bot_error_guidance("流式传输中断: 模型响应传输中断")
         assert "重试" in guidance
-
-    def test_workspace_full(self, handler):
-        guidance = handler._bot_error_guidance("工作区已满: 工作区配额超限")
-        assert "清理" in guidance
 
     def test_disk_full(self, handler):
         guidance = handler._bot_error_guidance("磁盘空间不足: 服务器磁盘空间不足")
@@ -357,106 +330,6 @@ class TestDispatchNonTextResults:
         assert len(guidance_texts) == 0
 
 
-# ── TestUnbindStateCleanup ──
-
-
-class TestUnbindStateCleanup:
-    """_cmd_unbind: 解绑后清理 session + pending + 区分提示。"""
-
-    @pytest.fixture
-    def unbound_handler(self):
-        """创建带 bind_manager 的 handler，模拟已绑定状态。"""
-        adapter = MagicMock()
-        adapter.name = "telegram"
-        adapter.send_text = AsyncMock()
-        adapter.send_markdown = AsyncMock()
-        api = MagicMock()
-        session_store = MagicMock()
-        bind_manager = MagicMock()
-        bind_manager.check_bind_status.return_value = "auth-user-123"
-        bind_manager.unbind_channel.return_value = True
-        h = MessageHandler(
-            adapter, api, session_store,
-            bind_manager=bind_manager,
-        )
-        # 预设一些状态
-        pk = h._pending_key("chat1", "user1")
-        h._pending[pk] = MagicMock()
-        h._pending_files[pk] = [MagicMock()]
-        h._staged_cache[pk] = [{"original_path": "/a.xlsx"}]
-        h._last_apply[pk] = [{"original_path": "/a.xlsx"}]
-        return h
-
-    def _make_unbind_msg(self):
-        from excelmanus.channels.base import ChannelMessage, ChannelUser
-        user = ChannelUser(user_id="user1", username="testuser")
-        return ChannelMessage(
-            channel="telegram",
-            chat_id="chat1",
-            user=user,
-            text="/unbind",
-            is_command=True,
-            command="unbind",
-        )
-
-    @pytest.mark.asyncio
-    async def test_unbind_clears_session(self, unbound_handler):
-        """解绑后 session store 被清理。"""
-        msg = self._make_unbind_msg()
-        await unbound_handler._cmd_unbind(msg)
-        unbound_handler.sessions.remove.assert_called_once_with(
-            "telegram", "chat1", "user1",
-        )
-
-    @pytest.mark.asyncio
-    async def test_unbind_clears_pending(self, unbound_handler):
-        """解绑后 pending 交互和文件缓冲被清理。"""
-        msg = self._make_unbind_msg()
-        pk = unbound_handler._pending_key("chat1", "user1")
-        await unbound_handler._cmd_unbind(msg)
-        assert pk not in unbound_handler._pending
-        assert pk not in unbound_handler._pending_files
-        assert pk not in unbound_handler._staged_cache
-        assert pk not in unbound_handler._last_apply
-
-    @pytest.mark.asyncio
-    async def test_unbind_message_no_require_bind(self, unbound_handler):
-        """_require_bind=False 时提示匿名模式。"""
-        msg = self._make_unbind_msg()
-        await unbound_handler._cmd_unbind(msg)
-        text = unbound_handler.adapter.send_text.call_args[0][1]
-        assert "匿名" in text
-        assert "独立工作区" in text
-        assert "/bind" in text
-
-    @pytest.mark.asyncio
-    async def test_unbind_message_require_bind(self, unbound_handler):
-        """_require_bind=True 时提示需要重新绑定。"""
-        import os
-        with MagicMock() as _:
-            os.environ["EXCELMANUS_CHANNEL_REQUIRE_BIND"] = "true"
-            try:
-                msg = self._make_unbind_msg()
-                await unbound_handler._cmd_unbind(msg)
-                text = unbound_handler.adapter.send_text.call_args[0][1]
-                assert "要求绑定" in text
-                assert "/bind" in text
-                assert "匿名" not in text
-            finally:
-                os.environ.pop("EXCELMANUS_CHANNEL_REQUIRE_BIND", None)
-
-    @pytest.mark.asyncio
-    async def test_unbind_invalidates_cache(self, unbound_handler):
-        """解绑后 auth 缓存被清除。"""
-        # 预填充缓存
-        import time
-        cache_key = f"telegram:user1"
-        unbound_handler._auth_user_cache[cache_key] = ("auth-user-123", time.monotonic())
-        msg = self._make_unbind_msg()
-        await unbound_handler._cmd_unbind(msg)
-        assert cache_key not in unbound_handler._auth_user_cache
-
-
 # ── TestOutputManagerErrorRewrite ──
 
 
@@ -554,7 +427,6 @@ class TestSessionAutoRecovery:
         session_store = MagicMock()
         session_store.get.return_value = "old-session-id"
         h = MessageHandler(adapter, api, session_store)
-        h._resolve_on_behalf_of = MagicMock(return_value="anon:tg:user1")
         return h
 
     @pytest.mark.asyncio

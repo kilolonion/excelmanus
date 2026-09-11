@@ -1,16 +1,7 @@
-"""统一测试：5 个工具的增强返回功能。
-
-覆盖：
-1. list_sheets + include
-2. format_cells + return_styles
-3. write_cells + return_preview
-4. inspect_excel_files + include
-5. create_excel_chart 返回图表元信息
-"""
+"""统一测试：list_sheets / inspect_excel_files include、图表元信息。"""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +12,19 @@ from openpyxl.formatting.rule import CellIsRule
 from openpyxl.styles import Font, PatternFill
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from excelmanus.tools import cell_tools, chart_tools, data_tools, format_tools, sheet_tools
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.workbook import cells as cell_tools
+from excelmanus.workbook import charts as chart_tools
+from excelmanus.workbook import data as data_tools
+from excelmanus.workbook import styles as format_tools
+from excelmanus.workbook import sheets as sheet_tools
+from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
+
+
+def _payload(result: ToolResult) -> dict[str, Any]:
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.value, dict)
+    return result.value
 
 
 @pytest.fixture(autouse=True)
@@ -29,6 +32,7 @@ def _init_guards(tmp_path: Path) -> None:
     """初始化所有模块的 FileAccessGuard。"""
     for mod in (data_tools, format_tools, sheet_tools, cell_tools, chart_tools):
         mod.init_guard(str(tmp_path))
+    seed_seen_versions({})
 
 
 @pytest.fixture()
@@ -102,13 +106,13 @@ class TestListSheetsInclude:
     """list_sheets include 参数测试。"""
 
     def test_no_include_regression(self, rich_xlsx: Path) -> None:
-        result = json.loads(sheet_tools.list_sheets(str(rich_xlsx)))
+        result = _payload(sheet_tools.list_sheets(str(rich_xlsx)))
         assert result["sheet_count"] == 2
         assert "column_names" not in result["sheets"][0]
         assert "freeze_panes" not in result["sheets"][0]
 
     def test_include_columns(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["columns"])
         )
         s1 = result["sheets"][0]
@@ -117,14 +121,14 @@ class TestListSheetsInclude:
         assert "金额" in s1["column_names"]
 
     def test_include_freeze_panes(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["freeze_panes"])
         )
         assert result["sheets"][0]["freeze_panes"] == "A2"
         assert result["sheets"][1]["freeze_panes"] == "A2"
 
     def test_include_preview(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["preview"], max_preview_rows=3)
         )
         s1 = result["sheets"][0]
@@ -132,21 +136,21 @@ class TestListSheetsInclude:
         assert len(s1["preview"]) == 3
 
     def test_include_charts(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["charts"])
         )
         assert len(result["sheets"][0]["charts"]) == 1
         assert result["sheets"][1]["charts"] == []
 
     def test_include_conditional_formatting(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["conditional_formatting"])
         )
         assert len(result["sheets"][0]["conditional_formatting"]) >= 1
         assert result["sheets"][1]["conditional_formatting"] == []
 
     def test_include_column_widths(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(rich_xlsx), include=["column_widths"])
         )
         widths = result["sheets"][0]["column_widths"]
@@ -154,7 +158,7 @@ class TestListSheetsInclude:
         assert widths["E"] == 12.0
 
     def test_multi_include(self, rich_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(
                 str(rich_xlsx),
                 include=["columns", "freeze_panes", "charts", "column_widths"],
@@ -167,98 +171,11 @@ class TestListSheetsInclude:
         assert "column_widths" in s1
 
     def test_invalid_dimension_warning(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             sheet_tools.list_sheets(str(simple_xlsx), include=["nonexistent"])
         )
         assert "include_warning" in result
 
-
-# ════════════════════════════════════════════════════════════
-# 2. format_cells + return_styles
-# ════════════════════════════════════════════════════════════
-
-
-class TestFormatCellsReturnStyles:
-    """format_cells return_styles 参数测试。"""
-
-    def test_no_return_styles_regression(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            format_tools.format_cells(
-                str(simple_xlsx), "A1:B1", font={"bold": True},
-            )
-        )
-        assert result["status"] == "success"
-        assert "after_styles" not in result
-
-    def test_return_styles_true(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            format_tools.format_cells(
-                str(simple_xlsx), "A1:B1",
-                font={"bold": True, "color": "FF0000"},
-                return_styles=True,
-            )
-        )
-        assert result["status"] == "success"
-        assert "after_styles" in result
-        styles = result["after_styles"]
-        assert "style_classes" in styles
-        assert "cell_style_map" in styles
-        # 应有包含 bold 的样式类
-        has_bold = any(
-            cls.get("font", {}).get("bold") is True
-            for cls in styles["style_classes"].values()
-        )
-        assert has_bold
-
-
-# ════════════════════════════════════════════════════════════
-# 3. write_cells + return_preview
-# ════════════════════════════════════════════════════════════
-
-
-class TestWriteCellsReturnPreview:
-    """write_cells return_preview 参数测试。"""
-
-    def test_no_return_preview_regression(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            cell_tools.write_cells(str(simple_xlsx), cell="C1", value="价格")
-        )
-        assert result["status"] == "success"
-        assert "preview_after" not in result
-
-    def test_single_cell_preview(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            cell_tools.write_cells(
-                str(simple_xlsx), cell="C1", value="价格", return_preview=True,
-            )
-        )
-        assert result["status"] == "success"
-        assert result["preview_after"] == [["价格"]]
-
-    def test_range_preview(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            cell_tools.write_cells(
-                str(simple_xlsx),
-                cell_range="C1",
-                values=[["价格", "备注"], [100, "VIP"], [200, "普通"]],
-                return_preview=True,
-            )
-        )
-        assert result["status"] == "success"
-        preview = result["preview_after"]
-        assert len(preview) == 3
-        assert preview[0][0] == "价格"
-        assert preview[1][0] == "100"
-
-    def test_formula_cell_preview(self, simple_xlsx: Path) -> None:
-        result = json.loads(
-            cell_tools.write_cells(
-                str(simple_xlsx), cell="C2", value="=B2*2", return_preview=True,
-            )
-        )
-        assert result["status"] == "success"
-        # data_only=True 模式下公式可能返回 None（未求值），但不应报错
-        assert "preview_after" in result
 
 
 # ════════════════════════════════════════════════════════════
@@ -270,39 +187,31 @@ class TestInspectExcelFilesInclude:
     """inspect_excel_files include 参数测试。"""
 
     def test_no_include_regression(self, rich_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(data_tools.inspect_excel_files(str(tmp_path)))
+        result = data_tools.inspect_excel_files(str(tmp_path)).value
         assert result["excel_files_found"] >= 1
         sheet0 = result["files"][0]["sheets"][0]
         assert "freeze_panes" not in sheet0
 
     def test_include_freeze_panes(self, rich_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(
-            data_tools.inspect_excel_files(str(tmp_path), include=["freeze_panes"])
-        )
+        result = data_tools.inspect_excel_files(str(tmp_path), include=["freeze_panes"]).value
         sheet0 = result["files"][0]["sheets"][0]
         assert sheet0["freeze_panes"] == "A2"
 
     def test_include_charts(self, rich_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(
-            data_tools.inspect_excel_files(str(tmp_path), include=["charts"])
-        )
+        result = data_tools.inspect_excel_files(str(tmp_path), include=["charts"]).value
         # 销售明细有 1 个图表
         sheets = result["files"][0]["sheets"]
         sales_sheet = [s for s in sheets if s["name"] == "销售明细"][0]
         assert len(sales_sheet["charts"]) == 1
 
     def test_include_column_widths(self, rich_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(
-            data_tools.inspect_excel_files(str(tmp_path), include=["column_widths"])
-        )
+        result = data_tools.inspect_excel_files(str(tmp_path), include=["column_widths"]).value
         sheet0 = result["files"][0]["sheets"][0]
         assert "column_widths" in sheet0
         assert sheet0["column_widths"]["A"] == 15.0
 
     def test_invalid_dimension_warning(self, simple_xlsx: Path, tmp_path: Path) -> None:
-        result = json.loads(
-            data_tools.inspect_excel_files(str(tmp_path), include=["nonexistent"])
-        )
+        result = data_tools.inspect_excel_files(str(tmp_path), include=["nonexistent"]).value
         assert "include_warning" in result
 
 
@@ -315,13 +224,14 @@ class TestCreateExcelChartInfo:
     """create_excel_chart 返回增强元信息测试。"""
 
     def test_chart_info_returned(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _payload(
             chart_tools.create_excel_chart(
                 file_path=str(simple_xlsx),
                 chart_type="bar",
                 data_range="B1:B3",
                 categories_range="A2:A3",
                 target_cell="D1",
+                expected_version=content_version_of_file(simple_xlsx),
             )
         )
         assert result["status"] == "success"
@@ -332,20 +242,21 @@ class TestCreateExcelChartInfo:
         assert info.get("type") == "bar"
 
     def test_multiple_charts_count(self, simple_xlsx: Path) -> None:
-        # 创建第一个图表
-        chart_tools.create_excel_chart(
+        first = chart_tools.create_excel_chart(
             file_path=str(simple_xlsx),
             chart_type="bar",
             data_range="B1:B3",
             target_cell="D1",
+            expected_version=content_version_of_file(simple_xlsx),
         )
-        # 创建第二个图表
-        result = json.loads(
+        assert first.success
+        result = _payload(
             chart_tools.create_excel_chart(
                 file_path=str(simple_xlsx),
                 chart_type="line",
                 data_range="B1:B3",
                 target_cell="D15",
+                expected_version=first.ui_meta.content_version or first.value.get("content_version"),
             )
         )
         assert result["total_charts_on_sheet"] == 2

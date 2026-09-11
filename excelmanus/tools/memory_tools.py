@@ -7,6 +7,7 @@ from contextvars import ContextVar
 from datetime import datetime
 from typing import TYPE_CHECKING, cast
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.logger import get_logger
 from excelmanus.memory_models import MemoryCategory, MemoryEntry
 from excelmanus.tools.registry import ToolDef
@@ -33,7 +34,7 @@ _TOPIC_FILE_MAP: dict[str, str] = {
     "general": "general.md",
 }
 
-# 输入别名兼容（旧字段仍可读）
+# 输入别名
 _TOPIC_ALIASES: dict[str, str] = {
     "file_pattern": "file_patterns",
     "user_pref": "user_prefs",
@@ -64,30 +65,33 @@ def _resolve_memory() -> PersistentMemory | None:
 # ── 工具函数 ──────────────────────────────────────────────
 
 
-def memory_read_topic(topic: str) -> str:
+def memory_read_topic(topic: str) -> ToolResult:
     """读取指定主题的持久记忆文件内容。
 
     Args:
         topic: 主题名称，支持 file_patterns 或 user_prefs。
 
     Returns:
-        主题文件内容字符串，或提示信息。
+        ToolResult，model_text 为主题内容或提示。
     """
     memory = _resolve_memory()
     if memory is None:
-        return "持久记忆功能未启用"
+        return ToolResult.from_text("持久记忆功能未启用", success=False)
 
     normalized_topic = _TOPIC_ALIASES.get(topic, topic)
     filename = _TOPIC_FILE_MAP.get(normalized_topic)
     if filename is None:
         supported = ", ".join(_TOPIC_FILE_MAP)
-        return f"不支持的主题: {topic}，支持的主题: {supported}"
+        return ToolResult.from_text(
+            f"不支持的主题: {topic}，支持的主题: {supported}",
+            success=False,
+        )
 
     content = memory.load_topic(filename)
     if not content:
-        return f"主题 '{normalized_topic}' 暂无记忆内容"
+        return ToolResult.from_text(f"主题 '{normalized_topic}' 暂无记忆内容")
 
-    return content
+    return ToolResult.from_text(content)
 
 
 # ── 记忆写入 ──────────────────────────────────────────────
@@ -104,7 +108,7 @@ _CATEGORY_MAP: dict[str, MemoryCategory] = {
 }
 
 
-def memory_save(content: str, category: str) -> str:
+def memory_save(content: str, category: str) -> ToolResult:
     """将一条有价值的信息保存到持久记忆中。
 
     仅保存对未来会话有复用价值的信息，例如：
@@ -118,23 +122,26 @@ def memory_save(content: str, category: str) -> str:
         category: 类别，支持 file_pattern / user_pref / error_solution / general。
 
     Returns:
-        操作结果描述。
+        ToolResult，model_text 为操作结果描述。
     """
     memory = _resolve_memory()
     if memory is None:
-        return "持久记忆功能未启用"
+        return ToolResult.from_text("持久记忆功能未启用", success=False)
 
     if memory.read_only_mode:
-        return "持久记忆处于只读模式，无法写入"
+        return ToolResult.from_text("持久记忆处于只读模式，无法写入", success=False)
 
     normalized_content = (content or "").strip()
     if not normalized_content:
-        return "记忆内容不能为空"
+        return ToolResult.from_text("记忆内容不能为空", success=False)
 
     cat_enum = _CATEGORY_MAP.get(category)
     if cat_enum is None:
         supported = "file_pattern, user_pref, error_solution, general"
-        return f"不支持的类别: {category}，支持的类别: {supported}"
+        return ToolResult.from_text(
+            f"不支持的类别: {category}，支持的类别: {supported}",
+            success=False,
+        )
 
     entry = MemoryEntry(
         content=normalized_content,
@@ -146,9 +153,9 @@ def memory_save(content: str, category: str) -> str:
         memory.save_entries([entry])
     except Exception:
         logger.exception("保存记忆条目失败")
-        return "保存记忆失败，请稍后重试"
+        return ToolResult.from_text("保存记忆失败，请稍后重试", success=False)
 
-    return f"已保存到 {cat_enum.value} 类别"
+    return ToolResult.from_text(f"已保存到 {cat_enum.value} 类别")
 
 
 # ── get_tools() 导出 ──────────────────────────────────────

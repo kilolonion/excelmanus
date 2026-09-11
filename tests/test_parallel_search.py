@@ -196,7 +196,7 @@ class TestParallelSearchImpl:
         mgr = MagicMock()
         mgr._clients = {}
         result = await _parallel_search_impl(mgr, "test query")
-        parsed = json.loads(result)
+        parsed = result.value
         assert "error" in parsed
 
     @pytest.mark.asyncio
@@ -207,7 +207,7 @@ class TestParallelSearchImpl:
         # client._tools 也为空
         mgr._clients["exa"]._tools = []
         result = await _parallel_search_impl(mgr, "test query")
-        parsed = json.loads(result)
+        parsed = result.value
         assert "error" in parsed
 
     @pytest.mark.asyncio
@@ -241,7 +241,7 @@ class TestParallelSearchImpl:
         finally:
             _st.format_tool_result = _orig
 
-        parsed = json.loads(result)
+        parsed = result.value
         assert "results" in parsed
         assert "variants_used" in parsed
         assert len(parsed["variants_used"]) <= 2
@@ -267,7 +267,7 @@ class TestParallelSearchImpl:
 
             result = await _parallel_search_impl(mgr, "test query", num_queries=1)
 
-        parsed = json.loads(result)
+        parsed = result.value
         # 超时后结果应为空但不报错
         assert parsed["total_results"] == 0
 
@@ -303,7 +303,7 @@ class TestParallelSearchImpl:
         finally:
             _st.format_tool_result = _orig
 
-        parsed = json.loads(result)
+        parsed = result.value
         # 至少一个查询应成功（第1个失败，后续应有结果）
         assert parsed["total_results"] >= 1
 
@@ -349,10 +349,6 @@ class TestPolicyIntegration:
     def test_parallel_search_in_parallelizable(self):
         from excelmanus.tools.policy import PARALLELIZABLE_READONLY_TOOLS
         assert "parallel_search" in PARALLELIZABLE_READONLY_TOOLS
-
-    def test_parallel_search_in_search_scope(self):
-        from excelmanus.tools.policy import ROUTE_TOOL_SCOPE
-        assert "parallel_search" in ROUTE_TOOL_SCOPE["search"]
 
     def test_parallelizable_subset_assertion(self):
         """PARALLELIZABLE_READONLY_TOOLS 仍然是 READ_ONLY_SAFE_TOOLS 的子集。"""
@@ -516,7 +512,7 @@ class TestNumQueriesClamp:
         mgr._clients = {}
         # 即使被 clamp，仍然会因为没有 client 返回错误
         result = await _parallel_search_impl(mgr, "test", num_queries=100)
-        parsed = json.loads(result)
+        parsed = result.value
         assert "error" in parsed
 
     @pytest.mark.asyncio
@@ -525,5 +521,5 @@ class TestNumQueriesClamp:
         mgr = MagicMock()
         mgr._clients = {}
         result = await _parallel_search_impl(mgr, "test", num_queries=0)
-        parsed = json.loads(result)
+        parsed = result.value
         assert "error" in parsed

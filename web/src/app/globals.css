@@ -1579,6 +1579,18 @@ button:active:not(:disabled),
     -webkit-backdrop-filter: none;
   }
 
+  .overlay-card {
+    background: oklch(1 0 0 / 98%);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
+  .dark .overlay-card {
+    background: oklch(0.18 0 0 / 98%);
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
+  }
+
   /* Reduce orb blur radius and disable animation on mobile */
   .auth-bg-orb {
     filter: blur(40px);
@@ -1602,11 +1614,10 @@ button:active:not(:disabled),
   }
 }
 
-/* ── Approval Modal ── */
+/* ── Overlay Card (approval / compact / rollback / apply) ── */
 
-/* Glassmorphism card */
-.approval-card {
-  background: oklch(1 0 0 / 85%);
+.overlay-card {
+  background: oklch(1 0 0 / 88%);
   backdrop-filter: blur(24px) saturate(1.8);
   -webkit-backdrop-filter: blur(24px) saturate(1.8);
   border: 1px solid oklch(0 0 0 / 6%);
@@ -1614,10 +1625,21 @@ button:active:not(:disabled),
     0 0 0 1px oklch(1 0 0 / 8%),
     0 24px 80px -12px oklch(0 0 0 / 18%),
     0 8px 24px -4px oklch(0 0 0 / 8%);
+  /* mobile: bottom sheet */
+  position: fixed;
+  top: auto;
+  right: 0;
+  bottom: 0;
+  left: 0;
+  width: 100%;
+  max-width: none;
+  transform: none;
+  border-radius: 1.5rem 1.5rem 0 0;
+  max-height: 90dvh;
 }
 
-.dark .approval-card {
-  background: oklch(0.16 0 0 / 88%);
+.dark .overlay-card {
+  background: oklch(0.16 0 0 / 90%);
   border-color: oklch(1 0 0 / 10%);
   box-shadow:
     0 0 0 1px oklch(1 0 0 / 5%),
@@ -1625,28 +1647,87 @@ button:active:not(:disabled),
     0 8px 24px -4px oklch(0 0 0 / 25%);
 }
 
-/* Icon pulse ring */
-@keyframes approval-icon-pulse-anim {
+@media (min-width: 640px) {
+  .overlay-card {
+    top: 50%;
+    right: auto;
+    bottom: auto;
+    left: 50%;
+    width: var(--overlay-card-width, 480px);
+    max-width: 92vw;
+    max-height: min(80vh, 720px);
+    transform: translate(-50%, -50%);
+    border-radius: 1.5rem;
+  }
+
+  .overlay-card-handle {
+    display: none;
+  }
+}
+
+@keyframes overlay-card-in-mobile {
+  from { opacity: 0; transform: translateY(28px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@keyframes overlay-card-out-mobile {
+  from { opacity: 1; transform: translateY(0); }
+  to { opacity: 0; transform: translateY(16px); }
+}
+
+@keyframes overlay-card-in-desktop {
+  from { opacity: 0; transform: translate(-50%, calc(-50% + 12px)) scale(0.97); }
+  to { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+}
+
+@keyframes overlay-card-out-desktop {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1); }
+  to { opacity: 0; transform: translate(-50%, calc(-50% + 8px)) scale(0.97); }
+}
+
+.overlay-card[data-state="open"] {
+  animation: overlay-card-in-mobile 220ms ease-out;
+}
+
+.overlay-card[data-state="closed"] {
+  animation: overlay-card-out-mobile 160ms ease-in;
+}
+
+@media (min-width: 640px) {
+  .overlay-card[data-state="open"] {
+    animation: overlay-card-in-desktop 220ms ease-out;
+  }
+
+  .overlay-card[data-state="closed"] {
+    animation: overlay-card-out-desktop 160ms ease-in;
+  }
+}
+
+@keyframes overlay-icon-pulse-anim {
   0%, 100% { transform: scale(1); opacity: 0.2; }
   50% { transform: scale(1.6); opacity: 0; }
 }
 
-.approval-icon-pulse {
-  animation: approval-icon-pulse-anim 2s ease-in-out infinite;
+.overlay-icon-pulse {
+  animation: overlay-icon-pulse-anim 2s ease-in-out infinite;
 }
 
-/* Accept button hover glow */
-.approval-btn-accept:hover:not(:disabled) {
+.overlay-btn-primary:hover:not(:disabled) {
   box-shadow: 0 6px 20px -4px var(--em-primary-alpha-25);
   transform: translateY(-1px);
 }
 
-.approval-btn-accept:active:not(:disabled) {
+.overlay-btn-primary:active:not(:disabled) {
   transform: translateY(0);
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .approval-icon-pulse {
+  .overlay-icon-pulse {
+    animation: none;
+  }
+
+  .overlay-card[data-state="open"],
+  .overlay-card[data-state="closed"] {
     animation: none;
   }
 }

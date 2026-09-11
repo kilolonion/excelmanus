@@ -46,12 +46,15 @@ _AUX_NO_THINKING_EXTRA_BODY: dict[str, Any] = {
     "reasoning": {"effort": "none"},            # openrouter
 }
 
-_WINDOW_ADVISOR_RETRY_DELAY_MIN_SECONDS = 0.3
-_WINDOW_ADVISOR_RETRY_DELAY_MAX_SECONDS = 0.8
-_WINDOW_ADVISOR_RETRY_AFTER_CAP_SECONDS = 1.5
-_WINDOW_ADVISOR_RETRY_TIMEOUT_CAP_SECONDS = 8.0
-_VALID_WRITE_HINTS = {"may_write", "read_only", "unknown"}
-_MID_DISCUSSION_MAX_LEN = 2000  # 中间讨论放行阈值（字符数）
+_TABLE_FILE_EXTENSIONS = (
+    ".xlsx",
+    ".xlsm",
+    ".xls",
+    ".xlsb",
+    ".csv",
+    ".tsv",
+    ".txt",
+)
 _SKILL_AGENT_ALIASES = {
     "explore": "explorer",
     "plan": "subagent",
@@ -80,34 +83,21 @@ _MENTION_XML_TAG_MAP: dict[str, tuple[str, str]] = {
 # ── 纯函数 ──────────────────────────────────────────────────
 
 
-def _normalize_write_hint(value: Any) -> str:
-    """规范化 write_hint，仅返回 may_write/read_only/unknown。"""
-    if not isinstance(value, str):
-        return "unknown"
-    normalized = value.strip().lower()
-    if normalized in _VALID_WRITE_HINTS:
-        return normalized
-    return "unknown"
+def normalize_path(path: Any) -> str:
+    """规范化路径字符串，供 FILES_CHANGED 等路径收集使用。"""
+    if not isinstance(path, str):
+        return ""
+    normalized = path.strip().replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized
 
 
-def _merge_write_hint(route_hint: Any, fallback_hint: Any) -> str:
-    """优先使用路由 write_hint；无效时回退到当前状态。"""
-    normalized_route = _normalize_write_hint(route_hint)
-    if normalized_route != "unknown":
-        return normalized_route
-    return _normalize_write_hint(fallback_hint)
+def is_excel_path(path: str) -> bool:
+    """判断是否 Excel/CSV 表格文件路径。"""
+    lower = (path or "").lower()
+    return any(lower.endswith(ext) for ext in _TABLE_FILE_EXTENSIONS)
 
-
-def _merge_write_hint_with_override(route_hint: Any, override_hint: Any) -> str:
-    """合并 write_hint，但 override_hint == 'may_write' 时强制覆盖 route_hint。
-
-    用于写入工具成功后的场景：当 override_hint == 'may_write' 时
-    强制覆盖，不应被原始 route_hint（如 'read_only'）压制。
-    """
-    normalized_override = _normalize_write_hint(override_hint)
-    if normalized_override == "may_write":
-        return "may_write"
-    return _merge_write_hint(route_hint, override_hint)
 
 
 def build_mention_context_block(
@@ -340,105 +330,6 @@ def _looks_like_html_document(text: str) -> bool:
     return "<html" in lowered and "</html>" in lowered and "<head" in lowered
 
 
-# ── 澄清检测：判断文本是否为向用户反问/澄清 ──────────────────
-
-_CLARIFICATION_PATTERNS = _re.compile(
-    r"(?:"
-    # 中文澄清信号
-    r"请(?:问|告诉|提供|确认|说明|指定|明确)"
-    r"|(?:哪个|哪些|哪一个|哪一些)(?:文件|表格|sheet|工作表|工作簿)"
-    r"|需要(?:你|您)(?:提供|确认|说明|指定|补充)"
-    r"|(?:你|您)(?:想|希望|需要|打算)(?:对|用|在|把)"
-    r"|(?:你|您)(?:指的是|说的是|想要的是)"
-    r"|(?:能否|可以|可否|是否能)(?:告诉|说明|提供|确认)"
-    r"|以下(?:信息|内容|参数|细节)(?:需要|还需)"
-    r"|为了(?:更好地|准确地|正确地)(?:完成|执行|处理)"
-    # 英文澄清信号
-    r"|(?:which|what|could you|can you|please (?:specify|provide|confirm|clarify))"
-    r"|(?:I need (?:to know|more info|clarification))"
-    r"|(?:before I (?:proceed|start|begin|continue))"
-    r")",
-    _re.IGNORECASE,
-)
-
-# 问号密度阈值：短文本中问号占比高说明是在提问
-_MIN_QUESTION_MARKS_FOR_CLARIFICATION = 1
-
-
-def _looks_like_clarification(text: str) -> bool:
-    """判断文本是否为 agent 向用户的澄清/反问。
-
-    用于在首轮无工具调用时放行澄清性文本回复，
-    避免被执行守卫或写入门禁误拦截。
-    """
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    # 条件 1：包含问号（中文或英文）
-    question_marks = stripped.count("？") + stripped.count("?")
-    if question_marks < _MIN_QUESTION_MARKS_FOR_CLARIFICATION:
-        return False
-    # 条件 2：匹配澄清模式关键词
-    if _CLARIFICATION_PATTERNS.search(stripped):
-        return True
-    # 条件 3：短文本（< 500 字符）且问号密度高（>= 2 个问号）
-    if len(stripped) < 500 and question_marks >= 2:
-        return True
-    return False
-
-
-# ── 等待用户操作检测：agent 正在等待用户上传/提供素材 ────────
-
-_WAITING_FOR_USER_ACTION_PATTERNS = _re.compile(
-    r"(?:"
-    # 中文：请求用户上传/发送/提供文件/图片
-    r"请(?:直接)?(?:上传|发送|提供|附上|拖入|粘贴)(?:.*?(?:图片|文件|截图|附件|素材|源文件|原始文件|照片|图像|表格))"
-    r"|(?:上传|发送|提供|附上)(?:到|至|后|完成后|之后)(?:.*?(?:我|就|即可|立刻|马上))"
-    r"|(?:等待|等你|等您|待你|待您)(?:上传|提供|发送|附上)"
-    r"|(?:需要|还需|缺少)(?:.*?(?:上传|提供|发送))(?:.*?(?:图片|文件|截图|附件|素材|源))"
-    r"|(?:尚未|还没有?|未)(?:收到|检测到|发现|看到)(?:.*?(?:图片|文件|截图|附件|上传))"
-    # 英文
-    r"|please\s+(?:upload|send|provide|attach|drag)\s+(?:the\s+)?(?:image|file|screenshot|attachment)"
-    r"|(?:waiting|wait)\s+(?:for\s+)?(?:you|your)\s+(?:upload|file|image|input)"
-    r"|(?:once|after)\s+(?:you\s+)?(?:upload|provide|send|attach)"
-    r")",
-    _re.IGNORECASE,
-)
-
-
-def _looks_like_waiting_for_user_action(text: str) -> bool:
-    """检测文本是否表示 agent 正在等待用户执行操作（上传文件等）。
-
-    用于在写入门禁/执行守卫触发前放行，避免 agent 被迫空转。
-    """
-    stripped = (text or "").strip()
-    if not stripped:
-        return False
-    return bool(_WAITING_FOR_USER_ACTION_PATTERNS.search(stripped))
-
-
-# ── 执行守卫：检测"仅建议不执行"的回复 ──────────────────────
-
-_FORMULA_ADVICE_PATTERN = _re.compile(
-    r"=(?:IF|DATE|VLOOKUP|HLOOKUP|INDEX|MATCH|SUMIF|COUNTIF|CONCATENATE|LEFT|RIGHT|MID|"
-    r"AVERAGE|MAX|MIN|SUM|TRIM|LEN|FIND|SEARCH|IFERROR|AND|OR|NOT|TEXT|VALUE|ROUND|"
-    r"SUMPRODUCT|OFFSET|INDIRECT|SUBSTITUTE|UPPER|LOWER|PROPER|DATEDIF|YEARFRAC|"
-    r"NETWORKDAYS|WORKDAY|EOMONTH|EDATE|DAYS|DATEVALUE|TIMEVALUE|NOW|TODAY|"
-    r"LARGE|TEXTJOIN|LET|TEXTSPLIT|XMATCH|VSTACK|SEQUENCE|FILTER|SORT|UNIQUE|"
-    r"LAMBDA|CHOOSECOLS|CHOOSEROWS|HSTACK)\s*\(",
-    _re.IGNORECASE,
-)
-
-_FORMULA_ADVICE_FALLBACK_PATTERN = _re.compile(
-    r"(?<![<>=!])=(?![<>=])\s*[A-Z][A-Z0-9_]{2,}\s*\(",
-)
-
-_VBA_MACRO_ADVICE_PATTERN = _re.compile(
-    r"(```\s*vb|Sub\s+\w+\s*\(|End\s+Sub\b|\.Range\s*\(|\.Cells\s*\("
-    r"|Application\.\w+|Dim\s+\w+\s+As\s)",
-    _re.IGNORECASE,
-)
-
 # 用户主动请求 VBA 相关帮助的检测模式
 _USER_VBA_REQUEST_PATTERN = _re.compile(
     r"(VBA|宏|macro|vbaProject"
@@ -455,22 +346,6 @@ def _user_requests_vba(text: str) -> bool:
     if not text:
         return False
     return bool(_USER_VBA_REQUEST_PATTERN.search(text))
-
-
-def _contains_formula_advice(text: str, *, vba_exempt: bool = False) -> bool:
-    """检测回复文本中是否包含 Excel 公式或 VBA/宏代码建议（而非实际执行）。
-
-    Args:
-        text: 回复文本。
-        vba_exempt: 若为 True，跳过 VBA 宏模式检测（用户主动请求 VBA 时）。
-    """
-    if not text:
-        return False
-    if _FORMULA_ADVICE_PATTERN.search(text) or _FORMULA_ADVICE_FALLBACK_PATTERN.search(text):
-        return True
-    if not vba_exempt and _VBA_MACRO_ADVICE_PATTERN.search(text):
-        return True
-    return False
 
 
 _WRITE_ACTION_VERBS = _re.compile(

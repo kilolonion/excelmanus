@@ -5,6 +5,8 @@
 - 增强的 ExcelManus 场景化摘要提示词
 - 用户可通过 /compact 手动触发
 - 可通过配置或命令开关关闭自动压缩
+- 此为唯一的默认上下文压缩层；旧式 memory.summarize_and_trim 默认关闭，
+  不再作为 compaction 之后的第二层摘要（见 summarization_enabled=False）
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ COMPACTION_SYSTEM_PROMPT = """\
    - 当前激活的 skill 名称
    - 备份模式状态（on/off、scope）
    - fullaccess 权限状态
-   - 窗口感知中活跃窗口的文件和工作表
+   - 最近读取的文件和工作表范围
 
 ## 输出格式
 
@@ -104,6 +106,28 @@ class CompactionResult:
     tokens_after: int = 0
     summary_text: str = ""
     error: str = ""
+    pruned_tool_results: int = 0
+
+
+_TOOL_RESULT_PRUNE_CHARS = 4000
+_TOOL_RESULT_PRUNE_MARKER = "\n…（工具结果已截断）"
+
+
+def prune_overlong_tool_results(
+    memory: ConversationMemory,
+    *,
+    max_chars: int = _TOOL_RESULT_PRUNE_CHARS,
+) -> int:
+    """步前先剪过长 tool 结果，再决定要不要摘要。"""
+    pruned = 0
+    for msg in memory.messages:
+        if msg.get("role") != "tool":
+            continue
+        content = msg.get("content")
+        if isinstance(content, str) and len(content) > max_chars:
+            msg["content"] = content[:max_chars] + _TOOL_RESULT_PRUNE_MARKER
+            pruned += 1
+    return pruned
 
 
 class CompactionManager:
@@ -307,11 +331,26 @@ class CompactionManager:
         """执行压缩的核心逻辑。"""
         messages_before = len(memory.messages)
         tokens_before = memory._total_tokens_with_system_messages(system_msgs)
+        pruned = prune_overlong_tool_results(memory)
+        tokens_after_prune = memory._total_tokens_with_system_messages(system_msgs)
 
         if messages_before == 0:
             return CompactionResult(
                 success=False,
                 error="没有可压缩的对话历史。",
+                pruned_tool_results=pruned,
+            )
+
+        threshold = int(self.max_context_tokens * self._config.compaction_threshold_ratio)
+        if pruned and tokens_after_prune <= threshold:
+            return CompactionResult(
+                success=False,
+                messages_before=messages_before,
+                messages_after=len(memory.messages),
+                tokens_before=tokens_before,
+                tokens_after=tokens_after_prune,
+                error="已剪过长工具结果，压力已下降，未做摘要。",
+                pruned_tool_results=pruned,
             )
 
         keep_recent = self._config.compaction_keep_recent_turns
@@ -327,6 +366,7 @@ class CompactionManager:
                 success=False,
                 messages_before=messages_before,
                 error="对话轮次不足，无需压缩。",
+                pruned_tool_results=pruned,
             )
 
         split_idx = user_indices[-keep_recent]
@@ -472,6 +512,7 @@ class CompactionManager:
             tokens_before=tokens_before,
             tokens_after=tokens_after,
             summary_text=summary_text,
+            pruned_tool_results=pruned,
         )
 
 
@@ -574,7 +615,8 @@ def _format_messages_for_compaction(
 _WRITE_TOOLS: frozenset[str] = frozenset({
     "run_shell", "delete_file",
     "write_text_file", "edit_text_file", "rename_file", "copy_file",
-    "create_excel_chart", "rebuild_excel_from_spec", "verify_excel_replica",
+    "edit_spreadsheet", "format_spreadsheet", "manage_spreadsheet_objects",
+    "manage_spreadsheet_versions", "write_word",
     "run_code",
 })
 

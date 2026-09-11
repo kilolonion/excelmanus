@@ -1,5 +1,6 @@
 "use client";
 
+import { useCallback, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { WelcomePage } from "@/components/welcome/WelcomePage";
 import { ChatInput } from "@/components/chat/ChatInput";
@@ -22,7 +23,7 @@ export default function Home() {
   const messageOrder = useChatStore((s) => s.messageOrder);
   const isStreaming = useChatStore((s) => s.isStreaming);
   const isLoadingMessages = useChatStore((s) => s.isLoadingMessages);
-  const currentSessionId = useChatStore((s) => s.currentSessionId);
+  const loadedSessionId = useChatStore((s) => s.loadedSessionId);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const compareMode = useExcelStore((s) => s.compareMode);
@@ -30,8 +31,10 @@ export default function Home() {
   const addSession = useSessionStore((s) => s.addSession);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const cmdResult = useCommandResult();
+  const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[] } | null>(null);
 
   const handleSend = (text: string, files?: AttachedFile[]) => {
+    setComposerDraft(null);
     if (!activeSessionId) {
       const id = uuid();
       addSession({
@@ -45,6 +48,10 @@ export default function Home() {
     sendMessage(text, files);
   };
 
+  const handleSuggestionClick = useCallback((text: string, files?: File[]) => {
+    setComposerDraft({ seq: Date.now(), text, files: files ?? [] });
+  }, []);
+
   const handleStop = () => {
     stopGeneration();
   };
@@ -53,7 +60,7 @@ export default function Home() {
   // 会话恢复中：activeSessionId 已从 localStorage 恢复但消息尚未加载
   // 不展示 WelcomePage，避免闪烁
   const isRestoringSession = !!activeSessionId && !hasMessages
-    && (currentSessionId !== activeSessionId || isLoadingMessages);
+    && (loadedSessionId !== activeSessionId || isLoadingMessages);
 
   return (
     <div className="flex flex-col h-full">
@@ -89,7 +96,7 @@ export default function Home() {
           <div key="restoring" className="flex-1" />
         ) : (
           <motion.div key="welcome" className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0, y: -10 }} transition={viewTransition}>
-            <WelcomePage onSuggestionClick={handleSend} />
+            <WelcomePage onSuggestionClick={handleSuggestionClick} />
           </motion.div>
         )}
       </AnimatePresence>
@@ -103,6 +110,7 @@ export default function Home() {
               disabled={false}
               isStreaming={isStreaming}
               onStop={handleStop}
+              composerDraft={composerDraft}
             />
           </div>
         </div>

@@ -1,20 +1,14 @@
-"""Tests for text-based tool call recovery and chitchat prompt cleanup.
+"""Tests for text-based tool call recovery.
 
 Covers:
 1. _extract_text_tool_calls — parsing various text-based tool call formats
 2. _match_tool_in_dict — tool name/args extraction from dicts
 3. _find_balanced_json — balanced brace matching
-4. Chitchat prompt capability map stripping
-5. Integration: recovery in engine loop (unit-level mocking)
 """
 
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
-
-import pytest
 
 from excelmanus.engine_utils import (
     _extract_text_tool_calls,
@@ -55,7 +49,7 @@ class TestTryParseJsonObject:
 # ════════════════════════════════════════════════════════════
 
 
-REGISTERED = frozenset({"list_directory", "read_excel", "run_code", "write_excel"})
+REGISTERED = frozenset({"list_directory", "inspect_spreadsheet", "run_code", "edit_spreadsheet"})
 
 
 class TestMatchToolInDict:
@@ -71,10 +65,10 @@ class TestMatchToolInDict:
 
     def test_name_arguments_format(self) -> None:
         """OpenAI 风格: name + arguments。"""
-        obj = {"name": "read_excel", "arguments": {"file_path": "test.xlsx"}}
+        obj = {"name": "inspect_spreadsheet", "arguments": {"file_path": "test.xlsx"}}
         result = _match_tool_in_dict(obj, REGISTERED)
         assert result is not None
-        assert result[0] == "read_excel"
+        assert result[0] == "inspect_spreadsheet"
 
     def test_tool_name_parameters_format(self) -> None:
         """通用风格: tool_name + parameters。"""
@@ -165,11 +159,11 @@ class TestExtractTextToolCalls:
         """裸 JSON 格式（无代码块包裹）。"""
         text = (
             '让我查看文件。\n\n'
-            '{"command": "read_excel", "kwargs": {"file_path": "test.xlsx"}}'
+            '{"command": "inspect_spreadsheet", "kwargs": {"file_path": "test.xlsx"}}'
         )
         calls, cleaned = _extract_text_tool_calls(text, REGISTERED)
         assert len(calls) == 1
-        assert calls[0].function.name == "read_excel"
+        assert calls[0].function.name == "inspect_spreadsheet"
         assert "让我查看文件" in cleaned
 
     def test_xml_tag_format(self) -> None:
@@ -218,12 +212,12 @@ class TestExtractTextToolCalls:
             "第一步：\n"
             '```json\n{"command": "list_directory", "kwargs": {"directory": "."}}\n```\n'
             "第二步：\n"
-            '```json\n{"command": "read_excel", "kwargs": {"file_path": "a.xlsx"}}\n```'
+            '```json\n{"command": "inspect_spreadsheet", "kwargs": {"file_path": "a.xlsx"}}\n```'
         )
         calls, cleaned = _extract_text_tool_calls(text, REGISTERED)
         assert len(calls) == 2
         names = {c.function.name for c in calls}
-        assert names == {"list_directory", "read_excel"}
+        assert names == {"list_directory", "inspect_spreadsheet"}
 
     def test_code_block_non_tool_json(self) -> None:
         """代码块中的非工具调用 JSON 不应被恢复。"""
@@ -255,108 +249,3 @@ class TestExtractTextToolCalls:
         assert "code" in args
         assert args["timeout"] == 30
 
-
-# ════════════════════════════════════════════════════════════
-# 5. Chitchat prompt — capability map stripping
-# ════════════════════════════════════════════════════════════
-
-
-class TestChitchatPromptCapabilityMapStrip:
-    """验证 chitchat 快速通道剥离能力图谱。"""
-
-    def _make_mock_context_builder(
-        self,
-        system_prompt: str = "Identity.",
-        capability_map_text: str = "",
-        rules_notice: str = "",
-        channel_notice: str = "",
-    ):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-        from excelmanus.skillpacks.models import SkillMatchResult
-
-        engine = MagicMock()
-        engine.memory.system_prompt = system_prompt
-        engine._capability_map_text = capability_map_text
-        engine._session_turn = 1
-        engine._channel_context = None  # web channel → _channel_cache_key = "channel_web"
-
-        cb = ContextBuilder.__new__(ContextBuilder)
-        cb._engine = engine
-        cb._notice_cache = {}
-        cb._token_count_cache = {}
-        cb._turn_notice_cache = {}
-        cb._turn_notice_cache_key = 1  # must match engine._session_turn
-        cb._window_notice_cache = None
-        cb._window_notice_dirty = True
-        cb._panorama_dirty = True
-        cb._panorama_cache_turn = -1
-
-        # _channel_cache_key is a property derived from engine._channel_context
-        _ck = cb._channel_cache_key  # resolve actual key
-
-        # Pre-fill turn notice cache (used by _prepare_system_prompts_for_request)
-        cb._turn_notice_cache["rules"] = rules_notice
-        cb._turn_notice_cache[_ck] = channel_notice
-        cb._turn_notice_cache["access"] = ""
-        cb._turn_notice_cache["backup"] = ""
-        cb._turn_notice_cache["mcp"] = ""
-
-        return cb, engine
-
-    def test_capability_map_stripped(self) -> None:
-        """chitchat prompt 应剥离能力图谱文本。"""
-        from excelmanus.skillpacks.models import SkillMatchResult
-
-        cap_map = "## 能力范围\n- 🟢 list_directory\n- 🟢 read_excel"
-        system_prompt = f"你是 ExcelManus。\n\n{cap_map}\n\n## 工作方式"
-
-        cb, _ = self._make_mock_context_builder(
-            system_prompt=system_prompt,
-            capability_map_text=cap_map,
-            rules_notice="Rules.",
-        )
-        route = SkillMatchResult(skills_used=[], route_mode="chitchat", system_contexts=[])
-        prompts, error = cb._prepare_system_prompts_for_request([], route_result=route)
-
-        assert error is None
-        prompt_text = prompts[0]
-        assert "list_directory" not in prompt_text
-        assert "read_excel" not in prompt_text
-        assert "ExcelManus" in prompt_text
-        assert "Rules." in prompt_text
-
-    def test_no_capability_map_attr(self) -> None:
-        """_capability_map_text 不存在时不报错。"""
-        from excelmanus.skillpacks.models import SkillMatchResult
-
-        cb, engine = self._make_mock_context_builder(
-            system_prompt="Identity.",
-            rules_notice="Rules.",
-        )
-        # Remove the attribute to simulate missing
-        engine._capability_map_text = ""
-
-        route = SkillMatchResult(skills_used=[], route_mode="chitchat", system_contexts=[])
-        prompts, error = cb._prepare_system_prompts_for_request([], route_result=route)
-        assert error is None
-        assert "Identity." in prompts[0]
-
-    def test_non_chitchat_keeps_capability_map(self) -> None:
-        """非 chitchat 路由不应剥离能力图谱。"""
-        from excelmanus.skillpacks.models import SkillMatchResult
-
-        cap_map = "## 能力范围\n- 🟢 list_directory"
-        system_prompt = f"Identity.\n\n{cap_map}"
-
-        cb, engine = self._make_mock_context_builder(
-            system_prompt=system_prompt,
-            capability_map_text=cap_map,
-        )
-
-        # For non-chitchat path, we need more mocks
-        route = SkillMatchResult(skills_used=[], route_mode="all_tools", system_contexts=[])
-
-        # The non-chitchat path uses _build_stable_system_prompt which includes the full prompt.
-        # Just verify the chitchat path strips and non-chitchat doesn't.
-        # We can verify indirectly: system_prompt still contains the cap map.
-        assert cap_map in engine.memory.system_prompt

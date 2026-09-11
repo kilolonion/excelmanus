@@ -83,7 +83,7 @@ class TestToolRegistry:
         )
 
         raw = registry.call_tool("need_file_path", {})
-        payload = json.loads(raw)
+        payload = raw.value
         assert payload["status"] == "error"
         assert payload["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
         assert payload["tool"] == "need_file_path"
@@ -99,17 +99,23 @@ class TestToolRegistry:
 
     def test_builtin_module_manifest_is_single_source(self) -> None:
         """模块清单应包含关键模块且不重复，作为注册唯一事实源。"""
-        module_paths = registry_module._BUILTIN_TOOL_MODULE_PATHS
+        module_paths = (
+            registry_module._WORKBOOK_IMPL_MODULE_PATHS
+            + registry_module._GUARD_ONLY_MODULE_PATHS
+            + registry_module._BUILTIN_TOOL_MODULE_PATHS
+        )
         assert module_paths == tuple(dict.fromkeys(module_paths))
-        assert "excelmanus.tools.image_tools" in module_paths
-        assert "excelmanus.tools.memory_tools" in module_paths
+        assert "excelmanus.tools.image_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
+        assert "excelmanus.tools.memory_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
+        assert "excelmanus.tools.intent_tools" in registry_module._BUILTIN_TOOL_MODULE_PATHS
+        assert "excelmanus.workbook.data" in registry_module._WORKBOOK_IMPL_MODULE_PATHS
 
     def test_builtin_tools_declare_write_effect_contract(self, tmp_path) -> None:
         registry = ToolRegistry()
         registry.register_builtin_tools(str(tmp_path))
 
-        assert registry.get_tool("read_excel") is not None
-        assert registry.get_tool("read_excel").write_effect == "none"
+        assert registry.get_tool("inspect_spreadsheet") is not None
+        assert registry.get_tool("inspect_spreadsheet").write_effect == "none"
 
         assert registry.get_tool("write_text_file") is not None
         assert registry.get_tool("write_text_file").write_effect == "workspace_write"
@@ -120,8 +126,8 @@ class TestToolRegistry:
         assert registry.get_tool("run_shell") is not None
         assert registry.get_tool("run_shell").write_effect == "dynamic"
 
-        assert registry.get_tool("list_sheets") is not None
-        assert registry.get_tool("list_sheets").write_effect == "none"
+        assert registry.get_tool("edit_spreadsheet") is not None
+        assert registry.get_tool("edit_spreadsheet").write_effect == "workspace_write"
 
         assert registry.get_tool("memory_save") is not None
         assert registry.get_tool("memory_save").write_effect == "external_write"

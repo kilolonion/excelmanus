@@ -35,6 +35,18 @@ class _FakeFileRegistry:
     def build_panorama(self) -> str:
         return self._panorama
 
+    def list_all(self, include_deleted: bool = False):
+        from types import SimpleNamespace
+
+        paths = set(self._mapping)
+        for token in self._panorama.replace("`", " ").replace("-", " ").split():
+            if "." in token:
+                paths.add(token.strip())
+        return [
+            SimpleNamespace(canonical_path=path, original_name=path, content_hash="")
+            for path in sorted(paths)
+        ]
+
 
 # ── SessionState CoW 统一入口 ───────────────────────────────
 
@@ -117,8 +129,9 @@ class TestExtractAndRegisterCowMapping:
             "status": "success",
             "cow_mapping": {"bench/external/data.xlsx": "outputs/data.xlsx"},
         })
-        extracted = dispatcher._extract_and_register_cow_mapping(result)
-        assert extracted == {"bench/external/data.xlsx": "outputs/data.xlsx"}
+        tr = dispatcher._coerce_tool_result(result)
+        dispatcher._apply_ui_meta_effects(tr)
+        assert tr.ui_meta.cow_mapping == {"bench/external/data.xlsx": "outputs/data.xlsx"}
         assert engine._state.get_cow_mappings() == {"bench/external/data.xlsx": "outputs/data.xlsx"}
 
     def test_extract_from_macro_tool_result(self):
@@ -128,36 +141,43 @@ class TestExtractAndRegisterCowMapping:
             "message": "写入完成",
             "cow_mapping": {"bench/external/src.xlsx": "outputs/src.xlsx"},
         })
-        extracted = dispatcher._extract_and_register_cow_mapping(result)
-        assert extracted == {"bench/external/src.xlsx": "outputs/src.xlsx"}
+        tr = dispatcher._coerce_tool_result(result)
+        dispatcher._apply_ui_meta_effects(tr)
+        assert tr.ui_meta.cow_mapping == {"bench/external/src.xlsx": "outputs/src.xlsx"}
 
     def test_no_cow_mapping_returns_none(self):
         dispatcher, engine = self._make_dispatcher()
         result = json.dumps({"status": "success"})
-        extracted = dispatcher._extract_and_register_cow_mapping(result)
-        assert extracted is None
+        tr = dispatcher._coerce_tool_result(result)
+        dispatcher._apply_ui_meta_effects(tr)
+        assert not tr.ui_meta.cow_mapping
         assert engine._state.get_cow_mappings() == {}
 
     def test_empty_cow_mapping_returns_none(self):
         dispatcher, engine = self._make_dispatcher()
         result = json.dumps({"status": "success", "cow_mapping": {}})
-        extracted = dispatcher._extract_and_register_cow_mapping(result)
-        assert extracted is None
+        tr = dispatcher._coerce_tool_result(result)
+        dispatcher._apply_ui_meta_effects(tr)
+        assert not tr.ui_meta.cow_mapping
 
     def test_non_json_result_returns_none(self):
         dispatcher, _ = self._make_dispatcher()
-        assert dispatcher._extract_and_register_cow_mapping("plain text") is None
+        tr = dispatcher._coerce_tool_result("plain text")
+        dispatcher._apply_ui_meta_effects(tr)
+        assert not tr.ui_meta.cow_mapping
 
     def test_non_dict_json_returns_none(self):
         dispatcher, _ = self._make_dispatcher()
-        assert dispatcher._extract_and_register_cow_mapping(json.dumps([1, 2, 3])) is None
+        tr = dispatcher._coerce_tool_result(json.dumps([1, 2, 3]))
+        dispatcher._apply_ui_meta_effects(tr)
+        assert not tr.ui_meta.cow_mapping
 
     def test_accumulates_across_multiple_calls(self):
         dispatcher, engine = self._make_dispatcher()
         r1 = json.dumps({"cow_mapping": {"a.xlsx": "outputs/a.xlsx"}})
         r2 = json.dumps({"cow_mapping": {"b.xlsx": "outputs/b.xlsx"}})
-        dispatcher._extract_and_register_cow_mapping(r1)
-        dispatcher._extract_and_register_cow_mapping(r2)
+        dispatcher._apply_ui_meta_effects(dispatcher._coerce_tool_result(r1))
+        dispatcher._apply_ui_meta_effects(dispatcher._coerce_tool_result(r2))
         assert len(engine._state.get_cow_mappings()) == 2
 
 
@@ -186,7 +206,7 @@ class TestRedirectCowPaths:
     def test_no_registry_noop(self):
         dispatcher = self._make_dispatcher()
         args = {"file_path": "bench/external/data.xlsx"}
-        new_args, reminders = dispatcher._redirect_cow_paths("read_excel", args)
+        new_args, reminders = dispatcher._redirect_cow_paths("inspect_spreadsheet", args)
         assert new_args == args
         assert reminders == []
 
@@ -195,7 +215,7 @@ class TestRedirectCowPaths:
             registry={"bench/external/data.xlsx": "outputs/data.xlsx"},
         )
         args = {"file_path": "bench/external/data.xlsx"}
-        new_args, reminders = dispatcher._redirect_cow_paths("read_excel", args)
+        new_args, reminders = dispatcher._redirect_cow_paths("inspect_spreadsheet", args)
         assert new_args["file_path"] == "outputs/data.xlsx"
         assert len(reminders) == 1
         assert "重定向" in reminders[0]
@@ -206,7 +226,7 @@ class TestRedirectCowPaths:
             workspace_root="/workspace",
         )
         args = {"file_path": "/workspace/bench/external/data.xlsx"}
-        new_args, reminders = dispatcher._redirect_cow_paths("read_excel", args)
+        new_args, reminders = dispatcher._redirect_cow_paths("inspect_spreadsheet", args)
         assert new_args["file_path"] == "/workspace/outputs/data.xlsx"
         assert len(reminders) == 1
 
@@ -215,7 +235,7 @@ class TestRedirectCowPaths:
             registry={"bench/external/data.xlsx": "outputs/data.xlsx"},
         )
         args = {"file_path": "outputs/result.xlsx"}
-        new_args, reminders = dispatcher._redirect_cow_paths("read_excel", args)
+        new_args, reminders = dispatcher._redirect_cow_paths("inspect_spreadsheet", args)
         assert new_args == args
         assert reminders == []
 
@@ -304,5 +324,6 @@ class TestBuildCowPathNotice:
             panorama="## 工作区文件全景\n- src.xlsx",
         )
         notice = builder._build_file_registry_notice()
-        assert "工作区文件全景" in notice
+        assert "工作区文件" in notice
+        assert "src.xlsx" in notice
         assert "文件保护路径映射（CoW）" in notice

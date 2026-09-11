@@ -77,14 +77,12 @@ class ChannelLauncher:
         channels: list[str],
         *,
         api_port: int = 8000,
-        bind_manager: Any | None = None,
         service_token: str | None = None,
         event_bridge: Any | None = None,
         config_store: Any | None = None,
     ) -> None:
         self._channel_names = channels
         self._api_port = api_port
-        self._bind_manager = bind_manager
         self._service_token = service_token
         self._event_bridge = event_bridge
         self._config_store = config_store
@@ -386,7 +384,6 @@ class ChannelLauncher:
             api_url=api_url,
             allowed_users=allowed_users,
             rate_limit_config=rate_limit_config,
-            bind_manager=self._bind_manager,
             service_token=self._service_token,
             event_bridge=self._event_bridge,
             config_store=self._config_store,
@@ -485,7 +482,6 @@ class ChannelLauncher:
             api_url=api_url,
             allowed_users=allowed_users,
             rate_limit_config=rate_limit_config,
-            bind_manager=self._bind_manager,
             service_token=self._service_token,
             is_sandbox=is_sandbox,
             config_store=self._config_store,
@@ -568,7 +564,6 @@ class ChannelLauncher:
             app_secret=app_secret,
             api_url=api_url,
             rate_limit_config=rate_limit_config,
-            bind_manager=self._bind_manager,
             service_token=self._service_token,
             event_bridge=self._event_bridge,
             config_store=self._config_store,

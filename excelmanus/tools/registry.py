@@ -10,6 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence
 
+from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.logger import get_logger
 
 logger = get_logger("tools")
@@ -47,18 +48,24 @@ WriteEffect = Literal[
 # 内置工具模块清单（单一事实源）：
 # 1) 该顺序即注册顺序；
 # 2) register_builtin_tools 与说明文档均以此为准，避免注释与实现漂移。
+_WORKBOOK_IMPL_MODULE_PATHS: tuple[str, ...] = (
+    "excelmanus.workbook.data",
+    "excelmanus.workbook.sheets",
+    "excelmanus.workbook.charts",
+    "excelmanus.workbook.cells",
+    "excelmanus.workbook.styles",
+)
+_GUARD_ONLY_MODULE_PATHS: tuple[str, ...] = (
+    "excelmanus.tools.reference_tools",
+)
 _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
-    "excelmanus.tools.data_tools",
     "excelmanus.tools.file_tools",
     "excelmanus.tools.code_tools",
     "excelmanus.tools.shell_tools",
-    "excelmanus.tools.sheet_tools",
-    "excelmanus.tools.chart_tools",
-    "excelmanus.tools.focus_tools",
+    "excelmanus.tools.intent_tools",
     "excelmanus.tools.image_tools",
     "excelmanus.tools.memory_tools",
     "excelmanus.tools.sleep_tools",
-    "excelmanus.tools.reference_tools",
     "excelmanus.tools.word_tools",
 )
 
@@ -555,11 +562,11 @@ class ToolRegistry:
         tool_name: str,
         arguments: dict[str, Any],
         schema: dict[str, Any] | None,
-    ) -> str | None:
+    ) -> ToolResult | None:
         """按当前策略校验参数 schema。
 
         Returns:
-            str | None: 当命中 enforce 且校验失败时返回结构化错误 JSON；
+            ToolResult | None: 当命中 enforce 且校验失败时返回结构化错误；
             其余情况返回 None（包括 shadow 仅打日志）。
         """
         if not isinstance(schema, dict):
@@ -704,7 +711,9 @@ class ToolRegistry:
                 )
 
         try:
-            return tool.func(**arguments)
+            from excelmanus.engine_core.tool_result import coerce_legacy_result
+
+            return coerce_legacy_result(tool.func(**arguments))
         except Exception as exc:
             logger.warning(
                 "工具 '%s' 执行异常: %s; arguments=%s",
@@ -770,7 +779,9 @@ class ToolRegistry:
                 )
 
         try:
-            return await tool.async_func(**arguments)
+            from excelmanus.engine_core.tool_result import coerce_legacy_result
+
+            return coerce_legacy_result(await tool.async_func(**arguments))
         except Exception as exc:
             logger.warning(
                 "工具 '%s' 异步执行异常: %s; arguments=%s",
@@ -789,8 +800,8 @@ class ToolRegistry:
         tool: ToolDef,
         arguments: dict[str, Any],
         detail: str,
-    ) -> str:
-        """构造统一的参数校验错误返回（JSON 字符串）。"""
+    ) -> ToolResult:
+        """构造统一的参数校验错误。"""
         schema = tool.input_schema if isinstance(tool.input_schema, dict) else {}
         required_raw = schema.get("required")
         required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
@@ -806,7 +817,7 @@ class ToolRegistry:
             "accepted_fields": accepted_fields,
             "provided_fields": sorted(arguments.keys()),
         }
-        return json.dumps(payload, ensure_ascii=False)
+        return from_payload(payload)
 
     @staticmethod
     def _format_argument_schema_validation_error(
@@ -815,8 +826,8 @@ class ToolRegistry:
         arguments: dict[str, Any],
         schema: dict[str, Any],
         violations: list[str],
-    ) -> str:
-        """构造 schema 级参数校验错误（JSON 字符串）。"""
+    ) -> ToolResult:
+        """构造 schema 级参数校验错误。"""
         required_raw = schema.get("required")
         required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
         properties_raw = schema.get("properties")
@@ -832,15 +843,15 @@ class ToolRegistry:
             "accepted_fields": accepted_fields,
             "provided_fields": sorted(arguments.keys()),
         }
-        return json.dumps(payload, ensure_ascii=False)
+        return from_payload(payload)
 
     @staticmethod
     def _format_execution_error(
         *,
         tool_name: str,
         exc: Exception,
-    ) -> str:
-        """构造统一的工具执行错误返回（JSON 字符串），透传原始异常信息。"""
+    ) -> ToolResult:
+        """构造统一的工具执行错误，透传原始异常信息。"""
         payload = {
             "status": "error",
             "error_code": "TOOL_EXECUTION_ERROR",
@@ -851,15 +862,12 @@ class ToolRegistry:
         # 如果有链式异常（__cause__），也透传
         if exc.__cause__ is not None and str(exc.__cause__) != str(exc):
             payload["cause"] = str(exc.__cause__)
-        return json.dumps(payload, ensure_ascii=False)
+        return from_payload(payload)
     @staticmethod
     def is_error_result(result: Any) -> bool:
-        """检测工具返回值是否为结构化错误 JSON。
-
-        支持两种格式：
-        - 标准格式: ``{"status": "error", "message": "..."}``
-        - 简写格式: ``{"error": "..."}``（data_tools/file_tools/cell_tools 等广泛使用）
-        """
+        """检测工具返回值是否为失败。优先认 ToolResult.success。"""
+        if isinstance(result, ToolResult):
+            return not result.success
         if not isinstance(result, str):
             return False
         # 快速前缀检测，避免对所有返回值做 JSON 解析
@@ -895,9 +903,17 @@ class ToolRegistry:
         # （不经过 tool_dispatcher.execute）也能拿到正确的 guard
         set_guard(FileAccessGuard(workspace_root))
 
+        for module_path in _WORKBOOK_IMPL_MODULE_PATHS + _GUARD_ONLY_MODULE_PATHS:
+            module = import_module(module_path)
+            init_guard = getattr(module, "init_guard", None)
+            if callable(init_guard):
+                init_guard(workspace_root)
+
         for module_path in _BUILTIN_TOOL_MODULE_PATHS:
             module = import_module(module_path)
             init_guard = getattr(module, "init_guard", None)
             if callable(init_guard):
                 init_guard(workspace_root)
-            self.register_tools(module.get_tools())
+            get_tools = getattr(module, "get_tools", None)
+            if callable(get_tools):
+                self.register_tools(get_tools())

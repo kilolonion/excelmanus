@@ -2,12 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
 import pytest
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.tools import shell_tools
+
+def _payload(result: ToolResult) -> dict:
+    assert isinstance(result, ToolResult)
+    assert isinstance(result.value, dict)
+    return result.value
 
 
 @pytest.fixture()
@@ -25,74 +30,74 @@ class TestRunShellAllowed:
     """白名单命令正常执行。"""
 
     def test_echo(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo hello"))
+        result = _payload(shell_tools.run_shell("echo hello"))
         assert result["status"] == "success"
         assert "hello" in result["stdout_tail"]
 
     def test_ls(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("ls"))
+        result = _payload(shell_tools.run_shell("ls"))
         assert result["status"] == "success"
         assert "hello.txt" in result["stdout_tail"]
 
     def test_cat(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("cat hello.txt"))
+        result = _payload(shell_tools.run_shell("cat hello.txt"))
         assert result["status"] == "success"
         assert "hello world" in result["stdout_tail"]
 
     def test_wc(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("wc -l hello.txt"))
+        result = _payload(shell_tools.run_shell("wc -l hello.txt"))
         assert result["status"] == "success"
         assert result["return_code"] == 0
 
     def test_head(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("head -1 data/sample.csv"))
+        result = _payload(shell_tools.run_shell("head -1 data/sample.csv"))
         assert result["status"] == "success"
         assert "a,b" in result["stdout_tail"]
 
     def test_grep(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("grep hello hello.txt"))
+        result = _payload(shell_tools.run_shell("grep hello hello.txt"))
         assert result["status"] == "success"
         assert "hello world" in result["stdout_tail"]
 
     def test_find(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("find . -name '*.csv'"))
+        result = _payload(shell_tools.run_shell("find . -name '*.csv'"))
         assert result["status"] == "success"
         assert "sample.csv" in result["stdout_tail"]
 
     def test_pwd(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("pwd"))
+        result = _payload(shell_tools.run_shell("pwd"))
         assert result["status"] == "success"
         assert result["return_code"] == 0
 
     def test_pipe_allowed(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo hello world | wc -w"))
+        result = _payload(shell_tools.run_shell("echo hello world | wc -w"))
         assert result["status"] == "success"
         assert "2" in result["stdout_tail"]
 
     def test_pipe_find_head(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("find . -type f | head -n 5"))
+        result = _payload(shell_tools.run_shell("find . -type f | head -n 5"))
         assert result["status"] == "success"
 
     def test_pipe_grep(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("cat hello.txt | grep hello"))
+        result = _payload(shell_tools.run_shell("cat hello.txt | grep hello"))
         assert result["status"] == "success"
         assert "hello world" in result["stdout_tail"]
 
     def test_pipe_blocked_command_in_pipeline(self, workspace: Path) -> None:
         """管道中包含黑名单命令仍然被拦截。"""
-        result = json.loads(shell_tools.run_shell("echo a | bash"))
+        result = _payload(shell_tools.run_shell("echo a | bash"))
         assert result["status"] == "blocked"
 
     def test_and_chain(self, workspace: Path) -> None:
         """&& 链式命令正常执行，两段输出合并。"""
-        result = json.loads(shell_tools.run_shell("echo a && echo b"))
+        result = _payload(shell_tools.run_shell("echo a && echo b"))
         assert result["status"] == "success"
         assert "a" in result["stdout_tail"]
         assert "b" in result["stdout_tail"]
 
     def test_or_chain(self, workspace: Path) -> None:
         """|| 链式命令：第一段成功时不执行第二段。"""
-        result = json.loads(shell_tools.run_shell("echo a || echo b"))
+        result = _payload(shell_tools.run_shell("echo a || echo b"))
         assert result["status"] == "success"
         assert "a" in result["stdout_tail"]
         # 第一段成功，第二段不会执行
@@ -100,24 +105,24 @@ class TestRunShellAllowed:
 
     def test_and_chain_stops_on_failure(self, workspace: Path) -> None:
         """&& 链式：前一段失败时不执行后续段。"""
-        result = json.loads(shell_tools.run_shell("ls nonexistent_file && echo should_not_appear"))
+        result = _payload(shell_tools.run_shell("ls nonexistent_file && echo should_not_appear"))
         assert result["return_code"] != 0
         assert "should_not_appear" not in result["stdout_tail"]
 
     def test_or_chain_runs_on_failure(self, workspace: Path) -> None:
         """|| 链式：前一段失败时执行第二段。"""
-        result = json.loads(shell_tools.run_shell("ls nonexistent_file || echo fallback"))
+        result = _payload(shell_tools.run_shell("ls nonexistent_file || echo fallback"))
         assert "fallback" in result["stdout_tail"]
 
     def test_and_chain_with_pipe(self, workspace: Path) -> None:
         """&& 和管道混合使用。"""
-        result = json.loads(shell_tools.run_shell("echo hello | wc -w && echo done"))
+        result = _payload(shell_tools.run_shell("echo hello | wc -w && echo done"))
         assert result["status"] == "success"
         assert "done" in result["stdout_tail"]
 
     def test_chain_blocked_command(self, workspace: Path) -> None:
         """&& 链中包含黑名单命令仍被拦截。"""
-        result = json.loads(shell_tools.run_shell("echo ok && rm -rf /"))
+        result = _payload(shell_tools.run_shell("echo ok && rm -rf /"))
         assert result["status"] == "blocked"
 
 
@@ -125,24 +130,24 @@ class TestRunShellBlocked:
     """黑名单和危险命令被拦截。"""
 
     def test_rm_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("rm hello.txt"))
+        result = _payload(shell_tools.run_shell("rm hello.txt"))
         assert result["status"] == "blocked"
         assert "禁止" in result["reason"]
 
     def test_curl_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("curl https://example.com"))
+        result = _payload(shell_tools.run_shell("curl https://example.com"))
         assert result["status"] == "blocked"
 
     def test_sudo_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("sudo ls"))
+        result = _payload(shell_tools.run_shell("sudo ls"))
         assert result["status"] == "blocked"
 
     def test_bash_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("bash -c 'echo pwned'"))
+        result = _payload(shell_tools.run_shell("bash -c 'echo pwned'"))
         assert result["status"] == "blocked"
 
     def test_unknown_command_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("unknown_cmd --flag"))
+        result = _payload(shell_tools.run_shell("unknown_cmd --flag"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
 
@@ -151,24 +156,24 @@ class TestRunShellInjection:
     """注入攻击防御。"""
 
     def test_backtick_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo `rm -rf /`"))
+        result = _payload(shell_tools.run_shell("echo `rm -rf /`"))
         assert result["status"] == "blocked"
         assert "危险字符" in result["reason"]
 
     def test_dollar_paren_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo $(cat /etc/passwd)"))
+        result = _payload(shell_tools.run_shell("echo $(cat /etc/passwd)"))
         assert result["status"] == "blocked"
 
     def test_semicolon_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo ok; rm -rf /"))
+        result = _payload(shell_tools.run_shell("echo ok; rm -rf /"))
         assert result["status"] == "blocked"
 
     def test_redirect_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo pwned > /etc/passwd"))
+        result = _payload(shell_tools.run_shell("echo pwned > /etc/passwd"))
         assert result["status"] == "blocked"
 
     def test_dollar_brace_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("echo ${HOME}"))
+        result = _payload(shell_tools.run_shell("echo ${HOME}"))
         assert result["status"] == "blocked"
 
 
@@ -206,7 +211,7 @@ class TestRunShellValidation:
             shell_tools.run_shell("echo ok", timeout_seconds=200)
 
     def test_empty_command(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell(""))
+        result = _payload(shell_tools.run_shell(""))
         assert result["status"] == "blocked"
         assert "为空" in result["reason"]
 
@@ -226,31 +231,31 @@ class TestSensitivePathBlocking:
 
     def test_cat_excelmanus_dir_blocked(self, workspace: Path) -> None:
         """cat ~/.excelmanus/config.env 被拦截。"""
-        result = json.loads(shell_tools.run_shell("cat ~/.excelmanus/config.env"))
+        result = _payload(shell_tools.run_shell("cat ~/.excelmanus/config.env"))
         assert result["status"] == "blocked"
         assert "敏感目录" in result["reason"]
 
     def test_cat_excelmanus_db_blocked(self, workspace: Path) -> None:
         """cat ~/.excelmanus/excelmanus.db 被拦截。"""
-        result = json.loads(shell_tools.run_shell("cat ~/.excelmanus/excelmanus.db"))
+        result = _payload(shell_tools.run_shell("cat ~/.excelmanus/excelmanus.db"))
         assert result["status"] == "blocked"
         assert "敏感目录" in result["reason"]
 
     def test_head_secret_key_blocked(self, workspace: Path) -> None:
         """head ~/.excelmanus/data/.secret_key 被拦截。"""
-        result = json.loads(shell_tools.run_shell("head ~/.excelmanus/data/.secret_key"))
+        result = _payload(shell_tools.run_shell("head ~/.excelmanus/data/.secret_key"))
         assert result["status"] == "blocked"
         assert "敏感目录" in result["reason"]
 
     def test_find_excelmanus_blocked(self, workspace: Path) -> None:
         """find ~/.excelmanus/ 被拦截。"""
-        result = json.loads(shell_tools.run_shell("find ~/.excelmanus/"))
+        result = _payload(shell_tools.run_shell("find ~/.excelmanus/"))
         assert result["status"] == "blocked"
         assert "敏感目录" in result["reason"]
 
     def test_grep_in_excelmanus_blocked(self, workspace: Path) -> None:
         """grep pattern ~/.excelmanus/config.env 被拦截。"""
-        result = json.loads(shell_tools.run_shell("grep API_KEY ~/.excelmanus/config.env"))
+        result = _payload(shell_tools.run_shell("grep API_KEY ~/.excelmanus/config.env"))
         assert result["status"] == "blocked"
         assert "敏感目录" in result["reason"]
 
@@ -279,7 +284,7 @@ class TestSensitivePathBlocking:
 
     def test_pipe_sensitive_blocked(self, workspace: Path) -> None:
         """管道中包含敏感路径也被拦截。"""
-        result = json.loads(
+        result = _payload(
             shell_tools.run_shell("grep key ~/.excelmanus/config.env | head -1")
         )
         assert result["status"] == "blocked"
@@ -289,17 +294,17 @@ class TestEnvPrintenvRemoved:
     """env/printenv 已从白名单移除。"""
 
     def test_env_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("env"))
+        result = _payload(shell_tools.run_shell("env"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
 
     def test_printenv_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("printenv"))
+        result = _payload(shell_tools.run_shell("printenv"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
 
     def test_printenv_home_blocked(self, workspace: Path) -> None:
-        result = json.loads(shell_tools.run_shell("printenv HOME"))
+        result = _payload(shell_tools.run_shell("printenv HOME"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
 

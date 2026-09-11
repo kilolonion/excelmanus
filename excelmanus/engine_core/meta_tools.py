@@ -3,7 +3,7 @@
 包括：
 - _build_meta_tools: 构建 activate_skill / manage_skills / delegate / list_subagents / ask_user / finish_task
 - _build_v5_tools: 带脏标记缓存的工具 schema 构建
-- _build_v5_tools_impl: 实际构建逻辑（read_only 过滤、route_tool_tags 白名单裁剪）
+- _build_v5_tools_impl: 实际构建逻辑（read_only 过滤）
 """
 
 from __future__ import annotations
@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_utils import (
     _ALWAYS_AVAILABLE_TOOLS_READONLY_SET,
-    _normalize_write_hint,
 )
 from excelmanus.logger import get_logger
 
@@ -197,7 +196,7 @@ class MetaToolBuilder:
                                         },
                                         "agent_name": {
                                             "type": "string",
-                                            "description": "可选，指定子代理名称",
+                                            "description": "子代理名称；省略则使用通用 subagent",
                                             **({
                                                 "enum": subagent_names,
                                             } if subagent_names else {}),
@@ -214,7 +213,7 @@ class MetaToolBuilder:
                             },
                             "agent_name": {
                                 "type": "string",
-                                "description": "可选，指定子代理名称（仅单任务模式）",
+                                "description": "子代理名称；省略则使用通用 subagent（仅单任务模式）",
                                 **({"enum": subagent_names} if subagent_names else {}),
                             },
                             "file_paths": {
@@ -383,7 +382,7 @@ class MetaToolBuilder:
                 "function": {
                     "name": "finish_task",
                     "description": (
-                        "任务完成声明。写入操作执行完毕后调用。"
+                        "本轮结果报告；不触发自动验收或额外模型调用。"
                         "只需一句话概括即可，不要详细展开。"
                     ),
                     "parameters": {
@@ -405,26 +404,60 @@ class MetaToolBuilder:
                 "function": {
                     "name": "finish_task",
                     "description": (
-                        "任务完成声明。写入/修改操作执行完毕后调用，或确认当前任务为纯分析/查询后调用。"
-                        "在计划模式下，若当前请求不需要完整计划文档（如问候、简短澄清、单步查询），"
-                        "也可直接调用 finish_task 收束本轮。"
-                        "用自然语言在 summary 中向用户汇报：做了什么、关键结果、涉及的文件，"
-                        "有价值时可附带后续建议。语气自然，像同事间的简洁对话，不要套模板。"
+                        "本轮结果报告。不触发自动验收或额外模型调用。"
+                        "用 status 标明完成程度：completed（完成）、partial（部分完成）、"
+                        "stopped（停止但未完成）。outputs 列出产出文件；"
+                        "warnings / incomplete 如实说明问题与未完成项。"
+                        "计划模式下若只需简短澄清或单步查询，也可直接 finish_task 收束本轮。"
                     ),
                     "parameters": {
                         "type": "object",
                         "properties": {
-                            "summary": {
+                            "status": {
                                 "type": "string",
+                                "enum": ["completed", "partial", "stopped"],
                                 "description": (
-                                    "用自然语言汇报任务结果。内容应涵盖：做了什么、关键数据/发现、涉及哪些文件。"
-                                    "如有必要可附带后续建议。不要逐条罗列，用流畅的段落表达即可。"
+                                    "完成程度：completed=完成，partial=部分完成，"
+                                    "stopped=停止但未完成。有未完成项时应标 partial 或 stopped。"
                                 ),
                             },
-                            "affected_files": {
+                            "summary": {
+                                "type": "string",
+                                "description": "用自然语言汇报：做了什么、关键结果。不要套模板。",
+                            },
+                            "outputs": {
+                                "type": "array",
+                                "items": {
+                                    "type": "object",
+                                    "properties": {
+                                        "path": {
+                                            "type": "string",
+                                            "description": "产出文件路径",
+                                        },
+                                        "changed_ranges": {
+                                            "type": "array",
+                                            "items": {"type": "string"},
+                                            "description": "修改范围，如 Sheet1!A1:B10",
+                                        },
+                                        "content_version": {
+                                            "type": "string",
+                                            "description": "内容版本（如文件哈希）；未知可省略",
+                                        },
+                                    },
+                                    "required": ["path"],
+                                    "additionalProperties": False,
+                                },
+                                "description": "本轮产出文件列表",
+                            },
+                            "warnings": {
                                 "type": "array",
                                 "items": {"type": "string"},
-                                "description": "涉及修改的文件路径列表（用于触发文件刷新事件）",
+                                "description": "警告（截断、推断、未校验等）",
+                            },
+                            "incomplete": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "未完成事项；有则 status 应为 partial 或 stopped",
                             },
                         },
                         "required": [],
@@ -439,23 +472,20 @@ class MetaToolBuilder:
     def build_v5_tools(
         self,
         *,
-        write_hint: str = "unknown",
-        route_tool_tags: tuple[str, ...] = (),
+        tool_access: str = "unknown",
     ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具（带脏标记缓存）。"""
         e = self._engine
         cache_key = (
-            write_hint,
-            _normalize_write_hint(getattr(e, "_current_write_hint", "unknown")),
+            tool_access,
+            getattr(e, "_current_chat_mode", "write"),
             frozenset(s.name for s in e._active_skills),
             getattr(e, "_bench_mode", False),
-            route_tool_tags,
         )
         if e._tools_cache is not None and e._tools_cache_key == cache_key:
             return e._tools_cache
         tools = self.build_v5_tools_impl(
-            write_hint=write_hint,
-            route_tool_tags=route_tool_tags,
+            tool_access=tool_access,
         )
         e._tools_cache = tools
         e._tools_cache_key = cache_key
@@ -464,16 +494,13 @@ class MetaToolBuilder:
     def build_v5_tools_impl(
         self,
         *,
-        write_hint: str = "unknown",
-        route_tool_tags: tuple[str, ...] = (),
+        tool_access: str = "unknown",
     ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具。
 
-        统一过滤管线：
-        1. write_hint == "read_only" → 仅暴露只读工具子集 + run_code + 元工具
-        2. route_tool_tags → ROUTE_TOOL_SCOPE 白名单过滤（LLM 驱动）
+        tool_access == "read_only" 时仅暴露只读工具子集 + run_code + 元工具。
         """
-        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS, ROUTE_TOOL_SCOPE, MCP_SCOPE_ACTIVATION
+        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS, CODE_POLICY_DYNAMIC_TOOLS
 
         e = self._engine
         domain_schemas = e._registry.get_tiered_schemas(
@@ -484,8 +511,7 @@ class MetaToolBuilder:
         meta_names = {s.get("function", {}).get("name") for s in meta_schemas}
         filtered_domain = [s for s in domain_schemas if s.get("function", {}).get("name") not in meta_names]
 
-        # 窄路由：read_only 任务只暴露读工具 + run_code（用于复杂分析）
-        if write_hint == "read_only":
+        if tool_access == "read_only":
             _allowed = READ_ONLY_SAFE_TOOLS | CODE_POLICY_DYNAMIC_TOOLS | _ALWAYS_AVAILABLE_TOOLS_READONLY_SET
             _chat_mode = getattr(e, "_current_chat_mode", "write")
             if _chat_mode == "plan":
@@ -494,66 +520,10 @@ class MetaToolBuilder:
                 s for s in filtered_domain
                 if s.get("function", {}).get("name", "") in _allowed
             ]
-            # 元工具也需过滤：delegate 系列在只读/plan 模式下不暴露
             _meta_blocked = {"delegate", "delegate_to_subagent", "parallel_delegate"}
             meta_schemas = [
                 s for s in meta_schemas
                 if s.get("function", {}).get("name", "") not in _meta_blocked
             ]
-
-        # 基于 LLM 路由标签的域工具白名单过滤（ROUTE_TOOL_SCOPE）
-        if route_tool_tags:
-            allowed: set[str] = set()
-            _has_all = False
-            for tag in route_tool_tags:
-                scope = ROUTE_TOOL_SCOPE.get(tag)
-                if scope is not None:
-                    allowed |= scope
-                else:
-                    # "all_tools" 或未知标签 → 不做过滤
-                    _has_all = True
-                    break
-
-            if not _has_all and allowed:
-                # MCP scope 激活：根据路由标签决定哪些 MCP scope 可见
-                _active_mcp_scopes: set[str] = {"always"}  # "always" 始终可见
-                for tag in route_tool_tags:
-                    _tag_scopes = MCP_SCOPE_ACTIVATION.get(tag)
-                    if _tag_scopes is not None:
-                        _active_mcp_scopes |= _tag_scopes
-                _mcp_tool_scopes = e._mcp_manager.tool_scopes if hasattr(e, "_mcp_manager") else {}
-
-                def _mcp_tool_visible(name: str) -> bool:
-                    """检查 MCP 工具是否在当前路由下可见。"""
-                    if not name.startswith("mcp_"):
-                        return False
-                    tool_scope = _mcp_tool_scopes.get(name, "always")
-                    return tool_scope in _active_mcp_scopes
-
-                filtered_domain = [
-                    s for s in filtered_domain
-                    if s.get("function", {}).get("name", "") in allowed
-                    or _mcp_tool_visible(s.get("function", {}).get("name", ""))
-                ]
-                logger.debug(
-                    "LLM 路由过滤: tags=%s, mcp_scopes=%s, 保留 %d 个域工具",
-                    route_tool_tags, _active_mcp_scopes, len(filtered_domain),
-                )
-
-                # 搜索路由下检查是否有可用的搜索 MCP 工具
-                if "search" in _active_mcp_scopes:
-                    _search_mcp_tools = [
-                        s.get("function", {}).get("name", "")
-                        for s in filtered_domain
-                        if s.get("function", {}).get("name", "").startswith("mcp_")
-                        and _mcp_tool_scopes.get(s.get("function", {}).get("name", "")) == "search"
-                    ]
-                    if not _search_mcp_tools:
-                        logger.warning(
-                            "搜索路由已激活但无可用的搜索 MCP 工具"
-                            "（搜索引擎可能未安装或连接失败，请检查 Exa/Tavily/Brave 配置）。"
-                            "mcp_tool_scopes=%s",
-                            _mcp_tool_scopes,
-                        )
 
         return meta_schemas + filtered_domain

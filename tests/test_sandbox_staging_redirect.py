@@ -116,7 +116,10 @@ class TestStagingRedirectOpen:
 
 
 class TestStagingRedirectOpenpyxl:
-    """openpyxl wb.save() 写入时重定向到 staging 副本。"""
+    """openpyxl wb.save() 写入时重定向到 staging 副本。
+
+    沙盒 save 不做 expected_version 校验；冲突检测仍由宿主锁 / P4 SDK 负责。
+    """
 
     def test_openpyxl_save_redirected(self, workspace: Path) -> None:
         """wb.save() 调用被重定向到 staging 副本。"""
@@ -152,6 +155,17 @@ class TestStagingRedirectOpenpyxl:
         wb_staged = load_workbook(staged)
         assert wb_staged.active["A1"].value == "modified_data"
         wb_staged.close()
+
+        # content_version 应对准 staging 目标，而非原始路径
+        import hashlib
+
+        marker = "EXCELMANUS_SAVE_VERSION\t"
+        version_lines = [ln for ln in result.stderr.splitlines() if ln.startswith(marker)]
+        assert version_lines, result.stderr
+        _, saved_path, ver = version_lines[-1].split("\t")
+        assert saved_path == os.path.realpath(str(staged))
+        assert saved_path != os.path.realpath(str(original))
+        assert ver == "sha256:" + hashlib.sha256(staged.read_bytes()).hexdigest()
 
     def test_openpyxl_save_no_staging_map(self, workspace: Path) -> None:
         """无 staging 映射时 openpyxl 正常写入。"""

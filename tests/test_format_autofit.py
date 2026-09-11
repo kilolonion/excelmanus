@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
 
-from excelmanus.tools.format_tools import (
+from excelmanus.workbook.styles import (
     _display_char_width,
     _estimate_display_width,
     _estimate_row_height,
@@ -209,7 +208,7 @@ class TestEstimateRowHeight:
         assert multi > single
 
 
-# ── 集成测试：adjust_column_width / adjust_row_height ─────
+# ── 集成测试：apply_column_sizes / apply_row_sizes ─────
 
 
 class TestAutoFitIntegration:
@@ -220,7 +219,7 @@ class TestAutoFitIntegration:
         from openpyxl import Workbook
         from openpyxl.styles import Alignment, Font
 
-        from excelmanus.tools.format_tools import init_guard
+        from excelmanus.workbook.styles import init_guard
 
         init_guard(str(tmp_path))
 
@@ -253,35 +252,22 @@ class TestAutoFitIntegration:
         return path
 
     def test_auto_fit_column_width(self, workbook_path: Path):
-        from excelmanus.tools.format_tools import adjust_column_width
+        from openpyxl import load_workbook
 
-        result = json.loads(
-            adjust_column_width(
-                file_path=str(workbook_path),
-                auto_fit=True,
-                sheet_name="Test",
-            )
-        )
-        assert result["status"] == "success"
-        cols = result["columns_adjusted"]
+        from excelmanus.workbook.styles import apply_column_sizes
 
-        # Column B (名称) should be wider than column A (ID) due to CJK content
+        wb = load_workbook(workbook_path)
+        cols = apply_column_sizes(wb["Test"], auto_fit=True)
+        wb.close()
         assert cols["B"] > cols["A"]
-        # Column C (金额) should be wide due to number format
         assert cols["C"] > 10
 
     def test_auto_fit_row_height(self, workbook_path: Path):
-        from excelmanus.tools.format_tools import adjust_row_height
+        from openpyxl import load_workbook
 
-        result = json.loads(
-            adjust_row_height(
-                file_path=str(workbook_path),
-                auto_fit=True,
-                sheet_name="Test",
-            )
-        )
-        assert result["status"] == "success"
-        rows = result["rows_adjusted"]
+        from excelmanus.workbook.styles import apply_row_sizes
 
-        # Header row (12pt bold) should be taller than data rows (11pt)
+        wb = load_workbook(workbook_path)
+        rows = apply_row_sizes(wb["Test"], auto_fit=True)
+        wb.close()
         assert float(rows["1"]) >= float(rows["2"])

@@ -1,6 +1,6 @@
 # Skillpack Protocol Specification (SSOT)
 
-> Last updated: 2026-03-03  
+> Last updated: 2026-09-11  
 > Scope: `excelmanus/skillpacks`, README, tests, and task documentation
 
 ## 1. Goals
@@ -25,10 +25,8 @@ Strict protocol notes:
 - `workspace/skills` is no longer used as an external tool project-level directory.
 
 ## 4. Routing Semantics
-- Slash commands: `/<skill_name> args...` directly invokes the skill (`slash_direct`).
-- Non-slash messages: enter `fallback`, where all tools are always visible (core with full schema, extended with summary schema).
-- The LLM injects domain knowledge via `activate_skill` and expands extended tools in a specified category via `expand_tools` to obtain full parameters.
-- **Semantic Skill Routing**: When Embedding is enabled, `SemanticSkillRouter` builds a vector index from Skillpack descriptions, performs parallel retrieval during `chat()` to auto-match the optimal skill, and injects matching hints into the system prompt. Degrades to no-op when Embedding is disabled.
+- Slash commands: `/<skill_name> args...` directly invoke the skill (`slash_direct`).
+- Non-slash messages: enter the step loop with all tools visible. Slash and `@skill` are explicit control plane, not lexical task routing.
 
 ## 5. Built-in system Skillpacks (Authoritative List)
 - `data_basic`
@@ -38,6 +36,8 @@ Strict protocol notes:
 - `sheet_ops`
 - `excel_code_runner`
 - `run_code_templates`
+- `word_basic`
+- `word_code_runner`
 
 ## 6. Change Governance Requirements
 - Any protocol change must simultaneously update: implementation, README, tests, and this document.

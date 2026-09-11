@@ -9,77 +9,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from excelmanus.engine import (
-    _contains_formula_advice,
-    _user_requests_vba,
-    _VBA_MACRO_ADVICE_PATTERN,
-)
-
-
-# ── write_excel keep_vba ──────────────────────────────────────
-
-
-class TestWriteExcelKeepVba:
-    """write_excel 写入 .xlsm 时应使用 keep_vba=True。"""
-
-    def test_write_excel_xlsm_passes_keep_vba(self, tmp_path: Path) -> None:
-        """验证 write_excel 对 .xlsm 文件传递 keep_vba=True。"""
-        import openpyxl
-
-        # 创建带 VBA 标记的 .xlsm 文件
-        xlsm_path = tmp_path / "test.xlsm"
-        wb = openpyxl.Workbook()
-        ws = wb.active
-        ws.title = "Sheet1"
-        ws["A1"] = "header"
-        ws["A2"] = "data"
-        # openpyxl 无法直接创建真实 VBA，但可以测试 writer 参数传递
-        wb.save(xlsm_path)
-        wb.close()
-
-        # 使用 write_excel 写入
-        from unittest.mock import patch
-
-        from excelmanus.tools.data_tools import write_excel
-
-        with patch("excelmanus.tools.data_tools._get_guard") as mock_guard:
-            mock_guard.return_value.resolve_and_validate.return_value = xlsm_path
-            result = write_excel(
-                str(xlsm_path),
-                [{"header": "new_data"}],
-                sheet_name="Sheet1",
-            )
-            parsed = json.loads(result)
-            assert parsed["status"] == "success"
-
-        # 验证文件仍然可读
-        wb2 = openpyxl.load_workbook(xlsm_path)
-        assert "Sheet1" in wb2.sheetnames
-        wb2.close()
-
-    def test_write_excel_xlsx_no_keep_vba(self, tmp_path: Path) -> None:
-        """验证 write_excel 对 .xlsx 文件不传递 keep_vba。"""
-        import openpyxl
-
-        xlsx_path = tmp_path / "test.xlsx"
-        wb = openpyxl.Workbook()
-        wb.active["A1"] = "header"
-        wb.save(xlsx_path)
-        wb.close()
-
-        from unittest.mock import patch
-
-        from excelmanus.tools.data_tools import write_excel
-
-        with patch("excelmanus.tools.data_tools._get_guard") as mock_guard:
-            mock_guard.return_value.resolve_and_validate.return_value = xlsx_path
-            result = write_excel(
-                str(xlsx_path),
-                [{"header": "new_data"}],
-                sheet_name="Sheet1",
-            )
-            parsed = json.loads(result)
-            assert parsed["status"] == "success"
+from excelmanus.engine import _user_requests_vba
 
 
 # ── VBA 信息提取 ─────────────────────────────────────────────
@@ -92,7 +22,7 @@ class TestCollectVbaInfo:
         """对 .xlsx 文件应返回 has_vba=False。"""
         import openpyxl
 
-        from excelmanus.tools.data_tools import _collect_vba_info
+        from excelmanus.workbook.data import _collect_vba_info
 
         xlsx_path = tmp_path / "test.xlsx"
         wb = openpyxl.Workbook()
@@ -107,7 +37,7 @@ class TestCollectVbaInfo:
         """对无 VBA 内容的 .xlsm 文件应返回 has_vba=False。"""
         import openpyxl
 
-        from excelmanus.tools.data_tools import _collect_vba_info
+        from excelmanus.workbook.data import _collect_vba_info
 
         # openpyxl 创建的 .xlsm 不包含 vbaProject.bin
         xlsm_path = tmp_path / "test.xlsm"
@@ -120,7 +50,7 @@ class TestCollectVbaInfo:
 
     def test_non_excel_returns_no_vba(self, tmp_path: Path) -> None:
         """对非 Excel 文件应返回 has_vba=False。"""
-        from excelmanus.tools.data_tools import _collect_vba_info
+        from excelmanus.workbook.data import _collect_vba_info
 
         txt_path = tmp_path / "test.txt"
         txt_path.write_text("not excel")
@@ -130,13 +60,13 @@ class TestCollectVbaInfo:
 
     def test_vba_dimension_in_include_dimensions(self) -> None:
         """vba 应在 INCLUDE_DIMENSIONS 中注册。"""
-        from excelmanus.tools.data_tools import INCLUDE_DIMENSIONS
+        from excelmanus.workbook.data import INCLUDE_DIMENSIONS
 
         assert "vba" in INCLUDE_DIMENSIONS
 
     def test_vba_dimension_in_scan_files_dimensions(self) -> None:
         """vba 应在 _SCAN_FILES_DIMENSIONS 中注册。"""
-        from excelmanus.tools.data_tools import _SCAN_FILES_DIMENSIONS
+        from excelmanus.workbook.data import _SCAN_FILES_DIMENSIONS
 
         assert "vba" in _SCAN_FILES_DIMENSIONS
 
@@ -181,47 +111,6 @@ class TestUserRequestsVba:
     def test_empty_returns_false(self) -> None:
         assert _user_requests_vba("") is False
         assert _user_requests_vba(None) is False  # type: ignore[arg-type]
-
-
-# ── _contains_formula_advice vba_exempt 参数 ─────────────────
-
-
-class TestContainsFormulaAdviceVbaExempt:
-    """_contains_formula_advice 的 vba_exempt 参数测试。"""
-
-    def test_vba_code_detected_without_exempt(self) -> None:
-        """默认模式应检测 VBA 代码模式。"""
-        vba_text = "Sub MyMacro()\n  MsgBox \"Hello\"\nEnd Sub"
-        assert _contains_formula_advice(vba_text) is True
-
-    def test_vba_code_exempted_with_flag(self) -> None:
-        """vba_exempt=True 时不检测 VBA 代码模式。"""
-        vba_text = "Sub MyMacro()\n  MsgBox \"Hello\"\nEnd Sub"
-        assert _contains_formula_advice(vba_text, vba_exempt=True) is False
-
-    def test_formula_still_detected_with_vba_exempt(self) -> None:
-        """vba_exempt=True 仍应检测公式建议。"""
-        formula_text = "你可以使用 =SUM(A1:A10) 来计算。"
-        assert _contains_formula_advice(formula_text, vba_exempt=True) is True
-
-    def test_vba_code_block_detected_without_exempt(self) -> None:
-        """VBA 代码块标记应被检测。"""
-        text = "```vb\nSub Test()\nEnd Sub\n```"
-        assert _contains_formula_advice(text) is True
-
-    def test_vba_code_block_exempted_with_flag(self) -> None:
-        """vba_exempt=True 时 VBA 代码块标记不被检测。"""
-        text = "```vb\nSub Test()\nEnd Sub\n```"
-        assert _contains_formula_advice(text, vba_exempt=True) is False
-
-    def test_application_object_detected_without_exempt(self) -> None:
-        """Application.xxx 模式应被检测。"""
-        text = "使用 Application.ScreenUpdating = False 来优化"
-        assert _contains_formula_advice(text) is True
-
-    def test_application_object_exempted_with_flag(self) -> None:
-        text = "使用 Application.ScreenUpdating = False 来优化"
-        assert _contains_formula_advice(text, vba_exempt=True) is False
 
 
 # ── Engine 集成测试 — VBA 豁免 ──────────────────────────────
@@ -293,7 +182,7 @@ class TestVbaExemptEngineIntegration:
 
     @pytest.mark.asyncio
     async def test_no_vba_exempt_for_normal_request(self) -> None:
-        """普通请求不应设置 _vba_exempt；guard_mode=off 时门禁不触发。"""
+        """普通请求不应设置 _vba_exempt；纯文本直接结束。"""
         engine = self._make_engine(max_iterations=3)
         route_result = self._make_route_result()
         engine._route_skills = AsyncMock(return_value=route_result)
@@ -313,7 +202,7 @@ class TestVbaExemptEngineIntegration:
 
         result = await engine.chat("帮我汇总销售数据")
         assert engine._vba_exempt is False
-        # guard_mode=off（默认）：门禁不触发，文本直接放行
+        # 纯文本一律结束本轮，不再因内容形态被门禁拦截
         assert result.reply == vba_reply
 
     @pytest.mark.asyncio

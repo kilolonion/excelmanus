@@ -44,7 +44,6 @@ def build_telegram_app(
     allowed_users: set[str] | None = None,
     session_store: SessionStore | None = None,
     rate_limit_config: RateLimitConfig | None = None,
-    bind_manager: object | None = None,
     service_token: str | None = None,
     event_bridge: object | None = None,
     config_store: object | None = None,
@@ -78,7 +77,6 @@ def build_telegram_app(
         session_store=store,
         allowed_users=allowed_users,
         rate_limit_config=rate_limit_config,
-        bind_manager=bind_manager,
         event_bridge=event_bridge,
         config_store=config_store,
     )
@@ -287,10 +285,6 @@ def build_telegram_app(
                 BotCommand("discard", "丢弃文件变更"),
                 BotCommand("undoapply", "撤销最近apply"),
                 BotCommand("concurrency", "查看/切换并发模式"),
-                BotCommand("quota", "查看token用量和配额"),
-                BotCommand("bind", "绑定 ExcelManus 账号"),
-                BotCommand("bindstatus", "查看绑定状态"),
-                BotCommand("unbind", "解除账号绑定"),
                 BotCommand("admin", "管理员命令"),
             ])
         except Exception:
@@ -317,7 +311,7 @@ def build_telegram_app(
     adapter.set_app(app)
 
     # 注册 handler（顺序重要）
-    commands = ["start", "help", "new", "mode", "model", "addmodel", "delmodel", "abort", "sessions", "history", "rollback", "undo", "staged", "apply", "discard", "undoapply", "concurrency", "quota", "bind", "bindstatus", "unbind"]
+    commands = ["start", "help", "new", "mode", "model", "addmodel", "delmodel", "abort", "sessions", "history", "rollback", "undo", "staged", "apply", "discard", "undoapply", "concurrency"]
     for cmd_name in commands:
         app.add_handler(CommandHandler(cmd_name, _on_command))
     app.add_handler(CallbackQueryHandler(_on_callback))

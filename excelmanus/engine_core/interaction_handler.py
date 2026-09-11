@@ -505,12 +505,27 @@ class InteractionHandler:
                 )
             )
 
-        try:
-            parsed = e._question_flow.parse_answer(user_message, question=current)
-        except ValueError as exc:
-            return ChatResult(
-                reply=f"回答格式错误：{exc}\n\n{e._question_flow.format_prompt(current)}"
-            )
+        parsed = e._question_flow.try_parse_explicit_answer(user_message, question=current)
+        if parsed is None:
+            seen_calls: set[str] = set()
+            while e._question_flow.has_pending():
+                popped_pending = e._question_flow.pop_current()
+                if popped_pending is None:
+                    break
+                e._system_question_actions.pop(popped_pending.question_id, None)
+                if popped_pending.tool_call_id in seen_calls:
+                    continue
+                seen_calls.add(popped_pending.tool_call_id)
+                e._memory.add_tool_result(
+                    popped_pending.tool_call_id,
+                    json.dumps(
+                        {"cancelled": True, "reason": "user_continued"},
+                        ensure_ascii=False,
+                    ),
+                )
+            e._pending_question_route_result = None
+            e._batch_answers.clear()
+            return None
 
         popped = e._question_flow.pop_current()
         if popped is None:
@@ -592,10 +607,6 @@ class InteractionHandler:
             return ChatResult(reply="已记录你的回答。")
         # 从上次中断的轮次之后继续执行
         resume_iteration = e._last_iteration_count + 1
-        e._context_builder._set_window_perception_turn_hints(
-            user_message=user_message,
-            is_new_task=False,
-        )
         return await e._tool_calling_loop(
             route_to_resume, on_event, start_iteration=resume_iteration,
             question_resolver=e._question_resolver,

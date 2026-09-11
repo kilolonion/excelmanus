@@ -53,7 +53,7 @@ class ConversationPersistence:
 
         turn = engine.session_turn
 
-        exists = self._chat_history.session_exists(session_id, user_id=user_id)
+        exists = self._chat_history.session_exists(session_id)
         if not exists:
             title = ""
             for msg in messages:
@@ -62,7 +62,7 @@ class ConversationPersistence:
                     if isinstance(content, str):
                         title = content[:80]
                     break
-            self._chat_history.create_session(session_id, title, user_id=user_id)
+            self._chat_history.create_session(session_id, title)
 
         # 压缩/摘要会替换 _messages 并将 snapshot_index 重置为 0，
         # 此时需要先清空旧消息再全量重写，否则 SQLite 中仍是压缩前的历史。
@@ -104,15 +104,14 @@ class ConversationPersistence:
     ) -> None:
         """基于快照增量持久化消息（并发安全）。
 
-        snapshot 应包含 messages, snapshot_index, turn, user_id 属性。
+        snapshot 应包含 messages, snapshot_index, turn 属性。
         此方法不读取 engine 可变状态，适用于锁外调用。
         """
         new_msgs = snapshot.messages[snapshot.snapshot_index:]
         if not new_msgs:
             return
 
-        user_id = snapshot.user_id
-        exists = self._chat_history.session_exists(session_id, user_id=user_id)
+        exists = self._chat_history.session_exists(session_id)
         if not exists:
             title = ""
             for msg in snapshot.messages:
@@ -121,7 +120,7 @@ class ConversationPersistence:
                     if isinstance(content, str):
                         title = content[:80]
                     break
-            self._chat_history.create_session(session_id, title, user_id=user_id)
+            self._chat_history.create_session(session_id, title)
 
         self._chat_history.save_turn_messages(
             session_id, new_msgs, turn_number=snapshot.turn

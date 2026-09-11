@@ -3,11 +3,11 @@ import { buildApiUrl } from "./api";
 import { mapWithConcurrency } from "./concurrency";
 import { uuid } from "@/lib/utils";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
-import { useSessionStore } from "@/stores/session-store";
-import { useAuthStore } from "@/stores/auth-store";
+import { useSessionStore, getActiveSessionId } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile, FileAttachment } from "@/lib/types";
+import { formatUploadNotice } from "./upload-notice";
 import {
   dispatchSSEEvent,
   preDispatch,
@@ -288,21 +288,29 @@ export async function sendMessage(
     for (const af of files) {
       if (af.status === "success" && af.uploadResult) {
         fileUploadResults.push(af.uploadResult);
+      } else if (
+        af.status === "success" &&
+        _isImageLike(af.file) &&
+        (af.cachedBase64 || af.file.size > 0)
+      ) {
+        // 示例卡片极速路径：图片可能只有本地 file / cachedBase64，没有 uploadResult
+        fileUploadResults.push({
+          filename: af.file.name,
+          path: af.file.name,
+          size: af.file.size,
+        });
       }
-      // 跳过上传失败的文件，避免空路径进入消息
     }
   }
 
-  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
+  const effectiveSessionId = sessionId || getActiveSessionId();
 
-  // 在添加消息之前同步 currentSessionId，确保 SessionSync 的 useEffect
-  //（在下下次渲染后触发）看到 currentSessionId === activeSessionId，
-  // 从而避免清空我们即将添加的消息的 switchSession() 调用。
-  if (effectiveSessionId && store.currentSessionId !== effectiveSessionId) {
-    if (store.currentSessionId && store.messages.length > 0) {
-      store.saveCurrentSession();
-    }
-    useChatStore.setState({ currentSessionId: effectiveSessionId });
+  // 选中态只写 session-store。bindLoadedSession 避免 SessionSync 在消息占位后误切会话清空。
+  if (effectiveSessionId && sessionStore.activeSessionId !== effectiveSessionId) {
+    sessionStore.setActiveSession(effectiveSessionId);
+  }
+  if (effectiveSessionId) {
+    store.bindLoadedSession(effectiveSessionId);
   }
 
   // 立即添加用户消息和助手占位消息 —— 用户界面看到自己的消息 + "正在连接" 加载状态
@@ -324,15 +332,21 @@ export async function sendMessage(
   const uploadedImagePaths: string[] = [];
   const imageAttachments: { data: string; media_type: string }[] = [];
   if (files && files.length > 0) {
-    const successfulFiles = files.filter((af) => af.status === "success" && af.uploadResult);
+    const successfulFiles = files.filter(
+      (af) =>
+        af.status === "success" &&
+        (af.uploadResult || (_isImageLike(af.file) && (af.cachedBase64 || af.file.size > 0))),
+    );
     for (const af of successfulFiles) {
       const isImage = _isImageLike(af.file);
-      if (isImage) uploadedImagePaths.push(af.uploadResult!.path);
-      else uploadedDocPaths.push(af.uploadResult!.path);
+      if (af.uploadResult) {
+        if (isImage) uploadedImagePaths.push(af.uploadResult.path);
+        else uploadedDocPaths.push(af.uploadResult.path);
+      }
     }
 
     const imageCandidates = successfulFiles.filter(
-      (af) => _isImageLike(af.file) && af.file.size > 0,
+      (af) => _isImageLike(af.file) && (af.file.size > 0 || !!af.cachedBase64),
     );
     const encodedImages = await mapWithConcurrency(
       imageCandidates,
@@ -355,14 +369,13 @@ export async function sendMessage(
     );
   }
 
-  // 涓?agent 鏋勫缓缁撴瀯鍖栨枃浠堕€氱煡
   let messageContent = text;
   const notices: string[] = [];
   for (const p of uploadedDocPaths) {
-    notices.push(`[宸蹭笂浼犳枃浠? ${p}]`);
+    notices.push(formatUploadNotice("file", p));
   }
   for (const p of uploadedImagePaths) {
-    notices.push(`[宸蹭笂浼犲浘鐗? ${p}]`);
+    notices.push(formatUploadNotice("image", p));
   }
   if (notices.length > 0) {
     messageContent = `${notices.join("\n")}\n\n${text}`;
@@ -499,8 +512,8 @@ export async function sendMessage(
       } else {
         S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "杩炴帴閿欒",
-          message: (err as Error).message || "缃戠粶杩炴帴澶辫触",
+          title: "连接错误",
+          message: (err as Error).message || "网络连接失败",
           retryable: true,
         }));
       }
@@ -536,7 +549,7 @@ export async function sendMessage(
         try {
           const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
           const chat = useChatStore.getState();
-          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+          if (chat.loadedSessionId === sid && !chat.isStreaming && !chat.abortController) {
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
@@ -570,8 +583,7 @@ export async function sendContinuation(
     return sendMessage(text, undefined, sessionId);
   }
 
-  const sessionStore = useSessionStore.getState();
-  const effectiveSessionId = sessionId || sessionStore.activeSessionId;
+  const effectiveSessionId = sessionId || getActiveSessionId();
 
   const abortController = new AbortController();
   store.setAbortController(abortController);
@@ -704,8 +716,8 @@ export async function sendContinuation(
       } else {
         S().appendBlock(msgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "杩炴帴閿欒",
-          message: (err as Error).message || "缃戠粶杩炴帴澶辫触",
+          title: "连接错误",
+          message: (err as Error).message || "网络连接失败",
           retryable: true,
         }));
       }
@@ -741,7 +753,7 @@ export async function sendContinuation(
         try {
           const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
           const chat = useChatStore.getState();
-          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+          if (chat.loadedSessionId === sid && !chat.isStreaming && !chat.abortController) {
             await refreshSessionMessagesFromBackend(sid);
           }
         } catch {
@@ -783,7 +795,7 @@ export async function rollbackAndResend(
     if (messages[i].role === "user") turnIndex++;
   }
 
-  const effectiveSessionId = sessionId || store.currentSessionId;
+  const effectiveSessionId = sessionId || getActiveSessionId() || store.loadedSessionId;
   if (!effectiveSessionId) return;
 
   // 璋冪敤鍚庣 rollback API锛坮esend_mode 浼氱Щ闄ょ洰鏍囩敤鎴锋秷鎭級
@@ -889,7 +901,7 @@ export async function retryAssistantMessage(
     if (messages[i].role === "user") turnIndex++;
   }
 
-  const effectiveSessionId = sessionId || store.currentSessionId;
+  const effectiveSessionId = sessionId || getActiveSessionId() || store.loadedSessionId;
   if (!effectiveSessionId) return;
 
   // 濡傛灉闇€瑕佸垏鎹㈡ā鍨嬶紝鍏堝垏鎹?
@@ -961,7 +973,7 @@ export function stopGeneration() {
   if (!store.abortController) return;
 
   // 1. 閫氱煡鍚庣鍙栨秷鏈嶅姟绔换鍔?
-  const sessionId = store.currentSessionId;
+  const sessionId = getActiveSessionId() || store.loadedSessionId;
   if (sessionId) {
     import("./api").then(({ abortChat }) => abortChat(sessionId)).catch(() => {});
   }
@@ -980,11 +992,11 @@ export function stopGeneration() {
     const patchedBlocks = lastMsg.blocks.map((block): AssistantBlock => {
       if (block.type === "tool_call" && block.status === "running") {
         blocksChanged = true;
-        return { ...block, status: "error", error: "宸茶鐢ㄦ埛鍋滄" };
+        return { ...block, status: "error", error: "已被用户停止" };
       }
       if (block.type === "subagent" && block.status === "running") {
         blocksChanged = true;
-        return { ...block, status: "done", summary: "宸茶鐢ㄦ埛鍋滄" };
+        return { ...block, status: "done", summary: "已被用户停止" };
       }
       return block;
     });
@@ -1150,8 +1162,8 @@ export async function subscribeToSession(sessionId: string) {
       } else {
         S().appendBlock(msgId, _buildClientFailureGuidance({
           code: "network_error",
-          title: "閲嶈繛閿欒",
-          message: (err as Error).message || "閲嶈繛澶辫触",
+          title: "重连错误",
+          message: (err as Error).message || "重连失败",
           retryable: true,
         }));
       }
@@ -1188,7 +1200,7 @@ export async function subscribeToSession(sessionId: string) {
         try {
           const { refreshSessionMessagesFromBackend } = await import("@/stores/chat-store");
           const chat = useChatStore.getState();
-          if (chat.currentSessionId === sid && !chat.isStreaming && !chat.abortController) {
+          if (chat.loadedSessionId === sid && !chat.isStreaming && !chat.abortController) {
             await refreshSessionMessagesFromBackend(sid);
             chat.clearResumeFailed();
           }

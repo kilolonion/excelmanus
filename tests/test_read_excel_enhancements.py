@@ -20,7 +20,18 @@ from pathlib import Path
 import pytest
 from openpyxl import Workbook
 
-from excelmanus.tools import data_tools
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.workbook import data as data_tools
+
+
+def _tool_payload(result: ToolResult | str) -> dict:
+    if isinstance(result, ToolResult):
+        if isinstance(result.value, dict):
+            return result.value
+        if result.error is not None:
+            return result.error.fields
+        return {"error": result.model_text}
+    return json.loads(result)
 
 
 # ── Fixtures ──────────────────────────────────────────────
@@ -96,7 +107,7 @@ def _init_guard(tmp_path: Path) -> None:
 class TestTailPreview:
     def test_tail_preview_shown_for_large_table(self, sample_excel: Path):
         """30 行表格应出现 tail_preview。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel)))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel)))
         assert "tail_preview" in result
         assert "tail_note" in result
         assert len(result["tail_preview"]) == 5
@@ -106,7 +117,7 @@ class TestTailPreview:
 
     def test_no_tail_preview_for_small_table(self, small_excel: Path):
         """5 行表格不应出现 tail_preview。"""
-        result = json.loads(data_tools.read_excel(str(small_excel)))
+        result = _tool_payload(data_tools.read_excel(str(small_excel)))
         assert "tail_preview" not in result
         assert "tail_note" not in result
 
@@ -117,7 +128,7 @@ class TestTailPreview:
 class TestRangeRead:
     def test_range_read_basic(self, sample_excel: Path):
         """读取指定范围返回正确数据。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel), range="A1:E3"))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel), range="A1:E3"))
         assert result["rows_count"] == 3
         assert result["columns_count"] == 5
         assert result["range"] == "A1:E3"
@@ -126,13 +137,14 @@ class TestRangeRead:
 
     def test_range_read_middle(self, sample_excel: Path):
         """读取中间区域。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel), range="A15:C17"))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel), range="A15:C17"))
         assert result["rows_count"] == 3
 
     def test_range_not_supported_for_csv(self, sample_csv: Path):
-        """CSV 文件不支持 range 参数。"""
-        result = json.loads(data_tools.read_excel(str(sample_csv), range="A1:C5"))
-        assert "error" in result
+        """CSV 文件忽略 range 参数，仍返回标准摘要。"""
+        result = _tool_payload(data_tools.read_excel(str(sample_csv), range="A1:C5"))
+        assert "columns" in result
+        assert result["shape"]["rows"] == 25
 
 
 # ── CSV/TSV 支持 ─────────────────────────────────────────
@@ -141,7 +153,7 @@ class TestRangeRead:
 class TestCSVSupport:
     def test_read_csv(self, sample_csv: Path):
         """读取 CSV 文件返回正确摘要。"""
-        result = json.loads(data_tools.read_excel(str(sample_csv)))
+        result = _tool_payload(data_tools.read_excel(str(sample_csv)))
         assert result["file"] == "data.csv"
         assert result["shape"]["rows"] == 25
         assert "ID" in result["columns"]
@@ -151,21 +163,21 @@ class TestCSVSupport:
 
     def test_read_tsv(self, sample_tsv: Path):
         """读取 TSV 文件返回正确摘要。"""
-        result = json.loads(data_tools.read_excel(str(sample_tsv)))
+        result = _tool_payload(data_tools.read_excel(str(sample_tsv)))
         assert result["file"] == "data.tsv"
         assert result["shape"]["rows"] == 10
         assert "编号" in result["columns"]
 
     def test_filter_csv(self, sample_csv: Path):
         """filter_data 应支持 CSV。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_csv), column="分数", operator="gt", value=80,
-        ))
+        ).value
         assert result["filtered_rows"] > 0
 
     def test_csv_total_rows(self, sample_csv: Path):
         """CSV max_rows 限制时应报告总行数。"""
-        result = json.loads(data_tools.read_excel(str(sample_csv), max_rows=5))
+        result = _tool_payload(data_tools.read_excel(str(sample_csv), max_rows=5))
         assert result["shape"]["rows"] == 5
         assert result.get("total_rows_in_sheet") == 25
 
@@ -176,7 +188,7 @@ class TestCSVSupport:
 class TestOffset:
     def test_offset_basic(self, sample_excel: Path):
         """offset 跳过前 N 行。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel), offset=25, max_rows=5))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel), offset=25, max_rows=5))
         assert result["shape"]["rows"] == 5
         # 第一行预览应是 ID=26 附近
         first_id = result["preview"][0]["ID"]
@@ -184,12 +196,12 @@ class TestOffset:
 
     def test_offset_without_max_rows(self, sample_excel: Path):
         """offset 不配合 max_rows 时读取剩余全部。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel), offset=28))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel), offset=28))
         assert result["shape"]["rows"] == 2  # 30 - 28 = 2
 
     def test_offset_csv(self, sample_csv: Path):
         """CSV 也支持 offset。"""
-        result = json.loads(data_tools.read_excel(str(sample_csv), offset=20, max_rows=5))
+        result = _tool_payload(data_tools.read_excel(str(sample_csv), offset=20, max_rows=5))
         assert result["shape"]["rows"] == 5
 
 
@@ -199,14 +211,14 @@ class TestOffset:
 class TestSampleRows:
     def test_sample_rows(self, sample_excel: Path):
         """sample_rows 返回等距采样数据。"""
-        result = json.loads(data_tools.read_excel(str(sample_excel), sample_rows=5))
+        result = _tool_payload(data_tools.read_excel(str(sample_excel), sample_rows=5))
         assert "sample_preview" in result
         assert "sample_note" in result
         assert len(result["sample_preview"]) == 5
 
     def test_sample_rows_not_triggered_for_small_data(self, small_excel: Path):
         """当数据行数 <= sample_rows 时不产生采样。"""
-        result = json.loads(data_tools.read_excel(str(small_excel), sample_rows=10))
+        result = _tool_payload(data_tools.read_excel(str(small_excel), sample_rows=10))
         assert "sample_preview" not in result
 
 
@@ -216,7 +228,7 @@ class TestSampleRows:
 class TestSummaryDimension:
     def test_summary_basic(self, sample_excel: Path):
         """include=["summary"] 返回每列数据概要。"""
-        result = json.loads(data_tools.read_excel(
+        result = _tool_payload(data_tools.read_excel(
             str(sample_excel), include=["summary"],
         ))
         assert "data_summary" in result
@@ -235,7 +247,7 @@ class TestSummaryDimension:
 
     def test_summary_csv(self, sample_csv: Path):
         """CSV 也支持 summary 维度。"""
-        result = json.loads(data_tools.read_excel(
+        result = _tool_payload(data_tools.read_excel(
             str(sample_csv), include=["summary"],
         ))
         assert "data_summary" in result
@@ -247,59 +259,59 @@ class TestSummaryDimension:
 class TestFilterOperators:
     def test_in_operator(self, sample_excel: Path):
         """in 运算符：值在列表中。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="城市", operator="in", value=["北京", "上海"],
-        ))
+        ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert row["城市"] in ["北京", "上海"]
 
     def test_not_in_operator(self, sample_excel: Path):
         """not_in 运算符：值不在列表中。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="城市", operator="not_in", value=["北京", "上海"],
-        ))
+        ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert row["城市"] not in ["北京", "上海"]
 
     def test_between_operator(self, sample_excel: Path):
         """between 运算符：值在范围内。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="金额", operator="between", value=[500, 1500],
-        ))
+        ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert 500 <= row["金额"] <= 1500
 
     def test_isnull_operator(self, sample_excel: Path):
         """isnull 运算符：值为空。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="备注", operator="isnull", value=None,
-        ))
+        ).value
         assert result["filtered_rows"] > 0
 
     def test_notnull_operator(self, sample_excel: Path):
         """notnull 运算符：值非空。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="备注", operator="notnull", value=None,
-        ))
+        ).value
         assert result["filtered_rows"] > 0
 
     def test_startswith_operator(self, sample_excel: Path):
         """startswith 运算符。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="姓名", operator="startswith", value="用户1",
-        ))
+        ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert str(row["姓名"]).startswith("用户1")
 
     def test_endswith_operator(self, sample_excel: Path):
         """endswith 运算符。"""
-        result = json.loads(data_tools.filter_data(
+        result = data_tools.filter_data(
             str(sample_excel), column="姓名", operator="endswith", value="0",
-        ))
+        ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert str(row["姓名"]).endswith("0")

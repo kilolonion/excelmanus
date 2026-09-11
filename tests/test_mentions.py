@@ -165,9 +165,9 @@ class TestEdgeCases:
     def test_consecutive_mentions(self) -> None:
         """连续多个 @ 标记（无间隔文本）。"""
         r = MentionParser.parse("@file:a.xlsx@file:b.xlsx")
-        # 第一个匹配 @file:a.xlsx@file:b.xlsx（\S+ 贪婪匹配）
-        # 实际行为取决于正则
-        assert len(r.mentions) >= 1
+        assert len(r.mentions) == 2
+        assert r.mentions[0].value == "a.xlsx"
+        assert r.mentions[1].value == "b.xlsx"
 
     def test_mention_with_path_separators(self) -> None:
         """value 包含路径分隔符。"""
@@ -250,6 +250,21 @@ class TestRangeSpecParsing:
         r = MentionParser.parse("@skill:data_basic")
         assert len(r.mentions) == 1
         assert r.mentions[0].range_spec is None
+
+    def test_file_with_content_version(self) -> None:
+        r = MentionParser.parse("@file:uploads/sales.xlsx[Sheet1!A1:B2]@sha256:abcd")
+        m = r.mentions[0]
+        assert m.value == "uploads/sales.xlsx"
+        assert m.range_spec == "Sheet1!A1:B2"
+        assert m.content_version == "sha256:abcd"
+        assert m.raw == "@file:uploads/sales.xlsx[Sheet1!A1:B2]@sha256:abcd"
+
+    def test_file_version_without_range(self) -> None:
+        r = MentionParser.parse("@file:sales.xlsx@sha256:ff00")
+        m = r.mentions[0]
+        assert m.value == "sales.xlsx"
+        assert m.range_spec is None
+        assert m.content_version == "sha256:ff00"
 
 
 # ══════════════════════════════════════════════════════════
@@ -802,7 +817,7 @@ class TestResolverResolve:
 
 
 from excelmanus.mentions.parser import ResolvedMention, Mention
-from excelmanus.engine import build_mention_context_block
+from excelmanus.engine_utils import build_mention_context_block
 
 
 class TestBuildMentionContextBlock:

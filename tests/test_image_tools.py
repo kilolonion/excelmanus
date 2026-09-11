@@ -26,19 +26,22 @@ class TestReadImage:
         img_path = tmp_path / "test.png"
         img_path.write_bytes(png_data)
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(img_path)))
-        assert result["status"] == "ok"
-        assert result["mime_type"] == "image/png"
-        assert result["size_bytes"] > 0
-        assert "__tool_result_image__" in result
+        out = read_image(file_path=str(img_path))
+        assert out.success
+        assert out.value["status"] == "ok"
+        assert out.value["mime_type"] == "image/png"
+        assert out.value["size_bytes"] > 0
+        assert "__tool_result_image__" not in out.model_text
+        assert out.ui_meta.image and out.ui_meta.image["base64"]
 
     def test_read_nonexistent_file(self, tmp_path: Path) -> None:
         """读取不存在的文件返回错误。"""
         from excelmanus.tools.image_tools import read_image, init_guard
 
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(tmp_path / "nope.png")))
-        assert result["status"] == "error"
+        out = read_image(file_path=str(tmp_path / "nope.png"))
+        assert not out.success
+        assert out.value["status"] == "error"
 
     def test_read_unsupported_format(self, tmp_path: Path) -> None:
         """不支持的格式返回错误。"""
@@ -47,8 +50,9 @@ class TestReadImage:
         txt = tmp_path / "test.txt"
         txt.write_text("not an image")
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(txt)))
-        assert result["status"] == "error"
+        out = read_image(file_path=str(txt))
+        assert not out.success
+        assert out.value["status"] == "error"
 
     def test_read_image_too_large(self, tmp_path: Path) -> None:
         """超大文件返回错误。"""
@@ -57,9 +61,9 @@ class TestReadImage:
         big = tmp_path / "big.png"
         big.write_bytes(b"x" * (20_000_001))
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(big)))
-        assert result["status"] == "error"
-        assert "超限" in result["message"] or "size" in result["message"].lower()
+        out = read_image(file_path=str(big))
+        assert not out.success
+        assert "超限" in out.error.message or "size" in out.error.message.lower()
 
     def test_image_injection_structure(self, tmp_path: Path) -> None:
         """__tool_result_image__ 结构正确。"""
@@ -69,11 +73,12 @@ class TestReadImage:
         img_path = tmp_path / "test.png"
         img_path.write_bytes(png_data)
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(img_path)))
-        injection = result["__tool_result_image__"]
+        out = read_image(file_path=str(img_path))
+        injection = out.ui_meta.image
         assert injection["mime_type"] == "image/png"
         assert injection["detail"] == "auto"
         assert len(injection["base64"]) > 0
+        assert "__tool_result_image__" not in out.model_text
 
     def test_get_tools_returns_read_image(self) -> None:
         """get_tools 返回 read_image 工具定义。"""
@@ -92,13 +97,13 @@ class TestReadImage:
         outside_img.write_bytes(base64.b64decode(_MINIMAL_PNG_B64))
 
         init_guard(str(tmp_path))
-        result = json.loads(read_image(file_path=str(outside_img)))
-        assert result["status"] == "error"
-        assert "路径" in result["message"]
+        out = read_image(file_path=str(outside_img))
+        assert not out.success
+        assert "路径" in out.error.message
 
 
-class TestTryInjectImage:
-    """ToolDispatcher._try_inject_image 单元测试。"""
+class TestUiMetaImageInjection:
+    """ToolDispatcher ui_meta.image 注入通道测试。"""
 
     def _make_dispatcher(self):
         """创建最小化 mock ToolDispatcher。"""
@@ -107,6 +112,7 @@ class TestTryInjectImage:
 
         engine = MagicMock()
         engine.memory = MagicMock()
+        engine.is_vision_capable = True
         engine._database = None
         engine.config = MagicMock()
         engine.config.code_policy_enabled = False
@@ -117,53 +123,45 @@ class TestTryInjectImage:
         engine.full_access_enabled = False
         dispatcher = ToolDispatcher.__new__(ToolDispatcher)
         dispatcher._engine = engine
-        dispatcher._pending_vlm_image = None
         dispatcher._deferred_image_injections = []
         dispatcher._injected_image_hashes = set()
-        dispatcher._last_vlm_description = None
-        dispatcher._last_vlm_description_image_hash = None
         dispatcher._tool_call_store = None
         dispatcher._handlers = []
         return dispatcher, engine
 
-    def test_inject_image_from_result(self) -> None:
-        """含 __tool_result_image__ 的结果应延迟注入并移除字段。"""
+    def test_inject_image_from_ui_meta(self) -> None:
+        """ui_meta.image 应延迟注入图片通道。"""
+        from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta
+
         dispatcher, engine = self._make_dispatcher()
-        # 使用合法 base64，避免解码路径（如 hash 或 VLM）在部分环境下报 Incorrect padding
         b64 = _MINIMAL_PNG_B64.replace("\n", "").strip()
-        result = json.dumps({
-            "status": "ok",
-            "hint": "图片已加载",
-            "__tool_result_image__": {"base64": b64, "mime_type": "image/png", "detail": "auto"},
-        })
-        cleaned = dispatcher._try_inject_image(result)
-        parsed = json.loads(cleaned)
-        assert "__tool_result_image__" not in parsed
-        assert parsed["status"] == "ok"
-        # 图片不再立即注入 memory，而是延迟到所有 tool result 写入后
+        tr = ToolResult(
+            success=True,
+            model_text="图片已加载",
+            ui_meta=ToolUiMeta(image={"base64": b64, "mime_type": "image/png", "detail": "auto"}),
+        )
+        dispatcher._apply_ui_meta_effects(tr)
         engine.memory.add_image_message.assert_not_called()
         assert len(dispatcher._deferred_image_injections) == 1
-        assert dispatcher._deferred_image_injections[0]["base64"] == b64
-        # flush 后才真正注入
         dispatcher.flush_deferred_images()
         engine.memory.add_image_message.assert_called_once_with(
             base64_data=b64, mime_type="image/png", detail="auto",
         )
-        assert len(dispatcher._deferred_image_injections) == 0
 
-    def test_no_injection_without_marker(self) -> None:
-        """无 __tool_result_image__ 时不触发注入。"""
+    def test_legacy_json_magic_field_is_lifted_at_dispatcher(self) -> None:
+        """消费边界把未迁移工具的 JSON 魔法字段提升到 ui_meta 并注入。"""
         dispatcher, engine = self._make_dispatcher()
-        result = json.dumps({"status": "ok", "data": "test"})
-        cleaned = dispatcher._try_inject_image(result)
-        assert cleaned == result
-        engine.memory.add_image_message.assert_not_called()
-
-    def test_no_injection_for_non_json(self) -> None:
-        """非 JSON 字符串不触发注入。"""
-        dispatcher, engine = self._make_dispatcher()
-        cleaned = dispatcher._try_inject_image("not json")
-        assert cleaned == "not json"
+        b64 = _MINIMAL_PNG_B64.replace("\n", "").strip()
+        raw = json.dumps({
+            "status": "ok",
+            "__tool_result_image__": {"base64": b64, "mime_type": "image/png"},
+        })
+        tr = dispatcher._coerce_tool_result(raw)
+        dispatcher._apply_ui_meta_effects(tr)
+        assert tr.ui_meta.image is not None
+        assert tr.ui_meta.image["base64"] == b64
+        assert "__tool_result_image__" not in tr.model_text
+        assert len(dispatcher._deferred_image_injections) == 1
         engine.memory.add_image_message.assert_not_called()
 
     @pytest.mark.asyncio
@@ -205,21 +203,21 @@ class TestTryInjectImage:
         engine.full_access_enabled = False
 
         dispatcher = ToolDispatcher(engine)
+        engine.is_vision_capable = True
         out = await dispatcher.call_registry_tool(
             tool_name="read_image",
             arguments={"file_path": "x.png"},
             tool_scope=None,
         )
-        # 截断后依然应是可解析 JSON 且已移除注入字段
-        parsed = json.loads(out)
-        assert parsed["status"] == "ok"
-        assert "__tool_result_image__" not in parsed
-        # 图片延迟注入：call_registry_tool 期间不直接调用 add_image_message
+        from excelmanus.engine_core.tool_result import ToolResult
+
+        assert isinstance(out, ToolResult)
+        assert out.ui_meta.image is not None
+        assert out.ui_meta.image["base64"] == "A" * 5000
+        assert "__tool_result_image__" not in out.model_text
+        assert len(out.model_text) <= 100
         engine.memory.add_image_message.assert_not_called()
         assert len(dispatcher._deferred_image_injections) == 1
-        # flush 后才真正注入
-        dispatcher.flush_deferred_images()
-        engine.memory.add_image_message.assert_called_once()
 
 
 _BASIC_SPEC = {
@@ -244,21 +242,20 @@ _BASIC_SPEC = {
 }
 
 
-class TestRebuildExcelFromSpec:
-    def test_basic_rebuild(self, tmp_path: Path) -> None:
-        """基础 spec → xlsx 编译。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
+def _compile_to_xlsx(spec: dict, dest: Path) -> dict:
+    from excelmanus.replica_spec import compile_spec_text_to_bytes
 
-        init_guard(str(tmp_path))
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_BASIC_SPEC), encoding="utf-8")
+    data, summary = compile_spec_text_to_bytes(json.dumps(spec))
+    dest.write_bytes(data)
+    return summary
+
+
+class TestCompileReplicaSpec:
+    def test_basic_compile(self, tmp_path: Path) -> None:
         output_path = tmp_path / "output.xlsx"
-
-        result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(spec_path), output_path=str(output_path),
-        ))
-        assert result["status"] == "ok"
+        summary = _compile_to_xlsx(_BASIC_SPEC, output_path)
         assert output_path.exists()
+        assert summary["cells_written"] >= 4
 
         from openpyxl import load_workbook
         wb = load_workbook(str(output_path))
@@ -267,21 +264,13 @@ class TestRebuildExcelFromSpec:
         assert ws["B2"].value == 30
         assert ws["A1"].font.bold is True
 
-    def test_spec_not_found(self, tmp_path: Path) -> None:
-        """Spec 文件不存在返回错误。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
+    def test_invalid_json_raises(self) -> None:
+        from excelmanus.replica_spec import compile_spec_text_to_bytes
 
-        init_guard(str(tmp_path))
-        result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(tmp_path / "nope.json"),
-        ))
-        assert result["status"] == "error"
+        with pytest.raises(ValueError):
+            compile_spec_text_to_bytes("{not json")
 
     def test_merged_cells(self, tmp_path: Path) -> None:
-        """合并单元格正确应用（非锚点无值时正常合并）。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
-
-        init_guard(str(tmp_path))
         spec = {
             **_BASIC_SPEC,
             "sheets": [{
@@ -297,262 +286,8 @@ class TestRebuildExcelFromSpec:
                 "column_widths": [15, 10],
             }],
         }
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
         output_path = tmp_path / "output.xlsx"
-
-        result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(spec_path), output_path=str(output_path),
-        ))
-        assert result["status"] == "ok"
-        assert result["build_summary"]["merges_applied"] == 1
-
-    def test_merge_skipped_when_non_anchor_has_value(self, tmp_path: Path) -> None:
-        """非锚点单元格含有值时跳过合并，保留数据完整性。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
-
-        init_guard(str(tmp_path))
-        spec = {
-            **_BASIC_SPEC,
-            "sheets": [{
-                "name": "Sheet1",
-                "dimensions": {"rows": 2, "cols": 4},
-                "cells": [
-                    {"address": "A1", "value": "日期：", "value_type": "string", "confidence": 1.0},
-                    {"address": "C1", "value": "客户：", "value_type": "string", "confidence": 1.0},
-                ],
-                "merged_ranges": [{"range": "A1:D1", "confidence": 0.98}],
-                "styles": {},
-                "column_widths": [10, 10, 10, 10],
-            }],
-        }
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
-        output_path = tmp_path / "output.xlsx"
-
-        result = json.loads(rebuild_excel_from_spec(
-            spec_path=str(spec_path), output_path=str(output_path),
-        ))
-        assert result["status"] == "ok"
-        # 合并被跳过（因为 C1 是非锚点但有值）
-        assert result["build_summary"]["merges_applied"] == 0
-        assert any("跳过" in s for s in result["build_summary"]["skipped_items"])
-
-        # 值仍然保留
-        from openpyxl import load_workbook
-        wb = load_workbook(str(output_path))
-        ws = wb["Sheet1"]
-        assert ws["A1"].value == "日期："
-        assert ws["C1"].value == "客户："
-
-    def test_rejects_outside_workspace_output_path(self, tmp_path: Path) -> None:
-        """输出路径在 workspace 外时应被拒绝。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, init_guard
-
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_BASIC_SPEC), encoding="utf-8")
-        init_guard(str(tmp_path))
-
-        outside_dir = Path(tempfile.mkdtemp())
-        outside_output = outside_dir / "output.xlsx"
-        result = json.loads(
-            rebuild_excel_from_spec(spec_path=str(spec_path), output_path=str(outside_output))
-        )
-        assert result["status"] == "error"
-        assert "路径" in result["message"]
+        summary = _compile_to_xlsx(spec, output_path)
+        assert summary["merges_applied"] == 1
 
 
-class TestVerifyReplica:
-    def test_perfect_match(self, tmp_path: Path) -> None:
-        """spec 与 rebuild 的 Excel 完全匹配时 match_rate=1.0。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, verify_excel_replica, init_guard
-
-        init_guard(str(tmp_path))
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_BASIC_SPEC), encoding="utf-8")
-        excel_path = tmp_path / "output.xlsx"
-        rebuild_excel_from_spec(spec_path=str(spec_path), output_path=str(excel_path))
-
-        report_path = tmp_path / "report.md"
-        result = json.loads(verify_excel_replica(
-            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
-        ))
-        assert result["status"] == "ok"
-        assert result["match_rate"] == 1.0
-        assert result["issues"]["total"] == 0
-        assert report_path.exists()
-
-    def test_report_file_generated(self, tmp_path: Path) -> None:
-        """diff report markdown 文件正确生成。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, verify_excel_replica, init_guard
-
-        init_guard(str(tmp_path))
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_BASIC_SPEC), encoding="utf-8")
-        excel_path = tmp_path / "output.xlsx"
-        rebuild_excel_from_spec(spec_path=str(spec_path), output_path=str(excel_path))
-
-        report_path = tmp_path / "report.md"
-        verify_excel_replica(
-            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
-        )
-        content = report_path.read_text(encoding="utf-8")
-        assert "验证报告" in content
-        assert "匹配率" in content
-
-    def test_uncertainty_items_in_report(self, tmp_path: Path) -> None:
-        """低置信项出现在 diff report 中。"""
-        from excelmanus.tools.image_tools import rebuild_excel_from_spec, verify_excel_replica, init_guard
-
-        init_guard(str(tmp_path))
-        spec = dict(_BASIC_SPEC)
-        spec["uncertainties"] = [
-            {"location": "B2", "reason": "数字模糊", "candidate_values": ["30", "38"], "confidence": 0.6},
-        ]
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
-        excel_path = tmp_path / "output.xlsx"
-        rebuild_excel_from_spec(spec_path=str(spec_path), output_path=str(excel_path))
-
-        report_path = tmp_path / "report.md"
-        result = json.loads(verify_excel_replica(
-            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
-        ))
-        assert result["issues"]["low_confidence"] == 1
-        content = report_path.read_text(encoding="utf-8")
-        assert "低置信项" in content
-
-    def test_merge_conflict_not_counted_as_mismatch(self, tmp_path: Path) -> None:
-        """合并区域非锚点单元格归类为 merge_conflict 而非 mismatch，不降低匹配率。"""
-        from excelmanus.tools.image_tools import verify_excel_replica, init_guard
-        from openpyxl import Workbook
-
-        init_guard(str(tmp_path))
-
-        # 手动构建一个含合并单元格的 Excel
-        wb = Workbook()
-        ws = wb.active
-        ws.title = "Sheet1"
-        ws["A1"].value = "日期："
-        # C1 本应有值 "客户：" 但因合并会变成 None
-        ws.merge_cells("A1:D1")
-        excel_path = tmp_path / "merged.xlsx"
-        wb.save(str(excel_path))
-
-        # 构建 spec：A1 和 C1 都有值
-        spec = {
-            **_BASIC_SPEC,
-            "sheets": [{
-                "name": "Sheet1",
-                "dimensions": {"rows": 1, "cols": 4},
-                "cells": [
-                    {"address": "A1", "value": "日期：", "value_type": "string", "confidence": 1.0},
-                    {"address": "C1", "value": "客户：", "value_type": "string", "confidence": 1.0},
-                ],
-                "merged_ranges": [{"range": "A1:D1", "confidence": 0.98}],
-                "styles": {},
-                "column_widths": [],
-            }],
-        }
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(spec), encoding="utf-8")
-        report_path = tmp_path / "report.md"
-
-        result = json.loads(verify_excel_replica(
-            spec_path=str(spec_path), excel_path=str(excel_path), report_path=str(report_path),
-        ))
-        assert result["status"] == "ok"
-        # C1 应被识别为 merge_conflict 而非 mismatch
-        assert result["issues"]["merge_conflicts"] == 1
-        assert result["issues"]["conflict"] == 0
-        # 匹配率应为 100%（merge_conflict 不降低匹配率）
-        assert result["match_rate"] == 1.0
-
-        # 报告中应包含合并冲突信息
-        content = report_path.read_text(encoding="utf-8")
-        assert "合并单元格冲突" in content
-
-    def test_rejects_outside_workspace_report_path(self, tmp_path: Path) -> None:
-        """报告路径在 workspace 外时应被拒绝。"""
-        from excelmanus.tools.image_tools import (
-            rebuild_excel_from_spec,
-            verify_excel_replica,
-            init_guard,
-        )
-
-        spec_path = tmp_path / "spec.json"
-        spec_path.write_text(json.dumps(_BASIC_SPEC), encoding="utf-8")
-        excel_path = tmp_path / "output.xlsx"
-        init_guard(str(tmp_path))
-        rebuild_excel_from_spec(spec_path=str(spec_path), output_path=str(excel_path))
-
-        outside_dir = Path(tempfile.mkdtemp())
-        outside_report = outside_dir / "report.md"
-        result = json.loads(
-            verify_excel_replica(
-                spec_path=str(spec_path),
-                excel_path=str(excel_path),
-                report_path=str(outside_report),
-            )
-        )
-        assert result["status"] == "error"
-        assert "路径" in result["message"]
-
-
-class TestValuesMatchDateNormalization:
-    """_values_match 日期归一化比较测试。"""
-
-    def test_datetime_vs_date_string(self) -> None:
-        from datetime import datetime
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match(datetime(2024, 1, 15), "2024-01-15") is True
-
-    def test_date_string_vs_datetime_ignores_time(self) -> None:
-        from datetime import datetime
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match("2024-01-15", datetime(2024, 1, 15, 10, 30)) is True
-
-    def test_two_datetimes_ignore_time(self) -> None:
-        from datetime import datetime
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match(datetime(2024, 1, 15), datetime(2024, 1, 15, 10, 30)) is True
-
-    def test_date_object_vs_string(self) -> None:
-        from datetime import date
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match(date(2024, 1, 15), "2024-01-15") is True
-
-    def test_slash_format(self) -> None:
-        from datetime import datetime
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match("2024/01/15", datetime(2024, 1, 15)) is True
-
-    def test_different_dates_return_false(self) -> None:
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match("2024-01-15", "2024-01-16") is False
-
-    def test_invalid_date_string_returns_false(self) -> None:
-        from datetime import datetime
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match("not-a-date", datetime(2024, 1, 15)) is False
-
-    def test_numeric_comparison_unchanged(self) -> None:
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match(1, 1.0) is True
-        assert _values_match(3.14, 3.14) is True
-        assert _values_match(1, 2) is False
-
-    def test_none_comparison_unchanged(self) -> None:
-        from excelmanus.tools.image_tools import _values_match
-
-        assert _values_match(None, None) is True
-        assert _values_match(None, "a") is False
-        assert _values_match("a", None) is False

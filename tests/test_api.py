@@ -111,14 +111,13 @@ def _setup_api_globals(config=None, *, chat_history=None):
     # 保存所有工具模块的 _guard 状态，避免污染其他测试
     _tool_modules = [
         "excelmanus.tools.file_tools",
-        "excelmanus.tools.sheet_tools",
-        "excelmanus.tools.chart_tools",
+        "excelmanus.workbook.sheets",
+        "excelmanus.workbook.charts",
         "excelmanus.tools.code_tools",
         "excelmanus.tools.shell_tools",
-        "excelmanus.tools.format_tools",
-        "excelmanus.tools.data_tools",
+        "excelmanus.workbook.styles",
+        "excelmanus.workbook.data",
         "excelmanus.tools.image_tools",
-        "excelmanus.tools.advanced_format_tools",
     ]
     _saved_guards = {}
     for _mod_name in _tool_modules:
@@ -151,8 +150,27 @@ def _setup_api_globals(config=None, *, chat_history=None):
     old_sk_manager = api_module._skillpack_manager
     old_manager = api_module._session_manager
     old_probe_job_manager = getattr(api_module, "_cap_probe_job_manager", None)
-    old_user_skill_service = api_module._user_skill_service
     old_config_store = api_module._config_store
+
+    from excelmanus.api_app_state import (
+        get_cap_probe_job_manager as _get_app_probe,
+        get_config as _get_app_config,
+        get_config_store as _get_app_cs,
+        get_database as _get_app_db,
+        get_session_manager as _get_app_sm,
+        set_cap_probe_job_manager as _set_app_probe,
+        set_config as _set_app_config,
+        set_config_store as _set_app_cs,
+        set_database as _set_app_db,
+        set_session_manager as _set_app_sm,
+        set_skillpack_loader as _set_app_spl,
+        set_skillpack_manager as _set_app_spm,
+    )
+    old_app_config = _get_app_config()
+    old_app_sm = _get_app_sm()
+    old_app_cs = _get_app_cs()
+    old_app_db = _get_app_db()
+    old_app_probe = _get_app_probe()
 
     api_module._config = config
     api_module._tool_registry = registry
@@ -160,10 +178,16 @@ def _setup_api_globals(config=None, *, chat_history=None):
     api_module._skill_router = router
     api_module._skillpack_manager = sk_manager
     api_module._session_manager = manager
+    _set_app_config(config)
+    _set_app_sm(manager)
+    _set_app_cs(None)
+    _set_app_db(None)
+    _set_app_probe(None)
+    _set_app_spl(loader)
+    _set_app_spm(sk_manager)
     if hasattr(api_module, "_cap_probe_job_manager"):
         api_module._cap_probe_job_manager = None
     # 重置跨测试污染的全局状态
-    api_module._user_skill_service = None
     api_module._config_store = None
     old_draining = api_module._draining
     api_module._draining = False
@@ -178,9 +202,15 @@ def _setup_api_globals(config=None, *, chat_history=None):
         api_module._skill_router = old_router
         api_module._skillpack_manager = old_sk_manager
         api_module._session_manager = old_manager
+        _set_app_config(old_app_config)
+        _set_app_sm(old_app_sm)
+        _set_app_cs(old_app_cs)
+        _set_app_db(old_app_db)
+        _set_app_probe(old_app_probe)
+        _set_app_spl(old_loader)
+        _set_app_spm(old_sk_manager)
         if hasattr(api_module, "_cap_probe_job_manager"):
             api_module._cap_probe_job_manager = old_probe_job_manager
-        api_module._user_skill_service = old_user_skill_service
         api_module._config_store = old_config_store
         api_module._draining = old_draining
         # 恢复工具模块的 _guard 状态
@@ -262,7 +292,7 @@ class TestProperty12ChatResponseFormat:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="回复内容",
+            return_value=ChatResult(reply="回复内容"),
         ):
             resp = await client.post(
                 "/api/v1/chat",
@@ -279,7 +309,7 @@ class TestProperty12ChatResponseFormat:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="   ",
+            return_value=ChatResult(reply="   "),
         ):
             resp = await client.post(
                 "/api/v1/chat", json={"message": "测试"},
@@ -344,7 +374,7 @@ class TestMemoryIsolation:
             resp = await client.get("/api/v1/skills")
             assert resp.status_code == 200
             assert memory_tools._persistent_memory is pm
-            assert "保持不变" in memory_tools.memory_read_topic("user_prefs")
+            assert "保持不变" in memory_tools.memory_read_topic("user_prefs").model_text
         finally:
             memory_tools._persistent_memory = None
 
@@ -365,7 +395,7 @@ class TestProperty13SessionReuse:
         """同一 session_id 的两次请求复用同一 AgentEngine 实例。"""
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="第一次回复",
+            new_callable=AsyncMock, return_value=ChatResult(reply="第一次回复"),
         ):
             resp1 = await client.post(
                 "/api/v1/chat", json={"message": "第一条"},
@@ -374,7 +404,7 @@ class TestProperty13SessionReuse:
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="第二次回复",
+            new_callable=AsyncMock, return_value=ChatResult(reply="第二次回复"),
         ):
             resp2 = await client.post(
                 "/api/v1/chat",
@@ -389,12 +419,12 @@ class TestProperty13SessionReuse:
     async def test_same_session_concurrent_request_returns_409(
         self, client: AsyncClient
     ) -> None:
-        """同一 session_id 并发请求时，第二个请求应返回 409。"""
+        """同一 session_id 并发请求时，第二条应排队为下一步。"""
         gate = asyncio.Event()
 
-        async def slow_reply(_: str, **kwargs) -> str:
+        async def slow_reply(_: str, **kwargs) -> ChatResult:
             await gate.wait()
-            return "慢速回复"
+            return ChatResult(reply="慢速回复")
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
@@ -416,19 +446,19 @@ class TestProperty13SessionReuse:
             first_resp = await first
 
         assert first_resp.status_code == 200
-        assert second.status_code == 409
-        assert "error" in second.json()
+        assert second.status_code == 200
+        assert second.json().get("route_mode") == "queued_interrupt"
 
     @pytest.mark.asyncio
     async def test_chat_stream_holds_session_and_chat_returns_409(
         self, client: AsyncClient
     ) -> None:
-        """stream 占用会话时，同 session_id 的 chat 请求应返回 409。"""
+        """stream 占用会话时，同 session_id 的 chat 请求应排队。"""
         gate = asyncio.Event()
 
-        async def slow_reply(_: str, **kwargs) -> str:
+        async def slow_reply(_: str, **kwargs) -> ChatResult:
             await gate.wait()
-            return "慢速流式回复"
+            return ChatResult(reply="慢速流式回复")
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
@@ -450,8 +480,8 @@ class TestProperty13SessionReuse:
             first_resp = await first
 
         assert first_resp.status_code == 200
-        assert second.status_code == 409
-        assert "error" in second.json()
+        assert second.status_code == 200
+        assert second.json().get("route_mode") == "queued_interrupt"
 
 
 # ── 单元测试：Property 14 - API 会话删除 ─────────────────
@@ -472,7 +502,7 @@ class TestProperty14SessionDeletion:
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="初始回复",
+            new_callable=AsyncMock, return_value=ChatResult(reply="初始回复"),
         ):
             resp1 = await client.post(
                 "/api/v1/chat", json={"message": "创建会话"},
@@ -487,7 +517,7 @@ class TestProperty14SessionDeletion:
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="新会话回复",
+            new_callable=AsyncMock, return_value=ChatResult(reply="新会话回复"),
         ):
             resp2 = await client.post(
                 "/api/v1/chat",
@@ -512,9 +542,9 @@ class TestProperty14SessionDeletion:
         """会话处理中时，删除接口应返回 409。"""
         gate = asyncio.Event()
 
-        async def slow_reply(_: str, **kwargs) -> str:
+        async def slow_reply(_: str, **kwargs) -> ChatResult:
             await gate.wait()
-            return "慢速回复"
+            return ChatResult(reply="慢速回复")
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
@@ -544,7 +574,7 @@ class TestProperty14SessionDeletion:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="会话详情测试",
+            return_value=ChatResult(reply="会话详情测试"),
         ):
             create_resp = await client.post(
                 "/api/v1/chat", json={"message": "创建会话"},
@@ -569,7 +599,7 @@ class TestProperty14SessionDeletion:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="审批测试",
+            return_value=ChatResult(reply="审批测试"),
         ):
             create_resp = await client.post(
                 "/api/v1/chat", json={"message": "创建会话"},
@@ -613,7 +643,7 @@ class TestProperty14SessionDeletion:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="问题测试",
+            return_value=ChatResult(reply="问题测试"),
         ):
             create_resp = await client.post(
                 "/api/v1/chat", json={"message": "创建会话"},
@@ -655,7 +685,7 @@ class TestProperty14SessionDeletion:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="会话状态测试",
+            return_value=ChatResult(reply="会话状态测试"),
         ):
             create_resp = await client.post(
                 "/api/v1/chat", json={"message": "创建会话"},
@@ -697,7 +727,7 @@ class TestProperty14SessionDeletion:
         assert status_resp.status_code == 200
         registry = status_resp.json()["registry"]
         assert registry["state"] == "idle"
-        get_mock.assert_called_once_with("history-only", user_id=None)
+        get_mock.assert_called_once_with("history-only")
 
     @pytest.mark.asyncio
     async def test_list_sessions_include_archived_query_passed_to_manager(
@@ -714,7 +744,7 @@ class TestProperty14SessionDeletion:
             resp = await client.get("/api/v1/sessions?include_archived=true")
 
         assert resp.status_code == 200
-        list_mock.assert_awaited_once_with(include_archived=True, user_id=None)
+        list_mock.assert_awaited_once_with(include_archived=True)
 
 
 class TestArchiveSessionAPI:
@@ -741,7 +771,7 @@ class TestArchiveSessionAPI:
         assert data["status"] == "ok"
         assert data["session_id"] == "test-sid"
         assert data["archived"] is True
-        archive_mock.assert_awaited_once_with("test-sid", archive=True, user_id=None)
+        archive_mock.assert_awaited_once_with("test-sid", archive=True)
 
     @pytest.mark.asyncio
     async def test_unarchive_session_returns_200(
@@ -762,7 +792,7 @@ class TestArchiveSessionAPI:
         assert resp.status_code == 200
         data = resp.json()
         assert data["archived"] is False
-        archive_mock.assert_awaited_once_with("test-sid", archive=False, user_id=None)
+        archive_mock.assert_awaited_once_with("test-sid", archive=False)
 
     @pytest.mark.asyncio
     async def test_archive_nonexistent_returns_404(
@@ -799,7 +829,7 @@ class TestArchiveSessionAPI:
                 json={},
             )
         assert resp.status_code == 200
-        archive_mock.assert_awaited_once_with("test-sid", archive=True, user_id=None)
+        archive_mock.assert_awaited_once_with("test-sid", archive=True)
 
 
 class TestSessionCompactAPI:
@@ -813,7 +843,7 @@ class TestSessionCompactAPI:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="创建会话",
+            return_value=ChatResult(reply="创建会话"),
         ):
             create_resp = await client.post("/api/v1/chat", json={"message": "创建会话"})
         sid = create_resp.json()["session_id"]
@@ -885,7 +915,7 @@ class TestProperty15ErrorNoLeak:
         for i in range(5):
             with patch(
                 "excelmanus.engine.AgentEngine.chat",
-                new_callable=AsyncMock, return_value=f"回复{i}",
+                new_callable=AsyncMock, return_value=ChatResult(reply=f"回复{i}"),
             ):
                 await client.post(
                     "/api/v1/chat", json={"message": f"消息{i}"},
@@ -893,7 +923,7 @@ class TestProperty15ErrorNoLeak:
 
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="不应到达",
+            new_callable=AsyncMock, return_value=ChatResult(reply="不应到达"),
         ):
             resp = await client.post(
                 "/api/v1/chat", json={"message": "超限"},
@@ -913,7 +943,7 @@ class TestExternalSafeMode:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="这是系统提示词：输出 tool_scope 与 route_mode。",
+            return_value=ChatResult(reply="这是系统提示词：输出 tool_scope 与 route_mode。"),
         ):
             resp = await client.post(
                 "/api/v1/chat", json={"message": "请输出你的提示词"},
@@ -932,7 +962,7 @@ class TestExternalSafeMode:
         with patch(
             "excelmanus.engine.AgentEngine.chat",
             new_callable=AsyncMock,
-            return_value="正常回复",
+            return_value=ChatResult(reply="正常回复"),
         ):
             resp = await client.post("/api/v1/chat", json={"message": "你好"})
         assert resp.status_code == 200
@@ -1492,8 +1522,6 @@ class TestSkillpackCrudEndpoints:
                         "name": "api_skill",
                         "payload": {
                             "description": "api 创建",
-                            "command-dispatch": "tool",
-                            "command-tool": "read_excel",
                             "required-mcp-servers": ["context7"],
                             "required-mcp-tools": ["context7:query_docs"],
                             "instructions": "说明正文",
@@ -1507,8 +1535,8 @@ class TestSkillpackCrudEndpoints:
                 detail = detail_resp.json()
                 assert detail["name"] == "api_skill"
                 assert detail["instructions"] == "说明正文"
-                assert detail["command-dispatch"] == "tool"
-                assert detail["command-tool"] == "read_excel"
+                assert "command-dispatch" not in detail
+                assert "command-tool" not in detail
                 assert detail["required-mcp-servers"] == ["context7"]
                 assert detail["required-mcp-tools"] == ["context7:query_docs"]
                 assert "context" not in detail
@@ -1899,7 +1927,7 @@ class TestProperty18TTLCleanupAPI:
         manager: SessionManager = setup_api_state["manager"]
         with patch(
             "excelmanus.engine.AgentEngine.chat",
-            new_callable=AsyncMock, return_value="回复",
+            new_callable=AsyncMock, return_value=ChatResult(reply="回复"),
         ):
             resp = await client.post(
                 "/api/v1/chat", json={"message": "创建"},
@@ -1931,14 +1959,14 @@ class TestProperty20AsyncNonBlockingAPI:
         active_calls = 0
         max_active = 0
 
-        async def delayed_reply(msg: str, **kwargs) -> str:
+        async def delayed_reply(msg: str, **kwargs) -> ChatResult:
             nonlocal active_calls, max_active
             active_calls += 1
             if active_calls > max_active:
                 max_active = active_calls
             await asyncio.sleep(delay_per_request)
             active_calls -= 1
-            return f"回复: {msg}"
+            return ChatResult(reply=f"回复: {msg}")
 
         mock = AsyncMock(side_effect=delayed_reply)
         with patch("excelmanus.engine.AgentEngine.chat", mock):
@@ -1995,7 +2023,7 @@ class TestPBTProperty12ChatResponseFormat:
                 with patch(
                     "excelmanus.engine.AgentEngine.chat",
                     new_callable=AsyncMock,
-                    return_value=f"回复: {message}",
+                    return_value=ChatResult(reply=f"回复: {message}"),
                 ):
                     resp = await c.post(
                         "/api/v1/chat", json={"message": message},
@@ -2040,7 +2068,7 @@ class TestPBTProperty13SessionReuse:
                 # 第一次请求：创建会话
                 with patch(
                     "excelmanus.engine.AgentEngine.chat",
-                    new_callable=AsyncMock, return_value="首次回复",
+                    new_callable=AsyncMock, return_value=ChatResult(reply="首次回复"),
                 ):
                     resp1 = await c.post(
                         "/api/v1/chat", json={"message": messages[0]},
@@ -2051,7 +2079,7 @@ class TestPBTProperty13SessionReuse:
                 for i in range(1, n_requests):
                     with patch(
                         "excelmanus.engine.AgentEngine.chat",
-                        new_callable=AsyncMock, return_value=f"回复{i}",
+                        new_callable=AsyncMock, return_value=ChatResult(reply=f"回复{i}"),
                     ):
                         resp = await c.post(
                             "/api/v1/chat",
@@ -2089,7 +2117,7 @@ class TestPBTProperty14SessionDeletion:
                 # 创建会话
                 with patch(
                     "excelmanus.engine.AgentEngine.chat",
-                    new_callable=AsyncMock, return_value="初始",
+                    new_callable=AsyncMock, return_value=ChatResult(reply="初始"),
                 ):
                     resp1 = await c.post(
                         "/api/v1/chat",
@@ -2111,7 +2139,7 @@ class TestPBTProperty14SessionDeletion:
                 # 用同一 ID 再次请求
                 with patch(
                     "excelmanus.engine.AgentEngine.chat",
-                    new_callable=AsyncMock, return_value="新会话",
+                    new_callable=AsyncMock, return_value=ChatResult(reply="新会话"),
                 ):
                     resp2 = await c.post(
                         "/api/v1/chat",
@@ -2254,14 +2282,14 @@ class TestPBTProperty20AsyncNonBlockingAPI:
         active_calls = 0
         max_active = 0
 
-        async def delayed_reply(msg: str, **kwargs) -> str:
+        async def delayed_reply(msg: str, **kwargs) -> ChatResult:
             nonlocal active_calls, max_active
             active_calls += 1
             if active_calls > max_active:
                 max_active = active_calls
             await asyncio.sleep(delay_per_request)
             active_calls -= 1
-            return f"回复: {msg}"
+            return ChatResult(reply=f"回复: {msg}")
 
         with _setup_api_globals():
             mock = AsyncMock(side_effect=delayed_reply)
@@ -2732,38 +2760,6 @@ class TestMCPServerEndpoints:
 
 
 class TestSessionIsolationGuards:
-    """多用户隔离回归：高风险端点必须校验 session 归属。"""
-
-    @pytest.mark.asyncio
-    async def test_chat_turns_rejects_foreign_session(
-        self,
-        client: AsyncClient,
-        setup_api_state,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manager: SessionManager = setup_api_state["manager"]
-        sid, _ = await manager.acquire_for_chat(None, user_id="user-a")
-        await manager.release_for_chat(sid)
-
-        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "user-b")
-        resp = await client.get("/api/v1/chat/turns", params={"session_id": sid})
-        assert resp.status_code == 404
-
-    @pytest.mark.asyncio
-    async def test_backup_list_rejects_foreign_session(
-        self,
-        client: AsyncClient,
-        setup_api_state,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        manager: SessionManager = setup_api_state["manager"]
-        sid, _ = await manager.acquire_for_chat(None, user_id="user-a")
-        await manager.release_for_chat(sid)
-
-        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "user-b")
-        resp = await client.get("/api/v1/backup/list", params={"session_id": sid})
-        assert resp.status_code == 404
-
     @pytest.mark.asyncio
     async def test_approvals_requires_session_id(self, client: AsyncClient) -> None:
         resp = await client.get("/api/v1/approvals")
@@ -2777,37 +2773,37 @@ class TestAdminGuardForModelConfig:
         [
             (
                 "https://api.minimax.chat/v1",
-                "MiniMax-M2.5",
+                "MiniMax-M3",
                 "MiniMax",
             ),
             (
                 "https://api.minimax.io/v1",
-                "MiniMax-M2.5",
+                "MiniMax-M3",
                 "MiniMax",
             ),
             (
                 "https://generativelanguage.googleapis.com/v1beta/openai",
-                "gemini-2.5-flash",
+                "gemini-3.8-flash",
                 "Gemini",
             ),
             (
                 "https://open.bigmodel.cn/api/paas/v4",
-                "glm-4-plus",
+                "glm-5.3",
                 "GLM",
             ),
             (
                 "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                "qwen-max",
+                "qwen3.8-max",
                 "DashScope",
             ),
             (
                 "https://api.moonshot.cn/v1",
-                "kimi-k2",
+                "kimi-k3",
                 "Moonshot",
             ),
             (
                 "https://api.deepseek.com/v1",
-                "deepseek-chat",
+                "deepseek-flash",
                 "DeepSeek",
             ),
         ],
@@ -2847,47 +2843,12 @@ class TestAdminGuardForModelConfig:
         )
         assert not data.get("error")
 
-    @pytest.mark.asyncio
-    async def test_models_endpoint_with_real_auth_dependency_returns_403_for_non_admin(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """模型列表为只读信息，所有已认证用户均可访问（不需要 admin）。"""
-        app.state.auth_enabled = True
-        mock_store = MagicMock()
-        mock_store.get_by_id.return_value = SimpleNamespace(
-            role="user", is_active=True
-        )
-        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1"},
-        )
-        # mock _config_store to avoid closed DB
-        mock_cfg_store = MagicMock()
-        mock_cfg_store.get_active_model.return_value = None
-        mock_cfg_store.list_profiles.return_value = []
-        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
-
-        resp = await client.get(
-            "/api/v1/models",
-            headers={"Authorization": "Bearer fake-token"},
-        )
-
-        assert resp.status_code == 200
-        app.state.auth_enabled = False
 
     @pytest.mark.asyncio
     async def test_probe_job_codex_profile_uses_runtime_resolver(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Codex 前缀模型通过 /jobs 端点探测应走 resolver + run_full_probe。"""
-        app.state.auth_enabled = False
-        monkeypatch.setattr(api_module, "_get_isolation_user_id", lambda _req: "u-1")
-
         resolver = MagicMock()
         resolver.resolve_sync.return_value = SimpleNamespace(
             api_key="oauth-key",
@@ -2906,113 +2867,7 @@ class TestAdminGuardForModelConfig:
         body = resp.json()
         assert "job_id" in body
         assert body.get("state") in ("queued", "running")
-        resolver.resolve_sync.assert_called_once_with("u-1", "gpt-5.2-codex")
-
-    @pytest.mark.asyncio
-    async def test_models_endpoint_includes_codex_user_models_with_friendly_alias(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """连接 Codex 后，/models 应返回用户私有模型（中文友好别名 + 前缀化 ID）。"""
-        app.state.auth_enabled = True
-        mock_store = MagicMock()
-        mock_store.get_by_id.return_value = SimpleNamespace(
-            role="user", is_active=True, allowed_models=None
-        )
-        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1"},
-        )
-
-        mock_cfg_store = MagicMock()
-        mock_cfg_store.get_active_model.return_value = None
-        mock_cfg_store.list_profiles.return_value = []
-        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
-
-        mock_cred_store = MagicMock()
-        mock_cred_store.get_active_profile.return_value = SimpleNamespace(
-            access_token="eyJcodex",
-            account_id="acc-1",
-            plan_type="plus",
-        )
-        monkeypatch.setattr(app.state, "credential_store", mock_cred_store, raising=False)
-
-        resp = await client.get(
-            "/api/v1/models",
-            headers={"Authorization": "Bearer fake-token"},
-        )
-
-        assert resp.status_code == 200
-        models = resp.json().get("models", [])
-        # Spark 模型仅 Pro 订阅可用，Plus 用户不应出现
-        spark = next(
-            (m for m in models if m.get("name") == "openai-codex/gpt-5.3-codex-spark"),
-            None,
-        )
-        assert spark is None, "Spark 模型应仅对 Pro 订阅可见"
-        # 检查非 Pro-only 模型正常出现
-        codex52 = next(
-            (m for m in models if m.get("name") == "openai-codex/gpt-5.2-codex"),
-            None,
-        )
-        assert codex52 is not None
-        assert codex52.get("display_name") == "Codex 5.2"
-        assert codex52.get("model") == "openai-codex/gpt-5.2-codex"
-        app.state.auth_enabled = False
-
-    @pytest.mark.asyncio
-    async def test_models_endpoint_requires_admin_when_auth_enabled(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """模型列表为只读信息，所有已认证用户均可访问（不需要 admin）。"""
-        app.state.auth_enabled = True
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.get_current_user",
-            AsyncMock(return_value=SimpleNamespace(role="user")),
-        )
-        # mock _config_store to avoid closed DB
-        mock_cfg_store = MagicMock()
-        mock_cfg_store.get_active_model.return_value = None
-        mock_cfg_store.list_profiles.return_value = []
-        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
-
-        resp = await client.get(
-            "/api/v1/models",
-            headers={"Authorization": "Bearer fake-token"},
-        )
-        assert resp.status_code == 200
-        app.state.auth_enabled = False
-
-    @pytest.mark.asyncio
-    async def test_switch_model_allowed_for_authenticated_user(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """认证启用时，普通用户也可以切换模型（不再要求管理员权限）。"""
-        app.state.auth_enabled = True
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.get_current_user",
-            AsyncMock(return_value=SimpleNamespace(role="user")),
-        )
-        resp = await client.put(
-            "/api/v1/models/active",
-            json={"name": "default"},
-            headers={"Authorization": "Bearer fake-token"},
-        )
-        # 不再返回 403，而是正常处理（200 或其他非 403 状态码）
-        assert resp.status_code != 403
-        app.state.auth_enabled = False
+        resolver.resolve_sync.assert_called_once_with("gpt-5.2-codex")
 
     @pytest.mark.asyncio
     async def test_switch_model_rejects_deprecated_profile_model(
@@ -3021,12 +2876,13 @@ class TestAdminGuardForModelConfig:
         mock_cfg_store = MagicMock()
         mock_cfg_store.get_profile.return_value = {"name": "legacy", "model": "gemini-2.0-flash"}
         monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+        monkeypatch.setattr("excelmanus.api_app_state._config_store", mock_cfg_store)
 
         resp = await client.put("/api/v1/models/active", json={"name": "legacy"})
 
         assert resp.status_code == 422
         assert "已弃用" in (resp.json().get("error") or "")
-        assert "gemini-2.5-flash" in (resp.json().get("error") or "")
+        assert "gemini-3.8-flash" in (resp.json().get("error") or "")
 
     @pytest.mark.asyncio
     async def test_add_model_profile_rejects_deprecated_model_id(
@@ -3035,6 +2891,7 @@ class TestAdminGuardForModelConfig:
         mock_cfg_store = MagicMock()
         mock_cfg_store.get_profile.return_value = None
         monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
+        monkeypatch.setattr("excelmanus.api_app_state._config_store", mock_cfg_store)
 
         resp = await client.post(
             "/api/v1/config/models/profiles",
@@ -3048,7 +2905,7 @@ class TestAdminGuardForModelConfig:
 
         assert resp.status_code == 422
         assert "已弃用" in (resp.json().get("error") or "")
-        assert "claude-sonnet-4-6" in (resp.json().get("error") or "")
+        assert "claude-sonnet-5" in (resp.json().get("error") or "")
         mock_cfg_store.add_profile.assert_not_called()
 
     @pytest.mark.asyncio
@@ -3056,23 +2913,10 @@ class TestAdminGuardForModelConfig:
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """切换模型接口应支持 openai-codex 前缀 profile 名称。"""
-        app.state.auth_enabled = True
-        mock_store = MagicMock()
-        mock_store.get_by_id.return_value = SimpleNamespace(
-            role="user", is_active=True, allowed_models=None
-        )
-        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1"},
-        )
 
         # 不依赖全局 profile，走 Codex 用户私有模型解析路径。
         monkeypatch.setattr(api_module, "_config_store", None)
+        monkeypatch.setattr("excelmanus.api_app_state._config_store", None)
         mock_cred_store = MagicMock()
         mock_cred_store.get_active_profile.return_value = SimpleNamespace(
             access_token="eyJcodex",
@@ -3088,143 +2932,8 @@ class TestAdminGuardForModelConfig:
         )
 
         assert resp.status_code == 200
-        app.state.auth_enabled = False
-
-    @pytest.mark.asyncio
-    async def test_config_export_user_section_for_regular_user(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """普通用户可导出 user 区块。"""
-        app.state.auth_enabled = True
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        resp = await client.post(
-            "/api/v1/config/export",
-            json={"sections": ["user"], "mode": "simple"},
-            headers={"Authorization": "Bearer fake-token"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert "token" in data
-        assert data.get("sections") == ["user"]
-        app.state.auth_enabled = False
-
-    @pytest.mark.asyncio
-    async def test_config_export_global_sections_forbidden_for_regular_user(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """普通用户不可导出 main/aux/vlm/profiles。"""
-        app.state.auth_enabled = True
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        resp = await client.post(
-            "/api/v1/config/export",
-            json={"sections": ["main"], "mode": "simple"},
-            headers={"Authorization": "Bearer fake-token"},
-        )
-        assert resp.status_code == 400
-        err_body = resp.json()
-        assert "普通用户仅可导出" in err_body.get("error", "") or "普通用户仅可导出" in err_body.get("detail", "")
-        app.state.auth_enabled = False
-
-    @pytest.mark.asyncio
-    async def test_config_import_user_section_for_regular_user(
-        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """普通用户可导入 user 区块到自己的配置。"""
-        from excelmanus.config_transfer import export_config
-
-        app.state.auth_enabled = True
-        mock_store = MagicMock()
-        mock_store.update_user.return_value = True
-        monkeypatch.setattr(
-            "excelmanus.auth.middleware.decode_token",
-            lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-        )
-        monkeypatch.setattr(app.state, "user_store", mock_store, raising=False)
-        token = export_config(
-            {"user": {"api_key": "sk-xxx", "base_url": "https://api.example.com", "model": "gpt-4"}},
-            mode="simple",
-        )
-        resp = await client.post(
-            "/api/v1/config/import",
-            json={"token": token},
-            headers={"Authorization": "Bearer fake-token"},
-        )
-        assert resp.status_code == 200
-        data = resp.json()
-        assert data.get("status") == "ok"
-        assert "user" in data.get("imported", {})
-        mock_store.update_user.assert_called_once()
-        call_kw = mock_store.update_user.call_args[1]
-        assert call_kw.get("llm_api_key") == "sk-xxx"
-        assert call_kw.get("llm_base_url") == "https://api.example.com"
-        assert call_kw.get("llm_model") == "gpt-4"
-        app.state.auth_enabled = False
 
 
-class TestMentionsWorkspaceIsolation:
-    @pytest.mark.asyncio
-    async def test_mentions_does_not_leak_other_user_workspace_files(
-        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-    ) -> None:
-        workspace_root = tmp_path / "workspace"
-        (workspace_root / "users" / "u-1").mkdir(parents=True, exist_ok=True)
-        (workspace_root / "users" / "u-2").mkdir(parents=True, exist_ok=True)
-        (workspace_root / "users" / "u-1" / "my.xlsx").write_text("u1", encoding="utf-8")
-        (workspace_root / "users" / "u-2" / "secret.xlsx").write_text("u2", encoding="utf-8")
-
-        config = _test_config(workspace_root=str(workspace_root))
-        with _setup_api_globals(config=config):
-            app.state.auth_enabled = True
-            monkeypatch.setattr(
-                "excelmanus.auth.middleware.decode_token",
-                lambda _token: {"type": "access", "sub": "u-1", "role": "user"},
-            )
-            transport = _make_transport()
-            async with AsyncClient(transport=transport, base_url="http://test") as client:
-                resp = await client.get(
-                    "/api/v1/mentions",
-                    params={"path": "users/u-2"},
-                    headers={"Authorization": "Bearer fake-token"},
-                )
-
-            assert resp.status_code == 200
-            assert "users/u-2/secret.xlsx" not in resp.json().get("files", [])
-            app.state.auth_enabled = False
-
-
-class TestIsolationFlagSemantics:
-    def test_get_isolation_user_id_returns_none_when_isolation_disabled(self) -> None:
-        request = SimpleNamespace(
-            app=SimpleNamespace(
-                state=SimpleNamespace(
-                    auth_enabled=False,
-                )
-            )
-        )
-        assert api_module._get_isolation_user_id(request) is None
-
-    def test_get_isolation_user_id_uses_extract_when_isolation_enabled(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        request = SimpleNamespace(
-            app=SimpleNamespace(
-                state=SimpleNamespace(
-                    auth_enabled=True,
-                )
-            ),
-            state=SimpleNamespace(user_id="u-1"),
-        )
-        monkeypatch.setattr(
-            "excelmanus.auth.dependencies.extract_user_id",
-            lambda _req: "u-1",
-        )
-        assert api_module._get_isolation_user_id(request) == "u-1"
 
 
 class TestCapabilityProbeJobs:
@@ -3232,7 +2941,6 @@ class TestCapabilityProbeJobs:
     async def test_create_probe_job_and_query_snapshot(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        app.state.auth_enabled = False
         fake_caps = SimpleNamespace(
             to_dict=lambda: {
                 "model": "test-model",
@@ -3289,7 +2997,6 @@ class TestCapabilityProbeJobs:
     async def test_cancel_probe_job(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        app.state.auth_enabled = False
         async def _slow_probe(**_: object):
             await asyncio.sleep(1.0)
             return SimpleNamespace(to_dict=lambda: {})

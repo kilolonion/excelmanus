@@ -1,14 +1,12 @@
 "use client";
 
 import { useState } from "react";
-import { Terminal, X } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Terminal } from "lucide-react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  OverlayCard,
+  OverlayCardBody,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -30,15 +28,15 @@ export function CommandResultDialog({
   format,
 }: CommandResultDialogProps) {
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onClose()}>
-      <DialogContent className="max-w-lg max-h-[70vh] p-0">
-        <DialogHeader className="px-5 pt-5 pb-2">
-          <DialogTitle className="flex items-center gap-2 text-sm">
-            <Terminal className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
-            <code className="font-mono text-xs bg-muted px-2 py-0.5 rounded">{command}</code>
-          </DialogTitle>
-        </DialogHeader>
-        <ScrollArea className="px-5 pb-5" style={{ maxHeight: "calc(70vh - 80px)" }}>
+    <OverlayCard open={open} onOpenChange={(v) => !v && onClose()} size="md" tone="muted">
+      <OverlayCardHeader
+        icon={<Terminal className="h-5 w-5" />}
+        title={<code className="font-mono text-xs bg-muted px-2 py-0.5 rounded">{command}</code>}
+        description="命令执行结果"
+        onClose={onClose}
+      />
+      <OverlayCardBody className="pb-5">
+        <ScrollArea className="max-h-[min(50vh,420px)] pr-2">
           {format === "markdown" ? (
             <div className="prose prose-sm max-w-none text-foreground">
               <ReactMarkdown remarkPlugins={[remarkGfm]} components={baseMarkdownComponents}>{result}</ReactMarkdown>
@@ -47,12 +45,11 @@ export function CommandResultDialog({
             <pre className="text-sm whitespace-pre-wrap text-foreground">{result}</pre>
           )}
         </ScrollArea>
-      </DialogContent>
-    </Dialog>
+      </OverlayCardBody>
+    </OverlayCard>
   );
 }
 
-// 用于管理命令结果弹窗状态的 Hook
 export function useCommandResult() {
   const [state, setState] = useState<{
     open: boolean;

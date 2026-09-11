@@ -5,7 +5,6 @@ import {
   buildDefaultSessionTitle,
   isFallbackSessionTitle,
 } from "@/lib/session-title";
-
 interface SessionState {
   sessions: Session[];
   activeSessionId: string | null;
@@ -16,6 +15,11 @@ interface SessionState {
   updateSessionTitle: (id: string, title: string) => void;
   mergeSessions: (remote: Session[]) => void;
   updateSessionStatus: (id: string, status: "active" | "archived") => void;
+}
+
+/** 当前选中会话 id 的唯一可变事实源。 */
+export function getActiveSessionId(): string | null {
+  return useSessionStore.getState().activeSessionId;
 }
 
 export const useSessionStore = create<SessionState>()(

@@ -118,7 +118,7 @@ class TaskItem:
         self.status = new_status
 
     def force_retry(self) -> None:
-        """强制将 FAILED 任务重置为 IN_PROGRESS（仅 Fix-Verify 循环使用）。
+        """强制将 FAILED 任务重置为 IN_PROGRESS。
 
         绕过 VALID_TRANSITIONS 约束。仅当 status == FAILED 时生效，
         其他状态调用无操作。

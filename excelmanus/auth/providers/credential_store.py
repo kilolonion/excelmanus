@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+PROCESS_USER_ID = "__process__"
+
 
 # ── CredentialStore ──────────────────────────────────────────
 
@@ -106,9 +108,10 @@ class CredentialStore:
         )
 
     def get_active_profile(
-        self, user_id: str, provider: str
+        self, provider: str, user_id: str | None = None
     ) -> AuthProfileRecord | None:
-        """获取用户指定 provider 的活跃 profile（解密 token）。"""
+        """获取指定 provider 的活跃 profile。默认取进程级一行。"""
+        uid = user_id if user_id is not None else PROCESS_USER_ID
         row = self._conn.execute(
             """SELECT id, user_id, provider, profile_name, credential_type,
                       access_token, refresh_token, expires_at,
@@ -117,7 +120,7 @@ class CredentialStore:
                FROM auth_profiles
                WHERE user_id = ? AND provider = ? AND is_active = 1
                ORDER BY updated_at DESC LIMIT 1""",
-            (user_id, provider),
+            (uid, provider),
         ).fetchone()
         if not row:
             return None
@@ -141,8 +144,9 @@ class CredentialStore:
             return None
         return self._row_to_record(row)
 
-    def list_profiles(self, user_id: str) -> list[AuthProfileSummary]:
-        """列出用户所有 profile（不含明文 token）。"""
+    def list_profiles(self, user_id: str | None = None) -> list[AuthProfileSummary]:
+        """列出指定归属的 profile（不含明文 token）。默认进程级。"""
+        uid = user_id if user_id is not None else PROCESS_USER_ID
         rows = self._conn.execute(
             """SELECT id, user_id, provider, profile_name, credential_type,
                       expires_at, account_id, plan_type, is_active,
@@ -150,7 +154,7 @@ class CredentialStore:
                FROM auth_profiles
                WHERE user_id = ?
                ORDER BY updated_at DESC""",
-            (user_id,),
+            (uid,),
         ).fetchall()
         result: list[AuthProfileSummary] = []
         for r in rows:

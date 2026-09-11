@@ -14,6 +14,8 @@ import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { buildExcelFileUrl, downloadFile } from "@/lib/api";
+import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
+import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -37,29 +39,38 @@ export function ExcelFullView() {
   const enterSelectionMode = useExcelStore((s) => s.enterSelectionMode);
   const exitSelectionMode = useExcelStore((s) => s.exitSelectionMode);
   const confirmSelection = useExcelStore((s) => s.confirmSelection);
+  const draftRange = useExcelStore((s) => s.draftRange);
+  const setDraftRange = useExcelStore((s) => s.setDraftRange);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const {
+    handleCellEdit,
+    conflict: writeConflict,
+    writeError,
+    reloadAfterConflict,
+  } = useExcelCellEdit(fullViewPath);
 
-  const [pendingRange, setPendingRange] = useState<{ range: string; sheet: string } | null>(null);
   const [withStyles, setWithStyles] = useState(true);
 
   const handleRangeSelected = useCallback((range: string, sheet: string) => {
-    setPendingRange({ range, sheet });
-  }, []);
+    const path = fullViewPath || undefined;
+    const contentVersion = path
+      ? useExcelStore.getState().getContentVersion(path) ?? undefined
+      : undefined;
+    setDraftRange({ range, sheet, path, contentVersion });
+  }, [setDraftRange, fullViewPath]);
 
   const handleConfirmRange = useCallback(() => {
-    if (pendingRange && fullViewPath) {
+    if (draftRange && fullViewPath) {
       confirmSelection({
         filePath: fullViewPath,
-        sheet: pendingRange.sheet,
-        range: pendingRange.range,
+        sheet: draftRange.sheet,
+        range: draftRange.range,
       });
-      setPendingRange(null);
     }
-  }, [pendingRange, fullViewPath, confirmSelection]);
+  }, [draftRange, fullViewPath, confirmSelection]);
 
   const handleCancelRange = useCallback(() => {
     exitSelectionMode();
-    setPendingRange(null);
   }, [exitSelectionMode]);
 
   const toggleSelectionMode = useCallback(() => {
@@ -67,7 +78,6 @@ export function ExcelFullView() {
       handleCancelRange();
     } else {
       enterSelectionMode();
-      setPendingRange(null);
     }
   }, [selectionMode, enterSelectionMode, handleCancelRange]);
 
@@ -211,14 +221,22 @@ export function ExcelFullView() {
           selectionMode={selectionMode}
           onRangeSelected={handleRangeSelected}
           withStyles={withStyles}
+          onCellEdit={handleCellEdit}
         />
       </div>
 
+      {(writeConflict || writeError) && (
+        <ExcelWriteConflictBar
+          onReload={reloadAfterConflict}
+          error={writeConflict ? null : writeError}
+        />
+      )}
+
       {/* 选区确认栏 */}
-      {selectionMode && pendingRange && (
+      {selectionMode && draftRange && (
         <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2 flex-shrink-0">
           <span className="text-xs font-mono flex-1 truncate" style={{ color: "var(--em-primary)" }}>
-            {pendingRange.sheet}!{pendingRange.range}
+            {draftRange.sheet}!{draftRange.range}
           </span>
           <button
             onClick={handleConfirmRange}

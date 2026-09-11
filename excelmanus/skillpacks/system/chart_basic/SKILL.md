@@ -9,24 +9,24 @@ version: "2.0.0"
 ---
 ## 图表工具选择（必须先判断）
 
-- **Excel 原生图表**（可交互、随数据更新）→ 直接调用 `create_excel_chart` 工具
+- **Excel 原生图表**（可交互、随数据更新）→ 直接调用 `manage_spreadsheet_objects(kind="chart")`
   适用：用户要求"在 Excel 中画图"、"插入图表到工作表"、目标产物是 Excel 文件。
 - **PNG 图片导出** → 通过 `run_code` + matplotlib（见参考模板）
   适用：用户要求"导出图片"、"生成图表图片"、目标产物是独立图片文件。
-- 意图不明确且数据源是 Excel 时，**默认优先 `create_excel_chart`**。
+- 意图不明确且数据源是 Excel 时，**默认优先 `manage_spreadsheet_objects`**。
 
 ## 图表任务流程
 
-1. 先用 `read_excel` 或 `list_sheets(include=["columns"])` 确认数据范围和列名。
+1. 先用 `inspect_spreadsheet` 确认数据范围和列名。
 2. 根据上述规则选择工具路径。
-3. `create_excel_chart` 的 `data_range` 必须包含表头行（第一行作为系列名）。
+3. 图表的 `data_range` 必须包含表头行（第一行作为系列名）。
 4. 图表失败时先解释字段/范围问题，再给可行参数。
 
 ## 聚合 + 画图
 
 当需要分组统计后再绘图（如"各部门人数饼图"）：
 1. 用 `run_code` 做 pandas 聚合并写回 Excel 新 sheet。
-2. 用 `create_excel_chart` 基于该 sheet 的单元格范围创建图表。
+2. 用 `manage_spreadsheet_objects(kind="chart")` 基于该 sheet 的单元格范围创建图表。
 3. 或用 `run_code` + matplotlib 直接生成 PNG（见参考模板）。
 
 ## Excel 表格对象（Table）

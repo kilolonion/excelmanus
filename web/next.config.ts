@@ -29,7 +29,7 @@ function getProjectVersion(): string {
 
 const nextConfig: NextConfig = {
   output: "standalone",
-  typescript: { ignoreBuildErrors: true },
+  typescript: { ignoreBuildErrors: false },
   allowedDevOrigins: getLocalNetworkOrigins(),
   env: {
     NEXT_PUBLIC_APP_VERSION: getProjectVersion(),

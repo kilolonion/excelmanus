@@ -1,23 +1,17 @@
-"""Verifier delta 注入测试。
+"""写入日志与摘要回归测试。
 
 覆盖：
 - SessionState.record_write_operation 记录结构化写入日志
 - SessionState.render_write_operations_log 渲染可读文本
 - ToolDispatcher._extract_write_summary 提取写入摘要
 - ToolDispatcher._extract_run_code_write_summary 提取 run_code 摘要
-- verifier prompt 包含写入操作记录
 """
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
 
-import pytest
 
 from excelmanus.engine_core.session_state import SessionState
-from excelmanus.subagent.models import SubagentResult
 
 
 # ── SessionState write_operations_log 测试 ──────────────────
@@ -166,106 +160,3 @@ class TestExtractRunCodeWriteSummary:
 
 
 # ── Verifier prompt 含 delta 注入测试 ──────────────────────
-
-
-class TestVerifierPromptDeltaInjection:
-    @pytest.mark.asyncio
-    async def test_verifier_prompt_includes_write_log(self):
-        """有写入操作日志时，verifier prompt 应包含「本轮写入操作记录」。"""
-        from excelmanus.config import ExcelManusConfig
-        from excelmanus.engine import AgentEngine
-        from excelmanus.tools.registry import ToolRegistry
-
-        cfg = ExcelManusConfig(
-            api_key="test-key",
-            base_url="https://test.example.com/v1",
-            model="test-model",
-            max_iterations=20,
-            max_consecutive_failures=3,
-            workspace_root=str(Path(__file__).resolve().parent),
-            backup_enabled=False,
-        )
-        engine = AgentEngine(config=cfg, registry=ToolRegistry())
-        engine._subagent_enabled = True
-
-        # 模拟写入操作日志
-        engine._state.record_write_operation(
-            tool_name="write_cells",
-            file_path="output.xlsx",
-            sheet="Sheet1",
-            cell_range="A1:D500",
-            summary="写入 500 行 × 4 列",
-        )
-        engine._state.record_write_operation(
-            tool_name="run_code",
-            file_path="output.xlsx",
-            summary="pandas groupby 写入汇总",
-        )
-
-        mock_result = SubagentResult(
-            success=True,
-            summary=json.dumps({"verdict": "pass", "confidence": "high", "checks": ["数据完整"]}),
-            subagent_name="verifier",
-            permission_mode="readOnly",
-            conversation_id="verifier-test",
-        )
-        captured_prompt: list[str] = []
-
-        async def _capture_prompt(*, agent_name, prompt, on_event=None):
-            captured_prompt.append(prompt)
-            return mock_result
-
-        with patch.object(engine, "run_subagent", side_effect=_capture_prompt):
-            await engine._run_finish_verifier_advisory(
-                report={"operations": "数据写入", "key_findings": "500行"},
-                summary="",
-            )
-
-        assert len(captured_prompt) == 1
-        prompt_text = captured_prompt[0]
-        assert "本轮写入操作记录" in prompt_text
-        assert "write_cells" in prompt_text
-        assert "output.xlsx / Sheet1 / A1:D500" in prompt_text
-        assert "500 行 × 4 列" in prompt_text
-        assert "run_code" in prompt_text
-
-    @pytest.mark.asyncio
-    async def test_verifier_prompt_omits_write_log_when_empty(self):
-        """无写入操作日志时，verifier prompt 不应包含写入记录段。"""
-        from excelmanus.config import ExcelManusConfig
-        from excelmanus.engine import AgentEngine
-        from excelmanus.tools.registry import ToolRegistry
-
-        cfg = ExcelManusConfig(
-            api_key="test-key",
-            base_url="https://test.example.com/v1",
-            model="test-model",
-            max_iterations=20,
-            max_consecutive_failures=3,
-            workspace_root=str(Path(__file__).resolve().parent),
-            backup_enabled=False,
-        )
-        engine = AgentEngine(config=cfg, registry=ToolRegistry())
-        engine._subagent_enabled = True
-
-        mock_result = SubagentResult(
-            success=True,
-            summary=json.dumps({"verdict": "pass", "checks": ["ok"]}),
-            subagent_name="verifier",
-            permission_mode="readOnly",
-            conversation_id="verifier-test",
-        )
-        captured_prompt: list[str] = []
-
-        async def _capture_prompt(*, agent_name, prompt, on_event=None):
-            captured_prompt.append(prompt)
-            return mock_result
-
-        with patch.object(engine, "run_subagent", side_effect=_capture_prompt):
-            await engine._run_finish_verifier_advisory(
-                report={"operations": "读取数据", "key_findings": "100行"},
-                summary="",
-            )
-
-        assert len(captured_prompt) == 1
-        assert "本轮写入操作记录" not in captured_prompt[0]

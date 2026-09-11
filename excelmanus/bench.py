@@ -210,8 +210,8 @@ class BenchResult:
     engine_trace: list[dict[str, Any]] = field(default_factory=list)
     # 当前使用的模型标识
     active_model: str = ""
-    # write_hint 分类结果（may_write / read_only / unknown）
-    write_hint: str = "unknown"
+    # 用户选定 chat_mode 对应的工具可见性（may_write / read_only）
+    tool_access: str = "unknown"
     # 关键配置快照（用于事后审计）
     config_snapshot: dict[str, Any] = field(default_factory=dict)
     # 任务/问答/审批事件
@@ -244,7 +244,7 @@ class BenchResult:
                 "tool_scope": self.tool_scope,
                 "status": self.status,
                 "error": self.error,
-                "write_hint": self.write_hint,
+                "tool_access": self.tool_access,
             },
             "artifacts": {
                 "tool_calls": [tc.to_dict() for tc in self.tool_calls],
@@ -717,7 +717,6 @@ class _EngineTracer:
 
     通过 monkey-patch 以下方法实现：
     - ``_prepare_system_prompts_for_request`` → 记录每轮注入的系统提示（分解各组件）
-    - ``_enrich_tool_result_with_window_perception`` → 记录窗口感知增强前后对比
 
     通过环境变量 ``EXCELMANUS_BENCH_TRACE=0`` 或 CLI ``--no-trace`` 禁用。
     """
@@ -734,16 +733,9 @@ class _EngineTracer:
             raise AttributeError(
                 "bench requires engine._context_builder; engine may have been refactored"
             )
-        if not hasattr(engine, "_enrich_tool_result_with_window_perception"):
-            raise AttributeError(
-                "bench requires engine._enrich_tool_result_with_window_perception; engine may have been refactored"
-            )
         self._orig_prepare = engine._context_builder._prepare_system_prompts_for_request
-        self._orig_enrich = engine._enrich_tool_result_with_window_perception
 
-        # 猴子补丁：拦截系统提示和窗口感知方法
         engine._context_builder._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
-        engine._enrich_tool_result_with_window_perception = self._traced_enrich  # type: ignore[assignment]
 
     def _traced_prepare(
         self, skill_contexts: list[str], **kwargs: Any,
@@ -763,9 +755,7 @@ class _EngineTracer:
             # 尝试识别组件类型
             if idx > 0:
                 snippet = prompt[:200]
-                if "窗口感知" in snippet or "Window Perception" in snippet:
-                    label = "window_perception_notice"
-                elif "权限提示" in snippet or "fullAccess" in snippet:
+                if "权限提示" in snippet or "fullAccess" in snippet:
                     label = "access_notice"
                 elif "MCP" in snippet:
                     label = "mcp_context_notice"
@@ -810,37 +800,6 @@ class _EngineTracer:
         })
         return prompts, error
 
-    def _traced_enrich(
-        self,
-        *,
-        tool_name: str,
-        arguments: dict[str, Any],
-        result_text: str,
-        success: bool,
-    ) -> str:
-        """拦截窗口感知增强，记录前后对比。"""
-        enriched = self._orig_enrich(
-            tool_name=tool_name,
-            arguments=arguments,
-            result_text=result_text,
-            success=success,
-        )
-        # 仅在内容实际被增强时记录
-        if enriched != result_text:
-            self.entries.append({
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-                "event": "window_perception_enrichment",
-                "iteration": self._iteration,
-                "data": {
-                    "tool_name": tool_name,
-                    "original_chars": len(result_text),
-                    "enriched_chars": len(enriched),
-                    "added_chars": len(enriched) - len(result_text),
-                    "enriched_suffix": enriched[len(result_text):][:2000],
-                },
-            })
-        return enriched
-
     def snapshot_and_reset(self) -> list[dict[str, Any]]:
         """快照当前 trace 数据并重置，用于多轮分轮记录。
 
@@ -855,7 +814,6 @@ class _EngineTracer:
     def restore(self) -> None:
         """恢复原始方法。"""
         self._engine._context_builder._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
-        self._engine._enrich_tool_result_with_window_perception = self._orig_enrich  # type: ignore[assignment]
 
 
 # ── 执行器 ────────────────────────────────────────────────
@@ -889,7 +847,7 @@ def _dump_conversation_messages(
 
     当 interceptor 有调用记录时，使用最后一次请求的 messages（完全准确，
     包含所有动态注入的 system prompts：file_structure_preview、
-    skill_context、window_perception 等）。
+    skill_context 等）。
     否则回退到 memory.get_messages()（仅含静态 base system prompt）。
     """
     try:
@@ -989,7 +947,7 @@ async def run_case(
 
     Args:
         trace_enabled: 启用 engine 内部交互轨迹记录（系统提示注入、
-            窗口感知增强、工具范围决策等）。默认开启，可通过 ``--no-trace`` 或
+            工具范围决策等）。默认开启，可通过 ``--no-trace`` 或
             ``EXCELMANUS_BENCH_TRACE=0`` 禁用。
         output_dir: 日志输出目录，用于构建文件隔离工作目录。
     """
@@ -1225,8 +1183,11 @@ async def run_case(
     if tracer is not None and not is_multi_turn:
         case_engine_trace = tracer.snapshot_and_reset()
 
-    # 采集 write_hint
-    _write_hint = str(getattr(engine, "_current_write_hint", "unknown"))
+    _chat_mode = str(getattr(engine, "_current_chat_mode", "write") or "write")
+    _tool_access = "read_only" if _chat_mode in ("read", "plan") else "may_write"
+    _result_access = getattr(chat_result, "tool_access", "") if chat_result is not None else ""
+    if _result_access:
+        _tool_access = str(_result_access)
 
     # 采集关键 config 快照
     _config_snapshot = {
@@ -1260,7 +1221,7 @@ async def run_case(
         error=case_error,
         engine_trace=case_engine_trace,
         active_model=engine.current_model,
-        write_hint=_write_hint,
+        tool_access=_tool_access,
         config_snapshot=_config_snapshot,
         reasoning_metrics=getattr(chat_result, "reasoning_metrics", {}) if chat_result is not None else {},
     )

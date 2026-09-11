@@ -12,6 +12,21 @@ from excelmanus.security import SecurityViolationError
 from excelmanus.tools import code_tools
 
 
+def _payload(result):
+    from excelmanus.engine_core.tool_result import ToolResult
+
+    if isinstance(result, ToolResult):
+        data = dict(result.value) if isinstance(result.value, dict) else json.loads(result.model_text)
+        if result.error is not None:
+            data.setdefault("error", result.error.message)
+            data.setdefault("message", result.error.message)
+            data.setdefault("status", "error")
+        return data
+    if isinstance(result, str):
+        return json.loads(result)
+    return result
+
+
 @pytest.fixture()
 def workspace(tmp_path: Path) -> Path:
     """创建临时工作区并初始化 guard。"""
@@ -22,7 +37,7 @@ def workspace(tmp_path: Path) -> Path:
 
 class TestWriteTextFile:
     def test_write_success(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.write_text_file(
                 "scripts/temp/job.py",
                 "print('ok')\n",
@@ -35,7 +50,7 @@ class TestWriteTextFile:
     def test_write_reject_when_overwrite_false(self, workspace: Path) -> None:
         target = workspace / "scripts" / "temp" / "job.py"
         target.write_text("old", encoding="utf-8")
-        result = json.loads(
+        result = _payload(
             code_tools.write_text_file(
                 "scripts/temp/job.py",
                 "new",
@@ -55,7 +70,7 @@ class TestRunCodeInline:
     """run_code 内联模式测试。"""
 
     def test_inline_success(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('hello')\n",
                 python_command=sys.executable,
@@ -79,7 +94,7 @@ class TestRunCodeInline:
         assert remaining == []
 
     def test_inline_syntax_error(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="def(",
                 python_command=sys.executable,
@@ -90,7 +105,7 @@ class TestRunCodeInline:
         assert result["return_code"] != 0
 
     def test_inline_timeout(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="import time; time.sleep(5)",
                 timeout_seconds=1,
@@ -104,7 +119,7 @@ class TestRunCodeInline:
 
     def test_inline_sandbox_env_whitelist(self, workspace: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("EXCELMANUS_TEST_SECRET", "TOP_SECRET")
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="import os; print(os.getenv('EXCELMANUS_TEST_SECRET'))",
                 python_command=sys.executable,
@@ -122,7 +137,7 @@ class TestRunCodeFile:
         script = workspace / "scripts" / "temp" / "ok.py"
         script.write_text("print('hello')\n", encoding="utf-8")
 
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 script_path="scripts/temp/ok.py",
                 python_command=sys.executable,
@@ -140,7 +155,7 @@ class TestRunCodeFile:
         script.write_text("print('auto')\n", encoding="utf-8")
         monkeypatch.setenv("EXCELMANUS_RUN_PYTHON", "python_not_found_123")
 
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 script_path="scripts/temp/auto_ok.py",
                 python_command="auto",
@@ -161,7 +176,7 @@ class TestRunCodeValidation:
         """当 code 和 script_path 都传了非空值时，优先使用 script_path。"""
         script = workspace / "scripts" / "temp" / "both.py"
         script.write_text("print('from_file')\n", encoding="utf-8")
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('from_code')",
                 script_path="scripts/temp/both.py",
@@ -181,7 +196,7 @@ class TestRunCodeValidation:
         """code 为空字符串 + script_path 有值 → 走文件模式（LLM 常见调用模式）。"""
         script = workspace / "scripts" / "temp" / "empty_code.py"
         script.write_text("print('script_ok')\n", encoding="utf-8")
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="",
                 script_path="scripts/temp/empty_code.py",
@@ -197,7 +212,7 @@ class TestRunCodeValidation:
         """code 为纯空白 + script_path 有值 → 走文件模式。"""
         script = workspace / "scripts" / "temp" / "ws.py"
         script.write_text("print('ws_ok')\n", encoding="utf-8")
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="   ",
                 script_path="scripts/temp/ws.py",
@@ -215,7 +230,7 @@ class TestRunCodeValidation:
 
     def test_empty_script_path_with_code(self, workspace: Path) -> None:
         """script_path 为空字符串 + code 有值 → 走内联模式（LLM 常见调用模式）。"""
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('inline_ok')",
                 script_path="",
@@ -229,7 +244,7 @@ class TestRunCodeValidation:
 
     def test_empty_stdout_stderr_file(self, workspace: Path) -> None:
         """stdout_file / stderr_file 为空字符串 → 视为未传，不写文件。"""
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('no_file')",
                 stdout_file="",
@@ -256,7 +271,7 @@ class TestRunCodeValidation:
         target = bench_dir / "data.txt"
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('bad')"
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code=code,
                 python_command=sys.executable,
@@ -289,7 +304,7 @@ class TestRunCodeValidation:
         target = bench_dir / "data.txt"
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('updated')"
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code=code,
                 python_command=sys.executable,
@@ -304,7 +319,7 @@ class TestRunCodeValidation:
 
     def test_no_cow_hint_when_no_cow_mapping(self, workspace: Path) -> None:
         """无 cow_mapping 时不应有 cow_hint。"""
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('ok')",
                 python_command=sys.executable,
@@ -317,7 +332,7 @@ class TestRunCodeValidation:
 
     def test_no_recovery_hint_on_success(self, workspace: Path) -> None:
         """成功执行不应有 recovery_hint。"""
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('ok')",
                 python_command=sys.executable,
@@ -329,7 +344,7 @@ class TestRunCodeValidation:
 
     def test_no_recovery_hint_on_red_tier(self, workspace: Path) -> None:
         """RED 模式失败不应有 recovery_hint（RED 无沙盒保护）。"""
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="raise ValueError('test')",
                 python_command=sys.executable,
@@ -400,7 +415,7 @@ class TestTruncationWarningInRunCode:
 
     def test_ellipsis_code_gets_truncation_warning(self, workspace: Path) -> None:
         code = "x = 1\n...\n"
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code=code,
                 python_command=sys.executable,
@@ -411,7 +426,7 @@ class TestTruncationWarningInRunCode:
         assert "Ellipsis" in result["truncation_warning"]
 
     def test_clean_code_no_truncation_warning(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('ok')",
                 python_command=sys.executable,
@@ -425,7 +440,7 @@ class TestEmptyOutputDiagnostic:
     """空输出诊断测试。"""
 
     def test_success_with_output_no_diagnostic(self, workspace: Path) -> None:
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="print('ok')",
                 python_command=sys.executable,
@@ -437,7 +452,7 @@ class TestEmptyOutputDiagnostic:
 
     def test_success_no_output_gets_diagnostic(self, workspace: Path) -> None:
         # Code that succeeds but produces no output
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="x = 1 + 2",
                 python_command=sys.executable,
@@ -451,7 +466,7 @@ class TestEmptyOutputDiagnostic:
     def test_failed_no_output_gets_diagnostic(self, workspace: Path) -> None:
         # Code that fails silently (try/except swallows error, no output)
         code = "import sys\ntry:\n    raise ValueError('x')\nexcept:\n    sys.exit(1)\n"
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code=code,
                 python_command=sys.executable,
@@ -464,7 +479,7 @@ class TestEmptyOutputDiagnostic:
 
     def test_failed_with_stderr_no_diagnostic(self, workspace: Path) -> None:
         # Code that fails with visible error output
-        result = json.loads(
+        result = _payload(
             code_tools.run_code(
                 code="raise ValueError('visible error')",
                 python_command=sys.executable,

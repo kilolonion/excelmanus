@@ -4,8 +4,6 @@ import { useState, useCallback, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { fetchCodexStatus } from "@/lib/auth-api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
-import { useAuthStore } from "@/stores/auth-store";
-import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useUIStore } from "@/stores/ui-store";
 import { WelcomeStep } from "./steps/WelcomeStep";
 import { ProviderSelectStep } from "./steps/ProviderSelectStep";
@@ -35,15 +33,10 @@ export function OnboardingWizard() {
   const completeWizard = useOnboardingStore((s) => s.completeWizard);
   const skipWizard = useOnboardingStore((s) => s.skipWizard);
   const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
-  const user = useAuthStore((s) => s.user);
-  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
-  const openProfile = useUIStore((s) => s.openProfile);
-  const isAdmin = !authEnabled || !user || user.role === "admin";
+  const openSettings = useUIStore((s) => s.openSettings);
 
-  // When backend config is missing, skip is not allowed — user must configure to proceed
   const configRequired = backendConfigured === false;
-  const isOAuthLoginUser = Boolean(user?.oauthProviders?.length);
-  const shouldCheckOAuthConnectStatus = isOAuthLoginUser && !isAdmin && !configRequired;
+  const shouldCheckOAuthConnectStatus = false;
 
   useEffect(() => {
     let cancelled = false;
@@ -104,13 +97,13 @@ export function OnboardingWizard() {
 
   const handleGoConnectOAuth = useCallback(() => {
     completeWizard();
-    openProfile();
-  }, [completeWizard, openProfile]);
+    openSettings("model");
+  }, [completeWizard, openSettings]);
 
   const skipHandler = configRequired ? undefined : handleSkip;
 
   const steps = [
-    <WelcomeStep key="welcome" onNext={goNext} onSkip={skipHandler} isAdmin={isAdmin} />,
+    <WelcomeStep key="welcome" onNext={goNext} onSkip={skipHandler} />,
     <ProviderSelectStep
       key="provider-select"
       onSelect={handleSelectProvider}
@@ -123,7 +116,6 @@ export function OnboardingWizard() {
       <ProviderGuideStep
         key="provider-guide"
         provider={selectedProvider}
-        isAdmin={isAdmin}
         onBack={goBack}
         onComplete={goNext}
         onSkip={skipHandler}

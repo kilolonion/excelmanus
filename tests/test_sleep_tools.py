@@ -18,14 +18,14 @@ class TestSleepValidation:
     """参数校验测试。"""
 
     def test_zero_seconds_rejected(self) -> None:
-        assert "必须大于 0" in sleep(0)
+        assert "必须大于 0" in sleep(0).model_text
 
     def test_negative_seconds_rejected(self) -> None:
-        assert "必须大于 0" in sleep(-5)
+        assert "必须大于 0" in sleep(-5).model_text
 
     def test_exceeds_max_rejected(self) -> None:
         result = sleep(_MAX_SLEEP_SECONDS + 1)
-        assert "不能超过" in result
+        assert "不能超过" in result.model_text
 
     def test_boundary_max_accepted(self) -> None:
         """最大值边界：不应被拒绝（但会实际 sleep，用 cancel 立即中断）。"""
@@ -33,8 +33,8 @@ class TestSleepValidation:
         event.set()  # 立即取消以避免真正等待 300 秒
         set_cancel_event(event)
         result = sleep(_MAX_SLEEP_SECONDS)
-        assert "已取消" in result
-        assert "未实际等待" in result
+        assert "已取消" in result.model_text
+        assert "未实际等待" in result.model_text
 
 
 class TestSleepExecution:
@@ -44,16 +44,16 @@ class TestSleepExecution:
         t0 = time.monotonic()
         result = sleep(0.1)
         elapsed = time.monotonic() - t0
-        assert "已等待" in result
+        assert "已等待" in result.model_text
         assert elapsed >= 0.09
 
     def test_reason_displayed(self) -> None:
         result = sleep(0.05, reason="等待文件同步")
-        assert "等待文件同步" in result
+        assert "等待文件同步" in result.model_text
 
     def test_no_reason_no_label(self) -> None:
         result = sleep(0.05)
-        assert "原因" not in result
+        assert "原因" not in result.model_text
 
 
 class TestSleepCancellation:
@@ -79,7 +79,7 @@ class TestSleepCancellation:
             # 手动注入 contextvar（asyncio.to_thread 会自动完成此步骤）
             token = set_cancel_event(event)
             try:
-                results.append(sleep(60))
+                results.append(sleep(60).model_text)
             finally:
                 _cancel_event_var.reset(token)
 
@@ -101,8 +101,8 @@ class TestSleepCancellation:
         t0 = time.monotonic()
         result = sleep(60)
         elapsed = time.monotonic() - t0
-        assert "已取消" in result
-        assert "未实际等待" in result
+        assert "已取消" in result.model_text
+        assert "未实际等待" in result.model_text
         assert elapsed < 1.0
 
     def test_cancel_clears_after_use(self) -> None:
@@ -111,7 +111,7 @@ class TestSleepCancellation:
         sleep(10)
         assert not self._event.is_set()
         result = sleep(0.05)
-        assert "已等待" in result
+        assert "已等待" in result.model_text
 
     def test_no_contextvar_fallback(self) -> None:
         """未设置 contextvar 时，sleep 回退到本地 event，正常完成（CLI 模式）。"""
@@ -119,7 +119,7 @@ class TestSleepCancellation:
         _cancel_event_var.reset(self._token)
         self._token = _cancel_event_var.set(None)
         result = sleep(0.05)
-        assert "已等待" in result
+        assert "已等待" in result.model_text
         # 恢复
         _cancel_event_var.reset(self._token)
         self._token = set_cancel_event(self._event)

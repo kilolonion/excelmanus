@@ -1,11 +1,26 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
 import { Check, Loader2, Search, Sparkles, RefreshCw, AlertTriangle, X, ChevronUp } from "lucide-react";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
 import type { ModelInfo } from "@/lib/types";
+
+/**
+ * Portal overlay to document.body so `position: fixed` is viewport-relative.
+ * The topbar uses `backdrop-filter` + `overflow-hidden`, which otherwise
+ * traps fixed descendants and makes the sheet expand inside the header.
+ */
+function BottomSheetPortal({ children }: { children: React.ReactNode }) {
+  const [target, setTarget] = useState<HTMLElement | null>(null);
+  useEffect(() => {
+    setTarget(document.body);
+  }, []);
+  if (!target) return null;
+  return createPortal(children, target);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Types                                                              */
@@ -93,6 +108,7 @@ function CompactRetrySheet({
   );
 
   return (
+    <BottomSheetPortal>
     <AnimatePresence>
       {open && (
         <>
@@ -103,7 +119,7 @@ function CompactRetrySheet({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-80 bg-black/40 backdrop-blur-[2px]"
+            className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-[2px]"
             onClick={close}
           />
 
@@ -118,7 +134,7 @@ function CompactRetrySheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-81 flex flex-col bg-background rounded-t-2xl shadow-2xl"
+            className="fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
             style={{ maxHeight: "50dvh", touchAction: "none" }}
           >
             {/* Drag handle */}
@@ -201,6 +217,7 @@ function CompactRetrySheet({
         </>
       )}
     </AnimatePresence>
+    </BottomSheetPortal>
   );
 }
 
@@ -280,6 +297,7 @@ function SwitchSheet({
   const canExpand = models.length >= 4;
 
   return (
+    <BottomSheetPortal>
     <AnimatePresence>
       {open && (
         <>
@@ -290,7 +308,7 @@ function SwitchSheet({
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.15 }}
-            className="fixed inset-0 z-80 bg-black/40 backdrop-blur-[2px]"
+            className="fixed inset-0 z-[80] bg-black/40 backdrop-blur-[2px]"
             onClick={close}
           />
 
@@ -305,7 +323,7 @@ function SwitchSheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-81 flex flex-col bg-background rounded-t-2xl shadow-2xl"
+            className="fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
             style={{
               maxHeight: expanded ? `${SNAP_FULL}dvh` : `${SNAP_HALF}dvh`,
               transition: "max-height 0.3s cubic-bezier(0.25, 0.1, 0.25, 1)",
@@ -552,6 +570,7 @@ function SwitchSheet({
         </>
       )}
     </AnimatePresence>
+    </BottomSheetPortal>
   );
 }
 

@@ -44,14 +44,8 @@ def _error(status: int, msg: str) -> JSONResponse:
 
 
 def _is_admin_or_noauth(request: Request) -> bool:
-    """管理员或无认证模式下允许操作。"""
-    from excelmanus.api import _config
-    if _config is None or not _config.auth_enabled:
-        return True
-    user = getattr(request.state, "user", None)
-    if user and getattr(user, "role", None) == "admin":
-        return True
-    return False
+    """单用户架构下始终允许版本/更新操作。"""
+    return True
 
 
 def _get_git_commit(root: Path) -> str | None:

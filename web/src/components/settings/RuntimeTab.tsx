@@ -14,7 +14,6 @@ import {
   Gauge,
   Shrink,
   History,
-  Lock,
   Clock,
   Users,
   AlertCircle,
@@ -42,32 +41,26 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { apiGet, apiPut, fetchDockerSandboxStatus, setDockerSandbox, buildDockerSandboxImage, fetchSessionIsolationStatus } from "@/lib/api";
-import type { DockerSandboxStatus, SessionIsolationStatus } from "@/lib/api";
+import { apiGet, apiPut, fetchDockerSandboxStatus, setDockerSandbox, buildDockerSandboxImage } from "@/lib/api";
+import type { DockerSandboxStatus } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
-import { useAuthStore } from "@/stores/auth-store";
-import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
 
 interface RuntimeConfig {
-  // 会话与多用户
-  auth_enabled: boolean;
+  // 会话
   session_ttl_seconds: number;
   max_sessions: number;
   max_consecutive_failures: number;
   // 执行与安全
   subagent_enabled: boolean;
-  verifier_enabled: boolean;
   backup_enabled: boolean;
   checkpoint_enabled: boolean;
   external_safe_mode: boolean;
   max_iterations: number;
-  guard_mode: string;
   friendly_error_messages: boolean;
-  // AUX / VLM 开关
+  // AUX 开关
   aux_enabled: boolean;
-  vlm_enabled: boolean;
   // 上下文与记忆
   max_context_tokens: number;
   memory_enabled: boolean;
@@ -102,39 +95,8 @@ interface RuntimeConfig {
   llm_retry_max_attempts: number;
   llm_retry_base_delay_seconds: number;
   llm_retry_max_delay_seconds: number;
-  // 感知与视觉
-  window_perception_enabled: boolean;
-  window_perception_system_budget_tokens: number;
-  window_perception_tool_append_tokens: number;
-  window_perception_max_windows: number;
-  window_perception_default_rows: number;
-  window_perception_default_cols: number;
-  window_perception_minimized_tokens: number;
-  window_perception_background_after_idle: number;
-  window_perception_suspend_after_idle: number;
-  window_perception_terminate_after_idle: number;
-  window_perception_advisor_mode: string;
-  window_perception_advisor_timeout_ms: number;
-  window_perception_advisor_trigger_window_count: number;
-  window_perception_advisor_trigger_turn: number;
-  window_perception_advisor_plan_ttl_turns: number;
-  window_return_mode: string;
-  window_full_max_rows: number;
-  window_full_total_budget_tokens: number;
-  window_data_buffer_max_rows: number;
-  window_intent_enabled: boolean;
-  window_intent_sticky_turns: number;
-  window_intent_repeat_warn_threshold: number;
-  window_intent_repeat_trip_threshold: number;
-  window_rule_engine_version: string;
-  vlm_enhance: boolean;
+  // 视觉
   main_model_vision: string;
-  vlm_timeout_seconds: number;
-  vlm_max_retries: number;
-  vlm_max_tokens: number;
-  vlm_image_max_long_edge: number;
-  vlm_image_jpeg_quality: number;
-  vlm_extraction_tier: string;
   image_keep_rounds: number;
   image_max_active: number;
   image_token_budget: number;
@@ -171,7 +133,6 @@ interface RuntimeConfig {
   // Playbook
   playbook_enabled: boolean;
   playbook_max_bullets: number;
-  playbook_inject_top_k: number;
   registry_semantic_top_k: number;
   registry_semantic_threshold: number;
 }
@@ -200,16 +161,9 @@ interface ItemGroup {
 
 const BASIC_GROUPS: ItemGroup[] = [
   {
-    title: "会话与多用户",
+    title: "会话",
     icon: <Users className="h-3.5 w-3.5" />,
     items: [
-      {
-        key: "auth_enabled",
-        label: "启用多用户认证",
-        desc: "开启用户注册/登录与会话隔离（修改后需重启生效）",
-        icon: <Lock className="h-4 w-4" />,
-        type: "bool",
-      },
       {
         key: "max_sessions",
         label: "最大会话数",
@@ -251,13 +205,6 @@ const BASIC_GROUPS: ItemGroup[] = [
         type: "bool",
       },
       {
-        key: "verifier_enabled",
-        label: "完成前验证器",
-        desc: "任务完成前自动运行 Verifier 子代理校验结果",
-        icon: <CheckCircle2 className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
         key: "backup_enabled",
         label: "备份沙盒",
         desc: "文件操作前自动创建备份副本",
@@ -281,17 +228,6 @@ const BASIC_GROUPS: ItemGroup[] = [
         max: 500,
       },
       {
-        key: "guard_mode",
-        label: "门禁模式",
-        desc: "off：关闭执行守卫/写入门禁；soft：仅记录诊断不强制继续",
-        icon: <ShieldOff className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "off", label: "关闭 (off)" },
-          { value: "soft", label: "软提示 (soft)" },
-        ],
-      },
-      {
         key: "friendly_error_messages",
         label: "友好错误消息",
         desc: "将内部错误映射为更友好的用户可见消息",
@@ -301,15 +237,8 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "aux_enabled",
         label: "辅助模型",
-        desc: "启用辅助模型（子代理默认模型、窗口感知等）",
+        desc: "启用辅助模型（子代理默认模型等）",
         icon: <Bot className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "vlm_enabled",
-        label: "VLM 模型",
-        desc: "启用视觉语言模型（独立 VLM 配置）",
-        icon: <ScanEye className="h-4 w-4" />,
         type: "bool",
       },
     ],
@@ -321,7 +250,7 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "max_context_tokens",
         label: "上下文窗口",
-        desc: "最大上下文 token 数（模型窗口大小）",
+        desc: "最大上下文 token 数。保存后立即同步到已打开的对话并锁定；未手动保存时设置页显示主模型推断值，对话页显示当前选用模型的窗口。",
         icon: <Layers className="h-4 w-4" />,
         type: "int",
         min: 1000,
@@ -380,23 +309,9 @@ const BASIC_GROUPS: ItemGroup[] = [
     icon: <Eye className="h-3.5 w-3.5" />,
     items: [
       {
-        key: "window_perception_enabled",
-        label: "窗口感知",
-        desc: "启用 Excel 窗口感知层，智能管理表格上下文",
-        icon: <Eye className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "vlm_enhance",
-        label: "VLM 增强",
-        desc: "启用视觉语言模型增强描述（图片表格提取）",
-        icon: <ScanEye className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
         key: "main_model_vision",
         label: "主模型视觉",
-        desc: "主模型视觉能力：auto 自动检测 / true 强制开启 / false 关闭",
+        desc: "主模型视觉能力：auto 自动检测 / true 强制开启 / false 关闭。图片只交给主模型阅读，随后用 edit_spreadsheet(workbook_spec) 建表。",
         icon: <ScanEye className="h-4 w-4" />,
         type: "select",
         options: [
@@ -404,6 +319,33 @@ const BASIC_GROUPS: ItemGroup[] = [
           { value: "true", label: "开启 (true)" },
           { value: "false", label: "关闭 (false)" },
         ],
+      },
+      {
+        key: "image_keep_rounds",
+        label: "图片保持轮次",
+        desc: "图片保持完整 base64 的最小轮次",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "image_max_active",
+        label: "活跃图片上限",
+        desc: "同时保持高清的最大图片数",
+        icon: <Eye className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "image_token_budget",
+        label: "图片 token 预算",
+        desc: "图片总 token 预算上限",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 1000,
+        max: 50000,
       },
     ],
   },
@@ -427,6 +369,7 @@ const ADVANCED_GROUPS: ItemGroup[] = [
           { value: "medium", label: "中等 (medium)" },
           { value: "high", label: "高 (high)" },
           { value: "xhigh", label: "极高 (xhigh)" },
+          { value: "max", label: "最深 (max)" },
         ],
       },
       {
@@ -758,235 +701,6 @@ const ADVANCED_GROUPS: ItemGroup[] = [
     ],
   },
   {
-    title: "窗口感知细参",
-    icon: <Eye className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "window_perception_system_budget_tokens",
-        label: "系统提示预算",
-        desc: "窗口感知层系统提示 token 预算",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 500,
-        max: 20000,
-      },
-      {
-        key: "window_perception_tool_append_tokens",
-        label: "工具追加 token",
-        desc: "每个工具结果追加的 token 数",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 100,
-        max: 5000,
-      },
-      {
-        key: "window_perception_max_windows",
-        label: "最大窗口数",
-        desc: "同时维护的最大窗口数量",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "window_perception_default_rows",
-        label: "默认行数",
-        desc: "窗口默认显示行数",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 5,
-        max: 200,
-      },
-      {
-        key: "window_perception_default_cols",
-        label: "默认列数",
-        desc: "窗口默认显示列数",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 100,
-      },
-      {
-        key: "window_perception_minimized_tokens",
-        label: "最小化 token",
-        desc: "最小化窗口的 token 预算",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 10,
-        max: 500,
-      },
-      {
-        key: "window_perception_background_after_idle",
-        label: "后台化闲置轮次",
-        desc: "窗口闲置多少轮后转为后台",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "window_perception_suspend_after_idle",
-        label: "挂起闲置轮次",
-        desc: "窗口闲置多少轮后挂起",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 30,
-      },
-      {
-        key: "window_perception_terminate_after_idle",
-        label: "关闭闲置轮次",
-        desc: "窗口闲置多少轮后关闭",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-      {
-        key: "window_perception_advisor_mode",
-        label: "顾问模式",
-        desc: "窗口感知顾问的工作模式",
-        icon: <Brain className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "rules", label: "规则 (rules)" },
-          { value: "hybrid", label: "混合 (hybrid)" },
-        ],
-      },
-      {
-        key: "window_perception_advisor_timeout_ms",
-        label: "顾问超时",
-        desc: "窗口感知顾问超时（毫秒）",
-        icon: <Timer className="h-4 w-4" />,
-        type: "int",
-        min: 100,
-        max: 10000,
-      },
-      {
-        key: "window_return_mode",
-        label: "返回模式",
-        desc: "工具返回数据的模式",
-        icon: <Layers className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "unified", label: "统一 (unified)" },
-          { value: "anchored", label: "锚定 (anchored)" },
-          { value: "enriched", label: "增强 (enriched)" },
-          { value: "adaptive", label: "自适应 (adaptive)" },
-        ],
-      },
-      {
-        key: "window_intent_enabled",
-        label: "意图识别",
-        desc: "启用窗口意图识别",
-        icon: <Eye className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "window_rule_engine_version",
-        label: "规则引擎版本",
-        desc: "窗口规则引擎版本",
-        icon: <Layers className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "v1", label: "v1" },
-          { value: "v2", label: "v2" },
-        ],
-      },
-    ],
-  },
-  {
-    title: "VLM 参数",
-    icon: <ScanEye className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "vlm_timeout_seconds",
-        label: "VLM 超时",
-        desc: "VLM 调用超时时间（秒）",
-        icon: <Timer className="h-4 w-4" />,
-        type: "int",
-        min: 10,
-        max: 600,
-      },
-      {
-        key: "vlm_max_retries",
-        label: "VLM 重试次数",
-        desc: "VLM 调用失败时的重试次数",
-        icon: <RotateCcw className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 5,
-      },
-      {
-        key: "vlm_max_tokens",
-        label: "VLM 最大输出",
-        desc: "VLM 最大输出 token 数",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 1024,
-        max: 65536,
-      },
-      {
-        key: "vlm_image_max_long_edge",
-        label: "图片长边上限",
-        desc: "图片长边像素上限",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 512,
-        max: 8192,
-      },
-      {
-        key: "vlm_image_jpeg_quality",
-        label: "JPEG 质量",
-        desc: "JPEG 压缩质量 (1-100)",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 100,
-      },
-      {
-        key: "vlm_extraction_tier",
-        label: "提取策略分级",
-        desc: "模型分级决定提取策略",
-        icon: <Layers className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "auto", label: "自动 (auto)" },
-          { value: "strong", label: "强 (strong)" },
-          { value: "standard", label: "标准 (standard)" },
-          { value: "weak", label: "弱 (weak)" },
-        ],
-      },
-      {
-        key: "image_keep_rounds",
-        label: "图片保持轮次",
-        desc: "图片保持完整 base64 的最小轮次",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "image_max_active",
-        label: "活跃图片上限",
-        desc: "同时保持高清的最大图片数",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10,
-      },
-      {
-        key: "image_token_budget",
-        label: "图片 token 预算",
-        desc: "图片总 token 预算上限",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 1000,
-        max: 50000,
-      },
-    ],
-  },
-  {
     title: "技能发现",
     icon: <Sparkles className="h-3.5 w-3.5" />,
     items: [
@@ -1094,15 +808,6 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         min: 10,
         max: 5000,
       },
-      {
-        key: "playbook_inject_top_k",
-        label: "注入 Top-K",
-        desc: "每轮注入的最大条目数",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
     ],
   },
 ];
@@ -1166,7 +871,6 @@ function StatusDot({ ok }: { ok: boolean }) {
 
 function DockerSandboxSection() {
   const [status, setStatus] = useState<DockerSandboxStatus | null>(null);
-  const [isolation, setIsolation] = useState<SessionIsolationStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [toggling, setToggling] = useState(false);
   const [building, setBuilding] = useState(false);
@@ -1177,12 +881,8 @@ function DockerSandboxSection() {
     setLoading(true);
     setError(null);
     try {
-      const [ds, si] = await Promise.all([
-        fetchDockerSandboxStatus(),
-        fetchSessionIsolationStatus(),
-      ]);
+      const ds = await fetchDockerSandboxStatus();
       setStatus(ds);
-      setIsolation(si);
     } catch {
       setError("无法获取沙盒状态");
     } finally {
@@ -1367,33 +1067,6 @@ function DockerSandboxSection() {
             </div>
           </div>
 
-          {/* Session isolation (read-only info) */}
-          {isolation && (
-            <>
-              <Separator />
-              <div className="flex items-center justify-between gap-3">
-                <div className="flex items-start gap-2.5 flex-1 min-w-0">
-                  <span className="mt-0.5 text-muted-foreground flex-shrink-0">
-                    <Users className="h-4 w-4" />
-                  </span>
-                  <div className="min-w-0">
-                    <div className="text-sm font-medium">会话用户隔离</div>
-                    <div className="text-[11px] sm:text-xs text-muted-foreground">
-                      启用多用户认证时自动激活，无需手动配置
-                    </div>
-                  </div>
-                </div>
-                <span className={`text-xs font-medium px-2 py-0.5 rounded-full flex-shrink-0 ${
-                  isolation.session_isolation_enabled
-                    ? "bg-green-500/10 text-green-600 dark:text-green-400"
-                    : "bg-muted text-muted-foreground"
-                }`}>
-                  {isolation.session_isolation_enabled ? "已启用" : "未启用"}
-                </span>
-              </div>
-            </>
-          )}
-
           {/* Error / success messages */}
           {error && (
             <div className="flex items-start gap-2 rounded-md bg-red-500/5 border border-red-500/10 px-3 py-2">
@@ -1514,10 +1187,6 @@ export function RuntimeTab() {
   const [showAdvanced, setShowAdvanced] = useState(false);
   const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
-  const user = useAuthStore((s) => s.user);
-  const authEnabled = useAuthConfigStore((s) => s.authEnabled);
-  const isAdmin = !authEnabled || !user || user.role === "admin";
-
   const fetchConfig = useCallback(async (force = false) => {
     if (!force) {
       const cached = settingsCache.get<RuntimeConfig>("/config/runtime");
@@ -1537,10 +1206,8 @@ export function RuntimeTab() {
   }, []);
 
   useEffect(() => {
-    if (isAdmin) {
-      fetchConfig();
-    }
-  }, [fetchConfig, isAdmin]);
+    fetchConfig();
+  }, [fetchConfig]);
 
   const merged = config
     ? { ...config, ...draft }
@@ -1549,7 +1216,7 @@ export function RuntimeTab() {
   const hasChanges = Object.keys(draft).length > 0;
 
   const handleSave = async () => {
-    if (!hasChanges || !isAdmin) return;
+    if (!hasChanges) return;
     setSaving(true);
     try {
       const res = await apiPut<{ restarting?: boolean; restart_reason?: string }>("/config/runtime", draft);
@@ -1567,23 +1234,6 @@ export function RuntimeTab() {
       setSaving(false);
     }
   };
-
-  if (!isAdmin) {
-    return (
-      <div className="space-y-4">
-        <div className="rounded-lg border border-border p-4">
-          <div className="flex items-center gap-2 mb-2">
-            <Lock className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
-            <h3 className="font-semibold text-sm">系统配置</h3>
-          </div>
-          <p className="text-xs text-muted-foreground">
-            系统配置由管理员管理。如需调整，请联系管理员。
-          </p>
-        </div>
-        <OnboardingReplayCard />
-      </div>
-    );
-  }
 
   if (loading && !config) {
     return (

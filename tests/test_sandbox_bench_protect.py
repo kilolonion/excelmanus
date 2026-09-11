@@ -332,9 +332,51 @@ class TestWrapperTemplateContent:
         assert "_atomic_save" in wrapper
         assert "os.replace" in wrapper
 
+    def test_wrapper_records_save_versions_without_host_commit_import(self) -> None:
+        """P3：wrapper 自算 sha256，不 import workbook_commit；无 expected_version 校验。"""
+        for tier in ("GREEN", "RED"):
+            wrapper = generate_wrapper_script(tier, "/tmp/ws")
+            assert "_SAVE_VERSIONS" in wrapper
+            assert "EXCELMANUS_SAVE_VERSION" in wrapper
+            assert "os.unlink" in wrapper
+            code_lines = [
+                ln.strip() for ln in wrapper.splitlines()
+                if ln.strip() and not ln.strip().startswith("#")
+            ]
+            assert not any(
+                ln.startswith("import excelmanus.workbook_commit")
+                or ln.startswith("from excelmanus.workbook_commit")
+                for ln in code_lines
+            )
+            assert "expected_version" in wrapper
+
     def test_red_wrapper_has_fs_guard(self) -> None:
         """RED wrapper 包含文件系统守卫和敏感目录保护。"""
         wrapper = generate_wrapper_script("RED", "/tmp/ws")
         assert "_BENCH_PROTECTED_DIRS" in wrapper
         assert "_patch_openpyxl_save" in wrapper
         assert "_SENSITIVE_DIRS" in wrapper
+
+    def test_red_save_also_emits_content_version(self, workspace: Path) -> None:
+        import hashlib
+        import os as _os
+
+        output = workspace / "outputs"
+        output.mkdir()
+        target = output / "red.xlsx"
+        code = (
+            "from openpyxl import Workbook\n"
+            "wb = Workbook()\n"
+            "wb.active['A1'] = 'red'\n"
+            f"wb.save(r'{target}')\n"
+            "print('saved')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "RED")
+        assert result.returncode == 0, result.stderr
+        marker = "EXCELMANUS_SAVE_VERSION\t"
+        lines = [ln for ln in result.stderr.splitlines() if ln.startswith(marker)]
+        assert len(lines) == 1
+        _, path, ver = lines[0].split("\t")
+        assert path == _os.path.realpath(str(target))
+        expect = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+        assert ver == expect

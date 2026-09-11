@@ -88,23 +88,23 @@ class TestEventBridgeBasics:
     @pytest.mark.asyncio
     async def test_notify_returns_delivered_count(self, event_bridge):
         cb = AsyncMock()
-        event_bridge.subscribe("u1", "telegram", "c1", cb)
-        delivered = await event_bridge.notify("u1", "chat_completed", {"session_id": "s1"})
+        event_bridge.subscribe("telegram", "c1", cb)
+        delivered = await event_bridge.notify("chat_completed", {"session_id": "s1"})
         assert delivered == 1
         cb.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_notify_unknown_user_returns_zero(self, event_bridge):
-        delivered = await event_bridge.notify("unknown", "chat_completed", {})
+        delivered = await event_bridge.notify("chat_completed", {})
         assert delivered == 0
 
     @pytest.mark.asyncio
     async def test_multiple_subscriptions_all_notified(self, event_bridge):
         cb1 = AsyncMock()
         cb2 = AsyncMock()
-        event_bridge.subscribe("u1", "telegram", "c1", cb1)
-        event_bridge.subscribe("u1", "qq", "c2", cb2)
-        delivered = await event_bridge.notify("u1", "chat_completed", {"session_id": "s1"})
+        event_bridge.subscribe("telegram", "c1", cb1)
+        event_bridge.subscribe("qq", "c2", cb2)
+        delivered = await event_bridge.notify("chat_completed", {"session_id": "s1"})
         assert delivered == 2
         cb1.assert_awaited_once()
         cb2.assert_awaited_once()
@@ -118,15 +118,12 @@ class TestOriginChannelFiltering:
     async def test_bridge_callback_skips_self_origin(self, handler, event_bridge):
         """Bot 端收到 origin_channel=telegram 的事件应跳过（防回声）。"""
         # 模拟绑定用户
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 注册 bridge 订阅
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # 发送 origin=telegram 的事件 → 应被跳过
-        delivered = await event_bridge.notify("auth_user_1", "chat_completed", {
+        delivered = await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "telegram",
             "reply_summary": "test reply",
@@ -137,13 +134,10 @@ class TestOriginChannelFiltering:
     @pytest.mark.asyncio
     async def test_bridge_callback_processes_different_origin(self, handler, event_bridge):
         """Bot 端收到 origin_channel=web 的事件应正常处理。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "web",
             "reply_summary": "任务完成",
@@ -162,14 +156,11 @@ class TestChatStartedEvent:
     @pytest.mark.asyncio
     async def test_chat_started_syncs_when_no_local_session(self, handler, event_bridge, session_store):
         """Bot 端无活跃会话时，chat_started 应自动同步 session_id。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # Bot 端当前无 session
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "new_web_session",
             "origin_channel": "web",
             "message_preview": "分析这个表格",
@@ -184,15 +175,12 @@ class TestChatStartedEvent:
     @pytest.mark.asyncio
     async def test_chat_started_does_not_overwrite_existing_session(self, handler, event_bridge, session_store):
         """Bot 端已有活跃会话时，chat_started 不应覆盖 session_id，且跳过通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # Bot 端有活跃 session
         session_store.set("telegram", "chat1", "user1", "bot_active_session")
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "web_different_session",
             "origin_channel": "web",
             "message_preview": "hello",
@@ -211,13 +199,10 @@ class TestChatCompletedEvent:
     @pytest.mark.asyncio
     async def test_chat_completed_with_error(self, handler, event_bridge):
         """Web 端操作出错时，Bot 端显示异常通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "web",
             "reply_summary": "出错了",
@@ -229,14 +214,11 @@ class TestChatCompletedEvent:
     @pytest.mark.asyncio
     async def test_chat_completed_does_not_overwrite_existing_session(self, handler, event_bridge, session_store):
         """Bot 端已有活跃会话时，chat_completed 不应覆盖 session_id。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         session_store.set("telegram", "chat1", "user1", "bot_active_session")
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "web_session",
             "origin_channel": "web",
             "reply_summary": "已完成",
@@ -247,13 +229,10 @@ class TestChatCompletedEvent:
     @pytest.mark.asyncio
     async def test_chat_completed_syncs_when_no_local_session(self, handler, event_bridge, session_store):
         """Bot 端无活跃会话时，chat_completed 应自动同步 session_id。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "web_session",
             "origin_channel": "web",
             "reply_summary": "已完成",
@@ -263,14 +242,11 @@ class TestChatCompletedEvent:
     @pytest.mark.asyncio
     async def test_chat_completed_truncates_long_reply(self, handler, event_bridge):
         """过长的 reply_summary 应被截断。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
         long_reply = "A" * 500
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "web",
             "reply_summary": long_reply,
@@ -288,13 +264,10 @@ class TestApprovalQuestionBridge:
     @pytest.mark.asyncio
     async def test_approval_from_web_pushed_to_bot(self, handler, event_bridge):
         """Web 端审批事件应推送到 Bot 并创建 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "approval", {
+        await event_bridge.notify("approval", {
             "approval_id": "apr_123",
             "approval_tool_name": "write_cells",
             "risk_level": "yellow",
@@ -311,13 +284,10 @@ class TestApprovalQuestionBridge:
     @pytest.mark.asyncio
     async def test_question_from_web_pushed_to_bot(self, handler, event_bridge):
         """Web 端问答事件应推送到 Bot 并创建 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "question", {
+        await event_bridge.notify("question", {
             "id": "q_456",
             "header": "确认",
             "text": "要继续吗？",
@@ -333,13 +303,10 @@ class TestApprovalQuestionBridge:
     @pytest.mark.asyncio
     async def test_approval_from_same_channel_skipped(self, handler, event_bridge):
         """同渠道的审批事件应被跳过。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "approval", {
+        await event_bridge.notify("approval", {
             "approval_id": "apr_789",
             "origin_channel": "telegram",  # 与 adapter.name 相同
             "session_id": "s1",
@@ -351,23 +318,9 @@ class TestApprovalQuestionBridge:
 
 
 class TestSessionStoreSharing:
-    def test_bot_and_web_share_session_via_user_id(self, session_store):
-        """同一 auth_user_id 下 bot 和 web 使用相同 session_id 应能互通。"""
+    def test_bot_reuses_stored_session_id(self, session_store):
         session_store.set("telegram", "chat1", "user1", "shared_session_123")
-        session_store.set_auth_user_id("telegram", "chat1", "user1", "auth_u1")
-
-        sid = session_store.get("telegram", "chat1", "user1")
-        assert sid == "shared_session_123"
-        assert session_store.get_auth_user_id("telegram", "chat1", "user1") == "auth_u1"
-
-    def test_backfill_updates_all_entries(self, session_store):
-        """绑定后 backfill 应更新该用户所有条目。"""
-        session_store.set("telegram", "chat_a", "user1", "s1")
-        session_store.set("telegram", "chat_b", "user1", "s2")
-        count = session_store.backfill_auth_user_id("telegram", "user1", "auth_u1")
-        assert count == 2
-        assert session_store.get_auth_user_id("telegram", "chat_a", "user1") == "auth_u1"
-        assert session_store.get_auth_user_id("telegram", "chat_b", "user1") == "auth_u1"
+        assert session_store.get("telegram", "chat1", "user1") == "shared_session_123"
 
 
 # ── 端到端会话互通场景 ──
@@ -377,15 +330,12 @@ class TestEndToEndInterop:
     @pytest.mark.asyncio
     async def test_web_chat_then_bot_receives_notification(self, handler, event_bridge, session_store):
         """模拟 Web 端完成一次 chat 后 Bot 端收到通知并同步会话的完整流程。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # Step 1: Bot 端注册 bridge 订阅（无现有 session）
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # Step 2: Web 端 chat_started → Bot 无 session，自动同步
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "web_session_001",
             "origin_channel": "web",
             "message_preview": "请帮我整理表格",
@@ -395,7 +345,7 @@ class TestEndToEndInterop:
 
         # Step 3: Web 端 chat_completed（Bot 已有 session，不再覆盖）
         handler.adapter.send_text.reset_mock()
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "web_session_001",
             "origin_channel": "web",
             "reply_summary": "表格已整理完毕，共修改 15 行。",
@@ -409,20 +359,17 @@ class TestEndToEndInterop:
     @pytest.mark.asyncio
     async def test_bot_chat_then_web_receives_no_echo(self, handler, event_bridge):
         """Bot 端发起 chat 时，Bot 端不应收到自身的 bridge 通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # Bot 端发起的事件（origin=telegram）
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "bot_session_001",
             "origin_channel": "telegram",
         })
         handler.adapter.send_text.assert_not_awaited()
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "bot_session_001",
             "origin_channel": "telegram",
             "reply_summary": "done",
@@ -430,24 +377,15 @@ class TestEndToEndInterop:
         handler.adapter.send_text.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_unbound_user_no_bridge_subscription(self, handler, event_bridge):
-        """未绑定用户不应注册 bridge 订阅。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value=None)
-
-        handler._ensure_bridge_subscription("chat1", "user1")
-        assert event_bridge.subscription_count == 0
-
-    @pytest.mark.asyncio
     async def test_multiple_channels_receive_notification(self, event_bridge):
         """同一用户绑定多个渠道时，所有渠道都应收到通知。"""
         tg_cb = AsyncMock()
         qq_cb = AsyncMock()
-        event_bridge.subscribe("auth_u1", "telegram", "chat_tg", tg_cb)
-        event_bridge.subscribe("auth_u1", "qq", "chat_qq", qq_cb)
+        event_bridge.subscribe("telegram", "chat_tg", tg_cb)
+        event_bridge.subscribe("qq", "chat_qq", qq_cb)
 
         # Web 端发送事件
-        delivered = await event_bridge.notify("auth_u1", "chat_completed", {
+        delivered = await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "web",
             "reply_summary": "done",
@@ -505,15 +443,12 @@ class TestSessionIdSafeSync:
     @pytest.mark.asyncio
     async def test_chat_started_preserves_active_session(self, handler, event_bridge, session_store):
         """Bot 正在使用的会话不应被跨渠道 chat_started 覆盖，且跳过通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         session_store.set("telegram", "chat1", "user1", "bot_session_A")
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # Web 创建新会话 B
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "web_session_B",
             "origin_channel": "web",
             "message_preview": "新任务",
@@ -526,14 +461,11 @@ class TestSessionIdSafeSync:
     @pytest.mark.asyncio
     async def test_chat_completed_preserves_active_session(self, handler, event_bridge, session_store):
         """Bot 正在使用的会话不应被跨渠道 chat_completed 覆盖。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         session_store.set("telegram", "chat1", "user1", "bot_session_A")
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "web_session_B",
             "origin_channel": "web",
             "reply_summary": "完成",
@@ -543,15 +475,12 @@ class TestSessionIdSafeSync:
     @pytest.mark.asyncio
     async def test_empty_session_gets_synced(self, handler, event_bridge, session_store):
         """Bot 无会话时应自动同步。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 无现有 session
         handler._ensure_bridge_subscription("chat1", "user1")
         assert session_store.get("telegram", "chat1", "user1") is None
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "web_session_X",
             "origin_channel": "web",
         })
@@ -567,14 +496,11 @@ class TestApprovalResolvedBridge:
     @pytest.mark.asyncio
     async def test_approval_resolved_clears_pending(self, handler, event_bridge):
         """收到 approval_resolved 事件应清除本地 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # 先模拟收到审批事件
-        await event_bridge.notify("auth_user_1", "approval", {
+        await event_bridge.notify("approval", {
             "approval_id": "apr_001",
             "approval_tool_name": "write_cells",
             "risk_level": "yellow",
@@ -588,7 +514,7 @@ class TestApprovalResolvedBridge:
 
         # Web 端处理了审批 → approval_resolved
         handler.adapter.send_text.reset_mock()
-        await event_bridge.notify("auth_user_1", "approval_resolved", {
+        await event_bridge.notify("approval_resolved", {
             "approval_id": "apr_001",
             "session_id": "s1",
             "origin_channel": "web",
@@ -602,14 +528,11 @@ class TestApprovalResolvedBridge:
     @pytest.mark.asyncio
     async def test_approval_resolved_no_pending_is_noop(self, handler, event_bridge):
         """没有 PendingInteraction 时收到 approval_resolved 应静默处理。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
         # 直接发送 resolved（无 pending）
-        await event_bridge.notify("auth_user_1", "approval_resolved", {
+        await event_bridge.notify("approval_resolved", {
             "approval_id": "apr_999",
             "session_id": "s1",
             "origin_channel": "web",
@@ -620,9 +543,6 @@ class TestApprovalResolvedBridge:
     @pytest.mark.asyncio
     async def test_approval_resolved_mismatched_id_is_noop(self, handler, event_bridge):
         """approval_id 不匹配时不应清除 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
@@ -637,7 +557,7 @@ class TestApprovalResolvedBridge:
         )
 
         # 发送不同 approval_id 的 resolved
-        await event_bridge.notify("auth_user_1", "approval_resolved", {
+        await event_bridge.notify("approval_resolved", {
             "approval_id": "apr_BBB",
             "session_id": "s1",
             "origin_channel": "web",
@@ -648,9 +568,6 @@ class TestApprovalResolvedBridge:
     @pytest.mark.asyncio
     async def test_approval_resolved_bypasses_origin_filter(self, handler, event_bridge):
         """approval_resolved 应绕过 origin_channel 回声过滤。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
@@ -665,7 +582,7 @@ class TestApprovalResolvedBridge:
         )
 
         # origin_channel=telegram（与 adapter.name 相同）但 approval_resolved 应仍被处理
-        await event_bridge.notify("auth_user_1", "approval_resolved", {
+        await event_bridge.notify("approval_resolved", {
             "approval_id": "apr_001",
             "session_id": "s1",
             "origin_channel": "telegram",
@@ -675,9 +592,6 @@ class TestApprovalResolvedBridge:
     @pytest.mark.asyncio
     async def test_chat_completed_clears_residual_pending(self, handler, event_bridge):
         """chat_completed 应清除残留的 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
@@ -692,7 +606,7 @@ class TestApprovalResolvedBridge:
         )
 
         # chat_completed 应清除
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "web",
             "reply_summary": "完成",
@@ -709,9 +623,6 @@ class TestDynamicChannelLabels:
     @pytest.mark.asyncio
     async def test_telegram_origin_label(self, handler, event_bridge):
         """origin_channel=telegram 的通知应显示 'Telegram'。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 需要另一个渠道接收（因为同渠道会被过滤）
         # 创建 QQ 渠道的 handler
@@ -728,12 +639,9 @@ class TestDynamicChannelLabels:
             session_store=handler.sessions,
             event_bridge=event_bridge,
         )
-        qq_handler._bind_manager = MagicMock()
-        qq_handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        qq_handler._auth_user_cache["qq:user1"] = ("auth_user_1", __import__("time").monotonic())
         qq_handler._ensure_bridge_subscription("chat_qq", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "s1",
             "origin_channel": "telegram",
             "reply_summary": "完成",
@@ -745,13 +653,10 @@ class TestDynamicChannelLabels:
     @pytest.mark.asyncio
     async def test_web_origin_label(self, handler, event_bridge):
         """origin_channel=web 的通知应显示 'Web 端'。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "s1",
             "origin_channel": "web",
             "message_preview": "hello",
@@ -771,9 +676,9 @@ class TestParallelNotify:
         """两个回调应并行完成，都计入 delivered。"""
         cb1 = AsyncMock()
         cb2 = AsyncMock()
-        event_bridge.subscribe("u1", "telegram", "c1", cb1)
-        event_bridge.subscribe("u1", "qq", "c2", cb2)
-        delivered = await event_bridge.notify("u1", "test", {"k": "v"})
+        event_bridge.subscribe("telegram", "c1", cb1)
+        event_bridge.subscribe("qq", "c2", cb2)
+        delivered = await event_bridge.notify("test", {"k": "v"})
         assert delivered == 2
         cb1.assert_awaited_once()
         cb2.assert_awaited_once()
@@ -783,9 +688,9 @@ class TestParallelNotify:
         """一个回调失败不应阻止另一个成功投递。"""
         cb_ok = AsyncMock()
         cb_err = AsyncMock(side_effect=RuntimeError("channel down"))
-        event_bridge.subscribe("u1", "telegram", "c1", cb_ok)
-        event_bridge.subscribe("u1", "qq", "c2", cb_err)
-        delivered = await event_bridge.notify("u1", "test", {})
+        event_bridge.subscribe("telegram", "c1", cb_ok)
+        event_bridge.subscribe("qq", "c2", cb_err)
+        delivered = await event_bridge.notify("test", {})
         assert delivered == 1
         cb_ok.assert_awaited_once()
         cb_err.assert_awaited_once()
@@ -794,8 +699,8 @@ class TestParallelNotify:
     async def test_single_subscription_fast_path(self, event_bridge):
         """单订阅走快速路径（无 gather 开销）。"""
         cb = AsyncMock()
-        event_bridge.subscribe("u1", "telegram", "c1", cb)
-        delivered = await event_bridge.notify("u1", "test", {"k": "v"})
+        event_bridge.subscribe("telegram", "c1", cb)
+        delivered = await event_bridge.notify("test", {"k": "v"})
         assert delivered == 1
         cb.assert_awaited_once()
 
@@ -843,16 +748,13 @@ class TestMultiGroupDedup:
     @pytest.mark.asyncio
     async def test_different_session_skips_notification(self, handler, event_bridge, session_store):
         """群聊有不同活跃会话时，chat_started 不发送通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 群聊 A 有活跃会话 session_A
         session_store.set("telegram", "chat_A", "user1", "session_A")
         handler._ensure_bridge_subscription("chat_A", "user1")
 
         # Web 端在 session_B 上工作
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "session_B",
             "origin_channel": "web",
             "message_preview": "hello",
@@ -863,14 +765,11 @@ class TestMultiGroupDedup:
     @pytest.mark.asyncio
     async def test_matching_session_receives_notification(self, handler, event_bridge, session_store):
         """群聊有匹配活跃会话时，chat_started 正常发送通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         session_store.set("telegram", "chat1", "user1", "shared_session")
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "shared_session",
             "origin_channel": "web",
             "message_preview": "hello",
@@ -880,14 +779,11 @@ class TestMultiGroupDedup:
     @pytest.mark.asyncio
     async def test_no_session_receives_notification(self, handler, event_bridge, session_store):
         """群聊无活跃会话时，chat_started 正常发送通知。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 无 session
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "chat_started", {
+        await event_bridge.notify("chat_started", {
             "session_id": "web_session",
             "origin_channel": "web",
             "message_preview": "hello",
@@ -897,9 +793,6 @@ class TestMultiGroupDedup:
     @pytest.mark.asyncio
     async def test_chat_completed_dedup_still_clears_pending(self, handler, event_bridge, session_store):
         """chat_completed 去重跳过通知但仍应清除 PendingInteraction。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         session_store.set("telegram", "chat1", "user1", "session_A")
         handler._ensure_bridge_subscription("chat1", "user1")
@@ -915,7 +808,7 @@ class TestMultiGroupDedup:
         )
 
         # session 不匹配 → 跳过通知，但 pending 应被清除
-        await event_bridge.notify("auth_user_1", "chat_completed", {
+        await event_bridge.notify("chat_completed", {
             "session_id": "session_B",
             "origin_channel": "web",
             "reply_summary": "done",
@@ -926,15 +819,12 @@ class TestMultiGroupDedup:
     @pytest.mark.asyncio
     async def test_approval_not_affected_by_dedup(self, handler, event_bridge, session_store):
         """审批事件不受多群聊去重影响，所有群都应收到。"""
-        handler._bind_manager = MagicMock()
-        handler._bind_manager.check_bind_status = MagicMock(return_value="auth_user_1")
-        handler._auth_user_cache["telegram:user1"] = ("auth_user_1", __import__("time").monotonic())
 
         # 群聊有不同 session
         session_store.set("telegram", "chat1", "user1", "different_session")
         handler._ensure_bridge_subscription("chat1", "user1")
 
-        await event_bridge.notify("auth_user_1", "approval", {
+        await event_bridge.notify("approval", {
             "approval_id": "apr_001",
             "approval_tool_name": "write_cells",
             "risk_level": "yellow",

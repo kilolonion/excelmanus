@@ -2,7 +2,6 @@
 
 import { useEffect, useRef, useState } from "react";
 import { buildApiUrl } from "@/lib/api";
-import { useAuthStore } from "@/stores/auth-store";
 
 /**
  * 通过 fetch + Authorization header 加载图片为 blob URL。
@@ -42,11 +41,7 @@ export function useAuthImage(apiPath: string | undefined, enabled = true) {
       setError(false);
 
       try {
-        const token = useAuthStore.getState().accessToken;
-        const headers: Record<string, string> = {};
-        if (token) headers["Authorization"] = `Bearer ${token}`;
-
-        const res = await fetch(url, { headers });
+        const res = await fetch(url);
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const blob = await res.blob();

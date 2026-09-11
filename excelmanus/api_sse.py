@@ -257,7 +257,7 @@ def sse_event_to_sse(
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
         EventType.FILE_DOWNLOAD: "file_download",
-        EventType.VERIFICATION_REPORT: "verification_report",
+        EventType.VERIFICATION_REPORT: "verification_report",  # 仅用于读取历史，不再产生
         EventType.RETRACT_THINKING: "retract_thinking",
         EventType.STAGING_UPDATED: "staging_updated",
         EventType.MODE_CHANGED: "mode_changed",
@@ -292,6 +292,8 @@ def sse_event_to_sse(
             ),
             "iteration": event.iteration,
         }
+        if event.parent_call_id:
+            data["parent_call_id"] = sanitize_external_text(event.parent_call_id, max_len=160)
     elif event.event_type == EventType.TOOL_CALL_END:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
@@ -308,6 +310,10 @@ def sse_event_to_sse(
             ),
             "iteration": event.iteration,
         }
+        if event.ui:
+            data["ui"] = sanitize_external_data(event.ui, max_len=2000)
+        if event.parent_call_id:
+            data["parent_call_id"] = sanitize_external_text(event.parent_call_id, max_len=160)
     elif event.event_type == EventType.ITERATION_START:
         data = {"iteration": event.iteration}
     elif event.event_type == EventType.SUBAGENT_START:
@@ -529,11 +535,6 @@ def sse_event_to_sse(
         data = {
             "stage": sanitize_external_text(event.pipeline_stage, max_len=60),
             "message": sanitize_external_text(event.pipeline_message, max_len=200),
-            "phase_index": event.pipeline_phase_index,
-            "total_phases": event.pipeline_total_phases,
-            "spec_path": event.pipeline_spec_path,
-            "diff": event.pipeline_diff,
-            "checkpoint": event.pipeline_checkpoint,
         }
         if event.tool_call_id:
             data["tool_call_id"] = sanitize_external_text(event.tool_call_id, max_len=160)
@@ -549,14 +550,6 @@ def sse_event_to_sse(
             "file_path": public_path_fn(event.download_file_path, safe_mode),
             "filename": sanitize_external_text(event.download_filename, max_len=260),
             "description": sanitize_external_text(event.download_description, max_len=500),
-        }
-    elif event.event_type == EventType.VERIFICATION_REPORT:
-        data = {
-            "verdict": event.verification_verdict,
-            "confidence": event.verification_confidence,
-            "checks": event.verification_checks[:10],
-            "issues": event.verification_issues[:10],
-            "mode": event.verification_mode,
         }
     elif event.event_type == EventType.RETRACT_THINKING:
         data = {"iteration": event.iteration}

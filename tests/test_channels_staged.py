@@ -349,7 +349,7 @@ class TestCmdApply:
         })
         msg = _make_cmd("apply")
         await handler.handle_message(msg)
-        api.apply_staged.assert_called_once_with("s1", None, on_behalf_of="channel_anon:mock:1")
+        api.apply_staged.assert_called_once_with("s1", None)
         assert any("已应用 2 个文件" in t[1] for t in adapter.sent_texts)
         # 验证 undo 缓存
         pk = handler._pending_key("100", "1")
@@ -369,7 +369,7 @@ class TestCmdApply:
         msg = _make_cmd("apply", ["1"])
         await handler.handle_message(msg)
         api.apply_staged.assert_called_once_with(
-            "s1", ["data/销售报表.xlsx"], on_behalf_of="channel_anon:mock:1",
+            "s1", ["data/销售报表.xlsx"],
         )
         assert any("已应用 1 个文件" in t[1] for t in adapter.sent_texts)
 
@@ -421,7 +421,7 @@ class TestCmdDiscard:
         })
         msg = _make_cmd("discard")
         await handler.handle_message(msg)
-        api.discard_staged.assert_called_once_with("s1", None, on_behalf_of="channel_anon:mock:1")
+        api.discard_staged.assert_called_once_with("s1", None)
         assert any("已丢弃全部文件" in t[1] for t in adapter.sent_texts)
 
     @pytest.mark.asyncio
@@ -436,7 +436,7 @@ class TestCmdDiscard:
         msg = _make_cmd("discard", ["2"])
         await handler.handle_message(msg)
         api.discard_staged.assert_called_once_with(
-            "s1", ["data/客户数据.xlsx"], on_behalf_of="channel_anon:mock:1",
+            "s1", ["data/客户数据.xlsx"],
         )
         assert any("已丢弃 1 个文件" in t[1] for t in adapter.sent_texts)
 
@@ -466,7 +466,7 @@ class TestCmdUndoapply:
         msg = _make_cmd("undoapply")
         await handler.handle_message(msg)
         api.undo_backup.assert_called_once_with(
-            "s1", "a.xlsx", "undo/a.xlsx", on_behalf_of="channel_anon:mock:1",
+            "s1", "a.xlsx", "undo/a.xlsx",
         )
         assert any("已撤销 1 个文件的 apply" in t[1] for t in adapter.sent_texts)
         # 缓存已清空
@@ -516,7 +516,7 @@ class TestStagedCallback:
         })
         msg = _make_callback("apply_staged:s1:all")
         await handler.handle_message(msg)
-        api.apply_staged.assert_called_once_with("s1", None, on_behalf_of="channel_anon:mock:1")
+        api.apply_staged.assert_called_once_with("s1", None)
         assert any("已应用 2 个文件" in t[1] for t in adapter.sent_texts)
 
     @pytest.mark.asyncio
@@ -528,7 +528,7 @@ class TestStagedCallback:
         })
         msg = _make_callback("discard_staged:s1:all")
         await handler.handle_message(msg)
-        api.discard_staged.assert_called_once_with("s1", None, on_behalf_of="channel_anon:mock:1")
+        api.discard_staged.assert_called_once_with("s1", None)
         assert any("已丢弃全部文件" in t[1] for t in adapter.sent_texts)
 
     @pytest.mark.asyncio
@@ -544,7 +544,7 @@ class TestStagedCallback:
         msg = _make_callback("apply_staged:s1:0")
         await handler.handle_message(msg)
         api.apply_staged.assert_called_once_with(
-            "s1", ["data/销售报表.xlsx"], on_behalf_of="channel_anon:mock:1",
+            "s1", ["data/销售报表.xlsx"],
         )
 
     @pytest.mark.asyncio

@@ -18,6 +18,7 @@ from excelmanus.compaction import (
     CompactionStats,
     _extract_rule_based_summary,
     _format_messages_for_compaction,
+    prune_overlong_tool_results,
 )
 from excelmanus.config import ExcelManusConfig
 from excelmanus.memory import ConversationMemory
@@ -116,6 +117,29 @@ class TestShouldCompact:
         for i in range(50):
             memory.add_user_message(f"消息 {i}" * 50)
         assert mgr.should_compact(memory, None) is False
+
+
+# ── 步前剪枝 ──────────────────────────────────────────────
+
+
+class TestPruneOverlongToolResults:
+    def test_truncates_overlong_tool_content(self) -> None:
+        config = _make_config()
+        memory = _make_memory(config)
+        memory.add_user_message("看表")
+        memory.add_tool_result("call-1", "Z" * 500)
+        pruned = prune_overlong_tool_results(memory, max_chars=50)
+        assert pruned == 1
+        content = memory.messages[-1]["content"]
+        assert content.startswith("Z" * 50)
+        assert "已截断" in content
+
+    def test_leaves_short_tool_results(self) -> None:
+        config = _make_config()
+        memory = _make_memory(config)
+        memory.add_tool_result("call-1", "short")
+        assert prune_overlong_tool_results(memory, max_chars=50) == 0
+        assert memory.messages[-1]["content"] == "short"
 
 
 # ── auto_compact 测试 ────────────────────────────────────
@@ -259,6 +283,38 @@ class TestAutoCompact:
 
         assert result.success is False
         assert "摘要为空" in result.error
+
+    @pytest.mark.asyncio
+    async def test_prune_only_is_not_summary_success(self) -> None:
+        config = _make_config(
+            max_context_tokens=8000,
+            compaction_threshold_ratio=0.15,
+            compaction_keep_recent_turns=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        client = _mock_client("不该用到")
+        for i in range(4):
+            memory.add_user_message(f"用户 {i}")
+            memory.add_assistant_message(f"助手 {i}")
+        memory.add_tool_result("call-1", "X" * 20000)
+
+        def _aggressive(mem, *, max_chars: int = 4000) -> int:
+            return prune_overlong_tool_results(mem, max_chars=80)
+
+        with patch("excelmanus.compaction.prune_overlong_tool_results", _aggressive):
+            result = await mgr.auto_compact(
+                memory=memory,
+                system_msgs=None,
+                client=client,
+                summary_model="test-model",
+            )
+
+        assert result.success is False
+        assert result.pruned_tool_results >= 1
+        assert "未做摘要" in result.error
+        client.chat.completions.create.assert_not_called()
+        assert mgr.stats.compaction_count == 0
 
 
 # ── manual_compact 测试 ──────────────────────────────────
@@ -518,7 +574,6 @@ class TestPromptQuality:
         assert "skill" in COMPACTION_SYSTEM_PROMPT.lower()
         assert "备份" in COMPACTION_SYSTEM_PROMPT
         assert "fullaccess" in COMPACTION_SYSTEM_PROMPT.lower()
-        assert "窗口" in COMPACTION_SYSTEM_PROMPT
 
     def test_system_prompt_contains_rules(self) -> None:
         """确保包含防止幻觉的规则。"""

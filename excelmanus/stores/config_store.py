@@ -1,9 +1,7 @@
 """ConfigStore：模型配置与运行时状态存储（支持 SQLite / PostgreSQL）。
 
 拆分为 GlobalConfigStore（全局 model_profiles + 部署设置）和
-UserConfigStore（用户级偏好，如 active_model）。
-
-旧 ``ConfigStore`` 保留为 ``GlobalConfigStore`` 的别名以兼容。
+UserConfigStore（进程级偏好，如 active_model）。
 """
 from __future__ import annotations
 
@@ -11,7 +9,6 @@ import logging
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
-from excelmanus.db_adapter import user_filter_clause
 from excelmanus.security.cipher import TokenCipher
 
 if TYPE_CHECKING:
@@ -238,80 +235,32 @@ class GlobalConfigStore:
 
 
 class UserConfigStore:
-    """用户级配置：active_model 等偏好。
+    """进程级配置：active_model 等偏好，写入全局 config_kv。"""
 
-    每个用户的偏好存储在用户级 DB（SQLite 物理隔离）或
-    全局 DB 的 user_config_kv 表（PostgreSQL 逻辑隔离）中。
-    匿名模式下回退到全局 config_kv 以兼容旧行为。
-    """
-
-    def __init__(self, conn: "ConnectionAdapter", user_id: str | None = None) -> None:
+    def __init__(self, conn: "ConnectionAdapter") -> None:
         from excelmanus.db_adapter import ConnectionAdapter as _CA
         if isinstance(conn, _CA):
             self._conn = conn
         else:
-            # 兼容旧调用方式（传入 Database 实例等）
             self._conn = conn.conn  # type: ignore[union-attr]
-        self._user_id = user_id
-        # 匿名模式使用 config_kv 表，认证模式使用 user_config_kv 表
-        self._table = "config_kv" if user_id is None else "user_config_kv"
-        self._uid_clause, self._uid_params = user_filter_clause("user_id", user_id)
-        self._ensure_table()
-
-    def _ensure_table(self) -> None:
-        """确保 user_config_kv 表存在。"""
-        try:
-            if not self._conn.table_exists("user_config_kv"):
-                self._conn.execute(
-                    "CREATE TABLE IF NOT EXISTS user_config_kv ("
-                    "  key TEXT NOT NULL,"
-                    "  user_id TEXT,"
-                    "  value TEXT NOT NULL,"
-                    "  updated_at TEXT NOT NULL,"
-                    "  UNIQUE(key, user_id)"
-                    ")"
-                )
-                self._conn.commit()
-        except Exception:
-            logger.debug("user_config_kv 表创建失败", exc_info=True)
 
     def get(self, key: str, default: str = "") -> str:
-        if self._user_id is None:
-            # 匿名模式：从全局 config_kv 读取（无 user_id 列）
-            row = self._conn.execute(
-                "SELECT value FROM config_kv WHERE key = ?", (key,)
-            ).fetchone()
-        else:
-            row = self._conn.execute(
-                f"SELECT value FROM {self._table} WHERE key = ? AND {self._uid_clause}",
-                (key, *self._uid_params),
-            ).fetchone()
+        row = self._conn.execute(
+            "SELECT value FROM config_kv WHERE key = ?", (key,)
+        ).fetchone()
         return row["value"] if row else default
 
     def set(self, key: str, value: str) -> None:
         now = _now_iso()
-        if self._user_id is None:
-            self._conn.execute(
-                "INSERT INTO config_kv (key, value, updated_at) VALUES (?, ?, ?) "
-                "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (key, value, now),
-            )
-        else:
-            self._conn.execute(
-                f"INSERT INTO {self._table} (key, user_id, value, updated_at) VALUES (?, ?, ?, ?) "
-                f"ON CONFLICT(key, user_id) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-                (key, self._user_id, value, now),
-            )
+        self._conn.execute(
+            "INSERT INTO config_kv (key, value, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+            (key, value, now),
+        )
         self._conn.commit()
 
     def delete_key(self, key: str) -> bool:
-        if self._user_id is None:
-            cur = self._conn.execute("DELETE FROM config_kv WHERE key = ?", (key,))
-        else:
-            cur = self._conn.execute(
-                f"DELETE FROM {self._table} WHERE key = ? AND {self._uid_clause}",
-                (key, *self._uid_params),
-            )
+        cur = self._conn.execute("DELETE FROM config_kv WHERE key = ?", (key,))
         self._conn.commit()
         return cur.rowcount > 0
 
@@ -332,23 +281,3 @@ class UserConfigStore:
     def set_full_access(self, enabled: bool) -> None:
         """持久化 full_access 开关（跨会话）。"""
         self.set("full_access_enabled", "true" if enabled else "false")
-
-
-# ── 向后兼容别名 ─────────────────────────────────────────
-
-
-class ConfigStore(GlobalConfigStore):
-    """向后兼容别名。包含用户级方法用于过渡期。
-
-    新代码应分别使用 GlobalConfigStore + UserConfigStore。
-    """
-
-    def get_active_model(self) -> str | None:
-        val = self.get("active_model")
-        return val if val else None
-
-    def set_active_model(self, name: str | None) -> None:
-        if name:
-            self.set("active_model", name)
-        else:
-            self.delete_key("active_model")

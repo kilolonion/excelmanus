@@ -146,7 +146,7 @@ export function TopModelSelector() {
       <>
         <Button
           variant="ghost"
-          className="gap-1.5 px-2.5 h-9 text-base font-semibold group"
+          className="gap-1.5 px-2.5 h-9 text-base font-semibold group shrink-0 overflow-hidden"
           data-coach-id="coach-model-selector"
           onClick={() => setOpen(true)}
         >

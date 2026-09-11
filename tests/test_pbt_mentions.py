@@ -600,7 +600,7 @@ def test_pbt_property_8_skill_raw_args_extraction(
 
 # ── Property 9: 上下文 XML 组装完整性 ──────────────────────
 
-from excelmanus.engine import build_mention_context_block
+from excelmanus.engine_utils import build_mention_context_block
 
 
 @st.composite

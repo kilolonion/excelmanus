@@ -99,32 +99,14 @@ async def _async_main() -> None:
 
     # ── 4. 持久记忆 ──
     persistent_memory = None
-    memory_extractor = None
     if config.memory_enabled:
-        from excelmanus.memory_extractor import MemoryExtractor
         from excelmanus.persistent_memory import PersistentMemory
-        from excelmanus.providers import create_client as _create_client
 
         persistent_memory = PersistentMemory(
             memory_dir=config.memory_dir,
             auto_load_lines=config.memory_auto_load_lines,
             database=_database,
         )
-        # 记忆提取优先使用 aux 模型，节省主模型 token
-        _mem_model = config.aux_model or config.model
-        _mem_api_key = config.aux_api_key or config.api_key
-        _mem_base_url = config.aux_base_url or config.base_url
-        _mem_protocol = (
-            config.aux_protocol
-            if config.aux_enabled and config.aux_model
-            else config.protocol
-        )
-        _client = _create_client(
-            api_key=_mem_api_key,
-            base_url=_mem_base_url,
-            protocol=_mem_protocol,
-        )
-        memory_extractor = MemoryExtractor(client=_client, model=_mem_model)
         console.print(
             f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
             f" [{THEME.DIM}]持久记忆[/{THEME.DIM}]"
@@ -143,7 +125,6 @@ async def _async_main() -> None:
         registry,
         skill_router=router,
         persistent_memory=persistent_memory,
-        memory_extractor=memory_extractor,
         database=_database,
     )
     engine.start_registry_scan()
@@ -235,10 +216,6 @@ async def _async_main() -> None:
                 _handle_save_command(console, engine, save_input)
             except Exception:
                 logger.warning("CLI 退出时自动保存对话失败，已跳过", exc_info=True)
-        try:
-            await engine.extract_and_save_memory()
-        except Exception:
-            logger.warning("CLI 退出时持久记忆提取失败，已跳过", exc_info=True)
         try:
             await engine.shutdown_mcp()
         except Exception:

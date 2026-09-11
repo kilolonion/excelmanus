@@ -1062,6 +1062,15 @@ class TestVersionedRegistry:
 
         f.write_text("v2", encoding="utf-8")
         ok = versioned_registry.restore_to_original("target.txt")
+        assert ok is False
+        assert f.read_text(encoding="utf-8") == "v2"
+
+        from excelmanus.workbook_commit import content_version_of
+
+        ok = versioned_registry.restore_to_original(
+            "target.txt",
+            expected_version=content_version_of(f.read_bytes()),
+        )
         assert ok is True
         assert f.read_text(encoding="utf-8") == "v1"
 
@@ -1126,6 +1135,7 @@ class TestBuildFileRegistryNotice:
         engine._state = _state
         engine.state = _state
         engine.file_registry = file_registry
+        engine._relevant_file_summary = ""
         if registry:
             # SessionState 的 get_cow_mappings() 仅从 state._file_registry 读取且要求 has_versions
             _state._file_registry = _CowMappingFake(registry)
@@ -1147,7 +1157,7 @@ class TestBuildFileRegistryNotice:
         builder = self._make_builder(file_registry=reg)
         notice = builder._build_file_registry_notice()
         assert "demo.xlsx" in notice
-        assert "工作区文件全景" in notice
+        assert "工作区文件" in notice
 
     def test_panorama_with_cow_mapping(self, tmp_path):
         """文件全景 + CoW 映射同时存在。"""
@@ -1162,8 +1172,7 @@ class TestBuildFileRegistryNotice:
             registry={"a.xlsx": "outputs/a.xlsx"},
         )
         notice = builder._build_file_registry_notice()
-        # 全景部分
-        assert "工作区文件全景" in notice
+        assert "工作区文件" in notice
         # CoW 部分
         assert "⚠️ 文件保护路径映射（CoW）" in notice
         assert "outputs/a.xlsx" in notice
@@ -1204,12 +1213,12 @@ class TestToolDispatcherWriteEvent:
 
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
         dispatcher = ToolDispatcher(engine)
-        dispatcher._EXCEL_WRITE_TOOLS = {"write_excel"}
+        dispatcher._EXCEL_WRITE_TOOLS = {"edit_spreadsheet"}
 
         # 模拟后处理中的写后事件记录逻辑
         with patch.object(reg, "record_event") as mock_record:
             # 直接调用写后事件记录段的逻辑
-            tool_name = "write_excel"
+            tool_name = "edit_spreadsheet"
             arguments = {"file_path": "target.xlsx"}
             _write_paths = []
             if tool_name in dispatcher._EXCEL_WRITE_TOOLS:
@@ -1226,7 +1235,7 @@ class TestToolDispatcherWriteEvent:
                         turn=engine.state.session_turn,
                     )
             mock_record.assert_called_once_with(
-                entry.id, "tool_write", tool_name="write_excel", turn=1,
+                entry.id, "tool_write", tool_name="edit_spreadsheet", turn=1,
             )
 
 

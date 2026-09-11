@@ -8,9 +8,9 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.7.0-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.2-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
-  <img src="https://img.shields.io/badge/tests-3900+-brightgreen.svg" alt="Tests" />
+  <img src="https://img.shields.io/badge/pytest-included-brightgreen.svg" alt="Tests" />
 </p>
 
 <p align="center">
@@ -26,8 +26,8 @@
 **ExcelManus** is a fully open-source, LLM-powered Excel Agent framework. Describe what you need in plain language and it will read data, write formulas, run analysis scripts, and create charts — like an AI assistant that truly understands Excel.
 
 - **Four interfaces** — Web UI / CLI Terminal / Multi-Channel Bot (Telegram · QQ · Feishu) / REST API
-- **Any LLM** — OpenAI · Claude · Gemini · local Ollama / vLLM, plug and play
-- **Production-ready** — Multi-arch Docker · hot updates · multi-user isolation · approval flows · version rollback
+- **Any LLM** — OpenAI · Claude · Gemini · DeepSeek · Qwen · Kimi · xAI · Doubao · local Ollama / vLLM, plug and play
+- **Production-ready** — Multi-arch Docker · hot updates · single-user workspace · approval flows · version rollback
 
 > 💡 Only 3 env vars to get started: `API_KEY` + `BASE_URL` + `MODEL`
 
@@ -48,16 +48,16 @@ Filter, sort, aggregate, pivot tables; complex logic auto-generates Python scrip
 Bar · line · pie charts embedded in Excel or exported as HD images
 
 ### 🖼️ Vision Recognition & Extraction
-Table screenshot → structured Excel data
-4-stage progressive pipeline (skeleton → data → style → formula), supports single-pass extraction and large-table chunking
+Table screenshots are attached for the main model, which produces structured Excel data
+No separate vision pipeline and no satellite VLM description step
 
 ### 🔄 Version Management & Diff
 Staging / Audit / CoW version chain, `/undo` precise rollback
 Excel write diff visualization, text file unified diff display
 
-### ✅ Verification Gate
-Attach structured verification conditions to subtasks (row count / sheet exists / formula / value match)
-Auto-validates before task completion, blocks agent if checks fail
+### ✅ Task Evidence & Agent Review
+Record optional check targets; the primary agent chooses relevant readback, comparison, and formula checks
+No hidden acceptance agent; permissions, file safety, backups, and rollback remain independent
 
 </td>
 <td width="50%">
@@ -74,15 +74,14 @@ Built-in [ClawHub](https://clawhub.ai) market for one-click search / install / u
 Connect external MCP Servers to extend toolset
 Large files and complex tasks auto-delegated to sub-agents
 
-### 🔍 Window Perception & Semantic Retrieval
-Adaptive window perception engine for intelligent context focus management
+### 🔍 Semantic Retrieval
 Embedding-powered parallel semantic retrieval for memory / files / skills, zero extra latency
 
 ### 🤖 Multi-Channel Bot
 Telegram · QQ · Feishu — three channels with file send/receive
 Three concurrency modes (Queue / Steer / Guide), adaptive streaming output strategies
 
-### � In-App Hot Update
+### 🔥 In-App Hot Update
 One-click version check → backup → update → auto-restart from Web UI
 Version compatibility validation, blue-green deployment, rollback window protection
 
@@ -92,7 +91,7 @@ Version compatibility validation, blue-green deployment, rollback window protect
 
 ## 🚀 Quick Start
 
-> **Prerequisites**: Python ≥ 3.10 · Node.js ≥ 18 (for Web UI)
+> **Prerequisites**: Python ≥ 3.10 · Node.js ≥ 20.9 (for Web UI; Next.js 16)
 
 ### Option 1: One-Click Start (Recommended)
 
@@ -131,7 +130,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Clone and install
 git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
-uv sync --all-extras     # Full install (also supports pip install ".[all]")
+uv sync --all-extras     # Full install: cli/web/channels/analysis (also supports pip install ".[all]")
 
 # 3. Configure
 cp .env.example .env     # Edit .env with your API Key / Base URL / Model
@@ -170,7 +169,7 @@ Built on **Next.js + Univer.js**, providing a full visual experience.
 | **Optimistic UI** | Messages appear immediately, writes optimistic update + rollback on failure |
 | **Error Guidance** | Actionable suggestion cards (retry / check settings / copy diagnostic ID) |
 | **ClawHub Market** | Inline skill market panel in sidebar |
-| **Admin Dashboard** | User management + per-provider/model LLM usage stats |
+| **API Pool** | Optional credential pool and subscription rotation (off by default) |
 | **Plan Mode** | Complex tasks auto-planned, interactive confirmation before execution |
 | **Hot Update Notification** | Detects new versions, auto-probes backend after upgrade |
 
@@ -193,8 +192,7 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 | `/clawhub search <keyword>` | ClawHub market search |
 | `/clawhub install <slug>` | Install market skill |
 | `/clawhub update` | Update all installed skills |
-| `/model list` | Switch models |
-| `/model aux` | Configure auxiliary model (AUX) |
+| `/model` / `/model list` / `/model <name>` | View, list, or switch models |
 | `/plan` | Toggle Plan mode |
 | `/undo <id>` | Rollback operation |
 | `/registry` | View file registry |
@@ -205,7 +203,7 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 | `/compact` | Context compaction |
 | `/config export` | Encrypted config export |
 | `/config import` | Import config |
-| `/export` | Export session (Markdown / Plain Text / EMX) |
+| `/save` | Save conversation log |
 | `/clear` | Clear conversation |
 | `/rollback` | Rollback session to a specific turn |
 
@@ -262,33 +260,32 @@ ExcelManus auto-detects model providers by URL — zero-config switching:
 | Provider | Description |
 | --- | --- |
 | **OpenAI Compatible** | Default protocol. Any OpenAI-compatible API — Ollama / vLLM / LM Studio / DeepSeek etc. |
-| **Claude (Anthropic)** | Auto-switches when URL contains `anthropic`, supports extended thinking |
+| **Claude (Anthropic)** | Auto-switches when URL contains `anthropic`; Claude 5 uses adaptive thinking |
 | **Gemini (Google)** | Auto-switches when URL contains `googleapis` / `generativelanguage` |
 | **OpenAI Responses API** | Next-gen inference API, enable with `EXCELMANUS_USE_RESPONSES_API=1` |
-| **OpenAI Codex** | Device Code Flow to bind Codex subscription, private models auto-discovered, no manual Key |
-| **MiniMax** | Auto-detects base_url, built-in recommended model list |
+| **OpenAI Codex** | ChatGPT subscription OAuth (browser PKCE or device code) binds Codex; private models auto-discovered, no manual Key |
+| **MiniMax / Zhipu / Qwen / Kimi / Doubao / xAI** | Auto-detects base_url; falls back to a curated model list when `/models` is unavailable |
 
 ### Auxiliary Model (AUX)
 
-Configure an independent lighter model for **intent routing, sub-agents, and window perception advisor** — significantly reduce cost without affecting task quality:
+Configure an independent lighter model for **intent routing and sub-agents** — significantly reduce cost without affecting task quality:
 
 ```dotenv
 EXCELMANUS_AUX_API_KEY=sk-xxxx
 EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
-EXCELMANUS_AUX_MODEL=gpt-5-mini
+EXCELMANUS_AUX_MODEL=gpt-5.6-luna
 ```
 
 ### Model Capability Probing
 
 On first use of a new model, ExcelManus auto-probes its capability boundaries (vision, function calling, context window, etc.) and dynamically adjusts tool strategies — no manual configuration needed.
 
-## 🔍 Window Perception & Semantic Engine
+## 🔍 Semantic Engine
 
-ExcelManus includes an **adaptive window perception engine** and **embedding-powered semantic retrieval system** to keep the agent precisely contextualized during long conversations:
+ExcelManus includes an **embedding-powered semantic retrieval system** to keep the agent precisely contextualized during long conversations:
 
 | Module | Description |
 | --- | --- |
-| **Window Perception Manager** | 25 sub-modules collaborating on dynamic context focus, projection, strategy adaptation |
 | **Semantic Memory Retrieval** | User preferences and history vectorized, auto-recalled for new tasks |
 | **Semantic File Registry** | Workspace files indexed by embedding, injected into context by relevance |
 | **Semantic Skill Router** | Skillpack descriptions vectorized, auto-matches optimal skill |
@@ -308,8 +305,8 @@ All semantic retrieval runs in parallel via `asyncio.gather`, zero extra latency
 | **Operation Approval** | High-risk writes require confirmation, changes auto-record diffs and snapshots |
 | **Version Chain** | Staging → Audit → CoW, `/undo` rollback to any version |
 | **MCP Whitelist** | External tools require per-item confirmation by default |
-| **Rate Limiting** | Built-in API rate limiting to prevent abuse |
-| **User Isolation** | Physical workspace, database, and session isolation per user |
+| **Channel Rate Limits** | Telegram / QQ / Feishu bots throttle by message type |
+| **Workspace Boundary** | One workspace, one credential store, and one memory store per process; multiple chats are not multi-tenancy |
 
 ## 🧩 Skillpack & ClawHub
 
@@ -337,40 +334,23 @@ Built-in [ClawHub](https://clawhub.ai) integration — search, install, and upda
 | `sheet_ops` | Worksheet & cross-sheet operations |
 | `excel_code_runner` | Python scripts for large files |
 | `run_code_templates` | Common code templates |
+| `word_basic` | Word read, edit, and content generation |
+| `word_code_runner` | Complex Word work via python-docx scripts |
 
 </details>
 
 Protocol details in [`docs/skillpack_protocol_en.md`](docs/skillpack_protocol_en.md).
 
-## 🧠 Playbook — Task Experience Learning
+## 🧠 Playbook — tactical handbook
 
-Playbook auto-analyzes success/failure patterns and distills reusable operational knowledge:
+Optional SQLite store (off by default). When enabled, `/playbook list` shows entries and `/playbook clear` resets them. The default path does not auto-learn after a task or inject bullets each turn.
 
-- **Auto-learn** — Generates PlaybookDelta after task completion, stored in SQLite
-- **Semantic dedup** — Similar entries merged, stale entries retired
-- **Auto-inject** — Matching entries injected before related future tasks, reducing repeated mistakes
-- **Management** — `/playbook list` to view · `/playbook clear` to reset
+## Single-user architecture
 
-## 👥 Multi-User & Admin
+One workspace, one credential store, and one memory store per process. Multiple conversations remain.
+Configure Codex subscription OAuth under Settings → Models → Subscription & OAuth; it is not tied to a login account.
 
-```dotenv
-EXCELMANUS_AUTH_ENABLED=true
-EXCELMANUS_JWT_SECRET=your-random-secret-key-at-least-64-chars
-```
-
-Supports **email/password** · **GitHub OAuth** · **Google OAuth** · **QQ OAuth**.
-Each user gets an independent workspace and database. First registered user becomes admin.
-
-**Admin Dashboard** (`/admin`):
-- View all users' LLM usage (grouped by provider/model)
-- Manage login method toggles
-- Set model allowlists and system-level configuration
-
-**OpenAI Codex Subscription**: Users can bind their Codex subscription via Device Code Flow — private models auto-discovered, no manual API Key needed.
-
-> **Split-server note**: OAuth callbacks optimized to frontend page + browser-direct-to-backend token exchange. Set redirect URI to `https://your-domain/auth/callback`.
-
-See [Configuration](docs/configuration_en.md) for details.
+Legacy `users/{id}/` trees are not auto-merged. Copy the one directory you want into `data_root` / `workspace_root`; per-user `data.db` files are not imported. See [Configuration](docs/configuration_en.md).
 
 ## 🏗️ Deployment
 
@@ -386,9 +366,9 @@ Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse prox
 Images support **amd64** + **arm64** dual architecture:
 
 ```bash
-docker pull kilol/excelmanus-api:1.7.0       # Backend API
-docker pull kilol/excelmanus-sandbox:1.7.0   # Code sandbox (optional)
-docker pull kilol/excelmanus-web:1.7.0       # Frontend Web
+docker pull kilol/excelmanus-api:1.7.2       # Backend API
+docker pull kilol/excelmanus-sandbox:1.7.2   # Code sandbox (optional)
+docker pull kilol/excelmanus-web:1.7.2       # Frontend Web
 ```
 
 ### Start Scripts (Local Development)
@@ -448,11 +428,9 @@ For manual deployment, see [Ops Manual](docs/ops-manual_en.md).
 | Optimization | Impact |
 | --- | --- |
 | **Claude Layered Cache** | System prompt split into stable prefix + dynamic block, 2nd request TTFT drops to 3-5s |
-| **Chitchat Fast Path** | Chitchat routing skips tool building, prompt tokens 28k → ~3k |
 | **SACR Sparse Compression** | Strips null keys from tool results, up to **74% token savings** on sparse data |
-| **Single-Pass Extraction** | Strong VLM models complete all 4 extraction phases in one call |
 | **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns |
-| **Auxiliary Model Separation** | Routing/sub-agents use lightweight AUX model, main model focuses on reasoning |
+| **Auxiliary Model Separation** | Subagents and compaction can use a lightweight AUX model; the main model focuses on reasoning |
 | **Context Budget Management** | Dynamic budget allocation with relevance-scored differential truncation |
 | **Parallel Semantic Retrieval** | `asyncio.gather` runs memory/file/skill/session-history retrieval in parallel, zero extra latency |
 | **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler |
@@ -466,10 +444,9 @@ Only 3 env vars to get started. Common configuration categories:
 | --- | --- |
 | **Basic** | `EXCELMANUS_API_KEY` / `BASE_URL` / `MODEL` |
 | **Auxiliary Model** | `EXCELMANUS_AUX_API_KEY` / `AUX_BASE_URL` / `AUX_MODEL` |
-| **VLM (Vision)** | `EXCELMANUS_VLM_MODEL` / `VLM_EXTRACTION_TIER` |
-| **Multi-User** | `EXCELMANUS_AUTH_ENABLED` / `JWT_SECRET` |
+| **Vision** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_KEEP_ROUNDS` |
 | **Security** | `EXCELMANUS_DOCKER_SANDBOX` / `GUARD_MODE` |
-| **Performance** | `EXCELMANUS_WINDOW_PERCEPTION_*` / `IMAGE_KEEP_ROUNDS` |
+| **Performance** | `IMAGE_KEEP_ROUNDS` |
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
 | **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EXCELMANUS_EMBEDDING_MODEL` |
@@ -500,12 +477,11 @@ uv run python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 ## 🛠️ Development & Contributing
 
 ```bash
-uv sync --all-extras --dev    # Full install + test dependencies
-uv run pytest                 # Run all tests (3900+ cases)
+uv sync --all-extras --dev    # Full install (cli/web/channels/analysis) + test dependencies
 uv run pytest tests/test_engine.py tests/test_api.py  # Targeted tests
 ```
 
-PRs and Issues welcome! Please ensure new code includes tests and `uv run pytest` passes.
+PRs and Issues welcome! Please include tests with new code and run the tests related to your change.
 
 ## ⭐ Star History
 

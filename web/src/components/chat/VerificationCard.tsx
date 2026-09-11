@@ -1,5 +1,8 @@
 "use client";
 
+// 仅渲染历史数据：自动验收 VerificationGate 已删除，不再产生新的 verification_report。
+// 旧会话消息里仍可能带有该 block，因此保留只读卡片。
+
 import { CheckCircle2, AlertTriangle, HelpCircle, Shield } from "lucide-react";
 
 interface VerificationCardProps {

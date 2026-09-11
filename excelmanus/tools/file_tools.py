@@ -2,24 +2,19 @@
 
 from __future__ import annotations
 
-import json
 import shutil
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
+from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, from_payload, ok_result
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.file")
-
-# ── Skill 元数据 ──────────────────────────────────────────
-
-SKILL_NAME = "file"
-SKILL_DESCRIPTION = "文件系统工具集：查看、搜索、读取、复制、重命名、删除"
 
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
 
@@ -166,7 +161,7 @@ def list_directory(
     exclude: list[str] | None = None,
     use_default_excludes: bool = True,
     max_nodes: int = _MAX_TREE_NODES,
-) -> str:
+) -> ToolResult:
     """列出指定目录下的文件和子目录。
 
     Args:
@@ -183,18 +178,17 @@ def list_directory(
         max_nodes: tree 模式最大节点数，超过后截断。
 
     Returns:
-        JSON 格式的目录内容。
+        ToolResult（value 为目录内容）。
     """
     effective_mode = _resolve_mode(mode, depth)
     if effective_mode is None:
-        return json.dumps(
+        return from_payload(
             {"error": "mode 仅支持 auto、flat、tree、overview"},
-            ensure_ascii=False,
         )
 
     effective_offset, cursor_error = _resolve_offset(offset, cursor)
     if cursor_error is not None:
-        return json.dumps({"error": cursor_error}, ensure_ascii=False)
+        return from_payload({"error": cursor_error})
 
     exclude_patterns = _normalize_exclude_patterns(
         exclude,
@@ -205,9 +199,8 @@ def list_directory(
     safe_path = guard.resolve_and_validate(directory)
 
     if not safe_path.is_dir():
-        return json.dumps(
+        return from_payload(
             {"error": f"路径 '{directory}' 不是一个有效的目录"},
-            ensure_ascii=False,
         )
 
     if effective_mode == "flat":
@@ -231,11 +224,11 @@ def list_directory(
         )
 
     if max_nodes <= 0:
-        return json.dumps({"error": "max_nodes 必须为正整数"}, ensure_ascii=False)
+        return from_payload({"error": "max_nodes 必须为正整数"})
 
     paging_error = _validate_pagination(effective_offset, limit)
     if paging_error is not None:
-        return json.dumps({"error": paging_error}, ensure_ascii=False)
+        return from_payload({"error": paging_error})
 
     stats: dict[str, Any] = {
         "scanned_count": 0,
@@ -280,7 +273,7 @@ def list_directory(
         },
         "exclude_patterns": exclude_patterns,
     }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return from_payload(result)
 
 
 def _list_directory_flat(
@@ -290,11 +283,11 @@ def _list_directory_flat(
     offset: int,
     limit: int,
     exclude_patterns: list[str],
-) -> str:
+) -> ToolResult:
     """扁平分页模式（depth=0 时的原有行为）。"""
     paging_error = _validate_pagination(offset, limit)
     if paging_error is not None:
-        return json.dumps({"error": paging_error}, ensure_ascii=False)
+        return from_payload({"error": paging_error})
 
     entries: list[dict[str, str]] = []
     omitted = _new_omitted_stats()
@@ -320,15 +313,15 @@ def _list_directory_flat(
                 total_directories += 1
             entries.append(entry)
     except PermissionError:
-        return json.dumps(
-            {"error": f"没有权限访问目录 '{directory}'"}, ensure_ascii=False
+        return from_payload(
+            {"error": f"没有权限访问目录 '{directory}'"}
         )
 
     total = len(entries)
     end = offset + limit
     paged_entries = entries[offset:end]
     has_more = end < total
-    return json.dumps(
+    return from_payload(
         {
             "directory": directory,
             "absolute_path": str(safe_path),
@@ -351,8 +344,6 @@ def _list_directory_flat(
             "exclude_patterns": exclude_patterns,
             "entries": paged_entries,
         },
-        ensure_ascii=False,
-        indent=2,
     )
 
 
@@ -459,10 +450,10 @@ def _list_directory_overview(
     offset: int,
     limit: int,
     exclude_patterns: list[str],
-) -> str:
+) -> ToolResult:
     paging_error = _validate_pagination(offset, limit)
     if paging_error is not None:
-        return json.dumps({"error": paging_error}, ensure_ascii=False)
+        return from_payload({"error": paging_error})
 
     entries: list[dict[str, Any]] = []
     hotspots: list[dict[str, Any]] = []
@@ -476,9 +467,8 @@ def _list_directory_overview(
     try:
         items = sorted(safe_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except PermissionError:
-        return json.dumps(
+        return from_payload(
             {"error": f"没有权限访问目录 '{directory}'"},
-            ensure_ascii=False,
         )
 
     for item in items:
@@ -534,7 +524,7 @@ def _list_directory_overview(
         key=lambda row: (-int(row["direct_children"]), str(row["path"])),
     )[:_MAX_OVERVIEW_HOTSPOTS]
 
-    return json.dumps(
+    return from_payload(
         {
             "directory": directory,
             "absolute_path": str(safe_path),
@@ -560,8 +550,6 @@ def _list_directory_overview(
             },
             "exclude_patterns": exclude_patterns,
         },
-        ensure_ascii=False,
-        indent=2,
     )
 
 
@@ -576,7 +564,7 @@ def _format_size(size_bytes: int) -> str:
     return f"{size_bytes:.1f}TB"
 
 
-def get_file_info(file_path: str) -> str:
+def get_file_info(file_path: str) -> ToolResult:
     """获取文件的详细信息。
 
     Args:
@@ -589,7 +577,7 @@ def get_file_info(file_path: str) -> str:
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.exists():
-        return json.dumps({"error": f"路径 '{file_path}' 不存在"}, ensure_ascii=False)
+        return from_payload({"error": f"路径 '{file_path}' 不存在"})
 
     stat = safe_path.stat()
     info: dict[str, Any] = {
@@ -612,10 +600,10 @@ def get_file_info(file_path: str) -> str:
         except PermissionError:
             info["children_count"] = "无权限"
 
-    return json.dumps(info, ensure_ascii=False, indent=2)
+    return from_payload(info)
 
 
-def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) -> str:
+def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) -> ToolResult:
     """按 glob 模式搜索工作区内的文件。
 
     Args:
@@ -630,9 +618,8 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
     safe_dir = guard.resolve_and_validate(directory)
 
     if not safe_dir.is_dir():
-        return json.dumps(
+        return from_payload(
             {"error": f"路径 '{directory}' 不是一个有效的目录"},
-            ensure_ascii=False,
         )
 
     matches: list[dict[str, str]] = []
@@ -660,9 +647,8 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
             if len(matches) >= max_results:
                 break
     except PermissionError:
-        return json.dumps(
+        return from_payload(
             {"error": f"没有权限访问目录 '{directory}'"},
-            ensure_ascii=False,
         )
 
     result = {
@@ -672,12 +658,12 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
         "truncated": len(matches) >= max_results,
         "matches": matches,
     }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return from_payload(result)
 
 
 def read_text_file(
     file_path: str, encoding: str = "utf-8", max_lines: int = 500
-) -> str:
+) -> ToolResult:
     """读取文本文件内容（CSV、TXT 等）。
 
     Args:
@@ -692,9 +678,8 @@ def read_text_file(
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.is_file():
-        return json.dumps(
+        return from_payload(
             {"error": f"路径 '{file_path}' 不是一个有效的文件"},
-            ensure_ascii=False,
         )
 
     try:
@@ -708,9 +693,8 @@ def read_text_file(
                     truncated = True
                     break
     except UnicodeDecodeError:
-        return json.dumps(
+        return from_payload(
             {"error": f"无法以 {encoding} 编码读取文件 '{file_path}'，可能是二进制文件"},
-            ensure_ascii=False,
         )
 
     total_lines = len(lines)
@@ -729,10 +713,10 @@ def read_text_file(
             "truncated": truncated,
         },
     }
-    return json.dumps(result, ensure_ascii=False, indent=2)
+    return from_payload(result)
 
 
-def copy_file(source: str, destination: str) -> str:
+def copy_file(source: str, destination: str) -> ToolResult:
     """复制文件到工作区内的新位置。
 
     Args:
@@ -747,34 +731,30 @@ def copy_file(source: str, destination: str) -> str:
     dst_path = guard.resolve_and_validate(destination)
 
     if not src_path.is_file():
-        return json.dumps(
+        return from_payload(
             {"error": f"源路径 '{source}' 不是一个有效的文件"},
-            ensure_ascii=False,
         )
 
     if dst_path.exists():
-        return json.dumps(
+        return from_payload(
             {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
-            ensure_ascii=False,
         )
 
     # 确保目标目录存在
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(src_path, dst_path)
 
-    return json.dumps(
+    return from_payload(
         {
             "status": "success",
             "source": source,
             "destination": destination,
             "size": _format_size(dst_path.stat().st_size),
         },
-        ensure_ascii=False,
-        indent=2,
     )
 
 
-def rename_file(source: str, destination: str) -> str:
+def rename_file(source: str, destination: str) -> ToolResult:
     """重命名或移动文件（工作区内）。
 
     Args:
@@ -789,33 +769,29 @@ def rename_file(source: str, destination: str) -> str:
     dst_path = guard.resolve_and_validate(destination)
 
     if not src_path.is_file():
-        return json.dumps(
+        return from_payload(
             {"error": f"源路径 '{source}' 不是一个有效的文件"},
-            ensure_ascii=False,
         )
 
     if dst_path.exists():
-        return json.dumps(
+        return from_payload(
             {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
-            ensure_ascii=False,
         )
 
     # 确保目标目录存在
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     src_path.rename(dst_path)
 
-    return json.dumps(
+    return from_payload(
         {
             "status": "success",
             "source": source,
             "destination": destination,
         },
-        ensure_ascii=False,
-        indent=2,
     )
 
 
-def delete_file(file_path: str, confirm: bool = False) -> str:
+def delete_file(file_path: str, confirm: bool = False) -> ToolResult:
     """安全删除文件（仅限文件，不删除目录）。
 
     Args:
@@ -829,21 +805,19 @@ def delete_file(file_path: str, confirm: bool = False) -> str:
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.exists():
-        return json.dumps(
+        return from_payload(
             {"error": f"路径 '{file_path}' 不存在"},
-            ensure_ascii=False,
         )
 
     if safe_path.is_dir():
-        return json.dumps(
+        return from_payload(
             {"error": f"路径 '{file_path}' 是目录，delete_file 仅允许删除文件"},
-            ensure_ascii=False,
         )
 
     if not confirm:
         # 返回待删除文件信息，供 LLM 二次确认
         stat = safe_path.stat()
-        return json.dumps(
+        return from_payload(
             {
                 "status": "pending_confirmation",
                 "message": "请将 confirm 设为 true 以确认删除",
@@ -853,29 +827,24 @@ def delete_file(file_path: str, confirm: bool = False) -> str:
                     stat.st_mtime, tz=timezone.utc
                 ).isoformat(),
             },
-            ensure_ascii=False,
-            indent=2,
         )
 
     size = _format_size(safe_path.stat().st_size)
     safe_path.unlink()
 
-    return json.dumps(
+    return from_payload(
         {
             "status": "success",
             "deleted": file_path,
             "size": size,
         },
-        ensure_ascii=False,
-        indent=2,
     )
 
 
-def offer_download(file_path: str, description: str = "") -> str:
+def offer_download(file_path: str, description: str = "") -> ToolResult:
     """向用户提供工作区内文件的可下载链接。
 
-    文件必须位于工作区内。工具返回包含 ``_file_download`` 标记的 JSON，
-    由 tool_dispatcher 检测后发射 FILE_DOWNLOAD SSE 事件，前端渲染为下载卡片。
+    下载事实放在 ui_meta.download，由分派器投影为 FILE_DOWNLOAD 事件。
     """
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
@@ -884,22 +853,24 @@ def offer_download(file_path: str, description: str = "") -> str:
 
     filename = safe_path.name
     size = _format_size(safe_path.stat().st_size)
-
-    return json.dumps(
-        {
-            "status": "success",
-            "file_path": file_path,
-            "filename": filename,
-            "size": size,
-            "description": description or f"文件 {filename} 已准备好下载",
-            "_file_download": {
+    description_text = description or f"文件 {filename} 已准备好下载"
+    payload = {
+        "status": "success",
+        "file_path": file_path,
+        "filename": filename,
+        "size": size,
+        "description": description_text,
+    }
+    return ok_result(
+        payload,
+        ui_meta=ToolUiMeta(
+            files=[file_path],
+            download={
                 "file_path": file_path,
                 "filename": filename,
-                "description": description or f"文件 {filename} 已准备好下载",
+                "description": description_text,
             },
-        },
-        ensure_ascii=False,
-        indent=2,
+        ),
     )
 
 
@@ -989,7 +960,7 @@ def get_tools() -> list[ToolDef]:
             description=(
                 "读取文本文件内容（md、txt、py、json、csv、yaml、toml 等）。"
                 "适用场景：查看脚本源码、配置文件、文档、日志等非 Excel 文本文件。"
-                "不适用：Excel/二进制文件请用 read_excel。"
+                "不适用：Excel/二进制文件请用 inspect_spreadsheet。"
                 "返回文件内容与行数信息；超长文件自动截断。"
             ),
             input_schema={

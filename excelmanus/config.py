@@ -6,7 +6,7 @@ import json
 import logging
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -35,10 +35,8 @@ class ModelProfile:
 # 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_ALLOWED_WINDOW_RETURN_MODES = {"unified", "anchored", "enriched", "adaptive"}
-_ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh"}
+_ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _ALLOWED_PROTOCOLS = {"auto", "openai", "openai_responses", "anthropic", "gemini"}
-_ALLOWED_WINDOW_RULE_ENGINE_VERSIONS = {"v1", "v2"}
 DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
 DEFAULT_EMBEDDING_DIMENSIONS = 1536
 logger = logging.getLogger(__name__)
@@ -50,6 +48,14 @@ _DEFAULT_CONTEXT_TOKENS = 128_000
 
 _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # OpenAI 提供商
+    "gpt-6-astra": 1_050_000,
+    "gpt-6": 1_050_000,
+    "gpt-5.6-sol": 1_050_000,
+    "gpt-5.6-terra": 1_050_000,
+    "gpt-5.6-luna": 1_050_000,
+    "gpt-5.6": 1_050_000,
+    "gpt-5.5": 1_050_000,
+    "gpt-5.4": 1_050_000,
     "gpt-5": 400_000,
     "gpt-5-pro": 400_000,
     "gpt-5-mini": 400_000,
@@ -94,8 +100,18 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "claude-opus-4.1": 200_000,
     "claude-opus-4.6": 200_000,
     "claude-opus-4-6": 200_000,
+    "claude-opus-4.7": 1_000_000,
+    "claude-opus-4-7": 1_000_000,
+    "claude-opus-4.8": 1_000_000,
+    "claude-opus-4-8": 1_000_000,
     "claude-sonnet-4.6": 200_000,
     "claude-sonnet-4-6": 200_000,
+    "claude-fable-5-1": 1_000_000,
+    "claude-fable-5": 1_000_000,
+    "claude-mythos-5-1": 1_000_000,
+    "claude-mythos-5": 1_000_000,
+    "claude-opus-5": 1_000_000,
+    "claude-sonnet-5": 1_000_000,
     "claude-haiku-4.5": 200_000,
     "claude-haiku-4-5": 200_000,
     "claude-haiku-4-5-20251001": 200_000,
@@ -110,6 +126,15 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-live-2.5-flash-preview": 1_048_576,
     "gemini-2.5-flash-live-preview": 1_048_576,
     "gemini-2.5-flash-native-audio-preview": 1_048_576,
+    "gemini-3.8-flash": 1_048_576,
+    "gemini-3.7-flash": 1_048_576,
+    "gemini-3.6-flash": 1_048_576,
+    "gemini-3.5-flash-lite": 1_048_576,
+    "gemini-3.5-flash": 1_048_576,
+    "gemini-3.1-pro": 1_048_576,
+    "gemini-3.1-flash-lite": 1_048_576,
+    "gemini-3.1-flash": 1_048_576,
+    "gemini-3-flash": 1_048_576,
     "gemini-3.0-pro-preview-02-2026": 1_048_576,
     "gemini-3.0-flash-preview-02-2026": 1_048_576,
     "gemini-3.0-flash-lite-preview-02-2026": 1_048_576,
@@ -120,6 +145,13 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "qwen-plus": 1_000_000,
     "qwen-plus-us": 1_000_000,
     "qwen-plus-latest": 1_000_000,
+    "qwen3.8-max": 1_000_000,
+    "qwen3.8-flash": 1_000_000,
+    "qwen3.7-plus": 1_000_000,
+    "qwen3.7-flash": 1_000_000,
+    "qwen3.7-max": 1_000_000,
+    "qwen3.6-plus": 1_000_000,
+    "qwen3.6-flash": 1_000_000,
     "qwen3.5-plus": 1_000_000,
     "qwq-plus": 131_072,
     "qwq-plus-latest": 131_072,
@@ -143,6 +175,9 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "qwen2.5-72b": 131_072,
     "qwen2.5-32b": 131_072,
     # DeepSeek 提供商
+    "deepseek-flash": 1_000_000,
+    "deepseek-v4-pro": 1_000_000,
+    "deepseek-v4-flash": 1_000_000,
     "deepseek-chat": 128_000,
     "deepseek-reasoner": 128_000,
     "deepseek-v3": 128_000,
@@ -207,6 +242,8 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "nova-2-lite": 1_000_000,
     "nova-2-sonic": 1_000_000,
     # MiniMax 提供商
+    "minimax-m3": 1_000_000,
+    "minimax-m2.7": 204_800,
     "minimax-m2.5": 204_800,
     "minimax-m2.5-highspeed": 204_800,
     "minimax-m2.1": 204_800,
@@ -215,6 +252,9 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "minimax-m2": 204_800,
     "m2-her": 64_000,
     # Moonshot（Kimi）提供商
+    "kimi-k3": 1_000_000,
+    "kimi-k2.7-code": 256_000,
+    "kimi-k2.6": 256_000,
     "kimi-k2": 262_144,
     "kimi-k2-thinking": 262_144,
     "kimi-k2.5": 262_144,
@@ -236,7 +276,33 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "c4ai-command-r7b-12-2024": 128_000,
     "command-r": 128_000,
     "command-r-08-2024": 128_000,
+    # 智谱 GLM 提供商
+    "glm-5.3": 1_000_000,
+    "glm-5.2": 1_000_000,
+    "glm-5.1": 1_000_000,
+    "glm-5-turbo": 1_000_000,
+    "glm-5": 1_000_000,
+    "glm-4.7": 128_000,
+    "glm-4-plus": 128_000,
+    "glm-4-long": 1_000_000,
+    "glm-4": 128_000,
+    # 字节豆包（火山方舟）
+    "doubao-seed-evolving": 256_000,
+    "doubao-seed-2.1-pro": 256_000,
+    "doubao-seed-2.1-turbo": 256_000,
+    "doubao-seed-2-1-pro": 256_000,
+    "doubao-seed-2-1-turbo": 256_000,
+    "doubao-seed-2.0-pro": 256_000,
+    "doubao-seed-2.0-code": 256_000,
+    "doubao-seed-2.0-lite": 256_000,
+    "doubao-seed-2.0-mini": 256_000,
+    "doubao-seed-2-0": 256_000,
+    "doubao-seed-1.6": 256_000,
+    "doubao-seed-1-6": 256_000,
     # xAI Grok 提供商
+    "grok-4.6": 500_000,
+    "grok-4.5": 500_000,
+    "grok-4.3": 1_000_000,
     "grok-4-fast-reasoning": 2_000_000,
     "grok-4-fast-non-reasoning": 2_000_000,
     "grok-4-1-fast-reasoning": 2_000_000,
@@ -268,31 +334,42 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
 
 _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     # OpenAI
-    "codex-mini-latest": "gpt-5-codex-mini",
-    "gpt-4-turbo": "gpt-5.2",
-    "gpt-4-turbo-preview": "gpt-5.2",
-    "gpt-4-0125-preview": "gpt-5.2",
-    "gpt-4-1106-preview": "gpt-5.2",
+    "codex-mini-latest": "gpt-5.6-luna",
+    "gpt-4-turbo": "gpt-6-astra",
+    "gpt-4-turbo-preview": "gpt-6-astra",
+    "gpt-4-0125-preview": "gpt-6-astra",
+    "gpt-4-1106-preview": "gpt-6-astra",
     "o1-mini": "o4-mini",
     # Anthropic Claude 3.x
-    "claude-3-opus": "claude-opus-4-6",
-    "claude-3-sonnet": "claude-sonnet-4-6",
+    "claude-3-opus": "claude-opus-5",
+    "claude-3-sonnet": "claude-sonnet-5",
     "claude-3-haiku": "claude-haiku-4-5",
-    "claude-3-5-sonnet": "claude-sonnet-4-6",
-    "claude-3.5-sonnet": "claude-sonnet-4-6",
+    "claude-3-5-sonnet": "claude-sonnet-5",
+    "claude-3.5-sonnet": "claude-sonnet-5",
     "claude-3-5-haiku": "claude-haiku-4-5",
     "claude-3.5-haiku": "claude-haiku-4-5",
-    "claude-3-7-sonnet": "claude-sonnet-4-6",
-    "claude-3.7-sonnet": "claude-sonnet-4-6",
-    # Gemini 1.5 / 2.0 generations
-    "gemini-1.5-pro": "gemini-2.5-pro",
-    "gemini-1.5-flash": "gemini-2.5-flash",
-    "gemini-2.0-flash": "gemini-2.5-flash",
-    "gemini-2.0-flash-001": "gemini-2.5-flash",
+    "claude-3-7-sonnet": "claude-sonnet-5",
+    "claude-3.7-sonnet": "claude-sonnet-5",
+    # Gemini 1.5 / 2.0 generations（2.0 已关停）
+    "gemini-1.5-pro": "gemini-3.8-flash",
+    "gemini-1.5-flash": "gemini-3.8-flash",
+    "gemini-2.0-flash": "gemini-3.8-flash",
+    "gemini-2.0-flash-001": "gemini-3.8-flash",
     "gemini-2.0-flash-live": "gemini-live-2.5-flash-preview",
-    "gemini-2.0-flash-thinking-exp": "gemini-2.5-flash",
-    "gemini-2.0-flash-lite": "gemini-2.5-flash-lite",
-    "gemini-2.0-flash-lite-001": "gemini-2.5-flash-lite",
+    "gemini-2.0-flash-thinking-exp": "gemini-3.8-flash",
+    "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
+    "gemini-2.0-flash-lite-001": "gemini-3.5-flash-lite",
+    # DeepSeek 旧别名（2026-07-24 下线）
+    "deepseek-chat": "deepseek-flash",
+    "deepseek-reasoner": "deepseek-flash",
+    # Moonshot 已下线系列
+    "moonshot-v1": "kimi-k3",
+    "kimi-k2.5": "kimi-k3",
+    "kimi-k2": "kimi-k3",
+    # 智谱旧旗舰
+    "glm-4-plus": "glm-5.3",
+    "glm-4-long": "glm-5.3",
+    "glm-z1": "glm-5.3",
 }
 
 
@@ -363,7 +440,12 @@ def _infer_context_tokens_for_model(model: str) -> int:
 
     if not best_key:
         for candidate in candidates:
-            # 兜底：未来 gpt-5.x-codex 变体，默认继承 GPT-5 Codex 400k。
+            # 兜底：未来 gpt-5.x / gpt-6.x Codex 变体，默认继承 400k / 1.05M。
+            if candidate.startswith("gpt-6"):
+                best_key = "gpt-6*(fallback)"
+                best_val = 1_050_000
+                best_candidate = candidate
+                break
             if candidate.startswith("gpt-5") and "codex" in candidate:
                 best_key = "gpt-5*-codex(fallback)"
                 best_val = 400_000
@@ -383,6 +465,18 @@ def _infer_context_tokens_for_model(model: str) -> int:
     return best_val
 
 
+def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
+    """用户是否显式锁定了上下文窗口。
+
+    设置页保存会写入 EXCELMANUS_MAX_CONTEXT_TOKENS；只要该环境变量存在
+    即视为锁定（即使数值恰好等于模型推断值）。否则回退到
+    「配置值 ≠ 当前模型推断值」——兼容测试和编程方式传入的 Config。
+    """
+    if os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"):
+        return True
+    return max_context_tokens != _infer_context_tokens_for_model(model)
+
+
 @dataclass(frozen=True)
 class ExcelManusConfig:
     """不可变的全局配置对象。"""
@@ -395,7 +489,6 @@ class ExcelManusConfig:
     max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
-    max_sessions_per_user: int = 0  # 每用户会话上限，0 表示不限制
     workspace_root: str = "."
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
     deploy_mode: str = "standalone"  # standalone|server|docker — 部署模式
@@ -419,7 +512,6 @@ class ExcelManusConfig:
     external_safe_mode: bool = True
     cors_allow_origins: tuple[str, ...] = (
         "http://localhost:3000",
-        "http://localhost:5173",
     )
     mcp_shared_manager: bool = False
     pool_enabled: bool = False  # 号池功能开关（默认关闭，灰度上线）
@@ -443,7 +535,7 @@ class ExcelManusConfig:
     cap_probe_vision_timeout: float = 20.0  # vision 探测超时（秒）
     cap_probe_thinking_total_timeout: float = 30.0  # thinking 总预算（秒）
     cap_probe_thinking_strategy_timeout: float = 8.0  # thinking 单策略上限（秒）
-    # AUX 配置（统一用于路由小模型 + 子代理默认模型 + 窗口感知顾问模型）
+    # AUX 配置（子代理默认模型、上下文压缩等附属任务）
     aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
     aux_api_key: str | None = None
     aux_base_url: str | None = None
@@ -451,7 +543,6 @@ class ExcelManusConfig:
     aux_protocol: str = "auto"  # 辅助模型协议类型
     # subagent 执行配置
     subagent_enabled: bool = True
-    verifier_enabled: bool = False  # 完成前验证器开关（默认关闭）
     subagent_max_iterations: int = 120
     subagent_max_consecutive_failures: int = 6
     subagent_timeout_seconds: int = 600  # 单个子代理执行超时（秒）
@@ -464,10 +555,10 @@ class ExcelManusConfig:
     memory_enabled: bool = True
     memory_dir: str = "~/.excelmanus/memory"
     memory_auto_load_lines: int = 200
-    memory_auto_extract_interval: int = 15  # 每 N 轮后台静默提取记忆（0 = 禁用）
+    memory_auto_extract_interval: int = 0  # 每 N 轮后台静默提取记忆（0 = 禁用，默认关）
     memory_expire_days: int = 90  # 记忆过期天数（0 = 不过期）
     # 记忆维护代理配置
-    memory_maintenance_enabled: bool = True  # 启用 LLM 驱动的记忆维护
+    memory_maintenance_enabled: bool = False  # LLM 记忆维护（默认关，显式开启）
     memory_maintenance_min_entries: int = 10  # 至少多少条才值得维护
     memory_maintenance_new_threshold: int = 5  # 新增多少条后触发维护
     memory_maintenance_interval_hours: float = 4.0  # 两次维护最小间隔（小时）
@@ -481,7 +572,7 @@ class ExcelManusConfig:
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
     # 对话历史摘要：超阈值时用辅助模型压缩早期对话（需配置 aux_model）
-    summarization_enabled: bool = True
+    summarization_enabled: bool = False  # 旧式 summarize_and_trim（默认关，compaction 已覆盖）
     summarization_threshold_ratio: float = 0.8
     summarization_keep_recent_turns: int = 3
     # 上下文自动压缩（Compaction）：增强版对话摘要，后台静默执行
@@ -494,55 +585,10 @@ class ExcelManusConfig:
     hooks_command_allowlist: tuple[str, ...] = ()
     hooks_command_timeout_seconds: int = 10
     hooks_output_max_chars: int = 32000
-    # 窗口感知层配置
-    window_perception_enabled: bool = True
-    window_perception_system_budget_tokens: int = 3000
-    window_perception_tool_append_tokens: int = 500
-    window_perception_max_windows: int = 6
-    window_perception_default_rows: int = 25
-    window_perception_default_cols: int = 10
-    window_perception_minimized_tokens: int = 80
-    window_perception_background_after_idle: int = 2
-    window_perception_suspend_after_idle: int = 5
-    window_perception_terminate_after_idle: int = 8
-    window_perception_advisor_mode: str = "rules"
-    window_perception_advisor_timeout_ms: int = 800
-    window_perception_advisor_trigger_window_count: int = 3
-    window_perception_advisor_trigger_turn: int = 4
-    window_perception_advisor_plan_ttl_turns: int = 2
-    window_return_mode: str = "adaptive"
-    adaptive_model_mode_overrides: dict[str, str] = field(default_factory=dict)
-    window_full_max_rows: int = 25
-    window_full_total_budget_tokens: int = 500
-    window_data_buffer_max_rows: int = 200
-    window_intent_enabled: bool = True
-    window_intent_sticky_turns: int = 3
-    window_intent_repeat_warn_threshold: int = 2
-    window_intent_repeat_trip_threshold: int = 3
-    window_rule_engine_version: str = "v1"
-    # VLM（视觉语言模型）独立模型配置（可选，未配置时回退到主模型）
-    vlm_enabled: bool = True  # 开关：False 时即使配置了 VLM 也回退到主模型
-    vlm_api_key: str | None = None
-    vlm_base_url: str | None = None
-    vlm_model: str | None = None
-    vlm_protocol: str = "auto"  # VLM 模型协议类型
-    vlm_timeout_seconds: int = 300
-    vlm_max_retries: int = 1
-    vlm_retry_base_delay_seconds: float = 5.0
-    vlm_max_tokens: int = 16384  # VLM 最大输出 token 数（结构化提取需要较大空间）
-    vlm_image_max_long_edge: int = 2048  # 图片长边上限（px），Qwen-VL 建议 4096
-    vlm_image_jpeg_quality: int = 92  # JPEG 压缩质量
-    vlm_enhance: bool = True  # B 通道总开关：VLM 增强描述，默认开启
-    # 视觉原生模式：图片生命周期管理
+    # 视觉：图片只交给主模型
     image_keep_rounds: int = 3  # 图片保持完整 base64 的最小轮数
     image_max_active: int = 2  # 同时保持高清的最大图片数（LRU 淘汰）
     image_token_budget: int = 6000  # 图片 token 总预算
-    # 提取策略配置
-    vlm_extraction_tier: str = "auto"  # 模型分级: auto | strong | standard | weak
-    # 渐进式管线配置
-    vlm_pipeline_uncertainty_threshold: int = 5  # 不确定项数量超过此值时暂停
-    vlm_pipeline_uncertainty_confidence_floor: float = 0.3  # 任一项低于此置信度时暂停
-    vlm_pipeline_chunk_cell_threshold: int = 500  # 预估 cell 数超过此值时分区提取
     main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
     # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
     backup_enabled: bool = True
@@ -569,7 +615,7 @@ class ExcelManusConfig:
     memory_semantic_threshold: float = 0.3
     memory_semantic_fallback_recent: int = 5
     # 历史会话感知（Session Summary）配置
-    session_summary_enabled: bool = True  # 会话结束时自动生成摘要
+    session_summary_enabled: bool = False  # 会话结束摘要（默认关，可手动/API 触发）
     session_summary_min_turns: int = 3  # 最少轮次才生成摘要
     session_summary_inject_top_k: int = 3  # 新会话注入的历史摘要条数
     session_summary_max_tokens: int = 800  # 注入的历史摘要总 token 预算
@@ -577,7 +623,6 @@ class ExcelManusConfig:
     playbook_enabled: bool = False  # 默认关闭，渐进开启
     playbook_db_path: str = ""  # 空 = 使用 db_path 同目录下 playbook.db
     playbook_max_bullets: int = 500  # 条目上限，超出时按 helpful_ratio 淘汰
-    playbook_inject_top_k: int = 5  # 每轮注入的最大条目数
     registry_semantic_top_k: int = 5
     registry_semantic_threshold: float = 0.25
     # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
@@ -589,10 +634,8 @@ class ExcelManusConfig:
     chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
     # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
     cli_layout_mode: str = "dashboard"
-    # 文本回复门禁模式：off（默认，完全关闭执行守卫和写入门禁）/ soft（降级为软提示后放行）
-    guard_mode: str = "off"
     # Thinking（推理深度）配置
-    thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh
+    thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
     thinking_budget: int = 0  # 精确 token 预算（>0 时覆盖 effort 换算值）
     # 友好错误消息：将内部错误映射为更友好的用户可见消息
     friendly_error_messages: bool = True
@@ -812,6 +855,10 @@ def _normalize_base_url(
     if path.endswith("/v1") or path == "/v1":
         return normalized
 
+    # 已带其它版本前缀（火山方舟 /api/v3、Anthropic 兼容 /anthropic）— 不要再补 /v1
+    if re.search(r"/api/v\d+$", path) or path.endswith("/anthropic"):
+        return normalized
+
     # 路径以 /v1/ 开头后面还有子路径（如 /v1/chat）→ 过度指定，警告
     if "/v1/" in path:
         logger.warning(
@@ -872,48 +919,6 @@ def _parse_system_message_mode(value: str | None) -> str:
     return normalized
 
 
-def _parse_window_perception_advisor_mode(value: str | None) -> str:
-    """解析窗口感知顾问模式。"""
-    if value is None:
-        return "rules"
-    normalized = value.strip().lower()
-    if normalized not in {"rules", "hybrid"}:
-        raise ConfigError(
-            "配置项 EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE 必须是 "
-            "['rules', 'hybrid'] 之一，当前值: "
-            f"{value!r}"
-        )
-    return normalized
-
-
-def _parse_window_return_mode(value: str | None) -> str:
-    """解析工具返回模式，非法值自动回退 adaptive（与默认值一致）。"""
-    if value is None:
-        return "adaptive"
-    normalized = value.strip().lower()
-    if normalized in _ALLOWED_WINDOW_RETURN_MODES:
-        return normalized
-    logger.warning(
-        "配置项 EXCELMANUS_WINDOW_RETURN_MODE 非法(%r)，已回退为 adaptive",
-        value,
-    )
-    return "adaptive"
-
-
-def _parse_window_rule_engine_version(value: str | None) -> str:
-    """解析窗口规则引擎版本。"""
-    if value is None:
-        return "v1"
-    normalized = value.strip().lower()
-    if normalized in _ALLOWED_WINDOW_RULE_ENGINE_VERSIONS:
-        return normalized
-    logger.warning(
-        "配置项 EXCELMANUS_WINDOW_RULE_ENGINE_VERSION 非法(%r)，已回退为 v1",
-        value,
-    )
-    return "v1"
-
-
 def _parse_tool_schema_validation_mode(value: str | None) -> str:
     """解析工具参数 schema 校验模式。"""
     if value is None:
@@ -943,57 +948,6 @@ def _parse_cli_layout_mode(value: str | None) -> str:
         value,
     )
     return "dashboard"
-
-
-def _parse_adaptive_model_mode_overrides(value: str | None) -> dict[str, str]:
-    """解析 adaptive 模型模式覆盖配置。"""
-    if value is None or not value.strip():
-        return {}
-
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        logger.warning(
-            "配置项 EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES 非法 JSON，已忽略"
-        )
-        return {}
-
-    if not isinstance(parsed, dict):
-        logger.warning(
-            "配置项 EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES 必须为 JSON object，已忽略"
-        )
-        return {}
-
-    normalized: dict[str, str] = {}
-    for raw_key, raw_mode in parsed.items():
-        if not isinstance(raw_key, str):
-            logger.warning(
-                "adaptive override key 非字符串(%r)，已忽略",
-                raw_key,
-            )
-            continue
-        if not isinstance(raw_mode, str):
-            logger.warning(
-                "adaptive override 模式非字符串(%r:%r)，已忽略",
-                raw_key,
-                raw_mode,
-            )
-            continue
-
-        key = raw_key.strip().lower()
-        mode = raw_mode.strip().lower()
-        if not key:
-            logger.warning("adaptive override key 为空，已忽略")
-            continue
-        if mode not in {"unified", "anchored", "enriched"}:
-            logger.warning(
-                "adaptive override 模式非法(%s=%s)，已忽略",
-                raw_key,
-                raw_mode,
-            )
-            continue
-        normalized[key] = mode
-    return normalized
 
 
 def _extract_first_model(raw: str | None) -> dict | None:
@@ -1074,12 +1028,11 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
 
 
 def _detect_deploy_mode() -> str:
-    """自动推断部署模式：docker > server > standalone。
+    """自动推断部署模式：docker > standalone。`server` 仍可通过环境变量显式指定。
 
     检测优先级：
     1. Docker 容器（/.dockerenv 或 /proc/1/cgroup 含 docker/containerd）
-    2. 服务器模式（auth 已启用 — 通常意味着多用户远程访问）
-    3. 默认单机模式
+    2. 默认单机模式（非 Docker 即 standalone）
     """
     # Docker 容器检测
     try:
@@ -1093,11 +1046,6 @@ def _detect_deploy_mode() -> str:
     except Exception:
         pass
 
-    # 服务器模式推断：auth 已启用通常意味着面向多用户的远程服务
-    auth_env = os.environ.get("EXCELMANUS_AUTH_ENABLED", "").strip().lower()
-    if auth_env in ("1", "true", "yes"):
-        return "server"
-
     return "standalone"
 
 
@@ -1106,7 +1054,7 @@ def _parse_cors_allow_origins() -> tuple[str, ...]:
     cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
     if cors_raw is not None:
         return tuple(o.strip() for o in cors_raw.split(",") if o.strip())
-    return ("http://localhost:3000", "http://localhost:5173")
+    return ("http://localhost:3000",)
 
 
 def load_cors_allow_origins() -> tuple[str, ...]:
@@ -1148,7 +1096,7 @@ def _load_context_optimization_config(model: str = "") -> _ContextOptimizationCo
         summarization_enabled=_parse_bool(
             os.environ.get("EXCELMANUS_SUMMARIZATION_ENABLED"),
             "EXCELMANUS_SUMMARIZATION_ENABLED",
-            True,
+            False,
         ),
         summarization_threshold_ratio=_parse_float_between_zero_and_one(
             os.environ.get("EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO"),
@@ -1233,7 +1181,7 @@ def load_config() -> ExcelManusConfig:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_MODEL。"
             "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
-            "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-2.5-flash:generateContent）"
+            "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-3.8-flash:generateContent）"
         )
     _log_deprecated_model_warning("EXCELMANUS_MODEL", model)
 
@@ -1252,10 +1200,6 @@ def load_config() -> ExcelManusConfig:
     )
     max_sessions = _parse_int(
         os.environ.get("EXCELMANUS_MAX_SESSIONS"), "EXCELMANUS_MAX_SESSIONS", 1000
-    )
-    max_sessions_per_user = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_SESSIONS_PER_USER"),
-        "EXCELMANUS_MAX_SESSIONS_PER_USER", 0,
     )
 
     workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
@@ -1428,11 +1372,6 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_SUBAGENT_ENABLED",
         True,
     )
-    verifier_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_VERIFIER_ENABLED"),
-        "EXCELMANUS_VERIFIER_ENABLED",
-        False,
-    )
     parallel_readonly_tools = _parse_bool(
         os.environ.get("EXCELMANUS_PARALLEL_READONLY_TOOLS"),
         "EXCELMANUS_PARALLEL_READONLY_TOOLS",
@@ -1482,7 +1421,7 @@ def load_config() -> ExcelManusConfig:
     memory_auto_extract_interval = _parse_int(
         os.environ.get("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL"),
         "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
-        15,
+        0,
     )
     context_optimization = _load_context_optimization_config(model=model)
     hooks_command_enabled = _parse_bool(
@@ -1503,152 +1442,7 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
         32000,
     )
-    window_perception_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ENABLED"),
-        "EXCELMANUS_WINDOW_PERCEPTION_ENABLED",
-        True,
-    )
-    window_perception_system_budget_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_SYSTEM_BUDGET_TOKENS",
-        3000,
-    )
-    window_perception_tool_append_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_TOOL_APPEND_TOKENS",
-        500,
-    )
-    window_perception_max_windows = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_MAX_WINDOWS",
-        6,
-    )
-    window_perception_default_rows = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_ROWS",
-        25,
-    )
-    window_perception_default_cols = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_DEFAULT_COLS",
-        10,
-    )
-    window_perception_minimized_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_MINIMIZED_TOKENS",
-        80,
-    )
-    window_perception_background_after_idle = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE"),
-        "EXCELMANUS_WINDOW_PERCEPTION_BACKGROUND_AFTER_IDLE",
-        2,
-    )
-    window_perception_suspend_after_idle = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE"),
-        "EXCELMANUS_WINDOW_PERCEPTION_SUSPEND_AFTER_IDLE",
-        5,
-    )
-    window_perception_terminate_after_idle = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE"),
-        "EXCELMANUS_WINDOW_PERCEPTION_TERMINATE_AFTER_IDLE",
-        8,
-    )
-    window_perception_advisor_mode = _parse_window_perception_advisor_mode(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_MODE")
-    )
-    window_perception_advisor_timeout_ms = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TIMEOUT_MS",
-        800,
-    )
-    window_perception_advisor_trigger_window_count = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT"),
-        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_WINDOW_COUNT",
-        3,
-    )
-    window_perception_advisor_trigger_turn = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN"),
-        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_TRIGGER_TURN",
-        4,
-    )
-    window_perception_advisor_plan_ttl_turns = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS"),
-        "EXCELMANUS_WINDOW_PERCEPTION_ADVISOR_PLAN_TTL_TURNS",
-        2,
-    )
-    window_return_mode = _parse_window_return_mode(
-        os.environ.get("EXCELMANUS_WINDOW_RETURN_MODE")
-    )
-    adaptive_model_mode_overrides = _parse_adaptive_model_mode_overrides(
-        os.environ.get("EXCELMANUS_ADAPTIVE_MODEL_MODE_OVERRIDES")
-    )
-    window_full_max_rows = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_FULL_MAX_ROWS"),
-        "EXCELMANUS_WINDOW_FULL_MAX_ROWS",
-        25,
-    )
-    window_full_total_budget_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS"),
-        "EXCELMANUS_WINDOW_FULL_TOTAL_BUDGET_TOKENS",
-        500,
-    )
-    window_data_buffer_max_rows = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS"),
-        "EXCELMANUS_WINDOW_DATA_BUFFER_MAX_ROWS",
-        200,
-    )
-    window_intent_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_WINDOW_INTENT_ENABLED"),
-        "EXCELMANUS_WINDOW_INTENT_ENABLED",
-        True,
-    )
-    window_intent_sticky_turns = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_INTENT_STICKY_TURNS"),
-        "EXCELMANUS_WINDOW_INTENT_STICKY_TURNS",
-        3,
-    )
-    window_intent_repeat_warn_threshold = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD"),
-        "EXCELMANUS_WINDOW_INTENT_REPEAT_WARN_THRESHOLD",
-        2,
-    )
-    window_intent_repeat_trip_threshold = _parse_int(
-        os.environ.get("EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD"),
-        "EXCELMANUS_WINDOW_INTENT_REPEAT_TRIP_THRESHOLD",
-        3,
-    )
-    window_rule_engine_version = _parse_window_rule_engine_version(
-        os.environ.get("EXCELMANUS_WINDOW_RULE_ENGINE_VERSION")
-    )
 
-    # VLM 独立模型配置（可选）
-    vlm_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_VLM_ENABLED"),
-        "EXCELMANUS_VLM_ENABLED",
-        True,
-    )
-    vlm_api_key = os.environ.get("EXCELMANUS_VLM_API_KEY") or None
-    vlm_base_url = os.environ.get("EXCELMANUS_VLM_BASE_URL") or None
-    if vlm_base_url:
-        _validate_base_url(vlm_base_url)
-    vlm_model = os.environ.get("EXCELMANUS_VLM_MODEL") or None
-    if vlm_model:
-        _log_deprecated_model_warning("EXCELMANUS_VLM_MODEL", vlm_model)
-    vlm_protocol = _parse_protocol(
-        os.environ.get("EXCELMANUS_VLM_PROTOCOL"), "EXCELMANUS_VLM_PROTOCOL"
-    )
-    if vlm_base_url:
-        vlm_base_url = _normalize_base_url(vlm_base_url, protocol=vlm_protocol, env_name="EXCELMANUS_VLM_BASE_URL", model=vlm_model or "", api_key=vlm_api_key or "")
-    vlm_max_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_VLM_MAX_TOKENS"),
-        "EXCELMANUS_VLM_MAX_TOKENS",
-        16384,
-    )
-    vlm_enhance = _parse_bool(
-        os.environ.get("EXCELMANUS_VLM_ENHANCE"),
-        "EXCELMANUS_VLM_ENHANCE",
-        True,
-    )
     main_model_vision = (
         os.environ.get("EXCELMANUS_MAIN_MODEL_VISION", "auto").strip().lower()
     )
@@ -1719,14 +1513,12 @@ def load_config() -> ExcelManusConfig:
     embedding_base_url = os.environ.get("EXCELMANUS_EMBEDDING_BASE_URL") or None
     if embedding_base_url:
         _validate_base_url(embedding_base_url)
-    # 自动启用：配置了 API key 或 base_url 即视为启用；也可显式覆盖
-    _embedding_explicit = os.environ.get("EXCELMANUS_EMBEDDING_ENABLED")
-    if _embedding_explicit is not None:
-        embedding_enabled = _parse_bool(
-            _embedding_explicit, "EXCELMANUS_EMBEDDING_ENABLED", False,
-        )
-    else:
-        embedding_enabled = bool(embedding_api_key or embedding_base_url)
+    # 显式启用：仅 EXCELMANUS_EMBEDDING_ENABLED=true 时构造客户端
+    embedding_enabled = _parse_bool(
+        os.environ.get("EXCELMANUS_EMBEDDING_ENABLED"),
+        "EXCELMANUS_EMBEDDING_ENABLED",
+        False,
+    )
     embedding_model = (
         os.environ.get("EXCELMANUS_EMBEDDING_MODEL")
         or DEFAULT_EMBEDDING_MODEL
@@ -1757,7 +1549,7 @@ def load_config() -> ExcelManusConfig:
     session_summary_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_SESSION_SUMMARY_ENABLED"),
         "EXCELMANUS_SESSION_SUMMARY_ENABLED",
-        True,
+        False,
     )
     session_summary_min_turns = _parse_int(
         os.environ.get("EXCELMANUS_SESSION_SUMMARY_MIN_TURNS"),
@@ -1786,12 +1578,6 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_PLAYBOOK_MAX_BULLETS",
         500,
     )
-    playbook_inject_top_k = _parse_int(
-        os.environ.get("EXCELMANUS_PLAYBOOK_INJECT_TOP_K"),
-        "EXCELMANUS_PLAYBOOK_INJECT_TOP_K",
-        5,
-    )
-
     registry_semantic_top_k = _parse_int(
         os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_TOP_K"),
         "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
@@ -1819,12 +1605,6 @@ def load_config() -> ExcelManusConfig:
     cli_layout_mode = _parse_cli_layout_mode(
         os.environ.get("EXCELMANUS_CLI_LAYOUT_MODE")
     )
-
-    # 文本回复门禁模式
-    guard_mode = (os.environ.get("EXCELMANUS_GUARD_MODE", "off").strip().lower())
-    if guard_mode not in ("off", "soft"):
-        logger.warning("EXCELMANUS_GUARD_MODE=%r 无效，回退到 'off'", guard_mode)
-        guard_mode = "off"
 
     # Thinking（推理深度）配置
     thinking_effort_raw = (os.environ.get("EXCELMANUS_THINKING_EFFORT", "medium").strip().lower())
@@ -1856,7 +1636,6 @@ def load_config() -> ExcelManusConfig:
         max_consecutive_failures=max_consecutive_failures,
         session_ttl_seconds=session_ttl_seconds,
         max_sessions=max_sessions,
-        max_sessions_per_user=max_sessions_per_user,
         workspace_root=workspace_root,
         data_root=data_root,
         deploy_mode=deploy_mode,
@@ -1906,7 +1685,6 @@ def load_config() -> ExcelManusConfig:
         aux_model=aux_model,
         aux_protocol=aux_protocol,
         subagent_enabled=subagent_enabled,
-        verifier_enabled=verifier_enabled,
         parallel_readonly_tools=parallel_readonly_tools,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
@@ -1931,38 +1709,6 @@ def load_config() -> ExcelManusConfig:
         hooks_command_allowlist=hooks_command_allowlist,
         hooks_command_timeout_seconds=hooks_command_timeout_seconds,
         hooks_output_max_chars=hooks_output_max_chars,
-        window_perception_enabled=window_perception_enabled,
-        window_perception_system_budget_tokens=window_perception_system_budget_tokens,
-        window_perception_tool_append_tokens=window_perception_tool_append_tokens,
-        window_perception_max_windows=window_perception_max_windows,
-        window_perception_default_rows=window_perception_default_rows,
-        window_perception_default_cols=window_perception_default_cols,
-        window_perception_minimized_tokens=window_perception_minimized_tokens,
-        window_perception_background_after_idle=window_perception_background_after_idle,
-        window_perception_suspend_after_idle=window_perception_suspend_after_idle,
-        window_perception_terminate_after_idle=window_perception_terminate_after_idle,
-        window_perception_advisor_mode=window_perception_advisor_mode,
-        window_perception_advisor_timeout_ms=window_perception_advisor_timeout_ms,
-        window_perception_advisor_trigger_window_count=window_perception_advisor_trigger_window_count,
-        window_perception_advisor_trigger_turn=window_perception_advisor_trigger_turn,
-        window_perception_advisor_plan_ttl_turns=window_perception_advisor_plan_ttl_turns,
-        window_return_mode=window_return_mode,
-        adaptive_model_mode_overrides=adaptive_model_mode_overrides,
-        window_full_max_rows=window_full_max_rows,
-        window_full_total_budget_tokens=window_full_total_budget_tokens,
-        window_data_buffer_max_rows=window_data_buffer_max_rows,
-        window_intent_enabled=window_intent_enabled,
-        window_intent_sticky_turns=window_intent_sticky_turns,
-        window_intent_repeat_warn_threshold=window_intent_repeat_warn_threshold,
-        window_intent_repeat_trip_threshold=window_intent_repeat_trip_threshold,
-        window_rule_engine_version=window_rule_engine_version,
-        vlm_enabled=vlm_enabled,
-        vlm_api_key=vlm_api_key,
-        vlm_base_url=vlm_base_url,
-        vlm_model=vlm_model,
-        vlm_protocol=vlm_protocol,
-        vlm_max_tokens=vlm_max_tokens,
-        vlm_enhance=vlm_enhance,
         main_model_vision=main_model_vision,
         backup_enabled=backup_enabled,
         checkpoint_enabled=checkpoint_enabled,
@@ -1990,7 +1736,6 @@ def load_config() -> ExcelManusConfig:
         playbook_enabled=playbook_enabled,
         playbook_db_path=playbook_db_path,
         playbook_max_bullets=playbook_max_bullets,
-        playbook_inject_top_k=playbook_inject_top_k,
         registry_semantic_top_k=registry_semantic_top_k,
         registry_semantic_threshold=registry_semantic_threshold,
         db_path=db_path,
@@ -1998,7 +1743,6 @@ def load_config() -> ExcelManusConfig:
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,
-        guard_mode=guard_mode,
         thinking_effort=thinking_effort_raw,
         thinking_budget=thinking_budget,
         models=models,

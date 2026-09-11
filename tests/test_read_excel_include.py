@@ -12,7 +12,15 @@ from openpyxl.drawing.image import Image as OpenpyxlImage
 from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
 from openpyxl.worksheet.datavalidation import DataValidation
 
-from excelmanus.tools import data_tools
+from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.workbook import data as data_tools
+
+
+def _read_payload(result: ToolResult | str) -> dict:
+    if isinstance(result, ToolResult):
+        assert isinstance(result.value, dict)
+        return result.value
+    return json.loads(result)
 
 
 @pytest.fixture(autouse=True)
@@ -139,34 +147,25 @@ class TestReadExcelRegression:
     """确保无 include 时返回与旧版一致。"""
 
     def test_basic_read_no_include(self, simple_xlsx: Path) -> None:
-        result = json.loads(data_tools.read_excel(str(simple_xlsx)))
+        result = _read_payload(data_tools.read_excel(str(simple_xlsx)))
         assert result["shape"] == {"rows": 2, "columns": 2}
         assert result["columns"] == ["名称", "数量"]
         assert "styles" not in result
         assert "charts" not in result
         assert "freeze_panes" not in result
 
-    def test_include_style_summary_backward_compat(self, styled_xlsx: Path) -> None:
-        """include_style_summary=True 应触发 styles 维度。"""
-        result = json.loads(
-            data_tools.read_excel(str(styled_xlsx), include_style_summary=True)
-        )
-        # 向后兼容：应返回 styles 键（压缩样式类格式）
-        assert "styles" in result
-        assert "style_classes" in result["styles"]
-        assert "cell_style_map" in result["styles"]
-
-    def test_tool_def_uses_higher_result_cap(self) -> None:
-        """read_excel ToolDef 应保留更高截断上限，减少关键预览信息丢失。"""
-        tools = {tool.name: tool for tool in data_tools.get_tools()}
-        assert tools["read_excel"].max_result_chars == 6000
+    def test_inspect_is_on_model_surface(self) -> None:
+        from excelmanus.tools.intent_tools import get_tools
+        tools = {tool.name: tool for tool in get_tools()}
+        assert "inspect_spreadsheet" in tools
+        assert tools["inspect_spreadsheet"].write_effect == "none"
 
 
 # ── include=["styles"] ──────────────────────────────────
 
 class TestIncludeStyles:
     def test_styles_returns_compressed_classes(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["styles"])
         )
         styles = result["styles"]
@@ -182,7 +181,7 @@ class TestIncludeStyles:
         assert any("F1" in mr for mr in styles["merged_ranges"])
 
     def test_style_classes_contain_font_info(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["styles"])
         )
         classes = result["styles"]["style_classes"]
@@ -198,7 +197,7 @@ class TestIncludeStyles:
 
 class TestIncludeCharts:
     def test_charts_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["charts"])
         )
         assert "charts" in result
@@ -208,7 +207,7 @@ class TestIncludeCharts:
         assert "title" in chart or "series_count" in chart
 
     def test_no_charts_returns_empty_list(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["charts"])
         )
         assert result["charts"] == []
@@ -218,13 +217,13 @@ class TestIncludeCharts:
 
 class TestIncludeFreezePanes:
     def test_freeze_panes_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["freeze_panes"])
         )
         assert result["freeze_panes"] == "A2"
 
     def test_no_freeze_panes(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["freeze_panes"])
         )
         assert result["freeze_panes"] is None
@@ -234,7 +233,7 @@ class TestIncludeFreezePanes:
 
 class TestIncludeConditionalFormatting:
     def test_conditional_formatting_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["conditional_formatting"])
         )
         assert "conditional_formatting" in result
@@ -243,7 +242,7 @@ class TestIncludeConditionalFormatting:
         assert "type" in cf[0]
 
     def test_no_conditional_formatting(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["conditional_formatting"])
         )
         assert result["conditional_formatting"] == []
@@ -253,7 +252,7 @@ class TestIncludeConditionalFormatting:
 
 class TestIncludeDataValidation:
     def test_data_validation_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["data_validation"])
         )
         assert "data_validation" in result
@@ -262,7 +261,7 @@ class TestIncludeDataValidation:
         assert dv[0]["type"] == "list"
 
     def test_no_data_validation(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["data_validation"])
         )
         assert result["data_validation"] == []
@@ -272,7 +271,7 @@ class TestIncludeDataValidation:
 
 class TestIncludePrintSettings:
     def test_print_settings_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["print_settings"])
         )
         ps = result["print_settings"]
@@ -280,7 +279,7 @@ class TestIncludePrintSettings:
         assert ps["orientation"] == "landscape"
 
     def test_no_print_settings(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["print_settings"])
         )
         # 简单文件应返回空或很少的设置
@@ -291,7 +290,7 @@ class TestIncludePrintSettings:
 
 class TestIncludeColumnWidths:
     def test_column_widths_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["column_widths"])
         )
         widths = result["column_widths"]
@@ -305,7 +304,7 @@ class TestIncludeColumnWidths:
 
 class TestIncludeFormulas:
     def test_formulas_detected(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(styled_xlsx), include=["formulas"])
         )
         formulas = result["formulas"]
@@ -320,7 +319,7 @@ class TestIncludeFormulas:
 
 class TestMultiDimensions:
     def test_multiple_include_dimensions(self, styled_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(
                 str(styled_xlsx),
                 include=["styles", "charts", "freeze_panes", "column_widths"],
@@ -340,7 +339,7 @@ class TestMultiDimensions:
 
 class TestInvalidDimension:
     def test_unknown_dimension_warning(self, simple_xlsx: Path) -> None:
-        result = json.loads(
+        result = _read_payload(
             data_tools.read_excel(str(simple_xlsx), include=["nonexistent_dim"])
         )
         assert "include_warning" in result

@@ -2,18 +2,18 @@
 
 import { useState, useEffect, useCallback } from "react";
 import {
-  Dialog,
-  DialogContent,
-  DialogHeader,
-  DialogFooter,
-  DialogTitle,
-  DialogDescription,
-} from "@/components/ui/dialog";
-import { Button } from "@/components/ui/button";
+  OverlayCard,
+  OverlayCardAction,
+  OverlayCardBody,
+  OverlayCardFooter,
+  OverlayCardHeader,
+  OverlayCardInset,
+} from "@/components/ui/overlay-card";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   CornerDownLeft,
   Check,
+  RotateCcw,
   FilePlus2,
   FileMinus2,
   FileEdit,
@@ -229,82 +229,83 @@ export function RollbackConfirmDialog({
   const hasChanges = fileChanges.length > 0;
 
   return (
-    <Dialog open={open} onOpenChange={(v) => !v && onCancel()}>
-      <DialogContent
-        className="w-[calc(100%-1.5rem)] sm:max-w-[560px] rounded-xl max-h-[90dvh] overflow-y-auto"
-        showCloseButton={false}
-        onOpenAutoFocus={(e) => e.preventDefault()}
-      >
-        <DialogHeader>
-          <DialogTitle className="text-base font-semibold">
-            从历史消息重新提交？
-          </DialogTitle>
-          <DialogDescription className="text-sm text-muted-foreground">
+    <OverlayCard
+      open={open}
+      onOpenChange={(v) => !v && onCancel()}
+      size="lg"
+      tone="warning"
+      onOpenAutoFocus={(e) => e.preventDefault()}
+    >
+      <OverlayCardHeader
+        icon={<RotateCcw className="h-5 w-5" />}
+        title="从历史消息重新提交？"
+        description={
+          <>
             重新提交将回退到该消息，并清除之后的所有对话。
             {preview && preview.removed_messages > 0 && (
               <span className="text-foreground/70"> 将移除 {preview.removed_messages} 条消息。</span>
             )}
-          </DialogDescription>
-        </DialogHeader>
+          </>
+        }
+        onClose={onCancel}
+      />
 
-        {/* 文件变更预览区 */}
-        <div className="my-1">
-          {loading && (
-            <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
-              <Loader2 className="h-4 w-4 animate-spin" />
-              正在加载变更预览...
-            </div>
-          )}
+      <OverlayCardBody>
+        {loading && (
+          <div className="flex items-center justify-center gap-2 py-6 text-sm text-muted-foreground">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            正在加载变更预览...
+          </div>
+        )}
 
-          {error && (
-            <div className="flex items-center gap-2 py-3 px-3 text-sm text-muted-foreground bg-muted/30 rounded-lg">
-              <FileWarning className="h-4 w-4 text-yellow-500" />
-              {error}
-            </div>
-          )}
+        {error && (
+          <div className="flex items-center gap-2 py-3 px-3 text-sm text-muted-foreground bg-muted/30 rounded-xl">
+            <FileWarning className="h-4 w-4 text-yellow-500" />
+            {error}
+          </div>
+        )}
 
-          {!loading && !error && preview && (
-            hasChanges ? (
-              <div>
-                {/* 变更统计 */}
-                <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2 text-xs text-muted-foreground">
-                  <span className="font-medium text-foreground/80">
-                    文件变更 ({fileChanges.length})
-                  </span>
-                  {addedCount > 0 && (
-                    <span className="text-green-600 dark:text-green-400">+{addedCount} 新增</span>
-                  )}
-                  {modifiedCount > 0 && (
-                    <span className="text-yellow-600 dark:text-yellow-400">~{modifiedCount} 修改</span>
-                  )}
-                  {deletedCount > 0 && (
-                    <span className="text-red-600 dark:text-red-400">-{deletedCount} 删除</span>
-                  )}
-                </div>
+        {!loading && !error && preview && (
+          hasChanges ? (
+            <div>
+              <div className="flex flex-wrap items-center gap-x-3 gap-y-1 mb-2 text-xs text-muted-foreground">
+                <span className="font-medium text-foreground/80">
+                  文件变更 ({fileChanges.length})
+                </span>
+                {addedCount > 0 && (
+                  <span className="text-green-600 dark:text-green-400">+{addedCount} 新增</span>
+                )}
+                {modifiedCount > 0 && (
+                  <span className="text-yellow-600 dark:text-yellow-400">~{modifiedCount} 修改</span>
+                )}
+                {deletedCount > 0 && (
+                  <span className="text-red-600 dark:text-red-400">-{deletedCount} 删除</span>
+                )}
+              </div>
 
-                {/* 文件列表 */}
-                <ScrollArea className="max-h-[40dvh] sm:max-h-[280px] rounded-lg border bg-background">
+              <OverlayCardInset padded={false}>
+                <ScrollArea className="max-h-[40dvh] sm:max-h-[280px]">
                   <div>
                     {fileChanges.map((change, i) => (
                       <FileChangeItem key={`${change.path}-${i}`} change={change} />
                     ))}
                   </div>
                 </ScrollArea>
+              </OverlayCardInset>
 
-                <p className="mt-2 text-[11px] text-muted-foreground/60 hidden sm:block">
-                  选择「回退并重发」将撤销以上文件变更。点击可展开查看 diff。
-                </p>
-              </div>
-            ) : (
-              <div className="py-3 px-3 text-sm text-muted-foreground bg-muted/30 rounded-lg">
-                没有检测到可回退的文件变更。
-              </div>
-            )
-          )}
-        </div>
+              <p className="mt-2 text-[11px] text-muted-foreground/60 hidden sm:block">
+                选择「回退并重发」将撤销以上文件变更。点击可展开查看 diff。
+              </p>
+            </div>
+          ) : (
+            <div className="py-3 px-3 text-sm text-muted-foreground bg-muted/30 rounded-xl">
+              没有检测到可回退的文件变更。
+            </div>
+          )
+        )}
 
         <label
-          className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none"
+          className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none mt-3"
           onClick={() => setDontAskAgain(!dontAskAgain)}
         >
           <span
@@ -322,36 +323,27 @@ export function RollbackConfirmDialog({
           </span>
           不再询问
         </label>
+      </OverlayCardBody>
 
-        <DialogFooter className="gap-2 sm:gap-2">
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={onCancel}
-            className="text-muted-foreground"
-          >
-            取消
-            <kbd className="ml-1.5 text-[10px] text-muted-foreground/60 font-normal hidden sm:inline">
-              esc
-            </kbd>
-          </Button>
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => handleConfirm(false)}
-          >
-            不回退改动
-            <span className="ml-1.5 items-center gap-0.5 text-[10px] text-muted-foreground/60 hidden sm:inline-flex">
-              <span>⇧</span>
-              <CornerDownLeft className="h-2.5 w-2.5" />
-            </span>
-          </Button>
-          <Button size="sm" onClick={() => handleConfirm(true)}>
-            回退并重发
-            <CornerDownLeft className="ml-1.5 h-3 w-3 opacity-60 hidden sm:inline" />
-          </Button>
-        </DialogFooter>
-      </DialogContent>
-    </Dialog>
+      <OverlayCardFooter>
+        <OverlayCardAction action="ghost" onClick={onCancel}>
+          取消
+          <kbd className="ml-0.5 text-[10px] text-muted-foreground/60 font-normal hidden sm:inline">
+            esc
+          </kbd>
+        </OverlayCardAction>
+        <OverlayCardAction action="outline" onClick={() => handleConfirm(false)}>
+          不回退改动
+          <span className="ml-0.5 items-center gap-0.5 text-[10px] text-muted-foreground/60 hidden sm:inline-flex">
+            <span>⇧</span>
+            <CornerDownLeft className="h-2.5 w-2.5" />
+          </span>
+        </OverlayCardAction>
+        <OverlayCardAction action="primary" onClick={() => handleConfirm(true)}>
+          回退并重发
+          <CornerDownLeft className="h-3 w-3 opacity-60 hidden sm:inline" />
+        </OverlayCardAction>
+      </OverlayCardFooter>
+    </OverlayCard>
   );
 }

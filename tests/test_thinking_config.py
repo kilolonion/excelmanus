@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from excelmanus.engine import ThinkingConfig, _EFFORT_RATIOS
+from excelmanus.engine_types import ThinkingConfig, _EFFORT_RATIOS
 
 
 # ── ThinkingConfig 数据类测试 ──────────────────────────────
@@ -64,11 +64,11 @@ class TestThinkingConfig:
         assert result in {"minimal", "low", "medium", "high"}
 
     def test_all_effort_ratios_present(self):
-        expected_efforts = {"none", "minimal", "low", "medium", "high", "xhigh"}
+        expected_efforts = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
         assert set(_EFFORT_RATIOS.keys()) == expected_efforts
 
     def test_effort_ratios_monotonically_increasing(self):
-        ordered = ["none", "minimal", "low", "medium", "high", "xhigh"]
+        ordered = ["none", "minimal", "low", "medium", "high", "xhigh", "max"]
         for i in range(len(ordered) - 1):
             assert _EFFORT_RATIOS[ordered[i]] < _EFFORT_RATIOS[ordered[i + 1]]
 
@@ -99,17 +99,23 @@ class TestModelProbeStrategies:
         names = [s[0] for s in strategies]
         assert "openai_reasoning" not in names
 
+    def test_openai_provider_gpt6_gets_openai_reasoning(self):
+        from excelmanus.model_probe import _get_thinking_strategies
+        strategies = _get_thinking_strategies("openai", "gpt-6-astra")
+        names = [s[0] for s in strategies]
+        assert "openai_reasoning" in names
+
     def test_xai_mini_gets_openai_reasoning(self):
         from excelmanus.model_probe import _get_thinking_strategies
         strategies = _get_thinking_strategies("xai", "grok-3-mini")
         types = [s[2] for s in strategies]
         assert "openai_reasoning" in types
 
-    def test_xai_non_mini_no_reasoning(self):
+    def test_xai_grok_4_6_gets_reasoning(self):
         from excelmanus.model_probe import _get_thinking_strategies
-        strategies = _get_thinking_strategies("xai", "grok-4")
+        strategies = _get_thinking_strategies("xai", "grok-4.6")
         names = [s[0] for s in strategies]
-        assert "xai_reasoning" not in names
+        assert "xai_reasoning" in names
 
     def test_openai_detected_from_url(self):
         from excelmanus.model_probe import _detect_openai_provider

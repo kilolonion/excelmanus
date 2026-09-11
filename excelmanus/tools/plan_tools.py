@@ -6,6 +6,7 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
+from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.logger import get_logger
 from excelmanus.plan_mode import parse_plan_markdown
 from excelmanus.task_list import TaskStore
@@ -27,7 +28,7 @@ def write_plan(
     *,
     store: TaskStore,
     workspace_root: str,
-) -> str:
+) -> ToolResult:
     """写入 Markdown 计划文档到 {workspace}/plans/，自动从末尾解析任务清单。
 
     工作流程：
@@ -61,10 +62,13 @@ def write_plan(
         parsed_title, subtasks = parse_plan_markdown(content)
     except ValueError as exc:
         # 文件已写入但解析失败 → 返回错误提示，agent 可修正后重试
-        return (
-            f"⚠️ 计划文档已保存到 `{rel_path}`，但任务清单解析失败：{exc}\n"
-            "请确保 content 末尾包含 `## 任务清单` + checkbox 子任务，"
-            "或 tasklist-json 代码块。"
+        return ToolResult.from_text(
+            (
+                f"⚠️ 计划文档已保存到 `{rel_path}`，但任务清单解析失败：{exc}\n"
+                "请确保 content 末尾包含 `## 任务清单` + checkbox 子任务，"
+                "或 tasklist-json 代码块。"
+            ),
+            success=False,
         )
 
     # 使用解析出的标题（如有），否则用 tool 参数的 title
@@ -83,13 +87,13 @@ def write_plan(
         v_tag = f"  [验证: {item.verification_criteria}]" if item.verification_criteria else ""
         lines.append(f"  {idx}. {item.title}{v_tag}")
 
-    return "\n".join(lines)
+    return ToolResult.from_text("\n".join(lines))
 
 
 def get_tools(store: TaskStore, workspace_root: str) -> list[ToolDef]:
     """返回绑定到 TaskStore + workspace 的计划工具定义。"""
 
-    def _write_plan(title: str, content: str) -> str:
+    def _write_plan(title: str, content: str) -> ToolResult:
         return write_plan(
             title=title,
             content=content,

@@ -39,19 +39,11 @@ def _get_api_persistent_memory():
     return _api_persistent_memory
 
 
-async def _require_admin(request: Request):
-    from excelmanus.api import _require_admin_if_auth_enabled
-    return await _require_admin_if_auth_enabled(request)
-
 
 async def _check_session_access(session_id: str, request: Request) -> bool:
     from excelmanus.api import _has_session_access
     return await _has_session_access(session_id, request)
 
-
-def _get_isolation_user_id(request: Request):
-    from excelmanus.api import _get_isolation_user_id
-    return _get_isolation_user_id(request)
 
 
 def _get_database():
@@ -83,9 +75,6 @@ async def create_global_rule(req: RuleCreateRequest, request: Request) -> dict:
     rm = _get_rules_manager()
     if rm is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
-    guard_error = await _require_admin(request)
-    if guard_error is not None:
-        return guard_error  # type: ignore[return-value]
     if not req.content.strip():
         return JSONResponse(status_code=400, content={"detail": "规则内容不能为空"})  # type: ignore[return-value]
     r = rm.add_global_rule(req.content)
@@ -97,9 +86,6 @@ async def update_global_rule(rule_id: str, req: RuleUpdateRequest, request: Requ
     rm = _get_rules_manager()
     if rm is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
-    guard_error = await _require_admin(request)
-    if guard_error is not None:
-        return guard_error  # type: ignore[return-value]
     r = rm.update_global_rule(rule_id, content=req.content, enabled=req.enabled)
     if r is None:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -111,9 +97,6 @@ async def delete_global_rule(rule_id: str, request: Request) -> dict:
     rm = _get_rules_manager()
     if rm is None:
         return JSONResponse(status_code=503, content={"detail": "规则功能未初始化"})  # type: ignore[return-value]
-    guard_error = await _require_admin(request)
-    if guard_error is not None:
-        return guard_error  # type: ignore[return-value]
     ok = rm.delete_global_rule(rule_id)
     if not ok:
         return JSONResponse(status_code=404, content={"detail": "规则不存在"})  # type: ignore[return-value]
@@ -191,33 +174,6 @@ async def list_memory_entries(request: Request, category: str | None = None) -> 
                 status_code=400,
                 content={"detail": f"不支持的类别: {category}"},
             )
-
-    user_id = _get_isolation_user_id(request)
-    db = _get_database()
-    cfg = _get_config()
-    if user_id is not None and db is not None and cfg is not None:
-        try:
-            from excelmanus.user_scope import UserScope
-            scope = UserScope.create(user_id, db, cfg.workspace_root, data_root=cfg.data_root)
-            mem_store = scope.memory_store()
-            if cat is not None:
-                entries = mem_store.load_by_category(cat)
-            else:
-                entries = mem_store.load_all()
-            return [
-                {
-                    "id": e.id,
-                    "content": e.content,
-                    "category": e.category.value,
-                    "timestamp": e.timestamp.isoformat(),
-                    "source": e.source,
-                }
-                for e in entries
-            ]
-        except Exception:
-            logger.debug("从用户隔离数据库读取记忆失败", exc_info=True)
-            return []
-
     pm = _get_api_persistent_memory()
     if pm is None:
         return []
@@ -236,22 +192,6 @@ async def list_memory_entries(request: Request, category: str | None = None) -> 
 
 @router.delete("/api/v1/memory/{entry_id}")
 async def delete_memory_entry(entry_id: str, request: Request) -> dict:
-    user_id = _get_isolation_user_id(request)
-    db = _get_database()
-    cfg = _get_config()
-    if user_id is not None and db is not None and cfg is not None:
-        try:
-            from excelmanus.user_scope import UserScope
-            scope = UserScope.create(user_id, db, cfg.workspace_root, data_root=cfg.data_root)
-            mem_store = scope.memory_store()
-            ok = mem_store.delete_entry(entry_id)
-            if not ok:
-                return JSONResponse(status_code=404, content={"detail": "记忆条目不存在"})  # type: ignore[return-value]
-            return {"status": "deleted"}
-        except Exception:
-            logger.debug("从用户隔离数据库删除记忆失败", exc_info=True)
-            return JSONResponse(status_code=500, content={"detail": "记忆删除失败"})  # type: ignore[return-value]
-
     pm = _get_api_persistent_memory()
     if pm is None:
         return JSONResponse(status_code=503, content={"detail": "记忆功能未启用"})  # type: ignore[return-value]

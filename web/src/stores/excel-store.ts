@@ -188,6 +188,9 @@ interface ExcelState {
   // 面板刷新计数器（每次 diff 后递增，触发 Univer 重新加载）
   refreshCounter: number;
 
+  // 当前打开文件的内容版本（sha256:...），按 normalize 后的 path 索引
+  contentVersions: Record<string, string>;
+
   // 快捷栏：最近使用的 Excel 文件（LRU，最多 5 个）
   recentFiles: ExcelFileRef[];
 
@@ -198,6 +201,7 @@ interface ExcelState {
   // 选区引用模式
   selectionMode: boolean;
   pendingSelection: { filePath: string; sheet: string; range: string } | null;
+  draftRange: { range: string; sheet: string; path?: string; contentVersion?: string } | null;
 
   // 快速添加文件提及到聊天输入（由侧栏设置，ChatInput 消费）
   pendingFileMention: { path: string; filename: string } | null;
@@ -272,6 +276,8 @@ interface ExcelState {
   openPanel: (filePath: string, sheet?: string) => void;
   closePanel: () => void;
   setActiveSheet: (sheet: string) => void;
+  setContentVersion: (path: string, version: string | null | undefined) => void;
+  getContentVersion: (path: string) => string | null;
   addDiff: (diff: ExcelDiffEntry) => void;
   addTextDiff: (diff: TextDiffEntry) => void;
   addTextPreview: (preview: TextPreviewEntry) => void;
@@ -291,6 +297,7 @@ interface ExcelState {
   enterSelectionMode: () => void;
   exitSelectionMode: () => void;
   confirmSelection: (sel: { filePath: string; sheet: string; range: string }) => void;
+  setDraftRange: (range: { range: string; sheet: string; path?: string; contentVersion?: string } | null) => void;
   clearPendingSelection: () => void;
   /** Insert @file:filename into chat input from sidebar click. */
   mentionFileToInput: (file: { path: string; filename: string }) => void;
@@ -348,11 +355,13 @@ export const useExcelStore = create<ExcelState>()(
   previews: {},
   textPreviews: {},
   refreshCounter: 0,
+  contentVersions: {},
   recentFiles: [],
   fullViewPath: null,
   fullViewSheet: null,
   selectionMode: false,
   pendingSelection: null,
+  draftRange: null,
   pendingFileMention: null,
   pendingFileMentions: null,
   pendingTemplateMessage: null,
@@ -403,6 +412,24 @@ export const useExcelStore = create<ExcelState>()(
 
   setActiveSheet: (sheet) => set({ activeSheet: sheet }),
 
+  setContentVersion: (path, version) =>
+    set((state) => {
+      const key = normalizeExcelPath(path);
+      if (!key) return state;
+      const next = { ...state.contentVersions };
+      if (!version) {
+        delete next[key];
+      } else {
+        next[key] = version;
+      }
+      return { contentVersions: next };
+    }),
+
+  getContentVersion: (path) => {
+    const key = normalizeExcelPath(path);
+    return get().contentVersions[key] ?? null;
+  },
+
   addDiff: (diff) =>
     set((state) => {
       // 按 toolCallId + filePath + sheet 去重，避免重放/多路径发射导致重复
@@ -412,8 +439,11 @@ export const useExcelStore = create<ExcelState>()(
       );
       if (isDup) return state;
       const newDiffs = [...state.diffs, diff].slice(-MAX_PERSISTED_DIFFS);
+      const contentVersions = { ...state.contentVersions };
+      delete contentVersions[normalizeExcelPath(diff.filePath)];
       return {
         diffs: newDiffs,
+        contentVersions,
         // 如果面板打开且是同一文件 → 触发刷新
         refreshCounter:
           state.panelOpen && state.activeFilePath === diff.filePath
@@ -551,12 +581,29 @@ export const useExcelStore = create<ExcelState>()(
       fullViewSheet: null,
     }),
 
-  enterSelectionMode: () => set({ selectionMode: true, pendingSelection: null }),
+  enterSelectionMode: () =>
+    set({ selectionMode: true, pendingSelection: null, draftRange: null }),
 
-  exitSelectionMode: () => set({ selectionMode: false, pendingSelection: null }),
+  exitSelectionMode: () =>
+    set({ selectionMode: false, pendingSelection: null, draftRange: null }),
 
   confirmSelection: (sel) =>
-    set({ selectionMode: false, pendingSelection: sel }),
+    set({ selectionMode: false, pendingSelection: sel, draftRange: null }),
+
+  setDraftRange: (range) => {
+    if (!range) {
+      set({ draftRange: null });
+      return;
+    }
+    const path = range.path;
+    const known = path ? get().getContentVersion(path) : null;
+    set({
+      draftRange: {
+        ...range,
+        contentVersion: range.contentVersion ?? known ?? undefined,
+      },
+    });
+  },
 
   clearPendingSelection: () => set({ pendingSelection: null }),
 
@@ -1027,10 +1074,12 @@ export const useExcelStore = create<ExcelState>()(
       streamingToolContent: {},
       previewTabs: [],
       refreshCounter: 0,
+      contentVersions: {},
       fullViewPath: null,
       fullViewSheet: null,
       selectionMode: false,
       pendingSelection: null,
+      draftRange: null,
       pendingFileMentions: null,
       pendingTemplateMessage: null,
       pendingBackups: [],

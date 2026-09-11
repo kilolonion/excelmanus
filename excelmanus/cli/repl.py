@@ -30,11 +30,8 @@ logger = logging.getLogger(__name__)
 # ------------------------------------------------------------------
 
 
-def _reply_text(result: "ChatResult | str") -> str:
-    """兼容 chat() 新旧返回类型，统一提取展示文本。"""
-    if hasattr(result, "reply"):
-        return result.reply
-    return str(result)
+def _reply_text(result: "ChatResult") -> str:
+    return result.reply
 
 
 # ------------------------------------------------------------------

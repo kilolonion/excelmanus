@@ -37,8 +37,6 @@ _SUPPORTED_FIELDS = {
     "hooks",
     "model",
     "metadata",
-    "command_dispatch",
-    "command_tool",
     "required_mcp_servers",
     "required_mcp_tools",
 }
@@ -48,8 +46,6 @@ _FIELD_ALIASES = {
     "disable-model-invocation": "disable_model_invocation",
     "user-invocable": "user_invocable",
     "argument-hint": "argument_hint",
-    "command-dispatch": "command_dispatch",
-    "command-tool": "command_tool",
     "required-mcp-servers": "required_mcp_servers",
     "required-mcp-tools": "required_mcp_tools",
 }
@@ -64,8 +60,6 @@ _DEFAULTS: dict[str, Any] = {
     "hooks": {},
     "model": None,
     "metadata": {},
-    "command_dispatch": "none",
-    "command_tool": None,
     "required_mcp_servers": [],
     "required_mcp_tools": [],
 }
@@ -537,9 +531,6 @@ class SkillpackManager:
         if not instructions:
             instructions = "测试说明"
 
-        if merged.get("command_dispatch") == "tool" and not merged.get("command_tool"):
-            raise SkillpackInputError("`command_dispatch=tool` 时必须提供 `command_tool`。")
-
         frontmatter = self._to_frontmatter_dict(name=name, payload=merged)
         frontmatter_text = SkillpackLoader.format_frontmatter(frontmatter)
         return f"---\n{frontmatter_text}\n---\n{instructions}\n"
@@ -563,8 +554,6 @@ class SkillpackManager:
             "hooks": dict(base.hooks),
             "model": base.model,
             "metadata": dict(base.metadata),
-            "command_dispatch": base.command_dispatch,
-            "command_tool": base.command_tool,
             "required_mcp_servers": list(base.required_mcp_servers),
             "required_mcp_tools": list(base.required_mcp_tools),
         }
@@ -603,12 +592,6 @@ class SkillpackManager:
         if isinstance(metadata, dict) and metadata:
             frontmatter["metadata"] = metadata
 
-        command_dispatch = str(payload.get("command_dispatch", "none") or "none").strip().lower()
-        if command_dispatch != "none":
-            frontmatter["command-dispatch"] = command_dispatch
-            command_tool = payload.get("command_tool")
-            if isinstance(command_tool, str) and command_tool.strip():
-                frontmatter["command-tool"] = command_tool.strip()
         required_mcp_servers = list(payload.get("required_mcp_servers", []) or [])
         required_mcp_tools = list(payload.get("required_mcp_tools", []) or [])
         if required_mcp_servers:
@@ -667,7 +650,7 @@ class SkillpackManager:
                     value,
                     allow_empty=(key in {"argument_hint", "instructions"}),
                 )
-            elif key in {"model", "command_tool"}:
+            elif key == "model":
                 normalized[key] = self._normalize_optional_str(key, value)
             elif key in {
                 "file_patterns",
@@ -681,11 +664,6 @@ class SkillpackManager:
                 normalized[key] = values
             elif key in {"disable_model_invocation", "user_invocable"}:
                 normalized[key] = self._normalize_bool(key, value)
-            elif key == "command_dispatch":
-                mode = self._normalize_str(key, value, allow_empty=False).lower()
-                if mode not in {"none", "tool"}:
-                    raise SkillpackInputError("`command_dispatch` 只能是 none 或 tool。")
-                normalized[key] = mode
             elif key in {"hooks", "metadata"}:
                 if value is None:
                     normalized[key] = {}
@@ -811,8 +789,6 @@ class SkillpackManager:
             "hooks": dict(skill.hooks),
             "model": skill.model,
             "metadata": dict(skill.metadata),
-            "command_dispatch": skill.command_dispatch,
-            "command_tool": skill.command_tool,
             "required_mcp_servers": list(skill.required_mcp_servers),
             "required_mcp_tools": list(skill.required_mcp_tools),
             "extensions": dict(skill.extensions),
@@ -823,8 +799,6 @@ class SkillpackManager:
         detail["disable-model-invocation"] = detail["disable_model_invocation"]
         detail["user-invocable"] = detail["user_invocable"]
         detail["argument-hint"] = detail["argument_hint"]
-        detail["command-dispatch"] = detail["command_dispatch"]
-        detail["command-tool"] = detail["command_tool"]
         detail["required-mcp-servers"] = detail["required_mcp_servers"]
         detail["required-mcp-tools"] = detail["required_mcp_tools"]
         return detail

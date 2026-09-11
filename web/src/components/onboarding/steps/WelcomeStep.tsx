@@ -46,10 +46,9 @@ const FEATURES = [
 interface WelcomeStepProps {
   onNext: () => void;
   onSkip?: () => void;
-  isAdmin: boolean;
 }
 
-export function WelcomeStep({ onNext, onSkip, isAdmin }: WelcomeStepProps) {
+export function WelcomeStep({ onNext, onSkip }: WelcomeStepProps) {
   return (
     <motion.div
       className="flex flex-col items-center justify-center min-h-full px-6 py-12"
@@ -95,9 +94,7 @@ export function WelcomeStep({ onNext, onSkip, isAdmin }: WelcomeStepProps) {
         variants={fadeUp}
         className="relative text-muted-foreground text-center max-w-md mb-6 sm:mb-10 text-xs sm:text-sm md:text-base px-2"
       >
-        {isAdmin
-          ? "让我们花 1 分钟完成初始配置，之后就可以用 AI 处理 Excel 了"
-          : "配置你的 AI 模型，即可开始用自然语言处理 Excel"}
+        让我们花 1 分钟完成初始配置，之后就可以用 AI 处理 Excel 了
       </motion.p>
 
       {/* Feature cards */}

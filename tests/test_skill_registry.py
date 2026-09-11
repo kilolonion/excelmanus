@@ -5,8 +5,6 @@
 
 from __future__ import annotations
 
-import json
-
 import pytest
 from hypothesis import given, strategies as st
 
@@ -121,7 +119,7 @@ class TestToolRegistryUnit:
         registry = ToolRegistry()
         registry.register_tools([_make_tool("echo")])
         result = registry.call_tool("echo", {"x": "hello"})
-        assert result == "result:hello"
+        assert result.model_text == "result:hello"
 
     def test_call_tool_not_found(self) -> None:
         """调用不存在的工具应抛出 ToolNotFoundError。"""
@@ -143,7 +141,7 @@ class TestToolRegistryUnit:
         registry = ToolRegistry()
         registry.register_tools([tool])
         result = registry.call_tool("bad", {})
-        parsed = json.loads(result)
+        parsed = result.value
         assert parsed["status"] == "error"
         assert parsed["error_code"] == "TOOL_EXECUTION_ERROR"
         assert parsed["tool"] == "bad"

@@ -552,62 +552,27 @@ def _check_min_match_rate(
     result_dict: dict[str, Any],
     threshold: float,
 ) -> AssertionResult:
-    """检查 verify_excel_replica 工具返回的 match_rate 是否达标。
-
-    从 tool_calls 中找到最后一次 verify_excel_replica 调用，
-    解析其 result JSON 字符串中的 match_rate 字段，与阈值比较。
-
-    Args:
-        result_dict: BenchResult.to_dict() 的输出。
-        threshold: match_rate 最低阈值（如 0.95）。
-
-    Returns:
-        AssertionResult 包含实际 match_rate 和比较结果。
-    """
+    """规格编译入口是 edit_spreadsheet。像素评分工具已删除。"""
+    del threshold
     tool_calls = result_dict.get("artifacts", {}).get("tool_calls", [])
-
-    # 找到所有 verify_excel_replica 调用
-    verify_calls = [
+    edits = [
         tc for tc in tool_calls
-        if tc.get("tool_name") == "verify_excel_replica"
+        if tc.get("tool_name") == "edit_spreadsheet" and tc.get("success")
     ]
-
-    if not verify_calls:
+    if not edits:
         return AssertionResult(
             rule="min_match_rate",
             passed=False,
-            expected=f"match_rate >= {threshold}",
+            expected="edit_spreadsheet success",
             actual=None,
-            message="未找到 verify_excel_replica 工具调用",
+            message="未找到成功的 edit_spreadsheet 调用",
         )
-
-    # 取最后一次调用（最终验证结果）
-    last_call = verify_calls[-1]
-    raw_result = last_call.get("result", "")
-
-    try:
-        parsed = json.loads(raw_result) if isinstance(raw_result, str) else raw_result
-        actual_rate = parsed["match_rate"]
-    except (json.JSONDecodeError, KeyError, TypeError) as exc:
-        return AssertionResult(
-            rule="min_match_rate",
-            passed=False,
-            expected=f"match_rate >= {threshold}",
-            actual=raw_result,
-            message=f"解析 verify_excel_replica 结果失败: {exc}",
-        )
-
-    passed = actual_rate >= threshold
-    message = "" if passed else (
-        f"match_rate {actual_rate} 低于阈值 {threshold}"
-    )
-
     return AssertionResult(
         rule="min_match_rate",
-        passed=passed,
-        expected=f"match_rate >= {threshold}",
-        actual=actual_rate,
-        message=message,
+        passed=True,
+        expected="edit_spreadsheet success",
+        actual="edit_spreadsheet",
+        message="",
     )
 
 

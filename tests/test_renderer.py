@@ -892,20 +892,17 @@ class TestFilesChangedRenderer:
 class TestPipelineProgressRenderer:
     """PIPELINE_PROGRESS 事件渲染测试。"""
 
-    def test_with_phase(self) -> None:
+    def test_progress_message(self) -> None:
         console = _make_console()
         renderer = StreamRenderer(console)
         event = ToolCallEvent(
             event_type=EventType.PIPELINE_PROGRESS,
             pipeline_stage="数据清洗",
             pipeline_message="正在清洗数据…",
-            pipeline_phase_index=1,
-            pipeline_total_phases=4,
         )
         renderer.handle_event(event)
         output = _get_output(console)
         assert "正在清洗数据" in output
-        assert "(2/4)" in output
 
     def test_without_phase(self) -> None:
         console = _make_console()

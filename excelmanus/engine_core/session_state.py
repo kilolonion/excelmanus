@@ -3,32 +3,14 @@
 负责管理：
 - 轮次计数（session_turn）
 - 工具调用统计（iteration/tool_call/success/failure counts）
-- write_hint 状态追踪
 - 每轮迭代诊断快照（turn_diagnostics）
 - 会话级诊断累积（session_diagnostics）
-- 执行守卫状态（execution_guard_fired, vba_exempt）
-- 卡住检测：检测重复工具调用和冗余读取模式
+- 写入追踪（has_write_tool_call / affected_files）
 """
 
 from __future__ import annotations
 
-import hashlib
-import json
-from collections import Counter, deque
 from typing import Any
-
-# 卡住检测参数
-_STUCK_WINDOW_SIZE = 15
-_ACTION_REPEAT_THRESHOLD = 3
-_READ_ONLY_LOOP_THRESHOLD = 8
-_REDUNDANT_READ_THRESHOLD = 6  # 同一文件读取 N 次触发提示
-
-# 数据读取类工具名集合（用于 Pattern 3 同文件重复读取检测）
-# 注意：list_sheets / inspect_excel_files 是轻量元数据查询，不计入重复读取
-_READ_TOOLS: frozenset[str] = frozenset({
-    "read_excel", "scan_excel_snapshot",
-    "search_excel_values",
-})
 
 
 class SessionState:
@@ -44,8 +26,6 @@ class SessionState:
         self.last_success_count: int = 0
         self.last_failure_count: int = 0
 
-        # write_hint 状态
-        self.current_write_hint: str = "unknown"
         self.has_write_tool_call: bool = False
 
         # 每轮迭代诊断快照
@@ -57,18 +37,15 @@ class SessionState:
         self.execution_guard_fired: bool = False
         self.last_text_reply: str | None = None  # 上一次文本回复（用于重复检测）
         self.vba_exempt: bool = False
-        self.finish_task_warned: bool = False
-        self.verification_attempt_count: int = 0
 
         # 自动追踪写入工具涉及的文件路径（替代 finish_task 的 affected_files）
         self.affected_files: list[str] = []
+        # 本会话最近读到/写到的内容版本（path → sha256:...）
+        self.file_content_versions: dict[str, str] = {}
 
-        # 写入操作日志（供 verifier delta 注入）
+        # 写入操作日志（当前仅供 Playbook 反思注入）
         # 每条: {tool_name, file_path, sheet, range, summary}
         self.write_operations_log: list[dict[str, str]] = []
-
-        # explorer 结构化报告缓存（供 context_builder 注入 system prompt）
-        self.explorer_reports: list[dict[str, Any]] = []
 
         # FileRegistry 引用（由 engine 注入，唯一接口）
         self._file_registry: Any = None
@@ -78,17 +55,10 @@ class SessionState:
 
         # 提示词注入快照（每轮完整文本，供 /save 导出）
         self.prompt_injection_snapshots: list[dict[str, Any]] = []
+        # 上次真正发给模型的动态快照指纹；相同则本步不再重注
+        self.injected_context_fingerprint: str | None = None
 
-        # ── 卡住检测 ──────────────────────────────────
-        # 滑动窗口：记录最近 N 次工具调用的 (tool_name, args_fingerprint)
-        self._recent_tool_calls: deque[tuple[str, str]] = deque(
-            maxlen=_STUCK_WINDOW_SIZE,
-        )
-        # 文件读取计数器：file_path → 读取次数（用于 Pattern 3）
-        self._file_read_counts: Counter[str] = Counter()
-        # 当前轮次内是否已触发过 stuck 警告（避免重复注入）
-        self.stuck_warning_fired: bool = False
-        # 待注入的系统级提示（下次迭代以 system prompt 形式注入，避免泄露到用户气泡）
+        # 待注入的系统级提示
         self._pending_system_notices: list[str] = []
 
         # ── Think-Act 推理检测 ─────────────────────────────────
@@ -112,15 +82,9 @@ class SessionState:
         self.last_failure_count = 0
         self.has_write_tool_call = False
         self.turn_diagnostics = []
-        self.finish_task_warned = False
-        self.verification_attempt_count = 0
-        self._recent_tool_calls.clear()
-        self._file_read_counts.clear()
-        self.stuck_warning_fired = False
         self._pending_system_notices.clear()
         self.affected_files = []
         self.write_operations_log = []
-        # 注意：explorer_reports 是跨轮次缓存，不在此处清空
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
@@ -131,12 +95,9 @@ class SessionState:
     def reset_session(self) -> None:
         """重置全部会话级状态（跨对话边界调用）。"""
         self.session_turn = 0
-        self.current_write_hint = "unknown"
         self.execution_guard_fired = False
         self.vba_exempt = False
         self.has_write_tool_call = False
-        self.finish_task_warned = False
-        self.verification_attempt_count = 0
         self.last_iteration_count = 0
         self.last_tool_call_count = 0
         self.last_success_count = 0
@@ -145,13 +106,11 @@ class SessionState:
         self.session_diagnostics = []
         self.backup_write_notice_shown = False
         self.prompt_injection_snapshots = []
-        self._recent_tool_calls.clear()
-        self._file_read_counts.clear()
-        self.stuck_warning_fired = False
+        self.injected_context_fingerprint = None
         self._pending_system_notices.clear()
         self.affected_files = []
+        self.file_content_versions = {}
         self.write_operations_log = []
-        self.explorer_reports = []
         self.silent_call_count = 0
         self.reasoned_call_count = 0
         self.reasoning_chars_total = 0
@@ -162,13 +121,21 @@ class SessionState:
     def record_write_action(self) -> None:
         """记录一次实质写入操作。"""
         self.has_write_tool_call = True
-        self.current_write_hint = "may_write"
 
     def record_affected_file(self, path: str) -> None:
         """记录被写入工具修改的文件路径。"""
         normalized = path.strip()
         if normalized and normalized not in self.affected_files:
             self.affected_files.append(normalized)
+
+    def remember_file_version(self, path: str, version: str) -> None:
+        key = path.replace("\\", "/").lstrip("./").strip()
+        if key and version:
+            self.file_content_versions[key] = version
+
+    def peek_file_version(self, path: str) -> str | None:
+        key = path.replace("\\", "/").lstrip("./").strip()
+        return self.file_content_versions.get(key)
 
     def record_write_operation(
         self,
@@ -179,7 +146,7 @@ class SessionState:
         cell_range: str = "",
         summary: str = "",
     ) -> None:
-        """记录一次写入操作的结构化摘要，供 verifier delta 注入。"""
+        """记录一次写入操作的结构化摘要，供 Playbook 反思注入。"""
         entry: dict[str, str] = {"tool_name": tool_name}
         if file_path:
             entry["file_path"] = file_path
@@ -192,7 +159,7 @@ class SessionState:
         self.write_operations_log.append(entry)
 
     def render_write_operations_log(self) -> str:
-        """将写入操作日志渲染为可读文本，供 verifier prompt 注入。"""
+        """将写入操作日志渲染为可读文本（调试/测试用；生产消费者为 Playbook）。"""
         if not self.write_operations_log:
             return ""
         lines: list[str] = ["## 本轮写入操作记录"]
@@ -254,118 +221,13 @@ class SessionState:
                 return redirect
         return None
 
-    # ── 卡住检测 ──────────────────────────────────────
-
-    @staticmethod
-    def _args_fingerprint(arguments: dict[str, Any]) -> str:
-        """生成工具参数的紧凑指纹，用于检测重复调用。"""
-        try:
-            canonical = json.dumps(arguments, sort_keys=True, ensure_ascii=False, default=str)
-        except (TypeError, ValueError):
-            canonical = str(arguments)
-        return hashlib.md5(canonical.encode()).hexdigest()[:8]
-
-    def record_tool_call_for_stuck_detection(
-        self, tool_name: str, arguments: dict[str, Any],
-    ) -> None:
-        """记录工具调用到滑动窗口，供卡住检测使用。"""
-        fp = self._args_fingerprint(arguments)
-        self._recent_tool_calls.append((tool_name, fp))
-        # Pattern 3: 追踪读取类工具的 file_path
-        if tool_name in _READ_TOOLS:
-            file_path = str(arguments.get("file_path", "") or "").strip()
-            if file_path:
-                self._file_read_counts[file_path] += 1
-
-    # 需要放宽只读循环阈值的 task_tags（复杂/表单类任务需要更多探索）
-    _RELAXED_TAGS: frozenset[str] = frozenset({
-        "cross_sheet", "large_data", "formatting", "multi_file",
-        "form_document", "complex",
-    })
-    _RELAXED_READ_ONLY_THRESHOLD: int = 12
-    _RELAXED_REDUNDANT_READ_THRESHOLD: int = 10
-
-    def detect_stuck_pattern(
-        self,
-        task_tags: tuple[str, ...] = (),
-    ) -> str | None:
-        """检测退化模式，返回警告消息或 None。
-
-        灵感来源：OpenHands 卡住检测。
-        检测两类模式：
-        1. 动作重复：连续 N 次调用同一工具且参数指纹相同
-        2. 只读循环：连续 N 次只读工具但 write_hint 为 may_write（应写未写）
-
-        task_tags 用于动态调整阈值：含 cross_sheet/large_data/formatting 等
-        复杂标签时放宽到 12 次，避免 agent 合理探索被过早中断。
-        """
-        if self.stuck_warning_fired:
-            return None
-
-        calls = list(self._recent_tool_calls)
-        if len(calls) < _ACTION_REPEAT_THRESHOLD:
-            return None
-
-        # 模式 1：动作重复（连续相同工具+相同参数）
-        tail = calls[-_ACTION_REPEAT_THRESHOLD:]
-        if len(set(tail)) == 1:
-            tool_name = tail[0][0]
-            self.stuck_warning_fired = True
-            return (
-                f"⚠️ 检测到重复操作：工具 `{tool_name}` 已连续调用 "
-                f"{_ACTION_REPEAT_THRESHOLD} 次且参数相同。"
-                "请更换策略：1) 检查参数是否正确 2) 尝试不同方法 "
-                "3) 调用 ask_user 寻求用户帮助。"
-            )
-
-        # 模式 3：同文件重复读取（不同参数但同一 file_path）
-        # 动态阈值：复杂任务（cross_sheet/multi_file 等）确实需要更多探查
-        _read_threshold = _REDUNDANT_READ_THRESHOLD
-        if task_tags and any(t in self._RELAXED_TAGS for t in task_tags):
-            _read_threshold = max(_read_threshold, self._RELAXED_REDUNDANT_READ_THRESHOLD)
-
-        for file_path, count in self._file_read_counts.items():
-            if count >= _read_threshold:
-                fname = file_path.rsplit("/", 1)[-1] if "/" in file_path else file_path
-                self.stuck_warning_fired = True
-                return (
-                    f"⚠️ 同一文件 `{fname}` 已读取 {count} 次。"
-                    "建议：1) 使用 include=[...] 一次获取所需全部维度 "
-                    "2) 使用 scan_excel_snapshot 一次性获取文件全貌 "
-                    "3) 复用已有上下文中的信息，避免重复读取。"
-                )
-
-        # 模式 2：只读循环（write_hint=may_write 时持续只读）
-        from excelmanus.tools.policy import READ_ONLY_SAFE_TOOLS
-
-        # 动态阈值：复杂任务放宽
-        effective_threshold = _READ_ONLY_LOOP_THRESHOLD
-        if task_tags and any(t in self._RELAXED_TAGS for t in task_tags):
-            effective_threshold = max(effective_threshold, self._RELAXED_READ_ONLY_THRESHOLD)
-
-        if (
-            self.current_write_hint == "may_write"
-            and len(calls) >= effective_threshold
-        ):
-            recent = calls[-effective_threshold:]
-            all_read_only = all(name in READ_ONLY_SAFE_TOOLS for name, _ in recent)
-            if all_read_only and not self.has_write_tool_call:
-                self.stuck_warning_fired = True
-                return (
-                    "⚠️ 检测到只读循环：任务需要写入操作，但最近 "
-                    f"{effective_threshold} 次调用均为只读工具。"
-                    "请立即执行写入操作（如 run_code），或调用 ask_user 确认任务意图。"
-                )
-
-        return None
-
     # ── 序列化 / 反序列化（状态持久化） ──────────────────────────
 
     def to_dict(self) -> dict[str, Any]:
         """将可恢复的会话状态序列化为 dict，供持久化存储。
 
         仅保存恢复执行所需的核心状态，不保存临时性运行时数据
-        （如 _recent_tool_calls、prompt_injection_snapshots 等）。
+        （如 prompt_injection_snapshots 等）。旧会话里的 current_write_hint 会被忽略。
         """
         return {
             "session_turn": self.session_turn,
@@ -373,12 +235,9 @@ class SessionState:
             "last_tool_call_count": self.last_tool_call_count,
             "last_success_count": self.last_success_count,
             "last_failure_count": self.last_failure_count,
-            "current_write_hint": self.current_write_hint,
             "has_write_tool_call": self.has_write_tool_call,
             "execution_guard_fired": self.execution_guard_fired,
             "vba_exempt": self.vba_exempt,
-            "finish_task_warned": self.finish_task_warned,
-            "verification_attempt_count": self.verification_attempt_count,
             "affected_files": list(self.affected_files),
             "backup_write_notice_shown": self.backup_write_notice_shown,
             "session_diagnostics": list(self.session_diagnostics),
@@ -393,12 +252,10 @@ class SessionState:
         state.last_tool_call_count = data.get("last_tool_call_count", 0)
         state.last_success_count = data.get("last_success_count", 0)
         state.last_failure_count = data.get("last_failure_count", 0)
-        state.current_write_hint = data.get("current_write_hint", "unknown")
+        # 旧会话可能仍带 current_write_hint，P1 已删除该状态机，忽略即可。
         state.has_write_tool_call = data.get("has_write_tool_call", False)
         state.execution_guard_fired = data.get("execution_guard_fired", False)
         state.vba_exempt = data.get("vba_exempt", False)
-        state.finish_task_warned = data.get("finish_task_warned", False)
-        state.verification_attempt_count = data.get("verification_attempt_count", 0)
         state.affected_files = data.get("affected_files", [])
         state.backup_write_notice_shown = data.get("backup_write_notice_shown", False)
         state.session_diagnostics = data.get("session_diagnostics", [])

@@ -113,7 +113,7 @@ export function friendlyUploadError(err: unknown): string {
   const msg = err instanceof Error ? err.message : String(err);
   if (/413|too large|过大/i.test(msg)) return "文件过大，请压缩后重试";
   if (/extension|格式|不支持|unsupported/i.test(msg)) return "不支持该文件格式";
-  if (/quota|配额|空间/i.test(msg)) return "存储空间不足";
+  if (/no space|disk full|磁盘空间不足/i.test(msg)) return "磁盘空间不足";
   if (/401|403|权限/i.test(msg)) return "没有上传权限";
   if (/network|fetch|连接/i.test(msg)) return "网络连接失败，请检查网络后重试";
   return "上传失败，请重试";

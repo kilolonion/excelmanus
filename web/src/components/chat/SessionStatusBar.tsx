@@ -7,17 +7,16 @@ import {
   CheckCircle2,
   AlertCircle,
   Brain,
+  Minimize2,
 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  OverlayCard,
+  OverlayCardAction,
+  OverlayCardFooter,
+  OverlayCardHeader,
+} from "@/components/ui/overlay-card";
 import {
   Tooltip,
   TooltipContent,
@@ -336,49 +335,47 @@ export function SessionStatusBar() {
         </div>
       </TooltipProvider>
 
-      <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>确认压缩上下文</DialogTitle>
-            <DialogDescription>
-              将立即触发一次上下文压缩（/compact），可能会精简历史消息内容。是否继续？
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setConfirmOpen(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={handleConfirmCompact}
-              disabled={compacting || !activeSessionId}
-            >
-              {compacting ? "压缩中..." : "确认压缩"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <OverlayCard open={confirmOpen} onOpenChange={setConfirmOpen} size="sm" tone="primary">
+        <OverlayCardHeader
+          icon={<Minimize2 className="h-5 w-5" />}
+          title="确认压缩上下文"
+          description="将立即触发一次上下文压缩（/compact），可能会精简历史消息内容。是否继续？"
+          onClose={() => setConfirmOpen(false)}
+        />
+        <OverlayCardFooter>
+          <OverlayCardAction action="ghost" onClick={() => setConfirmOpen(false)}>
+            取消
+          </OverlayCardAction>
+          <OverlayCardAction
+            action="primary"
+            onClick={handleConfirmCompact}
+            disabled={compacting || !activeSessionId}
+          >
+            {compacting ? "压缩中..." : "确认压缩"}
+          </OverlayCardAction>
+        </OverlayCardFooter>
+      </OverlayCard>
 
-      <Dialog open={scanConfirmOpen} onOpenChange={setScanConfirmOpen}>
-        <DialogContent className="sm:max-w-md">
-          <DialogHeader>
-            <DialogTitle>重新扫描文件注册表</DialogTitle>
-            <DialogDescription>
-              将重新扫描工作区文件并更新注册表索引。扫描过程在后台执行，不会中断当前对话。
-            </DialogDescription>
-          </DialogHeader>
-          <DialogFooter>
-            <Button variant="outline" onClick={() => setScanConfirmOpen(false)}>
-              取消
-            </Button>
-            <Button
-              onClick={handleConfirmScan}
-              disabled={scanning || !activeSessionId}
-            >
-              {scanning ? "扫描中..." : "确认扫描"}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
+      <OverlayCard open={scanConfirmOpen} onOpenChange={setScanConfirmOpen} size="sm" tone="primary">
+        <OverlayCardHeader
+          icon={<FolderSearch className="h-5 w-5" />}
+          title="重新扫描文件注册表"
+          description="将重新扫描工作区文件并更新注册表索引。扫描过程在后台执行，不会中断当前对话。"
+          onClose={() => setScanConfirmOpen(false)}
+        />
+        <OverlayCardFooter>
+          <OverlayCardAction action="ghost" onClick={() => setScanConfirmOpen(false)}>
+            取消
+          </OverlayCardAction>
+          <OverlayCardAction
+            action="primary"
+            onClick={handleConfirmScan}
+            disabled={scanning || !activeSessionId}
+          >
+            {scanning ? "扫描中..." : "确认扫描"}
+          </OverlayCardAction>
+        </OverlayCardFooter>
+      </OverlayCard>
     </>
   );
 }
