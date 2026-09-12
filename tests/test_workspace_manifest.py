@@ -162,34 +162,3 @@ class TestScanWorkspace:
         sales = registry.get_by_path("sales.xlsx")
         assert sales is not None
         assert sales.sheet_meta[0]["name"] == "新销售数据"
-
-
-class TestBuildPanorama:
-    def test_empty_registry(self, tmp_path: Path) -> None:
-        db = Database(str(tmp_path / "empty.db"))
-        reg = FileRegistry(db, tmp_path)
-        assert reg.build_panorama() == ""
-
-    def test_full_mode_small_workspace(self, registry: FileRegistry) -> None:
-        """≤20 文件应使用完整模式。"""
-        registry.scan_workspace(excel_only=True)
-        panorama = registry.build_panorama()
-        assert "## 工作区文件全景" in panorama
-        assert "sales.xlsx" in panorama
-        assert "迎新活动排班表.xlsx" in panorama
-
-    def test_compact_mode(self, tmp_path: Path) -> None:
-        """21-100 文件应使用紧凑模式。"""
-        for i in range(25):
-            wb = Workbook()
-            ws = wb.active
-            ws.title = f"Sheet_{i}"
-            ws.append([f"col_{i}"])
-            wb.save(tmp_path / f"file_{i:03d}.xlsx")
-
-        db = Database(str(tmp_path / "test.db"))
-        reg = FileRegistry(db, tmp_path)
-        reg.scan_workspace(excel_only=True)
-        panorama = reg.build_panorama()
-        assert "## 工作区文件全景" in panorama
-        assert "Sheet_0" in panorama

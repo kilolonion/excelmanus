@@ -21,6 +21,49 @@ from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
 from excelmanus.tools._helpers import check_file_exists, workspace_relpath
 from excelmanus.workbook_commit import content_version_of_file
 
+
+def _collect_compact_merges(ws: Any, *, limit: int = 20) -> dict[str, Any]:
+    ranges = [str(item) for item in ws.merged_cells.ranges]
+    return {"count": len(ranges), "ranges": ranges[:limit]}
+
+
+def _collect_compact_formulas(ws: Any, *, limit: int = 20) -> dict[str, Any]:
+    from excelmanus.workbook.data import _collect_formulas
+
+    payload = _collect_formulas(ws, max_rows=80)
+    items = payload.get("items") or []
+    return {
+        "count": len(items),
+        "sample": items[:limit],
+        "rows_scanned": payload.get("rows_scanned", 80),
+        "truncated": bool(payload.get("truncated")),
+    }
+
+
+def _collect_compact_styles(ws: Any) -> dict[str, Any]:
+    from excelmanus.workbook.data import _collect_styles_compressed
+
+    return _collect_styles_compressed(ws, max_rows=80)
+
+
+def _collect_compact_dtypes(ws: Any, *, max_rows: int = 20) -> dict[str, str]:
+    from collections import Counter
+
+    from openpyxl.utils import get_column_letter
+
+    types: dict[str, str] = {}
+    max_col = min(ws.max_column or 0, 40)
+    max_row = min(ws.max_row or 0, max_rows)
+    for col in range(1, max_col + 1):
+        counts: Counter[str] = Counter()
+        for row in range(1, max_row + 1):
+            value = ws.cell(row=row, column=col).value
+            if value is None:
+                continue
+            counts[type(value).__name__] += 1
+        types[get_column_letter(col)] = counts.most_common(1)[0][0] if counts else "empty"
+    return types
+
 logger = get_logger("tools.sheet")
 
 _guard: FileAccessGuard | None = None
@@ -64,7 +107,11 @@ _LIST_SHEETS_DIMENSIONS = (
     "images",
     "conditional_formatting",
     "column_widths",
+    "styles",
+    "merges",
+    "formulas",
 )
+_LIST_SHEETS_LIGHT_DIMS = {"columns", "preview"}
 
 
 def list_sheets(
@@ -89,6 +136,8 @@ def list_sheets(
             images — 嵌入图片元信息
             conditional_formatting — 条件格式规则
             column_widths — 非默认列宽
+            styles / merges / formulas — 压缩摘要，不是全表 dump
+            dtypes — 前若干行推断的列类型
         max_preview_rows: preview 维度的预览行数，默认 5。
 
     Returns:
@@ -115,10 +164,14 @@ def list_sheets(
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_LIST_SHEETS_DIMENSIONS)
     include_set -= invalid_dims
+    include_warning = ""
+    if invalid_dims:
+        include_warning = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
 
-    needs_full = bool(include_set - {"columns", "dtypes", "preview"})
+    needs_full = bool(include_set - _LIST_SHEETS_LIGHT_DIMS)
+    needs_formulas = "formulas" in include_set
 
-    wb = load_workbook(safe_path, read_only=not needs_full, data_only=True)
+    wb = load_workbook(safe_path, read_only=not needs_full, data_only=not needs_formulas)
     try:
         active_name = wb.active.title if wb.active else None
         sheets: list[dict[str, Any]] = []
@@ -170,6 +223,14 @@ def list_sheets(
                     info["conditional_formatting"] = _collect_conditional_formatting(ws)
                 if "column_widths" in include_set:
                     info["column_widths"] = _collect_column_widths(ws)
+                if "styles" in include_set:
+                    info["styles"] = _collect_compact_styles(ws)
+                if "merges" in include_set:
+                    info["merges"] = _collect_compact_merges(ws)
+                if "formulas" in include_set:
+                    info["formulas"] = _collect_compact_formulas(ws)
+                if "dtypes" in include_set:
+                    info["dtypes"] = _collect_compact_dtypes(ws)
 
             sheets.append(info)
     finally:
@@ -193,16 +254,21 @@ def list_sheets(
         "sheets": paged_sheets,
         "content_version": version,
     }
-    if invalid_dims:
-        result["include_warning"] = f"未知的 include 维度已忽略: {sorted(invalid_dims)}"
+    if include_warning:
+        result["include_warning"] = include_warning
 
     names = [str(item.get("name") or "") for item in paged_sheets if item.get("name")]
+    result["resolved_sheets"] = names
+    if len(names) == 1:
+        result["resolved_sheet"] = names[0]
     model_text = f"{safe_path.name}: {total} sheets"
     if names:
         shown = ", ".join(names[:12])
         model_text += f" ({shown})"
         if len(names) > 12 or has_more:
             model_text += " …"
+    if include_warning:
+        model_text += f"\n⚠️ {include_warning}"
     return ok_result(
         result,
         model_text=model_text,

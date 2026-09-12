@@ -13,3 +13,9 @@ EXCEL_EXTENSIONS: frozenset[str] = frozenset({
 # Excel + CSV（文件扫描、注册表等需要同时匹配 CSV 的场景）。
 EXCEL_AND_CSV_EXTENSIONS: frozenset[str] = EXCEL_EXTENSIONS | frozenset({".csv"})
 
+# 禁止当纯文本覆盖的电子表格后缀（含模板）。
+SPREADSHEET_WRITE_EXTENSIONS: frozenset[str] = EXCEL_EXTENSIONS | frozenset({
+    ".xltx",
+    ".xltm",
+})
+

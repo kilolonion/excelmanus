@@ -1,4 +1,4 @@
-"""会话列表/详情、导入导出、压缩记忆与操作历史 API。
+"""会话列表/详情、导出、压缩记忆与操作历史 API。
 
 从 api.py 抽出的独立路由模块。运行时状态只从 api_app_state 读取，
 禁止 ``from excelmanus.api import _config`` 反向导入。
@@ -377,6 +377,38 @@ async def list_sessions(request: Request) -> JSONResponse:
     return JSONResponse(content={"sessions": sessions})
 
 
+@router.post("/api/v1/sessions", responses={
+    400: _error_responses[422],
+    500: _error_responses[500],
+})
+async def create_session_api(request: Request) -> JSONResponse:
+    """Create or reuse a blank session in the conversation list. No engine."""
+    session_manager = get_session_manager()
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    if not isinstance(body, dict):
+        body = {}
+    workspace_id = (body.get("workspace_id") or "").strip() or None
+    workspace_path = (body.get("workspace_path") or "").strip() or None
+    title = (body.get("title") or "").strip() or "新对话"
+    from excelmanus.stores.workspace_store import WorkspacePathError
+    try:
+        session = await session_manager.create_or_reuse_session(
+            workspace_id=workspace_id,
+            workspace_path=workspace_path,
+            title=title,
+        )
+    except WorkspacePathError as exc:
+        return _error_json_response(400, str(exc))
+    except FileNotFoundError as exc:
+        return _error_json_response(400, str(exc))
+    return JSONResponse(content=session, status_code=200)
+
+
 @router.delete("/api/v1/sessions", responses={409: _error_responses[409]})
 async def clear_all_sessions(request: Request) -> JSONResponse:
     """清空全部会话历史。若有会话正在处理中则返回 409。"""
@@ -470,46 +502,22 @@ async def get_session_excel_events(session_id: str, request: Request) -> JSONRes
 
 @router.get("/api/v1/sessions/{session_id}/export")
 async def export_session(session_id: str, request: Request) -> Response:
-    """导出会话为 Markdown / 纯文本 / EMX 格式。
+    """导出会话为 Markdown 报告或 JSON 对话档案。
 
     Query params:
-        format: md | txt | emx (默认 md)
-        include_workspace: true | false (默认 true，仅 emx 有效)
+        format: md | json (默认 md)
     """
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
     fmt = (request.query_params.get("format") or "md").lower().strip()
-    if fmt not in ("md", "txt", "emx"):
-        return JSONResponse(status_code=400, content={"detail": f"不支持的格式: {fmt}，可选: md, txt, emx"})
+    if fmt not in ("md", "json"):
+        return JSONResponse(status_code=400, content={"detail": f"不支持的格式: {fmt}，可选: md, json"})
 
-    from excelmanus.session_export import export_markdown, export_text
+    from urllib.parse import quote
 
-    # ── EMX: 完整导出（v2.0），委托 SessionManager ──
-    if fmt == "emx":
-        include_ws = (request.query_params.get("include_workspace") or "true").lower() != "false"
-        try:
-            data = await session_manager.export_full_session(
-                session_id, include_workspace=include_ws,
-            )
-        except Exception as exc:
-            if "不存在" in str(exc):
-                return _error_json_response(404, str(exc))
-            logger.warning("EMX 导出失败", exc_info=True)
-            return _error_json_response(500, "导出失败")
+    from excelmanus.session_export import export_json, export_markdown
 
-        raw_title = data.get("session", {}).get("title", "session") or "session"
-        from urllib.parse import quote
-        ascii_title = "".join(c for c in raw_title if c.isascii() and (c.isalnum() or c in " _-")).strip()[:50] or "session"
-        utf8_title = "".join(c for c in raw_title if c.isalnum() or c in " _-").strip()[:50] or "session"
-        cd = f"attachment; filename=\"{ascii_title}.emx\"; filename*=UTF-8''{quote(utf8_title)}.emx"
-        return Response(
-            content=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
-            media_type="application/json; charset=utf-8",
-            headers={"Content-Disposition": cd},
-        )
-
-    # ── MD / TXT: 轻量导出（与 v1 行为一致）──
     messages = await session_manager.get_session_messages(
         session_id, limit=100000, offset=0,
     )
@@ -526,14 +534,25 @@ async def export_session(session_id: str, request: Request) -> Response:
     excel_diffs: list[dict] = []
     excel_previews: list[dict] = []
     affected_files: list[str] = []
-    if ch is not None and fmt == "md":
-        excel_diffs = ch.load_excel_diffs(session_id)
-        excel_previews = ch.load_excel_previews(session_id)
-        affected_files = ch.load_affected_files(session_id)
+    if ch is not None:
+        excel_diffs = [
+            {**d, "file_path": _public_excel_path(d.get("file_path", ""))}
+            for d in ch.load_excel_diffs(session_id)
+        ]
+        excel_previews = [
+            {**p, "file_path": _public_excel_path(p.get("file_path", ""))}
+            for p in ch.load_excel_previews(session_id)
+        ]
+        affected_files = []
+        for f in ch.load_affected_files(session_id):
+            if not f:
+                continue
+            ident = _public_excel_path(f)
+            if ident:
+                affected_files.append(ident)
 
     raw_title = session_meta.get("title", "session") or "session"
     ascii_title = "".join(c for c in raw_title if c.isascii() and (c.isalnum() or c in " _-")).strip()[:50] or "session"
-    from urllib.parse import quote
     utf8_title = "".join(c for c in raw_title if c.isalnum() or c in " _-").strip()[:50] or "session"
 
     def _cd(ext: str) -> str:
@@ -549,47 +568,13 @@ async def export_session(session_id: str, request: Request) -> Response:
             media_type="text/markdown; charset=utf-8",
             headers={"Content-Disposition": _cd("md")},
         )
-    else:  # txt
-        content = export_text(session_meta, messages)
-        return Response(
-            content=content.encode("utf-8"),
-            media_type="text/plain; charset=utf-8",
-            headers={"Content-Disposition": _cd("txt")},
-        )
 
-
-@router.post("/api/v1/sessions/import")
-async def import_session(request: Request) -> JSONResponse:
-    """从 EMX (.emx) 文件导入会话（v2.0 完整恢复）。
-
-    接收 JSON body（EMX 格式），创建新会话并恢复所有状态：
-    消息、SessionState checkpoint、持久记忆、工作区文件。
-    """
-    session_manager = get_session_manager()
-    if session_manager is None:
-        raise HTTPException(status_code=503, detail="服务未初始化")
-
-    from excelmanus.session_export import parse_emx, EMXImportError
-
-    try:
-        body = await request.json()
-    except Exception:
-        return JSONResponse(status_code=400, content={"detail": "无法解析 JSON body"})
-
-    try:
-        parsed = parse_emx(body)
-    except EMXImportError as exc:
-        return JSONResponse(status_code=400, content={"detail": str(exc)})
-
-    try:
-        result = await session_manager.import_full_session(parsed)
-    except RuntimeError as exc:
-        return _error_json_response(503, str(exc))
-    except Exception:
-        logger.warning("导入会话失败", exc_info=True)
-        return _error_json_response(500, "导入失败")
-
-    return JSONResponse(content={"status": "ok", **result})
+    data = export_json(session_meta, messages, excel_diffs, excel_previews, affected_files)
+    return Response(
+        content=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+        media_type="application/json; charset=utf-8",
+        headers={"Content-Disposition": _cd("json")},
+    )
 
 
 @router.get("/api/v1/sessions/{session_id}/status")
@@ -771,6 +756,42 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
     return JSONResponse(content={
         "session_id": session_id,
         "full_access_enabled": enabled,
+    })
+
+
+@router.post("/api/v1/sessions/{session_id}/present-as")
+async def toggle_present_as(session_id: str, request: Request) -> JSONResponse:
+    """切换指定会话的代码模式偏好（供设置页与快捷入口使用）。"""
+    session_manager = get_session_manager()
+    if session_manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+
+    body = await request.json()
+    from excelmanus.tools.runtime import preferred_present_as, set_present_as_preference
+
+    present_as = preferred_present_as(body.get("present_as"))
+
+    engine = await session_manager.get_or_restore_engine(
+        session_id
+    )
+    if engine is not None:
+        set_present_as_preference(engine, present_as)
+        persist = getattr(engine, "_persist_present_as", None)
+        if callable(persist):
+            persist(present_as)
+    else:
+        database = get_database()
+        if database is not None:
+            try:
+                from excelmanus.stores.config_store import UserConfigStore
+                uc = UserConfigStore(database.conn)
+                uc.set_present_as(present_as)
+            except Exception:
+                logger.debug("持久化 present_as 失败（无会话）", expl_info=True)
+
+    return JSONResponse(content={
+        "session_id": session_id,
+        "present_as": present_as,
     })
 
 

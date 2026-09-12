@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
@@ -91,7 +91,7 @@ export function Sidebar() {
       </AnimatePresence>
       <motion.aside
         data-coach-id="coach-sidebar"
-        animate={{ width: isMobile ? (sidebarOpen ? "min(85vw, 320px)" : 0) : (sidebarOpen ? 260 : 0) }}
+        animate={{ width: isMobile ? (sidebarOpen ? "min(92vw, 360px)" : 0) : (sidebarOpen ? 330 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
         className={`flex flex-col border-r border-border ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
@@ -107,21 +107,21 @@ export function Sidebar() {
         <motion.div 
           className="flex flex-col h-full"
           style={{ 
-            width: isMobile ? "min(85vw, 320px)" : "260px",
-            minWidth: isMobile ? "min(85vw, 320px)" : "260px"
+            width: isMobile ? "min(92vw, 360px)" : "330px",
+            minWidth: isMobile ? "min(92vw, 360px)" : "330px"
           }}
           variants={sidebarContentVariants}
           animate={sidebarOpen ? "open" : "closed"}
           transition={isFirstRender.current ? { duration: 0 } : undefined}
         >
       {/* Header */}
-      <div className="flex items-center justify-between px-3 py-3 flex-shrink-0">
+      <div className="flex items-center justify-between px-3 pt-3 pb-2 flex-shrink-0">
         <div className="flex items-center min-w-0">
           <img
             src="/logo.svg"
             alt="ExcelManus"
-            className="h-7 flex-shrink-0"
-            style={{ width: "auto", minWidth: "120px" }}
+            className="h-6 flex-shrink-0"
+            style={{ width: "auto", minWidth: "110px" }}
           />
         </div>
         <Button
@@ -133,14 +133,6 @@ export function Sidebar() {
           <PanelLeftClose className="h-4 w-4" />
         </Button>
       </div>
-
-      <div
-        className="h-px"
-        style={{
-          background:
-            "linear-gradient(to right, transparent, var(--border), transparent)",
-        }}
-      />
 
       {/* Tab Navigation */}
       <div className="px-3 flex gap-1 flex-shrink-0" data-coach-id="coach-sidebar-tabs">
@@ -173,9 +165,9 @@ export function Sidebar() {
 
       {/* Tab Content — both panels stay mounted, toggle via CSS to avoid layout thrash */}
       <div className="flex-1 min-h-0 overflow-hidden relative">
-        <ScrollArea className="h-full px-2" style={{ display: activeTab === "chats" ? undefined : "none" }}>
+        <div className="h-full px-2" style={{ display: activeTab === "chats" ? undefined : "none" }}>
           <SessionList />
-        </ScrollArea>
+        </div>
         <ScrollArea className="h-full px-2" style={{ display: activeTab === "files" ? undefined : "none" }}>
           <ExcelFilesBar embedded />
         </ScrollArea>

@@ -46,7 +46,6 @@ vi.mock("@/stores/excel-store", () => ({
   useExcelStore: {
     getState: () => ({
       diffs: [],
-      fetchBackups: vi.fn(),
     }),
   },
 }));

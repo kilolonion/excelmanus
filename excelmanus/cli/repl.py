@@ -182,7 +182,7 @@ async def chat_with_feedback(
             chat_kwargs["approval_resolver"] = approval_resolver
         if images:
             chat_kwargs["images"] = images
-        reply = _reply_text(await engine.chat(user_input, **chat_kwargs))
+        reply = _reply_text(await engine.followup(user_input, **chat_kwargs))
         streamed = renderer._streaming_text or renderer._streaming_thinking
         renderer.finish_streaming()
         return reply, streamed
@@ -671,7 +671,7 @@ async def repl_loop(console: Console, engine: "AgentEngine") -> None:
                     render_farewell(console)
                     return
             else:
-                reply = _reply_text(await engine.chat(user_input))
+                reply = _reply_text(await engine.followup(user_input))
                 console.print(f"  [{THEME.CYAN}]{reply}[/{THEME.CYAN}]")
             continue
 

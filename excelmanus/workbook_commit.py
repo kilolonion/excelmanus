@@ -220,6 +220,7 @@ def commit_bytes(
                     },
                 )
 
+        dest.parent.mkdir(parents=True, exist_ok=True)
         fd, tmp_name = tempfile.mkstemp(suffix=dest.suffix or ".xlsx", dir=str(dest.parent))
         os.close(fd)
         tmp_path = Path(tmp_name)
@@ -244,6 +245,145 @@ def commit_bytes(
         if tmp_path is not None:
             tmp_path.unlink(missing_ok=True)
         _release_lock(fh)
+
+
+def resolve_expected_version(
+    file_path: str,
+    expected_version: str | None,
+    *,
+    exists: bool,
+) -> str | None:
+    """CAS token from the caller or peek_seen — never the live disk hash."""
+    seen = (expected_version or "").strip() or peek_seen_content_version(file_path)
+    rel = normalize_version_path(file_path)
+    if exists and not seen:
+        raise CommitError(
+            "VERSION_CONFLICT",
+            f"{rel or file_path} 已存在，缺少 expected_version",
+            fields={"path": rel or file_path},
+        )
+    return seen or None
+
+
+def commit_unlink(
+    *,
+    guard: FileAccessGuard,
+    file_path: str,
+    expected_version: str | None = None,
+    record_history: bool = True,
+) -> CommitResult:
+    """Atomically delete a live workspace file after CAS."""
+    try:
+        dest = guard.resolve_and_validate(file_path)
+    except SecurityViolationError as exc:
+        raise CommitError("PATH_INVALID", str(exc)) from exc
+
+    rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+    from excelmanus.workspace.identity import is_reserved_relative
+
+    if is_reserved_relative(rel):
+        raise CommitError("PATH_INVALID", f"reserved namespace: {rel}", fields={"path": rel})
+    if not dest.is_file():
+        raise CommitError("PATH_INVALID", f"文件不存在：{rel}", fields={"path": rel})
+
+    seen = resolve_expected_version(rel, expected_version, exists=True)
+    lock_path = lock_path_for(dest)
+    fh = _acquire_lock(lock_path)
+    try:
+        before_bytes = dest.read_bytes()
+        current = content_version_of(before_bytes)
+        if current != seen:
+            raise CommitError(
+                "VERSION_CONFLICT",
+                f"{rel} 版本冲突：期望 {seen}，实际 {current}",
+                fields={
+                    "path": rel,
+                    "content_version": current,
+                    "expected_version": seen,
+                },
+            )
+        dest.unlink()
+        if record_history:
+            _record_revision_pair(guard.workspace_root, rel, before_bytes, b"")
+        return CommitResult(
+            path=rel,
+            content_version="",
+            previous_version=current,
+            status="committed",
+            bytes_written=0,
+        )
+    except CommitError:
+        raise
+    except Exception as exc:
+        raise CommitError("SAVE_FAILED", f"删除 {rel} 失败：{exc}") from exc
+    finally:
+        _release_lock(fh)
+
+
+def commit_move(
+    *,
+    guard: FileAccessGuard,
+    source: str,
+    destination: str,
+    expected_version: str | None = None,
+    record_history: bool = True,
+) -> CommitResult:
+    """CAS the source file, then atomically rename within the workspace."""
+    try:
+        src = guard.resolve_and_validate(source)
+        dst = guard.resolve_and_validate(destination)
+    except SecurityViolationError as exc:
+        raise CommitError("PATH_INVALID", str(exc)) from exc
+
+    src_rel = str(src.relative_to(guard.workspace_root)).replace("\\", "/")
+    dst_rel = str(dst.relative_to(guard.workspace_root)).replace("\\", "/")
+    from excelmanus.workspace.identity import is_reserved_relative
+
+    if is_reserved_relative(src_rel) or is_reserved_relative(dst_rel):
+        raise CommitError("PATH_INVALID", f"reserved namespace: {src_rel} -> {dst_rel}")
+    if not src.is_file():
+        raise CommitError("PATH_INVALID", f"源路径不是文件：{src_rel}", fields={"path": src_rel})
+    if dst.exists():
+        raise CommitError("PATH_INVALID", f"目标路径已存在：{dst_rel}", fields={"path": dst_rel})
+
+    seen = resolve_expected_version(src_rel, expected_version, exists=True)
+    src_lock = lock_path_for(src)
+    dst_lock = lock_path_for(dst)
+    fh_src = _acquire_lock(src_lock)
+    fh_dst = _acquire_lock(dst_lock)
+    try:
+        before_bytes = src.read_bytes()
+        current = content_version_of(before_bytes)
+        if current != seen:
+            raise CommitError(
+                "VERSION_CONFLICT",
+                f"{src_rel} 版本冲突：期望 {seen}，实际 {current}",
+                fields={
+                    "path": src_rel,
+                    "content_version": current,
+                    "expected_version": seen,
+                },
+            )
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        os.rename(str(src), str(dst))
+        if record_history:
+            _record_revision_pair(guard.workspace_root, src_rel, before_bytes, b"")
+            _record_revision_pair(guard.workspace_root, dst_rel, None, before_bytes)
+        return CommitResult(
+            path=dst_rel,
+            content_version=current,
+            previous_version=current,
+            status="committed",
+            bytes_written=len(before_bytes),
+            extra={"source": src_rel},
+        )
+    except CommitError:
+        raise
+    except Exception as exc:
+        raise CommitError("SAVE_FAILED", f"移动 {src_rel} → {dst_rel} 失败：{exc}") from exc
+    finally:
+        _release_lock(fh_dst)
+        _release_lock(fh_src)
 
 
 def commit_workbook(

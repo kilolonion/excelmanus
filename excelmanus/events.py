@@ -15,8 +15,8 @@ class EventType(Enum):
     TOOL_CALL_END = "tool_call_end"
     THINKING = "thinking"
     ITERATION_START = "iteration_start"
-    ROUTE_START = "route_start"
-    ROUTE_END = "route_end"
+    ROUTE_START = "route_start"  # 历史 replay only；默认路径不再发射
+    ROUTE_END = "route_end"  # 历史 replay only；默认路径不再发射
     SUBAGENT_START = "subagent_start"
     SUBAGENT_END = "subagent_end"
     SUBAGENT_ITERATION = "subagent_iteration"
@@ -38,6 +38,7 @@ class EventType(Enum):
     TEXT_DIFF = "text_diff"
     TEXT_PREVIEW = "text_preview"
     FILES_CHANGED = "files_changed"
+    MUTATION = "mutation"
     PIPELINE_PROGRESS = "pipeline_progress"
     MEMORY_EXTRACTED = "memory_extracted"
     FILE_DOWNLOAD = "file_download"
@@ -45,13 +46,18 @@ class EventType(Enum):
     VERIFICATION_REPORT = "verification_report"  # 仅用于读取历史，不再产生
     RETRACT_THINKING = "retract_thinking"
     BATCH_PROGRESS = "batch_progress"  # 批量任务进度
-    STAGING_UPDATED = "staging_updated"  # staging 文件列表变化（apply/discard/新增）
+    STAGING_UPDATED = "staging_updated"  # 历史 replay only；overlay 已删除，不再发射
     LLM_RETRY = "llm_retry"  # LLM 调用重试通知
     FAILURE_GUIDANCE = "failure_guidance"  # 结构化失败引导卡片
     CREDENTIAL_REFRESHED = "credential_refreshed"  # OAuth token 自动刷新成功
     CREDENTIAL_EXPIRED = "credential_expired"  # OAuth token 过期且刷新失败
     TOOL_CALL_NOTICE = "tool_call_notice"  # /tools 开启时的简要工具调用通知
     REASONING_NOTICE = "reasoning_notice"  # /reasoning 开启时的推理内容通知
+    TURN_START = "turn_start"
+    TURN_END = "turn_end"
+    STEP_START = "step_start"
+    STEP_END = "step_end"
+    INBOX_CLAIMED = "inbox_claimed"
 
 
 @dataclass
@@ -155,6 +161,7 @@ class ToolCallEvent:
     text_preview_truncated: bool = False
     # files_changed 事件字段
     changed_files: List[str] = field(default_factory=list)
+    mutations: List[Dict[str, Any]] = field(default_factory=list)
     # pipeline_progress 事件字段
     pipeline_stage: str = ""
     pipeline_message: str = ""
@@ -200,6 +207,10 @@ class ToolCallEvent:
     ui: Optional[Dict[str, Any]] = None
     # Code Mode 子调用：父 run_code 的 call id
     parent_call_id: str = ""
+    # Driver live 事件（不必持久成第二套日志）
+    turn_id: str = ""
+    step_id: str = ""
+    inbox_claimed: List[Dict[str, Any]] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""
@@ -215,6 +226,43 @@ class ToolCallEvent:
         data["event_type"] = EventType(data["event_type"])
         data["timestamp"] = datetime.fromisoformat(data["timestamp"])
         return cls(**data)
+
+
+@dataclass
+class MutationEvent:
+    """One public identity after a successful AtomicPublish."""
+
+    identity: str
+    content_version: str | None = None
+    before: str | None = None
+    after: str | None = None
+    source: str = "runtime"
+
+    def to_dict(self) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "identity": self.identity,
+            "source": self.source,
+        }
+        if self.content_version:
+            payload["contentVersion"] = self.content_version
+        if self.before:
+            payload["before"] = self.before
+        if self.after:
+            payload["after"] = self.after
+        return payload
+
+
+def mutations_from_identities(
+    identities: List[str],
+    *,
+    content_version: str | None = None,
+    source: str = "runtime",
+) -> List[Dict[str, Any]]:
+    return [
+        MutationEvent(identity=ident, content_version=content_version, source=source).to_dict()
+        for ident in identities
+        if ident
+    ]
 
 
 # 回调函数类型别名：接收 ToolCallEvent，无返回值

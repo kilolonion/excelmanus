@@ -73,7 +73,7 @@ def test_builtin_agents_loaded(tmp_path: Path) -> None:
     loaded = registry.load_all()
     assert "subagent" in loaded
     assert "explorer" in loaded
-    assert "verifier" in loaded
+    assert "verifier" not in loaded
 
 
 def test_builtin_explorer_is_readonly_restricted(tmp_path: Path) -> None:
@@ -91,7 +91,7 @@ def test_builtin_explorer_is_readonly_restricted(tmp_path: Path) -> None:
     assert explorer.source == "builtin"
 
 
-def test_builtin_verifier_is_readonly_restricted(tmp_path: Path) -> None:
+def test_builtin_verifier_unregistered(tmp_path: Path) -> None:
     user_dir = tmp_path / "user_agents"
     project_dir = tmp_path / "project_agents"
     user_dir.mkdir(parents=True, exist_ok=True)
@@ -99,12 +99,8 @@ def test_builtin_verifier_is_readonly_restricted(tmp_path: Path) -> None:
     registry = SubagentRegistry(_make_config(tmp_path, user_dir=user_dir, project_dir=project_dir))
 
     loaded = registry.load_all()
-    verifier = loaded["verifier"]
-    assert verifier.permission_mode == "readOnly"
-    assert verifier.capability_mode == "restricted"
-    assert "inspect_spreadsheet" in verifier.allowed_tools
-    assert verifier.source == "builtin"
-    assert "verdict" in verifier.system_prompt
+    assert "verifier" not in loaded
+    assert registry.get("verifier") is None
 
 
 def test_explorer_alias_resolve(tmp_path: Path) -> None:
@@ -192,8 +188,7 @@ def test_build_catalog_contains_agent_names(tmp_path: Path) -> None:
     assert "explorer" in names
     assert "verifier" not in names
     assert "verifier" not in catalog
-    assert registry.get("verifier") is not None
-    assert registry.get("verifier").name == "verifier"
+    assert registry.get("verifier") is None
 
 
 def test_get_supports_ecosystem_aliases(tmp_path: Path) -> None:

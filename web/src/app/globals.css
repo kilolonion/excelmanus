@@ -54,6 +54,10 @@
   --em-primary-light: #33a867;
   --em-accent: #107c41;
   --em-sidebar-bg: #f7f7f8;
+  --em-fill: #f4f6f4;
+  --em-hairline: #e4e8e5;
+  --em-text: #202823;
+  --em-text-secondary: #778179;
   --em-primary-dark: #1a5c38;
   --em-primary-alpha-02: rgba(33, 115, 70, 0.02);
   --em-primary-alpha-04: rgba(33, 115, 70, 0.04);
@@ -103,6 +107,10 @@
 }
 
 .dark {
+  --em-fill: oklch(0.22 0.01 145);
+  --em-hairline: oklch(1 0 0 / 10%);
+  --em-text: oklch(0.985 0 0);
+  --em-text-secondary: oklch(0.72 0.02 145);
   --background: oklch(0.145 0 0);
   --foreground: oklch(0.985 0 0);
   --card: oklch(0.205 0 0);
@@ -178,6 +186,83 @@
 @media (prefers-reduced-motion: reduce) {
   .animate-pulse-green {
     animation: none;
+  }
+}
+
+/* 侧边栏会话状态圆点：运行呼吸 / 审批金点 / 提问青点 */
+.session-status-dot {
+  position: relative;
+  display: inline-flex;
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+}
+
+.session-status-dot::before,
+.session-status-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+}
+
+.session-status-dot::before {
+  animation: session-status-halo 1.8s ease-in-out infinite;
+}
+
+.session-status-dot::after {
+  inset: 1.5px;
+  animation: session-status-core 1.8s ease-in-out infinite;
+}
+
+.session-status-dot--running::before,
+.session-status-dot--running::after {
+  background: var(--em-primary-light);
+}
+
+.session-status-dot--approval::before,
+.session-status-dot--approval::after {
+  background: var(--em-gold);
+}
+
+.session-status-dot--question::before,
+.session-status-dot--question::after {
+  background: var(--em-cyan);
+}
+
+@keyframes session-status-halo {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 0.38;
+  }
+  50% {
+    transform: scale(2.15);
+    opacity: 0.12;
+  }
+}
+
+@keyframes session-status-core {
+  0%,
+  100% {
+    transform: scale(1);
+    opacity: 1;
+  }
+  50% {
+    transform: scale(0.72);
+    opacity: 0.82;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .session-status-dot::before,
+  .session-status-dot::after {
+    animation: none;
+  }
+
+  .session-status-dot::before {
+    transform: scale(1.65);
+    opacity: 0.22;
   }
 }
 
@@ -1045,7 +1130,8 @@ button:active:not(:disabled),
   }
 }
 
-.streaming-cursor::after {
+.streaming-cursor > :last-child::after,
+.streaming-cursor:empty::after {
   content: "▌";
   display: inline;
   animation: blink-caret 1s step-end infinite;
@@ -1055,181 +1141,113 @@ button:active:not(:disabled),
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .streaming-cursor::after {
+  .streaming-cursor > :last-child::after,
+  .streaming-cursor:empty::after {
     animation: none;
   }
 }
 
-/* ── Loading Screen Animations ── */
-
-/* Logo 呼吸脉冲 */
-@keyframes loading-logo-pulse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(1.06); opacity: 0.88; }
+/* 助手消息：首块与头像对齐（纯文本去掉首段上边距，气泡去掉首块顶距） */
+.assistant-msg-body > :first-child {
+  margin-top: 0;
 }
 
-/* 涟漪扩散 */
-@keyframes loading-ring-pulse {
-  0% { box-shadow: 0 0 0 0 var(--em-primary-alpha-25); opacity: 1; }
-  100% { box-shadow: 0 0 0 20px var(--em-primary-alpha-25); opacity: 0; }
+.assistant-msg-body > :first-child .prose > :first-child {
+  margin-top: 0;
 }
 
-/* 底部进度条 */
-@keyframes loading-progress {
-  0% { transform: translateX(-100%); }
-  50% { transform: translateX(300%); }
-  100% { transform: translateX(-100%); }
+.assistant-wait {
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  gap: 6px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: var(--em-primary-alpha-06);
+  border: 1px solid var(--em-primary-alpha-10);
 }
 
-/* 背景光晕呼吸 */
-@keyframes loading-bg-breathe {
-  0%, 100% { opacity: 0.04; transform: translate(-50%, -50%) scale(1); }
-  50% { opacity: 0.07; transform: translate(-50%, -50%) scale(1.08); }
+.assistant-wait-dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--em-primary);
+  animation: assistant-wait-dot 1.05s ease-in-out infinite;
 }
 
-@keyframes loading-bg-breathe-delayed {
-  0%, 100% { opacity: 0.03; transform: translate(-50%, -50%) scale(1); }
-  50% { opacity: 0.05; transform: translate(-50%, -50%) scale(1.12); }
+.assistant-wait-dot:nth-child(2) {
+  animation-delay: 140ms;
 }
 
-/* 浮动光点 */
-@keyframes loading-float {
-  0%, 100% { transform: translateY(0) translateX(0); opacity: 0.2; }
-  25% { transform: translateY(-18px) translateX(6px); opacity: 0.35; }
-  50% { transform: translateY(-8px) translateX(-4px); opacity: 0.15; }
-  75% { transform: translateY(-22px) translateX(8px); opacity: 0.3; }
+.assistant-wait-dot:nth-child(3) {
+  animation-delay: 280ms;
 }
 
-/* 光环旋转 */
-@keyframes loading-ring-spin {
+.assistant-avatar-wait {
+  animation: assistant-avatar-wait 1.6s ease-in-out infinite;
+}
+
+@keyframes assistant-wait-dot {
+  0%, 80%, 100% {
+    transform: translateY(0) scale(0.82);
+    opacity: 0.28;
+  }
+  40% {
+    transform: translateY(-3px) scale(1);
+    opacity: 1;
+  }
+}
+
+@keyframes assistant-avatar-wait {
+  0%, 100% {
+    transform: scale(1);
+  }
+  50% {
+    transform: scale(1.05);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .assistant-wait-dot,
+  .assistant-avatar-wait {
+    animation: none;
+  }
+
+  .assistant-wait-dot {
+    opacity: 0.55;
+  }
+}
+
+/* ── Loading Screen ── */
+
+@keyframes loading-arc-spin {
   from { transform: rotate(0deg); }
   to { transform: rotate(360deg); }
 }
 
-/* 外层光环缩放 */
-@keyframes loading-ring-scale {
-  0%, 100% { transform: scale(1); opacity: 0.6; }
-  50% { transform: scale(1.05); opacity: 1; }
+@keyframes loading-status-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
 }
 
-/* 内层光环反向缩放 */
-@keyframes loading-ring-scale-reverse {
-  0%, 100% { transform: scale(1); opacity: 1; }
-  50% { transform: scale(0.96); opacity: 0.6; }
+.loading-arc-spin {
+  animation: loading-arc-spin 10s linear infinite;
+  transform-origin: 50% 50%;
 }
 
-/* 三点弹跳 */
-@keyframes loading-dot-bounce {
-  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
-  30% { transform: translateY(-6px); opacity: 1; }
-}
-
-/* 文字渐变闪光 */
-@keyframes loading-text-shimmer {
-  0% { background-position: -200% center; }
-  100% { background-position: 200% center; }
-}
-
-/* 淡入 */
-@keyframes loading-fade-in {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
-
-/* ── 动画类 ── */
-.loading-logo-pulse {
-  animation: loading-logo-pulse 2.4s ease-in-out infinite;
-}
-
-.loading-ring-pulse {
-  animation: loading-ring-pulse 2.4s ease-out infinite;
-}
-
-.loading-progress-bar {
-  animation: loading-progress 2.2s ease-in-out infinite;
-}
-
-.loading-bg-breathe {
-  animation: loading-bg-breathe 4s ease-in-out infinite;
-}
-
-.loading-bg-breathe-delayed {
-  animation: loading-bg-breathe-delayed 5s ease-in-out infinite;
-  animation-delay: 1s;
-}
-
-.loading-float-particle {
-  animation: loading-float 6s ease-in-out infinite;
-}
-
-.loading-float-particle-delayed {
-  animation: loading-float 7s ease-in-out infinite;
-  animation-delay: 2s;
-}
-
-.loading-float-particle-slow {
-  animation: loading-float 9s ease-in-out infinite;
-  animation-delay: 3.5s;
-}
-
-.loading-ring-spin {
-  animation: loading-ring-spin 12s linear infinite;
-}
-
-.loading-ring-outer {
-  animation: loading-ring-scale 3s ease-in-out infinite;
-}
-
-.loading-ring-inner {
-  animation: loading-ring-scale-reverse 3s ease-in-out infinite;
-}
-
-.loading-dot-bounce {
-  animation: loading-dot-bounce 1.4s ease-in-out infinite;
-}
-
-.loading-text-shimmer {
-  background: linear-gradient(
-    90deg,
-    currentColor 0%,
-    var(--em-primary-light) 40%,
-    var(--em-primary) 50%,
-    var(--em-primary-light) 60%,
-    currentColor 100%
-  );
-  background-size: 200% 100%;
-  -webkit-background-clip: text;
-  background-clip: text;
-  -webkit-text-fill-color: transparent;
-  animation: loading-text-shimmer 3s ease-in-out infinite;
-}
-
-.loading-fade-in {
-  animation: loading-fade-in 0.6s ease-out both;
-  animation-delay: 0.3s;
+.loading-status-spinner {
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  border: 2px solid var(--em-primary-alpha-15);
+  border-top-color: var(--em-primary);
+  animation: loading-status-spin 0.8s linear infinite;
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .loading-logo-pulse,
-  .loading-ring-pulse,
-  .loading-progress-bar,
-  .loading-bg-breathe,
-  .loading-bg-breathe-delayed,
-  .loading-float-particle,
-  .loading-float-particle-delayed,
-  .loading-float-particle-slow,
-  .loading-ring-spin,
-  .loading-ring-outer,
-  .loading-ring-inner,
-  .loading-dot-bounce,
-  .loading-text-shimmer,
-  .loading-fade-in {
+  .loading-arc-spin,
+  .loading-status-spinner {
     animation: none;
-  }
-
-  .loading-text-shimmer {
-    -webkit-text-fill-color: unset;
-    background: none;
   }
 }
 
@@ -1617,14 +1635,12 @@ button:active:not(:disabled),
 /* ── Overlay Card (approval / compact / rollback / apply) ── */
 
 .overlay-card {
-  background: oklch(1 0 0 / 88%);
-  backdrop-filter: blur(24px) saturate(1.8);
-  -webkit-backdrop-filter: blur(24px) saturate(1.8);
-  border: 1px solid oklch(0 0 0 / 6%);
+  background: #ffffff;
+  border: 1px solid var(--em-hairline);
   box-shadow:
-    0 0 0 1px oklch(1 0 0 / 8%),
-    0 24px 80px -12px oklch(0 0 0 / 18%),
-    0 8px 24px -4px oklch(0 0 0 / 8%);
+    0 0 0 1px oklch(1 0 0 / 4%),
+    0 18px 48px -16px oklch(0 0 0 / 16%),
+    0 6px 18px -8px oklch(0 0 0 / 6%);
   /* mobile: bottom sheet */
   position: fixed;
   top: auto;
@@ -1713,8 +1729,7 @@ button:active:not(:disabled),
 }
 
 .overlay-btn-primary:hover:not(:disabled) {
-  box-shadow: 0 6px 20px -4px var(--em-primary-alpha-25);
-  transform: translateY(-1px);
+  box-shadow: 0 4px 14px -4px var(--em-primary-alpha-25);
 }
 
 .overlay-btn-primary:active:not(:disabled) {
@@ -1767,10 +1782,8 @@ button:active:not(:disabled),
 
 /* ── TopBar Glassmorphism ── */
 .topbar-glass {
-  background: oklch(1 0 0 / 80%);
-  backdrop-filter: blur(12px) saturate(1.3);
-  -webkit-backdrop-filter: blur(12px) saturate(1.3);
-  border-bottom: 1px solid oklch(0 0 0 / 6%);
+  background: #ffffff;
+  border-bottom: 1px solid var(--em-hairline);
 }
 
 .dark .topbar-glass {

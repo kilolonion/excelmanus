@@ -1,4 +1,4 @@
-"""MemoryStore：持久记忆存储（支持 SQLite / PostgreSQL）。"""
+"""MemoryStore：持久记忆存储。"""
 from __future__ import annotations
 
 import hashlib
@@ -18,7 +18,7 @@ _TIMESTAMP_FMT = "%Y-%m-%d %H:%M"
 
 
 class MemoryStore:
-    """持久记忆 CRUD（支持 SQLite / PostgreSQL）。"""
+    """持久记忆 CRUD。"""
 
     @overload
     def __init__(self, conn: ConnectionAdapter) -> None: ...

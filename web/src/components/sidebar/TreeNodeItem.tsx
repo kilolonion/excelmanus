@@ -31,7 +31,6 @@ import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import {
   downloadFile,
-  normalizeExcelPath,
   workspaceMkdir,
   workspaceCreateFile,
   workspaceDeleteItem,
@@ -63,7 +62,6 @@ export interface TreeNodeProps {
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
-  pendingBackups: { original_path: string }[];
   onDragStart: (e: React.DragEvent, file: { path: string; filename: string }) => void;
   onDragEnd: () => void;
   onClick: (path: string) => void;
@@ -74,7 +72,7 @@ export interface TreeNodeProps {
 }
 
 export function TreeNodeItem(props: TreeNodeProps) {
-  const { node, sessionId, depth, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, pendingBackups, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
+  const { node, sessionId, depth, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
   const [expanded, setExpanded] = useState(depth < 2);
   const [renaming, setRenaming] = useState(false);
   const [creating, setCreating] = useState<"file" | "folder" | null>(null);
@@ -95,7 +93,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       });
       setRenaming(false);
       try {
-        await workspaceRenameItem(node.fullPath, newPath);
+        await workspaceRenameItem(node.fullPath, newPath, sessionId);
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
       } catch {
@@ -111,7 +109,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
         wsFilesLoaded: true,
       });
       try {
-        await workspaceDeleteItem(node.fullPath);
+        await workspaceDeleteItem(node.fullPath, sessionId);
         // W8: 同步清理 recentFiles 中属于该文件夹的条目
         const excelStore = useExcelStore.getState();
         const prefix = node.fullPath + "/";
@@ -152,9 +150,9 @@ export function TreeNodeItem(props: TreeNodeProps) {
       setCreating(null);
       try {
         if (creatingType === "folder") {
-          await workspaceMkdir(fullPath);
+          await workspaceMkdir(fullPath, sessionId);
         } else {
-          await workspaceCreateFile(fullPath);
+          await workspaceCreateFile(fullPath, sessionId);
         }
         useExcelStore.getState().bumpWorkspaceFilesVersion();
         onRefresh();
@@ -194,7 +192,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
         wsFilesLoaded: true,
       });
       try {
-        await workspaceRenameItem(draggingPath, newPath);
+        await workspaceRenameItem(draggingPath, newPath, sessionId);
         // Update recentFiles: remove old path
         useExcelStore.getState().removeRecentFile(draggingPath);
         useExcelStore.getState().bumpWorkspaceFilesVersion();
@@ -317,7 +315,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
     });
     setRenaming(false);
     try {
-      await workspaceRenameItem(node.fullPath, newPath);
+      await workspaceRenameItem(node.fullPath, newPath, sessionId);
       // W8: 从 recentFiles 移除旧路径（新路径会在下次扫描时加入）
       if (file) useExcelStore.getState().removeRecentFile(file.path);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
@@ -335,7 +333,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       wsFilesLoaded: true,
     });
     try {
-      await workspaceDeleteItem(node.fullPath);
+      await workspaceDeleteItem(node.fullPath, sessionId);
       // W8: 同步从 recentFiles 移除
       if (file) useExcelStore.getState().removeRecentFile(file.path);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
@@ -388,14 +386,6 @@ export function TreeNodeItem(props: TreeNodeProps) {
         <span className={`flex-1 min-w-0 truncate leading-snug ${isFileActive ? "font-medium text-foreground" : "text-foreground/80"}`}>
           {node.name}
         </span>
-      )}
-
-      {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
-        <span
-          className="flex-shrink-0 h-2 w-2 rounded-full"
-          style={{ backgroundColor: "var(--em-primary)" }}
-          title="沙箱修改待应用"
-        />
       )}
 
       {!selectMode && !renaming && (

@@ -19,6 +19,7 @@ id_new_server.pem.pub
 *.patch
 morph-smoke.jsonl
 tests/test_session_stream_metadata.py
+.playwright-mcp/
 
 # ==============================
 # Python
@@ -75,6 +76,7 @@ logs/
 # ==============================
 *.png
 !docs/images/*.png
+!docs/design/**/*.png
 !assets/*.png
 image/RELEASE_*/
 *.csv
@@ -160,7 +162,6 @@ RELEASE_v1.6.4.md
 # ==============================
 # Docker images
 # ==============================
-deploy/docker-images/
 
 # web/public assets needed for frontend
 !web/public/icon.png

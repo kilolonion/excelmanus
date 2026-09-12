@@ -23,6 +23,19 @@ def test_contained_in_rejects_prefix_sibling(tmp_path: Path) -> None:
         contained_in(root, secret)
 
 
+def test_path_in_workspace_rejects_prefix_sibling(tmp_path: Path) -> None:
+    from excelmanus.session import _path_in_workspace
+
+    ws = tmp_path / "workspace"
+    evil = tmp_path / "workspace-evil"
+    ws.mkdir()
+    evil.mkdir()
+    (evil / "x.txt").write_text("x", encoding="utf-8")
+    (ws / "y.txt").write_text("ok", encoding="utf-8")
+    assert _path_in_workspace(str(evil / "x.txt"), str(ws)) is False
+    assert _path_in_workspace(str(ws / "y.txt"), str(ws)) is True
+
+
 def test_safe_uploads_rejects_prefix_sibling(tmp_path: Path) -> None:
     uploads = tmp_path / "uploads"
     other = tmp_path / "uploads2"
@@ -30,6 +43,28 @@ def test_safe_uploads_rejects_prefix_sibling(tmp_path: Path) -> None:
     other.mkdir()
     (other / "x.txt").write_text("no", encoding="utf-8")
     assert safe_uploads_path(uploads, "../uploads2/x.txt") is None
+
+
+def test_safe_uploads_rejects_existing_symlink(tmp_path: Path) -> None:
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    real = tmp_path / "secret.txt"
+    real.write_text("secret", encoding="utf-8")
+    link = uploads / "link.txt"
+    link.symlink_to(real)
+    assert safe_uploads_path(uploads, "link.txt") is None
+
+
+def test_uploads_mkdir_does_not_follow_symlink_parent(tmp_path: Path) -> None:
+    from excelmanus.api_app_state import uploads_mkdir
+
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (uploads / "trap").symlink_to(outside)
+    assert uploads_mkdir(uploads, "trap/child") is None
+    assert not (outside / "child").exists()
 
 
 def test_sanitize_upload_filename_strips_paths() -> None:

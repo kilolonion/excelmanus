@@ -12,7 +12,7 @@ from excelmanus.reference_graph.models import (
 
 class TestBuildRefGraphNotice:
     def test_renders_summary(self) -> None:
-        from excelmanus.engine_core.context_builder import build_ref_graph_notice
+        from excelmanus.reference_graph.notice import build_ref_graph_notice
 
         cache = RefCache()
         edge = SheetRefEdge("订单表", "产品表", RefType.FORMULA, 10, ["=VLOOKUP(...)"], [])
@@ -34,14 +34,14 @@ class TestBuildRefGraphNotice:
         assert "产品表" in result
 
     def test_empty_cache_returns_empty(self) -> None:
-        from excelmanus.engine_core.context_builder import build_ref_graph_notice
+        from excelmanus.reference_graph.notice import build_ref_graph_notice
 
         cache = RefCache()
         result = build_ref_graph_notice(cache)
         assert result == ""
 
     def test_multiple_files(self) -> None:
-        from excelmanus.engine_core.context_builder import build_ref_graph_notice
+        from excelmanus.reference_graph.notice import build_ref_graph_notice
 
         cache = RefCache()
         edge1 = SheetRefEdge("A表", "B表", RefType.FORMULA, 5, [], [])

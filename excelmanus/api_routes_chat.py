@@ -45,7 +45,7 @@ from excelmanus.session import (
     SessionManager,
     SessionNotFoundError,
 )
-from excelmanus.session_title import SESSION_TITLE_MAX_LEN
+from excelmanus.session_title import instant_session_title, title_from_messages
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -86,7 +86,6 @@ class ChatRequest(BaseModel):
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
     present_as: Literal["native", "code"] | None = None
-    channel: str | None = None
     images: list[ImageAttachment] = Field(default_factory=list)
 
 
@@ -462,7 +461,6 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
                 images=_serialize_images(request.images),
                 chat_mode=request.chat_mode,
                 present_as=request.present_as,
-                channel=request.channel,
             )
     except Exception as _chat_exc:
         # 非流式路径：池健康信号更新 + 即时评估
@@ -573,8 +571,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     if not (request.message or "").strip() and not request.images:
         raise HTTPException(status_code=400, detail="消息内容不能为空。")
 
-    _bridge = getattr(raw_request.app.state, "event_bridge", None)
-
     async def _event_generator() -> AsyncIterator[str]:
         """SSE 事件生成器：所有阻塞操作在首个 yield 之后执行。
 
@@ -640,18 +636,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             assert session_id is not None and engine is not None
             yield _sse_format("session_init", {"session_id": session_id})
-
-            # EventBridge: 通知其他渠道 chat 已开始
-            _origin_channel = request.channel or "web"
-            if _bridge is not None:
-                _fire_and_forget(
-                    _bridge.notify("chat_started", {
-                        "session_id": session_id,
-                        "origin_channel": _origin_channel,
-                        "message_preview": (request.message or "")[:80],
-                    }),
-                    name="bridge_chat_started",
-                )
 
             # ── 保存命令快速路径 ──
             if _is_save_command(request.message):
@@ -757,51 +741,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     and get_session_manager() is not None
                 ):
                     _schedule_flush()
-                # EventBridge: 跨渠道实时事件推送（Web↔Bot 双向）
-                # origin_channel 用于接收方过滤自身发出的事件，防止回声
-                if (
-                    _bridge is not None
-                    and event.event_type in (
-                        EventType.PENDING_APPROVAL,
-                        EventType.USER_QUESTION,
-                        EventType.APPROVAL_RESOLVED,
-                    )
-                ):
-                    _bridge_data: dict[str, Any] = {}
-                    _bridge_evt = ""
-                    _origin = request.channel or "web"
-                    if event.event_type == EventType.PENDING_APPROVAL:
-                        _bridge_evt = "approval"
-                        _bridge_data = {
-                            "approval_id": event.approval_id,
-                            "approval_tool_name": event.approval_tool_name,
-                            "risk_level": event.approval_risk_level,
-                            "args_summary": event.approval_args_summary or {},
-                            "session_id": session_id,
-                            "origin_channel": _origin,
-                        }
-                    elif event.event_type == EventType.USER_QUESTION:
-                        _bridge_evt = "question"
-                        _bridge_data = {
-                            "id": event.question_id,
-                            "header": event.question_header,
-                            "text": event.question_text,
-                            "options": event.question_options or [],
-                            "session_id": session_id,
-                            "origin_channel": _origin,
-                        }
-                    elif event.event_type == EventType.APPROVAL_RESOLVED:
-                        _bridge_evt = "approval_resolved"
-                        _bridge_data = {
-                            "approval_id": event.approval_id,
-                            "session_id": session_id,
-                            "origin_channel": _origin,
-                        }
-                    if _bridge_evt:
-                        _fire_and_forget(
-                            _bridge.notify(_bridge_evt, _bridge_data),
-                            name=f"bridge_{_bridge_evt}",
-                        )
 
             async def _run_chat_inner() -> ChatResult:
                 """后台执行 engine.chat，完成后释放会话锁。"""
@@ -813,7 +752,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         images=_serialize_images(request.images),
                         chat_mode=request.chat_mode,
                         present_as=request.present_as,
-                        channel=request.channel,
                     )
                     return result
                 finally:
@@ -885,19 +823,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             chat_result = chat_task.result()
             normalized_reply = guard_public_reply((chat_result.reply or "").strip())
             yield _build_reply_sse(chat_result, engine)
-
-            # EventBridge: 通知其他渠道 chat 已完成
-            if _bridge is not None:
-                _fire_and_forget(
-                    _bridge.notify("chat_completed", {
-                        "session_id": session_id,
-                        "origin_channel": _origin_channel,
-                        "reply_summary": normalized_reply[:300] if normalized_reply else "",
-                        "tool_count": len(chat_result.tool_calls),
-                        "has_error": any(not tc.success for tc in chat_result.tool_calls),
-                    }),
-                    name="bridge_chat_completed",
-                )
 
             # 记录已认证用户的 token 使用量
             # 号池台账写入：pool_oauth 来源时记录用量
@@ -1369,11 +1294,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                         normalized_reply = guard_public_reply((chat_result.reply or "").strip())
                         yield _build_reply_sse(chat_result, engine)
                         if engine.session_turn == 1:
-                            _user_msg = ""
-                            for _m in engine.raw_messages:
-                                if _m.get("role") == "user":
-                                    _user_msg = str(_m.get("content", ""))[:200]
-                                    break
+                            _user_msg = title_from_messages(engine.raw_messages)
                             _instant_title = _truncate_user_message_as_title(_user_msg)
                             if _instant_title:
                                 yield _sse_format("session_title", {
@@ -1550,21 +1471,9 @@ async def chat_approve(
 
 
 
-def _truncate_user_message_as_title(
-    user_message: str, max_len: int = SESSION_TITLE_MAX_LEN
-) -> str | None:
-    """从用户消息截取会话标题（去除文件通知前缀，取前 max_len 字符）。"""
-    if not user_message:
-        return None
-    # 去除 [已上传文件: ...] / [已上传图片: ...] 等前缀
-    import re
-    cleaned = re.sub(r"\[已上传(?:文件|图片): [^\]]*\]\s*", "", user_message).strip()
-    if not cleaned:
-        return None
-    # 截取并添加省略号
-    if len(cleaned) > max_len:
-        return cleaned[:max_len].rstrip() + "…"
-    return cleaned
+def _truncate_user_message_as_title(user_message: str) -> str | None:
+    """从用户消息得到即时会话标题（去除上传前缀，取首行；显示层再做省略）。"""
+    return instant_session_title(user_message)
 
 
 async def _generate_session_title_background(

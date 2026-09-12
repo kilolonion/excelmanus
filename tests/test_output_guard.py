@@ -6,6 +6,7 @@ from excelmanus.output_guard import (
     guard_public_reply,
     sanitize_external_data,
     sanitize_external_text,
+    sanitize_streaming_text,
 )
 
 
@@ -78,3 +79,22 @@ def test_sanitize_external_data_masks_nested_strings() -> None:
     assert got["Authorization"] == "Bearer ***"
     assert got["nested"]["path"] == "<path>/a.txt"
     assert got["nested"]["cookie"] == "Cookie: ***"
+
+
+def test_sanitize_streaming_text_keeps_chunk_boundary_whitespace() -> None:
+    chunks = ["Let me ", " ", "read\n", "the file."]
+    assembled = "".join(sanitize_streaming_text(chunk) for chunk in chunks)
+    assert assembled == "".join(chunks)
+
+
+def test_sanitize_streaming_text_keeps_space_only_and_newline_chunks() -> None:
+    assert sanitize_streaming_text(" ") == " "
+    assert sanitize_streaming_text("\n") == "\n"
+    assert sanitize_streaming_text("hello \n") == "hello \n"
+
+
+def test_sanitize_streaming_text_still_masks_secrets() -> None:
+    got = sanitize_streaming_text(" see /Users/demo/project/secrets.txt ")
+    assert "/Users/demo/project/secrets.txt" not in got
+    assert got.startswith(" ")
+    assert got.endswith(" ")

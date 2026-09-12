@@ -380,6 +380,7 @@ class TestToolDispatcherExecute:
         assert result.success is False
         assert result.error == "PERMISSION_DENIED"
         assert ran["called"] is False
+        assert "计划模式" in result.result
 
     @pytest.mark.asyncio
     async def test_plan_mode_allows_write_plan(self) -> None:
@@ -410,6 +411,147 @@ class TestToolDispatcherExecute:
         )
         assert result.success is True
         assert ran["called"] is True
+
+    @pytest.mark.asyncio
+    async def test_write_mode_allows_unknown_mcp_without_pending(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def mcp_ok(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "ok"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="mcp_demo_mystery",
+                description="unknown mcp",
+                input_schema={"type": "object", "properties": {}},
+                func=mcp_ok,
+                write_effect="unknown",
+            )
+        )
+        engine._current_chat_mode = "write"
+        tc = SimpleNamespace(
+            id="call_mcp",
+            function=SimpleNamespace(name="mcp_demo_mystery", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is True
+        assert result.pending_approval is False
+        assert ran["called"] is True
+        assert engine.approval.has_pending() is False
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_denies_unknown_mcp_write(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def mcp_write(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "wrote"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="mcp_demo_mystery",
+                description="unknown mcp",
+                input_schema={"type": "object", "properties": {}},
+                func=mcp_write,
+                write_effect="unknown",
+            )
+        )
+        engine._current_chat_mode = "plan"
+        engine._plan_active = True
+        tc = SimpleNamespace(
+            id="call_mcp_plan",
+            function=SimpleNamespace(name="mcp_demo_mystery", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert "计划模式" in result.result
+        assert ran["called"] is False
+
+    @pytest.mark.asyncio
+    async def test_plan_mode_allows_none_write_effect(self) -> None:
+        engine = _make_engine()
+        ran = {"called": False}
+
+        def probe_ok(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "ok"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="probe_readonly",
+                description="readonly probe",
+                input_schema={"type": "object", "properties": {}},
+                func=probe_ok,
+                write_effect="none",
+            )
+        )
+        engine._current_chat_mode = "plan"
+        engine._plan_active = True
+        tc = SimpleNamespace(
+            id="call_probe",
+            function=SimpleNamespace(name="probe_readonly", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is True
+        assert ran["called"] is True
+
+    @pytest.mark.asyncio
+    async def test_plan_denies_write_even_with_full_access(self) -> None:
+        engine = _make_engine()
+        engine._full_access_enabled = True
+        ran = {"called": False}
+
+        def boom(**_kwargs: object) -> str:
+            ran["called"] = True
+            return "wrote"
+
+        engine._registry.register_tool(
+            ToolDef(
+                name="edit_spreadsheet_plan_fa",
+                description="edit",
+                input_schema={"type": "object", "properties": {}},
+                func=boom,
+                write_effect="workspace_write",
+            )
+        )
+        engine._current_chat_mode = "plan"
+        engine._plan_active = True
+        tc = SimpleNamespace(
+            id="call_edit_fa",
+            function=SimpleNamespace(name="edit_spreadsheet_plan_fa", arguments="{}"),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=None,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.success is False
+        assert result.error == "PERMISSION_DENIED"
+        assert ran["called"] is False
 
     @pytest.mark.asyncio
     async def test_read_mode_denies_unknown_write_effect(self) -> None:
@@ -444,3 +586,62 @@ class TestToolDispatcherExecute:
         assert result.success is False
         assert result.error == "PERMISSION_DENIED"
         assert ran["called"] is False
+
+
+class TestCallBudgetAndCodePolicy:
+    @pytest.mark.asyncio
+    async def test_execute_consumes_call_budget(self) -> None:
+        engine = _make_engine()
+        dispatcher = engine._tool_dispatcher
+        dispatcher.begin_call_budget(1, reason="已达到本轮工具调用上限 (1)")
+        tc1 = SimpleNamespace(
+            id="call_1",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 1, "b": 2}),
+            ),
+        )
+        tc2 = SimpleNamespace(
+            id="call_2",
+            function=SimpleNamespace(
+                name="add_numbers",
+                arguments=json.dumps({"a": 3, "b": 4}),
+            ),
+        )
+        first = await dispatcher.execute(
+            tc=tc1, tool_scope=["add_numbers"], on_event=None, iteration=1,
+        )
+        second = await dispatcher.execute(
+            tc=tc2, tool_scope=["add_numbers"], on_event=None, iteration=1,
+        )
+        assert first.success is True
+        assert second.success is False
+        assert second.error == "BUDGET_EXCEEDED"
+        assert "上限" in second.result
+
+    @pytest.mark.asyncio
+    async def test_fs_write_run_code_needs_approval_when_yellow_auto(self) -> None:
+        engine = _make_engine(
+            code_policy_enabled=True,
+            code_policy_yellow_auto_approve=True,
+        )
+        events: list = []
+        tc = SimpleNamespace(
+            id="call_run_code_csv",
+            function=SimpleNamespace(
+                name="run_code",
+                arguments=json.dumps({
+                    "code": "from pathlib import Path\nPath('a.csv').write_text('x')",
+                }),
+            ),
+        )
+        result = await engine._tool_dispatcher.execute(
+            tc=tc,
+            tool_scope=None,
+            on_event=events.append,
+            iteration=1,
+            route_result=None,
+        )
+        assert result.pending_approval is True
+        assert engine._approval.pending is not None
+        assert any(event.event_type == EventType.PENDING_APPROVAL for event in events)

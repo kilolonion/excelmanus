@@ -86,6 +86,8 @@ class TestSystemAssembly:
         ]
         assert text == "\n\n".join(parts)
         assert "finish_task" not in text
+        assert "没有轮次上限" in text
+        assert "宿主有轮次上限" not in text
         assert "finish_task" not in TOOL_DESCRIPTIONS
         assert "activate_skill" not in TOOL_DESCRIPTIONS
         from excelmanus.memory import _DEFAULT_SYSTEM_PROMPT

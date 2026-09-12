@@ -1,7 +1,7 @@
 """CommandHandler — 从 AgentEngine 解耦的控制命令处理组件。
 
 负责管理：
-- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /backup, /compact, /registry 命令
+- /fullaccess, /code, /subagent, /accept, /reject, /undo, /plan, /model, /compact, /registry 命令
 """
 
 from __future__ import annotations
@@ -107,6 +107,36 @@ class CommandHandler:
                 return f"当前代码技能权限：{status}。"
             return "无效参数。用法：/fullaccess [on|off|status]。"
 
+        if command == "/code":
+            from excelmanus.tools.runtime import present_as_of, set_present_as_preference
+
+            if (action in {"on", ""}) and not too_many_args:
+                set_present_as_preference(e, "code")
+                persist = getattr(e, "_persist_present_as", None)
+                if callable(persist):
+                    persist("code")
+                self._emit_mode_changed(on_event, "present_as", True)
+                return (
+                    "已开启代码模式。模型只能直调 run_code，其余能力在程序内通过 SDK 调用。"
+                    "观察/计划模式下仍使用原生工具。"
+                )
+            if action == "off" and not too_many_args:
+                set_present_as_preference(e, "native")
+                persist = getattr(e, "_persist_present_as", None)
+                if callable(persist):
+                    persist("native")
+                self._emit_mode_changed(on_event, "present_as", False)
+                return "已关闭代码模式，回到原生工具目录。"
+            if action == "status" and not too_many_args:
+                preferred = "code" if str(getattr(e, "_present_as", "native") or "") == "code" else "native"
+                effective = present_as_of(e)
+                if preferred == "code" and effective != "code":
+                    return "代码模式: **开启**（当前观察/计划，仍使用原生工具）。"
+                if preferred == "code":
+                    return "代码模式: **开启**。"
+                return "代码模式: **关闭**。"
+            return "无效参数。用法：/code [on|off|status]。"
+
         if command == "/subagent":
             # /subagent 默认行为为查询状态，避免误触启停
             if action in {"status", ""} and len(parts) <= 2:
@@ -161,14 +191,22 @@ class CommandHandler:
             )
 
         if command == "/plan":
-            return "该命令已废弃。请使用输入框上方的「写入 / 读取 / 计划」模式 Tab 切换。"
+            from excelmanus.plan_mode import handle_plan_command
+
+            reply = handle_plan_command(e, action)
+            self._emit_mode_changed(
+                on_event,
+                "plan",
+                bool(getattr(e, "_plan_active", False)),
+            )
+            return reply
 
         if command == "/model":
             # /model → 显示当前模型
             # /model list → 列出所有可用模型
             # /model <name> → 切换模型
             if not action:
-                name_display = e.active_model_name or "default"
+                name_display = e.active_model_name or e.active_model
                 return f"当前模型：{name_display}（{e.active_model}）"
             if action == "list":
                 rows = e.list_models()
@@ -193,9 +231,6 @@ class CommandHandler:
                 except Exception:
                     logger.debug("异步上下文预算更新失败，保持同步推断值", exc_info=True)
             return result_msg
-
-        if command == "/backup":
-            return self._handle_backup_command(parts)
 
         if command == "/compact":
             return await self._handle_compact_command(parts)
@@ -292,7 +327,7 @@ class CommandHandler:
             custom_instruction = " ".join(parts[1:])
 
         # 确定摘要模型
-        summary_model = e.config.aux_model or e.active_model
+        summary_model = e.active_model
         sys_msgs = getattr(e, "_last_system_msgs", None) or e.memory.build_system_messages()
 
         _msgs_before = len(e.memory.messages)
@@ -381,71 +416,6 @@ class CommandHandler:
 
         return "无效参数。用法：/registry [status|scan]。"
 
-    def _handle_backup_command(self, parts: list[str]) -> str:
-        """处理 /backup 会话控制命令。"""
-        e = self._engine
-        action = parts[1].strip().lower() if len(parts) >= 2 else ""
-        too_many_args = len(parts) > 3
-
-        if action in {"status", ""} and not too_many_args:
-            if not e.workspace.transaction_enabled:
-                return "备份沙盒模式：已关闭。"
-            tx = e.transaction
-            count = len(tx.list_staged()) if tx else 0
-            scope = tx.scope if tx else "all"
-            return (
-                f"备份沙盒模式：已启用（scope={scope}）。\n"
-                f"当前管理 {count} 个备份文件。\n"
-                f"备份目录：{tx.staging_dir if tx else 'N/A'}"
-            )
-
-        if action == "on" and (len(parts) == 2 or len(parts) == 3):
-            scope = "all"
-            if len(parts) == 3 and parts[2].strip().lower() == "--excel-only":
-                scope = "excel_only"
-            if e.file_registry is None or not e.file_registry.has_versions:
-                return "无法开启备份沙盒：FileRegistry 未就绪或版本管理未启用。"
-            e.workspace.transaction_enabled = True
-            e.workspace.transaction_scope = scope
-            e.transaction = e.workspace.create_transaction(
-                registry=e.file_registry,
-            )
-            e.sandbox_env = e.workspace.create_sandbox_env(transaction=e.transaction)
-            return f"已开启备份沙盒模式（scope={scope}）。所有文件操作将重定向到副本。"
-
-        if action == "off" and not too_many_args:
-            e.workspace.transaction_enabled = False
-            e.transaction = None
-            e.sandbox_env = e.workspace.create_sandbox_env(transaction=None)
-            return "已关闭备份沙盒模式。后续操作将直接修改原始文件。"
-
-        if action == "apply" and not too_many_args:
-            tx = e.transaction
-            if not e.workspace.transaction_enabled or tx is None:
-                return "备份模式未启用，无需 apply。"
-            applied = tx.commit_all()
-            if not applied:
-                return "没有需要应用的备份。"
-            lines = [f"已将 {len(applied)} 个备份文件应用到原始位置："]
-            for item in applied:
-                lines.append(f"  - {item['original']}")
-            return "\n".join(lines)
-
-        if action == "list" and not too_many_args:
-            tx = e.transaction
-            if not e.workspace.transaction_enabled or tx is None:
-                return "备份模式未启用。"
-            backups = tx.list_staged()
-            if not backups:
-                return "当前没有备份文件。"
-            lines = [f"当前 {len(backups)} 个备份文件："]
-            for item in backups:
-                exists = "✓" if item["exists"] == "True" else "✗"
-                lines.append(f"  [{exists}] {item['original']} → {item['backup']}")
-            return "\n".join(lines)
-
-        return "无效参数。用法：/backup [on|off|status|apply|list]"
-
     async def _handle_accept_command(
         self,
         parts: list[str],
@@ -521,7 +491,10 @@ class CommandHandler:
 
         resume_iteration = e._last_iteration_count + 1
         try:
-            resumed = await e._tool_calling_loop(
+            from excelmanus.agent.loop import run_tool_loop
+
+            resumed = await run_tool_loop(
+                e,
                 route_to_resume,
                 on_event,
                 start_iteration=resume_iteration,
@@ -590,15 +563,14 @@ class CommandHandler:
             return "无效参数。用法：/rollback [list] 或 /rollback <N>（N 为轮次序号）。"
 
         try:
-            result = e.rollback_conversation(turn_index, rollback_files=False)
+            result = e.rollback_conversation(turn_index)
         except IndexError as exc:
             return str(exc)
 
         removed = result["removed_messages"]
         return (
             f"已回退到第 {turn_index} 轮用户消息，移除了 {removed} 条后续消息。\n"
-            f"提示：如需同时回滚文件变更，请通过 API 传入 rollback_files=true，"
-            f"或使用 `/undo` 逐条回滚。"
+            "对话回滚不改磁盘。文件回退请用 manage_spreadsheet_versions restore。"
         )
 
     def _handle_undo_command(self, parts: list[str]) -> str:
@@ -626,38 +598,30 @@ class CommandHandler:
             lines.append("\n使用 `/undo <id>` 回滚指定操作。")
             return "\n".join(lines)
 
-        # W9: /undo diff <file> → 显示文件版本差异
+        # W9: /undo diff <file> → RevisionStore 时间线
         if action == "diff":
             if len(parts) < 3:
                 return "无效参数。用法：/undo diff <文件路径>。"
             file_path = " ".join(parts[2:]).strip()
-            registry = getattr(e, "_file_registry", None)
-            if registry is None:
-                return "FileRegistry 未初始化。"
-            original = registry.get_version_original(file_path)
-            latest = registry.get_version_latest(file_path)
-            if original is None and latest is None:
-                return f"未找到文件 {file_path!r} 的版本记录。"
-            if original is None or latest is None:
-                return f"文件 {file_path!r} 仅有单一版本，无法生成差异。"
-            orig_text = original if isinstance(original, str) else str(original)
-            latest_text = latest if isinstance(latest, str) else str(latest)
-            if orig_text == latest_text:
-                return f"文件 {file_path!r} 的最早版本与最新版本一致，无差异。"
-            import difflib
-            diff_lines = list(difflib.unified_diff(
-                orig_text.splitlines(keepends=True),
-                latest_text.splitlines(keepends=True),
-                fromfile=f"{file_path} (original)",
-                tofile=f"{file_path} (latest)",
-                n=3,
-            ))
-            if not diff_lines:
-                return f"文件 {file_path!r} 无差异。"
-            diff_text = "".join(diff_lines)
-            if len(diff_text) > 3000:
-                diff_text = diff_text[:3000] + "\n... (截断)"
-            return f"**文件版本差异** `{file_path}`\n```diff\n{diff_text}\n```"
+            from pathlib import Path
+            from excelmanus.workspace.identity import IdentityError, resolve_canonical
+            from excelmanus.workspace.revisions import RevisionStore
+            root = Path(e.config.workspace_root)
+            try:
+                ident = resolve_canonical(root, file_path)
+            except IdentityError as exc:
+                return f"路径无效：{exc}"
+            records = RevisionStore(root).list(ident.relative)
+            if not records:
+                return f"未找到文件 {ident.relative!r} 的 revision 记录。"
+            lines = [f"**文件版本** `{ident.relative}`\n"]
+            for rec in records[-20:]:
+                label = rec.label or rec.reason
+                lines.append(
+                    f"- `{rec.id}` seq={rec.sequence} {label} sha256:{rec.sha256[:12]}…"
+                )
+            lines.append("\n恢复：manage_spreadsheet_versions restore，或版本面板。")
+            return "\n".join(lines)
 
         # /undo <id> → 执行回滚
         if len(parts) == 2:

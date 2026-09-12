@@ -222,6 +222,18 @@ class TestMigrateChatHistoryDB:
         assert msg_count == 1
         db.close()
 
+    def test_migrate_missing_sessions_table_raises(self, tmp_path: Path) -> None:
+        old_db_path = tmp_path / "empty.db"
+        sqlite3.connect(str(old_db_path)).close()
+        db = Database(str(tmp_path / "excelmanus.db"))
+        with pytest.raises(sqlite3.OperationalError, match="sessions"):
+            migrate_legacy_data(db, old_chat_db_path=str(old_db_path))
+        count = db.conn.execute(
+            "SELECT COUNT(*) as cnt FROM sessions"
+        ).fetchone()["cnt"]
+        assert count == 0
+        db.close()
+
 
 class TestMigrationIdempotent:
     """迁移应是幂等的。"""

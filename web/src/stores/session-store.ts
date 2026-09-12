@@ -13,8 +13,8 @@ interface SessionState {
   addSession: (session: Session) => void;
   removeSession: (id: string) => void;
   updateSessionTitle: (id: string, title: string) => void;
+  patchSession: (id: string, patch: Partial<Session>) => void;
   mergeSessions: (remote: Session[]) => void;
-  updateSessionStatus: (id: string, status: "active" | "archived") => void;
 }
 
 /** 当前选中会话 id 的唯一可变事实源。 */
@@ -53,10 +53,10 @@ export const useSessionStore = create<SessionState>()(
             s.id === id ? { ...s, title } : s
           ),
         })),
-      updateSessionStatus: (id, status) =>
+      patchSession: (id, patch) =>
         set((state) => ({
           sessions: state.sessions.map((s) =>
-            s.id === id ? { ...s, status } : s
+            s.id === id ? { ...s, ...patch } : s
           ),
         })),
       mergeSessions: (remote) =>

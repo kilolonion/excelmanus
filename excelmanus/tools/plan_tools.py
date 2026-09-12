@@ -6,9 +6,12 @@ import secrets
 from datetime import datetime, timezone
 from pathlib import Path
 
-from excelmanus.engine_core.tool_result import ToolResult
+from collections.abc import Callable
+
+from excelmanus.engine_core.tool_result import ToolResult, error_result
 from excelmanus.logger import get_logger
 from excelmanus.plan_mode import parse_plan_markdown
+from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.task_list import TaskStore
 from excelmanus.tools.registry import ToolDef
 
@@ -90,8 +93,39 @@ def write_plan(
     return ToolResult.from_text("\n".join(lines))
 
 
-def get_tools(store: TaskStore, workspace_root: str) -> list[ToolDef]:
+def exit_plan_mode(
+    plan: str = "",
+    *,
+    is_plan_active: Callable[[], bool],
+    on_submitted: Callable[[str], None] | None = None,
+) -> ToolResult:
+    """呈交计划。plan 外失败；真正退出要用户批准。"""
+    if not is_plan_active():
+        return error_result(
+            "exit_plan_mode 仅在计划模式内有效。",
+            code="PLAN_INACTIVE",
+        )
+    text = (plan or "").strip()
+    if not text:
+        return error_result("需要完整计划正文。", code="INVALID_ARGUMENT")
+    if on_submitted is not None:
+        on_submitted(text)
+    return ToolResult.from_text("计划已呈交，等待用户批准后退出计划模式。")
+
+
+def get_tools(
+    store: TaskStore,
+    workspace_root: str,
+    *,
+    is_plan_active: Callable[[], bool] | None = None,
+    on_exit_submitted: Callable[[str], None] | None = None,
+) -> list[ToolDef]:
     """返回绑定到 TaskStore + workspace 的计划工具定义。"""
+
+    def _is_plan_active() -> bool:
+        if is_plan_active is None:
+            return False
+        return bool(is_plan_active())
 
     def _write_plan(title: str, content: str) -> ToolResult:
         return write_plan(
@@ -101,40 +135,50 @@ def get_tools(store: TaskStore, workspace_root: str) -> list[ToolDef]:
             workspace_root=workspace_root,
         )
 
+    def _exit_plan_mode(plan: str = "") -> ToolResult:
+        return exit_plan_mode(
+            plan=plan,
+            is_plan_active=_is_plan_active,
+            on_submitted=on_exit_submitted,
+        )
+
     return [
         ToolDef(
             name="write_plan",
-            description=(
-                "撰写 Markdown 计划文档并自动创建任务清单。"
-                "将完整的分析方案写入 {workspace}/plans/ 目录，"
-                "并从文档末尾自动解析子任务列表，创建可追踪的 TaskList。"
-                "使用场景："
-                "(1) plan 模式下必须使用此工具输出规划文档；"
-                "(2) 复杂任务（5步以上）的全面规划。"
-                "content 末尾必须包含可解析的任务清单，支持两种格式："
-                "格式A — `## 任务清单` + checkbox（`- [ ] 子任务标题`）；"
-                "格式B — tasklist-json 代码块（支持 verification 验证条件）。"
-                "调用后自动创建 TaskList，无需再调用 task_create。"
-            ),
+            description=TOOL_DESCRIPTIONS["write_plan"],
             input_schema={
                 "type": "object",
                 "properties": {
                     "title": {
                         "type": "string",
-                        "description": "计划标题（用于文件名和任务清单标题）",
+                        "description": "计划标题",
                     },
                     "content": {
                         "type": "string",
-                        "description": (
-                            "Markdown 计划正文。末尾必须包含可解析的任务清单。"
-                            "推荐结构：# 标题 → ## 背景分析 → ## 方案设计 → ## 任务清单（- [ ] 子任务）"
-                        ),
+                        "description": "Markdown 计划正文",
                     },
                 },
                 "required": ["title", "content"],
                 "additionalProperties": False,
             },
             func=_write_plan,
+            write_effect="none",
+        ),
+        ToolDef(
+            name="exit_plan_mode",
+            description=TOOL_DESCRIPTIONS["exit_plan_mode"],
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "plan": {
+                        "type": "string",
+                        "description": "完整计划正文，须含标题",
+                    },
+                },
+                "required": ["plan"],
+                "additionalProperties": False,
+            },
+            func=_exit_plan_mode,
             write_effect="none",
         ),
     ]

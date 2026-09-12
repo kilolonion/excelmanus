@@ -49,7 +49,8 @@ class TestBenchProtectedDirWrite:
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')"
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
         assert target.read_text(encoding="utf-8") == "original"
 
     def test_env_var_override_protected_dirs(self, workspace: Path) -> None:
@@ -63,7 +64,7 @@ class TestBenchProtectedDirWrite:
             workspace, code, "GREEN",
             env_override={"EXCELMANUS_BENCH_PROTECTED_DIRS": "my_data"},
         )
-        assert result.returncode == 0
+        assert result.returncode != 0
         assert target.read_text(encoding="utf-8") == "original"
 
     def test_bench_protection_yellow_mode(self, workspace: Path) -> None:
@@ -74,7 +75,7 @@ class TestBenchProtectedDirWrite:
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')"
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode == 0
+        assert result.returncode != 0
         assert target.read_text(encoding="utf-8") == "original"
 
     def test_bench_protection_red_mode_has_cow(self, workspace: Path) -> None:
@@ -85,7 +86,7 @@ class TestBenchProtectedDirWrite:
         target.write_text("original", encoding="utf-8")
         code = f"with open(r'{target}', 'w') as f:\n    f.write('overwritten')\nprint('done')"
         result = _run_in_sandbox(workspace, code, "RED")
-        assert result.returncode == 0
+        assert result.returncode != 0
         assert target.read_text(encoding="utf-8") == "original"
 
 
@@ -261,7 +262,8 @@ class TestOpenpyxlSandboxSave:
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode == 0, f"stderr: {result.stderr}"
         assert "saved" in result.stdout
-        assert target.exists()
+        assert not target.exists()
+        assert "EXCELMANUS_PENDING_WRITE" in result.stderr
 
     def test_openpyxl_save_existing_file_in_sandbox(self, workspace: Path) -> None:
         """覆盖已有 xlsx 文件（走 _atomic_save 路径）应成功。"""
@@ -306,13 +308,11 @@ class TestOpenpyxlSandboxSave:
             f"wb.save(r'{target}')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        
-        # 原文件应未修改
-        wb_orig = _Wb()
+        assert result.returncode != 0
         from openpyxl import load_workbook
         wb_check = load_workbook(target)
         assert wb_check.active["A1"].value == "original"
+        wb_check.close()
 
 
 class TestWrapperTemplateContent:
@@ -323,7 +323,7 @@ class TestWrapperTemplateContent:
         wrapper = generate_wrapper_script("GREEN", "/tmp/ws")
         assert "EXCELMANUS_BENCH_PROTECTED_DIRS" in wrapper
         assert "_BENCH_PROTECTED_DIRS" in wrapper
-        assert "bench 保护目录" in wrapper
+        assert "bench 目录" in wrapper
 
     def test_wrapper_contains_openpyxl_patch(self) -> None:
         """GREEN wrapper 包含 openpyxl atomic save patch。"""
@@ -348,7 +348,8 @@ class TestWrapperTemplateContent:
                 or ln.startswith("from excelmanus.workbook_commit")
                 for ln in code_lines
             )
-            assert "expected_version" in wrapper
+            assert "EXCELMANUS_PENDING_RUN_ID" in wrapper
+            assert "_EXPECTED_VERSIONS" not in wrapper
 
     def test_red_wrapper_has_fs_guard(self) -> None:
         """RED wrapper 包含文件系统守卫和敏感目录保护。"""
@@ -378,5 +379,12 @@ class TestWrapperTemplateContent:
         assert len(lines) == 1
         _, path, ver = lines[0].split("\t")
         assert path == _os.path.realpath(str(target))
-        expect = "sha256:" + hashlib.sha256(target.read_bytes()).hexdigest()
+        pending_lines = [
+            ln for ln in result.stderr.splitlines()
+            if ln.startswith("EXCELMANUS_PENDING_WRITE\t")
+        ]
+        assert pending_lines
+        pending_path = pending_lines[0].split("\t")[2]
+        expect = "sha256:" + hashlib.sha256(Path(pending_path).read_bytes()).hexdigest()
         assert ver == expect
+        assert not target.exists()

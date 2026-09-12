@@ -198,7 +198,7 @@ Categories=Office;
         return None
 
 
-# ── 浏览器书签快捷方式（server/docker 模式）────────────────
+# ── 浏览器书签快捷方式（server 模式）────────────────
 
 
 def _create_windows_web_shortcut(
@@ -303,12 +303,12 @@ def create_desktop_shortcut(
     """创建桌面快捷方式（自动检测平台）。
 
     - standalone 模式：创建启动脚本快捷方式（.lnk / .command / .desktop）
-    - server/docker 模式：创建浏览器书签（.url / .webloc / Type=Link）
+    - server 模式：创建浏览器书签（.url / .webloc / Type=Link）
 
     返回创建的快捷方式路径字符串，失败返回 None。
     """
     # 服务器模式：创建浏览器书签
-    if deploy_mode in ("server", "docker"):
+    if deploy_mode == "server":
         if not site_url:
             logger.warning("服务器模式需要 site_url 参数才能创建浏览器快捷方式")
             return None
@@ -399,7 +399,7 @@ def get_shortcut_info() -> dict[str, Any]:
             "platform": system,
         }
 
-    # 检查浏览器书签快捷方式（server/docker）
+    # 检查浏览器书签快捷方式（server）
     if system == "Windows":
         web_path = desktop / f"{_APP_NAME}.url"
     elif system == "Darwin":

@@ -32,11 +32,11 @@ class Skillpack:
     resource_contents: dict[str, str] = field(default_factory=dict)
 
     def render_context(self) -> str:
-        """渲染注入到 system 消息中的技能上下文。"""
+        """渲染技能正文（user-role invocation 或 tool result）。"""
         lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
-            "执行指引：",
+            "技能正文：",
             self.instructions.strip() or "(无)",
         ]
         if self.required_mcp_servers or self.required_mcp_tools:
@@ -53,16 +53,11 @@ class Skillpack:
         return "\n".join(lines).strip()
 
     def render_context_instructions_only(self) -> str:
-        """仅返回 name + description + instructions（不含 resource_contents）。
-
-        用于后续迭代的 system prompt 注入：首次激活时完整内容已通过
-        tool result 返回给 LLM，后续迭代只需 instructions 提醒即可，
-        避免 resource_contents 在每轮迭代中重复注入导致 token 放大。
-        """
+        """name + description + instructions，不含 resource_contents。"""
         lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
-            "执行指引：",
+            "技能正文：",
             self.instructions.strip() or "(无)",
         ]
         if self.required_mcp_servers or self.required_mcp_tools:
@@ -85,7 +80,7 @@ class Skillpack:
         header_lines = [
             f"[Skillpack] {self.name}",
             f"描述：{self.description}",
-            "执行指引：",
+            "技能正文：",
         ]
         header = "\n".join(header_lines) + "\n"
         remaining = max_chars - len(header) - len(truncate_suffix) - 1

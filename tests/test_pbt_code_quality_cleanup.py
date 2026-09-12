@@ -83,7 +83,7 @@ class TestFaultCondition:
 
         **验证：需求 1.1, 1.2**
         """
-        from excelmanus.prompt_composer import _FALLBACK_CORE_FILES
+        from excelmanus.prompt.load import _FALLBACK_CORE_FILES
 
         # 修复后期望：字典为空
         assert _FALLBACK_CORE_FILES == {}, (
@@ -99,7 +99,7 @@ class TestFaultCondition:
 
         **验证：需求 1.1, 1.2**
         """
-        from excelmanus.prompt_composer import _FALLBACK_CORE_FILES
+        from excelmanus.prompt.load import _FALLBACK_CORE_FILES
 
         all_content = "\n".join(_FALLBACK_CORE_FILES.values())
         assert "4.0.0" not in all_content, (
@@ -257,20 +257,12 @@ class _MockClient:
     chat = _Chat()
 
 
-class _MockContextBuilder:
-    """模拟 _context_builder 对象，提供 bench 所需的 _prepare_system_prompts_for_request。"""
-
-    @staticmethod
-    def _prepare_system_prompts_for_request(skill_contexts, **kwargs):
-        return (["system prompt"], None)
-
-
 class _MockEngineWithAllAttrs:
     """模拟具备所有 bench 所需私有属性的 engine。"""
 
     def __init__(self):
         self._client = _MockClient()
-        self._context_builder = _MockContextBuilder()
+        self._prepare_system_prompts_for_request = self._mock_prepare
 
     @staticmethod
     def _mock_prepare(skill_contexts, **kwargs):
@@ -420,14 +412,14 @@ class TestPreservation:
         from excelmanus.bench import _EngineTracer
 
         engine = _MockEngineWithAllAttrs()
-        original_prepare = engine._context_builder._prepare_system_prompts_for_request
+        original_prepare = engine._prepare_system_prompts_for_request
 
         # 初始化应成功
         tracer = _EngineTracer(engine)
 
         # monkey-patch 后方法应被替换
-        assert engine._context_builder._prepare_system_prompts_for_request is not original_prepare
+        assert engine._prepare_system_prompts_for_request is not original_prepare
 
         # restore 后应恢复原始方法
         tracer.restore()
-        assert engine._context_builder._prepare_system_prompts_for_request is original_prepare
+        assert engine._prepare_system_prompts_for_request is original_prepare

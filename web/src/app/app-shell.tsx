@@ -1,14 +1,24 @@
 "use client";
 
 import { useEffect, useState, useRef } from "react";
+import dynamic from "next/dynamic";
 import { usePathname } from "next/navigation";
-import { ClientLayout } from "./client-layout";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { LoadingScreen } from "@/components/ui/LoadingScreen";
 import { VersionUpdateToast } from "@/components/VersionUpdateToast";
 import { GlobalRestartOverlay } from "@/components/GlobalRestartOverlay";
+import { ManageTokenGate } from "@/components/ManageTokenGate";
 import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
 import { pathnameStartsWith } from "@/lib/pathname";
+import { getManageToken } from "@/lib/api";
+
+const loadClientLayout = () =>
+  import("./client-layout").then((m) => ({ default: m.ClientLayout }));
+
+const ClientLayout = dynamic(loadClientLayout, {
+  ssr: false,
+  loading: () => <LoadingScreen />,
+});
 
 const STANDALONE_PATHS = ["/admin"];
 const RETRY_INTERVAL_MS = 3000;
@@ -16,7 +26,9 @@ const RETRY_INTERVAL_MS = 3000;
 export function AppShell({ children }: { children: React.ReactNode }) {
   const pathname = usePathname();
   const { checkBackendHealth } = useAuthConfigStore();
+  const authRequired = useAuthConfigStore((s) => s.authRequired);
   const [ready, setReady] = useState(false);
+  const [tokenReady, setTokenReady] = useState(() => Boolean(getManageToken()));
   const [retryCount, setRetryCount] = useState(0);
   const cancelledRef = useRef(false);
   const newVersionAvailable = useHealthHubStore((s) => s.newVersionAvailable);
@@ -28,6 +40,7 @@ export function AppShell({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     cancelledRef.current = false;
     let timer: ReturnType<typeof setTimeout>;
+    void loadClientLayout();
 
     const tryConnect = () => {
       checkBackendHealth()
@@ -62,6 +75,10 @@ export function AppShell({ children }: { children: React.ReactNode }) {
           ? "正在连接服务器..."
           : "服务器连接中，请确认后端已启动";
     return <LoadingScreen message={msg} />;
+  }
+
+  if (authRequired && !tokenReady) {
+    return <ManageTokenGate onSaved={() => setTokenReady(true)} />;
   }
 
   const isStandalone = pathnameStartsWith(pathname, STANDALONE_PATHS);

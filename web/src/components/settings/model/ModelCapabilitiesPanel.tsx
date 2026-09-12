@@ -15,12 +15,15 @@ export function ModelCapabilitiesPanel() {
     handleCapToggle,
   } = useAdminModel();
 
+  const activeProfile = config?.profiles?.find((p) => p.name === config.active) || config?.profiles?.[0];
+  const activeCaps = activeProfile ? capsMap[activeProfile.name] : undefined;
+
   return (
             <div>
               <div className="flex items-center justify-between gap-2 mb-3">
                 <div className="min-w-0">
                   <p className="text-xs text-muted-foreground truncate">
-                    当前主模型: {config?.main?.model || "未配置"}
+                    当前模型: {activeProfile?.model || "未配置"}
                   </p>
                 </div>
                 <Button
@@ -39,36 +42,36 @@ export function ModelCapabilitiesPanel() {
                 </Button>
               </div>
 
-              {capsMap.main ? (
+              {activeCaps ? (
                 <div className="space-y-2">
                   <CapabilityRow
                     icon={<Wrench className="h-3.5 w-3.5" />}
                     label="工具调用 (Tool Calling)"
                     desc="模型是否支持 function calling"
-                    value={capsMap.main.supports_tool_calling}
-                    error={capsMap.main.probe_errors?.tool_calling}
-                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_tool_calling", v)}
+                    value={activeCaps.supports_tool_calling}
+                    error={activeCaps.probe_errors?.tool_calling}
+                    onToggle={(v) => handleCapToggle(activeProfile!.name, activeProfile!.model, activeProfile!.base_url, "supports_tool_calling", v)}
                   />
                   <CapabilityRow
                     icon={<ImageIcon className="h-3.5 w-3.5" />}
                     label="图像识别 (Vision)"
                     desc="模型是否支持图片输入"
-                    value={capsMap.main.supports_vision}
-                    error={capsMap.main.probe_errors?.vision}
-                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_vision", v)}
+                    value={activeCaps.supports_vision}
+                    error={activeCaps.probe_errors?.vision}
+                    onToggle={(v) => handleCapToggle(activeProfile!.name, activeProfile!.model, activeProfile!.base_url, "supports_vision", v)}
                   />
                   <CapabilityRow
                     icon={<Brain className="h-3.5 w-3.5" />}
                     label="思考输出 (Thinking)"
-                    desc={capsMap.main.thinking_type ? `类型: ${capsMap.main.thinking_type}` : "模型是否支持输出推理过程"}
-                    value={capsMap.main.supports_thinking}
-                    error={capsMap.main.probe_errors?.thinking}
-                    onToggle={(v) => handleCapToggle("main", config?.main?.model || "", config?.main?.base_url || "", "supports_thinking", v)}
+                    desc={activeCaps.thinking_type ? `类型: ${activeCaps.thinking_type}` : "模型是否支持输出推理过程"}
+                    value={activeCaps.supports_thinking}
+                    error={activeCaps.probe_errors?.thinking}
+                    onToggle={(v) => handleCapToggle(activeProfile!.name, activeProfile!.model, activeProfile!.base_url, "supports_thinking", v)}
                   />
-                  {capsMap.main.detected_at && (
+                  {activeCaps.detected_at && (
                     <p className="text-[10px] text-muted-foreground mt-2">
-                      上次探测: {new Date(capsMap.main.detected_at).toLocaleString()}
-                      {capsMap.main.manual_override && (
+                      上次探测: {new Date(activeCaps.detected_at).toLocaleString()}
+                      {activeCaps.manual_override && (
                         <Badge variant="secondary" className="ml-1.5 text-[9px]">手动覆盖</Badge>
                       )}
                     </p>

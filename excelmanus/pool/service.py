@@ -264,7 +264,7 @@ class PoolService:
     ) -> PoolManualActive:
         """设置人工激活映射。
 
-        使用 DELETE + INSERT 保证 SQLite/PostgreSQL 复合主键 UPSERT 兼容。
+        使用 DELETE + INSERT 保证复合主键 UPSERT。
         """
         now = _now_iso()
         self._conn.execute(

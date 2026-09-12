@@ -73,7 +73,7 @@ export function WordSidePanel() {
   return (
     <motion.div
       key="word-side-panel"
-      className="flex h-full flex-col border-l border-border bg-background"
+      className="flex h-full flex-shrink-0 flex-col border-l border-border bg-background"
       style={{ width: 480, minWidth: 360, maxWidth: "50vw" }}
       variants={panelSlideVariants}
       initial="hidden"

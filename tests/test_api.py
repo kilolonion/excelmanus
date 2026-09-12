@@ -762,6 +762,79 @@ class TestRemovedArchiveSessionAPI:
         assert resp.status_code == 404
 
 
+class TestSessionExportAPI:
+    """会话导出只接受 md/json；导入端点已删除。"""
+
+    @pytest.mark.asyncio
+    async def test_import_endpoint_is_gone(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        assert not hasattr(api_module, "import_session")
+        paths = [getattr(r, "path", "") for r in api_module.app.routes]
+        assert "/api/v1/sessions/import" not in paths
+        resp = await client.post("/api/v1/sessions/import", json={})
+        assert resp.status_code in (404, 405)
+
+    @pytest.mark.asyncio
+    async def test_legacy_formats_rejected(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        for fmt in ("txt", "emx"):
+            resp = await client.get(
+                "/api/v1/sessions/any/export",
+                params={"format": fmt},
+            )
+            assert resp.status_code == 400
+            assert "md, json" in resp.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_markdown_and_json_export(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        with patch(
+            "excelmanus.engine.AgentEngine.followup",
+            new_callable=AsyncMock,
+            return_value=ChatResult(reply="已分析表格"),
+        ):
+            create = await client.post("/api/v1/chat", json={"message": "分析表格"})
+        sid = create.json()["session_id"]
+        manager: SessionManager = setup_api_state["manager"]
+        engine = manager.get_engine(sid)
+        assert engine is not None
+        engine.memory.add_user_message("分析表格")
+        engine.memory.add_assistant_message("已分析表格")
+
+        md = await client.get(
+            f"/api/v1/sessions/{sid}/export",
+            params={"format": "md"},
+        )
+        assert md.status_code == 200
+        assert md.headers["content-type"].startswith("text/markdown")
+        assert "会话报告" in md.text
+        assert "分析表格" in md.text
+        assert "filename*=" in md.headers.get("content-disposition", "")
+
+        js = await client.get(
+            f"/api/v1/sessions/{sid}/export",
+            params={"format": "json"},
+        )
+        assert js.status_code == 200
+        assert js.headers["content-type"].startswith("application/json")
+        body = js.json()
+        assert "exported_at" in body
+        assert body["session"]["id"] == sid
+        assert any(m.get("content") == "分析表格" for m in body["messages"])
+        for key in (
+            "format",
+            "version",
+            "workspace_files",
+            "memories",
+            "session_state",
+            "task_list",
+        ):
+            assert key not in body
+
+
 class TestSessionCompactAPI:
     """会话级 compact API 端点测试。"""
 
@@ -935,6 +1008,7 @@ class TestPublicChatAndSseContract:
             ("/compact status", "上下文压缩状态"),
             ("/subagent status", None),
             ("/plan status", "计划模式"),
+            ("/code status", "代码模式"),
             ("/accept apv_demo", None),
         )
         session_id = "ctrl-cmd-session"

@@ -17,8 +17,16 @@ from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import MCPManager
 from excelmanus.skillpacks import SkillRouter
 from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
+from excelmanus.workspace.paths import (
+    default_workspace_path,
+    paths_equal,
+    workspace_title_from_path,
+)
+from excelmanus.stores.workspace_store import WorkspacePathError, WorkspaceStore
 
 from excelmanus.conversation_persistence import ConversationPersistence
+from excelmanus.session_title import title_from_messages
+from pathlib import Path
 
 if __import__("typing").TYPE_CHECKING:
     from excelmanus.chat_history import ChatHistoryStore
@@ -26,6 +34,16 @@ if __import__("typing").TYPE_CHECKING:
     from excelmanus.persistent_memory import PersistentMemory
 
 logger = get_logger("session")
+
+
+def _path_in_workspace(file_path: str, ws_root: str) -> bool:
+    from excelmanus.security.guard import SecurityViolationError, contained_in
+
+    try:
+        contained_in(Path(ws_root), Path(file_path))
+        return True
+    except (SecurityViolationError, OSError, ValueError):
+        return False
 
 
 # ── 异常定义 ──────────────────────────────────────────────
@@ -118,6 +136,9 @@ class SessionManager:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._cleanup_task_lock = asyncio.Lock()
         self._sandbox_config = SandboxConfig()
+        self._workspace_store: WorkspaceStore | None = (
+            WorkspaceStore(database) if database is not None else None
+        )
 
     @property
     def database(self) -> "Database | None":
@@ -128,6 +149,238 @@ class SessionManager:
     def chat_history(self) -> "ChatHistoryStore | None":
         """底层 ChatHistoryStore 实例（只读）。"""
         return self._chat_history
+
+    def default_workspace_binding(self) -> tuple[str, str | None]:
+        """Process default folder path and optional registry id."""
+        path = default_workspace_path(self._config)
+        Path(path).mkdir(parents=True, exist_ok=True)
+        if self._workspace_store is None:
+            return path, None
+        rec = self._workspace_store.ensure_path(path)
+        return rec["path"], rec["id"]
+
+    def ensure_default_workspace(self) -> dict[str, Any]:
+        path, workspace_id = self.default_workspace_binding()
+        if self._chat_history is not None:
+            self._chat_history.backfill_workspace_paths(path, workspace_id)
+        return {
+            "id": workspace_id,
+            "path": path,
+            "title": workspace_title_from_path(path),
+        }
+
+    def _mark_default_workspaces(self, items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        default_path, default_id = self.default_workspace_binding()
+        marked: list[dict[str, Any]] = []
+        for item in items:
+            rec = dict(item)
+            rec_path = str(rec.get("path") or "")
+            rec["is_default"] = bool(
+                (default_id and rec.get("id") == default_id)
+                or (rec_path and paths_equal(rec_path, default_path))
+            )
+            marked.append(rec)
+        return marked
+
+    def list_workspaces(self) -> list[dict[str, Any]]:
+        if self._workspace_store is None:
+            path, workspace_id = self.default_workspace_binding()
+            return self._mark_default_workspaces([{
+                "id": workspace_id,
+                "path": path,
+                "title": workspace_title_from_path(path),
+                "created_at": "",
+                "updated_at": "",
+                "sort_index": 0,
+            }])
+        items = self._workspace_store.list()
+        if items:
+            return self._mark_default_workspaces(items)
+        rec = self.ensure_default_workspace()
+        found = self._workspace_store.get(rec["id"]) if rec.get("id") else None
+        return self._mark_default_workspaces([found] if found else [rec])
+
+    def resolve_workspace_binding(
+        self,
+        workspace_id: str | None = None,
+        workspace_path: str | None = None,
+    ) -> tuple[str, str | None]:
+        """Resolve a registered folder. Unregistered paths are rejected unless default."""
+        if workspace_id:
+            if self._workspace_store is None:
+                raise WorkspacePathError("工作区登记未启用")
+            rec = self._workspace_store.get(workspace_id)
+            if rec is None:
+                raise WorkspacePathError("工作区不存在")
+            return rec["path"], rec["id"]
+        if workspace_path:
+            from excelmanus.workspace.paths import canonicalize_workspace_path
+
+            canon = canonicalize_workspace_path(workspace_path)
+            if self._workspace_store is not None:
+                rec = self._workspace_store.get_by_path(canon)
+                if rec is not None:
+                    return rec["path"], rec["id"]
+            default_path, default_id = self.default_workspace_binding()
+            if paths_equal(canon, default_path):
+                return default_path, default_id
+            raise WorkspacePathError("工作区未登记")
+        return self.default_workspace_binding()
+
+    def register_workspace(self, path: str, *, title: str = "") -> tuple[dict[str, Any], bool]:
+        if self._workspace_store is None:
+            raise WorkspacePathError("工作区登记未启用")
+        return self._workspace_store.create(path, title=title)
+
+    def rename_workspace(self, workspace_id: str, title: str) -> dict[str, Any] | None:
+        return self.update_workspace(workspace_id, title=title)
+
+    def update_workspace(
+        self,
+        workspace_id: str,
+        *,
+        title: str | None = None,
+        path: str | None = None,
+    ) -> dict[str, Any] | None:
+        if self._workspace_store is None:
+            raise WorkspacePathError("工作区登记未启用")
+        rec = self._workspace_store.get(workspace_id)
+        if rec is None:
+            return None
+        default_path, default_id = self.default_workspace_binding()
+        is_default = bool(
+            (default_id and workspace_id == default_id)
+            or paths_equal(rec["path"], default_path)
+        )
+        if path:
+            from excelmanus.workspace.paths import canonicalize_workspace_path
+
+            canon = canonicalize_workspace_path(path)
+            if is_default and not paths_equal(canon, default_path):
+                raise WorkspacePathError("不能更改默认工作区的文件夹")
+        updated = self._workspace_store.update(workspace_id, title=title, path=path)
+        if updated is None:
+            return None
+        return self._mark_default_workspaces([updated])[0]
+
+    def delete_workspace_registration(self, workspace_id: str) -> bool:
+        if self._workspace_store is None:
+            raise WorkspacePathError("工作区登记未启用")
+        default_path, default_id = self.default_workspace_binding()
+        if default_id and workspace_id == default_id:
+            raise WorkspacePathError("不能删除默认工作区")
+        rec = self._workspace_store.get(workspace_id)
+        if rec is not None and paths_equal(rec["path"], default_path):
+            raise WorkspacePathError("不能删除默认工作区")
+        return self._workspace_store.delete(workspace_id)
+
+    def workspace_path_for_session(self, session_id: str) -> str:
+        if self._chat_history is not None:
+            try:
+                meta = self._chat_history.get_session_meta(session_id)
+            except Exception:
+                meta = None
+            if isinstance(meta, dict):
+                path = meta.get("workspace_path")
+                if isinstance(path, str) and path.strip():
+                    return path
+        entry = self._sessions.get(session_id)
+        if entry is not None:
+            try:
+                return str(entry.engine.workspace.root_dir)
+            except Exception:
+                logger.debug("读取会话工作区失败", exc_info=True)
+        return default_workspace_path(self._config)
+
+    def _session_public_dict(
+        self,
+        row: dict[str, Any],
+        *,
+        in_flight: bool = False,
+        message_count: int | None = None,
+        title: str | None = None,
+        updated_at: str | None = None,
+        pending_approval: bool = False,
+        pending_question: bool = False,
+    ) -> dict[str, Any]:
+        sid = str(row.get("id") or "")
+        path = str(row.get("workspace_path") or "") or default_workspace_path(self._config)
+        blank_raw = row.get("blank")
+        msg_count = message_count if message_count is not None else int(row.get("message_count") or 0)
+        if blank_raw is None:
+            blank = msg_count == 0
+        else:
+            blank = bool(int(blank_raw))
+        fallback = f"会话 {sid[:8]}" if sid else "新对话"
+        resolved_title = title if title is not None else (row.get("title") or fallback)
+        return {
+            "id": sid,
+            "title": resolved_title or fallback,
+            "message_count": msg_count,
+            "in_flight": in_flight,
+            "updated_at": updated_at if updated_at is not None else (row.get("updated_at") or ""),
+            "workspace_path": path,
+            "workspace_id": row.get("workspace_id"),
+            "blank": blank,
+            "workspace_title": workspace_title_from_path(path),
+            "pending_approval": bool(pending_approval),
+            "pending_question": bool(pending_question),
+        }
+
+    async def create_or_reuse_session(
+        self,
+        *,
+        workspace_id: str | None = None,
+        workspace_path: str | None = None,
+        title: str = "新对话",
+    ) -> dict[str, Any]:
+        """Create a blank session or reuse the unused one for this folder. No engine."""
+        path, ws_id = self.resolve_workspace_binding(workspace_id, workspace_path)
+        display = (title or "").strip() or "新对话"
+        async with self._lock:
+            if self._chat_history is not None:
+                existing = self._chat_history.find_blank_session(path)
+                if existing is not None:
+                    return self._session_public_dict(existing)
+                new_id = str(uuid.uuid4())
+                self._chat_history.create_session(
+                    new_id,
+                    display,
+                    workspace_path=path,
+                    workspace_id=ws_id,
+                    blank=True,
+                )
+                meta = self._chat_history.get_session_meta(new_id) or {
+                    "id": new_id,
+                    "title": display,
+                    "workspace_path": path,
+                    "workspace_id": ws_id,
+                    "blank": 1,
+                }
+                return self._session_public_dict(meta)
+            new_id = str(uuid.uuid4())
+            now = datetime.now(timezone.utc).isoformat()
+            return self._session_public_dict(
+                {
+                    "id": new_id,
+                    "title": display,
+                    "message_count": 0,
+                    "workspace_path": path,
+                    "workspace_id": ws_id,
+                    "blank": 1,
+                    "updated_at": now,
+                }
+            )
+
+    def _engine_workspace(self, session_id: str) -> IsolatedWorkspace:
+        ws_path = self.workspace_path_for_session(session_id)
+        default_path = default_workspace_path(self._config)
+        create_missing = paths_equal(ws_path, default_path)
+        return IsolatedWorkspace(
+            root_dir=ws_path,
+            sandbox_config=self._sandbox_config,
+            create_missing=create_missing,
+        )
 
     def set_credential_store(self, credential_store: Any) -> None:
         """注入 CredentialStore 实例（订阅凭证管理）。"""
@@ -227,7 +480,7 @@ class SessionManager:
         for entry in entries:
             try:
                 ws_root = str(entry.engine.workspace.root_dir)
-                if not file_path.startswith(ws_root):
+                if not _path_in_workspace(file_path, ws_root):
                     continue
             except Exception:
                 logger.debug("notify_file_deleted 处理异常", exc_info=True)
@@ -248,7 +501,7 @@ class SessionManager:
                 if engine is None:
                     continue
                 ws_root = str(engine.workspace.root_dir)
-                if not old_path.startswith(ws_root):
+                if not _path_in_workspace(old_path, ws_root):
                     continue
             except Exception:
                 logger.debug("notify_file_renamed 处理异常", exc_info=True)
@@ -420,13 +673,8 @@ class SessionManager:
         user_ctx: Any = None,
         scope: Any = None,
     ) -> AgentEngine:
-        """创建 AgentEngine 并可选地注入历史消息。始终使用进程唯一工作区。"""
-        isolated_ws = IsolatedWorkspace.resolve(
-            self._config.workspace_root,
-            sandbox_config=self._sandbox_config,
-            transaction_enabled=False,
-            data_root=self._config.data_root,
-        )
+        """创建 AgentEngine 并注入历史。文件根取该会话的 workspace_path。"""
+        isolated_ws = self._engine_workspace(session_id)
         engine_config = self._config
         overrides: dict[str, Any] = {"workspace_root": str(isolated_ws.root_dir)}
         _target_model = self._config.model
@@ -562,6 +810,11 @@ class SessionManager:
             ):
                 history_messages = self._chat_history.load_messages(session_id)
                 restored = True
+            elif self._chat_history is not None and not self._chat_history.session_exists(new_id):
+                path, ws_id = self.default_workspace_binding()
+                self._chat_history.create_session(
+                    new_id, "", workspace_path=path, workspace_id=ws_id, blank=True,
+                )
 
             engine = self._create_engine_with_history(
                 new_id,
@@ -597,7 +850,10 @@ class SessionManager:
                 if self._chat_history is not None:
                     try:
                         if not self._chat_history.session_exists(new_id):
-                            self._chat_history.create_session(new_id, "")
+                            path, ws_id = self.default_workspace_binding()
+                            self._chat_history.create_session(
+                                new_id, "", workspace_path=path, workspace_id=ws_id, blank=True,
+                            )
                     except Exception:
                         logger.warning("新建会话 %s 立即持久化失败", new_id, exc_info=True)
 
@@ -1125,7 +1381,7 @@ class SessionManager:
                 logger.warning("预取 SQLite 会话列表失败", exc_info=True)
 
         # B6: 锁内仅收集轻量数据，锁外构建完整结果，减少锁持有时间
-        _raw_entries: list[tuple[str, int, str, bool, float]] = []
+        _raw_entries: list[tuple[str, int, str, bool, float, bool, bool]] = []
         wall_now = time.time()
         async with self._lock:
             for sid, entry in self._sessions.items():
@@ -1135,16 +1391,28 @@ class SessionManager:
                 # 从第一条用户消息截取标题（轻量遍历）
                 rule_title = ""
                 if msg_count > 0:
-                    for msg in engine.raw_messages:
-                        if isinstance(msg, dict) and msg.get("role") == "user":
-                            content = msg.get("content", "")
-                            if isinstance(content, str):
-                                rule_title = content[:80]
-                            break
-                _raw_entries.append((sid, msg_count, rule_title, entry.in_flight, entry.last_access))
+                    rule_title = title_from_messages(engine.raw_messages)
+                pending_approval = False
+                pending_question = False
+                try:
+                    pending_approval = bool(engine.has_pending_approval())
+                    pending_question = bool(engine.has_pending_question())
+                except Exception:
+                    logger.debug("读取会话待处理状态失败", exc_info=True)
+                _raw_entries.append(
+                    (
+                        sid,
+                        msg_count,
+                        rule_title,
+                        entry.in_flight,
+                        entry.last_access,
+                        pending_approval,
+                        pending_question,
+                    )
+                )
 
         # 锁外构建完整结果字典
-        for sid, msg_count, rule_title, in_flight, last_access in _raw_entries:
+        for sid, msg_count, rule_title, in_flight, last_access, pending_approval, pending_question in _raw_entries:
             db_info = db_sessions_map.get(sid, {})
             db_title = db_info.get("title", "")
             fallback = f"会话 {sid[:8]}"
@@ -1156,24 +1424,20 @@ class SessionManager:
             updated_at_iso = datetime.fromtimestamp(
                 wall_updated, tz=timezone.utc
             ).isoformat()
-            results.append({
-                "id": sid,
-                "title": title,
-                "message_count": msg_count,
-                "in_flight": in_flight,
-                "updated_at": updated_at_iso,
-            })
+            results.append(self._session_public_dict(
+                {"id": sid, **db_info},
+                in_flight=in_flight,
+                message_count=msg_count,
+                title=title,
+                updated_at=updated_at_iso,
+                pending_approval=pending_approval,
+                pending_question=pending_question,
+            ))
 
         # 合并 SQLite 中的历史会话（排除已在内存中的）
         for ds_id, ds in db_sessions_map.items():
             if ds_id not in in_memory_ids:
-                results.append({
-                    "id": ds_id,
-                    "title": ds.get("title") or f"会话 {ds_id[:8]}",
-                    "message_count": ds.get("message_count", 0),
-                    "in_flight": False,
-                    "updated_at": ds.get("updated_at", ""),
-                })
+                results.append(self._session_public_dict(ds, in_flight=False))
 
         # F6: 全局按 updated_at 降序排序，保证前端收到的列表顺序一致
         results.sort(key=lambda s: s.get("updated_at", ""), reverse=True)
@@ -1372,284 +1636,3 @@ class SessionManager:
                 return []
             return self._chat_history.load_messages(session_id, limit=limit, offset=offset)
         return []
-
-    # ── 完整会话导出 / 导入 ───────────────────────────────────
-
-    async def export_full_session(
-        self,
-        session_id: str,
-        *,
-        user_id: str | None = None,
-        include_workspace: bool = True,
-    ) -> dict:
-        """完整导出会话为 EMX v2.0 格式（消息 + 状态 + 记忆 + 工作区文件）。
-
-        Args:
-            session_id: 要导出的会话 ID。
-            user_id: 当前用户 ID，用于归属校验。
-            include_workspace: 是否包含工作区文件。
-
-        Returns:
-            EMX v2.0 格式的 dict。
-
-        Raises:
-            SessionNotFoundError: 会话不存在或无权访问。
-        """
-        from excelmanus.session_export import (
-            collect_workspace_files,
-            export_emx,
-        )
-
-        # ── 获取消息 ──
-        messages = await self.get_session_messages(
-            session_id, limit=100000, user_id=user_id,
-        )
-        if not messages and not self.session_exists(session_id):
-            raise SessionNotFoundError(f"会话 '{session_id}' 不存在。")
-
-        # ── 会话元数据 ──
-        session_meta: dict = {"id": session_id}
-        ch = self._chat_history
-        if ch is not None:
-            meta = ch.get_session_meta(session_id)
-            if meta:
-                session_meta.update(meta)
-
-        # ── Excel 事件数据 ──
-        excel_diffs: list[dict] = []
-        excel_previews: list[dict] = []
-        affected_files: list[str] = []
-        if ch is not None:
-            excel_diffs = ch.load_excel_diffs(session_id)
-            excel_previews = ch.load_excel_previews(session_id)
-            affected_files = ch.load_affected_files(session_id)
-
-        # ── 引擎状态（内存中有活跃会话时） ──
-        session_state: dict | None = None
-        task_list: dict | None = None
-        config_snapshot: dict | None = None
-        workspace_root: str = ""
-
-        engine = self.get_engine(session_id, user_id=user_id)
-        if engine is not None:
-            # 引擎活跃：直接采集运行时状态
-            session_state = engine._state.to_dict()
-            task_list = engine._task_store.to_dict()
-            config_snapshot = {
-                "model": engine.current_model,
-                "chat_mode": getattr(engine, "_current_chat_mode", "write"),
-                "present_as": getattr(engine, "_present_as", "native"),
-                "full_access_enabled": engine.full_access_enabled,
-            }
-            workspace_root = str(engine.workspace.root_dir)
-        else:
-            # 引擎不在内存：尝试从 checkpoint 恢复状态
-            if self._database is not None:
-                try:
-                    from excelmanus.stores.session_state_store import SessionStateStore
-                    store = SessionStateStore(self._database)
-                    cp = store.load_latest_checkpoint(session_id)
-                    if cp is not None:
-                        session_state = cp.get("state_dict")
-                        task_list = cp.get("task_list_dict")
-                except Exception:
-                    logger.debug("导出时加载 checkpoint 失败", exc_info=True)
-            # 解析工作区路径
-            try:
-                ws = IsolatedWorkspace.resolve(
-                    self._config.workspace_root,
-                    data_root=self._config.data_root,
-                )
-                workspace_root = str(ws.root_dir)
-            except Exception:
-                workspace_root = self._config.workspace_root
-
-        # ── 持久记忆 ──
-        memories_list: list[dict] | None = None
-        if self._database is not None:
-            try:
-                from excelmanus.stores.memory_store import MemoryStore
-                mem_store = MemoryStore(self._database)
-                entries = mem_store.load_all()
-                if entries:
-                    memories_list = [
-                        {
-                            "category": e.category.value,
-                            "content": e.content,
-                            "source": e.source or "",
-                            "created_at": e.timestamp.isoformat() if e.timestamp else "",
-                        }
-                        for e in entries
-                    ]
-            except Exception:
-                logger.debug("导出时加载记忆失败", exc_info=True)
-
-        # ── 工作区文件 ──
-        workspace_files: list[dict] | None = None
-        if include_workspace and workspace_root:
-            try:
-                workspace_files = collect_workspace_files(
-                    workspace_root,
-                    affected_only=affected_files or None,
-                )
-            except Exception:
-                logger.debug("导出时收集工作区文件失败", exc_info=True)
-
-        return export_emx(
-            session_meta,
-            messages,
-            excel_diffs,
-            excel_previews,
-            affected_files,
-            session_state=session_state,
-            task_list=task_list,
-            memories=memories_list,
-            config_snapshot=config_snapshot,
-            workspace_files=workspace_files,
-        )
-
-    async def import_full_session(
-        self,
-        parsed: dict,
-        *,
-        user_id: str | None = None,
-    ) -> dict:
-        """从 EMX 解析结果导入完整会话（消息 + 状态 + 记忆 + 工作区文件）。
-
-        Args:
-            parsed: parse_emx() 的返回值。
-            user_id: 当前用户 ID。
-
-        Returns:
-            {"session_id", "title", "message_count", "files_restored",
-             "memories_restored", "state_restored"}
-        """
-        ch = self._chat_history
-        if ch is None:
-            raise RuntimeError("聊天记录存储未启用，无法导入")
-
-        new_session_id = str(uuid.uuid4())
-        meta = parsed["session_meta"]
-        title = meta.get("title") or "导入的会话"
-        messages = parsed["messages"]
-
-        # ── 1. 创建会话 + 写入消息 ──
-        ch.create_session(new_session_id, title, user_id=user_id)
-        if messages:
-            ch.save_turn_messages(new_session_id, messages, turn_number=0)
-
-        # ── 2. 恢复 Excel 事件数据 ──
-        for diff in parsed.get("excel_diffs") or []:
-            try:
-                ch.save_excel_diff(
-                    new_session_id,
-                    diff.get("tool_call_id", ""),
-                    diff.get("file_path", ""),
-                    diff.get("sheet", ""),
-                    diff.get("affected_range", ""),
-                    diff.get("changes", []),
-                )
-            except Exception:
-                pass
-        for preview in parsed.get("excel_previews") or []:
-            try:
-                ch.save_excel_preview(
-                    new_session_id,
-                    preview.get("tool_call_id", ""),
-                    preview.get("file_path", ""),
-                    preview.get("sheet", ""),
-                    preview.get("columns", []),
-                    preview.get("rows", []),
-                    preview.get("total_rows", 0),
-                    preview.get("truncated", False),
-                )
-            except Exception:
-                pass
-        for fp in parsed.get("affected_files") or []:
-            try:
-                ch.save_affected_file(new_session_id, fp)
-            except Exception:
-                pass
-
-        # ── 3. 恢复 SessionState + TaskList checkpoint ──
-        state_restored = False
-        session_state = parsed.get("session_state")
-        task_list = parsed.get("task_list")
-        if (session_state or task_list) and self._database is not None:
-            try:
-                from excelmanus.stores.session_state_store import SessionStateStore
-                store = SessionStateStore(self._database)
-                store.save_session_snapshot(
-                    session_id=new_session_id,
-                    state_dict=session_state or {},
-                    task_list_dict=task_list or {},
-                    turn_number=session_state.get("session_turn", 0) if session_state else 0,
-                    checkpoint_type="import",
-                )
-                state_restored = True
-            except Exception:
-                logger.debug("导入时保存 checkpoint 失败", exc_info=True)
-
-        # ── 4. 恢复持久记忆 ──
-        memories_restored = 0
-        memories = parsed.get("memories")
-        if memories and self._database is not None:
-            try:
-                from excelmanus.memory_models import MemoryCategory, MemoryEntry
-                from excelmanus.stores.memory_store import MemoryStore
-
-                mem_store = MemoryStore(self._database)
-                entries: list[MemoryEntry] = []
-                for m in memories:
-                    try:
-                        cat = MemoryCategory(m.get("category", "general"))
-                    except ValueError:
-                        cat = MemoryCategory.GENERAL
-                    ts_str = m.get("created_at", "")
-                    try:
-                        ts = datetime.fromisoformat(ts_str) if ts_str else datetime.now(timezone.utc)
-                    except (ValueError, TypeError):
-                        ts = datetime.now(timezone.utc)
-                    entries.append(MemoryEntry(
-                        content=m.get("content", ""),
-                        category=cat,
-                        timestamp=ts,
-                        source=m.get("source", "emx_import"),
-                    ))
-                memories_restored = mem_store.save_entries(entries)
-            except Exception:
-                logger.debug("导入时恢复记忆失败", exc_info=True)
-
-        # ── 5. 恢复工作区文件 ──
-        files_restored = 0
-        workspace_files = parsed.get("workspace_files")
-        if workspace_files:
-            from excelmanus.session_export import restore_workspace_files
-
-            try:
-                ws = IsolatedWorkspace.resolve(
-                    self._config.workspace_root,
-                    data_root=self._config.data_root,
-                )
-                ws_root = str(ws.root_dir)
-            except Exception:
-                ws_root = self._config.workspace_root
-
-            try:
-                files_restored, _ = restore_workspace_files(ws_root, workspace_files)
-            except Exception:
-                logger.debug("导入时恢复工作区文件失败", exc_info=True)
-
-        logger.info(
-            "完整会话导入成功: session=%s messages=%d files=%d memories=%d state=%s",
-            new_session_id, len(messages), files_restored, memories_restored, state_restored,
-        )
-
-        return {
-            "session_id": new_session_id,
-            "title": title,
-            "message_count": len(messages),
-            "files_restored": files_restored,
-            "memories_restored": memories_restored,
-            "state_restored": state_restored,
-        }

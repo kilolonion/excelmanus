@@ -38,6 +38,7 @@ _SAFE_COMPUTE_MODULES: frozenset[str] = frozenset({
     "unicodedata", "locale", "codecs",
     "bisect", "heapq", "array",
     "contextlib", "weakref",
+    "sys", "builtins", "types",
 })
 
 _SAFE_IO_MODULES: frozenset[str] = frozenset({
@@ -55,6 +56,27 @@ _SUBPROCESS_MODULES: frozenset[str] = frozenset({
 _SYSTEM_CONTROL_MODULES: frozenset[str] = frozenset({
     "ctypes", "signal", "resource", "multiprocessing",
     "webbrowser", "antigravity",
+})
+
+_DESERIALIZE_MODULES: frozenset[str] = frozenset({
+    "pickle", "_pickle", "cPickle", "marshal", "shelve",
+    "dill", "cloudpickle",
+})
+
+_FS_WRITE_EXPORTS: frozenset[str] = frozenset({
+    "remove", "unlink", "rmdir", "removedirs", "mkdir", "makedirs",
+    "rename", "renames", "replace", "truncate",
+    "symlink", "link", "chmod", "chown", "chroot",
+    "mkfifo", "mknod", "write", "writev", "pwrite",
+    "copy", "copy2", "copyfile", "copytree", "move", "rmtree",
+    "copyfileobj", "make_archive", "unpack_archive",
+    "write_text", "write_bytes", "touch", "symlink_to", "hardlink_to",
+    "to_csv", "to_json", "to_pickle", "to_parquet", "to_html",
+    "to_markdown", "to_xml", "to_feather", "to_hdf", "to_stata",
+})
+
+_FS_ESCAPE_ATTRS: frozenset[str] = frozenset({
+    "symlink", "link", "symlink_to", "hardlink_to",
 })
 
 # ── 危险函数调用 ──────────────────────────────────────────
@@ -133,8 +155,12 @@ class _ASTVisitor(ast.NodeVisitor):
         elif module_name in _SYSTEM_CONTROL_MODULES or normalized_root in _SYSTEM_CONTROL_MODULES:
             self.capabilities.add("SYSTEM_CONTROL")
             self.details.append(f"system control module: {module_name}")
+        elif module_name in _DESERIALIZE_MODULES or normalized_root in _DESERIALIZE_MODULES:
+            self.capabilities.add("DESERIALIZE")
+            self.details.append(f"deserialize module: {module_name}")
         else:
-            self.capabilities.add("SAFE_IO")
+            self.capabilities.add("UNKNOWN_MODULE")
+            self.details.append(f"unknown module: {module_name}")
 
         if root == "base64":
             self._has_base64 = True
@@ -149,10 +175,17 @@ class _ASTVisitor(ast.NodeVisitor):
     def visit_ImportFrom(self, node: ast.ImportFrom) -> None:
         module = node.module or ""
         self._classify_module(module)
+        root = _normalize_module_root(_module_root(module)) if module else ""
         for alias in node.names:
             full = f"{module}.{alias.name}" if module else alias.name
             local_name = alias.asname or alias.name
             self._imported_names[local_name] = full
+            if alias.name in _FS_ESCAPE_ATTRS:
+                self.capabilities.add("SYSTEM_CONTROL")
+                self.details.append(f"fs escape import: {full}")
+            elif root in {"os", "shutil", "pathlib"} and alias.name in _FS_WRITE_EXPORTS:
+                self.capabilities.add("FS_WRITE")
+                self.details.append(f"fs write import: {full}")
         self.generic_visit(node)
 
     def visit_Call(self, node: ast.Call) -> None:
@@ -173,17 +206,64 @@ class _ASTVisitor(ast.NodeVisitor):
                         f"dangerous imported call: {root}.{attr_name}()"
                     )
 
+        if isinstance(node.func, ast.Name) and node.func.id == "open":
+            if self._open_mode_is_write(node):
+                self.capabilities.add("FS_WRITE")
+                self.details.append("builtin open() write mode")
+
         if isinstance(node.func, ast.Attribute):
+            attr_name = node.func.attr
+            if attr_name in _FS_ESCAPE_ATTRS:
+                self.capabilities.add("SYSTEM_CONTROL")
+                self.details.append(f"fs escape call: {attr_name}()")
+            elif attr_name in _FS_WRITE_EXPORTS:
+                self.capabilities.add("FS_WRITE")
+                self.details.append(f"fs write call: {attr_name}()")
             if isinstance(node.func.value, ast.Name):
                 obj_name = node.func.value.id
-                attr_name = node.func.attr
                 real_module = self._imported_names.get(obj_name, obj_name)
                 root = _module_root(real_module)
                 if (root, attr_name) in _DANGEROUS_ATTR_CALLS:
                     self.capabilities.add("SUBPROCESS")
                     self.details.append(f"dangerous attr call: {root}.{attr_name}()")
+                if root == "os" and attr_name == "open" and self._os_open_is_write(node):
+                    self.capabilities.add("FS_WRITE")
+                    self.details.append("os.open() write flags")
 
         self.generic_visit(node)
+
+    @staticmethod
+    def _open_mode_is_write(node: ast.Call) -> bool:
+        mode = None
+        if len(node.args) >= 2:
+            mode = node.args[1]
+        for kw in node.keywords:
+            if kw.arg == "mode":
+                mode = kw.value
+                break
+        if mode is None:
+            return False
+        if isinstance(mode, ast.Constant) and isinstance(mode.value, str):
+            return any(c in mode.value for c in "wax+")
+        return True
+
+    @staticmethod
+    def _os_open_is_write(node: ast.Call) -> bool:
+        flags = None
+        if len(node.args) >= 2:
+            flags = node.args[1]
+        for kw in node.keywords:
+            if kw.arg == "flags":
+                flags = kw.value
+                break
+        if flags is None:
+            return True
+        text = ast.dump(flags)
+        if "O_RDONLY" in text and not any(
+            tok in text for tok in ("O_WRONLY", "O_RDWR", "O_APPEND", "O_CREAT", "O_TRUNC")
+        ):
+            return False
+        return True
 
     def check_obfuscation(self) -> None:
         if self._has_base64 and self._has_exec_call:
@@ -331,6 +411,7 @@ class CodePolicyEngine:
 
     _RED_CAPABILITIES: frozenset[str] = frozenset({
         "SUBPROCESS", "DYNAMIC_EXEC", "SYSTEM_CONTROL", "OBFUSCATION",
+        "UNKNOWN_MODULE", "DESERIALIZE",
     })
 
     def __init__(
@@ -371,7 +452,7 @@ class CodePolicyEngine:
 
         if capabilities & self._RED_CAPABILITIES:
             tier = CodeRiskTier.RED
-        elif "NETWORK" in capabilities:
+        elif "NETWORK" in capabilities or "FS_WRITE" in capabilities:
             tier = CodeRiskTier.YELLOW
         else:
             tier = CodeRiskTier.GREEN
@@ -381,6 +462,27 @@ class CodePolicyEngine:
             capabilities=capabilities,
             details=visitor.details,
         )
+
+
+def allows_auto_run(
+    analysis: CodeAnalysisResult,
+    *,
+    green_auto: bool,
+    yellow_auto: bool,
+) -> bool:
+    """Whether run_code may execute without a confirmation dialog.
+
+    Filesystem writes are never auto-approved: Yellow auto-approve only
+    covers NETWORK (and similar non-FS) Yellow. ApprovalPolicy.never is
+    applied by the caller, not here.
+    """
+    if analysis.tier == CodeRiskTier.GREEN:
+        return bool(green_auto)
+    if analysis.tier == CodeRiskTier.YELLOW:
+        if "FS_WRITE" in analysis.capabilities:
+            return False
+        return bool(yellow_auto)
+    return False
 
 
 # ── 可自动清洗的退出调用模式 ──────────────────────────────

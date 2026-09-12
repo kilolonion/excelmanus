@@ -12,6 +12,12 @@ import {
 } from "@/components/ui/tooltip";
 import { useExcelStore } from "@/stores/excel-store";
 import { ACCEPTED_EXTENSIONS } from "./chat-input-constants";
+import {
+  WORKSPACE_FILE_MIME,
+  isWorkspaceFileDrag,
+  parseWorkspaceDroppedFiles,
+  shouldCancelComposerNativeDrop,
+} from "./chat-drop";
 
 interface ChatDropzoneProps {
   onNativeFiles: (files: File[]) => void;
@@ -35,57 +41,76 @@ export function ChatDropzone({ onNativeFiles, onExcelFiles, children, highlighte
     noKeyboard: true,
   });
 
-  const handleExcelDrop = useCallback(
+  const root = getRootProps();
+  const draggingFileCount = () => useExcelStore.getState().draggingFileCount;
+
+  const resetExcelDrag = () => {
+    excelDragCounter.current = 0;
+    setExcelDragOver(false);
+  };
+
+  const handleWorkspaceDrop = useCallback(
     (e: React.DragEvent) => {
-      const excelData = e.dataTransfer.getData("application/x-excel-file");
-      if (!excelData) return;
       e.preventDefault();
       e.stopPropagation();
-      try {
-        const parsed = JSON.parse(excelData);
-        const files: { path: string; filename: string }[] = Array.isArray(parsed) ? parsed : [parsed];
-        if (files.length === 0) return;
-        onExcelFiles(files);
-      } catch {
-        // 无效数据，忽略
-      }
+      const files = parseWorkspaceDroppedFiles(e.dataTransfer.getData(WORKSPACE_FILE_MIME));
+      if (files.length === 0) return;
+      onExcelFiles(files);
     },
-    [onExcelFiles]
+    [onExcelFiles],
   );
 
   return (
     <div
-      {...getRootProps()}
+      {...root}
       data-coach-id="coach-chat-input"
-      onDrop={(e) => {
-        if (e.dataTransfer.types.includes("application/x-excel-file")) {
-          excelDragCounter.current = 0;
-          setExcelDragOver(false);
-          handleExcelDrop(e);
+      onDragEnter={(e) => {
+        if (isWorkspaceFileDrag(e.dataTransfer.types, draggingFileCount())) {
+          excelDragCounter.current += 1;
+          setExcelDragOver(true);
           return;
         }
-        getRootProps().onDrop?.(e);
+        root.onDragEnter?.(e);
       }}
-      onDragEnter={(e) => {
-        if (e.dataTransfer.types.includes("application/x-excel-file")) {
-          excelDragCounter.current++;
-          setExcelDragOver(true);
+      onDragOverCapture={(e) => {
+        if (shouldCancelComposerNativeDrop(e.dataTransfer.types, draggingFileCount())) {
+          e.preventDefault();
+          if (isWorkspaceFileDrag(e.dataTransfer.types, draggingFileCount())) {
+            e.dataTransfer.dropEffect = "copy";
+          }
         }
       }}
       onDragOver={(e) => {
-        if (e.dataTransfer.types.includes("application/x-excel-file")) {
+        if (isWorkspaceFileDrag(e.dataTransfer.types, draggingFileCount())) {
           e.preventDefault();
           e.dataTransfer.dropEffect = "copy";
+          return;
         }
+        root.onDragOver?.(e);
       }}
       onDragLeave={(e) => {
-        if (e.dataTransfer.types.includes("application/x-excel-file")) {
-          excelDragCounter.current--;
+        if (isWorkspaceFileDrag(e.dataTransfer.types, draggingFileCount())) {
+          excelDragCounter.current -= 1;
           if (excelDragCounter.current <= 0) {
-            excelDragCounter.current = 0;
-            setExcelDragOver(false);
+            resetExcelDrag();
           }
+          return;
         }
+        root.onDragLeave?.(e);
+      }}
+      onDropCapture={(e) => {
+        if (shouldCancelComposerNativeDrop(e.dataTransfer.types, draggingFileCount())) {
+          e.preventDefault();
+        }
+      }}
+      onDrop={(e) => {
+        if (isWorkspaceFileDrag(e.dataTransfer.types, draggingFileCount()) || e.dataTransfer.getData(WORKSPACE_FILE_MIME)) {
+          resetExcelDrag();
+          handleWorkspaceDrop(e);
+          return;
+        }
+        resetExcelDrag();
+        root.onDrop?.(e);
       }}
       className={`relative rounded-[20px] border bg-background transition-all duration-200 chat-input-ring ${
         isDragActive || excelDragOver
@@ -97,15 +122,15 @@ export function ChatDropzone({ onNativeFiles, onExcelFiles, children, highlighte
     >
       <input {...getInputProps()} />
       {(isDragActive || excelDragOver) && (
-        <div className="absolute inset-0 z-40 flex items-center justify-center rounded-[20px] bg-[var(--em-primary-alpha-06)] border-2 border-dashed border-[var(--em-primary-light)] backdrop-blur-[2px]">
+        <div className="pointer-events-none absolute inset-0 z-40 flex items-center justify-center rounded-[20px] bg-[var(--em-primary-alpha-06)] border-2 border-dashed border-[var(--em-primary-light)] backdrop-blur-[2px]">
           <div className="flex flex-col items-center gap-1.5 text-[var(--em-primary)]">
             <Plus className="h-6 w-6" />
             <span className="text-sm font-medium">
-              {excelDragOver && useExcelStore.getState().draggingFileCount > 1
-                ? `拖放 ${useExcelStore.getState().draggingFileCount} 个文件到这里`
+              {excelDragOver && draggingFileCount() > 1
+                ? `拖放 ${draggingFileCount()} 个文件到这里`
                 : "拖放文件到这里"}
             </span>
-            <span className="text-[10px] text-muted-foreground">支持 xlsx、xls、csv、图片</span>
+            <span className="text-[10px] text-muted-foreground">支持工作区文件、本地上传与图片</span>
           </div>
         </div>
       )}

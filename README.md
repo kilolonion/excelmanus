@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.7.2-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.3-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/pytest-included-brightgreen.svg" alt="Tests" />
 </p>
@@ -25,9 +25,9 @@
 
 **ExcelManus** 是一个完全开源的 LLM 驱动 Excel Agent 框架。用一句话描述你想做的事，它就能自动读取数据、编写公式、运行分析脚本、绘制图表 —— 像一个真正理解 Excel 的 AI 助手。
 
-- **四种交互入口** — Web UI / CLI 终端 / 多渠道 Bot（Telegram · QQ · 飞书） / REST API
+- **三种交互入口** — Web UI / CLI 终端 / REST API
 - **任意大模型** — OpenAI · Claude · Gemini · DeepSeek · Qwen · Kimi · xAI · 豆包 · 本地 Ollama / vLLM，即插即用
-- **生产可用** — Docker 多架构镜像 · 热更新 · 单用户工作区 · 操作审批 · 版本回滚
+- **生产可用** — 本机 Git 停机升级 · 服务器 deploy.sh · 单用户工作区 · 操作审批 · 版本回滚
 
 > 💡 三个环境变量即可开始：`API_KEY` + `BASE_URL` + `MODEL`
 
@@ -48,7 +48,7 @@
 柱状图 · 折线图 · 饼图等嵌入 Excel 或导出高清图片
 
 ### 🖼️ 视觉识别与提取
-表格截图作为附件交给主模型，产出结构化 Excel 数据
+表格截图作为附件交给当前模型，产出结构化 Excel 数据
 没有独立视觉流水线，也没有附属 VLM 描述步骤
 
 ### 🔄 版本管理 & Diff
@@ -77,13 +77,9 @@ Excel 修改前后 Diff 可视化，文本文件 unified diff 展示
 ### 🔍 语义检索
 词嵌入驱动的语义记忆 / 文件 / 技能并行检索，零额外延迟
 
-### 🤖 多渠道 Bot
-Telegram · QQ · 飞书三渠道接入，支持文件收发
-三种并发模式（排队 / 转向 / 引导），自适应流式输出策略
-
-### 🔥 应用内热更新
-Web UI 一键检测新版本 → 备份 → 更新 → 自动重启
-支持版本兼容校验、蓝绿部署、回滚窗口保护
+### 🔄 本机停机升级
+设置页一键更新：停进程 → 备份 `$EXCELMANUS_HOME` → git fast-forward → 再拉起
+服务器部署请在运维机运行 `deploy.sh`，不要从生产 API 升级
 
 </td>
 </tr>
@@ -132,7 +128,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 git clone https://github.com/kilolonion/excelmanus.git
 # 国内推荐：git clone https://gitee.com/kilolonion/excelmanus.git
 cd excelmanus
-uv sync --all-extras     # 完整安装：cli/web/channels/analysis（也支持 pip install ".[all]"）
+uv sync --all-extras     # 完整安装：cli/web/analysis（也支持 pip install ".[all]"）
 
 # 3. 配置
 cp .env.example .env     # 编辑 .env 填写 API Key / Base URL / Model
@@ -173,7 +169,7 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 | **ClawHub 市场面板** | 侧边栏内嵌技能市场，一键搜索 / 安装 / 更新 |
 | **号池管理** | 可选的 API 号池与订阅轮换（默认关闭） |
 | **Plan 模式** | 复杂任务自动拆解规划，交互确认后执行 |
-| **热更新通知** | 检测到新版本时提示升级，升级后自动探活刷新 |
+| **升级通知** | 检测到新版本时提示升级；本机停机更新后探活刷新 |
 
 <p align="center">
   <img src="docs/images/webui-mobile.png" width="300" alt="移动端" />
@@ -198,7 +194,6 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 | `/plan` | 切换 Plan 模式 |
 | `/undo <id>` | 回滚操作 |
 | `/registry` | 查看文件注册表 |
-| `/backup list` | 查看备份 |
 | `/rules` | 自定义规则 |
 | `/memory` | 记忆管理 |
 | `/playbook` | Playbook 任务经验管理 |
@@ -210,21 +205,6 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 | `/rollback` | 回滚会话到指定轮次 |
 
 </details>
-
-### 多渠道 Bot
-
-支持 **Telegram** · **QQ** · **飞书** 三种机器人渠道，统一消息处理框架：
-
-| 特性 | 说明 |
-| --- | --- |
-| **统一适配层** | 消息收发、文件上传/下载、事件桥接统一抽象 |
-| **三种并发模式** | 排队（Queue）· 转向（Steer）· 引导（Guide），`/concurrency` 切换 |
-| **自适应流式输出** | Telegram 编辑流 · QQ 段落渐进 · 飞书卡片流，各渠道最优体验 |
-| **HTTP 重试 & 退避** | 连接级重试 + 指数退避 + 429 Retry-After 尊重 |
-
-```bash
-# 所有渠道（Telegram / QQ / 飞书）：通过 Web UI 设置页配置渠道凭据即可
-```
 
 ### REST API
 
@@ -247,8 +227,8 @@ cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
 | `POST /api/v1/files/excel/write` | 侧边面板回写 |
 | `GET /api/v1/skills` | 技能列表 |
 | `GET /api/v1/clawhub/*` | ClawHub 市场（搜索 / 安装 / 更新） |
-| `GET /api/v1/version/check` | 版本检查 & 热更新 |
-| `POST /api/v1/version/update` | 执行在线更新 |
+| `GET /api/v1/version/check` | 版本检查 |
+| `POST /api/v1/version/upgrade` | 本机停机更新（仅 standalone + loopback） |
 | `GET /api/v1/auth/codex/status` | Codex 连接状态 |
 | `POST /api/v1/config/export` | 导出配置 |
 | `GET /api/v1/health` | 健康检查 |
@@ -268,15 +248,9 @@ ExcelManus 通过 URL 自动检测模型提供商，零配置切换：
 | **OpenAI Codex** | ChatGPT 订阅 OAuth（浏览器 PKCE 或设备码）绑定 Codex，私有模型自动发现，无需手填 Key |
 | **MiniMax / 智谱 / 百炼 / Kimi / 豆包 / xAI** | 自动检测 base_url，`/models` 不可用时回退内置推荐列表 |
 
-### 辅助模型（AUX）
+### 模型档案
 
-可独立配置一个更轻量的辅助模型，用于**意图路由、子代理**，在不影响任务质量的前提下显著降低成本：
-
-```dotenv
-EXCELMANUS_AUX_API_KEY=sk-xxxx
-EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
-EXCELMANUS_AUX_MODEL=gpt-5.6-luna
-```
+在设置里添加多个模型档案，激活其中一个即可用于对话、子代理和上下文压缩。`/model <名称>` 切换当前激活档案。
 
 ### 模型能力探测
 
@@ -290,7 +264,7 @@ ExcelManus 内置**词嵌入语义检索系统**，让 Agent 在长对话中始�
 | --- | --- |
 | **语义记忆检索** | 用户偏好和历史操作向量化存储，新任务自动召回相关记忆 |
 | **语义文件注册表** | 对工作区文件建立 embedding 索引，按语义相关性注入上下文 |
-| **语义技能路由** | 对 Skillpack 描述建立向量索引，自动匹配最优技能 |
+| **技能目录** | 会话里列出可选技能；模型调用 `skill` 或用户 `/name` 才加载正文 |
 | **会话历史检索** | 自动生成结构化会话摘要，语义 / 文件名 / 时间序三路混合检索，首轮注入历史上下文 |
 | **错误解决方案库** | 错误 → 解决方案向量索引，同类错误自动召回历史解法 |
 | **智能上下文压缩** | 按语义相关性评分差异化截断，高相关消息保留更多细节 |
@@ -303,11 +277,10 @@ ExcelManus 内置**词嵌入语义检索系统**，让 Agent 在长对话中始�
 | --- | --- |
 | **路径沙盒** | 读写限制在工作目录，路径穿越和符号链接越界被拒绝 |
 | **代码审查** | `run_code` 静态分析，按 Green / Yellow / Red 三级自动审批 |
-| **Docker 沙盒** | 可选容器隔离执行用户代码（`EXCELMANUS_DOCKER_SANDBOX=1`） |
+| **本机代码围栏** | `run_code` 在本机子进程中执行（路径守卫、受限 builtins、超时）；不依赖 Docker |
 | **操作审批** | 高风险写入需用户确认，变更自动记录 diff 和快照 |
 | **版本链** | Staging → Audit → CoW，`/undo` 回滚任意历史版本 |
 | **MCP 白名单** | 外部工具默认需逐项确认 |
-| **渠道限流** | Telegram / QQ / 飞书 Bot 按消息类型限流，防止刷爆 |
 | **工作区边界** | 进程内一份工作区、一份凭证、一份记忆；多对话不是多租户 |
 
 ## 🧩 Skillpack & ClawHub
@@ -362,24 +335,7 @@ Codex 订阅 OAuth 在「设置 → 模型 → 订阅与 OAuth」中配置，不
 
 ## 🏗️ 部署
 
-### Docker Compose（推荐）
-
-```bash
-cp .env.example .env
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-访问 `http://localhost:3000`。加 `--profile production` 启用 Nginx 反向代理。
-
-镜像支持 **amd64** + **arm64** 双架构：
-
-```bash
-docker pull kilol/excelmanus-api:1.7.2       # 后端 API
-docker pull kilol/excelmanus-sandbox:1.7.2   # 代码沙盒（可选）
-docker pull kilol/excelmanus-web:1.7.2       # 前端 Web
-```
-
-### 一键启动脚本（本地开发）
+### 本机启动（推荐）
 
 ```bash
 ./deploy/start.sh              # macOS / Linux 开发模式
@@ -388,17 +344,22 @@ docker pull kilol/excelmanus-web:1.7.2       # 前端 Web
 deploy\start.bat --prod        # Windows CMD
 ```
 
-支持 `--backend-port` · `--frontend-port` · `--workers` · `--backend-only` 等选项。
+访问 `http://localhost:3000`。支持 `--backend-port` · `--frontend-port` · `--workers` · `--backend-only` 等选项。
+
+本机升级：设置页「执行更新」，或先停服务再 `./deploy/update.sh`。升级会停掉进程组、备份 `$EXCELMANUS_HOME`、fast-forward 拉代码后再拉起。
+
+**原 Compose / 镜像用户**：把卷里的数据库和上传文件拷到 `$EXCELMANUS_HOME`（默认 `~/.excelmanus`）后，改用 `./deploy/start.sh` 或服务器上的 PM2 / systemd。产品不再提供 Docker 安装轨。
 
 ### 远程部署
 
-部署脚本通过 SSH 操作远程服务器，支持单机 / 前后端分离 / Docker 等拓扑：
+部署脚本在**运维机**上通过 SSH 同步远程服务器，支持单机 / 前后端分离 / 本地拓扑。生产进程（`EXCELMANUS_DEPLOY_MODE=server`）不能自己升级或远程部署。
 
 ```bash
 ./deploy/deploy.sh                    # 完整部署
 ./deploy/deploy.sh --backend-only     # 仅后端
 ./deploy/deploy.sh --frontend-only    # 仅前端
 ./deploy/deploy.sh rollback           # 回滚上一版本
+./deploy/deploy.sh rollback-to --commit <hash>
 ./deploy/deploy.sh check              # 环境 + 互联检测
 ```
 
@@ -417,17 +378,13 @@ deploy\start.bat --prod        # Windows CMD
 
 </details>
 
-### 热更新
+### 升级
 
-ExcelManus 内置应用级热更新能力：
+本机（standalone）停机升级：设置页一键更新，或先停服务再 `./deploy/update.sh`。Helper 杀掉 start 进程组，备份 `$EXCELMANUS_HOME`，fast-forward 拉代码后再拉起。冲突不会 `reset --hard`。
 
-- **版本检查** — 定期轮询 Gitee / GitHub Tags API，TTL 缓存避免频繁请求
-- **数据备份** — 更新前自动备份 `.env`、用户数据、上传文件
-- **代码更新** — git pull + 依赖重装，互斥锁防止并发更新
-- **Web UI 集成** — 设置面板一键检查更新 → 确认 → 执行，进度实时展示
-- **重启探活** — 更新后前端自动探测后端恢复，无缝刷新
+服务器（`EXCELMANUS_DEPLOY_MODE=server`）请在运维机运行 `./deploy/deploy.sh`；生产 API 拒绝自己升级。回滚：`./deploy/deploy.sh rollback-to --commit <hash>`。
 
-详见 [热更新设计文档](docs/hot-update-design.md)。
+详见 [升级与部署](docs/hot-update-design.md)。
 
 手动部署详见 [运维手册](docs/ops-manual.md)。
 
@@ -438,7 +395,7 @@ ExcelManus 内置应用级热更新能力：
 | **Claude 分层 Cache** | System Prompt 拆分为稳定前缀 + 动态块，第 2 次请求 TTFT 降至 3-5s |
 | **SACR 稀疏压缩** | 工具结果去除 null 键，高空值率数据最高节省 **74% token** |
 | **图片生命周期管理** | 自动管理多轮对话中的图片保留/降级，避免重复传输 |
-| **辅助模型分离** | 子代理与压缩等附属任务可走轻量 AUX，主模型专注推理 |
+| **单一激活模型** | 对话、子代理与压缩共用当前激活档案，切换一次全部生效 |
 | **上下文预算管理** | 动态分配预算，语义相关性评分驱动差异化截断 |
 | **语义并行检索** | `asyncio.gather` 并行执行记忆/文件/技能/历史会话检索，零额外延迟 |
 | **SSE 事件去重** | 前端统一 `dispatchSSEEvent` 处理器 |
@@ -451,9 +408,8 @@ ExcelManus 内置应用级热更新能力：
 | 类别 | 关键配置 |
 | --- | --- |
 | **基础** | `EXCELMANUS_API_KEY` / `BASE_URL` / `MODEL` |
-| **辅助模型** | `EXCELMANUS_AUX_API_KEY` / `AUX_BASE_URL` / `AUX_MODEL` |
 | **视觉** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_KEEP_ROUNDS` |
-| **安全** | `EXCELMANUS_DOCKER_SANDBOX` / `GUARD_MODE` |
+| **安全** | `GUARD_MODE` |
 | **性能** | `IMAGE_KEEP_ROUNDS` |
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
@@ -485,7 +441,7 @@ uv run python -m excelmanus.bench --message "读取前10行"          # 单条
 ## 🛠️ 开发 & 贡献
 
 ```bash
-uv sync --all-extras --dev    # 完整安装（cli/web/channels/analysis）+ 测试依赖
+uv sync --all-extras --dev    # 完整安装（cli/web/analysis）+ 测试依赖
 uv run pytest tests/test_engine.py tests/test_api.py  # 针对性测试
 ```
 

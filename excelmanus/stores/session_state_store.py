@@ -1,9 +1,11 @@
-"""SessionStateStore：会话状态 checkpoint 持久化（支持 SQLite / PostgreSQL）。
+"""SessionStateStore：会话状态快照持久化。
 
 职责：
 - 保存会话状态快照（SessionState + TaskStore）到 session_checkpoints 表
-- 加载最新 checkpoint 用于会话恢复
-- 按 session_id 清理旧 checkpoint
+- 加载最新快照用于会话恢复
+- 按 session_id 清理旧快照
+
+表名仍为 session_checkpoints（历史兼容）；这不是文件检查点。
 """
 
 from __future__ import annotations
@@ -42,7 +44,7 @@ class SessionStateStore:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
-    def save_checkpoint(
+    def save_session_snapshot(
         self,
         *,
         session_id: str,
@@ -51,7 +53,7 @@ class SessionStateStore:
         turn_number: int = 0,
         checkpoint_type: str = "turn",
     ) -> int | None:
-        """保存一个 checkpoint，返回记录 ID（失败返回 None）。"""
+        """保存一个会话快照，返回记录 ID（失败返回 None）。"""
         try:
             state_json = json.dumps(state_dict, ensure_ascii=False, default=str)
             task_json = json.dumps(task_list_dict, ensure_ascii=False, default=str)
@@ -76,8 +78,10 @@ class SessionStateStore:
 
             return row_id
         except Exception:
-            logger.debug("保存 session checkpoint 失败", exc_info=True)
+            logger.debug("保存 session snapshot 失败", exc_info=True)
             return None
+
+    save_checkpoint = save_session_snapshot
 
     def load_latest_checkpoint(
         self,

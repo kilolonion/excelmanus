@@ -12,11 +12,12 @@ import {
 import { useUIStore } from "@/stores/ui-store";
 import { useShallow } from "zustand/react/shallow";
 import { apiGet, apiPut } from "@/lib/api";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
 import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
+import { applyVisionFromModel } from "@/lib/vision-capability";
 
 interface ModelCapabilitySummary {
   name: string;
@@ -61,7 +62,10 @@ export function TopModelSelector() {
       .then((data) => {
         setModels(data.models);
         const active = data.models.find((m) => m.active);
-        if (active) setCurrentModel(active.name);
+        if (active) {
+          setCurrentModel(active.name);
+          applyVisionFromModel(active);
+        }
       })
       .catch(() => {});
   };
@@ -103,6 +107,7 @@ export function TopModelSelector() {
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      applyVisionFromModel(models.find((m) => m.name === name));
       setOpen(false);
       fetchModels();
     } catch (e) {
@@ -114,8 +119,6 @@ export function TopModelSelector() {
     }
   };
 
-  const displayLabel = (m: ModelInfo) =>
-    m.name === "default" ? formatModelIdForDisplay(m.model) : formatModelIdForDisplay(m.display_name || m.name);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
 
   const filtered = useMemo(() => {
@@ -131,7 +134,7 @@ export function TopModelSelector() {
 
   const groups = groupByProvider(filtered);
   const activeModel = models.find((m) => m.name === currentModel);
-  const displayName = activeModel ? displayLabel(activeModel) : currentModel || "模型";
+  const displayName = activeModel ? displayModelLabel(activeModel) : currentModel || "模型";
   const currentModelUnhealthy = currentModel && capsMap[currentModel]?.healthy === false;
   const activeProvider = activeModel ? extractProvider(activeModel.base_url) : "unknown";
   const showSearch = models.length >= 4;
@@ -146,7 +149,7 @@ export function TopModelSelector() {
       <>
         <Button
           variant="ghost"
-          className="gap-1.5 px-2.5 h-9 text-base font-semibold group shrink-0 overflow-hidden"
+          className="gap-1 px-2 h-8 text-[13px] font-medium text-muted-foreground group shrink-0 overflow-hidden"
           data-coach-id="coach-model-selector"
           onClick={() => setOpen(true)}
         >
@@ -199,7 +202,7 @@ export function TopModelSelector() {
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-1.5 px-2.5 h-9 text-base font-semibold group" data-coach-id="coach-model-selector">
+        <Button variant="ghost" className="gap-1 px-2 h-8 text-[13px] font-medium text-muted-foreground group shrink-0" data-coach-id="coach-model-selector">
           {/* Provider color indicator dot */}
           <span
             className="h-2 w-2 rounded-full shrink-0 transition-all duration-300 group-hover:scale-125"
@@ -312,7 +315,7 @@ export function TopModelSelector() {
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-1.5">
                         <span className="text-sm font-semibold leading-tight truncate">
-                          {displayLabel(activeModel)}
+                          {displayModelLabel(activeModel)}
                         </span>
                         <span
                           className="text-[9px] px-1.5 py-px rounded-full font-semibold uppercase tracking-wider shrink-0"
@@ -321,18 +324,18 @@ export function TopModelSelector() {
                             color: providerColor,
                           }}
                         >
-                          主模型
+                          当前
                         </span>
                       </div>
                       <div className="flex items-center gap-1 mt-0.5">
-                        {activeModel.name !== "default" && activeModel.name !== resolvedModel(activeModel) && !isUnhealthy && (
+                        {activeModel.name !== resolvedModel(activeModel) && !isUnhealthy && (
                           <span className="text-[10px] text-muted-foreground/50 font-mono truncate">
                             {resolvedModel(activeModel)}
                           </span>
                         )}
                         {activeModel.description && (
                           <span className="text-[10px] text-muted-foreground/40 truncate">
-                            {activeModel.name !== "default" && activeModel.name !== resolvedModel(activeModel) && !isUnhealthy
+                            {activeModel.name !== resolvedModel(activeModel) && !isUnhealthy
                               ? `· ${activeModel.description}`
                               : activeModel.description}
                           </span>
@@ -416,7 +419,7 @@ export function TopModelSelector() {
                               isSelected ? "font-semibold" : "font-medium"
                             }`}
                           >
-                            {displayLabel(m)}
+                            {displayModelLabel(m)}
                           </span>
                           {isUnhealthy && (
                             <span className="inline-flex items-center gap-0.5 text-[9px] px-1.5 py-px rounded-full bg-destructive/10 text-destructive font-medium">
@@ -426,14 +429,14 @@ export function TopModelSelector() {
                           )}
                         </div>
                         <div className="flex items-center gap-1 mt-0.5">
-                          {m.name !== "default" && m.name !== resolvedModel(m) && !isUnhealthy && (
+                          {m.name !== resolvedModel(m) && !isUnhealthy && (
                             <span className="text-[10px] text-muted-foreground/50 font-mono truncate">
                               {resolvedModel(m)}
                             </span>
                           )}
                           {m.description && (
                             <span className="text-[10px] text-muted-foreground/40 truncate">
-                              {m.name !== "default" && m.name !== resolvedModel(m) && !isUnhealthy
+                              {m.name !== resolvedModel(m) && !isUnhealthy
                                 ? `· ${m.description}`
                                 : m.description}
                             </span>

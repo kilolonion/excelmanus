@@ -936,7 +936,7 @@ class TestBuildMentionContextBlock:
     def test_user_message_preserved(self) -> None:
         """用户消息保持原样（保留 @type:value 标记）。
 
-        这是一个概念验证：engine.chat() 不修改 user_message，
+        这是一个概念验证：engine.followup() 不修改 user_message，
         只将 mention 上下文注入系统提示词。
         """
         original_message = "请分析 @file:sales.xlsx 的数据"

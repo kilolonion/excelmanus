@@ -58,7 +58,7 @@ class TestSummarizeToolArgs:
 class TestNoticeSSESerialization:
     """TOOL_CALL_NOTICE and REASONING_NOTICE SSE serialization."""
 
-    def _default_path_fn(self, path: str, safe_mode: bool) -> str:
+    def _default_path_fn(self, path: str) -> str:
         return path
 
     def test_tool_call_notice_serialized(self):
@@ -69,7 +69,7 @@ class TestNoticeSSESerialization:
             arguments={"sheet": "Sheet1", "range": "A1:D10"},
             iteration=1,
         )
-        result = sse_event_to_sse(event, safe_mode=False, public_path_fn=self._default_path_fn)
+        result = sse_event_to_sse(event, public_path_fn=self._default_path_fn)
         assert result is not None
         assert "event: tool_call_notice" in result
         lines = result.strip().split("\n")
@@ -86,7 +86,7 @@ class TestNoticeSSESerialization:
             thinking="Let me analyze the data structure...",
             iteration=2,
         )
-        result = sse_event_to_sse(event, safe_mode=False, public_path_fn=self._default_path_fn)
+        result = sse_event_to_sse(event, public_path_fn=self._default_path_fn)
         assert result is not None
         assert "event: reasoning_notice" in result
         lines = result.strip().split("\n")
@@ -95,8 +95,8 @@ class TestNoticeSSESerialization:
         assert "analyze the data" in data["content"]
         assert data["iteration"] == 2
 
-    def test_notice_events_bypass_safe_mode(self):
-        """Notice events should NOT be filtered by safe_mode since user opted in."""
+    def test_notice_and_thinking_events_always_emit(self):
+        """Notice 与 THINKING 事件一律下发，不再按安全模式过滤。"""
         tool_event = ToolCallEvent(
             event_type=EventType.TOOL_CALL_NOTICE,
             tool_name="read_cells",
@@ -108,18 +108,14 @@ class TestNoticeSSESerialization:
             thinking="thinking...",
             iteration=0,
         )
-        # Both should pass through even with safe_mode=True
-        assert sse_event_to_sse(tool_event, safe_mode=True, public_path_fn=self._default_path_fn) is not None
-        assert sse_event_to_sse(reasoning_event, safe_mode=True, public_path_fn=self._default_path_fn) is not None
-
-    def test_original_thinking_filtered_by_safe_mode(self):
-        """Original THINKING events should still be filtered by safe_mode."""
-        event = ToolCallEvent(
+        thinking_event = ToolCallEvent(
             event_type=EventType.THINKING,
             thinking="thinking...",
             iteration=0,
         )
-        assert sse_event_to_sse(event, safe_mode=True, public_path_fn=self._default_path_fn) is None
+        assert sse_event_to_sse(tool_event, public_path_fn=self._default_path_fn) is not None
+        assert sse_event_to_sse(reasoning_event, public_path_fn=self._default_path_fn) is not None
+        assert sse_event_to_sse(thinking_event, public_path_fn=self._default_path_fn) is not None
 
 
 # ── CommandHandler 测试 ────────────────────────────────────

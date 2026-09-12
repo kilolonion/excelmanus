@@ -26,7 +26,6 @@ def _make_config(tmp_path: Path, **overrides: object) -> ExcelManusConfig:
         "base_url": "https://test.example.com/v1",
         "model": "test-model",
         "workspace_root": str(tmp_path),
-        "backup_enabled": False,
         "max_iterations": 8,
     }
     defaults.update(overrides)

@@ -13,7 +13,7 @@ Layout::
       blobs/<contentSha256>
 
 Record fields: id, path, sequence, reason, sha256, transactionId,
-parentRevisionId, label?
+parentRevisionId, label?, createdAt
 reason: beforeEdit | afterEdit | checkpoint | beforeRestore
 """
 
@@ -23,6 +23,7 @@ import hashlib
 import json
 import secrets
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -34,6 +35,10 @@ VALID_REASONS = frozenset({
 })
 
 DEFAULT_PRUNE_KEEP = 40
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 class RevisionIntegrityError(ValueError):
@@ -50,6 +55,7 @@ class RevisionRecord:
     transaction_id: str
     parent_revision_id: str | None = None
     label: str | None = None
+    created_at: str | None = None
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -61,6 +67,7 @@ class RevisionRecord:
             "transactionId": self.transaction_id,
             "parentRevisionId": self.parent_revision_id,
             "label": self.label,
+            "createdAt": self.created_at,
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -73,6 +80,7 @@ class RevisionRecord:
             "transaction_id": self.transaction_id,
             "label": self.label or "",
             "parent_revision_id": self.parent_revision_id,
+            "created_at": self.created_at or "",
         }
 
     @classmethod
@@ -86,6 +94,7 @@ class RevisionRecord:
             transaction_id=str(data.get("transactionId") or data.get("transaction_id") or ""),
             parent_revision_id=data.get("parentRevisionId") or data.get("parent_revision_id"),
             label=data.get("label"),
+            created_at=data.get("createdAt") or data.get("created_at") or None,
         )
 
 
@@ -166,6 +175,7 @@ class RevisionStore:
             transaction_id=transaction_id,
             parent_revision_id=parent_revision_id,
             label=label,
+            created_at=_utc_now(),
         )
         rec_dir = self._dir_for(rel) / "records"
         rec_dir.mkdir(parents=True, exist_ok=True)

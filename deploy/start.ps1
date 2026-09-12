@@ -265,11 +265,6 @@ if (-not $ListenHost) { $ListenHost = "127.0.0.1" }
 if ($Workers -eq 0)   { $Workers = 1 }
 if ($HealthTimeout -eq 0) { $HealthTimeout = 30 }
 
-# -- Default: enable QQ bot channel (override via .env or env var) --
-if (-not [System.Environment]::GetEnvironmentVariable("EXCELMANUS_CHANNELS")) {
-    [System.Environment]::SetEnvironmentVariable("EXCELMANUS_CHANNELS", "qq", "Process")
-}
-
 # ═══════════════════════════════════════════════════════════════
 #  初始化日志文件
 # ═══════════════════════════════════════════════════════════════

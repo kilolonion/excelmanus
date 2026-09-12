@@ -14,7 +14,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
-import { uuid } from "@/lib/utils";
+import { createOrReuseSession } from "@/lib/session-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
 
 const viewTransition = { duration: 0.2, ease: "easeOut" as const };
@@ -28,24 +28,22 @@ export default function Home() {
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const compareMode = useExcelStore((s) => s.compareMode);
   const wordFullViewPath = useWordStore((s) => s.fullViewPath);
-  const addSession = useSessionStore((s) => s.addSession);
-  const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const cmdResult = useCommandResult();
   const [composerDraft, setComposerDraft] = useState<{ seq: number; text: string; files: File[] } | null>(null);
 
-  const handleSend = (text: string, files?: AttachedFile[]) => {
+  const handleSend = async (text: string, files?: AttachedFile[]) => {
     setComposerDraft(null);
-    if (!activeSessionId) {
-      const id = uuid();
-      addSession({
-        id,
-        title: text.slice(0, 60) || "新对话",
-        messageCount: 0,
-        inFlight: false,
-      });
-      setActiveSession(id);
+    let sid = useSessionStore.getState().activeSessionId;
+    if (!sid) {
+      try {
+        const session = await createOrReuseSession();
+        sid = session.id;
+      } catch (err) {
+        console.error("创建对话失败:", err);
+        return;
+      }
     }
-    sendMessage(text, files);
+    sendMessage(text, files, sid);
   };
 
   const handleSuggestionClick = useCallback((text: string, files?: File[]) => {
@@ -81,14 +79,14 @@ export default function Home() {
           <motion.div key="chat" className="relative flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <MessageStream
               isStreaming={isStreaming}
-              onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
-                rollbackAndResend(messageId, newContent, rollbackFiles, activeSessionId, files, retainedFiles);
+              onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
+                rollbackAndResend(messageId, newContent, activeSessionId, files, retainedFiles);
               }}
-              onRetry={(assistantMessageId: string, rollbackFiles?: boolean) => {
-                retryAssistantMessage(assistantMessageId, activeSessionId, undefined, rollbackFiles);
+              onRetry={(assistantMessageId: string) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId);
               }}
-              onRetryWithModel={(assistantMessageId: string, modelName: string, rollbackFiles?: boolean) => {
-                retryAssistantMessage(assistantMessageId, activeSessionId, modelName, rollbackFiles);
+              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+                retryAssistantMessage(assistantMessageId, activeSessionId, modelName);
               }}
             />
           </motion.div>

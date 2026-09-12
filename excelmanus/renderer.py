@@ -42,7 +42,8 @@ logger = logging.getLogger(__name__)
 
 # 元工具：对用户隐藏内部细节，使用友好名称
 _META_TOOL_DISPLAY: dict[str, str] = {
-    "activate_skill": "激活技能指引",
+    "skill": "加载技能",
+    "activate_skill": "加载技能",
     "delegate": "委派子任务",
     "delegate_to_subagent": "委派子任务",
     "list_subagents": "查询可用助手",
@@ -162,6 +163,7 @@ class StreamRenderer:
         label_map = {
             "full_access": ("FULL ACCESS", THEME.GOLD),
             "plan_mode": ("PLAN MODE", THEME.CYAN),
+            "present_as": ("CODE MODE", THEME.GOLD),
         }
         label, color = label_map.get(event.mode_name, (event.mode_name, THEME.DIM))
         action = "已开启" if event.mode_enabled else "已关闭"

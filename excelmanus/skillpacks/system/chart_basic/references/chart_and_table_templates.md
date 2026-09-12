@@ -1,5 +1,7 @@
 # 图表与表格 run_code 模板
 
+工作区 xlsx 的改写必须走 SDK。原生图优先 `manage_spreadsheet_objects`。下面片段不要 `wb.save`。
+
 ## 1. PNG 图表导出（matplotlib）
 
 ### 柱状图
@@ -108,7 +110,7 @@ style = TableStyleInfo(
 )
 table.tableStyleInfo = style
 ws.add_table(table)
-wb.save("file.xlsx")
+# 写回走 SDK，不要 wb.save
 print(f"已创建表格 'SalesTable'，范围: {ref}")
 ```
 
@@ -130,7 +132,7 @@ table.tableStyleInfo = TableStyleInfo(
 )
 # autoFilter 默认启用（Table 自带）
 ws.add_table(table)
-wb.save("file.xlsx")
+# 写回走 SDK，不要 wb.save
 print(f"已创建筛选表格，范围: {ref}")
 ```
 
@@ -151,7 +153,7 @@ table.tableStyleInfo = TableStyleInfo(
     showFirstColumn=True,  # 首列加粗
 )
 ws.add_table(table)
-wb.save("file.xlsx")
+# 写回走 SDK，不要 wb.save
 print("已创建表格 'PartialTable'，范围: A1:D20")
 ```
 

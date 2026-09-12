@@ -1,10 +1,11 @@
-"""P4 knobs: map existing chat-mode / subagent flags. Do not invent a third world."""
+"""P4 knobs: four axes stay independent. Presets pack, they do not enforce."""
 
 from __future__ import annotations
 
 from types import SimpleNamespace
 
 from excelmanus.security.policy import (
+    is_plan_active,
     knobs_for_preset,
     preset_from_engine,
     resolve_approval_policy,
@@ -18,6 +19,7 @@ def _eng(**kwargs: object) -> SimpleNamespace:
         "_current_chat_mode": "write",
         "_full_access_enabled": False,
         "_subagent_config": None,
+        "_plan_active": False,
     }
     base.update(kwargs)
     return SimpleNamespace(**base)
@@ -28,6 +30,7 @@ def test_read_mode_is_read_only() -> None:
     assert resolve_execution_policy(e).mode == "read-only"
     assert writes_denied(e)
     assert resolve_approval_policy(e) == "ask"
+    assert not is_plan_active(e)
 
 
 def test_write_mode_is_workspace_write() -> None:
@@ -37,16 +40,33 @@ def test_write_mode_is_workspace_write() -> None:
     assert resolve_approval_policy(e) == "ask"
 
 
-def test_plan_mode_is_read_only() -> None:
-    e = _eng(_current_chat_mode="plan")
-    assert resolve_execution_policy(e).mode == "read-only"
-    assert writes_denied(e)
+def test_plan_mode_keeps_workspace_write_sandbox() -> None:
+    e = _eng(_current_chat_mode="plan", _plan_active=True)
+    assert resolve_execution_policy(e).mode == "workspace-write"
+    assert not writes_denied(e)
+    assert is_plan_active(e)
+    assert resolve_approval_policy(e) == "ask"
+
+
+def test_plan_plus_write_chat_is_still_workspace_write() -> None:
+    """Plan is not sandbox: even when plan is active, write chat stays workspace-write."""
+    e = _eng(_current_chat_mode="write", _plan_active=True)
+    assert resolve_execution_policy(e).mode == "workspace-write"
+    assert not writes_denied(e)
+    assert is_plan_active(e)
 
 
 def test_full_access_is_workspace_write_not_escape() -> None:
     e = _eng(_current_chat_mode="write", _full_access_enabled=True)
     assert resolve_execution_policy(e).mode == "workspace-write"
     assert resolve_approval_policy(e) == "never"
+    assert not writes_denied(e)
+
+
+def test_full_access_chat_mode_string_is_workspace_write() -> None:
+    e = _eng(_current_chat_mode="full_access")
+    assert resolve_execution_policy(e).mode == "workspace-write"
+    assert not writes_denied(e)
 
 
 def test_subagent_readonly_forces_read_only() -> None:
@@ -56,6 +76,7 @@ def test_subagent_readonly_forces_read_only() -> None:
     )
     assert resolve_execution_policy(e).mode == "read-only"
     assert writes_denied(e)
+    assert resolve_approval_policy(e) == "never"
 
 
 def test_subagent_accept_edits_skips_ask_respects_mode() -> None:
@@ -81,6 +102,15 @@ def test_subagent_dont_ask_is_never() -> None:
     assert resolve_execution_policy(e).mode == "workspace-write"
 
 
+def test_subagent_default_pins_approval_never() -> None:
+    e = _eng(
+        _current_chat_mode="write",
+        _subagent_config=SimpleNamespace(permission_mode="default"),
+    )
+    assert resolve_approval_policy(e) == "never"
+    assert resolve_execution_policy(e).mode == "workspace-write"
+
+
 def test_preset_observe_edit_auto() -> None:
     observe, ask = knobs_for_preset("observe")
     assert observe.mode == "read-only"
@@ -99,3 +129,5 @@ def test_preset_from_engine_maps_knobs() -> None:
     assert preset_from_engine(
         _eng(_current_chat_mode="write", _full_access_enabled=True)
     ) == "auto-edit"
+    # Plan is not observe: sandbox stays workspace-write.
+    assert preset_from_engine(_eng(_current_chat_mode="plan")) == "edit"

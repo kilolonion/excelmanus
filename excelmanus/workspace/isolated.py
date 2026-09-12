@@ -1,4 +1,4 @@
-"""Process-unique workspace root and sandbox tmpdir.
+"""Workspace root and sandbox tmpdir.
 
 Overlay staging / CoW / WorkspaceTransaction are gone.
 History lives in ``RevisionStore``; writes go through ``publish_bytes``.
@@ -28,7 +28,7 @@ class SandboxEnv:
 
 
 class IsolatedWorkspace:
-    """Process-unique workspace root."""
+    """A session's file-world root (one registered folder)."""
 
     def __init__(
         self,
@@ -37,9 +37,13 @@ class IsolatedWorkspace:
         sandbox_config: SandboxConfig | None = None,
         transaction_enabled: bool = False,
         transaction_scope: str = "all",
+        create_missing: bool = True,
     ) -> None:
         self._root_dir = Path(root_dir).expanduser().resolve()
-        self._root_dir.mkdir(parents=True, exist_ok=True)
+        if create_missing:
+            self._root_dir.mkdir(parents=True, exist_ok=True)
+        elif not self._root_dir.is_dir():
+            raise FileNotFoundError(f"工作区目录不存在: {self._root_dir}")
         self._sandbox_config = sandbox_config or SandboxConfig()
         _ = (transaction_enabled, transaction_scope)
 

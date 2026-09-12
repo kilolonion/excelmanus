@@ -6,7 +6,7 @@
  * - 普通事件更新 latestSeq = max(current, eventSeq)
  * - resume_failed 事件触发 markResumeFailed + setPipelineStatus
  * - subscribe_resume 事件设置 stream state + 清除 resume failed
- * - _friendlyRouteMode 映射
+ * - route_end 不再写入 Smart Route 状态块
  * - _mapDiffChanges snake_case → camelCase
  * - preDispatch / finalizeThinking 状态管理
  */
@@ -80,6 +80,7 @@ const sessionMock = vi.hoisted(() => {
       state.activeSessionId = id;
     }),
     updateSessionTitle: vi.fn(),
+    patchSession: vi.fn(),
   };
   return state;
 });
@@ -95,6 +96,7 @@ vi.mock("@/stores/ui-store", () => ({
     getState: () => ({
       setFullAccessEnabled: vi.fn(),
       setChatMode: vi.fn(),
+      setPresentAs: vi.fn(),
     }),
   },
 }));
@@ -109,8 +111,6 @@ const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
   clearStreamingArgs: vi.fn(),
   setMergeResult: vi.fn(),
   fetchOperationHistory: vi.fn(),
-  fetchBackups: vi.fn(),
-  handleStagingUpdated: vi.fn(),
   bumpWorkspaceFilesVersion: vi.fn(),
   openCompare: vi.fn(),
   openPanel: vi.fn(),
@@ -131,7 +131,6 @@ import {
   dispatchSSEEvent,
   finalizeThinking,
   preDispatch,
-  _friendlyRouteMode,
   _mapDiffChanges,
   type SSEEvent,
   type SSEHandlerContext,
@@ -178,6 +177,7 @@ describe("sse-event-handler", () => {
     sessionMock.activeSessionId = "test-session";
     sessionMock.setActiveSession.mockClear();
     sessionMock.updateSessionTitle.mockClear();
+    sessionMock.patchSession.mockClear();
     vi.mocked(useChatStore.setState).mockClear();
   });
 
@@ -242,6 +242,18 @@ describe("sse-event-handler", () => {
 
       expect(useChatStore.setState).not.toHaveBeenCalledWith(
         expect.objectContaining({ currentSessionId: expect.anything() }),
+      );
+    });
+
+    it("即时标题保留用户首行全文，不按 12 字截断", () => {
+      dispatchSSEEvent(
+        makeEvent("session_init", { session_id: "test-session" }),
+        makeCtx({ userText: "识别截图中的表格，还原数据" }),
+      );
+
+      expect(sessionMock.updateSessionTitle).toHaveBeenCalledWith(
+        "test-session",
+        "识别截图中的表格，还原数据",
       );
     });
   });
@@ -376,22 +388,14 @@ describe("sse-event-handler", () => {
   // ── route_end ───────────────────────────────────────────────
 
   describe("route_end", () => {
-    it("追加 status block with route variant", () => {
+    it("does not append Smart Route status blocks", () => {
       const ctx = makeCtx();
       dispatchSSEEvent(
         makeEvent("route_end", { route_mode: "all_tools", skills_used: ["csv_lookup"] }),
         ctx,
       );
 
-      expect(chatActions.appendBlock).toHaveBeenCalledWith(
-        "a1",
-        expect.objectContaining({
-          type: "status",
-          label: "Smart Route",
-          detail: "csv_lookup",
-          variant: "route",
-        }),
-      );
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
     });
   });
 
@@ -403,20 +407,6 @@ describe("sse-event-handler", () => {
       dispatchSSEEvent(makeEvent("done", {}), ctx);
 
       expect(chatActions.setPipelineStatus).toHaveBeenCalledWith(null);
-    });
-  });
-
-  // ── _friendlyRouteMode ──────────────────────────────────────
-
-  describe("_friendlyRouteMode", () => {
-    it("已知 mode 返回友好标签", () => {
-      expect(_friendlyRouteMode("all_tools")).toBe("Smart Route");
-      expect(_friendlyRouteMode("control_command")).toBe("Control Command");
-      expect(_friendlyRouteMode("fallback")).toBe("Fallback Mode");
-    });
-
-    it("未知 mode 返回原值", () => {
-      expect(_friendlyRouteMode("custom_mode")).toBe("custom_mode");
     });
   });
 
@@ -549,6 +539,41 @@ describe("sse-event-handler", () => {
     });
   });
 
+  // ── thinking_delta ──────────────────────────────────────────
+
+  describe("thinking_delta", () => {
+    it("首个增量保留边界空格", () => {
+      const ctx = makeCtx();
+      dispatchSSEEvent(makeEvent("thinking_delta", { content: "Let me " }), ctx);
+
+      expect(chatActions.appendBlock).toHaveBeenCalledWith(
+        "a1",
+        expect.objectContaining({ type: "thinking", content: "Let me " }),
+      );
+    });
+
+    it("后续增量把空格和换行原样推进 batcher", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "thinking" as const, content: "Let me", startedAt: Date.now() }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+      mockChatState.messageOrder = ["a1"];
+      mockChatState.messageIndexById = { a1: 0 };
+
+      const ctx = makeCtx();
+      dispatchSSEEvent(makeEvent("thinking_delta", { content: " " }), ctx);
+      expect(ctx.batcher.pushThinking).toHaveBeenCalledWith(" ");
+
+      dispatchSSEEvent(makeEvent("thinking_delta", { content: "\n" }), ctx);
+      expect(ctx.batcher.pushThinking).toHaveBeenCalledWith("\n");
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+  });
+
   // ── text_delta ──────────────────────────────────────────────
 
   describe("text_delta", () => {
@@ -572,6 +597,68 @@ describe("sse-event-handler", () => {
       // 因为没有 text block，应追加一个空 text block
       expect(chatActions.appendBlock).toHaveBeenCalledWith("a1", { type: "text", content: "" });
       expect(ctx.batcher.pushText).toHaveBeenCalledWith("hello");
+    });
+  });
+
+  describe("reply", () => {
+    it("没有文本块时用完整回复补上", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [] as { type: string; content: string }[],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("reply", { content: "最终回复" }), makeCtx());
+
+      expect(chatActions.appendBlock).toHaveBeenCalledWith("a1", {
+        type: "text",
+        content: "最终回复",
+      });
+    });
+
+    it("已有空文本块时回填完整回复", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, content: "" }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("reply", { content: "最终回复" }), makeCtx());
+
+      expect(chatActions.updateBlockByType).toHaveBeenCalledWith(
+        "a1",
+        "text",
+        expect.any(Function),
+      );
+      const updater = chatActions.updateBlockByType.mock.calls[0][2] as (
+        b: { type: string; content: string },
+      ) => { type: string; content: string };
+      expect(updater({ type: "text", content: "" })).toEqual({
+        type: "text",
+        content: "最终回复",
+      });
+    });
+
+    it("增量文本已存在时不覆盖", () => {
+      const assistantMsg = {
+        id: "a1",
+        role: "assistant" as const,
+        blocks: [{ type: "text" as const, content: "已经流出来的字" }],
+        timestamp: Date.now(),
+      };
+      mockChatState.messages = [assistantMsg];
+      mockChatState.messagesById = { a1: assistantMsg };
+
+      dispatchSSEEvent(makeEvent("reply", { content: "已经流出来的字更多" }), makeCtx());
+
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+      expect(chatActions.updateBlockByType).not.toHaveBeenCalled();
     });
   });
 
@@ -677,6 +764,34 @@ describe("sse-event-handler", () => {
           id: "ap1",
           toolName: "edit_spreadsheet",
           riskLevel: "high",
+        }),
+      );
+      expect(sessionMock.patchSession).toHaveBeenCalledWith("test-session", {
+        pendingApproval: true,
+        pendingQuestion: false,
+      });
+    });
+  });
+
+  describe("tool_call_start", () => {
+    it("没有同 id 的 streaming 块时 append 一条 running 工具卡片", () => {
+      dispatchSSEEvent(
+        makeEvent("tool_call_start", {
+          tool_call_id: "tc-live",
+          tool_name: "read_excel",
+          arguments: { file_path: "./sales.xlsx" },
+          iteration: 1,
+        }),
+        makeCtx(),
+      );
+
+      expect(chatActions.appendBlock).toHaveBeenCalledWith(
+        "a1",
+        expect.objectContaining({
+          type: "tool_call",
+          toolCallId: "tc-live",
+          name: "read_excel",
+          status: "running",
         }),
       );
     });

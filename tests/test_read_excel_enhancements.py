@@ -131,6 +131,7 @@ class TestRangeRead:
         result = _tool_payload(data_tools.read_excel(str(sample_excel), range="A1:E3"))
         assert result["rows_count"] == 3
         assert result["columns_count"] == 5
+        assert result["shape"] == {"rows": 3, "columns": 5}
         assert result["range"] == "A1:E3"
         # 第一行应是表头
         assert result["data"][0][0] == "ID"
@@ -141,10 +142,11 @@ class TestRangeRead:
         assert result["rows_count"] == 3
 
     def test_range_not_supported_for_csv(self, sample_csv: Path):
-        """CSV 文件忽略 range 参数，仍返回标准摘要。"""
-        result = _tool_payload(data_tools.read_excel(str(sample_csv), range="A1:C5"))
-        assert "columns" in result
-        assert result["shape"]["rows"] == 25
+        """CSV 不支持 range，返回 INVALID_ARGS。"""
+        result = data_tools.read_excel(str(sample_csv), range="A1:C5")
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
 
 
 # ── CSV/TSV 支持 ─────────────────────────────────────────

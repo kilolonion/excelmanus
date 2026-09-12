@@ -40,20 +40,32 @@ class ExecutionToken:
     parent: str | None = None
 
 
-def normalize_present_as(value: str | None, *, chat_mode: str = "write") -> str:
-    """``native|code`` only. Plan/read force native. Legacy ``both`` maps to code in write."""
-    chat = str(chat_mode or "write")
-    if chat in {"read", "plan"}:
-        return "native"
+def preferred_present_as(value: str | None) -> str:
+    """Store preference only. Plan/read still force native via ``present_as_of``."""
     raw = str(value or "native").strip().lower()
     if raw in {"code", "both"}:
         return "code"
     return "native"
 
 
+def normalize_present_as(value: str | None, *, chat_mode: str = "write") -> str:
+    """``native|code`` only. Plan/read force native. Legacy ``both`` maps to code in write."""
+    chat = str(chat_mode or "write")
+    if chat in {"read", "plan"}:
+        return "native"
+    return preferred_present_as(value)
+
+
 def present_as_of(engine: Any) -> str:
     chat = str(getattr(engine, "_current_chat_mode", "write") or "write")
     return normalize_present_as(getattr(engine, "_present_as", None), chat_mode=chat)
+
+
+def set_present_as_preference(engine: Any, value: str | None) -> str:
+    preferred = preferred_present_as(value)
+    engine._present_as = preferred
+    engine._tools_cache = None
+    return preferred
 
 
 def catalog_allows(name: str, present_as: str) -> bool:
@@ -151,7 +163,13 @@ class ToolRuntime:
         return {schema_tool_name(s) for s in collapse_schemas(schemas, self.present_as)}
 
     def is_concurrency_safe(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
-        """仅 PARALLELIZABLE_READONLY_TOOLS。autoApprove 不授予并行。"""
+        """仅 PARALLELIZABLE_READONLY_TOOLS。autoApprove / MCP 默认放行不授予并行。"""
+        if str(tool_name).startswith("mcp_"):
+            getter = getattr(self.engine, "get_tool_write_effect", None)
+            effect = getter(tool_name) if callable(getter) else "unknown"
+            if effect != "none":
+                return False
+            # write_effect=none 仍须落在只读并行名单；MCP 名默认不在其中。
         try:
             return policy_is_concurrency_safe(tool_name, args) is True
         except Exception:

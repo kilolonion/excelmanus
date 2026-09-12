@@ -68,6 +68,29 @@ class TestDatabase:
             assert expected in tables, f"缺少表: {expected}"
         db.close()
 
+    def test_sessions_schema_has_no_archive_status(self, tmp_path: Path) -> None:
+        db = Database(str(tmp_path / "test.db"))
+        columns = {
+            row["name"]
+            for row in db.conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        assert "status" not in columns
+        db.close()
+
+    def test_messages_unique_session_message_id(self, tmp_path: Path) -> None:
+        db = Database(str(tmp_path / "test.db"))
+        columns = {
+            row["name"]
+            for row in db.conn.execute("PRAGMA table_info(messages)").fetchall()
+        }
+        assert "message_id" in columns
+        indexes = {
+            row["name"]
+            for row in db.conn.execute("PRAGMA index_list(messages)").fetchall()
+        }
+        assert "idx_messages_session_message_id" in indexes
+        db.close()
+
     def test_schema_version_increments(self, tmp_path: Path) -> None:
         """打开后 schema_version 应至少为 1。"""
         db = Database(str(tmp_path / "test.db"))
@@ -75,6 +98,25 @@ class TestDatabase:
             "SELECT MAX(version) as v FROM schema_version"
         ).fetchone()["v"]
         assert version >= 1
+        db.close()
+
+    def test_v2_session_workspace_columns_and_workspaces_table(self, tmp_path: Path) -> None:
+        db = Database(str(tmp_path / "test.db"))
+        version = db.conn.execute(
+            "SELECT MAX(version) as v FROM schema_version"
+        ).fetchone()["v"]
+        assert version >= 2
+        cols = {
+            row["name"] for row in db.conn.execute("PRAGMA table_info(sessions)").fetchall()
+        }
+        assert {"workspace_path", "workspace_id", "blank"} <= cols
+        names = {
+            row["name"]
+            for row in db.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+        assert "workspaces" in names
         db.close()
 
     def test_migration_is_idempotent(self, tmp_path: Path) -> None:

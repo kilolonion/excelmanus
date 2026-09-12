@@ -12,15 +12,19 @@ from typing import Any, Callable
 
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger
-from excelmanus.output_guard import sanitize_external_data, sanitize_external_text
+from excelmanus.output_guard import (
+    sanitize_external_data,
+    sanitize_external_text,
+    sanitize_streaming_text,
+)
 
 logger = get_logger("api.sse")
 
 # 公共路径转换回调类型：由 api.py 注入，避免循环导入
-PublicPathFn = Callable[[str, bool], str]
+PublicPathFn = Callable[[str], str]
 
 # 默认 pass-through（未注入时原样返回）
-_default_public_path: PublicPathFn = lambda path, safe_mode: path
+_default_public_path: PublicPathFn = lambda path: path
 
 
 def sse_format(event_type: str, data: dict) -> str:
@@ -190,50 +194,13 @@ def _summarize_tool_args(tool_name: str, arguments: dict[str, Any]) -> str:
 def sse_event_to_sse(
     event: ToolCallEvent,
     *,
-    safe_mode: bool,
-    is_channel: bool = False,
     public_path_fn: PublicPathFn = _default_public_path,
 ) -> str | None:
     """将 ToolCallEvent 转换为 SSE 文本。
 
-    Args:
-        event: 引擎事件。
-        safe_mode: 是否启用对外安全模式（过滤内部事件）。
-        is_channel: 是否为 Bot 渠道请求。渠道请求需要工具追踪事件，
-                    即使 safe_mode 开启也保留工具/子代理/审批事件。
-        public_path_fn: 路径脱敏回调，签名 (path, safe_mode) -> str。
+    思考 / 工具 / 子代理 / 审批事件一律下发；payload 始终脱敏，
+    路径经 public_path_fn 映射为公开工作区身份。
     """
-    if safe_mode and event.event_type in {
-        EventType.THINKING,
-        EventType.THINKING_DELTA,
-        EventType.TOOL_CALL_START,
-        EventType.TOOL_CALL_END,
-        EventType.ITERATION_START,
-        EventType.SUBAGENT_START,
-        EventType.SUBAGENT_ITERATION,
-        EventType.SUBAGENT_SUMMARY,
-        EventType.SUBAGENT_END,
-        EventType.SUBAGENT_TOOL_START,
-        EventType.SUBAGENT_TOOL_END,
-        EventType.PENDING_APPROVAL,
-        EventType.APPROVAL_RESOLVED,
-        EventType.RETRACT_THINKING,
-    }:
-        # Bot 渠道需要工具追踪、子代理进度、审批事件才能正常反馈用户
-        if is_channel and event.event_type in {
-            EventType.TOOL_CALL_START,
-            EventType.TOOL_CALL_END,
-            EventType.SUBAGENT_START,
-            EventType.SUBAGENT_END,
-            EventType.SUBAGENT_TOOL_START,
-            EventType.SUBAGENT_TOOL_END,
-            EventType.PENDING_APPROVAL,
-            EventType.APPROVAL_RESOLVED,
-        }:
-            pass  # 允许通过
-        else:
-            return None
-
     event_map = {
         EventType.THINKING: "thinking",
         EventType.TOOL_CALL_START: "tool_call_start",
@@ -272,6 +239,11 @@ def sse_event_to_sse(
         EventType.FAILURE_GUIDANCE: "failure_guidance",
         EventType.TOOL_CALL_NOTICE: "tool_call_notice",
         EventType.REASONING_NOTICE: "reasoning_notice",
+        EventType.TURN_START: "turn_start",
+        EventType.TURN_END: "turn_end",
+        EventType.STEP_START: "step_start",
+        EventType.STEP_END: "step_end",
+        EventType.INBOX_CLAIMED: "inbox_claimed",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -316,6 +288,32 @@ def sse_event_to_sse(
             data["parent_call_id"] = sanitize_external_text(event.parent_call_id, max_len=160)
     elif event.event_type == EventType.ITERATION_START:
         data = {"iteration": event.iteration}
+        if event.turn_id:
+            data["turn_id"] = event.turn_id
+        if event.step_id:
+            data["step_id"] = event.step_id
+    elif event.event_type == EventType.STEP_START:
+        data = {"iteration": event.iteration}
+        if event.turn_id:
+            data["turn_id"] = event.turn_id
+        if event.step_id:
+            data["step_id"] = event.step_id
+    elif event.event_type == EventType.STEP_END:
+        data = {"iteration": event.iteration}
+        if event.turn_id:
+            data["turn_id"] = event.turn_id
+        if event.step_id:
+            data["step_id"] = event.step_id
+    elif event.event_type == EventType.TURN_START:
+        data = {"turn_id": event.turn_id, "iteration": event.iteration}
+    elif event.event_type == EventType.TURN_END:
+        data = {"turn_id": event.turn_id, "iteration": event.iteration}
+    elif event.event_type == EventType.INBOX_CLAIMED:
+        data = {
+            "turn_id": event.turn_id,
+            "step_id": event.step_id,
+            "claimed": event.inbox_claimed or [],
+        }
     elif event.event_type == EventType.SUBAGENT_START:
         data = {
             "name": sanitize_external_text(event.subagent_name, max_len=100),
@@ -440,7 +438,7 @@ def sse_event_to_sse(
         sse_type = "task_update"
     elif event.event_type == EventType.THINKING_DELTA:
         data = {
-            "content": event.thinking_delta,
+            "content": sanitize_streaming_text(event.thinking_delta),
             "iteration": event.iteration,
         }
     elif event.event_type == EventType.TEXT_DELTA:
@@ -479,7 +477,7 @@ def sse_event_to_sse(
     elif event.event_type == EventType.EXCEL_PREVIEW:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": public_path_fn(event.excel_file_path, safe_mode),
+            "file_path": public_path_fn(event.excel_file_path),
             "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
             "columns": event.excel_columns[:100],
             "rows": event.excel_rows[:50],
@@ -492,7 +490,7 @@ def sse_event_to_sse(
     elif event.event_type == EventType.EXCEL_DIFF:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": public_path_fn(event.excel_file_path, safe_mode),
+            "file_path": public_path_fn(event.excel_file_path),
             "sheet": sanitize_external_text(event.excel_sheet, max_len=100),
             "affected_range": sanitize_external_text(event.excel_affected_range, max_len=50),
             "changes": event.excel_changes[:200],
@@ -503,7 +501,7 @@ def sse_event_to_sse(
         # 跨文件/跨 Sheet 对比扩展字段
         if event.excel_diff_mode:
             data["diff_mode"] = event.excel_diff_mode
-            data["file_path_b"] = public_path_fn(event.excel_file_b, safe_mode) if event.excel_file_b else ""
+            data["file_path_b"] = public_path_fn(event.excel_file_b) if event.excel_file_b else ""
             data["sheet_b"] = sanitize_external_text(event.excel_sheet_b, max_len=100)
             if event.excel_diff_summary:
                 data["diff_summary"] = event.excel_diff_summary
@@ -527,7 +525,7 @@ def sse_event_to_sse(
     elif event.event_type == EventType.FILES_CHANGED:
         data = {
             "files": [
-                public_path_fn(f, safe_mode)
+                public_path_fn(f)
                 for f in (event.changed_files or [])[:50]
             ],
         }
@@ -538,6 +536,10 @@ def sse_event_to_sse(
         }
         if event.tool_call_id:
             data["tool_call_id"] = sanitize_external_text(event.tool_call_id, max_len=160)
+        if event.turn_id:
+            data["turn_id"] = event.turn_id
+        if event.step_id:
+            data["step_id"] = event.step_id
     elif event.event_type == EventType.MEMORY_EXTRACTED:
         data = {
             "entries": (event.memory_entries or [])[:50],
@@ -547,7 +549,7 @@ def sse_event_to_sse(
     elif event.event_type == EventType.FILE_DOWNLOAD:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
-            "file_path": public_path_fn(event.download_file_path, safe_mode),
+            "file_path": public_path_fn(event.download_file_path),
             "filename": sanitize_external_text(event.download_filename, max_len=260),
             "description": sanitize_external_text(event.download_description, max_len=500),
         }

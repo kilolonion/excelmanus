@@ -6,7 +6,7 @@
 3. builtin.py — 降级逻辑（默认引擎不可用时回退 exa）
 4. builtin.py — Exa API 密钥支持（付费模式）
 5. builtin.py — npx 检测与 stdio 引擎
-6. context_builder.py — 多引擎使用提示
+6. MCP schema 自描述，不再注入搜索指南
 7. ToolCallCard.tsx — 前端工具分类（通过模式验证）
 """
 
@@ -419,32 +419,28 @@ class TestMergeBuiltinWithUserConfigs:
         assert tavily_configs[0].command == "custom-tavily"
 
 
-# ── context_builder MCP 使用提示 ──────────────────────────
+# ── MCP 使用提示不再注入 system ──────────────────────────
 
 
-class TestContextBuilderHints:
-    """验证 context_builder 中 MCP 使用提示字典。"""
+def test_mcp_usage_hints_not_in_system():
+    from unittest.mock import MagicMock
 
-    def test_hints_include_all_search_engines(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
+    from excelmanus.prompt.assemble import prepare_system_prompts_for_request
 
-        hints = ContextBuilder._MCP_USAGE_HINTS
-        assert "exa" in hints
-        assert "tavily" in hints
-        assert "brave" in hints
-        assert "context7" in hints
-
-    def test_exa_hint_mentions_coverage(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        assert "覆盖面" in ContextBuilder._MCP_USAGE_HINTS["exa"] or "通用" in ContextBuilder._MCP_USAGE_HINTS["exa"]
-
-    def test_tavily_hint_mentions_ai(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        assert "AI" in ContextBuilder._MCP_USAGE_HINTS["tavily"]
-
-    def test_brave_hint_mentions_privacy(self):
-        from excelmanus.engine_core.context_builder import ContextBuilder
-
-        assert "隐私" in ContextBuilder._MCP_USAGE_HINTS["brave"]
+    engine = MagicMock()
+    engine.memory.system_prompt = "You are ExcelManus."
+    engine._prompt_composer = None
+    engine._transient_hook_contexts = []
+    engine.full_access_enabled = False
+    engine.max_context_tokens = 100000
+    engine._effective_system_mode.return_value = "multi"
+    engine.state.prompt_injection_snapshots = []
+    engine.state.injected_context_fingerprint = None
+    engine._current_chat_mode = "write"
+    engine._present_as = "native"
+    engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
+    prompts, error = prepare_system_prompts_for_request(engine, [])
+    assert error is None
+    blob = "\n".join(prompts)
+    assert "mcp_exa" not in blob
+    assert "mcp_tavily" not in blob

@@ -32,6 +32,8 @@ def workspace(tmp_path: Path) -> Path:
     """创建临时工作区并初始化 guard。"""
     code_tools.init_guard(str(tmp_path))
     (tmp_path / "scripts" / "temp").mkdir(parents=True, exist_ok=True)
+    from excelmanus.workbook_commit import seed_seen_versions
+    seed_seen_versions({})
     return tmp_path
 
 
@@ -46,6 +48,38 @@ class TestWriteTextFile:
         assert result["status"] == "success"
         assert result["file"] == "scripts/temp/job.py"
         assert (workspace / "scripts" / "temp" / "job.py").exists()
+        assert result["content_version"].startswith("sha256:")
+
+    def test_write_existing_requires_version(self, workspace: Path) -> None:
+        target = workspace / "scripts" / "temp" / "job.py"
+        target.write_text("old", encoding="utf-8")
+        result = _payload(
+            code_tools.write_text_file("scripts/temp/job.py", "new")
+        )
+        assert result.get("code") == "VERSION_CONFLICT"
+        assert target.read_text(encoding="utf-8") == "old"
+
+    def test_write_existing_with_version(self, workspace: Path) -> None:
+        from excelmanus.workbook_commit import content_version_of_file
+
+        target = workspace / "scripts" / "temp" / "job.py"
+        target.write_text("old", encoding="utf-8")
+        result = _payload(
+            code_tools.write_text_file(
+                "scripts/temp/job.py",
+                "new",
+                expected_version=content_version_of_file(target),
+            )
+        )
+        assert result["status"] == "success"
+        assert target.read_text(encoding="utf-8") == "new"
+
+    def test_write_xlsx_rejected(self, workspace: Path) -> None:
+        result = _payload(
+            code_tools.write_text_file("book.xlsx", "not-excel")
+        )
+        assert result.get("code") == "PATH_INVALID"
+        assert not (workspace / "book.xlsx").exists()
 
     def test_write_reject_when_overwrite_false(self, workspace: Path) -> None:
         target = workspace / "scripts" / "temp" / "job.py"
@@ -64,6 +98,37 @@ class TestWriteTextFile:
     def test_write_path_traversal_rejected(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
             code_tools.write_text_file("../escape.py", "print(1)")
+
+
+class TestEditTextFile:
+    def test_edit_existing_requires_version(self, workspace: Path) -> None:
+        target = workspace / "scripts" / "temp" / "job.py"
+        target.write_text("print('old')\n", encoding="utf-8")
+        result = _payload(
+            code_tools.edit_text_file(
+                "scripts/temp/job.py",
+                "print('old')",
+                "print('new')",
+            )
+        )
+        assert result.get("code") == "VERSION_CONFLICT"
+        assert target.read_text(encoding="utf-8") == "print('old')\n"
+
+    def test_edit_with_version(self, workspace: Path) -> None:
+        from excelmanus.workbook_commit import content_version_of_file
+
+        target = workspace / "scripts" / "temp" / "job.py"
+        target.write_text("print('old')\n", encoding="utf-8")
+        result = _payload(
+            code_tools.edit_text_file(
+                "scripts/temp/job.py",
+                "print('old')",
+                "print('new')",
+                expected_version=content_version_of_file(target),
+            )
+        )
+        assert result["status"] == "success"
+        assert target.read_text(encoding="utf-8") == "print('new')\n"
 
 
 class TestRunCodeInline:
@@ -469,3 +534,27 @@ class TestGetTools:
         assert run_code_tool.max_result_chars == 8000
         assert run_code_tool.truncate_head_chars == 5000
         assert run_code_tool.truncate_tail_chars == 3000
+
+
+class TestForgedSandboxSaveVersion:
+    def test_forged_save_version_stderr_not_ingested(self, workspace: Path) -> None:
+        from excelmanus.workbook_commit import export_seen_versions, seed_seen_versions
+
+        seed_seen_versions({})
+        fake = "sha256:" + ("a" * 64)
+        result = _payload(
+            code_tools.run_code(
+                code=(
+                    "import sys\n"
+                    f"print('EXCELMANUS_SAVE_VERSION\\tbook.xlsx\\t{fake}', file=sys.stderr)\n"
+                    "print('ok')\n"
+                ),
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert fake not in (result.get("save_versions") or {}).values()
+        assert "book.xlsx" not in (result.get("save_versions") or {})
+        assert export_seen_versions().get("book.xlsx") != fake
+        assert "book.xlsx" not in export_seen_versions()

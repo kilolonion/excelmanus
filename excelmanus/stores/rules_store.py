@@ -1,4 +1,4 @@
-"""RulesStore：会话级规则存储（支持 SQLite / PostgreSQL）。"""
+"""RulesStore：会话级规则存储。"""
 from __future__ import annotations
 
 import logging
@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 
 class RulesStore:
-    """会话级规则 CRUD（支持 SQLite / PostgreSQL）。"""
+    """会话级规则 CRUD。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn

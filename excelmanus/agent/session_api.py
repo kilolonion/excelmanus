@@ -74,7 +74,6 @@ async def followup(
     approval_resolver: ApprovalResolver | None = None,
     question_resolver: QuestionResolver | None = None,
     chat_mode: str = "write",
-    channel: str | None = None,
     present_as: str | None = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
@@ -82,7 +81,6 @@ async def followup(
     斜杠与待答问题不进模型历史。不在这里探查工作簿或分析任务意图。
     """
     engine._question_resolver = question_resolver
-    engine._channel_context = channel
     normalized_images: list[dict[str, str]] = []
     for item in images or []:
         if not isinstance(item, dict):
@@ -174,7 +172,6 @@ async def followup(
             "question_resolver": question_resolver,
             "chat_mode": chat_mode,
             "present_as": present_as,
-            "channel": channel,
         },
     )
     engine._driver._on_event = on_event
@@ -192,11 +189,8 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     normalized_images: list[dict[str, str]] = list(extra.get("images") or [])
     chat_mode = extra.get("chat_mode") or "write"
     present_as = extra.get("present_as")
-    channel = extra.get("channel")
     chat_start = time.monotonic()
 
-    if channel is not None:
-        engine._channel_context = channel
     requested_mode = str(chat_mode or "write")
     if requested_mode == "read":
         engine._current_chat_mode = "read"
@@ -207,14 +201,12 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
         engine._current_chat_mode = "plan"
     else:
         engine._current_chat_mode = requested_mode
-    from excelmanus.tools.runtime import normalize_present_as
+    from excelmanus.tools.runtime import set_present_as_preference
 
-    if present_as is None:
-        present_as = getattr(engine, "_present_as", "native")
-    engine._present_as = normalize_present_as(
-        present_as, chat_mode=engine._current_chat_mode,
-    )
-    engine._tools_cache = None
+    if present_as is not None:
+        set_present_as_preference(engine, present_as)
+    else:
+        engine._tools_cache = None
 
     def _add_user_turn_to_memory(text: str) -> None:
         if not normalized_images:

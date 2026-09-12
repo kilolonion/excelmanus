@@ -55,14 +55,14 @@ function ChatPage() {
           <motion.div key={`chat-${sessionId}`} className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
             <MessageStream
               isStreaming={isStreaming}
-              onEditAndResend={(messageId: string, newContent: string, rollbackFiles: boolean, files?: File[], retainedFiles?: FileAttachment[]) => {
-                rollbackAndResend(messageId, newContent, rollbackFiles, sessionId, files, retainedFiles);
+              onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
+                rollbackAndResend(messageId, newContent, sessionId, files, retainedFiles);
               }}
-              onRetry={(assistantMessageId: string, rollbackFiles?: boolean) => {
-                retryAssistantMessage(assistantMessageId, sessionId, undefined, rollbackFiles);
+              onRetry={(assistantMessageId: string) => {
+                retryAssistantMessage(assistantMessageId, sessionId);
               }}
-              onRetryWithModel={(assistantMessageId: string, modelName: string, rollbackFiles?: boolean) => {
-                retryAssistantMessage(assistantMessageId, sessionId, modelName, rollbackFiles);
+              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+                retryAssistantMessage(assistantMessageId, sessionId, modelName);
               }}
             />
           </motion.div>

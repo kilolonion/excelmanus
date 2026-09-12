@@ -15,8 +15,6 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
   const [mode, setMode] = useState<"idle" | "export" | "import">("idle");
   const [exportMode, setExportMode] = useState<"password" | "simple">("password");
   const [exportSections, setExportSections] = useState<Record<string, boolean>>({
-    main: true,
-    aux: true,
     embedding: true,
     profiles: true,
   });
@@ -54,7 +52,7 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
     setExporting(true);
     try {
       const sections = Object.entries(exportSections)
-        .filter(([k, v]) => ["main", "aux", "embedding", "profiles"].includes(k) && v)
+        .filter(([k, v]) => ["embedding", "profiles"].includes(k) && v)
         .map(([k]) => k);
       const data = await apiPost<{ token: string }>("/config/export", {
         sections,
@@ -107,10 +105,8 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
   };
 
   const sectionLabels: Record<string, string> = {
-    main: "主模型",
-    aux: "辅助模型",
     embedding: "Embedding 词嵌入",
-    profiles: "多模型配置",
+    profiles: "模型档案",
   };
 
   return (
@@ -224,7 +220,7 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
               className="h-7 text-xs gap-1 text-white"
               style={{ backgroundColor: "var(--em-primary)" }}
               onClick={handleExport}
-              disabled={exporting || !Object.entries(exportSections).some(([k, v]) => ["main","aux","embedding","profiles"].includes(k) && v)}
+              disabled={exporting || !Object.entries(exportSections).some(([k, v]) => ["embedding","profiles"].includes(k) && v)}
             >
               {exporting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Download className="h-3 w-3" />}
               {exporting ? "加密中..." : "生成令牌"}

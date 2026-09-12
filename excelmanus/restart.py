@@ -95,13 +95,12 @@ def _do_restart(port: int, entry: str, *, deploy_mode: str = "standalone") -> No
     """核心重启逻辑。
 
     - standalone: 生成临时脚本 → Popen 启动新进程 → os._exit(0)
-    - server/docker: 直接 os._exit(0)，依赖 systemd/supervisor/Docker restart 策略
+    - server: 直接 os._exit(0)，依赖 systemd/supervisor 重启策略
 
     此函数应在独立线程中调用，因为它会调用 os._exit(0)。
     """
-    # 服务器/Docker 模式：直接退出，让进程管理器负责重启
-    if deploy_mode in ("server", "docker"):
-        logger.info("部署模式=%s，直接退出进程（依赖进程管理器重启）...", deploy_mode)
+    if deploy_mode == "server":
+        logger.info("部署模式=server，直接退出进程（依赖进程管理器重启）...")
         time.sleep(1)
         os._exit(0)
         return  # unreachable, for clarity
@@ -154,9 +153,35 @@ def _get_deploy_mode() -> str:
     except Exception:
         pass
     raw = os.environ.get("EXCELMANUS_DEPLOY_MODE", "").strip().lower()
-    if raw in ("standalone", "server", "docker"):
+    if raw in ("standalone", "server"):
         return raw
     return "standalone"
+
+
+def _resolve_restart_target(port: int | None = None, entry: str | None = None) -> tuple[int, str]:
+    """端口与入口优先读 start 脚本写入的 runtime.json。"""
+    runtime_port: int | None = None
+    runtime_host = "0.0.0.0"
+    try:
+        from excelmanus.upgrade.runtime import read_runtime
+
+        rt = read_runtime() or {}
+        raw_port = rt.get("backend_port")
+        if raw_port is not None:
+            runtime_port = int(raw_port)
+        host = rt.get("backend_host")
+        if isinstance(host, str) and host.strip():
+            runtime_host = host.strip()
+    except Exception:
+        pass
+
+    resolved_port = port if port not in (None, 8000) else (runtime_port or 8000)
+    if not entry or entry == "from excelmanus.api import main; main()":
+        entry = (
+            "import uvicorn; uvicorn.run('excelmanus.api:app', "
+            f"host={runtime_host!r}, port={resolved_port}, log_level='info')"
+        )
+    return resolved_port, entry
 
 
 async def schedule_restart(
@@ -164,16 +189,16 @@ async def schedule_restart(
     entry: str = "from excelmanus.api import main; main()",
     delay: float = 1.0,
 ) -> None:
-    """异步触发服务重启。适用于 BackgroundTask / async 函数。
-
-    Args:
-        port: 服务监听端口，辅助脚本会等待该端口释放后再启动新进程。
-        entry: 新进程的 Python 入口代码。
-        delay: 触发重启前的等待秒数（确保 HTTP 响应已发送完毕）。
-    """
+    """异步触发服务重启。适用于 BackgroundTask / async 函数。"""
     await asyncio.sleep(delay)
     mode = _get_deploy_mode()
-    t = threading.Thread(target=_do_restart, args=(port, entry), kwargs={"deploy_mode": mode}, daemon=False)
+    resolved_port, resolved_entry = _resolve_restart_target(port, entry)
+    t = threading.Thread(
+        target=_do_restart,
+        args=(resolved_port, resolved_entry),
+        kwargs={"deploy_mode": mode},
+        daemon=False,
+    )
     t.start()
 
 
@@ -184,9 +209,6 @@ def schedule_restart_sync(
     """同步触发服务重启。适用于 CLI / 脚本场景。
 
     注意：此函数不会返回 —— 内部调用 os._exit(0)。
-
-    Args:
-        port: 服务监听端口。
-        entry: 新进程的 Python 入口代码。
     """
-    _do_restart(port, entry, deploy_mode=_get_deploy_mode())
+    resolved_port, resolved_entry = _resolve_restart_target(port, entry)
+    _do_restart(resolved_port, resolved_entry, deploy_mode=_get_deploy_mode())

@@ -1,4 +1,4 @@
-"""Bench 测试运行器：加载用例 JSON → 调用 engine.chat() → 收集事件轨迹 → 输出 JSON 日志。
+"""Bench 测试运行器：加载用例 JSON → 调用 engine.followup() → 收集事件轨迹 → 输出 JSON 日志。
 
 运行方式：
     python -m excelmanus.bench --all
@@ -729,13 +729,13 @@ class _EngineTracer:
         self._component_seen: dict[str, tuple[int, int]] = {}
 
         # 保存原始方法
-        if not hasattr(engine, "_context_builder"):
+        if not hasattr(engine, "_prepare_system_prompts_for_request"):
             raise AttributeError(
-                "bench requires engine._context_builder; engine may have been refactored"
+                "bench requires engine._prepare_system_prompts_for_request"
             )
-        self._orig_prepare = engine._context_builder._prepare_system_prompts_for_request
+        self._orig_prepare = engine._prepare_system_prompts_for_request
 
-        engine._context_builder._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
+        engine._prepare_system_prompts_for_request = self._traced_prepare  # type: ignore[assignment]
 
     def _traced_prepare(
         self, skill_contexts: list[str], **kwargs: Any,
@@ -813,7 +813,7 @@ class _EngineTracer:
 
     def restore(self) -> None:
         """恢复原始方法。"""
-        self._engine._context_builder._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
+        self._engine._prepare_system_prompts_for_request = self._orig_prepare  # type: ignore[assignment]
 
 
 # ── 执行器 ────────────────────────────────────────────────
@@ -1019,7 +1019,7 @@ async def run_case(
             turn_start = time.monotonic()
 
             try:
-                chat_result: ChatResult = await engine.chat(
+                chat_result: ChatResult = await engine.followup(
                     msg,
                     on_event=collector.on_event,
                 )
@@ -1094,7 +1094,7 @@ async def run_case(
                         f"  [dim]⤷ 自动回复 ask_user:[/dim] {reply_text}"
                     )
                 try:
-                    chat_result = await engine.chat(
+                    chat_result = await engine.followup(
                         reply_text,
                         on_event=collector.on_event,
                     )
@@ -1184,7 +1184,7 @@ async def run_case(
         case_engine_trace = tracer.snapshot_and_reset()
 
     _chat_mode = str(getattr(engine, "_current_chat_mode", "write") or "write")
-    _tool_access = "read_only" if _chat_mode in ("read", "plan") else "may_write"
+    _tool_access = "read_only" if _chat_mode == "read" else "may_write"
     _result_access = getattr(chat_result, "tool_access", "") if chat_result is not None else ""
     if _result_access:
         _tool_access = str(_result_access)
@@ -1193,8 +1193,6 @@ async def run_case(
     _config_snapshot = {
         "model": config.model,
         "base_url": config.base_url,
-        "aux_model": config.aux_model,
-        "aux_base_url": config.aux_base_url,
     }
 
     result = BenchResult(

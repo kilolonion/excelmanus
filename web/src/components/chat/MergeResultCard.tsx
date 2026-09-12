@@ -57,16 +57,16 @@ export function MergeResultCard({
       {/* 文件流程图 */}
       <div className="px-3 py-2.5 flex items-center gap-2 flex-wrap text-[11px]">
         {fileNameA && (
-          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-blue-50 dark:bg-blue-950/30 text-blue-700 dark:text-blue-300 border border-blue-100 dark:border-blue-900/40">
-            <FileSpreadsheet className="h-3 w-3" />
+          <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--em-fill)] text-foreground border border-[var(--em-hairline)]">
+            <FileSpreadsheet className="h-3 w-3 text-[var(--em-primary)]" />
             {fileNameA}
           </span>
         )}
         {fileNameB && (
           <>
             <span className="text-muted-foreground/50">+</span>
-            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-green-50 dark:bg-green-950/30 text-green-700 dark:text-green-300 border border-green-100 dark:border-green-900/40">
-              <FileSpreadsheet className="h-3 w-3" />
+            <span className="inline-flex items-center gap-1 px-2 py-1 rounded-md bg-[var(--em-fill)] text-foreground border border-[var(--em-hairline)]">
+              <FileSpreadsheet className="h-3 w-3 text-[var(--em-primary)]" />
               {fileNameB}
             </span>
           </>

@@ -21,6 +21,8 @@ npm run dev
 
 默认通过 `next.config.ts` 中的 rewrite 代理 `/api/v1/*` 请求到后端 `http://localhost:8000`，可通过 `BACKEND_INTERNAL_URL` 环境变量覆盖。
 
+生产前端由 `./deploy/start.sh --prod` 或服务器上的 PM2 / systemd 启动，不再提供独立 Web 镜像。
+
 ## 环境变量
 
 | 变量 | 说明 | 默认值 |
@@ -40,13 +42,6 @@ npm run build
 cp -r public .next/standalone/
 cp -r .next/static .next/standalone/.next/
 node .next/standalone/server.js
-```
-
-也可使用 Docker：
-
-```bash
-docker build -t excelmanus-web .
-docker run -p 3000:3000 excelmanus-web
 ```
 
 ## 目录结构

@@ -61,6 +61,14 @@ def disable_real_mcp_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_file = tmp_path / "mcp.empty.json"
     config_file.write_text('{"mcpServers": {}}', encoding="utf-8")
     monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(config_file))
+    monkeypatch.setattr(
+        "excelmanus.engine.AgentEngine.initialize_mcp",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "excelmanus.engine.AgentEngine.shutdown_mcp",
+        AsyncMock(return_value=None),
+    )
 
 
 @pytest.fixture
@@ -696,7 +704,6 @@ class TestProperty18SessionTTLCleanup:
             loop.run_until_complete(_inner())
         finally:
             loop.close()
-
     @given(
         ttl=st.integers(min_value=2, max_value=7200),
         n_sessions=st.integers(min_value=1, max_value=20),
@@ -742,126 +749,74 @@ class TestProperty18SessionTTLCleanup:
             loop.close()
 
 
-class TestArchiveSession:
-    """archive_session 方法测试。"""
+def test_apply_persisted_active_model_switches_from_env_snapshot() -> None:
+    config = ExcelManusConfig(
+        api_key="test-key",
+        base_url="https://test.example.com/v1",
+        model="test-model",
+        models=(
+            ModelProfile(
+                name="DeepSeek",
+                model="deepseek-flash",
+                api_key="sk-live",
+                base_url="https://api.deepseek.com/v1",
+            ),
+        ),
+        memory_enabled=False,
+        workspace_root="/tmp/excelmanus-test-session",
+    )
+    user = MagicMock()
+    user.get_active_model.return_value = "DeepSeek"
+    mgr = SessionManager(
+        max_sessions=5,
+        ttl_seconds=60,
+        config=config,
+        registry=ToolRegistry(),
+        config_store=user,
+    )
+    engine = MagicMock()
+    engine.switch_model.return_value = "已切换到模型：DeepSeek → deepseek-flash"
+    with patch("excelmanus.api_app_state.get_config", return_value=None), \
+         patch("excelmanus.api_app_state._sync_config_profiles_from_db"):
+        mgr._apply_persisted_active_model(engine, user)
+    engine.sync_model_profiles.assert_called_once_with(config.models)
+    engine.switch_model.assert_called_once_with("DeepSeek")
 
-    @pytest.mark.asyncio
-    async def test_archive_sqlite_only_session(
-        self, config: ExcelManusConfig, registry: ToolRegistry
-    ) -> None:
-        """仅存在于 SQLite 中的历史会话可被归档。"""
-        chat_history = MagicMock()
-        chat_history.session_exists.return_value = True
-        chat_history.update_session = MagicMock()
 
-        mgr = SessionManager(
-            max_sessions=5,
-            ttl_seconds=60,
-            config=config,
-            registry=registry,
-            chat_history=chat_history,
-        )
-
-        result = await mgr.archive_session("sqlite-only", archive=True)
-        assert result is True
-        chat_history.update_session.assert_called_once_with("sqlite-only", status="archived")
-
-    @pytest.mark.asyncio
-    async def test_unarchive_sqlite_only_session(
-        self, config: ExcelManusConfig, registry: ToolRegistry
-    ) -> None:
-        """仅存在于 SQLite 中的归档会话可被取消归档。"""
-        chat_history = MagicMock()
-        chat_history.session_exists.return_value = True
-        chat_history.update_session = MagicMock()
-
-        mgr = SessionManager(
-            max_sessions=5,
-            ttl_seconds=60,
-            config=config,
-            registry=registry,
-            chat_history=chat_history,
-        )
-
-        result = await mgr.archive_session("sqlite-only", archive=False)
-        assert result is True
-        chat_history.update_session.assert_called_once_with("sqlite-only", status="active")
-
-    @pytest.mark.asyncio
-    async def test_archive_in_memory_session(
-        self, config: ExcelManusConfig, registry: ToolRegistry
-    ) -> None:
-        """内存中的活跃会话可被归档（通过 SQLite 持久化状态）。"""
-        chat_history = MagicMock()
-        chat_history.session_exists.return_value = False
-        chat_history.update_session = MagicMock()
-
-        mgr = SessionManager(
-            max_sessions=5,
-            ttl_seconds=60,
-            config=config,
-            registry=registry,
-            chat_history=chat_history,
-        )
-
-        sid, _ = await _create_session(mgr)
-        result = await mgr.archive_session(sid, archive=True)
-        assert result is True
-        chat_history.update_session.assert_called_once_with(sid, status="archived")
-
-    @pytest.mark.asyncio
-    async def test_archive_nonexistent_session_returns_false(
-        self, manager: SessionManager
-    ) -> None:
-        """归档不存在的会话应返回 False。"""
-        result = await manager.archive_session("nonexistent", archive=True)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_archive_without_chat_history_returns_false(
-        self, manager: SessionManager
-    ) -> None:
-        """无 ChatHistoryStore 时，归档内存会话应返回 False。"""
-        sid, _ = await _create_session(manager)
-        # manager 默认无 chat_history
-        result = await manager.archive_session(sid, archive=True)
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_archive_persists_messages_before_status_update(
-        self, config: ExcelManusConfig, registry: ToolRegistry
-    ) -> None:
-        """归档内存会话时，应先持久化消息再更新状态。"""
-        chat_history = MagicMock()
-        chat_history.session_exists.return_value = False
-        chat_history.update_session = MagicMock()
-
-        call_order: list[str] = []
-        orig_save = chat_history.save_turn_messages
-        orig_update = chat_history.update_session
-
-        def track_save(*a, **kw):
-            call_order.append("save")
-            return orig_save(*a, **kw)
-
-        def track_update(*a, **kw):
-            call_order.append("update")
-            return orig_update(*a, **kw)
-
-        chat_history.save_turn_messages = track_save
-        chat_history.update_session = track_update
-
-        mgr = SessionManager(
-            max_sessions=5,
-            ttl_seconds=60,
-            config=config,
-            registry=registry,
-            chat_history=chat_history,
-        )
-
-        sid, _ = await _create_session(mgr)
-        await mgr.archive_session(sid, archive=True)
-
-        # update_session（状态更新）应在 save_turn_messages 之后
-        if "save" in call_order:
-            assert call_order.index("save") < call_order.index("update")
+def test_apply_persisted_active_model_refreshes_empty_profiles() -> None:
+    config = ExcelManusConfig(
+        api_key="test-key",
+        base_url="https://test.example.com/v1",
+        model="test-model",
+        models=(),
+        memory_enabled=False,
+        workspace_root="/tmp/excelmanus-test-session",
+    )
+    live_models = (
+        ModelProfile(
+            name="DeepSeek",
+            model="deepseek-flash",
+            api_key="sk-live",
+            base_url="https://api.deepseek.com/v1",
+        ),
+    )
+    live = SimpleNamespace(models=live_models)
+    user = MagicMock()
+    user.get_active_model.return_value = "DeepSeek"
+    mgr = SessionManager(
+        max_sessions=5,
+        ttl_seconds=60,
+        config=config,
+        registry=ToolRegistry(),
+        config_store=user,
+    )
+    engine = MagicMock()
+    engine.switch_model.side_effect = [
+        "未找到模型 'DeepSeek'。可用模型：无",
+        "已切换到模型：DeepSeek → deepseek-flash",
+    ]
+    with patch("excelmanus.api_app_state.get_config", return_value=live), \
+         patch("excelmanus.api_app_state._sync_config_profiles_from_db"):
+        mgr._apply_persisted_active_model(engine, user)
+    engine.sync_model_profiles.assert_called_with(live_models)
+    assert engine.switch_model.call_count == 2

@@ -133,6 +133,9 @@ def is_concurrency_safe(
             return False
         if tool_name in MUTATING_ALL_TOOLS or tool_name in CODE_POLICY_DYNAMIC_TOOLS:
             return False
+        # MCP 默认独占。autoApprove / 默认放行不授予并行。
+        if tool_name.startswith("mcp_"):
+            return False
         if extra_safe and tool_name in extra_safe:
             return True
         return tool_name in PARALLELIZABLE_READONLY_TOOLS

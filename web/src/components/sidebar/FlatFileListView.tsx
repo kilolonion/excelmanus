@@ -37,7 +37,6 @@ export interface FlatFileListViewProps {
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
-  pendingBackups: { original_path: string }[];
   onDragStart: (e: React.DragEvent, file: { path: string; filename: string }) => void;
   onDragEnd: () => void;
   onClick: (path: string) => void;
@@ -46,7 +45,7 @@ export interface FlatFileListViewProps {
 }
 
 export function FlatFileListView(props: FlatFileListViewProps) {
-  const { files, recentTimestamps, sessionId, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, pendingBackups, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove } = props;
+  const { files, recentTimestamps, sessionId, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove } = props;
 
   // 最近使用的文件排前面，其余按文件名字母序
   const flatFiles = useMemo(() => {
@@ -119,14 +118,6 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                 </span>
               )}
             </div>
-
-            {pendingBackups.some((b) => normalizeExcelPath(b.original_path) === normalizeExcelPath(file.path)) && (
-              <span
-                className="flex-shrink-0 h-2 w-2 rounded-full"
-                style={{ backgroundColor: "var(--em-primary)" }}
-                title="沙箱修改待应用"
-              />
-            )}
 
             {!selectMode && (
               <>
@@ -222,13 +213,13 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                                   onClick={async (e) => {
                                     e.stopPropagation();
                                     try {
-                                      const regData = await fetchFileRegistry();
+                                      const regData = await fetchFileRegistry({ sessionId });
                                       if ("files" in regData) {
                                         const entry = regData.files.find(
                                           (f) => f.canonical_path === file.path || f.canonical_path === `./${file.path}`,
                                         );
                                         if (entry) {
-                                          await updateFileGroupMembers(g.id, { add: [{ file_id: entry.id }] });
+                                          await updateFileGroupMembers(g.id, { add: [{ file_id: entry.id }], sessionId });
                                           useExcelStore.getState().loadFileGroups();
                                         }
                                       }

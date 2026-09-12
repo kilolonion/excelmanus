@@ -60,7 +60,8 @@ def test_text_file_audit_and_undo(tmp_path: Path) -> None:
 
     undo_msg = manager.undo(approval_id)
     assert "已回滚" in undo_msg
-    assert target.read_text(encoding="utf-8") == "old\n"
+    assert "manage_spreadsheet_versions" in undo_msg
+    assert target.read_text(encoding="utf-8") == "new\n"
 
 
 def test_undo_rejects_human_edit_after_approved_write(tmp_path: Path) -> None:
@@ -84,7 +85,8 @@ def test_undo_rejects_human_edit_after_approved_write(tmp_path: Path) -> None:
     )
     target.write_text("human\n", encoding="utf-8")
     undo_msg = manager.undo(approval_id)
-    assert "回滚被拒绝" in undo_msg or "冲突" in undo_msg
+    assert "已回滚" in undo_msg
+    assert "manage_spreadsheet_versions" in undo_msg
     assert target.read_text(encoding="utf-8") == "human\n"
 
 
@@ -112,12 +114,13 @@ def test_binary_snapshot_and_undo(tmp_path: Path) -> None:
 
     assert len(record.changes) == 1
     assert record.changes[0].is_binary is True
-    assert record.binary_snapshots
+    assert record.binary_snapshots == []
+    assert not (manager.audit_root / approval_id / "snapshots").exists()
     assert target.read_bytes() == b"\x00NEW_BINARY"
 
     undo_msg = manager.undo(approval_id)
     assert "已回滚" in undo_msg
-    assert target.read_bytes() == b"\x00OLD_BINARY"
+    assert target.read_bytes() == b"\x00NEW_BINARY"
 
 
 def test_empty_file_hash_recorded_and_undo(tmp_path: Path) -> None:
@@ -147,7 +150,7 @@ def test_empty_file_hash_recorded_and_undo(tmp_path: Path) -> None:
 
     undo_msg = manager.undo(approval_id)
     assert "已回滚" in undo_msg
-    assert target.read_text(encoding="utf-8") == "before"
+    assert target.read_text(encoding="utf-8") == ""
 
 
 def test_failed_execution_still_writes_manifest_and_supports_undo(tmp_path: Path) -> None:
@@ -181,7 +184,33 @@ def test_failed_execution_still_writes_manifest_and_supports_undo(tmp_path: Path
 
     undo_msg = manager.undo(approval_id)
     assert "已回滚" in undo_msg
-    assert target.read_text(encoding="utf-8") == "before"
+    assert target.read_text(encoding="utf-8") == "after"
+
+
+def test_tool_result_contract_error_is_returned_not_raised(tmp_path: Path) -> None:
+    from excelmanus.engine_core.tool_result import error_result
+
+    manager = ApprovalManager(str(tmp_path))
+    approval_id = manager.new_approval_id()
+    failed = error_result("版本冲突", code="VERSION_CONFLICT")
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]):
+        return failed
+
+    payload, record = manager.execute_and_audit(
+        approval_id=approval_id,
+        tool_name="edit_spreadsheet",
+        arguments={"file_path": "book.xlsx"},
+        tool_scope=["edit_spreadsheet"],
+        execute=execute,
+        undoable=True,
+        created_at_utc=manager.utc_now(),
+    )
+    assert payload is failed
+    assert payload.success is False
+    assert payload.error is not None
+    assert payload.error.code == "VERSION_CONFLICT"
+    assert record.execution_status == "failed"
 
 
 def test_undo_can_load_record_from_manifest_after_restart(tmp_path: Path) -> None:
@@ -209,7 +238,7 @@ def test_undo_can_load_record_from_manifest_after_restart(tmp_path: Path) -> Non
     manager2 = ApprovalManager(str(tmp_path))
     msg = manager2.undo(approval_id)
     assert "已回滚" in msg
-    assert not target.exists()
+    assert target.exists()
 
 
 def test_non_undoable_record_returns_message(tmp_path: Path) -> None:
@@ -282,12 +311,22 @@ def test_read_only_safe_tool_not_high_risk(tmp_path: Path) -> None:
     assert manager.is_high_risk_tool("read_excel") is False
 
 
-def test_non_whitelisted_mcp_high_risk_until_auto_approve(tmp_path: Path) -> None:
+def test_mcp_default_allow_without_auto_approve(tmp_path: Path) -> None:
     manager = ApprovalManager(str(tmp_path))
     tool_name = "mcp_context7_query_docs"
-    assert manager.is_high_risk_tool(tool_name) is True
-    manager.register_mcp_auto_approve([tool_name])
+    assert manager.is_mcp_tool(tool_name) is True
+    assert manager.is_confirm_required_tool(tool_name) is False
     assert manager.is_high_risk_tool(tool_name) is False
+    manager.register_mcp_auto_approve([tool_name])
+    assert manager.is_mcp_auto_approved(tool_name) is True
+    assert manager.is_high_risk_tool(tool_name) is False
+
+
+def test_builtin_high_risk_tools_still_confirm(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    assert manager.is_confirm_required_tool("run_shell") is True
+    assert manager.is_confirm_required_tool("delete_file") is True
+    assert manager.is_confirm_required_tool("write_text_file") is False
 
 
 def test_register_mcp_auto_approve_replaces_not_accumulates(tmp_path: Path) -> None:
@@ -303,6 +342,15 @@ def test_register_mcp_auto_approve_replaces_not_accumulates(tmp_path: Path) -> N
     manager.register_mcp_auto_approve([new_tool])
     assert manager.is_mcp_auto_approved(new_tool) is True
     assert manager.is_mcp_auto_approved(old_tool) is False
+
+
+def test_mcp_auto_approve_skips_confirm_not_readonly(tmp_path: Path) -> None:
+    manager = ApprovalManager(str(tmp_path))
+    tool_name = "mcp_excel_write"
+    manager.register_mcp_auto_approve([tool_name])
+    assert manager.is_mcp_auto_approved(tool_name) is True
+    assert manager.is_high_risk_tool(tool_name) is False
+    assert manager.is_read_only_safe_tool(tool_name) is False
 
 
 class TestSessionIdIsolation:

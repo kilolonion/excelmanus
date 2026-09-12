@@ -1,6 +1,6 @@
 ---
 name: run_code_templates
-description: run_code 常用代码模板库，覆盖数据写入、格式化、图表、跨表操作、VBA 替代、文件恢复等场景。直接复制修改参数即可。
+description: 已有大表的 run_code 模板（批量写入、格式、图表、跨表）。
 file_patterns:
   - "*.xlsx"
   - "*.xlsm"
@@ -10,18 +10,8 @@ resources:
   - references/format_patterns.md
   - references/analysis_patterns.md
   - references/advanced_patterns.md
-version: "1.0.0"
+version: "2.1.0"
 ---
-run_code 代码模板库。按场景分为四个参考文档，激活后自动加载。
+工作区 xlsx 的改写必须走 SDK。stdout 或成功退出码不证明业务正确。
 
-使用流程：
-1. 从参考文档中找到最匹配的模板
-2. 复制模板，替换文件名、列名、参数
-3. 添加顶层 try/except 异常处理
-4. 写入后用 inspect_spreadsheet 独立回读验证
-
-关键约束：
-- 禁止 sys.exit()/exit()/os._exit()
-- 禁止 exec()/eval()
-- 写入后必须 print 关键验证数据到 stdout
-- 错误信息 print 到 stderr，脚本正常结束
+参考文档里是可替换的模板，不是必须按顺序执行的流程。

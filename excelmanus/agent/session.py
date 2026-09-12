@@ -270,7 +270,9 @@ class AgentEngine:
         self._pending_plan_exit: str | None = None
         self._last_compact_failed: bool = False
         self._skill_catalog_digest: str | None = None
-        self._present_as: str = "native"
+        self._present_as: str = (
+            self._load_persisted_present_as(database) if self._is_host_session else "native"
+        )
         self._prompt_user_contexts: list[str] = []
         self._prompt_tool_snapshot: list[Any] | None = None
         self._prompt_last_assembly: Any = None
@@ -447,8 +449,6 @@ class AgentEngine:
         )
 
         # 插话 / guide 走 Driver inbox（next-turn / next-step）。
-        # ── 渠道上下文（Bot 渠道提示词注入） ──
-        self._channel_context: str | None = None
 
         # ── /tools 与 /reasoning 展示开关（仅会话级，不持久化） ──
         self._show_tool_calls: bool = False
@@ -1035,12 +1035,15 @@ class AgentEngine:
         search_tools = get_search_tools(self._mcp_manager)
         if search_tools:
             self._registry.register_tools(search_tools)
-            # parallel_search 是只读搜索工具，加入自动批准
+            # parallel_search 是内置只读搜索，加入只读安全名单；不授予 MCP 并行。
             for t in search_tools:
                 self._approval.register_read_only_safe_tools([t.name])
 
     def sync_mcp_auto_approve(self) -> None:
-        """将当前 MCP 白名单同步到审批管理器。"""
+        """同步 mcp.json autoApprove 到审批管理器（显式信任名单）。
+
+        MCP 默认已允许调用，此名单不再作为确认门。
+        """
         auto_approved = self._mcp_manager.auto_approved_tools
         if auto_approved:
             self._approval.register_mcp_auto_approve(auto_approved)
@@ -1179,9 +1182,9 @@ class AgentEngine:
         if self._checkpoint_store is None or self._session_id is None:
             return
         try:
-            from excelmanus.tools.runtime import present_as_of
+            from excelmanus.tools.runtime import preferred_present_as
 
-            self._state.present_as = present_as_of(self)
+            self._state.present_as = preferred_present_as(getattr(self, "_present_as", "native"))
             self._checkpoint_store.save_session_snapshot(
                 session_id=self._session_id,
                 state_dict=self._state.to_dict(),
@@ -1206,12 +1209,9 @@ class AgentEngine:
             # 保留 _file_registry 引用（不序列化）
             restored_state._file_registry = self._state._file_registry
             self._state = restored_state
-            from excelmanus.tools.runtime import normalize_present_as
+            from excelmanus.tools.runtime import preferred_present_as
 
-            self._present_as = normalize_present_as(
-                restored_state.present_as,
-                chat_mode=getattr(self, "_current_chat_mode", "write"),
-            )
+            self._present_as = preferred_present_as(restored_state.present_as)
             self._tools_cache = None
 
             from excelmanus.task_list import TaskStore
@@ -1359,7 +1359,31 @@ class AgentEngine:
             store = UserConfigStore(self._database.conn)
             store.set_full_access(enabled)
         except Exception:
-            logger.debug("持久化 full_access 失败", exc_info=True)
+            logger.debug("持久化 full_access 失败", expl_info=True)
+
+    def _load_persisted_present_as(self, database: "Database | None") -> str:
+        """从用户级配置读取代码模式偏好（跨会话继承）。"""
+        if database is None:
+            return "native"
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            store = UserConfigStore(database.conn)
+            return store.get_present_as()
+        except Exception:
+            logger.debug("读取持久化 present_as 失败", expl_info=True)
+            return "native"
+
+    def _persist_present_as(self, mode: str) -> None:
+        """将代码模式偏好持久化到用户级配置（跨会话生效）。"""
+        if self._database is None:
+            return
+        try:
+            from excelmanus.stores.config_store import UserConfigStore
+            from excelmanus.tools.runtime import preferred_present_as
+            store = UserConfigStore(self._database.conn)
+            store.set_present_as(preferred_present_as(mode))
+        except Exception:
+            logger.debug("持久化 present_as 失败", expl_info=True)
 
     @property
     def subagent_enabled(self) -> bool:
@@ -1747,7 +1771,6 @@ class AgentEngine:
         approval_resolver: ApprovalResolver | None = None,
         question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
-        channel: str | None = None,
         present_as: str | None = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
@@ -1762,7 +1785,6 @@ class AgentEngine:
             approval_resolver=approval_resolver,
             question_resolver=question_resolver,
             chat_mode=chat_mode,
-            channel=channel,
             present_as=present_as,
         )
 

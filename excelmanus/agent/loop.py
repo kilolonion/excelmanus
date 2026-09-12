@@ -163,16 +163,19 @@ async def run_tool_loop(
         return ChatResult(**kwargs)
 
     max_failures = engine._config.max_consecutive_failures
+    max_iterations = engine._config.max_iterations
     consecutive_failures = 0
     all_tool_results: list[ToolCallResult] = []
     current_route_result = route_result
-    max_iterations = max(1, int(getattr(engine._config, "max_iterations", 50) or 50))
     # 恢复执行时保留之前的统计，仅首次调用时重置
     if start_iteration <= 1:
         engine._state.reset_loop_stats()
         if engine._tool_dispatcher is not None:
             engine._tool_dispatcher.reset_cancel()
-            engine._tool_dispatcher.begin_call_budget(max_iterations)
+            engine._tool_dispatcher.begin_call_budget(
+                max_iterations,
+                reason=f"已达到本轮工具调用上限 ({max_iterations})",
+            )
     tool_access = "may_write"
     # token 使用累计
     total_prompt_tokens = 0
@@ -181,21 +184,30 @@ async def run_tool_loop(
     engine._turn_diagnostics = []
 
     for iteration in count(start_iteration):
-        if iteration > max_iterations:
-            reply = f"已达到最大迭代次数（{max_iterations}），已终止执行。"
+        dispatcher = engine._tool_dispatcher
+        budget_dead = (
+            dispatcher is not None and not dispatcher.has_call_budget_remaining()
+        )
+        if iteration > max_iterations or budget_dead:
+            if iteration > max_iterations:
+                reply = f"已达到最大迭代次数 ({max_iterations})，已停止。"
+                done_iter = max_iterations
+            else:
+                reply = f"已达到本轮工具调用上限 ({max_iterations})，已停止。"
+                done_iter = max(start_iteration, iteration - 1)
             engine._memory.add_assistant_message(reply)
-            engine._last_iteration_count = max_iterations
-            logger.warning("已达到最大迭代次数 %d，终止执行", max_iterations)
-            logger.info("最终结果摘要: %s", _summarize_text(reply))
+            engine._last_iteration_count = done_iter
+            logger.warning("%s", reply)
             return _finalize_result(
                 reply=reply,
                 tool_calls=list(all_tool_results),
-                iterations=max_iterations,
+                iterations=done_iter,
                 truncated=True,
                 prompt_tokens=total_prompt_tokens,
                 completion_tokens=total_completion_tokens,
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
+
         driver = getattr(engine, "_driver", None)
         if driver is not None:
             driver.mark_step(iteration)
@@ -915,6 +927,7 @@ async def run_tool_loop(
                     if tc_result.success:
                         engine._last_success_count += 1
                         consecutive_failures = 0
+                        # 计划/只读 PERMISSION_DENIED 为失败，不会走到这里。
                         _write_effect = engine._get_tool_write_effect(tc_result.tool_name)
                         if _write_effect == "workspace_write":
                             engine._record_workspace_write_action()

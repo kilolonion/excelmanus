@@ -9,7 +9,6 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from dotenv import load_dotenv
 
 
 class ConfigError(Exception):
@@ -484,15 +483,14 @@ class ExcelManusConfig:
     api_key: str
     base_url: str
     model: str
-    protocol: str = "auto"  # 主模型协议类型：auto|openai|openai_responses|anthropic|gemini
-    max_iterations: int = 50
+    protocol: str = "auto"  # 激活模型协议类型：auto|openai|openai_responses|anthropic|gemini
+    max_iterations: int = 50  # 本轮 LLM 回合与工具调用上限（并行工具各计 1 次）
     max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
     workspace_root: str = "."
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
-    deploy_mode: str = "standalone"  # standalone|server|docker — 部署模式
-    public_url: str = ""  # 公开访问 URL（如 https://kilon.top），用于 Bot 渠道生成下载链接
+    deploy_mode: str = "standalone"  # standalone|server — 部署模式
     log_level: str = "INFO"
     skills_system_dir: str = "excelmanus/skillpacks/system"
     skills_user_dir: str = "~/.excelmanus/skillpacks"
@@ -509,7 +507,6 @@ class ExcelManusConfig:
     system_message_mode: str = "auto"
     tool_result_hard_cap_chars: int = 12000
     large_excel_threshold_bytes: int = 8 * 1024 * 1024
-    external_safe_mode: bool = True
     cors_allow_origins: tuple[str, ...] = (
         "http://localhost:3000",
     )
@@ -535,15 +532,9 @@ class ExcelManusConfig:
     cap_probe_vision_timeout: float = 20.0  # vision 探测超时（秒）
     cap_probe_thinking_total_timeout: float = 30.0  # thinking 总预算（秒）
     cap_probe_thinking_strategy_timeout: float = 8.0  # thinking 单策略上限（秒）
-    # AUX 配置（子代理默认模型、上下文压缩等附属任务）
-    aux_enabled: bool = True  # 开关：False 时即使配置了 AUX 也回退到主模型
-    aux_api_key: str | None = None
-    aux_base_url: str | None = None
-    aux_model: str | None = None
-    aux_protocol: str = "auto"  # 辅助模型协议类型
     # subagent 执行配置
     subagent_enabled: bool = True
-    subagent_max_iterations: int = 120
+    subagent_max_iterations: int = 120  # 子循环 LLM 回合与工具调用上限
     subagent_max_consecutive_failures: int = 6
     subagent_timeout_seconds: int = 600  # 单个子代理执行超时（秒）
     parallel_subagent_max: int = 3  # 并行子代理最大并发数
@@ -562,7 +553,7 @@ class ExcelManusConfig:
     memory_maintenance_min_entries: int = 10  # 至少多少条才值得维护
     memory_maintenance_new_threshold: int = 5  # 新增多少条后触发维护
     memory_maintenance_interval_hours: float = 4.0  # 两次维护最小间隔（小时）
-    memory_maintenance_model: str | None = None  # 维护用模型，默认 None → 使用 aux_model
+    memory_maintenance_model: str | None = None  # 维护用模型，默认 None → 使用激活模型
     # LLM 调用重试配置：遇到 5xx / 429 / 网络错误时自动重试
     llm_retry_max_attempts: int = 3          # 最大尝试次数（含首次）
     llm_retry_base_delay_seconds: float = 2.0  # 指数退避基准延迟（秒）
@@ -571,7 +562,7 @@ class ExcelManusConfig:
     max_context_tokens: int = 128_000
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
-    # 对话历史摘要：超阈值时用辅助模型压缩早期对话（需配置 aux_model）
+    # 对话历史摘要：超阈值时用激活模型压缩早期对话
     summarization_enabled: bool = False  # 旧式 summarize_and_trim（默认关，compaction 已覆盖）
     summarization_threshold_ratio: float = 0.8
     summarization_keep_recent_turns: int = 3
@@ -585,19 +576,15 @@ class ExcelManusConfig:
     hooks_command_allowlist: tuple[str, ...] = ()
     hooks_command_timeout_seconds: int = 10
     hooks_output_max_chars: int = 32000
-    # 视觉：图片只交给主模型
+    # 视觉：图片只交给激活模型
     image_keep_rounds: int = 3  # 图片保持完整 base64 的最小轮数
     image_max_active: int = 2  # 同时保持高清的最大图片数（LRU 淘汰）
     image_token_budget: int = 6000  # 图片 token 总预算
-    main_model_vision: str = "auto"  # 主模型视觉能力：auto/true/false
-    # 备份沙盒模式：默认开启，所有文件操作重定向到 outputs/backups/ 副本
-    backup_enabled: bool = True
-    # 轮次 checkpoint 模式：每轮工具调用结束后自动快照被修改文件，支持按轮回退
-    checkpoint_enabled: bool = False
+    main_model_vision: str = "auto"  # 激活模型视觉能力：auto/true/false
     # 代码策略引擎配置
     code_policy_enabled: bool = True
     code_policy_green_auto_approve: bool = True
-    code_policy_yellow_auto_approve: bool = True
+    code_policy_yellow_auto_approve: bool = False
     code_policy_extra_safe_modules: tuple[str, ...] = ()
     code_policy_extra_blocked_modules: tuple[str, ...] = ()
     # 工具参数 schema 校验（off/shadow/enforce）
@@ -627,8 +614,6 @@ class ExcelManusConfig:
     registry_semantic_threshold: float = 0.25
     # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
     db_path: str = "~/.excelmanus/excelmanus.db"
-    # PostgreSQL 连接 URL（设置后优先使用 PG，忽略 db_path）
-    database_url: str = ""
     # 聊天记录持久化
     chat_history_enabled: bool = True
     chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
@@ -649,13 +634,8 @@ class ExcelManusConfig:
 
     @property
     def is_server(self) -> bool:
-        """前后端分离的服务器部署（含 Docker）。"""
-        return self.deploy_mode in ("server", "docker")
-
-    @property
-    def is_docker(self) -> bool:
-        """Docker 容器化部署。"""
-        return self.deploy_mode == "docker"
+        """前后端分离的服务器部署。"""
+        return self.deploy_mode == "server"
 
 
 @dataclass(frozen=True)
@@ -674,16 +654,13 @@ class _ContextOptimizationConfig:
 
 
 def load_runtime_env() -> None:
-    """加载配置文件（不覆盖已存在环境变量）。
+    """加载配置文件。空字符串视为未设置。
 
-    优先级: 环境变量 > 项目目录 .env > ~/.excelmanus/config.env
+    优先级: 非空进程环境 > cwd .env > 项目根 .env > $EXCELMANUS_HOME/config.env
     """
-    # 1. 先加载项目 .env（高优先级，不覆盖真实环境变量）
-    dotenv_path = Path.cwd() / ".env"
-    load_dotenv(dotenv_path=dotenv_path, override=False)
-    # 2. 再注入集中配置（最低优先级，不覆盖已有值）
-    from excelmanus.data_home import inject_centralized_config
-    inject_centralized_config()
+    from excelmanus.data_home import load_runtime_env as _load_runtime_env
+
+    _load_runtime_env()
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -983,7 +960,8 @@ def _parse_protocol(value: str | None, name: str = "protocol") -> str:
 def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) -> tuple[ModelProfile, ...]:
     """解析 EXCELMANUS_MODELS 环境变量（JSON 数组）。
 
-    每个元素必须包含 name 和 model，api_key/base_url 可省略（回退到主配置）。
+    每个元素必须包含 name 和 model；省略的 api_key/base_url 使用
+    EXCELMANUS_API_KEY / EXCELMANUS_BASE_URL（仅用于首次启动迁移）。
     """
     if not raw or not raw.strip():
         return ()
@@ -1028,24 +1006,7 @@ def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) 
 
 
 def _detect_deploy_mode() -> str:
-    """自动推断部署模式：docker > standalone。`server` 仍可通过环境变量显式指定。
-
-    检测优先级：
-    1. Docker 容器（/.dockerenv 或 /proc/1/cgroup 含 docker/containerd）
-    2. 默认单机模式（非 Docker 即 standalone）
-    """
-    # Docker 容器检测
-    try:
-        if Path("/.dockerenv").exists():
-            return "docker"
-        cgroup = Path("/proc/1/cgroup")
-        if cgroup.is_file():
-            content = cgroup.read_text(encoding="utf-8", errors="ignore")
-            if "docker" in content or "containerd" in content or "kubepods" in content:
-                return "docker"
-    except Exception:
-        pass
-
+    """自动推断部署模式。默认 standalone；server 只能通过环境变量显式指定。"""
     return "standalone"
 
 
@@ -1132,9 +1093,9 @@ def _load_context_optimization_config(model: str = "") -> _ContextOptimizationCo
 
 
 def load_config() -> ExcelManusConfig:
-    """加载配置。优先级：环境变量 > .env 文件 > 默认值。
+    """加载配置。优先级：非空进程环境 > cwd .env > 项目 .env > config.env > 默认值。
 
-    API Key 为必填项，缺失时抛出 ConfigError。
+    API Key 为必填项，缺失时抛出 ConfigError。空的 ``KEY=`` 不会挡住正式仓里的值。
     """
     load_runtime_env()
 
@@ -1163,7 +1124,7 @@ def load_config() -> ExcelManusConfig:
         )
     _validate_base_url(base_url)
 
-    # 主模型协议类型（提前解析，供 _normalize_base_url 使用）
+    # 模型协议类型（提前解析，供 _normalize_base_url 使用）
     protocol = _parse_protocol(
         os.environ.get("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL"
     )
@@ -1207,10 +1168,10 @@ def load_config() -> ExcelManusConfig:
 
     # 部署模式推断
     deploy_mode_raw = os.environ.get("EXCELMANUS_DEPLOY_MODE", "auto").strip().lower()
-    if deploy_mode_raw in ("standalone", "server", "docker"):
+    if deploy_mode_raw in ("standalone", "server"):
         deploy_mode = deploy_mode_raw
     else:
-        # auto 推断
+        # auto / 未知值（含已废弃的 docker）都走 standalone
         deploy_mode = _detect_deploy_mode()
     log_level = _parse_log_level(os.environ.get("EXCELMANUS_LOG_LEVEL"))
     default_system_skill_dir = (
@@ -1280,11 +1241,6 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES",
         8 * 1024 * 1024,
     )
-    external_safe_mode = _parse_bool(
-        os.environ.get("EXCELMANUS_EXTERNAL_SAFE_MODE"),
-        "EXCELMANUS_EXTERNAL_SAFE_MODE",
-        True,
-    )
     cors_allow_origins = _parse_cors_allow_origins()
     mcp_shared_manager = _parse_bool(
         os.environ.get("EXCELMANUS_MCP_SHARED_MANAGER"),
@@ -1347,25 +1303,6 @@ def load_config() -> ExcelManusConfig:
     cap_probe_thinking_total_timeout = float(os.environ.get("CAP_PROBE_THINKING_TOTAL_TIMEOUT", "30"))
     cap_probe_thinking_strategy_timeout = float(os.environ.get("CAP_PROBE_THINKING_STRATEGY_TIMEOUT", "8"))
 
-    # AUX 配置（统一配置）
-    aux_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_AUX_ENABLED"),
-        "EXCELMANUS_AUX_ENABLED",
-        True,
-    )
-    aux_api_key = os.environ.get("EXCELMANUS_AUX_API_KEY") or None
-    aux_base_url = os.environ.get("EXCELMANUS_AUX_BASE_URL") or None
-    if aux_base_url:
-        _validate_base_url(aux_base_url)
-    aux_model = os.environ.get("EXCELMANUS_AUX_MODEL") or None
-    if aux_model:
-        _log_deprecated_model_warning("EXCELMANUS_AUX_MODEL", aux_model)
-    aux_protocol = _parse_protocol(
-        os.environ.get("EXCELMANUS_AUX_PROTOCOL"), "EXCELMANUS_AUX_PROTOCOL"
-    )
-    if aux_base_url:
-        aux_base_url = _normalize_base_url(aux_base_url, protocol=aux_protocol, env_name="EXCELMANUS_AUX_BASE_URL", model=aux_model or "", api_key=aux_api_key or "")
-
     # subagent 执行配置
     subagent_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_SUBAGENT_ENABLED"),
@@ -1418,7 +1355,7 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
         200,
     )
-    memory_auto_extract_interval = _parse_int(
+    memory_auto_extract_interval = _parse_int_allow_zero(
         os.environ.get("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL"),
         "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
         0,
@@ -1453,20 +1390,6 @@ def load_config() -> ExcelManusConfig:
         )
         main_model_vision = "auto"
 
-    # 备份沙盒模式
-    backup_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_BACKUP_ENABLED"),
-        "EXCELMANUS_BACKUP_ENABLED",
-        True,
-    )
-
-    # 轮次 checkpoint 模式
-    checkpoint_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_CHECKPOINT_ENABLED"),
-        "EXCELMANUS_CHECKPOINT_ENABLED",
-        False,
-    )
-
     # 代码策略引擎配置
     code_policy_enabled = _parse_bool(
         os.environ.get("EXCELMANUS_CODE_POLICY_ENABLED"),
@@ -1481,7 +1404,7 @@ def load_config() -> ExcelManusConfig:
     code_policy_yellow_auto_approve = _parse_bool(
         os.environ.get("EXCELMANUS_CODE_POLICY_YELLOW_AUTO"),
         "EXCELMANUS_CODE_POLICY_YELLOW_AUTO",
-        True,
+        False,
     )
     code_policy_extra_safe_modules = _parse_csv_tuple(
         os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_SAFE")
@@ -1593,10 +1516,14 @@ def load_config() -> ExcelManusConfig:
         "EXCELMANUS_CHAT_HISTORY_ENABLED",
         True,
     )
-    db_path = os.environ.get(
-        "EXCELMANUS_DB_PATH", "~/.excelmanus/excelmanus.db"
-    )
-    database_url = os.environ.get("EXCELMANUS_DATABASE_URL", "")
+    from excelmanus.data_home import get_default_db_path
+
+    db_path = os.environ.get("EXCELMANUS_DB_PATH", "").strip() or str(get_default_db_path())
+    leftover_pg_url = os.environ.get("EXCELMANUS_DATABASE_URL", "").strip()
+    if leftover_pg_url:
+        logger.warning(
+            "EXCELMANUS_DATABASE_URL 已废弃并被忽略；ExcelManus 仅使用 SQLite（EXCELMANUS_DB_PATH）"
+        )
     chat_history_db_path = os.environ.get(
         "EXCELMANUS_CHAT_HISTORY_DB_PATH", ""
     )
@@ -1639,7 +1566,6 @@ def load_config() -> ExcelManusConfig:
         workspace_root=workspace_root,
         data_root=data_root,
         deploy_mode=deploy_mode,
-        public_url=os.environ.get("EXCELMANUS_PUBLIC_URL", "").rstrip("/"),
         log_level=log_level,
         skills_system_dir=skills_system_dir,
         skills_user_dir=skills_user_dir,
@@ -1656,7 +1582,6 @@ def load_config() -> ExcelManusConfig:
         system_message_mode=system_message_mode,
         tool_result_hard_cap_chars=tool_result_hard_cap_chars,
         large_excel_threshold_bytes=large_excel_threshold_bytes,
-        external_safe_mode=external_safe_mode,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
         pool_enabled=pool_enabled,
@@ -1679,11 +1604,6 @@ def load_config() -> ExcelManusConfig:
         cap_probe_vision_timeout=cap_probe_vision_timeout,
         cap_probe_thinking_total_timeout=cap_probe_thinking_total_timeout,
         cap_probe_thinking_strategy_timeout=cap_probe_thinking_strategy_timeout,
-        aux_enabled=aux_enabled,
-        aux_api_key=aux_api_key,
-        aux_base_url=aux_base_url,
-        aux_model=aux_model,
-        aux_protocol=aux_protocol,
         subagent_enabled=subagent_enabled,
         parallel_readonly_tools=parallel_readonly_tools,
         subagent_max_iterations=subagent_max_iterations,
@@ -1710,8 +1630,6 @@ def load_config() -> ExcelManusConfig:
         hooks_command_timeout_seconds=hooks_command_timeout_seconds,
         hooks_output_max_chars=hooks_output_max_chars,
         main_model_vision=main_model_vision,
-        backup_enabled=backup_enabled,
-        checkpoint_enabled=checkpoint_enabled,
         code_policy_enabled=code_policy_enabled,
         code_policy_green_auto_approve=code_policy_green_auto_approve,
         code_policy_yellow_auto_approve=code_policy_yellow_auto_approve,
@@ -1739,7 +1657,6 @@ def load_config() -> ExcelManusConfig:
         registry_semantic_top_k=registry_semantic_top_k,
         registry_semantic_threshold=registry_semantic_threshold,
         db_path=db_path,
-        database_url=database_url,
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
         cli_layout_mode=cli_layout_mode,

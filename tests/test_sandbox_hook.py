@@ -150,8 +150,11 @@ class TestGreenSandbox:
         out = workspace / "output.txt"
         code = f"with open(r'{out}', 'w') as f:\n    f.write('hello')\nprint('done')"
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        assert out.read_text() == "hello"
+        assert result.returncode == 0, result.stderr
+        assert not out.exists()
+        pending = list((workspace / ".excelmanus" / "pending").rglob("*_output.txt"))
+        assert pending
+        assert pending[0].read_text(encoding="utf-8") == "hello"
 
     def test_file_write_outside_workspace_blocked(self, workspace: Path) -> None:
         # 写入一个不存在的路径（不在工作区内，也不在系统临时目录下）
@@ -298,11 +301,7 @@ class TestWrapperPreservesSemantics:
 
 
 class TestSaveContentVersion:
-    """P3：sandbox Workbook.save 记录 sha256 content_version。
-
-    覆盖已有文件时，若宿主传入 EXCELMANUS_EXPECTED_VERSIONS 则比较哈希。
-    不导入 workbook_commit。未传环境变量时行为与原先一致。
-    """
+    """Sandbox Workbook.save 只把表格写到本 run 的 pending，CAS 由宿主负责。"""
 
     def test_wrapper_has_save_versions_without_workbook_commit(self) -> None:
         for tier in ("GREEN", "YELLOW", "RED"):
@@ -322,6 +321,7 @@ class TestSaveContentVersion:
             assert "manifest.jsonl" in src
             assert "EXCELMANUS_PENDING_RUN_ID" in src
             assert "_check_expected_version" not in src
+            assert "_EXPECTED_VERSIONS" not in src
 
     def test_existing_file_save_conflicts_when_expected_stale(self, workspace: Path) -> None:
         from openpyxl import Workbook
@@ -545,4 +545,136 @@ class TestYellowIoWrappers:
         result = _run_in_sandbox(workspace, code, "YELLOW")
         assert result.returncode == 0, result.stderr
         assert dest.read_bytes() == b"keep-xlsx"
+
+
+    def test_path_write_text_csv_does_not_touch_original(self, workspace: Path) -> None:
+        target = workspace / "a.csv"
+        target.write_text("old,csv\n", encoding="utf-8")
+        code = (
+            "from pathlib import Path\n"
+            f"Path(r'{target}').write_text('new,csv\\n', encoding='utf-8')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "YELLOW")
+        assert result.returncode == 0, result.stderr
+        assert target.read_text(encoding="utf-8") == "old,csv\n"
+
+    def test_csv_pending_publishes_via_cas(self, workspace: Path) -> None:
+        from excelmanus.workspace.runtime import (
+            prepare_pending_run_dir,
+            publish_pending_writes,
+        )
+
+        target = workspace / "notes.md"
+        target.write_text("keep\n", encoding="utf-8")
+        seen = _sha256_version(target)
+        run_id = "cccccccccccccccc"
+        pending_dir = prepare_pending_run_dir(workspace, run_id)
+        code = (
+            "from pathlib import Path\n"
+            f"Path(r'{target}').write_text('published\\n', encoding='utf-8')\n"
+        )
+        result = _run_in_sandbox(
+            workspace,
+            code,
+            "YELLOW",
+            env_override={
+                "EXCELMANUS_PENDING_RUN_ID": run_id,
+                "EXCELMANUS_PENDING_DIR": str(pending_dir),
+            },
+        )
+        assert result.returncode == 0, result.stderr
+        assert target.read_text(encoding="utf-8") == "keep\n"
+        published = publish_pending_writes(
+            workspace,
+            run_id=run_id,
+            expected_versions={"notes.md": seen},
+        )
+        assert published, "md write should land in pending manifest"
+        assert published[0]["status"] == "committed"
+        assert target.read_text(encoding="utf-8") == "published\n"
+
+    def test_tmp_write_stays_live(self, workspace: Path) -> None:
+        tmp = workspace / ".tmp"
+        tmp.mkdir()
+        dest = tmp / "scratch.txt"
+        code = (
+            "from pathlib import Path\n"
+            f"Path(r'{dest}').write_text('ephemeral', encoding='utf-8')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0, result.stderr
+        assert dest.read_text(encoding="utf-8") == "ephemeral"
+
+
+class TestPendingIsolation:
+    def test_cannot_write_sibling_run_pending(self, workspace: Path) -> None:
+        run_a = "aaaaaaaaaaaaaaaa"
+        run_b = "bbbbbbbbbbbbbbbb"
+        from excelmanus.workspace.runtime import prepare_pending_run_dir, publish_pending_writes
+
+        a_dir = prepare_pending_run_dir(workspace, run_a)
+        victim = a_dir / "aabbccddeeff0011_book.xlsx"
+        victim.write_bytes(b"from-A")
+        (a_dir / "manifest.jsonl").write_text(
+            json.dumps({"rel": "book.xlsx", "name": victim.name}) + "\n",
+            encoding="utf-8",
+        )
+        original = victim.read_bytes()
+
+        code = (
+            "from pathlib import Path\n"
+            f"p = Path(r'{a_dir / 'manifest.jsonl'}')\n"
+            "p.write_text('{\"rel\":\"book.xlsx\",\"name\":\"hijack\"}\\n', encoding='utf-8')\n"
+            f"Path(r'{victim}').write_bytes(b'from-B')\n"
+        )
+        result = _run_in_sandbox(
+            workspace,
+            code,
+            "GREEN",
+            env_override={
+                "EXCELMANUS_PENDING_RUN_ID": run_b,
+                "EXCELMANUS_PENDING_DIR": str(
+                    prepare_pending_run_dir(workspace, run_b)
+                ),
+            },
+        )
+        assert result.returncode != 0
+        assert victim.read_bytes() == original
+        published = publish_pending_writes(
+            workspace, run_id=run_a, expected_versions={},
+        )
+        dest = workspace / "book.xlsx"
+        assert dest.read_bytes() == b"from-A"
+        assert published[0]["status"] == "committed"
+
+    def test_os_symlink_blocked(self, workspace: Path) -> None:
+        code = (
+            "import os\n"
+            f"os.symlink(r'{workspace / 'a.txt'}', r'{workspace / 'link.txt'}')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "安全策略禁止" in result.stderr
+        assert not (workspace / "link.txt").exists()
+
+    def test_rel_of_does_not_basename_sibling_workspace(self, workspace: Path) -> None:
+        evil = workspace.parent / (workspace.name + "-evil")
+        evil.mkdir()
+        target = evil / "book.xlsx"
+        code = (
+            "from openpyxl import Workbook\n"
+            "wb = Workbook()\n"
+            "wb.active['A1'] = 'stolen'\n"
+            f"wb.save(r'{target}')\n"
+        )
+        try:
+            result = _run_in_sandbox(workspace, code, "GREEN")
+            assert result.returncode != 0
+            assert not target.exists()
+            assert _parse_pending_writes(result.stderr) == []
+        finally:
+            if target.exists():
+                target.unlink()
+            if evil.exists():
+                evil.rmdir()
 

@@ -4,17 +4,15 @@ import {
   FolderOpen,
   Copy,
   Brain,
-  Download,
-  ChevronDown,
-  ChevronRight,
-  Upload,
 } from "lucide-react";
+import { CodePreviewModal, isCodeFile } from "../CodePreviewModal";
+import { RelatedFilesCard, isExcelFilename } from "../FileCapsule";
 import { UndoableCard } from "../UndoableCard";
-import { ApplyPanel } from "../ApplyPanel";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
+import { useExcelStore } from "@/stores/excel-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl, downloadFile } from "@/lib/api";
+import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import type { AssistantBlock } from "@/lib/types";
 import { useCallback, useState } from "react";
@@ -185,90 +183,55 @@ export function MemoryExtractedBlock({
 
 export function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { type: "file_download" }> }) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const openPanel = useExcelStore((s) => s.openPanel);
+  const addRecentFile = useExcelStore((s) => s.addRecentFile);
+  const [previewOpen, setPreviewOpen] = useState(false);
+  const excel = isExcelFilename(block.filename);
+  const previewable = !excel && isCodeFile(block.filename);
+
+  const handleOpen = useCallback(() => {
+    if (excel) {
+      const normalized = normalizeExcelPath(block.filePath);
+      addRecentFile({ path: normalized, filename: block.filename });
+      openPanel(normalized);
+      return;
+    }
+    if (previewable) {
+      setPreviewOpen(true);
+      return;
+    }
+    downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
+  }, [excel, previewable, block.filePath, block.filename, activeSessionId, addRecentFile, openPanel]);
+
   const handleDownload = useCallback(() => {
     downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
   }, [block.filePath, block.filename, activeSessionId]);
 
   return (
-    <button
-      type="button"
-      onClick={handleDownload}
-      className="group/card flex items-center gap-0 w-full my-1 rounded-lg text-left cursor-pointer transition-all duration-200 border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:shadow-sm overflow-hidden"
-      title={`下载 ${block.filename}`}
-    >
-      {/* 左侧强调条 */}
-      <div className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg" style={{ backgroundColor: "var(--em-primary)" }} />
-
-      <div className="flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5">
-        {/* 圆形图标徽章 */}
-        <span className="flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 bg-[var(--em-primary-alpha-15)]">
-          <Download className="h-3 w-3 text-[var(--em-primary)]" />
-        </span>
-
-        {/* 文件名胶囊 */}
-        <span className="inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium flex-shrink-0 bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]">
-          {block.filename}
-        </span>
-
-        {/* 描述预览 */}
-        {block.description && (
-          <span className="text-[10px] text-muted-foreground/70 truncate min-w-0">
-            {block.description}
-          </span>
-        )}
-
-        {/* 右侧 */}
-        <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
-          <span className="text-[10px] text-muted-foreground opacity-0 group-hover/card:opacity-100 transition-opacity">
-            点击下载
-          </span>
-          <ChevronDown className="h-3 w-3 text-muted-foreground/50 group-hover/card:text-muted-foreground/70 transition-colors" />
-        </span>
-      </div>
-    </button>
+    <div className="my-1.5">
+      <RelatedFilesCard
+        files={[
+          {
+            key: block.filePath,
+            filename: block.filename,
+            filePath: block.filePath,
+            onOpen: handleOpen,
+            onDownload: handleDownload,
+          },
+        ]}
+      />
+      {previewable && (
+        <CodePreviewModal
+          filePath={block.filePath}
+          filename={block.filename}
+          open={previewOpen}
+          onOpenChange={setPreviewOpen}
+        />
+      )}
+    </div>
   );
 }
 
-export function StagingHintCard({ pendingCount, files }: { pendingCount: number; files: string[] }) {
-  const [panelOpen, setPanelOpen] = useState(false);
-  const fileName = (p: string) => p.split("/").pop() || p;
-
-  return (
-    <>
-      <button
-        onClick={() => setPanelOpen(true)}
-        className="group/card flex items-center gap-0 w-full my-1 rounded-lg border border-blue-200 dark:border-blue-800 bg-blue-50/50 dark:bg-blue-950/20 text-sm hover:bg-blue-100/60 dark:hover:bg-blue-900/30 hover:shadow-sm transition-all duration-200 overflow-hidden cursor-pointer"
-      >
-        {/* 左侧强调条 */}
-        <div className="self-stretch w-[3px] flex-shrink-0 rounded-l-lg bg-blue-500" />
-
-        <div className="flex items-center gap-2 flex-1 min-w-0 px-2.5 py-1.5">
-          {/* 圆形图标徽章 */}
-          <span className="flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 bg-blue-500/10 dark:bg-blue-400/15">
-            <Upload className="h-3 w-3 text-blue-600 dark:text-blue-400" />
-          </span>
-
-          {/* 数量胶囊 */}
-          <span className="inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium flex-shrink-0 bg-blue-500/8 dark:bg-blue-400/10 text-blue-700 dark:text-blue-300">
-            {pendingCount} 个文件待应用
-          </span>
-
-          {/* 文件名预览 */}
-          <span className="text-[10px] text-blue-600/60 dark:text-blue-400/50 truncate min-w-0">
-            {files.slice(0, 2).map(fileName).join("、")}
-            {files.length > 2 && ` 等${files.length}个`}
-          </span>
-
-          {/* 右侧 */}
-          <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
-            <span className="text-[11px] font-medium text-blue-600 dark:text-blue-400">
-              查看
-            </span>
-            <ChevronRight className="h-3 w-3 text-blue-400/50 group-hover/card:translate-x-0.5 transition-transform" />
-          </span>
-        </div>
-      </button>
-      <ApplyPanel open={panelOpen} onOpenChange={setPanelOpen} />
-    </>
-  );
+export function StagingHintCard({ pendingCount: _pendingCount, files: _files }: { pendingCount: number; files: string[] }) {
+  return null;
 }

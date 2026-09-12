@@ -1,7 +1,7 @@
 """Tests for deploy improvements (Issues 15, 16, 17).
 
 Issue 15: Version fingerprint-based restart detection
-Issue 16: Rollback panel / canary UI enhancements (backend API)
+Issue 16: Deploy log retrieval
 Issue 17: Cross-machine deploy lock
 """
 
@@ -193,53 +193,8 @@ class TestGetDeployStatusLockInfo:
 
 
 # ═══════════════════════════════════════════════════════════
-# Issue 16: canary_start / get_deploy_log
+# Issue 16: get_deploy_log
 # ═══════════════════════════════════════════════════════════
-
-
-class TestCanaryStart:
-    """Test canary_start function."""
-
-    def test_no_deploy_script(self, tmp_path: Path):
-        from excelmanus.updater import canary_start
-
-        result = canary_start(tmp_path)
-        assert result["success"] is False
-        assert "deploy.sh" in result["error"]
-
-    def test_already_active(self, tmp_path: Path):
-        deploy_dir = tmp_path / "deploy"
-        deploy_dir.mkdir(parents=True)
-        (deploy_dir / "deploy.sh").write_text("#!/bin/bash\necho ok")
-        canary_file = deploy_dir / ".deploy_canary.json"
-        canary_file.write_text(json.dumps({"active": True}))
-
-        from excelmanus.updater import canary_start
-
-        result = canary_start(tmp_path)
-        assert result["success"] is False
-        assert "已有灰度" in result["error"]
-
-    def test_start_success(self, tmp_path: Path):
-        deploy_dir = tmp_path / "deploy"
-        deploy_dir.mkdir(parents=True)
-        (deploy_dir / "deploy.sh").write_text("#!/bin/bash\necho ok")
-
-        from excelmanus.updater import canary_start
-
-        with patch("subprocess.run") as mock_run:
-            mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
-            result = canary_start(tmp_path, target="backend", observe_seconds=30)
-
-        assert result["success"] is True
-        # Verify --canary and --backend-only flags
-        cmd = mock_run.call_args[0][0]
-        assert "--canary" in cmd
-        assert "--backend-only" in cmd
-        assert "--canary-observe" in cmd
-
-
-class TestGetDeployLog:
     """Test get_deploy_log function."""
 
     def test_empty_release_id(self, tmp_path: Path):

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excelmanus"
-version = "1.7.2"
+version = "1.7.3"
 description = "基于大语言模型的 Excel 智能代理框架，支持 CLI / API 双模式运行"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -37,9 +37,7 @@ cli = [
 web = [
     "fastapi>=0.100.0",
     "uvicorn>=0.23.0",
-    "python-jose[cryptography]>=3.3.0",
     "python-multipart>=0.0.6",
-    "psycopg2-binary>=2.9.0",
 ]
 dev = [
     "pytest>=7.0.0",
@@ -50,16 +48,6 @@ dev = [
     "hypothesis>=6.0.0",
     "pyright>=1.1.400",
 ]
-telegram = [
-    "python-telegram-bot>=20.0",
-]
-qq = [
-    "qq-botpy>=1.0.0",
-]
-feishu = [
-    "lark-oapi>=1.0.0",
-    "httpx>=0.24.0",
-]
 vba = [
     "oletools>=0.60.0",
 ]
@@ -69,15 +57,9 @@ analysis = [
     "plotly>=5.18.0",
     "scipy>=1.11.0",
 ]
-channels = [
-    "excelmanus[telegram]",
-    "excelmanus[qq]",
-    "excelmanus[feishu]",
-]
 all = [
     "excelmanus[cli]",
     "excelmanus[web]",
-    "excelmanus[channels]",
     "excelmanus[analysis]",
 ]
 

@@ -128,6 +128,15 @@ class TestPresentAsNormalize:
         engine._current_chat_mode = "write"
         assert present_as_of(engine) == "code"
 
+    def test_set_present_as_preference_keeps_code_in_plan(self) -> None:
+        from excelmanus.tools.runtime import set_present_as_preference
+
+        engine = SimpleNamespace(_present_as="native", _current_chat_mode="plan", _tools_cache=["x"])
+        assert set_present_as_preference(engine, "code") == "code"
+        assert engine._present_as == "code"
+        assert present_as_of(engine) == "native"
+        assert engine._tools_cache is None
+
     def test_present_rejects_both(self) -> None:
         runtime = _runtime(present_as="native")
         with pytest.raises(ValueError, match="unknown present_as"):
@@ -192,6 +201,16 @@ class TestConcurrency:
         )
         runtime.engine.get_tool_write_effect = lambda _name: "unknown"
         assert runtime.is_concurrency_safe("mcp_excel_write", {}) is False
+
+    def test_mcp_default_allow_is_not_parallel(self) -> None:
+        runtime = _runtime()
+        runtime.engine.get_tool_write_effect = lambda _name: "unknown"
+        assert runtime.is_concurrency_safe("mcp_context7_query_docs", {}) is False
+
+    def test_mcp_readonly_effect_still_not_parallel_unless_listed(self) -> None:
+        runtime = _runtime()
+        runtime.engine.get_tool_write_effect = lambda _name: "none"
+        assert runtime.is_concurrency_safe("mcp_exa_web_search", {}) is False
 
 
 class TestFinalizeContent:

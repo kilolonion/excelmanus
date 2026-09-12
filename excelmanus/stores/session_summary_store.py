@@ -1,7 +1,7 @@
-"""SessionSummaryStore — 会话摘要持久化存储（SQLite / PostgreSQL）。
+"""SessionSummaryStore — 会话摘要持久化存储。
 
 提供 CRUD、按 user_id 查询、语义检索（embedding）、文件名匹配等能力。
-Schema 由 Database 迁移系统统一管理（migration 20）。
+Schema 由 Database 迁移系统统一管理。
 """
 
 from __future__ import annotations

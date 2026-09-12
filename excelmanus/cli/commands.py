@@ -143,7 +143,6 @@ DECLARED_SLASH_COMMAND_ALIASES: tuple[str, ...] = tuple(
 SLASH_COMMANDS = frozenset(DECLARED_SLASH_COMMAND_ALIASES)
 
 FULL_ACCESS_ALIASES = _aliases_for("/fullaccess")
-BACKUP_ALIASES = _aliases_for("/backup")
 SUBAGENT_ALIASES = _aliases_for("/subagent")
 APPROVAL_ALIASES = (
     _aliases_for("/accept")
@@ -836,44 +835,34 @@ def dotenv_path(workspace_root: str = ".") -> Path:
 
 
 def dotenv_set(dotenv_file: Path, key: str, value: str) -> None:
-    """在 .env 文件中设置或更新一个键值对。"""
-    lines = _read_dotenv_lines(dotenv_file)
-    pattern = re.compile(rf"^{re.escape(key)}\s*=")
-    new_line = f"{key}={value}"
-    replaced = False
-    for i, line in enumerate(lines):
-        if pattern.match(line):
-            lines[i] = new_line
-            replaced = True
-            break
-    if not replaced:
-        if lines and lines[-1].strip():
-            lines.append("")
-        lines.append(new_line)
-    _write_dotenv_lines(dotenv_file, lines)
+    """在正式仓设置键值，并同步到给定的 .env 文件。"""
+    from excelmanus.data_home import get_config_env_path, persist_env_updates, upsert_env_file
+
+    persist_env_updates({key: value})
+    try:
+        if dotenv_file.resolve() != get_config_env_path().resolve():
+            upsert_env_file(dotenv_file, {key: value})
+    except OSError:
+        upsert_env_file(dotenv_file, {key: value})
     os.environ[key] = value
 
 
 def dotenv_delete(dotenv_file: Path, key: str) -> bool:
-    """从 .env 文件中删除一个键。"""
-    lines = _read_dotenv_lines(dotenv_file)
-    pattern = re.compile(rf"^{re.escape(key)}\s*=")
-    new_lines = [line for line in lines if not pattern.match(line)]
-    if len(new_lines) == len(lines):
-        return False
-    _write_dotenv_lines(dotenv_file, new_lines)
-    os.environ.pop(key, None)
-    return True
+    """从正式仓和给定 .env 删除一个键。"""
+    from excelmanus.data_home import get_config_env_path, parse_env_file, persist_env_updates, upsert_env_file
 
-
-def _read_dotenv_lines(dotenv_file: Path) -> list[str]:
-    if not dotenv_file.is_file():
-        return []
-    return dotenv_file.read_text(encoding="utf-8").splitlines()
-
-
-def _write_dotenv_lines(dotenv_file: Path, lines: list[str]) -> None:
-    dotenv_file.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    existed = (
+        key in parse_env_file(dotenv_file)
+        or key in parse_env_file(get_config_env_path())
+        or bool(os.environ.get(key))
+    )
+    persist_env_updates({key: ""})
+    try:
+        if dotenv_file.is_file() and dotenv_file.resolve() != get_config_env_path().resolve():
+            upsert_env_file(dotenv_file, {key: ""})
+    except OSError:
+        pass
+    return existed
 
 
 def handle_config_command(
@@ -982,7 +971,7 @@ def _handle_config_export(
     user_input: str,
     workspace_root: str = ".",
 ) -> bool:
-    """处理 /config export [--simple] [--sections main,aux,profiles]。"""
+    """处理 /config export [--simple] [--sections embedding,profiles]。"""
     from getpass import getpass
 
     from excelmanus.config import load_config
@@ -990,7 +979,7 @@ def _handle_config_export(
 
     parts = user_input.split()
     mode = "password"
-    section_names = ["main", "aux", "profiles"]
+    section_names = ["embedding", "profiles"]
 
     idx = 2  # 跳过 "/config export"
     while idx < len(parts):
@@ -1008,10 +997,13 @@ def _handle_config_export(
         return True
 
     sections: dict = {}
-    if "main" in section_names:
-        sections["main"] = {"api_key": cfg.api_key, "base_url": cfg.base_url, "model": cfg.model, "protocol": cfg.protocol}
-    if "aux" in section_names:
-        sections["aux"] = {"api_key": cfg.aux_api_key or "", "base_url": cfg.aux_base_url or "", "model": cfg.aux_model or "", "protocol": cfg.aux_protocol}
+    if "embedding" in section_names:
+        sections["embedding"] = {
+            "api_key": cfg.embedding_api_key or "",
+            "base_url": cfg.embedding_base_url or "",
+            "model": cfg.embedding_model or "",
+            "enabled": cfg.embedding_enabled,
+        }
     if "profiles" in section_names:
         profiles = [
             {"name": p.name, "model": p.model, "api_key": p.api_key, "base_url": p.base_url, "description": p.description, "protocol": p.protocol}
@@ -1097,11 +1089,15 @@ def _handle_config_import(
     imported_items: list[str] = []
 
     _ENV_KEY_MAP = {
-        "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL", "protocol": "EXCELMANUS_PROTOCOL"},
-        "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "protocol": "EXCELMANUS_AUX_PROTOCOL"},
+        "embedding": {
+            "api_key": "EXCELMANUS_EMBEDDING_API_KEY",
+            "base_url": "EXCELMANUS_EMBEDDING_BASE_URL",
+            "model": "EXCELMANUS_EMBEDDING_MODEL",
+            "enabled": "EXCELMANUS_EMBEDDING_ENABLED",
+        },
     }
 
-    for section_key in ("main", "aux"):
+    for section_key in ("embedding",):
         data = sections.get(section_key)
         if not isinstance(data, dict):
             continue
@@ -1110,6 +1106,8 @@ def _handle_config_import(
             val = data.get(field)
             if val and isinstance(val, str) and field in key_map:
                 dotenv_set(df, key_map[field], val)
+        if "enabled" in data and "enabled" in key_map:
+            dotenv_set(df, key_map["enabled"], "true" if data["enabled"] else "false")
         imported_items.append(section_key)
 
     profiles = sections.get("profiles")

@@ -240,7 +240,6 @@ class TestGetOperationDetail:
 
         with (
             patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)),
-            patch.object(sessions_mod, "_is_external_safe_mode", return_value=False),
         ):
             resp = await client.get("/api/v1/sessions/sess-1/operations/apv_test_001")
         assert resp.status_code == 200

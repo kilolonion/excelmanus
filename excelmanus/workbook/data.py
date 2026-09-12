@@ -999,6 +999,15 @@ def _finalize_read_excel_result(
             f"前 {sample_n} 行样本："
             f"{json.dumps(preview[:sample_n], ensure_ascii=False, default=str)}"
         )
+    if summary.get("include_warning"):
+        lines.append(f"⚠️ {summary['include_warning']}")
+    if summary.get("csv_unsupported_dimensions"):
+        lines.append(f"⚠️ {summary['csv_unsupported_dimensions']}")
+    if summary.get("detected_form_type"):
+        lines.append("版式表单，质量信号按数据框不适用。")
+    merged_summary = summary.get("merged_cell_summary")
+    if merged_summary:
+        lines.append(f"合并摘要：{merged_summary}")
 
     ui_preview: dict[str, Any] | None = None
     if columns and isinstance(preview, list) and preview:
@@ -1027,6 +1036,8 @@ def _finalize_read_excel_result(
         summary["content_version"] = content_version
     if rel_path:
         summary["file_path"] = rel_path
+    if sheet_name:
+        summary.setdefault("resolved_sheet", sheet_name)
 
     return ToolResult(
         success=True,
@@ -1355,6 +1366,8 @@ def _finalize_scan_excel_snapshot_result(
     rels = result.get("relationships") or []
     if rels:
         lines.append(f"跨表关联 {len(rels)} 条。")
+    if result.get("form_layout"):
+        lines.append("版式表单，质量信号按数据框不适用。")
     if result.get("truncated_note"):
         lines.append(f"⚠️ {result['truncated_note']}")
     elif sampled:
@@ -1528,10 +1541,18 @@ def _read_range_direct(
     safe_path: Any,
     sheet_name: str | None,
     cell_range: str,
+    *,
+    include_formulas: bool = False,
 ) -> dict[str, Any]:
     """用 openpyxl read_only 模式读取指定坐标范围的原始单元格值。"""
     from openpyxl import load_workbook
     from openpyxl.utils.cell import range_boundaries
+
+    bounds = range_boundaries(cell_range)
+    if None in bounds:
+        raise ValueError(f"range 不支持整列/整行地址 {cell_range!r}，请写 A1:F20")
+    min_col, min_row, max_col, max_row = bounds
+    width = max_col - min_col + 1
 
     wb = load_workbook(safe_path, read_only=True, data_only=True)
     try:
@@ -1542,26 +1563,57 @@ def _read_range_direct(
             ws = wb.active
         if ws is None:
             return {"error": "无法打开工作表"}
+        resolved_title = ws.title
 
-        min_col, min_row, max_col, max_row = range_boundaries(cell_range)
         rows: list[list[Any]] = []
         for row in ws.iter_rows(
             min_row=min_row, max_row=max_row,
             min_col=min_col, max_col=max_col,
             values_only=True,
         ):
-            rows.append(_trim_trailing_nulls_generic([_serialize_cell_value(c) for c in row]))
-
-        return {
-            "range": cell_range,
-            "start_row": min_row,
-            "end_row": max_row,
-            "rows_count": len(rows),
-            "columns_count": max_col - min_col + 1,
-            "data": rows,
-        }
+            cells = [_serialize_cell_value(c) for c in row]
+            if len(cells) < width:
+                cells.extend([None] * (width - len(cells)))
+            rows.append(cells[:width])
     finally:
         wb.close()
+
+    payload: dict[str, Any] = {
+        "range": cell_range,
+        "start_row": min_row,
+        "end_row": max_row,
+        "rows_count": len(rows),
+        "columns_count": width,
+        "shape": {"rows": len(rows), "columns": width},
+        "data": rows,
+        "resolved_sheet": resolved_title,
+        "formulas_uncached": True,
+    }
+
+    if include_formulas:
+        wb_f = load_workbook(safe_path, read_only=True, data_only=False)
+        try:
+            ws_f = wb_f[resolved_title] if resolved_title in wb_f.sheetnames else wb_f.active
+            formula_rows: list[list[Any]] = []
+            for row in ws_f.iter_rows(
+                min_row=min_row, max_row=max_row,
+                min_col=min_col, max_col=max_col,
+                values_only=True,
+            ):
+                cells = []
+                for raw in row:
+                    if isinstance(raw, str) and raw.startswith("="):
+                        cells.append(raw)
+                    else:
+                        cells.append(None)
+                if len(cells) < width:
+                    cells.extend([None] * (width - len(cells)))
+                formula_rows.append(cells[:width])
+            payload["formula_grid"] = formula_rows
+            payload["formulas_uncached"] = False
+        finally:
+            wb_f.close()
+    return payload
 
 
 def read_excel(
@@ -1615,10 +1667,38 @@ def read_excel(
 
     # .xls/.xlsb → 透明转换为 xlsx（后续 openpyxl 调用统一走 xlsx）
     from excelmanus.tools._helpers import ensure_openpyxl_compatible, check_sheet_name
+    from excelmanus.workbook.address import combine_sheet_names, parse_sheet_address
     from excelmanus.workbook_commit import content_version_of, content_version_of_file
 
     safe_path = ensure_openpyxl_compatible(safe_path)
     bound_version = content_version_of(safe_path.read_bytes())
+
+    if range is not None:
+        parsed_range = parse_sheet_address(str(range))
+        range = parsed_range.address or None
+        try:
+            sheet_name = combine_sheet_names(sheet_name, parsed_range.sheet)
+        except ValueError as exc:
+            return _error_payload_result(
+                {"error": str(exc), "code": "INVALID_ARGS"},
+                code="INVALID_ARGS",
+            )
+
+    if range is not None and _is_csv_file(safe_path):
+        return _error_payload_result(
+            {"error": "CSV 不支持 range，请去掉 range 或改用 xlsx。", "code": "INVALID_ARGS"},
+            code="INVALID_ARGS",
+        )
+    if range is not None and (max_rows is not None or offset is not None or sample_rows is not None):
+        extras = [name for name, val in (("max_rows", max_rows), ("offset", offset), ("sample_rows", sample_rows)) if val is not None]
+        return _error_payload_result(
+            {
+                "error": "精确 range 不能同时使用 max_rows/offset/sample_rows",
+                "code": "INVALID_ARGS",
+                "ignored_fields": extras,
+            },
+            code="INVALID_ARGS",
+        )
 
     def _finish_read(summary: dict[str, Any], **kwargs: Any) -> ToolResult:
         if content_version_of_file(safe_path) != bound_version:
@@ -1630,26 +1710,63 @@ def read_excel(
                     message="文件在读取过程中被修改，请重试",
                 ),
             )
+        if sheet_name and "resolved_sheet" not in summary:
+            summary["resolved_sheet"] = sheet_name
         return _finalize_read_excel_result(
             summary,
             rel_path=rel_path,
-            sheet_name=sheet_name,
+            sheet_name=sheet_name or summary.get("resolved_sheet"),
             file_path=str(safe_path),
             content_version=bound_version,
             **kwargs,
         )
 
     # ── sheet 名验证：提前拦截无效 sheet 名，附带可用列表 ──
-    if sheet_name is not None and not _is_csv_file(safe_path):
-        resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
-        if sheet_err is not None:
-            return sheet_err
-        sheet_name = resolved_sheet  # 可能经过 case-insensitive 修正
+    if not _is_csv_file(safe_path):
+        if sheet_name is not None:
+            resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
+            if sheet_err is not None:
+                return sheet_err
+            sheet_name = resolved_sheet  # 可能经过 case-insensitive 修正
+        else:
+            from openpyxl import load_workbook as _lw_default
+
+            _wb_default = _lw_default(safe_path, read_only=True)
+            try:
+                sheet_name = _wb_default.sheetnames[0] if _wb_default.sheetnames else None
+            finally:
+                _wb_default.close()
 
     # ── range 模式：精确读取指定坐标范围 ──
     if range is not None and not _is_csv_file(safe_path):
-        result = _read_range_direct(safe_path, sheet_name, range)
+        include_set = set(include or [])
+        extra_include = sorted(include_set - {"formulas"})
+        try:
+            result = _read_range_direct(
+                safe_path,
+                sheet_name,
+                range,
+                include_formulas="formulas" in include_set,
+            )
+        except Exception as exc:
+            return _error_payload_result(
+                {
+                    "error": (
+                        f"range={range!r} 不是合法坐标：{exc}。"
+                        "请用 A1:F20，或 表名!A1:F20。"
+                    ),
+                    "code": "INVALID_ARGS",
+                },
+                code="INVALID_ARGS",
+            )
         result["file"] = str(safe_path.name)
+        if extra_include:
+            result["include_warning"] = (
+                "range 模式只支持 include=formulas；"
+                f"已忽略 {extra_include}。"
+            )
+        if result.get("resolved_sheet"):
+            sheet_name = result["resolved_sheet"]
         return _finish_read(result)
 
     # ── 标准模式 ──
@@ -1776,7 +1893,8 @@ def read_excel(
     # 分发 include 维度采集（需要用 openpyxl 打开，CSV 不支持）
     _CSV_UNSUPPORTED_DIMS = {"styles", "charts", "images", "freeze_panes",
                              "conditional_formatting", "data_validation",
-                             "print_settings", "column_widths", "formulas"}
+                             "print_settings", "column_widths", "formulas",
+                             "merges"}
     if include_set and _is_csv_file(safe_path):
         skipped = include_set & _CSV_UNSUPPORTED_DIMS
         if skipped:
@@ -1846,10 +1964,36 @@ def filter_data(
     rel_path = _workspace_rel_path(guard, safe_path, file_path)
 
     # .xls/.xlsb → 透明转换为 xlsx
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    from excelmanus.tools._helpers import check_sheet_name, ensure_openpyxl_compatible
     safe_path = ensure_openpyxl_compatible(safe_path)
 
+    if not _is_csv_file(safe_path):
+        if sheet_name is not None:
+            resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
+            if sheet_err is not None:
+                return sheet_err
+            sheet_name = resolved_sheet
+        else:
+            from openpyxl import load_workbook as _lw_filter
+
+            _wb_filter = _lw_filter(safe_path, read_only=True)
+            try:
+                sheet_name = _wb_filter.sheetnames[0] if _wb_filter.sheetnames else None
+            finally:
+                _wb_filter.close()
+
     df, _ = _read_df(safe_path, sheet_name, header_row=header_row)
+
+    def _contains_literal(s: pd.Series, v: Any) -> pd.Series:
+        return s.astype(str).str.contains(str(v), na=False, regex=False)
+
+    def _contains_regex(s: pd.Series, v: Any) -> pd.Series:
+        return s.astype(str).str.contains(str(v), na=False, regex=True)
+
+    def _between(s: pd.Series, v: Any) -> pd.Series:
+        if not isinstance(v, (list, tuple)) or len(v) < 2:
+            raise ValueError("between 需要长度为 2 的数组，如 [min, max]")
+        return s.between(v[0], v[1])
 
     ops = {
         "eq": lambda s, v: s == v,
@@ -1858,10 +2002,11 @@ def filter_data(
         "ge": lambda s, v: s >= v,
         "lt": lambda s, v: s < v,
         "le": lambda s, v: s <= v,
-        "contains": lambda s, v: s.astype(str).str.contains(str(v), na=False),
+        "contains": _contains_literal,
+        "regex": _contains_regex,
         "in": lambda s, v: s.isin(v if isinstance(v, list) else [v]),
         "not_in": lambda s, v: ~s.isin(v if isinstance(v, list) else [v]),
-        "between": lambda s, v: s.between(v[0], v[1]) if isinstance(v, list) and len(v) >= 2 else pd.Series([False] * len(s), index=s.index),
+        "between": _between,
         "isnull": lambda s, v: s.isna(),
         "notnull": lambda s, v: s.notna(),
         "startswith": lambda s, v: s.astype(str).str.startswith(str(v), na=False),
@@ -1886,11 +2031,27 @@ def filter_data(
         )
 
     # 逐条件构建 mask
+    _op_aliases = {
+        "==": "eq",
+        "=": "eq",
+        "equals": "eq",
+        "equal": "eq",
+        "!=": "ne",
+        "<>": "ne",
+        "not_equals": "ne",
+        ">": "gt",
+        ">=": "ge",
+        "<": "lt",
+        "<=": "le",
+    }
     masks = []
     for cond in cond_list:
         col = cond.get("column")
         op = cond.get("operator")
         val = cond.get("value")
+        if isinstance(op, str):
+            key = op.strip()
+            op = _op_aliases.get(key) or _op_aliases.get(key.lower()) or key.lower()
         if col not in df.columns:
             return _error_payload_result(
                 {"error": f"列 '{col}' 不存在，可用列: {[str(c) for c in df.columns]}"},
@@ -1901,7 +2062,10 @@ def filter_data(
                 {"error": f"不支持的运算符 '{op}'，支持: {list(ops.keys())}"},
                 code="INVALID_ARGS",
             )
-        masks.append(ops[op](df[col], val))
+        try:
+            masks.append(ops[op](df[col], val))
+        except ValueError as exc:
+            return _error_payload_result({"error": str(exc), "code": "INVALID_ARGS"}, code="INVALID_ARGS")
 
     # 组合 mask
     if logic == "and":
@@ -1911,35 +2075,29 @@ def filter_data(
 
     filtered = df[combined_mask]
 
-    # 投影：只保留指定列
-    if columns:
-        valid_cols = [c for c in columns if c in filtered.columns]
-        missing_cols = [c for c in columns if c not in filtered.columns]
-        filtered = filtered[valid_cols]
-    else:
-        missing_cols = []
-
-    # 排序
+    # 先筛选/排序/limit，再投影。排序列按原表判断。
     if sort_by is not None:
-        if sort_by not in filtered.columns:
+        if sort_by not in df.columns:
             return _error_payload_result(
-                {"error": f"排序列 '{sort_by}' 不存在，可用列: {[str(c) for c in filtered.columns]}"},
+                {"error": f"排序列 '{sort_by}' 不存在，可用列: {[str(c) for c in df.columns]}"},
                 code="INVALID_ARGS",
             )
-        # 对排序列做数值转换以支持文本型数值的正确排序
         sort_key = _coerce_numeric(filtered[sort_by])
         filtered = filtered.assign(**{"__sort_key__": sort_key}).sort_values(
             by="__sort_key__", ascending=ascending, na_position="last", kind="mergesort"
         ).drop(columns=["__sort_key__"])
 
-    # 排序后限制返回行数（limit）
     total_filtered = len(filtered)
     if limit is not None and limit > 0:
         filtered = filtered.head(limit)
-
-    # max_rows 兜底限制
     if max_rows is not None and max_rows > 0:
         filtered = filtered.head(max_rows)
+
+    missing_cols: list[str] = []
+    if columns:
+        valid_cols = [c for c in columns if c in filtered.columns]
+        missing_cols = [c for c in columns if c not in df.columns]
+        filtered = filtered[valid_cols]
 
     result: dict[str, Any] = {
         "file": str(safe_path.name),
@@ -1956,6 +2114,8 @@ def filter_data(
         result["note"] = f"结果已截断，共 {total_filtered} 条匹配，返回前 {len(filtered)} 条"
     if missing_cols:
         result["missing_columns"] = missing_cols
+    if sheet_name:
+        result["resolved_sheet"] = sheet_name
 
     return _finalize_filter_data_result(
         result,
@@ -2307,6 +2467,7 @@ INCLUDE_DIMENSIONS = (
     "categorical_summary",
     "summary",
     "vba",
+    "merges",
 )
 
 # categorical_summary 默认阈值：unique 值数量低于此值的列视为分类列
@@ -2361,14 +2522,28 @@ def _color_to_hex_short(color: Any) -> str | None:
     """将 openpyxl Color 对象转为 6 位十六进制字符串，无效或默认色返回 None。"""
     if color is None:
         return None
-    if hasattr(color, "rgb") and color.rgb:
-        rgb = str(color.rgb)
-        if rgb in ("00000000", "FFFFFFFF"):
+    from excelmanus.tools._style_extract import resolve_color
+
+    color_type = getattr(color, "type", None)
+    if color_type == "theme":
+        resolved = resolve_color(color)
+        return resolved.lstrip("#") if resolved else None
+    if color_type == "indexed":
+        resolved = resolve_color(color)
+        return resolved.lstrip("#") if resolved else None
+    if color_type == "rgb":
+        resolved = resolve_color(color)
+        if resolved is None:
             return None
-        return rgb[2:] if len(rgb) == 8 else rgb
-    if hasattr(color, "theme") and color.theme is not None:
-        return f"theme:{color.theme}"
-    return None
+        hex_val = resolved.lstrip("#")
+        if hex_val in {"000000", "FFFFFF"} and str(getattr(color, "rgb", "")).upper() in {
+            "00000000",
+            "FFFFFFFF",
+        }:
+            return None
+        return hex_val
+    resolved = resolve_color(color)
+    return resolved.lstrip("#") if resolved else None
 
 
 def _extract_style_tuple(cell: Any) -> tuple | None:
@@ -2503,6 +2678,7 @@ def _collect_styles_compressed(
             "cell_style_map": {},
             "merged_ranges": [str(mr) for mr in ws.merged_cells.ranges],
             "rows_scanned": scan_rows,
+            "truncated": (ws.max_row or 0) > max_rows,
         }
 
     # 第一遍：收集所有样式元组，分配 ID
@@ -2572,6 +2748,7 @@ def _collect_styles_compressed(
         "cell_style_map": range_map,
         "merged_ranges": merged_ranges,
         "rows_scanned": scan_rows,
+        "truncated": (ws.max_row or 0) > max_rows,
     }
 
 
@@ -2724,15 +2901,20 @@ def _collect_column_widths(ws: Any) -> dict[str, float]:
     return widths
 
 
-def _collect_formulas(ws: Any, max_rows: int = 200) -> list[dict[str, str]]:
+def _collect_formulas(ws: Any, max_rows: int = 200) -> dict[str, Any]:
     """收集含公式的单元格位置和公式内容。"""
     from openpyxl.utils import get_column_letter
 
     formulas: list[dict[str, str]] = []
-    scan_rows = min(ws.max_row or 0, max_rows)
+    total_rows = ws.max_row or 0
+    scan_rows = min(total_rows, max_rows)
     scan_cols = ws.max_column or 0
     if scan_rows == 0 or scan_cols == 0:
-        return formulas
+        return {
+            "items": formulas,
+            "rows_scanned": scan_rows,
+            "truncated": False,
+        }
 
     for row in ws.iter_rows(min_row=1, max_row=scan_rows, min_col=1, max_col=scan_cols):
         for cell in row:
@@ -2740,7 +2922,11 @@ def _collect_formulas(ws: Any, max_rows: int = 200) -> list[dict[str, str]]:
             if isinstance(val, str) and val.startswith("="):
                 coord = f"{get_column_letter(cell.column)}{cell.row}"
                 formulas.append({"cell": coord, "formula": val})
-    return formulas
+    return {
+        "items": formulas,
+        "rows_scanned": scan_rows,
+        "truncated": total_rows > max_rows,
+    }
 
 
 def _dispatch_include_dimensions(
@@ -2777,6 +2963,10 @@ def _dispatch_include_dimensions(
 
     if "formulas" in include_set:
         extra["formulas"] = _collect_formulas(ws_for_include, max_rows=max_style_scan_rows)
+
+    if "merges" in include_set:
+        ranges = [str(item) for item in ws_for_include.merged_cells.ranges]
+        extra["merges"] = {"count": len(ranges), "ranges": ranges[:20]}
 
     # vba 维度在调用方单独处理（需要 file path，不依赖 worksheet）
 
@@ -2927,25 +3117,51 @@ def compare_excel(
     ignore_style: bool = True,
     key_columns: list[str] | None = None,
     max_diffs: int = 500,
+    alignment: str = "position",
 ) -> ToolResult:
     """对比两个 Excel 文件（或同一文件的两个 Sheet），返回结构化差异报告。
 
     支持两种对比模式：
-    - 行号对齐模式（默认）：逐行逐列对比
-    - 关键列匹配模式（指定 key_columns 时）：按关键列 join 后对比
+    - alignment=position（默认）：按单元格行列坐标对比
+    - alignment=key：按 key_columns join 后对比
 
     Args:
         file_a: 基准文件路径
         file_b: 对比文件路径（与 file_a 相同时用于跨 Sheet 对比）
         sheet_a: file_a 的工作表名（空字符串=第一个）
         sheet_b: file_b 的工作表名（空字符串=第一个）
-        ignore_style: 是否忽略样式差异（默认 True）
-        key_columns: 关键列名列表（用于行匹配，为空则按行号对齐）
+        ignore_style: 必须为 True；false 返回不支持
+        key_columns: alignment=key 时的关键列
         max_diffs: 最大差异数量（超出截断）
+        alignment: position 按坐标；key 按关键列
 
     Returns:
         ToolResult（value 含差异摘要，ui_meta.diff 供 SSE 投影）。
     """
+    if ignore_style is False:
+        return _error_payload_result(
+            {"error": "当前不支持样式对比。请省略 ignore_style 或设为 true。", "code": "INVALID_ARGS"},
+            code="INVALID_ARGS",
+        )
+    align = str(alignment or "position").strip().lower()
+    if align not in {"position", "key"}:
+        return _error_payload_result(
+            {"error": "alignment 必须是 position 或 key", "code": "INVALID_ARGS"},
+            code="INVALID_ARGS",
+        )
+    if align == "position" and key_columns:
+        return _error_payload_result(
+            {
+                "error": "alignment=position 不能同时提供 key_columns；按键对齐请用 alignment=key",
+                "code": "INVALID_ARGS",
+            },
+            code="INVALID_ARGS",
+        )
+    if align == "key" and not key_columns:
+        return _error_payload_result(
+            {"error": "alignment=key 需要 key_columns", "code": "INVALID_ARGS"},
+            code="INVALID_ARGS",
+        )
     guard = _get_guard()
 
     # ── 1. 解析与校验路径 ──
@@ -3029,15 +3245,22 @@ def compare_excel(
     duplicate_keys_b: list[str] = []
     unmatched_in_a: list[str] = []
     unmatched_in_b: list[str] = []
-    alignment = "position"
+    alignment = align
 
-    if key_columns and all(k in cols_a and k in cols_b for k in key_columns):
-        alignment = "key"
-        # ── 4B. 关键列匹配模式 ──
+    if alignment == "key":
+        missing = [k for k in (key_columns or []) if k not in cols_a or k not in cols_b]
+        if missing:
+            return _error_payload_result(
+                {
+                    "error": f"key_columns 不在两边的列中: {missing}",
+                    "code": "INVALID_ARGS",
+                    "available_columns_a": sorted(cols_a),
+                    "available_columns_b": sorted(cols_b),
+                },
+                code="INVALID_ARGS",
+            )
         str_cols_a = {str(c): c for c in df_a.columns}
         str_cols_b = {str(c): c for c in df_b.columns}
-
-        # 将 key_columns 映射回原始列名
         key_a = [str_cols_a[k] for k in key_columns]
         key_b = [str_cols_b[k] for k in key_columns]
 
@@ -3083,10 +3306,8 @@ def compare_excel(
                 rows_added += 1
                 continue
 
-            # 两边都有 → 对比 common_cols 中非 key 的列
             row_a = df_a_keyed.loc[key_val]
             row_b = df_b_keyed.loc[key_val]
-            # 处理 duplicate key 的情况：取第一行
             if isinstance(row_a, pd.DataFrame):
                 row_a = row_a.iloc[0]
             if isinstance(row_b, pd.DataFrame):
@@ -3112,22 +3333,24 @@ def compare_excel(
                 rows_modified += 1
 
     else:
-        # ── 4A. 行号对齐模式 ──
+        from openpyxl.utils import get_column_letter
+
         rows_added = max(0, len(df_b) - len(df_a))
         rows_deleted = max(0, len(df_a) - len(df_b))
         min_rows = min(len(df_a), len(df_b))
+        n_cols = max(int(df_a.shape[1]), int(df_b.shape[1]))
 
-        # 大文件优化：先做行级 hash 快速过滤
         use_hash_filter = min_rows > 10000
         diff_row_indices: set[int] | None = None
-
-        if use_hash_filter and common_cols:
-            hash_a = df_a[list(df_a.columns)].iloc[:min_rows].astype(str).apply(
-                lambda r: hash(tuple(r)), axis=1
-            )
-            hash_b = df_b[list(df_b.columns)].iloc[:min_rows].astype(str).apply(
-                lambda r: hash(tuple(r)), axis=1
-            )
+        if use_hash_filter and n_cols > 0:
+            def _row_hash(df: pd.DataFrame, n: int) -> pd.Series:
+                width = int(df.shape[1])
+                return df.iloc[:min_rows].astype(str).apply(
+                    lambda r: hash(tuple(r.tolist() + [""] * (n - width))),
+                    axis=1,
+                )
+            hash_a = _row_hash(df_a, n_cols)
+            hash_b = _row_hash(df_b, n_cols)
             diff_row_indices = set((hash_a != hash_b).to_numpy().nonzero()[0])
             logger.info(
                 "行级 hash 过滤：%d/%d 行有差异",
@@ -3138,49 +3361,42 @@ def compare_excel(
             if len(cell_diffs) >= max_diffs:
                 break
             if diff_row_indices is not None and row_idx not in diff_row_indices:
-                total_cells_compared += len(common_cols)
+                total_cells_compared += n_cols
                 continue
-
             row_changed = False
-            for col in common_cols:
+            for col_idx in _builtin_range(n_cols):
                 total_cells_compared += 1
-                orig_col_a = col_map_a.get(col)
-                orig_col_b = col_map_b.get(col)
-                val_a = _serialize_cell_value(
-                    df_a.at[row_idx, orig_col_a] if orig_col_a is not None else None
+                val_a = (
+                    _serialize_cell_value(df_a.iat[row_idx, col_idx])
+                    if col_idx < df_a.shape[1]
+                    else None
                 )
-                val_b = _serialize_cell_value(
-                    df_b.at[row_idx, orig_col_b] if orig_col_b is not None else None
+                val_b = (
+                    _serialize_cell_value(df_b.iat[row_idx, col_idx])
+                    if col_idx < df_b.shape[1]
+                    else None
                 )
                 if str(val_a) != str(val_b):
                     row_changed = True
                     if len(cell_diffs) < max_diffs:
-                        from openpyxl.utils import get_column_letter
-                        try:
-                            col_idx = list(str(c) for c in df_a.columns).index(col)
-                            cell_ref = f"{get_column_letter(col_idx + 1)}{row_idx + 2}"
-                        except (ValueError, IndexError):
-                            cell_ref = f"R{row_idx + 2}:{col}"
                         cell_diffs.append({
-                            "cell": cell_ref,
+                            "cell": f"{get_column_letter(col_idx + 1)}{row_idx + 2}",
                             "old": val_a,
                             "new": val_b,
                         })
             if row_changed:
                 rows_modified += 1
 
-        # 统计超出部分行的额外单元格
         if len(df_b) > len(df_a):
             for extra_idx in _builtin_range(len(df_a), min(len(df_b), len(df_a) + max_diffs)):
                 if len(cell_diffs) >= max_diffs:
                     break
-                for col in cols_b:
+                for col_idx in _builtin_range(int(df_b.shape[1])):
                     total_cells_compared += 1
-                    orig_col = col_map_b.get(col)
-                    val = _serialize_cell_value(df_b.at[extra_idx, orig_col] if orig_col is not None else None)
+                    val = _serialize_cell_value(df_b.iat[extra_idx, col_idx])
                     if val is not None and str(val) != "":
                         cell_diffs.append({
-                            "cell": f"R{extra_idx + 2}:{col}",
+                            "cell": f"{get_column_letter(col_idx + 1)}{extra_idx + 2}",
                             "old": None,
                             "new": val,
                         })
@@ -3189,7 +3405,6 @@ def compare_excel(
     truncated = len(cell_diffs) >= max_diffs
     cells_different = len(cell_diffs)
 
-    # 选取前 10 个 sample_diffs 供 LLM 参考
     sample_diffs = cell_diffs[:10]
 
     is_same_file = str(safe_a) == str(safe_b)
@@ -3217,7 +3432,8 @@ def compare_excel(
         "truncated": truncated,
     }
 
-    if cells_different == 0 and rows_added == 0 and rows_deleted == 0:
+    structure_changed = bool(columns_added or columns_deleted or sheets_only_a or sheets_only_b)
+    if cells_different == 0 and rows_added == 0 and rows_deleted == 0 and not structure_changed:
         result["hint"] = "两个文件（或 Sheet）的数据完全相同。"
     else:
         parts = []
@@ -3231,7 +3447,15 @@ def compare_excel(
             parts.append(f"新增列: {', '.join(columns_added)}")
         if columns_deleted:
             parts.append(f"删除列: {', '.join(columns_deleted)}")
-        result["hint"] = f"共发现 {'、'.join(parts)}。完整 diff 已通过前端展示。"
+        if sheets_only_a:
+            parts.append(f"仅 A 有工作表: {', '.join(sheets_only_a)}")
+        if sheets_only_b:
+            parts.append(f"仅 B 有工作表: {', '.join(sheets_only_b)}")
+        result["hint"] = (
+            f"共发现 {'、'.join(parts)}。完整 diff 已通过前端展示。"
+            if parts
+            else "结构或数据存在差异。"
+        )
 
     result["duplicate_keys_a"] = duplicate_keys_a
     result["duplicate_keys_b"] = duplicate_keys_b
@@ -3465,19 +3689,22 @@ def _generate_quality_signals(
             col_name = col["name"]
             null_rate = col.get("null_rate", 0)
 
+            form_layout = bool(sheet.get("is_form_document"))
+
             # empty_column
             if null_rate >= 1.0:
-                signals.append({
-                    "severity": "high",
-                    "type": "empty_column",
-                    "sheet": sheet_name,
-                    "column": col_name,
-                    "detail": "该列全部为空值",
-                })
+                if not form_layout:
+                    signals.append({
+                        "severity": "high",
+                        "type": "empty_column",
+                        "sheet": sheet_name,
+                        "column": col_name,
+                        "detail": "该列全部为空值",
+                    })
                 continue
 
             # missing_data
-            if null_rate > 0.3:
+            if null_rate > 0.3 and not form_layout:
                 signals.append({
                     "severity": "high",
                     "type": "missing_data",
@@ -3485,7 +3712,7 @@ def _generate_quality_signals(
                     "column": col_name,
                     "detail": f"{col['null_count']} 个空值 ({null_rate:.1%})",
                 })
-            elif null_rate > 0.05:
+            elif null_rate > 0.05 and not form_layout:
                 signals.append({
                     "severity": "medium",
                     "type": "missing_data",
@@ -3495,7 +3722,7 @@ def _generate_quality_signals(
                 })
 
             # type_mixed
-            if col.get("mixed_type_counts"):
+            if col.get("mixed_type_counts") and not form_layout:
                 counts = col["mixed_type_counts"]
                 desc = " + ".join(f"{k}({v})" for k, v in counts.items())
                 signals.append({
@@ -3589,6 +3816,7 @@ def scan_excel_snapshot(
     file_path: str,
     max_sample_rows: int = 500,
     include_relationships: bool = True,
+    sheet_name: str | None = None,
 ) -> ToolResult:
     """一次性扫描 Excel 文件，返回所有 Sheet 的 schema、列统计、数据质量信号。
 
@@ -3618,8 +3846,15 @@ def scan_excel_snapshot(
         )
 
     # .xls/.xlsb → 透明转换为 xlsx
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
+    from excelmanus.tools._helpers import check_sheet_name, ensure_openpyxl_compatible
     safe_path = ensure_openpyxl_compatible(safe_path)
+
+    if sheet_name is not None:
+        resolved_sheet, sheet_err = check_sheet_name(safe_path, sheet_name)
+        if sheet_err is not None:
+            return sheet_err
+        sheet_name = resolved_sheet
+    requested_sheet = sheet_name
 
     from openpyxl import load_workbook
 
@@ -3627,6 +3862,8 @@ def scan_excel_snapshot(
     wb_meta = load_workbook(safe_path, read_only=True, data_only=True)
     sheet_metas: list[dict[str, Any]] = []
     for ws in wb_meta.worksheets[:_SNAPSHOT_MAX_SHEETS]:
+        if requested_sheet and ws.title != requested_sheet:
+            continue
         meta: dict[str, Any] = {
             "name": ws.title,
             "rows": ws.max_row or 0,
@@ -3639,6 +3876,12 @@ def scan_excel_snapshot(
     try:
         wb_full = load_workbook(safe_path, read_only=False, data_only=False)
         for i, ws in enumerate(wb_full.worksheets[:_SNAPSHOT_MAX_SHEETS]):
+            if requested_sheet and ws.title != requested_sheet:
+                continue
+            meta_i = next((idx for idx, item in enumerate(sheet_metas) if item["name"] == ws.title), None)
+            if meta_i is None:
+                continue
+            i = meta_i
             if i < len(sheet_metas):
                 has_merged = len(ws.merged_cells.ranges) > 0
                 sheet_metas[i]["has_merged_cells"] = has_merged
@@ -3711,6 +3954,7 @@ def scan_excel_snapshot(
             **meta,
             "duplicate_row_count": dup_count,
             "columns": columns_stats,
+            "is_form_document": bool(form_type),
         }
         if sampled:
             sheet_data["sampled"] = True
@@ -3727,6 +3971,7 @@ def scan_excel_snapshot(
 
     # 质量信号
     quality_signals = _generate_quality_signals(sheets_data)
+    form_layout = any(bool(item.get("is_form_document")) for item in sheets_data)
 
     result: dict[str, Any] = {
         "file": safe_path.name,
@@ -3735,7 +3980,13 @@ def scan_excel_snapshot(
         "sheets": sheets_data,
         "relationships": relationships,
         "quality_signals": quality_signals,
+        "form_layout": form_layout,
+        "resolved_sheets": [item.get("name") for item in sheets_data if isinstance(item, dict)],
     }
+    if requested_sheet:
+        result["resolved_sheet"] = requested_sheet
+    elif len(result["resolved_sheets"]) == 1:
+        result["resolved_sheet"] = result["resolved_sheets"][0]
 
     if len(wb_meta.sheetnames if hasattr(wb_meta, 'sheetnames') else sheet_metas) > _SNAPSHOT_MAX_SHEETS:
         result["truncated"] = True

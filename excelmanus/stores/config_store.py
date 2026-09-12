@@ -1,4 +1,4 @@
-"""ConfigStore：模型配置与运行时状态存储（支持 SQLite / PostgreSQL）。
+"""ConfigStore：模型配置与运行时状态存储。
 
 拆分为 GlobalConfigStore（全局 model_profiles + 部署设置）和
 UserConfigStore（进程级偏好，如 active_model）。
@@ -281,3 +281,11 @@ class UserConfigStore:
     def set_full_access(self, enabled: bool) -> None:
         """持久化 full_access 开关（跨会话）。"""
         self.set("full_access_enabled", "true" if enabled else "false")
+
+    def get_present_as(self) -> str:
+        """读取持久化的代码模式偏好（跨会话）。"""
+        return "code" if self.get("present_as") == "code" else "native"
+
+    def set_present_as(self, mode: str) -> None:
+        """持久化代码模式偏好（跨会话）。"""
+        self.set("present_as", "code" if mode == "code" else "native")

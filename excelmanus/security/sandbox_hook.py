@@ -103,7 +103,7 @@ if _sdk_file:
 
 
 # Injected after format() so braces stay as Python. Subprocess must not os.replace
-# user xlsx: spreadsheet saves land in .excelmanus/pending/; host Runtime publishes.
+# user files: workspace writes land in .excelmanus/pending/; host Runtime publishes.
 _PENDING_WRITE_RUNTIME = r'''
 import json as _json_mod
 _PENDING = {}
@@ -114,43 +114,99 @@ _orig_os_remove = os.remove
 _orig_os_unlink = os.unlink
 _orig_os_replace = os.replace
 _orig_os_rename = os.rename
-_EXPECTED_VERSIONS_RAW = os.environ.get("EXCELMANUS_EXPECTED_VERSIONS", "{}")
-try:
-    _EXPECTED_VERSIONS = _json_mod.loads(_EXPECTED_VERSIONS_RAW)
-    if not isinstance(_EXPECTED_VERSIONS, dict):
-        _EXPECTED_VERSIONS = {}
-except (ValueError, TypeError):
-    _EXPECTED_VERSIONS = {}
 _PENDING_RUN_ID = "".join(
     c for c in os.environ.get("EXCELMANUS_PENDING_RUN_ID", "")
     if c in "0123456789abcdefABCDEF"
 )[:64]
 if not _PENDING_RUN_ID:
     _PENDING_RUN_ID = "orphan"
+_PENDING_ROOT = os.path.realpath(
+    os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending", _PENDING_RUN_ID)
+)
+_PENDING_TREE_ROOT = os.path.realpath(
+    os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending")
+)
+_EXCELMANUS_ROOT = os.path.realpath(
+    os.path.join(_WORKSPACE_ROOT, ".excelmanus")
+)
+_PENDING_DIR_ENV = os.environ.get("EXCELMANUS_PENDING_DIR", "")
+if _PENDING_DIR_ENV:
+    _got_pending = os.path.realpath(_PENDING_DIR_ENV)
+    if _got_pending == _PENDING_ROOT:
+        pass
+
+def _path_is_inside(root, resolved):
+    root = os.path.realpath(str(root))
+    try:
+        resolved = os.path.realpath(str(resolved))
+    except OSError:
+        resolved = os.path.normpath(str(resolved))
+    prefix = root + os.sep
+    return resolved == root or resolved.startswith(prefix)
 
 def _rel_of(resolved):
-    ws = _WORKSPACE_ROOT + os.sep
-    if resolved.startswith(ws):
-        return resolved[len(ws):].replace("\\", "/")
-    return os.path.basename(resolved)
+    ws = os.path.realpath(_WORKSPACE_ROOT)
+    try:
+        resolved = os.path.realpath(str(resolved))
+    except OSError:
+        resolved = os.path.normpath(str(resolved))
+    prefix = ws + os.sep
+    if resolved == ws:
+        return ""
+    if resolved.startswith(prefix):
+        return resolved[len(prefix):].replace("\\", "/")
+    raise PermissionError(
+        "文件写入被安全策略禁止：路径不在工作区内 [等级: %s]" % _TIER
+    )
 
 def _is_spreadsheet(resolved):
     return os.path.splitext(resolved)[1].lower() in _SPREADSHEET_EXTS
 
+def _is_sandbox_ephemeral(resolved):
+    tmp = os.path.realpath(os.path.join(_WORKSPACE_ROOT, ".tmp"))
+    scripts_temp = os.path.realpath(os.path.join(_WORKSPACE_ROOT, "scripts", "temp"))
+    if _path_is_inside(tmp, resolved) or resolved == tmp:
+        return True
+    if _path_is_inside(scripts_temp, resolved) or resolved == scripts_temp:
+        return True
+    base = os.path.basename(resolved)
+    if base.endswith(".pyc") or base == "__pycache__":
+        return True
+    parent = os.path.basename(os.path.dirname(resolved))
+    if parent == "__pycache__":
+        return True
+    return False
+
+def _should_pending_write(resolved):
+    if _is_under_pending(resolved):
+        return False
+    if _is_sandbox_ephemeral(resolved):
+        return False
+    if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+        return False
+    return True
+
 def _is_bench_protected(resolved):
     for protected in _BENCH_PROTECTED_DIRS:
-        prefix = protected + os.sep
-        if resolved.startswith(prefix) or resolved == protected:
+        if _path_is_inside(protected, resolved):
             return True
     return False
 
 def _pending_root():
-    return os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending", _PENDING_RUN_ID)
+    return _PENDING_ROOT
 
 def _is_under_pending(resolved):
-    root = os.path.realpath(os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending"))
-    prefix = root + os.sep
-    return resolved.startswith(prefix) or resolved == root
+    return _path_is_inside(_PENDING_ROOT, resolved)
+
+def _is_under_foreign_pending(resolved):
+    if not _path_is_inside(_PENDING_TREE_ROOT, resolved):
+        return False
+    return not _is_under_pending(resolved)
+
+def _is_excelmanus_write_forbidden(resolved):
+    if not _path_is_inside(_EXCELMANUS_ROOT, resolved):
+        return False
+    return not _is_under_pending(resolved)
 
 def _pending_path(resolved):
     rel = _rel_of(resolved)
@@ -169,6 +225,14 @@ def _append_pending_manifest(rel, dest):
 
 def _prepare_open_path(resolved, mode):
     writing = any(c in str(mode) for c in "wax+")
+    if _is_under_foreign_pending(resolved):
+        raise PermissionError(
+            "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
+        )
+    if writing and _is_excelmanus_write_forbidden(resolved):
+        raise PermissionError(
+            "文件写入被安全策略禁止：保留目录 [.excelmanus] [等级: %s]" % _TIER
+        )
     if writing and _is_bench_protected(resolved):
         raise PermissionError(
             "文件写入被安全策略禁止：路径位于受保护的 bench 目录内 [等级: %s]" % _TIER
@@ -177,7 +241,7 @@ def _prepare_open_path(resolved, mode):
         return resolved
     if resolved in _PENDING:
         return _PENDING[resolved]
-    if writing and _is_spreadsheet(resolved):
+    if writing and _should_pending_write(resolved):
         pending = _pending_path(resolved)
         parent = os.path.dirname(pending)
         if parent:
@@ -191,6 +255,10 @@ def _prepare_open_path(resolved, mode):
                             break
                         _df.write(_chunk)
         _PENDING[resolved] = pending
+        try:
+            _append_pending_manifest(_rel_of(resolved), pending)
+        except Exception:
+            pass
         return pending
     return resolved
 
@@ -254,12 +322,7 @@ def _patch_openpyxl_save():
     def _atomic_save(self, filename):
         import tempfile
         resolved = os.path.realpath(str(filename))
-        ws = _WORKSPACE_ROOT + os.sep
-        if not (
-            resolved.startswith(ws)
-            or resolved == _WORKSPACE_ROOT
-            or _is_under_pending(resolved)
-        ):
+        if not (_path_is_inside(_WORKSPACE_ROOT, resolved) or _is_under_pending(resolved)):
             raise PermissionError(
                 "文件写入被安全策略禁止：路径不在工作区内 [等级: %s]" % _TIER
             )
@@ -311,19 +374,24 @@ def _flags_write(flags):
 
 def _deny_forbidden_read(resolved):
     for _pd in _PRODUCT_SOURCE_DIRS:
-        if resolved == _pd or resolved.startswith(_pd + os.sep):
+        if _path_is_inside(_pd, resolved):
             raise PermissionError(
                 "PRODUCT_SOURCE_FORBIDDEN: 禁止读取产品源码 [等级: %s]" % _TIER
             )
+    if _is_under_foreign_pending(resolved):
+        raise PermissionError(
+            "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
+        )
 
 def _guard_write_target(path):
     resolved = os.path.realpath(str(path))
     _deny_forbidden_read(resolved)
-    ws = _WORKSPACE_ROOT + os.sep
-    _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT
-    if not _in_workspace:
-        _tmp_prefix = _SYSTEM_TMPDIR + os.sep
-        if resolved.startswith(_tmp_prefix) or resolved == _SYSTEM_TMPDIR:
+    if _is_excelmanus_write_forbidden(resolved):
+        raise PermissionError(
+            "文件写入被安全策略禁止：保留目录 [.excelmanus] [等级: %s]" % _TIER
+        )
+    if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+        if _path_is_inside(_SYSTEM_TMPDIR, resolved):
             return resolved
         raise PermissionError(
             "文件写入被安全策略禁止：路径不在工作区内 [等级: %s]" % _TIER
@@ -331,12 +399,12 @@ def _guard_write_target(path):
     return _prepare_open_path(resolved, "w")
 
 def _guarded_os_open(path, flags, *args, **kwargs):
+    resolved = os.path.realpath(str(path))
     if _flags_write(flags):
         path = _guard_write_target(path)
     else:
-        resolved = os.path.realpath(str(path))
         _deny_forbidden_read(resolved)
-        path = resolved
+        path = _prepare_open_path(resolved, "r")
     return _orig_os_open(path, flags, *args, **kwargs)
 
 def _guarded_os_remove(path, *args, **kwargs):
@@ -356,6 +424,58 @@ os.remove = _guarded_os_remove
 os.unlink = _guarded_os_unlink
 os.replace = _guarded_os_replace
 os.rename = _guarded_os_rename
+
+def _blocked_symlink(*_a, **_kw):
+    raise PermissionError("os.symlink/link 被安全策略禁止 [等级: %s]" % _TIER)
+os.symlink = _blocked_symlink
+if hasattr(os, "link"):
+    os.link = _blocked_symlink
+
+def _mkdir_allowed(dest):
+    dest = os.path.realpath(str(dest))
+    if dest in (_EXCELMANUS_ROOT, _PENDING_TREE_ROOT, _PENDING_ROOT):
+        return True
+    if _path_is_inside(_PENDING_ROOT, dest):
+        return True
+    if _path_is_inside(_EXCELMANUS_ROOT, dest):
+        return False
+    return True
+
+_orig_mkdir = os.mkdir
+def _guarded_mkdir(path, *args, **kwargs):
+    parent = os.path.realpath(os.path.dirname(os.path.abspath(str(path))))
+    dest = os.path.join(parent, os.path.basename(str(path)))
+    if not _mkdir_allowed(dest):
+        raise PermissionError(
+            "文件写入被安全策略禁止：保留目录 [.excelmanus] [等级: %s]" % _TIER
+        )
+    return _orig_mkdir(path, *args, **kwargs)
+os.mkdir = _guarded_mkdir
+
+_orig_listdir = os.listdir
+def _guarded_listdir(path):
+    resolved = os.path.realpath(str(path))
+    if resolved == _PENDING_TREE_ROOT:
+        names = _orig_listdir(path)
+        return [n for n in names if n == _PENDING_RUN_ID]
+    if _is_under_foreign_pending(resolved):
+        raise PermissionError(
+            "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
+        )
+    return _orig_listdir(path)
+os.listdir = _guarded_listdir
+if hasattr(os, "scandir"):
+    _orig_scandir = os.scandir
+    def _guarded_scandir(path="."):
+        resolved = os.path.realpath(str(path))
+        if resolved == _PENDING_TREE_ROOT:
+            return [e for e in _orig_scandir(path) if e.name == _PENDING_RUN_ID]
+        if _is_under_foreign_pending(resolved):
+            raise PermissionError(
+                "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
+            )
+        return _orig_scandir(path)
+    os.scandir = _guarded_scandir
 
 import shutil as _shutil_mod
 _orig_copy = _shutil_mod.copy
@@ -405,8 +525,14 @@ def _path_write_target(self):
 
 def _guarded_path_open(self, mode="r", *args, **kwargs):
     writing = any(c in str(mode) for c in "wax+")
-    target = _path_write_target(self) if writing else self
-    return _orig_path_open(target, mode, *args, **kwargs)
+    if writing:
+        target = _path_write_target(self)
+        return _orig_path_open(target, mode, *args, **kwargs)
+    resolved = os.path.realpath(str(self))
+    dest = _prepare_open_path(resolved, mode)
+    if dest != resolved:
+        return _orig_path_open(_OrigPath(dest), mode, *args, **kwargs)
+    return _orig_path_open(self, mode, *args, **kwargs)
 
 def _guarded_path_write_bytes(self, data, *args, **kwargs):
     return _orig_path_write_bytes(_path_write_target(self), data, *args, **kwargs)
@@ -433,6 +559,21 @@ _OrigPath.touch = _guarded_path_touch
 _OrigPath.unlink = _guarded_path_unlink
 _OrigPath.replace = _guarded_path_replace
 _OrigPath.rename = _guarded_path_rename
+_orig_path_mkdir = _OrigPath.mkdir
+def _guarded_path_mkdir(self, *args, **kwargs):
+    parent = os.path.realpath(str(self.parent) if str(self.parent) else ".")
+    dest = os.path.join(parent, self.name)
+    if not _mkdir_allowed(dest):
+        raise PermissionError(
+            "文件写入被安全策略禁止：保留目录 [.excelmanus] [等级: %s]" % _TIER
+        )
+    return _orig_path_mkdir(self, *args, **kwargs)
+_OrigPath.mkdir = _guarded_path_mkdir
+def _blocked_path_symlink(self, *a, **kw):
+    raise PermissionError("Path.symlink_to 被安全策略禁止 [等级: %s]" % _TIER)
+_OrigPath.symlink_to = _blocked_path_symlink
+if hasattr(_OrigPath, "hardlink_to"):
+    _OrigPath.hardlink_to = _blocked_path_symlink
 '''
 
 
@@ -479,31 +620,27 @@ _BENCH_PROTECTED_DIRS = [
 
 def _guarded_open(file, mode="r", *args, **kwargs):
     resolved = os.path.realpath(str(file))
+    _deny_forbidden_read(resolved)
     for _pd in _PRODUCT_SOURCE_DIRS:
-        if resolved == _pd or resolved.startswith(_pd + os.sep):
+        if _path_is_inside(_pd, resolved):
             raise PermissionError(
                 "PRODUCT_SOURCE_FORBIDDEN: 禁止读取产品源码 [等级: {{_TIER}}]"
             )
     # ── 敏感路径读取保护 ──
     for _sd in _SENSITIVE_DIRS:
-        _sd_prefix = _sd + os.sep
-        if resolved.startswith(_sd_prefix) or resolved == _sd:
+        if _path_is_inside(_sd, resolved):
             raise PermissionError(
                 f"文件访问被安全策略禁止：路径位于敏感目录内 [等级: {{_TIER}}]"
             )
     _basename = os.path.basename(resolved)
     if _basename == ".env":
-        _ws = _WORKSPACE_ROOT + os.sep
-        if not (resolved.startswith(_ws) or resolved == _WORKSPACE_ROOT):
+        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
             raise PermissionError(
                 f"文件访问被安全策略禁止：禁止访问工作区外的 .env 文件 [等级: {{_TIER}}]"
             )
     if any(c in str(mode) for c in "wax+"):
-        ws = _WORKSPACE_ROOT + os.sep
-        _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT
-        if not _in_workspace:
-            _tmp_prefix = _SYSTEM_TMPDIR + os.sep
-            if resolved.startswith(_tmp_prefix) or resolved == _SYSTEM_TMPDIR:
+        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+            if _path_is_inside(_SYSTEM_TMPDIR, resolved):
                 return _original_open(file, mode, *args, **kwargs)
             raise PermissionError(
                 f"文件写入被安全策略禁止：路径不在工作区内 [等级: {{_TIER}}]"
@@ -512,6 +649,8 @@ def _guarded_open(file, mode="r", *args, **kwargs):
     return _original_open(resolved, mode, *args, **kwargs)
 
 builtins.open = _guarded_open
+import io as _io_mod
+_io_mod.open = _guarded_open
 
 {code_mode_inject}
 
@@ -595,17 +734,15 @@ _BENCH_PROTECTED_DIRS = [
 
 def _guarded_open(file, mode="r", *args, **kwargs):
     resolved = os.path.realpath(str(file))
+    _deny_forbidden_read(resolved)
     for _pd in _PRODUCT_SOURCE_DIRS:
-        if resolved == _pd or resolved.startswith(_pd + os.sep):
+        if _path_is_inside(_pd, resolved):
             raise PermissionError(
                 "PRODUCT_SOURCE_FORBIDDEN: 禁止读取产品源码 [等级: {{_TIER}}]"
             )
     if any(c in str(mode) for c in "wax+"):
-        ws = _WORKSPACE_ROOT + os.sep
-        _in_workspace = resolved.startswith(ws) or resolved == _WORKSPACE_ROOT
-        if not _in_workspace:
-            _tmp_prefix = _SYSTEM_TMPDIR + os.sep
-            if resolved.startswith(_tmp_prefix) or resolved == _SYSTEM_TMPDIR:
+        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+            if _path_is_inside(_SYSTEM_TMPDIR, resolved):
                 return _original_open(file, mode, *args, **kwargs)
             raise PermissionError(
                 f"文件写入被安全策略禁止：路径不在工作区内 [等级: {{_TIER}}]"
@@ -614,6 +751,8 @@ def _guarded_open(file, mode="r", *args, **kwargs):
     return _original_open(resolved, mode, *args, **kwargs)
 
 builtins.open = _guarded_open
+import io as _io_mod
+_io_mod.open = _guarded_open
 
 # ── Layer 3: os.system / os.popen Guard ──
 if hasattr(os, "system"):

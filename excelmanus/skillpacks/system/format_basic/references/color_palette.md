@@ -2,7 +2,7 @@
 
 ## 工具内置颜色名映射
 
-`run_code` 中使用 openpyxl 设置颜色时（Font(color=...)、PatternFill(fgColor=...)、Side(color=...)），支持以下中文/英文名称（通过内置映射自动转换为十六进制码）：
+颜色名只声明给 `format_spreadsheet` 的 `font.color` / `fill.color`（以及 WorkbookSpec 同等字段）。不要声称原生 `Font(color="red")` 能识别这些名字。
 
 ### 基础色
 | 名称 | 十六进制 | 示例用途 |

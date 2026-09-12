@@ -308,9 +308,12 @@ class TestIncludeFormulas:
             data_tools.read_excel(str(styled_xlsx), include=["formulas"])
         )
         formulas = result["formulas"]
-        assert len(formulas) >= 1
+        items = formulas["items"] if isinstance(formulas, dict) else formulas
+        assert len(items) >= 1
+        if isinstance(formulas, dict):
+            assert "rows_scanned" in formulas
         # 应检测到 D7 的公式
-        d7 = [f for f in formulas if f["cell"] == "D7"]
+        d7 = [f for f in items if f["cell"] == "D7"]
         assert len(d7) == 1
         assert d7[0]["formula"] == "=B7-C7"
 

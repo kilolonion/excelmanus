@@ -2,7 +2,7 @@
 
 当工具调用 ask_user 或触发审批时，创建一个 Future 并在此注册。
 前端通过专用 API 端点提交回答/决策后，resolve 对应的 Future，
-使工具调用在同一轮 _tool_calling_loop 内继续执行。
+使工具调用在同一轮循环内继续执行。
 """
 
 from __future__ import annotations

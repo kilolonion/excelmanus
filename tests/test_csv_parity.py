@@ -120,23 +120,25 @@ def _patch_guard(csv_dir: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 class TestReadExcelRangeCsvFallback:
-    """range 参数对 CSV 静默降级到 offset+max_rows 模式。"""
+    """CSV 带 range 必须 INVALID_ARGS，不再静默忽略。"""
 
     def test_range_ignored_for_csv(self, csv_dir: Path):
         from excelmanus.workbook.data import read_excel
 
         fp = _make_standard_csv(csv_dir)
-        result = _read_payload(read_excel(str(fp), range="A1:D3"))
-        assert "error" not in result
-        assert result["shape"]["rows"] > 0
+        result = read_excel(str(fp), range="A1:D3")
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
 
     def test_range_with_offset_and_max_rows(self, csv_dir: Path):
         from excelmanus.workbook.data import read_excel
 
         fp = _make_standard_csv(csv_dir)
-        result = _read_payload(read_excel(str(fp), range="A1:D10", max_rows=2, offset=1))
-        assert "error" not in result
-        assert result["shape"]["rows"] == 2
+        result = read_excel(str(fp), range="A1:D10", max_rows=2, offset=1)
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
 
 
 # ══════════════════════════════════════════════════════════

@@ -181,7 +181,8 @@ class ApprovalManager:
         if self.is_read_only_safe_tool(tool_name):
             return False
         if self.is_mcp_tool(tool_name):
-            return not self.is_mcp_auto_approved(tool_name)
+            # MCP 默认允许调用。autoApprove 是显式信任名单，不是确认门。
+            return False
         if self.is_audit_only_tool(tool_name):
             return False
         return tool_name in self._confirm_tools
@@ -354,8 +355,6 @@ class ApprovalManager:
     ) -> tuple[Any, AppliedApprovalRecord]:
         audit_dir = self.audit_root / approval_id
         audit_dir.mkdir(parents=True, exist_ok=True)
-        snapshots_dir = audit_dir / "snapshots"
-        snapshots_dir.mkdir(parents=True, exist_ok=True)
 
         targets = self._resolve_target_paths(tool_name, arguments)
         use_workspace_scan = (not targets) and self.is_mutating_tool(tool_name)
@@ -374,9 +373,10 @@ class ApprovalManager:
         execute_error: Exception | None = None
         error_type: str | None = None
         error_message: str | None = None
+        from excelmanus.engine_core.tool_result import ToolResult as _ToolResult
+
         try:
             result_payload = execute(tool_name, arguments, tool_scope)
-            from excelmanus.engine_core.tool_result import ToolResult as _ToolResult
 
             if isinstance(result_payload, _ToolResult):
                 result_text = result_payload.model_text
@@ -391,6 +391,8 @@ class ApprovalManager:
                         if result_payload.error is not None
                         else "TOOL_ERROR"
                     )
+                    if error_type == "TOOL_EXECUTION_ERROR":
+                        error_type = "ToolExecutionError"
             else:
                 result_text = str(result_payload)
                 result_payload = result_text
@@ -399,8 +401,14 @@ class ApprovalManager:
             error_type = type(exc).__name__
             error_message = str(exc)
 
-        # ── 检测 registry 层返回的结构化错误 JSON（工具不再抛异常） ──
-        if execute_error is None and result_text.startswith('{"status": "error"'):
+        # 字符串错误 JSON（非 ToolResult）仍记失败并抛出，便于旧调用方。
+        # 已是 ToolResult 的契约失败必须原样返回，不能改写成 RuntimeError，
+        # 否则 dispatcher 会 compact 掉 VERSION_CONFLICT / PATH_INVALID。
+        if (
+            execute_error is None
+            and not isinstance(result_payload, _ToolResult)
+            and result_text.startswith('{"status": "error"')
+        ):
             try:
                 _err_payload = json.loads(result_text)
                 if isinstance(_err_payload, dict) and _err_payload.get("status") == "error":
@@ -410,7 +418,6 @@ class ApprovalManager:
                     else:
                         error_type = _err_payload.get("exception") or "ToolExecutionError"
                     error_message = _err_payload.get("message") or result_text
-                    # 创建一个虚拟异常对象以保持后续逻辑兼容
                     execute_error = RuntimeError(error_message)
             except (json.JSONDecodeError, AttributeError):
                 pass
@@ -425,14 +432,12 @@ class ApprovalManager:
             changes, patch_text, binary_snapshots = self._build_change_records_from_snapshot_maps(
                 before=before,
                 after=after,
-                snapshots_dir=snapshots_dir,
             )
         else:
             changes, patch_text, binary_snapshots = self._build_change_records(
                 target_paths=targets,
                 before=before,
                 after=after,
-                snapshots_dir=snapshots_dir,
             )
 
         patch_rel = None
@@ -517,9 +522,6 @@ class ApprovalManager:
                 record.undoable = False
                 self._persist_undoable_flag(record)
                 count += 1
-        # 同步失效版本链
-        if self._file_registry is not None and self._file_registry.has_versions:
-            self._file_registry.invalidate_undo(rel_paths)
         return count
 
     def _persist_undoable_flag(self, record: AppliedApprovalRecord) -> None:
@@ -544,6 +546,7 @@ class ApprovalManager:
                 logger.debug("DB undoable 标记同步失败: %s", record.approval_id, exc_info=True)
 
     def undo(self, approval_id: str) -> str:
+        """Restore workbook files to this transaction's beforeEdit when present."""
         record = self.get_applied(approval_id)
         if record is None:
             return f"未找到已执行记录 `{approval_id}`。"
@@ -552,68 +555,79 @@ class ApprovalManager:
         if not record.changes:
             return f"记录 `{approval_id}` 没有可回滚的文件变更。"
 
-        conflicts: list[str] = []
-        for change in record.changes:
-            path = self.workspace_root / change.path
-            exists = path.exists() and path.is_file()
-            if exists != change.after_exists:
-                conflicts.append(f"{change.path}: 当前存在状态与执行后记录不一致")
-                continue
-            if exists:
-                current_hash = self._sha256(path.read_bytes())
-                if current_hash != change.after_hash:
-                    conflicts.append(f"{change.path}: 文件内容已变化（hash 不匹配）")
-        if conflicts:
-            detail = "\n".join(f"- {line}" for line in conflicts)
-            return f"回滚被拒绝：检测到后续变更冲突。\n{detail}\n请先人工确认后再处理。"
-
-        restored = 0
-        deleted = 0
-        for change in record.changes:
-            path = self.workspace_root / change.path
-            if change.before_exists:
-                if not change.before_snapshot_file:
-                    return f"回滚失败：缺少快照 `{change.path}`。"
-                snapshot = self.workspace_root / change.before_snapshot_file
-                if not snapshot.exists():
-                    return f"回滚失败：快照文件不存在 `{change.before_snapshot_file}`。"
-                path.parent.mkdir(parents=True, exist_ok=True)
-                try:
-                    self._restore_workspace_bytes(
-                        change.path,
-                        snapshot.read_bytes(),
-                        expected_hex=change.after_hash,
-                    )
-                except Exception as exc:
-                    return f"回滚失败：写入 `{change.path}` 失败：{exc}"
-                restored += 1
-            elif path.exists():
-                path.unlink()
-                deleted += 1
+        restored = self._restore_revision_before(record)
         record.undoable = False
         self._persist_undoable_flag(record)
-        return f"已回滚 `{approval_id}`：恢复 {restored} 个文件，删除 {deleted} 个新增文件。"
-
-    def _restore_workspace_bytes(
-        self,
-        rel_path: str,
-        data: bytes,
-        expected_hex: str | None,
-    ) -> None:
-        """把快照字节经 workbook_commit 写回工作区，expected 为当前 after 哈希。"""
-        from excelmanus.security.guard import FileAccessGuard
-        from excelmanus.workbook_commit import commit_bytes, content_version_of_file
-
-        dest = self.workspace_root / rel_path
-        expected = f"sha256:{expected_hex}" if expected_hex else None
-        if expected is None and dest.is_file():
-            expected = content_version_of_file(dest)
-        commit_bytes(
-            guard=FileAccessGuard(str(self.workspace_root)),
-            file_path=rel_path,
-            data=data,
-            expected_version=expected,
+        if restored:
+            names = ", ".join(restored)
+            return (
+                f"已回滚 `{approval_id}`：已 restore {len(restored)} 个文件到 beforeEdit"
+                f"（{names}）。"
+            )
+        return (
+            f"已回滚标记 `{approval_id}`：审批快照不再写回磁盘。"
+            "文件回退请用 manage_spreadsheet_versions restore。"
         )
+
+    def _restore_revision_before(self, record: AppliedApprovalRecord) -> list[str]:
+        from excelmanus.security.guard import FileAccessGuard
+        from excelmanus.workbook_commit import CommitError, commit_bytes, content_version_of_file
+        from excelmanus.workspace.revisions import RevisionStore
+
+        store = RevisionStore(self.workspace_root)
+        guard = FileAccessGuard(str(self.workspace_root))
+        restored: list[str] = []
+        for change in record.changes:
+            rel = str(change.path or "").replace("\\", "/").removeprefix("./").strip()
+            if not rel:
+                continue
+            after_hash = str(change.after_hash or "").replace("sha256:", "")
+            records = store.list(rel)
+            after_rec = None
+            if after_hash:
+                after_rec = next(
+                    (
+                        rec
+                        for rec in reversed(records)
+                        if rec.reason == "afterEdit" and rec.sha256 == after_hash
+                    ),
+                    None,
+                )
+            if after_rec is None:
+                after_rec = next(
+                    (rec for rec in reversed(records) if rec.reason == "afterEdit"),
+                    None,
+                )
+            if after_rec is None:
+                continue
+            before = next(
+                (
+                    rec
+                    for rec in records
+                    if rec.transaction_id == after_rec.transaction_id
+                    and rec.reason == "beforeEdit"
+                ),
+                None,
+            )
+            if before is None:
+                continue
+            blob = store.read_blob(rel, before.sha256)
+            if blob is None:
+                continue
+            dest = self.workspace_root / rel
+            current = content_version_of_file(dest) if dest.is_file() else None
+            try:
+                commit_bytes(
+                    guard=guard,
+                    file_path=rel,
+                    data=blob,
+                    expected_version=current,
+                    record_history=True,
+                )
+                restored.append(rel)
+            except (CommitError, ValueError, OSError):
+                logger.debug("approval undo restore failed: %s", rel, exc_info=True)
+        return restored
 
     def _new_approval_id(self) -> str:
         now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
@@ -764,7 +778,6 @@ class ApprovalManager:
         target_paths: list[Path],
         before: dict[str, _FileSnapshot],
         after: dict[str, _FileSnapshot],
-        snapshots_dir: Path,
     ) -> tuple[list[FileChangeRecord], str, list[BinarySnapshotRecord]]:
         before_subset: dict[str, _FileSnapshot] = {}
         after_subset: dict[str, _FileSnapshot] = {}
@@ -775,7 +788,6 @@ class ApprovalManager:
         return self._build_change_records_from_snapshot_maps(
             before=before_subset,
             after=after_subset,
-            snapshots_dir=snapshots_dir,
         )
 
     def _build_change_records_from_snapshot_maps(
@@ -783,10 +795,8 @@ class ApprovalManager:
         *,
         before: dict[str, _FileSnapshot],
         after: dict[str, _FileSnapshot],
-        snapshots_dir: Path,
     ) -> tuple[list[FileChangeRecord], str, list[BinarySnapshotRecord]]:
         changes: list[FileChangeRecord] = []
-        binary_snapshots: list[BinarySnapshotRecord] = []
         patches: list[str] = []
 
         for rel in sorted(set(before) | set(after)):
@@ -802,22 +812,6 @@ class ApprovalManager:
                 before_snap.content if before_snap.content is not None else after_snap.content
             )
             is_binary = self._is_binary_content(base_content)
-            before_snapshot_file: str | None = None
-
-            if before_snap.exists and before_snap.content is not None:
-                snapshot_path = snapshots_dir / rel
-                snapshot_path.parent.mkdir(parents=True, exist_ok=True)
-                snapshot_path.write_bytes(before_snap.content)
-                before_snapshot_file = str(snapshot_path.relative_to(self.workspace_root))
-                if is_binary:
-                    binary_snapshots.append(
-                        BinarySnapshotRecord(
-                            path=rel,
-                            snapshot_file=before_snapshot_file,
-                            hash_sha256=before_snap.sha256 or "",
-                            size_bytes=before_snap.size or 0,
-                        )
-                    )
 
             if not is_binary:
                 patch = self._build_unified_diff(
@@ -838,14 +832,13 @@ class ApprovalManager:
                     before_size=before_snap.size,
                     after_size=after_snap.size,
                     is_binary=is_binary,
-                    before_snapshot_file=before_snapshot_file,
                 )
             )
 
         patch_text = "\n".join(patches).strip()
         if patch_text:
             patch_text += "\n"
-        return changes, patch_text, binary_snapshots
+        return changes, patch_text, []
 
     def _build_manifest_v2(
         self,

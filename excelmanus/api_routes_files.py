@@ -20,7 +20,6 @@ from excelmanus.api_app_state import (
     UnicodeJSONResponse,
     error_json_response as _error_json_response,
     get_config,
-    get_config_store,
     get_file_registry as _get_file_registry,
     get_session_manager,
     make_content_disposition as _make_content_disposition,
@@ -28,6 +27,10 @@ from excelmanus.api_app_state import (
     resolve_workspace as _resolve_workspace,
     resolve_workspace_root as _resolve_workspace_root,
     safe_uploads_path as _safe_uploads_path,
+    uploads_create_file as _uploads_create_file,
+    uploads_delete as _uploads_delete,
+    uploads_mkdir as _uploads_mkdir,
+    uploads_rename as _uploads_rename,
 )
 from excelmanus.logger import get_logger
 from excelmanus.workbook_commit import content_version_of
@@ -95,7 +98,7 @@ async def get_excel_file(request: Request) -> StreamingResponse:
     from excelmanus.xls_converter import needs_conversion as _nc2, ensure_xlsx as _ensure2
     if _nc2(resolved):
         try:
-            _xlsx_p2, _ = _ensure2(resolved)
+            _xlsx_p2, _ = _ensure2(resolved, workspace_root=ws_root)
             actual_file = str(_xlsx_p2)
             suffix = ".xlsx"
         except Exception:
@@ -228,7 +231,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         _actual_path = resolved
         if _nc(resolved):
             try:
-                _xlsx_p, _ = _ensure(resolved)
+                _xlsx_p, _ = _ensure(resolved, workspace_root=ws_root)
                 _actual_path = str(_xlsx_p)
             except Exception:
                 logger.warning("snapshot 转换失败，尝试直接打开: %s", resolved)
@@ -374,10 +377,10 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
     """侧边面板编辑回写：将单元格变更写入文件。"""
     assert get_config() is not None, "服务未初始化"
 
-    ws_root = _resolve_workspace_root(raw_request)
+    ws_root = _resolve_workspace_root(raw_request, session_id=request.session_id)
 
     # 先解析工作区路径
-    resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root)
+    resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
 
@@ -392,7 +395,7 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
         from excelmanus.xls_converter import needs_conversion as _nc3, ensure_xlsx as _ensure3
         if _nc3(resolved):
             try:
-                _xlsx_p3, _ = _ensure3(resolved)
+                _xlsx_p3, _ = _ensure3(resolved, workspace_root=ws_root)
                 resolved = str(_xlsx_p3)
             except Exception:
                 pass
@@ -592,7 +595,11 @@ async def list_workspace_files(request: Request) -> JSONResponse:
             break
 
     results.sort(key=lambda x: (not x["is_dir"], x["path"].lower()))
-    return JSONResponse(content={"files": results, "truncated": len(results) >= _MAX_WORKSPACE_FILES})
+    return JSONResponse(content={
+        "files": results,
+        "truncated": len(results) >= _MAX_WORKSPACE_FILES,
+        "workspace_path": ws_root,
+    })
 
 
 @router.get("/api/v1/files/registry")
@@ -686,12 +693,12 @@ async def create_file_group(request: Request) -> JSONResponse:
     Body: {name: str, description?: str, file_ids?: [{id: str, role?: str}]}
     """
     assert get_config() is not None, "服务未初始化"
-    ws_root = _resolve_workspace_root(request)
+    body = await request.json()
+    ws_root = _resolve_workspace_root(request, session_id=(body.get("session_id") or None))
     registry = _get_file_registry(ws_root)
     if registry is None:
         return _error_json_response(500, "FileRegistry 不可用")
 
-    body = await request.json()
     name = body.get("name", "").strip()
     if not name:
         return _error_json_response(400, "缺少文件组名称")
@@ -952,102 +959,6 @@ async def download_file(request: Request) -> StreamingResponse:
         headers={"Content-Disposition": _make_content_disposition(file_path.name)},
     )
 
-@router.get("/api/v1/files/dl/{token}")
-async def download_file_by_token(token: str) -> StreamingResponse:
-    """通过短效令牌下载文件（无需 auth，供 Bot 渠道分享下载链接）。"""
-    assert get_config() is not None, "服务未初始化"
-
-    from excelmanus.auth.security import decode_download_token
-
-    claims = decode_download_token(token)
-    if claims is None:
-        return _error_json_response(403, "下载链接已过期或无效")  # type: ignore[return-value]
-
-    file_path_str = claims.get("file_path", "")
-
-    from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
-    ws = IsolatedWorkspace.resolve(
-        get_config().workspace_root,
-        sandbox_config=SandboxConfig(),
-        data_root=get_config().data_root,
-    )
-    ws_root = str(ws.root_dir)
-
-    resolved = _resolve_excel_path(file_path_str, None, workspace_root=ws_root)
-    if resolved is None:
-        return _error_json_response(404, "文件不存在或路径非法")  # type: ignore[return-value]
-
-    from pathlib import Path as _Path
-    import mimetypes
-
-    fp = _Path(resolved)
-    content_type = mimetypes.guess_type(fp.name)[0] or "application/octet-stream"
-
-    def _iter():
-        with open(resolved, "rb") as f:  # type: ignore[arg-type]
-            while chunk := f.read(65536):
-                yield chunk
-
-    return StreamingResponse(
-        _iter(),
-        media_type=content_type,
-        headers={"Content-Disposition": _make_content_disposition(fp.name)},
-    )
-
-@router.post("/api/v1/files/download/link")
-async def create_download_link(request: Request) -> JSONResponse:
-    """生成文件的短效下载链接（供 Bot 渠道使用）。
-
-    请求体: {"file_path": "..."}
-    返回: {"url": "https://...", "token": "...", "expires_minutes": 30}
-    """
-    assert get_config() is not None, "服务未初始化"
-
-    body = await request.json()
-    file_path_str = body.get("file_path", "")
-
-    if not file_path_str:
-        return _error_json_response(400, "缺少 file_path 参数")
-
-    from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
-    ws = IsolatedWorkspace.resolve(
-        get_config().workspace_root,
-        sandbox_config=SandboxConfig(),
-        data_root=get_config().data_root,
-    )
-    ws_root = str(ws.root_dir)
-
-    resolved = _resolve_excel_path(file_path_str, None, workspace_root=ws_root)
-    if resolved is None:
-        return _error_json_response(404, f"文件不存在或路径非法: {file_path_str}")
-
-    from excelmanus.auth.security import create_download_token, DOWNLOAD_TOKEN_EXPIRE_MINUTES
-    from pathlib import Path as _Path
-
-    try:
-        canon = str(_Path(resolved).resolve().relative_to(_Path(ws_root).resolve())).replace("\\", "/")
-    except ValueError:
-        return _error_json_response(404, f"文件不存在或路径非法: {file_path_str}")
-    token = create_download_token(canon)
-
-    # 构建公开 URL（优先级：env > config_kv > 请求 Host 推断）
-    public_url = get_config().public_url
-    if not public_url and get_config_store() is not None:
-        public_url = (get_config_store().get("channel_public_url", "") or "").strip().rstrip("/")
-    if not public_url:
-        # 回退：从请求 Host 推断
-        scheme = request.headers.get("x-forwarded-proto", request.url.scheme)
-        host = request.headers.get("x-forwarded-host", request.headers.get("host", "localhost:8000"))
-        public_url = f"{scheme}://{host}"
-
-    download_url = f"{public_url}/api/v1/files/dl/{token}"
-
-    return JSONResponse(content={
-        "url": download_url,
-        "token": token,
-        "expires_minutes": DOWNLOAD_TOKEN_EXPIRE_MINUTES,
-    })
-
 @router.get("/api/v1/files/excel/compare")
 async def get_excel_compare(request: Request) -> JSONResponse:
     """返回两个 Excel 文件的快照 + 跨文件列关系，供前端对比视图使用。
@@ -1146,8 +1057,9 @@ async def get_excel_compare(request: Request) -> JSONResponse:
         _actual_path = resolved
         if ext in (".xls", ".xlsb"):
             try:
-                from excelmanus.tools._helpers import ensure_openpyxl_compatible
-                _actual_path = str(ensure_openpyxl_compatible(resolved))
+                from excelmanus.xls_converter import ensure_xlsx as _ensure_cmp
+                _xlsx_cmp, _ = _ensure_cmp(resolved, workspace_root=ws_root)
+                _actual_path = str(_xlsx_cmp)
             except Exception:
                 logger.warning("Compare 格式转换失败，尝试直接打开: %s", resolved)
 
@@ -1250,6 +1162,9 @@ async def get_file_relationships(request: Request) -> JSONResponse:
     assert get_config() is not None, "服务未初始化"
 
     directory = request.query_params.get("directory", ".")
+    ws_root = _resolve_workspace_root(request)
+    if not directory or directory == ".":
+        directory = ws_root
 
     import asyncio
 
@@ -1447,8 +1362,8 @@ async def write_word_content(request: WordWriteRequest, raw_request: Request) ->
     if not request.expected_version.strip():
         return _error_json_response(400, "write 必须提供 expected_version")
 
-    ws_root = _resolve_workspace_root(raw_request)
-    resolved = _resolve_excel_path(request.path, None, workspace_root=ws_root)
+    ws_root = _resolve_workspace_root(raw_request, session_id=request.session_id)
+    resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
     file_path, error_response = _resolve_supported_word_file(request.path, resolved)
     if error_response is not None:
         return error_response
@@ -1534,14 +1449,18 @@ async def workspace_mkdir(request: Request) -> JSONResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request)
+    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
     uploads = ws.get_upload_dir()
-    target = _safe_uploads_path(uploads, path)
+    existing = _safe_uploads_path(uploads, path)
+    if existing is not None:
+        try:
+            os.lstat(existing)
+            return _error_json_response(409, "目录已存在")
+        except FileNotFoundError:
+            pass
+    target = _uploads_mkdir(uploads, path)
     if target is None:
         return _error_json_response(400, "非法目标路径")
-    if target.exists():
-        return _error_json_response(409, "目录已存在")
-    target.mkdir(parents=True, exist_ok=True)
     return JSONResponse(content={"status": "created", "path": path})
 
 @router.post("/api/v1/files/workspace/create")
@@ -1553,15 +1472,18 @@ async def workspace_create_file(request: Request) -> JSONResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request)
+    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
     uploads = ws.get_upload_dir()
-    target = _safe_uploads_path(uploads, path)
+    target = _uploads_create_file(uploads, path)
     if target is None:
+        existing = _safe_uploads_path(uploads, path)
+        if existing is not None:
+            try:
+                os.lstat(existing)
+                return _error_json_response(409, "文件已存在")
+            except FileNotFoundError:
+                pass
         return _error_json_response(400, "非法目标路径")
-    if target.exists():
-        return _error_json_response(409, "文件已存在")
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.touch()
     return JSONResponse(content={"status": "created", "path": path})
 
 @router.delete("/api/v1/files/workspace/item")
@@ -1573,23 +1495,13 @@ async def workspace_delete_item(request: Request) -> JSONResponse:
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request)
+    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
     uploads = ws.get_upload_dir()
-    target = _safe_uploads_path(uploads, path)
+    target, err = _uploads_delete(uploads, path)
+    if err == "路径不存在":
+        return _error_json_response(404, err)
     if target is None:
-        return _error_json_response(400, "非法目标路径")
-    if not target.exists():
-        return _error_json_response(404, "路径不存在")
-    # 防止删除上传根目录本身
-    if target.resolve() == uploads.resolve():
-        return _error_json_response(400, "无法删除根目录")
-
-    import shutil
-    if target.is_dir():
-        shutil.rmtree(target)
-    else:
-        target.unlink()
-    # W4: 通知所有活跃 session 清理关联 staging 条目
+        return _error_json_response(400, err or "非法目标路径")
     if get_session_manager() is not None:
         get_session_manager().notify_file_deleted(str(target))
     return JSONResponse(content={"status": "deleted", "path": path})
@@ -1601,22 +1513,15 @@ async def workspace_rename_item(request: Request) -> JSONResponse:
     body = await request.json()
     old_path = body.get("old_path", "").strip()
     new_path = body.get("new_path", "").strip()
-    if not old_path or not new_path:
-        return _error_json_response(400, "缺少 old_path 或 new_path 参数")
-
-    ws = _resolve_workspace(request)
+    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
     uploads = ws.get_upload_dir()
-    src = _safe_uploads_path(uploads, old_path)
-    dst = _safe_uploads_path(uploads, new_path)
+    src, dst, err = _uploads_rename(uploads, old_path, new_path)
+    if err == "源路径不存在":
+        return _error_json_response(404, err)
+    if err == "目标路径已存在":
+        return _error_json_response(409, err)
     if src is None or dst is None:
-        return _error_json_response(400, "非法路径")
-    if not src.exists():
-        return _error_json_response(404, "源路径不存在")
-    if dst.exists():
-        return _error_json_response(409, "目标路径已存在")
-    dst.parent.mkdir(parents=True, exist_ok=True)
-    src.rename(dst)
-    # W5: 通知所有活跃 session 更新 staging 映射
+        return _error_json_response(400, err or "非法路径")
     if get_session_manager() is not None:
         get_session_manager().notify_file_renamed(str(src), str(dst))
     return JSONResponse(content={"status": "renamed", "old_path": old_path, "new_path": new_path})

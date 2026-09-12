@@ -1,22 +1,11 @@
 ---
 name: word_code_runner
-description: 通过 Python 脚本 (python-docx) 处理复杂 Word 文档操作
+description: 用 python-docx 处理复杂 Word 操作。
 file_patterns:
   - "*.docx"
-version: "1.0.0"
+version: "1.1.0"
 ---
-优先在以下场景使用 `word_code_runner`：
-1. 简单读取、搜索、段落级替换优先走 `word_basic` 的结构化工具。
-2. 需要模板批量填充、邮件合并、复杂表格、图片、页眉页脚或精细样式控制时，使用 `run_code` + `python-docx`。
-3. 默认保留原文件，传入独立的 `output_path`，不要直接覆盖用户唯一副本。
-4. 路径一律通过 `run_code.args` 传入，不要把真实路径硬编码在脚本里。
-
-## 使用约束
-
-- 每个脚本首行固定为 `from docx import Document`
-- 需要 `pandas` 的场景显式设置 `require_excel_deps: true`
-- 批量生成文档时输出到目录，不把整份文档内容直接打印回上下文
-- 执行后建议再用 `read_word` 或 `inspect_word` 回读验证结果
+模板填充、邮件合并、复杂表格、图片或页眉页脚可用 `run_code` + python-docx。路径从 `run_code.args` 传入。需要 pandas 时设 `require_excel_deps: true`。
 
 ## 1. 批量替换模板变量
 

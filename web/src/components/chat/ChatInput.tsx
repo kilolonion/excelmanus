@@ -21,6 +21,7 @@ import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { buildApiUrl, apiGet, apiPut, getAuthHeaders } from "@/lib/api";
 import { formatModelIdForDisplay } from "@/lib/model-display";
+import { applyVisionFromModel } from "@/lib/vision-capability";
 import { UndoPanel } from "@/components/modals/UndoPanel";
 import type { ModelInfo, AttachedFile } from "@/lib/types";
 import {
@@ -31,7 +32,9 @@ import {
   type PopoverMode,
 } from "./chat-input-constants";
 import { ChatModeTabs } from "./ChatModeTabs";
+import { ModeBadges } from "./ModeBadges";
 import { ThinkingLevelSelector } from "./ThinkingLevelSelector";
+import { ContextUsageButton } from "./ContextUsageButton";
 import { FileAttachmentChips } from "./FileAttachmentChips";
 import { CommandPopover } from "./CommandPopover";
 import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
@@ -47,6 +50,8 @@ import {
 import { ChatDropzone, ChatUploadButton } from "./ChatUploadButton";
 import { ChatSelectionChip } from "./ChatSelectionChip";
 import { useChatUpload } from "./use-chat-upload";
+import { shouldCancelComposerNativeDrop } from "./chat-drop";
+import { useExcelStore } from "@/stores/excel-store";
 
 interface ChatInputProps {
   onSend: (text: string, files?: AttachedFile[]) => void;
@@ -85,6 +90,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const inputHintTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isComposingRef = useRef(false);
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
+  const hasMessages = useChatStore((s) => s.messageOrder.length > 0);
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const [questionSelected, setQuestionSelected] = useState<Set<string>>(new Set());
 
@@ -135,6 +141,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     retryUpload,
     removeFile,
     insertFileMentions,
+    attachWorkspaceFiles,
     applySuggestionDraft,
     handlePaste,
     hasUploadingFiles,
@@ -260,6 +267,8 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     try {
       const data = await apiGet<{ models: ModelInfo[] }>("/models");
       setModelList(data.models);
+      const active = data.models.find((m) => m.active);
+      applyVisionFromModel(active);
     } catch {
       // 后端不可用
     }
@@ -487,6 +496,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      applyVisionFromModel(modelList.find((m) => m.name === name));
       closePopover();
       setText("");
       if (onCommandResult) {
@@ -778,7 +788,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   return (
     <ChatDropzone
       onNativeFiles={insertFileMentions}
-      onExcelFiles={(dropped) => insertMentionTokens(dropped.map((file) => `@file:${file.filename}`))}
+      onExcelFiles={attachWorkspaceFiles}
       highlighted={draftHighlight}
     >
       <ChatSelectionChip insertMentionTokens={insertMentionTokens} />
@@ -868,7 +878,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
                             className="inline-flex items-center gap-1 rounded-md bg-amber-100/80 dark:bg-amber-900/30 px-1.5 py-0.5 text-[11px] text-amber-700 dark:text-amber-400"
                           >
                             <KeyRound className="h-2.5 w-2.5" />
-                            {item.name === "main" ? "主模型" : item.name}
+                            {item.name === "active" ? "当前模型" : item.name}
                             <span className="text-amber-500/60 dark:text-amber-500/40">·</span>
                             {item.field === "api_key" ? "Key 缺失" : `${item.field}`}
                           </span>
@@ -924,8 +934,10 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       {!pendingQuestion && (
         <div className="flex items-center justify-between">
           <ChatModeTabs />
-          <div className="pr-3 pt-1 pb-0">
+          <div className="flex items-center gap-0.5 pr-3 pt-1 pb-0">
+            <ModeBadges />
             <ThinkingLevelSelector />
+            <ContextUsageButton />
           </div>
         </div>
       )}
@@ -993,9 +1005,19 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
             onKeyDown={handleKeyDown}
             onScroll={syncScroll}
             onPaste={handlePaste}
+            onDragOver={(e) => {
+              if (shouldCancelComposerNativeDrop(e.dataTransfer.types, useExcelStore.getState().draggingFileCount)) {
+                e.preventDefault();
+              }
+            }}
+            onDrop={(e) => {
+              if (shouldCancelComposerNativeDrop(e.dataTransfer.types, useExcelStore.getState().draggingFileCount)) {
+                e.preventDefault();
+              }
+            }}
             onCompositionStart={() => { isComposingRef.current = true; }}
             onCompositionEnd={() => { isComposingRef.current = false; }}
-            placeholder={pendingQuestion ? "输入自定义回答，或选择上方选项后发送" : "有问题，尽管问"}
+            placeholder={pendingQuestion ? "输入自定义回答，或选择上方选项后发送" : (hasMessages ? "继续分析，或告诉我下一步…" : "有问题，尽管问")}
             disabled={disabled || isAnswerSubmitting}
             className="min-h-[36px] max-h-[180px] resize-none border-0 bg-transparent shadow-none
               focus-visible:ring-0 focus-visible:ring-offset-0

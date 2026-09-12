@@ -26,8 +26,6 @@ def _make_config() -> SimpleNamespace:
         log_level="INFO",
         model="test-model",
         base_url="http://localhost",
-        aux_model=None,
-        aux_base_url=None,
     )
 
 

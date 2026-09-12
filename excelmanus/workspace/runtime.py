@@ -38,6 +38,24 @@ def pending_run_dir(workspace_root: str | Path, run_id: str) -> Path:
     return Path(workspace_root).resolve() / ".excelmanus" / "pending" / run_id
 
 
+def prepare_pending_run_dir(workspace_root: str | Path, run_id: str) -> Path:
+    """Create this run's pending directory before launching the sandbox.
+
+    ``chmod 700`` is extra hardening. Same-uid sibling ``run_code`` processes
+    are isolated by the wrapper's ``_is_under_foreign_pending`` path checks,
+    not by Unix mode bits.
+    """
+    import os
+
+    run_dir = pending_run_dir(workspace_root, run_id)
+    run_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        os.chmod(run_dir, 0o700)
+    except OSError:
+        pass
+    return run_dir
+
+
 def _contained_file(root: Path, candidate: Path) -> Path | None:
     """Return resolved file if it stays inside root; never follow a path out."""
     try:
@@ -55,7 +73,7 @@ def _read_pending_manifest(run_dir: Path) -> list[tuple[str, str]]:
     manifest = run_dir / "manifest.jsonl"
     if not manifest.is_file():
         return []
-    entries: list[tuple[str, str]] = []
+    by_rel: dict[str, str] = {}
     try:
         text = manifest.read_text(encoding="utf-8")
     except OSError:
@@ -73,8 +91,8 @@ def _read_pending_manifest(run_dir: Path) -> list[tuple[str, str]]:
         rel = normalize_version_path(str(rec.get("rel") or ""))
         name = Path(str(rec.get("name") or "")).name
         if rel and name and name != "manifest.jsonl":
-            entries.append((rel, name))
-    return entries
+            by_rel[rel] = name
+    return list(by_rel.items())
 
 
 def publish_bytes(
@@ -105,12 +123,13 @@ def publish_pending_writes(
     run_id: str | None = None,
     expected_versions: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
-    """Host-side Runtime commit for sandbox pending spreadsheet saves.
+    """Host-side Runtime commit for sandbox pending writes.
 
     Source bytes come only from ``.excelmanus/pending/{run_id}/`` listed in
     that directory's manifest. Stderr is ignored for path selection.
     ``expected_versions`` is the host-seen CAS map; existing files without
     an entry conflict instead of matching the live disk hash.
+    Duplicate manifest rows for the same rel keep the last entry.
     """
     del stderr
     from excelmanus.workbook_commit import CommitError, export_seen_versions

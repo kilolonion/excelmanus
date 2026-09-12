@@ -3,7 +3,13 @@ from __future__ import annotations
 
 import pytest
 
-from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, extract_excel_targets, strip_exit_calls
+from excelmanus.security.code_policy import (
+    CodePolicyEngine,
+    CodeRiskTier,
+    allows_auto_run,
+    extract_excel_targets,
+    strip_exit_calls,
+)
 
 
 class TestGreenTier:
@@ -64,6 +70,58 @@ class TestRedTier:
     def test_obfuscation_base64_exec(self) -> None:
         code = "import base64\nexec(base64.b64decode('cHJpbnQoMSk='))"
         result = CodePolicyEngine().analyze(code)
+        assert result.tier == CodeRiskTier.RED
+
+
+class TestUnknownAndDeserialize:
+    def test_pickle_is_red(self) -> None:
+        result = CodePolicyEngine().analyze("import pickle\nprint(pickle.dumps(1))")
+        assert result.tier == CodeRiskTier.RED
+        assert "DESERIALIZE" in result.capabilities
+
+    def test_marshal_is_red(self) -> None:
+        result = CodePolicyEngine().analyze("import marshal")
+        assert result.tier == CodeRiskTier.RED
+
+    def test_unknown_module_is_red(self) -> None:
+        result = CodePolicyEngine().analyze("import totally_unknown_lib_xyz")
+        assert result.tier == CodeRiskTier.RED
+        assert "UNKNOWN_MODULE" in result.capabilities
+
+    def test_path_read_stays_green(self) -> None:
+        result = CodePolicyEngine().analyze(
+            "from pathlib import Path\nprint(Path('a.txt').read_text())"
+        )
+        assert result.tier == CodeRiskTier.GREEN
+
+    def test_path_write_is_not_green(self) -> None:
+        result = CodePolicyEngine().analyze(
+            "from pathlib import Path\nPath('a.txt').write_text('x')"
+        )
+        assert result.tier != CodeRiskTier.GREEN
+        assert "FS_WRITE" in result.capabilities
+
+    def test_open_write_is_not_green(self) -> None:
+        result = CodePolicyEngine().analyze("open('a.txt', 'w').write('x')")
+        assert result.tier != CodeRiskTier.GREEN
+        assert "FS_WRITE" in result.capabilities
+
+    def test_to_csv_is_fs_write(self) -> None:
+        result = CodePolicyEngine().analyze("df.to_csv('a.csv')")
+        assert result.tier == CodeRiskTier.YELLOW
+        assert "FS_WRITE" in result.capabilities
+
+    def test_os_listdir_stays_green(self) -> None:
+        result = CodePolicyEngine().analyze("import os\nprint(os.listdir('.'))")
+        assert result.tier == CodeRiskTier.GREEN
+
+    def test_os_remove_is_not_green(self) -> None:
+        result = CodePolicyEngine().analyze("import os\nos.remove('a.txt')")
+        assert result.tier != CodeRiskTier.GREEN
+        assert "FS_WRITE" in result.capabilities
+
+    def test_os_symlink_is_red(self) -> None:
+        result = CodePolicyEngine().analyze("import os\nos.symlink('a', 'b')")
         assert result.tier == CodeRiskTier.RED
 
 
@@ -242,3 +300,26 @@ class TestStripExitCalls:
         if sanitized is not None:
             result = CodePolicyEngine().analyze(sanitized)
             assert result.tier == CodeRiskTier.RED
+
+
+class TestAllowsAutoRun:
+    def test_green_respects_flag(self) -> None:
+        result = CodePolicyEngine().analyze("print(1)")
+        assert allows_auto_run(result, green_auto=True, yellow_auto=False) is True
+        assert allows_auto_run(result, green_auto=False, yellow_auto=True) is False
+
+    def test_network_yellow_respects_flag(self) -> None:
+        result = CodePolicyEngine().analyze("import requests")
+        assert allows_auto_run(result, green_auto=True, yellow_auto=True) is True
+        assert allows_auto_run(result, green_auto=True, yellow_auto=False) is False
+
+    def test_fs_write_never_auto_even_if_yellow_on(self) -> None:
+        result = CodePolicyEngine().analyze(
+            "from pathlib import Path\nPath('a.csv').write_text('x')"
+        )
+        assert result.tier == CodeRiskTier.YELLOW
+        assert allows_auto_run(result, green_auto=True, yellow_auto=True) is False
+
+    def test_red_never_auto(self) -> None:
+        result = CodePolicyEngine().analyze("import pickle")
+        assert allows_auto_run(result, green_auto=True, yellow_auto=True) is False

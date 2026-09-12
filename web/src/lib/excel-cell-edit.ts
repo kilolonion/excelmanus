@@ -253,6 +253,7 @@ export async function persistExcelCellEdits(
       resolved.setContentVersion(opts.path, result.content_version);
     }
     resolved.invalidateSnapshotCache(opts.path);
+    useExcelStore.getState().bumpWorkspaceFilesVersion();
     return { kind: "ok", contentVersion: result.content_version };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);

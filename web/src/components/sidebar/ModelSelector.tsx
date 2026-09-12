@@ -14,8 +14,9 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useUIStore } from "@/stores/ui-store";
 import { apiGet, apiPut } from "@/lib/api";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
+import { applyVisionFromModel } from "@/lib/vision-capability";
 
 export function ModelSelector() {
   const currentModel = useUIStore((s) => s.currentModel);
@@ -30,7 +31,10 @@ export function ModelSelector() {
       .then((data) => {
         setModels(data.models);
         const active = data.models.find((m) => m.active);
-        if (active) setCurrentModel(active.name);
+        if (active) {
+          setCurrentModel(active.name);
+          applyVisionFromModel(active);
+        }
       })
       .catch(() => {});
   };
@@ -53,6 +57,7 @@ export function ModelSelector() {
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      applyVisionFromModel(models.find((m) => m.name === name));
       fetchModels();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "切换失败";
@@ -64,11 +69,9 @@ export function ModelSelector() {
   };
 
   const activeModel = models.find((m) => m.name === currentModel);
-  const displayLabel = (m: ModelInfo) =>
-    m.name === "default" ? formatModelIdForDisplay(m.model) : formatModelIdForDisplay(m.display_name || m.name);
   const resolvedModel = (m: ModelInfo) => formatModelIdForDisplay(m.resolved_model || m.model);
   const displayName = activeModel
-    ? displayLabel(activeModel)
+    ? displayModelLabel(activeModel)
     : currentModel || "模型未加载";
 
   return (
@@ -98,7 +101,7 @@ export function ModelSelector() {
                   {displayName}
                 </motion.span>
               </AnimatePresence>
-              {activeModel?.model && activeModel.name !== "default" && activeModel.name !== resolvedModel(activeModel) && (
+              {activeModel?.model && activeModel.name !== resolvedModel(activeModel) && (
                 <span className="truncate text-muted-foreground text-[10px]">
                   {resolvedModel(activeModel)}
                 </span>
@@ -139,7 +142,7 @@ export function ModelSelector() {
             >
               <div className="flex items-center gap-2 w-full">
                 <span className={isSelected ? "font-semibold" : ""}>
-                  {displayLabel(m)}
+                  {displayModelLabel(m)}
                 </span>
                 {isSelected && (
                   <Check

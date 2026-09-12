@@ -1,4 +1,4 @@
-"""测试：上传图片时视觉能力前置检查 —— 主模型不支持视觉时直接拒绝。"""
+"""测试：上传图片时视觉能力前置检查 —— 当前模型不支持视觉时直接拒绝。"""
 
 from __future__ import annotations
 
@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from excelmanus.config import ExcelManusConfig
+from excelmanus.agent.loop import run_tool_loop
 from excelmanus.engine import AgentEngine, ChatResult
 from excelmanus.tools import ToolRegistry
 
@@ -19,7 +20,6 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "model": "test-model",
         "max_iterations": 20,
         "workspace_root": str(Path(__file__).resolve().parent),
-        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -33,12 +33,12 @@ class TestVisionRejectGuard:
 
     @pytest.mark.asyncio
     async def test_reject_image_when_no_vision(self) -> None:
-        """主模型无视觉 → 直接拒绝。"""
+        """当前模型无视觉 → 直接拒绝。"""
         config = _make_config(main_model_vision="false")
         engine = AgentEngine(config, ToolRegistry())
         assert not engine._is_vision_capable
 
-        result = await engine.chat("请分析这张图片", images=_FAKE_IMAGE)
+        result = await engine.followup("请分析这张图片", images=_FAKE_IMAGE)
         assert isinstance(result, ChatResult)
         assert "不支持图片识别" in result.reply
 
@@ -49,19 +49,19 @@ class TestVisionRejectGuard:
         engine = AgentEngine(config, ToolRegistry())
         assert not engine._is_vision_capable
 
-        result = await engine.chat("看看这个", images=_FAKE_IMAGE)
+        result = await engine.followup("看看这个", images=_FAKE_IMAGE)
         assert "不支持图片识别" in result.reply
 
     @pytest.mark.asyncio
     async def test_allow_image_when_main_model_has_vision(self) -> None:
-        """主模型有视觉能力 → 不拒绝（会进入后续路由）。"""
+        """当前模型有视觉能力 → 不拒绝（会进入后续路由）。"""
         config = _make_config(main_model_vision="true")
         engine = AgentEngine(config, ToolRegistry())
         assert engine._is_vision_capable
 
         # patch _tool_calling_loop 避免实际 LLM 调用，只验证不命中拒绝分支
-        with patch.object(engine, "_tool_calling_loop", new_callable=AsyncMock, return_value=ChatResult(reply="ok")):
-            result = await engine.chat("分析图片", images=_FAKE_IMAGE)
+        with patch("excelmanus.agent.loop.run_tool_loop", new_callable=AsyncMock, return_value=ChatResult(reply="ok")):
+            result = await engine.followup("分析图片", images=_FAKE_IMAGE)
         assert "不支持图片识别" not in result.reply
 
     @pytest.mark.asyncio
@@ -70,8 +70,8 @@ class TestVisionRejectGuard:
         config = _make_config(main_model_vision="false")
         engine = AgentEngine(config, ToolRegistry())
 
-        with patch.object(engine, "_tool_calling_loop", new_callable=AsyncMock, return_value=ChatResult(reply="你好")):
-            result = await engine.chat("你好")
+        with patch("excelmanus.agent.loop.run_tool_loop", new_callable=AsyncMock, return_value=ChatResult(reply="你好")):
+            result = await engine.followup("你好")
         assert "不支持图片识别" not in result.reply
 
 
@@ -137,6 +137,12 @@ class TestVisionProbeErrorClassification:
     def test_vision_unsupported_error_image_not_supported(self) -> None:
         from excelmanus.model_probe import _is_vision_unsupported_error
         assert _is_vision_unsupported_error("image input is not supported for this model") is True
+
+    def test_vision_unsupported_error_unknown_variant_image_url(self) -> None:
+        from excelmanus.model_probe import _is_vision_unsupported_error
+        assert _is_vision_unsupported_error(
+            "unknown variant `image_url`, expected `text`"
+        ) is True
 
     def test_vision_unsupported_error_vision_not_available(self) -> None:
         from excelmanus.model_probe import _is_vision_unsupported_error

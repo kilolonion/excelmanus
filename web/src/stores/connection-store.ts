@@ -12,7 +12,7 @@ interface ConnectionState {
   /** 重启阶段描述（供 UI 显示） */
   phase: string;
 
-  triggerRestart: (reason?: string) => Promise<void>;
+  triggerRestart: (reason?: string, opts?: { requireVersionChange?: boolean }) => Promise<void>;
   setDisconnected: () => void;
   setConnected: () => void;
   reset: () => void;
@@ -31,6 +31,28 @@ interface ProbeResult {
   gitCommit?: string;
 }
 
+/** HTTP 200 且非 draining 才算服务可用。 */
+export function healthResponseIsUp(httpOk: boolean, status?: string): boolean {
+  return httpOk && status !== "draining";
+}
+
+/**
+ * 重启 overlay 何时刷新页面。
+ * 进程先下线再起来（sawDown）就算完成，不再死等指纹——
+ * ff-only 失败时 helper 仍会拉起旧版本。
+ */
+export function restartShouldReload(opts: {
+  probeOk: boolean;
+  versionChanged: boolean;
+  sawDown: boolean;
+  requireVersionChange: boolean;
+}): boolean {
+  if (!opts.probeOk) return false;
+  if (opts.versionChanged) return true;
+  if (opts.sawDown) return true;
+  return !opts.requireVersionChange;
+}
+
 async function probeHealth(): Promise<ProbeResult> {
   try {
     const r = await fetch(resolveHealthUrl(), {
@@ -41,7 +63,7 @@ async function probeHealth(): Promise<ProbeResult> {
     try {
       const data = await r.json();
       return {
-        ok: true,
+        ok: healthResponseIsUp(true, data.status),
         fingerprint: data.version_fingerprint ?? undefined,
         gitCommit: data.git_commit ?? undefined,
       };
@@ -56,6 +78,8 @@ async function probeHealth(): Promise<ProbeResult> {
 export const useConnectionStore = create<ConnectionState>((set, get) => {
   let elapsedTimer: ReturnType<typeof setInterval> | null = null;
   let restartAborted = false;
+  /** 后到的 triggerRestart(requireVersionChange) 能抬高正在进行的等待条件 */
+  let requireVersionChange = false;
 
   const clearElapsedTimer = () => {
     if (elapsedTimer) {
@@ -72,6 +96,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
     }, 1000);
   };
 
+  const finishReload = async () => {
+    clearElapsedTimer();
+    set({ phase: "连接已恢复，正在刷新…" });
+    await wait(500);
+    window.location.reload();
+  };
+
   return {
     status: "connected",
     restartReason: null,
@@ -79,26 +110,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
     elapsedSeconds: 0,
     phase: "",
 
-    triggerRestart: async (reason?: string) => {
-      // 防止重复触发
-      if (get().status === "restarting") return;
+    triggerRestart: async (reason?: string, opts?: { requireVersionChange?: boolean }) => {
+      if (opts?.requireVersionChange) requireVersionChange = true;
+      if (get().status === "restarting") {
+        if (reason) set({ restartReason: reason });
+        return;
+      }
 
+      requireVersionChange = opts?.requireVersionChange === true;
       restartAborted = false;
       set({
         status: "restarting",
         restartReason: reason || null,
         restartTimeout: false,
-        phase: "正在保存配置…",
+        phase: requireVersionChange ? "正在发起停机更新…" : "正在保存配置…",
         elapsedSeconds: 0,
       });
       startElapsedTimer();
 
-      // 捕获重启前的版本指纹作为 baseline
       const baseline = await probeHealth();
       const baselineFingerprint = baseline.fingerprint;
       const baselineCommit = baseline.gitCommit;
 
-      /** 检查版本指纹/commit 是否已变化（即后端已用新版本重启完成） */
       const hasVersionChanged = (probe: ProbeResult): boolean => {
         if (!probe.ok) return false;
         if (baselineFingerprint && probe.fingerprint && probe.fingerprint !== baselineFingerprint) return true;
@@ -106,60 +139,66 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
         return false;
       };
 
-      // Phase 1: 等待后端下线或版本变化（最多 15 秒）
       await wait(2000);
       if (restartAborted) return;
 
-      set({ phase: "服务正在重启…" });
+      set({ phase: requireVersionChange ? "正在停止旧进程…" : "服务正在重启…" });
       let versionChanged = false;
-      for (let i = 0; i < 26; i++) {
+      let sawDown = !baseline.ok;
+      const phase1Iters = requireVersionChange ? 40 : 26;
+      for (let i = 0; i < phase1Iters; i++) {
         if (restartAborted) return;
         const probe = await probeHealth();
-        // 快速重启检测：后端仍在线但版本已变化 → 直接完成
-        if (hasVersionChanged(probe)) {
+        if (!probe.ok) {
+          sawDown = true;
+          break;
+        }
+        if (!requireVersionChange && hasVersionChanged(probe)) {
           versionChanged = true;
           break;
         }
-        // 原逻辑：后端已下线 → 进入 Phase 2
-        if (!probe.ok) break;
         await wait(500);
       }
 
       if (restartAborted) return;
 
-      // 如果 Phase 1 已检测到版本变化，跳过 Phase 2
       if (versionChanged) {
-        clearElapsedTimer();
-        set({ phase: "连接已恢复，正在刷新…" });
-        await wait(500);
-        window.location.reload();
+        await finishReload();
         return;
       }
 
-      // Phase 2: 等待后端上线（最多 60 秒），上线后验证版本变化
       if (!restartAborted) {
-        set({ phase: "正在恢复连接…" });
+        set({
+          phase: sawDown
+            ? "正在安装依赖并构建，恢复后将自动刷新…"
+            : "正在恢复连接…",
+        });
       }
+      const phase2Iters = sawDown ? 600 : 60;
       let online = false;
-      for (let i = 0; i < 60; i++) {
+      for (let i = 0; i < phase2Iters; i++) {
         if (restartAborted) return;
         const probe = await probeHealth();
-        if (probe.ok) {
+        if (
+          restartShouldReload({
+            probeOk: probe.ok,
+            versionChanged: hasVersionChanged(probe),
+            sawDown,
+            requireVersionChange,
+          })
+        ) {
           online = true;
           break;
         }
         await wait(1000);
       }
 
-      clearElapsedTimer();
-
       if (restartAborted) return;
 
       if (online) {
-        set({ phase: "连接已恢复，正在刷新…" });
-        await wait(500);
-        window.location.reload();
+        await finishReload();
       } else {
+        clearElapsedTimer();
         set({ restartTimeout: true, phase: "重启超时" });
       }
     },
@@ -209,6 +248,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
       const current = get().status;
       if (current === "connected") return;
       restartAborted = true;
+      requireVersionChange = false;
       clearElapsedTimer();
       set({
         status: "connected",
@@ -221,6 +261,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => {
 
     reset: () => {
       restartAborted = true;
+      requireVersionChange = false;
       clearElapsedTimer();
       set({
         status: "connected",

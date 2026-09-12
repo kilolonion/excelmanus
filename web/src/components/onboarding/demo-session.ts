@@ -129,15 +129,8 @@ export function injectMockStreaming() {
     startedAt: ts,
   });
 
-  // Phase 2: 准备本轮 + inspect_spreadsheet
+  // Phase 2: inspect_spreadsheet
   schedule(() => {
-    store.appendBlock(assistantMsgId, {
-      type: "status" as const,
-      label: "正在准备本轮",
-      detail: "inspect_spreadsheet,edit_spreadsheet",
-      variant: "route",
-    });
-
     store.appendBlock(assistantMsgId, {
       type: "tool_call" as const,
       toolCallId: readToolCallId,

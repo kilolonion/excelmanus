@@ -253,8 +253,7 @@ async def test_subscribe_completed_task_replays_buffered_with_seq():
     done_task.set_result(ChatResult(reply="done", iterations=1))
     app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -296,8 +295,7 @@ async def test_subscribe_after_seq_skips_already_received():
     done_task.set_result(ChatResult(reply="done", iterations=1))
     app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -329,8 +327,7 @@ async def test_subscribe_resume_failed_on_buffer_overflow():
     done_task.set_result(ChatResult(reply="done", iterations=1))
     app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             # Client says it last received seq=0 (expecting seq=1), but buffer starts at seq=3
             resp = await client.post(
@@ -365,8 +362,7 @@ async def test_subscribe_no_gap_when_after_seq_matches():
     done_task.set_result(ChatResult(reply="done", iterations=1))
     app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             # Client received up to seq=2, expects seq=3 → first_buf=1, after_seq+1=3
             # But buffer starts at 1, so 1 <= 3 → no gap
@@ -398,8 +394,7 @@ async def test_subscribe_skip_replay_omits_buffered():
     done_task.set_result(ChatResult(reply="done", iterations=1))
     app_state._active_chat_tasks[session_id] = done_task  # type: ignore[assignment]
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",
@@ -432,8 +427,7 @@ async def test_subscribe_active_task_replays_then_streams():
     mock_engine.last_route_result = MagicMock(route_mode="write", skills_used=[], tool_scope=[])
     sm.get_engine.return_value = mock_engine
 
-    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True), \
-         patch.object(chat_module, "_is_external_safe_mode", return_value=False):
+    with patch.object(chat_module, "_has_session_access", new_callable=AsyncMock, return_value=True):
         async with AsyncClient(transport=_make_transport(), base_url="http://test") as client:
             resp = await client.post(
                 "/api/v1/chat/subscribe",

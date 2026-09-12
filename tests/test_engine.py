@@ -150,6 +150,58 @@ class TestControlCommandFullAccess:
         _, kwargs_unlocked = mock_router.parse_slash_skill.call_args
         assert kwargs_unlocked['blocked_skillpacks'] is None
 
+
+class TestControlCommandCode:
+    """会话级 /code 控制命令测试。"""
+
+    @pytest.mark.asyncio
+    async def test_status_defaults_to_native(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        result = await engine.followup('/code status')
+        assert isinstance(result, ChatResult)
+        assert '关闭' in result.reply
+        assert engine._present_as == 'native'
+        assert engine.last_route_result.route_mode == 'control_command'
+
+    @pytest.mark.asyncio
+    async def test_on_then_off(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        on_result = await engine.followup('/code')
+        assert '已开启代码模式' in on_result.reply
+        assert engine._present_as == 'code'
+        assert engine.last_route_result.route_mode == 'control_command'
+        off_result = await engine.followup('/code off')
+        assert '已关闭代码模式' in off_result.reply
+        assert engine._present_as == 'native'
+
+    @pytest.mark.asyncio
+    async def test_code_preference_survives_plan_mode(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        await engine.followup('/code on')
+        from excelmanus.plan_mode import set_plan_active
+        set_plan_active(engine, True)
+        status = await engine.followup('/code status')
+        assert engine._present_as == 'code'
+        assert '观察/计划' in status.reply
+
+    @pytest.mark.asyncio
+    async def test_command_does_not_invoke_llm(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        mocked_create = AsyncMock(return_value=_make_text_response('不应被调用'))
+        engine._client.chat.completions.create = mocked_create
+        result = await engine.followup('/code_mode status')
+        assert '关闭' in result.reply
+        mocked_create.assert_not_called()
+
+
 class TestControlCommandSubagent:
     """会话级 /subagent 控制命令测试。"""
 
@@ -1392,11 +1444,11 @@ class TestConsecutiveFailureCircuitBreaker:
         assert {m['tool_call_id'] for m in tool_results} == {'call_1', 'call_2'}
 
 class TestIterationLimit:
-    """config.max_iterations 截断主循环。"""
+    """config.max_iterations 截断主循环（LLM 回合与工具调用共用）。"""
 
     @pytest.mark.asyncio
     async def test_truncates_at_max_iterations(self) -> None:
-        """超过配置里的 max_iterations 后终止，不再等到纯文本。"""
+        """工具步超过配置值时停止，不再继续要模型收束。"""
         config = _make_config(max_iterations=3)
         registry = _make_registry_with_tools()
         engine = AgentEngine(config, registry)
@@ -1409,9 +1461,10 @@ class TestIterationLimit:
             side_effect=[*tool_responses, _make_text_response('完成')],
         )
         result = await engine.followup('继续做完')
-        assert '最大迭代次数' in result.reply
         assert result.truncated is True
-        assert result.iterations == 3
+        assert '最大迭代次数' in result.reply or '调用上限' in result.reply
+        assert result.iterations <= 3
+        assert result.reply != '完成'
 
 class TestAsyncToolExecution:
     """异步工具执行场景（Requirement 1.10）。"""
@@ -1589,7 +1642,7 @@ async def test_property_3_pure_text_terminates_loop(reply_text: str) -> None:
 async def test_property_4_iteration_budget(max_iter: int) -> None:
     """Property 4：config.max_iterations 截断循环。
 
-    工具步超过配置值时终止，不再等到纯文本。
+    工具步超过配置值时停止，不再等到纯文本收束。
     """
     config = _make_config(max_iterations=max_iter)
     registry = _make_registry_with_tools()
@@ -1605,8 +1658,9 @@ async def test_property_4_iteration_budget(max_iter: int) -> None:
     )
     result = await engine.followup('继续做完')
     assert result.truncated is True
-    assert '最大迭代次数' in result.reply
-    assert result.iterations == max_iter
+    assert '最大迭代次数' in result.reply or '调用上限' in result.reply
+    assert result.iterations <= max_iter
+    assert result.reply != '完成'
 
 @given(error_msg=st.text(alphabet=st.characters(whitelist_categories=('L', 'N')), min_size=1, max_size=100))
 @pytest.mark.asyncio

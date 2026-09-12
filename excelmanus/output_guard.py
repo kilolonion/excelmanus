@@ -56,6 +56,16 @@ _TOOL_SCHEMA_PATTERN = re.compile(
 )
 
 
+def sanitize_streaming_text(text: str) -> str:
+    """脱敏流式增量，保留 chunk 边界空白。
+
+    ``sanitize_external_text`` 会 strip 并按行重组。用在 thinking_delta 这类
+    逐 token 增量上时，chunk 首尾的空格/换行会被吃掉，前端拼出来变成
+    ``helloworld``。流式路径只做敏感信息掩码，不做截断或行级改写。
+    """
+    return sanitize_sensitive_text(str(text or ""))
+
+
 def sanitize_external_text(text: str, *, max_len: int = 4000) -> str:
     """清理文本中的敏感内容，供外部接口返回。"""
     value = sanitize_sensitive_text(str(text or ""))

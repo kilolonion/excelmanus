@@ -23,7 +23,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiGet } from "@/lib/api";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { displayModelLabel } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { ModelInfo } from "@/lib/types";
 import { useIsMobile } from "@/hooks/use-mobile";
@@ -49,7 +49,9 @@ const STAGE_LABELS: Record<string, string> = {
 
 /** 根据错误 code 生成用户友好的简短描述 */
 const CODE_HINTS: Record<string, string> = {
-  model_auth_failed: "API Key 无效或过期",
+  model_auth_failed: "认证失败",
+  model_forbidden: "访问被拒绝",
+  vision_unsupported: "不支持图片输入",
   model_not_found: "模型不存在或已下线",
   quota_exceeded: "API 额度耗尽",
   rate_limited: "请求频率超限",
@@ -356,7 +358,7 @@ export function FailureGuidanceCard({
                 <div className="max-h-[30vh] overflow-y-auto py-1">
                   {models.map((m) => {
                     const isCurrent = m.name === currentModel;
-                    const label = m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+                    const label = displayModelLabel(m);
                     return (
                       <button
                         key={m.name}

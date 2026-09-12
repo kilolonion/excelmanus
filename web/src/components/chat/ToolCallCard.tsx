@@ -1,37 +1,11 @@
 "use client";
 
-import React, { useState, useCallback, useEffect, useRef, useMemo } from "react";
-import {
-  Wrench,
-  CheckCircle2,
-  XCircle,
-  Loader2,
-  ShieldAlert,
-  ChevronDown,
-  ChevronRight,
-  Upload,
-  Check,
-  BookOpen,
-  PenLine,
-  Code,
-  Table2,
-  ListChecks,
-  Search,
-  FileText,
-  Timer,
-  Globe,
-  type LucideIcon,
-} from "lucide-react";
-import {
-  Collapsible,
-  CollapsibleContent,
-  CollapsibleTrigger,
-} from "@/components/ui/collapsible";
+import React, { useState, useEffect, useRef, useMemo } from "react";
+import { ChevronDown } from "lucide-react";
+import { toolIcon, toolStatusIconClass } from "@/lib/tool-icons";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
-import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
-import { mapWithConcurrency } from "@/lib/concurrency";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
 import { TextDiffView } from "./TextDiffView";
@@ -39,37 +13,13 @@ import { TextPreviewView } from "./TextPreviewView";
 import StreamingTextPreview from "./StreamingTextPreview";
 import { CodeBlock } from "./CodeBlock";
 import { MergeResultCard } from "./MergeResultCard";
+import {
+  extractToolContext,
+  formatToolContextLine,
+  isWriteTool,
+  toolActionTitle,
+} from "@/lib/tool-labels";
 
-// 工具分类 → 图标映射
-const TOOL_ICON_MAP: Record<string, LucideIcon> = {
-  inspect_spreadsheet: BookOpen,
-  analyze_spreadsheet: Search,
-  compare_spreadsheets: Search,
-  edit_spreadsheet: PenLine,
-  format_spreadsheet: Table2,
-  manage_spreadsheet_objects: Table2,
-  trace_spreadsheet_formulas: Search,
-  manage_spreadsheet_versions: FileText,
-  run_code: Code,
-  finish_task: ListChecks,
-  read_text_file: FileText,
-  write_text_file: PenLine,
-  edit_text_file: PenLine,
-  sleep: Timer,
-};
-
-// 内置搜索引擎 MCP 前缀
-const SEARCH_MCP_PREFIXES = ["mcp_exa_", "mcp_tavily_", "mcp_brave_"] as const;
-function isSearchMcpTool(name: string): boolean {
-  return SEARCH_MCP_PREFIXES.some((p) => name.startsWith(p));
-}
-
-function getToolIcon(name: string): LucideIcon {
-  if (isSearchMcpTool(name)) return Globe;
-  return TOOL_ICON_MAP[name] || Wrench;
-}
-
-/** 检测工具结果的语法高亮语言。 */
 function detectResultLanguage(toolName: string, text: string): string | undefined {
   if (toolName === "run_code") return "python";
   const trimmed = text.trimStart();
@@ -82,172 +32,18 @@ function detectResultLanguage(toolName: string, text: string): string | undefine
   return undefined;
 }
 
-// 为折叠预览构建工具参数简短摘要
-function argsSummary(name: string, args: Record<string, unknown>): string | null {
-  const parts: string[] = [];
-  if (args.sheet) parts.push(`sheet: ${args.sheet}`);
-  if (args.range) parts.push(`range: ${args.range}`);
-  if (args.path) {
-    const p = String(args.path);
-    parts.push(p.split("/").pop() || p);
-  }
-  if (name === "run_code" && typeof args.code === "string") {
-    const firstLine = args.code.split("\n")[0].slice(0, 50);
-    parts.push(firstLine + (args.code.length > 50 ? "…" : ""));
-  }
-  // MCP 搜索工具参数预览（Exa / Tavily / Brave）
-  if (isSearchMcpTool(name) && typeof args.query === "string") {
-    parts.push(`🔍 ${args.query.slice(0, 60)}${args.query.length > 60 ? "…" : ""}`);
-  }
-  if (name === "sleep") {
-    if (args.seconds) parts.push(`${args.seconds}s`);
-    if (args.reason) parts.push(String(args.reason).slice(0, 40));
-  }
-  return parts.length > 0 ? parts.join(" · ") : null;
-}
-
-// 工具分类 → 绿色系主题
-type ToolCategoryTheme = {
-  bar: string;          // 左侧强调条
-  iconBg: string;       // 圆形图标背景
-  iconColor: string;    // 图标前景色
-  pillBg: string;       // 工具名胶囊背景
-  pillText: string;     // 工具名胶囊文字
-  cardBg: string;       // 卡片背景
-  cardHover: string;    // 卡片悬停背景
-  border: string;       // 卡片边框
-  label: string;        // 人类可读的分类标签
-};
-
-const CATEGORY_THEMES: Record<string, ToolCategoryTheme> = {
-  read: {
-    bar: "#0d9488",
-    iconBg: "bg-teal-500/10 dark:bg-teal-400/15",
-    iconColor: "text-teal-600 dark:text-teal-400",
-    pillBg: "bg-teal-500/8 dark:bg-teal-400/10",
-    pillText: "text-teal-700 dark:text-teal-300",
-    cardBg: "bg-teal-500/[0.02] dark:bg-teal-500/[0.03]",
-    cardHover: "hover:bg-teal-500/[0.05] dark:hover:bg-teal-400/[0.06]",
-    border: "border-teal-300/40 dark:border-teal-500/20",
-    label: "读取",
-  },
-  write: {
-    bar: "#217346",
-    iconBg: "bg-emerald-500/10 dark:bg-emerald-400/15",
-    iconColor: "text-emerald-600 dark:text-emerald-400",
-    pillBg: "bg-emerald-500/8 dark:bg-emerald-400/10",
-    pillText: "text-emerald-700 dark:text-emerald-300",
-    cardBg: "bg-emerald-500/[0.02] dark:bg-emerald-500/[0.03]",
-    cardHover: "hover:bg-emerald-500/[0.05] dark:hover:bg-emerald-400/[0.06]",
-    border: "border-emerald-300/40 dark:border-emerald-500/20",
-    label: "写入",
-  },
-  code: {
-    bar: "#4d7c0f",
-    iconBg: "bg-lime-500/10 dark:bg-lime-400/15",
-    iconColor: "text-lime-700 dark:text-lime-400",
-    pillBg: "bg-lime-500/8 dark:bg-lime-400/10",
-    pillText: "text-lime-700 dark:text-lime-300",
-    cardBg: "bg-lime-500/[0.02] dark:bg-lime-500/[0.03]",
-    cardHover: "hover:bg-lime-500/[0.05] dark:hover:bg-lime-400/[0.06]",
-    border: "border-lime-300/40 dark:border-lime-500/20",
-    label: "代码",
-  },
-  finish: {
-    bar: "#15803d",
-    iconBg: "bg-green-500/10 dark:bg-green-400/15",
-    iconColor: "text-green-600 dark:text-green-400",
-    pillBg: "bg-green-500/8 dark:bg-green-400/10",
-    pillText: "text-green-700 dark:text-green-300",
-    cardBg: "bg-green-500/[0.02] dark:bg-green-500/[0.03]",
-    cardHover: "hover:bg-green-500/[0.05] dark:hover:bg-green-400/[0.06]",
-    border: "border-green-300/40 dark:border-green-500/20",
-    label: "完成",
-  },
-  search: {
-    bar: "#0891b2",
-    iconBg: "bg-cyan-500/10 dark:bg-cyan-400/15",
-    iconColor: "text-cyan-600 dark:text-cyan-400",
-    pillBg: "bg-cyan-500/8 dark:bg-cyan-400/10",
-    pillText: "text-cyan-700 dark:text-cyan-300",
-    cardBg: "bg-cyan-500/[0.02] dark:bg-cyan-500/[0.03]",
-    cardHover: "hover:bg-cyan-500/[0.05] dark:hover:bg-cyan-400/[0.06]",
-    border: "border-cyan-300/40 dark:border-cyan-500/20",
-    label: "搜索",
-  },
-  sleep: {
-    bar: "#6366f1",
-    iconBg: "bg-indigo-500/10 dark:bg-indigo-400/15",
-    iconColor: "text-indigo-600 dark:text-indigo-400",
-    pillBg: "bg-indigo-500/8 dark:bg-indigo-400/10",
-    pillText: "text-indigo-700 dark:text-indigo-300",
-    cardBg: "bg-indigo-500/[0.02] dark:bg-indigo-500/[0.03]",
-    cardHover: "hover:bg-indigo-500/[0.05] dark:hover:bg-indigo-400/[0.06]",
-    border: "border-indigo-300/40 dark:border-indigo-500/20",
-    label: "等待",
-  },
-  default: {
-    bar: "#6b7280",
-    iconBg: "bg-slate-500/8 dark:bg-slate-400/10",
-    iconColor: "text-slate-500 dark:text-slate-400",
-    pillBg: "bg-slate-500/6 dark:bg-slate-400/8",
-    pillText: "text-slate-600 dark:text-slate-400",
-    cardBg: "bg-slate-500/[0.015] dark:bg-slate-400/[0.02]",
-    cardHover: "hover:bg-slate-500/[0.04] dark:hover:bg-slate-400/[0.05]",
-    border: "border-border",
-    label: "工具",
-  },
-};
-
-/** MCP 工具友好显示名（pill 标签用） */
-function getToolDisplayName(name: string): string {
-  // 搜索引擎 MCP 工具友好显示名
-  for (const prefix of SEARCH_MCP_PREFIXES) {
-    if (name.startsWith(prefix)) {
-      const engine = prefix.slice(4, -1); // mcp_exa_ → exa
-      const raw = name.slice(prefix.length).replace(new RegExp(`_${engine}$`), "").replace(/_/g, " ");
-      return `${engine}:${raw}`;
-    }
-  }
-  if (name.startsWith("mcp_")) {
-    // mcp_server_tool_name → server:tool_name
-    const rest = name.slice("mcp_".length);
-    const sep = rest.indexOf("_");
-    if (sep > 0) return `${rest.slice(0, sep)}:${rest.slice(sep + 1)}`;
-    return rest;
-  }
-  return name;
-}
-
-function getToolCategory(name: string): string {
-  if (isSearchMcpTool(name)) return "search";
-  if (["inspect_spreadsheet", "analyze_spreadsheet", "compare_spreadsheets", "trace_spreadsheet_formulas", "read_text_file"].includes(name)) return "read";
-  if (["edit_spreadsheet", "format_spreadsheet", "manage_spreadsheet_objects", "manage_spreadsheet_versions"].includes(name)) return "write";
-  if (name === "run_code") return "code";
-  if (name === "finish_task") return "finish";
-  if (name === "sleep") return "sleep";
-  return "default";
-}
-
-function getTheme(name: string): ToolCategoryTheme {
-  return CATEGORY_THEMES[getToolCategory(name)] || CATEGORY_THEMES.default;
-}
-
-/** Try to extract merge result info from a tool's JSON result string. */
 function parseMergeResult(toolName: string, resultStr: string | undefined): {
   sourceFiles: string[]; outputFile: string;
   rowsMatched: number; rowsAdded: number; rowsUnmatched: number;
   keyColumns: string[]; joinType: string;
 } | null {
   if (!resultStr) return null;
-  // Only attempt for code execution or merge/relationship tools
   if (!["run_code", "discover_file_relationships", "compare_excel"].includes(toolName)) return null;
   const trimmed = resultStr.trimStart();
   if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
   try {
     const data = JSON.parse(trimmed);
     if (typeof data !== "object" || data === null) return null;
-    // Detect merge result by presence of key fields
     const hasStats = typeof data.rows_matched === "number"
       || typeof data.matched_count === "number"
       || typeof data.merge_rows === "number";
@@ -294,29 +90,17 @@ interface ToolCallCardProps {
   status: "running" | "success" | "error" | "pending" | "streaming";
   result?: string;
   error?: string;
+  isLast?: boolean;
 }
 
-export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name, args, status, result, error }: ToolCallCardProps) {
+export const ToolCallCard = React.memo(function ToolCallCard({
+  toolCallId, name, args, status, result, error, isLast = true,
+}: ToolCallCardProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
-  const [applyingInline, setApplyingInline] = useState(false);
-  const [appliedInline, setAppliedInline] = useState(false);
-  const [chevronClass, setChevronClass] = useState("");
 
-  // 处理展开/收起箭头动画
-  const handleOpenChange = useCallback((newOpen: boolean) => {
-    setOpen(newOpen);
-    // 触发动画类名
-    const animationClass = newOpen ? "tool-chevron-expand" : "tool-chevron-collapse";
-    setChevronClass(animationClass);
-    // 动画结束后清除动画类（收起时超时稍长）
-    setTimeout(() => setChevronClass(""), newOpen ? 250 : 350);
-  }, []);
-
-  // 运行中工具的已用时间
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
-  // 流式工具参数预览
   const isStreaming = (status as string) === "streaming";
   const streamingRawArgs = useExcelStore((s) =>
     toolCallId && (isStreaming || status === "running") && TEXT_DIFF_TOOLS.has(name)
@@ -324,10 +108,10 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
       : null
   );
 
-  // 工具级进度（长耗时操作）
   const toolProgress = useChatStore((s) =>
     toolCallId ? s.toolProgress[toolCallId] ?? null : null
   );
+  const pendingApproval = useChatStore((s) => s.pendingApproval);
 
   useEffect(() => {
     if (status !== "running" && !isStreaming) {
@@ -341,14 +125,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
       setElapsed(Math.round((Date.now() - start) / 1000));
     }, 1000);
     return () => clearInterval(timer);
-  }, [status]);
+  }, [status, isStreaming]);
 
   const isExcelRead = EXCEL_READ_TOOLS.has(name);
-  const isExcelWrite = EXCEL_WRITE_TOOLS.has(name);
-
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const applyFile = useExcelStore((s) => s.applyFile);
-  const pendingBackups = useExcelStore((s) => s.pendingBackups);
 
   const preview = useExcelStore((s) =>
     toolCallId && isExcelRead ? s.previews[toolCallId] : undefined
@@ -356,8 +135,7 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
   const canHaveDiff = EXCEL_DIFF_TOOLS.has(name);
   const canHaveTextDiff = TEXT_DIFF_TOOLS.has(name);
   const canHaveTextPreview = TEXT_PREVIEW_TOOLS.has(name);
-  
-  // 使用 useMemo 缓存 diffs 计算结果，避免无限循环
+
   const allDiffs = useExcelStore((s) => s.diffs);
   const diffs = useMemo(() => {
     if (!toolCallId || !canHaveDiff) return [];
@@ -374,143 +152,118 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
     toolCallId && canHaveTextPreview ? s.textPreviews[toolCallId] : undefined
   );
 
-  // 按文件去重获取涉及的文件路径
-  const diffFilePaths = useMemo(
-    () => Array.from(new Set(diffs.map((d) => d.filePath).filter(Boolean))),
-    [diffs],
-  );
-  const hasPendingBackup = diffFilePaths.some((fp) =>
-    pendingBackups.some((b) => b.original_path === fp)
-  );
-
-  const handleInlineApply = useCallback(async () => {
-    if (!activeSessionId || diffFilePaths.length === 0) return;
-    setApplyingInline(true);
-    const results = await mapWithConcurrency(
-      diffFilePaths,
-      async (fp) => applyFile(activeSessionId, fp),
-      3,
-    );
-    setApplyingInline(false);
-    const anyOk = results.some(Boolean);
-    if (anyOk) setAppliedInline(true);
-  }, [activeSessionId, diffFilePaths, applyFile]);
-
-  const statusIconMap: Record<string, React.ReactNode> = {
-    streaming: <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--em-cyan)" }} />,
-    running: <Loader2 className="h-3 w-3 animate-spin" style={{ color: "var(--em-cyan)" }} />,
-    success: <CheckCircle2 className="h-3 w-3" style={{ color: "var(--em-primary)" }} />,
-    error: <XCircle className="h-3 w-3" style={{ color: "var(--em-error)" }} />,
-    pending: <ShieldAlert className="h-3 w-3" style={{ color: "var(--em-gold)" }} />,
-  };
-  const StatusIcon = statusIconMap[status];
-
-  const ToolIcon = getToolIcon(name);
-  const summary = !open ? argsSummary(name, args) : null;
-  const theme = getTheme(name);
-
   const isError = status === "error";
   const isPending = status === "pending";
   const isRunning = status === "running" || isStreaming;
-  const isSuccess = status === "success";
+  const title = toolActionTitle(name, args);
+  const ctx = extractToolContext(args);
+  const contextLine = formatToolContextLine(ctx);
 
-  const borderCls = isPending
-    ? "border-amber-400/50 dark:border-amber-500/30"
-    : isError
-      ? "border-red-300/50 dark:border-red-500/25"
-      : theme.border;
+  const Icon = toolIcon(name);
+  const node = (
+    <Icon className={`h-4 w-4 ${toolStatusIconClass(isStreaming ? "running" : status)}`} />
+  );
 
-  const bgCls = isPending
-    ? "bg-amber-500/[0.04] hover:bg-amber-500/[0.08]"
-    : isError
-      ? "bg-red-500/[0.03] hover:bg-red-500/[0.06]"
-      : `${theme.cardBg} ${theme.cardHover}`;
+  const elapsedLabel = isRunning && elapsed > 0 ? `${elapsed}s` : null;
+  const showApprovalCta = isPending && isWriteTool(name);
 
   return (
-    <div className={`my-1 rounded-lg relative ${isSuccess ? "animate-tool-success-flash tool-success-sparkle" : ""}`}>
-      <Collapsible open={open} onOpenChange={handleOpenChange}>
-        <CollapsibleTrigger
-          className={`group/card flex items-center gap-0 rounded-lg border transition-all duration-200 w-full text-left text-sm overflow-hidden hover:shadow-sm ${borderCls} ${bgCls}`}
+    <div className="flex gap-2.5">
+      <div className="flex w-4 flex-col items-center flex-shrink-0">
+        <div className="mt-0.5">{node}</div>
+        {!isLast && <div className="mt-1 w-px flex-1 bg-[#C9D1CB] dark:bg-muted-foreground/30 min-h-[12px]" />}
+      </div>
+
+      <div className={`min-w-0 flex-1 ${isLast ? "pb-1" : "pb-3"}`}>
+        <button
+          type="button"
+          onClick={() => setOpen((v) => !v)}
+          className="flex w-full items-start gap-2 text-left group/step"
         >
-          {/* 左侧强调条 */}
-          <div
-            className={`self-stretch w-[3px] flex-shrink-0 rounded-l-lg transition-colors duration-500 ${isRunning ? "animate-tool-running-bar" : ""}`}
-            style={{ backgroundColor: isError ? "var(--em-error)" : theme.bar, "--tool-cat-color": theme.bar } as React.CSSProperties}
-          />
-
-          <div className={`flex items-center gap-2 flex-1 min-w-0 px-2.5 py-2 sm:py-1.5 ${isRunning ? "animate-tool-running-pulse" : ""}`}>
-            {/* 圆形图标徽章 */}
-            <span className={`flex items-center justify-center h-5 w-5 rounded-full flex-shrink-0 ${theme.iconBg}`}>
-              <ToolIcon className={`h-3 w-3 ${theme.iconColor}`} />
-            </span>
-
-            {/* 工具名胶囊 */}
-            <span className={`inline-flex items-center rounded-md px-1.5 py-px text-[11px] font-medium font-mono flex-shrink-0 ${theme.pillBg} ${theme.pillText}`}>
-              {getToolDisplayName(name)}
-            </span>
-
-            {/* 参数预览 — 移动端隐藏以腾出进度信息空间 */}
-            {summary && (
-              <span className="hidden sm:inline text-[10px] text-muted-foreground/70 truncate min-w-0">
-                {summary}
-              </span>
-            )}
-
-            {/* 右侧：状态簇 */}
-            <span className="ml-auto flex items-center gap-1.5 flex-shrink-0 pl-2">
+          <div className="min-w-0 flex-1">
+            <div className="flex items-center gap-2">
+              <span className="text-[13px] font-medium text-foreground leading-5">{title}</span>
               {isPending && (
-                <span className="text-[10px] font-medium px-1.5 py-px rounded-full bg-amber-500/10 text-amber-600 dark:text-amber-400">待审批</span>
+                <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">等待授权</span>
               )}
-              {isRunning && name === "sleep" && typeof args.seconds === "number" && (
-                <span className="flex items-center gap-1.5">
-                  <span className="relative h-1 w-16 rounded-full bg-indigo-200/40 dark:bg-indigo-500/20 overflow-hidden">
-                    <span
-                      className="absolute inset-y-0 left-0 rounded-full bg-indigo-500 dark:bg-indigo-400 transition-all duration-1000 ease-linear"
-                      style={{ width: `${Math.min((elapsed / (args.seconds as number)) * 100, 100)}%` }}
-                    />
-                  </span>
-                  <span className="text-[10px] text-indigo-600 dark:text-indigo-400 tabular-nums font-medium">
-                    {Math.max(Math.round((args.seconds as number) - elapsed), 0)}s
-                  </span>
-                </span>
+              {isError && (
+                <span className="text-[10px] font-medium text-red-600">失败</span>
               )}
-              {isRunning && toolProgress && (
-                <span className="flex items-center gap-1 max-w-[140px] sm:max-w-[200px]">
-                  <span className="text-[10px] text-[var(--em-cyan)] truncate">{toolProgress.message}</span>
-                </span>
-              )}
-              {isRunning && !(name === "sleep" && typeof args.seconds === "number") && elapsed > 0 && (
-                <span className="text-[10px] text-muted-foreground tabular-nums">{elapsed}s</span>
-              )}
-              <span className="transition-transform duration-300" style={{ transform: isSuccess ? "scale(1.2)" : "scale(1)" }}>
-                {StatusIcon}
-              </span>
-              <ChevronRight className={`h-3 w-3 text-muted-foreground/50 transition-all duration-300 ${chevronClass} ${
-                !chevronClass && open 
-                  ? "rotate-90" 
-                  : !chevronClass && "group-hover/card:translate-x-0.5 group-hover/card:text-muted-foreground/70"
-              }`} />
-            </span>
+            </div>
+            {contextLine && (
+              <p className="text-[12px] text-muted-foreground mt-0.5 leading-4 break-words">
+                {contextLine}
+              </p>
+            )}
+            {isRunning && toolProgress?.message && (
+              <p className="text-[11px] text-muted-foreground mt-0.5 truncate">{toolProgress.message}</p>
+            )}
           </div>
-        </CollapsibleTrigger>
+          <span className="flex items-center gap-1 flex-shrink-0 pt-0.5">
+            {elapsedLabel && (
+              <span className="text-[11px] tabular-nums text-muted-foreground">{elapsedLabel}</span>
+            )}
+            <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground/40 transition-transform ${open ? "rotate-180" : ""}`} />
+          </span>
+        </button>
 
-        <CollapsibleContent className="data-[state=open]:animate-collapsible-down data-[state=closed]:animate-collapsible-up overflow-hidden">
-          <div className={`px-3 py-2 text-xs space-y-2 border border-t-0 rounded-b-lg ml-[3px] overscroll-contain ${borderCls} ${theme.cardBg}`}>
+        {showApprovalCta && (
+          <div className="mt-2 rounded-xl border border-amber-200/80 dark:border-amber-500/25 bg-amber-50/80 dark:bg-amber-500/10 px-3 py-2.5">
+            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-medium text-amber-900 dark:text-amber-200">需要你的授权</p>
+                <p className="text-[12px] text-amber-800/80 dark:text-amber-200/70 mt-0.5">
+                  {ctx.cellCount
+                    ? `本次操作将修改原文件中的 ${ctx.cellCount} 个单元格。`
+                    : "本次操作将修改原文件，需要你确认后继续。"}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  const overlay = document.querySelector<HTMLElement>("[data-slot='overlay-card']");
+                  overlay?.focus();
+                }}
+                className="inline-flex h-11 sm:h-8 items-center justify-center rounded-lg px-3 text-[13px] font-semibold text-white bg-[var(--em-primary)] sm:flex-shrink-0 w-full sm:w-auto"
+              >
+                {pendingApproval ? "查看并授权" : "等待授权"}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {isError && error && !open && (
+          <p className="mt-1.5 text-[12px] text-red-600 dark:text-red-400 leading-5 break-words">
+            {error}
+          </p>
+        )}
+
+        {open && (
+          <div className="mt-2 rounded-xl border border-[var(--em-hairline)] bg-[var(--em-fill)] dark:bg-muted/20 px-3 py-2.5 space-y-2">
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[11px] font-medium text-muted-foreground">执行详情</p>
+              <code className="font-mono text-[10px] text-muted-foreground">{name}</code>
+            </div>
             {Object.keys(args).length > 0 && (
               <div>
-                <p className="font-semibold text-muted-foreground mb-1">参数</p>
-                <CodeBlock language="json" code={JSON.stringify(args, null, isMobile ? 1 : 2)} />
+                <p className="text-[11px] font-medium text-muted-foreground mb-1">参数</p>
+                <CodeBlock
+                  language="json"
+                  code={JSON.stringify(args, null, isMobile ? 1 : 2)}
+                  maxHeightClass="max-h-48"
+                />
               </div>
             )}
             {result && (() => {
               const lang = detectResultLanguage(name, result);
               return (
                 <div>
-                  <p className="font-semibold text-muted-foreground mb-1">结果</p>
+                  <p className="text-[11px] font-medium text-muted-foreground mb-1">结果</p>
                   {lang ? (
-                    <CodeBlock language={lang} code={result} />
+                    <CodeBlock language={lang} code={result} maxHeightClass="max-h-48" />
                   ) : (
-                    <pre className="bg-muted/30 rounded p-2 overflow-x-auto whitespace-pre-wrap max-h-48">
+                    <pre className="bg-background/70 rounded p-2 overflow-auto whitespace-pre-wrap max-h-48 text-[11px]">
                       {result}
                     </pre>
                   )}
@@ -519,88 +272,52 @@ export const ToolCallCard = React.memo(function ToolCallCard({ toolCallId, name,
             })()}
             {error && (
               <div>
-                <p className="flex items-center gap-1 font-semibold mb-1" style={{ color: "var(--em-error)" }}>
-                  <span className="inline-block h-1 w-1 rounded-full bg-red-500" />
-                  错误
-                </p>
-                <pre className="bg-red-50/80 dark:bg-red-950/20 rounded-md p-2 overflow-x-auto whitespace-pre-wrap text-red-700 dark:text-red-300 border border-red-200/40 dark:border-red-500/20">
+                <p className="text-[11px] font-medium text-red-600 mb-1">错误</p>
+                <pre className="bg-red-50/80 dark:bg-red-950/20 rounded-md p-2 overflow-auto whitespace-pre-wrap max-h-48 text-red-700 dark:text-red-300 text-[11px]">
                   {error}
                 </pre>
               </div>
             )}
           </div>
-        </CollapsibleContent>
-      </Collapsible>
+        )}
 
-      {/* 流式内容预览 — 在工具参数生成期间显示 */}
-      {streamingRawArgs && textDiffs.length === 0 && (
-        <StreamingTextPreview toolName={name} rawArgs={streamingRawArgs} />
-      )}
+        {streamingRawArgs && textDiffs.length === 0 && (
+          <StreamingTextPreview toolName={name} rawArgs={streamingRawArgs} />
+        )}
 
-      {/* 文本文件 diff — 有数据时始终显示 */}
-      {textDiffs.length > 0 && (
-        <div>
-          {textDiffs.map((d, i) => (
-            <TextDiffView key={`${d.toolCallId}-${d.filePath}-${i}`} data={d} />
-          ))}
-        </div>
-      )}
+        {textDiffs.length > 0 && (
+          <div>
+            {textDiffs.map((d, i) => (
+              <TextDiffView key={`${d.toolCallId}-${d.filePath}-${i}`} data={d} />
+            ))}
+          </div>
+        )}
 
-      {/* 文本文件预览 — read_text_file 有数据时显示 */}
-      {textPreview && <TextPreviewView data={textPreview} />}
-
-      {/* Excel 内联预览/差异 — 有数据时始终显示 */}
-      {preview && <ExcelPreviewTable data={preview} />}
-      {diffs.length > 0 && (
-        <div className="relative">
-          {diffs.map((d, i) => (
-            <ExcelDiffTable key={`${d.toolCallId}-${d.sheet}-${i}`} data={d} />
-          ))}
-          {/* 本差异文件的内联应用按钮 */}
-          {(hasPendingBackup || appliedInline) && (
-            <div className="flex justify-end px-3 -mt-1 mb-2">
-              {appliedInline ? (
-                <span className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400">
-                  <Check className="h-3 w-3" />
-                  已应用到原文件
-                </span>
-              ) : (
-                <button
-                  onClick={handleInlineApply}
-                  disabled={applyingInline}
-                  className="flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium transition-colors text-white"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                >
-                  {applyingInline ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <>
-                      <Upload className="h-3 w-3" />
-                      应用到原文件
-                    </>
-                  )}
-                </button>
-              )}
-            </div>
-          )}
-        </div>
-      )}
-      {/* 合并结果卡片 — 从 run_code 等工具结果中智能检测 */}
-      {(() => {
-        const mr = parseMergeResult(name, result);
-        if (!mr || (!mr.outputFile && mr.sourceFiles.length === 0)) return null;
-        return (
-          <MergeResultCard
-            sourceFiles={mr.sourceFiles}
-            outputFile={mr.outputFile}
-            rowsMatched={mr.rowsMatched}
-            rowsAdded={mr.rowsAdded}
-            rowsUnmatched={mr.rowsUnmatched}
-            keyColumns={mr.keyColumns}
-            joinType={mr.joinType}
-          />
-        );
-      })()}
+        {textPreview && <TextPreviewView data={textPreview} />}
+        {preview && <ExcelPreviewTable data={preview} />}
+        {diffs.length > 0 && (
+          <div className="relative">
+            {diffs.map((d, i) => (
+              <ExcelDiffTable key={`${d.toolCallId}-${d.sheet}-${i}`} data={d} />
+            ))}
+          </div>
+        )}
+        {(() => {
+          const mr = parseMergeResult(name, result);
+          if (!mr || (!mr.outputFile && mr.sourceFiles.length === 0)) return null;
+          return (
+            <MergeResultCard
+              sourceFiles={mr.sourceFiles}
+              outputFile={mr.outputFile}
+              rowsMatched={mr.rowsMatched}
+              rowsAdded={mr.rowsAdded}
+              rowsUnmatched={mr.rowsUnmatched}
+              keyColumns={mr.keyColumns}
+              joinType={mr.joinType}
+            />
+          );
+        })()}
+      </div>
     </div>
   );
 });

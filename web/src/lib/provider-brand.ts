@@ -113,7 +113,7 @@ export function extractProvider(baseUrl: string | undefined): string {
 }
 
 export function getProviderColor(provider: string): string {
-  return PROVIDER_COLORS[provider] || "#888";
+  return PROVIDER_COLORS[provider] || "#6b7280";
 }
 
 export function getProviderDisplayName(provider: string): string {

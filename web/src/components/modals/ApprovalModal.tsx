@@ -1,46 +1,37 @@
 "use client";
 
-import { ShieldCheck, ShieldX, ShieldAlert, History, Unlock, Loader2, Check, AlertCircle } from "lucide-react";
+import {
+  Shield,
+  History,
+  Loader2,
+  Check,
+  AlertCircle,
+  FileSpreadsheet,
+  ChevronRight,
+  Info,
+} from "lucide-react";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { submitApproval, abortChat } from "@/lib/api";
-import { motion, AnimatePresence } from "framer-motion";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   OverlayCard,
   OverlayCardAction,
   OverlayCardBadge,
   OverlayCardBody,
+  OverlayCardDisclosure,
   OverlayCardFooter,
   OverlayCardHeader,
   OverlayCardInset,
-  type OverlayTone,
 } from "@/components/ui/overlay-card";
+import { approvalCopy, extractToolContext, isWriteTool } from "@/lib/tool-labels";
 
 type SubmitPhase = "idle" | "submitting" | "success" | "error";
 
-const RISK_TONE: Record<"high" | "medium" | "low", OverlayTone> = {
-  high: "danger",
-  medium: "warning",
-  low: "success",
-};
-
-const RISK_LABEL: Record<"high" | "medium" | "low", string> = {
-  high: "高风险",
-  medium: "中风险",
-  low: "低风险",
-};
-
-const RISK_ICON = {
-  high: ShieldAlert,
-  medium: ShieldAlert,
-  low: ShieldCheck,
-} as const;
-
-const ACTION_LABELS: Record<string, { ing: string; done: string }> = {
-  accept: { ing: "执行中…", done: "已允许执行" },
-  reject: { ing: "拒绝中…", done: "已拒绝" },
-  fullaccess: { ing: "授权中…", done: "已全部允许" },
+const ACTION_LABELS: Record<string, { ing: string; done: string; idle: string }> = {
+  accept: { idle: "允许本次写入", ing: "提交中…", done: "已允许" },
+  reject: { idle: "拒绝本次", ing: "拒绝中…", done: "已拒绝" },
+  fullaccess: { idle: "允许本会话全部操作", ing: "授权中…", done: "已全部允许" },
 };
 
 export function ApprovalModal() {
@@ -53,6 +44,7 @@ function ApprovalModalInner() {
   const pendingApproval = useChatStore((s) => s.pendingApproval);
   const dismissApproval = useChatStore((s) => s.dismissApproval);
   const messages = useChatStore((s) => s.messages);
+  const [showDetails, setShowDetails] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [phase, setPhase] = useState<SubmitPhase>("idle");
   const [chosenAction, setChosenAction] = useState<string | null>(null);
@@ -101,7 +93,7 @@ function ApprovalModalInner() {
       setPhase("success");
       autoDismissTimer.current = setTimeout(() => {
         dismissApproval(approvalId);
-      }, 600);
+      }, 700);
     } catch (err) {
       console.error("[ApprovalModal] submitApproval failed:", err);
       setPhase("error");
@@ -125,16 +117,27 @@ function ApprovalModalInner() {
 
   if (!pendingApproval) return null;
 
-  const riskLevel = pendingApproval.riskLevel || "high";
-  const RiskIcon = RISK_ICON[riskLevel];
   const argsSummary = pendingApproval.argsSummary || {};
   const argEntries = Object.entries(argsSummary);
+  const ctx = extractToolContext(pendingApproval.arguments, argsSummary);
+  const copy = approvalCopy(pendingApproval.toolName, ctx);
+  const writeTool = isWriteTool(pendingApproval.toolName);
+  const acceptIdle = writeTool ? "允许本次写入" : "允许本次操作";
   const isBusy = phase === "submitting" || phase === "success";
-  const actionMeta = chosenAction ? ACTION_LABELS[chosenAction] : null;
+  const acceptMeta = ACTION_LABELS.accept;
 
   const preventWhileBusy = (e: Event) => {
-    if (isBusy) e.preventDefault();
+    e.preventDefault();
   };
+
+  const primaryLabel =
+    phase === "submitting" && chosenAction === "accept"
+      ? acceptMeta.ing
+      : phase === "success" && chosenAction === "accept"
+        ? acceptMeta.done
+        : phase === "error" && chosenAction === "accept"
+          ? "提交失败，请重试"
+          : acceptIdle;
 
   return (
     <OverlayCard
@@ -143,168 +146,157 @@ function ApprovalModalInner() {
         if (!open) void handleDismiss();
       }}
       size="md"
-      tone={RISK_TONE[riskLevel]}
+      tone="warning"
       onEscapeKeyDown={preventWhileBusy}
       onPointerDownOutside={preventWhileBusy}
       onInteractOutside={preventWhileBusy}
     >
       <OverlayCardHeader
-        icon={<RiskIcon className="h-5 w-5" />}
-        pulse
-        title="工具审批请求"
-        badge={<OverlayCardBadge>{RISK_LABEL[riskLevel]}</OverlayCardBadge>}
-        description={
-          <>
-            即将执行{" "}
-            <code className="font-mono font-medium text-foreground/90 bg-muted/60 px-1.5 py-0.5 rounded text-xs border border-border/40">
-              {pendingApproval.toolName}
-            </code>
-          </>
-        }
-        onClose={() => void handleDismiss()}
-        closeDisabled={isBusy}
-        closeTitle="取消并终止任务"
+        icon={<Shield className="h-5 w-5" />}
+        eyebrow="执行授权"
+        title={copy.title}
+        badge={writeTool ? <OverlayCardBadge>将修改文件</OverlayCardBadge> : undefined}
+        description={copy.description}
       />
 
       <OverlayCardBody>
-        {argEntries.length > 0 && (
-          <OverlayCardInset title="参数详情" bodyClassName="space-y-2 sm:space-y-2.5 max-h-[140px] sm:max-h-[200px] overflow-y-auto overscroll-contain">
-            {argEntries.map(([key, val]) => (
-              <div key={key} className="flex gap-3 items-start text-[13px]">
-                <span className="text-muted-foreground shrink-0 min-w-[4rem] sm:min-w-[5rem] text-right font-medium tabular-nums">{key}</span>
-                <span className="text-border shrink-0 select-none">│</span>
-                <span className="font-mono text-foreground/85 break-all leading-relaxed text-xs">{String(val)}</span>
-              </div>
-            ))}
-          </OverlayCardInset>
-        )}
-
-        {approvalHistory.length > 0 && (
-          <div className={argEntries.length > 0 ? "mt-3 sm:mt-4" : undefined}>
-            <button
-              type="button"
-              onClick={() => setShowHistory(!showHistory)}
-              className="flex items-center gap-1.5 text-xs text-muted-foreground hover:text-foreground transition-colors py-1"
-            >
-              <History className="h-3.5 w-3.5" />
-              <span>本会话历史 ({approvalHistory.length})</span>
-            </button>
-            <AnimatePresence>
-              {showHistory && (
-                <motion.div
-                  initial={{ height: 0, opacity: 0 }}
-                  animate={{ height: "auto", opacity: 1 }}
-                  exit={{ height: 0, opacity: 0 }}
-                  transition={{ duration: 0.2 }}
-                  className="overflow-hidden"
-                >
-                  <div className="mt-2 space-y-1 pl-5">
-                    {approvalHistory.map((h) => (
-                      <div
-                        key={h.approvalId}
-                        className="flex items-center gap-2 text-xs text-muted-foreground"
-                      >
-                        <span className={`inline-flex items-center gap-1 ${h.success ? "text-emerald-500" : "text-red-500"}`}>
-                          <span className={`w-1.5 h-1.5 rounded-full ${h.success ? "bg-emerald-500" : "bg-red-500"}`} />
-                          {h.success ? "已执行" : "已拒绝"}
-                        </span>
-                        <span className="font-mono text-muted-foreground/50 text-[11px]">{h.approvalId.slice(-8)}</span>
-                      </div>
-                    ))}
-                  </div>
-                </motion.div>
+        <OverlayCardInset padded={false}>
+          <div className="px-4 py-3 flex items-start gap-3">
+            <div className="flex h-9 w-9 items-center justify-center rounded-lg bg-background border border-[var(--em-hairline)] flex-shrink-0">
+              <FileSpreadsheet className="h-4 w-4 text-[var(--em-primary)]" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <p className="text-sm font-semibold text-foreground truncate">
+                {ctx.filename || pendingApproval.toolName}
+              </p>
+              {(ctx.sheet || ctx.range) && (
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {[ctx.sheet, ctx.range].filter(Boolean).join(" · ")}
+                </p>
               )}
-            </AnimatePresence>
+            </div>
+          </div>
+          {ctx.cellCount != null && (
+            <div className="px-4 py-2.5 border-t border-[var(--em-hairline)] flex items-center justify-between text-sm">
+              <span className="text-muted-foreground">修改范围</span>
+              <span className="font-medium tabular-nums">{ctx.cellCount} 个单元格</span>
+            </div>
+          )}
+        </OverlayCardInset>
+
+        <div className="mt-1">
+          <OverlayCardDisclosure
+            icon={<ChevronRight className={`h-3.5 w-3.5 transition-transform ${showDetails ? "rotate-90" : ""}`} />}
+            label="查看执行详情"
+            open={showDetails}
+            onToggle={() => setShowDetails((v) => !v)}
+          >
+            <div className="rounded-xl border border-[var(--em-hairline)] bg-muted/20 px-3 py-2 space-y-1.5">
+              <div className="flex gap-3 text-xs">
+                <span className="text-muted-foreground w-16 flex-shrink-0">工具</span>
+                <code className="font-mono text-[11px] text-foreground/80">{pendingApproval.toolName}</code>
+              </div>
+              {argEntries.map(([key, val]) => (
+                <div key={key} className="flex gap-3 text-xs">
+                  <span className="text-muted-foreground w-16 flex-shrink-0 truncate">{key}</span>
+                  <span className="font-mono text-[11px] text-foreground/80 break-all">{String(val)}</span>
+                </div>
+              ))}
+            </div>
+          </OverlayCardDisclosure>
+
+          {approvalHistory.length > 0 && (
+            <OverlayCardDisclosure
+              icon={<History className="h-3.5 w-3.5" />}
+              label={`本会话授权记录 · ${approvalHistory.length}`}
+              extra={
+                <button
+                  type="button"
+                  className="text-[11px] text-muted-foreground hover:text-foreground"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleDismiss();
+                  }}
+                >
+                  终止当前任务
+                </button>
+              }
+              open={showHistory}
+              onToggle={() => setShowHistory((v) => !v)}
+            >
+              <div className="space-y-1 pl-6">
+                {approvalHistory.map((h) => (
+                  <div key={h.approvalId} className="flex items-center gap-2 text-xs text-muted-foreground">
+                    <span className={h.success ? "text-emerald-600" : "text-red-500"}>
+                      {h.success ? "已执行" : "已拒绝"}
+                    </span>
+                    <span className="font-mono text-[11px] text-muted-foreground/50">
+                      {h.approvalId.slice(-8)}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </OverlayCardDisclosure>
+          )}
+        </div>
+
+        {phase === "error" && errorMsg && (
+          <div className="mt-3 flex items-start gap-2 px-3 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 text-sm">
+            <AlertCircle className="h-4 w-4 flex-shrink-0 mt-0.5" />
+            <span className="flex-1 min-w-0">{errorMsg}</span>
           </div>
         )}
-
-        <AnimatePresence mode="wait">
-          {phase === "error" && errorMsg && (
-            <motion.div
-              key="error-banner"
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.2 }}
-              className="mt-3 overflow-hidden"
-            >
-              <div className="flex items-center gap-2 px-3 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 text-red-600 dark:text-red-400 text-sm">
-                <AlertCircle className="h-4 w-4 flex-shrink-0" />
-                <span className="flex-1 min-w-0 truncate">{errorMsg}</span>
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
       </OverlayCardBody>
 
-      <OverlayCardFooter className="flex-col sm:flex-row sm:justify-stretch">
+      <OverlayCardFooter className="flex-col sm:flex-row-reverse sm:justify-between">
         <OverlayCardAction
           action="primary"
           disabled={isBusy}
           onClick={() => handleAction("accept")}
+          className={phase === "error" && chosenAction === "accept" ? "bg-red-600 hover:bg-red-600/90" : undefined}
         >
           {phase === "submitting" && chosenAction === "accept" ? (
-            <Loader2 className="h-4.5 w-4.5 animate-spin" />
+            <Loader2 className="h-4 w-4 animate-spin" />
           ) : phase === "success" && chosenAction === "accept" ? (
-            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", damping: 12 }}>
-              <Check className="h-5 w-5" />
-            </motion.div>
-          ) : (
-            <ShieldCheck className="h-4.5 w-4.5" />
-          )}
-          {phase === "success" && chosenAction === "accept" ? "已允许" : "允许执行"}
+            <Check className="h-4.5 w-4.5" />
+          ) : null}
+          {primaryLabel}
         </OverlayCardAction>
 
         <OverlayCardAction
-          action="danger"
+          action="outline"
           disabled={isBusy}
           onClick={() => handleAction("reject")}
         >
           {phase === "submitting" && chosenAction === "reject" ? (
-            <Loader2 className="h-4.5 w-4.5 animate-spin" />
-          ) : phase === "success" && chosenAction === "reject" ? (
-            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", damping: 12 }}>
-              <Check className="h-5 w-5" />
-            </motion.div>
-          ) : (
-            <ShieldX className="h-4.5 w-4.5" />
-          )}
-          {phase === "success" && chosenAction === "reject" ? "已拒绝" : "拒绝"}
-        </OverlayCardAction>
-
-        <OverlayCardAction
-          action="ghost"
-          disabled={isBusy}
-          className="sm:flex-none"
-          onClick={() => handleAction("fullaccess")}
-          title="允许本会话所有后续操作"
-        >
-          {phase === "submitting" && chosenAction === "fullaccess" ? (
             <Loader2 className="h-4 w-4 animate-spin" />
-          ) : phase === "success" && chosenAction === "fullaccess" ? (
-            <motion.div initial={{ scale: 0 }} animate={{ scale: 1 }} transition={{ type: "spring", damping: 12 }}>
-              <Check className="h-5 w-5 text-emerald-500" />
-            </motion.div>
-          ) : (
-            <Unlock className="h-4 w-4" />
-          )}
-          {phase === "success" && chosenAction === "fullaccess" ? "已授权" : "全部允许"}
+          ) : phase === "success" && chosenAction === "reject" ? (
+            <Check className="h-4.5 w-4.5" />
+          ) : null}
+          {phase === "success" && chosenAction === "reject" ? "已拒绝" : "拒绝本次"}
         </OverlayCardAction>
       </OverlayCardFooter>
 
-      <AnimatePresence>
-        {phase === "submitting" && actionMeta && (
-          <motion.p
-            key="submitting-hint"
-            initial={{ opacity: 0, y: 4 }}
-            animate={{ opacity: 1, y: 0 }}
-            exit={{ opacity: 0 }}
-            className="text-center text-xs text-muted-foreground pb-3 sm:hidden"
-          >
-            {actionMeta.ing}
-          </motion.p>
-        )}
-      </AnimatePresence>
+      <div className="px-5 sm:px-8 pb-5 -mt-1 text-center sm:text-left">
+        <button
+          type="button"
+          disabled={isBusy}
+          onClick={() => handleAction("fullaccess")}
+          className="inline-flex items-center gap-1 text-[13px] font-medium text-[var(--em-primary)] hover:underline disabled:opacity-50"
+        >
+          {phase === "submitting" && chosenAction === "fullaccess" ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+          ) : phase === "success" && chosenAction === "fullaccess" ? (
+            <Check className="h-3.5 w-3.5" />
+          ) : (
+            <Info className="h-3.5 w-3.5 text-muted-foreground" />
+          )}
+          {phase === "success" && chosenAction === "fullaccess" ? "已全部允许" : "允许本会话全部操作"}
+        </button>
+        <p className="text-[11px] text-muted-foreground mt-0.5">
+          将允许本会话的所有后续操作
+        </p>
+      </div>
     </OverlayCard>
   );
 }

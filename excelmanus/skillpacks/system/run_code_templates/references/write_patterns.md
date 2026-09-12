@@ -1,74 +1,108 @@
 # 数据写入与 Sheet 管理模板
 
-## 写入数据（pandas 读→改→写回，保留其他 sheet）
+工作区 xlsx 的改写必须走 SDK。下面片段只演示计算与提交形；不要 `wb.save` 或 `ExcelWriter` 覆盖工作区文件。
+
+## 计算列后写回
 
 ```python
 import pandas as pd
-from openpyxl import load_workbook
+from em import edit_spreadsheet
 
-# 读取 → 修改 → 写回（保留其他 sheet）
 df = pd.read_excel("file.xlsx", sheet_name="Sheet1")
-df["新列"] = df["金额"] * 0.3  # 计算列
-# 写入时保留原文件其他 sheet
-with pd.ExcelWriter("file.xlsx", engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-    df.to_excel(w, sheet_name="Sheet1", index=False)
+df["新列"] = df["金额"] * 0.3
+values = [list(df.columns)] + df.astype(object).where(pd.notnull(df), None).values.tolist()
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": values}],
+)
 ```
 
 ## 单元格级写入
 
 ```python
-from openpyxl import load_workbook
-wb = load_workbook("file.xlsx")
-ws = wb["Sheet1"]
-ws["A1"] = "新值"
-ws["B2"] = 100
-wb.save("file.xlsx")
+from em import edit_spreadsheet
+
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [["新值", 100]]}],
+)
 ```
 
 ## 插入行
 
 ```python
-from openpyxl import load_workbook
-wb = load_workbook("file.xlsx")
-ws = wb["Sheet1"]
-ws.insert_rows(5, amount=3)  # 在第5行前插入3行
-wb.save("file.xlsx")
+from em import edit_spreadsheet
+
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "insert", "sheet": "Sheet1", "axis": "row", "at": 5, "count": 3}],
+)
 ```
 
-## 条件删除行
+## 条件过滤后写回（覆盖写不等于删除）
+
+`write` 只改传入矩形。更短的 `values` 不会清掉旧表尾部。没有删行操作。
+
+先读出旧矩形尺寸，把需要丢掉的行写成 `null`，或写到新表。
 
 ```python
 import pandas as pd
+from em import edit_spreadsheet, inspect_spreadsheet
+
+old = inspect_spreadsheet(mode="range", file_path="file.xlsx", sheet="Sheet1", range="A1:C20")
+shape = old["shape"]  # rows / columns
 df = pd.read_excel("file.xlsx", sheet_name="Sheet1")
-df = df[df["状态"] != "已取消"]  # 删除满足条件的行
-with pd.ExcelWriter("file.xlsx", engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-    df.to_excel(w, sheet_name="Sheet1", index=False)
+kept = df[df["状态"] != "已取消"]
+width = int(shape["columns"])
+new_rows = [list(kept.columns)] + kept.astype(object).where(pd.notnull(kept), None).values.tolist()
+# 把旧区里未被覆盖的行清空
+while len(new_rows) < int(shape["rows"]):
+    new_rows.append([None] * width)
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": new_rows}],
+)
 ```
 
-## 跨表匹配写回（VLOOKUP 等价）
+## 跨表匹配写回
 
 ```python
 import pandas as pd
+from em import edit_spreadsheet
+
 src = pd.read_excel("file.xlsx", sheet_name="源表")
 tgt = pd.read_excel("file.xlsx", sheet_name="目标表")
-merged = tgt.merge(src[["键列","值列"]], on="键列", how="left")
-with pd.ExcelWriter("file.xlsx", engine="openpyxl", mode="a", if_sheet_exists="replace") as w:
-    merged.to_excel(w, sheet_name="目标表", index=False)
+merged = tgt.merge(src[["键列", "值列"]], on="键列", how="left")
+values = [list(merged.columns)] + merged.astype(object).where(pd.notnull(merged), None).values.tolist()
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "write", "sheet": "目标表", "start_cell": "A1", "values": values}],
+)
 ```
 
 ## Sheet 管理
 
 ```python
-wb.create_sheet("新表")              # 新建
-wb.copy_worksheet(wb["Sheet1"])      # 复制
-wb["Sheet1"].title = "新名称"         # 重命名
-del wb["要删除的表"]                   # 删除
+from em import edit_spreadsheet
+
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[
+        {"kind": "sheet", "action": "create", "new_name": "新表"},
+        {"kind": "sheet", "action": "rename", "sheet": "Sheet1", "new_name": "新名称"},
+    ],
+)
 ```
 
-## 标准异常处理
+## 异常处理
 
-`run_code` 脚本必须包含顶层异常捕获，确保错误信息友好可读。
-**禁止**使用 `sys.exit()`、`exit()` 或 `os._exit()`，会触发安全拦截。只需 print 到 stderr，脚本正常结束即可：
+`sys.exit()` / `exit()` / `os._exit()` 会触发安全拦截。错误 print 到 stderr 后正常结束即可：
 
 ```python
 import sys

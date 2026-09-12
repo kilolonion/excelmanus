@@ -11,7 +11,7 @@ import pytest
 from openpyxl import Workbook
 
 from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
-from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta
+from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, coerce_legacy_result
 from excelmanus.workbook import data as data_tools
 
 
@@ -45,7 +45,17 @@ class TestToolResultAdapter:
         tr = ToolResult.from_text(raw)
         assert tr.model_text == raw
         assert tr.ui_meta.image is None
-        assert tr.ui_meta.cow_mapping is None
+        assert not hasattr(tr.ui_meta, "cow_mapping")
+
+    def test_compact_error_json_is_failure(self) -> None:
+        raw = json.dumps({
+            "error_kind": "permanent",
+            "summary": "book.xlsx 版本冲突",
+            "suggestion": "请检查参数是否正确，或尝试其他方法。",
+        }, ensure_ascii=False)
+        tr = coerce_legacy_result(raw)
+        assert tr.success is False
+        assert tr.error is not None
 
     def test_dispatcher_str_result_lifts_image_magic_field(self) -> None:
         dispatcher, engine = _make_dispatcher()
@@ -75,10 +85,9 @@ class TestToolResultAdapter:
         assert tr.ui_meta.download["file_path"] == "a.txt"
         assert tr.ui_meta.diff["file_path"] == "a.xlsx"
         assert tr.ui_meta.text_diff["file_path"] == "a.txt"
-        assert tr.ui_meta.cow_mapping == {"src.xlsx": "outputs/src.xlsx"}
-        for key in ("__tool_result_image__", "_file_download", "_excel_diff", "_text_diff"):
+        assert not hasattr(tr.ui_meta, "cow_mapping")
+        for key in ("__tool_result_image__", "_file_download", "_excel_diff", "_text_diff", "cow_mapping"):
             assert key not in tr.model_text
-        assert "cow_mapping" in tr.model_text
         events: list[Any] = []
         engine.emit = lambda _cb, ev: events.append(ev)
         dispatcher._emit_ui_meta_events(
@@ -210,7 +219,7 @@ class TestCompareExcelToolResult:
     def test_key_compare_ui_meta_and_bounded_model_text(self, pair: tuple[Path, Path]) -> None:
         fa, fb = pair
         tr = data_tools.compare_excel(
-            str(fa), str(fb), key_columns=["id"], max_diffs=500,
+            str(fa), str(fb), alignment="key", key_columns=["id"], max_diffs=500,
         )
         assert isinstance(tr, ToolResult)
         assert tr.success

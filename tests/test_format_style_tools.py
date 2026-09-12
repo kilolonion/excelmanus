@@ -76,9 +76,17 @@ def _init_guard(tmp_path: Path) -> None:
 
 
 def _format(path: Path, operations: list[dict]) -> ToolResult:
+    filled = []
+    for op in operations:
+        item = dict(op)
+        if "sheet" not in item and "sheet_name" not in item:
+            raw_range = str(item.get("range") or "")
+            if "!" not in raw_range:
+                item["sheet"] = "Sheet1"
+        filled.append(item)
     return format_spreadsheet(
         file_path=str(path),
-        operations=operations,
+        operations=filled,
         expected_version=content_version_of_file(path),
     )
 
@@ -138,10 +146,11 @@ class TestBuildFill:
         fill = _build_fill({"color": "浅黄色"})
         assert fill.start_color.rgb == "00FFF2CC"
 
-    def test_fill_type_none(self) -> None:
-        fill = _build_fill({"fill_type": "none"})
-        # openpyxl 将 fill_type='none' 存储为 patternType=None
-        assert fill.patternType is None
+    def test_pattern_and_type_aliases(self) -> None:
+        fill = _build_fill({"color": "FF0000", "pattern": "solid"})
+        assert fill.patternType == "solid"
+        fill2 = _build_fill({"color": "FF0000", "type": "solid"})
+        assert fill2.patternType == "solid"
 
 
 # ── _build_border 增强测试 ───────────────────────────────

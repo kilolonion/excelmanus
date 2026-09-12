@@ -1,6 +1,12 @@
 # 配置参考
 
-优先级：环境变量 > `.env` > 默认值。
+优先级：非空进程环境变量 > 项目根 `.env` > `$EXCELMANUS_HOME/config.env` > 默认值。
+
+空的 `KEY=`（包括从 `.env.example` 拷出来的空行）**不会**挡住正式仓里已经保存的 Key。
+
+前端设置页 / 导入配置写入的环境项落在 **`$EXCELMANUS_HOME/config.env`**（默认 `~/.excelmanus/config.env`）。项目根 `.env` 只是开发便利文件；若该文件已存在，保存时会顺带同步一份。
+
+模型档案的 API Key 加密后存在主数据库，Fernet 密钥在 `$EXCELMANUS_HOME/data/.secret_key`。这两处必须在同一持久卷上，否则重启后 Key 无法解密。
 
 ## 基础配置
 
@@ -9,16 +15,16 @@
 | `EXCELMANUS_API_KEY` | LLM API Key（必填） | — |
 | `EXCELMANUS_BASE_URL` | LLM API 地址（必填） | — |
 | `EXCELMANUS_MODEL` | 模型名称（必填；Gemini 可从 BASE_URL 自动提取） | — |
-| `EXCELMANUS_PROTOCOL` | 主模型协议类型（`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`） | `auto` |
-| `EXCELMANUS_MAX_ITERATIONS` | Agent 最大迭代轮数 | `50` |
+| `EXCELMANUS_PROTOCOL` | 模型协议类型（`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`） | `auto` |
+| `EXCELMANUS_MAX_ITERATIONS` | 本轮 LLM 回合与工具调用上限（并行工具各计 1 次） | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API 会话空闲超时（秒） | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | API 最大并发会话数 | `1000` |
+| `EXCELMANUS_HOME` | 持久化根目录（`config.env`、默认数据库、加密密钥） | `~/.excelmanus` |
 | `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `.` |
-| `EXCELMANUS_DATA_ROOT` | 集中数据目录 | `~/.excelmanus/data` |
-| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`/`docker`），`auto` 自动推断 | `auto` |
+| `EXCELMANUS_DATA_ROOT` | 集中数据目录（上传/密钥文件） | `{EXCELMANUS_HOME}/data` |
+| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`），`auto` 与未知值均为 standalone；`server` 必须显式指定 | `auto` |
 | `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
-| `EXCELMANUS_EXTERNAL_SAFE_MODE` | 对外安全模式（隐藏思考/工具细节与路由元信息） | `true` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔） | `http://localhost:3000` |
 | `EXCELMANUS_MAX_CONTEXT_TOKENS` | 对话上下文 token 上限 | `128000` |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | 向 API 发送 prompt_cache_key 提升缓存命中率 | `true` |
@@ -37,11 +43,6 @@
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS` | 是否发现 `.agents/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS` | 是否发现外部工具目录 | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | 额外扫描目录（逗号分隔） | 空 |
-| `EXCELMANUS_AUX_ENABLED` | AUX 总开关（`false` 时即使配了 AUX 也回退主模型） | `true` |
-| `EXCELMANUS_AUX_API_KEY` | AUX API Key（子代理默认模型、上下文压缩等） | — |
-| `EXCELMANUS_AUX_BASE_URL` | AUX Base URL（未设置时回退主配置） | — |
-| `EXCELMANUS_AUX_MODEL` | AUX 模型名称（未设置时回退主模型） | — |
-| `EXCELMANUS_AUX_PROTOCOL` | AUX 模型协议类型 | `auto` |
 | `EXCELMANUS_CLAWHUB_ENABLED` | 是否启用 ClawHub 技能市场 | `true` |
 | `EXCELMANUS_CLAWHUB_REGISTRY_URL` | ClawHub 注册中心 URL | `https://clawhub.ai` |
 | `EXCELMANUS_CLAWHUB_PREFER_CLI` | ClawHub 优先使用 CLI 安装 | `true` |
@@ -53,8 +54,7 @@
 |---|---|---|
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | 触发大文件 subagent 委派提示的阈值（字节） | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | 是否启用 subagent 执行 | `true` |
-| `EXCELMANUS_AUX_MODEL` | 辅助模型（子代理默认模型、上下文压缩等） | — |
-| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | subagent 最大迭代轮数 | `120` |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | 子代理循环的 LLM 回合与工具调用上限 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | 单个子代理执行超时（秒） | `600` |
 | `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | 并行子代理最大并发数 | `3` |
@@ -64,7 +64,7 @@
 
 ## 上下文自动压缩（Compaction）
 
-对话超阈值时用辅助模型压缩早期对话，后台静默执行，不阻塞主链路。需配置 `EXCELMANUS_AUX_MODEL`。
+对话超阈值时用当前激活模型压缩早期对话，后台静默执行，不阻塞主链路。
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
@@ -87,9 +87,8 @@
 
 ## 路由行为
 
-- 工具 schema 在每轮请求前按用户选定的 `chat_mode` 动态构建（默认注入元工具 + domain 工具）。
-- 当 `chat_mode` 为 `read` 或 `plan` 时，仅暴露只读工具子集（并保留 `run_code` 与常驻元工具）以降低 schema token 开销。
-- `activate_skill` 仅注入领域知识指引（纯知识注入，不控制工具可见性）。
+- 工具 schema 在每轮请求前构建（元工具 + domain 工具）。`plan` 与 `write` 看到同一套工具；看见写入工具不等于可以改表。
+- 技能靠 user-role 目录快照。模型调用 `skill` 加载正文；用户 `/name` 手势也会注入 `<skill-invocation>`。二者都不改工具可见性。
 
 ## System Message 模式
 
@@ -99,30 +98,25 @@
 - `merge`：合并为单条 system。
 - `auto`：默认先走 `replace`，遇到 provider 的多 system 兼容错误时自动回退到 `merge`。
 
-## 多模型与 AUX 模型
+## 多模型
 
-> **注意**：`EXCELMANUS_MODELS` 环境变量已废弃。多模型档案已迁移至数据库管理，通过 Web 设置页面或 `/model` 命令操作。首次启动时若存在此环境变量会自动迁移到数据库。
+> **注意**：`EXCELMANUS_MODELS` 环境变量已废弃。模型档案已迁移至数据库管理，通过 Web 设置页面或 `/model` 命令操作。首次启动时若存在此环境变量会自动迁移到数据库。
 
-- `/model <name>` 切换主对话模型。
-- 未设置 `EXCELMANUS_AUX_MODEL` 时，子代理等附属任务跟随主模型。
-- 设置了 `EXCELMANUS_AUX_MODEL` 时，子代理默认模型与压缩等附属任务使用 AUX，不受 `/model` 影响。
+- 只保留一个激活模型。`/model <name>` 切换当前激活档案。
+- 对话、子代理、上下文压缩、记忆提取都使用该激活模型。
 
 ## 视觉配置
 
-图片只交给主模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `edit_spreadsheet(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。
+图片只交给当前激活模型阅读。无视觉时拒绝附件；有视觉时用 `read_image` 或工作台附件注入，再由模型产出 `WorkbookSpec` 并调用 `edit_spreadsheet(workbook_spec=)` 建表。没有独立视觉流水线，也没有附属 VLM 描述。
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_MAIN_MODEL_VISION` | 主模型视觉能力（`auto`/`true`/`false`） | `auto` |
+| `EXCELMANUS_MAIN_MODEL_VISION` | 激活模型视觉能力（`auto`/`true`/`false`） | `auto` |
 | `EXCELMANUS_IMAGE_KEEP_ROUNDS` | 图片在上下文中保持完整 base64 的最小轮次 | `3` |
 
-## 备份沙盒配置
+## 备份沙盒
 
-默认开启，所有文件写操作自动在 `outputs/backups/` 保留副本，支持回滚。
-
-| 环境变量 | 说明 | 默认值 |
-|---|---|---|
-| `EXCELMANUS_BACKUP_ENABLED` | 是否启用备份沙盒 | `true` |
+备份 overlay 已移除。写入落在用户路径；历史在 `.excelmanus/revisions/`。
 
 ## 代码策略引擎配置
 
@@ -132,7 +126,7 @@
 |---|---|---|
 | `EXCELMANUS_CODE_POLICY_ENABLED` | 是否启用代码策略引擎 | `true` |
 | `EXCELMANUS_CODE_POLICY_GREEN_AUTO` | Green 级（安全）代码自动批准 | `true` |
-| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | Yellow 级（需审计）代码自动批准 | `true` |
+| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | Yellow 级代码自动批准（默认关；打开后仍不会自动批准文件系统写入） | `false` |
 | `EXCELMANUS_CODE_POLICY_EXTRA_SAFE` | 额外安全模块白名单（逗号分隔） | 空 |
 | `EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED` | 额外阻断模块黑名单（逗号分隔） | 空 |
 
@@ -238,7 +232,6 @@ MCP 安全扫描：
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_DB_PATH` | SQLite 数据库路径（聊天记录、记忆、向量、审批均存于此） | `~/.excelmanus/excelmanus.db` |
-| `EXCELMANUS_DATABASE_URL` | PostgreSQL 连接 URL（设置后优先使用 PG，忽略 `DB_PATH`） | 空 |
 
 ## 聊天记录持久化
 
@@ -256,17 +249,13 @@ MCP 安全扫描：
 | `EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT` | `enforce` 模式灰度比例（0~100），100 = 全量 | `100` |
 | `EXCELMANUS_TOOL_SCHEMA_STRICT_PATH` | 严格路径策略：路径参数必须为相对路径且禁止 `..` | `false` |
 
-## 轮次 Checkpoint
+## 会话快照
 
-| 环境变量 | 说明 | 默认值 |
-|---|---|---|
-| `EXCELMANUS_CHECKPOINT_ENABLED` | 每轮工具调用后自动快照被修改文件，支持按轮回退 | `false` |
+每轮结束后保存 SessionState / 任务列表到 `session_checkpoints` 表，用于会话恢复。这不是文件检查点；文件历史在 `.excelmanus/revisions/`。
 
-## Docker 沙盒
+## 代码沙盒
 
-| 环境变量 | 说明 | 默认值 |
-|---|---|---|
-| `EXCELMANUS_DOCKER_SANDBOX` | 启用 Docker 沙盒隔离（需预先构建镜像） | `false` |
+`run_code` 只走本机子进程围栏：禁网络、禁起进程、禁出工作区。产品安装也不再提供 Compose / 镜像轨。
 
 ## Thinking（推理深度）
 
@@ -287,24 +276,29 @@ MCP 安全扫描：
 
 | 环境变量 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子（留空则自动在 `~/.excelmanus/data/.secret_key` 生成） | 自动生成 |
+| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子（留空则自动在 `{EXCELMANUS_HOME}/data/.secret_key` 生成） | 自动生成 |
 
 密钥派生优先级：
 1. `EXCELMANUS_SECRET_KEY` 环境变量（SHA-256 派生）
-2. `~/.excelmanus/data/.secret_key` 自动生成（首次启动时创建，文件权限 600）
-3. 均不可用时，加密组件不启用（仅限开发环境）
+2. `{EXCELMANUS_HOME}/data/.secret_key` 自动生成（首次启动时创建，文件权限 600）
+3. 旧路径 `~/.excelmanus/data/.secret_key`（若存在则复制到正式路径）
+4. 均不可用时，加密组件不启用（仅限开发环境）
 
 ## 单用户工作区
 
-进程内只有一份工作区（`EXCELMANUS_DATA_ROOT` 或 `EXCELMANUS_WORKSPACE_ROOT`）、一份会话管理器、一份凭证与记忆。多对话仍然支持，那不是多租户。
+一份进程只有一份 data home（SQLite 聊天库、记忆、MCP 配置、模型凭证），**不是**多租户。用户可以把多个本机文件夹登记为工作区：每个对话绑定其中一个文件夹，同一文件夹下的多条对话共享该目录里的文件。Agent 的 cwd、文件守卫、版本与 registry 扫描根跟随当前会话的文件夹；记忆和 MCP 仍是进程级共享，不会按文件夹隔离。
 
-`EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` 已移除。Codex 订阅 OAuth 仍可用（进程级，不绑定登录用户）。文件下载令牌的 JWT 密钥可选用 `EXCELMANUS_JWT_SECRET`，未设置时自动生成。
+默认工作区是 `EXCELMANUS_DATA_ROOT`（若设置）或 `EXCELMANUS_WORKSPACE_ROOT`。对话 tab 可以收编已经存在的本机目录，不会在目标路径上 mkdir，也不会把聊天记录写到 xlsx 旁边。
+
+`EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` 已移除。Codex 订阅 OAuth 仍可用（进程级，不绑定登录用户）。
+
+后端默认监听 `127.0.0.1`。若绑定非 loopback 地址（LAN 或公网），必须设置 `EXCELMANUS_MANAGE_TOKEN`（至少 16 字符）；令牌一旦配置，除健康检查外全部 `/api/v1` 要求 `Authorization: Bearer`。服务器模式请让 Nginx 反代到 `127.0.0.1:8000`，不要把应用端口直接暴露到 `0.0.0.0`。
 
 ### 旧版 `users/` 手动搬迁
 
 不要自动合并多个 `users/{id}`。若本地还留着旧隔离目录：
 
-1. 选出**唯一**要继续用的 `users/{id}/`（或 `channel_anonymous/`）。
+1. 选出**唯一**要继续用的 `users/{id}/`。
 2. 把其中的工作区文件拷到当前 `data_root` / `workspace_root`。
 3. 各用户目录下的 `data.db` **不会**自动导入主库；聊天记录与记忆需自行决定是否手工迁移。
-4. FileRegistry 扫描会跳过名为 `users`、`channel_anonymous` 的目录，避免把归档残骸扫进工作区。
+4. FileRegistry 扫描会跳过名为 `users` 的目录，避免把归档残骸扫进工作区。

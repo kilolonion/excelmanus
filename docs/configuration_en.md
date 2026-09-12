@@ -1,6 +1,12 @@
 # Configuration Reference
 
-Priority: Environment variables > `.env` > Default values.
+Priority: non-empty process environment > project-root `.env` > `$EXCELMANUS_HOME/config.env` > defaults.
+
+Empty `KEY=` values (from `.env.example` copies or Docker `env_file`) **do not** hide keys already saved in the canonical store.
+
+Settings UI / config import write env items to **`$EXCELMANUS_HOME/config.env`** (default `~/.excelmanus/config.env`). The project-root `.env` is a convenience file; if it already exists, saves are mirrored there.
+
+Model-profile API keys are encrypted in the main database. The Fernet key lives at `$EXCELMANUS_HOME/data/.secret_key`. Keep both on the same persistent volume, or keys cannot be decrypted after restart.
 
 ## Basic Configuration
 
@@ -9,16 +15,16 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_API_KEY` | LLM API Key (required) | — |
 | `EXCELMANUS_BASE_URL` | LLM API endpoint (required) | — |
 | `EXCELMANUS_MODEL` | Model name (required; Gemini can be auto-extracted from BASE_URL) | — |
-| `EXCELMANUS_PROTOCOL` | Main model protocol type (`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`) | `auto` |
-| `EXCELMANUS_MAX_ITERATIONS` | Maximum agent iteration rounds | `50` |
+| `EXCELMANUS_PROTOCOL` | Model protocol type (`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`) | `auto` |
+| `EXCELMANUS_MAX_ITERATIONS` | Per-turn cap on LLM rounds and tool calls (each parallel tool counts as 1) | `50` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | Consecutive failure circuit-breaker threshold | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API session idle timeout (seconds) | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | Maximum concurrent API sessions | `1000` |
+| `EXCELMANUS_HOME` | Durable home (`config.env`, default DB, encryption keys) | `~/.excelmanus` |
 | `EXCELMANUS_WORKSPACE_ROOT` | File access whitelist root directory | `.` |
-| `EXCELMANUS_DATA_ROOT` | Centralized data directory | `~/.excelmanus/data` |
-| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`/`docker`), `auto` infers automatically | `auto` |
+| `EXCELMANUS_DATA_ROOT` | Centralized data directory (uploads / secret files) | `{EXCELMANUS_HOME}/data` |
+| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`). `auto` and unknown values are standalone; `server` must be set explicitly | `auto` |
 | `EXCELMANUS_LOG_LEVEL` | Log level | `INFO` |
-| `EXCELMANUS_EXTERNAL_SAFE_MODE` | External safe mode (hides thinking/tool details and routing metadata) | `true` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS allowed origins (comma-separated) | `http://localhost:3000` |
 | `EXCELMANUS_MAX_CONTEXT_TOKENS` | Conversation context token limit | `128000` |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | Send prompt_cache_key to API to improve cache hit rate | `true` |
@@ -37,11 +43,6 @@ Priority: Environment variables > `.env` > Default values.
 | `EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS` | Discover `.agents/skills` | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS` | Discover external tool directories | `true` |
 | `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` | Extra scan directories (comma-separated) | empty |
-| `EXCELMANUS_AUX_ENABLED` | AUX master switch (`false` to fall back to main model even if AUX is configured) | `true` |
-| `EXCELMANUS_AUX_API_KEY` | AUX API Key (subagent default model, compaction, etc.) | — |
-| `EXCELMANUS_AUX_BASE_URL` | AUX Base URL (falls back to main config if not set) | — |
-| `EXCELMANUS_AUX_MODEL` | AUX model name (falls back to main model if not set) | — |
-| `EXCELMANUS_AUX_PROTOCOL` | AUX model protocol type | `auto` |
 | `EXCELMANUS_CLAWHUB_ENABLED` | Enable ClawHub skill marketplace | `true` |
 | `EXCELMANUS_CLAWHUB_REGISTRY_URL` | ClawHub registry URL | `https://clawhub.ai` |
 | `EXCELMANUS_CLAWHUB_PREFER_CLI` | ClawHub prefers CLI installation | `true` |
@@ -53,8 +54,7 @@ Priority: Environment variables > `.env` > Default values.
 |---|---|---|
 | `EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES` | Threshold for triggering large-file subagent delegation prompt (bytes) | `8388608` |
 | `EXCELMANUS_SUBAGENT_ENABLED` | Enable subagent execution | `true` |
-| `EXCELMANUS_AUX_MODEL` | Auxiliary model (subagent default, compaction, etc.) | — |
-| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | Subagent maximum iteration rounds | `120` |
+| `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | Child-loop cap on LLM rounds and tool calls | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | Subagent consecutive failure circuit-breaker threshold | `6` |
 | `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | Single subagent execution timeout (seconds) | `600` |
 | `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | Maximum parallel subagent concurrency | `3` |
@@ -64,7 +64,7 @@ Priority: Environment variables > `.env` > Default values.
 
 ## Context Auto-Compaction
 
-When the conversation exceeds the threshold, the auxiliary model compresses earlier dialogue in the background without blocking the main pipeline. Requires `EXCELMANUS_AUX_MODEL` to be configured.
+When the conversation exceeds the threshold, the active model compresses earlier dialogue in the background without blocking the main pipeline.
 
 | Environment Variable | Description | Default |
 |---|---|---|
@@ -87,9 +87,8 @@ When the conversation exceeds the threshold, the auxiliary model compresses earl
 
 ## Routing Behavior
 
-- Tool schemas are dynamically built before each round based on the user-selected `chat_mode` (default injects meta-tools + domain tools).
-- When `chat_mode` is `read` or `plan`, only the read-only tool subset is exposed (while retaining `run_code` and persistent meta-tools) to reduce schema token overhead.
-- `activate_skill` only injects domain knowledge guidance (pure knowledge injection; does not control tool visibility).
+- Tool schemas are built each request (meta tools + domain tools). `plan` and `write` see the same catalog; seeing a write tool does not mean the workbook may be changed.
+- Skills come from a user-role catalog snapshot. The model loads a body with `skill`; a user `/name` gesture also injects `<skill-invocation>`. Neither changes tool visibility.
 
 ## System Message Mode
 
@@ -99,30 +98,25 @@ When the conversation exceeds the threshold, the auxiliary model compresses earl
 - `merge`: Merged into a single system message.
 - `auto`: Defaults to `replace`; automatically falls back to `merge` when encountering provider multi-system compatibility errors.
 
-## Multi-Model & AUX Model
+## Multi-Model
 
-> **Note**: The `EXCELMANUS_MODELS` environment variable is deprecated. Multi-model profiles have been migrated to database management via the Web settings page or `/model` command. On first launch, if this env var exists it will be auto-migrated to the database.
+> **Note**: The `EXCELMANUS_MODELS` environment variable is deprecated. Model profiles have been migrated to database management via the Web settings page or `/model` command. On first launch, if this env var exists it will be auto-migrated to the database.
 
-- `/model <name>` switches the main conversation model.
-- When `EXCELMANUS_AUX_MODEL` is not set, subagents and other auxiliary tasks follow the main model.
-- When `EXCELMANUS_AUX_MODEL` is set, the subagent default model and compaction use AUX, unaffected by `/model`.
+- Only one model is active. `/model <name>` switches the active profile.
+- Chat, subagents, compaction, and memory extraction all use that active model.
 
 ## Vision
 
-Images go to the main model only. If the main model has no vision, attachments are rejected. If it does, `read_image` or workbench attachments inject the picture; the model writes a `WorkbookSpec` and calls `edit_spreadsheet(workbook_spec=)`. There is no separate vision pipeline and no auxiliary VLM description.
+Images go to the active model only. If it has no vision, attachments are rejected. If it does, `read_image` or workbench attachments inject the picture; the model writes a `WorkbookSpec` and calls `edit_spreadsheet(workbook_spec=)`. There is no separate vision pipeline and no auxiliary VLM description.
 
 | Environment Variable | Description | Default |
 |---|---|---|
-| `EXCELMANUS_MAIN_MODEL_VISION` | Main model vision capability (`auto`/`true`/`false`) | `auto` |
+| `EXCELMANUS_MAIN_MODEL_VISION` | Active model vision capability (`auto`/`true`/`false`) | `auto` |
 | `EXCELMANUS_IMAGE_KEEP_ROUNDS` | Minimum rounds to keep full image base64 in context | `3` |
 
-## Backup Sandbox Configuration
+## Backup sandbox
 
-Enabled by default. All file write operations automatically retain copies in `outputs/backups/`, supporting rollback.
-
-| Environment Variable | Description | Default |
-|---|---|---|
-| `EXCELMANUS_BACKUP_ENABLED` | Enable backup sandbox | `true` |
+Backup overlay is removed. Writes land on the user path; history lives in `.excelmanus/revisions/`.
 
 ## Code Policy Engine Configuration
 
@@ -132,7 +126,7 @@ Performs static analysis on code executed by `run_code`, automatically routing a
 |---|---|---|
 | `EXCELMANUS_CODE_POLICY_ENABLED` | Enable code policy engine | `true` |
 | `EXCELMANUS_CODE_POLICY_GREEN_AUTO` | Auto-approve Green-level (safe) code | `true` |
-| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | Auto-approve Yellow-level (audit-required) code | `true` |
+| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | Auto-approve Yellow-level code (off by default; filesystem writes are never auto-approved) | `false` |
 | `EXCELMANUS_CODE_POLICY_EXTRA_SAFE` | Extra safe module allowlist (comma-separated) | empty |
 | `EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED` | Extra blocked module blocklist (comma-separated) | empty |
 
@@ -238,7 +232,6 @@ MCP security scanning:
 | Environment Variable | Description | Default |
 |---|---|---|
 | `EXCELMANUS_DB_PATH` | SQLite database path (chat history, memory, vectors, approvals all stored here) | `~/.excelmanus/excelmanus.db` |
-| `EXCELMANUS_DATABASE_URL` | PostgreSQL connection URL (takes priority over `DB_PATH` when set) | empty |
 
 ## Chat History Persistence
 
@@ -256,17 +249,13 @@ Performs JSON Schema-level validation on tool call parameters returned by the LL
 | `EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT` | `enforce` mode canary percentage (0~100), 100 = full rollout | `100` |
 | `EXCELMANUS_TOOL_SCHEMA_STRICT_PATH` | Strict path policy: path parameters must be relative and forbid `..` | `false` |
 
-## Turn Checkpoint
+## Session snapshot
 
-| Environment Variable | Description | Default |
-|---|---|---|
-| `EXCELMANUS_CHECKPOINT_ENABLED` | Auto-snapshot modified files after each tool call turn, supporting per-turn rollback | `false` |
+After each turn, SessionState / task list is saved to the `session_checkpoints` table for session restore. This is not a file checkpoint; file history lives in `.excelmanus/revisions/`.
 
-## Docker Sandbox
+## Code sandbox
 
-| Environment Variable | Description | Default |
-|---|---|---|
-| `EXCELMANUS_DOCKER_SANDBOX` | Enable Docker sandbox isolation (requires pre-built image) | `false` |
+`run_code` always uses the local subprocess fence: no network, no subprocess spawn, no writes outside the workspace. Compose / image install is also no longer a product path.
 
 ## Thinking (Reasoning Depth)
 
@@ -287,24 +276,29 @@ Encrypted storage for sensitive fields (model API Keys, OAuth Access Tokens, etc
 
 | Environment Variable | Description | Default |
 |---|---|---|
-| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed (auto-generates at `~/.excelmanus/data/.secret_key` if empty) | Auto-generated |
+| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed (auto-generates at `{EXCELMANUS_HOME}/data/.secret_key` if empty) | Auto-generated |
 
 Key derivation priority:
 1. `EXCELMANUS_SECRET_KEY` environment variable (SHA-256 derived)
-2. `~/.excelmanus/data/.secret_key` auto-generated (created on first launch, file permissions 600)
-3. When neither is available, encryption is disabled (development only)
+2. `{EXCELMANUS_HOME}/data/.secret_key` auto-generated (created on first launch, file permissions 600)
+3. Legacy `~/.excelmanus/data/.secret_key` (copied to the canonical path if present)
+4. When neither is available, encryption is disabled (development only)
 
 ## Single-user workspace
 
-The process has one workspace (`EXCELMANUS_DATA_ROOT` or `EXCELMANUS_WORKSPACE_ROOT`), one session manager, one credential store, and one memory store. Multiple conversations remain; that is not multi-tenancy.
+One process has one data home (SQLite chat DB, memory, MCP config, model credentials). That is **not** multi-tenancy. Users can register multiple local folders as workspaces: each conversation binds one folder, and conversations in the same folder share that folder's files. Agent cwd, the file-access guard, revisions, and registry scans follow the current session's folder. Memory and MCP stay process-wide; they are not isolated per folder.
 
-`EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` are removed. Codex subscription OAuth remains (process-level, not bound to a login user). Download-token JWT may use `EXCELMANUS_JWT_SECRET`; if unset it is generated automatically.
+The default workspace is `EXCELMANUS_DATA_ROOT` (if set) or `EXCELMANUS_WORKSPACE_ROOT`. The chats tab can adopt an existing local directory; it does not mkdir that path, and it does not store chat logs next to the xlsx files.
+
+`EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` are removed. Codex subscription OAuth remains (process-level, not bound to a login user).
+
+The API listens on `127.0.0.1` by default. Binding a non-loopback address requires `EXCELMANUS_MANAGE_TOKEN` (at least 16 characters). When that token is set, every `/api/v1` route except health requires `Authorization: Bearer`. Server deploys should reverse-proxy to `127.0.0.1:8000` instead of exposing the app port on `0.0.0.0`.
 
 ### Manual `users/` migration
 
 Do not auto-merge multiple `users/{id}` trees. If old isolation directories remain:
 
-1. Pick the **one** `users/{id}/` (or `channel_anonymous/`) you want to keep.
+1. Pick the **one** `users/{id}/` you want to keep.
 2. Copy its workspace files into the current `data_root` / `workspace_root`.
 3. Per-user `data.db` files are **not** imported into the main database.
-4. FileRegistry still skips directories named `users` and `channel_anonymous` so leftover archives are not scanned.
+4. FileRegistry still skips directories named `users` so leftover archives are not scanned.

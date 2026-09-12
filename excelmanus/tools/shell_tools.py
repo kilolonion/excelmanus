@@ -165,7 +165,23 @@ def _validate_single_command(segment: str) -> tuple[bool, str]:
     if cmd_name not in ALLOWED_COMMANDS:
         return False, f"命令不在白名单中: {cmd_name}"
 
+    write_flag = _write_output_flag(tokens)
+    if write_flag:
+        return False, f"禁止会写盘的参数: {write_flag}"
+
     return True, "ok"
+
+
+def _write_output_flag(tokens: list[str]) -> str | None:
+    """Detect flags that write to a named output file (e.g. sort -o)."""
+    for tok in tokens[1:]:
+        if tok in {"-o", "--output", "--out"}:
+            return tok
+        if tok.startswith("--output=") or tok.startswith("--out="):
+            return tok.split("=", 1)[0]
+        if tok.startswith("-o") and len(tok) > 2 and not tok.startswith("--"):
+            return "-o"
+    return None
 
 
 def _split_chain(command: str) -> list[tuple[str, str]]:

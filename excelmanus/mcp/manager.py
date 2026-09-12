@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,7 +188,7 @@ def _normalize_excel_mcp_absolute_path(path_value: Any, *, workspace_root: str) 
     """把 Excel MCP 路径收到工作区 FileAccessGuard 内。
 
     相对路径基于 workspace 解析。工作区外绝对路径一律拒绝，不因文件已存在而放行。
-    仅当越界路径的 basename 能通过 Guard 且工作区已有同名文件时，才回落到该文件。
+    禁止用 basename 回落到工作区同名文件。
     """
     if not isinstance(path_value, str):
         return path_value
@@ -197,21 +198,7 @@ def _normalize_excel_mcp_absolute_path(path_value: Any, *, workspace_root: str) 
         return path_value
 
     guard = FileAccessGuard(workspace_root)
-    try:
-        return str(guard.resolve_and_validate(raw))
-    except SecurityViolationError:
-        name = Path(raw.replace("\\", "/")).name
-        if not name or name in {".", ".."}:
-            raise
-        fallback = guard.resolve_and_validate(name)
-        if fallback.is_file():
-            logger.warning(
-                "检测到工作区外 Excel 路径，已回落到工作区同名文件: %s -> %s",
-                raw,
-                fallback,
-            )
-            return str(fallback)
-        raise
+    return str(guard.resolve_and_validate(raw))
 
 
 def _adapt_mcp_call_arguments(
@@ -328,12 +315,105 @@ def _make_tool_func(
 # MCP 工具定义 → ToolDef 转换
 # ---------------------------------------------------------------------------
 
+_MCP_WRITE_TOKENS = (
+    "write",
+    "delete",
+    "update",
+    "create",
+    "insert",
+    "remove",
+    "save",
+    "edit",
+    "append",
+    "drop",
+    "rename",
+    "move",
+    "copy",
+    "upload",
+    "mutate",
+    "destroy",
+    "replace",
+    "modify",
+    "commit",
+    "publish",
+    "put",
+    "patch",
+    "send",
+    "post",
+)
+_MCP_EXTERNAL_TOKENS = (
+    "http",
+    "https",
+    "url",
+    "email",
+    "webhook",
+    "slack",
+    "telegram",
+    "tweet",
+    "smtp",
+    "fetch_url",
+    "web_request",
+)
+_MCP_WRITE_ZH = ("写入", "删除", "更新", "创建", "保存", "修改", "重命名")
+_MCP_READONLY_SCOPES = frozenset({"search", "readonly", "read-only", "read"})
+
+
+def _normalize_ident(text: str) -> str:
+    spaced = re.sub(r"([a-z0-9])([A-Z])", r"\1 \2", text or "")
+    return spaced.replace("_", " ").replace("-", " ").lower()
+
+
+def _token_hit(blob: str, tokens: tuple[str, ...]) -> bool:
+    for token in tokens:
+        if re.search(rf"\b{re.escape(token)}\b", blob):
+            return True
+    return False
+
+
+def infer_mcp_write_effect(
+    *,
+    original_name: str,
+    description: str = "",
+    input_schema: dict[str, Any] | None = None,
+    auto_approved: bool = False,
+    scope: str = "",
+) -> str:
+    """Infer MCP write_effect. Fail-closed unless clearly declared readonly.
+
+    ``autoApprove`` is not a write-effect declaration (write-mode default-allow
+    is the approval axis). Plan/read-only only treat ``none`` as non-write.
+
+    1. Name/schema/description clearly write → workspace_write or external_write
+    2. Explicit readonly/search/read scope and no write tokens → none
+    3. Otherwise unknown
+    """
+    del auto_approved
+    props: list[str] = []
+    if isinstance(input_schema, dict):
+        raw_props = input_schema.get("properties")
+        if isinstance(raw_props, dict):
+            props = [str(key) for key in raw_props]
+    blob = _normalize_ident(" ".join([original_name, description, *props]))
+    desc = description or ""
+    write_hit = _token_hit(blob, _MCP_WRITE_TOKENS) or any(token in desc for token in _MCP_WRITE_ZH)
+    if write_hit:
+        if _token_hit(blob, _MCP_EXTERNAL_TOKENS):
+            return "external_write"
+        return "workspace_write"
+    scope_key = str(scope or "").strip().lower().replace("_", "-")
+    if scope_key in _MCP_READONLY_SCOPES:
+        return "none"
+    return "unknown"
+
 
 def make_tool_def(
     server_name: str,
     client: "MCPClientWrapper",
     mcp_tool: Any,
     workspace_root: str = ".",
+    *,
+    auto_approved: bool = False,
+    scope: str = "",
 ) -> ToolDef:
     """将 MCP 工具定义转换为 ToolDef。
 
@@ -343,17 +423,7 @@ def make_tool_def(
     - ``input_schema``：直接映射（已是 JSON Schema）
     - ``func``：异步调用闭包（同步包装）
     - ``max_result_chars``：默认 5000（远程工具结果可能较长）
-
-    Args:
-        server_name: MCP Server 名称（原始，可含 ``-``）。
-        client: 对应的 MCPClientWrapper 实例。
-        mcp_tool: MCP 工具定义对象（duck typing），需具有
-            ``name``、``description``，以及 ``input_schema`` 或
-            ``inputSchema`` 属性。
-        workspace_root: 当前工作区根目录。
-
-    Returns:
-        转换后的 ToolDef 实例。
+    - ``write_effect``：写 token → workspace/external；显式 readonly scope → none；其余 unknown。autoApprove 不改变写效应。
     """
     original_name: str = mcp_tool.name
     description: str = mcp_tool.description or ""
@@ -362,7 +432,6 @@ def make_tool_def(
     )
     input_schema: dict[str, Any] = raw_schema if isinstance(raw_schema, dict) else {}
 
-    # 获取超时配置（从 client 的 config 中读取，默认 30 秒）
     timeout: int = getattr(getattr(client, "_config", None), "timeout", 30)
 
     prefixed_name = add_tool_prefix(server_name, original_name)
@@ -383,6 +452,14 @@ def make_tool_def(
         workspace_root,
     )
 
+    write_effect = infer_mcp_write_effect(
+        original_name=original_name,
+        description=description,
+        input_schema=input_schema,
+        auto_approved=auto_approved,
+        scope=scope,
+    )
+
     return ToolDef(
         name=prefixed_name,
         description=tagged_description,
@@ -390,7 +467,7 @@ def make_tool_def(
         func=func,
         async_func=async_func,
         max_result_chars=5000,
-        write_effect="unknown",
+        write_effect=write_effect,  # type: ignore[arg-type]
     )
 
 
@@ -705,11 +782,15 @@ class MCPManager:
         tool_names: list[str] = []
 
         for tool in mcp_tools:
+            original_name: str = getattr(tool, "name", "")
+            auto_approved_flag = "*" in cfg.auto_approve or original_name in cfg.auto_approve
             tool_def = make_tool_def(
                 cfg.name,
                 client,
                 tool,
                 workspace_root=self._workspace_root,
+                auto_approved=auto_approved_flag,
+                scope=cfg.scope,
             )
             if tool_def.name in existing_names:
                 logger.warning(
@@ -727,12 +808,11 @@ class MCPManager:
                 continue
             tool_defs.append(tool_def)
             local_pending.add(tool_def.name)
-            original_name: str = getattr(tool, "name", "")
             if original_name:
                 tool_names.append(original_name)
 
-            # 收集白名单：autoApprove 含 "*" 或匹配原始工具名
-            if "*" in cfg.auto_approve or original_name in cfg.auto_approve:
+            # 收集白名单：autoApprove 含 "*" 或匹配原始工具名（显式信任，不是确认门）
+            if auto_approved_flag:
                 auto_approved.append(tool_def.name)
 
             # 记录工具 scope（用于路由过滤）

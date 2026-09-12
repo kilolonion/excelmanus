@@ -22,7 +22,6 @@
 - GET    /api/v1/sessions/{sid}/operations/{id} 操作详情（含 diff）
 - POST   /api/v1/sessions/{sid}/operations/{id}/undo 回滚指定操作
 - GET    /api/v1/health                       健康检查
-- GET    /api/v1/channels                     渠道协同启动状态
 """
 
 from __future__ import annotations
@@ -153,7 +152,6 @@ _config: ExcelManusConfig | None = None
 _config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
 _draining: bool = False  # True during graceful shutdown, health returns "draining"
 _restart_reason: str = ""  # 重启原因，draining 期间通过 health 传递给前端
-_channel_launcher: Any = None  # 与 api_app_state._channel_launcher 同步的别名；路由请用 getter
 _cap_probe_job_manager: Any = None  # 类型：CapabilityProbeJobManager | None
 _rules_manager: Any = None  # 类型：RulesManager | None
 _api_persistent_memory: Any = None  # 类型：PersistentMemory | None（API 层共享）
@@ -183,16 +181,9 @@ def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
         return fallback, exc
 
 
-def _resolve_workspace(request: Request) -> "IsolatedWorkspace":
-    """解析进程唯一工作区。"""
-    assert _config is not None
-    from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
-    return IsolatedWorkspace.resolve(
-        _config.workspace_root,
-        sandbox_config=SandboxConfig(),
-        transaction_enabled=False,
-        data_root=_config.data_root,
-    )
+def _resolve_workspace(request: Request, session_id: str | None = None) -> "IsolatedWorkspace":
+    from excelmanus.api_app_state import resolve_workspace
+    return resolve_workspace(request, session_id=session_id)
 
 
 def _resolve_workspace_root(request: Request) -> str:
@@ -219,7 +210,6 @@ from excelmanus.api_app_state import (  # noqa: F401
     _sync_config_profiles_from_db,
     ensure_active_model,
     get_cap_probe_job_manager,
-    get_channel_launcher,
     get_config_incomplete,
     get_draining,
     get_restart_reason,
@@ -227,7 +217,6 @@ from excelmanus.api_app_state import (  # noqa: F401
     get_skillpack_manager,
     get_tool_registry,
     set_cap_probe_job_manager,
-    set_channel_launcher,
     set_config_incomplete,
     set_draining,
     set_restart_reason,
@@ -273,7 +262,7 @@ def _make_content_disposition(filename: str) -> str:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database, _channel_launcher
+    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
@@ -355,12 +344,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     resolved_db_path = os.path.expanduser(
         _config.chat_history_db_path or _config.db_path
     )
-    if _config.database_url:
-        _database = Database(database_url=_config.database_url)
-        logger.info("统一数据库已启用 (PostgreSQL)")
-    else:
-        _database = Database(resolved_db_path)
-        logger.info("统一数据库已启用: %s", resolved_db_path)
+    _database = Database(resolved_db_path)
+    logger.info("统一数据库已启用: %s", resolved_db_path)
     if _config.chat_history_enabled:
         from excelmanus.chat_history import ChatHistoryStore
         chat_history = ChatHistoryStore(_database)
@@ -429,6 +414,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         config_store=_config_store,
     )
     bind_app_state(app, session_manager=_session_manager)
+    try:
+        _session_manager.ensure_default_workspace()
+    except Exception:
+        logger.warning("默认工作区登记失败", exc_info=True)
     await _session_manager.start_background_cleanup()
 
     # 初始化全局 RulesManager + 共享 PersistentMemory（供 API 层直接使用）
@@ -571,60 +560,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     _fire_and_forget(_background_update_check(), name="update_check")
 
-    # ── EventBridge（跨渠道实时事件推送） ──────────────────
-    _event_bridge = None
-    try:
-        from excelmanus.channels.event_bridge import EventBridge
-        _event_bridge = EventBridge()
-        app.state.event_bridge = _event_bridge
-        logger.info("EventBridge 已初始化")
-    except Exception:
-        logger.debug("EventBridge 初始化失败", exc_info=True)
-
-    # ── 渠道协同启动（可选） ──────────────────────────────
-    _channels_config: list[str] = getattr(app.state, "channels", None) or []
-    if not _channels_config:
-        from excelmanus.channels.launcher import parse_channels_config
-        _channels_config = parse_channels_config()
-
-    # 始终创建 launcher（即使环境变量未配置渠道），以支持前端热启动
-    from excelmanus.channels.launcher import ChannelLauncher
-    api_port = int(os.environ.get("EXCELMANUS_API_PORT", "8000"))
-    _channel_launcher = ChannelLauncher(
-        _channels_config,
-        api_port=api_port,
-        event_bridge=_event_bridge,
-        config_store=_config_store,
-    )
-    set_channel_launcher(_channel_launcher)
-    app.state.channel_launcher = _channel_launcher
-    # 合并环境变量/CLI + 持久化配置，统一启动渠道（避免无凭证先失败再重试）
-    _channels_to_start: dict[str, dict[str, str] | None] = {}
-    for _ch_name in _channels_config:
-        _channels_to_start[_ch_name] = None
-
-    if _config_store is not None:
-        try:
-            from excelmanus.channels.config_store import ChannelConfigStore
-            _ccs = ChannelConfigStore(_config_store)
-            for _ch_name, _ch_cfg in _ccs.load_all().items():
-                if _ch_cfg.enabled and _ch_cfg.has_required_credentials():
-                    _channels_to_start[_ch_name] = _ch_cfg.credentials
-        except Exception:
-            logger.debug("加载持久化渠道配置失败", exc_info=True)
-
-    for _ch_name, _ch_creds in _channels_to_start.items():
-        ok, msg = await _channel_launcher.start_channel(
-            _ch_name, credentials=_ch_creds,
-        )
-        if ok:
-            if _ch_creds is not None:
-                logger.info("从持久化配置自动启动渠道: %s", _ch_name)
-            else:
-                logger.info("渠道 %s 已启动", _ch_name)
-        else:
-            logger.warning("渠道 %s 启动失败: %s", _ch_name, msg)
-
     # ── 号池快照聚合后台任务（每 5 分钟） ──────────────────
     _pool_snapshot_task: asyncio.Task | None = None
     _pool_svc_bg = getattr(app.state, "pool_service", None)
@@ -725,11 +660,6 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             active = await _session_manager.get_active_count()
             if active > 0:
                 logger.warning("排空超时，仍有 %d 个活跃连接，强制关闭", active)
-
-    # 停止渠道协同 Bot
-    _launcher = get_channel_launcher() or _channel_launcher
-    if _launcher is not None:
-        await _launcher.stop()
 
     # 停止异步探测任务
     mgr = get_cap_probe_job_manager() or _cap_probe_job_manager
@@ -876,15 +806,11 @@ def _register_exception_handlers(application: FastAPI) -> None:
 
 def create_app(
     config: ExcelManusConfig | None = None,
-    *,
-    channels: list[str] | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用，CORS 与运行期配置共享同一来源。
 
     Args:
         config: 预构建的配置对象；为 None 时自动从环境加载。
-        channels: 要协同启动的渠道列表（如 ["qq"]）；
-                  为 None 时从 EXCELMANUS_CHANNELS 环境变量读取。
     """
     bootstrap_error: ConfigError | None = None
     bootstrap_config = config
@@ -899,7 +825,6 @@ def create_app(
     )
     application.state.bootstrap_config = bootstrap_config
     application.state.bootstrap_config_error = bootstrap_error
-    application.state.channels = channels
 
     # 构建 CORS 允许来源列表：除了显式配置的来源外，自动添加本机 LAN IP
     # 的前端端口来源，以便浏览器直连后端的 SSE 流式请求不被 CORS 拦截。
@@ -971,12 +896,12 @@ def create_app(
     application.include_router(files_router)
     from excelmanus.api_routes_sessions import router as sessions_router
     application.include_router(sessions_router)
+    from excelmanus.api_routes_workspaces import router as workspaces_router
+    application.include_router(workspaces_router)
     from excelmanus.api_routes_workspace import router as workspace_router
     application.include_router(workspace_router)
     from excelmanus.api_routes_config import router as config_router
     application.include_router(config_router)
-    from excelmanus.api_routes_channels import router as channels_router
-    application.include_router(channels_router)
     from excelmanus.api_routes_skills import router as skills_router
     application.include_router(skills_router)
     from excelmanus.api_routes_system import router as system_router
@@ -1009,10 +934,8 @@ def _safe_uploads_path(uploads_dir: "Path", relative: str) -> "Path | None":
     return safe_uploads_path(uploads_dir, relative)
 
 
-# ── Upload / mentions / command / health / public-ip（已提取到 api_routes_system.py）──────
+# ── Upload / mentions / command / health（已提取到 api_routes_system.py）──────
 
-
-# ── Channels API（已提取到 api_routes_channels.py）──────
 
 # ── Settings API（已提取到 api_routes_config.py）──────
 
@@ -1057,11 +980,9 @@ from excelmanus.api_routes_chat import (  # noqa: F401
 from excelmanus.api_routes_files import (  # noqa: F401
     ExcelWriteRequest,
     WordWriteRequest,
-    create_download_link,
     create_file_group,
     delete_file_group,
     download_file,
-    download_file_by_token,
     get_excel_compare,
     get_excel_file,
     get_excel_snapshot,
@@ -1097,12 +1018,12 @@ from excelmanus.api_routes_sessions import (  # noqa: F401
     get_session_excel_events,
     get_session_messages,
     get_session_status,
-    import_session,
     list_approvals,
     list_operations,
     list_sessions,
     scan_session_registry,
     toggle_full_access,
+    toggle_present_as,
     undo_approval,
     undo_operation,
     update_session_title_api,
@@ -1160,19 +1081,6 @@ from excelmanus.api_routes_config import (  # noqa: F401
     update_model_profile,
     update_runtime_config,
 )
-from excelmanus.api_routes_channels import (  # noqa: F401
-    _propagate_channel_settings,
-    _propagate_rate_limit_config,
-    channels_status,
-    delete_channel_config,
-    feishu_webhook,
-    save_channel_config,
-    start_channel,
-    stop_channel,
-    test_channel_config,
-    update_channel_settings,
-    update_rate_limit_settings,
-)
 from excelmanus.api_routes_skills import (  # noqa: F401
     ClawHubInstallRequest,
     ClawHubUpdateRequest,
@@ -1203,7 +1111,6 @@ from excelmanus.api_routes_system import (  # noqa: F401
     execute_command,
     health,
     list_mentions,
-    server_public_ip,
     upload_file,
     upload_file_from_url,
 )
@@ -1215,41 +1122,19 @@ app = create_app()
 
 
 def main() -> None:
-    """API 服务入口函数（pyproject.toml 入口点）。
-
-    支持 --channels 参数或 EXCELMANUS_CHANNELS 环境变量来协同启动渠道 Bot::
-
-        # 启动 API + QQ Bot
-        python -m excelmanus.api --channels qq
-
-        # 多渠道
-        python -m excelmanus.api --channels qq,telegram
-
-        # 通过环境变量（适合 systemd / 进程管理器）
-        EXCELMANUS_CHANNELS=qq python -m excelmanus.api
-    """
+    """API 服务入口函数（pyproject.toml 入口点）。"""
     import argparse
 
     parser = argparse.ArgumentParser(
         prog="excelmanus-api",
         description="ExcelManus API Server",
     )
-    parser.add_argument(
-        "--channels",
-        type=str,
-        default="",
-        help="要协同启动的渠道 Bot，逗号分隔（如 qq,telegram）",
-    )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
     args, _ = parser.parse_known_args()
 
-    # 将 CLI 参数提升为环境变量，供 lifespan 读取
-    # （模块级 app = create_app() 已在 import 时创建，lifespan 延迟读取环境变量）
     os.environ["EXCELMANUS_API_PORT"] = str(args.port)
     os.environ["EXCELMANUS_API_HOST"] = args.host
-    if args.channels:
-        os.environ["EXCELMANUS_CHANNELS"] = args.channels
 
     from excelmanus.auth.manage_token import require_manage_token_for_bind
 

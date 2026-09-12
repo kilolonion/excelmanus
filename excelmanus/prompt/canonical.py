@@ -14,7 +14,7 @@ PERSONA = """工作区根目录：`{{workspace_root}}`。你是由 {{model}} 驱
 
 路径一律相对工作区。uploads/ 是只读附件（展示时去掉 {8hex}_ 前缀）；outputs/ 可写；文件历史在 .excelmanus/revisions/。
 
-工具成功不等于业务正确。回复简短，交差只写事实。没有结束工具。宿主有轮次上限。
+工具成功不等于业务正确。回复简短，交差只写事实。没有结束工具，也没有轮次上限。
 
 不要阅读 excelmanus/、tests/、docs/，也不要打开 replica_spec.py 或 intent_tools.py 来猜测工具用法。不要创建 _probe_*.xlsx 或 outputs/_*.xlsx。"""
 
@@ -22,9 +22,12 @@ PLAN_POLICY = """当前是计划模式。write_plan 可把计划写成文档。�
 
 TOOL_INSPECT = (
     "不要凭记忆编 sheet 或 range。"
+    "range 可用 A1:F20 或 表名!A1:F20。"
+    "header_row 从 0 起（Excel 第 1 行 = 0）。"
     "截断、采样、推断或缓存只是有条件证据。"
     "range 的行列是该窗口，不是整表。"
-    "include 被丢掉时以返回正文里的警告为准，不要当成「没有样式」。"
+    "range 的 include 仅 formulas；其他值会 INVALID_ARGS。"
+    "overview 的 include 被丢掉时以返回正文里的警告为准，不要当成「没有样式」。"
 )
 
 TOOL_ANALYZE = (
@@ -33,18 +36,24 @@ TOOL_ANALYZE = (
 )
 
 TOOL_EDIT = (
-    "已有文件必须使用最近返回的 content_version。"
+    "已有文件必须使用最近返回的 content_version（写入参数名 expected_version）。"
     "VERSION_CONFLICT 表示这次没有落盘。不要重放旧批次。"
     "相关改动打成一次请求；不要与另一次写入并行。"
+    "write 必须带 sheet 或 表!A1；null 清空单元格；字符串按原样写入。"
+    "copy 只复制值与公式文本，不译相对引用、不拷样式。"
+    "insert/rename 不维护公式或图表引用；有公式或图表时会拒绝。"
 )
 
 TOOL_FORMAT = (
+    "工作表必须用 sheet，或在 range 里写 表!A1。"
+    "range 写 A1:C5，也接受 区域汇总!A5:C5。"
     "合并区的填充、边框、对齐以锚点格为准。"
     "非锚点回读为空或 fill 为空不是缺陷。"
-    "边框是整对象替换。工具回报已应用不等于每个格子都写下了。"
+    "边框是整对象替换。font/alignment 按传入键叠加。"
+    "工具回报已应用不等于每个格子都写下了。"
 )
 
-WORKBOOK_SPEC_CONTRACT = """WorkbookSpec 经 workbook_spec 一次编译出新工作簿。已有文件用 operations 改，不要把规格当补丁。规格字段只来自本段和工具参数说明。
+WORKBOOK_SPEC_CONTRACT = """WorkbookSpec 经 edit_spreadsheet 的 workbook_spec 一次编译出新工作簿。已有文件用 operations 改，不要把规格当补丁。规格字段只来自本段和工具参数说明。
 
 必填：
 - sheets[]：每个表含 name、dimensions{rows,cols}
@@ -52,12 +61,13 @@ WORKBOOK_SPEC_CONTRACT = """WorkbookSpec 经 workbook_spec 一次编译出新工
 每个 sheet 可用：
 - value_blocks[{start, values:非空矩形二维数组}]
 - formula_blocks[{start, formulas:非空矩形二维数组}]
-- cells[{address, value 或 formula, 可选 style_id / number_format}]
-- styles{style_id → {font, fill, border, alignment, number_format}}
+- cells[{address, value；公式用 value="=A1" 且 value_type="formula"}]
+- styles{style_id → {font, fill:{type,color}, border, alignment, number_format}}
 - style_regions[{range, style_id}]
-- merged_ranges[{range}]
-- column_widths、row_heights
-可选顶层：name、locale、default_font、theme_hint
+- merged_ranges[{range} 或 "A1:B1"]
+- column_widths：从 A 起的数字数组 [18,12]，或 {"A":18,"B":12}（与 inspect / format size 相同）
+- row_heights：{"1":22} 或 [22,15]
+可选顶层：name、locale、default_font（{"name":"微软雅黑"} 或 "微软雅黑"）、theme_hint
 
 规则：矩形块与样式区域不得超出 dimensions；style_id 必须在 styles 中存在；看不清的写入 uncertainties，不要编造。合并区把填充和边框写在锚点，style_regions 覆盖整个合并范围。活表用公式，冻结源用字面量。xlsm 可保留宏字节，但不执行宏，也不声称测过宏行为。
 
@@ -86,7 +96,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "relationships 看跨文件列关联，files 扫描目录。推断不是事实。"
     ),
     "compare_spreadsheets": (
-        "只读对比。alignment=position 按坐标；alignment=key 且提供 key_columns 时按键对齐。"
+        "只读对比。alignment=position 按单元格行列坐标；alignment=key 且提供 key_columns 时按键对齐。"
+        "二者不能同时用。ignore_style=false 当前不支持。"
         "差异样本不可当作全表事实。"
     ),
     "trace_spreadsheet_formulas": (
@@ -94,13 +105,17 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "部分解析是限定证据，不是证明。"
     ),
     "edit_spreadsheet": (
-        "原子编辑：写值或公式、插删行列、表结构，或传入 workbook_spec 创建新簿。"
+        "原子编辑：写值或公式、插入行列、表结构，或传入 workbook_spec 创建新簿。"
+        "没有删行/删列。"
+        "write 必须带 sheet；null 清空；copy 只复制值。"
+        "insert 不维护公式。"
         "已有文件必须带精确 content_version。规格只用于创建。"
     ),
     "format_spreadsheet": (
         "原子改外观：字体/填充/边框/对齐/数字格式、合并、行列尺寸。不改值语义。"
+        "必须带 sheet 或 表!A1。"
     ),
-    "manage_spreadsheet_objects": "富对象。当前 kind=chart 插入原生图表。",
+    "manage_spreadsheet_objects": "富对象。当前 kind=chart 插入原生图表。一批 operations 一次提交。",
     "manage_spreadsheet_versions": (
         "list 当前版本与检查点；checkpoint 打快照；restore 按 revision 恢复。"
         "历史读取结果不可当作写入目标。"

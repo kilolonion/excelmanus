@@ -11,6 +11,7 @@ import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
+import { instantSessionTitle } from "@/lib/session-title";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -40,6 +41,8 @@ export interface SSEHandlerContext {
   thinkingInProgress: boolean;
   /** 流是否遇到错误。 */
   hadStreamError: boolean;
+  /** 本轮是否出现过会写入历史的工具副作用（diff / 改文件），用于结束后补同步。 */
+  hadPersistedToolWork?: boolean;
 }
 
 /** DeltaBatcher 接口（从 chat-actions.ts 复用）。 */
@@ -54,21 +57,6 @@ export interface DeltaBatcher {
 // ---------------------------------------------------------------------------
 // Helpers (从 chat-actions.ts 提升为模块级共享)
 // ---------------------------------------------------------------------------
-
-/** 将后端 route_mode 映射为用户友好的中文标签 */
-export function _friendlyRouteMode(mode: string): string {
-  const map: Record<string, string> = {
-    all_tools: "Smart Route",
-    control_command: "Control Command",
-    slash_direct: "Slash Command",
-    slash_not_found: "Skill Not Found",
-    slash_not_user_invocable: "Skill Not Invocable",
-    no_skillpack: "Base Mode",
-    fallback: "Fallback Mode",
-    hidden: "Route",
-  };
-  return map[mode] || mode;
-}
 
 /** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
 export function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
@@ -151,6 +139,11 @@ function _getLastBlockOfType(msgId: string, type: string) {
   return null;
 }
 
+/** 流式增量按字符串原样保留，包括空格和换行。 */
+function _streamDeltaContent(data: Record<string, unknown>): string {
+  return typeof data.content === "string" ? data.content : "";
+}
+
 // ---------------------------------------------------------------------------
 // 核心分发器
 // ---------------------------------------------------------------------------
@@ -201,7 +194,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         chatState.bindLoadedSession(sid);
       }
       if (ctx.userText) {
-        ss.updateSessionTitle(ss.activeSessionId || sid, ctx.userText.slice(0, 20));
+        const instant = instantSessionTitle(ctx.userText);
+        if (instant) {
+          ss.updateSessionTitle(ss.activeSessionId || sid, instant);
+        }
       }
       const ui = useUIStore.getState();
       if (typeof data.full_access_enabled === "boolean") {
@@ -275,23 +271,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
-    // 路由
+    // 路由（历史 replay 仍可能到达，对话流不再展示）
     case "route_start":
+    case "route_end":
       break;
-
-    case "route_end": {
-      const mode = (data.route_mode as string) || "";
-      const skills = (data.skills_used as string[]) || [];
-      if (mode) {
-        S().appendBlock(msgId, {
-          type: "status",
-          label: _friendlyRouteMode(mode),
-          detail: skills.length > 0 ? skills.join(",") : undefined,
-          variant: "route",
-        });
-      }
-      break;
-    }
 
     // 迭代
     case "iteration_start": {
@@ -305,14 +288,15 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     // 思考
     case "thinking_delta": {
       S().setPipelineStatus(null);
+      const thinkingDelta = _streamDeltaContent(data);
       const lastThinking = _getLastBlockOfType(msgId, "thinking");
       if (lastThinking && lastThinking.type === "thinking" && lastThinking.duration == null) {
-        ctx.batcher.pushThinking((data.content as string) || "");
+        ctx.batcher.pushThinking(thinkingDelta);
       } else {
         ctx.batcher.flush();
         S().appendBlock(msgId, {
           type: "thinking",
-          content: (data.content as string) || "",
+          content: thinkingDelta,
           startedAt: Date.now(),
         });
       }
@@ -345,7 +329,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       if (!lastBlock || lastBlock.type !== "text") {
         S().appendBlock(msgId, { type: "text", content: "" });
       }
-      ctx.batcher.pushText((data.content as string) || "");
+      ctx.batcher.pushText(_streamDeltaContent(data));
       break;
     }
 
@@ -421,6 +405,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       // ask_user batch 结束后清理残留的 pendingQuestion
       if ((data.tool_name as string) === "ask_user" && S().pendingQuestion) {
         S().setPendingQuestion(null);
+        useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
+          pendingQuestion: false,
+        });
       }
       S().updateToolCallBlock(msgId, toolCallId, (b) => {
         if (b.type === "tool_call") {
@@ -582,6 +569,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         multiSelect: Boolean(data.multi_select),
         queueSize: typeof data.queue_size === "number" ? data.queue_size : undefined,
       });
+      useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
+        pendingQuestion: true,
+        pendingApproval: false,
+      });
       break;
     }
 
@@ -600,6 +591,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
         argsSummary: (data.args_summary as Record<string, string>) || {},
       });
+      useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
+        pendingApproval: true,
+        pendingQuestion: false,
+      });
       break;
     }
 
@@ -611,6 +606,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const hasChanges = Boolean(data.has_changes);
       const arResult = (data.result as string) || undefined;
       S().setPendingApproval(null);
+      useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
+        pendingApproval: false,
+      });
       const arToolCallId = (data.tool_call_id as string) || null;
       S().updateToolCallBlock(msgId, arToolCallId, (b) => {
         if (b.type === "tool_call" && b.status === "pending") {
@@ -715,6 +713,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           };
         }
       }
+      ctx.hadPersistedToolWork = true;
       useExcelStore.getState().addDiff(edEntry);
       if (edFilePath) {
         const fn = edFilePath.split("/").pop() || edFilePath;
@@ -732,6 +731,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "text_diff": {
+      ctx.hadPersistedToolWork = true;
       const tdFilePath = (data.file_path as string) || "";
       useExcelStore.getState().addTextDiff({
         toolCallId: (data.tool_call_id as string) || "",
@@ -760,6 +760,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "files_changed": {
+      ctx.hadPersistedToolWork = true;
       const changedFiles = (data.files as string[]) || [];
       const excelStore = useExcelStore.getState();
       const wordStore = useWordStore.getState();
@@ -773,28 +774,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         wordStore.handleFilesChanged(changedFiles);
         S().addAffectedFiles(msgId, changedFiles);
         excelStore.bumpWorkspaceFilesVersion();
-        if (ctx.effectiveSessionId) {
-          excelStore.fetchBackups(ctx.effectiveSessionId);
-        }
       }
       break;
     }
 
     case "staging_updated": {
-      const stAction = (data.action as string) || "";
-      const stFiles = (data.files as { original_path: string; backup_path: string }[]) || [];
-      const stPending = (data.pending_count as number) ?? 0;
-      useExcelStore.getState().handleStagingUpdated(stAction, stFiles, stPending);
-      if (stAction === "finish_hint" && stPending > 0) {
-        S().appendBlock(msgId, {
-          type: "staging_hint",
-          pendingCount: stPending,
-          files: stFiles.map((f) => f.original_path),
-        });
-      }
-      if (ctx.effectiveSessionId) {
-        useExcelStore.getState().fetchBackups(ctx.effectiveSessionId);
-      }
       break;
     }
 
@@ -814,6 +798,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "file_download": {
+      ctx.hadPersistedToolWork = true;
       const dlFilePath = (data.file_path as string) || "";
       const dlFilename = (data.filename as string) || dlFilePath.split("/").pop() || "download";
       const dlDescription = (data.description as string) || "";
@@ -856,8 +841,14 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         uiMode.setFullAccessEnabled(enabled);
       } else if (modeName === "chat_mode") {
         uiMode.setChatMode(data.value as "write" | "read" | "plan");
+      } else if (modeName === "present_as") {
+        uiMode.setPresentAs(enabled ? "code" : "native");
       }
-      const _modeLabelMap: Record<string, string> = { full_access: "Full Access", chat_mode: "Chat Mode" };
+      const _modeLabelMap: Record<string, string> = {
+        full_access: "跳过审批",
+        chat_mode: "对话模式",
+        present_as: "代码模式",
+      };
       const modeLabel = _modeLabelMap[modeName] || modeName;
       const modeAction = enabled ? "Enabled" : "Disabled";
       S().appendBlock(msgId, {
@@ -875,9 +866,19 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         S().pendingApproval !== null || S().pendingQuestion !== null;
       if (content && !hasPendingInteraction) {
         const msg = getLastAssistantMessage(S().messages, msgId);
-        const hasTextBlock = msg?.blocks.some((b) => b.type === "text" && b.content);
-        if (!hasTextBlock) {
-          S().appendBlock(msgId, { type: "text", content });
+        const textBlocks = msg?.blocks.filter((b) => b.type === "text") ?? [];
+        const combinedLen = textBlocks.reduce(
+          (n, b) => n + (b.type === "text" ? b.content.length : 0),
+          0,
+        );
+        if (combinedLen === 0) {
+          if (textBlocks.length === 0) {
+            S().appendBlock(msgId, { type: "text", content });
+          } else {
+            S().updateBlockByType(msgId, "text", (b) => (
+              b.type === "text" ? { ...b, content } : b
+            ));
+          }
         }
       }
       const uiReply = useUIStore.getState();

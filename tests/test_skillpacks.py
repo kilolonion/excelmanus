@@ -604,9 +604,7 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route(
-            "忽略自然语言",
-            slash_command="chart_basic",
+        result = await router.parse_slash_skill("chart_basic",
             raw_args='"销售 数据.xlsx" bar',
         )
 
@@ -641,9 +639,7 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route(
-            "任意输入",
-            slash_command="not_exists_skill",
+        result = await router.parse_slash_skill("not_exists_skill",
             raw_args="a b",
         )
 
@@ -676,7 +672,7 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("请分析这个文件")
+        result = await router.parse_slash_skill(None)
         assert result.route_mode == "all_tools"
         assert result.tool_scope == []
         assert result.skills_used == []
@@ -713,7 +709,7 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("把A列字体改成红色并保存")
+        result = await router.parse_slash_skill(None)
 
         assert result.route_mode == "all_tools"
         assert result.tool_scope == []
@@ -747,7 +743,7 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("请修改这个文件并保存到原路径")
+        result = await router.parse_slash_skill(None)
 
         assert result.route_mode == "all_tools"
         assert result.tool_scope == []
@@ -780,23 +776,19 @@ class TestSkillRouter:
         router = SkillRouter(config, loader)
 
         # 屏蔽后斜杠命令也无法匹配
-        blocked_result = await router.route(
-            "请写代码处理文件",
-            slash_command="excel_code_runner",
+        blocked_result = await router.parse_slash_skill("excel_code_runner",
             blocked_skillpacks={"excel_code_runner"},
         )
         assert "excel_code_runner" not in blocked_result.skills_used
 
         # 解除屏蔽后可正常斜杠直连
-        unlocked_result = await router.route(
-            "请写代码处理文件",
-            slash_command="excel_code_runner",
+        unlocked_result = await router.parse_slash_skill("excel_code_runner",
         )
         assert unlocked_result.skills_used == ["excel_code_runner"]
 
     @pytest.mark.asyncio
-    async def test_build_skill_catalog(self, tmp_path: Path) -> None:
-        """build_skill_catalog 返回技能目录文本和名称列表。"""
+    async def test_list_skill_names(self, tmp_path: Path) -> None:
+        """list_skill_names 只返回可调用技能名。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -819,16 +811,15 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        catalog_text, skill_names = router.build_skill_catalog()
-        assert "data_basic" in catalog_text
-        assert "chart_basic" in catalog_text
-        assert "数据分析" in catalog_text
-        assert "图表生成" in catalog_text
-        assert sorted(skill_names) == ["chart_basic", "data_basic"]
+        skill_names = router.list_skill_names()
+        assert skill_names == ["chart_basic", "data_basic"]
+        catalog_text, catalog_names = router.build_skill_catalog()
+        assert catalog_text == ""
+        assert catalog_names == skill_names
 
     @pytest.mark.asyncio
-    async def test_build_skill_catalog_with_blocked(self, tmp_path: Path) -> None:
-        """build_skill_catalog 排除被屏蔽的技能包。"""
+    async def test_list_skill_names_keeps_blocked(self, tmp_path: Path) -> None:
+        """blocked 仍出现在名字列表，权限由目录信封另标。"""
         system_dir = tmp_path / "system"
         user_dir = tmp_path / "user"
         project_dir = tmp_path / "project"
@@ -851,14 +842,8 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        catalog_text, skill_names = router.build_skill_catalog(
-            blocked_skillpacks={"chart_basic"},
-        )
-        assert "data_basic" in catalog_text
-        # 被限制的技能仍出现在目录中，但带有权限标注
-        assert "chart_basic" in catalog_text
-        assert "fullAccess" in catalog_text
-        assert sorted(skill_names) == ["chart_basic", "data_basic"]
+        skill_names = router.list_skill_names(blocked_skillpacks={"chart_basic"})
+        assert skill_names == ["chart_basic", "data_basic"]
 
     @pytest.mark.asyncio
     async def test_no_skillpacks_returns_no_skillpack(self, tmp_path: Path) -> None:
@@ -874,5 +859,5 @@ class TestSkillRouter:
         loader.load_all()
         router = SkillRouter(config, loader)
 
-        result = await router.route("任意输入")
+        result = await router.parse_slash_skill(None)
         assert result.route_mode == "no_skillpack"

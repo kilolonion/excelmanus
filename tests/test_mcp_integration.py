@@ -241,6 +241,7 @@ class TestAgentEngineMCPIntegration:
 
         # 替换 _mcp_manager 为 mock
         mock_manager = AsyncMock(spec=MCPManager)
+        mock_manager._on_builtin_retry_success = []
         engine._mcp_manager = mock_manager
 
         await engine.initialize_mcp()
@@ -288,6 +289,7 @@ class TestAgentEngineMCPIntegration:
         mock_manager = AsyncMock(spec=MCPManager)
         mock_manager.auto_approved_tools = []
         mock_manager.connected_servers = ["context7"]
+        mock_manager._on_builtin_retry_success = []
         engine._mcp_manager = mock_manager
 
         mock_loader = MagicMock()
@@ -344,8 +346,10 @@ class TestExcelMCPPathAdaptation:
             (tmp_path / "examples/demo/demo_sales_data.xlsx").resolve(),
         )
 
-    def test_excel_invalid_absolute_path_fallback_to_workspace_same_name(self, tmp_path):
-        """Excel MCP 错误绝对路径应回退到工作区同名文件。"""
+    def test_excel_invalid_absolute_path_is_rejected(self, tmp_path):
+        """Excel MCP 工作区外路径一律拒绝，不得 basename 回落。"""
+        from excelmanus.security.guard import SecurityViolationError
+
         workbook = tmp_path / "mcp_fallback_demo.xlsx"
         workbook.write_bytes(b"placeholder")
 
@@ -358,15 +362,12 @@ class TestExcelMCPPathAdaptation:
             workspace_root=str(tmp_path),
         )
 
-        result = tool_def.func(
-            fileAbsolutePath="/tmp/dataset/task_1749690261/examples/demo/mcp_fallback_demo.xlsx",
-            sheetName="Sheet1",
-        )
-
-        assert result == "ok"
-        called_args = captured["arguments"]
-        assert isinstance(called_args, dict)
-        assert called_args["fileAbsolutePath"] == str(workbook.resolve())
+        with pytest.raises(SecurityViolationError):
+            tool_def.func(
+                fileAbsolutePath="/tmp/dataset/task_1749690261/examples/demo/mcp_fallback_demo.xlsx",
+                sheetName="Sheet1",
+            )
+        assert "arguments" not in captured
 
     def test_excel_existing_outside_file_not_passed_through(self, tmp_path):
         """工作区外已存在的文件不得原样交给 Excel MCP。"""

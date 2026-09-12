@@ -1,71 +1,102 @@
 "use client";
 
 import { useCallback, useState } from "react";
+import { Check, Loader2, Shield } from "lucide-react";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuItem,
+} from "@/components/ui/dropdown-menu";
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
 import { toggleFullAccess } from "@/lib/api";
-import { Shield, Search, ClipboardList } from "lucide-react";
 
-const MODE_BADGES: Record<string, { icon: typeof Shield; label: string; color: string }> = {
-  read: { icon: Search, label: "READ", color: "var(--em-cyan)" },
-  plan: { icon: ClipboardList, label: "PLAN", color: "var(--em-gold)" },
-};
+const POLICIES = [
+  { key: "ask", label: "询问", desc: "写入前确认" },
+  { key: "skip", label: "跳过", desc: "自动写入，仍不出工作区" },
+] as const;
 
 export function ModeBadges() {
   const fullAccess = useUIStore((s) => s.fullAccessEnabled);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
-  const chatMode = useUIStore((s) => s.chatMode);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const modeBadge = MODE_BADGES[chatMode];
   const [toggling, setToggling] = useState(false);
+  const active = fullAccess ? "skip" : "ask";
+  const currentLabel = fullAccess ? "跳过" : "询问";
 
-  const handleToggleFullAccess = useCallback(async () => {
-    if (!activeSessionId || toggling) return;
-    const newValue = !fullAccess;
-    setToggling(true);
-    // 乐观更新
-    setFullAccessEnabled(newValue);
-    try {
-      await toggleFullAccess(activeSessionId, newValue);
-    } catch {
-      // 回滚
-      setFullAccessEnabled(!newValue);
-    } finally {
-      setToggling(false);
-    }
-  }, [activeSessionId, fullAccess, toggling, setFullAccessEnabled]);
+  const handleSelect = useCallback(
+    async (key: "ask" | "skip") => {
+      const wantSkip = key === "skip";
+      if (wantSkip === fullAccess || !activeSessionId || toggling) return;
+      setToggling(true);
+      setFullAccessEnabled(wantSkip);
+      try {
+        await toggleFullAccess(activeSessionId, wantSkip);
+      } catch {
+        setFullAccessEnabled(!wantSkip);
+      } finally {
+        setToggling(false);
+      }
+    },
+    [activeSessionId, fullAccess, toggling, setFullAccessEnabled],
+  );
 
   return (
-    <div className="flex items-center gap-1 sm:gap-1.5 ml-1.5 sm:ml-2" data-coach-id="coach-mode-badges">
-      <button
-        type="button"
-        onClick={handleToggleFullAccess}
-        disabled={!activeSessionId || toggling}
-        title={fullAccess ? "点击关闭 Full Access" : "点击开启 Full Access"}
-        className="touch-compact inline-flex items-center gap-0.5 sm:gap-1 px-1.5 sm:px-2 py-0.5 rounded-full text-[10px] sm:text-[11px] font-medium transition-all duration-200 cursor-pointer disabled:cursor-default"
-        style={{
-          backgroundColor: fullAccess
-            ? "color-mix(in srgb, var(--em-gold) 15%, transparent)"
-            : "color-mix(in srgb, var(--foreground) 6%, transparent)",
-          color: fullAccess ? "var(--em-gold)" : "var(--muted-foreground)",
-          opacity: toggling ? 0.5 : 1,
-        }}
-      >
-        <Shield className="h-3 w-3" />
-        FULL
-      </button>
-      {modeBadge && (
-        <span
-          className="hidden sm:inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium"
-          style={{
-            backgroundColor: `color-mix(in srgb, ${modeBadge.color} 15%, transparent)`,
-            color: modeBadge.color,
-          }}
-        >
-          <modeBadge.icon className="h-3 w-3" />
-          {modeBadge.label}
-        </span>
-      )}
-    </div>
+    <DropdownMenu>
+      <TooltipProvider delayDuration={400}>
+        <Tooltip>
+          <TooltipTrigger asChild>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                disabled={!activeSessionId || toggling}
+                data-coach-id="coach-mode-badges"
+                className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-medium transition-colors outline-none disabled:cursor-default disabled:opacity-50 ${
+                  fullAccess
+                    ? "hover:bg-accent/40"
+                    : "text-muted-foreground hover:text-foreground hover:bg-accent/40"
+                }`}
+                style={fullAccess ? { color: "var(--em-gold)" } : undefined}
+              >
+                {toggling ? (
+                  <Loader2 className="h-3 w-3 animate-spin" />
+                ) : (
+                  <Shield className="h-3 w-3" />
+                )}
+                <span className="hidden sm:inline">{currentLabel}</span>
+              </button>
+            </DropdownMenuTrigger>
+          </TooltipTrigger>
+          <TooltipContent side="top" className="text-xs">
+            审批策略: {currentLabel}
+          </TooltipContent>
+        </Tooltip>
+      </TooltipProvider>
+
+      <DropdownMenuContent align="end" sideOffset={6} className="min-w-[160px]">
+        {POLICIES.map(({ key, label, desc }) => (
+          <DropdownMenuItem
+            key={key}
+            onClick={() => void handleSelect(key)}
+            className="flex items-center justify-between gap-3 text-xs"
+          >
+            <div className="flex flex-col">
+              <span className="font-medium">{label}</span>
+              <span className="text-[10px] text-muted-foreground">{desc}</span>
+            </div>
+            {active === key && (
+              <Check className="h-3.5 w-3.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
+            )}
+          </DropdownMenuItem>
+        ))}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }

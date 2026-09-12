@@ -35,9 +35,9 @@ import {
   fetchDeployStatus,
   buildFrontendArtifact,
   executeRemoteDeploy,
-  streamVersionUpdate,
+  startVersionUpgrade,
 } from "@/lib/api";
-import type { DeployStatusInfo, DeployResult } from "@/lib/api";
+import type { DeployStatusInfo, DeployResult, VersionManifest } from "@/lib/api";
 import { fetchVersionManifest } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import { RollbackPanel } from "@/components/settings/RollbackPanel";
@@ -88,7 +88,6 @@ function formatTimestamp(ts: string): string {
 export function VersionTab() {
   const deployMode = useAuthConfigStore((s) => s.deployMode);
   const isStandalone = deployMode === "standalone";
-  const isDocker = deployMode === "docker";
 
   const [version, setVersion] = useState<VersionInfo | null>(null);
   const [backups, setBackups] = useState<BackupEntry[]>([]);
@@ -98,8 +97,6 @@ export function VersionTab() {
   const [deletingBackup, setDeletingBackup] = useState<string | null>(null);
   const [deletingInstall, setDeletingInstall] = useState<string | null>(null);
   const [updating, setUpdating] = useState(false);
-  const [updateProgress, setUpdateProgress] = useState<number | null>(null);
-  const [updateMessage, setUpdateMessage] = useState<string>("");
   const [cleaningUp, setCleaningUp] = useState(false);
   const [restoringBackup, setRestoringBackup] = useState<string | null>(null);
   const [migrating, setMigrating] = useState(false);
@@ -110,6 +107,7 @@ export function VersionTab() {
   const [deploySkipBuild, setDeploySkipBuild] = useState(false);
   const [deployOutput, setDeployOutput] = useState<string | null>(null);
   const [currentGitCommit, setCurrentGitCommit] = useState<string | null>(null);
+  const [lastUpgrade, setLastUpgrade] = useState<VersionManifest["last_upgrade"]>(null);
   const [actionMsg, setActionMsg] = useState<{ type: "ok" | "err"; text: string } | null>(null);
   const triggerRestart = useConnectionStore((s) => s.triggerRestart);
 
@@ -133,6 +131,7 @@ export function VersionTab() {
       setInstallations(i.installations ?? []);
       if (ds) setDeployStatus(ds);
       if (manifest?.git_commit) setCurrentGitCommit(manifest.git_commit);
+      setLastUpgrade(manifest?.last_upgrade ?? null);
     } catch {
       // 忽略
     } finally {
@@ -152,7 +151,11 @@ export function VersionTab() {
       if (v.check_failed) {
         showMsg("err", v.error ? `检查更新失败: ${v.error}` : "检查更新失败");
       } else if (v.has_update) {
-        showMsg("ok", `发现新版本 ${v.latest}（落后 ${v.commits_behind} 个提交）`);
+        const label =
+          v.latest && v.latest !== v.current
+            ? `发现新版本 ${v.latest}（落后 ${v.commits_behind} 个提交）`
+            : `发现 ${v.commits_behind} 个新提交`;
+        showMsg("ok", label);
       } else {
         showMsg("ok", "已是最新版本");
       }
@@ -189,44 +192,16 @@ export function VersionTab() {
     }
   };
 
-  const handleApplyUpdate = () => {
-    if (!confirm("确定要执行更新？更新前会自动备份数据。")) return;
+  const handleApplyUpdate = async () => {
+    if (!confirm("确定要执行更新？服务会先停止，备份数据后再拉起新版本。未提交的本地改动会被 git stash；无法 fast-forward 时不会 reset --hard。")) return;
     setUpdating(true);
-    setUpdateProgress(0);
-    setUpdateMessage("正在准备更新…");
-
-    streamVersionUpdate(
-      { useMirror: false },
-      {
-        onProgress: (ev) => {
-          setUpdateProgress(ev.percent);
-          setUpdateMessage(ev.message);
-        },
-        onDone: (result) => {
-          setUpdateProgress(null);
-          setUpdateMessage("");
-          if (result.success) {
-            if (result.needs_restart) {
-              showMsg("ok", `更新成功: ${result.old_version} → ${result.new_version}，正在重启服务…`);
-              setUpdating(false);
-              triggerRestart("版本更新已完成，正在重启服务");
-              return;
-            }
-            showMsg("ok", `更新成功: ${result.old_version} → ${result.new_version}`);
-            fetchAll();
-          } else {
-            showMsg("err", `更新失败: ${result.error || "未知错误"}`);
-          }
-          setUpdating(false);
-        },
-        onError: (error) => {
-          setUpdateProgress(null);
-          setUpdateMessage("");
-          showMsg("err", `更新失败: ${error}`);
-          setUpdating(false);
-        },
-      },
-    );
+    try {
+      await startVersionUpgrade({ useMirror: false });
+      void triggerRestart("版本更新：正在停机、拉取代码并重启", { requireVersionChange: true });
+    } catch (err) {
+      showMsg("err", `更新失败: ${err instanceof Error ? err.message : "未知错误"}`);
+      setUpdating(false);
+    }
   };
 
   const handleCleanupBackups = async () => {
@@ -244,11 +219,12 @@ export function VersionTab() {
   };
 
   const handleRestoreBackup = async (name: string) => {
-    if (!confirm(`确定从备份 ${name} 恢复数据？恢复后需要重启服务。`)) return;
+    if (!confirm(`确定从备份 ${name} 恢复数据？服务会先停止再恢复并重启。`)) return;
     setRestoringBackup(name);
     try {
-      const res = await restoreVersionBackup(name);
-      showMsg("ok", res.message || "恢复成功，请重启服务");
+      await restoreVersionBackup(name);
+      showMsg("ok", "已开始停机恢复，正在等待服务重启…");
+      void triggerRestart("正在从备份恢复并重启", { requireVersionChange: false });
     } catch {
       showMsg("err", "恢复备份失败");
     } finally {
@@ -347,7 +323,15 @@ export function VersionTab() {
         </div>
       )}
 
-      {/* ── 当前版本 ── */}
+      {lastUpgrade && lastUpgrade.ok === false && lastUpgrade.error && (
+        <div className="flex items-start gap-2 rounded-lg px-3 py-2 text-sm bg-red-500/10 text-red-700 dark:text-red-400">
+          <AlertCircle className="h-4 w-4 shrink-0 mt-0.5" />
+          <div>
+            <p className="font-medium">上次停机更新未完成</p>
+            <p className="text-[11px] mt-0.5 whitespace-pre-wrap">{lastUpgrade.error}</p>
+          </div>
+        </div>
+      )}
       <div className="rounded-lg border border-border p-4">
         <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
           <div className="flex items-center gap-2.5">
@@ -365,7 +349,9 @@ export function VersionTab() {
                 {version?.has_update ? (
                   <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
                     <ArrowUpCircle className="h-3 w-3" />
-                    可更新到 v{version.latest}（{version.commits_behind} 个新提交）
+                    {version.latest && version.latest !== version.current
+                      ? `可更新到 v${version.latest}（${version.commits_behind} 个新提交）`
+                      : `有 ${version.commits_behind} 个新提交可更新`}
                   </span>
                 ) : version?.check_failed ? (
                   <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
@@ -379,7 +365,7 @@ export function VersionTab() {
             </div>
           </div>
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-1.5 sm:gap-2 shrink-0 mt-2 sm:mt-0">
-            {version?.has_update && !isDocker && (
+            {version?.has_update && isStandalone && (
               <Button
                 variant="default"
                 size="sm"
@@ -395,9 +381,9 @@ export function VersionTab() {
                 执行更新
               </Button>
             )}
-            {version?.has_update && isDocker && (
+            {version?.has_update && !isStandalone && (
               <Badge variant="outline" className="text-[10px] h-6 px-2 text-amber-600 dark:text-amber-400">
-                请重新拉取镜像更新
+                服务器部署请在运维机运行 deploy.sh
               </Badge>
             )}
             <Button
@@ -424,27 +410,6 @@ export function VersionTab() {
             </pre>
           </div>
         )}
-        {updating && updateProgress !== null && (
-          <div className="mt-3 pt-3 border-t border-border">
-            <div className="flex items-center justify-between mb-1.5">
-              <p className="text-[11px] font-medium text-muted-foreground truncate mr-2">
-                {updateMessage || "更新中…"}
-              </p>
-              <span className="text-[11px] font-mono text-muted-foreground shrink-0">
-                {updateProgress}%
-              </span>
-            </div>
-            <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-              <div
-                className="h-full rounded-full transition-all duration-300 ease-out"
-                style={{
-                  width: `${Math.min(100, Math.max(0, updateProgress))}%`,
-                  backgroundColor: "var(--em-primary)",
-                }}
-              />
-            </div>
-          </div>
-        )}
       </div>
 
       <Separator />
@@ -461,7 +426,7 @@ export function VersionTab() {
           <span className="text-[10px] text-muted-foreground ml-auto mr-2">
             {backups.length} 个 · {totalBackupMB.toFixed(1)} MB
           </span>
-          {backups.length > 0 && (
+          {isStandalone && backups.length > 0 && (
             <Button
               variant="ghost"
               size="sm"
@@ -498,6 +463,8 @@ export function VersionTab() {
                   </div>
                 </div>
                 <div className="flex items-center gap-1 opacity-100 sm:opacity-0 sm:group-hover:opacity-100 transition-opacity shrink-0">
+                  {isStandalone && (
+                    <>
                   <Button
                     variant="ghost"
                     size="icon"
@@ -526,6 +493,8 @@ export function VersionTab() {
                       <Trash2 className="h-3.5 w-3.5" />
                     )}
                   </Button>
+                    </>
+                  )}
                 </div>
               </div>
             ))}
@@ -534,7 +503,6 @@ export function VersionTab() {
       </div>
 
       {/* ── 安装记录 ── */}
-      {/* 服务器/Docker 模式隐藏安装记录（仅单机多版本共存场景有意义） */}
       {isStandalone && <Separator />}
       {isStandalone && <div>
         <div className="flex items-center gap-1.5 mb-3">
@@ -593,9 +561,8 @@ export function VersionTab() {
       </div>}
 
       {/* ── 数据迁移 ── */}
-      {/* Docker 模式隐藏数据迁移（容器内数据管理通过 volume mount） */}
-      {!isDocker && <Separator />}
-      {!isDocker && <div>
+      {isStandalone && <Separator />}
+      {isStandalone && <div>
         <div className="flex items-center gap-1.5 mb-3">
           <span style={{ color: "var(--em-primary)" }}>
             <DatabaseBackup className="h-3.5 w-3.5" />
@@ -626,7 +593,7 @@ export function VersionTab() {
       </div>}
 
       {/* ── 远程部署 ── */}
-      {deployStatus?.deploy_script_found && (
+      {isStandalone && deployStatus?.env_deploy_found && (
         <>
           <Separator />
           <div>
@@ -784,7 +751,7 @@ export function VersionTab() {
       )}
 
       {/* ── 部署回滚 ── */}
-      {deployStatus?.deploy_script_found && (
+      {isStandalone && deployStatus?.env_deploy_found && (
         <>
           <Separator />
           <div>
@@ -815,17 +782,22 @@ export function VersionTab() {
           <strong>数据迁移</strong>：将项目内的数据文件迁移到系统集中位置，
           方便多版本共存与升级后数据保留。
         </p>
-        {deployStatus?.deploy_script_found && (
+        {isStandalone && deployStatus?.env_deploy_found && (
           <>
             <p className="mt-1">
-              <strong>远程部署</strong>：本地构建前端制品后通过 deploy.sh 推送到远程服务器，
-              支持完整部署、仅后端、仅前端三种模式。需先配置 deploy/.env.deploy。
+              <strong>远程部署</strong>：本机作为运维控制台，通过 deploy.sh 同步并重启远程服务器。
+              需先配置 deploy/.env.deploy。生产 API（server 模式）不能自己部署。
             </p>
             <p className="mt-1">
-              <strong>部署回滚</strong>：查看部署历史时间线，一键回滚到任意成功的部署版本。
-              支持前后端独立回滚。灰度部署时可手动控制流量比例。
+              <strong>部署回滚</strong>：查看部署历史，回滚到指定 commit（远端 checkout + 重启 + 健康检查）。
             </p>
           </>
+        )}
+        {!isStandalone && (
+          <p className="mt-1">
+            <strong>服务器部署</strong>：请在运维机运行 <code>./deploy/deploy.sh</code> 同步代码并重启，
+            不要从生产 API 升级。
+          </p>
         )}
       </div>
     </div>

@@ -75,27 +75,21 @@ async def _async_main() -> None:
         highlight=False,
     )
 
-    # ── 3.5. 统一数据库 ──
+    # ── 3.5. 统一数据库（配置档案必须落库） ──
     _database = None
-    if config.chat_history_enabled:
-        import os
-        from excelmanus.database import Database
+    import os
+    from excelmanus.database import Database
 
-        resolved_db_path = os.path.expanduser(
-            config.chat_history_db_path or config.db_path
-        )
-        if config.database_url:
-            _database = Database(database_url=config.database_url)
-            db_label = "PostgreSQL"
-        else:
-            _database = Database(resolved_db_path)
-            db_label = "SQLite"
-        console.print(
-            f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
-            f" [{THEME.DIM}]统一数据库 ({db_label})[/{THEME.DIM}]"
-            f" [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]已启用[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]",
-            highlight=False,
-        )
+    resolved_db_path = os.path.expanduser(
+        config.chat_history_db_path or config.db_path
+    )
+    _database = Database(resolved_db_path)
+    console.print(
+        f"  [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS}[/{THEME.PRIMARY_LIGHT}]"
+        f" [{THEME.DIM}]统一数据库[/{THEME.DIM}]"
+        f" [{THEME.BOLD} {THEME.PRIMARY_LIGHT}]已启用[/{THEME.BOLD} {THEME.PRIMARY_LIGHT}]",
+        highlight=False,
+    )
 
     # ── 4. 持久记忆 ──
     persistent_memory = None

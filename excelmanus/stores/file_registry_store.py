@@ -1,4 +1,4 @@
-"""FileRegistryStore：文件注册表持久化层（支持 SQLite / PostgreSQL）。
+"""FileRegistryStore：文件注册表持久化层。
 
 管理 file_registry / file_registry_aliases / file_registry_events 三张表的 CRUD。
 """
@@ -21,7 +21,7 @@ def _now_iso() -> str:
 
 
 class FileRegistryStore:
-    """文件注册表 SQLite / PostgreSQL 持久化。"""
+    """文件注册表 SQLite 持久化。"""
 
     def __init__(self, database: "Database") -> None:
         self._conn: ConnectionAdapter = database.conn
@@ -64,8 +64,8 @@ class FileRegistryStore:
                 json.dumps(record.get("sheet_meta", []), ensure_ascii=False),
                 record.get("content_hash", ""),
                 record.get("mtime_ns", 0),
-                record.get("staging_path"),
-                1 if record.get("is_active_cow") else 0,
+                None,
+                0,
                 record.get("created_at", now),
                 now,
                 None,
@@ -94,8 +94,8 @@ class FileRegistryStore:
                 json.dumps(r.get("sheet_meta", []), ensure_ascii=False),
                 r.get("content_hash", ""),
                 r.get("mtime_ns", 0),
-                r.get("staging_path"),
-                1 if r.get("is_active_cow") else 0,
+                None,
+                0,
                 r.get("created_at", now),
                 now,
                 None,
@@ -183,56 +183,6 @@ class FileRegistryStore:
         )
         self._conn.commit()
         return cur.rowcount > 0
-
-    def update_staging(
-        self,
-        workspace: str,
-        canonical_path: str,
-        staging_path: str | None,
-    ) -> bool:
-        """更新文件的 staging 路径。"""
-        now = _now_iso()
-        cur = self._conn.execute(
-            "UPDATE file_registry SET staging_path = ?, updated_at = ?"
-            " WHERE workspace = ? AND canonical_path = ?",
-            (staging_path, now, workspace, canonical_path),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def update_cow_status(
-        self,
-        workspace: str,
-        canonical_path: str,
-        is_active_cow: bool,
-    ) -> bool:
-        """更新文件的 CoW 活跃状态。"""
-        now = _now_iso()
-        cur = self._conn.execute(
-            "UPDATE file_registry SET is_active_cow = ?, updated_at = ?"
-            " WHERE workspace = ? AND canonical_path = ?",
-            (1 if is_active_cow else 0, now, workspace, canonical_path),
-        )
-        self._conn.commit()
-        return cur.rowcount > 0
-
-    def list_active_cow(self, workspace: str) -> list[dict[str, Any]]:
-        """列出所有活跃的 CoW 副本。"""
-        rows = self._conn.execute(
-            "SELECT * FROM file_registry"
-            " WHERE workspace = ? AND is_active_cow = 1 AND deleted_at IS NULL",
-            (workspace,),
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
-
-    def list_staged(self, workspace: str) -> list[dict[str, Any]]:
-        """列出所有有 staging 路径的记录。"""
-        rows = self._conn.execute(
-            "SELECT * FROM file_registry"
-            " WHERE workspace = ? AND staging_path IS NOT NULL AND deleted_at IS NULL",
-            (workspace,),
-        ).fetchall()
-        return [self._row_to_dict(r) for r in rows]
 
     def rename_path(
         self,
@@ -517,10 +467,9 @@ class FileRegistryStore:
             "id", "workspace", "canonical_path", "original_name", "file_type",
             "size_bytes", "origin", "origin_session_id", "origin_turn",
             "origin_tool", "parent_file_id", "content_hash", "mtime_ns",
-            "staging_path", "created_at", "updated_at", "deleted_at",
+            "created_at", "updated_at", "deleted_at",
         ):
             d[key] = row[key]  # type: ignore[index]
-        d["is_active_cow"] = bool(row["is_active_cow"])  # type: ignore[index]
         raw_meta = row["sheet_meta_json"]  # type: ignore[index]
         try:
             d["sheet_meta"] = json.loads(raw_meta) if raw_meta else []

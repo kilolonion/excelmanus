@@ -57,7 +57,6 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "max_iterations": 20,
         "max_consecutive_failures": 3,
         "workspace_root": str(Path(__file__).resolve().parent),
-        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)

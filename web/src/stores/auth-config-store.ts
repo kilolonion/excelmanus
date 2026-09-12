@@ -2,11 +2,12 @@ import { create } from "zustand";
 import { buildApiUrl } from "@/lib/api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 
-export type DeployMode = "standalone" | "server" | "docker";
+export type DeployMode = "standalone" | "server";
 
 interface AuthConfigState {
   deployMode: DeployMode;
   checked: boolean;
+  authRequired: boolean;
   /** 探测后端是否可达，并同步 deploy_mode / configured。 */
   checkBackendHealth: () => Promise<boolean>;
 }
@@ -14,6 +15,7 @@ interface AuthConfigState {
 export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
   deployMode: "standalone",
   checked: false,
+  authRequired: false,
 
   checkBackendHealth: async () => {
     if (get().checked) return true;
@@ -22,10 +24,9 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
       if (res.ok) {
         const data = await res.json();
         const deployMode: DeployMode =
-          data.deploy_mode === "server" ? "server"
-            : data.deploy_mode === "docker" ? "docker"
-              : "standalone";
-        set({ deployMode, checked: true });
+          data.deploy_mode === "server" ? "server" : "standalone";
+        const authRequired = Boolean(data.auth_required);
+        set({ deployMode, checked: true, authRequired });
         if (typeof data.configured === "boolean") {
           useOnboardingStore.getState().setBackendConfigured(data.configured);
         }

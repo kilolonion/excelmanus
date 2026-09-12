@@ -645,6 +645,7 @@ def _is_vision_unsupported_error(err: str) -> bool:
     reject_keywords = (
         "not support", "unsupported", "does not support",
         "not available", "not allowed", "cannot process",
+        "unknown variant", "unknown field",
         "不支持", "无法处理",
     )
     has_image = any(kw in lowered for kw in image_keywords)

@@ -217,9 +217,9 @@ class TestGetTools:
     def test_returns_write_plan_tool(self, tmp_path: Path) -> None:
         store = TaskStore()
         tools = get_tools(store, str(tmp_path))
-        assert len(tools) == 1
-        assert tools[0].name == "write_plan"
-        assert tools[0].write_effect == "none"
+        names = [t.name for t in tools]
+        assert names == ["write_plan", "exit_plan_mode"]
+        assert all(t.write_effect == "none" for t in tools)
 
     def test_tool_func_works(self, tmp_path: Path) -> None:
         """通过 get_tools 返回的闭包函数能正常工作。"""

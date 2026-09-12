@@ -11,7 +11,6 @@ import pytest
 from excelmanus.database import (
     Database,
     _LATEST_VERSION,
-    _PG_MIGRATIONS,
     _SQLITE_MIGRATIONS,
 )
 
@@ -20,31 +19,38 @@ class TestSqliteAlterTableIdempotent:
     """SQLite ALTER TABLE 幂等保护：列已存在时不崩溃。"""
 
     def test_reopen_after_partial_migration_does_not_crash(self, tmp_path: Path) -> None:
-        """模拟：v10 部分执行（部分列已加），重新打开不应报错。"""
+        """未来版本部分列已加、schema_version 回退后重新打开不应报错。"""
         db_path = str(tmp_path / "test.db")
-        # 正常创建到最新版本
         db = Database(db_path)
         db.close()
 
-        # 人为回退 schema_version 到 v7（假装 v8-17 未完成）
-        conn = sqlite3.connect(db_path)
-        conn.execute("DELETE FROM schema_version WHERE version > 7")
-        conn.commit()
-        conn.close()
+        future_version = _LATEST_VERSION + 1
+        extended = dict(_SQLITE_MIGRATIONS)
+        extended[future_version] = [
+            "ALTER TABLE sessions ADD COLUMN extra_col TEXT DEFAULT ''",
+            "ALTER TABLE sessions ADD COLUMN extra_col2 TEXT DEFAULT ''",
+        ]
+        with patch("excelmanus.database._SQLITE_MIGRATIONS", extended), \
+             patch("excelmanus.database._LATEST_VERSION", future_version):
+            db2 = Database(db_path)
+            db2.close()
 
-        # 重新打开 — 应安全地跳过已存在的列
-        db2 = Database(db_path)
-        current = db2._current_version()
-        assert current == _LATEST_VERSION
-        db2.close()
+            conn = sqlite3.connect(db_path)
+            conn.execute(
+                f"DELETE FROM schema_version WHERE version = {future_version}"
+            )
+            conn.commit()
+            conn.close()
+
+            db3 = Database(db_path)
+            assert db3._current_version() == future_version
+            db3.close()
 
     def test_alter_table_column_already_exists(self, tmp_path: Path) -> None:
         """直接测试 _safe_execute_sql 跳过已存在列。"""
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
 
-        # sessions.user_id 已在 migration 8 中创建
-        # 再次执行应安全跳过
         db._safe_execute_sql("ALTER TABLE sessions ADD COLUMN user_id TEXT")
         db.close()
 
@@ -64,29 +70,25 @@ class TestMigrationBackup:
     """迁移前自动备份。"""
 
     def test_backup_created_on_upgrade(self, tmp_path: Path) -> None:
-        """从旧版本升级时应创建 .bak 文件。"""
+        """从当前版本升到未来版本时应创建 .bak 文件。"""
         db_path = str(tmp_path / "test.db")
-        # 手动创建一个 v1 数据库
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)"
-        )
-        for sql in _SQLITE_MIGRATIONS[1]:
-            conn.execute(sql)
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, 'now')")
-        conn.commit()
-        conn.close()
-
-        # 打开 Database 触发迁移 v2 -> v_LATEST
         db = Database(db_path)
         db.close()
 
-        # 检查备份文件存在
+        future_version = _LATEST_VERSION + 1
+        extended = dict(_SQLITE_MIGRATIONS)
+        extended[future_version] = [
+            "ALTER TABLE sessions ADD COLUMN bak_col TEXT DEFAULT ''",
+        ]
+        with patch("excelmanus.database._SQLITE_MIGRATIONS", extended), \
+             patch("excelmanus.database._LATEST_VERSION", future_version):
+            db2 = Database(db_path)
+            db2.close()
+
         bak_files = list(tmp_path.glob("*.bak"))
         assert len(bak_files) >= 1
         bak_name = bak_files[0].name
-        assert "v1_to_v" in bak_name
+        assert f"v{_LATEST_VERSION}_to_v{future_version}" in bak_name
 
     def test_no_backup_for_fresh_db(self, tmp_path: Path) -> None:
         """全新数据库无需备份。"""
@@ -115,83 +117,70 @@ class TestMigrationErrorHandling:
     def test_migration_failure_raises_runtime_error(self, tmp_path: Path) -> None:
         """迁移中某条 SQL 失败应抛出 RuntimeError。"""
         db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        db.close()
 
-        # 创建 v1 数据库
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)"
-        )
-        for sql in _SQLITE_MIGRATIONS[1]:
-            conn.execute(sql)
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, 'now')")
-        conn.commit()
-        conn.close()
-
-        # 注入一条必定失败的 SQL 到 v2
+        future_version = _LATEST_VERSION + 1
         bad_migrations = dict(_SQLITE_MIGRATIONS)
-        bad_migrations[2] = ["THIS IS INVALID SQL THAT WILL FAIL"]
+        bad_migrations[future_version] = ["THIS IS INVALID SQL THAT WILL FAIL"]
 
-        with patch("excelmanus.database._SQLITE_MIGRATIONS", bad_migrations):
-            with pytest.raises(RuntimeError, match="v2 失败"):
+        with patch("excelmanus.database._SQLITE_MIGRATIONS", bad_migrations), \
+             patch("excelmanus.database._LATEST_VERSION", future_version):
+            with pytest.raises(RuntimeError, match=f"v{future_version} 失败"):
                 Database(db_path)
 
     def test_partial_migration_preserves_successful_versions(self, tmp_path: Path) -> None:
         """部分迁移成功的版本应被记录。"""
         db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        db.close()
 
-        # 创建 v1 数据库
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.row_factory = sqlite3.Row
-        conn.execute(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)"
-        )
-        for sql in _SQLITE_MIGRATIONS[1]:
-            conn.execute(sql)
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, 'now')")
-        conn.commit()
-        conn.close()
-
-        # v2 正常，v3 注入失败
+        v_ok = _LATEST_VERSION + 1
+        v_bad = _LATEST_VERSION + 2
         bad_migrations = dict(_SQLITE_MIGRATIONS)
-        bad_migrations[3] = ["THIS IS INVALID SQL"]
+        bad_migrations[v_ok] = [
+            "ALTER TABLE sessions ADD COLUMN ok_col TEXT DEFAULT ''",
+        ]
+        bad_migrations[v_bad] = ["THIS IS INVALID SQL"]
 
-        with patch("excelmanus.database._SQLITE_MIGRATIONS", bad_migrations):
-            with pytest.raises(RuntimeError, match="v3 失败"):
+        with patch("excelmanus.database._SQLITE_MIGRATIONS", bad_migrations), \
+             patch("excelmanus.database._LATEST_VERSION", v_bad):
+            with pytest.raises(RuntimeError, match=f"v{v_bad} 失败"):
                 Database(db_path)
 
-        # v2 应已成功记录
         conn = sqlite3.connect(db_path)
         conn.row_factory = sqlite3.Row
         row = conn.execute(
             "SELECT MAX(version) as v FROM schema_version"
         ).fetchone()
-        assert row["v"] == 2
+        assert row["v"] == v_ok
         conn.close()
 
 
 class TestCrossVersionUpgrade:
     """跨多个版本升级的完整性。"""
 
-    def test_upgrade_from_v1_to_latest(self, tmp_path: Path) -> None:
-        """从 v1 一路升级到最新版本。"""
+    def test_fresh_db_is_current_form(self, tmp_path: Path) -> None:
+        """空库打开后即为当前形态，无需 1→25 梯子。"""
         db_path = str(tmp_path / "test.db")
-
-        # 手动创建 v1
-        conn = sqlite3.connect(db_path)
-        conn.execute("PRAGMA journal_mode=WAL")
-        conn.execute(
-            "CREATE TABLE schema_version (version INTEGER PRIMARY KEY, applied_at TEXT)"
-        )
-        for sql in _SQLITE_MIGRATIONS[1]:
-            conn.execute(sql)
-        conn.execute("INSERT INTO schema_version (version, applied_at) VALUES (1, 'now')")
-        conn.commit()
-        conn.close()
-
         db = Database(db_path)
         assert db._current_version() == _LATEST_VERSION
+        assert not db._sqlite_column_exists("sessions", "status")
+        assert db._sqlite_column_exists("sessions", "user_id")
+        assert db._sqlite_column_exists("messages", "message_id")
+        assert db._sqlite_column_exists("approvals", "session_id")
+        for col in (
+            "thinking_mode", "model_family",
+            "custom_extra_body", "custom_extra_headers",
+        ):
+            assert db._sqlite_column_exists("model_profiles", col), f"缺少列: {col}"
+        for col in ("hysteresis_delta", "min_dwell_seconds", "breaker_open_seconds"):
+            assert db._sqlite_column_exists("pool_auto_policies", col), f"缺少列: {col}"
+        row = db.conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_messages_session_message_id'"
+        ).fetchone()
+        assert row is not None
         db.close()
 
     def test_all_migration_versions_recorded(self, tmp_path: Path) -> None:
@@ -206,22 +195,22 @@ class TestCrossVersionUpgrade:
         assert versions == list(range(1, _LATEST_VERSION + 1))
         db.close()
 
-    def test_migration_8_adds_user_id_to_sessions(self, tmp_path: Path) -> None:
-        """验证 migration 8 确实为 sessions 表添加了 user_id 列。"""
+    def test_sessions_have_user_id(self, tmp_path: Path) -> None:
+        """当前形态 sessions 表含 user_id 列。"""
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
         assert db._sqlite_column_exists("sessions", "user_id")
         db.close()
 
-    def test_migration_13_adds_session_id_to_approvals(self, tmp_path: Path) -> None:
-        """验证 migration 13 确实为 approvals 表添加了 session_id 列。"""
+    def test_approvals_have_session_id(self, tmp_path: Path) -> None:
+        """当前形态 approvals 表含 session_id 列。"""
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
         assert db._sqlite_column_exists("approvals", "session_id")
         db.close()
 
-    def test_migration_17_adds_model_profile_columns(self, tmp_path: Path) -> None:
-        """验证 migration 17 为 model_profiles 添加了所有新列。"""
+    def test_model_profiles_have_thinking_columns(self, tmp_path: Path) -> None:
+        """当前形态 model_profiles 含 thinking / 自定义列。"""
         db_path = str(tmp_path / "test.db")
         db = Database(db_path)
         for col in ("thinking_mode", "model_family", "custom_extra_body", "custom_extra_headers"):
@@ -229,36 +218,15 @@ class TestCrossVersionUpgrade:
         db.close()
 
 
-# ── SQLite / PG 迁移一致性守护 ────────────────────────────────────
+# ── SQLite 迁移定义守护 ──────────────────────────────────────────
 
 
-class TestMigrationParity:
-    """确保 SQLite 和 PostgreSQL 迁移定义始终保持同步。
-
-    如果有人只加了 SQLite 迁移忘了加 PG（或反过来），这些测试会立刻失败。
-    """
-
-    def test_version_keys_identical(self) -> None:
-        """两个 dict 的版本号集合必须完全一致。"""
-        assert sorted(_SQLITE_MIGRATIONS.keys()) == sorted(_PG_MIGRATIONS.keys()), (
-            "SQLite 和 PG 迁移版本号不一致！\n"
-            f"  SQLite: {sorted(_SQLITE_MIGRATIONS.keys())}\n"
-            f"  PG:     {sorted(_PG_MIGRATIONS.keys())}"
-        )
-
-    def test_statement_count_per_version(self) -> None:
-        """每个版本的语句数必须相同（DDL 逻辑应对称）。"""
-        for v in _SQLITE_MIGRATIONS:
-            s_count = len(_SQLITE_MIGRATIONS[v])
-            p_count = len(_PG_MIGRATIONS[v])
-            assert s_count == p_count, (
-                f"v{v} 语句数不一致: SQLite={s_count}, PG={p_count}"
-            )
+class TestSqliteMigrations:
+    """squash 后的 SQLite 迁移定义约束。"""
 
     def test_latest_version_consistent(self) -> None:
-        """_LATEST_VERSION 应等于两个 dict 的最大 key。"""
+        """_LATEST_VERSION 应等于 dict 的最大 key。"""
         assert _LATEST_VERSION == max(_SQLITE_MIGRATIONS.keys())
-        assert _LATEST_VERSION == max(_PG_MIGRATIONS.keys())
 
     def test_no_gaps_in_version_sequence(self) -> None:
         """版本号必须连续，不能跳号。"""
@@ -284,6 +252,93 @@ class TestMigrationParity:
                     f"SQLite v{v} 含 'ADD COLUMN IF NOT EXISTS'，"
                     f"SQLite 不支持此语法: {sql[:80]}"
                 )
+
+
+class TestLegacySchemaStamp:
+    """旧梯子 MAX(schema_version)=25 必须 stamp 成 v1，否则未来 v2 会 skip。"""
+
+    def _fake_legacy_versions(self, db_path: str, max_version: int = 25) -> None:
+        conn = sqlite3.connect(db_path)
+        conn.execute("DELETE FROM schema_version")
+        for version in range(1, max_version + 1):
+            conn.execute(
+                "INSERT INTO schema_version (version, applied_at) VALUES (?, 'now')",
+                (version,),
+            )
+        conn.commit()
+        conn.close()
+
+    def test_stamp_v25_to_v1_preserves_data(self, tmp_path: Path) -> None:
+        db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        db.conn.execute(
+            "INSERT INTO sessions (id, title, created_at, updated_at, message_count) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("s1", "hello", "t", "t", 0),
+        )
+        db.conn.commit()
+        db.close()
+
+        self._fake_legacy_versions(db_path, 25)
+
+        db2 = Database(db_path)
+        assert db2._current_version() == _LATEST_VERSION
+        versions = [
+            r["version"]
+            for r in db2.conn.execute(
+                "SELECT version FROM schema_version ORDER BY version"
+            ).fetchall()
+        ]
+        assert versions == list(range(1, _LATEST_VERSION + 1))
+        assert 25 not in versions
+        title = db2.conn.execute(
+            "SELECT title FROM sessions WHERE id = ?", ("s1",)
+        ).fetchone()["title"]
+        assert title == "hello"
+        assert db2._sqlite_column_exists("sessions", "workspace_path")
+        db2.close()
+
+    def test_stamped_legacy_db_can_apply_future_v2(self, tmp_path: Path) -> None:
+        db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        db.close()
+        self._fake_legacy_versions(db_path, 25)
+
+        future_version = _LATEST_VERSION + 1
+        extended = dict(_SQLITE_MIGRATIONS)
+        extended[future_version] = [
+            "ALTER TABLE sessions ADD COLUMN stamp_col TEXT DEFAULT ''",
+        ]
+        with patch("excelmanus.database._SQLITE_MIGRATIONS", extended), \
+             patch("excelmanus.database._LATEST_VERSION", future_version):
+            db2 = Database(db_path)
+            assert db2._current_version() == future_version
+            assert db2._sqlite_column_exists("sessions", "stamp_col")
+            versions = [
+                r["version"]
+                for r in db2.conn.execute(
+                    "SELECT version FROM schema_version ORDER BY version"
+                ).fetchall()
+            ]
+            assert 25 not in versions
+            assert 1 in versions
+            assert future_version in versions
+            db2.close()
+
+    def test_incomplete_legacy_db_refuses_stamp(self, tmp_path: Path) -> None:
+        db_path = str(tmp_path / "broken.db")
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE schema_version ("
+            "  version INTEGER PRIMARY KEY, applied_at TEXT)"
+        )
+        conn.execute("CREATE TABLE sessions (id TEXT PRIMARY KEY, status TEXT)")
+        conn.execute("INSERT INTO schema_version (version) VALUES (25)")
+        conn.commit()
+        conn.close()
+
+        with pytest.raises(RuntimeError, match="无法 stamp"):
+            Database(db_path)
 
 
 # ── 模拟未来结构变更 ──────────────────────────────────────────────
@@ -375,8 +430,8 @@ class TestFutureSchemaChanges:
         future_version = _LATEST_VERSION + 1
         extended = dict(_SQLITE_MIGRATIONS)
         extended[future_version] = [
-            "CREATE INDEX IF NOT EXISTS idx_sessions_status_updated "
-            "ON sessions(status, updated_at)",
+            "CREATE INDEX IF NOT EXISTS idx_sessions_updated_at "
+            "ON sessions(updated_at)",
         ]
 
         with patch("excelmanus.database._SQLITE_MIGRATIONS", extended), \

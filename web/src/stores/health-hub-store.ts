@@ -9,7 +9,6 @@ export interface HealthData {
   tools: string[];
   skillpacks: string[];
   active_sessions: number;
-  channels?: string[];
   restart_reason?: string;
 }
 
@@ -17,7 +16,6 @@ interface HealthPayload extends HealthData {
   build_id?: string | null;
   version_fingerprint?: string | null;
   api_schema_version?: number;
-  min_frontend_build_id?: string | null;
 }
 
 interface HealthHubState {
@@ -61,7 +59,6 @@ const normalizeHealthData = (raw: HealthPayload): HealthData => ({
   tools: Array.isArray(raw.tools) ? raw.tools : [],
   skillpacks: Array.isArray(raw.skillpacks) ? raw.skillpacks : [],
   active_sessions: typeof raw.active_sessions === "number" ? raw.active_sessions : 0,
-  channels: Array.isArray(raw.channels) ? raw.channels : undefined,
   restart_reason: typeof raw.restart_reason === "string" ? raw.restart_reason : undefined,
 });
 
@@ -91,21 +88,6 @@ function applyVersionState(data: HealthPayload): void {
     remoteSchema !== null
     && baselineRef.apiSchemaVersion !== null
     && remoteSchema > baselineRef.apiSchemaVersion
-  ) {
-    useHealthHubStore.setState({
-      newVersionAvailable: false,
-      apiIncompatible: true,
-      remoteVersion: data.version ?? null,
-    });
-    return;
-  }
-
-  const minBuildId = data.min_frontend_build_id ?? null;
-  if (
-    minBuildId !== null
-    && baselineRef.buildId !== null
-    && baselineRef.buildId !== minBuildId
-    && baselineRef.buildId < minBuildId
   ) {
     useHealthHubStore.setState({
       newVersionAvailable: false,

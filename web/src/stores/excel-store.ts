@@ -1,23 +1,22 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import {
-  fetchBackupList,
   fetchWorkspaceFiles,
-  applyBackup,
-  discardBackup,
-  undoBackup,
   normalizeExcelPath,
   fetchOperations,
   undoOperation as apiUndoOperation,
   fetchFileGroups,
   createFileGroup as apiCreateFileGroup,
   deleteFileGroup as apiDeleteFileGroup,
-  type BackupFile,
-  type AppliedFile,
   type ExcelFileListItem,
   type OperationRecord,
   type FileGroup,
 } from "@/lib/api";
+import { useSessionStore } from "@/stores/session-store";
+
+function activeSessionId(): string | null {
+  return useSessionStore.getState().activeSessionId;
+}
 
 /** Univer 兼容的单元格样式（轻量子集） */
 export interface CellStyle {
@@ -132,13 +131,6 @@ export interface FileRelationship {
   sharedColumns: SharedColumn[];
 }
 
-export interface RelationshipDiscovery {
-  files_analyzed: number;
-  file_pairs: { file_a: string; file_b: string; shared_columns: SharedColumn[] }[];
-  summary: string;
-  merge_hints?: { file_a: string; file_b: string; key_column_a: string; key_column_b: string; suggested_join: string }[];
-}
-
 export interface MergeResultInfo {
   sourceFiles: string[];
   outputFile: string;
@@ -152,20 +144,6 @@ export interface MergeResultInfo {
 
 const MAX_RECENT_FILES = 50;
 const MAX_PERSISTED_DIFFS = 500;
-
-function mergeAppliedFilesByOriginal(
-  base: AppliedFile[],
-  incoming: AppliedFile[]
-): AppliedFile[] {
-  const merged = new Map<string, AppliedFile>();
-  for (const item of base) {
-    merged.set(normalizeExcelPath(item.original), item);
-  }
-  for (const item of incoming) {
-    merged.set(normalizeExcelPath(item.original), item);
-  }
-  return Array.from(merged.values());
-}
 
 interface ExcelState {
   // 侧边面板
@@ -237,15 +215,6 @@ interface ExcelState {
   // 文本文件预览弹窗 tab 栏（最近打开的文件）
   previewTabs: { filePath: string; filename: string }[];
 
-  // 备份应用
-  pendingBackups: BackupFile[];
-  backupEnabled: boolean;
-  backupLoading: boolean;
-  backupInFlight: boolean;
-  appliedPaths: Set<string>;
-  /** 最近 apply 的文件列表（支持 undo） */
-  undoableApplies: AppliedFile[];
-
   // 操作历史时间线
   operations: OperationRecord[];
   operationsLoading: boolean;
@@ -264,10 +233,6 @@ interface ExcelState {
   compareSheetA: string | null;
   compareSheetB: string | null;
   compareRelationship: FileRelationship | null;
-
-  // 工作区文件关系缓存
-  workspaceRelationships: RelationshipDiscovery | null;
-  workspaceRelationshipsLoading: boolean;
 
   // 合并结果（最近一次）
   lastMergeResult: MergeResultInfo | null;
@@ -308,19 +273,11 @@ interface ExcelState {
   /** Set a template message to inject into chat input (e.g. merge/compare prompt). */
   setPendingTemplateMessage: (msg: string) => void;
   clearPendingTemplateMessage: () => void;
-  fetchBackups: (sessionId: string) => Promise<void>;
-  applyFile: (sessionId: string, filePath: string) => Promise<boolean>;
-  applyAll: (sessionId: string) => Promise<number>;
-  discardFile: (sessionId: string, filePath: string) => Promise<void>;
-  discardAll: (sessionId: string) => Promise<void>;
-  isFileApplied: (filePath: string) => boolean;
-  undoApply: (sessionId: string, item: AppliedFile) => Promise<boolean>;
-  handleStagingUpdated: (action: string, files: { original_path: string; backup_path: string }[], pendingCount: number) => void;
   addPreviewTab: (tab: { filePath: string; filename: string }) => void;
   removePreviewTab: (filePath: string) => void;
   toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
-  refreshWorkspaceFiles: () => Promise<void>;
+  refreshWorkspaceFiles: (sessionId?: string | null) => Promise<void>;
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
@@ -335,8 +292,6 @@ interface ExcelState {
   setCompareSheetA: (sheet: string) => void;
   setCompareSheetB: (sheet: string) => void;
   setCompareRelationship: (rel: FileRelationship | null) => void;
-  /** 加载工作区文件关系 */
-  fetchWorkspaceRelationships: () => Promise<void>;
   /** 设置合并结果摘要 */
   setMergeResult: (result: MergeResultInfo | null) => void;
   injectDemoFile: () => void;
@@ -374,12 +329,6 @@ export const useExcelStore = create<ExcelState>()(
   demoFile: null,
   streamingToolContent: {},
   previewTabs: [],
-  pendingBackups: [],
-  backupEnabled: false,
-  backupLoading: false,
-  backupInFlight: false,
-  appliedPaths: new Set<string>(),
-  undoableApplies: [],
   operations: [],
   operationsLoading: false,
   operationsLoaded: false,
@@ -395,9 +344,6 @@ export const useExcelStore = create<ExcelState>()(
   compareSheetA: null,
   compareSheetB: null,
   compareRelationship: null,
-
-  workspaceRelationships: null,
-  workspaceRelationshipsLoading: false,
 
   lastMergeResult: null,
 
@@ -619,273 +565,6 @@ export const useExcelStore = create<ExcelState>()(
 
   clearPendingTemplateMessage: () => set({ pendingTemplateMessage: null }),
 
-  fetchBackups: async (sessionId) => {
-    set({ backupLoading: true });
-    try {
-      const data = await fetchBackupList(sessionId);
-      set({
-        pendingBackups: data.files,
-        backupEnabled: data.backup_enabled,
-        backupInFlight: !!data.in_flight,
-        backupLoading: false,
-      });
-    } catch {
-      set({ backupLoading: false });
-    }
-  },
-
-  applyFile: async (sessionId, filePath) => {
-    const normPath = normalizeExcelPath(filePath);
-    const snapshot = (() => {
-      const state = get();
-      return {
-        pendingBackups: state.pendingBackups,
-        appliedPaths: new Set(state.appliedPaths),
-        undoableApplies: state.undoableApplies,
-        refreshCounter: state.refreshCounter,
-      };
-    })();
-    const pendingItem = snapshot.pendingBackups.find(
-      (b) => normalizeExcelPath(b.original_path) === normPath
-    );
-    const optimisticApplied: AppliedFile = {
-      original: pendingItem?.original_path ?? filePath,
-      backup: pendingItem?.backup_path ?? filePath,
-    };
-
-    set((state) => {
-      const newApplied = new Set(state.appliedPaths);
-      newApplied.add(normPath);
-      return {
-        pendingBackups: state.pendingBackups.filter(
-          (b) => normalizeExcelPath(b.original_path) !== normPath
-        ),
-        appliedPaths: newApplied,
-        refreshCounter: state.refreshCounter + 1,
-        undoableApplies: mergeAppliedFilesByOriginal(state.undoableApplies, [optimisticApplied]),
-      };
-    });
-
-    try {
-      const result = await applyBackup({ sessionId, files: [filePath] });
-      if (result.count <= 0) {
-        set({
-          pendingBackups: snapshot.pendingBackups,
-          appliedPaths: snapshot.appliedPaths,
-          undoableApplies: snapshot.undoableApplies,
-          refreshCounter: snapshot.refreshCounter,
-        });
-        return false;
-      }
-
-      set((state) => {
-        const newApplied = new Set(state.appliedPaths);
-        for (const item of result.applied) {
-          newApplied.add(normalizeExcelPath(item.original));
-        }
-        const confirmedForPath = result.applied.filter(
-          (item) => normalizeExcelPath(item.original) === normPath
-        );
-        return {
-          appliedPaths: newApplied,
-          undoableApplies: mergeAppliedFilesByOriginal(
-            state.undoableApplies.filter(
-              (item) => normalizeExcelPath(item.original) !== normPath
-            ),
-            confirmedForPath.length > 0 ? confirmedForPath : [optimisticApplied]
-          ),
-        };
-      });
-      return true;
-    } catch {
-      set({
-        pendingBackups: snapshot.pendingBackups,
-        appliedPaths: snapshot.appliedPaths,
-        undoableApplies: snapshot.undoableApplies,
-        refreshCounter: snapshot.refreshCounter,
-      });
-      return false;
-    }
-  },
-
-  applyAll: async (sessionId) => {
-    const snapshot = (() => {
-      const state = get();
-      return {
-        pendingBackups: state.pendingBackups,
-        appliedPaths: new Set(state.appliedPaths),
-        undoableApplies: state.undoableApplies,
-        refreshCounter: state.refreshCounter,
-      };
-    })();
-    if (snapshot.pendingBackups.length === 0) return 0;
-
-    const optimisticApplied = snapshot.pendingBackups.map<AppliedFile>((b) => ({
-      original: b.original_path,
-      backup: b.backup_path,
-    }));
-    const optimisticPathSet = new Set(
-      snapshot.pendingBackups.map((b) => normalizeExcelPath(b.original_path))
-    );
-
-    set((state) => {
-      const newApplied = new Set(state.appliedPaths);
-      for (const path of optimisticPathSet) {
-        newApplied.add(path);
-      }
-      return {
-        pendingBackups: [],
-        appliedPaths: newApplied,
-        refreshCounter: state.refreshCounter + 1,
-        undoableApplies: mergeAppliedFilesByOriginal(
-          state.undoableApplies.filter(
-            (item) => !optimisticPathSet.has(normalizeExcelPath(item.original))
-          ),
-          optimisticApplied
-        ),
-      };
-    });
-
-    try {
-      const result = await applyBackup({ sessionId });
-      if (result.count <= 0 && snapshot.pendingBackups.length > 0) {
-        set({
-          pendingBackups: snapshot.pendingBackups,
-          appliedPaths: snapshot.appliedPaths,
-          undoableApplies: snapshot.undoableApplies,
-          refreshCounter: snapshot.refreshCounter,
-        });
-        return 0;
-      }
-
-      set((state) => {
-        const newApplied = new Set(state.appliedPaths);
-        for (const a of result.applied) {
-          newApplied.add(normalizeExcelPath(a.original));
-        }
-        const confirmed = optimisticApplied.map((item) => {
-          const match = result.applied.find(
-            (applied) =>
-              normalizeExcelPath(applied.original) === normalizeExcelPath(item.original)
-          );
-          return match ?? item;
-        });
-        return {
-          appliedPaths: newApplied,
-          undoableApplies: mergeAppliedFilesByOriginal(
-            state.undoableApplies.filter(
-              (item) => !optimisticPathSet.has(normalizeExcelPath(item.original))
-            ),
-            confirmed
-          ),
-        };
-      });
-      return result.count;
-    } catch {
-      set({
-        pendingBackups: snapshot.pendingBackups,
-        appliedPaths: snapshot.appliedPaths,
-        undoableApplies: snapshot.undoableApplies,
-        refreshCounter: snapshot.refreshCounter,
-      });
-      return 0;
-    }
-  },
-
-  discardFile: async (sessionId, filePath) => {
-    const snapshot = get().pendingBackups;
-    const normPath = normalizeExcelPath(filePath);
-
-    set((state) => ({
-      pendingBackups: state.pendingBackups.filter(
-        (b) => normalizeExcelPath(b.original_path) !== normPath
-      ),
-    }));
-
-    try {
-      await discardBackup({ sessionId, files: [filePath] });
-    } catch {
-      set({ pendingBackups: snapshot });
-    }
-  },
-
-  discardAll: async (sessionId) => {
-    const snapshot = get().pendingBackups;
-    set({ pendingBackups: [] });
-    try {
-      await discardBackup({ sessionId });
-    } catch {
-      set({ pendingBackups: snapshot });
-    }
-  },
-
-  isFileApplied: (filePath) => {
-    return get().appliedPaths.has(normalizeExcelPath(filePath));
-  },
-
-  undoApply: async (sessionId, item) => {
-    if (!item.undo_path) return false;
-    const normOriginal = normalizeExcelPath(item.original);
-    const snapshot = (() => {
-      const state = get();
-      return {
-        appliedPaths: new Set(state.appliedPaths),
-        undoableApplies: state.undoableApplies,
-        refreshCounter: state.refreshCounter,
-      };
-    })();
-
-    set((state) => {
-      const newApplied = new Set(state.appliedPaths);
-      newApplied.delete(normOriginal);
-      return {
-        appliedPaths: newApplied,
-        undoableApplies: state.undoableApplies.filter(
-          (a) => normalizeExcelPath(a.original) !== normOriginal
-        ),
-        refreshCounter: state.refreshCounter + 1,
-      };
-    });
-
-    try {
-      await undoBackup({
-        sessionId,
-        originalPath: item.original,
-        undoPath: item.undo_path,
-      });
-      return true;
-    } catch {
-      set({
-        appliedPaths: snapshot.appliedPaths,
-        undoableApplies: snapshot.undoableApplies,
-        refreshCounter: snapshot.refreshCounter,
-      });
-      return false;
-    }
-  },
-
-  handleStagingUpdated: (action, files, pendingCount) => {
-    if (action === "finish_hint" || action === "new") {
-      // 触发备份列表刷新 — 前端收到后由 chat-actions 调用 fetchBackups
-      set((state) => ({
-        backupEnabled: true,
-        pendingBackups: files.length > 0
-          ? files.map((f) => ({
-              original_path: f.original_path,
-              backup_path: f.backup_path,
-              exists: true,
-              modified_at: Date.now() / 1000,
-            }))
-          : state.pendingBackups,
-      }));
-    } else if (action === "applied" || action === "discarded" || action === "undone") {
-      // 服务端已处理完成，直接更新 pending count
-      if (pendingCount === 0) {
-        set({ pendingBackups: [] });
-      }
-    }
-  },
-
   addPreviewTab: (tab) =>
     set((state) => {
       const exists = state.previewTabs.some((t) => t.filePath === tab.filePath);
@@ -904,9 +583,10 @@ export const useExcelStore = create<ExcelState>()(
   bumpWorkspaceFilesVersion: () =>
     set((state) => ({ workspaceFilesVersion: state.workspaceFilesVersion + 1 })),
 
-  refreshWorkspaceFiles: async () => {
+  refreshWorkspaceFiles: async (sessionId) => {
     try {
-      const files = await fetchWorkspaceFiles();
+      const sid = sessionId ?? activeSessionId();
+      const files = await fetchWorkspaceFiles(sid);
       set({
         workspaceFiles: files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir })),
         wsFilesLoaded: true,
@@ -976,7 +656,7 @@ export const useExcelStore = create<ExcelState>()(
 
   loadFileGroups: async () => {
     try {
-      const data = await fetchFileGroups();
+      const data = await fetchFileGroups(activeSessionId());
       set({ fileGroups: data.groups, fileGroupsLoaded: true });
     } catch {
       set({ fileGroupsLoaded: true });
@@ -988,6 +668,7 @@ export const useExcelStore = create<ExcelState>()(
       const group = await apiCreateFileGroup({
         name,
         file_ids: fileIds.map((id) => ({ id })),
+        sessionId: activeSessionId(),
       });
       set((state) => ({
         fileGroups: [...state.fileGroups, group],
@@ -1005,7 +686,7 @@ export const useExcelStore = create<ExcelState>()(
       activeGroupId: state.activeGroupId === groupId ? null : state.activeGroupId,
     }));
     try {
-      await apiDeleteFileGroup(groupId);
+      await apiDeleteFileGroup(groupId, activeSessionId());
     } catch {
       set({ fileGroups: snapshot });
     }
@@ -1045,17 +726,6 @@ export const useExcelStore = create<ExcelState>()(
 
   setCompareRelationship: (rel) => set({ compareRelationship: rel }),
 
-  fetchWorkspaceRelationships: async () => {
-    set({ workspaceRelationshipsLoading: true });
-    try {
-      const { fetchFileRelationships } = await import("@/lib/api");
-      const data = await fetchFileRelationships();
-      set({ workspaceRelationships: data, workspaceRelationshipsLoading: false });
-    } catch {
-      set({ workspaceRelationshipsLoading: false });
-    }
-  },
-
   setMergeResult: (result) => set({ lastMergeResult: result }),
 
   injectDemoFile: () => {
@@ -1082,12 +752,6 @@ export const useExcelStore = create<ExcelState>()(
       draftRange: null,
       pendingFileMentions: null,
       pendingTemplateMessage: null,
-      pendingBackups: [],
-      backupEnabled: false,
-      backupLoading: false,
-      backupInFlight: false,
-      appliedPaths: new Set<string>(),
-      undoableApplies: [],
       operations: [],
       operationsLoading: false,
       operationsLoaded: false,
@@ -1100,8 +764,6 @@ export const useExcelStore = create<ExcelState>()(
       compareSheetA: null,
       compareSheetB: null,
       compareRelationship: null,
-      workspaceRelationships: null,
-      workspaceRelationshipsLoading: false,
       lastMergeResult: null,
     }),
     }),
@@ -1119,12 +781,11 @@ export const useExcelStore = create<ExcelState>()(
           ? new Set<string>(p.dismissedPaths as string[])
           : new Set<string>();
         // diffs / textDiffs 是会话级瞬态数据，不从 localStorage 恢复
-        const { diffs: _d, textDiffs: _td, ...safeP } = (p ?? {}) as Record<string, unknown>;
+        const { diffs: _d, textDiffs: _td, pendingBackups: _pb, appliedPaths: _ap, undoableApplies: _ua, backupEnabled: _be, backupLoading: _bl, backupInFlight: _bi, ...safeP } = (p ?? {}) as Record<string, unknown>;
         return {
           ...current,
           ...safeP,
           dismissedPaths: dismissed,
-          appliedPaths: new Set<string>(),
         };
       },
     }

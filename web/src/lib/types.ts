@@ -13,6 +13,8 @@ export interface AttachedFile {
   error?: string;
   /** 预编码的 base64 数据（由示例卡片预上传时生成），sendMessage 可跳过重复编码 */
   cachedBase64?: string;
+  /** 侧边栏拖入的已有工作区文件：展示附件芯片，但不走“新上传”通知 */
+  fromWorkspace?: boolean;
 }
 
 export interface Session {
@@ -23,6 +25,22 @@ export interface Session {
   updatedAt?: string;
   /** 本地创建时间戳（Date.now()），用于 mergeSessions 宽限期保护 */
   createdAt?: number;
+  workspacePath?: string;
+  workspaceId?: string | null;
+  workspaceTitle?: string;
+  blank?: boolean;
+  pendingApproval?: boolean;
+  pendingQuestion?: boolean;
+}
+
+export interface WorkspaceFolder {
+  id: string;
+  path: string;
+  title: string;
+  created_at?: string;
+  updated_at?: string;
+  sort_index?: number;
+  is_default?: boolean;
 }
 
 export interface SessionDetail {

@@ -38,11 +38,11 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
   );
 
   return (
-    <div className="my-2 rounded-lg border border-border/80 overflow-hidden text-xs shadow-sm">
+    <div className="my-2 rounded-xl border border-[var(--em-hairline)] overflow-hidden text-xs">
       {/* Header bar */}
       <div className="flex items-center justify-between px-3 py-1.5 bg-muted/50 border-b border-border/60">
         <div className="flex items-center gap-2 text-muted-foreground min-w-0">
-          <Table2 className="h-3.5 w-3.5 flex-shrink-0 text-blue-500" />
+          <Table2 className="h-3.5 w-3.5 flex-shrink-0 text-[var(--em-primary)]" />
           <span className="font-semibold text-foreground truncate text-[11px]">
             {data.filePath.split("/").pop() || data.filePath}
           </span>

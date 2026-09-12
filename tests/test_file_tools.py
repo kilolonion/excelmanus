@@ -9,6 +9,7 @@ import pytest
 from excelmanus.security import SecurityViolationError
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.tools import file_tools
+from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
 
 def _payload(result: ToolResult) -> dict:
     assert isinstance(result, ToolResult)
@@ -31,6 +32,7 @@ def workspace(tmp_path: Path) -> Path:
     (tmp_path / ".hidden").write_text("secret", encoding="utf-8")
 
     file_tools.init_guard(str(tmp_path))
+    seed_seen_versions({})
     return tmp_path
 
 
@@ -306,13 +308,15 @@ class TestCopyFile:
 
 class TestRenameFile:
     def test_rename_success(self, workspace: Path) -> None:
-        result = _payload(file_tools.rename_file("hello.txt", "greeting.txt"))
+        ver = content_version_of_file(workspace / "hello.txt")
+        result = _payload(file_tools.rename_file("hello.txt", "greeting.txt", expected_version=ver))
         assert result["status"] == "success"
         assert not (workspace / "hello.txt").exists()
         assert (workspace / "greeting.txt").exists()
 
     def test_rename_to_subdir(self, workspace: Path) -> None:
-        result = _payload(file_tools.rename_file("data.csv", "archive/data.csv"))
+        ver = content_version_of_file(workspace / "data.csv")
+        result = _payload(file_tools.rename_file("data.csv", "archive/data.csv", expected_version=ver))
         assert result["status"] == "success"
         assert (workspace / "archive" / "data.csv").exists()
 
@@ -321,12 +325,18 @@ class TestRenameFile:
         assert "error" in result
 
     def test_rename_destination_exists(self, workspace: Path) -> None:
-        result = _payload(file_tools.rename_file("hello.txt", "data.csv"))
+        ver = content_version_of_file(workspace / "hello.txt")
+        result = _payload(file_tools.rename_file("hello.txt", "data.csv", expected_version=ver))
         assert "error" in result
 
     def test_rename_path_traversal(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
             file_tools.rename_file("hello.txt", "../outside.txt")
+
+    def test_rename_missing_version_conflicts(self, workspace: Path) -> None:
+        result = _payload(file_tools.rename_file("hello.txt", "greeting.txt"))
+        assert result.get("code") == "VERSION_CONFLICT"
+        assert (workspace / "hello.txt").exists()
 
 
 # ── delete_file ──────────────────────────────────────────
@@ -339,9 +349,15 @@ class TestDeleteFile:
         assert (workspace / "hello.txt").exists()  # 未实际删除
 
     def test_delete_with_confirm(self, workspace: Path) -> None:
-        result = _payload(file_tools.delete_file("hello.txt", confirm=True))
+        ver = content_version_of_file(workspace / "hello.txt")
+        result = _payload(file_tools.delete_file("hello.txt", confirm=True, expected_version=ver))
         assert result["status"] == "success"
         assert not (workspace / "hello.txt").exists()
+
+    def test_delete_missing_version_conflicts(self, workspace: Path) -> None:
+        result = _payload(file_tools.delete_file("hello.txt", confirm=True))
+        assert result.get("code") == "VERSION_CONFLICT"
+        assert (workspace / "hello.txt").exists()
 
     def test_delete_directory_rejected(self, workspace: Path) -> None:
         result = _payload(file_tools.delete_file("subdir"))

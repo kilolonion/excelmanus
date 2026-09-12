@@ -105,11 +105,11 @@ const BASIC_DESKTOP: TourStep[] = [
   },
   {
     target: "coach-mode-badges",
-    title: "权限与模式",
-    description: "FULL 开关控制 AI 的写入权限，旁边显示当前对话模式（读取/规划）",
+    title: "审批策略",
+    description: "询问会在写入前提示确认；跳过则自动写入，但仍不出工作区。编辑 / 观察 / 计划在输入框左侧切换。",
     icon: "Shield",
-    placement: "bottom",
-    interaction: { type: "click", hint: "👆 试试点击 FULL 开关切换权限", autoAdvanceMs: 800 },
+    placement: "top",
+    interaction: { type: "click", hint: "👆 试试切换审批策略", autoAdvanceMs: 800 },
   },
   {
     target: "coach-settings",
@@ -161,11 +161,11 @@ const BASIC_MOBILE: TourStep[] = [
   },
   {
     target: "coach-mode-badges",
-    title: "权限控制",
-    description: "FULL 开关控制 AI 的写入权限，关闭时 AI 只读不写",
+    title: "审批策略",
+    description: "询问会在写入前确认；跳过则自动写入，但仍不出工作区。",
     icon: "Shield",
-    placement: "bottom",
-    interaction: { type: "click", hint: "👆 试试点击 FULL 切换", autoAdvanceMs: 800 },
+    placement: "top",
+    interaction: { type: "click", hint: "👆 试试切换审批策略", autoAdvanceMs: 800 },
   },
 ];
 
@@ -258,7 +258,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "这里是 AI 的核心配置。可以设置主模型和辅助模型 (Aux) 的 API Key、Base URL 和 Model ID，还能创建多个模型配置档案并快速切换",
+    description: "这里是 AI 的核心配置。可以创建多个模型档案，激活其中一个即可用于对话、子代理和压缩",
     icon: "Server",
     placement: "left",
     onEnter: "openSettings_model",
@@ -401,7 +401,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "配置主模型和辅助模型的 API Key 和参数",
+    description: "配置模型档案的 API Key 和参数，并激活当前使用的模型",
     icon: "Server",
     placement: "top",
     onEnter: "openSettings_model",

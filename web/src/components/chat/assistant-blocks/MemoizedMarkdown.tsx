@@ -120,7 +120,7 @@ export const MemoizedMarkdown = React.memo(function MemoizedMarkdown({
     <div className="relative">
       <div
         ref={contentRef}
-        className={`prose prose-sm max-w-none text-foreground text-[13px] leading-relaxed overflow-hidden transition-[max-height] duration-300${isStreamingText ? " streaming-cursor" : ""}`}
+        className={`prose prose-sm max-w-none text-foreground text-[13px] leading-relaxed transition-[max-height] duration-300${needsExpand && !expanded && !isStreamingText ? " overflow-hidden" : ""}${isStreamingText ? " streaming-cursor" : ""}`}
         style={{
           maxHeight: needsExpand && !expanded && !isStreamingText ? `${MAX_COLLAPSED_HEIGHT_ASSISTANT}px` : undefined,
         }}

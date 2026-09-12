@@ -517,7 +517,7 @@ class TestSseEventToSseTaskUpdate:
             task_index=None,
             task_status="",
         )
-        sse_text = _sse_event_to_sse(event, safe_mode=False)
+        sse_text = _sse_event_to_sse(event)
         assert sse_text is not None
         assert sse_text.startswith("event: task_update\n")
 
@@ -530,7 +530,7 @@ class TestSseEventToSseTaskUpdate:
             task_index=None,
             task_status="",
         )
-        sse_text = _sse_event_to_sse(event, safe_mode=False)
+        sse_text = _sse_event_to_sse(event)
         assert sse_text is not None
         # 解析 data 行
         data_line = sse_text.split("\n")[1]
@@ -548,7 +548,7 @@ class TestSseEventToSseTaskUpdate:
             task_index=0,
             task_status="completed",
         )
-        sse_text = _sse_event_to_sse(event, safe_mode=False)
+        sse_text = _sse_event_to_sse(event)
         assert sse_text is not None
         assert sse_text.startswith("event: task_update\n")
 
@@ -561,7 +561,7 @@ class TestSseEventToSseTaskUpdate:
             task_index=1,
             task_status="in_progress",
         )
-        sse_text = _sse_event_to_sse(event, safe_mode=False)
+        sse_text = _sse_event_to_sse(event)
         assert sse_text is not None
         data_line = sse_text.split("\n")[1]
         payload = json.loads(data_line[len("data: "):])
@@ -575,6 +575,6 @@ class TestSseEventToSseTaskUpdate:
             event_type=EventType.TASK_LIST_CREATED,
             task_list_data=self._make_task_list_data(),
         )
-        sse_text = _sse_event_to_sse(event, safe_mode=False)
+        sse_text = _sse_event_to_sse(event)
         assert sse_text is not None
         assert sse_text.endswith("\n\n")

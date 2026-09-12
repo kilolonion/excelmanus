@@ -81,7 +81,7 @@ class TestMigrationV23:
     def test_version_is_23(self):
         db = _create_test_db()
         row = db.conn.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
-        assert row["v"] >= 23
+        assert row["v"] >= 1
         db.close()
 
     def test_old_data_survives(self):

@@ -12,7 +12,6 @@ import {
 import { ScrollArea } from "@/components/ui/scroll-area";
 import {
   CornerDownLeft,
-  Check,
   RotateCcw,
   FilePlus2,
   FileMinus2,
@@ -23,30 +22,6 @@ import {
   FileWarning,
 } from "lucide-react";
 import type { RollbackFileChange, RollbackPreviewResult } from "@/lib/api";
-
-const STORAGE_KEY = "em_rollback_file_preference";
-
-export type RollbackFilePreference = "always_rollback" | "never_rollback" | null;
-
-function loadPreference(): RollbackFilePreference {
-  if (typeof window === "undefined") return null;
-  const val = localStorage.getItem(STORAGE_KEY);
-  if (val === "always_rollback" || val === "never_rollback") return val;
-  return null;
-}
-
-function savePreference(pref: RollbackFilePreference) {
-  if (typeof window === "undefined") return;
-  if (pref === null) {
-    localStorage.removeItem(STORAGE_KEY);
-  } else {
-    localStorage.setItem(STORAGE_KEY, pref);
-  }
-}
-
-export function getRollbackFilePreference(): RollbackFilePreference {
-  return loadPreference();
-}
 
 function formatBytes(bytes: number | null): string {
   if (bytes === null || bytes === undefined) return "-";
@@ -148,7 +123,7 @@ interface RollbackConfirmDialogProps {
   open: boolean;
   sessionId: string | null;
   turnIndex: number;
-  onConfirm: (rollbackFiles: boolean) => void;
+  onConfirm: () => void;
   onCancel: () => void;
 }
 
@@ -159,7 +134,6 @@ export function RollbackConfirmDialog({
   onConfirm,
   onCancel,
 }: RollbackConfirmDialogProps) {
-  const [dontAskAgain, setDontAskAgain] = useState(false);
   const [preview, setPreview] = useState<RollbackPreviewResult | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -168,7 +142,6 @@ export function RollbackConfirmDialog({
     if (!open) {
       setPreview(null);
       setError(null);
-      setDontAskAgain(false);
       return;
     }
     if (!sessionId) return;
@@ -194,28 +167,18 @@ export function RollbackConfirmDialog({
     return () => { cancelled = true; };
   }, [open, sessionId, turnIndex]);
 
-  const handleConfirm = useCallback(
-    (rollbackFiles: boolean) => {
-      if (dontAskAgain) {
-        savePreference(rollbackFiles ? "always_rollback" : "never_rollback");
-      }
-      onConfirm(rollbackFiles);
-    },
-    [dontAskAgain, onConfirm]
-  );
+  const handleConfirm = useCallback(() => {
+    onConfirm();
+  }, [onConfirm]);
 
-  // 快捷键：Enter = 回滚，Shift+Enter = 不回滚，Esc = 取消
+  // 快捷键：Enter = 确认对话回退，Esc = 取消
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
       if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         e.stopPropagation();
-        handleConfirm(true);
-      } else if (e.key === "Enter" && e.shiftKey) {
-        e.preventDefault();
-        e.stopPropagation();
-        handleConfirm(false);
+        handleConfirm();
       }
     };
     window.addEventListener("keydown", handler, true);
@@ -241,7 +204,7 @@ export function RollbackConfirmDialog({
         title="从历史消息重新提交？"
         description={
           <>
-            重新提交将回退到该消息，并清除之后的所有对话。
+            重新提交将回退到该消息，并清除之后的所有对话。磁盘文件不会被改写。
             {preview && preview.removed_messages > 0 && (
               <span className="text-foreground/70"> 将移除 {preview.removed_messages} 条消息。</span>
             )}
@@ -294,35 +257,15 @@ export function RollbackConfirmDialog({
               </OverlayCardInset>
 
               <p className="mt-2 text-[11px] text-muted-foreground/60 hidden sm:block">
-                选择「回退并重发」将撤销以上文件变更。点击可展开查看 diff。
+                对话回退不改磁盘。文件回退请用版本面板。
               </p>
             </div>
           ) : (
             <div className="py-3 px-3 text-sm text-muted-foreground bg-muted/30 rounded-xl">
-              没有检测到可回退的文件变更。
+              没有检测到该轮之后的文件变更。
             </div>
           )
         )}
-
-        <label
-          className="flex items-center gap-1.5 text-xs text-muted-foreground cursor-pointer select-none mt-3"
-          onClick={() => setDontAskAgain(!dontAskAgain)}
-        >
-          <span
-            role="checkbox"
-            aria-checked={dontAskAgain}
-            className={[
-              "inline-flex items-center justify-center shrink-0 rounded-[3px] border transition-colors",
-              "h-[14px] w-[14px]",
-              dontAskAgain
-                ? "bg-primary border-primary text-primary-foreground"
-                : "border-muted-foreground/40 bg-transparent",
-            ].join(" ")}
-          >
-            {dontAskAgain && <Check className="h-[10px] w-[10px]" strokeWidth={2.5} />}
-          </span>
-          不再询问
-        </label>
       </OverlayCardBody>
 
       <OverlayCardFooter>
@@ -332,14 +275,7 @@ export function RollbackConfirmDialog({
             esc
           </kbd>
         </OverlayCardAction>
-        <OverlayCardAction action="outline" onClick={() => handleConfirm(false)}>
-          不回退改动
-          <span className="ml-0.5 items-center gap-0.5 text-[10px] text-muted-foreground/60 hidden sm:inline-flex">
-            <span>⇧</span>
-            <CornerDownLeft className="h-2.5 w-2.5" />
-          </span>
-        </OverlayCardAction>
-        <OverlayCardAction action="primary" onClick={() => handleConfirm(true)}>
+        <OverlayCardAction action="primary" onClick={handleConfirm}>
           回退并重发
           <CornerDownLeft className="h-3 w-3 opacity-60 hidden sm:inline" />
         </OverlayCardAction>

@@ -139,6 +139,31 @@ def test_distinct_run_ids_do_not_share_pending_names(tmp_path: Path) -> None:
     assert a != b
 
 
+def test_publish_does_not_use_sibling_run_bytes(tmp_path: Path) -> None:
+    run_a = allocate_pending_run_id()
+    run_b = allocate_pending_run_id()
+    _write_pending(tmp_path, "book.xlsx", "from-A", run_id=run_a)
+    b_dir = pending_run_dir(tmp_path, run_b)
+    b_dir.mkdir(parents=True)
+    a_dir = pending_run_dir(tmp_path, run_a)
+    hijack = a_dir / "aabbccddeeff0011_book.xlsx"
+    # B writes into A's directory as a host-level attacker simulation of the old wrapper hole.
+    # Isolation is enforced in the sandbox; host publish still only reads A's manifest + contained file.
+    # If B only has its own dir, A's bytes stay "from-A".
+    (b_dir / "manifest.jsonl").write_text(
+        json.dumps({"rel": "book.xlsx", "name": hijack.name}) + "\n",
+        encoding="utf-8",
+    )
+    published = publish_pending_writes(tmp_path, run_id=run_a, expected_versions={})
+    dest = tmp_path / "book.xlsx"
+    assert dest.is_file()
+    from openpyxl import load_workbook
+    wb = load_workbook(str(dest))
+    assert wb.active["A1"].value == "from-A"
+    wb.close()
+    assert published[0]["status"] == "committed"
+
+
 def test_file_access_guard_rejects_reserved(tmp_path: Path) -> None:
     guard = FileAccessGuard(str(tmp_path))
     with pytest.raises(SecurityViolationError):

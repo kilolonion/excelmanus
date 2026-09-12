@@ -2,27 +2,32 @@
 
 import { useState, useRef, useEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronDown } from "lucide-react";
+import { Brain, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
+import { formatThinkingDuration, thinkingPreview } from "@/lib/thinking";
 
 interface ThinkingBlockProps {
   content: string;
   duration?: number;
   startedAt?: number;
   isActive?: boolean;
+  title?: string;
+  defaultExpanded?: boolean;
 }
 
 const FADE_MASK =
   "linear-gradient(to bottom, transparent 0%, black 14%, black 86%, transparent 100%)";
-const PREVIEW_MAX_H = "6.5rem"; // ~4.2 lines at text-xs leading-relaxed
+const ACTIVE_MAX_H = "6.5rem";
 
 export function ThinkingBlock({
   content,
   duration,
   startedAt,
   isActive = false,
+  title,
+  defaultExpanded = false,
 }: ThinkingBlockProps) {
-  const [expanded, setExpanded] = useState(false);
+  const [expanded, setExpanded] = useState(defaultExpanded);
   const [elapsed, setElapsed] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
 
@@ -46,62 +51,70 @@ export function ThinkingBlock({
     : duration != null
       ? Math.round(duration)
       : 0;
-
-  const fmtDuration = (s: number): string => {
-    if (s <= 0) return "";
-    if (s < 60) return `${s}s`;
-    const m = Math.floor(s / 60);
-    const r = s % 60;
-    return r > 0 ? `${m}m ${r}s` : `${m}m`;
-  };
-
-  const durationStr = fmtDuration(seconds);
-  const showContent = isActive || expanded;
+  const durationStr = formatThinkingDuration(seconds);
+  const heading = title ?? (isActive ? "思考中" : "思考完成");
+  const showBody = (isActive || expanded) && !!content;
+  const preview = !isActive && !expanded ? thinkingPreview(content) : "";
 
   return (
-    <div className="my-2">
+    <div className="my-2 rounded-2xl border border-[var(--em-hairline)] bg-background overflow-hidden">
       <button
         type="button"
         onClick={() => !isActive && setExpanded((v) => !v)}
+        disabled={isActive}
+        aria-expanded={isActive || expanded}
+        aria-label={isActive ? heading : expanded ? "收起思考" : "展开思考"}
         className={cn(
-          "flex items-center gap-1.5 text-sm transition-colors select-none max-w-full",
-          isActive
-            ? "text-muted-foreground cursor-default"
-            : "text-muted-foreground hover:text-foreground cursor-pointer",
+          "flex w-full items-center gap-2 px-3 sm:px-3.5 py-2.5 text-left",
+          !isActive && "hover:bg-[var(--em-fill)] transition-colors",
+          isActive && "cursor-default",
         )}
       >
-        <span className="truncate">
-          {isActive ? "思考中" : "思考完成"}
+        <Brain
+          className={cn(
+            "h-4 w-4 flex-shrink-0",
+            isActive
+              ? "text-muted-foreground animate-tool-running-pulse"
+              : "text-[var(--em-primary)]",
+          )}
+        />
+        <span className="text-[13px] font-medium text-foreground whitespace-nowrap">
+          {heading}
+        </span>
+        <span
+          className={cn(
+            "text-[11px] font-medium px-1.5 py-px rounded-full",
+            isActive
+              ? "bg-[var(--em-fill)] text-[var(--em-text-secondary)]"
+              : "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]",
+          )}
+        >
+          {isActive ? "进行中" : "已完成"}
+        </span>
+        {preview && (
+          <span className="hidden sm:inline min-w-0 truncate text-[12px] text-muted-foreground">
+            {preview}
+          </span>
+        )}
+        <span className="ml-auto flex items-center gap-1.5 flex-shrink-0">
           {durationStr && (
-            <span className="ml-1 font-normal opacity-60">
+            <span className="text-[11px] tabular-nums text-muted-foreground">
               {durationStr}
             </span>
           )}
-          {!isActive && !expanded && content && (
-            <span className="ml-1.5 font-normal opacity-40 text-xs">
-              {content.replace(/\n/g, " ").slice(0, 60)}{content.length > 60 ? "…" : ""}
-            </span>
+          {!isActive && (
+            <ChevronDown
+              className={cn(
+                "h-4 w-4 text-muted-foreground/60 transition-transform",
+                expanded && "rotate-180",
+              )}
+            />
           )}
         </span>
-
-        {isActive ? (
-          <span className="inline-flex items-center gap-px ml-0.5 opacity-50">
-            <span className="w-[3px] h-[3px] rounded-full bg-current animate-bounce [animation-delay:0ms]" />
-            <span className="w-[3px] h-[3px] rounded-full bg-current animate-bounce [animation-delay:150ms]" />
-            <span className="w-[3px] h-[3px] rounded-full bg-current animate-bounce [animation-delay:300ms]" />
-          </span>
-        ) : (
-          <ChevronDown
-            className={cn(
-              "h-3.5 w-3.5 flex-shrink-0 transition-transform duration-200",
-              !expanded && "-rotate-90",
-            )}
-          />
-        )}
       </button>
 
       <AnimatePresence initial={false}>
-        {showContent && content && (
+        {showBody && (
           <motion.div
             key="thinking-content"
             initial={{ height: 0, opacity: 0 }}
@@ -113,15 +126,14 @@ export function ThinkingBlock({
             <div
               ref={contentRef}
               className={cn(
-                "mt-1.5 text-xs text-muted-foreground whitespace-pre-wrap leading-relaxed",
-                "rounded-lg bg-muted/20 dark:bg-muted/10 px-3 py-2",
-                "scrollbar-none",
-                isActive && "overflow-y-auto",
+                "px-3 sm:px-3.5 pb-3 text-[12px] text-[var(--em-text-secondary)] whitespace-pre-wrap leading-relaxed break-words",
+                "max-h-48 overflow-y-auto",
+                isActive && "scrollbar-none",
               )}
               style={
                 isActive
                   ? {
-                      maxHeight: PREVIEW_MAX_H,
+                      maxHeight: ACTIVE_MAX_H,
                       maskImage: FADE_MASK,
                       WebkitMaskImage: FADE_MASK,
                     }

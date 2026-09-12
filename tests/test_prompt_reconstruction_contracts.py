@@ -172,9 +172,10 @@ def test_range_include_declares_ignored(tmp_path: Path) -> None:
         range="A1:A1",
         include=["styles"],
     )
-    assert result.success
-    assert "include_warning" in _payload(result)
-    assert "忽略" in result.model_text
+    assert not result.success
+    assert result.error is not None
+    assert result.error.code == "INVALID_ARGS"
+    assert "formulas" in result.model_text or "ignored_fields" in result.value
 
 
 def test_analyze_form_does_not_emit_missing_data(tmp_path: Path) -> None:
@@ -219,6 +220,7 @@ def test_format_skips_merged_non_anchors(tmp_path: Path) -> None:
         operations=[
             {
                 "kind": "format",
+                "sheet": "Sheet",
                 "range": "A1:B1",
                 "fill": {"color": "FFCC00"},
             }

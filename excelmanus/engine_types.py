@@ -126,12 +126,6 @@ class TurnDiagnostic:
     tool_names: list[str] = field(default_factory=list)
     # 门禁事件
     guard_events: list[str] = field(default_factory=list)
-    # Think-Act 推理检测
-    has_reasoning: bool = True
-    reasoning_chars: int = 0
-    silent_tool_call_count: int = 0
-    # 文本工具调用恢复
-    text_tool_call_recovered: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -153,14 +147,6 @@ class TurnDiagnostic:
             d["tool_names"] = self.tool_names
         if self.guard_events:
             d["guard_events"] = self.guard_events
-        if not self.has_reasoning:
-            d["has_reasoning"] = False
-        if self.reasoning_chars:
-            d["reasoning_chars"] = self.reasoning_chars
-        if self.silent_tool_call_count:
-            d["silent_tool_call_count"] = self.silent_tool_call_count
-        if self.text_tool_call_recovered:
-            d["text_tool_call_recovered"] = True
         return d
 
 
@@ -183,8 +169,6 @@ class ChatResult:
     tool_access: str = ""
     route_mode: str = ""
     skills_used: list[str] = field(default_factory=list)
-    # Think-Act 推理质量指标
-    reasoning_metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

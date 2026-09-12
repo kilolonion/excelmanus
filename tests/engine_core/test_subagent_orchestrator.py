@@ -9,7 +9,6 @@ from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import DelegateSubagentOutcome
 from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
 from excelmanus.memory import ConversationMemory
-from excelmanus.subagent.executor import SubagentExecutor
 from excelmanus.subagent.models import SubagentFileChange, SubagentResult
 
 
@@ -33,7 +32,6 @@ def _make_orchestrator(
     engine_mock._skill_resolver.resolve_hook_result = AsyncMock(return_value=None)
     engine_mock._run_skill_hook = MagicMock(return_value=None)
     engine_mock.run_subagent = AsyncMock()
-    engine_mock._context_builder = MagicMock()
     engine_mock._normalize_subagent_file_paths = MagicMock(return_value=[])
     # E4: orchestrator 现在直接访问 _subagent_registry
     engine_mock._subagent_registry = MagicMock()
@@ -189,178 +187,6 @@ class TestFailurePartialArtifacts:
 
         assert outcome.success is False
         assert "已保留部分产出" in outcome.reply
-
-
-class TestCategorySignature:
-    """_category_signature 类别签名测试。"""
-
-    def test_same_tool_same_error_category_yields_same_signature(self):
-        """同工具 + 同类错误（不同参数）应该产生相同的类别签名。"""
-        sig1 = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="文件 data.xlsx 不存在",
-        )
-        sig2 = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="文件 other.xlsx 不存在",
-        )
-        assert sig1 == sig2
-
-    def test_different_error_categories_yield_different_signatures(self):
-        """同工具但不同错误类别应该产生不同的类别签名。"""
-        sig_not_found = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="文件不存在",
-        )
-        sig_permission = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="权限不足",
-        )
-        assert sig_not_found != sig_permission
-
-    def test_different_tools_same_error_yield_different_signatures(self):
-        """不同工具即使同类错误也应该产生不同签名。"""
-        sig1 = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="file not found",
-        )
-        sig2 = SubagentExecutor._category_signature(
-            tool_name="list_sheets", error="file not found",
-        )
-        assert sig1 != sig2
-
-    def test_unknown_error_category_fallback(self):
-        """未匹配任何关键词时应归类为 unknown。"""
-        sig = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="一个完全随机的错误",
-        )
-        # 只要能返回就说明没报错
-        assert isinstance(sig, str) and len(sig) == 32
-
-
-class TestBuildFailureHint:
-    """渐进降级提示消息构建测试。"""
-
-    def test_hint_contains_tool_name_and_streak(self):
-        hint = SubagentExecutor._build_failure_hint(
-            tool_name="read_excel", streak=3, max_failures=6,
-            error="文件不存在",
-        )
-        assert "read_excel" in hint
-        assert "3" in hint
-        assert "还剩" in hint
-
-    def test_hint_shows_urgency_when_near_limit(self):
-        hint = SubagentExecutor._build_failure_hint(
-            tool_name="read_excel", streak=5, max_failures=6,
-            error="boom",
-        )
-        assert "即将触发终止" in hint
-
-    def test_hint_truncates_long_error(self):
-        long_error = "x" * 500
-        hint = SubagentExecutor._build_failure_hint(
-            tool_name="read_excel", streak=2, max_failures=6,
-            error=long_error,
-        )
-        assert len(hint) < 600  # 提示不会无限膊长
-
-
-class TestFailureSignatureVsCategory:
-    """_failure_signature 与 _category_signature 的对比。"""
-
-    def test_exact_signature_requires_same_args(self):
-        """精确签名要求参数完全相同。"""
-        sig1 = SubagentExecutor._failure_signature(
-            tool_name="read_excel",
-            arguments={"file_path": "a.xlsx"},
-            error="not found",
-        )
-        sig2 = SubagentExecutor._failure_signature(
-            tool_name="read_excel",
-            arguments={"file_path": "b.xlsx"},
-            error="not found",
-        )
-        assert sig1 != sig2  # 精确签名不同
-
-        # 但类别签名相同
-        cat1 = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="not found",
-        )
-        cat2 = SubagentExecutor._category_signature(
-            tool_name="read_excel", error="not found",
-        )
-        assert cat1 == cat2
-
-
-class TestPartialProgressSummary:
-    """异常退出时应保留已完成工作的中间产出摘要。"""
-
-    def _make_memory_with_history(self) -> ConversationMemory:
-        config = MagicMock(spec=ExcelManusConfig)
-        config.max_context_tokens = 128000
-        mem = ConversationMemory(config)
-        mem.add_user_message("请分析 data.xlsx")
-        mem.add_assistant_message("已读取 data.xlsx，共 500 行 10 列，包含销售数据。")
-        return mem
-
-    def test_extracts_assistant_analysis_from_memory(self):
-        """应从 memory 中提取 assistant 的中间分析文本。"""
-        mem = self._make_memory_with_history()
-        summary = SubagentExecutor._build_partial_progress_summary(
-            memory=mem,
-            observed_files={"data.xlsx"},
-            structured_changes=[],
-            iterations=2,
-            tool_calls=3,
-        )
-        assert "中间分析" in summary
-        assert "500 行" in summary
-        assert "data.xlsx" in summary
-        assert "2 轮迭代" in summary
-        assert "3 次工具调用" in summary
-
-    def test_empty_memory_returns_stats_only(self):
-        """无 assistant 消息时仅返回统计信息。"""
-        config = MagicMock(spec=ExcelManusConfig)
-        config.max_context_tokens = 128000
-        mem = ConversationMemory(config)
-        mem.add_user_message("测试")
-        summary = SubagentExecutor._build_partial_progress_summary(
-            memory=mem,
-            observed_files=set(),
-            structured_changes=[],
-            iterations=1,
-            tool_calls=1,
-        )
-        assert "中间分析" not in summary
-        assert "1 轮迭代" in summary
-
-    def test_no_iterations_returns_empty(self):
-        """无任何迭代时应返回空字符串。"""
-        config = MagicMock(spec=ExcelManusConfig)
-        config.max_context_tokens = 128000
-        mem = ConversationMemory(config)
-        summary = SubagentExecutor._build_partial_progress_summary(
-            memory=mem,
-            observed_files=set(),
-            structured_changes=[],
-            iterations=0,
-            tool_calls=0,
-        )
-        assert summary == ""
-
-    def test_truncates_long_assistant_text(self):
-        """超长 assistant 文本应被截断。"""
-        config = MagicMock(spec=ExcelManusConfig)
-        config.max_context_tokens = 128000
-        mem = ConversationMemory(config)
-        mem.add_user_message("测试")
-        mem.add_assistant_message("x" * 500)
-        summary = SubagentExecutor._build_partial_progress_summary(
-            memory=mem,
-            observed_files=set(),
-            structured_changes=[],
-            iterations=1,
-            tool_calls=0,
-        )
-        assert "…" in summary
-        assert len(summary) < 400
 
 
 class TestFailureReplyDedup:

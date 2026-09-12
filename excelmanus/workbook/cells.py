@@ -18,21 +18,19 @@ def init_guard(workspace_root: str) -> None:
 
 
 def _coerce_value(raw: Any) -> Any:
-    """字符串值转成合适的 Python 类型；以 '=' 开头的保留为公式。"""
-    if not isinstance(raw, str):
+    """尊重 JSON/Python 类型；字符串不解析成数字。以 '=' 开头的保留为公式。"""
+    if raw is None or not isinstance(raw, str):
         return raw
     stripped = raw.strip()
-    if not stripped:
-        return stripped
     if stripped.startswith("="):
         return stripped
-    try:
-        if "." in stripped or "e" in stripped.lower():
-            return float(stripped)
-        return int(stripped)
-    except (ValueError, OverflowError):
-        pass
     return raw
+
+
+def assign_cell_value(ws: Any, row: int, col: int, raw: Any) -> None:
+    """写入或清空单元格。``ws.cell(..., value=None)`` 不会改已有值。"""
+    cell = ws.cell(row=row, column=col)
+    cell.value = _coerce_value(raw)
 
 
 def _resolve_merged_cell(ws: Any, row: int, col: int) -> tuple[int, int, bool]:

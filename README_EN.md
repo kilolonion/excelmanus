@@ -8,7 +8,7 @@
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.7.2-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.7.3-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
   <img src="https://img.shields.io/badge/pytest-included-brightgreen.svg" alt="Tests" />
 </p>
@@ -25,9 +25,9 @@
 
 **ExcelManus** is a fully open-source, LLM-powered Excel Agent framework. Describe what you need in plain language and it will read data, write formulas, run analysis scripts, and create charts — like an AI assistant that truly understands Excel.
 
-- **Four interfaces** — Web UI / CLI Terminal / Multi-Channel Bot (Telegram · QQ · Feishu) / REST API
+- **Three interfaces** — Web UI / CLI Terminal / REST API
 - **Any LLM** — OpenAI · Claude · Gemini · DeepSeek · Qwen · Kimi · xAI · Doubao · local Ollama / vLLM, plug and play
-- **Production-ready** — Multi-arch Docker · hot updates · single-user workspace · approval flows · version rollback
+- **Production-ready** — Local Git stop-then-upgrade · server deploy.sh · single-user workspace · approval flows · version rollback
 
 > 💡 Only 3 env vars to get started: `API_KEY` + `BASE_URL` + `MODEL`
 
@@ -77,13 +77,9 @@ Large files and complex tasks auto-delegated to sub-agents
 ### 🔍 Semantic Retrieval
 Embedding-powered parallel semantic retrieval for memory / files / skills, zero extra latency
 
-### 🤖 Multi-Channel Bot
-Telegram · QQ · Feishu — three channels with file send/receive
-Three concurrency modes (Queue / Steer / Guide), adaptive streaming output strategies
-
-### 🔥 In-App Hot Update
-One-click version check → backup → update → auto-restart from Web UI
-Version compatibility validation, blue-green deployment, rollback window protection
+### 🔄 Local stop-then-upgrade
+Settings one-click update: stop processes → backup `$EXCELMANUS_HOME` → git fast-forward → start again
+Server deploys run `deploy.sh` on an ops machine, not from the production API
 
 </td>
 </tr>
@@ -130,7 +126,7 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Clone and install
 git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
-uv sync --all-extras     # Full install: cli/web/channels/analysis (also supports pip install ".[all]")
+uv sync --all-extras     # Full install: cli/web/analysis (also supports pip install ".[all]")
 
 # 3. Configure
 cp .env.example .env     # Edit .env with your API Key / Base URL / Model
@@ -171,7 +167,7 @@ Built on **Next.js + Univer.js**, providing a full visual experience.
 | **ClawHub Market** | Inline skill market panel in sidebar |
 | **API Pool** | Optional credential pool and subscription rotation (off by default) |
 | **Plan Mode** | Complex tasks auto-planned, interactive confirmation before execution |
-| **Hot Update Notification** | Detects new versions, auto-probes backend after upgrade |
+| **Upgrade notification** | Detects new versions; local stop-then-upgrade then probe |
 
 <p align="center">
   <img src="docs/images/webui-mobile.png" width="300" alt="Mobile" />
@@ -196,7 +192,6 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 | `/plan` | Toggle Plan mode |
 | `/undo <id>` | Rollback operation |
 | `/registry` | View file registry |
-| `/backup list` | View backups |
 | `/rules` | Custom rules |
 | `/memory` | Memory management |
 | `/playbook` | Playbook task experience management |
@@ -208,21 +203,6 @@ Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
 | `/rollback` | Rollback session to a specific turn |
 
 </details>
-
-### Multi-Channel Bot
-
-Supports **Telegram** · **QQ** · **Feishu** with a unified message handling framework:
-
-| Feature | Description |
-| --- | --- |
-| **Unified Adapter Layer** | Message send/receive, file upload/download, event bridging abstracted uniformly |
-| **Three Concurrency Modes** | Queue · Steer · Guide, switch via `/concurrency` |
-| **Adaptive Streaming Output** | Telegram edit-stream · QQ progressive paragraphs · Feishu card-stream, optimal UX per channel |
-| **HTTP Retry & Backoff** | Connection-level retry + exponential backoff + 429 Retry-After respect |
-
-```bash
-# All channels (Telegram / QQ / Feishu): configure channel credentials in Web UI settings
-```
 
 ### REST API
 
@@ -245,8 +225,8 @@ Available once `excelmanus-api` starts. SSE pushes 30+ event types.
 | `POST /api/v1/files/excel/write` | Side panel write-back |
 | `GET /api/v1/skills` | Skill list |
 | `GET /api/v1/clawhub/*` | ClawHub market (search / install / update) |
-| `GET /api/v1/version/check` | Version check & hot update |
-| `POST /api/v1/version/update` | Execute online update |
+| `GET /api/v1/version/check` | Version check |
+| `POST /api/v1/version/upgrade` | Local stop-then-upgrade (standalone + loopback only) |
 | `GET /api/v1/auth/codex/status` | Codex connection status |
 | `POST /api/v1/config/export` | Export config |
 | `GET /api/v1/health` | Health check |
@@ -266,15 +246,9 @@ ExcelManus auto-detects model providers by URL — zero-config switching:
 | **OpenAI Codex** | ChatGPT subscription OAuth (browser PKCE or device code) binds Codex; private models auto-discovered, no manual Key |
 | **MiniMax / Zhipu / Qwen / Kimi / Doubao / xAI** | Auto-detects base_url; falls back to a curated model list when `/models` is unavailable |
 
-### Auxiliary Model (AUX)
+### Model Profiles
 
-Configure an independent lighter model for **intent routing and sub-agents** — significantly reduce cost without affecting task quality:
-
-```dotenv
-EXCELMANUS_AUX_API_KEY=sk-xxxx
-EXCELMANUS_AUX_BASE_URL=https://api.openai.com/v1
-EXCELMANUS_AUX_MODEL=gpt-5.6-luna
-```
+Add multiple model profiles in Settings and activate one for chat, subagents, and compaction. `/model <name>` switches the active profile.
 
 ### Model Capability Probing
 
@@ -288,7 +262,7 @@ ExcelManus includes an **embedding-powered semantic retrieval system** to keep t
 | --- | --- |
 | **Semantic Memory Retrieval** | User preferences and history vectorized, auto-recalled for new tasks |
 | **Semantic File Registry** | Workspace files indexed by embedding, injected into context by relevance |
-| **Semantic Skill Router** | Skillpack descriptions vectorized, auto-matches optimal skill |
+| **Skill catalog** | Optional skills listed in-session; the model loads a body with `skill`, or the user injects one with `/name` |
 | **Session History Retrieval** | Auto-generates structured session summaries, semantic / filename / recency three-path hybrid retrieval, injects history context on first turn |
 | **Error Solution Store** | Error → solution vector index, auto-recalls past fixes for similar errors |
 | **Smart Context Compaction** | Relevance-scored differential truncation, high-relevance messages retain more detail |
@@ -301,11 +275,10 @@ All semantic retrieval runs in parallel via `asyncio.gather`, zero extra latency
 | --- | --- |
 | **Path Sandbox** | Reads/writes restricted to working directory, path traversal and symlink escapes rejected |
 | **Code Review** | `run_code` static analysis, Green / Yellow / Red tier auto-approval |
-| **Docker Sandbox** | Optional container isolation for user code (`EXCELMANUS_DOCKER_SANDBOX=1`) |
+| **Local process fence** | `run_code` runs in a local subprocess (path jail, restricted builtins, timeout); no Docker |
 | **Operation Approval** | High-risk writes require confirmation, changes auto-record diffs and snapshots |
 | **Version Chain** | Staging → Audit → CoW, `/undo` rollback to any version |
 | **MCP Whitelist** | External tools require per-item confirmation by default |
-| **Channel Rate Limits** | Telegram / QQ / Feishu bots throttle by message type |
 | **Workspace Boundary** | One workspace, one credential store, and one memory store per process; multiple chats are not multi-tenancy |
 
 ## 🧩 Skillpack & ClawHub
@@ -354,24 +327,7 @@ Legacy `users/{id}/` trees are not auto-merged. Copy the one directory you want 
 
 ## 🏗️ Deployment
 
-### Docker Compose (Recommended)
-
-```bash
-cp .env.example .env
-docker compose -f deploy/docker-compose.yml up -d
-```
-
-Visit `http://localhost:3000`. Add `--profile production` for Nginx reverse proxy.
-
-Images support **amd64** + **arm64** dual architecture:
-
-```bash
-docker pull kilol/excelmanus-api:1.7.2       # Backend API
-docker pull kilol/excelmanus-sandbox:1.7.2   # Code sandbox (optional)
-docker pull kilol/excelmanus-web:1.7.2       # Frontend Web
-```
-
-### Start Scripts (Local Development)
+### Local start (recommended)
 
 ```bash
 ./deploy/start.sh              # macOS / Linux dev mode
@@ -380,17 +336,22 @@ docker pull kilol/excelmanus-web:1.7.2       # Frontend Web
 deploy\start.bat --prod        # Windows CMD
 ```
 
-Supports `--backend-port` · `--frontend-port` · `--workers` · `--backend-only` and more.
+Visit `http://localhost:3000`. Supports `--backend-port` · `--frontend-port` · `--workers` · `--backend-only` and more.
+
+Local upgrade: Settings → Apply update, or stop the service then `./deploy/update.sh`. The helper stops the process group, backs up `$EXCELMANUS_HOME`, fast-forwards git, then starts again.
+
+**Former Compose / image users**: copy the volume's database and uploads into `$EXCELMANUS_HOME` (default `~/.excelmanus`), then use `./deploy/start.sh` or PM2 / systemd on the server. Docker is no longer a product install path.
 
 ### Remote Deploy
 
-Deploy scripts operate remote servers via SSH, supporting single-server / split frontend-backend / Docker topologies:
+Run deploy scripts on an **ops machine** over SSH. Topologies: single-server, split frontend/backend, or local. A production process (`EXCELMANUS_DEPLOY_MODE=server`) cannot upgrade itself or trigger remote deploy.
 
 ```bash
 ./deploy/deploy.sh                    # Full deploy
 ./deploy/deploy.sh --backend-only     # Backend only
 ./deploy/deploy.sh --frontend-only    # Frontend only
 ./deploy/deploy.sh rollback           # Rollback to previous version
+./deploy/deploy.sh rollback-to --commit <hash>
 ./deploy/deploy.sh check              # Environment + connectivity check
 ```
 
@@ -409,17 +370,13 @@ On failure, keeps current running version. Auto-excludes `.env`, `data/`, `works
 
 </details>
 
-### Hot Update
+### Upgrade
 
-ExcelManus has built-in application-level hot update:
+Local (standalone) stop-then-upgrade: Settings one-click update, or stop the service then `./deploy/update.sh`. The helper kills the start process group, backs up `$EXCELMANUS_HOME`, fast-forwards git, then starts again. Conflicts are not `reset --hard`.
 
-- **Version check** — Periodically polls Gitee / GitHub Tags API with TTL cache
-- **Data backup** — Auto-backs up `.env`, user data, uploads before update
-- **Code update** — git pull + dependency reinstall, mutex lock prevents concurrent updates
-- **Web UI integration** — Settings panel one-click: check → confirm → execute with live progress
-- **Restart probe** — Frontend auto-detects backend recovery after update, seamless refresh
+On a server (`EXCELMANUS_DEPLOY_MODE=server`), run `./deploy/deploy.sh` from an ops machine; the production API refuses to upgrade itself. Rollback: `./deploy/deploy.sh rollback-to --commit <hash>`.
 
-See [Hot Update Design](docs/hot-update-design.md).
+See [Upgrade & deploy](docs/hot-update-design.md).
 
 For manual deployment, see [Ops Manual](docs/ops-manual_en.md).
 
@@ -430,7 +387,7 @@ For manual deployment, see [Ops Manual](docs/ops-manual_en.md).
 | **Claude Layered Cache** | System prompt split into stable prefix + dynamic block, 2nd request TTFT drops to 3-5s |
 | **SACR Sparse Compression** | Strips null keys from tool results, up to **74% token savings** on sparse data |
 | **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns |
-| **Auxiliary Model Separation** | Subagents and compaction can use a lightweight AUX model; the main model focuses on reasoning |
+| **Single Active Model** | Chat, subagents, and compaction share the active profile |
 | **Context Budget Management** | Dynamic budget allocation with relevance-scored differential truncation |
 | **Parallel Semantic Retrieval** | `asyncio.gather` runs memory/file/skill/session-history retrieval in parallel, zero extra latency |
 | **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler |
@@ -443,9 +400,8 @@ Only 3 env vars to get started. Common configuration categories:
 | Category | Key Config |
 | --- | --- |
 | **Basic** | `EXCELMANUS_API_KEY` / `BASE_URL` / `MODEL` |
-| **Auxiliary Model** | `EXCELMANUS_AUX_API_KEY` / `AUX_BASE_URL` / `AUX_MODEL` |
 | **Vision** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_KEEP_ROUNDS` |
-| **Security** | `EXCELMANUS_DOCKER_SANDBOX` / `GUARD_MODE` |
+| **Security** | `GUARD_MODE` |
 | **Performance** | `IMAGE_KEEP_ROUNDS` |
 | **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
 | **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
@@ -477,7 +433,7 @@ uv run python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 ## 🛠️ Development & Contributing
 
 ```bash
-uv sync --all-extras --dev    # Full install (cli/web/channels/analysis) + test dependencies
+uv sync --all-extras --dev    # Full install (cli/web/analysis) + test dependencies
 uv run pytest tests/test_engine.py tests/test_api.py  # Targeted tests
 ```
 

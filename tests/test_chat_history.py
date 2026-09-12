@@ -148,6 +148,15 @@ def test_save_turn_messages_dedupes_by_message_id(store):
     assert loaded[1]["content"] == "ok"
 
 
+def test_unique_index_rejects_duplicate_message_id(store):
+    store.create_session("s1", "测试")
+    store.save_turn_messages("s1", [{"role": "user", "content": "a", "message_id": "same"}], turn_number=1)
+    store.save_turn_messages("s1", [{"role": "user", "content": "b", "message_id": "same"}], turn_number=1)
+    loaded = store.load_messages("s1")
+    assert len(loaded) == 1
+    assert loaded[0]["content"] == "a"
+
+
 def test_get_message_count(store):
     store.create_session("s1", "测试")
     assert store.get_message_count("s1") == 0
@@ -155,3 +164,40 @@ def test_get_message_count(store):
         "s1", [{"role": "user", "content": "hi"}], turn_number=1
     )
     assert store.get_message_count("s1") == 1
+
+
+def test_session_workspace_fields_and_blank_flip(store):
+    store.create_session(
+        "s1", "新对话", workspace_path="/tmp/ws-a", workspace_id="w1", blank=True,
+    )
+    meta = store.get_session_meta("s1")
+    assert meta is not None
+    assert meta["workspace_path"] == "/tmp/ws-a"
+    assert meta["workspace_id"] == "w1"
+    assert int(meta["blank"]) == 1
+    found = store.find_blank_session("/tmp/ws-a")
+    assert found is not None
+    assert found["id"] == "s1"
+    store.save_turn_messages(
+        "s1", [{"role": "user", "content": "hello", "message_id": "m1"}], turn_number=1,
+    )
+    meta = store.get_session_meta("s1")
+    assert int(meta["blank"]) == 0
+    assert store.find_blank_session("/tmp/ws-a") is None
+
+
+def test_backfill_workspace_paths(store):
+    store.create_session("old", "旧会话")
+    store.backfill_workspace_paths("/tmp/default-ws", "wid-1")
+    meta = store.get_session_meta("old")
+    assert meta["workspace_path"] == "/tmp/default-ws"
+    assert meta["workspace_id"] == "wid-1"
+    store.create_session("with-msgs", "有消息")
+    store.save_turn_messages(
+        "with-msgs",
+        [{"role": "user", "content": "hi", "message_id": "m2"}],
+        turn_number=1,
+    )
+    store.set_session_blank("with-msgs", True)
+    store.backfill_workspace_paths("/tmp/default-ws", "wid-1")
+    assert int(store.get_session_meta("with-msgs")["blank"]) == 0

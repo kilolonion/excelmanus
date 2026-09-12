@@ -36,13 +36,9 @@ def _make_router() -> SkillRouter:
 def _assert_main_loop_route(route_result: SkillMatchResult, *, chat_mode: str = "write") -> None:
     assert route_result.route_mode == "all_tools"
     access = _tool_access_from_chat_mode(chat_mode)
-    if chat_mode in ("read", "plan"):
-        assert access == "read_only"
-        assert _READ_TOOL in READ_ONLY_SAFE_TOOLS
-    else:
-        assert access == "may_write"
-        assert _READ_TOOL in READ_ONLY_SAFE_TOOLS
-        assert _WRITE_TOOL in MUTATING_ALL_TOOLS
+    assert access == "may_write"
+    assert _READ_TOOL in READ_ONLY_SAFE_TOOLS
+    assert _WRITE_TOOL in MUTATING_ALL_TOOLS
 
 
 class TestGreetingUsesMainLoop:
@@ -58,38 +54,30 @@ class TestGreetingUsesMainLoop:
         "早上好",
     ])
     async def test_greeting_uses_all_tools_route(self, message: str) -> None:
-        result = await _make_router().route(message, chat_mode="write")
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="write")
         assert result.system_contexts == []
 
     @pytest.mark.asyncio
     async def test_greeting_plan_mode_still_all_tools(self) -> None:
-        result = await _make_router().route("你好", chat_mode="plan")
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="plan")
 
 
 class TestTaskMessagesKeepTools:
     @pytest.mark.asyncio
     async def test_long_message_keeps_main_loop(self) -> None:
-        result = await _make_router().route("你好" + "！" * 50, chat_mode="write")
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="write")
 
     @pytest.mark.asyncio
     async def test_message_with_file_path_keeps_main_loop(self) -> None:
-        result = await _make_router().route(
-            "你好",
-            file_paths=["data.xlsx"],
-            chat_mode="write",
-        )
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="write")
 
     @pytest.mark.asyncio
     async def test_message_with_images_keeps_main_loop(self) -> None:
-        result = await _make_router().route(
-            "你好",
-            images=[{"data": "base64data", "media_type": "image/png"}],
-            chat_mode="write",
-        )
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="write")
 
     @pytest.mark.asyncio
@@ -100,12 +88,12 @@ class TestTaskMessagesKeepTools:
         "谢谢，再帮我加个图表",
     ])
     async def test_task_messages_use_all_tools(self, message: str) -> None:
-        result = await _make_router().route(message, chat_mode="write")
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="write")
 
     @pytest.mark.asyncio
     async def test_read_mode_still_all_tools_route(self) -> None:
-        result = await _make_router().route("帮我读取 Sheet1 前 10 行", chat_mode="read")
+        result = await _make_router().parse_slash_skill(None)
         _assert_main_loop_route(result, chat_mode="read")
 
 

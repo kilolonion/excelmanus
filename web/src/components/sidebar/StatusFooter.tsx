@@ -91,9 +91,6 @@ export function StatusFooter() {
                 {health && (
                   <span className="text-muted-foreground/50 hidden sm:inline">
                     · {health.tools.length}T · {health.skillpacks.length}S
-                    {health.channels && health.channels.length > 0 && (
-                      <> · {health.channels.length}Ch</>
-                    )}
                   </span>
                 )}
               </span>
@@ -104,9 +101,6 @@ export function StatusFooter() {
                 <>
                   <br />模型: {health.model}
                   <br />工具: {health.tools.length} · 技能包: {health.skillpacks.length} · 会话: {health.active_sessions}
-                  {health.channels && health.channels.length > 0 && (
-                    <><br />渠道: {health.channels.join(", ")}</>
-                  )}
                 </>
               )}
             </TooltipContent>

@@ -346,19 +346,18 @@ The backend `.env` is located at `/opt/excelmanus/.env`. Key configurations:
 
 | Variable | Purpose | Notes |
 |----------|---------|-------|
-| `EXCELMANUS_API_KEY` | Primary model API Key | Required |
-| `EXCELMANUS_BASE_URL` | Primary model endpoint | Required |
-| `EXCELMANUS_MODEL` | Primary model name | Required |
-| `EXCELMANUS_PROTOCOL` | Primary model protocol type | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`/`docker`) | `auto` |
-| `EXCELMANUS_AUX_*` | Auxiliary model (subagent default, compaction, etc.) | |
-| `EXCELMANUS_MAIN_MODEL_VISION` | Whether the main model accepts image attachments (`auto`/`true`/`false`) | `auto` |
+| `EXCELMANUS_API_KEY` | Bootstrap model API Key (overridden by the active profile) | Required |
+| `EXCELMANUS_BASE_URL` | Bootstrap model endpoint | Required |
+| `EXCELMANUS_MODEL` | Bootstrap model name | Required |
+| `EXCELMANUS_PROTOCOL` | Model protocol type | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`) | `auto` |
+| `EXCELMANUS_MAIN_MODEL_VISION` | Whether the active model accepts image attachments (`auto`/`true`/`false`) | `auto` |
 | `EXCELMANUS_EMBEDDING_*` | Embedding model (semantic search/skill routing/error solutions) | |
 | `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Auto-generated if empty |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Must include frontend domain |
-| `EXCELMANUS_DATABASE_URL` | PostgreSQL connection URL (takes priority over SQLite) | Empty (uses SQLite) |
-| `EXCELMANUS_JWT_SECRET` | Optional JWT secret for download tokens | Auto-generated if unset |
+
+Set `EXCELMANUS_DEPLOY_MODE=server` on production. The API then rejects `/version/upgrade` and `/deploy/execute`; upgrade and rollback run on an ops machine via `./deploy/deploy.sh` (`rollback-to --commit` is checkout + restart). Local Git installs use the Settings stop-then-upgrade flow. See [Upgrade & deploy](hot-update-design.md).
 
 ---
 
@@ -522,10 +521,7 @@ Project Root/
 │   ├── start.bat          # One-click start script (Windows CMD)
 │   ├── deploy.sh          # Remote deployment script (macOS / Linux)
 │   ├── deploy.ps1         # Remote deployment script (Windows PowerShell)
-│   ├── Dockerfile         # Backend Docker image
-│   ├── Dockerfile.sandbox # Code sandbox image
-│   ├── docker-compose.yml # Docker Compose orchestration
-│   ├── nginx.conf         # Nginx reverse proxy config
+│   ├── nginx.conf         # Nginx reverse proxy config (127.0.0.1 sample; see this manual for production)
 │   └── certs/             # TLS certificates
 ├── excelmanus/
 │   ├── config.py           # Environment variables & config loading

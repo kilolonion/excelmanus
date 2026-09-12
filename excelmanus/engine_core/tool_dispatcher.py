@@ -33,7 +33,11 @@ from excelmanus.engine_core.workspace_probe import (
 )
 from excelmanus.hooks import HookDecision, HookEvent
 from excelmanus.logger import get_logger, log_tool_call
-from excelmanus.security.policy import writes_denied
+from excelmanus.security.policy import (
+    RESTRICTED_WRITE_EFFECTS,
+    is_plan_active,
+    writes_denied,
+)
 from excelmanus.tools.registry import ToolNotAllowedError
 from excelmanus.workspace.identity import IdentityError
 
@@ -124,6 +128,7 @@ class ToolDispatcher:
         # Code Mode 子调用与父 run_code 共用的调用次数预算；None 表示不限制
         self._call_budget: int | None = None
         self._call_count: int = 0
+        self._call_budget_reason: str = "已达到调用上限"
         self._runtime: Any = None
         # 最近一次工具调用的截断前 model_text
         self._last_call_raw_result: str = ""
@@ -343,10 +348,16 @@ class ToolDispatcher:
     def is_cancelled(self) -> bool:
         return self._cancel_event.is_set()
 
-    def begin_call_budget(self, max_calls: int | None) -> None:
+    def begin_call_budget(
+        self,
+        max_calls: int | None,
+        *,
+        reason: str = "已达到调用上限",
+    ) -> None:
         """开始一段共享调用预算。``None`` 表示不限制。"""
         self._call_budget = max_calls
         self._call_count = 0
+        self._call_budget_reason = reason
 
     def consume_call_budget(self) -> bool:
         """消耗一次调用额度。超预算返回 False。"""
@@ -356,6 +367,12 @@ class ToolDispatcher:
             return False
         self._call_count += 1
         return True
+
+    def has_call_budget_remaining(self) -> bool:
+        """主循环在下一轮 LLM 之前检查：工具调用预算是否还剩额度。"""
+        if self._call_budget is None:
+            return True
+        return self._call_count < self._call_budget
 
     @staticmethod
     def _blocked_tool_result(code: str, message: str) -> ToolResult:
@@ -399,16 +416,22 @@ class ToolDispatcher:
             parent=parent,
         )
 
-    def _denied_in_read_mode(self, tool_name: str) -> bool:
-        """read/plan 目录仍完整；执行器拒绝写入。plan 仅放行写计划/退出计划。"""
-        chat = str(getattr(self._engine, "_current_chat_mode", "write") or "write")
-        if chat == "plan" and tool_name in self._PLAN_MODE_ALLOWED:
-            return False
-        if tool_name in self._READ_MODE_DENIED_BY_NAME:
-            return True
+    def _write_effect_of(self, tool_name: str) -> str:
         getter = getattr(self._engine, "get_tool_write_effect", None)
         effect = getter(tool_name) if callable(getter) else "unknown"
-        return effect in ("workspace_write", "external_write", "dynamic", "unknown")
+        return effect if isinstance(effect, str) else "unknown"
+
+    def _denied_in_read_mode(self, tool_name: str) -> bool:
+        """read-only sandbox: catalog stays full; executor rejects writes."""
+        if tool_name in self._READ_MODE_DENIED_BY_NAME:
+            return True
+        return self._write_effect_of(tool_name) in RESTRICTED_WRITE_EFFECTS
+
+    def _denied_in_plan_mode(self, tool_name: str) -> bool:
+        """Plan is not sandbox. Hard-reject writes except plan tools."""
+        if tool_name in self._PLAN_MODE_ALLOWED:
+            return False
+        return self._write_effect_of(tool_name) in RESTRICTED_WRITE_EFFECTS
 
     async def call_registry_tool(
         self,
@@ -502,10 +525,6 @@ class ToolDispatcher:
 
         if self.is_cancelled():
             return self._blocked_tool_result("CANCELLED", "任务已取消")
-        if not self.consume_call_budget():
-            return self._blocked_tool_result(
-                "BUDGET_EXCEEDED", "本次 run_code 内嵌套调用达上限"
-            )
         self._seed_seen_versions()
         if not call_id:
             self._subcall_seq = getattr(self, "_subcall_seq", 0) + 1
@@ -574,6 +593,12 @@ class ToolDispatcher:
 
         if self.is_cancelled():
             return self._blocked_call_result(tc, code="CANCELLED", message="任务已取消")
+        if not self.consume_call_budget():
+            return self._blocked_call_result(
+                tc,
+                code="BUDGET_EXCEEDED",
+                message=self._call_budget_reason,
+            )
 
         # 注入每会话的沙盒环境和 FileAccessGuard 到 contextvars。
         _sandbox_token = _set_sandbox_env(e.sandbox_env)
@@ -674,11 +699,14 @@ class ToolDispatcher:
             error = UNKNOWN_TOOL
             structured = self._blocked_tool_result(UNKNOWN_TOOL, result_str)
             log_tool_call(logger, tool_name, arguments, error=error)
-        elif (
-            writes_denied(e)
-            and self._denied_in_read_mode(tool_name)
-        ):
+        elif writes_denied(e) and self._denied_in_read_mode(tool_name):
             result_str = "当前是只读模式，写入被拒绝。"
+            success = False
+            error = "PERMISSION_DENIED"
+            structured = self._blocked_tool_result("PERMISSION_DENIED", result_str)
+            log_tool_call(logger, tool_name, arguments, error=error)
+        elif is_plan_active(e) and self._denied_in_plan_mode(tool_name):
+            result_str = "当前是计划模式，写入被拒绝。"
             success = False
             error = "PERMISSION_DENIED"
             structured = self._blocked_tool_result("PERMISSION_DENIED", result_str)
@@ -863,7 +891,7 @@ class ToolDispatcher:
         """
         session = None
         session_token = None
-        nested_prev: tuple[int | None, int] | None = None
+        nested_prev: tuple[int | None, int, str] | None = None
         if tool_name == "run_code":
             from excelmanus.code_mode import (
                 build_session_for_run_code,
@@ -881,8 +909,15 @@ class ToolDispatcher:
                     )
                     session_token = set_code_mode_session(session)
                     session.start()
-                    nested_prev = (self._call_budget, self._call_count)
-                    self.begin_call_budget(_CODE_MODE_NESTED_CALL_BUDGET)
+                    nested_prev = (
+                        self._call_budget,
+                        self._call_count,
+                        self._call_budget_reason,
+                    )
+                    self.begin_call_budget(
+                        _CODE_MODE_NESTED_CALL_BUDGET,
+                        reason="本次 run_code 内嵌套调用达上限",
+                    )
                 except Exception:
                     logger.debug("Code Mode 桥启动失败，继续无 SDK", exc_info=True)
                     session = None
@@ -905,7 +940,7 @@ class ToolDispatcher:
                 except Exception:
                     logger.debug("Code Mode 桥停止失败", exc_info=True)
                 if nested_prev is not None:
-                    self._call_budget, self._call_count = nested_prev
+                    self._call_budget, self._call_count, self._call_budget_reason = nested_prev
                 else:
                     self.begin_call_budget(None)
             if session_token is not None:

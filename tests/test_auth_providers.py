@@ -480,7 +480,7 @@ class TestOAuthStateToken:
 
 
 class TestAuthProfilesMigration:
-    """验证 v18 迁移正确创建 auth_profiles 表。"""
+    """验证当前 schema 含 auth_profiles 表。"""
 
     def test_migration_creates_table(self, tmp_path):
         from excelmanus.database import Database
@@ -490,13 +490,6 @@ class TestAuthProfilesMigration:
             "SELECT name FROM sqlite_master WHERE type='table' AND name='auth_profiles'"
         ).fetchone()
         assert row is not None
-        db.close()
-
-    def test_migration_version_18(self, tmp_path):
-        from excelmanus.database import Database, _LATEST_VERSION
-        db = Database(str(tmp_path / "test.db"))
-        assert db._current_version() >= 18
-        assert _LATEST_VERSION >= 18
         db.close()
 
     def test_insert_into_auth_profiles(self, tmp_path):

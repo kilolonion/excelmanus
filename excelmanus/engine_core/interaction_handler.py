@@ -17,6 +17,7 @@ from excelmanus.engine_utils import (
     _SUBAGENT_APPROVAL_OPTION_ACCEPT,
     _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
     _SUBAGENT_APPROVAL_OPTION_REJECT,
+    _SYSTEM_Q_PLAN_EXIT,
     _SYSTEM_Q_SUBAGENT_APPROVAL,
 )
 from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
@@ -474,6 +475,21 @@ class InteractionHandler:
         )
         return ChatResult(reply=manual)
 
+    def handle_plan_exit_answer(self, *, parsed: Any) -> "ChatResult":
+        from excelmanus.engine_types import ChatResult
+        from excelmanus.plan_mode import set_plan_active
+
+        e = self._engine
+        selected = ""
+        options = getattr(parsed, "selected_options", None) or []
+        if options:
+            selected = str(options[0].get("label", "") or "")
+        if "批准" in selected:
+            set_plan_active(e, False)
+            return ChatResult(reply="已批准计划并退出计划模式。")
+        e._pending_plan_exit = None
+        return ChatResult(reply="已拒绝退出，仍留在计划模式。")
+
     # ── 待回答问题处理 ──────────────────────────────────────
 
     async def handle_pending_question_answer(
@@ -494,7 +510,7 @@ class InteractionHandler:
         if text.startswith("/"):
             # 允许审批/权限相关命令在问题待回答时穿透执行
             _lower = text.lower().replace("_", "")
-            _passthrough = ("/fullaccess", "/accept", "/reject")
+            _passthrough = ("/fullaccess", "/accept", "/reject", "/plan")
             if any(_lower.startswith(p) for p in _passthrough):
                 # 返回 None 表示本方法不处理，由 chat() 继续走控制命令路径
                 return None
@@ -572,6 +588,8 @@ class InteractionHandler:
                     parsed=parsed,
                     on_event=on_event,
                 )
+            elif action_type == _SYSTEM_Q_PLAN_EXIT:
+                action_result = self.handle_plan_exit_answer(parsed=parsed)
             else:
                 action_result = ChatResult(reply="已记录你的回答。")
 
@@ -607,7 +625,12 @@ class InteractionHandler:
             return ChatResult(reply="已记录你的回答。")
         # 从上次中断的轮次之后继续执行
         resume_iteration = e._last_iteration_count + 1
-        return await e._tool_calling_loop(
-            route_to_resume, on_event, start_iteration=resume_iteration,
+        from excelmanus.agent.loop import run_tool_loop
+
+        return await run_tool_loop(
+            e,
+            route_to_resume,
+            on_event,
+            start_iteration=resume_iteration,
             question_resolver=e._question_resolver,
         )

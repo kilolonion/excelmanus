@@ -7,6 +7,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { cellStyleToCSS, hasWrapText } from "./cell-style-utils";
 import { buildMergeMaps, getMergeInfo, type MergeSpan } from "./merge-utils";
 import { ScrollablePreview } from "@/components/chat/ScrollablePreview";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 // ── 阈值 ────────────────────────────────────────────────
 const INLINE_THRESHOLD = 5;
@@ -566,6 +567,8 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const containerWidth = useContainerWidth(containerRef);
   const openPanel = useExcelStore((s) => s.openPanel);
+  const isMobile = useIsMobile();
+  const [expanded, setExpanded] = useState(false);
 
   const handleOpenPanel = () => {
     openPanel(data.filePath, data.sheet);
@@ -616,7 +619,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
   const fileNameB = data.filePathB?.split("/").pop() || data.filePathB || "";
 
   return (
-    <div ref={containerRef} className="my-2 rounded-lg border border-border/80 overflow-hidden text-xs shadow-sm">
+    <div ref={containerRef} className="my-2 rounded-xl border border-[var(--em-hairline)] overflow-hidden text-xs bg-background">
       {/* Header bar */}
       {isCrossFile ? (
         <div className="px-3 py-1.5 bg-muted/50 border-b border-border/60">
@@ -692,6 +695,7 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
       )}
 
       {/* Diff 内容区 */}
+      {(expanded || !isMobile) && (
       <ScrollablePreview collapsedHeight={160} expandedHeight={420}>
         {useInline ? (
           <InlineDiffView changes={data.changes} layout={layout} />
@@ -699,10 +703,21 @@ export function ExcelDiffTable({ data }: ExcelDiffTableProps) {
           <GridDiffView changes={data.changes} layout={layout} profile={profile} mergeRanges={data.mergeRanges} oldMergeRanges={data.oldMergeRanges} />
         )}
       </ScrollablePreview>
+      )}
 
       {/* Footer */}
-      <div className="px-3 py-1 bg-muted/30 border-t border-border/50 text-[10px] text-muted-foreground/70 flex flex-wrap items-center gap-x-3 gap-y-0.5">
-        <span className="font-medium">{total} 处变更</span>
+      <div className="px-3 py-1.5 bg-[var(--em-fill)] dark:bg-muted/20 border-t border-[var(--em-hairline)] text-[10px] text-muted-foreground flex flex-wrap items-center gap-x-3 gap-y-0.5">
+        {isMobile ? (
+          <button
+            type="button"
+            onClick={() => setExpanded((v) => !v)}
+            className="font-medium text-[var(--em-primary)] hover:underline"
+          >
+            {expanded ? "收起变更" : `查看 ${total} 处变更`}
+          </button>
+        ) : (
+          <span className="font-medium text-[var(--em-primary)]">查看 {total} 处变更</span>
+        )}
         {counts.modified > 0 && (
           <span className="flex items-center gap-1">
             <span className="w-1.5 h-1.5 rounded-full bg-amber-400 dark:bg-amber-500" />

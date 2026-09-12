@@ -56,18 +56,18 @@ class BaseToolHandler:
 # ---------------------------------------------------------------------------
 
 class SkillActivationHandler(BaseToolHandler):
-    """处理 activate_skill 工具调用。"""
+    """处理 skill / activate_skill 工具调用。"""
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        return tool_name == "activate_skill"
+        return tool_name in {"skill", "activate_skill"}
 
     async def handle(self, tool_name, tool_call_id, arguments, **kwargs):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
         e = self._engine
-        selected_name = arguments.get("skill_name")
+        selected_name = arguments.get("name") or arguments.get("skill_name")
         if not isinstance(selected_name, str) or not selected_name.strip():
-            result_str = "工具参数错误: skill_name 必须为非空字符串。"
+            result_str = "工具参数错误: name 必须为非空字符串。"
             log_tool_call(logger, tool_name, arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
@@ -236,13 +236,7 @@ class SkillManagementHandler(BaseToolHandler):
             log_tool_call(logger, "manage_skills", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
-        # 安全门控
         e = self._engine
-        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
-            result_str = "安全模式已开启，禁止安装技能。请关闭 external_safe_mode 后重试。"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
         manager = self._get_manager()
         if manager is None:
             return self._manager_unavailable(arguments)
@@ -270,7 +264,7 @@ class SkillManagementHandler(BaseToolHandler):
             log_tool_call(logger, "manage_skills", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
-        # 安装成功 → 失效工具缓存，使新技能出现在 activate_skill enum 中
+        # 安装成功 → 失效工具缓存，使新技能出现在 skill.name enum 中
         e._tools_cache = None
 
         name = result.get("name", slug)
@@ -281,7 +275,7 @@ class SkillManagementHandler(BaseToolHandler):
             parts[0] = f"OK 技能 '{name}' (v{version}) 安装成功。"
         if desc:
             parts.append(f"描述: {desc}")
-        parts.append("现在可以通过 activate_skill 激活使用此技能。")
+        parts.append("现在可以通过 skill 加载此技能的完整说明。")
         result_str = "\n".join(parts)
         log_tool_call(logger, "manage_skills", arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=True)
@@ -337,13 +331,7 @@ class SkillManagementHandler(BaseToolHandler):
             log_tool_call(logger, "manage_skills", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
-        # 安全门控
         e = self._engine
-        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
-            result_str = "安全模式已开启，禁止卸载技能。请关闭 external_safe_mode 后重试。"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
         manager = self._get_manager()
         if manager is None:
             return self._manager_unavailable(arguments)
@@ -382,13 +370,7 @@ class SkillManagementHandler(BaseToolHandler):
     async def _handle_update(self, arguments: dict[str, Any]):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
-        # 安全门控
         e = self._engine
-        if getattr(getattr(e, "_config", None), "external_safe_mode", True):
-            result_str = "安全模式已开启，禁止更新技能。请关闭 external_safe_mode 后重试。"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
         manager = self._get_manager()
         if manager is None:
             return self._manager_unavailable(arguments)
@@ -623,81 +605,6 @@ class DelegationHandler(BaseToolHandler):
 
 
 # ---------------------------------------------------------------------------
-# 完成任务处理器（FinishTaskHandler）
-# ---------------------------------------------------------------------------
-
-class FinishTaskHandler(BaseToolHandler):
-    """处理 finish_task 工具调用。"""
-
-    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        return tool_name == "finish_task"
-
-    async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
-        from excelmanus.engine_core.tool_dispatcher import (
-            _ToolExecOutcome,
-            _as_str_list,
-            _coerce_finish_outputs,
-            _infer_finish_status,
-            _render_finish_task_report,
-        )
-
-        e = self._engine
-        report = arguments.get("report")
-        summary = arguments.get("summary", "")
-        warnings = _as_str_list(arguments.get("warnings"))
-        incomplete = _as_str_list(arguments.get("incomplete"))
-        outputs = _coerce_finish_outputs(arguments if isinstance(arguments, dict) else {}, engine=e)
-        status = _infer_finish_status(arguments if isinstance(arguments, dict) else {}, incomplete)
-        rendered = _render_finish_task_report(
-            report if isinstance(report, dict) else None,
-            str(summary or ""),
-            status=status,
-            outputs=outputs,
-            warnings=warnings,
-            incomplete=incomplete,
-        )
-        # 完成是主 Agent 的声明，不触发隐藏检查、文件扫描或额外模型调用。
-        result_str = rendered
-        finish_accepted = True
-        success = True
-
-        _report_for_event: dict | None = report if isinstance(report, dict) else {}
-        if outputs:
-            _report_for_event = {**_report_for_event, "outputs": outputs}
-        if not _report_for_event:
-            _report_for_event = None
-        self._dispatcher._emit_files_changed_from_report(e, on_event, tool_call_id, _report_for_event, iteration)
-
-        # 任务完成时，如果有 pending staged 文件，发射 staging_updated 提示
-        if finish_accepted and on_event is not None:
-            try:
-                tx = getattr(e, "transaction", None)
-                if tx is not None:
-                    staged = tx.list_staged()
-                    if staged:
-                        from excelmanus.events import EventType, ToolCallEvent as _TCEvent
-                        staging_files = []
-                        for s in staged:
-                            staging_files.append({
-                                "original_path": tx.to_relative(s["original"]),
-                                "backup_path": tx.to_relative(s["backup"]),
-                            })
-                        on_event(_TCEvent(
-                            event_type=EventType.STAGING_UPDATED,
-                            tool_call_id=tool_call_id,
-                            staging_action="finish_hint",
-                            staging_files=staging_files,
-                            staging_pending_count=len(staged),
-                            iteration=iteration,
-                        ))
-            except Exception:
-                pass
-
-        log_tool_call(logger, tool_name, arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=success, finish_accepted=finish_accepted)
-
-
-# ---------------------------------------------------------------------------
 # 询问用户处理器（AskUserHandler）
 # ---------------------------------------------------------------------------
 
@@ -722,90 +629,6 @@ class AskUserHandler(BaseToolHandler):
             result_str=result_str, success=True,
             pending_question=False, question_id=None, defer_tool_result=False,
         )
-
-
-# ---------------------------------------------------------------------------
-# 建议模式切换处理器（SuggestModeSwitchHandler）
-# ---------------------------------------------------------------------------
-
-class SuggestModeSwitchHandler(BaseToolHandler):
-    """处理 suggest_mode_switch 工具调用。
-
-    阻塞模式：await 用户选择后返回结果。
-    """
-
-    def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
-        return tool_name == "suggest_mode_switch"
-
-    async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
-        import asyncio
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-
-        e = self._engine
-        target_mode = str(arguments.get("target_mode", "write")).strip()
-        reason = str(arguments.get("reason", "")).strip()
-        mode_labels = {"write": "写入", "read": "读取", "plan": "计划"}
-        target_label = mode_labels.get(target_mode, target_mode)
-
-        question_payload = {
-            "header": "建议切换模式",
-            "text": f"{reason}\n\n是否切换到「{target_label}」模式？",
-            "options": [
-                {"label": f"切换到{target_label}", "description": f"切换到{target_label}模式继续"},
-                {"label": "保持当前模式", "description": "不切换，继续当前模式"},
-            ],
-            "multiSelect": False,
-        }
-
-        pending_q = e._question_flow.enqueue(
-            question_payload=question_payload,
-            tool_call_id=tool_call_id,
-        )
-        e._interaction_handler.emit_user_question_event(
-            question=pending_q,
-            on_event=on_event,
-            iteration=iteration,
-        )
-
-        # 阻塞等待用户回答（支持 question_resolver / InteractionRegistry）
-        try:
-            payload = await e.await_question_answer(pending_q)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
-            e._question_flow.pop_current()
-            e._interaction_registry.cleanup_done()
-            result_str = "用户未回答模式切换建议（超时/取消）。"
-            log_tool_call(logger, tool_name, arguments, result=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=True)
-
-        e._question_flow.pop_current()
-        e._interaction_registry.cleanup_done()
-
-        # 解析用户选择并执行实际模式切换
-        accepted = False
-        if isinstance(payload, dict):
-            selected_options = payload.get("selected_options", [])
-            if selected_options:
-                first_label = str(selected_options[0].get("label", "")).strip()
-                # 第一个选项 = 确认切换
-                if first_label.startswith("切换到"):
-                    accepted = True
-
-        old_mode = getattr(e, "_current_chat_mode", "write")
-        if accepted and target_mode in ("write", "read", "plan"):
-            e._current_chat_mode = target_mode
-            e._tools_cache = None  # 失效工具缓存，下轮重建时反映新模式
-            result_str = (
-                f"用户已确认切换。模式已从「{mode_labels.get(old_mode, old_mode)}」"
-                f"切换到「{target_label}」。请按新模式继续执行任务。"
-            )
-        else:
-            result_str = (
-                f"用户选择保持当前「{mode_labels.get(old_mode, old_mode)}」模式。"
-                "请在当前模式下继续。"
-            )
-
-        log_tool_call(logger, tool_name, arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True)
 
 
 # ---------------------------------------------------------------------------
@@ -850,7 +673,10 @@ class AuditOnlyHandler(BaseToolHandler):
 # ---------------------------------------------------------------------------
 
 class HighRiskApprovalHandler(BaseToolHandler):
-    """处理高风险工具（需审批或 fullaccess 直接执行）。"""
+    """高风险工具审批。ask 才弹确认；never 自动过（与 full_access 对齐）。
+
+    无人应答不能放行：ask 超时在循环里 reject。MCP 默认不是高风险。
+    """
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return self._engine.approval.is_high_risk_tool(tool_name)
@@ -859,7 +685,10 @@ class HighRiskApprovalHandler(BaseToolHandler):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
 
         e = self._engine
-        if not e.full_access_enabled and not skip_high_risk_approval_by_hook:
+        from excelmanus.security.policy import resolve_approval_policy
+
+        approval = resolve_approval_policy(e)
+        if approval == "ask" and not skip_high_risk_approval_by_hook:
             pending = e.approval.create_pending(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
             e.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=iteration, tool_call_id=tool_call_id)
             result_str = e.format_pending_prompt(pending)
@@ -868,6 +697,7 @@ class HighRiskApprovalHandler(BaseToolHandler):
                 result_str=result_str, success=True,
                 pending_approval=True, approval_id=pending.approval_id,
             )
+        # never：高危自动过，不存在无人应答却放行。
         elif e.approval.is_mcp_tool(tool_name):
             probe_before, probe_before_partial = self._dispatcher._capture_unknown_write_probe(tool_name)
             structured = await self._dispatcher.call_registry_tool(
@@ -951,7 +781,12 @@ class CodePolicyHandler(BaseToolHandler):
 
     async def handle(self, tool_name, tool_call_id, arguments, *, tool_scope=None, on_event=None, iteration=0, route_result=None):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-        from excelmanus.security.code_policy import CodePolicyEngine, CodeRiskTier, strip_exit_calls
+        from excelmanus.security.code_policy import (
+            CodePolicyEngine,
+            CodeRiskTier,
+            allows_auto_run,
+            strip_exit_calls,
+        )
 
         e = self._engine
         _code_arg = arguments.get("code") or ""
@@ -960,10 +795,15 @@ class CodePolicyHandler(BaseToolHandler):
             extra_blocked_modules=e.config.code_policy_extra_blocked_modules,
         )
         _analysis = _cp_engine.analyze(_code_arg)
-        _auto_green = _analysis.tier == CodeRiskTier.GREEN and e.config.code_policy_green_auto_approve
-        _auto_yellow = _analysis.tier == CodeRiskTier.YELLOW and e.config.code_policy_yellow_auto_approve
+        _auto = allows_auto_run(
+            _analysis,
+            green_auto=e.config.code_policy_green_auto_approve,
+            yellow_auto=e.config.code_policy_yellow_auto_approve,
+        )
 
-        if _auto_green or _auto_yellow or e.full_access_enabled:
+        from excelmanus.security.policy import resolve_approval_policy
+
+        if _auto or resolve_approval_policy(e) == "never":
             return await self._execute_code_with_policy(
                 code=_code_arg, arguments=arguments, analysis=_analysis,
                 tool_name=tool_name, tool_call_id=tool_call_id, tool_scope=tool_scope,
@@ -974,9 +814,11 @@ class CodePolicyHandler(BaseToolHandler):
         _sanitized_code = strip_exit_calls(_code_arg) if _analysis.tier == CodeRiskTier.RED else None
         if _sanitized_code is not None:
             _re_analysis = _cp_engine.analyze(_sanitized_code)
-            _re_auto_green = _re_analysis.tier == CodeRiskTier.GREEN and e.config.code_policy_green_auto_approve
-            _re_auto_yellow = _re_analysis.tier == CodeRiskTier.YELLOW and e.config.code_policy_yellow_auto_approve
-            if _re_auto_green or _re_auto_yellow:
+            if allows_auto_run(
+                _re_analysis,
+                green_auto=e.config.code_policy_green_auto_approve,
+                yellow_auto=e.config.code_policy_yellow_auto_approve,
+            ):
                 logger.info(
                     "run_code 自动清洗: %s → %s (移除退出调用)",
                     _analysis.tier.value, _re_analysis.tier.value,
@@ -1035,14 +877,6 @@ class CodePolicyHandler(BaseToolHandler):
         _sandbox_tier = analysis.tier.value
         _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
 
-        # ── run_code 前: 对可能被修改的 Excel 文件做快照 ──
-        _excel_targets = [
-            t.file_path for t in extract_excel_targets(code)
-            if t.operation in ("write", "unknown")
-        ]
-        _before_snap = dispatcher._snapshot_excel_for_diff(
-            _excel_targets, e.config.workspace_root,
-        ) if _excel_targets else {}
         # uploads 目录快照，用于检测新建/变更文件
         _uploads_before = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
 
@@ -1061,23 +895,28 @@ class CodePolicyHandler(BaseToolHandler):
             structured = structured.with_model_text(result_str)
 
         # ── 写入追踪 ──
-        _has_cow = bool(structured.ui_meta.cow_mapping)
+        _published_paths = ""
+        if isinstance(structured.value, dict):
+            _published_items = structured.value.get("published") or []
+            if isinstance(_published_items, list):
+                _published_paths = ", ".join(
+                    str(item.get("path"))
+                    for item in _published_items
+                    if isinstance(item, dict)
+                    and item.get("status") == "committed"
+                    and item.get("path")
+                )
+        _has_published = bool(_published_paths)
         _has_ast_write = any(t.operation == "write" for t in extract_excel_targets(code))
-        if (audit_record is not None and audit_record.changes) or _has_cow or _has_ast_write:
+        if (audit_record is not None and audit_record.changes) or _has_published or _has_ast_write:
             e.record_write_action()
-            # 写入操作日志（供 Playbook 反思注入）
             _state = getattr(e, "_state", None)
             if _state is not None:
-                _cow_paths = ""
-                if structured.ui_meta.cow_mapping:
-                    _cow_paths = ", ".join(
-                        str(v) for v in structured.ui_meta.cow_mapping.values() if v.strip()
-                    )
                 _ast_paths = ", ".join(
                     t.file_path for t in extract_excel_targets(code)
                     if t.operation == "write" and t.file_path != "<variable>"
                 ) if _has_ast_write else ""
-                _file_path = _cow_paths or _ast_paths
+                _file_path = _published_paths or _ast_paths
                 _state.record_write_operation(
                     tool_name="run_code",
                     file_path=_file_path,
@@ -1087,49 +926,16 @@ class CodePolicyHandler(BaseToolHandler):
         # ── files_changed 事件 ──
         _uploads_after = dispatcher._snapshot_uploads_dir(e.config.workspace_root)
         _uploads_changed = dispatcher._diff_uploads_snapshots(_uploads_before, _uploads_after)
-        dispatcher._emit_files_changed_from_audit(
-            e, on_event, tool_call_id, code,
-            audit_record.changes if audit_record else None,
-            iteration,
-            extra_changed_paths=_uploads_changed or None,
-            cow_mapping=structured.ui_meta.cow_mapping,
-        )
-
-        # ── Excel diff ──
-        if _excel_targets and on_event is not None:
-            try:
-                _after_snap = dispatcher._snapshot_excel_for_diff(
-                    _excel_targets, e.config.workspace_root,
-                )
-                _diffs = dispatcher._compute_snapshot_diffs(_before_snap, _after_snap)
-                from excelmanus.events import EventType, ToolCallEvent
-                for _rd in _diffs:
-                    _rd_old_merges: list[dict[str, int]] = _rd.get("old_merge_ranges", [])
-                    _rd_new_merges: list[dict[str, int]] = _rd.get("new_merge_ranges", [])
-                    _rd_hints: list[str] = []
-                    try:
-                        _, _rd_hints = dispatcher._extract_sheet_metadata(
-                            _rd["file_path"], _rd["sheet"] or None,
-                            e.config.workspace_root,
-                        )
-                    except Exception:
-                        pass
-                    e.emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.EXCEL_DIFF,
-                            tool_call_id=tool_call_id,
-                            excel_file_path=_rd["file_path"],
-                            excel_sheet=_rd["sheet"],
-                            excel_affected_range=_rd["affected_range"],
-                            excel_changes=_rd["changes"],
-                            excel_merge_ranges=_rd_new_merges,
-                            excel_old_merge_ranges=_rd_old_merges,
-                            excel_metadata_hints=_rd_hints,
-                        ),
-                    )
-            except Exception:
-                logger.debug("run_code%s Excel diff 计算失败", label_suffix, exc_info=True)
+        _extra_changed = list(_uploads_changed or [])
+        if isinstance(structured.value, dict):
+            for _item in structured.value.get("published") or []:
+                if (
+                    isinstance(_item, dict)
+                    and _item.get("status") == "committed"
+                    and _item.get("path")
+                ):
+                    _extra_changed.append(str(_item["path"]))
+        dispatcher._record_files_from_run_code(e, extra_changed_paths=_extra_changed or None)
 
         logger.info(
             "run_code 策略引擎: tier=%s%s auto_approved=True caps=%s",

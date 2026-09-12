@@ -13,7 +13,6 @@ interface UIState {
   settingsOpen: boolean;
   settingsTab: string;
   sidebarTab: "chats" | "files";
-  channelsOpen: boolean;
   adminOpen: boolean;
   configReady: boolean | null;
   configError: string | null;
@@ -30,8 +29,6 @@ interface UIState {
   setSidebarTab: (tab: "chats" | "files") => void;
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
-  openChannels: () => void;
-  closeChannels: () => void;
   openAdmin: () => void;
   closeAdmin: () => void;
   setConfigReady: (ready: boolean) => void;
@@ -62,7 +59,6 @@ export const useUIStore = create<UIState>()(
   settingsOpen: false,
   settingsTab: "model",
   sidebarTab: "chats" as const,
-  channelsOpen: false,
   adminOpen: false,
   configReady: null,
   configError: null,
@@ -73,18 +69,12 @@ export const useUIStore = create<UIState>()(
   setCurrentModel: (model) => set({ currentModel: model }),
   setFullAccessEnabled: (enabled) => set({ fullAccessEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
-  setChatMode: (mode) =>
-    set((s) => ({
-      chatMode: mode,
-      presentAs: mode === "write" ? s.presentAs : "native",
-    })),
+  setChatMode: (mode) => set({ chatMode: mode }),
   setPresentAs: (mode) => set({ presentAs: mode }),
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab || "model" }),
   closeSettings: () => set({ settingsOpen: false }),
-  openChannels: () => set({ channelsOpen: true }),
-  closeChannels: () => set({ channelsOpen: false }),
   openAdmin: () => set({ adminOpen: true }),
   closeAdmin: () => set({ adminOpen: false }),
   setConfigReady: (ready) => set({ configReady: ready, ...(ready ? { configError: null } : {}) }),
@@ -98,7 +88,10 @@ export const useUIStore = create<UIState>()(
     }),
     {
       name: "excelmanus-ui",
-      partialize: (state) => ({ fullAccessEnabled: state.fullAccessEnabled }),
+      partialize: (state) => ({
+        fullAccessEnabled: state.fullAccessEnabled,
+        presentAs: state.presentAs,
+      }),
     }
   )
 );

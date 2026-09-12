@@ -47,10 +47,10 @@ def _error_json(message: str) -> ToolResult:
 
 def _parse_target(target: str) -> tuple[str | None, str]:
     """解析 'Sheet!Cell' 格式的目标。"""
-    if "!" in target:
-        sheet, addr = target.split("!", 1)
-        return sheet.strip("'"), addr
-    return None, target
+    from excelmanus.workbook.address import parse_sheet_address
+
+    parsed = parse_sheet_address(target)
+    return parsed.sheet, parsed.address
 
 
 def get_reference_map(file_path: str, detail: str = "summary") -> ToolResult:

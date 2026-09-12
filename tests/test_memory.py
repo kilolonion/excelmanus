@@ -69,6 +69,8 @@ class TestConversationMemory:
         assert "工具成功不等于业务正确" in _DEFAULT_SYSTEM_PROMPT
         assert "VERSION_CONFLICT" in _DEFAULT_SYSTEM_PROMPT
         assert "没有结束工具" in _DEFAULT_SYSTEM_PROMPT
+        assert "没有轮次上限" in _DEFAULT_SYSTEM_PROMPT
+        assert "宿主有轮次上限" not in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
         """初始状态只有 system 消息。"""

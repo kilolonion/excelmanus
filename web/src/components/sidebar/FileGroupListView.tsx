@@ -21,7 +21,6 @@ import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import { updateFileGroup, type FileGroup } from "@/lib/api";
 import { InlineRenameInput } from "./InlineInputs";
-import { FileRelationshipGraph } from "./FileRelationshipGraph";
 
 interface FileGroupListViewProps {
   onClickFile: (path: string) => void;
@@ -99,11 +98,6 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
 
   return (
     <div className="space-y-1">
-      {/* 文件关系可视化 — 在文件组列表顶部展示 */}
-      <div className="border-b border-border/40 mb-1">
-        <FileRelationshipGraph onClickFile={onClickFile} />
-      </div>
-
       {fileGroups.map((group) => {
         const isExpanded = expandedIds.has(group.id);
         const memberCount = group.members?.length ?? 0;
@@ -128,7 +122,11 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
                     JSON.stringify(files),
                   );
                   e.dataTransfer.effectAllowed = "copy";
+                  useExcelStore.getState().draggingFileCount = files.length;
                 }
+              }}
+              onDragEnd={() => {
+                useExcelStore.getState().draggingFileCount = 0;
               }}
               className="flex items-center gap-2 px-3 py-2 cursor-pointer hover:bg-accent/40 transition-colors duration-100 group"
               onClick={() => toggleExpand(group.id)}
@@ -230,6 +228,10 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
                         JSON.stringify({ path: member.canonical_path, filename: member.original_name }),
                       );
                       e.dataTransfer.effectAllowed = "copy";
+                      useExcelStore.getState().draggingFileCount = 1;
+                    }}
+                    onDragEnd={() => {
+                      useExcelStore.getState().draggingFileCount = 0;
                     }}
                     className="flex items-center gap-2 px-3 py-1.5 rounded-md cursor-pointer hover:bg-accent/30 transition-colors duration-100 text-[12px]"
                     onClick={() => onClickFile(member.canonical_path)}

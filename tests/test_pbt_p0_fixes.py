@@ -154,42 +154,8 @@ async def test_b2_exploration_linear_task_accumulation():
 # U2 探索性测试 — PENDING_APPROVAL 敏感信息暴露
 # ============================================================
 
-def test_u2_exploration_pending_approval_not_filtered_in_safe_mode():
-    """
-    U2 探索：构造 PENDING_APPROVAL 事件 + safe_mode=True，
-    断言返回值不为 None（isBugCondition_U2 = True）。
-
-    在未修复代码中，PENDING_APPROVAL 不在 safe_mode 过滤集合中，
-    会进入 else 分支调用 event.to_dict()，返回非 None 值。
-
-    **预期在未修复代码上 FAIL（这是正确的 —— 证明 Bug 存在）**
-    **验证：需求 1.4**
-    """
-    event = _make_pending_approval_event()
-
-    # isBugCondition_U2：safe_mode=True 且 event_type=PENDING_APPROVAL
-    result = _sse_event_to_sse(event, safe_mode=True)
-
-    # Bug 修复后：result 应该为 None（事件被过滤）
-    # Bug 存在时：result 不为 None（事件未被过滤，进入 else 分支）
-    assert result is None, (
-        f"Bug U2 已确认存在：safe_mode=True 时 PENDING_APPROVAL 事件未被过滤，"
-        f"_sse_event_to_sse 返回了非 None 值。"
-        f"isBugCondition_U2=True 证明敏感信息暴露 Bug 存在。"
-        f"返回值: {result!r}"
-    )
-
-
-def test_u2_exploration_approval_arguments_exposed():
-    """
-    U2 探索：检查返回值中含 approval_arguments 字段（敏感信息暴露）。
-
-    在未修复代码中，PENDING_APPROVAL 事件进入 else 分支调用 event.to_dict()，
-    返回值中包含 approval_arguments 字段（含用户文件路径等敏感信息）。
-
-    **预期在未修复代码上 FAIL（这是正确的 —— 证明 Bug 存在）**
-    **验证：需求 1.5**
-    """
+def test_u2_pending_approval_is_emitted_and_sanitized():
+    """PENDING_APPROVAL 一律下发，但不暴露 approval_arguments 原始字段。"""
     sensitive_path = "/Users/secret/sensitive_data.xlsx"
     event = _make_pending_approval_event(
         approval_arguments={
@@ -198,33 +164,11 @@ def test_u2_exploration_approval_arguments_exposed():
             "value": "confidential",
         }
     )
-
-    # safe_mode=True 时调用
-    result = _sse_event_to_sse(event, safe_mode=True)
-
-    # 如果 result 为 None，说明事件已被过滤（Bug 已修复），此测试不适用
-    if result is None:
-        pytest.skip("事件已被过滤（Bug 可能已修复），跳过敏感字段检查")
-
-    # Bug 存在时：result 不为 None，且包含 approval_arguments 字段
-    # 解析 SSE 格式，提取 data 部分
-    data_line = None
-    for line in result.split("\n"):
-        if line.startswith("data:"):
-            data_line = line[len("data:"):].strip()
-            break
-
-    assert data_line is not None, f"SSE 格式异常，未找到 data 行: {result!r}"
-
-    payload = json.loads(data_line)
-
-    # 断言：返回值中不应包含 approval_arguments（敏感字段）
-    # Bug 存在时：包含 approval_arguments，此断言 FAIL
-    assert "approval_arguments" not in payload, (
-        f"Bug U2 已确认存在：safe_mode=True 时 PENDING_APPROVAL 事件的返回值中"
-        f"包含敏感字段 approval_arguments，内容: {payload.get('approval_arguments')!r}。"
-        f"敏感路径 {sensitive_path!r} 已暴露给外部调用方。"
-    )
+    result = _sse_event_to_sse(event)
+    assert result is not None
+    assert "event: pending_approval" in result
+    assert "approval_arguments" not in result
+    assert sensitive_path not in result
 
 
 # ============================================================
@@ -235,8 +179,7 @@ from hypothesis import given, settings
 import hypothesis.strategies as st
 
 
-# 已有过滤事件类型（safe_mode=True 时应返回 None）
-SAFE_MODE_FILTERED_EVENT_TYPES = [
+ALWAYS_EMITTED_EVENT_TYPES = [
     EventType.THINKING,
     EventType.THINKING_DELTA,
     EventType.TOOL_CALL_START,
@@ -246,18 +189,9 @@ SAFE_MODE_FILTERED_EVENT_TYPES = [
     EventType.SUBAGENT_ITERATION,
     EventType.SUBAGENT_SUMMARY,
     EventType.SUBAGENT_END,
-]
-
-# 非敏感事件类型（safe_mode=True 时应正常输出，不为 None）
-NON_SENSITIVE_EVENT_TYPES = [
     EventType.USER_QUESTION,
     EventType.TEXT_DELTA,
-    EventType.THINKING_DELTA,  # 注意：safe_mode=True 时被过滤，但 safe_mode=False 时正常输出
-]
-
-# 非 PENDING_APPROVAL 的所有事件类型（safe_mode=False 时应正常输出）
-NON_PENDING_APPROVAL_EVENT_TYPES = [
-    et for et in EventType if et != EventType.PENDING_APPROVAL
+    EventType.PENDING_APPROVAL,
 ]
 
 
@@ -279,85 +213,17 @@ def _make_event_for_type(event_type: EventType) -> ToolCallEvent:
 
 
 # ============================================================
-# U2 保留性测试 — 已有过滤事件在 safe_mode=True 时仍被过滤
+# U2 保留性测试 — UI 事件一律下发
 # ============================================================
 
-@given(event_type=st.sampled_from(SAFE_MODE_FILTERED_EVENT_TYPES))
+@given(event_type=st.sampled_from(ALWAYS_EMITTED_EVENT_TYPES))
 @settings(max_examples=50)
-def test_u2_preservation_existing_filtered_events_still_filtered(event_type):
-    """
-    U2 保留性：safe_mode=True 时，已有过滤事件类型继续被过滤（返回 None）。
-
-    此测试验证修复前的基线行为：THINKING、TOOL_CALL_START 等事件
-    在 safe_mode=True 时应返回 None，此行为不应被修复破坏。
-
-    **预期在未修复代码上 PASS（建立基线）**
-    **验证：需求 3.4**
-    """
+def test_u2_all_ui_events_are_emitted(event_type):
+    """思考 / 工具 / 子代理 / 审批等 UI 事件一律下发。"""
     event = _make_event_for_type(event_type)
-    result = _sse_event_to_sse(event, safe_mode=True)
-    assert result is None, (
-        f"保留性违反：safe_mode=True 时 {event_type.value} 事件应返回 None，"
-        f"但实际返回了 {result!r}"
-    )
-
-
-# ============================================================
-# U2 保留性测试 — safe_mode=False 时非 PENDING_APPROVAL 事件正常输出
-# ============================================================
-
-@given(event_type=st.sampled_from(NON_PENDING_APPROVAL_EVENT_TYPES))
-@settings(max_examples=50)
-def test_u2_preservation_safe_mode_false_non_approval_events_pass_through(event_type):
-    """
-    U2 保留性：safe_mode=False 时，非 PENDING_APPROVAL 事件正常输出（不为 None）。
-
-    此测试验证修复前的基线行为：safe_mode=False 时所有非敏感事件
-    应正常输出，此行为不应被修复破坏。
-
-    **预期在未修复代码上 PASS（建立基线）**
-    **验证：需求 3.5**
-    """
-    event = _make_event_for_type(event_type)
-    result = _sse_event_to_sse(event, safe_mode=False)
-    assert result is not None, (
-        f"保留性违反：safe_mode=False 时 {event_type.value} 事件应正常输出，"
-        f"但实际返回了 None"
-    )
-    assert isinstance(result, str) and len(result) > 0, (
-        f"保留性违反：safe_mode=False 时 {event_type.value} 事件应返回非空字符串，"
-        f"但实际返回了 {result!r}"
-    )
-
-
-# ============================================================
-# U2 保留性测试 — safe_mode=True 时非敏感事件正常输出
-# ============================================================
-
-@pytest.mark.parametrize("event_type", [
-    EventType.USER_QUESTION,
-    EventType.TEXT_DELTA,
-])
-def test_u2_preservation_safe_mode_true_non_sensitive_events_pass_through(event_type):
-    """
-    U2 保留性：safe_mode=True 时，USER_QUESTION、TEXT_DELTA 等非敏感事件正常输出。
-
-    此测试验证修复前的基线行为：这些事件不在过滤集合中，
-    safe_mode=True 时应正常输出，此行为不应被修复破坏。
-
-    **预期在未修复代码上 PASS（建立基线）**
-    **验证：需求 3.6**
-    """
-    event = _make_event_for_type(event_type)
-    result = _sse_event_to_sse(event, safe_mode=True)
-    assert result is not None, (
-        f"保留性违反：safe_mode=True 时 {event_type.value} 事件应正常输出，"
-        f"但实际返回了 None"
-    )
-    assert isinstance(result, str) and len(result) > 0, (
-        f"保留性违反：safe_mode=True 时 {event_type.value} 事件应返回非空字符串，"
-        f"但实际返回了 {result!r}"
-    )
+    result = _sse_event_to_sse(event)
+    assert result is not None
+    assert isinstance(result, str) and len(result) > 0
 
 
 # ============================================================

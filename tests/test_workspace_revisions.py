@@ -21,6 +21,8 @@ def test_put_list_get_and_blob_roundtrip(tmp_path: Path) -> None:
     assert rec.sequence == 1
     assert rec.path == "sales.xlsx"
     assert rec.reason == "beforeEdit"
+    assert rec.created_at
+    assert rec.to_public_dict()["created_at"] == rec.created_at
     listed = store.list("sales.xlsx")
     assert [r.id for r in listed] == [rec.id]
     loaded = store.get("sales.xlsx", rec.id)

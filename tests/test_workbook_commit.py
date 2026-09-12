@@ -52,6 +52,60 @@ def test_commit_bytes_stale_version(tmp_path: Path) -> None:
     assert (tmp_path / "a.bin").read_bytes() == b"v2"
 
 
+def test_commit_revision_failure_does_not_fail_user_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from excelmanus.workspace import revisions as rev_mod
+
+    def boom(self, *args, **kwargs):
+        raise RuntimeError("revision store down")
+
+    monkeypatch.setattr(rev_mod.RevisionStore, "capture_edit_pair", boom)
+    guard = _guard(tmp_path)
+    result = commit_bytes(guard=guard, file_path="book.xlsx", data=b"ok", expected_version=None)
+    assert result.status == "committed"
+    assert (tmp_path / "book.xlsx").read_bytes() == b"ok"
+
+
+def test_commit_bytes_records_revision_pair_not_backups(tmp_path: Path) -> None:
+    from excelmanus.workspace.revisions import RevisionStore
+
+    guard = _guard(tmp_path)
+    first = commit_bytes(guard=guard, file_path="book.xlsx", data=b"v1", expected_version=None)
+    second = commit_bytes(
+        guard=guard, file_path="book.xlsx", data=b"v2", expected_version=first.content_version
+    )
+    store = RevisionStore(tmp_path)
+    recs = store.list("book.xlsx")
+    reasons = [r.reason for r in recs]
+    assert reasons.count("afterEdit") == 2
+    assert "beforeEdit" in reasons
+    assert (tmp_path / "book.xlsx").read_bytes() == b"v2"
+    assert not (tmp_path / "outputs" / "backups").exists()
+    assert second.previous_version == first.content_version
+    blob_dir = store.root / store.path_key("book.xlsx") / "blobs"
+    blobs = [p for p in blob_dir.iterdir() if p.is_file()]
+    assert blobs
+
+
+def test_commit_workbook_records_after_edit(tmp_path: Path) -> None:
+    from excelmanus.workspace.revisions import RevisionStore
+
+    guard = _guard(tmp_path)
+
+    def mutate(wb) -> None:
+        wb.active["A1"] = "hello"
+
+    commit_workbook(guard=guard, file_path="new.xlsx", mutate_fn=mutate, create=True)
+    store = RevisionStore(tmp_path)
+    recs = store.list("new.xlsx")
+    assert [r.reason for r in recs] == ["afterEdit"]
+    assert not (tmp_path / "outputs" / "backups").exists()
+    assert not list((tmp_path / "outputs").glob("**/*")) or all(
+        "backups" not in str(p) for p in (tmp_path / "outputs").rglob("*")
+    )
+
+
 def test_commit_workbook_mutate(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     seed = Workbook()
@@ -73,12 +127,37 @@ def test_commit_workbook_mutate(tmp_path: Path) -> None:
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb.active["A1"].value == "new"
     assert content_version_of_file(tmp_path / "book.xlsx") == result.content_version
+    from excelmanus.workspace.revisions import RevisionStore
+
+    recs = RevisionStore(tmp_path).list("book.xlsx")
+    assert [r.reason for r in recs] == ["beforeEdit", "afterEdit"]
+    assert recs[0].transaction_id == recs[1].transaction_id
 
 
 def test_commit_rejects_path_traversal(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     with pytest.raises(CommitError) as ei:
         commit_bytes(guard=guard, file_path="../secret.bin", data=b"x", expected_version=None)
+    assert ei.value.code == "PATH_INVALID"
+
+
+def test_commit_rejects_reserved_namespace(tmp_path: Path) -> None:
+    guard = _guard(tmp_path)
+    with pytest.raises(CommitError) as ei:
+        commit_bytes(
+            guard=guard,
+            file_path=".excelmanus/revisions/x.xlsx",
+            data=b"x",
+            expected_version=None,
+        )
+    assert ei.value.code == "PATH_INVALID"
+    with pytest.raises(CommitError) as ei:
+        commit_bytes(
+            guard=guard,
+            file_path="outputs/backups/copy.xlsx",
+            data=b"x",
+            expected_version=None,
+        )
     assert ei.value.code == "PATH_INVALID"
 
 
@@ -186,7 +265,7 @@ def test_tool_write_conflicts_after_read_then_external_edit(tmp_path: Path) -> N
 
         result = edit_spreadsheet(
             file_path="book.xlsx",
-            operations=[{"kind": "write", "start_cell": "A1", "values": [["from-tool"]]}],
+            operations=[{"kind": "write", "sheet": "Sheet", "start_cell": "A1", "values": [["from-tool"]]}],
         )
         assert result.success is False
         assert result.error is not None
@@ -214,10 +293,10 @@ async def test_write_excel_cells_stale_version_returns_409(
     seed.save(tmp_path / "book.xlsx")
     seed.close()
 
-    cfg = SimpleNamespace(workspace_root=str(tmp_path), backup_enabled=False)
+    cfg = SimpleNamespace(workspace_root=str(tmp_path))
     monkeypatch.setattr(api_app_state, "_config", cfg)
     monkeypatch.setattr(api_app_state, "_session_manager", None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
 
     req = api_module.ExcelWriteRequest(
         path="book.xlsx",
@@ -240,10 +319,10 @@ def _write_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     from excelmanus import api_app_state
     import excelmanus.api_routes_files as files_mod
 
-    cfg = SimpleNamespace(workspace_root=str(tmp_path), backup_enabled=False)
+    cfg = SimpleNamespace(workspace_root=str(tmp_path))
     monkeypatch.setattr(api_app_state, "_config", cfg)
     monkeypatch.setattr(api_app_state, "_session_manager", None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
     raw = MagicMock()
     raw.app.state.auth_enabled = False
     return api_module, raw
@@ -340,3 +419,44 @@ async def test_write_excel_cells_clears_and_writes_other_sheet(
     wb = load_workbook(tmp_path / "book.xlsx")
     assert wb["Sheet1"]["A1"].value is None
     assert wb["Sheet2"]["A1"].value == "new-two"
+
+
+def test_commit_unlink_requires_expected_version(tmp_path: Path) -> None:
+    from excelmanus.workbook_commit import commit_unlink
+
+    guard = _guard(tmp_path)
+    target = tmp_path / "a.bin"
+    target.write_bytes(b"keep")
+    with pytest.raises(CommitError) as ei:
+        commit_unlink(guard=guard, file_path="a.bin")
+    assert ei.value.code == "VERSION_CONFLICT"
+    assert target.read_bytes() == b"keep"
+
+    result = commit_unlink(
+        guard=guard,
+        file_path="a.bin",
+        expected_version=content_version_of(b"keep"),
+    )
+    assert result.status == "committed"
+    assert not target.exists()
+
+
+def test_commit_move_requires_expected_version(tmp_path: Path) -> None:
+    from excelmanus.workbook_commit import commit_move
+
+    guard = _guard(tmp_path)
+    (tmp_path / "a.bin").write_bytes(b"keep")
+    with pytest.raises(CommitError) as ei:
+        commit_move(guard=guard, source="a.bin", destination="b.bin")
+    assert ei.value.code == "VERSION_CONFLICT"
+    assert (tmp_path / "a.bin").read_bytes() == b"keep"
+
+    result = commit_move(
+        guard=guard,
+        source="a.bin",
+        destination="b.bin",
+        expected_version=content_version_of(b"keep"),
+    )
+    assert result.status == "committed"
+    assert not (tmp_path / "a.bin").exists()
+    assert (tmp_path / "b.bin").read_bytes() == b"keep"

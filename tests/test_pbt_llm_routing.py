@@ -171,7 +171,7 @@ class TestSlashDirectRouting:
         with tempfile.TemporaryDirectory() as tmp:
             router = _setup_router_in(Path(tmp), [skill_name])
             result = asyncio.run(
-                router.route(user_message, slash_command=skill_name, raw_args="")
+                router.parse_slash_skill(skill_name, raw_args="")
             )
             assert result.route_mode == "slash_direct"
             assert skill_name in result.skills_used
@@ -196,7 +196,7 @@ class TestSlashDirectRouting:
         with tempfile.TemporaryDirectory() as tmp:
             router = _setup_router_in(Path(tmp), [skill_name])
             result = asyncio.run(
-                router.route(user_message, slash_command=nonexistent_name, raw_args="")
+                router.parse_slash_skill(nonexistent_name, raw_args="")
             )
             assert result.route_mode == "slash_not_found"
 
@@ -251,7 +251,7 @@ class TestSlashNameNormalization:
         with tempfile.TemporaryDirectory() as tmp:
             router = _setup_router_in(Path(tmp), [skill_name])
             result = asyncio.run(
-                router.route("测试消息", slash_command=mutated, raw_args="")
+                router.parse_slash_skill(mutated, raw_args="")
             )
             assert result.route_mode == "slash_direct"
             assert skill_name in result.skills_used
@@ -301,17 +301,19 @@ class TestSkillCatalogIntegrity:
             meta_tools = engine._meta_tool_builder.build_meta_tools()
             activate_tool = next(
                 tool for tool in meta_tools
-                if tool["function"]["name"] == "activate_skill"
+                if tool["function"]["name"] == "skill"
             )
             description = activate_tool["function"]["description"]
             enum_values = (
-                activate_tool["function"]["parameters"]["properties"]["skill_name"]["enum"]
+                activate_tool["function"]["parameters"]["properties"]["name"]["enum"]
             )
 
             assert set(enum_values) == set(skill_names)
+            from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
+
+            assert description == TOOL_DESCRIPTIONS["skill"]
             for name in skill_names:
-                assert name in description
-                assert f"描述_{name}" in description
+                assert f"描述_{name}" not in description
 
 
 # ── Property 4/5/7：activate_skill 调用正确性 ────────────────────────

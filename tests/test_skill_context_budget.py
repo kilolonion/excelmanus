@@ -33,7 +33,7 @@ class TestRenderContextMinimal:
         assert "[Skillpack] foo" in out
         assert "描述：bar" in out
         assert "授权工具" not in out
-        assert "执行指引" not in out
+        assert "技能正文" not in out
 
     def test_no_instructions_in_minimal(self) -> None:
         skill = _make_skillpack("x", instructions="很长的指引内容" * 100)
@@ -55,7 +55,7 @@ class TestRenderContextTruncated:
         assert "[Skillpack] test" in out
         assert "描述：" in out
         assert "授权工具" not in out
-        assert "执行指引：" in out
+        assert "技能正文：" in out
 
     def test_falls_back_to_minimal_when_budget_tiny(self) -> None:
         skill = _make_skillpack("tiny", instructions="content")

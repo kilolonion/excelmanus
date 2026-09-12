@@ -3,9 +3,10 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
-import { Check, Loader2, Search, Sparkles, RefreshCw, AlertTriangle, X, ChevronUp } from "lucide-react";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { Check, Loader2, Search, Sparkles, RefreshCw, AlertTriangle, X } from "lucide-react";
+import { displayModelLabel } from "@/lib/model-display";
 import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
+import { ProviderAvatar } from "@/components/settings/model/ProviderLogo";
 import type { ModelInfo } from "@/lib/types";
 
 /**
@@ -48,10 +49,11 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-const displayLabel = (m: ModelInfo) =>
-  m.name === "default"
-    ? formatModelIdForDisplay(m.model)
-    : formatModelIdForDisplay(m.display_name || m.name);
+const displayLabel = (m: ModelInfo) => displayModelLabel(m);
+
+function providerOf(m: ModelInfo): string {
+  return m.provider || extractProvider(m.base_url);
+}
 
 /* ------------------------------------------------------------------ */
 /*  Props                                                              */
@@ -134,8 +136,8 @@ function CompactRetrySheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
-            style={{ maxHeight: "50dvh", touchAction: "none" }}
+            className="fixed inset-x-0 bottom-0 z-[81] flex h-[50dvh] max-h-[50dvh] flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
+            style={{ touchAction: "none" }}
           >
             {/* Drag handle */}
             <div className="flex justify-center pt-2.5 pb-1 shrink-0">
@@ -168,13 +170,14 @@ function CompactRetrySheet({
             >
               {models.map((m) => {
                 const isCurrent = m.name === currentModel;
-                const providerColor = getProviderColor(extractProvider(m.base_url));
+                const provider = providerOf(m);
+                const providerColor = getProviderColor(provider);
                 return (
                   <button
                     key={m.name}
                     onClick={() => { onSelect(m.name); close(); }}
                     className={[
-                      "w-full text-left px-4 py-2.5 min-h-[44px] flex items-center gap-3",
+                      "w-full text-left px-4 py-2.5 min-h-[48px] flex items-center gap-3",
                       "transition-all duration-150 ease-out cursor-pointer",
                       "active:bg-accent/70",
                       isCurrent
@@ -182,9 +185,11 @@ function CompactRetrySheet({
                         : "hover:bg-accent/50",
                     ].join(" ")}
                   >
-                    <span
-                      className="h-2 w-2 rounded-full shrink-0"
-                      style={{ backgroundColor: providerColor, opacity: isCurrent ? 1 : 0.5 }}
+                    <ProviderAvatar
+                      id={provider}
+                      color={providerColor}
+                      className="h-8 w-8"
+                      iconClassName="h-4 w-4"
                     />
                     <span className={`text-sm flex-1 min-w-0 truncate ${isCurrent ? "font-semibold" : "font-medium"}`}>
                       {displayLabel(m)}
@@ -222,11 +227,10 @@ function CompactRetrySheet({
 }
 
 /* ------------------------------------------------------------------ */
-/*  Two-stage Switch Sheet                                             */
+/*  Switch Sheet                                                       */
 /* ------------------------------------------------------------------ */
 
-const SNAP_HALF = 50;  // dvh
-const SNAP_FULL = 85;  // dvh
+const SHEET_HEIGHT = "50dvh";
 
 function SwitchSheet({
   open,
@@ -239,14 +243,12 @@ function SwitchSheet({
   switchError = null,
 }: Omit<ModelListBottomSheetProps, "mode">) {
   const [search, setSearch] = useState("");
-  const [expanded, setExpanded] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const searchRef = useRef<HTMLInputElement>(null);
 
   const close = useCallback(() => {
     onOpenChange(false);
     setSearch("");
-    setExpanded(false);
   }, [onOpenChange]);
 
   // Lock body scroll when open
@@ -264,18 +266,10 @@ function SwitchSheet({
       if (!atTop) return;
 
       if (info.offset.y > 80 || info.velocity.y > 300) {
-        if (expanded) {
-          setExpanded(false);
-        } else {
-          close();
-        }
-      } else if (info.offset.y < -40 || info.velocity.y < -200) {
-        if (!expanded && models.length >= 4) {
-          setExpanded(true);
-        }
+        close();
       }
     },
-    [close, expanded, models.length],
+    [close],
   );
 
   // Filter
@@ -291,10 +285,9 @@ function SwitchSheet({
   }, [models, search]);
 
   const groups = groupByProvider(filtered);
-  const showSearch = expanded && models.length >= 4;
+  const showSearch = models.length >= 4;
   const showProviderHeaders = groups.length > 1;
   const activeModel = models.find((m) => m.name === currentModel);
-  const canExpand = models.length >= 4;
 
   return (
     <BottomSheetPortal>
@@ -312,7 +305,6 @@ function SwitchSheet({
             onClick={close}
           />
 
-          {/* Two-stage bottom sheet */}
           <motion.div
             key="switch-sheet-content"
             initial={{ y: "100%" }}
@@ -325,8 +317,8 @@ function SwitchSheet({
             onDragEnd={handleDragEnd}
             className="fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
             style={{
-              maxHeight: expanded ? `${SNAP_FULL}dvh` : `${SNAP_HALF}dvh`,
-              transition: "max-height 0.3s cubic-bezier(0.25, 0.1, 0.25, 1)",
+              height: SHEET_HEIGHT,
+              maxHeight: SHEET_HEIGHT,
               touchAction: "none",
             }}
           >
@@ -352,7 +344,7 @@ function SwitchSheet({
               </button>
             </div>
 
-            {/* Search — only in expanded state */}
+            {/* Search — shown when the list is long enough to need it */}
             <AnimatePresence>
               {showSearch && (
                 <motion.div
@@ -390,41 +382,50 @@ function SwitchSheet({
               style={{ WebkitOverflowScrolling: "touch" }}
               onPointerDownCapture={(e) => e.stopPropagation()}
             >
-              {/* ── Compact active model bar ── */}
               {activeModel && !search.trim() && (() => {
-                const providerColor = getProviderColor(extractProvider(activeModel.base_url));
+                const provider = providerOf(activeModel);
+                const providerColor = getProviderColor(provider);
                 const isUnhealthy = capsMap[activeModel.name]?.healthy === false;
                 return (
-                  <div className="mx-3 mt-1 mb-1.5">
+                  <div className="mx-3 mt-1.5 mb-2">
                     <div
-                      className="rounded-lg px-3 py-2 flex items-center gap-2.5 cursor-default"
-                      style={{
-                        backgroundColor: `${providerColor}08`,
-                        borderLeft: `3px solid ${isUnhealthy ? "var(--em-error)" : providerColor}`,
-                      }}
+                      className={[
+                        "flex items-center gap-3 rounded-2xl border px-3 py-3 cursor-default",
+                        isUnhealthy
+                          ? "border-destructive/30 bg-destructive/[0.04]"
+                          : "border-border/70 bg-muted/30",
+                      ].join(" ")}
                     >
-                      <span
-                        className="h-2.5 w-2.5 rounded-full shrink-0"
-                        style={{
-                          backgroundColor: isUnhealthy ? "var(--em-error)" : providerColor,
-                          boxShadow: isUnhealthy
-                            ? "0 0 6px var(--em-error)"
-                            : `0 0 6px ${providerColor}40`,
-                        }}
+                      <ProviderAvatar
+                        id={provider}
+                        color={isUnhealthy ? undefined : providerColor}
+                        className="h-11 w-11"
+                        iconClassName="h-5 w-5"
                       />
-                      <span className="text-sm font-semibold leading-tight truncate flex-1 min-w-0">
-                        {displayLabel(activeModel)}
-                      </span>
-                      <span
-                        className="text-[9px] px-1.5 py-px rounded-full font-semibold shrink-0"
-                        style={{
-                          backgroundColor: `${providerColor}15`,
-                          color: providerColor,
-                        }}
-                      >
-                        当前
-                      </span>
-                      <Check className="h-3.5 w-3.5 shrink-0" style={{ color: providerColor }} />
+                      <div className="min-w-0 flex-1">
+                        <p className="text-sm font-semibold leading-tight truncate">
+                          {displayLabel(activeModel)}
+                        </p>
+                        <p className="mt-0.5 text-[11px] text-muted-foreground truncate">
+                          {isUnhealthy ? "当前不可用" : getProviderDisplayName(provider)}
+                        </p>
+                      </div>
+                      {isUnhealthy ? (
+                        <span className="inline-flex items-center gap-0.5 text-[10px] px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive font-medium shrink-0">
+                          <AlertTriangle className="h-2.5 w-2.5" />
+                          不可用
+                        </span>
+                      ) : (
+                        <span
+                          className="text-[10px] font-medium px-2 py-0.5 rounded-full shrink-0"
+                          style={{
+                            backgroundColor: `${providerColor}18`,
+                            color: providerColor,
+                          }}
+                        >
+                          当前
+                        </span>
+                      )}
                     </div>
                   </div>
                 );
@@ -443,9 +444,11 @@ function SwitchSheet({
                     {/* Provider header — hidden when single provider */}
                     {showProviderHeaders && (
                       <div className="flex items-center gap-2 px-4 pt-2 pb-1">
-                        <span
-                          className="h-1.5 w-1.5 rounded-full shrink-0"
-                          style={{ backgroundColor: color }}
+                        <ProviderAvatar
+                          id={group.provider}
+                          color={color}
+                          className="h-4 w-4 rounded-md"
+                          iconClassName="h-2.5 w-2.5"
                         />
                         <span
                           className="text-[10px] font-semibold uppercase tracking-widest"
@@ -459,34 +462,26 @@ function SwitchSheet({
                     {remainingModels.map((m) => {
                       const isSelected = m.name === currentModel;
                       const isUnhealthy = capsMap[m.name]?.healthy === false;
-                      const hasHealthData = m.name in capsMap;
                       return (
                         <button
                           key={m.name}
                           onClick={() => onSelect(m.name)}
                           disabled={switching}
                           className={[
-                            "w-full text-left px-4 py-2 min-h-[44px] flex items-center gap-3",
+                            "w-full text-left px-4 py-2 min-h-[48px] flex items-center gap-3",
                             "transition-all duration-150 ease-out cursor-pointer",
-                            "border-l-[3px] border-l-transparent",
                             "active:bg-accent/70",
                             isSelected
-                              ? "bg-(--em-primary-alpha-06) border-l-(--em-primary)!"
-                              : "hover:bg-accent/50 hover:border-l-(--em-primary-alpha-25)",
+                              ? "bg-(--em-primary-alpha-06)"
+                              : "hover:bg-accent/50",
                             switching ? "opacity-50 pointer-events-none" : "",
                           ].join(" ")}
                         >
-                          {/* Health indicator dot */}
-                          <span
-                            className="h-2 w-2 rounded-full shrink-0 transition-colors duration-200"
-                            style={{
-                              backgroundColor: isUnhealthy
-                                ? "var(--em-error)"
-                                : hasHealthData && capsMap[m.name]?.healthy === true
-                                  ? "var(--em-primary)"
-                                  : "var(--muted-foreground)",
-                              opacity: hasHealthData ? 1 : 0.25,
-                            }}
+                          <ProviderAvatar
+                            id={group.provider}
+                            color={isUnhealthy ? undefined : color}
+                            className="h-8 w-8"
+                            iconClassName="h-4 w-4"
                           />
 
                           {/* Model info */}
@@ -543,18 +538,6 @@ function SwitchSheet({
                 </div>
               )}
             </div>
-
-            {/* Expand hint — only when collapsed and many models */}
-            {!expanded && canExpand && (
-              <button
-                type="button"
-                onClick={() => setExpanded(true)}
-                className="shrink-0 flex items-center justify-center gap-1 py-1.5 text-[11px] text-muted-foreground/50 hover:text-muted-foreground/70 transition-colors border-t border-border/30"
-              >
-                <ChevronUp className="h-3 w-3" />
-                上拉展开搜索
-              </button>
-            )}
 
             {/* Error banner */}
             {switchError && (

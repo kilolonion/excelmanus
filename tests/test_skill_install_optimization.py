@@ -197,7 +197,7 @@ class TestP2VersionCache:
 
         engine = MagicMock()
         engine._tools_cache = {"cached": True}
-        engine._config = SimpleNamespace(external_safe_mode=False)
+        engine._config = SimpleNamespace()
         engine._active_skills = []
         engine._loaded_skill_names = {}
 

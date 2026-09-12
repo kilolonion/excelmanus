@@ -360,9 +360,9 @@ export function ImagePreviewModal({
   return (
     <>
       {trigger !== undefined && trigger !== null && (
-        <div onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
+        <span className="inline-flex max-w-full" onClick={(e) => { e.stopPropagation(); setOpen(true); }}>
           {trigger}
-        </div>
+        </span>
       )}
       {typeof window !== "undefined" && createPortal(overlay, document.body)}
     </>

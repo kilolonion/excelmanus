@@ -233,7 +233,11 @@ def ensure_openpyxl_compatible(safe_path: Path) -> Path:
         return safe_path
 
     try:
-        xlsx_path, converted = ensure_xlsx(safe_path)
+        from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+
+        ctx = _get_ctx_guard()
+        workspace_root = str(ctx.workspace_root) if ctx is not None else None
+        xlsx_path, converted = ensure_xlsx(safe_path, workspace_root=workspace_root)
         if converted:
             _logger.info("工具层自动转换: %s → %s", safe_path.name, xlsx_path.name)
         return xlsx_path

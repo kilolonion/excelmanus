@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Upload, Loader2, Download, Paintbrush, MoreHorizontal, History, FileSpreadsheet } from "lucide-react";
+import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Download, Paintbrush, MoreHorizontal, History, FileSpreadsheet } from "lucide-react";
 import { OperationTimeline } from "./OperationTimeline";
 import {
   DropdownMenu,
@@ -18,7 +18,7 @@ import { useIsMobile, useIsTablet, useIsDesktop, useIsMediumScreen } from "@/hoo
 import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl, downloadFile, normalizeExcelPath, invalidateSnapshotCache } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile, invalidateSnapshotCache } from "@/lib/api";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 
@@ -36,7 +36,7 @@ export function ExcelSidePanel() {
   const {
     panelOpen, activeFilePath, activeSheet, diffs, closePanel,
     openFullView, selectionMode, enterSelectionMode,
-    exitSelectionMode, confirmSelection, draftRange, setDraftRange, pendingBackups, applyFile,
+    exitSelectionMode, confirmSelection, draftRange, setDraftRange,
     recentFiles, openPanel, removeRecentFile,
   } = useExcelStore(useShallow((s) => ({
     panelOpen: s.panelOpen,
@@ -51,8 +51,6 @@ export function ExcelSidePanel() {
     confirmSelection: s.confirmSelection,
     draftRange: s.draftRange,
     setDraftRange: s.setDraftRange,
-    pendingBackups: s.pendingBackups,
-    applyFile: s.applyFile,
     recentFiles: s.recentFiles,
     openPanel: s.openPanel,
     removeRecentFile: s.removeRecentFile,
@@ -80,26 +78,6 @@ export function ExcelSidePanel() {
   // 移动端（<1024px）：全屏浮层
   const useFloatingMode = !isDesktop || isFloatingByResize;
   const panelWidth = isMobile ? undefined : isDesktop ? resizableWidth : isTablet ? 420 : 600;
-
-  const hasBackupForFile = useMemo(
-    () => {
-      if (!activeFilePath) return false;
-      const norm = normalizeExcelPath(activeFilePath);
-      return pendingBackups.some((b) => normalizeExcelPath(b.original_path) === norm);
-    },
-    [pendingBackups, activeFilePath]
-  );
-
-  const [applyingSidePanel, setApplyingSidePanel] = useState(false);
-  const [appliedSidePanel, setAppliedSidePanel] = useState(false);
-
-  const handleApplyCurrentFile = useCallback(async () => {
-    if (!activeSessionId || !activeFilePath) return;
-    setApplyingSidePanel(true);
-    const ok = await applyFile(activeSessionId, activeFilePath);
-    setApplyingSidePanel(false);
-    if (ok) setAppliedSidePanel(true);
-  }, [activeSessionId, activeFilePath, applyFile]);
 
   // ── Tab 栏鼠标拖拽横向滚动（适配无触摸板的电脑端 + 移动端触摸） ──
   const tabBarRef = useRef<HTMLDivElement>(null);
@@ -250,7 +228,7 @@ export function ExcelSidePanel() {
               : isFloatingByResize
                 ? "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-2xl"
                 : "fixed inset-y-0 right-0 z-40 flex flex-col bg-background border-l border-border shadow-xl"
-            : "relative flex flex-col h-full border-l border-border bg-background"
+            : "relative flex flex-col h-full flex-shrink-0 border-l border-border bg-background"
         }
         style={{
           ...(useFloatingMode ? (isMobile ? {} : { width: panelWidth }) : { width: panelWidth }),
@@ -515,35 +493,6 @@ export function ExcelSidePanel() {
                 <XCircle className="h-3 w-3" />
                 取消
               </button>
-            </div>
-          )}
-
-          {/* 应用到原文件栏 */}
-          {(hasBackupForFile || appliedSidePanel) && (
-            <div className="border-t border-border bg-muted/30 px-3 py-2 flex items-center justify-between">
-              <span className="text-[11px] text-muted-foreground">沙盒文件</span>
-              {appliedSidePanel ? (
-                <span className="flex items-center gap-1 text-[11px] text-emerald-600 dark:text-emerald-400 font-medium">
-                  <Check className="h-3 w-3" />
-                  已应用到原文件
-                </span>
-              ) : (
-                <button
-                  onClick={handleApplyCurrentFile}
-                  disabled={applyingSidePanel}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded text-[11px] font-medium transition-colors text-white"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                >
-                  {applyingSidePanel ? (
-                    <Loader2 className="h-3 w-3 animate-spin" />
-                  ) : (
-                    <>
-                      <Upload className="h-3 w-3" />
-                      应用到原文件
-                    </>
-                  )}
-                </button>
-              )}
             </div>
           )}
 

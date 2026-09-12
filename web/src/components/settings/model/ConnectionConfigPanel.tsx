@@ -3,8 +3,8 @@
 import { motion, LayoutGroup } from "framer-motion";
 import {
   Plus, Trash2, Pencil, Save, X, Eye, EyeOff, Loader2, CheckCircle2,
-  Server, Bot, Zap, Wrench, AlertTriangle, Wifi, XCircle,
-  ChevronDown, ChevronRight, ArrowRightLeft, ExternalLink, Crown, Lock, Dices,
+  Bot, Zap, Wrench, AlertTriangle, Wifi, XCircle,
+  ChevronDown, ChevronRight, ExternalLink, Crown, Lock, Dices,
   Search,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -49,12 +49,7 @@ export function ConnectionConfigPanel() {
     setProfileDraft,
     capsMap,
     probingKey,
-    applyingProfile,
-    applyMenuOpen,
-    setApplyMenuOpen,
-    applyMenuRef,
-    applyMenuDropUp,
-    setApplyMenuDropUp,
+    activatingProfile,
     expandedSections,
     setExpandedSections,
     toggleSection,
@@ -68,7 +63,7 @@ export function ConnectionConfigPanel() {
     handleProbeOne,
     handleTestConnection,
     handleFetchRemoteModels,
-    handleApplyProfileToRole,
+    handleActivateProfile,
     handleSaveSection,
     handleToggleEnabled,
     handleAddProfile,
@@ -81,7 +76,7 @@ export function ConnectionConfigPanel() {
   return (
     <div className="flex flex-col gap-2">
         <style>{`
-          @keyframes main-model-glow {
+          @keyframes active-model-glow {
             0%, 100% { box-shadow: 0 0 15px -3px var(--em-primary); }
             50% { box-shadow: 0 0 25px -3px var(--em-primary); }
           }
@@ -93,7 +88,7 @@ export function ConnectionConfigPanel() {
           const sectionCaps = capsMap[section.key];
           const isExpanded = !!expandedSections[section.key];
           const modelId = editDrafts[section.key]?.model || (config?.[section.key as keyof ModelConfig] as ModelSection)?.model || "";
-          const isDisabled = (section.key === "aux" || section.key === "embedding") && enabledDrafts[section.key] === false;
+          const isDisabled = section.key === "embedding" && enabledDrafts[section.key] === false;
           return (
           <div key={section.key} className={`rounded-lg border transition-colors ${
             isModelUnhealthy(sectionCaps)
@@ -113,7 +108,7 @@ export function ConnectionConfigPanel() {
               </span>
               <span className="flex-shrink-0" style={{ color: isModelUnhealthy(sectionCaps) ? "var(--destructive, #ef4444)" : "var(--em-primary)" }}>{section.icon}</span>
               <span className="font-semibold text-sm whitespace-nowrap">{section.label}</span>
-              {(section.key === "aux" || section.key === "embedding") && (
+              {section.key === "embedding" && (
                 <Switch
                   checked={section.key === "embedding" ? enabledDrafts[section.key] === true : enabledDrafts[section.key] !== false}
                   onCheckedChange={(checked) => { handleToggleEnabled(section.key, checked); }}
@@ -151,7 +146,7 @@ export function ConnectionConfigPanel() {
                   </div>
                 )}
                 {isDisabled && (
-                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">{section.key === "embedding" ? "已禁用，语义检索功能关闭" : "已禁用，将回退到主模型"}</p>
+                  <p className="text-xs text-amber-600 dark:text-amber-400 mb-2">已禁用，语义检索功能关闭</p>
                 )}
                 <div className={`space-y-2 transition-opacity ${isDisabled ? "opacity-40 pointer-events-none" : ""}`}>
                   {section.fields.map((field) => (
@@ -321,22 +316,6 @@ export function ConnectionConfigPanel() {
                     )}
                     {testingKey === section.key ? "测试中..." : "连通测试"}
                   </Button>
-                  )}
-                  {section.key === "main" && (
-                    <Button
-                      size="sm"
-                      variant="outline"
-                      className="h-8 sm:h-7 text-xs gap-1"
-                      onClick={() => handleProbeOne(section.key)}
-                      disabled={probingKey === section.key}
-                    >
-                      {probingKey === section.key ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Zap className="h-3 w-3" />
-                      )}
-                      {probingKey === section.key ? "探测中" : "探测能力"}
-                    </Button>
                   )}
                   <Button
                     size="sm"
@@ -748,7 +727,7 @@ export function ConnectionConfigPanel() {
                   const pCaps = capsMap[p.name];
                   const isHighlighted = highlightProfile === p.name;
                   const isCodexProfile = p.model.startsWith("openai-codex/");
-                  const isMainProfile = !isCodexProfile && p.model === config?.main?.model;
+                  const isActiveProfile = p.name === config?.active;
                   const isUnhealthy = isModelUnhealthy(pCaps);
                   const initials = p.name.slice(0, 2).toUpperCase();
                   const providerId = inferProfileProvider(p);
@@ -764,7 +743,7 @@ export function ConnectionConfigPanel() {
                     className={`group rounded-xl border text-sm transition-[border-color,background-color] duration-200 ${
                       isCodexProfile
                         ? "border-[var(--em-primary)]/25 bg-gradient-to-r from-[var(--em-primary)]/5 to-transparent"
-                        : isMainProfile
+                        : isActiveProfile
                           ? "border-[var(--em-primary)] bg-gradient-to-br from-[var(--em-primary)]/10 via-[var(--em-primary)]/3 to-transparent ring-1 ring-[var(--em-primary)]/15 cursor-pointer"
                           : isHighlighted
                             ? "border-[var(--em-primary)] bg-[var(--em-primary)]/5 ring-1 ring-[var(--em-primary)]/20 scale-[1.005] cursor-pointer shadow-sm"
@@ -772,7 +751,7 @@ export function ConnectionConfigPanel() {
                               ? "border-destructive/30 bg-destructive/3 cursor-pointer hover:border-destructive/50 hover:shadow-sm"
                               : "border-border/60 bg-card cursor-pointer hover:border-border hover:shadow-sm hover:bg-muted/20"
                     }`}
-                    style={isMainProfile ? { animation: "main-model-glow 3s ease-in-out infinite" } : undefined}
+                    style={isActiveProfile ? { animation: "active-model-glow 3s ease-in-out infinite" } : undefined}
                     onClick={() => {
                       if (isCodexProfile) return;
                       setEditingProfile(p.name);
@@ -800,8 +779,8 @@ export function ConnectionConfigPanel() {
                         isCodexProfile
                           ? "bg-[var(--em-primary)]/15 text-[var(--em-primary)]"
                           : hasProviderLogo
-                            ? (isMainProfile ? "bg-[var(--em-primary)]/10" : "bg-muted/40")
-                          : isMainProfile
+                            ? (isActiveProfile ? "bg-[var(--em-primary)]/10" : "bg-muted/40")
+                          : isActiveProfile
                             ? "bg-amber-500/15 text-amber-600 dark:text-amber-400"
                           : isUnhealthy
                             ? "bg-destructive/10 text-destructive"
@@ -831,10 +810,10 @@ export function ConnectionConfigPanel() {
                               OAuth
                             </span>
                           )}
-                          {isMainProfile && (
+                          {isActiveProfile && (
                             <span className="flex-shrink-0 inline-flex items-center gap-0.5 rounded-full px-1.5 py-0.5 text-[9px] font-semibold bg-amber-500/15 text-amber-600 dark:text-amber-400 border border-amber-500/20">
                               <Crown className="h-2.5 w-2.5" />
-                              主模型
+                              当前
                             </span>
                           )}
                           {isUnhealthy && (
@@ -859,56 +838,20 @@ export function ConnectionConfigPanel() {
 
                       {/* Action buttons */}
                       <div className="flex items-center gap-0.5 flex-shrink-0 opacity-100 sm:opacity-60 sm:group-hover:opacity-100 transition-opacity touch-show">
-                        {/* Apply role dropdown */}
-                        <div className="relative" ref={applyMenuOpen === p.name ? applyMenuRef : undefined}>
+                        {!isActiveProfile && (
                           <button
-                            title="应用到角色"
+                            title="激活此模型"
                             className="h-7 w-7 sm:h-6 sm:w-6 flex items-center justify-center rounded-md text-muted-foreground hover:text-foreground hover:bg-muted/60 transition-colors disabled:opacity-40"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              if (applyMenuOpen === p.name) {
-                                setApplyMenuOpen(null);
-                              } else {
-                                const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
-                                const dropdownHeight = 160;
-                                const spaceBelow = window.innerHeight - rect.bottom;
-                                setApplyMenuDropUp(spaceBelow < dropdownHeight && rect.top > dropdownHeight);
-                                setApplyMenuOpen(p.name);
-                              }
-                            }}
-                            disabled={applyingProfile === p.name}
+                            onClick={(e) => { e.stopPropagation(); handleActivateProfile(p); }}
+                            disabled={activatingProfile === p.name}
                           >
-                            {applyingProfile === p.name ? (
+                            {activatingProfile === p.name ? (
                               <Loader2 className="h-3.5 w-3.5 animate-spin" />
                             ) : (
-                              <ArrowRightLeft className="h-3.5 w-3.5" />
+                              <Crown className="h-3.5 w-3.5" />
                             )}
                           </button>
-                          {applyMenuOpen === p.name && (
-                              <div className={`absolute right-0 z-50 w-40 rounded-xl border border-border/60 bg-popover shadow-lg overflow-hidden ${
-                                applyMenuDropUp ? "bottom-full mb-1.5" : "top-full mt-1.5"
-                              }`}>
-                                <div className="px-2.5 py-1.5 border-b border-border/40">
-                                  <p className="text-[10px] font-medium text-muted-foreground uppercase tracking-wide">应用到角色</p>
-                                </div>
-                                <div className="p-1">
-                                  {([
-                                    { role: "main" as const, label: "主模型", icon: <Server className="h-3.5 w-3.5" />, color: "text-blue-500" },
-                                    { role: "aux" as const, label: "辅助模型", icon: <Bot className="h-3.5 w-3.5" />, color: "text-violet-500" },
-                                  ]).map((item) => (
-                                    <button
-                                      key={item.role}
-                                      className="flex items-center gap-2.5 w-full px-2.5 py-2 text-xs rounded-lg hover:bg-muted/60 active:bg-muted transition-colors text-left"
-                                      onClick={(e) => { e.stopPropagation(); handleApplyProfileToRole(p, item.role); }}
-                                    >
-                                      <span className={item.color}>{item.icon}</span>
-                                      <span className="font-medium">用作{item.label}</span>
-                                    </button>
-                                  ))}
-                                </div>
-                              </div>
-                          )}
-                        </div>
+                        )}
                         {/* Probe */}
                         <button
                           title="探测能力"

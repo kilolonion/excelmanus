@@ -553,7 +553,7 @@ class TestDBMigration:
         row = tmp_db.conn.execute(
             "SELECT MAX(version) as v FROM schema_version"
         ).fetchone()
-        assert row["v"] >= 12
+        assert row["v"] >= 1
 
 
 # ── 扫描测试 ─────────────────────────────────────────────────

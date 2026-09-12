@@ -52,8 +52,12 @@ def test_staging_map_does_not_redirect_open(tmp_path: Path) -> None:
         staging_map={str(original): str(staged)},
     )
     assert result.returncode == 0, result.stderr
-    assert original.read_text(encoding="utf-8") == "modified"
+    assert original.read_text(encoding="utf-8") == "original_content"
     assert staged.read_text(encoding="utf-8") == "staged_content"
+    pending_dir = tmp_path / ".excelmanus" / "pending"
+    pending_files = list(pending_dir.rglob("*_data.txt")) if pending_dir.is_dir() else []
+    assert pending_files, "txt writes should land in pending, not the live path"
+    assert pending_files[0].read_text(encoding="utf-8") == "modified"
 
 
 def test_staging_map_does_not_redirect_openpyxl_save(tmp_path: Path) -> None:

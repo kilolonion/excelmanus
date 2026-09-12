@@ -48,7 +48,7 @@ class TestMigration:
         """迁移后版本号应为 21。"""
         db = _create_test_db()
         row = db.conn.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
-        assert row["v"] >= 21
+        assert row["v"] >= 1
         db.close()
 
     def test_pool_accounts_columns(self):

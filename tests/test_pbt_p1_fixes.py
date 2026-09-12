@@ -17,12 +17,17 @@ from __future__ import annotations
 import types
 from unittest.mock import MagicMock, patch, call
 
+import inspect
+
 import pytest
 from hypothesis import given, assume, settings
 from hypothesis import strategies as st
 
+from excelmanus.agent.loop import _handle_text_reply, run_tool_loop
+from excelmanus.engine import AgentEngine
+
 # ---------------------------------------------------------------------------
-# B3 测试 — context_builder.py FileRegistry 构建失败可恢复
+# B3 测试 — FileRegistry 构建失败可恢复
 # ---------------------------------------------------------------------------
 
 
@@ -33,13 +38,6 @@ def _make_engine_stub(built: bool = False) -> MagicMock:
     e._file_registry = None
     e._config.workspace_root = "/fake/workspace"
     return e
-
-
-def _make_context_builder(engine_stub: MagicMock) -> MagicMock:
-    """构造一个 ContextBuilder stub，持有 engine stub。"""
-    cb = MagicMock()
-    cb._engine = engine_stub
-    return cb
 
 
 def _run_registry_scan(engine_stub: MagicMock, raises: bool) -> None:
@@ -195,6 +193,7 @@ class TestB4ThresholdParsing:
         monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "0.6")
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
         monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL", "30")
 
         from excelmanus.config import load_config
         config = load_config()
@@ -207,6 +206,7 @@ class TestB4ThresholdParsing:
         monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "2.0")
         monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
         monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
+        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL", "30")
 
         from excelmanus.config import load_config
         config = load_config()
@@ -228,24 +228,19 @@ class TestB1RegistryRefreshOnExit:
         LLM 返回纯文本（无 tool_calls）时经 _handle_text_reply 退出，
         统一走 _finalize_result → _try_refresh_registry。
         """
-        from excelmanus.engine import AgentEngine
-
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
 
         # 统一出口 helper 中应有 refresh
         helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
         assert "_try_refresh_registry()" in helper_block
 
         # 文本回复退出路径走统一出口
-        text_reply_source = inspect.getsource(AgentEngine._handle_text_reply)
+        text_reply_source = inspect.getsource(_handle_text_reply)
         assert "_finalize_result(" in text_reply_source
 
     def test_property1_pending_approval_handled_inline(self) -> None:
         """pending_approval 在循环内内联处理（不再有独立退出路径）。"""
-        from excelmanus.engine import AgentEngine
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
 
         # P6: 审批已改为内联解决，验证内联审批代码存在
         assert "tc_result.pending_approval" in source
@@ -253,18 +248,14 @@ class TestB1RegistryRefreshOnExit:
 
     def test_property1_ask_user_handled_blocking(self) -> None:
         """ask_user 在循环内阻塞等待（不再有独立退出路径）。"""
-        from excelmanus.engine import AgentEngine
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
 
         # P6: ask_user 已改为阻塞式，循环不中断
         assert "旧的 ask_user 退出路径已移除" in source
 
     def test_property1_breaker_calls_refresh(self) -> None:
         """breaker_triggered 退出路径调用 _try_refresh_registry。"""
-        from excelmanus.engine import AgentEngine
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
 
         block = source[source.find("连续 %d 次工具失败，熔断终止"):]
         assert "return _finalize_result(" in block
@@ -274,7 +265,7 @@ class TestB1RegistryRefreshOnExit:
         from excelmanus.engine import AgentEngine
         from excelmanus.engine_core import tool_handlers as th_mod
         import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
         source_engine = inspect.getsource(AgentEngine)
         source_handlers = inspect.getsource(th_mod)
 
@@ -288,9 +279,7 @@ class TestB1RegistryRefreshOnExit:
 
     def test_property6_max_iter_still_calls_refresh(self) -> None:
         """Preservation: max_iter 路径仍然调用 _try_refresh_registry（原有行为不变）。"""
-        from excelmanus.engine import AgentEngine
-        import inspect
-        source = inspect.getsource(AgentEngine._tool_calling_loop)
+        source = inspect.getsource(run_tool_loop)
 
         # max_iter 路径在函数末尾
         max_iter_block = source[source.rfind("达到迭代上限"):]
@@ -318,16 +307,27 @@ class TestU1IntrospectCapabilityRegistered:
         register_introspection_tools(registry)
         assert "introspect_capability" in registry.get_tool_names()
 
-    def test_property5_engine_init_registers_introspect(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_property5_engine_init_registers_introspect(self) -> None:
         """AgentEngine 初始化后 introspect_capability 在 registry 中可用。"""
-        from excelmanus.tools.registry import ToolRegistry
-        from excelmanus.tools.introspection_tools import register_introspection_tools
+        from pathlib import Path
 
-        # 验证 engine.py 中确实 import 并调用了 register_introspection_tools
-        import excelmanus.engine as engine_module
-        assert hasattr(engine_module, "register_introspection_tools"), (
-            "register_introspection_tools 未在 engine.py 中 import"
+        from excelmanus.config import ExcelManusConfig
+        from excelmanus.tools.registry import ToolRegistry
+        import excelmanus.agent.session as session_module
+
+        assert hasattr(session_module, "register_introspection_tools"), (
+            "register_introspection_tools 未在 agent/session.py 中 import"
         )
+        engine = AgentEngine(
+            ExcelManusConfig(
+                api_key="test-key",
+                base_url="https://test.example.com/v1",
+                model="test-model",
+                workspace_root=str(Path(__file__).resolve().parent),
+            ),
+            ToolRegistry(),
+        )
+        assert "introspect_capability" in engine.registry.get_tool_names()
 
     def test_property5_other_tools_unaffected(self) -> None:
         """Preservation: 其他工具注册不受影响。"""

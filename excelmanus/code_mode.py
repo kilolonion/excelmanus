@@ -340,8 +340,9 @@ def _sdk_signature_line(tool: ToolDef) -> str:
     if not isinstance(properties, dict):
         properties = {}
     required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
-    req_names = [name for name in properties if name in required]
-    opt_names = [name for name in properties if name not in required]
+    names = [name for name in properties if not _sdk_skip_property(str(name), properties)]
+    req_names = [name for name in names if name in required]
+    opt_names = [name for name in names if name not in required]
     params: list[str] = []
     for name in [*req_names, *opt_names]:
         py_name = _py_name(str(name))
@@ -351,7 +352,11 @@ def _sdk_signature_line(tool: ToolDef) -> str:
             spec = properties.get(name) if isinstance(properties.get(name), dict) else {}
             default = spec.get("default") if "default" in spec else None
             params.append(f"{py_name}={default!r}")
-    return f"- {_py_name(str(tool.name))}({', '.join(params)})"
+    line = f"- {_py_name(str(tool.name))}({', '.join(params)})"
+    enum_lines = _schema_enum_lines(schema)
+    if enum_lines:
+        return line + "\n" + "\n".join(enum_lines)
+    return line
 
 
 def render_sdk_source(
@@ -360,7 +365,7 @@ def render_sdk_source(
 ) -> str:
     """从 ToolDef 生成可执行 Python 模块文本（不在沙盒内直接调 func）。"""
     parts: list[str] = [
-        _SDK_PREAMBLE.format(disclaimer=LOCAL_SANDBOX_DISCLAIMER),
+        _SDK_PREAMBLE.replace("{disclaimer}", LOCAL_SANDBOX_DISCLAIMER),
     ]
     exported: list[str] = []
     for tool in tool_defs:
@@ -406,10 +411,21 @@ def _payload_from_tool_result(result: ToolResult) -> dict[str, Any]:
         code = "TOOL_ERROR"
         message = getattr(result, "model_text", None) or "tool failed"
         error = getattr(result, "error", None)
+        fields: dict[str, Any] = {}
         if error is not None:
             code = str(getattr(error, "code", None) or code)
             message = str(getattr(error, "message", None) or message)
-        return {"ok": False, "error": {"code": code, "message": message}}
+            raw_fields = getattr(error, "fields", None)
+            if isinstance(raw_fields, dict):
+                fields = raw_fields
+        value = getattr(result, "value", None)
+        if isinstance(value, dict):
+            fields = {**fields, **value}
+        error_obj: dict[str, Any] = {"code": code, "message": message}
+        for key in ("accepted_fields", "violations", "required_fields"):
+            if key in fields:
+                error_obj[key] = fields[key]
+        return {"ok": False, "error": error_obj}
     value = getattr(result, "value", None)
     if value is None:
         text = getattr(result, "model_text", None) or ""
@@ -418,6 +434,40 @@ def _payload_from_tool_result(result: ToolResult) -> dict[str, Any]:
         except (json.JSONDecodeError, TypeError, ValueError):
             value = text
     return {"ok": True, "value": value}
+
+
+def _sdk_skip_property(name: str, properties: dict[str, Any]) -> bool:
+    if name == "path" and "file_path" in properties:
+        return True
+    if name == "sheet_name" and "sheet" in properties:
+        return True
+    if name == "content_version" and "expected_version" in properties:
+        return True
+    if name == "cell_range" and "range" in properties:
+        return True
+    if name == "other_path" and "file_b" in properties:
+        return True
+    return False
+
+
+def _schema_enum_lines(schema: dict[str, Any]) -> list[str]:
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return []
+    lines: list[str] = []
+    for key in ("mode", "kind", "action", "alignment"):
+        spec = properties.get(key)
+        if isinstance(spec, dict) and spec.get("enum"):
+            lines.append(f"  {key}: " + "|".join(str(item) for item in spec["enum"]))
+    operations = properties.get("operations")
+    if isinstance(operations, dict):
+        items = operations.get("items")
+        if isinstance(items, dict):
+            item_props = items.get("properties") if isinstance(items.get("properties"), dict) else {}
+            kind_spec = item_props.get("kind")
+            if isinstance(kind_spec, dict) and kind_spec.get("enum"):
+                lines.append("  operations.kind: " + "|".join(str(item) for item in kind_spec["enum"]))
+    return lines
 
 
 def _py_name(name: str) -> str:
@@ -433,8 +483,9 @@ def _render_tool_function(tool: ToolDef) -> str:
     if not isinstance(properties, dict):
         properties = {}
     required = set(schema.get("required") or []) if isinstance(schema, dict) else set()
-    req_names = [name for name in properties if name in required]
-    opt_names = [name for name in properties if name not in required]
+    names = [name for name in properties if not _sdk_skip_property(str(name), properties)]
+    req_names = [name for name in names if name in required]
+    opt_names = [name for name in names if name not in required]
     params: list[str] = []
     arg_items: list[str] = []
     for name in [*req_names, *opt_names]:
@@ -450,9 +501,13 @@ def _render_tool_function(tool: ToolDef) -> str:
     description = str(getattr(tool, "description", "") or "").replace('"""', "'''")
     args_literal = ", ".join(arg_items)
     fn_name = _py_name(str(tool.name))
+    enum_comment = "".join(
+        f"    # {line.strip()}\n" for line in _schema_enum_lines(schema)
+    )
     return (
         f"def {fn_name}({signature}):\n"
         f'    """{description}"""\n'
+        f"{enum_comment}"
         f"    return _call_host({tool.name!r}, {{{args_literal}}})\n"
     )
 
@@ -466,6 +521,8 @@ _SDK_PREAMBLE = '''\
 用法::
 
     from em import inspect_spreadsheet, edit_spreadsheet, format_spreadsheet
+
+首次用某工具前可 introspect_capability(query_type="tool_detail", query="工具名")。
 """
 from __future__ import annotations
 
@@ -475,9 +532,10 @@ import time
 
 
 class HostToolError(Exception):
-    def __init__(self, message, code="TOOL_ERROR"):
+    def __init__(self, message, code="TOOL_ERROR", details=None):
         super().__init__(message)
         self.code = code
+        self.details = details or {}
 
 
 _SEQ = 0
@@ -492,12 +550,12 @@ def _call_host(tool, arguments):
     seq = _SEQ
     req_path = os.path.join(bridge, "%08d.req.json" % seq)
     resp_path = os.path.join(bridge, "%08d.resp.json" % seq)
-    payload = {{
+    payload = {
         "id": seq,
         "tool": tool,
-        "arguments": {{k: v for k, v in arguments.items() if v is not None}},
+        "arguments": {k: v for k, v in arguments.items() if v is not None},
         "root_call_id": os.environ.get("EXCELMANUS_CODE_MODE_ROOT_CALL_ID") or "",
-    }}
+    }
     tmp_path = req_path + ".tmp"
     with open(tmp_path, "w", encoding="utf-8") as _rf:
         json.dump(payload, _rf, ensure_ascii=False)
@@ -511,10 +569,15 @@ def _call_host(tool, arguments):
             with open(resp_path, encoding="utf-8") as _vf:
                 resp = json.load(_vf)
             if not resp.get("ok"):
-                err = resp.get("error") or {{}}
+                err = resp.get("error") or {}
                 raise HostToolError(
                     err.get("message") or "tool failed",
                     err.get("code") or "TOOL_ERROR",
+                    {
+                        key: err[key]
+                        for key in ("accepted_fields", "violations", "required_fields")
+                        if key in err
+                    },
                 )
             return resp.get("value")
         time.sleep(0.02)

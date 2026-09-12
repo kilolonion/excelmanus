@@ -25,6 +25,7 @@ import {
   type FileRegistryEntry,
   type FileRegistryEvent,
 } from "@/lib/api";
+import { useSessionStore } from "@/stores/session-store";
 
 // ── Helpers ──────────────────────────────────────────────
 
@@ -100,7 +101,11 @@ export function FileInfoDialog({ open, onOpenChange, filePath }: FileInfoDialogP
     setLoading(true);
     setError(null);
     try {
-      const res = await fetchFileRegistry({ fileId: filePath, includeEvents: true });
+      const res = await fetchFileRegistry({
+        fileId: filePath,
+        includeEvents: true,
+        sessionId: useSessionStore.getState().activeSessionId,
+      });
       if ("file" in res) {
         setEntry(res.file);
       } else if ("files" in res && res.files.length > 0) {

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import shutil
 from datetime import datetime, timezone
 from fnmatch import fnmatch
 from pathlib import Path
@@ -698,15 +697,20 @@ def read_text_file(
             {"error": f"无法以 {encoding} 编码读取文件 '{file_path}'，可能是二进制文件"},
         )
 
+    from excelmanus.workbook_commit import content_version_of_file, remember_content_version
+
     total_lines = len(lines)
-    rel_path = str(safe_path.relative_to(guard.workspace_root))
+    rel_path = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
     content_str = "\n".join(lines)
+    version = content_version_of_file(safe_path)
+    remember_content_version(rel_path, version)
     result = {
         "file": safe_path.name,
         "encoding": encoding,
         "lines_read": total_lines,
         "truncated": truncated,
         "content": content_str,
+        "content_version": version,
         "_text_preview": {
             "file_path": rel_path,
             "content": content_str,
@@ -732,6 +736,12 @@ def copy_file(source: str, destination: str) -> ToolResult:
         is_probe_path,
         probe_error_message,
     )
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import (
+        CommitError,
+        commit_bytes,
+        remember_content_version,
+    )
 
     if is_probe_path(destination):
         return from_payload(
@@ -755,30 +765,47 @@ def copy_file(source: str, destination: str) -> ToolResult:
             {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
         )
 
-    # 确保目标目录存在
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(src_path, dst_path)
+    dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
+    try:
+        cr = commit_bytes(
+            guard=guard,
+            file_path=dst_rel,
+            data=src_path.read_bytes(),
+            expected_version=None,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
+    remember_content_version(dst_rel, cr.content_version)
 
     return from_payload(
         {
             "status": "success",
             "source": source,
-            "destination": destination,
-            "size": _format_size(dst_path.stat().st_size),
+            "destination": cr.path,
+            "size": _format_size(cr.bytes_written),
+            "content_version": cr.content_version,
         },
     )
 
 
-def rename_file(source: str, destination: str) -> ToolResult:
+def rename_file(
+    source: str,
+    destination: str,
+    expected_version: str | None = None,
+) -> ToolResult:
     """重命名或移动文件（工作区内）。
 
     Args:
         source: 源文件路径（相对于工作目录）。
         destination: 目标路径（相对于工作目录）。
+        expected_version: 源文件本轮已读 content_version。
 
     Returns:
         操作结果描述。
     """
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import CommitError, commit_move, remember_content_version
+
     guard = _get_guard()
     src_path = guard.resolve_and_validate(source)
     dst_path = guard.resolve_and_validate(destination)
@@ -793,29 +820,47 @@ def rename_file(source: str, destination: str) -> ToolResult:
             {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
         )
 
-    # 确保目标目录存在
-    dst_path.parent.mkdir(parents=True, exist_ok=True)
-    src_path.rename(dst_path)
+    src_rel = str(src_path.relative_to(guard.workspace_root)).replace("\\", "/")
+    dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
+    try:
+        cr = commit_move(
+            guard=guard,
+            source=src_rel,
+            destination=dst_rel,
+            expected_version=expected_version,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
+    remember_content_version(dst_rel, cr.content_version)
 
     return from_payload(
         {
             "status": "success",
             "source": source,
-            "destination": destination,
+            "destination": cr.path,
+            "content_version": cr.content_version,
         },
     )
 
 
-def delete_file(file_path: str, confirm: bool = False) -> ToolResult:
+def delete_file(
+    file_path: str,
+    confirm: bool = False,
+    expected_version: str | None = None,
+) -> ToolResult:
     """安全删除文件（仅限文件，不删除目录）。
 
     Args:
         file_path: 要删除的文件路径（相对于工作目录）。
         confirm: 是否确认删除，必须为 True 才执行删除。
+        expected_version: 本轮已读 content_version。
 
     Returns:
         操作结果描述。
     """
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import CommitError, commit_unlink
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
@@ -830,7 +875,6 @@ def delete_file(file_path: str, confirm: bool = False) -> ToolResult:
         )
 
     if not confirm:
-        # 返回待删除文件信息，供 LLM 二次确认
         stat = safe_path.stat()
         return from_payload(
             {
@@ -844,14 +888,23 @@ def delete_file(file_path: str, confirm: bool = False) -> ToolResult:
             },
         )
 
+    rel = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
     size = _format_size(safe_path.stat().st_size)
-    safe_path.unlink()
+    try:
+        cr = commit_unlink(
+            guard=guard,
+            file_path=rel,
+            expected_version=expected_version,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
 
     return from_payload(
         {
             "status": "success",
-            "deleted": file_path,
+            "deleted": cr.path,
             "size": size,
+            "previous_version": cr.previous_version,
         },
     )
 
@@ -1050,6 +1103,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "目标路径（相对于工作目录）",
                     },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "源文件本轮已读 content_version；缺省则 VERSION_CONFLICT",
+                    },
                 },
                 "required": ["source", "destination"],
                 "additionalProperties": False,
@@ -1076,6 +1133,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "是否确认删除，必须为 true 才执行",
                         "default": False,
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "本轮已读 content_version；缺省则 VERSION_CONFLICT",
                     },
                 },
                 "required": ["file_path"],

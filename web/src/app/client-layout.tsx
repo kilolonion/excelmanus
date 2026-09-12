@@ -3,16 +3,12 @@
 import dynamic from "next/dynamic";
 import { Sidebar, SidebarToggle } from "@/components/sidebar/Sidebar";
 import { TopModelSelector } from "@/components/chat/TopModelSelector";
-import { ModeBadges } from "@/components/chat/ModeBadges";
-import { SessionStatusBar } from "@/components/chat/SessionStatusBar";
-import { BackupApplyBadge } from "@/components/chat/BackupApplyBadge";
+import { ChatSessionHeader } from "@/components/chat/ChatSessionHeader";
 import { CheckpointTimeline } from "@/components/chat/CheckpointTimeline";
-import { TurnBrowser } from "@/components/chat/TurnBrowser";
 import { SessionSync } from "@/components/providers/SessionSync";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
 import { SettingsDialog } from "@/components/settings/SettingsDialog";
-import { ChannelsPanel } from "@/components/channels/ChannelsPanel";
 import { AdminPanel } from "@/components/admin/AdminPanel";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
@@ -59,38 +55,28 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
 
       <div className="flex h-viewport overflow-hidden">
         <Sidebar />
-        <main className="flex-1 flex flex-col overflow-hidden">
-          {/* 顶栏 — 模型选择器 */}
+        <main className="flex-1 flex flex-col overflow-hidden min-w-0">
+          {/* 顶栏只占对话列；表格/文档侧栏与左侧栏一样通顶挤压 */}
           <div className="flex items-center h-12 px-2 sm:px-3 flex-shrink-0 topbar-glass overflow-hidden">
-            {/* 左侧：导航 + 模型 */}
             <SidebarToggle />
-            <TopModelSelector />
-            <ModeBadges />
+            <ChatSessionHeader />
 
-            <div className="flex-1" />
-
-            {/* 右侧：状态指示 */}
-            <div className="flex items-center gap-1 sm:gap-1.5 md:gap-2 flex-shrink-0 min-w-0">
-              <BackupApplyBadge />
-              <TurnBrowser />
+            <div className="ml-auto flex items-center gap-1 sm:gap-1.5 md:gap-2 flex-shrink-0 min-w-0">
+              <TopModelSelector />
               <CheckpointTimeline />
-              <SessionStatusBar />
             </div>
           </div>
-          <div className="flex-1 min-h-0 overflow-hidden flex">
-            <div className="flex-1 min-w-0 overflow-hidden">
-              {children}
-            </div>
-            <ExcelSidePanel />
-            <WordSidePanel />
+          <div className="flex-1 min-h-0 overflow-hidden">
+            {children}
           </div>
         </main>
+        <ExcelSidePanel />
+        <WordSidePanel />
         <ApprovalModal />
         <SessionSync />
         <ExcelDataRecovery />
         <PlaceholderAlert />
         <SettingsDialog />
-        <ChannelsPanel />
         <AdminPanel />
       </div>
     </>

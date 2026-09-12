@@ -47,6 +47,8 @@ def test_is_concurrency_safe_matches_readonly_set() -> None:
     for name in MUTATING_ALL_TOOLS:
         assert is_concurrency_safe(name, {}) is False
     assert is_concurrency_safe("run_code", {"code": ""}) is False
+    assert is_concurrency_safe("mcp_demo_query", {}) is False
+    assert is_concurrency_safe("mcp_demo_query", {}, extra_safe=frozenset({"mcp_demo_query"})) is False
 
 
 def test_mutating_tool_tiers_match_expected_contract() -> None:

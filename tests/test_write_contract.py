@@ -77,10 +77,10 @@ async def test_snapshot_bound_bytes_not_later_disk(
 
     monkeypatch.setattr("openpyxl.load_workbook", _load)
 
-    cfg = type("C", (), {"workspace_root": str(tmp_path), "backup_enabled": False})()
+    cfg = type("C", (), {"workspace_root": str(tmp_path)})()
     monkeypatch.setattr(api_app_state, "_config", cfg)
     monkeypatch.setattr(api_app_state, "_session_manager", None)
-    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req: str(tmp_path))
+    monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
     monkeypatch.setattr(files_mod, "_resolve_excel_path", lambda *a, **k: str(tmp_path / "book.xlsx"))
 
     req = MagicMock()
@@ -107,7 +107,8 @@ async def test_snapshot_bound_bytes_not_later_disk(
     wb.close()
 
 
-def test_sandbox_double_save_updates_expected(tmp_path: Path) -> None:
+def test_sandbox_double_save_does_not_replace_user_xlsx(tmp_path: Path) -> None:
+    """Wrapper may only write pending bytes; host Runtime publishes."""
     xlsx = tmp_path / "book.xlsx"
     wb = Workbook()
     wb.active["A1"] = "v0"
@@ -130,12 +131,13 @@ def test_sandbox_double_save_updates_expected(tmp_path: Path) -> None:
     )
     assert result.returncode == 0, result.stderr
     assert "ok" in result.stdout
+    assert "EXCELMANUS_PENDING_WRITE" in (result.stderr or "")
     wb = load_workbook(xlsx)
-    assert wb.active["A1"].value == "v2"
+    assert wb.active["A1"].value == "v0"
     wb.close()
 
 
-def test_sandbox_same_basename_does_not_use_other_dir(tmp_path: Path) -> None:
+def test_sandbox_same_basename_pending_does_not_touch_other_dir(tmp_path: Path) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"
     left.mkdir()
@@ -162,8 +164,9 @@ def test_sandbox_same_basename_does_not_use_other_dir(tmp_path: Path) -> None:
         env_override={"EXCELMANUS_EXPECTED_VERSIONS": json.dumps(mapping)},
     )
     assert result.returncode == 0, result.stderr
+    assert "EXCELMANUS_PENDING_WRITE" in (result.stderr or "")
     wb = load_workbook(left / "book.xlsx")
-    assert wb.active["A1"].value == "L2"
+    assert wb.active["A1"].value == "L"
     wb.close()
     wb = load_workbook(right / "book.xlsx")
     assert wb.active["A1"].value == "R"

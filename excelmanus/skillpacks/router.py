@@ -18,20 +18,14 @@ class SkillRouter:
         self._config = config
         self._loader = loader
 
-    async def route(
+    async def parse_slash_skill(
         self,
-        user_message: str,
+        slash_command: str | None,
         *,
-        slash_command: str | None = None,
         raw_args: str | None = None,
-        file_paths: list[str] | None = None,
         blocked_skillpacks: set[str] | None = None,
-        chat_mode: str = "write",
-        on_event: object | None = None,
-        images: list[dict] | None = None,
     ) -> SkillMatchResult:
-        """执行路由：斜杠命令按技能直连；非斜杠默认全量工具。"""
-        del user_message, file_paths, chat_mode, on_event, images
+        """斜杠技能解析。非斜杠请走 catalog 手势，不要用本方法探查。"""
         skillpacks = self._loader.get_skillpacks()
         if not skillpacks:
             skillpacks = self._loader.load_all()
@@ -78,39 +72,32 @@ class SkillRouter:
             route_mode="all_tools",
         )
 
+    def list_skill_names(
+        self,
+        blocked_skillpacks: set[str] | None = None,
+    ) -> list[str]:
+        """模型面技能名。blocked 仍列出，权限由目录信封另标。"""
+        del blocked_skillpacks
+        skillpacks = self._loader.get_skillpacks()
+        if not skillpacks:
+            skillpacks = self._loader.load_all()
+        if not skillpacks:
+            return []
+        return sorted(
+            (
+                name
+                for name, skill in skillpacks.items()
+                if not skill.disable_model_invocation
+            ),
+            key=str.lower,
+        )
+
     def build_skill_catalog(
         self,
         blocked_skillpacks: set[str] | None = None,
     ) -> tuple[str, list[str]]:
-        """生成技能目录摘要和技能名称列表。"""
-        skillpacks = self._loader.get_skillpacks()
-        if not skillpacks:
-            skillpacks = self._loader.load_all()
-
-        if not skillpacks:
-            return ("", [])
-
-        blocked = set(blocked_skillpacks or [])
-        visible_pairs = sorted(
-            (
-                (name, skill)
-                for name, skill in skillpacks.items()
-                if not skill.disable_model_invocation
-            ),
-            key=lambda item: item[0].lower(),
-        )
-        skill_names = [name for name, _ in visible_pairs]
-        lines = ["可用技能：\n"]
-        for name, skill in visible_pairs:
-            if name in blocked:
-                lines.append(
-                    f"- {name}：{skill.description} "
-                    f"[⚠️ 需要 fullAccess 权限，使用 /fullAccess on 开启]"
-                )
-            else:
-                lines.append(f"- {name}：{skill.description}")
-        catalog_text = "\n".join(lines)
-        return (catalog_text, skill_names)
+        """兼容旧调用：只返回名称，正文走 user-role 目录。"""
+        return ("", self.list_skill_names(blocked_skillpacks=blocked_skillpacks))
 
     def _build_result(
         self,

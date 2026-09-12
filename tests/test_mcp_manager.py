@@ -9,6 +9,7 @@ from excelmanus.mcp.manager import (
     _prefix_registry,
     add_tool_prefix,
     format_tool_result,
+    infer_mcp_write_effect,
     parse_tool_prefix,
 )
 
@@ -588,3 +589,40 @@ class TestMCPManagerShutdown:
         assert client.close_calls == 1
         assert manager.connected_servers == []
         assert manager.is_initialized is False
+
+
+class TestMCPWriteEffectInference:
+    def test_write_name_is_workspace_write(self) -> None:
+        assert infer_mcp_write_effect(original_name="write_sheet") == "workspace_write"
+        assert infer_mcp_write_effect(original_name="delete_rows") == "workspace_write"
+        assert infer_mcp_write_effect(original_name="writeSheet") == "workspace_write"
+
+    def test_send_email_is_external_write(self) -> None:
+        assert infer_mcp_write_effect(original_name="send_email") == "external_write"
+
+    def test_auto_approve_readonly_stays_unknown(self) -> None:
+        assert (
+            infer_mcp_write_effect(original_name="query_docs", auto_approved=True)
+            == "unknown"
+        )
+        assert infer_mcp_write_effect(original_name="query_docs") == "unknown"
+
+    def test_search_scope_without_write_is_none(self) -> None:
+        assert infer_mcp_write_effect(original_name="web_search_exa", scope="search") == "none"
+
+    def test_auto_approve_does_not_hide_write(self) -> None:
+        assert (
+            infer_mcp_write_effect(original_name="write_sheet", auto_approved=True)
+            == "workspace_write"
+        )
+
+    def test_mystery_without_hints_is_unknown(self) -> None:
+        assert infer_mcp_write_effect(original_name="do_stuff") == "unknown"
+
+    def test_make_tool_def_uses_inferred_effect(self) -> None:
+        client = _make_mock_client()
+        tool = _make_mcp_tool("write_sheet", "Write cells")
+        tool_def = make_tool_def("excel", client, tool)
+        assert tool_def.write_effect == "workspace_write"
+        mystery = make_tool_def("excel", client, _make_mcp_tool("do_stuff", "opaque"))
+        assert mystery.write_effect == "unknown"

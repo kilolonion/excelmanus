@@ -35,7 +35,6 @@ def _make_config(**overrides) -> ExcelManusConfig:
         "max_iterations": 20,
         "max_consecutive_failures": 10,
         "workspace_root": str(Path(__file__).resolve().parent),
-        "backup_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -189,7 +188,7 @@ async def test_property_2_tool_call_start_event_data(
         side_effect=[tool_response, text_response]
     )
 
-    await engine.chat("测试", on_event=collector)
+    await engine.followup("测试", on_event=collector)
 
     # 验证：至少有一个 TOOL_CALL_START 事件
     start_events = collector.by_type(EventType.TOOL_CALL_START)
@@ -266,7 +265,7 @@ async def test_property_3_tool_call_end_event_status(
         side_effect=[tool_response, text_response]
     )
 
-    await engine.chat("测试", on_event=collector)
+    await engine.followup("测试", on_event=collector)
 
     # 验证：至少有一个 TOOL_CALL_END 事件
     end_events = collector.by_type(EventType.TOOL_CALL_END)
@@ -333,7 +332,7 @@ async def test_property_4_iteration_numbers_strictly_increasing(
 
     engine._client.chat.completions.create = AsyncMock(side_effect=responses)
 
-    await engine.chat("测试", on_event=collector)
+    await engine.followup("测试", on_event=collector)
 
     # 获取所有 ITERATION_START 事件
     iter_events = collector.by_type(EventType.ITERATION_START)
@@ -376,9 +375,9 @@ class TestOnEventNone:
         )
 
         # 不传 on_event（默认 None）
-        reply = await engine.chat("测试")
+        reply = await engine.followup("测试")
 
-        assert reply == "你好，世界"
+        assert reply.reply == "你好，世界"
 
     @pytest.mark.asyncio
     async def test_chat_without_callback_with_tool_calls(self) -> None:
@@ -396,9 +395,9 @@ class TestOnEventNone:
             side_effect=[tool_response, text_response],
         )
 
-        reply = await engine.chat("测试")
+        reply = await engine.followup("测试")
 
-        assert reply == "完成"
+        assert reply.reply == "完成"
 
     @pytest.mark.asyncio
     async def test_emit_with_none_callback_is_noop(self) -> None:
@@ -435,9 +434,9 @@ class TestCallbackExceptionIsolation:
         )
 
         # 即使回调每次都抛异常，chat() 也应正常返回
-        reply = await engine.chat("测试", on_event=bad_callback)
+        reply = await engine.followup("测试", on_event=bad_callback)
 
-        assert reply == "最终回复"
+        assert reply.reply == "最终回复"
 
     @pytest.mark.asyncio
     async def test_callback_exception_does_not_prevent_subsequent_events(self) -> None:
@@ -462,9 +461,9 @@ class TestCallbackExceptionIsolation:
             side_effect=[tool_response, text_response],
         )
 
-        reply = await engine.chat("测试", on_event=flaky_callback)
+        reply = await engine.followup("测试", on_event=flaky_callback)
 
-        assert reply == "完成"
+        assert reply.reply == "完成"
 
         # 验证所有关键事件类型都被触发过
         assert EventType.ITERATION_START in received_types
@@ -483,7 +482,7 @@ class TestCallbackExceptionIsolation:
 
         event = ToolCallEvent(event_type=EventType.TOOL_CALL_START, tool_name="test")
 
-        with patch("excelmanus.engine.logger") as mock_logger:
+        with patch("excelmanus.agent.session.logger") as mock_logger:
             engine._emit(bad_callback, event)
             mock_logger.warning.assert_called_once()
 
@@ -520,11 +519,21 @@ class TestAskUserQuestionEvent:
         ask_response = _make_tool_call_response(
             [("call_q1", "ask_user", json.dumps(ask_payload, ensure_ascii=False))]
         )
-        engine._client.chat.completions.create = AsyncMock(return_value=ask_response)
+        text_response = _make_text_response("已记录选择")
+        engine._client.chat.completions.create = AsyncMock(
+            side_effect=[ask_response, text_response],
+        )
+
+        async def _answer(pending) -> str:
+            return "方案A"
 
         collector = EventCollector()
-        result = await engine.chat("测试提问", on_event=collector)
-        assert "请先回答这个问题后再继续" in result
+        result = await engine.followup(
+            "测试提问",
+            on_event=collector,
+            question_resolver=_answer,
+        )
+        assert result.reply == "已记录选择"
 
         events = collector.by_type(EventType.USER_QUESTION)
         assert len(events) == 1

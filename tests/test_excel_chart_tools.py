@@ -51,9 +51,12 @@ def _make_chart_data(tmp_path: Path, name: str = "chart_data.xlsx") -> Path:
 
 
 def _chart(path: Path, **fields: object) -> ToolResult:
+    payload = {"kind": "chart", **fields}
+    if "sheet" not in payload and "sheet_name" not in payload:
+        payload["sheet"] = "数据"
     return manage_spreadsheet_objects(
         file_path=str(path),
-        operations=[{"kind": "chart", **fields}],
+        operations=[payload],
         expected_version=content_version_of_file(path),
     )
 
@@ -167,3 +170,30 @@ class TestCreateExcelChart:
             _chart(fp, chart_type="bar", data_range="A1:G3", from_rows=True)
         )
         assert result["status"] == "success"
+
+    def test_missing_sheet_is_invalid_args_not_save_failed(self, tmp_path: Path) -> None:
+        fp = _make_chart_data(tmp_path)
+        result = _chart(
+            fp,
+            chart_type="bar",
+            data_range="B1:C7",
+            sheet="不存在的表",
+        )
+        assert result.success is False
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
+        assert "SAVE_FAILED" not in (result.model_text or "")
+
+    def test_sheet_qualified_data_range(self, tmp_path: Path) -> None:
+        fp = _make_chart_data(tmp_path)
+        result = _payload(
+            _chart(
+                fp,
+                chart_type="column",
+                data_range="数据!B1:C7",
+                categories_range="数据!A2:A7",
+                target_cell="E2",
+            )
+        )
+        assert result["status"] == "success"
+        assert result["chart_type"] == "bar"

@@ -1,7 +1,7 @@
 "use client";
 
-import React, { useState, useRef, useEffect, useCallback } from "react";
-import { User, Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet, FileText } from "lucide-react";
+import React, { useState, useRef, useEffect, useCallback, useLayoutEffect } from "react";
+import { Check, X, Download, Pencil, Image as ImageIcon, Plus, FolderOpen, ChevronDown, ChevronUp, FileSpreadsheet, FileText } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -12,17 +12,6 @@ import { downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { ImagePreviewModal } from "./ImagePreviewModal";
 import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
 import type { FileAttachment } from "@/lib/types";
-
-function UserAvatar() {
-  return (
-    <span
-      className="flex-shrink-0 h-6 w-6 rounded-full flex items-center justify-center text-white text-[10px] font-medium"
-      style={{ backgroundColor: "var(--em-primary)" }}
-    >
-      U
-    </span>
-  );
-}
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
 
@@ -45,9 +34,15 @@ interface UserMessageProps {
   files?: FileAttachment[];
   onEditAndResend?: (newContent: string, newFiles?: File[], retainedFiles?: FileAttachment[]) => void;
   isStreaming?: boolean;
+  timestamp?: number;
 }
 
-export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming }: UserMessageProps) {
+function formatClock(ts?: number): string | null {
+  if (!ts) return null;
+  return new Date(ts).toLocaleTimeString("zh-CN", { hour: "2-digit", minute: "2-digit" });
+}
+
+export const UserMessage = React.memo(function UserMessage({ content, files, onEditAndResend, isStreaming, timestamp }: UserMessageProps) {
   const [editing, setEditing] = useState(false);
   const [editText, setEditText] = useState(content);
   const [editFiles, setEditFiles] = useState<File[]>([]);
@@ -58,9 +53,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const [wsFiles, setWsFiles] = useState<string[]>([]);
   const [wsFilter, setWsFilter] = useState("");
   const [filesExpanded, setFilesExpanded] = useState(false);
+  const [editWidth, setEditWidth] = useState<number | null>(null);
   const isMobile = useIsMobile();
   const MOBILE_FILE_LIMIT = 2;
   const contentRef = useRef<HTMLDivElement>(null);
+  const columnRef = useRef<HTMLDivElement>(null);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
@@ -76,15 +73,33 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     }
   }, [content]);
 
+  const resizeEditTextarea = useCallback(() => {
+    const el = textareaRef.current;
+    if (!el) return;
+    el.style.height = "auto";
+    const next = Math.min(Math.max(el.scrollHeight, 60), 240);
+    el.style.height = `${next}px`;
+    el.style.overflowY = el.scrollHeight > 240 ? "auto" : "hidden";
+  }, []);
+
+  useLayoutEffect(() => {
+    if (!editing) return;
+    resizeEditTextarea();
+  }, [editing, editText, editWidth, resizeEditTextarea]);
+
   useEffect(() => {
-    if (editing && textareaRef.current) {
-      textareaRef.current.focus();
-      textareaRef.current.setSelectionRange(editText.length, editText.length);
-    }
-  }, [editing, editText.length]);
+    if (!editing || !textareaRef.current) return;
+    const el = textareaRef.current;
+    el.focus();
+    const len = el.value.length;
+    el.setSelectionRange(len, len);
+  }, [editing]);
 
   const startEdit = useCallback(() => {
     if (isStreaming) return;
+    const bubbleEl = columnRef.current?.querySelector(".user-bubble") as HTMLElement | null;
+    const measured = (bubbleEl ?? columnRef.current)?.getBoundingClientRect().width ?? 0;
+    setEditWidth(Math.max(Math.ceil(measured), 260));
     setEditText(content);
     setRetainedFiles(files ?? []);
     setFilesExpanded(false);
@@ -93,6 +108,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   const cancelEdit = useCallback(() => {
     setEditing(false);
+    setEditWidth(null);
     setEditText(content);
     setEditFiles([]);
     setRetainedFiles([]);
@@ -143,7 +159,10 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
 
   const fetchWorkspaceFiles = useCallback(async () => {
     try {
-      const res = await fetch(buildApiUrl("/mentions"), {
+      const params = new URLSearchParams();
+      if (activeSessionId) params.set("session_id", activeSessionId);
+      const qs = params.toString();
+      const res = await fetch(buildApiUrl(`/mentions${qs ? `?${qs}` : ""}`), {
         headers: { ...getAuthHeaders() },
       });
       if (res.ok) {
@@ -151,7 +170,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
         setWsFiles((data.files as string[]) || []);
       }
     } catch { /* 后端不可用 */ }
-  }, []);
+  }, [activeSessionId]);
 
   const toggleWsPicker = useCallback(() => {
     if (!wsPickerOpen) {
@@ -191,6 +210,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     const trimmed = editText.trim();
     if (!trimmed && editFiles.length === 0 && retainedFiles.length === 0) return;
     setEditing(false);
+    setEditWidth(null);
     onEditAndResend?.(
       trimmed,
       editFiles.length > 0 ? editFiles : undefined,
@@ -212,19 +232,34 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     [cancelEdit, confirmEdit]
   );
 
+  const clock = formatClock(timestamp);
+
   return (
-    <div className="group flex gap-2.5 py-2.5">
-      <UserAvatar />
-      <div className="flex-1 min-w-0">
+    <div className="group flex justify-end py-2.5">
+      <div
+        className={`flex gap-2 max-w-[88%] sm:max-w-[75%] min-w-0 ${
+          editing ? "items-stretch" : "items-start"
+        }`}
+      >
+        <div
+          ref={columnRef}
+          className={`min-w-0 max-w-full flex flex-col items-start ${
+            editing ? "w-full" : "w-max"
+          }`}
+          style={
+            editing && editWidth
+              ? { width: editWidth, minWidth: editWidth, flexShrink: 0 }
+              : undefined
+          }
+        >
         {editing ? (
-          <div className="space-y-2">
+          <div className="w-full min-w-0 space-y-2">
             <textarea
               ref={textareaRef}
               value={editText}
               onChange={(e) => setEditText(e.target.value)}
               onKeyDown={handleKeyDown}
-              className="w-full text-[13px] leading-relaxed rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
-              rows={Math.min(editText.split("\n").length + 1, 8)}
+              className="box-border block w-full min-w-0 text-[13px] leading-relaxed whitespace-pre-wrap break-words rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 resize-none focus:outline-none focus:ring-2 focus:ring-[var(--em-primary-alpha-25)] focus:border-[var(--em-primary-alpha-25)] min-h-[60px] shadow-sm transition-colors"
             />
             {(retainedFiles.length > 0 || editFiles.length > 0) && (() => {
               const allEditBadges = [
@@ -235,7 +270,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               const visible = shouldCollapse ? allEditBadges.slice(0, MOBILE_FILE_LIMIT) : allEditBadges;
               const hiddenCount = allEditBadges.length - visible.length;
               return (
-                <div className="flex flex-wrap gap-1">
+                <div className="flex w-full flex-wrap gap-1">
                   {visible.map((b) => (
                     <Badge key={b.key} variant="secondary" className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px]">
                       {b.isImage && <ImageIcon className="h-3 w-3 flex-shrink-0" />}
@@ -277,7 +312,7 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                 e.target.value = "";
               }}
             />
-            <div className="flex flex-wrap gap-1.5 relative items-center">
+            <div className="flex w-full flex-wrap gap-1.5 relative items-center justify-end">
               <button
                 onClick={() => editFileInputRef.current?.click()}
                 className="inline-flex items-center gap-1 text-xs px-2 sm:px-3 py-2 sm:py-1.5 rounded-lg bg-muted text-muted-foreground hover:bg-muted/80 transition-colors font-medium"
@@ -355,9 +390,9 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               </button>
             </div>
           </div>
-        ) : (
+        ) : content ? (
           <div
-            className={`group/bubble relative inline-block max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 user-bubble ${
+            className={`group/bubble relative w-fit max-w-full rounded-2xl border border-[var(--em-primary-alpha-20)] bg-[var(--em-primary-alpha-10)] px-3 py-2 user-bubble ${
               onEditAndResend && !isStreaming
                 ? "cursor-pointer hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-25)]"
                 : ""
@@ -407,13 +442,13 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
               </span>
             )}
           </div>
-        )}
+        ) : null}
         {!editing && files && files.length > 0 && (() => {
           const shouldCollapseView = isMobile && files.length > MOBILE_FILE_LIMIT && !filesExpanded;
           const visibleFiles = shouldCollapseView ? files.slice(0, MOBILE_FILE_LIMIT) : files;
           const hiddenFileCount = files.length - visibleFiles.length;
           return (
-          <div className="flex flex-wrap gap-1 mt-1.5">
+          <div className={`flex max-w-full flex-wrap gap-1 ${content ? "mt-1.5" : ""}`}>
             {visibleFiles.map((f, i) => {
               const excel = isExcelFile(f.filename);
               const image = isImageFile(f.filename);
@@ -501,6 +536,12 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           </div>
           );
         })()}
+        </div>
+        {!editing && clock && (
+          <span className="text-[11px] text-muted-foreground/70 tabular-nums pt-2 flex-shrink-0">
+            {clock}
+          </span>
+        )}
       </div>
     </div>
   );

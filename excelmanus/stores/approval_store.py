@@ -1,4 +1,4 @@
-"""ApprovalStore：审批审计记录存储（支持 SQLite / PostgreSQL）。"""
+"""ApprovalStore：审批审计记录存储。"""
 from __future__ import annotations
 
 import json
@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 
 class ApprovalStore:
-    """审批记录 CRUD（支持 SQLite / PostgreSQL）。
+    """审批记录 CRUD。
 
     文件产物（diff/patch/binary snapshot）仍保留在文件系统，
     此处仅持久化元数据。

@@ -138,7 +138,6 @@ async def test_chat_does_not_open_xlsx_before_first_model(tmp_path: Path) -> Non
         base_url="https://example.test/v1",
         model="test-model",
         workspace_root=str(tmp_path),
-        backup_enabled=False,
         main_model_vision="false",
     )
     engine = AgentEngine(config, ToolRegistry())
@@ -148,10 +147,10 @@ async def test_chat_does_not_open_xlsx_before_first_model(tmp_path: Path) -> Non
         assert sales.resolve() not in {Path(p).resolve() for p in opened}
         return ChatResult(reply="先 inspect_spreadsheet")
 
-    with patch("openpyxl.load_workbook", side_effect=_track), patch.object(
-        engine, "_tool_calling_loop", new=_loop
+    with patch("openpyxl.load_workbook", side_effect=_track), patch(
+        "excelmanus.agent.loop.run_tool_loop", new=_loop
     ):
-        result = await engine.chat("看一下 sales.xlsx")
+        result = await engine.followup("看一下 sales.xlsx")
     assert "先 inspect" in result.reply
     assert not any(Path(p).name == "sales.xlsx" for p in opened)
 
@@ -168,21 +167,22 @@ async def test_pending_approval_does_not_block_unrelated_chat(tmp_path: Path) ->
         base_url="https://example.test/v1",
         model="test-model",
         workspace_root=str(tmp_path),
-        backup_enabled=False,
     )
     engine = AgentEngine(config, ToolRegistry())
     engine._approval.has_pending = lambda: True  # type: ignore[method-assign]
     engine._approval.pending_block_message = lambda: "不应出现"  # type: ignore[method-assign]
-    with patch.object(
-        engine, "_tool_calling_loop", new_callable=AsyncMock, return_value=ChatResult(reply="继续")
+    with patch(
+        "excelmanus.agent.loop.run_tool_loop",
+        new_callable=AsyncMock,
+        return_value=ChatResult(reply="继续"),
     ):
-        result = await engine.chat("先看另一张表")
+        result = await engine.followup("先看另一张表")
     assert result.reply == "继续"
     assert "不应出现" not in result.reply
 
 
 def test_interrupt_queue_drains_on_next_step(tmp_path: Path) -> None:
-    """第六块：当前步不读插话，下一步才并入。"""
+    """飞行中 followup 进 next-turn；drain 兼容旧 API。"""
     from excelmanus.config import ExcelManusConfig
     from excelmanus.engine import AgentEngine
     from excelmanus.tools import ToolRegistry
@@ -192,7 +192,6 @@ def test_interrupt_queue_drains_on_next_step(tmp_path: Path) -> None:
         base_url="https://example.test/v1",
         model="test-model",
         workspace_root=str(tmp_path),
-        backup_enabled=False,
     )
     engine = AgentEngine(config, ToolRegistry())
     engine.push_interrupt_message("改用 B 表")
@@ -210,7 +209,6 @@ async def test_enqueue_interrupt_when_in_flight(tmp_path: Path) -> None:
         base_url="https://example.test/v1",
         model="test-model",
         workspace_root=str(tmp_path),
-        backup_enabled=False,
     )
     manager = SessionManager(max_sessions=4, ttl_seconds=60, config=config, registry=MagicMock())
     session_id, engine = await manager.acquire_for_chat(None)
@@ -221,11 +219,14 @@ async def test_enqueue_interrupt_when_in_flight(tmp_path: Path) -> None:
 
 
 def test_code_mode_disclaimer_and_parent_call_field() -> None:
-    """第七块：Docker 关着时有未隔离声明；事件带 parent_call_id。"""
-    from excelmanus.code_mode import DOCKER_OFF_DISCLAIMER
+    """第七块：本机围栏声明；事件带 parent_call_id。"""
+    from excelmanus.code_mode import LOCAL_SANDBOX_DISCLAIMER
     from excelmanus.events import EventType, ToolCallEvent
 
-    assert "隔离" in DOCKER_OFF_DISCLAIMER or "受限" in DOCKER_OFF_DISCLAIMER
+    assert "本机" in LOCAL_SANDBOX_DISCLAIMER
+    assert "禁网络" in LOCAL_SANDBOX_DISCLAIMER
+    assert "禁起进程" in LOCAL_SANDBOX_DISCLAIMER
+    assert "禁出工作区" in LOCAL_SANDBOX_DISCLAIMER
     event = ToolCallEvent(
         event_type=EventType.TOOL_CALL_START,
         tool_call_id="child",

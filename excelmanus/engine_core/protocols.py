@@ -103,8 +103,6 @@ class ToolExecutionContext(Protocol):
 
     def get_tool_write_effect(self, tool_name: str) -> str: ...
 
-    def redirect_backup_paths(self, tool_name: str, arguments: dict[str, Any]) -> dict[str, Any]: ...
-
     def pick_route_skill(self, route_result: SkillMatchResult) -> Any: ...
 
     def run_skill_hook(self, hook_event: Any, **kwargs: Any) -> Any: ...
@@ -115,12 +113,12 @@ class ToolExecutionContext(Protocol):
 
 
 # ---------------------------------------------------------------------------
-# 视觉上下文（VisionContext）— 主模型是否收图
+# 视觉上下文（VisionContext）— 当前模型是否收图
 # ---------------------------------------------------------------------------
 
 @runtime_checkable
 class VisionContext(Protocol):
-    """主模型视觉能力。"""
+    """当前模型视觉能力。"""
 
     @property
     def is_vision_capable(self) -> bool: ...

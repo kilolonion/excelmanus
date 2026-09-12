@@ -338,11 +338,14 @@ class TestExtendedCapabilitiesConstants:
                 or "edit_spreadsheet" in desc
                 or "format_spreadsheet" in desc
                 or "manage_spreadsheet_objects" in desc
-            ), f"扩展能力 {key} 应指向意图工具或 run_code"
+                or "WorkbookSpec" in desc
+                or "当前不可用" in desc
+                or "不可用" in desc
+            ), f"扩展能力 {key} 应指向意图工具、run_code，或声明当前不可用"
 
     def test_subagent_capabilities_match_builtin(self) -> None:
         """子代理能力描述应与 builtin.py 中定义的子代理一致。"""
-        expected = {"explorer", "verifier", "subagent"}
+        expected = {"explorer", "subagent"}
         assert set(_SUBAGENT_CAPABILITIES.keys()) == expected
 
 

@@ -10,6 +10,15 @@ import {
   isFallbackSessionTitle,
 } from "@/lib/session-title";
 import { extractFileAttachmentsFromContent, stripImageSentPlaceholder } from "@/lib/upload-notice";
+import {
+  isHiddenBackendUserMessage,
+  stripInjectedUserPromptBlocks,
+} from "@/lib/injected-user-prompt";
+import {
+  collectHistoryAffectedFiles,
+  mergeAffectedFiles,
+  toPublicFileIdentity,
+} from "@/lib/file-identity";
 
 // 内存快速缓存（扩展 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
@@ -105,8 +114,6 @@ const _ALL_WRITE_TOOL_NAMES = new Set([
   "write_text_file", "edit_text_file",
 ]);
 
-const _EXCEL_EXT_RE = /\.(xlsx|xlsm|xls|csv)$/i;
-const _EXCEL_PATH_SCAN_RE = /(?:^|[\s`"'(\【[])([^ \t\r\n`"'()【】\[\]<>]+?\.(?:xlsx|xlsm|xls|csv))(?=$|[\s`"'.,;:!?)】\]\]])/gi;
 const _MAX_DIFFS_IN_STORE = 500;
 
 // 仅由 SSE 事件产生的块类型，不持久化到后端消息存储。
@@ -260,15 +267,7 @@ interface BackendConversionResult {
 }
 
 function _normalizeRecoveredPath(rawPath: string): string | null {
-  const text = String(rawPath || "").trim();
-  if (!text) return null;
-  if (text.startsWith("<path>/")) {
-    const basename = text.slice("<path>/".length).trim();
-    return basename ? `./${basename}` : null;
-  }
-  if (text.startsWith("./") || text.startsWith("/")) return text;
-  if (_EXCEL_EXT_RE.test(text)) return `./${text}`;
-  return null;
+  return toPublicFileIdentity(rawPath);
 }
 
 function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
@@ -294,18 +293,6 @@ function _parseLooseJsonObject(raw: string): Record<string, unknown> | null {
     }
   }
   return null;
-}
-
-function _extractExcelPathsFromText(raw: string): string[] {
-  const source = String(raw || "");
-  const found = new Set<string>();
-  let match: RegExpExecArray | null;
-  _EXCEL_PATH_SCAN_RE.lastIndex = 0;
-  while ((match = _EXCEL_PATH_SCAN_RE.exec(source)) !== null) {
-    const normalized = _normalizeRecoveredPath(match[1]);
-    if (normalized) found.add(normalized);
-  }
-  return Array.from(found);
 }
 
 function _normalizeDiffCellValue(value: unknown): string | number | boolean | null {
@@ -441,10 +428,11 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
     const backendMessageId = _resolveBackendMessageId(msg);
     const role = msg.role as string;
     if (role === "user") {
+      if (isHiddenBackendUserMessage(msg)) continue;
       let content: string;
       if (typeof msg.content === "string") {
         content = stripImageSentPlaceholder(msg.content);
-        // 璺宠繃浠呭寘鍚郴缁熸敞鍏ュ浘鐗囩殑娑堟伅锛圕 閫氶亾闄嶇骇锛夛紝鍏舵暣鏉″唴瀹逛粎涓哄崰浣嶇鏃惰烦杩囥€?
+        // 跳过仅包含系统注入图片的消息（C 通道降级），其整条内容仅为占位符时跳过。
         if (!content) continue;
       } else if (Array.isArray(msg.content)) {
         // 澶氭ā鎬佹秷鎭紙鏂囨湰 + image_url 閮ㄥ垎锛夈€備粎鎻愬彇鏂囨湰閮ㄥ垎锛涘皢 image_url 閮ㄥ垎鏇挎崲涓虹煭鍗犱綅绗︼紝閬垮厤鍘熷 base64 娉勯湶鍒?UI銆?
@@ -468,9 +456,11 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       } else {
         content = JSON.stringify(msg.content ?? "");
       }
-      // 浠庡唴瀹逛腑宓屽叆鐨勪笂浼犻€氱煡鎻愬彇鏂囦欢闄勪欢
+      // 从内容中嵌入的上传通知提取文件附件，并去掉后台注入的技能目录。
       const extracted = _extractFileAttachmentsFromContent(content);
-      const userMsg: Message = { id: backendMessageId, role: "user", content: extracted.content };
+      const visible = stripInjectedUserPromptBlocks(extracted.content);
+      if (!visible && extracted.files.length === 0) continue;
+      const userMsg: Message = { id: backendMessageId, role: "user", content: visible };
       if (extracted.files.length > 0) {
         userMsg.files = extracted.files;
       }
@@ -534,18 +524,13 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             }
           }
           if (_ALL_WRITE_TOOL_NAMES.has(toolName) && hasResult && tcId) {
-            const argFilePath = typeof args.file_path === "string" ? args.file_path : "";
-            const normalizedArgPath = _normalizeRecoveredPath(argFilePath);
-            if (normalizedArgPath) {
-              affectedFilePaths.add(normalizedArgPath);
-              recoveredFilePaths.add(normalizedArgPath);
+            for (const ident of collectHistoryAffectedFiles(toolName, args, _ALL_WRITE_TOOL_NAMES)) {
+              affectedFilePaths.add(ident);
+              recoveredFilePaths.add(ident);
             }
             const toolResultText = toolResultByCallId.get(tcId);
             if (toolResultText) {
-              for (const p of _extractExcelPathsFromText(toolResultText)) {
-                affectedFilePaths.add(p);
-                recoveredFilePaths.add(p);
-              }
+              // 不再从 tool JSON 正则捞所有 .xlsx（cow_mapping / 绝对 staging 路径会泄漏副本）
               const recoveredDiff = _buildRecoveredDiffFromToolResult(
                 tcId,
                 args,
@@ -564,14 +549,15 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       if (prev && prev.role === "assistant") {
         prev.blocks = [...prev.blocks, ...blocks];
         if (affectedFilePaths.size > 0) {
-          const existing = new Set(prev.affectedFiles ?? []);
-          for (const f of affectedFilePaths) existing.add(f);
-          prev.affectedFiles = Array.from(existing);
+          prev.affectedFiles = mergeAffectedFiles(prev.affectedFiles ?? [], Array.from(affectedFilePaths));
         }
       } else {
         const newMsg: Message = { id: backendMessageId, role: "assistant", blocks };
         if (affectedFilePaths.size > 0) {
-          (newMsg as Extract<Message, { role: "assistant" }>).affectedFiles = Array.from(affectedFilePaths);
+          (newMsg as Extract<Message, { role: "assistant" }>).affectedFiles = mergeAffectedFiles(
+            [],
+            Array.from(affectedFilePaths),
+          );
         }
         result.push(newMsg);
       }
@@ -715,22 +701,17 @@ function _restoreAffectedFilesOnMessages(
   let changed = false;
   const updated = messages.map((m) => {
     if (m.role !== "assistant") return m;
-    const existing = new Set(m.affectedFiles ?? []);
-    const beforeSize = existing.size;
-
+    const incoming: string[] = [];
     for (const block of m.blocks) {
       if (block.type !== "tool_call" || !block.toolCallId) continue;
       const files = toolCallFileMap.get(block.toolCallId);
-      if (files) {
-        for (const f of files) {
-          if (f.length <= 260 && !/[\n\r\t]/.test(f)) existing.add(f);
-        }
-      }
+      if (files) incoming.push(...files);
     }
-
-    if (existing.size === beforeSize) return m;
+    const merged = mergeAffectedFiles(m.affectedFiles ?? [], incoming);
+    const before = m.affectedFiles ?? [];
+    if (merged.length === before.length && merged.every((f, i) => f === before[i])) return m;
     changed = true;
-    return { ...m, affectedFiles: Array.from(existing) };
+    return { ...m, affectedFiles: merged };
   });
 
   if (changed) {
@@ -1121,11 +1102,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
     set((state) => {
       const patch = _patchMessageById(state, messageId, (message) => {
         if (message.role !== "assistant") return message;
-        const existing = new Set(message.affectedFiles ?? []);
-        for (const f of files) {
-          if (f && f.length <= 260 && !/[\n\r\t]/.test(f)) existing.add(f);
-        }
-        return { ...message, affectedFiles: Array.from(existing) };
+        const merged = mergeAffectedFiles(message.affectedFiles ?? [], files);
+        return { ...message, affectedFiles: merged };
       });
       return patch ?? {};
     }),

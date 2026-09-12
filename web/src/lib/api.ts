@@ -1,4 +1,4 @@
-import type { SessionDetail } from "@/lib/types";
+import type { SessionDetail, WorkspaceFolder } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 
 const API_BASE_PATH = "/api/v1";
@@ -223,6 +223,54 @@ export async function fetchSessions(): Promise<unknown[]> {
   return res.sessions ?? [];
 }
 
+export async function createSession(opts?: {
+  workspaceId?: string | null;
+  workspacePath?: string | null;
+  title?: string;
+}): Promise<{
+  id: string;
+  title: string;
+  message_count: number;
+  in_flight: boolean;
+  updated_at: string;
+  workspace_path: string;
+  workspace_id: string | null;
+  workspace_title: string;
+  blank: boolean;
+}> {
+  return apiPost("/sessions", {
+    workspace_id: opts?.workspaceId || undefined,
+    workspace_path: opts?.workspacePath || undefined,
+    title: opts?.title || undefined,
+  });
+}
+
+export async function fetchWorkspaces(): Promise<WorkspaceFolder[]> {
+  const res: { workspaces?: WorkspaceFolder[] } = await apiGet("/workspaces");
+  return res.workspaces ?? [];
+}
+
+export async function createWorkspaceFolder(path: string, title?: string): Promise<{
+  workspace: WorkspaceFolder;
+  created: boolean;
+}> {
+  return apiPost("/workspaces", { path, title: title || undefined });
+}
+
+export async function updateWorkspaceFolder(
+  workspaceId: string,
+  opts: { title?: string; path?: string },
+): Promise<{ workspace: WorkspaceFolder }> {
+  return apiPatch(`/workspaces/${encodeURIComponent(workspaceId)}`, {
+    title: opts.title || undefined,
+    path: opts.path || undefined,
+  });
+}
+
+export async function deleteWorkspaceFolder(workspaceId: string): Promise<void> {
+  await apiDelete(`/workspaces/${encodeURIComponent(workspaceId)}`);
+}
+
 export async function fetchSessionDetail(
   sessionId: string
 ): Promise<SessionDetail | null> {
@@ -371,22 +419,34 @@ export async function fetchSessionExcelEvents(
   }
 }
 
-// ── Session Export / Import ──────────────────────────
+// ── Session Export ───────────────────────────────────
 
-export type ExportFormat = "md" | "txt" | "emx";
+export type ExportFormat = "md" | "json";
+
+function filenameFromDisposition(disposition: string, fallback: string): string {
+  const star = disposition.match(/filename\*=(?:UTF-8''|utf-8'')([^;]+)/i);
+  if (star?.[1]) {
+    try {
+      return decodeURIComponent(star[1].trim().replace(/^"(.*)"$/, "$1"));
+    } catch {
+      // fall through to quoted filename
+    }
+  }
+  const quoted = disposition.match(/filename="([^"]+)"/);
+  if (quoted?.[1]) return quoted[1];
+  const plain = disposition.match(/filename=([^;]+)/);
+  if (plain?.[1]) return plain[1].trim().replace(/^"(.*)"$/, "$1");
+  return fallback;
+}
 
 /**
- * 导出会话为指定格式，触发浏览器下载。
+ * 导出会话为 Markdown 或 JSON，触发浏览器下载。
  */
 export async function exportSession(
   sessionId: string,
   format: ExportFormat = "md",
-  opts?: { includeWorkspace?: boolean },
 ): Promise<void> {
   const params = new URLSearchParams({ format });
-  if (format === "emx" && opts?.includeWorkspace === false) {
-    params.set("include_workspace", "false");
-  }
   const url = buildApiUrl(
     `/sessions/${encodeURIComponent(sessionId)}/export?${params.toString()}`,
   );
@@ -396,9 +456,10 @@ export async function exportSession(
     throw new Error(data.detail || `导出失败: ${res.status}`);
   }
   const blob = await res.blob();
-  const disposition = res.headers.get("Content-Disposition") || "";
-  const filenameMatch = disposition.match(/filename="?([^"]+)"?/);
-  const filename = filenameMatch?.[1] || `session.${format}`;
+  const filename = filenameFromDisposition(
+    res.headers.get("Content-Disposition") || "",
+    `session.${format}`,
+  );
 
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
@@ -409,34 +470,6 @@ export async function exportSession(
     URL.revokeObjectURL(a.href);
     a.remove();
   }, 100);
-}
-
-/**
- * 从 EMX JSON 导入会话（v2.0 完整恢复）。
- */
-export async function importSession(
-  emxData: unknown,
-): Promise<{
-  status: string;
-  session_id: string;
-  title: string;
-  message_count: number;
-  files_restored?: number;
-  memories_restored?: number;
-  state_restored?: boolean;
-}> {
-  const url = buildApiUrl("/sessions/import");
-  const res = await fetch(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify(emxData),
-    signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || `导入失败: ${res.status}`);
-  }
-  return res.json();
 }
 
 export interface ApprovalRecord {
@@ -513,6 +546,24 @@ export async function submitApproval(
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Approve error: ${res.status}`);
+  }
+  return res.json();
+}
+
+export async function togglePresentAs(
+  sessionId: string,
+  presentAs: "native" | "code",
+): Promise<{ session_id: string; present_as: "native" | "code" }> {
+  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/present-as`, { direct: true });
+  const res = await fetch(url, _withCredentials(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({ present_as: presentAs }),
+    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+  }));
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.error || data.detail || `Toggle present-as error: ${res.status}`);
   }
   return res.json();
 }
@@ -766,16 +817,22 @@ export interface ExcelFileListItem {
   is_dir?: boolean;
 }
 
-export async function fetchExcelFiles(): Promise<ExcelFileListItem[]> {
-  const url = buildApiUrl("/files/excel/list");
+export async function fetchExcelFiles(sessionId?: string | null): Promise<ExcelFileListItem[]> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session_id", sessionId);
+  const qs = params.toString();
+  const url = buildApiUrl(`/files/excel/list${qs ? `?${qs}` : ""}`);
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) return [];
   const data = await res.json();
   return data.files ?? [];
 }
 
-export async function fetchWorkspaceFiles(): Promise<ExcelFileListItem[]> {
-  const url = buildApiUrl("/files/workspace/list");
+export async function fetchWorkspaceFiles(sessionId?: string | null): Promise<ExcelFileListItem[]> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session_id", sessionId);
+  const qs = params.toString();
+  const url = buildApiUrl(`/files/workspace/list${qs ? `?${qs}` : ""}`);
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
   if (!res.ok) return [];
   const data = await res.json();
@@ -821,11 +878,13 @@ export async function fetchFileRegistry(opts?: {
   includeDeleted?: boolean;
   includeEvents?: boolean;
   fileId?: string;
+  sessionId?: string | null;
 }): Promise<{ files: FileRegistryEntry[]; total: number } | { file: FileRegistryEntry }> {
   const params = new URLSearchParams();
   if (opts?.includeDeleted) params.set("include_deleted", "true");
   if (opts?.includeEvents) params.set("include_events", "true");
   if (opts?.fileId) params.set("file_id", opts.fileId);
+  if (opts?.sessionId) params.set("session_id", opts.sessionId);
   const qs = params.toString();
   return apiGet(`/files/registry${qs ? `?${qs}` : ""}`);
 }
@@ -851,9 +910,12 @@ export interface FileGroup {
   updated_at: string;
 }
 
-export async function fetchFileGroups(): Promise<{ groups: FileGroup[] }> {
+export async function fetchFileGroups(sessionId?: string | null): Promise<{ groups: FileGroup[] }> {
   try {
-    return await apiGet<{ groups: FileGroup[] }>("/files/groups");
+    const params = new URLSearchParams();
+    if (sessionId) params.set("session_id", sessionId);
+    const qs = params.toString();
+    return await apiGet<{ groups: FileGroup[] }>(`/files/groups${qs ? `?${qs}` : ""}`);
   } catch {
     return { groups: [] };
   }
@@ -863,32 +925,50 @@ export async function createFileGroup(opts: {
   name: string;
   description?: string;
   file_ids?: { id: string; role?: string }[];
+  sessionId?: string | null;
 }): Promise<FileGroup> {
-  return apiPost<FileGroup>("/files/groups", opts);
+  return apiPost<FileGroup>("/files/groups", {
+    name: opts.name,
+    description: opts.description,
+    file_ids: opts.file_ids,
+    session_id: opts.sessionId || undefined,
+  });
 }
 
 export async function updateFileGroup(
   groupId: string,
-  opts: { name?: string; description?: string },
+  opts: { name?: string; description?: string; sessionId?: string | null },
 ): Promise<FileGroup> {
-  return apiPut<FileGroup>(`/files/groups/${encodeURIComponent(groupId)}`, opts);
+  const params = new URLSearchParams();
+  if (opts.sessionId) params.set("session_id", opts.sessionId);
+  const qs = params.toString();
+  return apiPut<FileGroup>(
+    `/files/groups/${encodeURIComponent(groupId)}${qs ? `?${qs}` : ""}`,
+    { name: opts.name, description: opts.description },
+  );
 }
 
-export async function deleteFileGroup(groupId: string): Promise<void> {
-  await apiDelete(`/files/groups/${encodeURIComponent(groupId)}`);
+export async function deleteFileGroup(groupId: string, sessionId?: string | null): Promise<void> {
+  const params = new URLSearchParams();
+  if (sessionId) params.set("session_id", sessionId);
+  const qs = params.toString();
+  await apiDelete(`/files/groups/${encodeURIComponent(groupId)}${qs ? `?${qs}` : ""}`);
 }
 
 export async function updateFileGroupMembers(
   groupId: string,
-  opts: { add?: { file_id: string; role?: string }[]; remove?: string[] },
+  opts: { add?: { file_id: string; role?: string }[]; remove?: string[]; sessionId?: string | null },
 ): Promise<FileGroup> {
+  const params = new URLSearchParams();
+  if (opts.sessionId) params.set("session_id", opts.sessionId);
+  const qs = params.toString();
   return apiPut<FileGroup>(
-    `/files/groups/${encodeURIComponent(groupId)}/members`,
-    opts,
+    `/files/groups/${encodeURIComponent(groupId)}/members${qs ? `?${qs}` : ""}`,
+    { add: opts.add, remove: opts.remove },
   );
 }
 
-// ── Cross-file Compare & Relationships APIs ──────────────
+// ── Cross-file Compare APIs ──────────────────────────────
 
 export interface SharedColumnAPI {
   col_a: string;
@@ -929,52 +1009,14 @@ export async function fetchExcelCompare(
   return res.json();
 }
 
-export interface RelationshipDiscoveryAPI {
-  files_analyzed: number;
-  file_pairs: {
-    file_a: string;
-    file_b: string;
-    shared_columns: SharedColumnAPI[];
-  }[];
-  summary: string;
-  merge_hints?: {
-    file_a: string;
-    file_b: string;
-    key_column_a: string;
-    key_column_b: string;
-    suggested_join: string;
-    suggested_join_label?: string;
-    relationship?: string;
-    pandas_hint?: string;
-  }[];
-}
-
-export async function fetchFileRelationships(
-  opts?: { directory?: string },
-): Promise<RelationshipDiscoveryAPI> {
-  const params = new URLSearchParams();
-  if (opts?.directory) params.set("directory", opts.directory);
-  const qs = params.toString();
-  const url = buildApiUrl(`/files/relationships${qs ? `?${qs}` : ""}`);
-  const res = await fetch(url, {
-    headers: { ...getAuthHeaders() },
-    signal: _withTimeout(60_000),
-  });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Relationships error: ${res.status}`);
-  }
-  return res.json();
-}
-
 // ── Workspace file management APIs ───────────────────────
 
-export async function workspaceMkdir(path: string): Promise<void> {
+export async function workspaceMkdir(path: string, sessionId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/mkdir");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -983,12 +1025,12 @@ export async function workspaceMkdir(path: string): Promise<void> {
   }
 }
 
-export async function workspaceCreateFile(path: string): Promise<void> {
+export async function workspaceCreateFile(path: string, sessionId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/create");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -997,12 +1039,12 @@ export async function workspaceCreateFile(path: string): Promise<void> {
   }
 }
 
-export async function workspaceDeleteItem(path: string): Promise<void> {
+export async function workspaceDeleteItem(path: string, sessionId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/item");
   const res = await fetch(url, {
     method: "DELETE",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1011,12 +1053,12 @@ export async function workspaceDeleteItem(path: string): Promise<void> {
   }
 }
 
-export async function workspaceRenameItem(oldPath: string, newPath: string): Promise<void> {
+export async function workspaceRenameItem(oldPath: string, newPath: string, sessionId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/rename");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ old_path: oldPath, new_path: newPath }),
+    body: JSON.stringify({ old_path: oldPath, new_path: newPath, session_id: sessionId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1027,11 +1069,13 @@ export async function workspaceRenameItem(oldPath: string, newPath: string): Pro
 
 export async function uploadFileToFolder(
   file: File,
-  folder: string
+  folder: string,
+  sessionId?: string | null,
 ): Promise<{ filename: string; path: string; size: number }> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("folder", folder);
+  if (sessionId) formData.append("session_id", sessionId);
   const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
     body: formData,
@@ -1105,7 +1149,7 @@ export async function fetchExcelSnapshot(
     // 兼容历史脱敏路径 "<path>/foo.xlsx"：尝试按 basename 回查 workspace 文件并重试
     const maskedBasename = extractSanitizedPathBasename(path);
     if (maskedBasename) {
-      const files = await fetchWorkspaceFiles().catch(() => []);
+      const files = await fetchWorkspaceFiles(opts?.sessionId).catch(() => []);
       const matches = files.filter((f) => f.filename === maskedBasename);
       if (matches.length === 1) {
         const retryRes = await fetch(buildExcelSnapshotUrl(matches[0].path, opts), {
@@ -1226,13 +1270,14 @@ export async function downloadFile(path: string, filename?: string, sessionId?: 
   URL.revokeObjectURL(objectUrl);
 }
 
-export async function uploadFile(file: File): Promise<{
+export async function uploadFile(file: File, sessionId?: string | null): Promise<{
   filename: string;
   path: string;
   size: number;
 }> {
   const formData = new FormData();
   formData.append("file", file);
+  if (sessionId) formData.append("session_id", sessionId);
   const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
     method: "POST",
     body: formData,
@@ -1500,6 +1545,7 @@ export interface WorkbookRevisionItem {
   transaction_id: string;
   label: string;
   parent_revision_id: string | null;
+  created_at?: string;
 }
 
 export interface RevisionListResponse {
@@ -1590,11 +1636,11 @@ export interface VersionManifest {
   last_upgrade?: {
     ok?: boolean | null;
     action?: string;
+    outcome?: string;
     error?: string | null;
     finished_at?: string;
     old_version?: string;
     new_version?: string;
-    already_latest?: boolean;
   } | null;
 }
 
@@ -1726,126 +1772,4 @@ export async function fetchDeployLockStatus(): Promise<DeployLockStatus> {
 
 export async function fetchDeployLog(releaseId: string): Promise<{ release_id: string; log: string }> {
   return apiGet<{ release_id: string; log: string }>(`/deploy/history/${encodeURIComponent(releaseId)}/log`);
-}
-
-// ── Channel Status API ───────────────────────────────────
-
-export interface ChannelFieldDef {
-  key: string;
-  label: string;
-  hint: string;
-  required: boolean;
-  secret: boolean;
-  type?: string;
-}
-
-export interface ChannelDetail {
-  name: string;
-  status: "running" | "stopped" | "error";
-  supported: boolean;
-  enabled: boolean;
-  credentials: Record<string, string>;
-  has_required: boolean;
-  missing_fields: string[];
-  fields: ChannelFieldDef[];
-  updated_at?: string;
-  dep_installed: boolean;
-  install_hint?: string;
-}
-
-export interface RateLimitConfig {
-  chat_per_minute: number;
-  chat_per_hour: number;
-  command_per_minute: number;
-  command_per_hour: number;
-  upload_per_minute: number;
-  upload_per_hour: number;
-  global_per_minute: number;
-  global_per_hour: number;
-  reject_cooldown_seconds: number;
-  auto_ban_threshold: number;
-  auto_ban_duration_seconds: number;
-}
-
-export interface ChannelSettings {
-  admin_users: string;
-  group_policy: string;
-  group_whitelist: string;
-  group_blacklist: string;
-  allowed_users: string;
-  default_concurrency: string;
-  default_chat_mode: string;
-  public_url: string;
-  tg_edit_interval_min: string;
-  tg_edit_interval_max: string;
-  qq_progressive_chars: string;
-  qq_progressive_interval: string;
-  feishu_update_interval: string;
-}
-
-export interface ChannelStatusInfo {
-  enabled: boolean;
-  channels: string[];
-  details: ChannelDetail[];
-  require_bind: boolean;
-  require_bind_source: "env" | "config" | "default";
-  rate_limit: RateLimitConfig;
-  rate_limit_env_overrides: Record<string, string>;
-  settings: ChannelSettings;
-  settings_env_overrides: Record<string, string>;
-}
-
-export async function fetchServerPublicIp(): Promise<{ ip: string | null }> {
-  try {
-    return await apiGet<{ ip: string | null }>("/server/public-ip");
-  } catch {
-    return { ip: null };
-  }
-}
-
-export async function fetchChannelsStatus(): Promise<ChannelStatusInfo> {
-  return apiGet<ChannelStatusInfo>("/channels");
-}
-
-export async function updateChannelSettings(
-  settings: Partial<ChannelSettings> & { require_bind?: boolean },
-): Promise<{ status: string; updated_fields?: string[]; locked_fields?: string[]; message?: string }> {
-  return apiPut("/channels/settings", settings);
-}
-
-export async function saveChannelConfig(
-  channelName: string,
-  credentials: Record<string, string>,
-  enabled: boolean,
-): Promise<{ status: string; channel: string; enabled: boolean; has_required: boolean; missing_fields: string[] }> {
-  return apiPut(`/channels/${channelName}/config`, { credentials, enabled });
-}
-
-export async function deleteChannelConfig(channelName: string): Promise<void> {
-  return apiDelete(`/channels/${channelName}/config`);
-}
-
-export async function startChannel(
-  channelName: string,
-): Promise<{ status: string; message: string }> {
-  return apiPost(`/channels/${channelName}/start`, {});
-}
-
-export async function stopChannel(
-  channelName: string,
-): Promise<{ status: string; message: string }> {
-  return apiPost(`/channels/${channelName}/stop`, {});
-}
-
-export async function testChannelConfig(
-  channelName: string,
-  credentials?: Record<string, string>,
-): Promise<{ status: string; message: string; bot_info?: { username?: string; name?: string } }> {
-  return apiPost(`/channels/${channelName}/test`, credentials ? { credentials } : {});
-}
-
-export async function updateRateLimitSettings(
-  settings: Partial<RateLimitConfig>,
-): Promise<{ status: string; updated_fields: string[]; locked_fields?: string[]; message?: string }> {
-  return apiPut("/channels/rate-limit", settings);
 }

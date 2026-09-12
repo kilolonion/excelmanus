@@ -1,6 +1,11 @@
 import React from "react";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
+
+const sidebarDir = join(dirname(fileURLToPath(import.meta.url)), "../components/sidebar");
 
 const refreshWorkspaceFiles = vi.fn().mockResolvedValue(undefined);
 const excelStoreState = {
@@ -16,8 +21,6 @@ const excelStoreState = {
   closeCompare: vi.fn(),
   panelOpen: false,
   activeFilePath: null,
-  pendingBackups: [],
-  applyFile: vi.fn(),
   workspaceFilesVersion: 0,
   workspaceFiles: [],
   wsFilesLoaded: true,
@@ -109,10 +112,6 @@ vi.mock("@/components/sidebar/ExcelFilesDialogs", () => ({
   RemoveConfirmDialog: () => null,
 }));
 
-vi.mock("@/components/sidebar/FileRelationshipGraph", () => ({
-  FileRelationshipGraph: () => null,
-}));
-
 import { ExcelFilesBar } from "@/components/sidebar/ExcelFilesBar";
 
 describe("ExcelFilesBar", () => {
@@ -135,5 +134,27 @@ describe("ExcelFilesBar", () => {
 
     expect(html).toContain('data-file-picker="sidebar-upload"');
     expect(html).toContain('class="sr-only"');
+  });
+
+  it("file tab sources never create conversations", () => {
+    const files = [
+      "ExcelFilesBar.tsx",
+      "TreeNodeItem.tsx",
+      "FlatFileListView.tsx",
+    ];
+    for (const file of files) {
+      const src = readFileSync(join(sidebarDir, file), "utf8");
+      expect(src).not.toMatch(/\baddSession\b/);
+      expect(src).not.toMatch(/\bcreateOrReuseSession\b/);
+    }
+  });
+
+  it("does not render the file-relationship sidebar section", () => {
+    const html = renderToStaticMarkup(React.createElement(ExcelFilesBar, { embedded: true }));
+    expect(html).not.toContain("文件关系");
+
+    const src = readFileSync(join(sidebarDir, "ExcelFilesBar.tsx"), "utf8");
+    expect(src).not.toContain("文件关系");
+    expect(src).not.toContain("FileRelationshipGraph");
   });
 });

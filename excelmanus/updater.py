@@ -16,6 +16,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from pathlib import Path
 from typing import Callable
 
@@ -55,6 +56,32 @@ def _parse_version_tuple(v: str) -> tuple[int, ...]:
         return (0,)
 
 
+class UpgradeOutcome(str, Enum):
+    """停机升级 / 恢复的显式结果。控制流只认这个枚举，不认 error 字符串。"""
+
+    SUCCESS = "success"
+    ALREADY_LATEST = "already_latest"
+    CHECK_FAILED = "check_failed"
+    NOT_GIT_REPO = "not_git_repo"
+    FF_CONFLICT = "ff_conflict"
+    BACKUP_FAILED = "backup_failed"
+    DEPS_FAILED = "deps_failed"
+    BUILD_FAILED = "build_failed"
+    PRECHECK_FAILED = "precheck_failed"
+    API_RUNNING = "api_running"
+    IN_PROGRESS = "in_progress"
+    RESTORE_OK = "restore_ok"
+    RESTORE_FAILED = "restore_failed"
+    FAILED = "failed"
+
+
+_SUCCESS_OUTCOMES = frozenset({
+    UpgradeOutcome.SUCCESS,
+    UpgradeOutcome.ALREADY_LATEST,
+    UpgradeOutcome.RESTORE_OK,
+})
+
+
 @dataclass
 class VersionInfo:
     current: str = ""
@@ -65,6 +92,7 @@ class VersionInfo:
     release_url: str = ""
     check_method: str = ""
     check_failed: bool = False
+    error: str = ""
 
 
 @dataclass
@@ -77,13 +105,17 @@ class BackupResult:
 
 @dataclass
 class UpdateResult:
-    success: bool = False
+    outcome: UpgradeOutcome = UpgradeOutcome.FAILED
     old_version: str = ""
     new_version: str = ""
     backup_dir: str = ""
     steps_completed: list[str] = field(default_factory=list)
     error: str = ""
     needs_restart: bool = False
+
+    @property
+    def success(self) -> bool:
+        return self.outcome in _SUCCESS_OUTCOMES
 
 
 def _read_version_from_disk(project_root: Path) -> str:
@@ -152,7 +184,8 @@ def _run_cmd(
 
 
 def _is_git_repo(project_root: str | Path) -> bool:
-    return (Path(project_root) / ".git").is_dir()
+    """普通仓库是 `.git` 目录；git worktree 的 `.git` 是文件。"""
+    return (Path(project_root) / ".git").exists()
 
 
 _domestic_cache: bool | None = None
@@ -254,19 +287,38 @@ def check_for_updates(
             # 两个源都 fetch 失败：标记失败 + 短 TTL 缓存
             info.check_failed = True
             info.latest = info.current
+            info.error = "无法从 origin 或 GitHub 获取远程提交"
             _version_check_cache = info
             _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
             return info
         # fetch 成功，比较版本
         _, branch, _ = _run_cmd(["git", "rev-parse", "--abbrev-ref", "HEAD"], cwd=project_root)
         branch = branch or "main"
-        _, count_str, _ = _run_cmd(
-            ["git", "rev-list", "--count", f"HEAD..{git_remote}/{branch}"], cwd=project_root,
+        remote_ref = f"{git_remote}/{branch}"
+        rc_ref, _, ref_err = _run_cmd(
+            ["git", "rev-parse", "--verify", remote_ref], cwd=project_root,
+        )
+        if rc_ref != 0:
+            info.check_failed = True
+            info.latest = info.current
+            info.error = f"远程分支 {remote_ref} 不存在，无法比较提交差: {ref_err}".strip()
+            _version_check_cache = info
+            _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
+            return info
+        rc_list, count_str, list_err = _run_cmd(
+            ["git", "rev-list", "--count", f"HEAD..{remote_ref}"], cwd=project_root,
         )
         try:
+            if rc_list != 0:
+                raise ValueError(list_err or count_str or f"rev-list 退出码 {rc_list}")
             info.commits_behind = int(count_str)
-        except (ValueError, TypeError):
-            info.commits_behind = 0
+        except (ValueError, TypeError) as exc:
+            info.check_failed = True
+            info.latest = info.current
+            info.error = f"无法解析与 {remote_ref} 的提交差: {exc}"
+            _version_check_cache = info
+            _version_check_cache_time = time.monotonic() - (_VERSION_CHECK_TTL - _FAILED_CHECK_TTL)
+            return info
         info.has_update = info.commits_behind > 0
         if info.has_update:
             _, log_out, _ = _run_cmd(
@@ -338,6 +390,7 @@ def check_for_updates(
         logger.warning("Gitee/GitHub API 检查更新均失败")
         info.latest = info.current
         info.check_failed = True
+        info.error = "Gitee/GitHub API 检查更新均失败"
 
     # 更新 TTL 缓存（失败时用短 TTL）
     _version_check_cache = info
@@ -591,12 +644,31 @@ def restore_from_backup(
 
     def _restore_tree(src: Path, dst: Path) -> None:
         dst_tmp = dst.with_name(dst.name + "._restore_tmp")
-        if dst_tmp.is_dir():
-            shutil.rmtree(str(dst_tmp))
+        dst_old = dst.with_name(dst.name + "._restore_old")
+        for leftover in (dst_tmp, dst_old):
+            if leftover.exists() or leftover.is_symlink():
+                if leftover.is_dir() and not leftover.is_symlink():
+                    shutil.rmtree(str(leftover))
+                else:
+                    leftover.unlink()
         shutil.copytree(str(src), str(dst_tmp))
-        if dst.is_dir():
-            shutil.rmtree(str(dst))
-        dst_tmp.rename(dst)
+        if dst.exists() or dst.is_symlink():
+            os.rename(str(dst), str(dst_old))
+            try:
+                os.rename(str(dst_tmp), str(dst))
+            except OSError:
+                try:
+                    if not dst.exists():
+                        os.rename(str(dst_old), str(dst))
+                except OSError:
+                    logger.error(
+                        "恢复失败且无法还原旧目录: dst=%s old=%s tmp=%s",
+                        dst, dst_old, dst_tmp,
+                    )
+                raise
+            shutil.rmtree(str(dst_old), ignore_errors=True)
+        else:
+            os.rename(str(dst_tmp), str(dst))
 
     try:
         from excelmanus.data_home import get_excelmanus_home
@@ -642,68 +714,86 @@ def restore_from_backup(
         return False
 
 
+def _venv_python(project_root: Path) -> str:
+    if platform.system() == "Windows":
+        venv_py = project_root / ".venv" / "Scripts" / "python.exe"
+    else:
+        venv_py = project_root / ".venv" / "bin" / "python"
+    return str(venv_py) if venv_py.exists() else sys.executable
+
+
 def _build_pip_cmd(
     project_root: Path, use_mirror: bool = False, use_uv: bool = False,
 ) -> list[str]:
+    py = _venv_python(project_root)
     if use_uv:
-        cmd = ["uv", "pip", "install", "-e", str(project_root)]
+        cmd = ["uv", "pip", "install", "--python", py, "-e", str(project_root)]
     else:
-        if platform.system() == "Windows":
-            venv_py = project_root / ".venv" / "Scripts" / "python.exe"
-        else:
-            venv_py = project_root / ".venv" / "bin" / "python"
-        py = str(venv_py) if venv_py.exists() else sys.executable
         cmd = [py, "-m", "pip", "install", "-e", str(project_root)]
     if use_mirror:
         cmd.extend(["-i", "https://pypi.tuna.tsinghua.edu.cn/simple"])
     return cmd
 
 
+def _resolve_sqlite_path() -> Path:
+    raw = (
+        os.environ.get("EXCELMANUS_DB_PATH", "").strip()
+        or os.environ.get("EXCELMANUS_CHAT_HISTORY_DB_PATH", "").strip()
+    )
+    if raw:
+        return Path(os.path.expanduser(raw))
+    from excelmanus.data_home import get_default_db_path
+
+    return get_default_db_path()
+
+
+def _schema_status_message(current: int, latest: int) -> str:
+    if current > latest:
+        return f"schema v{current} → stamp 为 v{latest}（将在启动时执行）"
+    if current == latest:
+        return f"schema v{current}（已是最新）"
+    return f"schema v{current} → v{latest} 待迁移（将在启动时自动执行）"
+
+
+def _read_schema_version_sqlite(db_path: Path, latest: int) -> tuple[bool, str]:
+    if db_path.exists() and not db_path.is_file():
+        return False, f"数据库路径存在但不是文件: {db_path}"
+    if not db_path.is_file():
+        return True, "数据库文件尚不存在（将在启动时创建）"
+    import sqlite3
+
+    try:
+        uri = db_path.resolve().as_uri() + "?mode=ro"
+        conn = sqlite3.connect(uri, uri=True, timeout=5.0)
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'"
+            ).fetchone()
+            if row is None:
+                return True, "schema_version 不存在（将在启动时迁移）"
+            ver_row = conn.execute("SELECT MAX(version) FROM schema_version").fetchone()
+            current = int(ver_row[0] or 0) if ver_row and ver_row[0] is not None else 0
+        finally:
+            conn.close()
+    except Exception as exc:
+        return False, f"无法只读读取 schema_version: {exc}"
+    return True, _schema_status_message(current, latest)
+
+
 def verify_database_migration(
     project_root: str | Path | None = None,
 ) -> tuple[bool, str]:
-    """预检数据库连接与 schema 版本，判断启动时是否需要自动迁移。
+    """只读预检：连库并读取 schema_version。禁止构造会跑迁移的 Database()。
 
-    在更新代码后、重启服务前调用。仅检查数据库可达性和当前 schema 版本，
-    不实际执行迁移 SQL（迁移在服务启动时由 Database 构造函数自动完成）。
-    Returns:
-        (success, message) — True 表示数据库可达；False 表示连接失败。
+    迁移只在新进程启动时由 Database() 执行。连不上或读失败必须返回 False。
     """
-    if project_root is None:
-        project_root = Path(__file__).resolve().parent.parent
-    project_root = Path(project_root)
-
+    del project_root  # 库路径由 HOME / env 决定，不依赖工作树
     try:
-        from excelmanus.config import load_config
-        config = load_config()
-    except Exception:
-        return True, "无法加载配置，跳过预验证"
-
-    if not config.database_url and not (config.chat_history_db_path or config.db_path):
-        return True, "数据库路径未配置，跳过预验证"
-
-    import os
-    resolved_db_path = os.path.expanduser(
-        config.chat_history_db_path or config.db_path
-    )
-
-    try:
-        if config.database_url:
-            from excelmanus.database import Database
-            db = Database(database_url=config.database_url)
-        else:
-            from excelmanus.database import Database
-            db = Database(resolved_db_path)
-
         from excelmanus.database import _LATEST_VERSION
-        current = db._current_version()
-        db.close()
+    except Exception as exc:
+        return False, f"无法读取最新 schema 版本: {exc}"
 
-        if current >= _LATEST_VERSION:
-            return True, f"schema v{current}（已是最新）"
-        return True, f"schema v{current} → v{_LATEST_VERSION} 待迁移（将在启动时自动执行）"
-    except Exception as e:
-        return False, f"迁移失败: {e}"
+    return _read_schema_version_sqlite(_resolve_sqlite_path(), _LATEST_VERSION)
 
 
 def perform_update(
@@ -712,9 +802,12 @@ def perform_update(
     use_mirror: bool = False,
     progress_cb: Callable[[str, int], None] | None = None,
 ) -> UpdateResult:
-    """在已停机的工作树上执行更新。服务仍在监听时请走 upgrade helper。"""
+    """CLI 停机更新入口。与 helper 共用 apply_on_stopped_tree 的结果枚举。"""
     if not _update_lock.acquire(blocking=False):
-        return UpdateResult(error="另一个更新正在进行中，请等待完成后再试")
+        return UpdateResult(
+            outcome=UpgradeOutcome.IN_PROGRESS,
+            error="另一个更新正在进行中，请等待完成后再试",
+        )
     try:
         if project_root is None:
             project_root = Path(__file__).resolve().parent.parent
@@ -724,12 +817,16 @@ def perform_update(
 
         if api_is_running():
             return UpdateResult(
+                outcome=UpgradeOutcome.API_RUNNING,
                 error="API 仍在运行。请使用设置页升级，或先停止服务再执行 CLI 更新。",
             )
         if not skip_backup:
             bk = backup_user_data(project_root)
             if not bk.success:
-                return UpdateResult(error=f"备份失败: {bk.error}")
+                return UpdateResult(
+                    outcome=UpgradeOutcome.BACKUP_FAILED,
+                    error=f"备份失败: {bk.error}",
+                )
             cleanup_old_backups(project_root, max_keep=2)
         return apply_on_stopped_tree(
             project_root,

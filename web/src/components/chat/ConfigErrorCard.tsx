@@ -13,7 +13,7 @@ export function ConfigErrorCard({ items }: { items: { name: string; field: strin
   const openSettings = useUIStore((s) => s.openSettings);
 
   const friendlyName = (name: string) => {
-    if (name === "main") return "主模型";
+    if (name === "active") return "当前模型";
     if (name === "vision") return "视觉模型";
     return name;
   };

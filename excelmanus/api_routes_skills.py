@@ -16,7 +16,6 @@ from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StringConstrain
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
     get_skillpack_manager,
-    is_external_safe_mode as _is_external_safe_mode,
 )
 from excelmanus.logger import get_logger
 from excelmanus.skillpacks import (
@@ -264,8 +263,6 @@ async def get_skill(name: str, raw_request: Request) -> SkillpackDetailResponse 
     except SkillpackNotFoundError as exc:
         return _error_json_response(404, str(exc))
 
-    if _is_external_safe_mode():
-        return _to_skill_summary(detail)
     return _to_skill_detail(detail)
 
 
@@ -285,8 +282,6 @@ async def create_skill(
     raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
     """创建 skillpack。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
     manager = _require_skillpack_manager()
     try:
         detail = manager.create_skillpack(
@@ -323,8 +318,6 @@ async def patch_skill(
     raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
     """更新 skillpack。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
     manager = _require_skillpack_manager()
     try:
         detail = manager.patch_skillpack(
@@ -363,8 +356,6 @@ async def delete_skill(
     reason: str = "",
 ) -> SkillpackMutationResponse | JSONResponse:
     """软删除 skillpack。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
     manager = _require_skillpack_manager()
     try:
         detail = manager.delete_skillpack(
@@ -402,8 +393,6 @@ async def import_skill(
     raw_request: Request,
 ) -> SkillpackMutationResponse | JSONResponse:
     """从本地路径或 GitHub URL 导入 SKILL.md 及附属资源。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止写入 skillpack。")
     manager = _require_skillpack_manager()
     try:
         result = await manager.import_skillpack_async(
@@ -460,8 +449,6 @@ async def clawhub_install(
     request: ClawHubInstallRequest,
 ) -> dict[str, Any]:
     """从 ClawHub 安装技能。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止安装。")
     manager = _require_skillpack_manager()
     try:
         result = await manager.import_skillpack_async(
@@ -496,8 +483,6 @@ async def clawhub_update(
     request: ClawHubUpdateRequest,
 ) -> dict[str, Any]:
     """更新 ClawHub 技能。"""
-    if _is_external_safe_mode():
-        return _error_json_response(403, "external_safe_mode 开启时禁止更新。")
     manager = _require_skillpack_manager()
     try:
         results = await manager.clawhub_update(

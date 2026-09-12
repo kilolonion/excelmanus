@@ -1,41 +1,28 @@
 ---
 name: format_basic
-description: 工作表格式化与样式感知技能包，覆盖颜色/字体/边框/填充/合并单元格/行列尺寸
+description: 已有工作表上的样式（颜色、字体、边框、填充、合并、行列尺寸）。
 file_patterns:
   - "*.xlsx"
 resources:
   - references/color_palette.md
   - references/aesthetic_guide.md
-version: "3.0.0"
+version: "4.1.0"
 ---
-格式化任务标准流程：
+样式走 `format_spreadsheet`。合并区写锚点。工作区 xlsx 直接 `wb.save` 会失败。
 
-1. 感知优先
-- 修改样式前**必须**先调用 `inspect_spreadsheet(mode="range", include=["styles"])` 了解目标范围的现有样式。
-- 如果用户提到"把红色改为蓝色"等基于现有样式的需求，先用 `inspect_spreadsheet(mode="range", include=["styles"])` 定位哪些单元格有该样式。
-- 对整表样式概览，可使用 `inspect_spreadsheet(include=["styles"])` 快速获取压缩样式类；也可按需附加 charts/images/freeze_panes 等维度。
-- **列数感知**：格式化整行时，优先使用行引用（如 `1:1`）而非具体列范围（如 `A1:J1`），避免因视口限制遗漏列。如需精确列范围，从感知块的 `range: NNNr x NNc` 读取总列数。
+用户明确要求美化时，可再读 `references/aesthetic_guide.md`。
 
-2. 精准修改
-- 样式变更尽量最小化，只改动用户指定的属性，避免覆盖其他样式。
-- 颜色参数支持中文名（如"红色"、"浅蓝"）和十六进制码（如 "FF0000"），优先使用用户的表达方式。
-- 边框支持统一模式（四边相同）和单边差异化模式（left/right/top/bottom 独立设置）。
+```
+format_spreadsheet(
+  file_path="book.xlsx",
+  expected_version=...,
+  operations=[{
+    "kind": "format",
+    "sheet": "区域汇总",
+    "range": "A5:C5",
+    "fill": {"color": "FFCC00"}
+  }]
+)
+```
 
-3. 条件格式
-- 条件格式走 `format_spreadsheet`（`kind=conditional`），或在 `run_code` 里用 openpyxl 写规则后仍须经意图提交，禁止直接 `wb.save`。
-- 颜色参数支持中文名（"红色"）和十六进制（"FF0000"）。
-
-4. 布局操作
-- 合并单元格前确认范围内只有左上角有数据，避免数据丢失。
-- 行高/列宽调整支持手动指定和自动适配两种模式。
-- **对齐约定**：数字/金额/百分比列右对齐，文本列左对齐，表头居中，合并单元格居中。
-- **收尾动作**：数据和样式写入完成后，**always** 在 `run_code` 中通过 openpyxl 自动适配列宽和行高（遍历单元格计算最大内容宽度并设置 `column_dimensions[col].width`、`row_dimensions[row].height`）。
-
-5. 输出规范
-- 返回修改范围与影响单元格数量。
-- 建议用户核实关键格式变更。
-
-6. 审美设计
-- 美化/专业排版任务时，参考 `references/aesthetic_guide.md` 获取完整设计原则、五套专业色板、场景模板和反模式清单。
-- 核心原则：三色克制、字号层级递减、无框优先用交替行色、数据从 B2 开始留呼吸空间。
-- 不确定配色时默认使用**商务蓝色板**（主色 002060 + 表头 4472C4 + 交替行 D6E4F0）。
+`range` 写 A1:C5，也接受 `区域汇总!A5:C5`。多表时请带 `sheet`。列宽用 `kind=size` 的 `columns={"A":18}`，不要把 inspect 的列宽字典塞进 WorkbookSpec 时再换成另一种形状——两种都接受。

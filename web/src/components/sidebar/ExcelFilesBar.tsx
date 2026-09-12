@@ -51,7 +51,6 @@ import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
 import { FileGroupListView } from "./FileGroupListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
-import { FileRelationshipGraph } from "./FileRelationshipGraph";
 
 const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx";
 
@@ -103,8 +102,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const closeCompare = useExcelStore((s) => s.closeCompare);
   const panelOpen = useExcelStore((s) => s.panelOpen);
   const activeFilePath = useExcelStore((s) => s.activeFilePath);
-  const pendingBackups = useExcelStore((s) => s.pendingBackups);
-  const applyFile = useExcelStore((s) => s.applyFile);
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const workspaceFiles = useExcelStore((s) => s.workspaceFiles);
   const wsFilesLoaded = useExcelStore((s) => s.wsFilesLoaded);
@@ -186,7 +183,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   useEffect(() => {
     if (scannedUserIdRef.current === currentUserId) return;
     scannedUserIdRef.current = currentUserId;
-    fetchExcelFiles()
+    fetchExcelFiles(activeSessionId)
       .then((files) => {
         if (files.length > 0) {
           mergeRecentFiles(
@@ -199,7 +196,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         }
       })
       .catch(() => {});
-  }, [mergeRecentFiles, currentUserId]);
+  }, [mergeRecentFiles, currentUserId, activeSessionId]);
 
   const handleCreateRootFolder = useCallback(async (name: string) => {
     const folderName = name.trim();
@@ -220,20 +217,28 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     setCreatingRootFolder(false);
 
     try {
-      await workspaceMkdir(folderName);
+      await workspaceMkdir(folderName, activeSessionId);
       useExcelStore.getState().bumpWorkspaceFilesVersion();
-      refreshWorkspaceFiles();
+      refreshWorkspaceFiles(activeSessionId);
     } catch (err) {
       if (!isNotFoundError(err)) {
         useExcelStore.setState({ workspaceFiles: prevWorkspaceFiles });
       }
     }
-  }, [refreshWorkspaceFiles]);
+  }, [refreshWorkspaceFiles, activeSessionId]);
 
+  const prevSessionRef = useRef(activeSessionId);
   useEffect(() => {
-    if (wsFilesLoaded) return;
-    refreshWorkspaceFiles();
-  }, [wsFilesLoaded, refreshWorkspaceFiles]);
+    if (prevSessionRef.current !== activeSessionId) {
+      prevSessionRef.current = activeSessionId;
+      useExcelStore.setState({
+        workspaceFiles: [],
+        wsFilesLoaded: false,
+        fileGroupsLoaded: false,
+      });
+    }
+    void refreshWorkspaceFiles(activeSessionId);
+  }, [activeSessionId, refreshWorkspaceFiles]);
 
   const openFilePicker = useCallback(() => {
     const input = fileInputRef.current;
@@ -274,7 +279,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         fileList,
         async (file) => {
           try {
-            return await uploadFile(file);
+            return await uploadFile(file, activeSessionId);
           } catch {
             return null;
           }
@@ -286,9 +291,9 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         addRecentFile({ path: result.path, filename: result.filename });
       }
       e.target.value = "";
-      refreshWorkspaceFiles();
+      refreshWorkspaceFiles(activeSessionId);
     },
-    [addRecentFile, refreshWorkspaceFiles]
+    [addRecentFile, refreshWorkspaceFiles, activeSessionId]
   );
 
   const handleClick = useCallback(
@@ -395,7 +400,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         pendingRemovePaths,
         async (path) => {
           try {
-            await workspaceDeleteItem(path);
+            await workspaceDeleteItem(path, activeSessionId);
             return true;
           } catch (err) {
             return isNotFoundError(err);
@@ -415,14 +420,14 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         }
         useExcelStore.getState().bumpWorkspaceFilesVersion();
       }
-      refreshWorkspaceFiles();
+      refreshWorkspaceFiles(activeSessionId);
     } finally {
       setDeleting(false);
     }
     setConfirmRemoveOpen(false);
     setPendingRemovePaths([]);
     exitSelectMode();
-  }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles]);
+  }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles, activeSessionId]);
 
   const requestClearAll = useCallback(() => {
     setPendingRemovePaths(wsFilePaths);
@@ -712,6 +717,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                 JSON.stringify(demoFile),
               );
               e.dataTransfer.effectAllowed = "copy";
+              useExcelStore.getState().draggingFileCount = 1;
+            }}
+            onDragEnd={() => {
+              useExcelStore.getState().draggingFileCount = 0;
             }}
             onClick={() => openPanel(demoFile.path)}
             className="flex items-center gap-2.5 pl-5 pr-2 py-2 cursor-pointer transition-colors duration-100 hover:bg-accent/40"
@@ -834,7 +843,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
                   // 前端需要先获取 registry entry ids
                   const { fetchFileRegistry } = await import("@/lib/api");
                   try {
-                    const regData = await fetchFileRegistry();
+                    const regData = await fetchFileRegistry({ sessionId: activeSessionId });
                     if ("files" in regData) {
                       const pathToId = new Map<string, string>();
                       for (const f of regData.files) {
@@ -857,17 +866,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             </div>
           )}
         </div>
-      )}
-
-      {/* 文件关系图（非文件组视图 + 工作区有 ≥2 个 Excel 文件时） */}
-      {!groupViewMode && wsFilesLoaded && visibleFiles.filter((f) => !f.is_dir && isExcelFile(f.filename)).length >= 2 && (
-        <details className="border-b border-border/40 text-[11px]">
-          <summary className="flex items-center gap-1.5 px-3 py-1.5 cursor-pointer text-muted-foreground hover:text-foreground select-none">
-            <ArrowLeftRight className="h-3 w-3" />
-            <span className="font-medium">文件关系</span>
-          </summary>
-          <FileRelationshipGraph onClickFile={handleClick} />
-        </details>
       )}
 
       {groupViewMode ? (
@@ -897,7 +895,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             draggingPath={draggingPath}
             selectMode={selectMode}
             selectedPaths={selectedPaths}
-            pendingBackups={pendingBackups}
             onDragStart={handleDragStart}
             onDragEnd={handleDragEnd}
             onClick={handleClick}
@@ -917,7 +914,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           draggingPath={draggingPath}
           selectMode={selectMode}
           selectedPaths={selectedPaths}
-          pendingBackups={pendingBackups}
           onDragStart={handleDragStart}
           onDragEnd={handleDragEnd}
           onClick={handleClick}
@@ -1002,7 +998,6 @@ interface TreeViewProps {
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
-  pendingBackups: { original_path: string }[];
   onDragStart: (e: React.DragEvent, file: { path: string; filename: string }) => void;
   onDragEnd: () => void;
   onClick: (path: string) => void;
@@ -1026,7 +1021,7 @@ function FileTreeView(props: TreeViewProps) {
         fileList,
         async (file) => {
           try {
-            return await uploadFileToFolder(file, uploadTargetFolder);
+            return await uploadFileToFolder(file, uploadTargetFolder, props.sessionId);
           } catch {
             return null;
           }
@@ -1061,7 +1056,6 @@ function FileTreeView(props: TreeViewProps) {
           draggingPath={props.draggingPath}
           selectMode={props.selectMode}
           selectedPaths={props.selectedPaths}
-          pendingBackups={props.pendingBackups}
           onDragStart={props.onDragStart}
           onDragEnd={props.onDragEnd}
           onClick={props.onClick}

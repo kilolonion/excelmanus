@@ -1,4 +1,4 @@
-"""聊天记录持久化：支持 SQLite / PostgreSQL 存储后端。
+"""聊天记录持久化：SQLite 存储。
 
 Schema 由 Database 迁移系统统一管理，ChatHistoryStore 仅负责查询与写入。
 """
@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any, overload
 
@@ -62,15 +63,31 @@ class ChatHistoryStore:
     # ── Session CRUD ──────────────────────────────────
 
     def create_session(
-        self, session_id: str, title: str = "", *, user_id: str | None = None
+        self,
+        session_id: str,
+        title: str = "",
+        *,
+        user_id: str | None = None,
+        workspace_path: str = "",
+        workspace_id: str | None = None,
+        blank: bool = True,
     ) -> None:
         now = self._now_iso()
+        path = workspace_path or ""
         self._conn.execute(
             "INSERT OR IGNORE INTO sessions "
-            "(id, title, created_at, updated_at, user_id, title_source) "
-            "VALUES (?, ?, ?, ?, ?, 'fallback')",
-            (session_id, title, now, now, None),
+            "(id, title, created_at, updated_at, user_id, title_source, "
+            " workspace_path, workspace_id, blank) "
+            "VALUES (?, ?, ?, ?, ?, 'fallback', ?, ?, ?)",
+            (session_id, title, now, now, None, path, workspace_id, 1 if blank else 0),
         )
+        if path:
+            self._conn.execute(
+                "UPDATE sessions SET workspace_path = ?, "
+                "workspace_id = COALESCE(workspace_id, ?) "
+                "WHERE id = ? AND (workspace_path IS NULL OR workspace_path = '')",
+                (path, workspace_id, session_id),
+            )
         self._conn.commit()
 
     def session_exists(self, session_id: str, *, user_id: str | None = None) -> bool:
@@ -85,14 +102,55 @@ class ChatHistoryStore:
         return self.session_exists(session_id)
 
     def get_session_meta(self, session_id: str) -> dict | None:
-        """返回会话元数据（id, title, created_at, updated_at），不存在时返回 None。"""
+        """返回会话元数据，不存在时返回 None。"""
         row = self._conn.execute(
-            "SELECT id, title, created_at, updated_at FROM sessions WHERE id = ?",
+            "SELECT id, title, created_at, updated_at, message_count, "
+            "workspace_path, workspace_id, blank "
+            "FROM sessions WHERE id = ?",
             (session_id,),
         ).fetchone()
         if row is None:
             return None
         return dict(row)
+
+    def find_blank_session(self, workspace_path: str) -> dict | None:
+        """Latest unused session for this folder, if any."""
+        row = self._conn.execute(
+            "SELECT id, title, created_at, updated_at, message_count, "
+            "workspace_path, workspace_id, blank "
+            "FROM sessions WHERE workspace_path = ? AND blank = 1 "
+            "AND COALESCE(message_count, 0) = 0 "
+            "ORDER BY updated_at DESC LIMIT 1",
+            (workspace_path,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def set_session_blank(self, session_id: str, blank: bool) -> None:
+        now = self._now_iso()
+        self._conn.execute(
+            "UPDATE sessions SET blank = ?, updated_at = ? WHERE id = ?",
+            (1 if blank else 0, now, session_id),
+        )
+        self._conn.commit()
+
+    def backfill_workspace_paths(
+        self, workspace_path: str, workspace_id: str | None = None
+    ) -> int:
+        """Fill empty workspace_path on existing rows with the process default."""
+        if not workspace_path:
+            return 0
+        cur = self._conn.execute(
+            "UPDATE sessions SET workspace_path = ?, "
+            "workspace_id = COALESCE(workspace_id, ?) "
+            "WHERE workspace_path IS NULL OR workspace_path = ''",
+            (workspace_path, workspace_id),
+        )
+        self._conn.execute(
+            "UPDATE sessions SET blank = 0 "
+            "WHERE COALESCE(message_count, 0) > 0 AND blank != 0"
+        )
+        self._conn.commit()
+        return int(cur.rowcount or 0)
 
     def get_title_source(self, session_id: str) -> str | None:
         """返回会话的 title_source 字段，会话不存在时返回 None。"""
@@ -147,7 +205,7 @@ class ChatHistoryStore:
             "DELETE FROM messages WHERE session_id = ?", (session_id,)
         )
         self._conn.execute(
-            "UPDATE sessions SET message_count = 0, updated_at = ? WHERE id = ?",
+            "UPDATE sessions SET message_count = 0, blank = 1, updated_at = ? WHERE id = ?",
             (now, session_id),
         )
         self._conn.commit()
@@ -168,69 +226,50 @@ class ChatHistoryStore:
 
     # ── Message CRUD ──────────────────────────────────
 
-    def _existing_message_ids(self, session_id: str) -> set[str]:
-        ids: set[str] = set()
-        try:
-            rows = self._conn.execute(
-                "SELECT content FROM messages WHERE session_id = ?",
-                (session_id,),
-            ).fetchall()
-        except Exception:
-            return ids
-        for row in rows:
-            raw = row["content"]  # type: ignore[index]
-            try:
-                msg = json.loads(raw) if raw else {}
-            except (json.JSONDecodeError, TypeError):
-                continue
-            if not isinstance(msg, dict):
-                continue
-            mid = msg.get("message_id")
-            if mid:
-                ids.add(str(mid))
-        return ids
-
     def save_turn_messages(
         self, session_id: str, messages: list[dict], turn_number: int = 0
     ) -> None:
         if not messages:
             return
-        existing = self._existing_message_ids(session_id)
-        filtered: list[dict] = []
+        now = self._now_iso()
+        rows: list[tuple[str, str, str, int, str, str]] = []
+        batch_ids: set[str] = set()
         for msg in messages:
             if not isinstance(msg, dict):
-                filtered.append(msg)
+                payload = {"role": "unknown", "content": msg}
+                mid = uuid.uuid4().hex
+            else:
+                payload = dict(msg)
+                mid = str(payload.get("message_id") or "").strip() or uuid.uuid4().hex
+                payload["message_id"] = mid
+            if mid in batch_ids:
                 continue
-            mid = msg.get("message_id")
-            if mid:
-                mid_s = str(mid)
-                if mid_s in existing:
-                    continue
-                existing.add(mid_s)
-            filtered.append(msg)
-        if not filtered:
-            return
-        now = self._now_iso()
-        rows = [
-            (
-                session_id,
-                msg.get("role", "unknown"),
-                self._serialize_content(msg),
-                turn_number,
-                now,
+            batch_ids.add(mid)
+            rows.append(
+                (
+                    session_id,
+                    str(payload.get("role", "unknown")),
+                    self._serialize_content(payload),
+                    turn_number,
+                    now,
+                    mid,
+                )
             )
-            for msg in filtered
-        ]
+        if not rows:
+            return
         self._conn.executemany(
-            "INSERT INTO messages (session_id, role, content, turn_number, created_at) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT OR IGNORE INTO messages "
+            "(session_id, role, content, turn_number, created_at, message_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
             rows,
         )
         self._conn.execute(
             "UPDATE sessions SET message_count = "
             "(SELECT COUNT(*) FROM messages WHERE session_id = ?), "
+            "blank = CASE WHEN (SELECT COUNT(*) FROM messages WHERE session_id = ?) = 0 "
+            "THEN 1 ELSE 0 END, "
             "updated_at = ? WHERE id = ?",
-            (session_id, now, session_id),
+            (session_id, session_id, now, session_id),
         )
         self._conn.commit()
 

@@ -84,7 +84,7 @@ def setup_logging(level: str = "INFO") -> logging.Logger:
     # 为关键第三方库配置日志（WARNING+），确保错误可见
     _handler = logger.handlers[0] if logger.handlers else None
     if _handler is not None:
-        for lib_name in ("telegram", "httpx", "httpcore"):
+        for lib_name in ("httpx", "httpcore"):
             lib_logger = logging.getLogger(lib_name)
             if not lib_logger.handlers:
                 lib_logger.setLevel(logging.WARNING)

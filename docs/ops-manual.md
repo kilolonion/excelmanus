@@ -390,19 +390,18 @@ systemctl restart nginx  # 完全重启
 
 | 变量 | 用途 | 备注 |
 |------|------|------|
-| `EXCELMANUS_API_KEY` | 主模型 API Key | 必填 |
-| `EXCELMANUS_BASE_URL` | 主模型端点 | 必填 |
-| `EXCELMANUS_MODEL` | 主模型名称 | 必填 |
-| `EXCELMANUS_PROTOCOL` | 主模型协议类型 | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`/`docker`） | `auto` |
-| `EXCELMANUS_AUX_*` | 辅助模型（子代理默认模型、上下文压缩等） | |
-| `EXCELMANUS_MAIN_MODEL_VISION` | 主模型是否接受图片附件（`auto`/`true`/`false`） | `auto` |
+| `EXCELMANUS_API_KEY` | 启动时的模型 API Key（可被激活档案覆盖） | 必填 |
+| `EXCELMANUS_BASE_URL` | 启动时的模型端点 | 必填 |
+| `EXCELMANUS_MODEL` | 启动时的模型名称 | 必填 |
+| `EXCELMANUS_PROTOCOL` | 模型协议类型 | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`） | `auto` |
+| `EXCELMANUS_MAIN_MODEL_VISION` | 激活模型是否接受图片附件（`auto`/`true`/`false`） | `auto` |
 | `EXCELMANUS_EMBEDDING_*` | Embedding 模型（语义检索/技能路由/错误方案） | |
 | `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 留空自动生成 |
 | `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 必须包含前端域名 |
-| `EXCELMANUS_DATABASE_URL` | PostgreSQL 连接 URL（设置后优先使用 PG） | 空（用 SQLite） |
-| `EXCELMANUS_JWT_SECRET` | 下载令牌 JWT 密钥（可选） | 未设置则自动生成 |
+
+服务器部署请设 `EXCELMANUS_DEPLOY_MODE=server`。此时 API 拒绝 `/version/upgrade` 与 `/deploy/execute`；升级与回滚只在运维机跑 `./deploy/deploy.sh`（`rollback-to --commit` 为 checkout + 重启）。本机 Git 安装用设置页停机更新，详见 [升级与部署](hot-update-design.md)。
 
 ---
 
@@ -568,10 +567,7 @@ firewall-cmd --reload
 │   ├── deploy.ps1         # 远程部署脚本 v2.0（Windows PowerShell）
 │   ├── .env.deploy        # 部署配置（服务器地址/端口/路径，不入 Git）
 │   ├── .env.deploy.example # 部署配置模板
-│   ├── Dockerfile         # 后端 Docker 镜像
-│   ├── Dockerfile.sandbox # 代码沙盒镜像
-│   ├── docker-compose.yml # Docker Compose 编排
-│   ├── nginx.conf         # Nginx 反向代理配置
+│   ├── nginx.conf         # Nginx 反向代理配置（127.0.0.1 示例；生产见本手册）
 │   └── certs/             # TLS 证书
 ├── excelmanus/
 │   ├── config.py           # 环境变量与配置加载

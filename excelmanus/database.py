@@ -1,4 +1,4 @@
-"""统一数据库连接管理与 schema 迁移（支持 SQLite / PostgreSQL）。"""
+"""统一数据库连接管理与 schema 迁移（SQLite）。"""
 from __future__ import annotations
 
 import hashlib
@@ -16,13 +16,12 @@ import numpy as np
 from excelmanus.db_adapter import (
     Backend,
     ConnectionAdapter,
-    create_pg_adapter,
     create_sqlite_adapter,
 )
 
 logger = logging.getLogger(__name__)
 
-# ── SQLite 迁移 DDL ──────────────────────────────────────────
+# ── SQLite 迁移 DDL（squash：旧 1→25 最终形态即为唯一 v1）────────
 
 _SQLITE_MIGRATIONS: dict[int, list[str]] = {
     1: [
@@ -32,17 +31,22 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             created_at    TEXT NOT NULL,
             updated_at    TEXT NOT NULL,
             message_count INTEGER DEFAULT 0,
-            status        TEXT DEFAULT 'active'
+            user_id       TEXT,
+            title_source  TEXT DEFAULT 'auto'
         )""",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
         """CREATE TABLE IF NOT EXISTS messages (
             id          INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
             role        TEXT NOT NULL,
             content     TEXT,
             turn_number INTEGER DEFAULT 0,
-            created_at  TEXT NOT NULL
+            created_at  TEXT NOT NULL,
+            message_id  TEXT NOT NULL DEFAULT ''
         )""",
         "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_messages_session_message_id "
+        "ON messages(session_id, message_id)",
         """CREATE TABLE IF NOT EXISTS memory_entries (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             category     TEXT NOT NULL,
@@ -50,10 +54,12 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             content_hash TEXT NOT NULL,
             source       TEXT DEFAULT '',
             created_at   TEXT NOT NULL,
+            user_id      TEXT,
             UNIQUE(category, content_hash)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_entries(category)",
         "CREATE INDEX IF NOT EXISTS idx_memory_created ON memory_entries(created_at)",
+        "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
         """CREATE TABLE IF NOT EXISTS vector_records (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             content_hash TEXT UNIQUE NOT NULL,
@@ -82,12 +88,14 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             repo_diff_before TEXT,
             repo_diff_after  TEXT,
             changes          TEXT,
-            binary_snapshots TEXT
+            binary_snapshots TEXT,
+            user_id          TEXT,
+            session_id       TEXT
         )""",
         "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(execution_status)",
         "CREATE INDEX IF NOT EXISTS idx_approvals_created ON approvals(created_at_utc)",
-    ],
-    2: [
+        "CREATE INDEX IF NOT EXISTS idx_approvals_user_id ON approvals(user_id)",
+        "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
         """CREATE TABLE IF NOT EXISTS workspace_files (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             workspace    TEXT NOT NULL,
@@ -97,9 +105,11 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             mtime_ns     INTEGER NOT NULL,
             sheets_json  TEXT NOT NULL DEFAULT '[]',
             scanned_at   TEXT NOT NULL,
+            user_id      TEXT,
             UNIQUE(workspace, path)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_wf_workspace ON workspace_files(workspace)",
+        "CREATE INDEX IF NOT EXISTS idx_wf_user_id ON workspace_files(user_id)",
         """CREATE TABLE IF NOT EXISTS tool_call_log (
             id             INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id     TEXT,
@@ -112,35 +122,38 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             result_chars   INTEGER DEFAULT 0,
             error_type     TEXT,
             error_preview  TEXT,
-            created_at     TEXT NOT NULL
+            created_at     TEXT NOT NULL,
+            user_id        TEXT
         )""",
         "CREATE INDEX IF NOT EXISTS idx_tcl_session ON tool_call_log(session_id, turn)",
         "CREATE INDEX IF NOT EXISTS idx_tcl_tool ON tool_call_log(tool_name, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
-    ],
-    3: [
+        "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
         """CREATE TABLE IF NOT EXISTS llm_call_log (
-            id                INTEGER PRIMARY KEY AUTOINCREMENT,
-            session_id        TEXT,
-            turn              INTEGER DEFAULT 0,
-            iteration         INTEGER DEFAULT 0,
-            model             TEXT NOT NULL,
-            prompt_tokens     INTEGER DEFAULT 0,
-            completion_tokens INTEGER DEFAULT 0,
-            cached_tokens     INTEGER DEFAULT 0,
-            total_tokens      INTEGER DEFAULT 0,
-            has_tool_calls    INTEGER DEFAULT 0,
-            thinking_chars    INTEGER DEFAULT 0,
-            stream            INTEGER DEFAULT 0,
-            latency_ms        REAL DEFAULT 0,
-            error             TEXT,
-            created_at        TEXT NOT NULL
+            id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id            TEXT,
+            turn                  INTEGER DEFAULT 0,
+            iteration             INTEGER DEFAULT 0,
+            model                 TEXT NOT NULL,
+            prompt_tokens         INTEGER DEFAULT 0,
+            completion_tokens     INTEGER DEFAULT 0,
+            cached_tokens         INTEGER DEFAULT 0,
+            total_tokens          INTEGER DEFAULT 0,
+            has_tool_calls        INTEGER DEFAULT 0,
+            thinking_chars        INTEGER DEFAULT 0,
+            stream                INTEGER DEFAULT 0,
+            latency_ms            REAL DEFAULT 0,
+            error                 TEXT,
+            created_at            TEXT NOT NULL,
+            user_id               TEXT,
+            ttft_ms               REAL DEFAULT 0,
+            cache_creation_tokens INTEGER DEFAULT 0,
+            cache_read_tokens     INTEGER DEFAULT 0
         )""",
         "CREATE INDEX IF NOT EXISTS idx_llm_session ON llm_call_log(session_id, turn)",
         "CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_call_log(model, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_llm_created ON llm_call_log(created_at)",
-    ],
-    4: [
+        "CREATE INDEX IF NOT EXISTS idx_llm_user_id ON llm_call_log(user_id)",
         """CREATE TABLE IF NOT EXISTS session_excel_diffs (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -160,8 +173,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             UNIQUE(session_id, file_path)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_saf_session ON session_affected_files(session_id)",
-    ],
-    5: [
         """CREATE TABLE IF NOT EXISTS session_rules (
             id           INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id   TEXT NOT NULL,
@@ -172,8 +183,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             UNIQUE(session_id, rule_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_sr_session ON session_rules(session_id)",
-    ],
-    6: [
         """CREATE TABLE IF NOT EXISTS session_excel_previews (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -187,41 +196,26 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             created_at      TEXT NOT NULL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_sep_session ON session_excel_previews(session_id)",
-    ],
-    7: [
         """CREATE TABLE IF NOT EXISTS model_profiles (
-            id          INTEGER PRIMARY KEY AUTOINCREMENT,
-            name        TEXT NOT NULL UNIQUE,
-            model       TEXT NOT NULL,
-            api_key     TEXT DEFAULT '',
-            base_url    TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
+            id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+            name                 TEXT NOT NULL UNIQUE,
+            model                TEXT NOT NULL,
+            api_key              TEXT DEFAULT '',
+            base_url             TEXT DEFAULT '',
+            description          TEXT DEFAULT '',
+            created_at           TEXT NOT NULL,
+            updated_at           TEXT NOT NULL,
+            protocol             TEXT DEFAULT 'auto',
+            thinking_mode        TEXT DEFAULT 'auto',
+            model_family         TEXT DEFAULT '',
+            custom_extra_body    TEXT DEFAULT '',
+            custom_extra_headers TEXT DEFAULT ''
         )""",
         """CREATE TABLE IF NOT EXISTS config_kv (
             key        TEXT PRIMARY KEY,
             value      TEXT NOT NULL,
             updated_at TEXT NOT NULL
         )""",
-    ],
-    8: [
-        "ALTER TABLE sessions ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
-    ],
-    9: [
-        "ALTER TABLE memory_entries ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
-    ],
-    10: [
-        "ALTER TABLE approvals ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_user_id ON approvals(user_id)",
-        "ALTER TABLE tool_call_log ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
-        "ALTER TABLE llm_call_log ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_llm_user_id ON llm_call_log(user_id)",
-        "ALTER TABLE workspace_files ADD COLUMN user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_wf_user_id ON workspace_files(user_id)",
         """CREATE TABLE IF NOT EXISTS user_config_kv (
             key        TEXT NOT NULL,
             user_id    TEXT,
@@ -230,33 +224,26 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             UNIQUE(key, user_id)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_uckv_user ON user_config_kv(user_id)",
-    ],
-    11: [
-        "ALTER TABLE llm_call_log ADD COLUMN ttft_ms REAL DEFAULT 0",
-        "ALTER TABLE llm_call_log ADD COLUMN cache_creation_tokens INTEGER DEFAULT 0",
-        "ALTER TABLE llm_call_log ADD COLUMN cache_read_tokens INTEGER DEFAULT 0",
-    ],
-    12: [
         """CREATE TABLE IF NOT EXISTS file_registry (
-            id              TEXT PRIMARY KEY,
-            workspace       TEXT NOT NULL,
-            canonical_path  TEXT NOT NULL,
-            original_name   TEXT NOT NULL,
-            file_type       TEXT NOT NULL DEFAULT 'other',
-            size_bytes      INTEGER DEFAULT 0,
-            origin          TEXT NOT NULL DEFAULT 'scan',
+            id                TEXT PRIMARY KEY,
+            workspace         TEXT NOT NULL,
+            canonical_path    TEXT NOT NULL,
+            original_name     TEXT NOT NULL,
+            file_type         TEXT NOT NULL DEFAULT 'other',
+            size_bytes        INTEGER DEFAULT 0,
+            origin            TEXT NOT NULL DEFAULT 'scan',
             origin_session_id TEXT,
-            origin_turn     INTEGER,
-            origin_tool     TEXT,
-            parent_file_id  TEXT REFERENCES file_registry(id),
-            sheet_meta_json TEXT DEFAULT '[]',
-            content_hash    TEXT DEFAULT '',
-            mtime_ns        INTEGER DEFAULT 0,
-            staging_path    TEXT,
-            is_active_cow   INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL,
-            updated_at      TEXT NOT NULL,
-            deleted_at      TEXT,
+            origin_turn       INTEGER,
+            origin_tool       TEXT,
+            parent_file_id    TEXT REFERENCES file_registry(id),
+            sheet_meta_json   TEXT DEFAULT '[]',
+            content_hash      TEXT DEFAULT '',
+            mtime_ns          INTEGER DEFAULT 0,
+            staging_path      TEXT,
+            is_active_cow     INTEGER DEFAULT 0,
+            created_at        TEXT NOT NULL,
+            updated_at        TEXT NOT NULL,
+            deleted_at        TEXT,
             UNIQUE(workspace, canonical_path)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_fr_workspace ON file_registry(workspace)",
@@ -284,37 +271,17 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_fre_file ON file_registry_events(file_id)",
         "CREATE INDEX IF NOT EXISTS idx_fre_session ON file_registry_events(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_fre_turn ON file_registry_events(session_id, turn)",
-    ],
-    13: [
-        "ALTER TABLE approvals ADD COLUMN session_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
-    ],
-    14: [
         """CREATE TABLE IF NOT EXISTS session_checkpoints (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL,
             checkpoint_type TEXT NOT NULL DEFAULT 'turn',
             state_json      TEXT NOT NULL DEFAULT '{}',
-            task_list_json   TEXT NOT NULL DEFAULT '{}',
+            task_list_json  TEXT NOT NULL DEFAULT '{}',
             turn_number     INTEGER DEFAULT 0,
             created_at      TEXT NOT NULL
         )""",
         "CREATE INDEX IF NOT EXISTS idx_scp_session ON session_checkpoints(session_id)",
         "CREATE INDEX IF NOT EXISTS idx_scp_session_turn ON session_checkpoints(session_id, turn_number)",
-    ],
-    15: [
-        "ALTER TABLE model_profiles ADD COLUMN protocol TEXT DEFAULT 'auto'",
-    ],
-    16: [
-        "ALTER TABLE sessions ADD COLUMN title_source TEXT DEFAULT 'auto'",
-    ],
-    17: [
-        "ALTER TABLE model_profiles ADD COLUMN thinking_mode TEXT DEFAULT 'auto'",
-        "ALTER TABLE model_profiles ADD COLUMN model_family TEXT DEFAULT ''",
-        "ALTER TABLE model_profiles ADD COLUMN custom_extra_body TEXT DEFAULT ''",
-        "ALTER TABLE model_profiles ADD COLUMN custom_extra_headers TEXT DEFAULT ''",
-    ],
-    18: [
         """CREATE TABLE IF NOT EXISTS auth_profiles (
             id              TEXT PRIMARY KEY,
             user_id         TEXT NOT NULL,
@@ -334,8 +301,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
-    ],
-    19: [
         """CREATE TABLE IF NOT EXISTS file_groups (
             id          TEXT PRIMARY KEY,
             workspace   TEXT NOT NULL,
@@ -355,8 +320,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
         "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
-    ],
-    20: [
         """CREATE TABLE IF NOT EXISTS session_summaries (
             id              INTEGER PRIMARY KEY AUTOINCREMENT,
             session_id      TEXT NOT NULL UNIQUE,
@@ -373,9 +336,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
         "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
-    ],
-    21: [
-        # ── 号池：池账号主表 ──
         """CREATE TABLE IF NOT EXISTS pool_accounts (
             id                   TEXT PRIMARY KEY,
             label                TEXT NOT NULL DEFAULT '',
@@ -392,7 +352,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             created_at           TEXT NOT NULL,
             updated_at           TEXT NOT NULL
         )""",
-        # ── 号池：用量台账 ──
         """CREATE TABLE IF NOT EXISTS pool_usage_ledger (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             pool_account_id   TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
@@ -408,7 +367,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_pool_ledger_account ON pool_usage_ledger(pool_account_id, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_pool_ledger_created ON pool_usage_ledger(created_at)",
-        # ── 号池：预算快照 ──
         """CREATE TABLE IF NOT EXISTS pool_budget_snapshots (
             pool_account_id    TEXT PRIMARY KEY REFERENCES pool_accounts(id) ON DELETE CASCADE,
             day_window_tokens  INTEGER NOT NULL DEFAULT 0,
@@ -417,7 +375,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             weekly_remaining   INTEGER NOT NULL DEFAULT 0,
             snapshot_at        TEXT NOT NULL
         )""",
-        # ── 号池：人工激活映射 ──
         """CREATE TABLE IF NOT EXISTS pool_manual_active (
             provider         TEXT NOT NULL,
             model_pattern    TEXT NOT NULL DEFAULT '*',
@@ -426,9 +383,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             activated_at     TEXT NOT NULL,
             PRIMARY KEY (provider, model_pattern)
         )""",
-    ],
-    22: [
-        # ── 号池：自动轮换策略 ──
         """CREATE TABLE IF NOT EXISTS pool_auto_policies (
             id                    TEXT PRIMARY KEY,
             provider              TEXT NOT NULL DEFAULT 'openai-codex',
@@ -442,9 +396,11 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             fallback_to_default   INTEGER NOT NULL DEFAULT 1,
             created_at            TEXT NOT NULL,
             updated_at            TEXT NOT NULL,
+            hysteresis_delta      REAL NOT NULL DEFAULT 0.12,
+            min_dwell_seconds     INTEGER NOT NULL DEFAULT 180,
+            breaker_open_seconds  INTEGER NOT NULL DEFAULT 120,
             UNIQUE(provider, model_pattern)
         )""",
-        # ── 号池：轮换审计事件 ──
         """CREATE TABLE IF NOT EXISTS pool_rotation_events (
             id                INTEGER PRIMARY KEY AUTOINCREMENT,
             provider          TEXT NOT NULL,
@@ -458,19 +414,16 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_rotation_events_time ON pool_rotation_events(created_at DESC)",
         "CREATE INDEX IF NOT EXISTS idx_rotation_events_scope ON pool_rotation_events(provider, model_pattern)",
-    ],
-    23: [
-        # ── 号池 P3：稳态治理 ──
         """CREATE TABLE IF NOT EXISTS pool_scope_state (
-            provider          TEXT NOT NULL,
-            model_pattern     TEXT NOT NULL DEFAULT '*',
-            mode              TEXT NOT NULL DEFAULT 'auto',
+            provider           TEXT NOT NULL,
+            model_pattern      TEXT NOT NULL DEFAULT '*',
+            mode               TEXT NOT NULL DEFAULT 'auto',
             current_account_id TEXT DEFAULT '',
-            current_score     REAL NOT NULL DEFAULT 0.0,
-            activated_at      TEXT DEFAULT '',
-            cooldown_until    TEXT DEFAULT '',
-            last_rotation_at  TEXT DEFAULT '',
-            updated_at        TEXT NOT NULL,
+            current_score      REAL NOT NULL DEFAULT 0.0,
+            activated_at       TEXT DEFAULT '',
+            cooldown_until     TEXT DEFAULT '',
+            last_rotation_at   TEXT DEFAULT '',
+            updated_at         TEXT NOT NULL,
             PRIMARY KEY (provider, model_pattern)
         )""",
         """CREATE TABLE IF NOT EXISTS pool_account_breakers (
@@ -494,518 +447,85 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             PRIMARY KEY (minute_bucket, provider, model_pattern)
         )""",
         "CREATE INDEX IF NOT EXISTS idx_metrics_minute ON pool_rotation_metrics_minute(minute_bucket DESC)",
-        # ALTER 新列（SQLite 不支持 IF NOT EXISTS，用 try/except 在迁移框架中处理）
-        "ALTER TABLE pool_auto_policies ADD COLUMN hysteresis_delta REAL NOT NULL DEFAULT 0.12",
-        "ALTER TABLE pool_auto_policies ADD COLUMN min_dwell_seconds INTEGER NOT NULL DEFAULT 180",
-        "ALTER TABLE pool_auto_policies ADD COLUMN breaker_open_seconds INTEGER NOT NULL DEFAULT 120",
-    ],
-}
-
-# ── PostgreSQL 迁移 DDL ──────────────────────────────────────
-
-_PG_MIGRATIONS: dict[int, list[str]] = {
-    1: [
-        """CREATE TABLE IF NOT EXISTS sessions (
-            id            TEXT PRIMARY KEY,
-            title         TEXT NOT NULL DEFAULT '',
-            created_at    TEXT NOT NULL,
-            updated_at    TEXT NOT NULL,
-            message_count INTEGER DEFAULT 0,
-            status        TEXT DEFAULT 'active'
+        """CREATE TABLE IF NOT EXISTS memory_meta (
+            key     TEXT PRIMARY KEY,
+            value   TEXT,
+            user_id TEXT
         )""",
-        """CREATE TABLE IF NOT EXISTS messages (
-            id          SERIAL PRIMARY KEY,
-            session_id  TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            role        TEXT NOT NULL,
-            content     TEXT,
-            turn_number INTEGER DEFAULT 0,
-            created_at  TEXT NOT NULL
+        """CREATE TABLE IF NOT EXISTS oauth_pending_states (
+            state      TEXT PRIMARY KEY,
+            data       TEXT NOT NULL,
+            created_at TEXT NOT NULL
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_messages_session ON messages(session_id, id)",
-        """CREATE TABLE IF NOT EXISTS memory_entries (
-            id           SERIAL PRIMARY KEY,
-            category     TEXT NOT NULL,
-            content      TEXT NOT NULL,
-            content_hash TEXT NOT NULL,
-            source       TEXT DEFAULT '',
-            created_at   TEXT NOT NULL,
-            UNIQUE(category, content_hash)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_entries(category)",
-        "CREATE INDEX IF NOT EXISTS idx_memory_created ON memory_entries(created_at)",
-        """CREATE TABLE IF NOT EXISTS vector_records (
-            id           SERIAL PRIMARY KEY,
-            content_hash TEXT UNIQUE NOT NULL,
-            text         TEXT NOT NULL,
-            metadata     TEXT,
-            vector       BYTEA,
-            dimensions   INTEGER NOT NULL DEFAULT 1536,
-            created_at   TEXT NOT NULL
-        )""",
-        """CREATE TABLE IF NOT EXISTS approvals (
-            id               TEXT PRIMARY KEY,
-            tool_name        TEXT NOT NULL,
-            arguments        TEXT NOT NULL,
-            tool_scope       TEXT DEFAULT '[]',
-            created_at_utc   TEXT NOT NULL,
-            applied_at_utc   TEXT,
-            execution_status TEXT DEFAULT 'pending',
-            undoable         INTEGER DEFAULT 0,
-            result_preview   TEXT,
-            error_type       TEXT,
-            error_message    TEXT,
-            partial_scan     INTEGER DEFAULT 0,
-            audit_dir        TEXT,
-            manifest_file    TEXT,
-            patch_file       TEXT,
-            repo_diff_before TEXT,
-            repo_diff_after  TEXT,
-            changes          TEXT,
-            binary_snapshots TEXT
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(execution_status)",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_created ON approvals(created_at_utc)",
     ],
     2: [
-        """CREATE TABLE IF NOT EXISTS workspace_files (
-            id           SERIAL PRIMARY KEY,
-            workspace    TEXT NOT NULL,
-            path         TEXT NOT NULL,
-            name         TEXT NOT NULL,
-            size_bytes   BIGINT NOT NULL,
-            mtime_ns     BIGINT NOT NULL,
-            sheets_json  TEXT NOT NULL DEFAULT '[]',
-            scanned_at   TEXT NOT NULL,
-            UNIQUE(workspace, path)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_wf_workspace ON workspace_files(workspace)",
-        """CREATE TABLE IF NOT EXISTS tool_call_log (
-            id             SERIAL PRIMARY KEY,
-            session_id     TEXT,
-            turn           INTEGER DEFAULT 0,
-            iteration      INTEGER DEFAULT 0,
-            tool_name      TEXT NOT NULL,
-            arguments_hash TEXT,
-            success        INTEGER NOT NULL,
-            duration_ms    DOUBLE PRECISION DEFAULT 0,
-            result_chars   INTEGER DEFAULT 0,
-            error_type     TEXT,
-            error_preview  TEXT,
-            created_at     TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_tcl_session ON tool_call_log(session_id, turn)",
-        "CREATE INDEX IF NOT EXISTS idx_tcl_tool ON tool_call_log(tool_name, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
-    ],
-    3: [
-        """CREATE TABLE IF NOT EXISTS llm_call_log (
-            id                SERIAL PRIMARY KEY,
-            session_id        TEXT,
-            turn              INTEGER DEFAULT 0,
-            iteration         INTEGER DEFAULT 0,
-            model             TEXT NOT NULL,
-            prompt_tokens     INTEGER DEFAULT 0,
-            completion_tokens INTEGER DEFAULT 0,
-            cached_tokens     INTEGER DEFAULT 0,
-            total_tokens      INTEGER DEFAULT 0,
-            has_tool_calls    INTEGER DEFAULT 0,
-            thinking_chars    INTEGER DEFAULT 0,
-            stream            INTEGER DEFAULT 0,
-            latency_ms        DOUBLE PRECISION DEFAULT 0,
-            error             TEXT,
-            created_at        TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_llm_session ON llm_call_log(session_id, turn)",
-        "CREATE INDEX IF NOT EXISTS idx_llm_model ON llm_call_log(model, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_llm_created ON llm_call_log(created_at)",
-    ],
-    4: [
-        """CREATE TABLE IF NOT EXISTS session_excel_diffs (
-            id              SERIAL PRIMARY KEY,
-            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            tool_call_id    TEXT NOT NULL,
-            file_path       TEXT NOT NULL,
-            sheet           TEXT DEFAULT '',
-            affected_range  TEXT DEFAULT '',
-            changes_json    TEXT NOT NULL DEFAULT '[]',
-            created_at      TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_sed_session ON session_excel_diffs(session_id)",
-        """CREATE TABLE IF NOT EXISTS session_affected_files (
-            id           SERIAL PRIMARY KEY,
-            session_id   TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            file_path    TEXT NOT NULL,
-            created_at   TEXT NOT NULL,
-            UNIQUE(session_id, file_path)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_saf_session ON session_affected_files(session_id)",
-    ],
-    5: [
-        """CREATE TABLE IF NOT EXISTS session_rules (
-            id           SERIAL PRIMARY KEY,
-            session_id   TEXT NOT NULL,
-            rule_id      TEXT NOT NULL,
-            content      TEXT NOT NULL,
-            enabled      INTEGER NOT NULL DEFAULT 1,
-            created_at   TEXT NOT NULL,
-            UNIQUE(session_id, rule_id)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_sr_session ON session_rules(session_id)",
-    ],
-    6: [
-        """CREATE TABLE IF NOT EXISTS session_excel_previews (
-            id              SERIAL PRIMARY KEY,
-            session_id      TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-            tool_call_id    TEXT NOT NULL UNIQUE,
-            file_path       TEXT NOT NULL,
-            sheet           TEXT DEFAULT '',
-            columns_json    TEXT NOT NULL DEFAULT '[]',
-            rows_json       TEXT NOT NULL DEFAULT '[]',
-            total_rows      INTEGER DEFAULT 0,
-            truncated       INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_sep_session ON session_excel_previews(session_id)",
-    ],
-    7: [
-        """CREATE TABLE IF NOT EXISTS model_profiles (
-            id          SERIAL PRIMARY KEY,
-            name        TEXT NOT NULL UNIQUE,
-            model       TEXT NOT NULL,
-            api_key     TEXT DEFAULT '',
-            base_url    TEXT DEFAULT '',
-            description TEXT DEFAULT '',
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
-        )""",
-        """CREATE TABLE IF NOT EXISTS config_kv (
-            key        TEXT PRIMARY KEY,
-            value      TEXT NOT NULL,
-            updated_at TEXT NOT NULL
-        )""",
-    ],
-    8: [
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_sessions_user_id ON sessions(user_id)",
-    ],
-    9: [
-        "ALTER TABLE memory_entries ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
-    ],
-    10: [
-        "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_user_id ON approvals(user_id)",
-        "ALTER TABLE tool_call_log ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
-        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_llm_user_id ON llm_call_log(user_id)",
-        "ALTER TABLE workspace_files ADD COLUMN IF NOT EXISTS user_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_wf_user_id ON workspace_files(user_id)",
-        """CREATE TABLE IF NOT EXISTS user_config_kv (
-            key        TEXT NOT NULL,
-            user_id    TEXT,
-            value      TEXT NOT NULL,
+        "ALTER TABLE sessions ADD COLUMN workspace_path TEXT NOT NULL DEFAULT ''",
+        "ALTER TABLE sessions ADD COLUMN workspace_id TEXT",
+        "ALTER TABLE sessions ADD COLUMN blank INTEGER NOT NULL DEFAULT 1",
+        "UPDATE sessions SET blank = CASE WHEN COALESCE(message_count, 0) = 0 THEN 1 ELSE 0 END",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_path ON sessions(workspace_path)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_workspace_id ON sessions(workspace_id)",
+        "CREATE INDEX IF NOT EXISTS idx_sessions_blank ON sessions(blank)",
+        """CREATE TABLE IF NOT EXISTS workspaces (
+            id         TEXT PRIMARY KEY,
+            path       TEXT NOT NULL UNIQUE,
+            title      TEXT NOT NULL DEFAULT '',
+            created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            UNIQUE(key, user_id)
+            sort_index INTEGER NOT NULL DEFAULT 0
         )""",
-        "CREATE INDEX IF NOT EXISTS idx_uckv_user ON user_config_kv(user_id)",
-    ],
-    11: [
-        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS ttft_ms REAL DEFAULT 0",
-        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS cache_creation_tokens INTEGER DEFAULT 0",
-        "ALTER TABLE llm_call_log ADD COLUMN IF NOT EXISTS cache_read_tokens INTEGER DEFAULT 0",
-    ],
-    12: [
-        """CREATE TABLE IF NOT EXISTS file_registry (
-            id              TEXT PRIMARY KEY,
-            workspace       TEXT NOT NULL,
-            canonical_path  TEXT NOT NULL,
-            original_name   TEXT NOT NULL,
-            file_type       TEXT NOT NULL DEFAULT 'other',
-            size_bytes      INTEGER DEFAULT 0,
-            origin          TEXT NOT NULL DEFAULT 'scan',
-            origin_session_id TEXT,
-            origin_turn     INTEGER,
-            origin_tool     TEXT,
-            parent_file_id  TEXT REFERENCES file_registry(id),
-            sheet_meta_json TEXT DEFAULT '[]',
-            content_hash    TEXT DEFAULT '',
-            mtime_ns        INTEGER DEFAULT 0,
-            staging_path    TEXT,
-            is_active_cow   INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL,
-            updated_at      TEXT NOT NULL,
-            deleted_at      TEXT,
-            UNIQUE(workspace, canonical_path)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_fr_workspace ON file_registry(workspace)",
-        "CREATE INDEX IF NOT EXISTS idx_fr_parent ON file_registry(parent_file_id)",
-        "CREATE INDEX IF NOT EXISTS idx_fr_origin ON file_registry(origin)",
-        """CREATE TABLE IF NOT EXISTS file_registry_aliases (
-            id          TEXT PRIMARY KEY,
-            file_id     TEXT NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
-            alias_type  TEXT NOT NULL,
-            alias_value TEXT NOT NULL,
-            UNIQUE(file_id, alias_type, alias_value)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_fra_file ON file_registry_aliases(file_id)",
-        "CREATE INDEX IF NOT EXISTS idx_fra_value ON file_registry_aliases(alias_value)",
-        """CREATE TABLE IF NOT EXISTS file_registry_events (
-            id           TEXT PRIMARY KEY,
-            file_id      TEXT NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
-            event_type   TEXT NOT NULL,
-            session_id   TEXT,
-            turn         INTEGER,
-            tool_name    TEXT,
-            details_json TEXT DEFAULT '{}',
-            created_at   TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_fre_file ON file_registry_events(file_id)",
-        "CREATE INDEX IF NOT EXISTS idx_fre_session ON file_registry_events(session_id)",
-        "CREATE INDEX IF NOT EXISTS idx_fre_turn ON file_registry_events(session_id, turn)",
-    ],
-    13: [
-        "ALTER TABLE approvals ADD COLUMN IF NOT EXISTS session_id TEXT",
-        "CREATE INDEX IF NOT EXISTS idx_approvals_session_id ON approvals(session_id)",
-    ],
-    14: [
-        """CREATE TABLE IF NOT EXISTS session_checkpoints (
-            id              SERIAL PRIMARY KEY,
-            session_id      TEXT NOT NULL,
-            checkpoint_type TEXT NOT NULL DEFAULT 'turn',
-            state_json      TEXT NOT NULL DEFAULT '{}',
-            task_list_json   TEXT NOT NULL DEFAULT '{}',
-            turn_number     INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_scp_session ON session_checkpoints(session_id)",
-        "CREATE INDEX IF NOT EXISTS idx_scp_session_turn ON session_checkpoints(session_id, turn_number)",
-    ],
-    15: [
-        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS protocol TEXT DEFAULT 'auto'",
-    ],
-    16: [
-        "ALTER TABLE sessions ADD COLUMN IF NOT EXISTS title_source TEXT DEFAULT 'auto'",
-    ],
-    17: [
-        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS thinking_mode TEXT DEFAULT 'auto'",
-        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS model_family TEXT DEFAULT ''",
-        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_body TEXT DEFAULT ''",
-        "ALTER TABLE model_profiles ADD COLUMN IF NOT EXISTS custom_extra_headers TEXT DEFAULT ''",
-    ],
-    18: [
-        """CREATE TABLE IF NOT EXISTS auth_profiles (
-            id              TEXT PRIMARY KEY,
-            user_id         TEXT NOT NULL,
-            provider        TEXT NOT NULL,
-            profile_name    TEXT NOT NULL DEFAULT 'default',
-            credential_type TEXT NOT NULL DEFAULT 'oauth',
-            access_token    TEXT,
-            refresh_token   TEXT,
-            expires_at      TEXT,
-            account_id      TEXT,
-            plan_type       TEXT,
-            extra_data      TEXT,
-            is_active       INTEGER DEFAULT 1,
-            created_at      TEXT NOT NULL,
-            updated_at      TEXT NOT NULL,
-            UNIQUE(user_id, provider, profile_name)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_ap_user ON auth_profiles(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_ap_provider ON auth_profiles(user_id, provider)",
-    ],
-    19: [
-        """CREATE TABLE IF NOT EXISTS file_groups (
-            id          TEXT PRIMARY KEY,
-            workspace   TEXT NOT NULL,
-            name        TEXT NOT NULL,
-            description TEXT DEFAULT '',
-            created_at  TEXT NOT NULL,
-            updated_at  TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_fg_workspace ON file_groups(workspace)",
-        "CREATE UNIQUE INDEX IF NOT EXISTS idx_fg_workspace_name ON file_groups(workspace, name)",
-        """CREATE TABLE IF NOT EXISTS file_group_members (
-            group_id TEXT NOT NULL REFERENCES file_groups(id) ON DELETE CASCADE,
-            file_id  TEXT NOT NULL REFERENCES file_registry(id) ON DELETE CASCADE,
-            role     TEXT DEFAULT 'member',
-            added_at TEXT NOT NULL,
-            PRIMARY KEY (group_id, file_id)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_fgm_group ON file_group_members(group_id)",
-        "CREATE INDEX IF NOT EXISTS idx_fgm_file ON file_group_members(file_id)",
-    ],
-    20: [
-        """CREATE TABLE IF NOT EXISTS session_summaries (
-            id              SERIAL PRIMARY KEY,
-            session_id      TEXT NOT NULL UNIQUE,
-            user_id         TEXT,
-            summary_text    TEXT NOT NULL,
-            task_goal       TEXT DEFAULT '',
-            files_involved  TEXT DEFAULT '[]',
-            outcome         TEXT DEFAULT '',
-            unfinished      TEXT DEFAULT '',
-            embedding       BYTEA,
-            token_count     INTEGER DEFAULT 0,
-            created_at      TEXT NOT NULL,
-            updated_at      TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_ss_user ON session_summaries(user_id)",
-        "CREATE INDEX IF NOT EXISTS idx_ss_updated ON session_summaries(updated_at DESC)",
-    ],
-    21: [
-        # ── 号池：池账号主表 ──
-        """CREATE TABLE IF NOT EXISTS pool_accounts (
-            id                   TEXT PRIMARY KEY,
-            label                TEXT NOT NULL DEFAULT '',
-            provider             TEXT NOT NULL DEFAULT 'openai-codex',
-            account_id           TEXT DEFAULT '',
-            plan_type            TEXT DEFAULT '',
-            status               TEXT NOT NULL DEFAULT 'active',
-            daily_budget_tokens  INTEGER NOT NULL DEFAULT 0,
-            weekly_budget_tokens INTEGER NOT NULL DEFAULT 0,
-            timezone             TEXT NOT NULL DEFAULT 'Asia/Shanghai',
-            health_signal        TEXT NOT NULL DEFAULT 'ok',
-            health_confidence    DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            health_updated_at    TEXT DEFAULT '',
-            created_at           TEXT NOT NULL,
-            updated_at           TEXT NOT NULL
-        )""",
-        # ── 号池：用量台账 ──
-        """CREATE TABLE IF NOT EXISTS pool_usage_ledger (
-            id                SERIAL PRIMARY KEY,
-            pool_account_id   TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
-            session_id        TEXT DEFAULT '',
-            user_id           TEXT DEFAULT '',
-            model             TEXT NOT NULL DEFAULT '',
-            prompt_tokens     INTEGER NOT NULL DEFAULT 0,
-            completion_tokens INTEGER NOT NULL DEFAULT 0,
-            total_tokens      INTEGER NOT NULL DEFAULT 0,
-            outcome           TEXT NOT NULL DEFAULT 'success',
-            error_code        TEXT DEFAULT '',
-            created_at        TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_account ON pool_usage_ledger(pool_account_id, created_at)",
-        "CREATE INDEX IF NOT EXISTS idx_pool_ledger_created ON pool_usage_ledger(created_at)",
-        # ── 号池：预算快照 ──
-        """CREATE TABLE IF NOT EXISTS pool_budget_snapshots (
-            pool_account_id    TEXT PRIMARY KEY REFERENCES pool_accounts(id) ON DELETE CASCADE,
-            day_window_tokens  INTEGER NOT NULL DEFAULT 0,
-            week_window_tokens INTEGER NOT NULL DEFAULT 0,
-            daily_remaining    INTEGER NOT NULL DEFAULT 0,
-            weekly_remaining   INTEGER NOT NULL DEFAULT 0,
-            snapshot_at        TEXT NOT NULL
-        )""",
-        # ── 号池：人工激活映射 ──
-        """CREATE TABLE IF NOT EXISTS pool_manual_active (
-            provider         TEXT NOT NULL,
-            model_pattern    TEXT NOT NULL DEFAULT '*',
-            pool_account_id  TEXT NOT NULL REFERENCES pool_accounts(id) ON DELETE CASCADE,
-            activated_by     TEXT DEFAULT '',
-            activated_at     TEXT NOT NULL,
-            PRIMARY KEY (provider, model_pattern)
-        )""",
-    ],
-    22: [
-        # ── 号池：自动轮换策略 ──
-        """CREATE TABLE IF NOT EXISTS pool_auto_policies (
-            id                    TEXT PRIMARY KEY,
-            provider              TEXT NOT NULL DEFAULT 'openai-codex',
-            model_pattern         TEXT NOT NULL DEFAULT '*',
-            enabled               INTEGER NOT NULL DEFAULT 1,
-            low_watermark         DOUBLE PRECISION NOT NULL DEFAULT 0.15,
-            rate_limit_threshold  INTEGER NOT NULL DEFAULT 3,
-            transient_threshold   INTEGER NOT NULL DEFAULT 5,
-            error_window_minutes  INTEGER NOT NULL DEFAULT 5,
-            cooldown_seconds      INTEGER NOT NULL DEFAULT 300,
-            fallback_to_default   INTEGER NOT NULL DEFAULT 1,
-            created_at            TEXT NOT NULL,
-            updated_at            TEXT NOT NULL,
-            UNIQUE(provider, model_pattern)
-        )""",
-        # ── 号池：轮换审计事件 ──
-        """CREATE TABLE IF NOT EXISTS pool_rotation_events (
-            id                SERIAL PRIMARY KEY,
-            provider          TEXT NOT NULL,
-            model_pattern     TEXT NOT NULL DEFAULT '*',
-            from_account_id   TEXT DEFAULT '',
-            to_account_id     TEXT DEFAULT '',
-            reason            TEXT NOT NULL DEFAULT '',
-            trigger           TEXT NOT NULL DEFAULT 'hard',
-            fallback_used     INTEGER NOT NULL DEFAULT 0,
-            created_at        TEXT NOT NULL
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_rotation_events_time ON pool_rotation_events(created_at DESC)",
-        "CREATE INDEX IF NOT EXISTS idx_rotation_events_scope ON pool_rotation_events(provider, model_pattern)",
-    ],
-    23: [
-        # ── 号池 P3：稳态治理 ──
-        """CREATE TABLE IF NOT EXISTS pool_scope_state (
-            provider          TEXT NOT NULL,
-            model_pattern     TEXT NOT NULL DEFAULT '*',
-            mode              TEXT NOT NULL DEFAULT 'auto',
-            current_account_id TEXT DEFAULT '',
-            current_score     DOUBLE PRECISION NOT NULL DEFAULT 0.0,
-            activated_at      TEXT DEFAULT '',
-            cooldown_until    TEXT DEFAULT '',
-            last_rotation_at  TEXT DEFAULT '',
-            updated_at        TEXT NOT NULL,
-            PRIMARY KEY (provider, model_pattern)
-        )""",
-        """CREATE TABLE IF NOT EXISTS pool_account_breakers (
-            pool_account_id       TEXT PRIMARY KEY,
-            consecutive_failures  INTEGER NOT NULL DEFAULT 0,
-            breaker_state         TEXT NOT NULL DEFAULT 'closed',
-            open_until            TEXT DEFAULT '',
-            last_failure_at       TEXT DEFAULT '',
-            updated_at            TEXT NOT NULL
-        )""",
-        """CREATE TABLE IF NOT EXISTS pool_rotation_metrics_minute (
-            minute_bucket   TEXT NOT NULL,
-            provider        TEXT NOT NULL,
-            model_pattern   TEXT NOT NULL DEFAULT '*',
-            total_requests  INTEGER NOT NULL DEFAULT 0,
-            success_count   INTEGER NOT NULL DEFAULT 0,
-            error_429       INTEGER NOT NULL DEFAULT 0,
-            error_5xx       INTEGER NOT NULL DEFAULT 0,
-            rotations       INTEGER NOT NULL DEFAULT 0,
-            fallbacks       INTEGER NOT NULL DEFAULT 0,
-            PRIMARY KEY (minute_bucket, provider, model_pattern)
-        )""",
-        "CREATE INDEX IF NOT EXISTS idx_metrics_minute ON pool_rotation_metrics_minute(minute_bucket DESC)",
-        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS hysteresis_delta DOUBLE PRECISION NOT NULL DEFAULT 0.12",
-        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS min_dwell_seconds INTEGER NOT NULL DEFAULT 180",
-        "ALTER TABLE pool_auto_policies ADD COLUMN IF NOT EXISTS breaker_open_seconds INTEGER NOT NULL DEFAULT 120",
+        "CREATE INDEX IF NOT EXISTS idx_workspaces_sort ON workspaces(sort_index, created_at)",
     ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())
+# 旧梯子 1→25 squash 后的基线版本。stamp 必须写成 1，不能写成当时的 _LATEST_VERSION，
+# 否则以后加 v2 时旧库 MAX(schema_version)=25 会跳过真正的 v2 DDL。
+_SCHEMA_SQUASH_VERSION = 1
+
+_CURRENT_FORM_TABLES = (
+    "sessions",
+    "messages",
+    "memory_entries",
+    "vector_records",
+    "approvals",
+    "workspace_files",
+    "tool_call_log",
+    "llm_call_log",
+    "session_excel_diffs",
+    "session_affected_files",
+    "session_rules",
+    "session_excel_previews",
+    "model_profiles",
+    "config_kv",
+    "user_config_kv",
+    "file_registry",
+    "file_registry_aliases",
+    "file_registry_events",
+    "session_checkpoints",
+    "auth_profiles",
+    "file_groups",
+    "file_group_members",
+    "session_summaries",
+    "pool_accounts",
+    "pool_usage_ledger",
+    "pool_budget_snapshots",
+    "pool_manual_active",
+    "pool_auto_policies",
+    "pool_rotation_events",
+    "pool_scope_state",
+    "pool_account_breakers",
+    "pool_rotation_metrics_minute",
+)
 
 
 class Database:
-    """统一数据库连接管理，支持增量 schema 迁移。
+    """统一数据库连接管理，支持增量 schema 迁移。"""
 
-    支持两种后端：
-    - ``db_path`` → SQLite（默认，向后兼容）
-    - ``database_url`` → PostgreSQL（以 ``postgresql://`` 开头的 URL）
-    """
-
-    def __init__(
-        self,
-        db_path: str = "",
-        *,
-        database_url: str = "",
-    ) -> None:
-        if database_url:
-            self._backend = Backend.POSTGRES
-            self._adapter = create_pg_adapter(database_url)
-            self._db_path = ""
-            self._database_url = database_url
-        else:
-            self._backend = Backend.SQLITE
-            self._adapter = create_sqlite_adapter(db_path)
-            self._db_path = db_path
-            self._database_url = ""
+    def __init__(self, db_path: str = "") -> None:
+        self._backend = Backend.SQLITE
+        self._adapter = create_sqlite_adapter(db_path)
+        self._db_path = db_path
         self._ensure_schema_version_table()
         self._migrate()
 
@@ -1019,12 +539,8 @@ class Database:
         return self._backend
 
     @property
-    def is_pg(self) -> bool:
-        return self._backend == Backend.POSTGRES
-
-    @property
     def db_path(self) -> str:
-        """返回数据库文件路径（仅 SQLite 有意义）。"""
+        """返回数据库文件路径。"""
         return self._db_path
 
     def close(self) -> None:
@@ -1032,20 +548,12 @@ class Database:
         self._adapter.close()
 
     def _ensure_schema_version_table(self) -> None:
-        if self._backend == Backend.SQLITE:
-            self._adapter.execute(
-                "CREATE TABLE IF NOT EXISTS schema_version ("
-                "  version INTEGER PRIMARY KEY,"
-                "  applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
-                ")"
-            )
-        else:
-            self._adapter.execute(
-                "CREATE TABLE IF NOT EXISTS schema_version ("
-                "  version INTEGER PRIMARY KEY,"
-                "  applied_at TEXT NOT NULL DEFAULT (NOW()::TEXT)"
-                ")"
-            )
+        self._adapter.execute(
+            "CREATE TABLE IF NOT EXISTS schema_version ("
+            "  version INTEGER PRIMARY KEY,"
+            "  applied_at TEXT NOT NULL DEFAULT (datetime('now'))"
+            ")"
+        )
         self._adapter.commit()
 
     def _current_version(self) -> int:
@@ -1061,6 +569,10 @@ class Database:
 
     _ALTER_ADD_COL_RE = re.compile(
         r"ALTER\s+TABLE\s+(\S+)\s+ADD\s+COLUMN\s+(\S+)",
+        re.IGNORECASE,
+    )
+    _ALTER_DROP_COL_RE = re.compile(
+        r"ALTER\s+TABLE\s+(\S+)\s+DROP\s+COLUMN(?:\s+IF\s+EXISTS)?\s+(\S+)",
         re.IGNORECASE,
     )
 
@@ -1080,25 +592,69 @@ class Database:
         SQLite 不支持 ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``，
         因此在执行前检查列是否已存在，已存在则跳过。
         """
-        if self._backend == Backend.SQLITE:
-            m = self._ALTER_ADD_COL_RE.search(sql)
-            if m:
-                table, column = m.group(1), m.group(2)
-                if self._sqlite_column_exists(table, column):
-                    logger.debug(
-                        "跳过已存在的列: %s.%s", table, column,
-                    )
-                    return
+        m = self._ALTER_ADD_COL_RE.search(sql)
+        if m:
+            table, column = m.group(1), m.group(2).strip("\"'`[]")
+            if self._sqlite_column_exists(table, column):
+                logger.debug(
+                    "跳过已存在的列: %s.%s", table, column,
+                )
+                return
+        drop = self._ALTER_DROP_COL_RE.search(sql)
+        if drop:
+            table, column = drop.group(1), drop.group(2).strip("\"'`[]")
+            if not self._sqlite_column_exists(table, column):
+                logger.debug(
+                    "跳过不存在的列: %s.%s", table, column,
+                )
+                return
         self._adapter.execute(sql)
+
+    def _schema_is_current_form(self) -> bool:
+        """旧梯子 MAX(schema_version)=25 的库是否已是 squash 后的当前形态。"""
+        for name in _CURRENT_FORM_TABLES:
+            if not self._adapter.table_exists(name):
+                return False
+        if self._sqlite_column_exists("sessions", "status"):
+            return False
+        if not self._sqlite_column_exists("messages", "message_id"):
+            return False
+        for col in ("hysteresis_delta", "min_dwell_seconds", "breaker_open_seconds"):
+            if not self._sqlite_column_exists("pool_auto_policies", col):
+                return False
+        row = self._adapter.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='index' "
+            "AND name='idx_messages_session_message_id'"
+        ).fetchone()
+        return row is not None
+
+    def _stamp_legacy_schema(self, current: int) -> None:
+        """把旧梯子版本号（如 25）收成只保留 squash 基线 v1，保留用户数据。"""
+        if not self._schema_is_current_form():
+            raise RuntimeError(
+                f"数据库 schema_version={current} 高于当前 v{_LATEST_VERSION}，"
+                "但表结构不是当前形态，无法 stamp。请从备份恢复。"
+            )
+        self._backup_before_migrate(current, _SCHEMA_SQUASH_VERSION)
+        self._adapter.execute("DELETE FROM schema_version")
+        self._adapter.execute(
+            "INSERT INTO schema_version (version) VALUES (?)",
+            (_SCHEMA_SQUASH_VERSION,),
+        )
+        self._adapter.commit()
+        logger.info(
+            "已将旧 schema_version（max=%d）stamp 为 v%d",
+            current, _SCHEMA_SQUASH_VERSION,
+        )
 
     # ── 迁移前备份 ────────────────────────────────────────────
 
     def _backup_before_migrate(self, from_version: int, to_version: int) -> str | None:
         """迁移前自动备份 SQLite 数据库文件。
 
-        返回备份路径；PostgreSQL 或备份失败时返回 None。
+        返回备份路径；备份失败时返回 None。
         """
-        if self._backend != Backend.SQLITE or not self._db_path:
+        if not self._db_path:
             return None
         if from_version == 0:
             return None  # 全新数据库无用户数据，无需备份
@@ -1144,41 +700,33 @@ class Database:
 
     def _migrate(self) -> None:
         current = self._current_version()
+        if current > _LATEST_VERSION:
+            self._stamp_legacy_schema(current)
+            current = self._current_version()
         if current >= _LATEST_VERSION:
             return
 
         # 迁移前自动备份
         self._backup_before_migrate(current, _LATEST_VERSION)
 
-        migrations = (
-            _PG_MIGRATIONS if self._backend == Backend.POSTGRES
-            else _SQLITE_MIGRATIONS
-        )
         for version in range(current + 1, _LATEST_VERSION + 1):
-            statements = migrations.get(version, [])
+            statements = _SQLITE_MIGRATIONS.get(version, [])
             try:
                 for sql in statements:
                     self._safe_execute_sql(sql)
-                if self._backend == Backend.SQLITE:
-                    self._adapter.execute(
-                        "INSERT INTO schema_version (version) VALUES (?)",
-                        (version,),
-                    )
-                else:
-                    self._adapter.execute(
-                        "INSERT INTO schema_version (version) VALUES (%s)",
-                        (version,),
-                    )
+                self._adapter.execute(
+                    "INSERT INTO schema_version (version) VALUES (?)",
+                    (version,),
+                )
                 self._adapter.commit()
-                logger.info("数据库 schema 迁移到 v%d（%s）", version, self._backend)
+                logger.info("数据库 schema 迁移到 v%d", version)
             except Exception:
                 logger.error(
-                    "数据库 schema 迁移 v%d 失败（%s），后续版本将跳过",
-                    version, self._backend, exc_info=True,
+                    "数据库 schema 迁移 v%d 失败，后续版本将跳过",
+                    version, exc_info=True,
                 )
-                # 尝试回滚当前事务（PG 需要）
                 try:
-                    self._adapter.commit()  # SQLite: no-op on error
+                    self._adapter.commit()
                 except Exception:
                     pass
                 raise RuntimeError(
@@ -1231,32 +779,40 @@ def migrate_legacy_data(
 
 
 def _migrate_chat_history(conn: ConnectionAdapter, old_db_path: str) -> None:
-    """从旧 chat_history.db 复制 sessions 和 messages 数据。"""
+    """从旧 chat_history.db 复制 sessions 和 messages 数据。失败必须抛出。"""
+    old_conn = sqlite3.connect(old_db_path)
+    old_conn.row_factory = sqlite3.Row
     try:
-        old_conn = sqlite3.connect(old_db_path)
-        old_conn.row_factory = sqlite3.Row
-
         for row in old_conn.execute("SELECT * FROM sessions").fetchall():
             conn.execute(
                 "INSERT OR IGNORE INTO sessions "
-                "(id, title, created_at, updated_at, message_count, status, user_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                "(id, title, created_at, updated_at, message_count, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
                 (
                     row["id"],
                     row["title"],
                     row["created_at"],
                     row["updated_at"],
                     row["message_count"],
-                    row["status"],
                     None,  # 旧数据无 user_id，迁移后为 NULL
                 ),
             )
 
         for row in old_conn.execute("SELECT * FROM messages").fetchall():
+            raw = row["content"]
+            try:
+                msg = json.loads(raw) if raw else {}
+            except (json.JSONDecodeError, TypeError):
+                msg = {}
+            mid = ""
+            if isinstance(msg, dict) and msg.get("message_id"):
+                mid = str(msg.get("message_id"))
+            if not mid:
+                mid = f"legacy:{row['id']}"
             conn.execute(
                 "INSERT OR IGNORE INTO messages "
-                "(id, session_id, role, content, turn_number, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
+                "(id, session_id, role, content, turn_number, created_at, message_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     row["id"],
                     row["session_id"],
@@ -1264,14 +820,17 @@ def _migrate_chat_history(conn: ConnectionAdapter, old_db_path: str) -> None:
                     row["content"],
                     row["turn_number"],
                     row["created_at"],
+                    mid,
                 ),
             )
 
         conn.commit()
-        old_conn.close()
         logger.info("已从旧 chat_history.db 迁移会话数据")
     except Exception:
-        logger.warning("迁移旧 chat_history.db 失败", exc_info=True)
+        logger.exception("迁移旧 chat_history.db 失败")
+        raise
+    finally:
+        old_conn.close()
 
 
 def _migrate_memory_files(conn: ConnectionAdapter, memory_dir: str) -> None:
@@ -1412,11 +971,6 @@ def _migrate_vector_files(conn: ConnectionAdapter, vectors_dir: str) -> None:
             vec = vectors[i].astype(np.float32)
             vec_blob = vec.tobytes()
             dimensions = vec.shape[0]
-
-        # 对 PG，需要用 psycopg2.Binary 包装 bytes
-        if conn.is_pg and vec_blob is not None:
-            import psycopg2
-            vec_blob = psycopg2.Binary(vec_blob)  # type: ignore[assignment]
 
         try:
             conn.execute(

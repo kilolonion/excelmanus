@@ -1,4 +1,4 @@
-"""上传、@ 提及列表、斜杠命令、健康检查与公网 IP。
+"""上传、@ 提及列表、斜杠命令与健康检查。
 
 从 api.py 抽出的独立路由模块。运行时状态只从 api_app_state 读取，
 禁止 ``from excelmanus.api import _config`` 反向导入。
@@ -17,7 +17,6 @@ from fastapi.responses import JSONResponse
 import excelmanus
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
-    get_channel_launcher,
     get_config,
     get_config_incomplete,
     get_database,
@@ -27,10 +26,9 @@ from excelmanus.api_app_state import (
     get_session_manager,
     get_skillpack_loader,
     get_tool_registry,
-    is_external_safe_mode as _is_external_safe_mode,
     resolve_workspace as _resolve_workspace,
     resolve_workspace_root as _resolve_workspace_root,
-    safe_uploads_path as _safe_uploads_path,
+    uploads_mkdir as _uploads_mkdir,
 )
 from excelmanus.logger import get_logger
 
@@ -59,7 +57,10 @@ async def upload_file(raw_request: Request) -> JSONResponse:
 
     filename = file.filename or "unnamed"
 
-    ws = _resolve_workspace(raw_request)
+    ws = _resolve_workspace(
+        raw_request,
+        session_id=str(form.get("session_id") or raw_request.query_params.get("session_id") or "") or None,
+    )
 
     content = await file.read()
 
@@ -71,18 +72,20 @@ async def upload_file(raw_request: Request) -> JSONResponse:
         folder = str(form.get("folder", ""))
 
     if folder:
-        target_dir = _safe_uploads_path(upload_dir, folder)
+        target_dir = _uploads_mkdir(upload_dir, folder)
         if target_dir is None:
             return _error_json_response(400, "非法目标路径")
-        target_dir.mkdir(parents=True, exist_ok=True)
     else:
         target_dir = upload_dir
 
-    safe_name = f"{uuid.uuid4().hex[:8]}_{filename}"
+    from excelmanus.api_app_state import sanitize_upload_filename
+
+    safe_name = f"{uuid.uuid4().hex[:8]}_{sanitize_upload_filename(filename)}"
     dest_path = target_dir / safe_name
 
-    with open(dest_path, "wb") as f:
-        f.write(content)
+    from excelmanus.api_app_state import write_new_file_nofollow
+
+    write_new_file_nofollow(dest_path, content)
 
     # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
     converted = False
@@ -91,7 +94,9 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     from excelmanus.xls_converter import needs_conversion, convert_to_xlsx, ConversionError
     if needs_conversion(dest_path):
         try:
-            xlsx_path = convert_to_xlsx(dest_path, overwrite=True)
+            xlsx_path = convert_to_xlsx(
+                dest_path, overwrite=True, workspace_root=str(ws.root_dir),
+            )
             dest_path = xlsx_path
             filename = xlsx_path.name
             converted = True
@@ -151,45 +156,41 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     if not url:
         return _error_json_response(400, "缺少 url 字段")
 
-    # 仅允许 http/https
-    if not url.lower().startswith(("http://", "https://")):
-        return _error_json_response(400, "仅支持 http/https 链接")
+    from urllib.parse import unquote, urlparse
 
     import httpx
-    from urllib.parse import urlparse, unquote
 
-    # 从 URL 路径推断文件名
+    from excelmanus.api_app_state import sanitize_upload_filename
+    from excelmanus.security.url_fetch import UnsafeURLError, fetch_public_http
+
     parsed = urlparse(url)
     url_path = unquote(parsed.path.rstrip("/"))
     raw_filename = url_path.split("/")[-1] if "/" in url_path else ""
     if not raw_filename or "." not in raw_filename:
         return _error_json_response(400, "无法从 URL 推断文件名（需带扩展名，如 .xlsx/.csv/.png）")
+    raw_filename = sanitize_upload_filename(raw_filename)
 
-    # 下载文件（限制大小）
-    max_download = _UPLOAD_MAX_PART_SIZE  # 复用上传限制
+    max_download = _UPLOAD_MAX_PART_SIZE
     try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60.0) as client:
-            resp = await client.get(url)
-            resp.raise_for_status()
+        content = await fetch_public_http(url, max_bytes=max_download)
+    except UnsafeURLError as exc:
+        msg = str(exc)
+        code = 413 if "过大" in msg else 400
+        return _error_json_response(code, msg)
     except httpx.HTTPStatusError as exc:
         return _error_json_response(502, f"远程服务器返回 {exc.response.status_code}")
     except Exception as exc:
         return _error_json_response(502, f"下载失败: {exc}")
 
-    content = resp.content
-    if len(content) > max_download:
-        return _error_json_response(413, f"文件过大 (>{max_download // (1024*1024)} MB)")
     if len(content) == 0:
         return _error_json_response(400, "下载到空文件")
 
-    ws = _resolve_workspace(raw_request)
-
-    upload_dir = ws.get_upload_dir()
-    safe_name = f"{uuid.uuid4().hex[:8]}_{raw_filename}"
+    ws = _resolve_workspace(raw_request, session_id=(body.get("session_id") or None))
     dest_path = upload_dir / safe_name
 
-    with open(dest_path, "wb") as f:
-        f.write(content)
+    from excelmanus.api_app_state import write_new_file_nofollow
+
+    write_new_file_nofollow(dest_path, content)
 
     # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
     converted = False
@@ -198,7 +199,9 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     from excelmanus.xls_converter import needs_conversion as _nc_url, convert_to_xlsx as _conv_url, ConversionError as _CE_url
     if _nc_url(dest_path):
         try:
-            xlsx_path = _conv_url(dest_path, overwrite=True)
+            xlsx_path = _conv_url(
+                dest_path, overwrite=True, workspace_root=str(ws.root_dir),
+            )
             dest_path = xlsx_path
             raw_filename = xlsx_path.name
             converted = True
@@ -354,12 +357,8 @@ async def execute_command(request: Request) -> JSONResponse:
         lines.append(f"- **模型**: `{_config.model}`")
         lines.append(f"- **Base URL**: `{_config.base_url}`")
         lines.append(f"- **工作区**: `{_config.workspace_root}`")
-        lines.append(f"- **最大迭代**: {_config.max_iterations}")
-        lines.append(f"- **辅助模型**: `{_config.aux_model or '未配置'}`")
-        lines.append(f"- **AUX Base URL**: `{_config.aux_base_url or '继承主配置'}`")
         lines.append(f"- **子代理**: {'开启' if _config.subagent_enabled else '关闭'}")
-        lines.append(f"- **备份模式**: {'开启' if _config.backup_enabled else '关闭'}")
-        lines.append(f"- **安全模式**: {'开启' if _config.external_safe_mode else '关闭'}")
+        lines.append(f"- **备份 overlay**: 已移除（写入直接落用户路径）")
         lines.append(f"- **多模型配置**: {len(_config.models)} 个")
         return JSONResponse(content={"result": "\n".join(lines), "format": "markdown"})
 
@@ -380,13 +379,7 @@ async def execute_command(request: Request) -> JSONResponse:
     if command in {"/subagent list", "/subagent status"}:
         assert _config is not None
         status = "开启" if _config.subagent_enabled else "关闭"
-        return JSONResponse(content={"result": f"子代理状态: **{status}**\n\n最大迭代: {_config.subagent_max_iterations}", "format": "markdown"})
-
-    # /backup list, /backup status
-    if command in {"/backup list", "/backup status"}:
-        assert _config is not None
-        status = "开启" if _config.backup_enabled else "关闭"
-        return JSONResponse(content={"result": f"备份沙盒: **{status}**", "format": "markdown"})
+        return JSONResponse(content={"result": f"子代理状态: **{status}**", "format": "markdown"})
 
     # /compact status
     if command == "/compact status":
@@ -468,16 +461,6 @@ async def health(request: Request) -> dict:
             "restart_reason": get_restart_reason(),
         }
 
-    if _is_external_safe_mode():
-        return {
-            "status": "ok",
-            "version": excelmanus.__version__,
-            "configured": not get_config_incomplete(),
-            "model": "hidden",
-            "tools": [],
-            "skillpacks": [],
-        }
-
     tools: list[str] = []
     skillpacks: list[str] = []
     _tool_registry = get_tool_registry()
@@ -493,10 +476,10 @@ async def health(request: Request) -> dict:
     if _session_manager is not None:
         active_sessions = await _session_manager.get_active_count()
 
-    # 发布清单摘要（供前端版本轮询使用）
+    # 发布清单摘要（供前端版本轮询使用）。不得开库：fingerprint 只读文件 / git。
+    from excelmanus.auth.manage_token import manage_token_configured
     from excelmanus.api_routes_version import get_manifest_data, _API_SCHEMA_VERSION
     _manifest = get_manifest_data()
-    _launcher = get_channel_launcher()
 
     return {
         "status": "ok",
@@ -506,36 +489,10 @@ async def health(request: Request) -> dict:
         "tools": tools,
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,
-        "docker_sandbox_enabled": getattr(request.app.state, "docker_sandbox_enabled", False),
         "build_id": _manifest.get("frontend_build_id"),
         "version_fingerprint": _manifest.get("version_fingerprint"),
         "api_schema_version": _API_SCHEMA_VERSION,
         "git_commit": _manifest.get("git_commit"),
-        "min_frontend_build_id": _manifest.get("min_frontend_build_id"),
-        "min_backend_version": _manifest.get("min_backend_version"),
         "deploy_mode": _config.deploy_mode if _config is not None else "standalone",
-        "channels": _launcher.active_channels if _launcher is not None else [],
+        "auth_required": manage_token_configured(),
     }
-
-
-@router.get("/api/v1/server/public-ip")
-async def server_public_ip() -> JSONResponse:
-    """检测服务器的公网 IP 地址。"""
-    import httpx
-
-    _IP_SERVICES = [
-        "https://api.ipify.org",
-        "https://icanhazip.com",
-        "https://checkip.amazonaws.com",
-    ]
-    async with httpx.AsyncClient(timeout=5) as client:
-        for url in _IP_SERVICES:
-            try:
-                resp = await client.get(url)
-                if resp.status_code == 200:
-                    ip = resp.text.strip()
-                    if ip:
-                        return JSONResponse({"ip": ip})
-            except Exception:
-                continue
-    return JSONResponse({"ip": None, "error": "无法检测公网 IP"}, status_code=503)

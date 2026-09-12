@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { apiPut, testModelConnection } from "@/lib/api";
+import { apiPost, apiPut, testModelConnection } from "@/lib/api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { PROVIDER_LOGO_SLUG } from "../provider-guides";
 import type { ProviderGuide } from "../provider-guides";
@@ -99,16 +99,35 @@ export function ProviderGuideStep({
     if (!apiKey.trim()) return;
     setSaving(true);
     try {
-      await apiPut(
-        "/config/models/main",
-        {
-          model,
-          base_url: baseUrl,
-          api_key: apiKey,
-          protocol: provider.protocol,
-        },
-        { direct: true }
-      );
+      const profileName = provider.label || model;
+      try {
+        await apiPost(
+          "/config/models/profiles",
+          {
+            name: profileName,
+            model,
+            base_url: baseUrl,
+            api_key: apiKey,
+            protocol: provider.protocol,
+            description: provider.description || "",
+          },
+          { direct: true }
+        );
+      } catch {
+        await apiPut(
+          `/config/models/profiles/${encodeURIComponent(profileName)}`,
+          {
+            name: profileName,
+            model,
+            base_url: baseUrl,
+            api_key: apiKey,
+            protocol: provider.protocol,
+            description: provider.description || "",
+          },
+          { direct: true }
+        );
+      }
+      await apiPut("/models/active", { name: profileName }, { direct: true });
       useOnboardingStore.getState().setBackendConfigured(true);
       onComplete();
     } catch (e) {
@@ -370,7 +389,7 @@ export function ProviderGuideStep({
         </div>
 
         <p className="text-[11px] text-muted-foreground mt-4 text-center">
-          此配置将作为系统主模型。你可以稍后在设置中配置辅助模型。
+          此配置将保存为模型档案并立即激活。之后可在设置中添加更多档案并切换。
         </p>
       </div>
     </div>

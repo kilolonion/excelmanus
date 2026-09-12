@@ -181,12 +181,9 @@ export function TurnBrowser() {
     setRolling(true);
     setLastResult(null);
     try {
-      const hasFileChanges =
-        preview && preview.file_changes && preview.file_changes.length > 0;
       const res = await rollbackChat({
         sessionId: activeSessionId,
         turnIndex: rollbackTarget,
-        rollbackFiles: !!hasFileChanges,
       });
 
       setLastResult({

@@ -9,6 +9,8 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Any
 
+from excelmanus.session_title import title_from_messages
+
 if TYPE_CHECKING:
     from excelmanus.chat_history import ChatHistoryStore
     from excelmanus.engine import AgentEngine
@@ -55,14 +57,7 @@ class ConversationPersistence:
 
         exists = self._chat_history.session_exists(session_id)
         if not exists:
-            title = ""
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        title = content[:80]
-                    break
-            self._chat_history.create_session(session_id, title)
+            self._chat_history.create_session(session_id, title_from_messages(messages))
 
         # 压缩/摘要会替换 _messages 并将 snapshot_index 重置为 0，
         # 此时需要先清空旧消息再全量重写，否则 SQLite 中仍是压缩前的历史。
@@ -83,15 +78,9 @@ class ConversationPersistence:
         """从消息列表中派生标题并更新 SQLite（仅当标题尚未被 LLM 或用户设置时）。"""
         try:
             existing_source = self._chat_history.get_title_source(session_id)
-            if existing_source in ("auto", "user"):
+            if existing_source in ("auto", "user", "truncated"):
                 return
-            title = ""
-            for msg in messages:
-                if isinstance(msg, dict) and msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, str) and content.strip():
-                        title = content.strip()[:80]
-                        break
+            title = title_from_messages(messages)
             if title:
                 self._chat_history.update_session(session_id, title=title)
         except Exception:
@@ -113,14 +102,9 @@ class ConversationPersistence:
 
         exists = self._chat_history.session_exists(session_id)
         if not exists:
-            title = ""
-            for msg in snapshot.messages:
-                if isinstance(msg, dict) and msg.get("role") == "user":
-                    content = msg.get("content", "")
-                    if isinstance(content, str):
-                        title = content[:80]
-                    break
-            self._chat_history.create_session(session_id, title)
+            self._chat_history.create_session(
+                session_id, title_from_messages(snapshot.messages),
+            )
 
         self._chat_history.save_turn_messages(
             session_id, new_msgs, turn_number=snapshot.turn

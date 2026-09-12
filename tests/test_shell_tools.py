@@ -152,6 +152,23 @@ class TestRunShellBlocked:
         assert "白名单" in result["reason"]
 
 
+class TestRunShellWriteFlags:
+    def test_sort_dash_o_blocked(self, workspace: Path) -> None:
+        result = _payload(shell_tools.run_shell("sort -o pwned.txt hello.txt"))
+        assert result["status"] == "blocked"
+        assert "写盘" in result["reason"]
+        assert not (workspace / "pwned.txt").exists()
+
+    def test_sort_long_output_blocked(self, workspace: Path) -> None:
+        result = _payload(shell_tools.run_shell("sort --output=pwned.txt hello.txt"))
+        assert result["status"] == "blocked"
+        assert "写盘" in result["reason"]
+
+    def test_sort_glued_o_blocked(self, workspace: Path) -> None:
+        result = _payload(shell_tools.run_shell("sort -opwned.txt hello.txt"))
+        assert result["status"] == "blocked"
+
+
 class TestRunShellInjection:
     """注入攻击防御。"""
 

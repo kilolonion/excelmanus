@@ -29,6 +29,8 @@ from excelmanus.tools.registry import ToolDef
 
 # ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
 
+# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
+
 _guard: FileAccessGuard | None = None
 
 
@@ -92,53 +94,6 @@ def _apply_code_mode_env(
     env["EXCELMANUS_CODE_MODE_SDK"] = str(sdk)
     env["EXCELMANUS_CODE_MODE_ROOT_CALL_ID"] = session.root_call_id
     env["EXCELMANUS_CODE_MODE_TIMEOUT"] = str(int(session.call_timeout))
-
-
-def _ingest_sandbox_save_versions(
-    stderr: str,
-    workspace_root: Path,
-    *,
-    skip_rels: set[str] | None = None,
-) -> dict[str, str]:
-    """解析沙盒 EXCELMANUS_SAVE_VERSION 行，记入本轮 seen。"""
-    from excelmanus.workbook_commit import normalize_version_path, remember_content_version
-    from excelmanus.workspace.identity import is_reserved_relative
-
-    found: dict[str, str] = {}
-    skipped = {p.replace("\\", "/").lstrip("./") for p in (skip_rels or set())}
-    root = workspace_root.resolve()
-    for line in (stderr or "").splitlines():
-        if not line.startswith("EXCELMANUS_SAVE_VERSION\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) < 3:
-            continue
-        raw_path, version = parts[1], parts[2]
-        rel = normalize_version_path(raw_path)
-        try:
-            rel = str(Path(raw_path).resolve().relative_to(root)).replace("\\", "/")
-        except ValueError:
-            posix = raw_path.replace("\\", "/")
-            marker = "/workspace/"
-            if marker in posix:
-                rel = posix.split(marker, 1)[-1]
-        rel_key = rel.replace("\\", "/").lstrip("./")
-        if not rel or not version or is_reserved_relative(rel_key) or rel_key in skipped:
-            continue
-        remember_content_version(rel, version)
-        found[rel] = version
-    return found
-
-
-def _apply_expected_versions_env(env: dict[str, str]) -> None:
-    """把本轮已读到的 content_version 传给宿主 publish 做 CAS。"""
-    try:
-        from excelmanus.workbook_commit import export_seen_versions
-
-        mapping = export_seen_versions()
-    except Exception:
-        mapping = {}
-    env["EXCELMANUS_EXPECTED_VERSIONS"] = json.dumps(mapping, ensure_ascii=False)
 
 
 # ── 解释器探测 ───────────────────────────────────────────
@@ -545,19 +500,40 @@ def write_text_file(
     content: str,
     overwrite: bool = True,
     encoding: str = "utf-8",
+    expected_version: str | None = None,
 ) -> ToolResult:
-    """写入文本文件（默认覆盖）。"""
+    """写入文本文件（默认覆盖）。已有文件必须提供 expected_version 或本轮 peek_seen。"""
+    from excelmanus.excel_extensions import SPREADSHEET_WRITE_EXTENSIONS
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import (
+        CommitError,
+        commit_bytes,
+        remember_content_version,
+        resolve_expected_version,
+    )
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
-    existed_before = safe_path.exists()
+    if safe_path.suffix.lower() in SPREADSHEET_WRITE_EXTENSIONS:
+        return error_result(
+            "表格文件禁止当纯文本覆盖，请使用 workbook 提交路径",
+            code="PATH_INVALID",
+            fields={"file": file_path},
+        )
 
+    existed_before = safe_path.is_file()
     if existed_before and not overwrite:
         return error_result(
             f"文件已存在且 overwrite=false: {safe_path.name}",
             code="FILE_EXISTS",
         )
 
-    # 读取旧内容用于生成 diff
+    rel_path = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
+    try:
+        seen = resolve_expected_version(rel_path, expected_version, exists=existed_before)
+    except CommitError as exc:
+        return commit_error_result(exc)
+
     old_text = ""
     if existed_before:
         try:
@@ -565,22 +541,28 @@ def write_text_file(
         except Exception:
             pass
 
-    write_path = safe_path
-    write_path.parent.mkdir(parents=True, exist_ok=True)
-    write_path.write_text(content, encoding=encoding)
+    try:
+        cr = commit_bytes(
+            guard=guard,
+            file_path=rel_path,
+            data=content.encode(encoding, errors="strict"),
+            expected_version=seen,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
+    remember_content_version(rel_path, cr.content_version)
 
-    rel_path = str(safe_path.relative_to(guard.workspace_root))
     result: dict[str, Any] = {
         "status": "success",
-        "file": rel_path,
-        "bytes": len(content.encode(encoding, errors="ignore")),
+        "file": cr.path,
+        "bytes": cr.bytes_written,
         "encoding": encoding,
         "overwritten": existed_before,
+        "content_version": cr.content_version,
     }
 
-    # 生成 text diff，只放 ui_meta，不塞回模型 JSON
     diff_data = _generate_text_diff(old_text, content, rel_path)
-    ui = ToolUiMeta(files=[rel_path])
+    ui = ToolUiMeta(files=[cr.path], content_version=cr.content_version)
     if diff_data is not None:
         ui.text_diff = diff_data
     return ok_result(result, ui_meta=ui)
@@ -592,16 +574,38 @@ def edit_text_file(
     new_string: str,
     encoding: str = "utf-8",
     replace_all: bool = False,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """精准编辑文本文件：查找 old_string 并替换为 new_string。
 
     类似于 IDE 的查找替换功能。支持单次替换或全部替换。
     """
+    from excelmanus.excel_extensions import SPREADSHEET_WRITE_EXTENSIONS
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import (
+        CommitError,
+        commit_bytes,
+        remember_content_version,
+        resolve_expected_version,
+    )
+
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.is_file():
         return error_result(f"文件不存在: {file_path}", code="PATH_INVALID")
+    if safe_path.suffix.lower() in SPREADSHEET_WRITE_EXTENSIONS:
+        return error_result(
+            "表格文件禁止当纯文本覆盖，请使用 workbook 提交路径",
+            code="PATH_INVALID",
+            fields={"file": file_path},
+        )
+
+    rel_path = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
+    try:
+        seen = resolve_expected_version(rel_path, expected_version, exists=True)
+    except CommitError as exc:
+        return commit_error_result(exc)
 
     try:
         old_text = safe_path.read_text(encoding=encoding)
@@ -617,7 +621,6 @@ def edit_text_file(
     if old_string == new_string:
         return error_result("old_string 与 new_string 相同，无需修改", code="NOOP")
 
-    # 非 replace_all 时检查唯一性
     if not replace_all and old_text.count(old_string) > 1:
         return error_result(
             f"old_string 在文件中出现 {old_text.count(old_string)} 次，"
@@ -632,21 +635,27 @@ def edit_text_file(
         new_text = old_text.replace(old_string, new_string, 1)
         match_count = 1
 
-    write_path = safe_path
-    write_path.parent.mkdir(parents=True, exist_ok=True)
-    write_path.write_text(new_text, encoding=encoding)
+    try:
+        cr = commit_bytes(
+            guard=guard,
+            file_path=rel_path,
+            data=new_text.encode(encoding, errors="strict"),
+            expected_version=seen,
+        )
+    except CommitError as exc:
+        return commit_error_result(exc)
+    remember_content_version(rel_path, cr.content_version)
 
-    rel_path = str(safe_path.relative_to(guard.workspace_root))
     result: dict[str, Any] = {
         "status": "success",
-        "file": rel_path,
+        "file": cr.path,
         "replacements": match_count,
-        "bytes": len(new_text.encode(encoding, errors="ignore")),
+        "bytes": cr.bytes_written,
+        "content_version": cr.content_version,
     }
 
-    # 生成 text diff，只放 ui_meta
     diff_data = _generate_text_diff(old_text, new_text, rel_path)
-    ui = ToolUiMeta(files=[rel_path])
+    ui = ToolUiMeta(files=[cr.path], content_version=cr.content_version)
     if diff_data is not None:
         ui.text_diff = diff_data
     return ok_result(result, ui_meta=ui)
@@ -811,11 +820,17 @@ def _execute_script(
     sandbox_env["EXCELMANUS_WORKDIR"] = str(workdir_safe)
 
     _apply_code_mode_env(sandbox_env, workspace_root=guard.workspace_root)
-    _apply_expected_versions_env(sandbox_env)
-    from excelmanus.workspace.runtime import PENDING_RUN_ID_ENV, allocate_pending_run_id
+    from excelmanus.workbook_commit import export_seen_versions
+    from excelmanus.workspace.runtime import (
+        PENDING_RUN_ID_ENV,
+        allocate_pending_run_id,
+        prepare_pending_run_dir,
+    )
 
     pending_run_id = allocate_pending_run_id()
+    pending_dir = prepare_pending_run_dir(guard.workspace_root, pending_run_id)
     sandbox_env[PENDING_RUN_ID_ENV] = pending_run_id
+    sandbox_env["EXCELMANUS_PENDING_DIR"] = str(pending_dir)
 
     # ── 沙盒 wrapper 注入（所有安全等级均注入） ──
     temp_wrapper: Path | None = None
@@ -872,16 +887,37 @@ def _execute_script(
 
     stdout_saved: str | None = None
     stderr_saved: str | None = None
+    from excelmanus.tools._helpers import commit_error_result
+    from excelmanus.workbook_commit import (
+        CommitError,
+        commit_bytes,
+        remember_content_version,
+        resolve_expected_version,
+    )
+
+    def _commit_capture(user_path: str, text: str) -> str:
+        safe = guard.resolve_and_validate(user_path)
+        rel = str(safe.relative_to(guard.workspace_root)).replace("\\", "/")
+        seen = resolve_expected_version(rel, None, exists=safe.is_file())
+        cr = commit_bytes(
+            guard=guard,
+            file_path=rel,
+            data=text.encode("utf-8"),
+            expected_version=seen,
+        )
+        remember_content_version(rel, cr.content_version)
+        return cr.path
+
     if stdout_file:
-        stdout_safe = guard.resolve_and_validate(stdout_file)
-        stdout_safe.parent.mkdir(parents=True, exist_ok=True)
-        stdout_safe.write_text(stdout, encoding="utf-8")
-        stdout_saved = str(stdout_safe.relative_to(guard.workspace_root))
+        try:
+            stdout_saved = _commit_capture(stdout_file, stdout)
+        except CommitError as exc:
+            return commit_error_result(exc)
     if stderr_file:
-        stderr_safe = guard.resolve_and_validate(stderr_file)
-        stderr_safe.parent.mkdir(parents=True, exist_ok=True)
-        stderr_safe.write_text(stderr, encoding="utf-8")
-        stderr_saved = str(stderr_safe.relative_to(guard.workspace_root))
+        try:
+            stderr_saved = _commit_capture(stderr_file, stderr)
+        except CommitError as exc:
+            return commit_error_result(exc)
 
     if timed_out:
         status = "timed_out"
@@ -897,26 +933,15 @@ def _execute_script(
         guard.workspace_root,
         stderr,
         run_id=pending_run_id,
+        expected_versions=export_seen_versions(),
     )
     save_versions: dict[str, str] = {}
-    pending_rels: set[str] = set()
-    for line in (stderr or "").splitlines():
-        if not line.startswith("EXCELMANUS_PENDING_WRITE\t"):
-            continue
-        parts = line.split("\t")
-        if len(parts) >= 2:
-            pending_rels.add(parts[1].replace("\\", "/").lstrip("./"))
     for item in published:
         path = str(item.get("path") or "").strip()
         version = item.get("content_version")
         if item.get("status") == "committed" and path and isinstance(version, str):
             remember_content_version(path, version)
             save_versions[path] = version
-    ingested = _ingest_sandbox_save_versions(
-        stderr, guard.workspace_root, skip_rels=pending_rels,
-    )
-    for rel, version in ingested.items():
-        save_versions.setdefault(rel, version)
 
     result: dict[str, Any] = {
         "stdout_tail": _tail(stdout, tail_lines),
@@ -1001,8 +1026,8 @@ def get_tools() -> list[ToolDef]:
             name="write_text_file",
             description=(
                 "写入文本文件（常用于生成 Python 脚本后交给 run_code 执行）。"
-                "适用场景：创建或覆盖 .py/.txt/.csv 等文本文件。"
-                "不适用：直接写入 Excel 数据（改用 run_code + openpyxl/pandas）。"
+                "适用场景：创建或覆盖 .py/.txt/.csv 文本文件。"
+                "不适用：直接写入 Excel 数据（改用 SDK：edit_spreadsheet / format_spreadsheet）。"
             ),
             input_schema={
                 "type": "object",
@@ -1018,6 +1043,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "文本编码",
                         "default": "utf-8",
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "已有文件的本轮已读 content_version；缺省且文件已存在则 VERSION_CONFLICT",
                     },
                 },
                 "required": ["file_path", "content"],
@@ -1048,6 +1077,10 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "是否替换所有匹配项（默认仅替换首个且要求唯一）",
                         "default": False,
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "本轮已读 content_version；缺省则 VERSION_CONFLICT",
                     },
                 },
                 "required": ["file_path", "old_string", "new_string"],

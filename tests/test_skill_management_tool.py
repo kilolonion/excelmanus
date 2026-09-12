@@ -2,7 +2,7 @@
 
 覆盖 SkillManagementHandler 的全部 5 个操作：
 search / detail / install / list / uninstall
-以及安全门控和边界条件。
+以及边界条件。
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from excelmanus.engine_core.tool_handlers import SkillManagementHandler
 def _make_engine(
     *,
     has_manager: bool = True,
-    external_safe_mode: bool = False,
     skills: list[dict[str, Any]] | None = None,
     clawhub_search_results: list[dict[str, Any]] | None = None,
     clawhub_detail: dict[str, Any] | None = None,
@@ -43,7 +42,7 @@ def _make_engine(
     """构造带 mock SkillpackManager 的 engine。"""
     engine = MagicMock()
     engine._tools_cache = {"cached": True}
-    engine._config = SimpleNamespace(external_safe_mode=external_safe_mode)
+    engine._config = SimpleNamespace()
     engine._active_skills = active_skills if active_skills is not None else []
     engine._loaded_skill_names = {}
 
@@ -247,7 +246,7 @@ class TestInstall:
         assert outcome.success is True
         assert "安装成功" in outcome.result_str
         assert "data-cleaning" in outcome.result_str
-        assert "activate_skill" in outcome.result_str
+        assert "skill" in outcome.result_str
         # 验证 tools_cache 被失效
         assert engine._tools_cache is None
         # 验证调用参数
@@ -284,15 +283,6 @@ class TestInstall:
             source="clawhub", value="data-cleaning", actor="agent", overwrite=True,
             version=None,
         )
-
-    @pytest.mark.asyncio
-    async def test_install_blocked_by_safe_mode(self):
-        engine = _make_engine(external_safe_mode=True)
-        handler = _make_handler(engine)
-        outcome = await _call(handler, {"action": "install", "slug": "data-cleaning"})
-
-        assert outcome.success is False
-        assert "安全模式" in outcome.result_str
 
     @pytest.mark.asyncio
     async def test_install_conflict_error(self):
@@ -382,15 +372,6 @@ class TestUninstall:
         engine._require_skillpack_manager().delete_skillpack.assert_called_once_with(
             name="data-cleaning", actor="agent",
         )
-
-    @pytest.mark.asyncio
-    async def test_uninstall_blocked_by_safe_mode(self):
-        engine = _make_engine(external_safe_mode=True)
-        handler = _make_handler(engine)
-        outcome = await _call(handler, {"action": "uninstall", "slug": "data-cleaning"})
-
-        assert outcome.success is False
-        assert "安全模式" in outcome.result_str
 
     @pytest.mark.asyncio
     async def test_uninstall_not_found(self):
@@ -665,15 +646,6 @@ class TestUpdate:
 
         assert outcome.success is False
         assert "网络超时" in outcome.result_str
-
-    @pytest.mark.asyncio
-    async def test_update_blocked_by_safe_mode(self):
-        engine = _make_engine(external_safe_mode=True)
-        handler = _make_handler(engine)
-        outcome = await _call(handler, {"action": "update", "slug": "x"})
-
-        assert outcome.success is False
-        assert "安全模式" in outcome.result_str
 
     @pytest.mark.asyncio
     async def test_update_check_error(self):

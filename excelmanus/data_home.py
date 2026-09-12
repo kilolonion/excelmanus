@@ -6,12 +6,11 @@
 目录结构::
 
     $EXCELMANUS_HOME/
-    ├── excelmanus.db          # 主数据库（模型档案、会话、渠道凭证）
+    ├── excelmanus.db          # 主数据库（模型档案、会话）
     ├── config.env             # 环境项正式仓（UI 填写的 Key / 运行时设置）
     ├── installations.json     # 安装注册表
     ├── data/                  # EXCELMANUS_DATA_ROOT 可覆盖
     │   ├── .secret_key        # Fernet 密钥（加密 DB 内 API Key）
-    │   ├── .jwt_secret        # 下载令牌 JWT
     │   ├── uploads/
     │   └── outputs/
     ├── memory/
@@ -155,11 +154,6 @@ def get_installations_path() -> Path:
 def get_secret_key_path() -> Path:
     """Fernet 密钥文件，必须和数据库在同一持久卷上。"""
     return get_data_home() / ".secret_key"
-
-
-def get_jwt_secret_path() -> Path:
-    """下载令牌 JWT 密钥文件。"""
-    return get_data_home() / ".jwt_secret"
 
 
 def get_default_db_path() -> Path:

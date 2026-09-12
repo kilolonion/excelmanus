@@ -13,16 +13,13 @@ import {
   preDispatch,
   finalizeThinking,
   getLastAssistantMessage,
-  _friendlyRouteMode,
-  _mapDiffChanges,
   type SSEHandlerContext,
   type SSEEvent,
   type DeltaBatcher as DeltaBatcherInterface,
 } from "./sse-event-handler";
 
 function currentPresentAs(): "native" | "code" {
-  const { chatMode, presentAs } = useUIStore.getState();
-  return chatMode === "write" && presentAs === "code" ? "code" : "native";
+  return useUIStore.getState().presentAs === "code" ? "code" : "native";
 }
 
 const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -220,7 +217,7 @@ class DeltaBatcher {
     const thinking = this._thinkingBuf;
     this._textBuf = "";
     this._thinkingBuf = "";
-    if (text || thinking) {
+    if (text.length > 0 || thinking.length > 0) {
       try {
         this._onFlush(text, thinking);
       } catch (error) {
@@ -231,7 +228,7 @@ class DeltaBatcher {
 }
 
 function applyTextDelta(messageId: string, textDelta: string) {
-  if (!textDelta) return;
+  if (textDelta.length === 0) return;
   const store = useChatStore.getState();
   const msg = getLastAssistantMessage(store.messages, messageId);
   const lastText = msg
@@ -248,7 +245,7 @@ function applyTextDelta(messageId: string, textDelta: string) {
 }
 
 function applyThinkingDelta(messageId: string, thinkingDelta: string) {
-  if (!thinkingDelta) return;
+  if (thinkingDelta.length === 0) return;
   useChatStore.getState().updateBlockByType(messageId, "thinking", (b) => {
     if (b.type === "thinking") return { ...b, content: b.content + thinkingDelta };
     return b;
@@ -257,8 +254,8 @@ function applyThinkingDelta(messageId: string, thinkingDelta: string) {
 
 function makeDeltaBatcher(messageId: string) {
   return new DeltaBatcher((textDelta, thinkingDelta) => {
-    if (textDelta) applyTextDelta(messageId, textDelta);
-    if (thinkingDelta) applyThinkingDelta(messageId, thinkingDelta);
+    if (textDelta.length > 0) applyTextDelta(messageId, textDelta);
+    if (thinkingDelta.length > 0) applyThinkingDelta(messageId, thinkingDelta);
   });
 }
 
@@ -404,7 +401,7 @@ export async function sendMessage(
     );
     for (const af of successfulFiles) {
       const isImage = _isImageLike(af.file);
-      if (af.uploadResult) {
+      if (af.uploadResult && !af.fromWorkspace) {
         if (isImage) uploadedImagePaths.push(af.uploadResult.path);
         else uploadedDocPaths.push(af.uploadResult.path);
       }

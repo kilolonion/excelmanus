@@ -123,6 +123,7 @@ class TestEventTypeEnum:
             "EXCEL_PREVIEW",
             "EXCEL_DIFF",
             "FILES_CHANGED",
+            "MUTATION",
             "MEMORY_EXTRACTED",
             "PIPELINE_PROGRESS",
             "FILE_DOWNLOAD",
@@ -140,6 +141,11 @@ class TestEventTypeEnum:
             "CREDENTIAL_EXPIRED",
             "TOOL_CALL_NOTICE",
             "REASONING_NOTICE",
+            "TURN_START",
+            "TURN_END",
+            "STEP_START",
+            "STEP_END",
+            "INBOX_CLAIMED",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -184,6 +190,7 @@ class TestEventTypeEnum:
             ("TEXT_DIFF", "text_diff"),
             ("TEXT_PREVIEW", "text_preview"),
             ("FILES_CHANGED", "files_changed"),
+            ("MUTATION", "mutation"),
             ("PIPELINE_PROGRESS", "pipeline_progress"),
             ("MEMORY_EXTRACTED", "memory_extracted"),
             ("FILE_DOWNLOAD", "file_download"),
@@ -198,6 +205,11 @@ class TestEventTypeEnum:
             ("CREDENTIAL_EXPIRED", "credential_expired"),
             ("TOOL_CALL_NOTICE", "tool_call_notice"),
             ("REASONING_NOTICE", "reasoning_notice"),
+            ("TURN_START", "turn_start"),
+            ("TURN_END", "turn_end"),
+            ("STEP_START", "step_start"),
+            ("STEP_END", "step_end"),
+            ("INBOX_CLAIMED", "inbox_claimed"),
         ]
 
 
@@ -332,6 +344,7 @@ class TestToolCallEventFields:
             "excel_affected_range",
             "excel_changes",
             "changed_files",
+            "mutations",
             "memory_entries",
             "memory_trigger",
             "pipeline_message",
@@ -385,5 +398,8 @@ class TestToolCallEventFields:
             "fg_model",
             "ui",
             "parent_call_id",
+            "turn_id",
+            "step_id",
+            "inbox_claimed",
         }
         assert set(annotations.keys()) == expected_fields

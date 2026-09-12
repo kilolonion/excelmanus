@@ -48,7 +48,6 @@ vi.mock("@/stores/excel-store", () => ({
   useExcelStore: {
     getState: () => ({
       diffs: [],
-      fetchBackups: vi.fn(),
     }),
   },
 }));
@@ -332,6 +331,71 @@ describe("chat-store", () => {
     });
   });
 
+  describe("updateLastBlock / updateBlockByType", () => {
+    it("增量追加文本时替换消息引用，供列表订阅刷新", () => {
+      useChatStore.getState().addAssistantMessage("a1");
+      useChatStore.getState().appendBlock("a1", { type: "text", content: "你" });
+      const before = useChatStore.getState().messagesById.a1;
+
+      useChatStore.getState().updateLastBlock("a1", (b) => (
+        b.type === "text" ? { ...b, content: b.content + "好" } : b
+      ));
+
+      const after = useChatStore.getState().messagesById.a1;
+      expect(after).not.toBe(before);
+      expect(after).toBe(useChatStore.getState().messages[0]);
+      expect(after.role).toBe("assistant");
+      if (after.role === "assistant") {
+        expect(after.blocks[0]).toEqual({ type: "text", content: "你好" });
+      }
+    });
+
+    it("updateBlockByType 更新最后一个文本块而不是末尾的其他块", () => {
+      useChatStore.getState().addAssistantMessage("a1");
+      useChatStore.getState().appendBlock("a1", { type: "text", content: "你" });
+      useChatStore.getState().appendBlock("a1", {
+        type: "token_stats",
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+        iterations: 1,
+      });
+
+      useChatStore.getState().updateBlockByType("a1", "text", (b) => (
+        b.type === "text" ? { ...b, content: b.content + "好" } : b
+      ));
+
+      const msg = useChatStore.getState().messagesById.a1;
+      expect(msg.role).toBe("assistant");
+      if (msg.role === "assistant") {
+        expect(msg.blocks[0]).toEqual({ type: "text", content: "你好" });
+        expect(msg.blocks[1].type).toBe("token_stats");
+      }
+    });
+
+    it("thinking 增量拼接保留空格", () => {
+      useChatStore.getState().addAssistantMessage("a1");
+      useChatStore.getState().appendBlock("a1", {
+        type: "thinking",
+        content: "Let me",
+        startedAt: Date.now(),
+      });
+
+      useChatStore.getState().updateBlockByType("a1", "thinking", (b) => (
+        b.type === "thinking" ? { ...b, content: b.content + " " } : b
+      ));
+      useChatStore.getState().updateBlockByType("a1", "thinking", (b) => (
+        b.type === "thinking" ? { ...b, content: b.content + "think" } : b
+      ));
+
+      const msg = useChatStore.getState().messagesById.a1;
+      expect(msg.role).toBe("assistant");
+      if (msg.role === "assistant") {
+        expect(msg.blocks[0]).toMatchObject({ type: "thinking", content: "Let me think" });
+      }
+    });
+  });
+
   // ── updateToolCallBlock ─────────────────────────────────────
   describe("updateToolCallBlock", () => {
     it("按 toolCallId 精确匹配更新", () => {
@@ -439,17 +503,27 @@ describe("chat-store", () => {
       useChatStore.getState().addAffectedFiles("a1", ["/workspace/data.xlsx"]);
 
       const msg = useChatStore.getState().messagesById["a1"] as any;
-      expect(msg.affectedFiles).toEqual(["/workspace/data.xlsx"]);
+      expect(msg.affectedFiles).toEqual(["./data.xlsx"]);
     });
 
-    it("重复文件不重复添加", () => {
+    it("重复文件按 identity 去重", () => {
       useChatStore.getState().addAssistantMessage("a1");
-      useChatStore.getState().addAffectedFiles("a1", ["/a.xlsx", "/b.xlsx"]);
-      useChatStore.getState().addAffectedFiles("a1", ["/a.xlsx", "/c.xlsx"]);
+      useChatStore.getState().addAffectedFiles("a1", ["./a.xlsx", "b.xlsx"]);
+      useChatStore.getState().addAffectedFiles("a1", ["a.xlsx", "./c.xlsx"]);
 
       const msg = useChatStore.getState().messagesById["a1"] as any;
-      expect(msg.affectedFiles.length).toBe(3);
-      expect(new Set(msg.affectedFiles)).toEqual(new Set(["/a.xlsx", "/b.xlsx", "/c.xlsx"]));
+      expect(msg.affectedFiles).toEqual(["./a.xlsx", "./b.xlsx", "./c.xlsx"]);
+    });
+
+    it("丢弃 outputs/backups 时间戳副本", () => {
+      useChatStore.getState().addAssistantMessage("a1");
+      useChatStore.getState().addAffectedFiles("a1", [
+        "./sales.xlsx",
+        "outputs/backups/sales_20260911T091344_f525.xlsx",
+      ]);
+
+      const msg = useChatStore.getState().messagesById["a1"] as any;
+      expect(msg.affectedFiles).toEqual(["./sales.xlsx"]);
     });
   });
 

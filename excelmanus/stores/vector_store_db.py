@@ -1,4 +1,4 @@
-"""VectorStoreDB：向量持久层（支持 SQLite BLOB / PostgreSQL BYTEA）。"""
+"""VectorStoreDB：向量持久层（SQLite BLOB）。"""
 from __future__ import annotations
 
 import hashlib
@@ -16,11 +16,10 @@ logger = logging.getLogger(__name__)
 
 
 class VectorStoreDB:
-    """向量记录存储，向量以 BLOB / BYTEA 形式持久化。"""
+    """向量记录存储，向量以 BLOB 形式持久化。"""
 
     def __init__(self, database: "Database", dimensions: int = 1536) -> None:
         self._conn = database.conn
-        self._is_pg = database.is_pg
         self._dimensions = dimensions
 
     @property
@@ -60,10 +59,7 @@ class VectorStoreDB:
     ) -> bool:
         """添加一条向量记录。已存在则跳过。返回是否新增。"""
         content_hash = self._hash_text(text)
-        vec_blob: Any = vector.astype(np.float32).tobytes()
-        if self._is_pg:
-            import psycopg2
-            vec_blob = psycopg2.Binary(vec_blob)
+        vec_blob = vector.astype(np.float32).tobytes()
         meta_json = json.dumps(metadata or {}, ensure_ascii=False)
         try:
             cur = self._conn.execute(

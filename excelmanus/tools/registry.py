@@ -70,6 +70,60 @@ _BUILTIN_TOOL_MODULE_PATHS: tuple[str, ...] = (
 )
 
 
+_ALIAS_FOLDS: tuple[tuple[str, str], ...] = (
+    ("path", "file_path"),
+    ("sheet", "sheet_name"),
+    ("content_version", "expected_version"),
+)
+
+
+def _schema_property_names(schema: dict[str, Any] | None) -> set[str] | None:
+    if schema is None:
+        return None
+    properties = schema.get("properties") if isinstance(schema, dict) else None
+    if not isinstance(properties, dict):
+        return set()
+    return {str(name) for name in properties}
+
+
+def normalize_tool_aliases(
+    arguments: dict[str, Any],
+    schema: dict[str, Any] | None = None,
+) -> dict[str, Any] | ToolResult:
+    """把 path/sheet/content_version 折到规范名；冲突则报错。
+
+    仅当 schema 含规范名时才折叠，避免把只接受 ``path`` 的工具改坏。
+    未传 schema 时保持无条件折叠，供单测直接断言冲突。
+    """
+    args = dict(arguments)
+    accepted = _schema_property_names(schema)
+    for src, dest in _ALIAS_FOLDS:
+        if src not in args:
+            continue
+        if accepted is not None and dest not in accepted:
+            continue
+        src_val = args[src]
+        dest_val = args.get(dest)
+        if (
+            dest_val not in (None, "")
+            and src_val not in (None, "")
+            and dest_val != src_val
+        ):
+            payload = {
+                "status": "error",
+                "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
+                "message": f"别名冲突：{src} 与 {dest} 值不同",
+                "violations": [f"{src}={src_val!r} 与 {dest}={dest_val!r}"],
+                "accepted_fields": [dest],
+                "required_fields": [],
+            }
+            return from_payload(payload)
+        if dest not in args or args[dest] in (None, ""):
+            args[dest] = src_val
+        args.pop(src, None)
+    return args
+
+
 class ToolRegistryError(Exception):
     """工具注册失败。"""
 
@@ -335,6 +389,21 @@ class ToolRegistry:
         child._schema_validation_canary_percent = self._schema_validation_canary_percent
         child._schema_strict_path = self._schema_strict_path
         return child
+
+    def restrict(
+        self,
+        *,
+        allowed: Sequence[str] | None = None,
+        disallowed: Sequence[str] = (),
+    ) -> None:
+        """按名收窄目录。``allowed`` 为 None 时只剔除 ``disallowed``。"""
+        blocked = set(disallowed)
+        if allowed is not None:
+            keep = set(allowed) - blocked
+            self._tools = {name: tool for name, tool in self._tools.items() if name in keep}
+            return
+        for name in blocked:
+            self._tools.pop(name, None)
 
     def configure_schema_validation(
         self,
@@ -679,6 +748,11 @@ class ToolRegistry:
         if tool is None:
             raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
 
+        normalized = normalize_tool_aliases(arguments, schema=tool.input_schema)
+        if isinstance(normalized, ToolResult):
+            return normalized
+        arguments = normalized
+
         schema_error = self.validate_arguments_by_schema(
             tool_name=tool_name,
             arguments=arguments,
@@ -748,6 +822,11 @@ class ToolRegistry:
             raise RuntimeError(
                 f"工具 '{tool_name}' 未提供 async_func，不能使用 call_tool_async。"
             )
+
+        normalized = normalize_tool_aliases(arguments, schema=tool.input_schema)
+        if isinstance(normalized, ToolResult):
+            return normalized
+        arguments = normalized
 
         schema_error = self.validate_arguments_by_schema(
             tool_name=tool_name,

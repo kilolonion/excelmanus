@@ -7,11 +7,13 @@ import { ensureHljs, highlightCode } from "@/lib/hljs-utils";
 interface CodeBlockProps {
   language?: string;
   code: string;
+  maxHeightClass?: string;
 }
 
 export const CodeBlock = React.memo(function CodeBlock({
   language,
   code,
+  maxHeightClass,
 }: CodeBlockProps) {
   const [copied, setCopied] = useState(false);
   const [highlightedHtml, setHighlightedHtml] = useState<string | null>(null);
@@ -65,7 +67,7 @@ export const CodeBlock = React.memo(function CodeBlock({
       </div>
 
       {/* 代码主体 */}
-      <div className="overflow-x-auto bg-zinc-50 dark:bg-zinc-900">
+      <div className={`overflow-auto bg-zinc-50 dark:bg-zinc-900 ${maxHeightClass ?? ""}`}>
         <pre className="!m-0 !rounded-none !bg-transparent p-3">
           {highlightedHtml ? (
             <code

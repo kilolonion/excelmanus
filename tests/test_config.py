@@ -154,6 +154,15 @@ class TestDefaultValues:
         cfg = load_config()
         assert cfg.max_iterations == 50
 
+    def test_default_yellow_auto_approve_is_false(self, monkeypatch, tmp_path) -> None:
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.delenv('EXCELMANUS_CODE_POLICY_YELLOW_AUTO', raising=False)
+        monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
+        monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
+        monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
+        cfg = load_config()
+        assert cfg.code_policy_yellow_auto_approve is False
+
     def test_default_max_consecutive_failures(self, monkeypatch) -> None:
         """默认最大连续失败次数为 6。（需求 6.6）"""
         monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
@@ -269,10 +278,8 @@ class TestDefaultValues:
         monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
         monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
         monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
-        monkeypatch.setenv('EXCELMANUS_AUX_MODEL', '')
         cfg = load_config()
         assert cfg.subagent_enabled is True
-        assert cfg.aux_model is None
         assert cfg.subagent_max_iterations == 120
         assert cfg.subagent_max_consecutive_failures == 6
         assert cfg.subagent_user_dir == '~/.excelmanus/agents'
@@ -284,14 +291,12 @@ class TestDefaultValues:
         monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
         monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_ENABLED', 'false')
-        monkeypatch.setenv('EXCELMANUS_AUX_MODEL', 'qwen-turbo')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_MAX_ITERATIONS', '4')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES', '1')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_USER_DIR', '~/.my-agents')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_PROJECT_DIR', '.my-agents')
         cfg = load_config()
         assert cfg.subagent_enabled is False
-        assert cfg.aux_model == 'qwen-turbo'
         assert cfg.subagent_max_iterations == 4
         assert cfg.subagent_max_consecutive_failures == 1
         assert cfg.subagent_user_dir == '~/.my-agents'
@@ -302,38 +307,18 @@ class TestDefaultValues:
         monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
         monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
         monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
-        monkeypatch.setenv('EXCELMANUS_AUX_MODEL', '')
         monkeypatch.setenv('EXCELMANUS_SUBAGENT_MODEL', 'legacy-subagent')
         cfg = load_config()
-        assert cfg.aux_model is None
+        assert not hasattr(cfg, 'aux_model')
 
     def test_legacy_window_advisor_model_env_is_ignored(self, monkeypatch) -> None:
         """旧变量 EXCELMANUS_WINDOW_ADVISOR_MODEL 不再生效。"""
         monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
         monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
         monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
-        monkeypatch.setenv('EXCELMANUS_AUX_MODEL', '')
         monkeypatch.setenv('EXCELMANUS_WINDOW_ADVISOR_MODEL', 'legacy-window-advisor')
         cfg = load_config()
-        assert cfg.aux_model is None
-
-    def test_default_external_safe_mode_enabled(self, monkeypatch, tmp_path) -> None:
-        """默认开启对外安全模式。"""
-        monkeypatch.chdir(tmp_path)
-        monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
-        monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
-        monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
-        cfg = load_config()
-        assert cfg.external_safe_mode is True
-
-    def test_external_safe_mode_can_be_disabled(self, monkeypatch) -> None:
-        """允许通过环境变量关闭对外安全模式。"""
-        monkeypatch.setenv('EXCELMANUS_API_KEY', 'test-key')
-        monkeypatch.setenv('EXCELMANUS_BASE_URL', 'https://example.com/v1')
-        monkeypatch.setenv('EXCELMANUS_MODEL', 'test-model')
-        monkeypatch.setenv('EXCELMANUS_EXTERNAL_SAFE_MODE', 'false')
-        cfg = load_config()
-        assert cfg.external_safe_mode is False
+        assert not hasattr(cfg, 'aux_model')
 
     def test_config_is_frozen(self, monkeypatch) -> None:
         """配置对象不可变。"""
@@ -550,12 +535,6 @@ class TestModelsRouterHooksAndMcpConfig:
         assert cfg.models[0].name == 'alt'
         assert cfg.models[0].api_key == 'test-key'
         assert cfg.models[0].base_url == 'https://example.com/v1'
-
-    def test_aux_base_url_invalid_raises_error(self, monkeypatch) -> None:
-        self._set_required_env(monkeypatch)
-        monkeypatch.setenv('EXCELMANUS_AUX_BASE_URL', 'ftp://invalid')
-        with pytest.raises(ConfigError, match='EXCELMANUS_BASE_URL'):
-            load_config()
 
     def test_hooks_and_max_context_tokens_loaded(self, monkeypatch) -> None:
         self._set_required_env(monkeypatch)

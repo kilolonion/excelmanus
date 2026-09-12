@@ -74,10 +74,15 @@ def from_payload(
     ui = _overlay_ui(ui_meta or ToolUiMeta(), lifted)
     status = str(cleaned.get("status") or "").lower()
     err = cleaned.get("error")
+    error_kind = str(cleaned.get("error_kind") or "").lower()
     is_fail = (
         cleaned.get("ok") is False
         or status in {"error", "failed", "fail", "blocked"}
         or (bool(err) and status not in {"success", "ok", "confirmation_required"})
+        or (
+            error_kind in {"permanent", "retryable", "transient"}
+            and status not in {"success", "ok", "confirmation_required"}
+        )
     )
     if is_fail:
         msg = str(err or cleaned.get("message") or cleaned.get("reason") or status or "error")
@@ -149,7 +154,10 @@ def payload_has_legacy_magic(payload: dict[str, Any]) -> bool:
 
 
 def lift_ui_keys(payload: dict[str, Any]) -> tuple[dict[str, Any], ToolUiMeta]:
-    """把载荷里的 UI 键提升到 ui_meta。下载/diff 从模型文本中剥掉；cow_mapping 留给模型看。"""
+    """把载荷里的 UI 键提升到 ui_meta。下载/diff 从模型文本中剥掉。
+
+    cow_mapping 已从载荷中剥掉，不进入 ui_meta / model_text。
+    """
     cleaned = dict(payload)
     ui = ToolUiMeta()
 
@@ -169,9 +177,7 @@ def lift_ui_keys(payload: dict[str, Any]) -> tuple[dict[str, Any], ToolUiMeta]:
     if isinstance(text_diff, dict):
         ui.text_diff = text_diff
 
-    cow = cleaned.get("cow_mapping")
-    if isinstance(cow, dict) and cow:
-        ui.cow_mapping = {str(k): str(v) for k, v in cow.items()}
+    cleaned.pop("cow_mapping", None)
 
     return cleaned, ui
 
@@ -185,9 +191,75 @@ def _overlay_ui(base: ToolUiMeta, extra: ToolUiMeta) -> ToolUiMeta:
         base.diff = extra.diff
     if extra.text_diff and not base.text_diff:
         base.text_diff = extra.text_diff
-    if extra.cow_mapping and not base.cow_mapping:
-        base.cow_mapping = extra.cow_mapping
     return base
+
+
+def _collect_content_versions(result: "ToolResult") -> list[str]:
+    versions: list[str] = []
+    seen: set[str] = set()
+
+    def _add(raw: Any) -> None:
+        if isinstance(raw, str) and raw and raw not in seen:
+            seen.add(raw)
+            versions.append(raw)
+
+    _add(getattr(result.ui_meta, "content_version", None))
+    value = result.value
+    if isinstance(value, dict):
+        _add(value.get("content_version"))
+        writes = (value.get("sdk_calls") or {}).get("writes") if isinstance(value.get("sdk_calls"), dict) else None
+        if isinstance(writes, list):
+            for item in writes:
+                if isinstance(item, dict):
+                    _add(item.get("content_version"))
+    return versions
+
+
+def _strip_magic_from_text(text: str) -> str:
+    stripped = (text or "").strip()
+    if not (stripped.startswith("{") and stripped.endswith("}")):
+        return text
+    if not any(key in stripped for key in _MAGIC_UI_KEYS):
+        return text
+    try:
+        parsed = json.loads(stripped)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        return text
+    if not isinstance(parsed, dict):
+        return text
+    cleaned, _lifted = lift_ui_keys(parsed)
+    return json.dumps(cleaned, ensure_ascii=False, default=str)
+
+
+def finalize_content(result: "ToolResult", *, max_chars: int = 0) -> "ToolResult":
+    """阶段 8：同步、只动 model_text，失败也跑。
+
+    截断、覆盖声明、content_version 诚实性在这里收口。魔法 UI 字段不得进 model_text。
+    """
+    result = coerce_legacy_result(result)
+    text = _strip_magic_from_text(result.model_text or "")
+    for key in _MAGIC_UI_KEYS:
+        if key in text:
+            text = _strip_magic_from_text(text)
+            break
+    versions = _collect_content_versions(result)
+    missing = [ver for ver in versions if ver not in text]
+    if missing:
+        note = {"content_version": missing[0]} if len(missing) == 1 else {"content_versions": missing}
+        text = (text + ("\n" if text else "") + json.dumps(note, ensure_ascii=False)).strip()
+    truncated = bool(result.truncated)
+    coverage = result.coverage
+    if max_chars > 0 and len(text) > max_chars:
+        original = len(text)
+        text = (
+            f"{text[:max_chars]}\n"
+            f"[结果已截断，原始长度: {original} 字符，上限: {max_chars} 字符]"
+        )
+        truncated = True
+        coverage = dict(coverage or {})
+        coverage["declared"] = True
+        coverage["truncated"] = True
+    return replace(result, model_text=text, truncated=truncated, coverage=coverage)
 
 
 def _lift_result_value(result: "ToolResult") -> "ToolResult":
@@ -212,7 +284,6 @@ class ToolUiMeta:
     diff: dict[str, Any] | None = None
     download: dict[str, Any] | None = None
     merge: dict[str, Any] | None = None
-    cow_mapping: dict[str, str] | None = None
     text_diff: dict[str, Any] | None = None
     revision: dict[str, Any] | None = None
 

@@ -20,6 +20,9 @@ def test_run_code_write_stays_on_user_path(tmp_path: Path) -> None:
     set_guard(FileAccessGuard(str(tmp_path)))
     target = tmp_path / "book.txt"
     target.write_text("original", encoding="utf-8")
+    from excelmanus.workbook_commit import content_version_of_file, seed_seen_versions
+
+    seed_seen_versions({"book.txt": content_version_of_file(target)})
     result = _payload(
         code_tools.run_code(
             code=f"open(r'{target}', 'w').write('updated')",
@@ -30,6 +33,11 @@ def test_run_code_write_stays_on_user_path(tmp_path: Path) -> None:
     assert result["status"] == "success"
     assert "cow_mapping" not in result
     assert "cow_hint" not in result
+    published = result.get("published") or []
+    assert any(
+        item.get("path") == "book.txt" and item.get("status") == "committed"
+        for item in published
+    )
     assert target.read_text(encoding="utf-8") == "updated"
     assert not (tmp_path / "outputs" / "backups").exists()
 

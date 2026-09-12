@@ -7,9 +7,7 @@ import {
   Save,
   CheckCircle2,
   Shield,
-  ShieldOff,
   Bot,
-  FolderArchive,
   RotateCcw,
   Gauge,
   Shrink,
@@ -17,8 +15,6 @@ import {
   Clock,
   Users,
   AlertCircle,
-  Container,
-  Hammer,
   RefreshCw,
   Brain,
   BookOpen,
@@ -35,17 +31,18 @@ import {
   Cpu,
   ArrowRight,
   SlidersHorizontal,
+  Code2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { apiGet, apiPut, fetchDockerSandboxStatus, setDockerSandbox, buildDockerSandboxImage } from "@/lib/api";
-import type { DockerSandboxStatus } from "@/lib/api";
+import { apiGet, apiPut, togglePresentAs } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
+import { useSessionStore } from "@/stores/session-store";
 
 interface RuntimeConfig {
   // 会话
@@ -54,13 +51,8 @@ interface RuntimeConfig {
   max_consecutive_failures: number;
   // 执行与安全
   subagent_enabled: boolean;
-  backup_enabled: boolean;
-  checkpoint_enabled: boolean;
-  external_safe_mode: boolean;
   max_iterations: number;
   friendly_error_messages: boolean;
-  // AUX 开关
-  aux_enabled: boolean;
   // 上下文与记忆
   max_context_tokens: number;
   memory_enabled: boolean;
@@ -205,40 +197,10 @@ const BASIC_GROUPS: ItemGroup[] = [
         type: "bool",
       },
       {
-        key: "backup_enabled",
-        label: "备份沙盒",
-        desc: "文件操作前自动创建备份副本",
-        icon: <FolderArchive className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "checkpoint_enabled",
-        label: "轮次快照",
-        desc: "每轮工具调用后自动快照被修改文件，支持按轮回退",
-        icon: <History className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "max_iterations",
-        label: "最大迭代次数",
-        desc: "单轮对话中工具调用循环上限",
-        icon: <RotateCcw className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 500,
-      },
-      {
         key: "friendly_error_messages",
         label: "友好错误消息",
         desc: "将内部错误映射为更友好的用户可见消息",
         icon: <AlertCircle className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "aux_enabled",
-        label: "辅助模型",
-        desc: "启用辅助模型（子代理默认模型等）",
-        icon: <Bot className="h-4 w-4" />,
         type: "bool",
       },
     ],
@@ -250,7 +212,7 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "max_context_tokens",
         label: "上下文窗口",
-        desc: "最大上下文 token 数。保存后立即同步到已打开的对话并锁定；未手动保存时设置页显示主模型推断值，对话页显示当前选用模型的窗口。",
+        desc: "最大上下文 token 数。保存后立即同步到已打开的对话并锁定；未手动保存时按当前激活模型推断。",
         icon: <Layers className="h-4 w-4" />,
         type: "int",
         min: 1000,
@@ -266,7 +228,7 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "summarization_enabled",
         label: "对话摘要",
-        desc: "超阈值时用辅助模型压缩早期对话（需配置 aux_model）",
+        desc: "超阈值时用激活模型压缩早期对话",
         icon: <BookOpen className="h-4 w-4" />,
         type: "bool",
       },
@@ -310,8 +272,8 @@ const BASIC_GROUPS: ItemGroup[] = [
     items: [
       {
         key: "main_model_vision",
-        label: "主模型视觉",
-        desc: "主模型视觉能力：auto 自动检测 / true 强制开启 / false 关闭。图片只交给主模型阅读，随后用 edit_spreadsheet(workbook_spec) 建表。",
+        label: "视觉能力",
+        desc: "激活模型视觉能力：auto 自动检测 / true 强制开启 / false 关闭。图片只交给当前模型阅读，随后用 edit_spreadsheet(workbook_spec) 建表。",
         icon: <ScanEye className="h-4 w-4" />,
         type: "select",
         options: [
@@ -387,15 +349,6 @@ const ADVANCED_GROUPS: ItemGroup[] = [
     title: "子代理",
     icon: <Bot className="h-3.5 w-3.5" />,
     items: [
-      {
-        key: "subagent_max_iterations",
-        label: "子代理最大迭代",
-        desc: "单个子代理的工具调用循环上限",
-        icon: <RotateCcw className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 500,
-      },
       {
         key: "subagent_timeout_seconds",
         label: "子代理超时",
@@ -509,7 +462,7 @@ const ADVANCED_GROUPS: ItemGroup[] = [
       {
         key: "memory_maintenance_model",
         label: "维护模型",
-        desc: "用于记忆维护的模型 ID（留空使用辅助模型）",
+        desc: "用于记忆维护的模型 ID（留空使用激活模型）",
         icon: <Brain className="h-4 w-4" />,
         type: "string",
       },
@@ -561,13 +514,6 @@ const ADVANCED_GROUPS: ItemGroup[] = [
     icon: <Shield className="h-3.5 w-3.5" />,
     items: [
       {
-        key: "external_safe_mode",
-        label: "安全模式",
-        desc: "过滤 SSE 中的内部事件（工具调用/思考等）",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
         key: "code_policy_enabled",
         label: "代码策略",
         desc: "启用代码安全策略引擎（沙盒限制）",
@@ -612,7 +558,7 @@ const ADVANCED_GROUPS: ItemGroup[] = [
       {
         key: "code_policy_yellow_auto_approve",
         label: "黄区自动审批",
-        desc: "中风险代码（黄区）自动审批执行",
+        desc: "中风险代码（黄区）自动审批。默认关闭；打开后仍不会自动批准文件系统写入",
         icon: <Shield className="h-4 w-4" />,
         type: "bool",
       },
@@ -869,219 +815,64 @@ function StatusDot({ ok }: { ok: boolean }) {
   );
 }
 
-function DockerSandboxSection() {
-  const [status, setStatus] = useState<DockerSandboxStatus | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [toggling, setToggling] = useState(false);
-  const [building, setBuilding] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [buildMsg, setBuildMsg] = useState<string | null>(null);
-
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const ds = await fetchDockerSandboxStatus();
-      setStatus(ds);
-    } catch {
-      setError("无法获取沙盒状态");
-    } finally {
-      setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { refresh(); }, [refresh]);
-
-  const handleToggle = async (enabled: boolean) => {
-    setToggling(true);
-    setError(null);
-    setBuildMsg(null);
-    try {
-      const res = await setDockerSandbox(enabled);
-      setStatus((prev) => prev ? { ...prev, docker_sandbox_enabled: res.docker_sandbox_enabled } : prev);
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "操作失败");
-    } finally {
-      setToggling(false);
-    }
-  };
-
-  const handleBuild = async (force: boolean) => {
-    setBuilding(true);
-    setError(null);
-    setBuildMsg(null);
-    try {
-      const res = await buildDockerSandboxImage(force);
-      setBuildMsg(res.message || "镜像构建完成");
-      await refresh();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : "构建失败");
-    } finally {
-      setBuilding(false);
-    }
-  };
-
-  if (loading && !status) {
-    return (
-      <div className="rounded-lg border border-border p-4">
-        <div className="flex items-center gap-2 text-muted-foreground text-sm">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          加载沙盒状态…
-        </div>
+function LocalSandboxNote() {
+  return (
+    <div className="rounded-lg border border-border p-4">
+      <div className="text-sm font-medium">本机代码围栏</div>
+      <div className="mt-1 text-[11px] sm:text-xs text-muted-foreground">
+        本机受限子进程：禁网络、禁起进程、禁出工作区。
+        文件历史在 .excelmanus/revisions，不写 outputs/backups。
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+function CodeModeCard() {
+  const presentAs = useUIStore((s) => s.presentAs);
+  const setPresentAs = useUIStore((s) => s.setPresentAs);
+  const sessionId = useSessionStore((s) => s.activeSessionId);
+  const [saving, setSaving] = useState(false);
+  const enabled = presentAs === "code";
+
+  const handleChange = useCallback(
+    async (checked: boolean) => {
+      const mode = checked ? "code" : "native";
+      setPresentAs(mode);
+      if (!sessionId) return;
+      setSaving(true);
+      try {
+        await togglePresentAs(sessionId, mode);
+      } catch {
+        setPresentAs(checked ? "native" : "code");
+      } finally {
+        setSaving(false);
+      }
+    },
+    [sessionId, setPresentAs],
+  );
 
   return (
-    <div className="rounded-lg border border-border overflow-hidden">
-      {/* Header */}
-      <div className="flex items-center gap-2.5 p-4 pb-3">
-        <span
-          className="flex-shrink-0 w-7 h-7 rounded-md flex items-center justify-center"
-          style={{ backgroundColor: "var(--em-primary-alpha-10)", color: "var(--em-primary)" }}
-        >
-          <Container className="h-3.5 w-3.5" />
-        </span>
-        <div className="flex-1 min-w-0">
-          <div className="text-sm font-medium">Docker 沙盒</div>
-          <div className="text-[11px] sm:text-xs text-muted-foreground">
-            在隔离容器中执行代码，防止文件系统被意外修改
+    <div className="rounded-lg border border-border p-4" data-coach-id="coach-code-mode">
+      <div className="flex items-center justify-between gap-3">
+        <div className="flex items-start gap-2.5 min-w-0">
+          <span className="mt-0.5 text-muted-foreground flex-shrink-0">
+            <Code2 className="h-4 w-4" />
+          </span>
+          <div className="min-w-0">
+            <div className="text-sm font-medium">代码模式</div>
+            <div className="mt-1 text-[11px] sm:text-xs text-muted-foreground">
+              只向模型暴露 run_code，其余能力在程序内通过 SDK 调用。观察/计划模式仍使用原生工具。
+              也可用 <code className="font-mono">/code on</code> 或 <code className="font-mono">/code off</code>。
+            </div>
           </div>
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          className="h-8 w-8 sm:h-7 sm:w-7 flex-shrink-0"
-          onClick={refresh}
-          disabled={loading}
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-        </Button>
+        <Switch
+          checked={enabled}
+          onCheckedChange={(checked: boolean) => void handleChange(checked)}
+          disabled={saving}
+          className="flex-shrink-0"
+        />
       </div>
-
-      {status && (
-        <div className="px-4 pb-4 space-y-3">
-          {/* Status indicators */}
-          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <StatusDot ok={status.docker_available} />
-              <span className="text-xs">
-                Docker Daemon {status.docker_available ? "可用" : "不可用"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <StatusDot ok={status.sandbox_image_ready} />
-              <span className="text-xs">
-                沙盒镜像 {status.sandbox_image_ready ? "就绪" : "未就绪"}
-              </span>
-            </div>
-            <div className="flex items-center gap-2 rounded-md border border-border/60 bg-muted/20 px-3 py-2">
-              <StatusDot ok={status.docker_sandbox_enabled} />
-              <span className="text-xs">
-                沙盒 {status.docker_sandbox_enabled ? "已启用" : "已关闭"}
-              </span>
-            </div>
-          </div>
-
-          {/* Toggle */}
-          <div className="flex items-center justify-between gap-3">
-            <div className="flex items-start gap-2.5 flex-1 min-w-0">
-              <span className="mt-0.5 text-muted-foreground flex-shrink-0">
-                <Shield className="h-4 w-4" />
-              </span>
-              <div className="min-w-0">
-                <div className="text-sm font-medium">启用 Docker 沙盒</div>
-                <div className="text-[11px] sm:text-xs text-muted-foreground">
-                  启用时，代码在隔离容器中执行；启用时若镜像未就绪会自动构建
-                </div>
-              </div>
-            </div>
-            <Switch
-              checked={status.docker_sandbox_enabled}
-              onCheckedChange={handleToggle}
-              disabled={toggling || !status.docker_available}
-              className="flex-shrink-0"
-            />
-          </div>
-
-          {/* Build image button */}
-          <div className="space-y-2 sm:space-y-0">
-            <div className="flex items-center justify-between gap-3">
-              <div className="flex items-start gap-2.5 flex-1 min-w-0">
-                <span className="mt-0.5 text-muted-foreground flex-shrink-0">
-                  <Hammer className="h-4 w-4" />
-                </span>
-                <div className="min-w-0">
-                  <div className="text-sm font-medium">沙盒镜像管理</div>
-                  <div className="text-[11px] sm:text-xs text-muted-foreground">
-                    构建或重建 Docker 沙盒镜像
-                  </div>
-                </div>
-              </div>
-              <div className="hidden sm:flex gap-1.5 flex-shrink-0">
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs gap-1.5 h-7"
-                  disabled={building || !status.docker_available}
-                  onClick={() => handleBuild(false)}
-                >
-                  {building ? <Loader2 className="h-3 w-3 animate-spin" /> : <Hammer className="h-3 w-3" />}
-                  构建
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  className="text-xs gap-1.5 h-7"
-                  disabled={building || !status.docker_available}
-                  onClick={() => handleBuild(true)}
-                >
-                  {building ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
-                  强制重建
-                </Button>
-              </div>
-            </div>
-            {/* Mobile: full-width build buttons */}
-            <div className="flex sm:hidden gap-2 pl-6.5">
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs gap-1.5 h-9 flex-1"
-                disabled={building || !status.docker_available}
-                onClick={() => handleBuild(false)}
-              >
-                {building ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <Hammer className="h-3.5 w-3.5" />}
-                构建镜像
-              </Button>
-              <Button
-                variant="outline"
-                size="sm"
-                className="text-xs gap-1.5 h-9 flex-1"
-                disabled={building || !status.docker_available}
-                onClick={() => handleBuild(true)}
-              >
-                {building ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <RefreshCw className="h-3.5 w-3.5" />}
-                强制重建
-              </Button>
-            </div>
-          </div>
-
-          {/* Error / success messages */}
-          {error && (
-            <div className="flex items-start gap-2 rounded-md bg-red-500/5 border border-red-500/10 px-3 py-2">
-              <AlertCircle className="h-3.5 w-3.5 text-red-500 flex-shrink-0 mt-0.5" />
-              <span className="text-[11px] text-red-600 dark:text-red-400">{error}</span>
-            </div>
-          )}
-          {buildMsg && !error && (
-            <div className="flex items-start gap-2 rounded-md bg-green-500/5 border border-green-500/10 px-3 py-2">
-              <CheckCircle2 className="h-3.5 w-3.5 text-green-500 flex-shrink-0 mt-0.5" />
-              <span className="text-[11px] text-green-600 dark:text-green-400">{buildMsg}</span>
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
 }
@@ -1351,7 +1142,8 @@ export function RuntimeTab() {
   return (
     <div className="space-y-5">
       <OnboardingReplayCard />
-      <DockerSandboxSection />
+      <LocalSandboxNote />
+      <CodeModeCard />
       <Separator />
       {renderGroups(BASIC_GROUPS)}
 

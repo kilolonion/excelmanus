@@ -42,9 +42,16 @@ def _make_sample(tmp_path: Path, name: str = "sample.xlsx") -> Path:
 
 
 def _edit(path: Path, operations: list[dict]) -> ToolResult:
+    filled = []
+    for op in operations:
+        item = dict(op)
+        if item.get("kind") in {"write", "insert", "copy"} and "sheet" not in item and "sheet_name" not in item:
+            if not str(item.get("start_cell") or "").count("!"):
+                item["sheet"] = "Sheet1"
+        filled.append(item)
     return edit_spreadsheet(
         file_path=str(path),
-        operations=operations,
+        operations=filled,
         expected_version=content_version_of_file(path),
     )
 
@@ -109,12 +116,12 @@ class TestWriteCells:
         assert wb["Sheet1"]["A1"].value == "姓名"
         wb.close()
 
-    def test_numeric_string_coercion(self, tmp_path: Path) -> None:
+    def test_numeric_string_preserved(self, tmp_path: Path) -> None:
         fp = _make_sample(tmp_path)
         result = _edit(fp, [{"kind": "write", "start_cell": "D2", "values": [["42.5"]]}])
         assert result.success
         wb = load_workbook(fp)
-        assert wb.active["D2"].value == 42.5
+        assert wb.active["D2"].value == "42.5"
         wb.close()
 
     def test_write_requires_values(self, tmp_path: Path) -> None:

@@ -1,18 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
-import {
-  History,
-  Loader2,
-  RotateCcw,
-  FileText,
-  Wrench,
-  ChevronDown,
-  ChevronUp,
-  AlertTriangle,
-  CheckCircle2,
-} from "lucide-react";
+import { History, Loader2, RotateCcw, AlertTriangle, CheckCircle2 } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,249 +10,88 @@ import {
   OverlayCardFooter,
   OverlayCardHeader,
 } from "@/components/ui/overlay-card";
-import {
-  Tooltip,
-  TooltipContent,
-  TooltipProvider,
-  TooltipTrigger,
-} from "@/components/ui/tooltip";
 import { SlidePanel } from "@/components/ui/slide-panel";
 import { useSessionStore } from "@/stores/session-store";
+import { useExcelStore } from "@/stores/excel-store";
+import { isWordDocumentPath, useWordStore } from "@/stores/word-store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
-  fetchCheckpoints,
-  checkpointRollback,
-  type CheckpointItem,
+  fetchRevisions,
+  invalidateSnapshotCache,
+  restoreRevision,
+  type WorkbookRevisionItem,
 } from "@/lib/api";
 
-function formatTime(isoStr: string): string {
-  try {
-    const d = new Date(isoStr);
-    return d.toLocaleTimeString(undefined, {
-      hour: "2-digit",
-      minute: "2-digit",
-      second: "2-digit",
-    });
-  } catch {
-    return isoStr;
+export function revisionReasonLabel(reason: string, label: string): string {
+  if (label) return label;
+  if (reason === "beforeEdit") return "编辑前";
+  if (reason === "afterEdit") return "编辑后";
+  if (reason === "beforeRestore") return "恢复前";
+  if (reason === "checkpoint") return "检查点";
+  return reason;
+}
+
+function formatWhen(iso: string | undefined): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  return d.toLocaleString();
+}
+
+function refreshOpenDocument(path: string, contentVersion: string | null) {
+  invalidateSnapshotCache(path);
+  const excel = useExcelStore.getState();
+  excel.setContentVersion(path, contentVersion);
+  excel.bumpWorkspaceFilesVersion();
+  useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
+  if (isWordDocumentPath(path)) {
+    useWordStore.getState().triggerRefresh();
   }
 }
 
-function formatDate(isoStr: string): string {
-  try {
-    const d = new Date(isoStr);
-    const today = new Date();
-    if (d.toDateString() === today.toDateString()) return "今天";
-    const yesterday = new Date(today);
-    yesterday.setDate(yesterday.getDate() - 1);
-    if (d.toDateString() === yesterday.toDateString()) return "昨天";
-    return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
-  } catch {
-    return "";
-  }
-}
-
-function shortenPath(path: string): string {
-  const parts = path.replace(/\\/g, "/").split("/");
-  return parts[parts.length - 1] || path;
-}
-
-interface CheckpointTimelineItemProps {
-  cp: CheckpointItem;
-  isLatest: boolean;
-  onRollback: (turnNumber: number) => void;
-  rolling: boolean;
-  isMobile: boolean;
-}
-
-function CheckpointTimelineItem({ cp, isLatest, onRollback, rolling, isMobile }: CheckpointTimelineItemProps) {
-  const [expanded, setExpanded] = useState(false);
-
-  return (
-    <div className="relative pl-6">
-      {/* Timeline dot */}
-      <div
-        className="absolute left-0 top-2 w-3 h-3 rounded-full border-2 z-10"
-        style={{
-          borderColor: isLatest ? "var(--em-primary)" : "var(--border)",
-          backgroundColor: isLatest ? "var(--em-primary)" : "var(--background)",
-        }}
-      />
-
-      <div
-        className={`group rounded-lg border border-border/60 transition-colors cursor-pointer ${
-          isMobile ? "p-3.5 active:bg-muted/30" : "p-3 hover:border-border"
-        }`}
-        onClick={() => setExpanded(!expanded)}
-      >
-        {/* Header */}
-        <div className="flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 min-w-0">
-            <span className="text-xs font-mono font-semibold tabular-nums" style={{ color: "var(--em-primary)" }}>
-              轮次 {cp.turn_number}
-            </span>
-            <span className="text-[10px] text-muted-foreground tabular-nums">
-              {formatTime(cp.created_at)}
-            </span>
-            {isLatest && (
-              <Badge variant="outline" className="h-4 px-1 text-[9px] border-emerald-500/40 text-emerald-600 dark:text-emerald-400">
-                当前
-              </Badge>
-            )}
-          </div>
-          <div className="flex items-center gap-1">
-            {!isLatest && (
-              isMobile ? (
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 shrink-0"
-                  disabled={rolling}
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    onRollback(cp.turn_number);
-                  }}
-                >
-                  {rolling ? (
-                    <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                  ) : (
-                    <RotateCcw className="h-3.5 w-3.5" />
-                  )}
-                </Button>
-              ) : (
-                <TooltipProvider delayDuration={200}>
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-6 w-6 opacity-0 group-hover:opacity-100 transition-opacity"
-                        disabled={rolling}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onRollback(cp.turn_number);
-                        }}
-                      >
-                        {rolling ? (
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                        ) : (
-                          <RotateCcw className="h-3 w-3" />
-                        )}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent side="left" className="text-xs">
-                      回退到此轮次
-                    </TooltipContent>
-                  </Tooltip>
-                </TooltipProvider>
-              )
-            )}
-            {expanded ? (
-              <ChevronUp className="h-3 w-3 text-muted-foreground" />
-            ) : (
-              <ChevronDown className="h-3 w-3 text-muted-foreground" />
-            )}
-          </div>
-        </div>
-
-        {/* Summary line */}
-        <div className="flex items-center gap-2 mt-1.5 text-[11px] text-muted-foreground">
-          <span className="flex items-center gap-0.5">
-            <FileText className="h-3 w-3" />
-            {cp.files_modified.length} 文件
-          </span>
-          {cp.tool_names.length > 0 && (
-            <span className="flex items-center gap-0.5">
-              <Wrench className="h-3 w-3" />
-              {cp.tool_names.length} 工具
-            </span>
-          )}
-          <span className="tabular-nums">{cp.version_count} 版本</span>
-        </div>
-
-        {/* Expanded details */}
-        <AnimatePresence>
-          {expanded && (
-            <motion.div
-              initial={{ height: 0, opacity: 0 }}
-              animate={{ height: "auto", opacity: 1 }}
-              exit={{ height: 0, opacity: 0 }}
-              transition={{ duration: 0.15 }}
-              className="overflow-hidden"
-            >
-              <div className="mt-2 pt-2 border-t border-border/40 space-y-1.5">
-                {cp.files_modified.length > 0 && (
-                  <div>
-                    <div className="text-[10px] font-medium text-muted-foreground mb-0.5">修改文件</div>
-                    <div className="flex flex-wrap gap-1">
-                      {cp.files_modified.map((f) => (
-                        <Badge
-                          key={f}
-                          variant="secondary"
-                          className="h-5 px-1.5 text-[10px] font-mono max-w-[140px] sm:max-w-[200px] truncate"
-                          title={f}
-                        >
-                          {shortenPath(f)}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-                {cp.tool_names.length > 0 && (
-                  <div>
-                    <div className="text-[10px] font-medium text-muted-foreground mb-0.5">使用工具</div>
-                    <div className="flex flex-wrap gap-1">
-                      {cp.tool_names.map((t) => (
-                        <Badge
-                          key={t}
-                          variant="outline"
-                          className="h-5 px-1.5 text-[10px]"
-                        >
-                          {t}
-                        </Badge>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            </motion.div>
-          )}
-        </AnimatePresence>
-      </div>
-    </div>
-  );
-}
-
-export function CheckpointTimeline() {
+export function RevisionTimeline() {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const excelPath = useExcelStore((s) => s.activeFilePath);
+  const excelOpen = useExcelStore((s) => s.panelOpen);
+  const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
+  const excelRefresh = useExcelStore((s) => s.refreshCounter);
+  const wordPath = useWordStore((s) => s.activeDocPath);
+  const wordOpen = useWordStore((s) => s.panelOpen);
+  const wordRefresh = useWordStore((s) => s.refreshCounter);
+  const activeFilePath =
+    (excelOpen && excelPath) || (wordOpen && wordPath) || excelPath || wordPath;
   const isMobile = useIsMobile();
   const [panelOpen, setPanelOpen] = useState(false);
-  const [checkpoints, setCheckpoints] = useState<CheckpointItem[]>([]);
-  const [enabled, setEnabled] = useState(false);
+  const [revisions, setRevisions] = useState<WorkbookRevisionItem[]>([]);
+  const [currentVersion, setCurrentVersion] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [rolling, setRolling] = useState(false);
-  const [rollbackTarget, setRollbackTarget] = useState<number | null>(null);
+  const [restoring, setRestoring] = useState(false);
+  const [target, setTarget] = useState<WorkbookRevisionItem | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [lastResult, setLastResult] = useState<{ ok: boolean; message: string } | null>(null);
 
   const load = useCallback(async () => {
-    if (!activeSessionId) {
-      setCheckpoints([]);
-      setEnabled(false);
+    if (!activeFilePath) {
+      setRevisions([]);
+      setCurrentVersion(null);
+      setLoadError(null);
       return;
     }
     setLoading(true);
     try {
-      const data = await fetchCheckpoints(activeSessionId);
-      setCheckpoints(data.checkpoints);
-      setEnabled(data.checkpoint_enabled);
-    } catch {
-      setCheckpoints([]);
-      setEnabled(false);
+      const data = await fetchRevisions(activeFilePath, activeSessionId ?? undefined);
+      setRevisions(data.revisions);
+      setCurrentVersion(data.content_version);
+      setLoadError(null);
+    } catch (err) {
+      setRevisions([]);
+      setCurrentVersion(null);
+      setLoadError(err instanceof Error ? err.message : "无法读取文件版本");
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId]);
+  }, [activeFilePath, activeSessionId]);
 
   useEffect(() => {
     load();
@@ -274,201 +102,140 @@ export function CheckpointTimeline() {
     load();
     const id = setInterval(load, 10000);
     return () => clearInterval(id);
-  }, [panelOpen, load]);
+  }, [panelOpen, load, workspaceFilesVersion, excelRefresh, wordRefresh]);
 
-  const handleRollbackClick = (turnNumber: number) => {
-    setRollbackTarget(turnNumber);
-    setConfirmOpen(true);
-  };
-
-  const handleConfirmRollback = async () => {
-    if (!activeSessionId || rollbackTarget == null) return;
+  const handleConfirm = async () => {
+    if (!activeFilePath || !target) return;
     setConfirmOpen(false);
-    setRolling(true);
+    if (!currentVersion) {
+      setLastResult({ ok: false, message: "无法读取当前版本，请刷新后重试" });
+      setTarget(null);
+      return;
+    }
+    setRestoring(true);
     setLastResult(null);
     try {
-      const res = await checkpointRollback(activeSessionId, rollbackTarget);
+      const res = await restoreRevision({
+        path: activeFilePath,
+        revisionId: target.revision_id,
+        expectedVersion: currentVersion,
+        sessionId: activeSessionId,
+      });
       setLastResult({
         ok: true,
-        message: `已回退到轮次 ${res.turn_number}，恢复了 ${res.count} 个文件`,
+        message: `已恢复到 ${target.revision_id.slice(0, 8)}，当前 ${res.content_version.slice(0, 19)}`,
       });
+      refreshOpenDocument(activeFilePath, res.content_version);
       await load();
     } catch (err) {
       setLastResult({
         ok: false,
-        message: err instanceof Error ? err.message : "回退失败",
+        message: err instanceof Error ? err.message : "恢复失败（需要当前版本）",
       });
     } finally {
-      setRolling(false);
-      setRollbackTarget(null);
+      setRestoring(false);
+      setTarget(null);
     }
   };
 
-  if (!enabled) return null;
-
-  const sorted = [...checkpoints].sort((a, b) => b.turn_number - a.turn_number);
-  const latestTurn = sorted.length > 0 ? sorted[0].turn_number : -1;
-
-  // Group checkpoints by date
-  const groups: { date: string; items: CheckpointItem[] }[] = [];
-  for (const cp of sorted) {
-    const dateLabel = formatDate(cp.created_at);
-    const existing = groups.find((g) => g.date === dateLabel);
-    if (existing) {
-      existing.items.push(cp);
-    } else {
-      groups.push({ date: dateLabel, items: [cp] });
-    }
-  }
+  const sorted = [...revisions].sort((a, b) => b.sequence - a.sequence);
 
   return (
     <>
-      {/* Topbar trigger button */}
-      <TooltipProvider delayDuration={300}>
-        <Tooltip>
-          <TooltipTrigger asChild>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-8 w-8 sm:h-7 sm:w-7 p-0 relative"
-              onClick={() => setPanelOpen(true)}
-              aria-label="Checkpoint 时间线"
-            >
-              <History className="h-4 w-4 sm:h-3.5 sm:w-3.5" />
-              {checkpoints.length > 0 && (
-                <span
-                  className="absolute -top-0.5 -right-0.5 flex h-3.5 min-w-[14px] items-center justify-center rounded-full text-[9px] font-bold text-white px-0.5"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                >
-                  {checkpoints.length}
-                </span>
-              )}
-            </Button>
-          </TooltipTrigger>
-          <TooltipContent side="bottom" className="text-xs">
-            Checkpoint 时间线{checkpoints.length > 0 ? ` (${checkpoints.length})` : ""}
-          </TooltipContent>
-        </Tooltip>
-      </TooltipProvider>
-
-      {/* Slide Panel */}
+      <Button
+        variant="ghost"
+        size="icon"
+        className="h-7 w-7 p-0"
+        title="文件版本"
+        aria-label="文件版本"
+        onClick={() => setPanelOpen(true)}
+      >
+        <History className="h-3.5 w-3.5" />
+      </Button>
       <SlidePanel
         open={panelOpen}
-        onClose={() => {
-          setPanelOpen(false);
-          setLastResult(null);
-        }}
-        title="Checkpoint 时间线"
+        onClose={() => setPanelOpen(false)}
+        title="文件版本"
         icon={<History className="h-4 w-4" style={{ color: "var(--em-primary)" }} />}
         width={400}
       >
-        <div className="px-4 py-3" style={{ paddingBottom: isMobile ? "max(0.75rem, env(safe-area-inset-bottom))" : undefined }}>
-          {/* Result banner */}
-          <AnimatePresence>
-            {lastResult && (
-              <motion.div
-                initial={{ height: 0, opacity: 0 }}
-                animate={{ height: "auto", opacity: 1 }}
-                exit={{ height: 0, opacity: 0 }}
-                className="overflow-hidden mb-3"
+        <div className="p-3 space-y-3">
+          {!activeFilePath && (
+            <p className="text-xs text-muted-foreground">打开一个工作簿后可查看版本时间线。</p>
+          )}
+          {activeFilePath && (
+            <p className="text-[11px] text-muted-foreground break-all">
+              {activeFilePath}
+              {currentVersion ? ` · ${currentVersion.slice(0, 19)}` : ""}
+            </p>
+          )}
+          {loading && <Loader2 className="h-4 w-4 animate-spin text-muted-foreground" />}
+          {loadError && (
+            <p className="text-xs text-destructive flex items-center gap-1">
+              <AlertTriangle className="h-3.5 w-3.5" />
+              {loadError}
+            </p>
+          )}
+          {sorted.length === 0 && activeFilePath && !loading && !loadError && (
+            <p className="text-xs text-muted-foreground">
+              还没有写入记录。用对话、表格编辑或恢复成功改过这个文件后，这里会留下「编辑前 / 编辑后」版本。
+            </p>
+          )}
+          {sorted.map((rec) => (
+            <div key={rec.revision_id} className="rounded-lg border border-border/60 p-3 space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-xs font-mono">{rec.revision_id}</span>
+                <Badge variant="outline" className="h-4 px-1 text-[9px]">
+                  {revisionReasonLabel(rec.reason, rec.label)}
+                </Badge>
+              </div>
+              <div className="text-[10px] text-muted-foreground">
+                {rec.created_at ? formatWhen(rec.created_at) : `seq ${rec.sequence}`}
+                {rec.content_version ? ` · ${rec.content_version.slice(7, 19) || rec.content_version.slice(0, 19)}` : ""}
+              </div>
+              <Button
+                variant="outline"
+                size="sm"
+                className="h-7 text-xs"
+                disabled={restoring}
+                onClick={() => {
+                  setTarget(rec);
+                  setConfirmOpen(true);
+                }}
               >
-                <div
-                  className={`flex items-center gap-2 rounded-lg px-3 py-2 text-xs ${
-                    lastResult.ok
-                      ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300"
-                      : "bg-red-500/10 text-red-700 dark:text-red-300"
-                  }`}
-                >
-                  {lastResult.ok ? (
-                    <CheckCircle2 className="h-3.5 w-3.5 shrink-0" />
-                  ) : (
-                    <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
-                  )}
-                  {lastResult.message}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {loading && checkpoints.length === 0 ? (
-            <div className="flex items-center justify-center py-12 text-muted-foreground text-sm">
-              <Loader2 className="h-4 w-4 animate-spin mr-2" />
-              加载中…
+                <RotateCcw className="h-3 w-3 mr-1" />
+                恢复到此版本
+              </Button>
             </div>
-          ) : checkpoints.length === 0 ? (
-            <div className="text-center py-12 text-muted-foreground text-sm space-y-1">
-              <History className="h-8 w-8 mx-auto opacity-30 mb-2" />
-              <div>暂无 Checkpoint</div>
-              <div className="text-xs opacity-60">
-                AI 执行工具操作后会自动创建文件快照
-              </div>
-            </div>
-          ) : (
-            <div>
-              <div className="space-y-4">
-                {groups.map((group) => (
-                  <div key={group.date}>
-                    <div className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mb-2">
-                      {group.date}
-                    </div>
-                    {/* Timeline line */}
-                    <div className="relative">
-                      <div
-                        className="absolute left-[5px] top-4 bottom-4 w-px"
-                        style={{ backgroundColor: "var(--border)" }}
-                      />
-                      <div className="space-y-2">
-                        {group.items.map((cp) => (
-                          <CheckpointTimelineItem
-                            key={cp.turn_number}
-                            cp={cp}
-                            isLatest={cp.turn_number === latestTurn}
-                            onRollback={handleRollbackClick}
-                            rolling={rolling && rollbackTarget === cp.turn_number}
-                            isMobile={isMobile}
-                          />
-                        ))}
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-
-              <div className="mt-4 pt-3 border-t border-border/40 text-[10px] text-muted-foreground/60 text-center pb-2">
-                共 {checkpoints.length} 个 checkpoint · 点击轮次展开详情
-              </div>
+          ))}
+          {lastResult && (
+            <div className={`text-xs flex items-center gap-1 ${lastResult.ok ? "text-emerald-600" : "text-destructive"}`}>
+              {lastResult.ok ? <CheckCircle2 className="h-3.5 w-3.5" /> : <AlertTriangle className="h-3.5 w-3.5" />}
+              {lastResult.message}
             </div>
           )}
         </div>
       </SlidePanel>
-
       <OverlayCard open={confirmOpen} onOpenChange={setConfirmOpen} size="sm" tone="warning">
         <OverlayCardHeader
-          icon={<AlertTriangle className="h-5 w-5" />}
-          title={`确认回退到轮次 ${rollbackTarget}`}
-          description={`将回退文件状态到轮次 ${rollbackTarget} 之前的快照。此操作会覆盖当前文件内容，无法撤销。`}
+          title="恢复文件版本"
+          description={
+            target
+              ? `将用「${revisionReasonLabel(target.reason, target.label)}」覆盖当前文件。若文件刚被改过，恢复会被拒绝，请刷新后再试。`
+              : ""
+          }
           onClose={() => setConfirmOpen(false)}
         />
         <OverlayCardFooter>
-          <OverlayCardAction action="ghost" onClick={() => setConfirmOpen(false)}>
-            取消
-          </OverlayCardAction>
-          <OverlayCardAction
-            action="destructive"
-            onClick={handleConfirmRollback}
-            disabled={rolling}
-          >
-            {rolling ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" />
-                回退中…
-              </>
-            ) : (
-              "确认回退"
-            )}
+          <OverlayCardAction action="ghost" onClick={() => setConfirmOpen(false)}>取消</OverlayCardAction>
+          <OverlayCardAction action="destructive" onClick={() => void handleConfirm()}>
+            {isMobile ? "恢复" : "确认恢复"}
           </OverlayCardAction>
         </OverlayCardFooter>
       </OverlayCard>
     </>
   );
 }
+
+/** @deprecated overlay turn checkpoints are gone; alias for layout imports */
+export const CheckpointTimeline = RevisionTimeline;

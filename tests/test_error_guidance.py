@@ -56,8 +56,15 @@ class TestClassifyByStatusCode:
         assert g.code == "model_auth_failed"
         assert g.retryable is False
 
-    def test_403_auth_failed(self):
+    def test_403_forbidden_is_not_invalid_key(self):
         g = classify_failure(_FakeHTTPError(403, "Forbidden"))
+        assert g.category == "model"
+        assert g.code == "model_forbidden"
+        assert g.title == "模型拒绝访问"
+        assert not g.message.startswith("API Key")
+
+    def test_403_auth_failed(self):
+        g = classify_failure(_FakeHTTPError(403, "invalid api key"))
         assert g.category == "model"
         assert g.code == "model_auth_failed"
 
@@ -457,3 +464,53 @@ class TestClassifySessionErrors:
         exc = SessionNotFoundError("会话 'xyz' 不存在")
         g = classify_failure(exc)
         assert g.code == "session_not_found"
+
+
+class _FakePermissionDeniedError(Exception):
+    """模拟 openai.PermissionDeniedError。"""
+    pass
+
+
+class TestVisionAndForbiddenClassification:
+    """图片拒绝 / 403 不得包装成 API Key 无效。"""
+
+    def test_400_does_not_support_image(self):
+        g = classify_failure(_FakeHTTPError(400, "This model does not support image"))
+        assert g.code == "vision_unsupported"
+        assert "API Key 无效" not in g.message
+        assert "不支持 image" in g.message.lower() or "图片" in g.message
+
+    def test_403_does_not_support_image(self):
+        g = classify_failure(_FakeHTTPError(403, "image input is not supported for this model"))
+        assert g.code == "vision_unsupported"
+        assert "API Key 无效" not in g.message
+
+    def test_400_unknown_variant_image_url(self):
+        g = classify_failure(_FakeHTTPError(
+            400,
+            "Failed to deserialize the JSON body: unknown variant `image_url`, expected `text`",
+        ))
+        assert g.code == "vision_unsupported"
+
+    def test_400_generic_is_invalid_request(self):
+        g = classify_failure(_FakeHTTPError(400, "invalid request: extra field"))
+        assert g.code == "invalid_request"
+        assert "API Key 无效" not in g.message
+
+    def test_403_message_mentions_provider_body(self):
+        g = classify_failure(_FakeHTTPError(403, "model not activated for this account"))
+        assert g.code == "model_forbidden"
+        assert "不一定是 API Key 无效" in g.message
+        assert "model not activated" in g.message.lower()
+
+    def test_permission_denied_error_class_is_forbidden(self):
+        g = classify_failure(_FakePermissionDeniedError("You do not have access to this model"))
+        assert g.code == "model_forbidden"
+        assert g.title == "模型拒绝访问"
+        assert not g.message.startswith("API Key")
+
+    def test_401_without_invalid_key_language_does_not_claim_expired(self):
+        g = classify_failure(_FakeHTTPError(401, "Unauthorized"))
+        assert g.code == "model_auth_failed"
+        assert "已过期或权限不足" not in g.message
+

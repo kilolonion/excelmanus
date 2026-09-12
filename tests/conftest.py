@@ -1,6 +1,7 @@
 """pytest 全局配置与共享 fixtures。"""
 
 import os
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
@@ -26,14 +27,21 @@ hyp_settings.load_profile(os.getenv("HYPOTHESIS_PROFILE", "dev"))
 
 
 @pytest.fixture(autouse=True)
-def _isolate_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """每个测试用例自动隔离环境变量，避免测试间互相污染。
 
     动态清理所有 EXCELMANUS_ 前缀的环境变量，无需手动维护列表。
+    同时把 EXCELMANUS_HOME 指到临时目录，避免读写开发者本机 ~/.excelmanus。
     """
     for key in list(os.environ):
         if key.startswith("EXCELMANUS_"):
             monkeypatch.delenv(key, raising=False)
+    home = tmp_path / "excelmanus-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("EXCELMANUS_HOME", str(home))
+    work = tmp_path / "cwd"
+    work.mkdir()
+    monkeypatch.chdir(work)
 
 
 @pytest.fixture(autouse=True)

@@ -1,17 +1,15 @@
 "use client";
 
 import {
-  Route,
-  Repeat,
   Info,
   Zap,
   CircleStop,
   ChevronsUpDown,
-  Brain,
   CheckCircle2,
   XCircle,
   Wrench,
 } from "lucide-react";
+import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { ToolCallCard } from "../ToolCallCard";
 import { AskUserCard } from "../AskUserCard";
@@ -22,7 +20,6 @@ import { ConfigErrorCard } from "../ConfigErrorCard";
 import { FailureGuidanceCard } from "../FailureGuidanceCard";
 import type { AssistantBlock } from "@/lib/types";
 import React from "react";
-import { motion } from "framer-motion";
 import { MemoizedMarkdown } from "./MemoizedMarkdown";
 import {
   ApprovalActionBlock,
@@ -57,31 +54,6 @@ export interface AssistantBlockRendererProps {
   onRetryWithModel?: (modelName: string) => void;
 }
 
-function IterationDivider({ iteration }: { iteration: number }) {
-  return (
-    <div className="flex items-center gap-2 my-3 text-xs">
-      <motion.div
-        className="flex items-center gap-1.5 px-2 py-1 rounded-md bg-[var(--em-primary-alpha-06)] border border-[var(--em-primary-alpha-15)]"
-        initial={{ opacity: 0, scale: 0.9 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.25, ease: "easeOut" }}
-      >
-        <Repeat className="h-3 w-3" style={{ color: "var(--em-primary)" }} />
-        <span className="font-medium" style={{ color: "var(--em-primary)" }}>
-          第 {iteration} 轮迭代
-        </span>
-      </motion.div>
-      <motion.div
-        className="flex-1 border-t border-[var(--em-primary-alpha-15)]"
-        initial={{ scaleX: 0 }}
-        animate={{ scaleX: 1 }}
-        transition={{ duration: 0.35, ease: [0.4, 0, 0.2, 1], delay: 0.1 }}
-        style={{ transformOrigin: "left" }}
-      />
-    </div>
-  );
-}
-
 export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer({
   block,
   blockIndex,
@@ -96,7 +68,7 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
   onRetry,
   onRetryWithModel,
 }: AssistantBlockRendererProps) {
-  if (skipRender) return null;
+  if (skipRender || isHiddenAssistantChrome(block)) return null;
   switch (block.type) {
     case "thinking":
       return (
@@ -152,9 +124,7 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
     case "task_list":
       return <TaskList items={block.items} />;
     case "iteration":
-      return (
-        <IterationDivider iteration={block.iteration} />
-      );
+      return null;
     case "status": {
       const isStopped = block.label === "对话已停止";
       if (isStopped) {
@@ -164,38 +134,6 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
             <span className="font-medium">{block.label}</span>
             {block.detail && (
               <span className="text-amber-600/70 dark:text-amber-500/70 text-xs">{block.detail}</span>
-            )}
-          </div>
-        );
-      }
-      if (block.variant === "route") {
-        const skills = block.detail ? block.detail.split(",").map((s) => s.trim()).filter(Boolean) : [];
-        return (
-          <div className="flex items-center justify-between gap-2 my-1.5">
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <span className="inline-flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] font-medium bg-[var(--em-primary-alpha-06)] border border-[var(--em-primary-alpha-15)] text-[var(--em-primary)]">
-                <Route className="h-2.5 w-2.5" />
-                {block.label}
-              </span>
-              {skills.map((skill) => (
-                <span
-                  key={skill}
-                  className="inline-flex items-center rounded-md px-1.5 py-0.5 text-[10px] bg-muted/40 text-muted-foreground border border-border/40"
-                >
-                  {skill}
-                </span>
-              ))}
-            </div>
-            {showCollapseButton && onCollapse && (
-              <button
-                type="button"
-                onClick={onCollapse}
-                className="flex items-center gap-1 rounded-md px-1.5 py-0.5 text-[10px] text-muted-foreground hover:bg-muted/50 hover:text-foreground transition-colors cursor-pointer"
-                title="折叠工具链"
-              >
-                <ChevronsUpDown className="h-3 w-3" />
-                <span>折叠</span>
-              </button>
             )}
           </div>
         );
@@ -318,23 +256,13 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
     }
     case "tool_notice":
       return (
-        <div className="flex items-center gap-2 my-1 px-3 py-1.5 rounded-md border border-blue-500/20 bg-blue-500/5 text-xs font-mono text-blue-700 dark:text-blue-400">
-          <Wrench className="h-3.5 w-3.5 flex-shrink-0 text-blue-500/70" />
+        <div className="flex items-center gap-2 my-1 px-1 py-1 text-xs text-muted-foreground">
+          <Wrench className="h-3.5 w-3.5 flex-shrink-0" />
           <span className="truncate" title={block.argsSummary}>{block.argsSummary}</span>
         </div>
       );
     case "reasoning_notice":
-      return (
-        <details className="my-1 rounded-md border border-purple-500/20 bg-purple-500/5 text-xs text-purple-700 dark:text-purple-400" open>
-          <summary className="flex items-center gap-2 px-3 py-1.5 cursor-pointer select-none">
-            <Brain className="h-3.5 w-3.5 flex-shrink-0 text-purple-500/70" />
-            <span className="font-medium">推理过程</span>
-          </summary>
-          <div className="px-3 pb-2 whitespace-pre-wrap break-words max-h-60 overflow-y-auto text-purple-600/80 dark:text-purple-400/80">
-            {block.content}
-          </div>
-        </details>
-      );
+      return <ThinkingBlock content={block.content} title="推理过程" />;
     default:
       return null;
   }

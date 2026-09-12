@@ -8,7 +8,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { apiGet } from "@/lib/api";
-import { formatModelIdForDisplay } from "@/lib/model-display";
+import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
 import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
@@ -54,7 +54,7 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 }
 
 function displayLabel(m: ModelInfo): string {
-  return m.name === "default" ? formatModelIdForDisplay(m.model) : (m.display_name || m.name);
+  return displayModelLabel(m);
 }
 
 function resolvedModel(m: ModelInfo): string {
@@ -229,7 +229,7 @@ export const MessageActions = React.memo(function MessageActions({
                                 </span>
                               )}
                             </div>
-                            {m.name !== "default" && m.name !== resolvedModel(m) && (
+                            {m.name !== resolvedModel(m) && (
                               <span className="text-[10px] text-muted-foreground/50 font-mono truncate block mt-0.5">
                                 {resolvedModel(m)}
                               </span>

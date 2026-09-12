@@ -10,52 +10,9 @@ import { subscribeToSession } from "@/lib/chat-actions";
 import { useUIStore } from "@/stores/ui-store";
 import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
-import type { Session, AssistantBlock } from "@/lib/types";
+import { isPlaceholderModelId } from "@/lib/model-display";
+import type { Session } from "@/lib/types";
 import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
-
-/** 将后端 route_mode 映射为用户友好的中文标签（与 chat-actions.ts 保持一致） */
-const _ROUTE_MODE_LABELS: Record<string, string> = {
-  all_tools: "Smart Route",
-  control_command: "Control Command",
-  slash_direct: "Slash Command",
-  slash_not_found: "Skill Not Found",
-  slash_not_user_invocable: "Skill Not Invocable",
-  no_skillpack: "Base Mode",
-  fallback: "Fallback Mode",
-  hidden: "Route",
-};
-
-function _friendlyRouteMode(mode: string): string {
-  return _ROUTE_MODE_LABELS[mode] || mode;
-}
-
-/**
- * 刷新后恢复路由状态 block：在最后一个 assistant 消息的 blocks 开头注入路由信息，
- * 仅当该消息尚未包含 route variant 的 status block 时执行。
- */
-function _injectRouteBlock(
-  chat: ReturnType<typeof useChatStore.getState>,
-  route: { routeMode: string; skillsUsed: string[] },
-) {
-  const msgs = chat.messages;
-  for (let i = msgs.length - 1; i >= 0; i--) {
-    const m = msgs[i];
-    if (m.role !== "assistant") continue;
-    // 已有 route status block 则跳过
-    if (m.blocks.some((b) => b.type === "status" && b.variant === "route")) return;
-    const routeBlock: AssistantBlock = {
-      type: "status",
-      label: _friendlyRouteMode(route.routeMode),
-      detail: route.skillsUsed.length > 0 ? route.skillsUsed.join(",") : undefined,
-      variant: "route",
-    };
-    chat.updateAssistantMessage(m.id, (message) => ({
-      ...message,
-      blocks: [routeBlock, ...message.blocks],
-    }));
-    return;
-  }
-}
 
 /**
  * 将最后一个 assistant 消息中最后一个 running/success 状态的 tool_call 标记为 pending，
@@ -112,7 +69,7 @@ export function SessionSync() {
 
     const syncSessions = async () => {
       try {
-        const raw = await fetchSessions({ includeArchived: true });
+        const raw = await fetchSessions();
         if (cancelled) return;
         const mapped: Session[] = (raw as Record<string, unknown>[]).map((s) => ({
           id: s.id as string,
@@ -122,7 +79,12 @@ export function SessionSync() {
           messageCount: (s.message_count as number) ?? 0,
           inFlight: (s.in_flight as boolean) ?? false,
           updatedAt: s.updated_at as string | undefined,
-          status: s.status === "archived" ? "archived" : "active",
+          workspacePath: typeof s.workspace_path === "string" ? s.workspace_path : undefined,
+          workspaceId: (s.workspace_id as string | null | undefined) ?? undefined,
+          workspaceTitle: typeof s.workspace_title === "string" ? s.workspace_title : undefined,
+          blank: Boolean(s.blank),
+          pendingApproval: Boolean(s.pending_approval),
+          pendingQuestion: Boolean(s.pending_question),
         }));
         mergeSessions(mapped);
 
@@ -232,14 +194,17 @@ export function SessionSync() {
         consecutiveErrors = 0;
 
         setFullAccessEnabled(detail.fullAccessEnabled);
-        setVisionCapable(detail.visionCapable);
+        // 占位会话（engine 尚未创建）会返回 vision_capable=null；不要把未知当成不支持。
+        if (detail.currentModel != null && typeof detail.visionCapable === "boolean") {
+          setVisionCapable(detail.visionCapable);
+        }
         // 娉ㄦ剰锛氫笉瑕佸湪杞涓敤鍚庣 chatMode 瑕嗙洊鍓嶇鐘舵€併€?
         // chatMode 鐨勬潈濞佹潵婧愭槸鍓嶇鐢ㄦ埛鎿嶄綔锛圕hatModeTabs 鐐瑰嚮锛夛紝
         // 鍚庣 _current_chat_mode 鍙湪 engine.chat() 璋冪敤鏃舵洿鏂帮紝
         // 杞瑕嗙洊浼氬鑷寸敤鎴峰垏鎹㈡ā寮忓悗鍑犵琚噸缃洖鏃у€笺€?
         // 鍚庣涓诲姩鎺ㄩ€佺殑妯″紡鍙樻洿锛圫SE mode_changed 浜嬩欢锛変粛鐒剁敓鏁堛€?
         const modelName = detail.currentModelName || detail.currentModel;
-        if (modelName) setCurrentModel(modelName);
+        if (modelName && !isPlaceholderModelId(modelName)) setCurrentModel(modelName);
 
         // 閲嶈锛歱ollDetail 涓哄紓姝ワ紝鍙兘涓庝箰瑙傛湰鍦?sendMessage() 绔炴€併€?
         // 鍦ㄤ换浣曚細瑕嗙洊娑堟伅鐨勫埛鏂板墠锛屽姟蹇呴噸鏂拌鍙栨渶鏂?chat 鐘舵€侊紝閬垮厤鎿﹂櫎鍒氳拷鍔犵殑鏈湴 user/assistant 姘旀场銆?
@@ -295,10 +260,6 @@ export function SessionSync() {
           const freshChat = useChatStore.getState();
 
           // 鎭㈠璺敱鐘舵€?block锛堝埛鏂板悗涓㈠け鐨?SSE route_end 浜х墿锛?
-          if (detail.lastRoute && detail.lastRoute.routeMode) {
-            _injectRouteBlock(useChatStore.getState(), detail.lastRoute);
-          }
-
           // 鎭㈠寰呭鐞嗗鎵瑰脊绐楋紙鍒锋柊鍚庝涪澶辩殑鐬€佺姸鎬侊級
           // 娉ㄦ剰锛氱敤鎴风偣鍑诲厑璁?鎷掔粷鍚庝細璁板綍 _lastDismissedApprovalId锛?
           // 闃叉 SessionSync 杞鍦ㄥ悗绔皻鏈鐞嗗畬瀹℃壒鏃舵妸寮圭獥閲嶆柊鎷夊洖鏉?
@@ -371,4 +332,3 @@ export function SessionSync() {
 
   return null;
 }
-

@@ -51,10 +51,10 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(
-        command="/backup",
-        description="工作区事务控制（备份沙盒）",
-        aliases=("/workspace",),
-        arguments=("status", "on", "off", "apply", "list"),
+        command="/code",
+        description="代码模式",
+        aliases=("/code_mode",),
+        arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(
         command="/plan",

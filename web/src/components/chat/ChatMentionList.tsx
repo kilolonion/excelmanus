@@ -4,6 +4,7 @@ import { useCallback, useEffect, useState, type Dispatch, type MutableRefObject,
 import { FileSpreadsheet, FolderOpen, Sparkles, Wrench } from "lucide-react";
 import { buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
+import { useSessionStore } from "@/stores/session-store";
 import { AT_TOP_LEVEL, type MentionData, type PopoverMode } from "./chat-input-constants";
 import { CommandPopover, type PopoverItem } from "./CommandPopover";
 import {
@@ -19,8 +20,12 @@ export function useChatMentions() {
 
   const fetchMentionData = useCallback(async (subpath?: string) => {
     try {
-      const params = subpath ? `?path=${encodeURIComponent(subpath)}` : "";
-      const res = await fetch(`${buildApiUrl("/mentions")}${params}`, {
+      const params = new URLSearchParams();
+      if (subpath) params.set("path", subpath);
+      const sessionId = useSessionStore.getState().activeSessionId;
+      if (sessionId) params.set("session_id", sessionId);
+      const qs = params.toString();
+      const res = await fetch(`${buildApiUrl("/mentions")}${qs ? `?${qs}` : ""}`, {
         headers: { ...getAuthHeaders() },
       });
       if (res.ok) {

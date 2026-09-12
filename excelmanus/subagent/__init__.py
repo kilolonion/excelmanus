@@ -1,7 +1,7 @@
 """Subagent 模块导出。"""
 
 from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
-from excelmanus.subagent.executor import SubagentExecutor
+from excelmanus.subagent.child import ChildDriver, start_child_driver
 from excelmanus.subagent.models import (
     SubagentConfig,
     SubagentFileChange,
@@ -15,13 +15,14 @@ from excelmanus.subagent.tool_filter import FilteredToolRegistry
 
 __all__ = [
     "BUILTIN_SUBAGENTS",
+    "ChildDriver",
     "FilteredToolRegistry",
     "SubagentConfig",
-    "SubagentExecutor",
     "SubagentFileChange",
     "SubagentMemoryScope",
     "SubagentPermissionMode",
     "SubagentRegistry",
     "SubagentResult",
     "SubagentSource",
+    "start_child_driver",
 ]

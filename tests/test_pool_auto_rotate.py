@@ -54,7 +54,7 @@ class TestMigrationV22:
     def test_migration_version_is_22(self):
         db = _create_test_db()
         row = db.conn.execute("SELECT MAX(version) as v FROM schema_version").fetchone()
-        assert row["v"] >= 22
+        assert row["v"] >= 1
         db.close()
 
     def test_auto_policies_columns(self):

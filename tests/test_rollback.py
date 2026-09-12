@@ -115,6 +115,49 @@ class TestListUserTurns:
         assert turns[0]["content_preview"] == "[多模态消息]"
 
 
+class TestHiddenUserTurns:
+    """后台注入的 user-role 消息不计入 rollback / list_user_turns。"""
+
+    def test_rollback_skips_skill_catalog(self) -> None:
+        mem = ConversationMemory(_make_config())
+        mem.add_user_message(
+            "<available_skills>\n- `data-basic`: 分析\n</available_skills>",
+            hidden=True,
+            prompt_kind="skill_catalog",
+        )
+        mem.add_user_message("帮我看这张表")
+        mem.add_assistant_message("好的")
+        mem.add_user_message("再按区域汇总")
+        mem.add_assistant_message("已汇总")
+
+        turns = mem.list_user_turns()
+        assert [t["content_preview"] for t in turns] == ["帮我看这张表", "再按区域汇总"]
+
+        mem.rollback_to_user_turn(0, keep_target=False)
+        visible = [
+            m["content"] for m in mem.messages if m.get("role") == "user" and not m.get("_ui_hidden")
+        ]
+        assert visible == []
+        assert any(m.get("_ui_hidden") for m in mem.messages if m.get("role") == "user")
+
+    def test_legacy_catalog_without_flag_is_skipped(self) -> None:
+        mem = ConversationMemory(_make_config())
+        mem.add_user_message("<available_skills>\n- `x`: y\n</available_skills>")
+        mem.add_user_message("真实问题")
+        turns = mem.list_user_turns()
+        assert len(turns) == 1
+        assert turns[0]["content_preview"] == "真实问题"
+
+    def test_get_messages_strips_hidden_flag(self) -> None:
+        mem = ConversationMemory(_make_config())
+        mem.add_user_message("目录", hidden=True, prompt_kind="skill_catalog")
+        msgs = mem.get_messages()
+        user = [m for m in msgs if m.get("role") == "user"][0]
+        assert user["content"] == "目录"
+        assert "_ui_hidden" not in user
+        assert "_prompt_kind" not in user
+
+
 class TestControlCommandRollback:
     """验证 /rollback 命令注册。"""
 

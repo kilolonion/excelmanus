@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any
@@ -68,6 +69,100 @@ def _extract_status_code(exc: Exception) -> int | None:
     return None
 
 
+_INVALID_KEY_KEYWORDS = (
+    "invalid api key",
+    "invalid api_key",
+    "invalid_api_key",
+    "incorrect api key",
+    "api key is invalid",
+    "api key expired",
+    "expired api key",
+    "malformed api key",
+    "api key not found",
+)
+
+_USELESS_PROVIDER_DETAILS = {
+    "",
+    "forbidden",
+    "unauthorized",
+    "error",
+    "http 400",
+    "http 401",
+    "http 403",
+    "permission denied",
+}
+
+
+def _combined_exc_text(exc: Exception) -> str:
+    """拼接异常链与 OpenAI-style body，供关键词分类使用。"""
+    parts: list[str] = []
+    for candidate in iter_exception_chain(exc):
+        parts.append(str(candidate))
+        body = getattr(candidate, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                for key in ("message", "code", "type"):
+                    val = err.get(key)
+                    if isinstance(val, str) and val.strip():
+                        parts.append(val)
+            elif isinstance(err, str) and err.strip():
+                parts.append(err)
+        elif isinstance(body, str) and body.strip():
+            parts.append(body)
+        msg = getattr(candidate, "message", None)
+        if isinstance(msg, str) and msg.strip():
+            parts.append(msg)
+    return " ".join(parts).lower()
+
+
+def _looks_like_invalid_api_key(text: str) -> bool:
+    lowered = text.lower()
+    return any(kw in lowered for kw in _INVALID_KEY_KEYWORDS)
+
+
+def _provider_error_detail(exc: Exception, limit: int = 180) -> str:
+    """提取服务商返回的简短错误，避免把 403 误说成 Key 无效时用户看不到原文。"""
+    raw = ""
+    for candidate in iter_exception_chain(exc):
+        body = getattr(candidate, "body", None)
+        if isinstance(body, dict):
+            err = body.get("error")
+            if isinstance(err, dict):
+                msg = err.get("message")
+                if isinstance(msg, str) and msg.strip():
+                    raw = msg.strip()
+                    break
+            elif isinstance(err, str) and err.strip():
+                raw = err.strip()
+                break
+        msg = getattr(candidate, "message", None)
+        if isinstance(msg, str) and len(msg.strip()) > 8:
+            raw = msg.strip()
+            break
+    if not raw:
+        raw = str(exc).strip()
+    raw = re.sub(r"(sk-[A-Za-z0-9_-]{8,}|Bearer\s+\S+)", "[redacted]", raw, flags=re.I)
+    raw = " ".join(raw.split())
+    if len(raw) > limit:
+        raw = raw[: limit - 1] + "…"
+    return raw
+
+
+def _append_detail(message: str, exc: Exception) -> str:
+    detail = _provider_error_detail(exc)
+    if not detail or detail.lower() in _USELESS_PROVIDER_DETAILS:
+        return message
+    if detail in message or detail.lower() in message.lower():
+        return message
+    return f"{message} 服务商返回：{detail}"
+
+
+def _is_vision_request_rejected(text: str) -> bool:
+    from excelmanus.model_probe import _is_vision_unsupported_error
+    return _is_vision_unsupported_error(text)
+
+
 # ── 分类规则 ──────────────────────────────────────────────────
 
 # 关键词 → (category, code, title, message, retryable)
@@ -79,9 +174,13 @@ _KEYWORD_RULES: list[tuple[tuple[str, ...], str, str, str, str, bool]] = [
         "额度不足", "模型 API 额度已用尽或账单异常，请检查服务商账户余额。",
         False,
     ),
-    # auth
+    # auth — 只匹配明确的 Key 无效，避免把任意 403/「authentication」包装成 Key 过期
     (
-        ("invalid api key", "invalid api_key", "api key", "authentication", "unauthorized"),
+        (
+            "invalid api key", "invalid api_key", "invalid_api_key",
+            "incorrect api key", "api key is invalid", "api key expired",
+            "unauthorized",
+        ),
         "model", "model_auth_failed",
         "模型认证失败", "API Key 无效或已过期，请在模型设置中更新。",
         False,
@@ -247,30 +346,81 @@ def classify_failure(
     """从异常对象构建结构化失败引导。
 
     分类优先级：
-    1. HTTP 状态码精确匹配（401/402/403/404/429/5xx）
-    2. 异常类名精确匹配
-    3. 错误消息关键词匹配
-    4. 兜底 → unknown/internal_error
+    1. 明确的视觉/图片拒绝（任何 HTTP 状态码）
+    2. HTTP 状态码精确匹配（401/402/403/404/429/5xx）
+    3. 异常类名精确匹配
+    4. 错误消息关键词匹配
+    5. 兜底 → unknown/internal_error
     """
     diagnostic_id = str(uuid.uuid4())
     status_code = _extract_status_code(exc)
-    exc_class_name = type(exc).__name__.lower()
-    exc_text = str(exc).lower()
+    exc_class_name = " ".join(type(c).__name__.lower() for c in iter_exception_chain(exc))
+    exc_text = _combined_exc_text(exc)
+
+    def _fg(
+        category: str,
+        code: str,
+        title: str,
+        message: str,
+        *,
+        retryable: bool,
+        with_detail: bool = False,
+    ) -> FailureGuidance:
+        if with_detail:
+            message = _append_detail(message, exc)
+        return FailureGuidance(
+            category=category,
+            code=code,
+            title=title,
+            message=message,
+            stage=stage,
+            retryable=retryable,
+            diagnostic_id=diagnostic_id,
+            actions=_actions_for(retryable) if code != "session_not_found" else [_ACTION_COPY_DIAGNOSTIC],
+            provider=provider,
+            model=model,
+        )
+
+    # ── 0. 视觉/图片拒绝：不能包装成 API Key 无效 ──
+    if _is_vision_request_rejected(exc_text):
+        return _fg(
+            "model",
+            "vision_unsupported",
+            "不支持图片输入",
+            "模型服务拒绝了当前请求中的图片。请确认 Model ID 是否为支持视觉的版本，或去掉图片后再试。",
+            retryable=False,
+            with_detail=True,
+        )
 
     # ── 1. HTTP 状态码精确匹配 ──
 
-    if status_code == 401 or status_code == 403:
-        return FailureGuidance(
-            category="model",
-            code="model_auth_failed",
-            title="模型认证失败",
-            message="API Key 无效、已过期或权限不足，请在模型设置中更新。",
-            stage=stage,
+    if status_code == 401:
+        if _looks_like_invalid_api_key(exc_text):
+            auth_msg = "API Key 无效或已过期，请在模型设置中更新。"
+        else:
+            auth_msg = (
+                "模型服务返回 401 认证失败。请核对 API Key；"
+                "若 Key 本身可用于文本对话，也可能是该模型或当前请求未被授权。"
+            )
+        return _fg(
+            "model", "model_auth_failed", "模型认证失败", auth_msg,
+            retryable=False, with_detail=True,
+        )
+
+    if status_code == 403:
+        if _looks_like_invalid_api_key(exc_text):
+            return _fg(
+                "model", "model_auth_failed", "模型认证失败",
+                "API Key 无效或已过期，请在模型设置中更新。",
+                retryable=False, with_detail=True,
+            )
+        return _fg(
+            "model",
+            "model_forbidden",
+            "模型拒绝访问",
+            "模型服务拒绝访问（HTTP 403）。常见原因是该模型未开通或当前请求不被允许，不一定是 API Key 无效或过期。",
             retryable=False,
-            diagnostic_id=diagnostic_id,
-            actions=_actions_for(False),
-            provider=provider,
-            model=model,
+            with_detail=True,
         )
 
     if status_code == 402:
@@ -287,9 +437,19 @@ def classify_failure(
             model=model,
         )
 
+    if status_code == 400:
+        return _fg(
+            "model",
+            "invalid_request",
+            "请求格式错误",
+            "模型服务拒绝了当前请求格式。",
+            retryable=False,
+            with_detail=True,
+        )
+
     if status_code == 404:
         # 区分 "路由不存在"（base URL 路径错误）和 "模型不存在"（模型 ID 错误）
-        _route_keywords = ("route", "completions not found", "endpoint not found", "path not found", "not found")
+        _route_keywords = ("route", "completions not found", "endpoint not found", "path not found")
         _model_keywords = ("model", "deployment")
         _is_route_error = any(kw in exc_text for kw in _route_keywords) and not any(kw in exc_text for kw in _model_keywords)
         if _is_route_error:
@@ -437,17 +597,20 @@ def classify_failure(
         )
 
     if "authenticationerror" in exc_class_name:
-        return FailureGuidance(
-            category="model",
-            code="model_auth_failed",
-            title="模型认证失败",
-            message="API Key 无效或已过期，请在模型设置中更新。",
-            stage=stage,
+        return _fg(
+            "model", "model_auth_failed", "模型认证失败",
+            "模型服务认证失败。请核对 API Key 是否有效；这不一定表示 Key 已过期。",
+            retryable=False, with_detail=True,
+        )
+
+    if "permissiondeniederror" in exc_class_name:
+        return _fg(
+            "model",
+            "model_forbidden",
+            "模型拒绝访问",
+            "模型服务拒绝访问。常见原因是该模型未开通或当前请求不被允许，不一定是 API Key 无效或过期。",
             retryable=False,
-            diagnostic_id=diagnostic_id,
-            actions=_actions_for(False),
-            provider=provider,
-            model=model,
+            with_detail=True,
         )
 
     if "ratelimiterror" in exc_class_name:

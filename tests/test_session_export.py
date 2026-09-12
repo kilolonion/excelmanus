@@ -1,4 +1,4 @@
-"""Tests for excelmanus/session_export.py — session export & import."""
+"""Tests for excelmanus/session_export.py — Markdown / JSON session export."""
 
 from __future__ import annotations
 
@@ -6,19 +6,11 @@ import json
 import pytest
 
 from excelmanus.session_export import (
-    EMX_FORMAT_ID,
-    EMX_VERSION,
-    EMXImportError,
-    export_emx,
+    export_json,
     export_markdown,
-    export_text,
-    parse_emx,
     _extract_text_content,
     _escape_md_table_cell,
 )
-
-
-# ── Fixtures ─────────────────────────────────────────
 
 
 @pytest.fixture
@@ -28,6 +20,7 @@ def session_meta():
         "title": "测试会话",
         "created_at": "2026-03-01T00:00:00Z",
         "updated_at": "2026-03-01T01:00:00Z",
+        "workspace_path": "/tmp/ws",
     }
 
 
@@ -85,9 +78,6 @@ def sample_excel_previews():
     ]
 
 
-# ── _extract_text_content ────────────────────────────
-
-
 class TestExtractTextContent:
     def test_string_content(self):
         assert _extract_text_content({"content": "hello"}) == "hello"
@@ -110,9 +100,6 @@ class TestExtractTextContent:
         assert _extract_text_content({"content": None}) == ""
 
 
-# ── _escape_md_table_cell ─────────────────────────────
-
-
 class TestEscapeMdTableCell:
     def test_pipe_escaped(self):
         assert _escape_md_table_cell("A|B") == "A\\|B"
@@ -128,9 +115,6 @@ class TestEscapeMdTableCell:
 
     def test_combined(self):
         assert _escape_md_table_cell("a|b\nc") == "a\\|b c"
-
-
-# ── Markdown export ──────────────────────────────────
 
 
 class TestExportMarkdown:
@@ -180,111 +164,74 @@ class TestExportMarkdown:
         assert "val\\|with\\|pipes" in md
 
 
-# ── Text export ──────────────────────────────────────
-
-
-class TestExportText:
-    def test_basic_structure(self, session_meta, sample_messages):
-        txt = export_text(session_meta, sample_messages)
-        assert "会话报告: 测试会话" in txt
-        assert "[用户 - 轮次 1]" in txt
-        assert "[助手 - 轮次 1]" in txt
-        assert "请帮我分析这个表格" in txt
-
-    def test_tool_names_listed(self, session_meta, sample_messages):
-        txt = export_text(session_meta, sample_messages)
-        assert "read_excel" in txt
-
-    def test_no_markdown_syntax(self, session_meta, sample_messages):
-        txt = export_text(session_meta, sample_messages)
-        assert "##" not in txt
-        assert "**" not in txt
-
-
-# ── EMX export ───────────────────────────────────────
-
-
-class TestExportEmx:
+class TestExportJson:
     def test_structure(self, session_meta, sample_messages):
-        emx = export_emx(session_meta, sample_messages)
-        assert emx["format"] == EMX_FORMAT_ID
-        assert emx["version"] == EMX_VERSION
-        assert "exported_at" in emx
-        assert emx["session"]["id"] == "test-session-001"
-        assert emx["session"]["title"] == "测试会话"
-        assert len(emx["messages"]) == len(sample_messages)
+        data = export_json(session_meta, sample_messages)
+        assert "exported_at" in data
+        assert data["session"]["id"] == "test-session-001"
+        assert data["session"]["title"] == "测试会话"
+        assert data["session"]["workspace_path"] == "/tmp/ws"
+        assert data["messages"] == sample_messages
+        assert data["excel_diffs"] == []
+        assert data["excel_previews"] == []
+        assert data["affected_files"] == []
 
     def test_with_excel_data(self, session_meta, sample_messages, sample_excel_diffs, sample_excel_previews):
-        emx = export_emx(
+        data = export_json(
             session_meta, sample_messages,
             excel_diffs=sample_excel_diffs,
             excel_previews=sample_excel_previews,
             affected_files=["test.xlsx"],
         )
-        assert len(emx["excel_diffs"]) == 1
-        assert len(emx["excel_previews"]) == 1
-        assert emx["affected_files"] == ["test.xlsx"]
+        assert len(data["excel_diffs"]) == 1
+        assert len(data["excel_previews"]) == 1
+        assert data["affected_files"] == ["test.xlsx"]
 
-    def test_roundtrip_json_serializable(self, session_meta, sample_messages):
-        emx = export_emx(session_meta, sample_messages)
-        serialized = json.dumps(emx, ensure_ascii=False)
-        restored = json.loads(serialized)
-        assert restored["format"] == EMX_FORMAT_ID
+    def test_no_restore_fields(self, session_meta, sample_messages):
+        data = export_json(session_meta, sample_messages)
+        for key in (
+            "format",
+            "version",
+            "workspace_files",
+            "memories",
+            "session_state",
+            "task_list",
+            "config_snapshot",
+        ):
+            assert key not in data
+
+    def test_json_serializable(self, session_meta, sample_messages):
+        data = export_json(session_meta, sample_messages)
+        restored = json.loads(json.dumps(data, ensure_ascii=False))
+        assert restored["session"]["id"] == "test-session-001"
+        assert restored["messages"][1]["content"] == "请帮我分析这个表格"
+
+    def test_missing_optional_meta_defaults(self, sample_messages):
+        data = export_json({"id": "s1"}, sample_messages)
+        assert data["session"]["title"] == ""
+        assert data["session"]["workspace_path"] == ""
 
 
-# ── EMX import (parse_emx) ──────────────────────────
+def test_old_export_symbols_removed():
+    import excelmanus.session_export as mod
+
+    for name in (
+        "export_emx",
+        "export_text",
+        "parse_emx",
+        "EMXImportError",
+        "EMX_FORMAT_ID",
+        "EMX_VERSION",
+        "collect_workspace_files",
+        "restore_workspace_files",
+    ):
+        assert not hasattr(mod, name)
+    assert hasattr(mod, "export_json")
+    assert hasattr(mod, "export_markdown")
 
 
-class TestParseEmx:
-    def test_valid_roundtrip(self, session_meta, sample_messages):
-        emx = export_emx(session_meta, sample_messages)
-        parsed = parse_emx(emx)
-        assert parsed["session_meta"]["id"] == "test-session-001"
-        assert parsed["session_meta"]["title"] == "测试会话"
-        assert len(parsed["messages"]) == len(sample_messages)
+def test_session_manager_has_no_emx_roundtrip():
+    from excelmanus.session import SessionManager
 
-    def test_invalid_format(self):
-        with pytest.raises(EMXImportError, match="不支持的格式"):
-            parse_emx({"format": "wrong", "version": "1.0.0", "session": {}, "messages": []})
-
-    def test_invalid_version(self):
-        with pytest.raises(EMXImportError, match="不支持的版本"):
-            parse_emx({"format": EMX_FORMAT_ID, "version": "3.0.0", "session": {}, "messages": []})
-
-    def test_missing_session(self):
-        with pytest.raises(EMXImportError, match="缺少 session"):
-            parse_emx({"format": EMX_FORMAT_ID, "version": "1.0.0", "messages": []})
-
-    def test_missing_messages(self):
-        with pytest.raises(EMXImportError, match="缺少 messages"):
-            parse_emx({"format": EMX_FORMAT_ID, "version": "1.0.0", "session": {}})
-
-    def test_invalid_message_not_dict(self):
-        with pytest.raises(EMXImportError, match="不是 dict"):
-            parse_emx({
-                "format": EMX_FORMAT_ID,
-                "version": "1.0.0",
-                "session": {"id": "x"},
-                "messages": ["not a dict"],
-            })
-
-    def test_invalid_message_missing_role(self):
-        with pytest.raises(EMXImportError, match="缺少 role"):
-            parse_emx({
-                "format": EMX_FORMAT_ID,
-                "version": "1.0.0",
-                "session": {"id": "x"},
-                "messages": [{"content": "no role"}],
-            })
-
-    def test_defaults_for_missing_optional(self):
-        parsed = parse_emx({
-            "format": EMX_FORMAT_ID,
-            "version": "1.0.0",
-            "session": {"id": "s1"},
-            "messages": [{"role": "user", "content": "hi"}],
-        })
-        assert parsed["excel_diffs"] == []
-        assert parsed["excel_previews"] == []
-        assert parsed["affected_files"] == []
-        assert parsed["session_meta"]["title"] == "导入的会话"
+    assert not hasattr(SessionManager, "export_full_session")
+    assert not hasattr(SessionManager, "import_full_session")

@@ -44,6 +44,7 @@ def convert_to_xlsx(
     dst: str | Path | None = None,
     *,
     overwrite: bool = False,
+    workspace_root: str | Path | None = None,
 ) -> Path:
     """将 .xls/.xlsb 文件转换为 .xlsx。
 
@@ -51,6 +52,7 @@ def convert_to_xlsx(
         src: 源文件路径。
         dst: 目标 .xlsx 路径，默认同目录后缀替换。
         overwrite: 是否覆盖已存在的目标文件。
+        workspace_root: 工作区根；缺省时用当前会话 Guard 或 dst 父目录。
 
     Returns:
         转换后的 .xlsx 文件路径。
@@ -80,9 +82,9 @@ def convert_to_xlsx(
     dst.parent.mkdir(parents=True, exist_ok=True)
 
     if ext == ".xls":
-        return _convert_xls(src, dst)
+        return _convert_xls(src, dst, workspace_root=workspace_root)
     elif ext == ".xlsb":
-        return _convert_xlsb(src, dst)
+        return _convert_xlsb(src, dst, workspace_root=workspace_root)
     else:
         raise ValueError(f"不支持的格式: {ext}")
 
@@ -92,10 +94,58 @@ class ConversionError(Exception):
     pass
 
 
+def _commit_converted_xlsx(
+    dst: Path,
+    data: bytes,
+    *,
+    workspace_root: str | Path | None = None,
+) -> None:
+    """Publish converted xlsx bytes through FileAccessGuard + commit_bytes."""
+    from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+    from excelmanus.tools._guard_ctx import get_guard as get_ctx_guard
+    from excelmanus.workbook_commit import CommitError, commit_bytes, resolve_expected_version
+
+    guard = None
+    if workspace_root is not None:
+        guard = FileAccessGuard(str(workspace_root))
+    else:
+        guard = get_ctx_guard()
+    if guard is None:
+        guard = FileAccessGuard(str(dst.parent.resolve()))
+    try:
+        dest = guard.resolve_and_validate(str(dst))
+        rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+        seen = resolve_expected_version(rel, None, exists=dest.is_file())
+        commit_bytes(guard=guard, file_path=rel, data=data, expected_version=seen)
+    except (CommitError, SecurityViolationError) as exc:
+        raise ConversionError(str(exc)) from exc
+
+
+def _save_converted_workbook(
+    xlsx_wb: Any,
+    dst: Path,
+    *,
+    workspace_root: str | Path | None = None,
+) -> Path:
+    from io import BytesIO
+
+    buf = BytesIO()
+    try:
+        xlsx_wb.save(buf)
+    except Exception as e:
+        raise ConversionError(f"保存 .xlsx 失败: {e}") from e
+    finally:
+        xlsx_wb.close()
+    _commit_converted_xlsx(dst, buf.getvalue(), workspace_root=workspace_root)
+    return dst
+
+
 # ── .xls 转换 ──────────────────────────────────────────────
 
 
-def _convert_xls(src: Path, dst: Path) -> Path:
+def _convert_xls(
+    src: Path, dst: Path, *, workspace_root: str | Path | None = None,
+) -> Path:
     """用 xlrd 读取 .xls，openpyxl 写出 .xlsx。
 
     保留：数据、sheet 结构、基础字体/填充/对齐/边框、列宽、行高、合并单元格。
@@ -205,13 +255,7 @@ def _convert_xls(src: Path, dst: Path) -> Path:
             except Exception:
                 pass
 
-    try:
-        xlsx_wb.save(str(dst))
-    except Exception as e:
-        raise ConversionError(f"保存 .xlsx 失败: {e}") from e
-    finally:
-        xlsx_wb.close()
-
+    dst = _save_converted_workbook(xlsx_wb, dst, workspace_root=workspace_root)
     logger.info("XLS → XLSX 转换完成: %s → %s (%d sheets)", src.name, dst.name, xls_wb.nsheets)
     return dst
 
@@ -299,7 +343,9 @@ def _xlrd_color_to_hex(colour_index: int, xls_wb: Any) -> str | None:
 # ── .xlsb 转换 ──────────────────────────────────────────────
 
 
-def _convert_xlsb(src: Path, dst: Path) -> Path:
+def _convert_xlsb(
+    src: Path, dst: Path, *, workspace_root: str | Path | None = None,
+) -> Path:
     """用 pyxlsb 读取 .xlsb，openpyxl 写出 .xlsx。
 
     仅转换数据和 sheet 结构，不保留样式。
@@ -343,13 +389,7 @@ def _convert_xlsb(src: Path, dst: Path) -> Path:
     if not xlsx_wb.sheetnames:
         xlsx_wb.create_sheet(title="Sheet1")
 
-    try:
-        xlsx_wb.save(str(dst))
-    except Exception as e:
-        raise ConversionError(f"保存 .xlsx 失败: {e}") from e
-    finally:
-        xlsx_wb.close()
-
+    dst = _save_converted_workbook(xlsx_wb, dst, workspace_root=workspace_root)
     logger.info("XLSB → XLSX 转换完成: %s → %s", src.name, dst.name)
     return dst
 
@@ -357,7 +397,12 @@ def _convert_xlsb(src: Path, dst: Path) -> Path:
 # ── 便捷入口 ────────────────────────────────────────────────
 
 
-def ensure_xlsx(path: str | Path, *, overwrite: bool = False) -> tuple[Path, bool]:
+def ensure_xlsx(
+    path: str | Path,
+    *,
+    overwrite: bool = False,
+    workspace_root: str | Path | None = None,
+) -> tuple[Path, bool]:
     """确保路径指向 xlsx 文件。如果是 xls/xlsb 则自动转换。
 
     Returns:
@@ -367,5 +412,5 @@ def ensure_xlsx(path: str | Path, *, overwrite: bool = False) -> tuple[Path, boo
     if not needs_conversion(p):
         return p, False
 
-    xlsx_path = convert_to_xlsx(p, overwrite=overwrite)
+    xlsx_path = convert_to_xlsx(p, overwrite=overwrite, workspace_root=workspace_root)
     return xlsx_path, True

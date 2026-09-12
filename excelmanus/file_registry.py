@@ -1,8 +1,7 @@
-"""FileRegistry：统一文件注册表 — 元数据 + provenance + 物理操作 + 路径解析。
+"""FileRegistry：别名索引 — 元数据 + provenance + 路径解析。
 
-当前实现：核心数据模型、注册/查询/事件记录、路径解析、panorama 构建。
-目标为统一收敛为文件管理的唯一外部接口，后续可扩展全文件类型扫描、
-uploads 接入、Staging/CoW/checkpoint 等。
+权威是磁盘正本 + RevisionStore + ContentVersion。本表只记 original_name
+等展示别名。Overlay / FileVersionManager 已删除。
 """
 from __future__ import annotations
 
@@ -37,8 +36,17 @@ _SKIP_DIRS: frozenset[str] = frozenset({
     ".git", ".venv", "node_modules", "__pycache__",
     ".worktrees", "dist", "build",
     # 旧版隔离目录：扫描不得走进归档残骸
-    "users", "channel_anonymous",
+    "users",
+    # 保留命名空间：scan 不得走进（方案 P1 CatalogFilter）
+    ".excelmanus",
+    ".versions",
 })
+
+_SKIP_REL_PREFIXES: tuple[str, ...] = (
+    "outputs/backups",
+    "outputs/.versions",
+    "outputs/audits",
+)
 
 # 全文件扫描时跳过的二进制/编译文件扩展名
 _SKIP_EXTENSIONS: frozenset[str] = frozenset({
@@ -49,67 +57,6 @@ _SKIP_EXTENSIONS: frozenset[str] = frozenset({
     ".woff", ".woff2", ".ttf", ".otf", ".eot",
     ".DS_Store",
 })
-
-# Panorama 自适应阈值
-_PANORAMA_FULL_THRESHOLD = 20
-_PANORAMA_COMPACT_THRESHOLD = 100
-
-# 目录语义标签
-_DIR_LABELS: dict[str, str] = {
-    "uploads": "用户上传",
-    "outputs": "产出物",
-    "outputs/backups": "备份副本",
-}
-
-
-def _estimate_tokens(text: str) -> int:
-    """Fast approximate token count for mixed CJK / ASCII text.
-
-    CJK characters ≈ 1 token each; ASCII runs ≈ 1 token per 4 chars.
-    Deliberately conservative (over-estimates) so the budget guard errs on
-    the safe side.
-    """
-    if not text:
-        return 0
-    cjk = 0
-    other = 0
-    for ch in text:
-        if "\u2e80" <= ch <= "\u9fff" or "\uf900" <= ch <= "\ufaff":
-            cjk += 1
-        else:
-            other += 1
-    return cjk + max(other // 4, 1)
-
-
-def _truncate_to_tokens(text: str, max_tokens: int) -> str:
-    """Hard-truncate *text* at a line boundary to fit within *max_tokens*."""
-    if _estimate_tokens(text) <= max_tokens:
-        return text
-    notice = "\n\n(… 全景已截断，完整列表请查阅文件管理器)"
-    notice_tokens = _estimate_tokens(notice)
-    budget = max(max_tokens - notice_tokens, 0)
-
-    lines = text.split("\n")
-    kept: list[str] = []
-    running = 0
-    for ln in lines:
-        cost = _estimate_tokens(ln) + 1  # +1 for newline
-        if running + cost > budget:
-            break
-        kept.append(ln)
-        running += cost
-    if not kept:
-        kept.append(lines[0])
-    return "\n".join(kept) + notice
-
-
-def _dir_label(parent: str) -> str:
-    normalized = parent.replace("\\", "/").strip("/")
-    for prefix, label_ in _DIR_LABELS.items():
-        if normalized == prefix or normalized.startswith(prefix + "/"):
-            return label_
-    return ""
-
 
 def _detect_file_type(path: str) -> str:
     ext = os.path.splitext(path)[1].lower()
@@ -153,8 +100,6 @@ class FileEntry:
     sheet_meta: list[dict] = field(default_factory=list)
     content_hash: str = ""
     mtime_ns: int = 0
-    staging_path: str | None = None
-    is_active_cow: bool = False
     created_at: str = ""
     updated_at: str = ""
     deleted_at: str | None = None
@@ -175,8 +120,6 @@ class FileEntry:
             "sheet_meta": self.sheet_meta,
             "content_hash": self.content_hash,
             "mtime_ns": self.mtime_ns,
-            "staging_path": self.staging_path,
-            "is_active_cow": self.is_active_cow,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
             "deleted_at": self.deleted_at,
@@ -199,8 +142,6 @@ class FileEntry:
             sheet_meta=d.get("sheet_meta", []),
             content_hash=d.get("content_hash", ""),
             mtime_ns=d.get("mtime_ns", 0),
-            staging_path=d.get("staging_path"),
-            is_active_cow=d.get("is_active_cow", False),
             created_at=d.get("created_at", ""),
             updated_at=d.get("updated_at", ""),
             deleted_at=d.get("deleted_at"),
@@ -283,11 +224,7 @@ class FileGroup:
 
 
 class FileRegistry:
-    """全局文件注册表 — 统一元数据 + provenance + 路径解析 + 物理操作。
-
-    enable_versions=True 时内部组合 FileVersionManager，
-    提供 staging / CoW / checkpoint / rollback 统一接口。
-    """
+    """别名索引。enable_versions 已忽略；版本权威是 RevisionStore。"""
 
     def __init__(
         self,
@@ -307,11 +244,8 @@ class FileRegistry:
         self._id_to_path: dict[str, str] = {}  # file_id → canonical_path
         self._alias_cache: dict[str, str] = {}  # alias_value → file_id
 
-        # 可选版本管理层（session 级）
-        self._fvm: Any = None
-        if enable_versions:
-            from excelmanus.file_versions import FileVersionManager
-            self._fvm = FileVersionManager(self._workspace_root)
+        _ = enable_versions
+        self._fvm = None
 
         self._load_cache()
 
@@ -516,90 +450,6 @@ class FileRegistry:
         )
         return entry
 
-    def register_backup(
-        self,
-        backup_path: str,
-        parent_canonical: str,
-        reason: str = "staging",
-        session_id: str | None = None,
-        turn: int | None = None,
-        tool_name: str | None = None,
-    ) -> FileEntry:
-        """注册备份/副本文件。"""
-        file_type = _detect_file_type(backup_path)
-        now = _now_iso()
-        parent = self._path_cache.get(parent_canonical)
-        parent_id = parent.id if parent else None
-        original_name = Path(backup_path).name
-
-        existing = self._path_cache.get(backup_path)
-        entry = FileEntry(
-            id=existing.id if existing else _new_id(),
-            workspace=self._workspace_key,
-            canonical_path=backup_path,
-            original_name=original_name,
-            file_type=file_type,
-            origin="backup",
-            origin_session_id=session_id,
-            origin_turn=turn,
-            origin_tool=tool_name,
-            parent_file_id=parent_id,
-            created_at=existing.created_at if existing else now,
-            updated_at=now,
-        )
-        self._store.upsert_file(entry.to_dict())
-        self._cache_entry(entry)
-
-        self.record_event(
-            entry.id, "backed_up",
-            session_id=session_id, turn=turn, tool_name=tool_name,
-            details={"reason": reason, "parent": parent_canonical},
-        )
-        return entry
-
-    def register_cow(
-        self,
-        cow_path: str,
-        parent_canonical: str,
-        session_id: str | None = None,
-        turn: int | None = None,
-    ) -> FileEntry:
-        """注册 CoW 副本。"""
-        file_type = _detect_file_type(cow_path)
-        now = _now_iso()
-        parent = self._path_cache.get(parent_canonical)
-        parent_id = parent.id if parent else None
-
-        existing = self._path_cache.get(cow_path)
-        entry = FileEntry(
-            id=existing.id if existing else _new_id(),
-            workspace=self._workspace_key,
-            canonical_path=cow_path,
-            original_name=Path(cow_path).name,
-            file_type=file_type,
-            origin="cow_copy",
-            origin_session_id=session_id,
-            origin_turn=turn,
-            parent_file_id=parent_id,
-            is_active_cow=True,
-            created_at=existing.created_at if existing else now,
-            updated_at=now,
-        )
-        self._store.upsert_file(entry.to_dict())
-        self._cache_entry(entry)
-
-        # 添加 CoW 路径别名
-        alias_id = _new_id()
-        self._store.add_alias(alias_id, entry.id, "cow_path", cow_path)
-        self._alias_cache[cow_path] = entry.id
-
-        self.record_event(
-            entry.id, "cow_created",
-            session_id=session_id, turn=turn,
-            details={"parent": parent_canonical},
-        )
-        return entry
-
     def _try_tier1_scan(self, canonical_path: str) -> None:
         """对 Excel 文件尝试 Tier 1 引用图谱扫描。"""
         ext = os.path.splitext(canonical_path)[1].lower()
@@ -771,7 +621,7 @@ class FileRegistry:
     ) -> bool:
         """原子重命名文件路径，保留 file_id / provenance / events / 别名。
 
-        同时同步 staging 条目和别名缓存，并记录 renamed 事件。
+        同时同步别名缓存，并记录 renamed 事件。
         返回 True 表示成功迁移，False 表示旧路径不存在于注册表。
         """
         entry = self._path_cache.get(old_path)
@@ -803,14 +653,7 @@ class FileRegistry:
         # 3. 添加旧路径为 previous_path 别名，保证旧路径仍可被解析
         self.add_alias(entry.id, "previous_path", old_path)
 
-        # 4. 同步 staging 条目（如果有）
-        if self._fvm is not None:
-            try:
-                self._fvm.rename_staging_path(old_path, new_path)
-            except Exception:
-                logger.debug("rename_entry: staging 路径同步失败", exc_info=True)
-
-        # 5. 记录 renamed 事件
+        # 4. 记录 renamed 事件
         self.record_event(
             entry.id, "renamed",
             session_id=session_id, turn=turn,
@@ -913,241 +756,6 @@ class FileRegistry:
         """查询文件所属的所有组。"""
         rows = self._store.get_file_groups(file_id)
         return [FileGroup.from_dict(r) for r in rows]
-
-    # ── System Prompt 构建 ───────────────────────────────────
-
-    def build_panorama(self, max_tokens: int = 1500) -> str:
-        """构建文件全景图文本，用于 system prompt 注入。
-
-        统一覆盖文件全景、上传文件提示与 CoW 路径提示。
-        当输出超过 *max_tokens* 预算时，自动降级渲染模式或硬截断。
-        """
-        active = [
-            e for e in self._path_cache.values()
-            if e.deleted_at is None
-        ]
-        if not active:
-            return ""
-
-        # 分类
-        user_files: list[FileEntry] = []
-        backups: list[FileEntry] = []
-        agent_outputs: list[FileEntry] = []
-
-        for e in active:
-            if e.origin in ("backup", "cow_copy", "staged"):
-                backups.append(e)
-            elif e.origin == "agent_created":
-                agent_outputs.append(e)
-            else:
-                user_files.append(e)
-
-        total = len(active)
-
-        if total <= _PANORAMA_FULL_THRESHOLD:
-            modes = (self._panorama_full, self._panorama_compact, self._panorama_summary)
-        elif total <= _PANORAMA_COMPACT_THRESHOLD:
-            modes = (self._panorama_compact, self._panorama_summary)
-        else:
-            modes = (self._panorama_summary,)
-
-        text = ""
-        for mode_fn in modes:
-            lines: list[str] = ["## 工作区文件全景"]
-            mode_fn(lines, user_files, backups, agent_outputs)
-            self._panorama_append_tail(lines)
-            text = "\n".join(lines)
-            if _estimate_tokens(text) <= max_tokens:
-                return text
-
-        return _truncate_to_tokens(text, max_tokens)
-
-    def _panorama_append_tail(self, lines: list[str]) -> None:
-        """Append file-group info and footer notes to panorama *lines*."""
-        try:
-            groups = self.list_groups()
-            if groups:
-                lines.append("")
-                lines.append(f"### 文件组 ({len(groups)})")
-                lines.append("用户已将以下文件归为逻辑组，跨文件操作时优先在同组内匹配：")
-                for g in groups:
-                    members = self.get_group_files(g.id)
-                    if members:
-                        member_strs = [
-                            f"`{m['canonical_path']}`({m['role']})"
-                            for m in members
-                        ]
-                        desc = f" — {g.description}" if g.description else ""
-                        lines.append(f"- **{g.name}**{desc}: {', '.join(member_strs)}")
-                    else:
-                        lines.append(f"- **{g.name}**: (空)")
-        except Exception:
-            pass  # 组表可能尚未创建（旧 DB 版本）
-
-        lines.append("")
-        lines.append("⚠️ 路径规则：读写操作使用「位置」列路径。向用户展示使用「文件」列名称。")
-        lines.append("备份副本不可直接修改，操作原始文件即可。")
-
-    def _panorama_full(
-        self,
-        lines: list[str],
-        user_files: list[FileEntry],
-        backups: list[FileEntry],
-        agent_outputs: list[FileEntry],
-    ) -> None:
-        """完整模式：表格 + sheet 详情。"""
-        if user_files:
-            lines.append(f"\n### 用户文件 ({len(user_files)})")
-            lines.append("| 文件 | 位置 | 来源 | 结构 |")
-            lines.append("|---|---|---|---|")
-            for e in sorted(user_files, key=lambda x: x.canonical_path):
-                parent = str(Path(e.canonical_path).parent)
-                loc = parent + "/" if parent != "." else "./"
-                origin_str = self._format_origin(e)
-                struct = self._format_structure(e)
-                lines.append(f"| {e.original_name} | {loc} | {origin_str} | {struct} |")
-
-        if backups:
-            lines.append(f"\n### 备份与副本 ({len(backups)})")
-            lines.append("| 副本 | 原始文件 | 类型 | 产生于 |")
-            lines.append("|---|---|---|---|")
-            for e in sorted(backups, key=lambda x: x.created_at):
-                parent_name = self._get_parent_name(e)
-                btype = "CoW保护" if e.origin == "cow_copy" else "事务备份"
-                origin_str = self._format_origin(e)
-                lines.append(f"| {e.canonical_path} | {parent_name} | {btype} | {origin_str} |")
-
-        if agent_outputs:
-            lines.append(f"\n### Agent 产出 ({len(agent_outputs)})")
-            lines.append("| 文件 | 位置 | 派生自 | 产生于 |")
-            lines.append("|---|---|---|---|")
-            for e in sorted(agent_outputs, key=lambda x: x.created_at):
-                parent_name = self._get_parent_name(e)
-                parent_dir = str(Path(e.canonical_path).parent)
-                loc = parent_dir + "/" if parent_dir != "." else "./"
-                origin_str = self._format_origin(e)
-                lines.append(f"| {e.original_name} | {loc} | {parent_name} | {origin_str} |")
-
-    def _panorama_compact(
-        self,
-        lines: list[str],
-        user_files: list[FileEntry],
-        backups: list[FileEntry],
-        agent_outputs: list[FileEntry],
-    ) -> None:
-        """紧凑模式：文件列表。"""
-        if user_files:
-            lines.append(f"\n### 用户文件 ({len(user_files)})")
-            for e in sorted(user_files, key=lambda x: x.canonical_path):
-                sheets = ""
-                if e.file_type in ("excel", "csv") and e.sheet_meta:
-                    sheet_names = [s.get("name", "") for s in e.sheet_meta]
-                    sheets = f" [{', '.join(sheet_names)}]"
-                elif e.file_type == "word" and e.sheet_meta:
-                    sheets = f" ({self._format_structure(e)})"
-                lines.append(f"- `{e.canonical_path}`{sheets}")
-
-        if backups:
-            lines.append(f"\n### 备份与副本 ({len(backups)})")
-            for e in sorted(backups, key=lambda x: x.created_at):
-                parent_name = self._get_parent_name(e)
-                lines.append(f"- `{e.canonical_path}` ← {parent_name}")
-
-        if agent_outputs:
-            lines.append(f"\n### Agent 产出 ({len(agent_outputs)})")
-            for e in sorted(agent_outputs, key=lambda x: x.created_at):
-                lines.append(f"- `{e.canonical_path}`")
-
-    def _panorama_summary(
-        self,
-        lines: list[str],
-        user_files: list[FileEntry],
-        backups: list[FileEntry],
-        agent_outputs: list[FileEntry],
-    ) -> None:
-        """统计摘要模式。"""
-        lines.append(f"\n共 {len(user_files)} 个用户文件, "
-                      f"{len(backups)} 个备份/副本, "
-                      f"{len(agent_outputs)} 个 agent 产出")
-
-        # 热点目录
-        dir_counts: dict[str, int] = {}
-        for e in user_files:
-            parent = str(Path(e.canonical_path).parent)
-            dir_counts[parent] = dir_counts.get(parent, 0) + 1
-        if dir_counts:
-            top_dirs = sorted(dir_counts.items(), key=lambda x: -x[1])[:10]
-            lines.append("热点目录：")
-            for d, count in top_dirs:
-                label_ = _dir_label(d) if d != "." else ""
-                suffix = f"（{label_}）" if label_ else ""
-                dn = d if d != "." else "(根目录)"
-                lines.append(f"  - `{dn}/` ({count} 个文件){suffix}")
-
-    def _format_origin(self, e: FileEntry) -> str:
-        """格式化来源信息。"""
-        parts: list[str] = []
-        if e.origin == "uploaded":
-            parts.append("上传")
-        elif e.origin == "scan":
-            parts.append("扫描")
-        elif e.origin == "agent_created":
-            parts.append("agent")
-        elif e.origin == "backup":
-            parts.append("备份")
-        elif e.origin == "cow_copy":
-            parts.append("CoW")
-        if e.origin_turn is not None:
-            parts.append(f"T{e.origin_turn}")
-        if e.origin_tool:
-            parts.append(e.origin_tool)
-        return "(" + " ".join(parts) + ")" if parts else ""
-
-    def _format_structure(self, e: FileEntry) -> str:
-        """格式化文件结构（sheet 详情或文件类型）。"""
-        if e.file_type in ("excel", "csv") and e.sheet_meta:
-            parts: list[str] = []
-            for s in e.sheet_meta:
-                name = s.get("name", "")
-                rows = s.get("rows", 0)
-                cols = s.get("columns", 0)
-                parts.append(f"{name}({rows}×{cols})")
-            return f"{len(e.sheet_meta)}表: " + ", ".join(parts)
-        if e.file_type == "word" and e.sheet_meta:
-            meta = e.sheet_meta[0] if e.sheet_meta else {}
-            paras = meta.get("paragraphs", 0)
-            tables = meta.get("tables", 0)
-            headings = meta.get("headings", 0)
-            parts_w: list[str] = [f"{paras}段"]
-            if headings:
-                parts_w.append(f"{headings}标题")
-            if tables:
-                parts_w.append(f"{tables}表")
-            return "文档: " + ", ".join(parts_w)
-        if e.file_type == "image":
-            return f"图片 {self._format_size(e.size_bytes)}"
-        if e.size_bytes:
-            return self._format_size(e.size_bytes)
-        return e.file_type
-
-    def _get_parent_name(self, e: FileEntry) -> str:
-        """获取父文件的用户友好名。"""
-        if not e.parent_file_id:
-            return "-"
-        path = self._id_to_path.get(e.parent_file_id)
-        if path:
-            parent = self._path_cache.get(path)
-            if parent:
-                return parent.original_name
-        return "-"
-
-    @staticmethod
-    def _format_size(size_bytes: int) -> str:
-        if size_bytes < 1024:
-            return f"{size_bytes}B"
-        if size_bytes < 1024 * 1024:
-            return f"{size_bytes / 1024:.0f}KB"
-        return f"{size_bytes / (1024 * 1024):.1f}MB"
 
     # ── 扫描 ─────────────────────────────────────────────────
 
@@ -1315,7 +923,18 @@ class FileRegistry:
         paths: list[Path] = []
 
         for walk_root, dirs, files in os.walk(root):
+            try:
+                rel_dir = Path(walk_root).relative_to(root).as_posix()
+            except ValueError:
+                rel_dir = "."
+            if rel_dir in _SKIP_REL_PREFIXES or any(
+                rel_dir.startswith(prefix + "/") for prefix in _SKIP_REL_PREFIXES
+            ):
+                dirs[:] = []
+                continue
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            if rel_dir == "outputs":
+                dirs[:] = [d for d in dirs if d not in {"backups", "audits", ".versions"}]
             for name in files:
                 if name.startswith((".", "~$")):
                     continue
@@ -1586,252 +1205,21 @@ class FileRegistry:
             wb.close()
         return sheets
 
-    # ── Staging / CoW / Checkpoint 委托层 ────────────────────
-
     @property
     def has_versions(self) -> bool:
-        """是否启用了版本管理层。"""
-        return self._fvm is not None
+        """FileVersionManager is gone. History is RevisionStore."""
+        return False
 
-    @property
-    def fvm(self) -> Any:
-        """底层 FileVersionManager（仅 enable_versions=True 时可用）。"""
-        return self._fvm
 
-    # -- Staging -------------------------------------------------------
+_SHARED_REGISTRIES: dict[str, FileRegistry] = {}
 
-    def stage_for_write(
-        self,
-        file_path: str,
-        *,
-        ref_id: str = "",
-        scope: str = "all",
-    ) -> str:
-        """确保文件有原始快照，返回 staged 副本路径。
 
-        委托 FVM.stage_for_write() + 注册备份到 registry 元数据。
-        """
-        if self._fvm is None:
-            return str(self._resolve(file_path))
-
-        staged_path = self._fvm.stage_for_write(
-            file_path, ref_id=ref_id, scope=scope,
-        )
-
-        # 在 registry 元数据中注册备份副本
-        try:
-            resolved = self._resolve(file_path)
-            rel = self._to_rel(resolved)
-            staged_rel = self._to_rel(Path(staged_path))
-            if staged_rel != rel:
-                self.register_backup(
-                    canonical_path=staged_rel,
-                    parent_path=rel,
-                )
-        except Exception:
-            logger.debug("stage_for_write registry 注册失败", exc_info=True)
-
-        return staged_path
-
-    def get_staged_path(self, file_path: str) -> str | None:
-        """查询文件的 staged 副本路径。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.get_staged_path(file_path)
-
-    def commit_staged(self, file_path: str) -> dict[str, str] | None:
-        """将单个 staged 文件提交回原位置。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.commit_staged(file_path)
-
-    def commit_all_staged(self) -> list[dict[str, str]]:
-        """将所有 staged 文件提交回原位置。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.commit_all_staged()
-
-    def discard_staged(self, file_path: str) -> bool:
-        """丢弃单个 staged 文件。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.discard_staged(file_path)
-
-    def discard_all_staged(self) -> int:
-        """丢弃所有 staged 文件。"""
-        if self._fvm is None:
-            return 0
-        return self._fvm.discard_all_staged()
-
-    def list_staged(self) -> list[dict[str, str]]:
-        """列出所有活跃的 staged 文件。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.list_staged()
-
-    def staged_file_map(self) -> dict[str, str]:
-        """返回 original_abs → staged_abs 映射。"""
-        if self._fvm is None:
-            return {}
-        return self._fvm.staged_file_map()
-
-    def has_staging(self, file_path: str) -> bool:
-        """检查文件是否有活跃的 staging 条目。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.has_staging(file_path)
-
-    def undo_commit(
-        self,
-        original_path: str,
-        undo_path: str,
-        *,
-        expected_version: str | None = None,
-    ) -> bool:
-        """撤销一次 commit。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.undo_commit(
-            original_path, undo_path, expected_version=expected_version
-        )
-
-    def diff_staged_summary(self, file_path: str) -> dict | None:
-        """返回 staged vs original 的轻量变更摘要。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.diff_staged_summary(file_path)
-
-    def remove_staging_for_path(self, file_path: str) -> bool:
-        """移除指定文件的 staging 条目。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.remove_staging_for_path(file_path)
-
-    def rename_staging_path(self, old_path: str, new_path: str) -> bool:
-        """重命名 staging 条目的原始路径。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.rename_staging_path(old_path, new_path)
-
-    def prune_stale_staging(self) -> int:
-        """移除 staged 物理文件已不存在的条目。"""
-        if self._fvm is None:
-            return 0
-        return self._fvm.prune_stale_staging()
-
-    # -- CoW -----------------------------------------------------------
-
-    def register_cow_mapping(self, src_rel: str, dst_rel: str) -> None:
-        """注册 CoW 路径映射。
-
-        委托 FVM + 注册到 registry 元数据。
-        """
-        if self._fvm is not None:
-            self._fvm.register_cow_mapping(src_rel, dst_rel)
-
-        # 在 registry 中注册 CoW 条目
-        try:
-            self.register_cow(
-                canonical_path=dst_rel,
-                source_path=src_rel,
-            )
-        except Exception:
-            logger.debug("register_cow_mapping registry 注册失败", exc_info=True)
-
-    def lookup_cow_redirect(self, rel_path: str) -> str | None:
-        """查找相对路径是否有 CoW/staging 副本。"""
-        if self._fvm is not None:
-            return self._fvm.lookup_cow_redirect(rel_path)
-        return None
-
-    def get_cow_mappings(self) -> dict[str, str]:
-        """返回当前所有活跃的 CoW 映射（src_rel → dst_rel）。"""
-        if self._fvm is not None:
-            return dict(getattr(self._fvm, "_cow_registry", {}))
-        return {}
-
-    # -- Checkpoint / Version ------------------------------------------
-
-    def checkpoint_file(
-        self,
-        file_path: str,
-        *,
-        reason: str = "staging",
-        ref_id: str = "",
-    ) -> Any:
-        """为文件创建版本快照。返回 FileVersion 或 None（去重）。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.checkpoint(file_path, reason=reason, ref_id=ref_id)
-
-    def create_turn_checkpoint(
-        self,
-        turn_number: int,
-        dirty_files: list[str],
-        tool_names: list[str] | None = None,
-    ) -> Any:
-        """对 dirty_files 做快照，记录为一个轮次 checkpoint。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.create_turn_checkpoint(
-            turn_number, dirty_files, tool_names=tool_names,
-        )
-
-    def rollback_to_turn(self, turn_number: int) -> list[str]:
-        """回退到指定轮次之前的状态。返回被恢复的文件路径列表。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.rollback_to_turn(turn_number)
-
-    def list_turn_checkpoints(self) -> list[Any]:
-        """返回所有轮次 checkpoint（时间正序）。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.list_turn_checkpoints()
-
-    def restore_to_original(
-        self,
-        file_path: str,
-        *,
-        expected_version: str | None = None,
-    ) -> bool:
-        """将文件恢复到最早的原始版本。"""
-        if self._fvm is None:
-            return False
-        return self._fvm.restore_to_original(file_path, expected_version=expected_version)
-
-    def invalidate_undo(self, rel_paths: set[str]) -> int:
-        """标记指定文件的版本链为不可恢复。"""
-        if self._fvm is None:
-            return 0
-        return self._fvm.invalidate_undo(rel_paths)
-
-    def get_version_original(self, file_path: str) -> Any:
-        """获取文件的最早版本。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.get_original(file_path)
-
-    def get_version_latest(self, file_path: str) -> Any:
-        """获取文件的最新版本。"""
-        if self._fvm is None:
-            return None
-        return self._fvm.get_latest(file_path)
-
-    def list_versions(self, file_path: str) -> list[Any]:
-        """获取文件的完整版本链。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.list_versions(file_path)
-
-    def list_all_tracked(self) -> list[str]:
-        """返回所有有版本记录的文件相对路径。"""
-        if self._fvm is None:
-            return []
-        return self._fvm.list_all_tracked()
-
-    def gc_versions(self, max_age_seconds: float = 3600) -> int:
-        """清理过期版本快照。"""
-        if self._fvm is None:
-            return 0
-        return self._fvm.gc(max_age_seconds)
+def get_shared_file_registry(database: "Database", workspace_root: str | Path) -> FileRegistry:
+    """Process-wide FileRegistry: engine and API share one instance per workspace."""
+    key = str(Path(workspace_root).expanduser().resolve())
+    existing = _SHARED_REGISTRIES.get(key)
+    if existing is not None:
+        return existing
+    reg = FileRegistry(database, workspace_root)
+    _SHARED_REGISTRIES[key] = reg
+    return reg

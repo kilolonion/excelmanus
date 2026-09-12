@@ -19,11 +19,13 @@ from excelmanus.api_app_state import (
     _get_probe_job_mgr,
     _list_available_model_names,
     _sync_config_profiles_from_db,
+    _user_config_store,
+    apply_profile_to_config,
     error_json_response as _error_json_response,
     get_config,
-    get_config_incomplete,
     get_config_store,
     get_session_manager,
+    is_placeholder_model_profile,
     set_config_incomplete,
     set_restart_reason,
 )
@@ -34,6 +36,26 @@ from excelmanus.logger import get_logger
 logger = get_logger("api.config")
 
 router = APIRouter()
+
+
+def _supports_vision_for(model: str, base_url: str) -> bool:
+    """给模型列表带上与引擎一致的视觉推断，供新对话在 engine 创建前使用。"""
+    from excelmanus.vision_capability import infer_vision_capable
+
+    probe: bool | None = None
+    config = get_config()
+    override = getattr(config, "main_model_vision", "auto") if config is not None else "auto"
+    sm = get_session_manager()
+    db = sm.database if sm is not None else None
+    if db is not None:
+        try:
+            from excelmanus.model_probe import load_capabilities
+            caps = load_capabilities(db, model, base_url)
+            if caps is not None:
+                probe = caps.supports_vision
+        except Exception:
+            logger.debug("模型列表视觉推断加载 probe 失败", exc_info=True)
+    return infer_vision_capable(model, override=override, probe=probe)
 
 
 class ModelSwitchRequest(BaseModel):
@@ -48,106 +70,73 @@ async def list_models(request: Request) -> JSONResponse:
     注意：模型列表为只读信息，不需要管理员权限，所有已认证用户均可访问。
     """
     assert get_config() is not None, "服务未初始化"
-    active_name: str | None = None
-    if get_config_store() is not None:
-        from excelmanus.stores.config_store import UserConfigStore
-        _user_cfg = UserConfigStore(get_config_store()._conn)
-        active_name = _user_cfg.get_active_model()
+    user_cfg = _user_config_store()
+    active_name = user_cfg.get_active_model() if user_cfg is not None else None
     db_profiles = get_config_store().list_profiles() if get_config_store() else []
 
-    # 去重：如果 default 的 model 与某个 profile 的 model 完全一致，
-    # 则隐藏 default 条目，避免模型列表出现两个相同模型。
-    default_duplicated_by = next(
-        (p["name"] for p in db_profiles if p["model"] == get_config().model),
-        None,
-    )
-
     models: list[dict] = []
-    if default_duplicated_by is None:
-        models.append({
-            "name": "default",
-            "model": get_config().model,
-            "display_name": get_config().model,
-            "description": "默认模型（主配置）",
-            "active": active_name is None,
-            "base_url": get_config().base_url,
-        })
-
     for p in db_profiles:
-        is_active = p["name"] == active_name
-        # 当 default 被去重且用户选中的是 default 时，将 active 转移到匹配的 profile
-        if p["name"] == default_duplicated_by and active_name is None:
-            is_active = True
+        if is_placeholder_model_profile(
+            p.get("name", ""), p.get("model", ""), p.get("base_url", ""),
+        ):
+            continue
         models.append({
             "name": p["name"],
             "model": p["model"],
             "display_name": p.get("name", ""),
             "description": p.get("description", ""),
-            "active": is_active,
+            "active": p["name"] == active_name,
             "base_url": p.get("base_url", ""),
+            "supports_vision": _supports_vision_for(
+                p["model"], p.get("base_url") or "",
+            ),
         })
+    if models and not any(m["active"] for m in models):
+        models[0]["active"] = True
 
     return JSONResponse(content={"models": models})
 
 
-@router.put("/api/v1/models/active")
-async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSONResponse:
-    """切换当前活跃模型并持久化到数据库，同时同步所有活跃会话的 engine。"""
+async def _activate_named_profile(name: str) -> JSONResponse | None:
+    """校验并激活档案。成功返回 None，失败返回错误响应。"""
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    store = get_config_store()
+    profile = store.get_profile(name) if store is not None else None
+    if profile is None and OpenAICodexProvider.is_codex_profile_name(name):
+        profile = {"name": name, "model": name}
+    if profile is None:
+        if store is None:
+            return _error_json_response(503, "配置存储未初始化")
+        available_names = _list_available_model_names()
+        return _error_json_response(
+            404,
+            f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
+        )
+    deprecated = _deprecated_model_error_response(
+        profile.get("model", ""),
+        prefix=f"模型 {name!r} 使用了已弃用 Model ID。",
+    )
+    if deprecated is not None:
+        return deprecated
+
+    user_cfg = _user_config_store()
+    if user_cfg is not None:
+        user_cfg.set_active_model(name)
+    apply_profile_to_config(name)
+
     if get_session_manager() is None:
-        raise HTTPException(status_code=503, detail="服务未初始化")
-    assert get_config() is not None, "服务未初始化"
-
-    name = request.name.strip()
-    if not name:
-        return _error_json_response(400, "请指定模型名称。")
-
-    # 验证目标模型存在（统一走 DB profile 查找）
-    if name.lower() != "default":
-        profile = get_config_store().get_profile(name) if get_config_store() else None
-        if profile is None:
-            from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-
-            if OpenAICodexProvider.is_codex_profile_name(name):
-                profile = {"name": name, "model": name}
-            else:
-                available_names = _list_available_model_names()
-                return _error_json_response(
-                    404,
-                    f"未找到模型 {name!r}。可用模型：{', '.join(available_names)}",
-                )
-        deprecated = _deprecated_model_error_response(
-            profile.get("model", ""),
-            prefix=f"模型 {name!r} 使用了已弃用 Model ID。",
-        )
-        if deprecated is not None:
-            return deprecated
-    else:
-        deprecated = _deprecated_model_error_response(
-            get_config().model,
-            prefix="默认模型配置已过时。",
-        )
-        if deprecated is not None:
-            return deprecated
-
-    # 持久化活跃模型
-    if get_config_store() is not None:
-        from excelmanus.stores.config_store import UserConfigStore
-        _user_cfg = UserConfigStore(get_config_store()._conn)
-        _user_cfg.set_active_model(None if name.lower() == "default" else name)
-
-    # 同步全部活跃会话 engine
-    result_msg = f"模型已切换为 {name}"
+        return None
     sessions = await get_session_manager().list_sessions()
     for session_info in sessions:
         try:
             engine = get_session_manager().get_engine(session_info["id"])
             if engine is not None:
-                result_msg = engine.switch_model(name)
+                engine.switch_model(name)
         except Exception:
             pass
 
-    # 模型切换后尝试从缓存加载新模型的能力探测结果
-    db = get_session_manager().database if get_session_manager() else None
+    db = get_session_manager().database
     if db is not None:
         try:
             from excelmanus.model_probe import load_capabilities
@@ -162,8 +151,24 @@ async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSO
                         engine.set_model_capabilities(caps)
         except Exception:
             logger.debug("模型切换后加载能力缓存失败", exc_info=True)
+    return None
 
-    return JSONResponse(content={"message": result_msg})
+
+@router.put("/api/v1/models/active")
+async def switch_model(request: ModelSwitchRequest, raw_request: Request) -> JSONResponse:
+    """切换当前激活模型并持久化，同时同步所有活跃会话。"""
+    assert get_config() is not None, "服务未初始化"
+
+    name = request.name.strip()
+    if not name or name.lower() == "default":
+        return _error_json_response(400, "请指定模型档案名称。")
+    if is_placeholder_model_profile(name):
+        return _error_json_response(400, "不能激活测试占位模型。")
+
+    err = await _activate_named_profile(name)
+    if err is not None:
+        return err
+    return JSONResponse(content={"message": f"模型已切换为 {name}"})
 
 
 # ── Thinking 配置 API ──────────────────────────────────
@@ -229,59 +234,48 @@ async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Reque
     })
 
 
-# ── 模型配置管理 API（.env 持久化） ──────────────────────
+# ── 模型配置管理 API（正式仓 config.env 持久化） ──────────────────────
 
 _MODEL_ENV_KEYS = {
-    "main": {"api_key": "EXCELMANUS_API_KEY", "base_url": "EXCELMANUS_BASE_URL", "model": "EXCELMANUS_MODEL", "protocol": "EXCELMANUS_PROTOCOL"},
-    "aux": {"api_key": "EXCELMANUS_AUX_API_KEY", "base_url": "EXCELMANUS_AUX_BASE_URL", "model": "EXCELMANUS_AUX_MODEL", "enabled": "EXCELMANUS_AUX_ENABLED", "protocol": "EXCELMANUS_AUX_PROTOCOL"},
     "embedding": {"api_key": "EXCELMANUS_EMBEDDING_API_KEY", "base_url": "EXCELMANUS_EMBEDDING_BASE_URL", "model": "EXCELMANUS_EMBEDDING_MODEL", "enabled": "EXCELMANUS_EMBEDDING_ENABLED"},
 }
 
 
 def _find_env_file() -> str:
-    """定位 .env 文件路径。"""
-    candidates = [
-        os.path.join(os.getcwd(), ".env"),
-        os.path.join(os.path.dirname(os.path.dirname(__file__)), ".env"),
-    ]
-    for path in candidates:
-        if os.path.isfile(path):
-            return path
-    return candidates[0]
+    """定位可读的 .env：项目根优先，否则正式仓。保留给调用方探测路径。"""
+    from excelmanus.data_home import get_config_env_path, get_project_env_path
+
+    project = get_project_env_path()
+    if project.is_file():
+        return str(project)
+    cwd = os.path.join(os.getcwd(), ".env")
+    if os.path.isfile(cwd):
+        return cwd
+    return str(get_config_env_path())
 
 
 def _read_env_file(path: str) -> list[str]:
-    """读取 .env 文件所有行。"""
-    if not os.path.isfile(path):
-        return []
-    with open(path, "r", encoding="utf-8") as f:
-        return f.readlines()
+    from excelmanus.data_home import read_env_lines
+
+    return read_env_lines(path)
 
 
 def _write_env_file(path: str, lines: list[str]) -> None:
-    """写回 .env 文件。"""
-    with open(path, "w", encoding="utf-8") as f:
-        f.writelines(lines)
+    from excelmanus.data_home import _atomic_write_text
+
+    _atomic_write_text(path, "".join(lines), private=path.endswith("config.env"))
 
 
 def _update_env_var(lines: list[str], key: str, value: str) -> list[str]:
-    """更新或追加环境变量行，保持注释和格式。"""
-    new_lines = []
-    found = False
-    for line in lines:
-        stripped = line.strip()
-        # 匹配 KEY=... 或 # KEY=...
-        if stripped.startswith(f"{key}=") or stripped.startswith(f"# {key}="):
-            if value:
-                new_lines.append(f"{key}={value}\n")
-            else:
-                new_lines.append(f"# {key}=\n")
-            found = True
-        else:
-            new_lines.append(line)
-    if not found and value:
-        new_lines.append(f"{key}={value}\n")
-    return new_lines
+    from excelmanus.data_home import update_env_lines
+
+    return update_env_lines(lines, key, value)
+
+
+def _persist_env_updates(updates: dict[str, str]) -> None:
+    from excelmanus.data_home import persist_env_updates
+
+    persist_env_updates(updates)
 
 
 class ModelConfigUpdate(BaseModel):
@@ -318,22 +312,10 @@ def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONRes
 
 @router.get("/api/v1/config/models")
 async def get_model_config(request: Request) -> JSONResponse:
-    """获取全部模型配置（main/aux/embedding + profiles）。"""
+    """获取模型配置（embedding + profiles + 当前激活档案）。"""
     assert get_config() is not None, "服务未初始化"
+    user_cfg = _user_config_store()
     result: dict = {
-        "main": {
-            "api_key": _mask_key(get_config().api_key),
-            "base_url": get_config().base_url,
-            "model": get_config().model,
-            "protocol": get_config().protocol,
-        },
-        "aux": {
-            "api_key": _mask_key(get_config().aux_api_key or ""),
-            "base_url": get_config().aux_base_url or "",
-            "model": get_config().aux_model or "",
-            "enabled": get_config().aux_enabled,
-            "protocol": get_config().aux_protocol,
-        },
         "embedding": {
             "api_key": _mask_key(get_config().embedding_api_key or ""),
             "base_url": get_config().embedding_base_url or "",
@@ -355,6 +337,7 @@ async def get_model_config(request: Request) -> JSONResponse:
             }
             for p in (get_config_store().list_profiles() if get_config_store() else [])
         ],
+        "active": user_cfg.get_active_model() if user_cfg is not None else None,
     }
     return JSONResponse(content=result)
 
@@ -373,12 +356,10 @@ async def update_model_config(
     request: ModelConfigUpdate,
     raw_request: Request,
 ) -> JSONResponse:
-    """更新指定模型配置区块并持久化到 .env。"""
+    """更新指定模型配置区块并持久化到正式仓。"""
     if section not in _MODEL_ENV_KEYS:
         return _error_json_response(400, f"未知配置区块: {section}")
 
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
     key_map = _MODEL_ENV_KEYS[section]
 
     updates: dict[str, str] = {}
@@ -402,23 +383,11 @@ async def update_model_config(
     if not updates:
         return _error_json_response(400, "无有效更新字段")
 
-    for env_key, env_val in updates.items():
-        lines = _update_env_var(lines, env_key, env_val)
-
-    _write_env_file(env_path, lines)
-
-    # 同步更新环境变量使运行时生效
-    for env_key, env_val in updates.items():
-        if env_val:
-            os.environ[env_key] = env_val
-        elif env_key in os.environ:
-            del os.environ[env_key]
+    _persist_env_updates(updates)
 
     # 同步更新内存中的 _config 实例
     if get_config() is not None:
         _SECTION_CONFIG_FIELDS = {
-            "main": {"api_key": "api_key", "base_url": "base_url", "model": "model", "protocol": "protocol"},
-            "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "enabled": "aux_enabled", "protocol": "aux_protocol"},
             "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
         }
         field_map = _SECTION_CONFIG_FIELDS.get(section, {})
@@ -426,21 +395,6 @@ async def update_model_config(
             val = getattr(request, req_field, None)
             if val is not None:
                 object.__setattr__(get_config(), config_attr, val)
-
-    # 主模型配置更新后，检查是否已补齐必填项 → 解除降级模式
-    if section == "main" and get_config() is not None and get_config_incomplete():
-        if get_config().api_key and get_config().base_url and get_config().model:
-            set_config_incomplete(False)
-            logger.info("模型配置已补齐，服务已从降级模式恢复为正常模式。")
-
-    # AUX 变更需广播到所有活跃 engine，避免子代理/压缩使用过时快照
-    if section == "aux" and get_session_manager() is not None:
-        await get_session_manager().broadcast_aux_config(
-            aux_enabled=get_config().aux_enabled if get_config() else True,
-            aux_model=get_config().aux_model if get_config() else None,
-            aux_api_key=get_config().aux_api_key if get_config() else None,
-            aux_base_url=get_config().aux_base_url if get_config() else None,
-        )
 
     return JSONResponse(content={"status": "ok", "section": section, "updated": list(updates.keys())})
 
@@ -453,6 +407,8 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
 
     if get_config_store().get_profile(request.name):
         return _error_json_response(409, f"模型名称已存在: {request.name}")
+    if is_placeholder_model_profile(request.name, request.model, request.base_url or ""):
+        return _error_json_response(400, "不能保存测试占位模型。")
 
     deprecated = _deprecated_model_error_response(
         request.model,
@@ -477,6 +433,10 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
     if get_session_manager() is not None and get_config() is not None:
         await get_session_manager().broadcast_model_profiles(get_config().models)
 
+    user_cfg = _user_config_store()
+    if user_cfg is not None and not user_cfg.get_active_model():
+        await _activate_named_profile(request.name)
+
     return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
 
 
@@ -489,9 +449,18 @@ async def delete_model_profile(name: str, request: Request) -> JSONResponse:
     if not get_config_store().delete_profile(name):
         return _error_json_response(404, f"未找到模型: {name}")
 
+    user_cfg = _user_config_store()
+    was_active = user_cfg is not None and user_cfg.get_active_model() == name
     _sync_config_profiles_from_db()
     if get_session_manager() is not None and get_config() is not None:
         await get_session_manager().broadcast_model_profiles(get_config().models)
+    if was_active:
+        remaining = get_config_store().list_profiles()
+        if remaining:
+            await _activate_named_profile(remaining[0]["name"])
+        elif user_cfg is not None:
+            user_cfg.set_active_model(None)
+            set_config_incomplete(True)
     return JSONResponse(content={"status": "deleted", "name": name})
 
 
@@ -532,6 +501,11 @@ async def update_model_profile(
     if get_session_manager() is not None and get_config() is not None:
         await get_session_manager().broadcast_model_profiles(get_config().models)
 
+    user_cfg = _user_config_store()
+    active_name = user_cfg.get_active_model() if user_cfg is not None else None
+    if active_name == name or active_name == request.name:
+        await _activate_named_profile(request.name)
+
     return JSONResponse(content={"status": "updated", "name": request.name})
 
 
@@ -540,7 +514,7 @@ async def update_model_profile(
 
 class ConfigExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    sections: list[str] = ["main", "aux", "profiles"]
+    sections: list[str] = ["embedding", "profiles"]
     mode: Literal["password", "simple"] = "password"
     password: str | None = None
 
@@ -555,20 +529,6 @@ def _collect_raw_sections(section_names: list[str]) -> dict[str, Any]:
     """收集指定区块的原始（未脱敏）配置数据。"""
     assert get_config() is not None
     result: dict[str, Any] = {}
-    if "main" in section_names:
-        result["main"] = {
-            "api_key": get_config().api_key,
-            "base_url": get_config().base_url,
-            "model": get_config().model,
-            "protocol": get_config().protocol,
-        }
-    if "aux" in section_names:
-        result["aux"] = {
-            "api_key": get_config().aux_api_key or "",
-            "base_url": get_config().aux_base_url or "",
-            "model": get_config().aux_model or "",
-            "protocol": get_config().aux_protocol,
-        }
     if "embedding" in section_names:
         result["embedding"] = {
             "api_key": get_config().embedding_api_key or "",
@@ -585,11 +545,11 @@ def _collect_raw_sections(section_names: list[str]) -> dict[str, Any]:
 async def export_model_config(
     request: ConfigExportRequest,
 ) -> JSONResponse:
-    """将模型配置加密导出为令牌字符串。进程内始终导出全局配置（main/aux/embedding/profiles）。"""
+    """将模型配置加密导出为令牌字符串。"""
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
-    valid_sections = {"main", "aux", "embedding", "profiles"}
+    valid_sections = {"embedding", "profiles"}
     invalid = set(request.sections) - valid_sections
     if invalid:
         return _error_json_response(400, f"无效的配置区块: {', '.join(invalid)}")
@@ -620,12 +580,9 @@ async def import_model_config(
 
     sections = payload.get("sections", {})
     imported: dict[str, Any] = {}
+    env_updates: dict[str, str] = {}
 
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
-    env_dirty = False
-
-    for section_key in ("main", "aux", "embedding"):
+    for section_key in ("embedding",):
         section_data = sections.get(section_key)
         if not isinstance(section_data, dict):
             continue
@@ -648,28 +605,18 @@ async def import_model_config(
             env_key = key_map.get(field_name)
             if not env_key:
                 continue
-            lines = _update_env_var(lines, env_key, val)
-            if val:
-                os.environ[env_key] = val
-            elif env_key in os.environ:
-                del os.environ[env_key]
+            env_updates[env_key] = val
             updated_fields.append(field_name)
-            env_dirty = True
 
         # enabled 字段为 bool，单独处理
         if "enabled" in section_data and isinstance(section_data["enabled"], bool):
             env_key = key_map.get("enabled")
             if env_key:
-                env_val = "true" if section_data["enabled"] else "false"
-                lines = _update_env_var(lines, env_key, env_val)
-                os.environ[env_key] = env_val
+                env_updates[env_key] = "true" if section_data["enabled"] else "false"
                 updated_fields.append("enabled")
-                env_dirty = True
 
         if get_config() is not None and updated_fields:
             field_map = {
-                "main": {"api_key": "api_key", "base_url": "base_url", "model": "model", "protocol": "protocol"},
-                "aux": {"api_key": "aux_api_key", "base_url": "aux_base_url", "model": "aux_model", "protocol": "aux_protocol"},
                 "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
             }.get(section_key, {})
             for f in updated_fields:
@@ -680,8 +627,8 @@ async def import_model_config(
         if updated_fields:
             imported[section_key] = updated_fields
 
-    if env_dirty:
-        _write_env_file(env_path, lines)
+    if env_updates:
+        _persist_env_updates(env_updates)
 
     profiles_data = sections.get("profiles")
     if isinstance(profiles_data, list) and get_config_store() is not None:
@@ -755,9 +702,23 @@ async def detect_config_token(request: Request) -> JSONResponse:
 
 
 def _resolve_active_engine_info() -> tuple[str, str, str]:
-    """返回最新的主模型配置（始终从 get_config() 读取，不用引擎缓存）。"""
+    """返回当前激活模型配置（始终从 get_config() 读取）。"""
     assert get_config() is not None
     return get_config().model, get_config().base_url, get_config().api_key
+
+
+def _profile_connection(
+    profile: dict,
+    *,
+    default_protocol: str = "auto",
+) -> tuple[str, str, str, str]:
+    """读取档案自身的连接信息，不借用其它档案的凭证。"""
+    return (
+        str(profile.get("model") or ""),
+        str(profile.get("base_url") or ""),
+        str(profile.get("api_key") or ""),
+        str(profile.get("protocol") or default_protocol),
+    )
 
 
 def _resolve_model_info(
@@ -773,19 +734,11 @@ def _resolve_model_info(
     assert get_config() is not None
     _default_protocol = get_config().protocol or "auto"
 
-    # 1) 无参数：返回主模型配置
+    # 1) 无参数：返回激活模型配置
     if not req_name and not req_model:
         m, b, a = _resolve_active_engine_info()
         return m, b, a, _default_protocol
 
-    # 1.5) 内置 section 名称直接返回对应配置
-    if req_name == "main":
-        return get_config().model, get_config().base_url, get_config().api_key, _default_protocol
-    if req_name == "aux":
-        return (get_config().aux_model or get_config().model,
-                get_config().aux_base_url or get_config().base_url,
-                get_config().aux_api_key or get_config().api_key,
-                getattr(get_config(), 'aux_protocol', None) or _default_protocol)
     # 2) 按 profile name 精确查找
     lookup_name = req_name or req_model
 
@@ -793,24 +746,20 @@ def _resolve_model_info(
     if get_config_store() is not None and lookup_name:
         profile = get_config_store().get_profile(lookup_name)
         if profile is not None:
-            p_base_url = profile.get("base_url") or get_config().base_url
-            p_api_key = profile.get("api_key") or get_config().api_key
-            p_protocol = profile.get("protocol") or _default_protocol
-            return profile["model"], p_base_url, p_api_key, p_protocol
+            return _profile_connection(profile, default_protocol=_default_protocol)
 
     # 3) 按 model ID 在所有 profiles 中查找（处理前端传 model ID 而非 name 的情况）
     if get_config_store() is not None and req_model:
         for p in get_config_store().list_profiles():
             if p["model"] == req_model:
-                p_base_url = p.get("base_url") or get_config().base_url
-                p_api_key = p.get("api_key") or get_config().api_key
-                p_protocol = p.get("protocol") or _default_protocol
-                # 如果也指定了 base_url，需要匹配
-                if req_base_url and p_base_url != req_base_url:
+                model, base_url, api_key, protocol = _profile_connection(
+                    p, default_protocol=_default_protocol,
+                )
+                if req_base_url and base_url != req_base_url:
                     continue
-                return p["model"], p_base_url, p_api_key, p_protocol
+                return model, base_url, api_key, protocol
 
-    # 4) 兜底：直接使用参数，API key 从最新 get_config() 取
+    # 4) 无匹配档案：使用请求参数，缺省项取当前激活快照
     model = req_model or get_config().model
     base_url = req_base_url or get_config().base_url
     return model, base_url, get_config().api_key, _default_protocol
@@ -843,7 +792,7 @@ async def get_model_capabilities(request: Request) -> JSONResponse:
 
 @router.get("/api/v1/config/models/capabilities/all")
 async def get_all_model_capabilities(request: Request) -> JSONResponse:
-    """获取所有已配置模型的能力探测结果（主模型 + profiles）。"""
+    """获取所有已配置模型档案的能力探测结果。"""
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
@@ -855,20 +804,9 @@ async def get_all_model_capabilities(request: Request) -> JSONResponse:
 
     result: list[dict] = []
 
-    # 主模型
-    main_caps = load_capabilities(db, get_config().model, get_config().base_url)
-    result.append({
-        "name": "main",
-        "model": get_config().model,
-        "base_url": get_config().base_url,
-        "capabilities": main_caps.to_dict() if main_caps else None,
-    })
-
-    # 模型配置档案
     profiles = get_config_store().list_profiles() if get_config_store() else []
     for p in profiles:
-        p_model = p["model"]
-        p_base_url = p.get("base_url") or get_config().base_url
+        p_model, p_base_url, _, _ = _profile_connection(p)
         caps = load_capabilities(db, p_model, p_base_url)
         result.append({
             "name": p["name"],
@@ -991,17 +929,16 @@ async def probe_all_model_capabilities(request: Request) -> JSONResponse:
 
     # 收集所有需要探测的 (name, model, base_url, api_key, protocol) 元组
     targets: list[tuple[str, str, str, str, str]] = []
-    targets.append(("main", get_config().model, get_config().base_url, get_config().api_key, get_config().protocol))
 
     profiles = get_config_store().list_profiles() if get_config_store() else []
     for p in profiles:
         # Codex OAuth 档案使用用户订阅凭据，不走通用 API Key 探测
         if p.get("model", "").startswith("openai-codex/"):
             continue
-        p_base_url = p.get("base_url") or get_config().base_url
-        p_api_key = p.get("api_key") or get_config().api_key
-        p_protocol = p.get("protocol") or get_config().protocol
-        targets.append((p["name"], p["model"], p_base_url, p_api_key, p_protocol))
+        p_model, p_base_url, p_api_key, p_protocol = _profile_connection(
+            p, default_protocol=get_config().protocol or "auto",
+        )
+        targets.append((p["name"], p_model, p_base_url, p_api_key, p_protocol))
 
     results: list[dict] = []
     # 构建 name → thinking_mode 映射
@@ -1058,25 +995,23 @@ def _build_probe_targets(
 
     want_names: list[str]
     if probe_all:
-        want_names = ["main"] + [p["name"] for p in profiles]
+        want_names = [p["name"] for p in profiles]
     elif names:
         want_names = names
     else:
-        want_names = ["main"]
+        user_cfg = _user_config_store()
+        active = user_cfg.get_active_model() if user_cfg is not None else None
+        want_names = [active] if active else [p["name"] for p in profiles[:1]]
 
     targets: list[ProbeTargetSpec] = []
     seen_keys: set[str] = set()
 
     for name in want_names:
-        if name == "main":
-            model, base_url, api_key = get_config().model, get_config().base_url, get_config().api_key
-            protocol = default_protocol
-        elif name in profile_map:
+        if name in profile_map:
             p = profile_map[name]
-            model = p["model"]
-            base_url = p.get("base_url") or get_config().base_url
-            api_key = p.get("api_key") or get_config().api_key
-            protocol = p.get("protocol") or default_protocol
+            model, base_url, api_key, protocol = _profile_connection(
+                p, default_protocol=default_protocol,
+            )
         else:
             continue
 
@@ -1155,7 +1090,7 @@ async def create_probe_job(request: Request) -> JSONResponse:
                 logger.debug("probe job 解析运行时凭证失败", exc_info=True)
 
         targets = [ProbeTargetSpec(
-            name=req_name or "main",
+            name=req_name or req_model or "active",
             cache_model=cache_model,
             api_model=api_model,
             base_url=base_url,
@@ -1613,23 +1548,15 @@ async def check_model_placeholder(request: Request) -> JSONResponse:
 
     results: list[dict] = []
 
-    # 主模型
-    if _is_placeholder(get_config().api_key):
-        results.append({"name": "main", "field": "api_key", "model": get_config().model})
-    if not get_config().model or not get_config().model.strip():
-        results.append({"name": "main", "field": "model", "model": ""})
-
-    # AUX
-    if get_config().aux_model:
-        if _is_placeholder(get_config().aux_api_key or ""):
-            results.append({"name": "aux", "field": "api_key", "model": get_config().aux_model})
-
-    # Profiles
     profiles = get_config_store().list_profiles() if get_config_store() else []
+    if not profiles:
+        results.append({"name": "active", "field": "model", "model": ""})
     for p in profiles:
-        p_api_key = p.get("api_key") or get_config().api_key
-        if _is_placeholder(p_api_key):
+        p_api_key = p.get("api_key") or ""
+        if not p.get("model", "").startswith("openai-codex/") and _is_placeholder(p_api_key):
             results.append({"name": p["name"], "field": "api_key", "model": p["model"]})
+        if not p.get("model") or not str(p.get("model")).strip():
+            results.append({"name": p["name"], "field": "model", "model": ""})
 
     return JSONResponse(content={
         "has_placeholder": len(results) > 0,
@@ -1688,13 +1615,8 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "max_consecutive_failures": "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
     # ── 执行与安全 ──
     "subagent_enabled": "EXCELMANUS_SUBAGENT_ENABLED",
-    "backup_enabled": "EXCELMANUS_BACKUP_ENABLED",
-    "checkpoint_enabled": "EXCELMANUS_CHECKPOINT_ENABLED",
-    "external_safe_mode": "EXCELMANUS_EXTERNAL_SAFE_MODE",
     "max_iterations": "EXCELMANUS_MAX_ITERATIONS",
     "friendly_error_messages": "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
-    # ── AUX 开关 ──
-    "aux_enabled": "EXCELMANUS_AUX_ENABLED",
     # ── 上下文与记忆 ──
     "max_context_tokens": "EXCELMANUS_MAX_CONTEXT_TOKENS",
     "memory_enabled": "EXCELMANUS_MEMORY_ENABLED",
@@ -1789,13 +1711,8 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "max_consecutive_failures": get_config().max_consecutive_failures,
         # ── 执行与安全 ──
         "subagent_enabled": get_config().subagent_enabled,
-        "backup_enabled": get_config().backup_enabled,
-        "checkpoint_enabled": get_config().checkpoint_enabled,
-        "external_safe_mode": get_config().external_safe_mode,
         "max_iterations": get_config().max_iterations,
         "friendly_error_messages": get_config().friendly_error_messages,
-        # ── AUX 开关 ──
-        "aux_enabled": get_config().aux_enabled,
         # ── 上下文与记忆 ──
         "max_context_tokens": get_config().max_context_tokens,
         "memory_enabled": get_config().memory_enabled,
@@ -1887,13 +1804,8 @@ class RuntimeConfigUpdate(BaseModel):
     max_consecutive_failures: int | None = Field(default=None, gt=0)
     # ── 执行与安全 ──
     subagent_enabled: bool | None = None
-    backup_enabled: bool | None = None
-    checkpoint_enabled: bool | None = None
-    external_safe_mode: bool | None = None
     max_iterations: int | None = None
     friendly_error_messages: bool | None = None
-    # ── AUX 开关 ──
-    aux_enabled: bool | None = None
     # ── 上下文与记忆 ──
     max_context_tokens: int | None = Field(default=None, gt=0)
     memory_enabled: bool | None = None
@@ -1978,10 +1890,8 @@ class RuntimeConfigUpdate(BaseModel):
 
 @router.put("/api/v1/config/runtime")
 async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Request) -> JSONResponse:
-    """更新运行时行为配置并持久化到 .env。"""
+    """更新运行时行为配置并持久化到正式仓。"""
     assert get_config() is not None, "服务未初始化"
-    env_path = _find_env_file()
-    lines = _read_env_file(env_path)
     updates: dict[str, str] = {}
 
     payload = request.model_dump(exclude_none=True)
@@ -2003,12 +1913,9 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
         else:
             str_val = str(value)
         updates[env_key] = str_val
-        lines = _update_env_var(lines, env_key, str_val)
 
-    _write_env_file(env_path, lines)
-
-    for env_key, env_val in updates.items():
-        os.environ[env_key] = env_val
+    if updates:
+        _persist_env_updates(updates)
 
     # 同步更新内存中的 config 实例
     for field, value in payload.items():
@@ -2100,73 +2007,3 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
 
 
 
-
-@router.get("/api/v1/settings/docker-sandbox")
-async def get_docker_sandbox(request: Request) -> JSONResponse:
-    """查询 Docker 沙盒状态（含 daemon / 镜像可用性）。"""
-    from excelmanus.security.docker_sandbox import is_docker_available, is_sandbox_image_ready
-
-    return JSONResponse(content={
-        "docker_sandbox_enabled": getattr(
-            request.app.state, "docker_sandbox_enabled", False
-        ),
-        "docker_available": is_docker_available(),
-        "sandbox_image_ready": is_sandbox_image_ready(),
-    })
-
-
-@router.put("/api/v1/settings/docker-sandbox")
-async def set_docker_sandbox(request: Request) -> JSONResponse:
-    """管理员切换 Docker 沙盒开关（持久化到 config_kv）。
-
-    请求体: {"enabled": true}  启用
-    请求体: {"enabled": false} 关闭
-    启用时自动检测 Docker 可用性和镜像状态。
-    """
-    body = await request.json()
-    enabled = bool(body.get("enabled", False))
-
-    if enabled:
-        from excelmanus.security.docker_sandbox import (
-            is_docker_available,
-            is_sandbox_image_ready,
-            build_sandbox_image,
-        )
-
-        if not is_docker_available():
-            return _error_json_response(
-                400, "Docker daemon 不可用，无法启用 Docker 沙盒。"
-            )
-        if not is_sandbox_image_ready():
-            ok, msg = build_sandbox_image()
-            if not ok:
-                return _error_json_response(
-                    400, f"沙盒镜像构建失败: {msg}"
-                )
-
-    if get_config_store() is not None:
-        get_config_store().set("docker_sandbox_enabled", "true" if enabled else "false")
-    request.app.state.docker_sandbox_enabled = enabled
-
-    from excelmanus.tools.code_tools import init_docker_sandbox
-    init_docker_sandbox(enabled)
-
-    logger.info("Docker 沙盒已%s（管理员操作）", "启用" if enabled else "关闭")
-    return JSONResponse(content={
-        "status": "ok",
-        "docker_sandbox_enabled": enabled,
-    })
-
-
-@router.post("/api/v1/settings/docker-sandbox/build")
-async def build_docker_sandbox_image(request: Request) -> JSONResponse:
-    """管理员触发构建/重建 Docker 沙盒镜像。"""
-    body = await request.json() if request.headers.get("content-type") == "application/json" else {}
-    force = bool(body.get("force", False))
-
-    from excelmanus.security.docker_sandbox import build_sandbox_image
-
-    ok, msg = build_sandbox_image(force=force)
-    if ok:
-        return JSONResponse(content={"status": "ok", "message": msg})
-    return _error_json_response(500, f"镜像构建失败: {msg}")

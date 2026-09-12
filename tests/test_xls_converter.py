@@ -212,7 +212,9 @@ class TestConvertXls:
 
         dst = tmp_path / "test.xlsx"
         dst.write_text("old")
+        from excelmanus.workbook_commit import content_version_of_file, remember_content_version
 
+        remember_content_version(dst.name, content_version_of_file(dst))
         result = convert_to_xlsx(src, overwrite=True)
         assert result == dst
         assert dst.stat().st_size > 3  # 不再是 "old" 的 3 字节

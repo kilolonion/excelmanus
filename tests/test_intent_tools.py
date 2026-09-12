@@ -12,13 +12,8 @@ from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.security import FileAccessGuard
 from excelmanus.tools import (
     ToolRegistry,
-    cell_tools,
-    chart_tools,
-    data_tools,
-    format_tools,
     intent_tools,
     reference_tools,
-    sheet_tools,
 )
 from excelmanus.tools._guard_ctx import set_guard
 from excelmanus.tools.intent_tools import (
@@ -37,12 +32,7 @@ def _bind_workspace(root: Path) -> None:
     workspace = str(root)
     set_guard(FileAccessGuard(workspace))
     intent_tools.init_guard(workspace)
-    data_tools.init_guard(workspace)
-    sheet_tools.init_guard(workspace)
-    chart_tools.init_guard(workspace)
     reference_tools.init_guard(workspace)
-    format_tools.init_guard(workspace)
-    cell_tools.init_guard(workspace)
 
 
 _MODEL_SPREADSHEET_TOOLS = {
@@ -243,6 +233,61 @@ def test_versions_checkpoint_revision_on_all_three_lanes(tmp_path: Path) -> None
     assert checkpoint.ui_meta.revision == revision
     assert revision["revision_id"] in checkpoint.model_text
     assert checkpoint.ui_meta.content_version == payload.get("content_version")
+    assert revision.get("reason") == "checkpoint"
+    assert not (tmp_path / "outputs" / ".versions").exists()
+    assert not (tmp_path / "outputs" / "backups").exists()
+    listed = manage_spreadsheet_versions(file_path=str(path), action="list")
+    listed_ids = [item.get("revision_id") for item in _payload(listed).get("revisions") or []]
+    assert revision["revision_id"] in listed_ids
+
+
+def test_versions_restore_from_revision_store(tmp_path: Path) -> None:
+    from excelmanus.workbook_commit import content_version_of_file
+    from openpyxl import load_workbook
+
+    _bind_workspace(tmp_path)
+    path = _book(tmp_path / "book.xlsx")
+    before = manage_spreadsheet_versions(file_path=str(path), action="checkpoint", label="before")
+    revision_id = _payload(before)["revision"]["revision_id"]
+    ver = content_version_of_file(path)
+    edited = edit_spreadsheet(
+        file_path=str(path),
+        operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [["changed"]]}],
+        expected_version=ver,
+    )
+    assert edited.success
+    restored = manage_spreadsheet_versions(
+        file_path=str(path),
+        action="restore",
+        revision_id=revision_id,
+        expected_version=_payload(edited).get("content_version"),
+    )
+    assert restored.success
+    wb = load_workbook(path)
+    try:
+        assert wb["Sheet1"]["A1"].value == "部门"
+    finally:
+        wb.close()
+    assert not (tmp_path / "outputs" / ".versions").exists()
+    listed = _payload(manage_spreadsheet_versions(file_path=str(path), action="list"))
+    reasons = [item.get("reason") for item in listed.get("revisions") or []]
+    assert "beforeRestore" in reasons
+    assert "afterEdit" in reasons
+
+
+def test_versions_restore_requires_expected_version(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    path = _book(tmp_path / "book.xlsx")
+    before = manage_spreadsheet_versions(file_path=str(path), action="checkpoint", label="before")
+    revision_id = _payload(before)["revision"]["revision_id"]
+    restored = manage_spreadsheet_versions(
+        file_path=str(path),
+        action="restore",
+        revision_id=revision_id,
+    )
+    assert not restored.success
+    assert restored.error is not None
+    assert restored.error.code == "VERSION_CONFLICT"
 
 
 def test_trace_map(tmp_path: Path) -> None:
@@ -262,18 +307,20 @@ def test_trace_map(tmp_path: Path) -> None:
 def test_prompt_sections_follow_segment_order() -> None:
     from pathlib import Path as P
 
-    from excelmanus.prompt_composer import PromptComposer, PromptContext
+    import excelmanus
+    from excelmanus.prompt.load import PromptComposer, PromptContext
 
-    composer = PromptComposer(P("excelmanus/prompts"))
+    composer = PromptComposer(P(excelmanus.__file__).resolve().parent / "prompts")
     composer.load_all()
     names = {seg.name: seg.order for seg in composer.core_segments + composer.strategy_segments}
     assert names["harness:identity"] == -100
     assert names["deployment:persona"] == 0
     assert names["plan:policy"] == 50
-    assert names["spreadsheet:workflow"] == 125
+    assert names["tool:inspect"] == 100
+    assert names["spreadsheet:workbook_spec"] == 110
+    assert "spreadsheet:invariants" not in names
     assert names["tool:run_code"] == 150
-    text = composer.compose_strategies_text(PromptContext())
-    assert "inspect_spreadsheet" in text
+    text = composer.compose_system_text(PromptContext())
+    assert "VERSION_CONFLICT" in text
     assert "read_excel" not in text
-    assert "快速模式" not in text
-    assert "## Plan mode" not in text
+    assert "当前是计划模式" not in text

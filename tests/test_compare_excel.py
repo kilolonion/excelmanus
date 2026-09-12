@@ -134,6 +134,22 @@ class TestRowAlignedMode:
         assert result["status"] == "ok"
         assert "班级" in result["summary"]["columns_added"]
         assert "等级" in result["summary"]["columns_deleted"]
+        assert "完全相同" not in result.get("hint", "")
+
+    def test_swapped_columns_differ_by_position(self, tmp_path: Path):
+        """列对调后同名值相同，position 仍按坐标报差异。"""
+        fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": [["id", "value"], [1, 2]]})
+        fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": [["value", "id"], [2, 1]]})
+        result = _compare_payload(compare_excel(str(fa), str(fb), alignment="position"))
+        assert result["status"] == "ok"
+        assert result["summary"]["cells_different"] > 0
+
+    def test_added_column_hint_not_identical(self, tmp_path: Path):
+        fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": [["id"], [1]]})
+        fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": [["id", "new"], [1, "x"]]})
+        result = _compare_payload(compare_excel(str(fa), str(fb)))
+        assert "new" in result["summary"]["columns_added"]
+        assert "完全相同" not in result.get("hint", "")
 
 
 # ── 关键列匹配模式 ───────────────────────────────────────
@@ -150,7 +166,7 @@ class TestKeyColumnMode:
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
         result = _compare_payload(compare_excel(
-            str(fa), str(fb), key_columns=["ID"],
+            str(fa), str(fb), alignment="key", key_columns=["ID"],
         ))
 
         assert result["status"] == "ok"
@@ -166,26 +182,25 @@ class TestKeyColumnMode:
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
         result = _compare_payload(compare_excel(
-            str(fa), str(fb), key_columns=["ID"],
+            str(fa), str(fb), alignment="key", key_columns=["ID"],
         ))
 
         assert result["status"] == "ok"
         assert result["summary"]["rows_added"] == 1    # ID=99
         assert result["summary"]["rows_deleted"] == 1   # ID=10
 
-    def test_invalid_key_falls_back(self, tmp_path: Path):
-        """无效的关键列应回退到行号对齐模式。"""
+    def test_invalid_key_is_rejected(self, tmp_path: Path):
+        """不存在的关键列应报错，而不是静默回退。"""
         rows = [["姓名", "分数"]] + [["学生" + str(i), 60 + i] for i in range(10)]
         data = {"Sheet1": rows}
         fa = _make_xlsx(tmp_path / "a.xlsx", data)
         fb = _make_xlsx(tmp_path / "b.xlsx", data)
 
         result = _compare_payload(compare_excel(
-            str(fa), str(fb), key_columns=["不存在的列"],
+            str(fa), str(fb), alignment="key", key_columns=["不存在的列"],
         ))
 
-        assert result["status"] == "ok"
-        assert result["summary"]["cells_different"] == 0
+        assert result.get("code") == "INVALID_ARGS" or "key_columns" in str(result.get("error", ""))
 
 
 # ── 跨 Sheet 对比 ────────────────────────────────────────

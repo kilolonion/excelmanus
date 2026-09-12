@@ -14,7 +14,6 @@ MANAGE_TOKEN_MIN_LEN = 16
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "0:0:0:0:0:0:0:1"})
 
 _HEALTH_PATH = "/api/v1/health"
-_DOWNLOAD_PREFIX = "/api/v1/files/dl/"
 
 
 def get_manage_token() -> str:
@@ -65,7 +64,7 @@ def token_matches(provided: str, expected: str) -> bool:
 
 
 class ManageTokenMiddleware:
-    """When EXCELMANUS_MANAGE_TOKEN is set, require it on /api except health and download tokens."""
+    """When EXCELMANUS_MANAGE_TOKEN is set, require it on /api except health."""
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -84,7 +83,7 @@ class ManageTokenMiddleware:
             await self.app(scope, receive, send)
             return
         path = request.url.path
-        if path == _HEALTH_PATH or path.startswith(_DOWNLOAD_PREFIX):
+        if path == _HEALTH_PATH:
             await self.app(scope, receive, send)
             return
         if not path.startswith("/api/"):

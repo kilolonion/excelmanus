@@ -464,8 +464,35 @@ def _resolve_color(value: str | None) -> str | None:
     return value
 
 
+LEGAL_FILL_PATTERN_TYPES: frozenset[str] = frozenset(
+    {
+        "solid",
+        "none",
+        "darkDown",
+        "darkGray",
+        "darkGrid",
+        "darkHorizontal",
+        "darkTrellis",
+        "darkUp",
+        "darkVertical",
+        "gray0625",
+        "gray125",
+        "lightDown",
+        "lightGray",
+        "lightGrid",
+        "lightHorizontal",
+        "lightTrellis",
+        "lightUp",
+        "lightVertical",
+        "mediumGray",
+    }
+)
+
+
 def _build_font(config: dict[str, Any]) -> Font:
     """从配置字典构建 openpyxl Font 对象。"""
+    if isinstance(config, str):
+        return Font(name=config)
     return Font(
         name=config.get("name"),
         size=config.get("size"),
@@ -473,14 +500,79 @@ def _build_font(config: dict[str, Any]) -> Font:
         italic=config.get("italic"),
         color=_resolve_color(config.get("color")),
         underline=config.get("underline"),
-        strike=config.get("strikethrough"),
+        strike=config.get("strikethrough", config.get("strike")),
     )
 
 
+def _patch_font(existing: Any, config: dict[str, Any] | str) -> Font:
+    """按显式键叠加到已有 Font，未出现的属性保持原值。"""
+    if isinstance(config, str):
+        return Font(name=config) if existing is None else Font(
+            name=config,
+            size=getattr(existing, "size", None),
+            bold=getattr(existing, "bold", None),
+            italic=getattr(existing, "italic", None),
+            color=getattr(existing, "color", None),
+            underline=getattr(existing, "underline", None),
+            strike=getattr(existing, "strike", None),
+            vertAlign=getattr(existing, "vertAlign", None),
+        )
+    kwargs: dict[str, Any] = {}
+    if existing is not None:
+        kwargs = {
+            "name": existing.name,
+            "size": existing.size,
+            "bold": existing.bold,
+            "italic": existing.italic,
+            "color": existing.color,
+            "underline": existing.underline,
+            "strike": existing.strike,
+            "vertAlign": existing.vertAlign,
+        }
+    if "name" in config:
+        kwargs["name"] = config.get("name")
+    if "size" in config:
+        kwargs["size"] = config.get("size")
+    if "bold" in config:
+        kwargs["bold"] = config.get("bold")
+    if "italic" in config:
+        kwargs["italic"] = config.get("italic")
+    if "color" in config:
+        kwargs["color"] = _resolve_color(config.get("color"))
+    if "underline" in config:
+        kwargs["underline"] = config.get("underline")
+    if "strike" in config or "strikethrough" in config:
+        kwargs["strike"] = config.get("strikethrough", config.get("strike"))
+    if "vertAlign" in config:
+        kwargs["vertAlign"] = config.get("vertAlign")
+    return Font(**kwargs)
+
+
 def _build_fill(config: dict[str, Any]) -> PatternFill:
-    """从配置字典构建 openpyxl PatternFill 对象。"""
-    color = _resolve_color(config.get("color")) or "FFFFFF"
-    fill_type = config.get("fill_type", "solid")
+    """从配置字典构建 openpyxl PatternFill 对象。不接受笼统的 type=pattern。"""
+    color = _resolve_color(
+        config.get("color")
+        or config.get("fgColor")
+        or config.get("start_color")
+        or config.get("fg_color")
+    ) or "FFFFFF"
+    fill_type = (
+        config.get("fill_type")
+        or config.get("type")
+        or config.get("pattern")
+        or config.get("patternType")
+        or "solid"
+    )
+    fill_type = str(fill_type)
+    if fill_type == "pattern":
+        raise ValueError(
+            "fill.type=pattern 不是合法 patternType。请用 solid 或 openpyxl 的 patternType 名称。"
+        )
+    if fill_type not in LEGAL_FILL_PATTERN_TYPES:
+        raise ValueError(
+            f"fill.type={fill_type!r} 不是合法 patternType。"
+            f"可用：{sorted(LEGAL_FILL_PATTERN_TYPES - {'none'})}"
+        )
     return PatternFill(
         start_color=color,
         end_color=color,
@@ -518,11 +610,38 @@ def _build_border(config: dict[str, Any]) -> Border:
 
 def _build_alignment(config: dict[str, Any]) -> Alignment:
     """从配置字典构建 openpyxl Alignment 对象。"""
+    wrap = config.get("wrap_text")
+    if wrap is None:
+        wrap = config.get("wrapText")
     return Alignment(
-        horizontal=config.get("horizontal"),
-        vertical=config.get("vertical"),
-        wrap_text=config.get("wrap_text"),
+        horizontal=config.get("horizontal") or config.get("horizontalAlignment"),
+        vertical=config.get("vertical") or config.get("verticalAlignment"),
+        wrap_text=wrap,
     )
+
+
+def _patch_alignment(existing: Any, config: dict[str, Any]) -> Alignment:
+    """按显式键叠加到已有 Alignment，未出现的属性保持原值。"""
+    kwargs: dict[str, Any] = {}
+    if existing is not None:
+        kwargs = {
+            "horizontal": existing.horizontal,
+            "vertical": existing.vertical,
+            "wrap_text": existing.wrap_text,
+            "shrink_to_fit": existing.shrinkToFit,
+            "indent": existing.indent,
+            "text_rotation": existing.textRotation,
+        }
+    if "horizontal" in config or "horizontalAlignment" in config:
+        kwargs["horizontal"] = config.get("horizontal") or config.get("horizontalAlignment")
+    if "vertical" in config or "verticalAlignment" in config:
+        kwargs["vertical"] = config.get("vertical") or config.get("verticalAlignment")
+    if "wrap_text" in config or "wrapText" in config:
+        wrap = config.get("wrap_text")
+        if wrap is None:
+            wrap = config.get("wrapText")
+        kwargs["wrap_text"] = wrap
+    return Alignment(**kwargs)
 
 
 # ── 样式提取辅助函数（用于 read_cell_styles）──────────────
