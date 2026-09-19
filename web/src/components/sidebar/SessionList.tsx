@@ -284,7 +284,17 @@ export function SessionList() {
   };
 
   const searchAndNewRow = (
-    <div className="flex items-center gap-2 px-1 pt-3 pb-2 flex-shrink-0">
+    <div className="em-session-tools flex flex-col gap-2 px-1 pt-3 pb-2 flex-shrink-0">
+      <button
+        type="button"
+        className="em-new-chat flex h-10 w-full items-center justify-center gap-2 rounded-xl text-[13px] font-semibold text-white"
+        onClick={() => void handleNewSession()}
+        disabled={creating}
+      >
+        <Plus className="h-4 w-4" />
+        {creating ? "正在创建…" : "新建对话"}
+      </button>
+      <div className="flex items-center gap-2">
       <div className="relative flex-1 min-w-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
         <input
@@ -316,6 +326,7 @@ export function SessionList() {
       >
         <FolderPlus className="h-4 w-4" />
       </Button>
+      </div>
     </div>
   );
 
@@ -341,7 +352,7 @@ export function SessionList() {
                       <div key={group.key} className="space-y-0.5">
                         <div
                           className={cn(
-                            "group/ws flex items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
+                            "em-workspace-group group/ws flex items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
                             "hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)]",
                             "focus-within:bg-[var(--em-primary-alpha-06)] focus-within:text-[var(--em-primary)]",
                             workspaceMenuKey === group.key && "bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]",
@@ -484,7 +495,7 @@ export function SessionList() {
                         exit="exit"
                         layout
                         className={cn(
-                          "group relative mx-2 flex min-w-0 cursor-pointer items-center gap-1 rounded-xl py-1.5 pr-1 pl-[calc(0.875rem+0.375rem)] transition-colors",
+                          "em-session-card group relative mx-2 flex min-w-0 cursor-pointer items-center gap-1 rounded-xl py-2 pr-1 pl-[calc(0.875rem+0.375rem)] transition-colors",
                           awaitingApproval
                             ? isActive
                               ? "bg-[color-mix(in_srgb,var(--em-gold)_18%,transparent)]"

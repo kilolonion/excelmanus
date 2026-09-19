@@ -91,9 +91,9 @@ export function Sidebar() {
       </AnimatePresence>
       <motion.aside
         data-coach-id="coach-sidebar"
-        animate={{ width: isMobile ? (sidebarOpen ? "min(88vw, 360px)" : 0) : (sidebarOpen ? 296 : 0) }}
+        animate={{ width: isMobile ? (sidebarOpen ? "min(88vw, 360px)" : 0) : (sidebarOpen ? 320 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
-        className={`em-sidebar flex flex-col border-r border-border ${
+        className={`em-sidebar flex flex-col ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
         style={{ 
@@ -107,15 +107,15 @@ export function Sidebar() {
         <motion.div
           className="em-sidebar-inner flex flex-col h-full"
           style={{
-            width: isMobile ? "min(88vw, 360px)" : "296px",
-            minWidth: isMobile ? "min(88vw, 360px)" : "296px",
+            width: isMobile ? "min(88vw, 360px)" : "320px",
+            minWidth: isMobile ? "min(88vw, 360px)" : "320px",
           }}
           variants={sidebarContentVariants}
           animate={sidebarOpen ? "open" : "closed"}
           transition={isFirstRender.current ? { duration: 0 } : undefined}
         >
           {/* Header */}
-          <div className="flex items-center justify-between px-4 pt-4 pb-3 flex-shrink-0">
+          <div className="em-sidebar-header flex items-center justify-between px-4 pt-4 pb-3 flex-shrink-0">
             <div className="em-brand-lockup">
               <div className="em-brand-mark" aria-hidden="true">E</div>
               <div className="em-brand-copy">

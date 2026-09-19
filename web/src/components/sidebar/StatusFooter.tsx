@@ -36,9 +36,12 @@ export function StatusFooter() {
 
   useEffect(() => {
     if (prevConnected.current === false && connected === true) {
-      setReconnectFlash(true);
+      const frame = requestAnimationFrame(() => setReconnectFlash(true));
       const timer = setTimeout(() => setReconnectFlash(false), 500);
-      return () => clearTimeout(timer);
+      return () => {
+        cancelAnimationFrame(frame);
+        clearTimeout(timer);
+      };
     }
     prevConnected.current = connected;
   }, [connected]);
@@ -62,14 +65,14 @@ export function StatusFooter() {
   return (
     <>
       <div
-        className="h-px flex-shrink-0"
+        className="em-sidebar-footer-divider h-px flex-shrink-0"
         style={{
           background:
             "linear-gradient(to right, transparent, var(--border), transparent)",
         }}
       />
 
-      <div className="px-3 py-2 flex items-center justify-between flex-shrink-0">
+      <div className="em-sidebar-footer px-3 py-3 flex items-center justify-between flex-shrink-0">
         <TooltipProvider delayDuration={300}>
           <Tooltip
             open={isMobile ? openTooltipId === "conn" : undefined}

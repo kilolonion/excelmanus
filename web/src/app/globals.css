@@ -1858,7 +1858,12 @@ body {
 
 .em-sidebar {
   background: color-mix(in srgb, var(--em-sidebar-bg) 92%, white);
-  border-color: var(--em-line);
+  border: 1px solid color-mix(in srgb, var(--em-line) 72%, transparent);
+  border-radius: 0 26px 26px 0;
+  box-shadow: 10px 0 34px rgba(24, 58, 40, 0.055);
+  align-self: center;
+  height: calc(100% - 20px);
+  margin-block: 10px;
 }
 
 .em-sidebar-inner {
@@ -1916,6 +1921,90 @@ body {
 .em-sidebar-tabs button {
   min-height: 32px;
   border-radius: 8px;
+}
+
+.em-sidebar-header {
+  padding-top: 18px;
+}
+
+.em-sidebar-header > button {
+  width: 32px;
+  height: 32px;
+  border-radius: 12px;
+  color: var(--em-muted);
+  background: color-mix(in srgb, var(--em-panel) 48%, transparent);
+}
+
+.em-sidebar-tabs {
+  background: color-mix(in srgb, var(--em-panel) 60%, transparent);
+  border-color: color-mix(in srgb, var(--em-line) 74%, transparent);
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.5);
+}
+
+.em-sidebar-tabs button[style*="--em-primary"] {
+  font-weight: 700;
+}
+
+.em-session-tools {
+  padding-inline: 4px;
+}
+
+.em-new-chat {
+  border: 1px solid color-mix(in srgb, var(--em-primary) 30%, transparent);
+  background: linear-gradient(135deg, var(--em-primary-light), var(--em-primary));
+  box-shadow: 0 9px 18px color-mix(in srgb, var(--em-primary) 18%, transparent);
+  transition: transform 160ms ease, box-shadow 160ms ease, filter 160ms ease;
+}
+
+.em-new-chat:hover:not(:disabled) {
+  filter: saturate(1.08) brightness(1.02);
+  box-shadow: 0 12px 24px color-mix(in srgb, var(--em-primary) 24%, transparent);
+  transform: translateY(-1px);
+}
+
+.em-workspace-group {
+  margin: 6px 4px 2px;
+  min-height: 32px;
+  border-radius: 10px;
+  color: var(--em-muted);
+}
+
+.em-workspace-group > button {
+  font-size: 10px;
+  font-weight: 750;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.em-session-card {
+  margin-inline: 4px;
+  border: 1px solid transparent;
+  color: var(--em-ink);
+}
+
+.em-session-card:hover {
+  background: color-mix(in srgb, var(--em-primary) 5%, transparent) !important;
+  border-color: color-mix(in srgb, var(--em-primary) 9%, transparent);
+}
+
+.em-session-card:has(.session-rename-input),
+.em-session-card.bg-black\/\[0\.055\],
+.em-session-card.bg-white\/\[0\.09\] {
+  border-color: color-mix(in srgb, var(--em-primary) 16%, transparent);
+  background: color-mix(in srgb, var(--em-primary) 9%, var(--em-panel)) !important;
+  box-shadow: inset 0 1px 0 rgba(255,255,255,0.5), 0 5px 14px rgba(24, 58, 40, 0.05);
+}
+
+.em-sidebar-footer {
+  margin: 8px 10px 0;
+  padding: 8px 10px;
+  border: 1px solid color-mix(in srgb, var(--em-line) 72%, transparent);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--em-panel) 54%, transparent);
+}
+
+.em-sidebar-footer-divider {
+  display: none;
 }
 
 .em-topbar {
@@ -2074,6 +2163,22 @@ body {
 }
 
 @media (max-width: 767px) {
+  .em-sidebar {
+    align-self: auto;
+    height: 100%;
+    margin: 0;
+    border-radius: 0 24px 24px 0;
+    box-shadow: 16px 0 40px rgba(24, 58, 40, 0.14);
+  }
+
+  .em-sidebar-header {
+    padding-top: max(18px, var(--sat, 0px));
+  }
+
+  .em-sidebar-footer {
+    margin-bottom: max(8px, var(--sab, 0px));
+  }
+
   .em-app-shell {
     background: var(--em-page);
   }
