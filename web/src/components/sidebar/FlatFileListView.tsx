@@ -84,7 +84,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
             onDragEnd={onDragEnd}
             onClick={() => onClick(file.path)}
             onDoubleClick={() => { if (selectMode) return; onDoubleClick(file.path); }}
-            className={`group relative flex items-center gap-2.5 pl-5 pr-2 py-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
+            className={`em-file-row group relative flex items-center gap-2.5 pl-5 pr-2 py-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
               isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
             } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
             title={

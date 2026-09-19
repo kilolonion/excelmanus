@@ -132,7 +132,7 @@ function CompactRetrySheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-[81] flex min-h-[280px] h-[min(70dvh,520px)] max-h-[78dvh] flex-col rounded-t-2xl border border-b-0 border-[var(--em-line)] bg-[var(--em-panel)] shadow-2xl overflow-hidden"
+            className="em-model-sheet fixed inset-x-0 bottom-0 z-[81] flex min-h-[280px] h-[min(70dvh,520px)] max-h-[78dvh] flex-col rounded-t-2xl border border-b-0 border-[var(--em-line)] bg-[var(--em-panel)] shadow-2xl overflow-hidden"
             style={{ touchAction: "none" }}
           >
             {/* Drag handle */}
@@ -311,7 +311,7 @@ function SwitchSheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
+            className="em-model-sheet fixed inset-x-0 bottom-0 z-[81] flex flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
             style={{
               height: SHEET_HEIGHT,
               maxHeight: SHEET_HEIGHT,

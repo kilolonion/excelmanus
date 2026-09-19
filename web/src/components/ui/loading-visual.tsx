@@ -9,8 +9,8 @@ const PROGRESS_MS = 4200;
 let progressStartedAt: number | null = null;
 
 const SHEET_FILL = "#ffffff";
-const SHEET_STROKE = "#e4e8e5";
-const SHEET_PRIMARY = "#217346";
+const SHEET_STROKE = "#dce7e0";
+const SHEET_PRIMARY = "#0b6b4f";
 
 function SheetPreview({ highlight = false }: { highlight?: boolean }) {
   return (
@@ -87,7 +87,7 @@ export function LoadingBrandMark({ className }: { className?: string }) {
             cy="81"
             r="73"
             fill="none"
-            stroke="rgba(33,115,70,0.12)"
+            stroke="rgba(11,107,79,0.12)"
             strokeWidth="3"
           />
           <circle

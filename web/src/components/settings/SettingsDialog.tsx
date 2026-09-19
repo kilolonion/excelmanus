@@ -102,7 +102,7 @@ export function SettingsDialog() {
           className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
         >
           {/* ── Tab navigation (mobile: 2×4 grid, desktop: horizontal strip) ── */}
-          <nav className="relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
+            <nav className="em-settings-tabs relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
             {/* Desktop: horizontal strip */}
             <div className="hidden sm:flex px-4">
               {TAB_META.map((tab) => {
@@ -198,7 +198,7 @@ export function SettingsDialog() {
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -8 }}
               transition={{ duration: 0.15 }}
-              className="overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[env(safe-area-inset-bottom)]"
+              className="em-settings-scroll overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[env(safe-area-inset-bottom)]"
             >
               <Suspense fallback={<TabSpinner />}>
                 <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">

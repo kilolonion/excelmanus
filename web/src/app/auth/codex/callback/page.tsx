@@ -40,8 +40,8 @@ function CallbackContent() {
 
   if (error) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4">
-        <div className="text-center space-y-3">
+      <div className="em-auth-gate min-h-screen flex items-center justify-center px-4">
+        <div className="em-auth-card w-full max-w-sm rounded-2xl border p-7 text-center shadow-xl space-y-3">
           <AlertCircle className="h-10 w-10 mx-auto text-destructive" />
           <h2 className="text-lg font-semibold">授权失败</h2>
           <p className="text-sm text-muted-foreground max-w-xs">{error}</p>
@@ -53,8 +53,8 @@ function CallbackContent() {
 
   if (code && state) {
     return (
-      <div className="min-h-screen flex items-center justify-center bg-background px-4">
-        <div className="text-center space-y-3">
+      <div className="em-auth-gate min-h-screen flex items-center justify-center px-4">
+        <div className="em-auth-card w-full max-w-sm rounded-2xl border p-7 text-center shadow-xl space-y-3">
           <CheckCircle2 className="h-10 w-10 mx-auto text-green-500" />
           <h2 className="text-lg font-semibold">授权成功</h2>
           <p className="text-sm text-muted-foreground">正在完成连接，此窗口将自动关闭...</p>
@@ -64,8 +64,8 @@ function CallbackContent() {
   }
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-background px-4">
-      <div className="text-center space-y-3">
+    <div className="em-auth-gate min-h-screen flex items-center justify-center px-4">
+      <div className="em-auth-card w-full max-w-sm rounded-2xl border p-7 text-center shadow-xl space-y-3">
         <AlertCircle className="h-10 w-10 mx-auto text-amber-500" />
         <h2 className="text-lg font-semibold">参数缺失</h2>
         <p className="text-sm text-muted-foreground">未收到授权码，请关闭此窗口重试。</p>
@@ -78,7 +78,7 @@ export default function CodexOAuthCallbackPage() {
   return (
     <Suspense
       fallback={
-        <div className="min-h-screen flex items-center justify-center bg-background">
+        <div className="em-auth-gate min-h-screen flex items-center justify-center">
           <Loader2 className="h-8 w-8 animate-spin text-muted-foreground" />
         </div>
       }

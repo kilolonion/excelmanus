@@ -441,7 +441,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
                 )}
 
                 <motion.div
-                  className="max-w-3xl mx-auto px-3 sm:px-4"
+                  className="max-w-4xl mx-auto px-3 sm:px-4"
                   variants={messageEnterVariants}
                   initial={isNew ? "initial" : false}
                   animate="animate"
@@ -465,7 +465,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
             {pinnedTimestamp && timestampIndices.has(pinnedIndex) && (
               <TimestampSeparator ts={pinnedTimestamp} isNew={pinnedIsNew} />
             )}
-            <div ref={pinnedMeasureRef} className="max-w-3xl mx-auto px-3 sm:px-4">
+            <div ref={pinnedMeasureRef} className="max-w-4xl mx-auto px-3 sm:px-4">
             <motion.div
               variants={messageEnterVariants}
               initial={pinnedIsNew ? "initial" : false}
@@ -521,7 +521,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
 function TimestampSeparator({ ts, isNew }: { ts: number; isNew: boolean }) {
   return (
     <motion.div
-      className="flex items-center justify-center py-1 max-w-3xl mx-auto px-3 sm:px-4"
+      className="flex items-center justify-center py-1 max-w-4xl mx-auto px-3 sm:px-4"
       initial={isNew ? { opacity: 0, scale: 0.95 } : false}
       animate={{ opacity: 1, scale: 1 }}
       transition={{ duration: 0.2, ease: "easeOut" }}

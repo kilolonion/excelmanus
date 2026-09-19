@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
 import { Download, FileText, History, Maximize2, RefreshCw, X } from "lucide-react";
@@ -10,6 +10,7 @@ import { buildWordFileUrl, downloadFile } from "@/lib/api";
 import { panelSlideVariants } from "@/lib/sidebar-motion";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
+import { useIsMobile } from "@/hooks/use-mobile";
 
 const WordSnapshotView = dynamic(
   () => import("./WordSnapshotView").then((module) => ({ default: module.WordSnapshotView })),
@@ -24,6 +25,7 @@ const WordSnapshotView = dynamic(
 );
 
 export function WordSidePanel() {
+  const isMobile = useIsMobile();
   const { panelOpen, panelTab, setPanelTab, activeDocPath, closePanel, openFullView, triggerRefresh } = useWordStore(
     useShallow((state) => ({
       panelOpen: state.panelOpen,
@@ -37,7 +39,7 @@ export function WordSidePanel() {
   );
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<{ scope: string; message: string } | null>(null);
 
   const fileUrl = useMemo(() => {
     if (!activeDocPath) return "";
@@ -49,9 +51,8 @@ export function WordSidePanel() {
     return activeDocPath.split("/").pop() || activeDocPath;
   }, [activeDocPath]);
 
-  useEffect(() => {
-    setActionError(null);
-  }, [activeDocPath, activeSessionId]);
+  const viewScope = `${activeSessionId ?? ""}:${activeDocPath ?? ""}`;
+  const visibleActionError = actionError?.scope === viewScope ? actionError.message : null;
 
   const handleRefresh = useCallback(() => {
     setActionError(null);
@@ -66,10 +67,13 @@ export function WordSidePanel() {
     void downloadFile(activeDocPath, fileName || undefined, activeSessionId ?? undefined).catch(
       (err: unknown) => {
         console.error("Error downloading Word file:", err);
-        setActionError(err instanceof Error ? err.message : "下载失败，请重试");
+        setActionError({
+          scope: viewScope,
+          message: err instanceof Error ? err.message : "下载失败，请重试",
+        });
       }
     );
-  }, [activeDocPath, activeSessionId, fileName]);
+  }, [activeDocPath, activeSessionId, fileName, viewScope]);
 
   if (!panelOpen || !activeDocPath) return null;
 
@@ -77,9 +81,9 @@ export function WordSidePanel() {
     <motion.div
       key="word-side-panel"
       data-coach-id="coach-word-panel"
-      className="flex h-full flex-shrink-0 flex-col border-l border-border bg-background"
-      style={{ width: 480, minWidth: 360, maxWidth: "50vw" }}
-      variants={panelSlideVariants}
+      className={`em-word-panel flex h-full flex-shrink-0 flex-col border-l border-border bg-background ${isMobile ? "fixed inset-0 z-50" : ""}`}
+      style={isMobile ? undefined : { width: "min(480px, 50vw)", minWidth: 0 }}
+      variants={isMobile ? { hidden: { y: "100%", opacity: 0 }, visible: { y: 0, opacity: 1 }, exit: { y: "100%", opacity: 0 } } : panelSlideVariants}
       initial="hidden"
       animate="visible"
       exit="hidden"
@@ -156,8 +160,8 @@ export function WordSidePanel() {
           <p className="text-[11px] leading-4 text-muted-foreground">
             只读快照预览（正文 + 表格）：不会写回文档；内容由 Agent 写入，精调版式请下载后用 Word 打开。
           </p>
-          {actionError && (
-            <p className="mt-1 text-[11px] leading-4 text-destructive">{actionError}</p>
+          {visibleActionError && (
+            <p className="mt-1 text-[11px] leading-4 text-destructive">{visibleActionError}</p>
           )}
         </div>
       )}

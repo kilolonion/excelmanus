@@ -976,7 +976,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       </AnimatePresence>
 
       {!pendingQuestion && (
-        <div className="flex items-center justify-between px-1 pt-1">
+        <div className="flex flex-wrap items-center justify-between gap-y-1 px-1 pt-1">
           <ChatModeTabs />
           <div className="flex items-center gap-0.5 pr-3 pt-1 pb-0">
             <ModeBadges />
@@ -1029,7 +1029,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
           <div
             ref={backdropRef}
             aria-hidden="true"
-            className="absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words font-sans"
+            className="em-composer-backdrop absolute inset-0 pointer-events-none overflow-hidden whitespace-pre-wrap break-words font-sans"
             style={{
               color: "var(--foreground)",
               padding: "8px 8px",

@@ -378,7 +378,7 @@ export function CodePreviewModal({
               ))}
               <div className="flex-1" />
               {/* Action buttons — prominent */}
-              <div className="flex items-center gap-1">
+              <div className="em-preview-actions flex items-center gap-1">
                 {isMarkdown && !loading && !error && (
                   <button
                     onClick={() => setMdPreview(!mdPreview)}

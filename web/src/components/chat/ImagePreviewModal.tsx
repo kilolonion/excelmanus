@@ -246,7 +246,7 @@ export function ImagePreviewModal({
               ))}
               <div className="flex-1" />
               {/* Action buttons — prominent */}
-              <div className="flex items-center gap-1">
+              <div className="em-preview-actions flex items-center gap-1">
                 <ToolBtn onClick={handleZoomOut} disabled={zoom <= MIN_ZOOM} title="缩小">
                   <ZoomOut className="w-3.5 h-3.5" />
                 </ToolBtn>

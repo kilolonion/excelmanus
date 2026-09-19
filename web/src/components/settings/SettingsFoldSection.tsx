@@ -36,7 +36,7 @@ export function SettingsFoldSection({
   const toggle = () => setOpen(!open);
 
   return (
-    <section className="rounded-lg border border-border" data-coach-id={coachId}>
+    <section className="em-settings-section rounded-xl border border-border" data-coach-id={coachId}>
       <div
         role="button"
         tabIndex={0}

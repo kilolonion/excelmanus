@@ -36,7 +36,7 @@ export function SettingsEntityCard({
   return (
     <div
       className={cn(
-        "rounded-lg border overflow-hidden",
+        "em-settings-section rounded-xl border overflow-hidden",
         dashed
           ? "border-dashed border-[var(--em-primary-alpha-25)] bg-[var(--em-primary-alpha-06)]"
           : "border-border",

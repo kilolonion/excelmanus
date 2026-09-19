@@ -292,7 +292,7 @@ export function SessionList() {
           placeholder="搜索对话…"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className={`w-full h-9 pl-8 text-[12px] rounded-xl border border-[var(--em-line)] bg-white/70 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
+          className={`w-full h-9 pl-8 text-[12px] rounded-xl border border-[var(--em-line)] bg-card/80 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
         />
         {searchQuery ? (
           <button

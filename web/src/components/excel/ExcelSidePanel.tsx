@@ -212,19 +212,21 @@ export function ExcelSidePanel() {
     [diffs, activeFilePath]
   );
 
-  const handleRefresh = useCallback(() => {
+  const handleRefresh = () => {
     if (activeFilePath) {
       invalidateWorkbookCaches({ workspaceKey, relative: activeFilePath });
     }
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
-  }, [activeFilePath, workspaceKey]);
+  };
 
   const isOpen = panelOpen;
 
   // 面板首次打开后保持挂载，关闭时用 CSS 隐藏，避免 Univer 实例被销毁重建
-  const [hasEverMounted, setHasEverMounted] = useState(false);
+  const [hasEverMounted, setHasEverMounted] = useState(() => panelOpen);
   useEffect(() => {
-    if (isOpen && !hasEverMounted) setHasEverMounted(true);
+    if (!isOpen || hasEverMounted) return;
+    const frame = requestAnimationFrame(() => setHasEverMounted(true));
+    return () => cancelAnimationFrame(frame);
   }, [isOpen, hasEverMounted]);
 
   // 根据屏幕尺寸选择合适的动画变体
@@ -270,8 +272,6 @@ export function ExcelSidePanel() {
           // 关闭时隐藏但保持挂载
           ...(!isOpen ? { display: "none" } : {}),
         }}
-        onTouchStart={handlePanelTouchStart}
-        onTouchEnd={handlePanelTouchEnd}
       >
         {/* ── 桌面端：左侧拖拽手柄 ── */}
         {isDesktop && isOpen && (
@@ -292,7 +292,12 @@ export function ExcelSidePanel() {
 
             {/* 移动端与中等屏幕的滑动指示条 */}
             {useFloatingMode && !isFloatingByResize && (
-              <div className="flex justify-center py-1.5 flex-shrink-0">
+              <div
+                className="flex justify-center py-1.5 flex-shrink-0"
+                onTouchStart={handlePanelTouchStart}
+                onTouchEnd={handlePanelTouchEnd}
+                aria-label="下滑关闭表格面板"
+              >
                 <div className="w-10 h-1 rounded-full bg-muted-foreground/30" />
               </div>
             )}

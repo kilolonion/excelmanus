@@ -52,7 +52,7 @@ export function ManageTokenGate({ onSaved }: { onSaved: () => void }) {
           autoComplete="off"
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          className="h-11 w-full rounded-xl border border-[var(--em-line)] bg-white/70 pl-10 pr-3 text-sm outline-none transition focus:border-[var(--em-primary-light)] focus:ring-4 focus:ring-[var(--em-primary)]/10"
+          className="h-11 w-full rounded-xl border border-[var(--em-line)] bg-card/80 pl-10 pr-3 text-sm outline-none transition focus:border-[var(--em-primary-light)] focus:ring-4 focus:ring-[var(--em-primary)]/10"
           placeholder="管理令牌"
           />
         </div>

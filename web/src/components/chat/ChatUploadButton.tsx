@@ -155,6 +155,7 @@ export function ChatUploadButton({ onPick }: ChatUploadButtonProps) {
               variant="ghost"
               size="icon"
               className="touch-compact h-9 w-9 sm:h-8 sm:w-8 rounded-full flex-shrink-0 text-muted-foreground hover:text-foreground"
+              aria-label="添加文件"
               onClick={() => fileInputRef.current?.click()}
             >
               <Plus className="h-4 w-4" />

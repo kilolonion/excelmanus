@@ -166,6 +166,7 @@ export function OverlayCardHeader({
                     disabled={closeDisabled}
                     className="text-muted-foreground/50 hover:text-foreground transition-colors p-2 sm:p-1.5 rounded-xl hover:bg-muted/80 active:scale-95 disabled:opacity-40 min-h-11 min-w-11 sm:min-h-0 sm:min-w-0 inline-flex items-center justify-center"
                     title={closeTitle}
+                    aria-label={closeTitle}
                   >
                     <X className="h-5 w-5 sm:h-[18px] sm:w-[18px]" />
                   </button>
@@ -240,7 +241,7 @@ export function OverlayCardFooter({
     <div
       className={cn(
         "flex flex-col-reverse sm:flex-row sm:justify-end gap-2.5 sm:gap-3",
-        "px-5 sm:px-8 py-4 sm:py-5 mt-auto border-t border-[var(--em-hairline)]",
+        "shrink-0 bg-card px-5 sm:px-8 py-4 sm:py-5 mt-auto border-t border-[var(--em-hairline)]",
         className,
       )}
     >

@@ -72,7 +72,7 @@ export interface TreeNodeProps {
 }
 
 export function TreeNodeItem(props: TreeNodeProps) {
-  const { node, sessionId, depth, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
+  const { node, sessionId, depth, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRefresh, onUploadToFolder } = props;
   const [expanded, setExpanded] = useState(depth < 2);
   const [renaming, setRenaming] = useState(false);
   const [creating, setCreating] = useState<"file" | "folder" | null>(null);
@@ -80,6 +80,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
   const [fileInfoPath, setFileInfoPath] = useState<string | null>(null);
   const isFolder = !node.file;
   const indent = depth * 12;
+  const isFileActive = useWorkspaceFileActive(node.file?.path ?? "", node.file?.filename);
 
   // ── Folder node ──
   if (isFolder) {
@@ -291,7 +292,6 @@ export function TreeNodeItem(props: TreeNodeProps) {
 
   // ── File node ──
   const file = node.file!;
-  const isFileActive = useWorkspaceFileActive(file.path, file.filename);
   const isDragging = draggingPath === file.path;
   const isSelected = selectedPaths.has(file.path);
 
@@ -354,7 +354,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       onDragEnd={onDragEnd}
       onClick={handleFileClick}
       onDoubleClick={handleFileDblClick}
-      className={`group relative flex items-center gap-2.5 py-2 pr-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
+      className={`em-file-row group relative flex items-center gap-2.5 py-2 pr-2 rounded-lg transition-colors duration-100 text-[13px] cursor-pointer ${
         isSelected ? "bg-accent/80" : isFileActive ? "bg-accent/60" : "hover:bg-accent/40"
       } ${isDragging ? "opacity-70 scale-[0.98]" : ""}`}
       style={{ paddingLeft: `${indent + 4 + 16}px` }}

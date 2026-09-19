@@ -148,7 +148,7 @@ export function TopModelSelector() {
       <>
         <Button
           variant="ghost"
-          className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-white/55 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
+          className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
           data-coach-id="coach-model-selector"
           onClick={() => setOpen(true)}
         >
@@ -201,7 +201,7 @@ export function TopModelSelector() {
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-white/55 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
+        <Button variant="ghost" className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
           {/* Provider color indicator dot */}
           <span
             className="h-2 w-2 rounded-full shrink-0 transition-all duration-300 group-hover:scale-125"
