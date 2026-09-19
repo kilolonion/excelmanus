@@ -10,7 +10,6 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useUIStore } from "@/stores/ui-store";
-import { useShallow } from "zustand/react/shallow";
 import { apiGet, apiPut } from "@/lib/api";
 import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
@@ -149,7 +148,7 @@ export function TopModelSelector() {
       <>
         <Button
           variant="ghost"
-          className="gap-1 px-2 h-8 text-[13px] font-medium text-muted-foreground group shrink-0 overflow-hidden"
+          className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-white/55 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
           data-coach-id="coach-model-selector"
           onClick={() => setOpen(true)}
         >
@@ -202,7 +201,7 @@ export function TopModelSelector() {
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-1 px-2 h-8 text-[13px] font-medium text-muted-foreground group shrink-0" data-coach-id="coach-model-selector">
+        <Button variant="ghost" className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-white/55 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
           {/* Provider color indicator dot */}
           <span
             className="h-2 w-2 rounded-full shrink-0 transition-all duration-300 group-hover:scale-125"

@@ -50,15 +50,15 @@
 :root {
   --radius: 0.625rem;
   /* ExcelManus 品牌色 */
-  --em-primary: #217346;
-  --em-primary-light: #33a867;
-  --em-accent: #107c41;
-  --em-sidebar-bg: #f7f7f8;
-  --em-fill: #f4f6f4;
-  --em-hairline: #e4e8e5;
-  --em-text: #202823;
-  --em-text-secondary: #778179;
-  --em-primary-dark: #1a5c38;
+  --em-primary: #0b6b4f;
+  --em-primary-light: #3b9b74;
+  --em-accent: #0b8f67;
+  --em-sidebar-bg: #eef3ef;
+  --em-fill: #f6f8f6;
+  --em-hairline: #dce7e0;
+  --em-text: #18241e;
+  --em-text-secondary: #66756c;
+  --em-primary-dark: #075239;
   --em-primary-alpha-02: rgba(33, 115, 70, 0.02);
   --em-primary-alpha-04: rgba(33, 115, 70, 0.04);
   --em-primary-alpha-06: rgba(33, 115, 70, 0.06);
@@ -69,12 +69,12 @@
   --em-primary-alpha-20: rgba(33, 115, 70, 0.2);
   --em-primary-alpha-25: rgba(33, 115, 70, 0.25);
   --em-primary-alpha-30: rgba(33, 115, 70, 0.3);
-  --em-surface: #f4f4f5;
+  --em-surface: #f2f6f3;
   --em-error: #d13438;
   --em-gold: #e5a100;
   --em-cyan: #0078d4;
-  --background: oklch(1 0 0);
-  --foreground: oklch(0.145 0 0);
+  --background: #f8faf8;
+  --foreground: #18241e;
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.145 0 0);
   --popover: oklch(1 0 0);
@@ -1822,6 +1822,338 @@ button:active:not(:disabled),
 
 .send-btn-glow:hover:not(:disabled) {
   box-shadow: 0 0 16px -2px var(--em-primary-alpha-25);
+}
+
+/* ── ExcelManus unified workspace language ── */
+:root {
+  --em-page: #f8faf8;
+  --em-panel: #ffffff;
+  --em-panel-soft: #f2f7f3;
+  --em-ink: #18241e;
+  --em-muted: #66756c;
+  --em-line: #dce7e0;
+  --em-line-strong: #c8d8ce;
+  --em-radius-sm: 10px;
+  --em-radius-md: 16px;
+  --em-radius-lg: 22px;
+  --em-shadow-soft: 0 10px 30px rgba(24, 58, 40, 0.07);
+  --em-shadow-lift: 0 18px 42px rgba(24, 58, 40, 0.12);
+}
+
+body {
+  background: var(--em-page);
+  color: var(--em-ink);
+  font-feature-settings: "ss01" 1, "cv11" 1;
+}
+
+.em-app-shell {
+  background:
+    radial-gradient(circle at 78% -10%, rgba(59, 155, 116, 0.09), transparent 34%),
+    var(--em-page);
+}
+
+.em-main {
+  background: transparent;
+}
+
+.em-sidebar {
+  background: color-mix(in srgb, var(--em-sidebar-bg) 92%, white);
+  border-color: var(--em-line);
+}
+
+.em-sidebar-inner {
+  background: linear-gradient(180deg, rgba(255,255,255,0.5), transparent 34%);
+}
+
+.em-brand-lockup {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.em-brand-mark {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  flex: 0 0 auto;
+  border-radius: 12px;
+  color: white;
+  background: linear-gradient(145deg, var(--em-primary-light), var(--em-primary-dark));
+  box-shadow: 0 7px 16px rgba(11, 107, 79, 0.2);
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: -0.04em;
+}
+
+.em-brand-copy {
+  min-width: 0;
+}
+
+.em-brand-name {
+  color: var(--em-ink);
+  font-size: 14px;
+  font-weight: 750;
+  letter-spacing: -0.02em;
+}
+
+.em-brand-subtitle {
+  margin-top: 1px;
+  color: var(--em-muted);
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.em-sidebar-tabs {
+  padding: 4px;
+  border: 1px solid var(--em-line);
+  border-radius: 12px;
+  background: rgba(255,255,255,0.62);
+}
+
+.em-sidebar-tabs button {
+  min-height: 32px;
+  border-radius: 8px;
+}
+
+.em-topbar {
+  background: rgba(248, 250, 248, 0.9);
+  border-color: var(--em-line);
+  backdrop-filter: blur(18px);
+  -webkit-backdrop-filter: blur(18px);
+}
+
+.em-topbar-toolbar {
+  min-height: 54px;
+  padding-inline: clamp(12px, 2.5vw, 30px);
+}
+
+.em-topbar .topbar-glass {
+  background: transparent;
+  border: 0;
+}
+
+.em-workspace-tabs {
+  padding-inline: clamp(12px, 2.5vw, 30px);
+  padding-bottom: 8px;
+}
+
+.em-workspace-tabs [role="tablist"] {
+  gap: 4px;
+  padding: 3px;
+  width: max-content;
+  border: 1px solid var(--em-line);
+  border-radius: 10px;
+  background: rgba(255,255,255,0.7);
+}
+
+.em-workspace-tabs [role="tab"] {
+  height: 26px;
+  padding-inline: 12px;
+  border-radius: 7px;
+  font-size: 11px;
+}
+
+.em-workspace-tabs [role="tab"][aria-selected="true"] {
+  background: var(--em-primary);
+  color: white;
+  box-shadow: 0 4px 10px rgba(11, 107, 79, 0.18);
+}
+
+.em-workspace-tabs [role="tab"][aria-selected="true"] span {
+  display: none;
+}
+
+.em-welcome {
+  width: min(100%, 980px);
+  margin-inline: auto;
+  padding: clamp(28px, 7vh, 78px) clamp(16px, 4vw, 56px) 32px;
+}
+
+.em-welcome-hero {
+  position: relative;
+  width: 100%;
+  overflow: hidden;
+  border: 1px solid var(--em-line);
+  border-radius: var(--em-radius-lg);
+  padding: clamp(22px, 4vw, 38px);
+  background:
+    linear-gradient(135deg, rgba(255,255,255,0.96), rgba(241,248,243,0.9)),
+    var(--em-panel);
+  box-shadow: var(--em-shadow-soft);
+}
+
+.em-welcome-hero::after {
+  content: "";
+  position: absolute;
+  width: 220px;
+  height: 220px;
+  right: -78px;
+  top: -92px;
+  border-radius: 50%;
+  border: 1px solid rgba(11, 107, 79, 0.14);
+  box-shadow: 0 0 0 22px rgba(11, 107, 79, 0.035), 0 0 0 44px rgba(11, 107, 79, 0.022);
+  pointer-events: none;
+}
+
+.em-welcome-kicker {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--em-primary);
+  font-size: 11px;
+  font-weight: 750;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+}
+
+.em-welcome-kicker::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--em-primary-light);
+  box-shadow: 0 0 0 4px rgba(59,155,116,0.12);
+}
+
+.em-task-grid {
+  width: 100%;
+  max-width: 980px;
+  margin-top: 14px;
+}
+
+.em-task-card {
+  border-color: var(--em-line);
+  border-radius: var(--em-radius-md);
+  background: rgba(255,255,255,0.84);
+  box-shadow: 0 4px 14px rgba(24,58,40,0.035);
+}
+
+.em-task-card:hover {
+  border-color: rgba(11, 107, 79, 0.38);
+  background: #fff;
+  box-shadow: var(--em-shadow-soft);
+}
+
+.em-composer-dock {
+  padding-inline: clamp(12px, 3vw, 30px);
+  padding-bottom: max(16px, var(--sab, 0px));
+  background: linear-gradient(to top, var(--em-page) 70%, transparent);
+}
+
+.em-chat-input-shell {
+  border-color: var(--em-line-strong);
+  border-radius: var(--em-radius-md);
+  background: rgba(255,255,255,0.95);
+  box-shadow: 0 12px 28px rgba(24,58,40,0.09);
+}
+
+.em-chat-input-shell:focus-within {
+  border-color: var(--em-primary-light);
+  box-shadow: 0 0 0 3px rgba(11,107,79,0.1), 0 16px 34px rgba(24,58,40,0.13);
+}
+
+.em-chat-input-shell .em-input-toolbar {
+  border-top: 1px solid rgba(220,231,224,0.8);
+}
+
+.em-settings-dialog {
+  border-color: var(--em-line-strong);
+  border-radius: var(--em-radius-lg) !important;
+  background: var(--em-panel);
+  box-shadow: var(--em-shadow-lift);
+}
+
+[data-coach-id="coach-excel-panel"],
+[data-coach-id="coach-word-panel"] {
+  background: var(--em-panel) !important;
+  border-color: var(--em-line) !important;
+  box-shadow: -18px 0 44px rgba(24,58,40,0.1);
+}
+
+@media (max-width: 767px) {
+  .em-app-shell {
+    background: var(--em-page);
+  }
+
+  .em-topbar-toolbar {
+    min-height: 52px;
+    padding-inline: 10px;
+  }
+
+  .em-topbar-toolbar .em-hide-mobile {
+    display: none;
+  }
+
+  .em-workspace-tabs {
+    padding-inline: 10px;
+    padding-bottom: 7px;
+  }
+
+  .em-welcome {
+    padding: 18px 12px 22px;
+  }
+
+  .em-welcome-hero {
+    border-radius: 18px;
+    padding: 20px 18px;
+  }
+
+  .em-task-grid {
+    margin-top: 10px;
+  }
+
+  .em-task-card {
+    min-height: 76px;
+  }
+
+  .em-composer-dock {
+    padding-inline: 10px;
+    padding-top: 14px;
+  }
+
+  .em-chat-input-shell {
+    border-radius: 16px;
+  }
+
+  .em-settings-dialog {
+    border-radius: 0 !important;
+  }
+}
+
+@media (min-width: 768px) and (max-width: 1100px) {
+  .em-welcome {
+    padding-inline: 24px;
+  }
+}
+
+.dark {
+  --em-page: #111916;
+  --em-panel: #17211c;
+  --em-panel-soft: #1c2a22;
+  --em-ink: #ecf4ef;
+  --em-muted: #9aac9f;
+  --em-line: rgba(193, 224, 205, 0.13);
+  --em-line-strong: rgba(193, 224, 205, 0.2);
+  --em-shadow-soft: 0 10px 30px rgba(0, 0, 0, 0.16);
+  --em-shadow-lift: 0 18px 48px rgba(0, 0, 0, 0.28);
+}
+
+.dark .em-app-shell,
+.dark .em-topbar {
+  background: var(--em-page);
+}
+
+.dark .em-sidebar {
+  background: #152019;
+}
+
+.dark .em-welcome-hero,
+.dark .em-task-card,
+.dark .em-chat-input-shell {
+  background: var(--em-panel);
 }
 
 /* ── Sidebar Session Card Enhanced ── */

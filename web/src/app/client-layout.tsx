@@ -66,12 +66,12 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
       {/* Coach Marks — two-phase guide (basic + advanced explore) */}
       {showCoachMarks && <CoachMarks />}
 
-      <div className="flex h-viewport overflow-hidden">
+      <div className="em-app-shell flex h-viewport overflow-hidden">
         <Sidebar />
-        <main className="flex-1 flex flex-col overflow-hidden min-w-0">
+        <main className="em-main flex-1 flex flex-col overflow-hidden min-w-0">
           {/* 顶栏只占对话列；表格/文档侧栏与左侧栏一样通顶挤压 */}
-          <div className="flex flex-col shrink-0 topbar-glass">
-            <div className="flex items-center h-12 px-2 sm:px-3 overflow-hidden">
+          <div className="em-topbar flex flex-col shrink-0 topbar-glass">
+            <div className="em-topbar-toolbar flex items-center overflow-hidden">
               <SidebarToggle />
               <ChatSessionHeader />
 
@@ -81,7 +81,9 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
                 <WorkbookPanelButton />
               </div>
             </div>
-            <ChatWorkspaceTabs />
+            <div className="em-workspace-tabs">
+              <ChatWorkspaceTabs />
+            </div>
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
             {children}

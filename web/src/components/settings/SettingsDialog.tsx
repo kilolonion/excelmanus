@@ -82,8 +82,8 @@ export function SettingsDialog() {
 
   return (
     <Dialog open={settingsOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} className="!grid-none !flex !flex-col max-w-none sm:max-w-2xl h-[100dvh] sm:h-[70vh] sm:max-h-[85vh] p-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
-        <DialogHeader className="px-4 pt-4 pb-0 sm:px-6 sm:pt-6 flex-shrink-0 flex-row items-center">
+      <DialogContent showCloseButton={false} className="em-settings-dialog !grid-none !flex !flex-col max-w-none sm:max-w-3xl h-[100dvh] sm:h-[76vh] sm:max-h-[88vh] p-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
+        <DialogHeader className="border-b border-[var(--em-line)] bg-[var(--em-panel-soft)] px-4 pt-4 pb-4 sm:px-6 sm:pt-5 flex-shrink-0 flex-row items-center">
           <DialogTitle className="flex items-center gap-2 flex-1">
             <Settings className="h-5 w-5" />
             设置

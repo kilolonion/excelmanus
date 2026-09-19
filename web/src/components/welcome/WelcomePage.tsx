@@ -66,11 +66,6 @@ const fadeUp = {
   show: { opacity: 1, y: 0, transition: { duration: duration.normal, ease: smoothEase } },
 };
 
-const logoVariant = {
-  hidden: { opacity: 0, scale: 0.85 },
-  show: { opacity: 1, scale: 1, transition: { duration: duration.slow, ease: smoothEase } },
-};
-
 const cardVariants = {
   hidden: { opacity: 0, y: 20, scale: 0.95 },
   show: { opacity: 1, y: 0, scale: 1, transition: { duration: duration.normal, ease: smoothEase } },
@@ -167,31 +162,39 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
 
   return (
     <motion.div
-      className="relative flex-1 min-h-0 flex flex-col items-center px-4 py-6 overflow-y-auto before:content-[''] before:flex-[1_0_0px] after:content-[''] after:flex-[1_0_0px]"
+      className="em-welcome relative flex-1 min-h-0 flex flex-col items-center overflow-y-auto"
       variants={containerVariants}
       initial="hidden"
       animate="show"
     >
-      <div className="absolute inset-0 welcome-bg-grid pointer-events-none" />
-      <div className="welcome-orb welcome-orb-1" />
-      <div className="welcome-orb welcome-orb-2" />
-
-      <motion.div className="relative flex items-center gap-3 mb-4" variants={logoVariant}>
-        <div className="absolute inset-0 -m-4 rounded-full bg-[var(--em-primary-alpha-06)] blur-xl" />
-        <img
-          src="/logo.svg"
-          alt="ExcelManus"
-          className="relative h-12 w-auto drop-shadow-sm"
-        />
-      </motion.div>
-
-      <motion.h1 className="relative text-xl font-semibold mb-1" variants={fadeUp}>你好！我是你的 Excel 智能助手</motion.h1>
-      <motion.p className="relative text-sm text-muted-foreground mb-8" variants={fadeUp}>上传文件或输入任务，我来帮你处理</motion.p>
+      <motion.section className="em-welcome-hero" variants={fadeUp}>
+        <div className="relative z-10 max-w-2xl">
+          <div className="em-welcome-kicker">Spreadsheet intelligence</div>
+          <motion.h1 className="mt-4 text-[clamp(1.65rem,4vw,2.65rem)] font-semibold tracking-[-0.04em] text-[var(--em-ink)]" variants={fadeUp}>
+            把琐碎的表格工作，交给你的智能工作区。
+          </motion.h1>
+          <motion.p className="mt-3 max-w-xl text-sm leading-6 text-[var(--em-muted)] sm:text-[15px]" variants={fadeUp}>
+            上传文件、描述目标，ExcelManus 会在同一个工作区里完成分析、编辑和复核。
+          </motion.p>
+          <motion.div className="mt-6 flex flex-wrap items-center gap-2 text-[11px] text-[var(--em-muted)]" variants={fadeUp}>
+            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">支持 Excel、CSV、图片</span>
+            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">结果可追溯</span>
+            <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">移动端友好</span>
+          </motion.div>
+        </div>
+      </motion.section>
 
       <motion.div
-        className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-lg w-full"
-        variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06 } } }}
+        className="em-task-grid grid grid-cols-1 gap-3 sm:grid-cols-2"
+        variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.1 } } }}
       >
+        <div className="col-span-full mb-1 flex items-center justify-between px-1">
+          <div>
+            <h2 className="text-sm font-semibold text-[var(--em-ink)]">从一个具体任务开始</h2>
+            <p className="mt-1 text-xs text-[var(--em-muted)]">选择示例，或直接在下方输入你的目标</p>
+          </div>
+          <span className="hidden text-[11px] text-[var(--em-muted)] sm:block">常用工作流</span>
+        </div>
         {SUGGESTIONS.map((suggestion) => {
           const { text, icon: Icon, samples } = suggestion;
           const isThis = loadingKey === text;
@@ -209,13 +212,13 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
               onClick={() => handleClick(suggestion)}
               disabled={isBusy}
               aria-label={`试用示例：${text}`}
-              className={`group flex flex-col gap-2 rounded-xl welcome-card-glass p-4 text-left text-sm
+              className={`em-task-card group flex flex-col gap-2 p-4 text-left text-sm
                 transition-[border-color,background-color,box-shadow,color,opacity] duration-200 min-h-[44px]
                 ${isThis ? "opacity-60 cursor-wait" : isBusy ? "opacity-80 cursor-default" : "hover:bg-[var(--em-primary-alpha-06)] active:bg-[var(--em-primary-alpha-10)] cursor-pointer"}
                 ${hasError ? "border-[color:var(--destructive)]/40" : ""}`}
             >
               <span className="flex items-center gap-3">
-                <span className="flex-shrink-0 h-8 w-8 rounded-lg bg-[var(--em-primary-alpha-06)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
+                  <span className="flex-shrink-0 h-9 w-9 rounded-xl bg-[var(--em-primary-alpha-08)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
                   {isThis ? (
                     <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
                   ) : (

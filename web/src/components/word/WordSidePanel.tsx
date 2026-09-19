@@ -76,6 +76,7 @@ export function WordSidePanel() {
   return (
     <motion.div
       key="word-side-panel"
+      data-coach-id="coach-word-panel"
       className="flex h-full flex-shrink-0 flex-col border-l border-border bg-background"
       style={{ width: 480, minWidth: 360, maxWidth: "50vw" }}
       variants={panelSlideVariants}
@@ -83,7 +84,7 @@ export function WordSidePanel() {
       animate="visible"
       exit="hidden"
     >
-      <div className="flex items-center gap-2 border-b border-border px-3 py-2 shrink-0">
+      <div className="flex items-center gap-2 border-b border-[var(--em-line)] bg-[var(--em-panel-soft)] px-3 py-2.5 shrink-0">
         <FileText className="h-4 w-4 shrink-0 text-blue-500" />
         <span className="flex-1 truncate text-sm font-medium" title={activeDocPath}>
           {fileName}
@@ -123,7 +124,7 @@ export function WordSidePanel() {
         </button>
       </div>
 
-      <div className="flex border-b border-border bg-muted/20 px-1 shrink-0">
+      <div className="flex border-b border-[var(--em-line)] bg-[var(--em-panel)] px-1 shrink-0">
         <button
           type="button"
           onClick={() => setPanelTab("doc")}

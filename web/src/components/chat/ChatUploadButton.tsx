@@ -112,7 +112,7 @@ export function ChatDropzone({ onNativeFiles, onExcelFiles, children, highlighte
         resetExcelDrag();
         root.onDrop?.(e);
       }}
-      className={`relative rounded-[20px] border bg-background transition-all duration-200 chat-input-ring ${
+      className={`em-chat-input-shell relative rounded-[20px] border bg-background transition-all duration-200 chat-input-ring ${
         isDragActive || excelDragOver
           ? "border-[var(--em-primary-light)] bg-[var(--em-primary)]/5 shadow-lg shadow-[var(--em-primary)]/10"
           : highlighted

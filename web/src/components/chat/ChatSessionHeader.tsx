@@ -15,7 +15,7 @@ export function ChatSessionHeader() {
     <div className="flex items-center gap-2 min-w-0 flex-1 mr-2">
       {title && (
         <h1
-          className="min-w-0 max-w-full text-[15px] sm:text-base font-semibold text-foreground truncate"
+          className="min-w-0 max-w-full truncate rounded-full border border-[var(--em-line)] bg-white/55 px-3 py-1 text-[13px] font-semibold text-[var(--em-ink)] shadow-sm sm:text-sm"
           title={title}
         >
           {title}

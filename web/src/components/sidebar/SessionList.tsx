@@ -284,7 +284,7 @@ export function SessionList() {
   };
 
   const searchAndNewRow = (
-    <div className="flex items-center gap-1.5 px-1 pt-2 pb-1.5 flex-shrink-0">
+    <div className="flex items-center gap-2 px-1 pt-3 pb-2 flex-shrink-0">
       <div className="relative flex-1 min-w-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
         <input
@@ -292,7 +292,7 @@ export function SessionList() {
           placeholder="搜索对话…"
           value={searchQuery}
           onChange={(e) => setSearchQuery(e.target.value)}
-          className={`w-full h-8 pl-8 text-[13px] rounded-lg border border-border/60 bg-background/80 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
+          className={`w-full h-9 pl-8 text-[12px] rounded-xl border border-[var(--em-line)] bg-white/70 outline-none placeholder:text-muted-foreground/50 focus:border-[var(--em-primary)] focus:ring-2 focus:ring-[var(--em-primary-alpha-15)] transition-all duration-200 ${searchQuery ? "pr-8" : "pr-3"}`}
         />
         {searchQuery ? (
           <button
@@ -304,7 +304,7 @@ export function SessionList() {
         ) : null}
       </div>
       <Button
-        className="shrink-0 text-white rounded-xl"
+        className="shrink-0 text-white rounded-xl shadow-sm"
         size="icon-sm"
         style={{ backgroundColor: "var(--em-primary)" }}
         onClick={() => {

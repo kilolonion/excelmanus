@@ -79,7 +79,7 @@ export function Sidebar() {
       {/* Mobile backdrop */}
       <AnimatePresence>
         {isMobile && sidebarOpen && (
-          <motion.div
+        <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
@@ -91,9 +91,9 @@ export function Sidebar() {
       </AnimatePresence>
       <motion.aside
         data-coach-id="coach-sidebar"
-        animate={{ width: isMobile ? (sidebarOpen ? "min(92vw, 360px)" : 0) : (sidebarOpen ? 330 : 0) }}
+        animate={{ width: isMobile ? (sidebarOpen ? "min(88vw, 360px)" : 0) : (sidebarOpen ? 296 : 0) }}
         transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
-        className={`flex flex-col border-r border-border ${
+        className={`em-sidebar flex flex-col border-r border-border ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
         style={{ 
@@ -104,79 +104,78 @@ export function Sidebar() {
         onTouchEnd={swipe.onTouchEnd}
       >
         {/* Inner content container with fixed width to prevent layout shifts */}
-        <motion.div 
-          className="flex flex-col h-full"
-          style={{ 
-            width: isMobile ? "min(92vw, 360px)" : "330px",
-            minWidth: isMobile ? "min(92vw, 360px)" : "330px"
+        <motion.div
+          className="em-sidebar-inner flex flex-col h-full"
+          style={{
+            width: isMobile ? "min(88vw, 360px)" : "296px",
+            minWidth: isMobile ? "min(88vw, 360px)" : "296px",
           }}
           variants={sidebarContentVariants}
           animate={sidebarOpen ? "open" : "closed"}
           transition={isFirstRender.current ? { duration: 0 } : undefined}
         >
-      {/* Header */}
-      <div className="flex items-center justify-between px-3 pt-3 pb-2 flex-shrink-0">
-        <div className="flex items-center min-w-0">
-          <img
-            src="/logo.svg"
-            alt="ExcelManus"
-            className="h-6 flex-shrink-0"
-            style={{ width: "auto", minWidth: "110px" }}
+          {/* Header */}
+          <div className="flex items-center justify-between px-4 pt-4 pb-3 flex-shrink-0">
+            <div className="em-brand-lockup">
+              <div className="em-brand-mark" aria-hidden="true">E</div>
+              <div className="em-brand-copy">
+                <div className="em-brand-name">ExcelManus</div>
+                <div className="em-brand-subtitle">智能工作区</div>
+              </div>
+            </div>
+            <Button
+              variant="ghost"
+              size="icon"
+              onClick={toggleSidebar}
+              className="h-7 w-7 min-h-8 min-w-8 flex-shrink-0"
+            >
+              <PanelLeftClose className="h-4 w-4" />
+            </Button>
+          </div>
+
+          {/* Tab Navigation */}
+          <div className="em-sidebar-tabs mx-3 flex gap-1 flex-shrink-0" data-coach-id="coach-sidebar-tabs">
+            {tabs.map(({ key, label, icon: Icon }) => (
+              <button
+                key={key}
+                className="relative flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md cursor-pointer transition-colors duration-150 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)]"
+                style={activeTab === key ? { color: "var(--em-primary)" } : { color: "var(--muted-foreground)" }}
+                onClick={() => setActiveTab(key)}
+              >
+                {activeTab === key && (
+                  <motion.div
+                    layoutId="sidebar-tab-indicator"
+                    className="absolute inset-0 rounded-md"
+                    style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
+                    transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                  />
+                )}
+                <Icon className="h-3.5 w-3.5 relative z-10" />
+                <span className="relative z-10">{label}</span>
+              </button>
+            ))}
+          </div>
+
+          {/* Divider */}
+          <div
+            className="mx-3 mt-2 mb-1 h-px flex-shrink-0"
+            style={{ background: "linear-gradient(to right, transparent, var(--border), transparent)" }}
           />
-        </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={toggleSidebar}
-          className="h-7 w-7 min-h-8 min-w-8 flex-shrink-0"
-        >
-          <PanelLeftClose className="h-4 w-4" />
-        </Button>
-      </div>
 
-      {/* Tab Navigation */}
-      <div className="px-3 flex gap-1 flex-shrink-0" data-coach-id="coach-sidebar-tabs">
-        {tabs.map(({ key, label, icon: Icon }) => (
-          <button
-            key={key}
-            className="relative flex-1 flex items-center justify-center gap-1.5 py-1.5 text-xs font-medium rounded-md cursor-pointer transition-colors duration-150 select-none focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary)]"
-            style={activeTab === key ? { color: "var(--em-primary)" } : { color: "var(--muted-foreground)" }}
-            onClick={() => setActiveTab(key)}
-          >
-            {activeTab === key && (
-              <motion.div
-                layoutId="sidebar-tab-indicator"
-                className="absolute inset-0 rounded-md"
-                style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-                transition={{ type: "spring", stiffness: 400, damping: 30 }}
-              />
-            )}
-            <Icon className="h-3.5 w-3.5 relative z-10" />
-            <span className="relative z-10">{label}</span>
-          </button>
-        ))}
-      </div>
+          {/* Tab Content — both panels stay mounted, toggle via CSS to avoid layout thrash */}
+          <div className="flex-1 min-h-0 overflow-hidden relative">
+            <div className="h-full px-2" style={{ display: activeTab === "chats" ? undefined : "none" }}>
+              <SessionList />
+            </div>
+            <ScrollArea className="h-full px-2" style={{ display: activeTab === "files" ? undefined : "none" }}>
+              <ExcelFilesBar embedded />
+            </ScrollArea>
+          </div>
 
-      {/* Divider */}
-      <div
-        className="mx-3 mt-2 mb-1 h-px flex-shrink-0"
-        style={{ background: "linear-gradient(to right, transparent, var(--border), transparent)" }}
-      />
-
-      {/* Tab Content — both panels stay mounted, toggle via CSS to avoid layout thrash */}
-      <div className="flex-1 min-h-0 overflow-hidden relative">
-        <div className="h-full px-2" style={{ display: activeTab === "chats" ? undefined : "none" }}>
-          <SessionList />
-        </div>
-        <ScrollArea className="h-full px-2" style={{ display: activeTab === "files" ? undefined : "none" }}>
-          <ExcelFilesBar embedded />
-        </ScrollArea>
-      </div>
-
-        {/* Footer */}
-        <div style={{ paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : undefined }}>
-          <StatusFooter />
-        </div>
+          {/* Footer */}
+          <div style={{ paddingBottom: isMobile ? "env(safe-area-inset-bottom)" : undefined }}>
+            <StatusFooter />
+          </div>
         </motion.div>
       </motion.aside>
     </>

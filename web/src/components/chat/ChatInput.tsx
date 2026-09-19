@@ -976,7 +976,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       </AnimatePresence>
 
       {!pendingQuestion && (
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between px-1 pt-1">
           <ChatModeTabs />
           <div className="flex items-center gap-0.5 pr-3 pt-1 pb-0">
             <ModeBadges />
@@ -1022,7 +1022,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         )}
       </AnimatePresence>
 
-      <div className="flex items-end gap-1 px-1.5 py-1.5">
+      <div className="em-input-toolbar flex items-end gap-1 px-1.5 py-1.5">
         <ChatUploadButton onPick={insertFileMentions} />
 
         <div className="relative flex-1 min-w-0">

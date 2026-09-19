@@ -77,8 +77,8 @@ export default function Home() {
       </WorkspaceViewHost>
 
       {!compareMode && (
-        <div className="relative z-30 px-3 sm:px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
-          <div className="max-w-3xl mx-auto pointer-events-auto">
+        <div className="em-composer-dock relative z-30 pt-6 -mt-6 pointer-events-none flex-shrink-0">
+          <div className="mx-auto w-full max-w-4xl pointer-events-auto">
             <ChatInput
               onSend={handleSend}
               onCommandResult={cmdResult.show}

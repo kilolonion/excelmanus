@@ -67,7 +67,7 @@ export function ChatWorkspaceTabs() {
   };
 
   return (
-    <div className="flex items-center h-5 px-2 sm:px-3 -mt-1.5 pb-1">
+    <div className="flex items-center h-7 -mt-1 pb-0">
       {!sidebarOpen && <div className="w-8 mr-1 shrink-0" aria-hidden />}
       <div
         role="tablist"

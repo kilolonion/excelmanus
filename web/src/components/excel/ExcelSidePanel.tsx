@@ -299,7 +299,7 @@ export function ExcelSidePanel() {
 
           {/* 多文件 Tab 栏 */}
           {visibleRecentFiles.length > 1 && (
-            <div ref={tabBarRef} className="flex items-center bg-muted/20 border-b border-border min-h-[32px] select-none overflow-x-auto scrollbar-none flex-shrink-0">
+            <div ref={tabBarRef} className="flex items-center bg-[var(--em-panel-soft)] border-b border-[var(--em-line)] min-h-[36px] select-none overflow-x-auto scrollbar-none flex-shrink-0">
               {visibleRecentFiles.slice(0, 10).map((file) => {
                 const isActive = file.path === activeFilePath;
                 return (
@@ -308,7 +308,7 @@ export function ExcelSidePanel() {
                     onClick={() => openPanel(file.path)}
                     className={`group relative flex items-center gap-1.5 px-2.5 h-[32px] text-[11px] cursor-pointer shrink-0 border-r border-border/40 transition-colors ${
                       isActive
-                        ? "bg-background text-foreground"
+                        ? "bg-[var(--em-panel)] text-foreground"
                         : "text-muted-foreground hover:bg-muted/40 hover:text-foreground"
                     }`}
                   >
@@ -342,7 +342,7 @@ export function ExcelSidePanel() {
           )}
 
           {!activeFilePath && (
-            <div className="flex items-center justify-end px-1 h-9 border-b border-border bg-muted/20 shrink-0">
+              <div className="flex items-center justify-end px-2 h-10 border-b border-[var(--em-line)] bg-[var(--em-panel-soft)] shrink-0">
               <button
                 type="button"
                 onClick={closePanel}
