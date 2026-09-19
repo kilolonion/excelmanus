@@ -21,9 +21,12 @@ class ExecutionPolicy:
 
 
 def is_plan_active(engine: Any) -> bool:
-    """Plan is a collaboration stance, not a sandbox mode."""
-    if bool(getattr(engine, "_plan_active", False)):
-        return True
+    """Plan is a collaboration stance, not a sandbox mode.
+
+    ``chat_mode`` is the only runtime permission fact.
+    ``is_plan_active(engine) := _current_chat_mode == "plan"``.
+    Leftover ``_plan_active`` is ignored (migrate old snapshots explicitly).
+    """
     return str(getattr(engine, "_current_chat_mode", "") or "") == "plan"
 
 

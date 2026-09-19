@@ -39,8 +39,12 @@
     仅启动后端
 
 .EXAMPLE
-    .\deploy\start.ps1 -Production -Workers 4 -LogDir .\logs
-    生产模式 4 workers，日志输出到 .\logs
+    .\deploy\start.ps1 -Production -LogDir .\logs
+    生产模式（默认 1 worker），日志输出到 .\logs
+
+.EXAMPLE
+    .\deploy\start.ps1 -Production -Workers 4
+    不推荐：多 worker 会跨进程重建会话信封，导致 prompt cache 静默失效
 #>
 
 [CmdletBinding()]
@@ -173,46 +177,6 @@ if (-not (Test-Path $pyprojectPath)) {
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  交互式 .env 配置（首次启动）
-# ═══════════════════════════════════════════════════════════════
-
-$envFilePath = Join-Path $Script:PROJECT_ROOT ".env"
-if (-not (Test-Path $envFilePath)) {
-    Write-Host ""
-    Write-Host "  ========================================" -ForegroundColor Cyan
-    Write-Host "    首次启动 - 配置 ExcelManus" -ForegroundColor Cyan
-    Write-Host "  ========================================" -ForegroundColor Cyan
-    Write-Host ""
-    Write-Host "  需要配置 LLM API 信息才能使用。" -ForegroundColor White
-    Write-Host "  （直接按回车可跳过，稍后手动编辑 .env 文件）" -ForegroundColor DarkGray
-    Write-Host ""
-    $inputApiKey = Read-Host "  API Key"
-    $inputBaseUrl = Read-Host "  Base URL (例: https://api.openai.com/v1)"
-    $inputModel = Read-Host "  Model (例: gpt-5.2)"
-    Write-Host ""
-    if ([string]::IsNullOrWhiteSpace($inputApiKey)) {
-        Write-Host "[!!] 未填写 API Key，创建空模板 .env 文件" -ForegroundColor Yellow
-        Write-Host "[!!] 请稍后编辑 $envFilePath 填入配置" -ForegroundColor Yellow
-        @"
-# ExcelManus Configuration
-# Please fill in your LLM API settings
-EXCELMANUS_API_KEY=your-api-key
-EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
-EXCELMANUS_MODEL=your-model-id
-"@ | Set-Content -Path $envFilePath -Encoding UTF8
-    } else {
-        @"
-# ExcelManus Configuration
-EXCELMANUS_API_KEY=$inputApiKey
-EXCELMANUS_BASE_URL=$inputBaseUrl
-EXCELMANUS_MODEL=$inputModel
-"@ | Set-Content -Path $envFilePath -Encoding UTF8
-        Write-Host "[OK] .env 配置文件已创建" -ForegroundColor Green
-    }
-    Write-Host ""
-}
-
-# ═══════════════════════════════════════════════════════════════
 #  互斥检查
 # ═══════════════════════════════════════════════════════════════
 
@@ -222,35 +186,7 @@ if ($BackendOnly -and $FrontendOnly) {
 }
 
 # ═══════════════════════════════════════════════════════════════
-#  加载 .env
-# ═══════════════════════════════════════════════════════════════
-
-function Load-EnvFile {
-    param([string]$FilePath)
-    if (Test-Path $FilePath) {
-        Write-Dbg "加载环境变量: $FilePath"
-        Get-Content $FilePath | ForEach-Object {
-            $line = $_.Trim()
-            if ($line -and -not $line.StartsWith("#")) {
-                $parts = $line -split "=", 2
-                if ($parts.Count -eq 2) {
-                    $key = $parts[0].Trim()
-                    $val = $parts[1].Trim()
-                    # 去掉可能的引号
-                    $val = $val -replace '^["'']|["'']$', ''
-                    [System.Environment]::SetEnvironmentVariable($key, $val, "Process")
-                }
-            }
-        }
-    }
-}
-
-# 优先级: .env.local > .env
-Load-EnvFile (Join-Path $Script:PROJECT_ROOT ".env")
-Load-EnvFile (Join-Path $Script:PROJECT_ROOT ".env.local")
-
-# ═══════════════════════════════════════════════════════════════
-#  应用默认值（命令行 > 环境变量 > 默认）
+#  应用默认值（命令行优先，其次已有进程环境）
 # ═══════════════════════════════════════════════════════════════
 
 if ($BackendPort -eq 0) {
@@ -290,36 +226,32 @@ function Test-CommandExists {
     return $true
 }
 
-function Test-DomesticNetwork {
-    <# Auto-detect if user is on a domestic (Chinese) network via TCP ping race #>
+function Test-TcpFast {
+    param(
+        [string]$TargetHost,
+        [int]$Port = 443,
+        [int]$TimeoutMs = 800
+    )
+    $client = $null
     try {
-        $mirrorJob = Start-Job -ScriptBlock {
-            try {
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $tcp.Connect('pypi.tuna.tsinghua.edu.cn', 443)
-                $tcp.Close()
-                $sw.Stop()
-                return $sw.Elapsed.TotalSeconds
-            } catch { return 999 }
+        $client = New-Object System.Net.Sockets.TcpClient
+        $ar = $client.BeginConnect($TargetHost, $Port, $null, $null)
+        if (-not $ar.AsyncWaitHandle.WaitOne($TimeoutMs, $false)) {
+            return $false
         }
-        $pypiJob = Start-Job -ScriptBlock {
-            try {
-                $sw = [System.Diagnostics.Stopwatch]::StartNew()
-                $tcp = New-Object System.Net.Sockets.TcpClient
-                $tcp.Connect('pypi.org', 443)
-                $tcp.Close()
-                $sw.Stop()
-                return $sw.Elapsed.TotalSeconds
-            } catch { return 999 }
-        }
-        $null = Wait-Job $mirrorJob, $pypiJob -Timeout 6
-        $tMirror = Receive-Job $mirrorJob
-        $tPypi = Receive-Job $pypiJob
-        Remove-Job $mirrorJob, $pypiJob -Force -ErrorAction SilentlyContinue
-        if ($null -eq $tMirror) { $tMirror = 999 }
-        if ($null -eq $tPypi) { $tPypi = 999 }
-        return ($tMirror -lt 5 -and ($tPypi -gt 5 -or $tMirror -lt $tPypi * 0.8))
+        $client.EndConnect($ar)
+        return $client.Connected
+    } catch {
+        return $false
+    } finally {
+        if ($client) { $client.Close() }
+    }
+}
+
+function Test-DomesticNetwork {
+    <# Fast path: probe Tsinghua mirror; skip Start-Job which is expensive on Windows. #>
+    try {
+        return (Test-TcpFast -TargetHost 'pypi.tuna.tsinghua.edu.cn' -Port 443 -TimeoutMs 800)
     } catch {
         return $false
     }
@@ -626,16 +558,16 @@ function Stop-PortProcess {
         $connections = Get-NetTCPConnection -LocalPort $Port -ErrorAction SilentlyContinue
         if ($connections) {
             $pids = $connections | Select-Object -ExpandProperty OwningProcess -Unique
-            foreach ($pid in $pids) {
-                if ($pid -and $pid -ne 0) {
-                    $proc = Get-Process -Id $pid -ErrorAction SilentlyContinue
+            foreach ($procId in $pids) {
+                if ($procId -and $procId -ne 0) {
+                    $proc = Get-Process -Id $procId -ErrorAction SilentlyContinue
                     if ($proc) {
-                        Write-Warn "端口 $Port 被占用 (PID $pid - $($proc.ProcessName))，正在清理..."
+                        Write-Warn "端口 $Port 被占用 (PID $procId - $($proc.ProcessName))，正在清理..."
                         # 优雅关闭
                         $proc.CloseMainWindow() | Out-Null
                         if (-not $proc.WaitForExit(3000)) {
                             # 强制终止
-                            Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                            Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
                         }
                     }
                 }
@@ -648,10 +580,10 @@ function Stop-PortProcess {
             $lines = netstat -ano | Select-String ":$Port\s"
             foreach ($line in $lines) {
                 if ($line -match '\s(\d+)$') {
-                    $pid = [int]$Matches[1]
-                    if ($pid -and $pid -ne 0) {
-                        Write-Warn "端口 $Port 被占用 (PID $pid)，正在清理..."
-                        Stop-Process -Id $pid -Force -ErrorAction SilentlyContinue
+                    $procId = [int]$Matches[1]
+                    if ($procId -and $procId -ne 0) {
+                        Write-Warn "端口 $Port 被占用 (PID $procId)，正在清理..."
+                        Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
                     }
                 }
             }
@@ -673,6 +605,10 @@ if (-not $NoKillPorts) {
 
 function Start-Backend {
     Write-Info "启动 FastAPI 后端 (${ListenHost}:${BackendPort})..."
+    $env:EXCELMANUS_WEB_WORKERS = "$Workers"
+    if ($Workers -gt 1) {
+        Write-Warn "检测到 $Workers 个 uvicorn worker。会话引擎是进程内存态，同一 session_id 落到不同 worker 会从 SQLite 重建信封；MCP 未连上或技能快照丢失时 tools/system 前缀不等值，将静默打满 prompt cache miss。单机请保持 workers=1；多实例扩容请在反代层按 session_id 粘性路由。"
+    }
 
     $uvicornCmd = if ($Workers -gt 1) {
         "import uvicorn; uvicorn.run('excelmanus.api:app', host='$ListenHost', port=$BackendPort, log_level='info', workers=$Workers)"
@@ -713,26 +649,30 @@ function Start-Backend {
         Write-Err "后端启动失败: $_"
         exit 1
     }
+}
 
-    # 等待健康检查
+function Wait-BackendHealth {
+    param(
+        [System.Diagnostics.Process]$Proc
+    )
     $ready = $false
-    for ($i = 0; $i -lt $HealthTimeout; $i++) {
+    $maxTries = [Math]::Max(1, $HealthTimeout * 5)
+    for ($i = 0; $i -lt $maxTries; $i++) {
         try {
-            $response = Invoke-RestMethod -Uri "http://localhost:${BackendPort}/api/v1/health" -TimeoutSec 3 -ErrorAction Stop
-            if ($response.status -eq "ok" -or $response) {
-                Write-Log "后端已就绪 (PID $($proc.Id))"
+            $response = Invoke-RestMethod -Uri "http://127.0.0.1:${BackendPort}/api/v1/health" -TimeoutSec 1 -ErrorAction Stop
+            if ($response.status -eq "ok" -or $response.status -eq "draining" -or $response) {
+                Write-Log "后端已就绪 (PID $($Proc.Id))"
                 $ready = $true
                 break
             }
         } catch {
-            # 检查进程是否已退出
-            if ($proc.HasExited) {
-                Write-Err "后端启动失败（退出码 $($proc.ExitCode)），请检查配置（.env 文件）"
+            if ($Proc.HasExited) {
+                Write-Err "后端启动失败（退出码 $($Proc.ExitCode)），请检查日志或到 Web 设置页完成模型配置"
                 if ($LogDir) { Write-Err "查看日志: $(Join-Path $LogDir 'backend.log')" }
                 exit 1
             }
         }
-        Start-Sleep -Seconds 1
+        Start-Sleep -Milliseconds 200
     }
 
     if (-not $ready) {
@@ -873,17 +813,21 @@ if (-not $BackendOnly) {
     Start-Frontend
 }
 
+if (-not $FrontendOnly) {
+    Wait-BackendHealth -Proc $Script:BackendProcess
+}
+
 # 等待前端启动（轮询健康检查）
 if (-not $BackendOnly) {
-    $feUrl = "http://localhost:${FrontendPort}"
+    $feUrl = "http://127.0.0.1:${FrontendPort}"
     $feReady = $false
-    for ($i = 0; $i -lt 30; $i++) {
-        Start-Sleep -Seconds 2
+    for ($i = 0; $i -lt 60; $i++) {
         try {
-            $resp = Invoke-WebRequest -Uri $feUrl -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+            $resp = Invoke-WebRequest -Uri $feUrl -UseBasicParsing -TimeoutSec 2 -ErrorAction Stop
             if ($resp.StatusCode -lt 500) { $feReady = $true; break }
         } catch { }
-        if ($i % 5 -eq 4) { Write-Info "  前端尚未就绪，已等待 $((($i + 1) * 2)) 秒..." }
+        if ($i -gt 0 -and $i % 10 -eq 0) { Write-Info "  前端尚未就绪，已等待 $([int]($i * 0.5)) 秒..." }
+        Start-Sleep -Milliseconds 500
     }
     if (-not $feReady) {
         Write-Warn "前端在 60 秒内未就绪，请检查日志"
@@ -930,8 +874,18 @@ try {
                 if (-not $proc.HasExited) { $anyAlive = $true; break }
             }
             if (-not $anyAlive) {
-                Write-Warn "所有服务进程已退出"
-                break
+                # python/cmd 包装进程退出后，uvicorn/next 子进程可能仍占着端口
+                $portsAlive = $false
+                if (-not $FrontendOnly) {
+                    $portsAlive = $portsAlive -or [bool](Get-NetTCPConnection -LocalPort $BackendPort -State Listen -ErrorAction SilentlyContinue)
+                }
+                if (-not $BackendOnly) {
+                    $portsAlive = $portsAlive -or [bool](Get-NetTCPConnection -LocalPort $FrontendPort -State Listen -ErrorAction SilentlyContinue)
+                }
+                if (-not $portsAlive) {
+                    Write-Warn "所有服务进程已退出"
+                    break
+                }
             }
             Start-Sleep -Seconds 2
         }

@@ -4,7 +4,7 @@ import { useEffect, useState, useRef } from "react";
 import { Circle, Settings } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useUIStore } from "@/stores/ui-store";
-import { ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
+import { healthSkillpackCount, healthToolCount, ensureHealthHubPolling, useHealthHubStore } from "@/stores/health-hub-store";
 import {
   Tooltip,
   TooltipContent,
@@ -90,7 +90,7 @@ export function StatusFooter() {
                 )}
                 {health && (
                   <span className="text-muted-foreground/50 hidden sm:inline">
-                    · {health.tools.length}T · {health.skillpacks.length}S
+                    · {healthToolCount(health)}T · {healthSkillpackCount(health)}S
                   </span>
                 )}
               </span>
@@ -100,7 +100,7 @@ export function StatusFooter() {
               {health && (
                 <>
                   <br />模型: {health.model}
-                  <br />工具: {health.tools.length} · 技能包: {health.skillpacks.length} · 会话: {health.active_sessions}
+                  <br />工具: {healthToolCount(health)} · 技能包: {healthSkillpackCount(health)} · 会话: {health.active_sessions}
                 </>
               )}
             </TooltipContent>

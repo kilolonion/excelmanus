@@ -48,6 +48,9 @@ def test_resolve_rejects_hidden_and_lock_names(tmp_path: Path) -> None:
         resolve_canonical(tmp_path, ".hidden.xlsx")
     with pytest.raises(IdentityError):
         resolve_canonical(tmp_path, "~$Book.xlsx")
+    with pytest.raises(IdentityError):
+        resolve_canonical(tmp_path, "scripts/job.py.em-lock")
+    assert public_identity("scripts/job.py.em-lock", tmp_path) == ""
 
 
 def test_display_name_strips_upload_hex_prefix() -> None:
@@ -55,7 +58,7 @@ def test_display_name_strips_upload_hex_prefix() -> None:
     assert display_name_for("outputs/report.xlsx") == "report.xlsx"
 
 
-def test_public_identity_maps_timestamped_backup_when_original_exists(tmp_path: Path) -> None:
+def test_public_identity_skips_timestamped_backup_even_if_original_exists(tmp_path: Path) -> None:
     (tmp_path / "sales.xlsx").write_bytes(b"orig")
     backup = tmp_path / "outputs" / "backups"
     backup.mkdir(parents=True)
@@ -64,14 +67,14 @@ def test_public_identity_maps_timestamped_backup_when_original_exists(tmp_path: 
     assert public_identity(
         "outputs/backups/sales_20260911T091344_f525.xlsx",
         tmp_path,
-    ) == "./sales.xlsx"
+    ) == ""
     assert public_identity(
         str(backup / "sales_20260911T091344_f525.xlsx"),
         tmp_path,
-    ) == "./sales.xlsx"
+    ) == ""
 
 
-def test_public_identity_maps_timestamped_backup_to_uploads(tmp_path: Path) -> None:
+def test_public_identity_skips_timestamped_backup_even_if_uploads_exist(tmp_path: Path) -> None:
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     (uploads / "deadbeef_chart.xlsx").write_bytes(b"u")
@@ -82,7 +85,7 @@ def test_public_identity_maps_timestamped_backup_to_uploads(tmp_path: Path) -> N
     assert public_identity(
         "outputs/backups/chart_20260911T091344_abcd.xlsx",
         tmp_path,
-    ) == "./uploads/deadbeef_chart.xlsx"
+    ) == ""
 
 
 def test_public_identity_skips_backup_when_original_missing(tmp_path: Path) -> None:
@@ -97,7 +100,7 @@ def test_public_identity_maps_sandbox_cow_basename(tmp_path: Path) -> None:
     backup = tmp_path / "outputs" / "backups"
     backup.mkdir(parents=True)
     (backup / "report.xlsx").write_bytes(b"c")
-    assert public_identity("outputs/backups/report.xlsx", tmp_path) == "./report.xlsx"
+    assert public_identity("outputs/backups/report.xlsx", tmp_path) == ""
 
 
 def test_public_identity_skips_sandbox_cow_when_missing(tmp_path: Path) -> None:

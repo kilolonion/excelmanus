@@ -7,7 +7,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from excelmanus.workspace.paths import canonicalize_workspace_path, workspace_title_from_path
+from excelmanus.workspace.paths import (
+    canonicalize_workspace_path,
+    unique_workspace_title,
+    workspace_title_from_path,
+)
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -46,12 +50,54 @@ class WorkspaceStore:
             "sort_index": int(data.get("sort_index") or 0),
         }
 
-    def list(self) -> list[dict[str, Any]]:
+    def _rows(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
             "SELECT id, path, title, created_at, updated_at, sort_index "
             "FROM workspaces ORDER BY sort_index ASC, created_at ASC"
         ).fetchall()
         return [self._row(r) for r in rows]
+
+    def _taken_titles(self, *, exclude_id: str | None = None) -> set[str]:
+        taken: set[str] = set()
+        for item in self._rows():
+            if exclude_id and item["id"] == exclude_id:
+                continue
+            title = str(item.get("title") or "").strip()
+            if title:
+                taken.add(title)
+        return taken
+
+    def _persist_unique_titles(self, items: list[dict[str, Any]]) -> None:
+        taken: set[str] = set()
+        now = _now_iso()
+        dirty = False
+        for item in items:
+            current = str(item.get("title") or "").strip() or "工作区"
+            unique = unique_workspace_title(current, taken)
+            taken.add(unique)
+            if unique == current:
+                continue
+            item["title"] = unique
+            item["updated_at"] = now
+            self._conn.execute(
+                "UPDATE workspaces SET title = ?, updated_at = ? WHERE id = ?",
+                (unique, now, item["id"]),
+            )
+            dirty = True
+        if dirty:
+            self._conn.commit()
+
+    def _ensure_unique_titles(self) -> None:
+        self._persist_unique_titles(self._rows())
+
+    def _allocate_title(self, desired: str, *, exclude_id: str | None = None) -> str:
+        self._ensure_unique_titles()
+        return unique_workspace_title(desired, self._taken_titles(exclude_id=exclude_id))
+
+    def list(self) -> list[dict[str, Any]]:
+        items = self._rows()
+        self._persist_unique_titles(items)
+        return items
 
     def get(self, workspace_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
@@ -80,7 +126,7 @@ class WorkspaceStore:
         if existing is not None:
             return existing, False
         now = _now_iso()
-        display = (title or "").strip() or workspace_title_from_path(canon)
+        display = self._allocate_title((title or "").strip() or workspace_title_from_path(canon))
         row = self._conn.execute("SELECT COALESCE(MAX(sort_index), -1) AS m FROM workspaces").fetchone()
         sort_index = int(row["m"] if row is not None else -1) + 1
         workspace_id = str(uuid.uuid4())
@@ -118,7 +164,7 @@ class WorkspaceStore:
             trimmed = title.strip()
             if not trimmed:
                 raise WorkspacePathError("工作区名称不能为空")
-            next_title = trimmed
+            next_title = self._allocate_title(trimmed, exclude_id=workspace_id)
         if path is not None:
             canon = canonicalize_workspace_path(path)
             if not Path(canon).is_dir():

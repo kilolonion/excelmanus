@@ -11,21 +11,35 @@ import json
 from dataclasses import dataclass, field, replace
 from typing import Any
 
+from excelmanus.engine_core.error_payload import (
+    TOOL_ERROR,
+    canonicalize_error_payload,
+    error_code_from_mapping,
+    error_message_from_mapping,
+    make_error_payload,
+    should_canonicalize_error_payload,
+)
+
 
 @dataclass
 class ImageInjection:
     """工具返回的图片注入数据（ui_meta.image 的别名来源）。"""
 
-    base64: str
+    base64: str = ""
     mime_type: str = "image/png"
     detail: str = "auto"
+    attachment: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
-            "base64": self.base64,
+        payload: dict[str, Any] = {
             "mime_type": self.mime_type,
             "detail": self.detail,
         }
+        if self.attachment:
+            payload["attachment"] = self.attachment
+        if self.base64:
+            payload["base64"] = self.base64
+        return payload
 
 
 @dataclass
@@ -48,18 +62,34 @@ _MAGIC_UI_KEYS = (
 def error_result(
     message: str,
     *,
-    code: str = "TOOL_ERROR",
+    code: str = TOOL_ERROR,
     fields: dict[str, Any] | None = None,
+    failure_class: str | None = None,
+    remediation: str | None = None,
 ) -> "ToolResult":
-    payload: dict[str, Any] = {"status": "error", "code": code, "message": message}
-    if fields:
-        for key, value in fields.items():
-            payload.setdefault(key, value)
+    extra = dict(fields or {})
+    if failure_class is None:
+        raw_class = extra.pop("failure_class", None)
+        failure_class = str(raw_class) if raw_class else None
+    else:
+        extra.pop("failure_class", None)
+    if remediation is None:
+        raw_hint = extra.pop("remediation", None)
+        remediation = str(raw_hint) if raw_hint else None
+    else:
+        extra.pop("remediation", None)
+    payload = make_error_payload(
+        message,
+        error_code=code,
+        failure_class=failure_class,
+        remediation=remediation,
+        **extra,
+    )
     return ToolResult(
         success=False,
         model_text=json.dumps(payload, ensure_ascii=False, default=str),
         value=payload,
-        error=ToolError(code=code, message=message, fields=payload),
+        error=ToolError(code=str(code or TOOL_ERROR), message=str(message), fields=payload),
     )
 
 
@@ -78,15 +108,17 @@ def from_payload(
     is_fail = (
         cleaned.get("ok") is False
         or status in {"error", "failed", "fail", "blocked"}
-        or (bool(err) and status not in {"success", "ok", "confirmation_required"})
+        or (bool(err) and status not in {"success", "ok", "confirmation_required", "pending_confirmation"})
         or (
             error_kind in {"permanent", "retryable", "transient"}
-            and status not in {"success", "ok", "confirmation_required"}
+            and status not in {"success", "ok", "confirmation_required", "pending_confirmation"}
         )
     )
     if is_fail:
-        msg = str(err or cleaned.get("message") or cleaned.get("reason") or status or "error")
-        code = str(cleaned.get("code") or cleaned.get("error_code") or "TOOL_ERROR")
+        if should_canonicalize_error_payload(cleaned):
+            cleaned = canonicalize_error_payload(cleaned)
+        msg = error_message_from_mapping(cleaned, default=status or "error")
+        code = error_code_from_mapping(cleaned, default=TOOL_ERROR)
         return ToolResult(
             success=False,
             model_text=model_text or json.dumps(cleaned, ensure_ascii=False, default=str),
@@ -147,6 +179,61 @@ def coerce_legacy_result(raw: Any, *, default_code: str = "TOOL_ERROR") -> "Tool
                 result.error.code = default_code
             return result
     return ToolResult.from_text(text, success=True)
+
+
+def annotate_shadow_schema_violations(
+    result: "ToolResult",
+    *,
+    registry: Any,
+    tool_name: str,
+    arguments: dict[str, Any],
+) -> "ToolResult":
+    """shadow 模式：不阻断，把 schema 违规写入结果载荷供模型自纠。"""
+    mode = str(getattr(registry, "_schema_validation_mode", "off") or "off").strip().lower()
+    if mode != "shadow" or not tool_name:
+        return result
+    getter = getattr(registry, "get_tool", None)
+    tool = getter(tool_name) if callable(getter) else None
+    schema = getattr(tool, "input_schema", None) if tool is not None else None
+    if not isinstance(schema, dict):
+        return result
+    collector = getattr(registry, "_collect_schema_violations", None)
+    if not callable(collector):
+        return result
+    violations: list[str] = []
+    collector(value=arguments, schema=schema, path="$", violations=violations)
+    if not violations:
+        return result
+    clipped = [str(item) for item in violations[:20] if str(item).strip()]
+    hint = (
+        "本次已执行（shadow 不阻断）。请按 schema_violations 修正参数后再调；"
+        "不要用同一组违规参数重试。"
+    )
+    value = result.value
+    if isinstance(value, dict):
+        if value.get("schema_violations"):
+            return result
+        updated = dict(value)
+        updated["schema_validation"] = "shadow"
+        updated["schema_violations"] = clipped
+        updated["remediation"] = hint
+        return replace(
+            result,
+            value=updated,
+            model_text=json.dumps(updated, ensure_ascii=False, default=str),
+        )
+    wrapped: dict[str, Any] = {
+        "status": "success" if result.success else "error",
+        "result": result.model_text,
+        "schema_validation": "shadow",
+        "schema_violations": clipped,
+        "remediation": hint,
+    }
+    return replace(
+        result,
+        value=wrapped,
+        model_text=json.dumps(wrapped, ensure_ascii=False, default=str),
+    )
 
 
 def payload_has_legacy_magic(payload: dict[str, Any]) -> bool:
@@ -249,6 +336,9 @@ def finalize_content(result: "ToolResult", *, max_chars: int = 0) -> "ToolResult
         text = (text + ("\n" if text else "") + json.dumps(note, ensure_ascii=False)).strip()
     truncated = bool(result.truncated)
     coverage = result.coverage
+    cov = dict(coverage) if isinstance(coverage, dict) else {}
+    if cov.get("spill_retrieve"):
+        return replace(result, model_text=text, truncated=truncated, coverage=coverage)
     if max_chars > 0 and len(text) > max_chars:
         original = len(text)
         text = (
@@ -259,6 +349,8 @@ def finalize_content(result: "ToolResult", *, max_chars: int = 0) -> "ToolResult
         coverage = dict(coverage or {})
         coverage["declared"] = True
         coverage["truncated"] = True
+        if coverage.get("kind") == "complete":
+            coverage["kind"] = "truncated"
     return replace(result, model_text=text, truncated=truncated, coverage=coverage)
 
 

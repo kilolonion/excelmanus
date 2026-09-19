@@ -1,10 +1,12 @@
 import { consumeSSE, SSEError } from "./sse";
-import { buildApiUrl } from "./api";
+import { apiPost, buildApiUrl } from "./api";
 import { mapWithConcurrency } from "./concurrency";
 import { uuid } from "@/lib/utils";
+import { isVisionImageFile, isVisionImageUpload } from "@/lib/file-kind";
 import { useChatStore, type PipelineStatus } from "@/stores/chat-store";
 import { useSessionStore, getActiveSessionId } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
+import { useJevStore } from "@/stores/jev-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import type { AssistantBlock, TaskItem, AttachedFile, FileAttachment } from "@/lib/types";
 import { formatUploadNotice } from "./upload-notice";
@@ -17,19 +19,37 @@ import {
   type SSEEvent,
   type DeltaBatcher as DeltaBatcherInterface,
 } from "./sse-event-handler";
+import { resolveFailureActions } from "./failure-recovery";
 
 function currentPresentAs(): "native" | "code" {
   return useUIStore.getState().presentAs === "code" ? "code" : "native";
 }
 
-const _IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
-function _isImageFile(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  return dot >= 0 && _IMAGE_EXTS.has(name.slice(dot).toLowerCase());
-}
+type ChatImagePayload = {
+  media_type: string;
+  attachment_id: string;
+  name?: string;
+};
 
-function _isImageLike(file: File): boolean {
-  return _isImageFile(file.name) || (file.type || "").toLowerCase().startsWith("image/");
+async function _admitChatImage(
+  data: string,
+  media_type: string,
+  name?: string,
+): Promise<ChatImagePayload> {
+  const res = await apiPost<{ attachment?: { attachmentId?: string; mediaType?: string } }>(
+    "/attachments",
+    { data, media_type, name },
+    { direct: true, timeoutMs: 120_000 },
+  );
+  const attachmentId = res.attachment?.attachmentId;
+  if (!attachmentId) {
+    throw new Error("图片准入接口没有返回 attachmentId");
+  }
+  return {
+    attachment_id: attachmentId,
+    media_type: res.attachment?.mediaType || media_type,
+    name,
+  };
 }
 
 /** 在客户端本地构建 failure_guidance block（用于网络级错误，无 SSE 事件可达的场景）。*/
@@ -51,12 +71,7 @@ function _buildClientFailureGuidance(opts: {
     stage: opts.stage || "connecting",
     retryable: opts.retryable,
     diagnosticId: crypto.randomUUID?.() || uuid(),
-    actions: opts.retryable
-      ? [
-          { type: "retry", label: "Retry Now" },
-          { type: "open_settings", label: "Check Settings" },
-        ]
-      : [{ type: "open_settings", label: "Check Settings" }],
+    actions: resolveFailureActions({ code: opts.code, retryable: opts.retryable }),
   };
 }
 
@@ -67,10 +82,10 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "model",
       code: "model_auth_failed",
-      title: "Authentication Failed",
+      title: "模型认证失败",
       message: status === 401
-        ? "API key is invalid or expired. Check your model settings."
-        : "Unauthorized to access the model provider. Check API key permissions.",
+        ? "API Key 无效或已过期，请在模型设置中更新后重试。"
+        : "无权访问该模型服务，请检查 API Key 权限后重试。",
       retryable: false,
     });
   }
@@ -78,8 +93,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "quota",
       code: "quota_exceeded",
-      title: "Quota Exceeded",
-      message: "Model API quota has been exhausted. Recharge and retry.",
+      title: "额度不足",
+      message: "模型 API 额度已用尽，请充值后重试。",
       retryable: false,
     });
   }
@@ -87,8 +102,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "model",
       code: "model_not_found",
-      title: "Model Not Found",
-      message: "Requested model does not exist or is offline. Choose another model.",
+      title: "模型不存在",
+      message: "请求的模型不存在或已下线，请更换模型后重试。",
       retryable: false,
     });
   }
@@ -96,8 +111,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "transport",
       code: "session_busy",
-      title: "Session Busy",
-      message: "This session is processing another request. Wait and try again.",
+      title: "会话忙碌",
+      message: "当前会话正在处理另一个请求，请稍后重试。",
       retryable: true,
     });
   }
@@ -105,8 +120,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "quota",
       code: "rate_limited",
-      title: "Rate Limited",
-      message: "API rate limit exceeded. Retry later.",
+      title: "请求频率受限",
+      message: "模型 API 调用频率超限，请稍后重试。",
       retryable: true,
     });
   }
@@ -114,8 +129,8 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "model",
       code: "provider_internal_error",
-      title: "Provider Internal Error",
-      message: `Model provider returned ${status}. Retry later.`,
+      title: "模型服务异常",
+      message: `模型服务返回 ${status} 错误，请稍后重试。`,
       retryable: true,
     });
   }
@@ -123,14 +138,14 @@ function _classifySSEError(err: SSEError): Extract<AssistantBlock, { type: "fail
     return _buildClientFailureGuidance({
       category: "transport",
       code: "stream_interrupted",
-      title: "Connection Interrupted",
-      message: err.message || "Connection to backend was interrupted.",
+      title: "连接中断",
+      message: err.message || "与后端的连接已中断，请重试。",
       retryable: true,
     });
   }
   return _buildClientFailureGuidance({
     code: "http_error",
-    title: "Request Error",
+    title: "请求失败",
     message: err.message || `HTTP ${status}`,
     retryable: status >= 500,
   });
@@ -333,6 +348,7 @@ export async function sendMessage(
   const abortController = new AbortController();
   store.setAbortController(abortController);
   store.setStreaming(true);
+  useJevStore.getState().beginTurn(sessionId);
   store.setPipelineStatus({
     stage: "connecting",
     message: "正在连接...",
@@ -352,7 +368,7 @@ export async function sendMessage(
         fileUploadResults.push(af.uploadResult);
       } else if (
         af.status === "success" &&
-        _isImageLike(af.file) &&
+        isVisionImageUpload(af.file) &&
         (af.cachedBase64 || af.file.size > 0)
       ) {
         // 示例卡片极速路径：图片可能只有本地 file / cachedBase64，没有 uploadResult
@@ -392,15 +408,15 @@ export async function sendMessage(
   // 鏂囦欢宸茬敱 ChatInput 棰勫厛涓婁紶銆傝繖閲屾敹闆嗚矾寰勫拰 base64 鏁版嵁鐢ㄤ簬 SSE 杞借嵎銆?
   const uploadedDocPaths: string[] = [];
   const uploadedImagePaths: string[] = [];
-  const imageAttachments: { data: string; media_type: string }[] = [];
+  const imageAttachments: ChatImagePayload[] = [];
   if (files && files.length > 0) {
     const successfulFiles = files.filter(
       (af) =>
         af.status === "success" &&
-        (af.uploadResult || (_isImageLike(af.file) && (af.cachedBase64 || af.file.size > 0))),
+        (af.uploadResult || (isVisionImageUpload(af.file) && (af.cachedBase64 || af.file.size > 0))),
     );
     for (const af of successfulFiles) {
-      const isImage = _isImageLike(af.file);
+      const isImage = isVisionImageUpload(af.file);
       if (af.uploadResult && !af.fromWorkspace) {
         if (isImage) uploadedImagePaths.push(af.uploadResult.path);
         else uploadedDocPaths.push(af.uploadResult.path);
@@ -408,27 +424,40 @@ export async function sendMessage(
     }
 
     const imageCandidates = successfulFiles.filter(
-      (af) => _isImageLike(af.file) && (af.file.size > 0 || !!af.cachedBase64),
+      (af) => isVisionImageUpload(af.file) && (af.file.size > 0 || !!af.cachedBase64),
     );
+    let imageAdmitError: unknown = null;
     const encodedImages = await mapWithConcurrency(
       imageCandidates,
       async (af) => {
         try {
           const b64 = af.cachedBase64 ?? await _fileToBase64(af.file);
-          return {
-            data: b64,
-            media_type: af.file.type || "image/png",
-          };
+          return _admitChatImage(
+            b64,
+            af.file.type || "image/png",
+            af.file.name,
+          );
         } catch (b64Err) {
-          console.error("Base64 encoding failed for image:", af.file.name, b64Err);
-          return null;
+          console.error("Image attachment admission failed:", af.file.name, b64Err);
+          throw b64Err;
         }
       },
       4,
-    );
-    imageAttachments.push(
-      ...encodedImages.filter((item): item is { data: string; media_type: string } => item !== null),
-    );
+    ).catch((err) => {
+      imageAdmitError = err;
+      return [] as ChatImagePayload[];
+    });
+    if (imageAdmitError) {
+      useChatStore.getState().appendBlock(assistantMsgId, _buildClientFailureGuidance({
+        category: "transport",
+        code: "attachment_admit_failed",
+        title: "图片上传失败",
+        message: (imageAdmitError as Error).message || "图片未能完成准入，请重试。",
+        retryable: true,
+      }));
+      return;
+    }
+    imageAttachments.push(...encodedImages);
   }
 
   let messageContent = text;
@@ -489,9 +518,9 @@ export async function sendMessage(
     );
     for (const att of imageAttachments) {
       console.log(
-        "[sendMessage] image: media_type=%s, data_length=%d",
+        "[sendMessage] image: media_type=%s, attachment_id=%s",
         att.media_type,
-        att.data.length,
+        att.attachment_id || "",
       );
     }
   }
@@ -561,16 +590,16 @@ export async function sendMessage(
       sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "Connection Timeout",
-        message: "Unable to establish connection within 30 seconds. Check model settings or network.",
+        title: "连接超时",
+        message: "30 秒内未能建立连接，请检查模型设置或网络后重试。",
         retryable: true,
       }));
     } else if (_stallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(assistantMsgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "Stream Stalled",
-        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒没有新数据，服务可能已停滞，请重试。",
         retryable: true,
       }));
     }
@@ -582,6 +611,7 @@ export async function sendMessage(
     try { S().saveCurrentSession(); } catch (e) { console.error("[sendMessage] save session error:", e); }
     S().setStreaming(false);
     S().setAbortController(null);
+    useJevStore.getState().finishTurn();
 
     if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
       scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
@@ -735,16 +765,16 @@ export async function sendContinuation(
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "Connection Timeout",
-        message: "Unable to establish connection within 30 seconds. Check model settings or network.",
+        title: "连接超时",
+        message: "30 秒内未能建立连接，请检查模型设置或网络后重试。",
         retryable: true,
       }));
     } else if (_contStallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "Stream Stalled",
-        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒没有新数据，服务可能已停滞，请重试。",
         retryable: true,
       }));
     }
@@ -756,6 +786,7 @@ export async function sendContinuation(
     try { S().saveCurrentSession(); } catch (e) { console.error("[sendContinuation] save session error:", e); }
     S().setStreaming(false);
     S().setAbortController(null);
+    useJevStore.getState().finishTurn();
 
     if (effectiveSessionId && shouldResyncAfterStream(sseCtx, assistantMsgId)) {
       scheduleSessionResync(effectiveSessionId, sseCtx.hadStreamError ? 1500 : 400);
@@ -811,8 +842,8 @@ export async function rollbackAndResend(
     if (lastAssistant && lastAssistant.role === "assistant") {
       store.appendBlock(lastAssistant.id, _buildClientFailureGuidance({
         code: "network_error",
-        title: "Edit Resend Failed",
-        message: "Rollback failed. Retry later or refresh the page.",
+        title: "重新发送失败",
+        message: "回滚失败，请稍后重试或刷新页面。",
         retryable: true,
       }));
     }
@@ -912,6 +943,8 @@ export async function retryAssistantMessage(
     }
   }
 
+  store.setMessages(messages.slice(0, assistantIdx));
+
   // 璋冪敤鍚庣 rollback API
   try {
     const { rollbackChat } = await import("./api");
@@ -941,7 +974,7 @@ export async function retryAssistantMessage(
     retainedAttached = await Promise.all(
       userMessage.files.map(async (f, i): Promise<AttachedFile> => {
         const id = `retry-retained-${Date.now()}-${i}`;
-        const isImage = _isImageFile(f.filename);
+        const isImage = isVisionImageFile(f.filename);
 
         if (isImage) {
           // 鍥剧墖闇€瑕侀噸鏂拌幏鍙栧唴瀹癸紝鍚﹀垯 sendMessage 鍥?file.size===0 璺宠繃 base64 缂栫爜
@@ -998,8 +1031,8 @@ export function stopGeneration() {
 
     patchedBlocks.push({
       type: "status",
-      label: "Conversation Stopped",
-      detail: "Generation was manually stopped by the user.",
+      label: "对话已停止",
+      detail: "已手动停止生成",
       variant: "info",
     });
 
@@ -1147,16 +1180,16 @@ export async function subscribeToSession(sessionId: string) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "connect_timeout",
-        title: "Reconnect Timeout",
-        message: "Unable to reconnect within 30 seconds. Check network or refresh the page.",
+        title: "重连超时",
+        message: "30 秒内未能重新连接，请检查网络或刷新页面后重试。",
         retryable: true,
       }));
     } else if (_subStallTimedOut) {
       sseCtx.hadStreamError = true;
       S().appendBlock(msgId, _buildClientFailureGuidance({
         code: "stream_stalled",
-        title: "Stream Stalled",
-        message: "Connected but no new data received for over 90 seconds. Provider may be stalled.",
+        title: "响应停滞",
+        message: "已连接但超过 90 秒没有新数据，服务可能已停滞，请重试。",
         retryable: true,
       }));
     }
@@ -1169,6 +1202,7 @@ export async function subscribeToSession(sessionId: string) {
     S().saveCurrentSession();
     S().setStreaming(false);
     S().setAbortController(null);
+    useJevStore.getState().finishTurn();
 
     if (S().resumeFailedReason) {
       const sid = sessionId;

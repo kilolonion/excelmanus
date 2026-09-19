@@ -118,6 +118,8 @@ class _Message:
     thinking: str | None = None
     reasoning: str | None = None
     reasoning_content: str | None = None
+    replay_state: Any = None
+    thinking_text: str | None = None
 
 
 @dataclass
@@ -160,46 +162,31 @@ def _parse_data_uri(url: str) -> tuple[str, str]:
     return "image/png", url
 
 
-def _inject_messages_cache_breakpoints(
-    claude_messages: list[dict[str, Any]],
-) -> None:
-    """在 Claude messages 中注入 cache_control breakpoint，最大化对话历史缓存命中。
-
-    策略：在倒数第二条 user 消息上设置 breakpoint（即当前轮 user 消息之前的那条）。
-    这样整个对话历史前缀（包括之前所有轮次）都可以被缓存。
-    仅当对话历史 >= 3 条消息时才注入（至少有一轮完整的 user→assistant 交互）。
-
-    Anthropic 限制最多 4 个 breakpoint（system 已占 1 个），这里最多再加 1 个。
-    """
-    if len(claude_messages) < 3:
-        return
-
-    # 找到倒数第二条 user 消息的索引（跳过最后一条 user 消息）
-    user_indices = [
-        i for i, msg in enumerate(claude_messages) if msg.get("role") == "user"
-    ]
-    if len(user_indices) < 2:
-        return
-
-    # 在倒数第二条 user 消息上设置 cache breakpoint
-    target_idx = user_indices[-2]
-    target_msg = claude_messages[target_idx]
-    content = target_msg.get("content")
-
+def _pin_cache_control(message: dict[str, Any]) -> None:
+    content = message.get("content")
     if isinstance(content, list) and content:
-        # 结构化 content：在最后一个 block 上设置 cache_control
         last_block = content[-1]
         if isinstance(last_block, dict) and "cache_control" not in last_block:
             last_block["cache_control"] = {"type": "ephemeral"}
-    elif isinstance(content, str):
-        # 纯文本 content：转换为结构化格式以支持 cache_control
-        claude_messages[target_idx]["content"] = [
+        return
+    if isinstance(content, str):
+        message["content"] = [
             {
                 "type": "text",
                 "text": content,
                 "cache_control": {"type": "ephemeral"},
             }
         ]
+
+
+def _inject_messages_cache_breakpoints(
+    claude_messages: list[dict[str, Any]],
+) -> None:
+    """只钉第一条 user。移动倒数第二条会每步改已缓存前缀的结构。"""
+    for message in claude_messages:
+        if message.get("role") == "user":
+            _pin_cache_control(message)
+            return
 
 
 def _openai_messages_to_claude(
@@ -219,6 +206,15 @@ def _openai_messages_to_claude(
 
         if role == "system":
             if isinstance(content, str) and content.strip():
+                if system_parts:
+                    # 不变量 tripwire：正常路径 project_for_request 的 sanitize
+                    # 已把历史内 system 全部降级为 user，wire 只应有 head system。
+                    # 触发此异常说明某条 wire 生产路径绕过了 sanitize（如
+                    # memory=None 的防御投影），是 bug 信号而非可恢复错误。
+                    raise ValueError(
+                        "mid-history system is not representable; "
+                        "wire 出现第二个 system 消息，说明投影层绕过了 sanitize"
+                    )
                 system_parts.append(content)
             continue
 
@@ -241,6 +237,11 @@ def _openai_messages_to_claude(
                                     "data": b64,
                                 },
                             })
+                        elif item.get("type") == "file":
+                            raise ValueError(
+                                "Claude provider does not support Files transport; "
+                                "keep request images inline or use an OpenAI-compatible endpoint."
+                            )
                 claude_messages.append({"role": "user", "content": blocks})
             else:
                 claude_messages.append({
@@ -251,6 +252,13 @@ def _openai_messages_to_claude(
 
         if role == "assistant":
             blocks: list[dict[str, Any]] = []
+            replay = msg.get("replay_state")
+            if isinstance(replay, dict):
+                thinking_blocks = replay.get("thinking_blocks")
+                if isinstance(thinking_blocks, list):
+                    for block in thinking_blocks:
+                        if isinstance(block, dict) and block.get("type") == "thinking":
+                            blocks.append(dict(block))
             # 文本内容
             if content:
                 blocks.append({"type": "text", "text": content})
@@ -300,10 +308,7 @@ def _openai_messages_to_claude(
     # Claude 要求 user/assistant 严格交替，合并连续同角色消息
     claude_messages = _merge_consecutive_claude_messages(claude_messages)
 
-    # Prompt Caching：在对话历史中设置 cache_control breakpoint。
-    # Anthropic 建议最多 4 个 breakpoint：system + 对话历史中的关键位置。
-    # 策略：在最后一条 user 消息（即当前轮之前的最后一条）上设置 breakpoint，
-    # 使整个对话历史前缀可被缓存，大幅降低多轮对话的 token 成本。
+    # Prompt Caching：只钉第一条 user，避免每步改历史前缀结构。
     _inject_messages_cache_breakpoints(claude_messages)
 
     # Prompt Caching：将 system 构建为带 cache_control breakpoint 的结构化格式。
@@ -375,6 +380,8 @@ def _openai_tools_to_claude(
         else:
             ct["input_schema"] = {"type": "object", "properties": {}}
         claude_tools.append(ct)
+    if claude_tools:
+        claude_tools[-1]["cache_control"] = {"type": "ephemeral"}
     return claude_tools or None
 
 
@@ -428,6 +435,7 @@ def _claude_response_to_openai(
 
     text_parts: list[str] = []
     thinking_parts: list[str] = []
+    thinking_blocks: list[dict[str, Any]] = []
     tool_calls: list[_ToolCall] = []
 
     for block in content_blocks:
@@ -443,6 +451,7 @@ def _claude_response_to_openai(
                 ),
             ))
         elif block_type == "thinking":
+            thinking_blocks.append(dict(block))
             thinking_text = block.get("thinking", "")
             if thinking_text:
                 thinking_parts.append(thinking_text)
@@ -461,6 +470,8 @@ def _claude_response_to_openai(
         thinking=thinking_joined,
         reasoning=thinking_joined,
         reasoning_content=thinking_joined,
+        thinking_text=thinking_joined,
+        replay_state={"thinking_blocks": thinking_blocks} if thinking_blocks else None,
     )
 
     # stop_reason 映射为 OpenAI finish_reason
@@ -522,6 +533,7 @@ class _ClaudeChatCompletions:
         thinking_budget = kwargs.pop("_thinking_budget", 0)
         thinking_effort = kwargs.pop("_thinking_effort", "")
         extra_body = kwargs.pop("extra_body", None)
+        prepared_body = kwargs.pop("_prepared_body", None)
         extra_headers = kwargs.pop("extra_headers", None)
         if stream:
             return await self._client._generate_stream(
@@ -531,6 +543,7 @@ class _ClaudeChatCompletions:
                 thinking_budget=thinking_budget,
                 thinking_effort=thinking_effort,
                 extra_body=extra_body,
+                prepared_body=prepared_body,
                 extra_headers=extra_headers,
             )
         return await self._client._generate(
@@ -542,6 +555,7 @@ class _ClaudeChatCompletions:
             thinking_budget=thinking_budget,
             thinking_effort=thinking_effort,
             extra_body=extra_body,
+                prepared_body=prepared_body,
             extra_headers=extra_headers,
         )
 
@@ -581,38 +595,20 @@ class ClaudeClient:
         thinking_budget: int = 0,
         thinking_effort: str = "",
         extra_body: dict[str, Any] | None = None,
+        prepared_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> _ChatCompletion:
         """执行 Claude Messages API 请求。"""
-        system, claude_messages = _openai_messages_to_claude(messages)
+        from excelmanus.providers.request_body import claude_body
 
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": claude_messages,
-            "max_tokens": _DEFAULT_MAX_TOKENS,
-        }
-        _apply_thinking_to_body(
-            body,
-            model,
-            thinking_enabled=thinking_enabled,
-            thinking_budget=thinking_budget,
-            thinking_effort=thinking_effort,
+        body = dict(prepared_body) if prepared_body is not None else claude_body(
+            model, messages, tools, tool_choice=tool_choice,
+            thinking_enabled=thinking_enabled, thinking_budget=thinking_budget,
+            thinking_effort=thinking_effort, extra_body=extra_body,
         )
-        if system:
-            body["system"] = system
-
-        tools_list = tools if isinstance(tools, list) else None
-        claude_tools = _openai_tools_to_claude(tools_list)
-        if claude_tools:
-            body["tools"] = claude_tools
-
-        mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
-        if mapped_tool_choice is not None:
-            body["tool_choice"] = mapped_tool_choice
-
-        # 透传 extra_body：过滤非 Claude 原生字段后合并到请求体
-        if extra_body and isinstance(extra_body, dict):
-            body.update(_strip_non_claude_extra_body(extra_body))
+        body.pop("stream", None)
+        claude_messages = body.get("messages", [])
+        claude_tools = body.get("tools", [])
 
         url = f"{self._base_url}/v1/messages"
         headers = {
@@ -669,35 +665,20 @@ class ClaudeClient:
         thinking_budget: int = 0,
         thinking_effort: str = "",
         extra_body: dict[str, Any] | None = None,
+        prepared_body: dict[str, Any] | None = None,
         extra_headers: dict[str, str] | None = None,
     ) -> Any:
         """流式执行 Claude Messages API 请求，返回异步生成器 yield StreamDelta。"""
-        system, claude_messages = _openai_messages_to_claude(messages)
-        body: dict[str, Any] = {
-            "model": model,
-            "messages": claude_messages,
-            "max_tokens": _DEFAULT_MAX_TOKENS,
-            "stream": True,
-        }
-        _apply_thinking_to_body(
-            body,
-            model,
-            thinking_enabled=thinking_enabled,
-            thinking_budget=thinking_budget,
-            thinking_effort=thinking_effort,
+        from excelmanus.providers.request_body import claude_body
+
+        body = dict(prepared_body) if prepared_body is not None else claude_body(
+            model, messages, tools, tool_choice=tool_choice,
+            thinking_enabled=thinking_enabled, thinking_budget=thinking_budget,
+            thinking_effort=thinking_effort, extra_body=extra_body,
         )
-        if system:
-            body["system"] = system
-        tools_list = tools if isinstance(tools, list) else None
-        claude_tools = _openai_tools_to_claude(tools_list)
-        if claude_tools:
-            body["tools"] = claude_tools
-        mapped_tool_choice = _map_openai_tool_choice_to_claude(tool_choice)
-        if mapped_tool_choice is not None:
-            body["tool_choice"] = mapped_tool_choice
-        # 透传 extra_body：过滤非 Claude 原生字段
-        if extra_body and isinstance(extra_body, dict):
-            body.update(_strip_non_claude_extra_body(extra_body))
+        body["stream"] = True
+        claude_messages = body.get("messages", [])
+        claude_tools = body.get("tools", [])
 
         url = f"{self._base_url}/v1/messages"
         headers = {
@@ -721,6 +702,7 @@ class ClaudeClient:
                 current_tool_name: str | None = None
                 current_tool_json: str = ""
                 tool_call_index: int = -1
+                replay_blocks: dict[int, dict[str, Any]] = {}
                 # 提示词缓存统计（从 message_start 事件提取）
                 _cache_creation_tokens: int = 0
                 _cache_read_tokens: int = 0
@@ -767,6 +749,8 @@ class ClaudeClient:
 
                     if event_type == "content_block_start":
                         block = event_data.get("content_block", {})
+                        if block.get("type") in {"thinking", "redacted_thinking"}:
+                            replay_blocks[int(event_data.get("index", 0))] = dict(block)
                         if block.get("type") == "tool_use":
                             tool_call_index += 1
                             current_tool_id = block.get("id", str(uuid.uuid4()))
@@ -776,6 +760,12 @@ class ClaudeClient:
                     elif event_type == "content_block_delta":
                         delta = event_data.get("delta", {})
                         delta_type = delta.get("type", "")
+                        replay = replay_blocks.get(int(event_data.get("index", 0)))
+                        if replay is not None:
+                            if delta_type == "thinking_delta":
+                                replay["thinking"] = replay.get("thinking", "") + delta.get("thinking", "")
+                            elif delta_type == "signature_delta":
+                                replay["signature"] = replay.get("signature", "") + delta.get("signature", "")
                         if delta_type == "text_delta":
                             text_chunk = delta.get("text", "")
                             for _d in _inline_sm.feed(text_chunk):
@@ -786,6 +776,8 @@ class ClaudeClient:
                             current_tool_json += delta.get("partial_json", "")
 
                     elif event_type == "content_block_stop":
+                        if int(event_data.get("index", 0)) in replay_blocks:
+                            yield StreamDelta(replay_state={"thinking_blocks": [dict(b) for b in replay_blocks.values()]})
                         if current_tool_id and current_tool_name:
                             yield StreamDelta(tool_calls_delta=[{
                                 "index": tool_call_index,

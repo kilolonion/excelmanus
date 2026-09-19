@@ -1,0 +1,27 @@
+{
+  "suite_name": "smoke",
+  "description": "基础冒烟：纯对话与工具调用。注意 auto_approve=fullaccess 为预授权模式，非网页默认权限。",
+  "assertions": {
+    "status": "ok",
+    "no_silent_first_turn": true
+  },
+  "cases": [
+    {
+      "id": "S01",
+      "name": "纯文本对话",
+      "message": "请用一句话介绍你可以帮助用户做什么。",
+      "chat_mode": "write",
+      "auto_approve": "fullaccess",
+      "assertions": {
+        "max_tool_calls": 3
+      }
+    },
+    {
+      "id": "S02",
+      "name": "工作区列文件",
+      "message": "列出当前工作区根目录下的文件和文件夹，并做一句话总结。",
+      "chat_mode": "write",
+      "auto_approve": "fullaccess"
+    }
+  ]
+}

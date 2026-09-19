@@ -45,31 +45,45 @@ def _isolate_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _reset_tool_guards() -> None:
-    """每个测试结束后重置所有工具模块的模块级 _guard 单例及 contextvar。
+def _isolate_settings() -> None:
+    """每个测试清空设置覆盖层与绑定的设置仓。"""
+    from excelmanus.settings_runtime import reset_runtime_settings
 
-    防止 init_guard(tmp_path) 或 register_builtin_tools 设置的路径在测试结束后污染后续测试。
-    """
+    reset_runtime_settings()
     yield
-    _TOOL_MODULES_WITH_GUARD = [
-        "excelmanus.workbook.cells",
-        "excelmanus.workbook.data",
-        "excelmanus.workbook.styles",
-        "excelmanus.workbook.charts",
-        "excelmanus.workbook.sheets",
-        "excelmanus.tools.file_tools",
-        "excelmanus.tools.image_tools",
-        "excelmanus.tools.code_tools",
-        "excelmanus.tools.shell_tools",
-        "excelmanus.tools.intent_tools",
-        "excelmanus.tools.reference_tools",
-    ]
+    reset_runtime_settings()
+
+
+@pytest.fixture(autouse=True)
+def _reset_tool_guards() -> None:
+    """每个测试结束后清空 ToolCallContext，防止 bind_workspace / init_guard 泄漏。"""
+    yield
+    from excelmanus.tools.context import clear_call
+    from excelmanus.tools.introspection_tools import _call_catalog
+
+    clear_call()
+    _call_catalog.set(None)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_api_runtime(monkeypatch):
     import sys
-    for mod_name in _TOOL_MODULES_WITH_GUARD:
-        mod = sys.modules.get(mod_name)
-        if mod is not None and hasattr(mod, "_guard"):
-            mod._guard = None
-    # 同时重置 contextvar，防止 register_builtin_tools 设置的 guard 跨测试污染
-    _guard_ctx = sys.modules.get("excelmanus.tools._guard_ctx")
-    if _guard_ctx is not None:
-        _guard_ctx._current_guard.set(None)
+    from excelmanus.api_app_state import AppRuntime, bind_runtime, reset_runtime
+
+    runtime = AppRuntime()
+    module = sys.modules.get("excelmanus.api")
+    if module is not None and hasattr(module, "app"):
+        monkeypatch.setattr(module.app.state, "runtime", runtime)
+    token = bind_runtime(runtime)
+    try:
+        yield runtime
+    finally:
+        reset_runtime(token)
+
+
+def symlink_or_skip(link: "Path", target: "Path") -> None:
+    """创建符号链接；Windows 无管理员/开发者模式特权时跳过测试。"""
+    try:
+        link.symlink_to(target)
+    except OSError as exc:
+        pytest.skip(f"当前环境无符号链接特权（WinError 1314）: {exc}")

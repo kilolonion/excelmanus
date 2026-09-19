@@ -2,22 +2,40 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 import tiktoken
 
+from excelmanus.attachments.image_tokens import estimate_image_tokens
+from excelmanus.attachments.migrate import migrate_messages
+from excelmanus.attachments.project import assemble_model_request, resolve_image_request_policy
+from excelmanus.attachments.request import request_image_dimensions
 from excelmanus.config import ExcelManusConfig
 
 logger = logging.getLogger(__name__)
 
-IMAGE_TOKEN_ESTIMATE = 1500  # 图片 token 估算值（用于 memory 截断）
+IMAGE_TOKEN_ESTIMATE = 85  # 无尺寸信息时的保守下限（不再用作降级预算）
 
-_INJECTED_USER_PREFIXES = ("<available_skills>", "<skill-invocation")
+_INJECTED_USER_PREFIXES = (
+    "<available_skills>",
+    "<skill-invocation",
+    "<mention_context>",
+    "## Hook 上下文",
+)
+
+# role → 事件 kind（无 _event_kind 标记时的兜底映射）。
+_ROLE_EVENT_KIND = {
+    "user": "user/message",
+    "assistant": "assistant/message",
+    "tool": "tool/result",
+    "system": "system/update",
+}
 
 
 def plain_user_text(content: Any) -> str:
@@ -35,6 +53,16 @@ def plain_user_text(content: Any) -> str:
     return str(content or "")
 
 
+def _prefix_fingerprint(messages: list[dict]) -> tuple[int, str]:
+    """surface 前缀指纹：条数 + 内容 md5（逐条拼接，O(字符数)，远快于 tokenize）。"""
+    h = hashlib.md5()
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else ""
+        h.update(str(content or "").encode("utf-8", "replace"))
+        h.update(b"\x00")
+    return (len(messages), h.hexdigest())
+
+
 def is_visible_user_turn(msg: dict) -> bool:
     """是否计入 UI / rollback 的用户轮次。
 
@@ -49,201 +77,60 @@ def is_visible_user_turn(msg: dict) -> bool:
     return not text.startswith(_INJECTED_USER_PREFIXES)
 
 
-def _context_role_messages(context_prompts: list[str] | None) -> list[dict]:
-    """请求级 user-role 快照，不写入对话历史。"""
-    return [
-        {"role": "user", "content": prompt}
-        for prompt in (context_prompts or [])
-        if isinstance(prompt, str) and prompt.strip()
-    ]
-
-
 # ---------------------------------------------------------------------------
 # 消息清洗：发送到 LLM API 前剥离非标准字段
 # ---------------------------------------------------------------------------
 
 # 各角色允许的标准字段（OpenAI Chat Completions API 规范）
-_ASSISTANT_ALLOWED_KEYS = frozenset({"role", "content", "tool_calls", "name", "refusal"})
+_REPLAY_KEYS = frozenset({
+    "reasoning_content",
+    "thinking",
+    "reasoning",
+    "replay_state",
+    "replay_source",
+    "signature",
+    "thinking_text",
+})
+_ASSISTANT_ALLOWED_KEYS = frozenset({"role", "content", "tool_calls", "name", "refusal"}) | _REPLAY_KEYS
 _TOOL_ALLOWED_KEYS = frozenset({"role", "content", "tool_call_id", "name"})
 _GENERAL_ALLOWED_KEYS = frozenset({"role", "content", "name"})
 
 
 def _sanitize_messages_for_api(messages: list[dict]) -> list[dict]:
-    """剥离消息中的非标准字段，防止不同 LLM 提供商因未知字段拒绝请求。
-
-    provider 特有字段（thinking / reasoning / reasoning_content）在此处剥离；
-    需要这些字段的 provider（如 DeepSeek thinking mode）由
-    ``llm_caller._patch_reasoning_content`` 在调用失败后按需补回。
-    """
+    """去掉内部标记，但保留回放字段。展示清洗不得丢掉 replay_state。"""
     result: list[dict] = []
     for msg in messages:
         role = msg.get("role", "")
         if role == "assistant":
             clean = {k: v for k, v in msg.items() if k in _ASSISTANT_ALLOWED_KEYS}
-            # tool_calls 为 None 或空列表时移除该键，避免某些 provider 拒绝 null
             tc = clean.get("tool_calls")
             if tc is None or (isinstance(tc, list) and len(tc) == 0):
                 clean.pop("tool_calls", None)
+            if clean.get("reasoning_content") in (None, ""):
+                fallback = clean.get("thinking_text") or clean.get("thinking") or clean.get("reasoning")
+                if fallback:
+                    clean["reasoning_content"] = fallback
             result.append(clean)
         elif role == "tool":
             result.append({k: v for k, v in msg.items() if k in _TOOL_ALLOWED_KEYS})
+        elif role == "system":
+            # 历史内 system_update（模式切换/提示词重载）在严格 OpenAI 网关上
+            # 会触发 "System message must be at the beginning" 400；
+            # 降级为 user 角色并加提示头，位置与内容语义不变。
+            clean = {k: v for k, v in msg.items() if k in _GENERAL_ALLOWED_KEYS}
+            content = clean.get("content")
+            result.append({
+                "role": "user",
+                "content": (
+                    "[系统提示已更新，以下为最新系统提示]\n" + str(content)
+                    if isinstance(content, str) and content.strip()
+                    else content
+                ),
+            })
         else:
-            # system / user — 保留 content 原始结构（可能为多模态 list）
             result.append({k: v for k, v in msg.items() if k in _GENERAL_ALLOWED_KEYS})
     return result
 
-
-# ---------------------------------------------------------------------------
-# 图片生命周期管理
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class ImageCacheEntry:
-    """图片本地缓存条目（支持降级后重注入）。"""
-
-    image_id: int
-    raw_base64: str  # 原始 base64 数据
-    mime_type: str = "image/png"
-    detail: str = "auto"
-    inject_round: int = 0  # 注入时的对话轮次
-    last_referenced_round: int = 0  # 最后被 LLM 看到的轮次
-    degraded: bool = False  # 是否已降级为文本引用
-
-
-class ImageLifecycleManager:
-    """Provider-aware 的图片上下文生命周期管理。
-
-    替代粗暴的 ``mark_images_sent()`` 立即降级策略。
-
-    策略矩阵：
-    ┌──────────────────┬──────────────────────────────────────┐
-    │ 条件              │ 行为                                  │
-    ├──────────────────┼──────────────────────────────────────┤
-    │ 图片 < keep_rounds│ 保持完整 base64（Provider 自动缓存）   │
-    │ 活跃数 > max      │ LRU 淘汰最老图片                      │
-    │ token 超限        │ 强制降级最老图片                       │
-    │ 用户引用已降级图片 │ 从本地缓存重注入                       │
-    └──────────────────┴──────────────────────────────────────┘
-    """
-
-    def __init__(
-        self,
-        keep_rounds: int = 3,
-        max_active_images: int = 2,
-        image_token_budget: int = 6000,
-    ):
-        self.keep_rounds = keep_rounds
-        self.max_active_images = max_active_images
-        self.image_token_budget = image_token_budget
-        self._cache: dict[int, ImageCacheEntry] = {}
-
-    def register(
-        self,
-        image_id: int,
-        base64_data: str,
-        mime_type: str,
-        detail: str,
-        current_round: int,
-    ) -> None:
-        """注册新图片到生命周期管理器。"""
-        self._cache[image_id] = ImageCacheEntry(
-            image_id=image_id,
-            raw_base64=base64_data,
-            mime_type=mime_type,
-            detail=detail,
-            inject_round=current_round,
-            last_referenced_round=current_round,
-        )
-
-    def get_ids_to_degrade(self, current_round: int) -> list[int]:
-        """返回本轮应该降级的图片 ID 列表。
-
-        策略：
-        1. 超过 keep_rounds 的图片加入候选
-        2. 活跃图片数超过 max_active_images 时 LRU 淘汰
-        3. 活跃图片 token 超过 budget 时强制淘汰最老的
-        """
-        to_degrade: list[int] = []
-        active = [
-            e for e in self._cache.values() if not e.degraded
-        ]
-        if not active:
-            return to_degrade
-
-        # 按 last_referenced_round 排序（最老的在前）
-        active.sort(key=lambda e: e.last_referenced_round)
-
-        # 规则 1：超过 keep_rounds 的候选降级
-        for entry in active:
-            age = current_round - entry.inject_round
-            if age >= self.keep_rounds:
-                to_degrade.append(entry.image_id)
-
-        # 规则 2：活跃数超限 → LRU 淘汰
-        remaining_active = len(active) - len(to_degrade)
-        if remaining_active > self.max_active_images:
-            excess = remaining_active - self.max_active_images
-            for entry in active:
-                if entry.image_id not in to_degrade:
-                    to_degrade.append(entry.image_id)
-                    excess -= 1
-                    if excess <= 0:
-                        break
-
-        # 规则 3：token 预算检查
-        remaining_active_count = len(active) - len(to_degrade)
-        active_tokens = remaining_active_count * IMAGE_TOKEN_ESTIMATE
-        while active_tokens > self.image_token_budget and remaining_active_count > 0:
-            # 找最老的还没被标记降级的
-            for entry in active:
-                if entry.image_id not in to_degrade:
-                    to_degrade.append(entry.image_id)
-                    remaining_active_count -= 1
-                    active_tokens = remaining_active_count * IMAGE_TOKEN_ESTIMATE
-                    break
-            else:
-                break
-
-        return to_degrade
-
-    _MAX_CACHE_SIZE = 10  # 降级后的缓存条目上限（防止长会话内存泄漏）
-
-    def mark_degraded(self, image_id: int) -> None:
-        """标记图片为已降级。超过缓存上限时淘汰最老的降级条目。"""
-        entry = self._cache.get(image_id)
-        if entry:
-            entry.degraded = True
-        # 淘汰最老的降级条目（保持 _cache 不无限增长）
-        degraded = [e for e in self._cache.values() if e.degraded]
-        if len(degraded) > self._MAX_CACHE_SIZE:
-            degraded.sort(key=lambda e: e.last_referenced_round)
-            for old in degraded[: len(degraded) - self._MAX_CACHE_SIZE]:
-                del self._cache[old.image_id]
-
-    def mark_round_sent(self, image_id: int, current_round: int) -> None:
-        """更新图片的最后引用轮次。"""
-        entry = self._cache.get(image_id)
-        if entry and not entry.degraded:
-            entry.last_referenced_round = current_round
-
-    def get_reinject_data(self, image_id: int) -> ImageCacheEntry | None:
-        """获取已降级图片的缓存数据（用于重注入）。"""
-        entry = self._cache.get(image_id)
-        if entry and entry.degraded and entry.raw_base64:
-            return entry
-        return None
-
-    def get_degraded_image_ids(self) -> list[int]:
-        """返回所有已降级且可重注入的图片 ID 列表。"""
-        return [
-            e.image_id for e in self._cache.values()
-            if e.degraded and e.raw_base64
-        ]
-
-    def clear(self) -> None:
-        """清空所有缓存。"""
-        self._cache.clear()
 
 # ---------------------------------------------------------------------------
 # 默认系统提示词：从 prompts/ 文件加载，缺失时自动补齐
@@ -282,9 +169,18 @@ class TokenCounter:
         return len(TokenCounter._encoding.encode(text))
 
     @staticmethod
-    def count_message(message: dict) -> int:
-        """计算单条消息的 token 数量（含结构开销）。"""
+    def count_message(
+        message: dict,
+        *,
+        config: Any | None = None,
+        deepseek: bool = False,
+    ) -> int:
+        """计算单条消息的 token 数量（含结构开销）。
+
+        图片按请求版尺寸估价，不再用固定 1500 当预算闸。
+        """
         tokens = 4  # 每条消息的固定开销（role、分隔符等）
+        policy = resolve_image_request_policy(config) if config is not None else None
         for key, value in message.items():
             if value is None:
                 continue
@@ -296,6 +192,20 @@ class TokenCounter:
                     if isinstance(item, dict):
                         if item.get("type") == "image_url":
                             tokens += IMAGE_TOKEN_ESTIMATE
+                        elif item.get("type") == "image":
+                            att = item.get("attachment")
+                            if isinstance(att, dict):
+                                width = int(att.get("width") or 0)
+                                height = int(att.get("height") or 0)
+                                if policy is not None and width > 0 and height > 0:
+                                    width, height = request_image_dimensions(
+                                        width, height, policy.max_pixels,
+                                    )
+                                tokens += estimate_image_tokens(
+                                    width, height, deepseek=deepseek,
+                                )
+                            else:
+                                tokens += IMAGE_TOKEN_ESTIMATE
                         elif item.get("type") == "text":
                             tokens += TokenCounter.count(item.get("text", ""))
                         else:
@@ -309,9 +219,9 @@ class ConversationMemory:
     """对话记忆管理器。
 
     职责：
-    - 维护有序的消息列表
+    - 维护有序的消息列表（只追加；前缀替换只走 compaction）
     - 提供 system prompt 始终在首位的消息序列
-    - 当 token 总量接近上下文窗口限制时，截断最早的对话记录
+    - 发送投影不改写已发出的历史前缀
     """
 
     def __init__(self, config: ExcelManusConfig) -> None:
@@ -319,23 +229,113 @@ class ConversationMemory:
         self._system_prompt: str = _DEFAULT_SYSTEM_PROMPT
         self._max_context_tokens: int = config.max_context_tokens
         self._token_counter = TokenCounter()
+        self._config = config
         # 预留 10% 的 token 空间给模型输出
-        self._truncation_threshold = int(self._max_context_tokens * 0.9)
-        # 图片降级追踪
-        self._image_seq: int = 0  # 图片序号
-        self._fresh_image_ids: set[int] = set()  # 尚未发送过的图片 ID
-        # 图片生命周期管理器（视觉原生模式使用）
-        self._lifecycle = ImageLifecycleManager(
-            keep_rounds=getattr(config, "image_keep_rounds", 3),
-            max_active_images=getattr(config, "image_max_active", 2),
-            image_token_budget=getattr(config, "image_token_budget", 6000),
+        self._compaction_generation: int = 0
+        self._wire_sent_tool_ids: set[str] = set()
+        self._projection_dirty: bool = False
+        self._event_log: Any | None = None
+        # 逐消息 token 定价缓存：content digest 变化才重新 tokenize。
+        self._msg_token_cache: dict[tuple[bool, str], int] = {}
+        # provider usage 锚点：最近一次成功请求的 prompt_tokens +
+        # 发送时刻的 surface 前缀指纹。前缀未变时压力测量直接锚定，
+        # 只对锚点之后追加的消息用启发式 delta。
+        self._pending_anchor: tuple[int, tuple[int, str]] | None = None
+        self._usage_anchor: tuple[int, int, tuple[int, str], int] | None = None
+
+    @staticmethod
+    def _message_token_key(message: dict) -> str:
+        """消息内容的稳定 digest（含 role/tool_calls，排除易变内部键）。"""
+        body = json.dumps(
+            {k: v for k, v in message.items() if not str(k).startswith("_")},
+            ensure_ascii=False, sort_keys=True, default=str,
         )
-        self._current_round: int = 0  # 当前对话轮次
+        return hashlib.md5(body.encode("utf-8")).hexdigest()
+
+    # ── 事件日志接线（append-only 事实源）────────────────
+
+    def attach_event_log(self, log: Any | None) -> None:
+        """挂接 SessionEventLog；挂接后所有历史变更都会落事件。"""
+        self._event_log = log
+
+    @property
+    def event_log(self) -> Any | None:
+        return self._event_log
+
+    # 内部链接键：只进内存，不进事件 payload / wire / 持久化。
+    _LINK_KEYS = frozenset({"_seq", "_event_kind"})
+
+    def _event_payload(self, msg: dict) -> dict:
+        return {k: v for k, v in msg.items() if k not in self._LINK_KEYS}
+
+    def _emit(self, kind: str, msg: dict, **kw: Any) -> None:
+        """追加 surface 事件并在消息上打 seq/种类标记。未挂日志时空操作。"""
+        log = self._event_log
+        if log is None:
+            return
+        ev = log.append(kind, self._event_payload(msg), **kw)
+        msg["_seq"] = ev.seq
+        msg["_event_kind"] = ev.kind
+
+    def _emit_void(self, msg: dict, *, kind: str) -> None:
+        """对一条已上链的消息发撤回事件（遮蔽但不替换）。"""
+        log = self._event_log
+        seq = msg.get("_seq") if isinstance(msg, dict) else None
+        if log is None or not isinstance(seq, int):
+            return
+        from excelmanus.session_log import OP_VOID
+
+        log.append(kind, {}, surface_op=OP_VOID, source_seqs=(seq,))
+
+    def _emit_replace(self, msg: dict, *, kind: str | None = None) -> None:
+        """对一条已上链的消息发 replace 事件（遮蔽原节点、原位插入新内容）。"""
+        log = self._event_log
+        seq = msg.get("_seq") if isinstance(msg, dict) else None
+        if log is None or not isinstance(seq, int):
+            return
+        from excelmanus.session_log import OP_REPLACE
+
+        ev_kind = kind or msg.get("_event_kind") or _ROLE_EVENT_KIND.get(
+            str(msg.get("role") or ""), "user/message"
+        )
+        ev = log.append(
+            ev_kind,
+            self._event_payload(msg),
+            surface_op=OP_REPLACE,
+            source_seqs=(seq,),
+        )
+        msg["_seq"] = ev.seq
+        msg["_event_kind"] = ev.kind
+
+    def load_from_log(self, log: Any) -> None:
+        """resume 路径：从事件日志 fold 出 live surface 重建消息列表。"""
+        self.attach_event_log(log)
+        self._messages = []
+        for seq, kind, message in log.live_nodes_view():
+            msg = dict(message)
+            msg["_seq"] = seq
+            msg["_event_kind"] = kind
+            self._messages.append(msg)
+
+    def drain_events(self) -> list:
+        """取走未持久化的事件（ConversationPersistence 在每个保存点调用）。"""
+        log = self._event_log
+        return log.drain_pending() if log is not None else []
+
+    def surface_contains_seq(self, seq: int) -> bool:
+        """某 durable 节点是否仍在 live surface 上（未被遮蔽/撤回）。"""
+        log = self._event_log
+        if log is not None:
+            live = getattr(log, "live_seqs", None)
+            if callable(live):
+                return seq in live()
+        return any(
+            m.get("_seq") == seq for m in self._messages if isinstance(m, dict)
+        )
 
     def update_context_window(self, max_context_tokens: int) -> None:
         """切换模型后更新上下文窗口大小和截断阈值。"""
         self._max_context_tokens = max(1, max_context_tokens)
-        self._truncation_threshold = int(self._max_context_tokens * 0.9)
 
     @property
     def messages(self) -> list[dict]:
@@ -351,14 +351,17 @@ class ConversationMemory:
         if self._messages and self._messages[-1].get("role") == "assistant":
             content = self._messages[-1].get("content", "")
             if isinstance(content, str) and predicate(content):
-                self._messages.pop()
+                msg = self._messages.pop()
+                self._emit_void(msg, kind="history/truncate")
                 return True
         return False
 
     def replace_message_content(self, index: int, content: str) -> bool:
         """替换指定位置的消息内容。越界时返回 False。"""
         if 0 <= index < len(self._messages):
-            self._messages[index]["content"] = content
+            msg = self._messages[index]
+            msg["content"] = content
+            self._emit_replace(msg)
             return True
         return False
 
@@ -383,9 +386,7 @@ class ConversationMemory:
 
         Args:
             content: 纯文本字符串或多模态 content parts 列表。
-                     当 content 为列表且包含 image_url 类型的 part 时，
-                     自动注册到图片追踪系统，使 mark_images_sent() 可以
-                     在首轮 LLM 调用后将 base64 降级为文本引用。
+                     列表中的 image_url / image 会在写入时准入为 durable ref。
             hidden: 为 True 时仍进入模型上下文，但不计入 UI / rollback 用户轮次。
             prompt_kind: 注入来源标记（如 skill_catalog），仅用于持久化与排查。
         """
@@ -395,81 +396,121 @@ class ConversationMemory:
         if prompt_kind:
             extra["_prompt_kind"] = prompt_kind
 
-        # 检测多模态内容中的图片并注册追踪
-        has_images = False
-        if isinstance(content, list):
-            for part in content:
-                if isinstance(part, dict) and part.get("type") == "image_url":
-                    has_images = True
-                    break
-
-        if has_images:
-            self._image_seq += 1
-            image_id = self._image_seq
-            self._messages.append({
-                "role": "user", "content": content, "_image_id": image_id,
-                "message_id": uuid4().hex,
-                **extra,
-            })
-            self._fresh_image_ids.add(image_id)
-            # 注册到生命周期管理器（提取第一张图片的 base64/mime/detail）
-            if isinstance(content, list):
-                for part in content:
-                    if isinstance(part, dict) and part.get("type") == "image_url":
-                        img_url = part.get("image_url", {})
-                        url_str = img_url.get("url", "")
-                        detail = img_url.get("detail", "auto")
-                        # 从 data URI 提取 base64 和 mime
-                        if url_str.startswith("data:") and ";base64," in url_str:
-                            header, b64_data = url_str.split(";base64,", 1)
-                            mime_type = header.replace("data:", "")
-                            self._lifecycle.register(
-                                image_id, b64_data, mime_type, detail, self._current_round,
-                            )
-                        break  # 只注册第一张
-        else:
-            self._messages.append({
-                "role": "user",
-                "content": content,
-                "message_id": uuid4().hex,
-                **extra,
-            })
-        self._truncate_if_needed()
-
-    def add_image_message(
-        self, base64_data: str, mime_type: str = "image/png", detail: str = "auto",
-    ) -> None:
-        """便捷方法：注入图片到对话上下文。
-
-        图片首次注入时保留完整 base64 数据；LLM 调用完成后通过
-        ``mark_images_sent()`` 或 ``manage_image_lifecycle()`` 管理降级。
-        """
-        self._image_seq += 1
-        image_id = self._image_seq
-        part = {
-            "type": "image_url",
-            "image_url": {
-                "url": f"data:{mime_type};base64,{base64_data}",
-                "detail": detail,
-            },
+        durable = self._durablize_content(content)
+        msg = {
+            "role": "user",
+            "content": durable,
+            "message_id": uuid4().hex,
+            **extra,
         }
-        msg = {"role": "user", "content": [part], "_image_id": image_id, "message_id": uuid4().hex}
         self._messages.append(msg)
-        self._fresh_image_ids.add(image_id)
-        # 注册到生命周期管理器
-        self._lifecycle.register(
-            image_id, base64_data, mime_type, detail, self._current_round,
-        )
-        self._truncate_if_needed()
+        # prompt_kind 标记的注入物（技能目录/mention/hook 等）走 context/inject
+        self._emit("context/inject" if prompt_kind else "user/message", msg)
+
+    def add_system_message(
+        self,
+        content: str,
+        *,
+        hidden: bool = True,
+        prompt_kind: str = "system_update",
+    ) -> None:
+        """追加 in-history system（模式切换）。不改 leading system。"""
+        if not isinstance(content, str) or not content.strip():
+            return
+        extra: dict[str, Any] = {"_prompt_kind": prompt_kind}
+        if hidden:
+            extra["_ui_hidden"] = True
+        msg = {
+            "role": "system",
+            "content": content,
+            "message_id": uuid4().hex,
+            **extra,
+        }
+        self._messages.append(msg)
+        self._emit("system/update", msg)
+
+    def drop_system_updates(self) -> int:
+        """移除 durable 中全部 in-history system_update 消息，返回移除数。
+
+        仅允许在信封 series 边界调用（starts_series = 缓存前缀已 miss，
+        本请求重新定义后续前缀）——这是与 compaction 同级的唯一合法历史
+        重写点。不清理会导致新 series 后模型读到新旧多份 system 指令叠加。
+        """
+        kept: list[dict[str, Any]] = []
+        removed = 0
+        for msg in self._messages:
+            if msg.get("_prompt_kind") == "system_update":
+                self._emit_void(msg, kind="system/drop-updates")
+                removed += 1
+                continue
+            kept.append(msg)
+        if removed:
+            self._messages[:] = kept
+        return removed
+
+    def _durablize_content(self, content: str | list[dict]) -> str | list[dict]:
+        if isinstance(content, str):
+            return content
+        if not isinstance(content, list):
+            return content
+        from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+        from excelmanus.attachments.types import AttachmentError
+
+        out: list[dict] = []
+        for part in content:
+            if not isinstance(part, dict):
+                out.append(part)
+                continue
+            if part.get("type") == "image" and isinstance(part.get("attachment"), dict):
+                out.append(part)
+                continue
+            if part.get("type") != "image_url":
+                out.append(part)
+                continue
+            url = str((part.get("image_url") or {}).get("url") or "")
+            try:
+                raw = decode_image_payload(url)
+                header = url.split(";base64,", 1)[0] if ";base64," in url else "data:image/png"
+                media = header.replace("data:", "", 1) or "image/png"
+                ref = admit_image_bytes(raw, media_type=media)
+                out.append({"type": "image", "attachment": ref.to_dict()})
+            except (AttachmentError, ValueError, Exception):
+                logger.warning("图片准入失败，写入占位文本", exc_info=True)
+                out.append({"type": "text", "text": "[image omitted: unreadable attachment]"})
+        return out
+
+    def _live_config(self) -> ExcelManusConfig:
+        try:
+            from excelmanus.api_app_state import get_config
+            cfg = get_config()
+            if cfg is not None:
+                return cfg
+        except Exception:
+            pass
+        return self._config
+
+    def _count_message(self, message: dict) -> int:
+        cfg = self._live_config()
+        deepseek = "deepseek" in str(getattr(cfg, "base_url", "") or "").lower()
+        key = (bool(deepseek), self._message_token_key(message))
+        cached = self._msg_token_cache.get(key)
+        if cached is not None:
+            return cached
+        value = self._token_counter.count_message(message, config=cfg, deepseek=deepseek)
+        if len(self._msg_token_cache) > 8192:
+            self._msg_token_cache.clear()
+        self._msg_token_cache[key] = value
+        return value
 
     def add_assistant_message(self, content: str) -> None:
         """添加助手纯文本回复。"""
-        self._messages.append({"role": "assistant", "content": content, "message_id": uuid4().hex})
-        self._truncate_if_needed()
+        msg = {"role": "assistant", "content": content, "message_id": uuid4().hex}
+        self._messages.append(msg)
+        self._emit("assistant/message", msg)
 
     def add_tool_call(self, tool_call_id: str, name: str, arguments: str) -> None:
         """添加助手的工具调用消息。"""
-        self._messages.append({
+        msg = {
             "role": "assistant",
             "content": None,
             "tool_calls": [
@@ -480,8 +521,9 @@ class ConversationMemory:
                 }
             ],
             "message_id": uuid4().hex,
-        })
-        self._truncate_if_needed()
+        }
+        self._messages.append(msg)
+        self._emit("assistant/message", msg)
 
     def add_assistant_tool_message(self, message: dict) -> None:
         """添加完整的 assistant tool 调用消息。
@@ -499,27 +541,45 @@ class ConversationMemory:
         if not normalized.get("message_id"):
             normalized["message_id"] = uuid4().hex
         self._messages.append(normalized)
-        self._truncate_if_needed()
+        self._emit("assistant/message", normalized)
 
-    def add_tool_result(self, tool_call_id: str, content: str) -> None:
-        """添加工具执行结果消息。"""
-        self._messages.append({
+    def add_tool_result(
+        self,
+        tool_call_id: str,
+        content: str,
+        *,
+        projection_content: str | None = None,
+    ) -> None:
+        """添加工具执行结果消息，可附带仅出网投影使用的精简文本。"""
+        message = {
             "role": "tool",
             "tool_call_id": tool_call_id,
             "content": content,
             "message_id": uuid4().hex,
-        })
-        self._truncate_if_needed()
+        }
+        if projection_content is not None and projection_content != content:
+            message["_projection_content"] = projection_content
+        self._messages.append(message)
+        self._emit("tool/result", message)
 
     def replace_tool_result(self, tool_call_id: str, content: str) -> bool:
         """替换已有工具结果消息的内容（按 tool_call_id 匹配最后一条）。
 
         用于审批通过后将审批提示替换为实际工具执行结果。
+        若该结果已经进入上一封信封，标记 projection dirty，由信封 bump generation。
         返回是否成功替换。
         """
         for msg in reversed(self._messages):
             if msg.get("role") == "tool" and msg.get("tool_call_id") == tool_call_id:
+                if msg.get("content") == content:
+                    return True
                 msg["content"] = content
+                msg.pop("_projection_content", None)
+                # 审批替换：已上链则落 replace 事件（原文留在日志里），
+                # 未上链则原地改 durable——两种路径模型可见行为一致。
+                self._emit_replace(msg, kind="tool/result")
+                if tool_call_id in self._wire_sent_tool_ids:
+                    self._projection_dirty = True
                 return True
         return False
 
@@ -538,64 +598,62 @@ class ConversationMemory:
     def get_messages(
         self,
         system_prompts: list[str] | None = None,
-        context_prompts: list[str] | None = None,
     ) -> list[dict]:
-        """获取完整消息列表（system prompt + 对话历史）。
+        """获取完整消息列表（leading system + 对话历史）。
 
         会过滤内部标记字段（``_image_id`` / ``_ui_hidden`` 等），
-        确保不泄露到发送给 LLM 的消息中。
-
-        Args:
-            system_prompts:
-                可选的 system 消息列表；为空时使用默认 system prompt。
-            context_prompts:
-                请求级 user-role 快照（技能正文 / hook），不写入历史。
+        确保不泄露到发送给 LLM 的消息中。动态事实必须先写入 durable。
         """
         system_msgs = self.build_system_messages(system_prompts)
-        context_msgs = _context_role_messages(context_prompts)
         output: list[dict] = []
         for msg in self._messages:
             output.append({k: v for k, v in msg.items() if not str(k).startswith("_")})
-        return system_msgs + context_msgs + output
+        return system_msgs + output
 
-    def trim_for_request(
+    def project_for_request(
         self,
         system_prompts: list[str],
-        max_context_tokens: int,
-        reserve_ratio: float = 0.1,
-        context_prompts: list[str] | None = None,
+        vision_capable: bool = True,
+        image_pins: list[str] | tuple[str, ...] | None = None,
+        image_report: dict | None = None,
     ) -> list[dict]:
-        """按最终请求消息预算裁剪历史，返回可直接发送的消息列表。"""
-        if max_context_tokens <= 0:
-            return self.get_messages(
-                system_prompts=system_prompts,
-                context_prompts=context_prompts,
-            )
-        ratio = reserve_ratio
-        if ratio < 0:
-            ratio = 0
-        elif ratio >= 1:
-            ratio = 0.99
-        threshold = max(1, int(max_context_tokens * (1 - ratio)))
-        system_msgs = self.build_system_messages(system_prompts)
-        context_msgs = _context_role_messages(context_prompts)
-        self._truncate_history_to_threshold(
-            threshold, system_msgs=system_msgs + context_msgs,
-        )
-        # 截断后修复消息序列：确保首条消息为 user 角色，
-        # 避免部分 provider（Claude / GLM 等）因 assistant-first 拒绝请求。
-        self._ensure_starts_with_user()
-        # 过滤内部标记字段，与 get_messages 保持一致
-        output: list[dict] = []
+        """投影 leading system + durable 历史。不插段、不改写已发出前缀。
+
+        预算压力由 compaction 处理；此方法不做 token 截断。
+        system 前缀以调用方（信封）给定的为准，不回退默认值——
+        否则 wire 上的 messages[0] 会与 envelope.system_head 分叉。
+        """
+        projected: list[dict] = []
         for msg in self._messages:
-            output.append({k: v for k, v in msg.items() if not str(k).startswith("_")})
-        # 对旧轮次的工具返回值做结构化遮蔽，节约上下文空间
-        from excelmanus.engine_core.observation_masker import mask_messages
-        output = mask_messages(output)
-        # 剥离非标准字段（thinking/reasoning/reasoning_content 等），
-        # 防止不同 LLM provider 因未知字段返回 400 错误
-        output = _sanitize_messages_for_api(output)
-        return system_msgs + context_msgs + output
+            clean = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+            projection_content = msg.get("_projection_content")
+            if msg.get("role") == "tool" and isinstance(projection_content, str):
+                clean["content"] = projection_content
+            projected.append(clean)
+        body = _sanitize_messages_for_api(projected)
+        # 记录发送时刻的 surface 快照；请求成功后由
+        # note_provider_prompt_tokens 绑定为 usage 锚点。
+        self._pending_anchor = (
+            len(self._messages),
+            _prefix_fingerprint(self._messages),
+        )
+        self._wire_sent_tool_ids = {
+            str(m.get("tool_call_id"))
+            for m in body
+            if m.get("role") == "tool" and m.get("tool_call_id")
+        }
+        system_msgs = [
+            {"role": "system", "content": prompt}
+            for prompt in (system_prompts or [])
+            if isinstance(prompt, str) and prompt.strip()
+        ]
+        return assemble_model_request(
+            system_msgs + body,
+            vision_capable=vision_capable,
+            config=self._live_config(),
+            pin_seq=image_pins,
+            report=image_report,
+        )
 
     def repair_dangling_tool_calls(self) -> int:
         """修复尾部悬空的 tool_call：为缺失 result 的 tool_call 补占位 tool result。
@@ -638,18 +696,27 @@ class ConversationMemory:
         repaired = 0
         for tc_id in expected_ids:
             if tc_id not in existing_ids:
-                self._messages.append({
+                msg = {
                     "role": "tool",
                     "tool_call_id": tc_id,
                     "content": "[任务已中断，该工具未执行完成]",
-                })
+                }
+                self._messages.append(msg)
+                self._emit("tool/result", msg)
                 repaired += 1
 
         return repaired
 
     def inject_messages(self, messages: list[dict]) -> None:
-        """注入历史消息（用于会话恢复）。不触发截断。"""
-        self._messages.extend(messages)
+        """注入历史消息（用于会话恢复）。不触发截断。旧 base64 行当场迁成 ref。
+
+        挂了事件日志时逐条落 ``legacy/import`` append——旧会话由此惰性
+        迁入事件溯源，无需一次性全库迁移。
+        """
+        migrated = migrate_messages(messages)
+        for msg in migrated:
+            self._emit("legacy/import", msg)
+        self._messages.extend(migrated)
 
     def rollback_to_user_turn(self, turn_index: int, *, keep_target: bool = True) -> int:
         """回退对话到第 turn_index 个用户消息（0-indexed）。
@@ -676,12 +743,14 @@ class ConversationMemory:
             )
         cut_after = user_indices[turn_index]
         if keep_target:
-            removed_count = len(self._messages) - cut_after - 1
+            removed = self._messages[cut_after + 1:]
             self._messages = self._messages[: cut_after + 1]
         else:
-            removed_count = len(self._messages) - cut_after
+            removed = self._messages[cut_after:]
             self._messages = self._messages[:cut_after]
-        return removed_count
+        for msg in removed:
+            self._emit_void(msg, kind="rollback/edit")
+        return len(removed)
 
     def list_user_turns(self) -> list[dict]:
         """列出所有用户轮次摘要，返回 [{index, content_preview, msg_index}]。"""
@@ -709,152 +778,117 @@ class ConversationMemory:
         """当前消息数量。"""
         return len(self._messages)
 
-    def reset_image_tracking(self) -> None:
-        """重置图片追踪状态（rollback 后调用）。
-
-        清除 fresh IDs 和 lifecycle 缓存，保留 _image_seq 以避免
-        新图片 ID 冲突。_current_round 同步到当前用户轮次数。
-        """
-        self._fresh_image_ids.clear()
-        self._lifecycle.clear()
-        # 同步 round 到当前剩余消息的用户轮次数
-        user_count = sum(1 for m in self._messages if m.get("role") == "user")
-        self._current_round = user_count
-
     def clear(self) -> None:
         """清除所有对话历史（保留 system prompt 配置）。"""
+        for msg in self._messages:
+            self._emit_void(msg, kind="session/clear")
         self._messages.clear()
-        self._image_seq = 0
-        self._fresh_image_ids.clear()
-        self._lifecycle.clear()
-        self._current_round = 0
 
-    def mark_images_sent(self) -> None:
-        """将已发送的图片消息降级为文本引用，释放 base64 内存。
+    def apply_compaction_summary(
+        self, synthetic: list[dict], split_idx: int,
+    ) -> None:
+        """压缩落点：用 ``synthetic`` 替换 ``_messages[:split_idx]``。
 
-        在每轮 LLM 调用完成后调用。fresh 图片在本轮已随完整 base64
-        发送给 LLM，后续轮次只需保留短文本引用即可。
-
-        对于多模态消息（text + image 混合），保留原始文本部分，
-        仅将 image_url 部分替换为短文本引用。
-
-        注意：视觉原生模式应改用 ``manage_image_lifecycle()``。
+        挂日志时落一条多节点 ``user/message`` replace 事件：被压区间的
+        原始消息在事件日志中永久保留，surface 上原位换成摘要——
+        原文不再随压缩丢失。
         """
-        if not self._fresh_image_ids:
-            return
-        for i, msg in enumerate(self._messages):
-            image_id = msg.get("_image_id")
-            if image_id is not None and image_id in self._fresh_image_ids:
-                self._degrade_image_message(i, image_id)
-        self._fresh_image_ids.clear()
-
-    def manage_image_lifecycle(self) -> None:
-        """Provider-aware 图片生命周期管理（视觉原生模式）。
-
-        替代 ``mark_images_sent()`` 的粗暴降级策略：
-        - 图片在 keep_rounds 内保持完整 base64（利用 Provider 缓存）
-        - 超期或超数量时 LRU 淘汰
-        - 降级后仍缓存原始数据，支持按需重注入
-        """
-        self._current_round += 1
-
-        # 更新所有 fresh 图片的引用轮次
-        for msg in self._messages:
-            image_id = msg.get("_image_id")
-            if image_id is not None and image_id in self._fresh_image_ids:
-                self._lifecycle.mark_round_sent(image_id, self._current_round)
-        self._fresh_image_ids.clear()
-
-        # 获取需要降级的图片
-        to_degrade = self._lifecycle.get_ids_to_degrade(self._current_round)
-        if not to_degrade:
-            return
-
-        degrade_set = set(to_degrade)
-        for i, msg in enumerate(self._messages):
-            image_id = msg.get("_image_id")
-            if image_id is not None and image_id in degrade_set:
-                if not msg.get("_image_downgraded"):
-                    self._degrade_image_message(i, image_id)
-                    self._lifecycle.mark_degraded(image_id)
-                    cached = self._lifecycle._cache.get(image_id)
-                    age = self._current_round - cached.inject_round if cached else 0
-                    logger.info("图片生命周期: 降级图片 #%d (age=%d rounds)", image_id, age)
-
-    def _degrade_image_message(self, msg_index: int, image_id: int) -> None:
-        """将指定消息中的图片降级为文本引用。"""
-        msg = self._messages[msg_index]
-        original_text = ""
-        content = msg.get("content")
-        if isinstance(content, list):
-            text_parts = [
-                p.get("text", "")
-                for p in content
-                if isinstance(p, dict) and p.get("type") == "text"
-            ]
-            original_text = "\n".join(t for t in text_parts if t)
-
-        image_ref = f"[图片 #{image_id} 已在之前的对话中发送]"
-        degraded_content = (
-            f"{original_text}\n{image_ref}" if original_text else image_ref
+        removed = self._messages[:split_idx]
+        seqs = sorted(
+            m["_seq"] for m in removed if isinstance(m.get("_seq"), int)
         )
-        self._messages[msg_index] = {
-            "role": "user",
-            "content": degraded_content,
-            "_image_id": image_id,
-            "_image_downgraded": True,
-        }
+        log = self._event_log
+        if log is not None and len(seqs) == len(removed) and seqs:
+            from excelmanus.session_log import OP_REPLACE
 
-    def _total_tokens(self) -> int:
-        """计算当前所有消息（含 system prompt）的总 token 数。"""
-        system_msg = {"role": "system", "content": self._system_prompt}
-        total = self._token_counter.count_message(system_msg)
-        for msg in self._messages:
-            total += self._token_counter.count_message(msg)
-        return total
+            ev = log.append(
+                "user/message",
+                {"messages": [self._event_payload(m) for m in synthetic]},
+                surface_op=OP_REPLACE,
+                source_seqs=seqs,
+            )
+            for offset, msg in enumerate(synthetic):
+                msg["_seq"] = ev.seq + offset
+                msg["_event_kind"] = ev.kind
+        else:
+            # 无日志或区间含未上链消息：退化为逐条 void + 直接拼接。
+            for msg in removed:
+                self._emit_void(msg, kind="compaction/summary")
+            for msg in synthetic:
+                self._emit("context/inject", msg)
+        self._messages = synthetic + self._messages[split_idx:]
 
-    def _truncate_if_needed(self) -> None:
-        """当 token 总量超过阈值时，从最早的消息开始截断。
-
-        截断策略：
-        1. 始终保留 system prompt（不在 _messages 中，由 get_messages 拼接）
-        2. 从 _messages 头部逐条移除最早的消息
-        3. 跳过孤立的 tool 结果消息（确保 tool_call 和 tool_result 成对移除）
-        """
-        self._truncate_history_to_threshold(self._truncation_threshold, system_msgs=None)
+    def note_provider_prompt_tokens(self, prompt_tokens: int) -> None:
+        """请求成功后绑定 usage 锚点（provider 上报的真实输入 token 数）。"""
+        pending = self._pending_anchor
+        if pending is None or int(prompt_tokens or 0) <= 0:
+            return
+        count, fp = pending
+        self._usage_anchor = (
+            int(prompt_tokens), count, fp, self._compaction_generation,
+        )
 
     def _total_tokens_with_system_messages(self, system_msgs: list[dict] | None) -> int:
+        # usage 锚点命中：前缀指纹与压缩代数都没变 → provider 真实计量
+        # 直接复用，只对锚点后追加的消息做启发式 delta。
+        anchor = self._usage_anchor
+        if anchor is not None:
+            prompt_tokens, count, fp, gen = anchor
+            if (
+                gen == self._compaction_generation
+                and len(self._messages) >= count
+                and _prefix_fingerprint(self._messages[:count]) == fp
+            ):
+                delta = sum(
+                    self._count_message(m) for m in self._messages[count:]
+                )
+                return prompt_tokens + delta
+            self._usage_anchor = None
+
         total = 0
         if system_msgs is None:
             system_msg = {"role": "system", "content": self._system_prompt}
-            total += self._token_counter.count_message(system_msg)
+            total += self._count_message(system_msg)
         else:
             for msg in system_msgs:
-                total += self._token_counter.count_message(msg)
+                total += self._count_message(msg)
         for msg in self._messages:
-            total += self._token_counter.count_message(msg)
+            total += self._count_message(msg)
         return total
 
     def _truncate_history_to_threshold(
         self,
         threshold: int,
         system_msgs: list[dict] | None,
+        *,
+        protect_first: int = 0,
     ) -> None:
-        while self._messages and self._total_tokens_with_system_messages(system_msgs) > threshold:
-            # 仅剩最后一条时做内容收缩，避免单条超长消息长期越阈值。
-            if len(self._messages) == 1:
+        """从头部截断历史直到 token 数降回阈值以内。
+
+        protect_first：头部 N 条消息受保护（如压缩刚写入的合成摘要），
+        只会被内容收缩、不会被删除。
+        """
+        while (
+            self._messages
+            and len(self._messages) > protect_first
+            and self._total_tokens_with_system_messages(system_msgs) > threshold
+        ):
+            # 只剩最后一条（未保护）时做内容收缩，避免单条超长消息长期越阈值。
+            if len(self._messages) == protect_first + 1:
                 if not self._shrink_last_message_for_threshold(threshold, system_msgs):
                     # 无法收缩（例如 content 为 None 的 tool_call 壳消息）时，
-                    # 直接丢弃最后一条，保证请求不会持续超预算。
-                    self._messages.pop(0)
+                    # 直接丢弃该条，保证请求不会持续超预算。
+                    removed_last = self._messages.pop(protect_first)
+                    self._emit_void(removed_last, kind="compaction/truncate")
                     break
                 # 收缩后仍可能因 system 过大而超阈值，此时保留最后一条不删
                 if self._total_tokens_with_system_messages(system_msgs) > threshold:
                     break
                 continue
 
-            # 移除最早的消息，但至少保留最后一条（最近的消息）
-            removed = self._messages.pop(0)
+            # 移除最早的未保护消息，但至少保护住头部 protect_first 条
+            removed = self._messages.pop(protect_first)
+            self._emit_void(removed, kind="compaction/truncate")
 
             # 如果移除的是带 tool_calls 的 assistant 消息，
             # 需要同时移除对应的 tool result 消息
@@ -863,18 +897,21 @@ class ConversationMemory:
                     tc["id"] for tc in removed["tool_calls"] if "id" in tc
                 }
                 # 移除所有匹配的 tool result（它们紧跟在 tool_call 之后）
-                self._messages = [
-                    m for m in self._messages
-                    if not (
-                        m.get("role") == "tool"
-                        and m.get("tool_call_id") in call_ids
-                    )
-                ]
+                kept_msgs = []
+                for m in self._messages:
+                    if m.get("role") == "tool" and m.get("tool_call_id") in call_ids:
+                        self._emit_void(m, kind="compaction/truncate")
+                        continue
+                    kept_msgs.append(m)
+                self._messages = kept_msgs
 
-            # 如果最早的消息是孤立的 tool result（对应的 tool_call 已不存在），
+            # 如果未保护区域头部是孤立的 tool result（对应的 tool_call 已不存在），
             # 继续移除以保持消息一致性。
             # 注意：必须检查 tool_call_id 是否真的孤立，避免误删有效的 tool result。
-            while self._messages and self._messages[0].get("role") == "tool":
+            while (
+                len(self._messages) > protect_first
+                and self._messages[protect_first].get("role") == "tool"
+            ):
                 # 收集剩余消息中所有有效的 tool_call id
                 valid_call_ids: set[str] = {
                     tc["id"]
@@ -883,48 +920,12 @@ class ConversationMemory:
                     for tc in m["tool_calls"]
                     if "id" in tc
                 }
-                head_call_id = self._messages[0].get("tool_call_id")
+                head_call_id = self._messages[protect_first].get("tool_call_id")
                 if head_call_id in valid_call_ids:
                     # 对应的 tool_call 仍存在，不是孤立消息，停止清理
                     break
-                self._messages.pop(0)
-
-    def _ensure_starts_with_user(self) -> None:
-        """确保 _messages 首条消息为 user 角色。
-
-        截断可能导致首条消息为 assistant（带或不带 tool_calls），
-        部分 provider（Claude / GLM）要求首条非 system 消息必须是 user。
-        此方法移除前导的非 user 消息及其关联的 tool result，直到
-        遇到 user 消息或列表为空。
-        """
-        while self._messages and self._messages[0].get("role") != "user":
-            removed = self._messages.pop(0)
-            # 移除被删 assistant 的关联 tool results
-            if removed.get("tool_calls"):
-                call_ids = {
-                    tc["id"] for tc in removed["tool_calls"]
-                    if isinstance(tc, dict) and "id" in tc
-                }
-                if call_ids:
-                    self._messages = [
-                        m for m in self._messages
-                        if not (
-                            m.get("role") == "tool"
-                            and m.get("tool_call_id") in call_ids
-                        )
-                    ]
-            # 清理可能暴露在头部的孤立 tool results
-            while self._messages and self._messages[0].get("role") == "tool":
-                valid_call_ids: set[str] = {
-                    tc["id"]
-                    for m in self._messages
-                    if m.get("tool_calls")
-                    for tc in m["tool_calls"]
-                    if isinstance(tc, dict) and "id" in tc
-                }
-                if self._messages[0].get("tool_call_id") in valid_call_ids:
-                    break
-                self._messages.pop(0)
+                orphan = self._messages.pop(protect_first)
+                self._emit_void(orphan, kind="compaction/truncate")
 
     def _shrink_last_message_for_threshold(
         self,
@@ -940,7 +941,7 @@ class ConversationMemory:
             # 已为空，无需再收缩，保留该条消息
             return True
 
-        message_tokens = self._token_counter.count_message(msg)
+        message_tokens = self._count_message(msg)
         content_tokens = self._token_counter.count(content)
         base_tokens = message_tokens - content_tokens
         budget_for_content = threshold - (
@@ -948,6 +949,7 @@ class ConversationMemory:
         ) - base_tokens
         if budget_for_content <= 0:
             msg["content"] = ""
+            self._emit_replace(msg)
             return True
 
         if content_tokens <= budget_for_content:
@@ -986,6 +988,7 @@ class ConversationMemory:
 
         if not best:
             msg["content"] = ""
+            self._emit_replace(msg)
             return True
 
         if len(best) >= len(content):
@@ -994,78 +997,9 @@ class ConversationMemory:
         # 防止收缩后内容未变导致外层 while 无限循环
         if best == content:
             msg["content"] = ""
+            self._emit_replace(msg)
             return True
 
         msg["content"] = best
-        return True
-
-    async def summarize_and_trim(
-        self,
-        threshold: int,
-        system_msgs: list[dict] | None,
-        *,
-        client: object,
-        summary_model: str,
-        keep_recent_turns: int = 3,
-    ) -> bool:
-        """超阈值时：用轻量模型摘要旧消息 + 保留最近 N 轮。
-
-        Args:
-            threshold: token 阈值
-            system_msgs: 当前系统消息（用于 token 计算）
-            client: openai.AsyncOpenAI 兼容客户端
-            summary_model: 摘要模型名称
-            keep_recent_turns: 保留最近的 user turn 数
-
-        Returns:
-            是否执行了摘要操作
-        """
-        if self._total_tokens_with_system_messages(system_msgs) <= threshold:
-            return False
-
-        # 找到最近 keep_recent_turns 个 user 消息的起始索引
-        user_indices = [
-            i for i, m in enumerate(self._messages)
-            if m.get("role") == "user"
-        ]
-        if len(user_indices) <= keep_recent_turns:
-            # 消息太少，不值得摘要，走硬截断
-            self._truncate_history_to_threshold(threshold, system_msgs)
-            return False
-
-        split_idx = user_indices[-keep_recent_turns]
-        old_messages = self._messages[:split_idx]
-        recent_messages = self._messages[split_idx:]
-
-        if not old_messages:
-            self._truncate_history_to_threshold(threshold, system_msgs)
-            return False
-
-        from excelmanus.memory_summarizer import summarize_history
-
-        summary_text = await summarize_history(
-            client, summary_model, old_messages,
-        )
-
-        if not summary_text:
-            # 摘要失败，走硬截断兜底
-            logger.warning("对话摘要为空，回退到硬截断")
-            self._truncate_history_to_threshold(threshold, system_msgs)
-            return False
-
-        # 用两条合成消息替换旧历史
-        synthetic: list[dict] = [
-            {"role": "user", "content": "[系统] 请基于以下摘要继续工作。"},
-            {"role": "assistant", "content": f"[对话摘要]\n{summary_text}"},
-        ]
-        self._messages = synthetic + recent_messages
-
-        # 如果摘要后仍然超限，走硬截断兜底
-        if self._total_tokens_with_system_messages(system_msgs) > threshold:
-            self._truncate_history_to_threshold(threshold, system_msgs)
-
-        logger.info(
-            "对话历史已摘要压缩: %d 条旧消息 → 2 条合成消息 + %d 条保留消息",
-            len(old_messages), len(recent_messages),
-        )
+        self._emit_replace(msg)
         return True

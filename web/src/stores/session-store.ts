@@ -8,6 +8,8 @@ import {
 interface SessionState {
   sessions: Session[];
   activeSessionId: string | null;
+  lastWorkspaceId: string | null;
+  lastWorkspacePath: string | null;
   setSessions: (sessions: Session[]) => void;
   setActiveSession: (id: string | null) => void;
   addSession: (session: Session) => void;
@@ -27,8 +29,19 @@ export const useSessionStore = create<SessionState>()(
     (set) => ({
       sessions: [],
       activeSessionId: null,
+      lastWorkspaceId: null,
+      lastWorkspacePath: null,
       setSessions: (sessions) => set({ sessions }),
-      setActiveSession: (id) => set({ activeSessionId: id }),
+      setActiveSession: (id) =>
+        set((state) => {
+          if (!id) return { activeSessionId: null };
+          const session = state.sessions.find((item) => item.id === id);
+          return {
+            activeSessionId: id,
+            lastWorkspaceId: session?.workspaceId ?? state.lastWorkspaceId,
+            lastWorkspacePath: session?.workspacePath ?? state.lastWorkspacePath,
+          };
+        }),
       addSession: (session) =>
         set((state) => {
           const withTs = {
@@ -108,7 +121,20 @@ export const useSessionStore = create<SessionState>()(
       partialize: (state) => ({
         sessions: state.sessions,
         activeSessionId: state.activeSessionId,
+        lastWorkspaceId: state.lastWorkspaceId,
+        lastWorkspacePath: state.lastWorkspacePath,
       }),
     }
   )
 );
+
+export function waitForSessionHydration(): Promise<void> {
+  const persistApi = useSessionStore.persist;
+  if (persistApi.hasHydrated()) return Promise.resolve();
+  return new Promise((resolve) => {
+    const unsub = persistApi.onFinishHydration(() => {
+      if (typeof unsub === "function") unsub();
+      resolve();
+    });
+  });
+}

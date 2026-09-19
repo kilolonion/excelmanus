@@ -1,12 +1,14 @@
 "use client";
 
 import { useCallback, useEffect, useState } from "react";
-import { invalidateSnapshotCache } from "@/lib/api";
+import { invalidateWorkbookCaches } from "@/lib/api";
 import {
   enqueueExcelCellEdit,
   resumeExcelCellEdits,
 } from "@/lib/excel-cell-edit";
 import { useExcelStore } from "@/stores/excel-store";
+import { activeFileRef } from "@/lib/workspace-file-ref";
+import { useSessionStore } from "@/stores/session-store";
 
 export function useExcelCellEdit(filePath: string | null) {
   const [conflict, setConflict] = useState(false);
@@ -21,11 +23,16 @@ export function useExcelCellEdit(filePath: string | null) {
   const handleCellEdit = useCallback(
     (cell: string, value: unknown, sheet?: string) => {
       if (!filePath || !cell) return;
+      const file = activeFileRef(filePath);
       enqueueExcelCellEdit({
         path: filePath,
         sheet,
         cell,
         value,
+        file,
+        sessionId: useSessionStore.getState().activeSessionId,
+        viewGeneration: useExcelStore.getState().viewGeneration,
+        expectedVersion: useExcelStore.getState().getContentVersion(filePath, file.workspaceKey),
         onConflict: () => {
           setWriteError(null);
           setConflict(true);
@@ -42,8 +49,9 @@ export function useExcelCellEdit(filePath: string | null) {
   const reloadAfterConflict = useCallback(() => {
     if (!filePath) return;
     resumeExcelCellEdits(filePath);
-    useExcelStore.getState().setContentVersion(filePath, null);
-    invalidateSnapshotCache(filePath);
+    const file = activeFileRef(filePath);
+    useExcelStore.getState().setContentVersion(filePath, null, file.workspaceKey);
+    invalidateWorkbookCaches({ workspaceKey: file.workspaceKey, relative: filePath });
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
     setConflict(false);
     setWriteError(null);

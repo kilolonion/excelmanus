@@ -1,0 +1,87 @@
+import { downloadFile } from "@/lib/api";
+import {
+  classifyWorkspaceFile,
+  fileNameOf,
+  type WorkspaceFileKind,
+} from "@/lib/file-kind";
+import { useExcelStore } from "@/stores/excel-store";
+import { useFilePreviewStore } from "@/stores/file-preview-store";
+import { useSessionStore } from "@/stores/session-store";
+import { useWordStore } from "@/stores/word-store";
+
+export type OpenWorkspaceFileIntent = "preview" | "full";
+
+export interface OpenWorkspaceFileOptions {
+  intent?: OpenWorkspaceFileIntent;
+  sheet?: string;
+}
+
+function currentSessionId(): string | undefined {
+  return useSessionStore.getState().activeSessionId ?? undefined;
+}
+
+export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions): WorkspaceFileKind {
+  const filename = fileNameOf(path);
+  const kind = classifyWorkspaceFile(filename);
+  const intent = opts?.intent ?? "preview";
+  const excel = useExcelStore.getState();
+  const word = useWordStore.getState();
+  const preview = useFilePreviewStore.getState();
+
+  if (kind === "spreadsheet") {
+    preview.closeText();
+    preview.closeImage();
+    word.closePanel();
+    word.closeFullView();
+    excel.addRecentFile({ path, filename });
+    if (intent === "full") {
+      excel.openFullView(path, opts?.sheet);
+    } else {
+      excel.openPanel(path, opts?.sheet);
+    }
+    return kind;
+  }
+
+  if (kind === "word") {
+    preview.closeText();
+    preview.closeImage();
+    if (intent === "full") {
+      excel.closeCompare();
+      excel.closeFullView();
+      excel.closePanel();
+      word.closePanel();
+      word.openFullView(path);
+    } else {
+      excel.closePanel();
+      word.openPanel(path);
+    }
+    return kind;
+  }
+
+  if (kind === "image") {
+    preview.closeText();
+    preview.openImage(path, filename);
+    return kind;
+  }
+
+  if (kind === "text") {
+    preview.closeImage();
+    preview.openText(path, filename);
+    return kind;
+  }
+
+  downloadFile(path, filename, currentSessionId()).catch(() => {});
+  return kind;
+}
+
+export function useOpenWorkspacePathSet(): Set<string> {
+  const excelPath = useExcelStore((s) => (s.panelOpen ? s.activeFilePath : null));
+  const wordPath = useWordStore((s) => (s.panelOpen ? s.activeDocPath : null));
+  const textPath = useFilePreviewStore((s) => (s.textOpen ? s.textTarget?.path ?? null : null));
+  const imagePath = useFilePreviewStore((s) => (s.imageOpen ? s.imageTarget?.path ?? null : null));
+  return new Set([excelPath, wordPath, textPath, imagePath].filter((value): value is string => Boolean(value)));
+}
+
+export function useWorkspaceFileActive(path: string, _filename?: string): boolean {
+  return useOpenWorkspacePathSet().has(path);
+}

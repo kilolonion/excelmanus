@@ -77,6 +77,8 @@ class TestApplyFfOnly:
         assert "fast-forward" in (result.error or "").lower() or "冲突" in (result.error or "")
         assert _git(repo, "rev-parse", "HEAD") == local_head
         assert "reset --hard" not in json.dumps(result.steps_completed)
+        # ff-only 失败是本地分叉，不是 origin 不可达：不得改用公网备用源
+        assert _git(repo, "remote") == "origin"
 
 
 class TestHelperStopThenApply:
@@ -242,11 +244,12 @@ class TestDeployMode:
     def test_docker_env_value_becomes_standalone(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from excelmanus.config import ExcelManusConfig, load_config
 
-        monkeypatch.setenv("EXCELMANUS_API_KEY", "test-key")
-        monkeypatch.setenv("EXCELMANUS_BASE_URL", "https://example.com/v1")
-        monkeypatch.setenv("EXCELMANUS_MODEL", "test-model")
         monkeypatch.setenv("EXCELMANUS_DEPLOY_MODE", "docker")
-        cfg = load_config()
+        cfg = load_config(values={
+            "EXCELMANUS_API_KEY": "test-key",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
+            "EXCELMANUS_MODEL": "test-model",
+        })
         assert cfg.deploy_mode == "standalone"
         assert not hasattr(ExcelManusConfig, "is_docker")
         assert not hasattr(cfg, "is_docker")
@@ -354,7 +357,9 @@ class TestHelperStatusAndStop:
         from excelmanus.upgrade import helper as h
 
         killed: list[tuple] = []
-        monkeypatch.setattr(h.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)))
+        monkeypatch.setattr(
+            h.os, "killpg", lambda pgid, sig: killed.append((pgid, sig)), raising=False,
+        )
         monkeypatch.setattr(h, "_pid_alive", lambda pid: False)
         monkeypatch.setattr(h, "_port_busy", lambda _p: False)
         monkeypatch.setattr(h.time, "sleep", lambda *_a, **_k: None)
@@ -369,7 +374,7 @@ class TestHelperStatusAndStop:
 
         ports: list[int] = []
         monkeypatch.setattr(h, "_port_busy", lambda _p: True)
-        monkeypatch.setattr(h, "_kill_port", lambda p: ports.append(p))
+        monkeypatch.setattr(h, "_kill_port", lambda p, **_kw: ports.append(p))
         monkeypatch.setattr(h.time, "sleep", lambda *_a, **_k: None)
         h.stop_supervised({}, wait_s=0)
         assert 8000 in ports
@@ -558,9 +563,13 @@ class TestGitAndUv:
     def test_uv_pip_pins_project_venv(self, tmp_path: Path) -> None:
         from excelmanus.updater import _build_pip_cmd
 
-        venv_bin = tmp_path / ".venv" / "bin"
+        import platform
+
+        bin_dir = "Scripts" if platform.system() == "Windows" else "bin"
+        py_name = "python.exe" if platform.system() == "Windows" else "python"
+        venv_bin = tmp_path / ".venv" / bin_dir
         venv_bin.mkdir(parents=True)
-        py = venv_bin / "python"
+        py = venv_bin / py_name
         py.write_text("", encoding="utf-8")
         cmd = _build_pip_cmd(tmp_path, False, True)
         assert cmd[:4] == ["uv", "pip", "install", "--python"]

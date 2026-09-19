@@ -26,6 +26,7 @@ from excelmanus.engine_core.tool_result import (
     ToolError,
     ToolResult,
     coerce_legacy_result,
+    error_result,
 )
 from excelmanus.engine_core.workspace_probe import (
     collect_workspace_mtime_index,
@@ -77,8 +78,6 @@ class _ToolExecOutcome:
     structured: ToolResult | None = None
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from excelmanus.engine import AgentEngine
     from excelmanus.events import EventCallback
     from excelmanus.stores.tool_call_store import ToolCallStore
@@ -86,7 +85,11 @@ if TYPE_CHECKING:
 logger = get_logger("tool_dispatcher")
 
 # 单次 run_code 内的嵌套 SDK 调用上限；与回合步数无关。
-_CODE_MODE_NESTED_CALL_BUDGET = 64
+_CODE_MODE_NESTED_CALL_BUDGET = 128
+
+# 子调用审批等待终态哨兵（区别于正常 decision 值）。
+_WAIT_TIMEOUT = object()
+_WAIT_PARENT_CANCELLED = object()
 
 
 def _image_content_hash(raw_bytes: bytes) -> str:
@@ -113,6 +116,50 @@ def _image_content_hash_b64(b64_str: str) -> str:
     return _image_content_hash(raw)
 
 
+_REPEAT_REMINDER_THRESHOLDS = (3, 5, 8)
+
+
+def _canonical_args(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, default=str)
+    except (TypeError, ValueError):
+        return str(value)
+
+
+def _example_from_structured(structured: ToolResult | None) -> Any:
+    """从上次失败回执里取出可复制示例（若有）。"""
+    if structured is None:
+        return None
+    value = structured.value if isinstance(getattr(structured, "value", None), dict) else None
+    if isinstance(value, dict) and value.get("example") is not None:
+        return value["example"]
+    error = getattr(structured, "error", None)
+    fields = getattr(error, "fields", None) if error is not None else None
+    if isinstance(fields, dict) and fields.get("example") is not None:
+        return fields["example"]
+    return None
+
+
+def _identical_failure_result(
+    *,
+    previous_message: str,
+    example: Any = None,
+) -> ToolResult:
+    """同参失败硬拦截：不执行工具，把上次错误与可复制示例一并返回。"""
+    from excelmanus.engine_core.error_payload import INVALID_ARGS
+
+    prev = (previous_message or "").strip() or "上次调用失败"
+    message = f"参数与上次失败完全相同。上次错误：{prev}"
+    extra: dict[str, Any] = {}
+    if example is not None:
+        extra["example"] = example
+        try:
+            message += f"。最小合法示例：{json.dumps(example, ensure_ascii=False)}"
+        except (TypeError, ValueError):
+            pass
+    return error_result(message, code=INVALID_ARGS, fields=extra or None)
+
+
 class ToolDispatcher:
     """工具调度器：参数解析、分支路由、执行、审计。"""
 
@@ -133,6 +180,13 @@ class ToolDispatcher:
         # 最近一次工具调用的截断前 model_text
         self._last_call_raw_result: str = ""
         self._last_call_structured: ToolResult | None = None
+        # 连续同参调用链：3/5/8 软提醒；上一笔失败且 canonical args 相同则硬拦截
+        self._repeat_key: str | None = None
+        self._repeat_count: int = 0
+        self._last_repeat_success: bool = True
+        self._last_repeat_error_message: str | None = None
+        self._last_repeat_example: Any = None
+        self._readonly_replay_cache: dict[tuple[str, str, str], ToolResult] = {}
 
         self._tool_call_store: "ToolCallStore | None" = None
         db = getattr(engine, "_database", None)
@@ -260,16 +314,21 @@ class ToolDispatcher:
 
     def _schedule_image_injection(self, injection: dict[str, Any]) -> None:
         e = self._engine
+        attachment = injection.get("attachment")
         base64_data = injection.get("base64")
-        if not base64_data:
+        if not attachment and not base64_data:
             return
 
         if e.is_vision_capable:
-            _img_hash = _image_content_hash_b64(base64_data)
+            if isinstance(attachment, dict) and attachment.get("attachmentId"):
+                _img_hash = str(attachment["attachmentId"])
+            else:
+                _img_hash = _image_content_hash_b64(str(base64_data or ""))
             if _img_hash in self._injected_image_hashes:
                 logger.info("图片已在上下文中 (hash=%s)，跳过重复注入", _img_hash)
             else:
                 self._deferred_image_injections.append({
+                    "attachment": attachment,
                     "base64": base64_data,
                     "mime_type": injection.get("mime_type", "image/png"),
                     "detail": injection.get("detail", "auto"),
@@ -303,11 +362,19 @@ class ToolDispatcher:
         e = self._engine
         count = 0
         for inj in self._deferred_image_injections:
-            e.memory.add_image_message(
-                base64_data=inj["base64"],
-                mime_type=inj.get("mime_type", "image/png"),
-                detail=inj.get("detail", "auto"),
-            )
+            attachment = inj.get("attachment")
+            if not attachment and inj.get("base64"):
+                try:
+                    from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+                    raw = decode_image_payload(str(inj["base64"]))
+                    ref = admit_image_bytes(raw, media_type=inj.get("mime_type", "image/png"))
+                    attachment = ref.to_dict()
+                except Exception:
+                    logger.warning("延迟图片准入失败，写入占位文本", exc_info=True)
+            if attachment:
+                e.memory.add_user_message([{"type": "image", "attachment": attachment}])
+            else:
+                e.memory.add_user_message([{"type": "text", "text": "[image omitted: unreadable attachment]"}])
             count += 1
             logger.info("已注入 %d 张延迟图片到 memory", count)
         self._deferred_image_injections.clear()
@@ -331,6 +398,27 @@ class ToolDispatcher:
             except (json.JSONDecodeError, TypeError) as exc:
                 return {}, f"JSON 解析失败: {exc}"
         return {}, f"参数类型无效: {type(raw_args).__name__}"
+
+    def _note_repeat_outcome(
+        self,
+        success: bool,
+        structured: ToolResult | None,
+        error: str | None,
+        result_str: str,
+    ) -> None:
+        """记录上一笔 (tool, args) 的成败，供下一次同参硬拦截使用。"""
+        self._last_repeat_success = bool(success)
+        if success:
+            self._last_repeat_error_message = None
+            self._last_repeat_example = None
+            return
+        if self._repeat_count != 1:
+            return
+        if structured is not None and structured.error is not None and structured.error.message:
+            self._last_repeat_error_message = structured.error.message
+        else:
+            self._last_repeat_error_message = str(error or result_str or "")
+        self._last_repeat_example = _example_from_structured(structured)
 
     def cancel_active_sleep(self) -> None:
         """中断当前会话正在执行的 sleep 工具调用。"""
@@ -358,6 +446,55 @@ class ToolDispatcher:
         self._call_budget = max_calls
         self._call_count = 0
         self._call_budget_reason = reason
+        self._readonly_replay_cache.clear()
+
+    def begin_nested_call_budget(self) -> tuple[int | None, int, str]:
+        """run_code 内层预算：重置计数但不丢弃父消耗。"""
+        snapshot = (self._call_budget, self._call_count, self._call_budget_reason)
+        self.begin_call_budget(
+            _CODE_MODE_NESTED_CALL_BUDGET,
+            reason=(
+                f"本次 run_code 内嵌套调用达上限（{_CODE_MODE_NESTED_CALL_BUDGET} 次）；"
+                "批量任务请拆成多次 run_code，或改用工具直接调用分批执行"
+            ),
+        )
+        return snapshot
+
+    def restore_parent_call_budget(self, snapshot: tuple[int | None, int, str]) -> None:
+        """恢复父预算上限，并把子调用消耗加回父计数。"""
+        nested_used = self._call_count
+        budget, parent_count, reason = snapshot
+        self._call_budget = budget
+        self._call_budget_reason = reason
+        self._call_count = parent_count + nested_used
+
+    def _readonly_replay_key(
+        self,
+        tool_name: str,
+        arguments: dict[str, Any],
+    ) -> tuple[str, str, str] | None:
+        """同一 run 内只读工具：工具名 + 规范参数 + 文件 content_version。"""
+        from excelmanus.tools.policy import is_mutating_write_effect
+        from excelmanus.tools.registry import normalize_tool_aliases
+
+        tool = self._registry.get_tool(tool_name)
+        if tool is None:
+            return None
+        effect = getattr(tool, "write_effect", "unknown")
+        if is_mutating_write_effect(effect):
+            return None
+        folded = normalize_tool_aliases(dict(arguments or {}), getattr(tool, "input_schema", None))
+        if isinstance(folded, ToolResult):
+            return None
+        file_path = str(folded.get("file_path") or folded.get("path") or "")
+        version = ""
+        if file_path:
+            state = getattr(self._engine, "state", None)
+            mapping = getattr(state, "file_content_versions", None) if state is not None else None
+            if isinstance(mapping, dict):
+                version = str(mapping.get(file_path) or "")
+        payload = json.dumps(folded, ensure_ascii=False, sort_keys=True, default=str)
+        return (tool_name, payload, version)
 
     def consume_call_budget(self) -> bool:
         """消耗一次调用额度。超预算返回 False。"""
@@ -376,11 +513,9 @@ class ToolDispatcher:
 
     @staticmethod
     def _blocked_tool_result(code: str, message: str) -> ToolResult:
-        return ToolResult(
-            success=False,
-            model_text=message,
-            error=ToolError(code=code, message=message),
-        )
+        from excelmanus.engine_core.tool_result import error_result
+
+        return error_result(message, code=code)
 
     def _blocked_call_result(
         self, tc: Any, *, code: str, message: str
@@ -395,7 +530,7 @@ class ToolDispatcher:
         return ToolCallResult(
             tool_name=getattr(function, "name", "") or "",
             arguments=arguments,
-            result=message,
+            result=structured.model_text,
             success=False,
             error=code,
             structured=structured,
@@ -416,22 +551,81 @@ class ToolDispatcher:
             parent=parent,
         )
 
-    def _write_effect_of(self, tool_name: str) -> str:
+    def _write_effect_of(self, tool_name: str, args: dict[str, Any] | None = None) -> str:
         getter = getattr(self._engine, "get_tool_write_effect", None)
         effect = getter(tool_name) if callable(getter) else "unknown"
-        return effect if isinstance(effect, str) else "unknown"
+        declared = effect if isinstance(effect, str) else "unknown"
+        from excelmanus.tools.policy import write_effect_for_call
 
-    def _denied_in_read_mode(self, tool_name: str) -> bool:
+        registry = self._registry
+        tool = registry.get_tool(tool_name) if registry is not None else None
+        actions = getattr(tool, "actions", None) if tool is not None else None
+        return write_effect_for_call(
+            tool_name, args, declared=declared, actions=actions if isinstance(actions, dict) else None,
+        )
+
+    def _denied_in_read_mode(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
         """read-only sandbox: catalog stays full; executor rejects writes."""
         if tool_name in self._READ_MODE_DENIED_BY_NAME:
             return True
-        return self._write_effect_of(tool_name) in RESTRICTED_WRITE_EFFECTS
+        from excelmanus.tools.policy import CODE_POLICY_DYNAMIC_TOOLS
 
-    def _denied_in_plan_mode(self, tool_name: str) -> bool:
+        if tool_name in CODE_POLICY_DYNAMIC_TOOLS and getattr(
+            self._engine, "_subagent_config", None
+        ) is not None:
+            return False
+        return self._write_effect_of(tool_name, args) in RESTRICTED_WRITE_EFFECTS
+
+    def _denied_in_plan_mode(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
         """Plan is not sandbox. Hard-reject writes except plan tools."""
         if tool_name in self._PLAN_MODE_ALLOWED:
             return False
-        return self._write_effect_of(tool_name) in RESTRICTED_WRITE_EFFECTS
+        effect = self._write_effect_of(tool_name, args)
+        if effect == "dynamic" and tool_name in {"delegate", "delegate_to_subagent", "parallel_delegate"}:
+            return self._delegate_would_write(args)
+        return effect in RESTRICTED_WRITE_EFFECTS
+
+    def _delegate_would_write(self, args: dict[str, Any] | None) -> bool:
+        """交集后的 child 若仍可写，则 plan 拒绝委派。"""
+        from excelmanus.subagent.child import child_capability
+
+        parent = self._engine
+        registry = getattr(parent, "_subagent_registry", None)
+        names: list[str] = []
+        raw_tasks = (args or {}).get("tasks")
+        if isinstance(raw_tasks, list) and len(raw_tasks) >= 2:
+            for item in raw_tasks:
+                if isinstance(item, dict):
+                    names.append(str(item.get("agent_name") or "subagent"))
+        else:
+            names.append(str((args or {}).get("agent_name") or "subagent"))
+        for raw_name in names:
+            cfg = registry.get(raw_name) if registry is not None else None
+            if cfg is None:
+                continue
+            if child_capability(parent, cfg).catalog_mode == "write":
+                return True
+        return False
+
+    def _is_excel_mutating_call(self, tool_name: str, args: dict[str, Any] | None = None) -> bool:
+        if tool_name not in self._EXCEL_WRITE_TOOLS:
+            return False
+        return self._write_effect_of(tool_name, args) != "none"
+
+    def _workspace_root(self) -> str:
+        e = self._engine
+        cfg = getattr(e, "_config", None) or getattr(e, "config", None)
+        if cfg is None:
+            return ""
+        return str(getattr(cfg, "workspace_root", "") or "")
+
+    def _spill_store(self):
+        from excelmanus.engine_core.spill import SpillStore
+
+        root = self._workspace_root()
+        if not root:
+            return None
+        return SpillStore(root)
 
     async def call_registry_tool(
         self,
@@ -453,8 +647,20 @@ class ToolDispatcher:
                 tool_name,
                 root_call_id,
             )
+        from excelmanus.engine_core.spill import extract_spill_locator, retrieve_spill_result
         from excelmanus.tools import memory_tools
         from excelmanus.tools.sleep_tools import set_cancel_event, reset_cancel_event
+
+        replay_key = self._readonly_replay_key(tool_name, arguments)
+        cached = self._readonly_replay_cache.get(replay_key) if replay_key else None
+        if cached is not None:
+            return cached
+
+        spill_locator = extract_spill_locator(arguments)
+        if spill_locator and tool_name in self._SPILL_RETRIEVE_TOOLS:
+            store_root = self._workspace_root()
+            if store_root:
+                return retrieve_spill_result(spill_locator, workspace_root=store_root)
 
         registry = self._registry
 
@@ -508,6 +714,14 @@ class ToolDispatcher:
                 tool_def.truncate_result(tool_result.model_text)
             )
 
+        from excelmanus.tools.policy import is_mutating_write_effect
+
+        effect = getattr(tool_def, "write_effect", "unknown") if tool_def is not None else "unknown"
+        if is_mutating_write_effect(effect):
+            self._readonly_replay_cache.clear()
+        elif replay_key and tool_result.success:
+            self._readonly_replay_cache[replay_key] = tool_result
+
         return tool_result
 
     async def execute_subcall(
@@ -545,14 +759,7 @@ class ToolDispatcher:
             return tcr
         if isinstance(tcr, ToolCallResult):
             if tcr.pending_approval:
-                return ToolResult(
-                    success=False,
-                    model_text=tcr.result,
-                    error=ToolError(
-                        code="PENDING_APPROVAL",
-                        message=tcr.result or "工具等待审批",
-                    ),
-                )
+                return await self._await_subcall_approval(tcr, tc, on_event)
             if tcr.structured is not None:
                 if tcr.success or not tcr.structured.success:
                     return tcr.structured
@@ -569,6 +776,176 @@ class ToolDispatcher:
                 )
             return ToolResult.from_text(tcr.result, success=bool(tcr.success))
         return self._coerce_tool_result(tcr)
+
+    async def _await_subcall_approval(
+        self,
+        tcr: Any,
+        tc: Any,
+        on_event: "EventCallback | None",
+    ) -> ToolResult:
+        """子调用命中确认门：等待与顶层一致的决策通道，accept 后原调用恢复一次。
+
+        与回合级 pending+重放不同：子调用在 ``run_code`` 内部等待，批准后
+        经 ``_apply_approval_decision`` 恢复同一调用（同一审计路径），不
+        重新触发 ASK、不产生第二次执行。等待期间父取消经
+        ``session._subcall_cancel`` 传播；超时/取消/迟到批准都收敛为
+        确定终态并清理 pending，不留孤儿审批卡。
+        """
+        from excelmanus.engine_core.error_payload import (
+            APPROVAL_DENIED,
+            APPROVAL_TIMEOUT,
+            PENDING_APPROVAL,
+        )
+        from excelmanus.engine_core.tool_result import error_result
+        from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
+
+        e = self._engine
+        approval_id = tcr.approval_id or ""
+        pending = e.approval.pending
+        if pending is None or pending.approval_id != approval_id:
+            return error_result(
+                tcr.result or "工具等待审批",
+                code=PENDING_APPROVAL,
+                fields={"approval_id": approval_id},
+            )
+
+        inflight = getattr(e, "_inflight_approval_ids", None)
+        if inflight is None:
+            inflight = e._inflight_approval_ids = set()
+        inflight.add(approval_id)
+        try:
+            resolver = getattr(e, "_approval_resolver", None)
+            session = getattr(e, "_active_code_mode_session", None)
+            cancel_event = getattr(session, "_subcall_cancel", None)
+
+            registry = getattr(e, "_interaction_registry", None)
+            if callable(resolver):
+                wait_coro = self._resolve_decision_via_resolver(resolver, pending)
+            elif registry is not None:
+                fut = registry.create(approval_id)
+                wait_coro = self._resolve_decision_via_registry(fut)
+            else:
+                e._approval.reject_pending(approval_id)
+                return error_result(
+                    "无可用审批决策通道，审批已撤销",
+                    code=APPROVAL_DENIED,
+                    fields={"approval_id": approval_id},
+                )
+
+            wait_timeout = DEFAULT_INTERACTION_TIMEOUT
+            timeout_for = getattr(session, "timeout_for", None) if session is not None else None
+            if callable(timeout_for):
+                fn = getattr(tc, "function", None)
+                tool = (
+                    str(getattr(fn, "name", "") or "")
+                    or str(getattr(tc, "name", "") or "")
+                    or "ask_user"
+                )
+                wait_timeout = timeout_for(tool)
+            decision = await self._wait_approval_decision(
+                wait_coro, cancel_event, wait_timeout,
+            )
+            if decision is _WAIT_PARENT_CANCELLED:
+                e._approval.reject_pending(approval_id)
+                return error_result(
+                    "父 run_code 已取消，审批撤销",
+                    code="CANCELLED",
+                    fields={"approval_id": approval_id},
+                )
+            if decision is _WAIT_TIMEOUT:
+                reject_msg = e._approval.reject_pending(approval_id, timeout=True)
+                return error_result(
+                    reject_msg,
+                    code=APPROVAL_TIMEOUT,
+                    fields={"approval_id": approval_id},
+                )
+            # 批准后、执行前再查一次取消：提交后取消不回滚已提交版本，
+            # 但未执行的调用不得继续。
+            if self.is_cancelled():
+                e._approval.reject_pending(approval_id)
+                return error_result(
+                    "任务已取消，审批未执行",
+                    code="CANCELLED",
+                    fields={"approval_id": approval_id},
+                )
+            apply_decision = getattr(e, "_apply_approval_decision", None)
+            if not callable(apply_decision):
+                e._approval.reject_pending(approval_id)
+                return error_result(
+                    "引擎缺少审批恢复通道，审批已撤销",
+                    code=APPROVAL_DENIED,
+                    fields={"approval_id": approval_id},
+                )
+            updates, _wrote = await apply_decision(
+                decision, pending, approval_id,
+                getattr(tc, "id", None) or getattr(tc, "call_id", None),
+                on_event, 0, "Code Mode 子调用审批",
+            )
+            if updates.get("success"):
+                # 批准恢复走 _execute_approved_pending → registry.call_tool，
+                # 结构化结果由引擎暂存，不是 _last_call_structured。
+                structured = getattr(e, "_last_approved_structured", None)
+                e._last_approved_structured = None
+                if structured is not None:
+                    return structured
+                return ToolResult.from_text(
+                    str(updates.get("result") or ""), success=True,
+                )
+            return error_result(
+                str(updates.get("result") or "审批未通过"),
+                code=APPROVAL_DENIED,
+                fields={"approval_id": approval_id},
+            )
+        finally:
+            inflight.discard(approval_id)
+            # 兜底：本子调用创建的 pending 不得跨过自身终态残留。
+            leftover = e.approval.pending
+            if leftover is not None and leftover.approval_id == approval_id:
+                e._approval.clear_pending()
+
+    @staticmethod
+    async def _resolve_decision_via_resolver(resolver: Any, pending: Any) -> Any:
+        """resolver 回调通道（CLI/bench）：返回 decision 字符串或 dict。"""
+        try:
+            return await resolver(pending)
+        except Exception:  # noqa: BLE001
+            logger.warning("子调用审批 resolver 异常，视为拒绝", exc_info=True)
+            return "reject"
+
+    @staticmethod
+    async def _resolve_decision_via_registry(fut: Any) -> Any:
+        """InteractionRegistry 通道（Web /approve）：返回 payload dict。"""
+        return await fut
+
+    @staticmethod
+    async def _wait_approval_decision(
+        wait_coro: Any,
+        cancel_event: Any,
+        timeout: float,
+    ) -> Any:
+        """等待决策，父取消先到返回 _WAIT_PARENT_CANCELLED，超时返回 _WAIT_TIMEOUT。"""
+        tasks: set[asyncio.Task] = {asyncio.ensure_future(wait_coro)}
+        cancel_task: asyncio.Task | None = None
+        if cancel_event is not None:
+            cancel_task = asyncio.ensure_future(cancel_event.wait())
+            tasks.add(cancel_task)
+        try:
+            done, _ = await asyncio.wait(
+                tasks, timeout=timeout, return_when=asyncio.FIRST_COMPLETED,
+            )
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+        if not done:
+            return _WAIT_TIMEOUT
+        if cancel_task is not None and cancel_task in done:
+            return _WAIT_PARENT_CANCELLED
+        decision_task = next(iter(done))
+        payload = decision_task.result()
+        if isinstance(payload, dict):
+            return payload.get("decision")
+        return payload
 
     # ── 核心执行方法：从 AgentEngine._execute_tool_call 搬迁 ──
 
@@ -587,7 +964,10 @@ class ToolDispatcher:
         引用回调 AgentEngine 上的基础设施方法。
         """
         from excelmanus.tools.code_tools import set_sandbox_env as _set_sandbox_env
-        from excelmanus.tools._guard_ctx import set_guard as _set_guard, reset_guard as _reset_guard
+        from excelmanus.tools.code_tools import set_readonly_exec as _set_readonly_exec
+        from excelmanus.security.policy import writes_denied as _writes_denied
+        from excelmanus.attachments.offload import attachment_ids_from_engine
+        from excelmanus.tools.context import ToolCallContext, bind_call, binding_from_engine, reset_call
 
         e = self._engine  # 引擎快捷引用
 
@@ -600,9 +980,18 @@ class ToolDispatcher:
                 message=self._call_budget_reason,
             )
 
-        # 注入每会话的沙盒环境和 FileAccessGuard 到 contextvars。
+        function = getattr(tc, "function", None)
         _sandbox_token = _set_sandbox_env(e.sandbox_env)
-        _guard_token = _set_guard(e.file_access_guard)
+        _readonly_token = _set_readonly_exec(_writes_denied(e))
+        _call_token = bind_call(
+            ToolCallContext(
+                binding=binding_from_engine(e),
+                call_id=str(getattr(tc, "id", "") or ""),
+                tool_name=str(getattr(function, "name", "") or ""),
+                parent_call_id=getattr(tc, "parent_call_id", None) or None,
+                durable_attachment_ids=attachment_ids_from_engine(e),
+            )
+        )
         prev_event = getattr(self, "_current_on_event", None)
         self._current_on_event = on_event
         try:
@@ -613,8 +1002,10 @@ class ToolDispatcher:
         finally:
             self._current_on_event = prev_event
             from excelmanus.tools.code_tools import _current_sandbox_env
+            from excelmanus.tools.code_tools import _current_readonly_exec
             _current_sandbox_env.reset(_sandbox_token)
-            _reset_guard(_guard_token)
+            _current_readonly_exec.reset(_readonly_token)
+            reset_call(_call_token)
 
     async def _execute_inner(
         self,
@@ -679,18 +1070,65 @@ class ToolDispatcher:
         _raw_result_str: str | None = None
         structured: ToolResult | None = None
 
+        # 连续同参：计数先于执行。上一笔失败且本次 hash 相同 → 硬拦截（G3/G5）。
+        _chain_key = f"{tool_name}\x00{_canonical_args(arguments)}"
+        _identical_failed_retry = (
+            _chain_key == self._repeat_key and not self._last_repeat_success
+        )
+        if _chain_key == self._repeat_key:
+            self._repeat_count += 1
+        else:
+            self._repeat_key, self._repeat_count = _chain_key, 1
+        if (
+            not _identical_failed_retry
+            and self._repeat_count in _REPEAT_REMINDER_THRESHOLDS
+        ):
+            if self._repeat_count == _REPEAT_REMINDER_THRESHOLDS[0]:
+                _cow_reminders.append(
+                    f"[提示] 已连续 {self._repeat_count} 次以相同参数调用 {tool_name}；"
+                    "若无新信息请换参数、换工具或先交付。"
+                )
+            else:
+                _cow_reminders.append(
+                    f"[提示] {tool_name} 已连续 {self._repeat_count} 次以相同参数调用："
+                    f"参数 {_canonical_args(arguments)[:300]}。"
+                    "重复调用没有推进任务，不要再以相同参数重试。"
+                )
+
         # 执行工具调用
         hook_skill = e.pick_route_skill(route_result)
         if parse_error is not None:
-            result_str = f"工具参数解析错误: {parse_error}"
+            from excelmanus.engine_core.error_payload import INVALID_ARGS
+            from excelmanus.engine_core.tool_result import error_result
+
+            structured = error_result(
+                f"工具参数解析错误: {parse_error}",
+                code=INVALID_ARGS,
+            )
+            result_str = structured.model_text
             success = False
-            error = result_str
+            error = INVALID_ARGS
             log_tool_call(
                 logger,
                 tool_name,
                 {"_raw_arguments": raw_args},
                 error=error,
             )
+        elif _identical_failed_retry:
+            from excelmanus.engine_core.error_payload import INVALID_ARGS
+
+            structured = _identical_failure_result(
+                previous_message=self._last_repeat_error_message or "",
+                example=self._last_repeat_example,
+            )
+            result_str = structured.model_text
+            success = False
+            error = (
+                structured.error.code
+                if structured.error is not None
+                else INVALID_ARGS
+            )
+            log_tool_call(logger, tool_name, arguments, error=error)
         elif not self._direct_call_allowed(tc, tool_name):
             from excelmanus.tools.runtime import UNKNOWN_TOOL, unknown_tool_message
 
@@ -698,18 +1136,21 @@ class ToolDispatcher:
             success = False
             error = UNKNOWN_TOOL
             structured = self._blocked_tool_result(UNKNOWN_TOOL, result_str)
+            result_str = structured.model_text
             log_tool_call(logger, tool_name, arguments, error=error)
-        elif writes_denied(e) and self._denied_in_read_mode(tool_name):
+        elif writes_denied(e) and self._denied_in_read_mode(tool_name, arguments):
             result_str = "当前是只读模式，写入被拒绝。"
             success = False
             error = "PERMISSION_DENIED"
             structured = self._blocked_tool_result("PERMISSION_DENIED", result_str)
+            result_str = structured.model_text
             log_tool_call(logger, tool_name, arguments, error=error)
-        elif is_plan_active(e) and self._denied_in_plan_mode(tool_name):
+        elif is_plan_active(e) and self._denied_in_plan_mode(tool_name, arguments):
             result_str = "当前是计划模式，写入被拒绝。"
             success = False
             error = "PERMISSION_DENIED"
             structured = self._blocked_tool_result("PERMISSION_DENIED", result_str)
+            result_str = structured.model_text
             log_tool_call(logger, tool_name, arguments, error=error)
         else:
             pre_hook_raw = e.run_skill_hook(
@@ -739,11 +1180,30 @@ class ToolDispatcher:
                     iteration,
                 )
 
-            if pre_hook is not None and pre_hook.decision == HookDecision.DENY:
-                reason = pre_hook.reason or "Hook 拒绝执行该工具。"
-                result_str = f"工具调用被 Hook 拒绝：{reason}"
+            preflight_error = None
+            if tool_name == "run_shell":
+                from excelmanus.tools.shell_tools import preflight_shell
+
+                preflight_error = preflight_shell(arguments, e.file_access_guard)
+
+            if preflight_error is not None:
+                structured = preflight_error
+                result_str = structured.model_text
                 success = False
-                error = result_str
+                error = structured.error.code if structured.error else "INVALID_ARGS"
+            elif pre_hook is not None and pre_hook.decision == HookDecision.DENY:
+                from excelmanus.engine_core.error_payload import PRE_EXECUTE_DENIED
+                from excelmanus.engine_core.tool_result import error_result
+
+                reason = pre_hook.reason or "Hook 拒绝执行该工具。"
+                structured = error_result(
+                    f"工具调用被 Hook 拒绝：{reason}",
+                    code=PRE_EXECUTE_DENIED,
+                    fields={"tool": tool_name},
+                )
+                result_str = structured.model_text
+                success = False
+                error = PRE_EXECUTE_DENIED
                 log_tool_call(logger, tool_name, arguments, error=error)
             elif pre_hook is not None and pre_hook.decision == HookDecision.ASK:
                 try:
@@ -768,29 +1228,52 @@ class ToolDispatcher:
                     error = result_str
                     log_tool_call(logger, tool_name, arguments, error=error)
             else:
-                outcome = await self._dispatch_via_handlers(
-                    tool_name=tool_name,
-                    tool_call_id=tool_call_id,
-                    arguments=arguments,
-                    tool_scope=tool_scope,
-                    on_event=on_event,
-                    iteration=iteration,
-                    route_result=route_result,
-                    skip_high_risk_approval_by_hook=skip_high_risk_approval_by_hook,
+                from excelmanus.engine_core.spill import (
+                    extract_spill_locator,
+                    retrieve_spill_result,
                 )
-                result_str = outcome.result_str
-                success = outcome.success
-                error = outcome.error
-                error_kind = outcome.error_kind
-                pending_approval = outcome.pending_approval
-                approval_id = outcome.approval_id
-                audit_record = outcome.audit_record
-                pending_question = outcome.pending_question
-                question_id = outcome.question_id
-                defer_tool_result = outcome.defer_tool_result
-                finish_accepted = outcome.finish_accepted
-                _raw_result_str = outcome.raw_result_str
-                structured = outcome.structured
+
+                spill_locator = extract_spill_locator(arguments)
+                if spill_locator and tool_name in self._SPILL_RETRIEVE_TOOLS and self._workspace_root():
+                    structured = retrieve_spill_result(
+                        spill_locator, workspace_root=self._workspace_root(),
+                    )
+                    result_str = structured.model_text
+                    success = structured.success
+                    error = (
+                        None
+                        if success
+                        else (
+                            structured.error.code
+                            if structured.error is not None
+                            else "NOT_FOUND"
+                        )
+                    )
+                    log_tool_call(logger, tool_name, arguments, result=result_str)
+                else:
+                    outcome = await self._dispatch_via_handlers(
+                        tool_name=tool_name,
+                        tool_call_id=tool_call_id,
+                        arguments=arguments,
+                        tool_scope=tool_scope,
+                        on_event=on_event,
+                        iteration=iteration,
+                        route_result=route_result,
+                        skip_high_risk_approval_by_hook=skip_high_risk_approval_by_hook,
+                    )
+                    result_str = outcome.result_str
+                    success = outcome.success
+                    error = outcome.error
+                    error_kind = outcome.error_kind
+                    pending_approval = outcome.pending_approval
+                    approval_id = outcome.approval_id
+                    audit_record = outcome.audit_record
+                    pending_question = outcome.pending_question
+                    question_id = outcome.question_id
+                    defer_tool_result = outcome.defer_tool_result
+                    finish_accepted = outcome.finish_accepted
+                    _raw_result_str = outcome.raw_result_str
+                    structured = outcome.structured
 
             # ── 检测 registry 层返回的结构化错误 JSON ──
             if success and structured is not None and not structured.success:
@@ -855,6 +1338,8 @@ class ToolDispatcher:
             parent_call_id=getattr(tc, "parent_call_id", "") or "",
         )
 
+        self._note_repeat_outcome(success, structured, error, result_str)
+
         return ToolCallResult(
             tool_name=tool_name,
             arguments=arguments,
@@ -891,12 +1376,19 @@ class ToolDispatcher:
         """
         session = None
         session_token = None
+        sdk_unavailable_token = None
         nested_prev: tuple[int | None, int, str] | None = None
         if tool_name == "run_code":
             from excelmanus.code_mode import (
+                attach_sdk_calls,
                 build_session_for_run_code,
                 get_code_mode_session,
+                reset_code_mode_session,
+                reset_sdk_unavailable,
+                script_uses_sdk,
                 set_code_mode_session,
+                set_sdk_unavailable,
+                timeout_seconds_from_args,
             )
 
             if get_code_mode_session() is None:
@@ -906,24 +1398,49 @@ class ToolDispatcher:
                         root_call_id=tool_call_id,
                         tool_scope=tool_scope,
                         on_event=on_event,
+                        timeout_seconds=timeout_seconds_from_args(arguments),
                     )
                     session_token = set_code_mode_session(session)
                     session.start()
-                    nested_prev = (
-                        self._call_budget,
-                        self._call_count,
-                        self._call_budget_reason,
-                    )
-                    self.begin_call_budget(
-                        _CODE_MODE_NESTED_CALL_BUDGET,
-                        reason="本次 run_code 内嵌套调用达上限",
-                    )
-                except Exception:
-                    logger.debug("Code Mode 桥启动失败，继续无 SDK", exc_info=True)
+                    # 引擎级句柄：子调用协程与 session 处于不同 context，
+                    # ContextVar 传不过去，审批等待需经此读到取消事件。
+                    engine = getattr(self, "_engine", None)
+                    if engine is not None:
+                        engine._active_code_mode_session = session
+                    nested_prev = self.begin_nested_call_budget()
+                except Exception as exc:
+                    logger.debug("Code Mode 桥启动失败", exc_info=True)
+                    if session_token is not None:
+                        reset_code_mode_session(session_token)
+                    if session is not None:
+                        try:
+                            session.stop()
+                        except Exception:
+                            pass
                     session = None
                     session_token = None
+                    # 启动失败：依赖 SDK 的脚本必须明确失败；只有可靠判定
+                    # 不依赖 SDK 时才降级执行，并在结果中如实标记。
+                    engine = getattr(self, "_engine", None)
+                    ws_root = getattr(getattr(engine, "config", None), "workspace_root", None)
+                    if script_uses_sdk(arguments, workspace_root=ws_root):
+                        from excelmanus.engine_core.error_payload import CODE_MODE_UNAVAILABLE
+                        from excelmanus.engine_core.tool_result import error_result
+
+                        structured = error_result(
+                            f"Code Mode 桥启动失败，脚本依赖 em SDK，已中止执行: {exc}",
+                            code=CODE_MODE_UNAVAILABLE,
+                        )
+                        return _ToolExecOutcome(
+                            result_str=structured.model_text,
+                            success=False,
+                            error=CODE_MODE_UNAVAILABLE,
+                            structured=structured,
+                        )
+                    sdk_unavailable_token = set_sdk_unavailable(str(exc))
+        outcome = None
         try:
-            return await self._dispatch_via_handlers_loop(
+            outcome = await self._dispatch_via_handlers_loop(
                 tool_name=tool_name,
                 tool_call_id=tool_call_id,
                 arguments=arguments,
@@ -939,14 +1456,47 @@ class ToolDispatcher:
                     session.stop()
                 except Exception:
                     logger.debug("Code Mode 桥停止失败", exc_info=True)
+                try:
+                    await session.wait_settlement(timeout=2.0)
+                except Exception:
+                    logger.debug("Code Mode 桥结算等待失败", exc_info=True)
+                if outcome is not None:
+                    if outcome.structured is not None:
+                        outcome.structured = attach_sdk_calls(
+                            outcome.structured, session,
+                        )
+                        outcome.result_str = outcome.structured.model_text
+                    elif outcome.result_str:
+                        from excelmanus.code_mode import apply_sdk_calls_summary
+
+                        outcome.result_str = apply_sdk_calls_summary(
+                            outcome.result_str, session,
+                        )
+                engine = getattr(self, "_engine", None)
+                if engine is not None:
+                    settled = not session.has_unsettled_work()
+                    if settled and getattr(engine, "_active_code_mode_session", None) is session:
+                        engine._active_code_mode_session = None
+                    elif not settled:
+                        logger.warning("Code Mode 桥线程仍在结算，已关闭新提交")
+                    # run 结算兜底：子调用审批 pending 不得跨 run 残留。
+                    inflight_ids = getattr(engine, "_inflight_approval_ids", None)
+                    if inflight_ids:
+                        leftover = getattr(getattr(engine, "_approval", None), "pending", None)
+                        if leftover is not None and getattr(leftover, "approval_id", None) in inflight_ids:
+                            engine._approval.clear_pending()
+                        inflight_ids.clear()
                 if nested_prev is not None:
-                    self._call_budget, self._call_count, self._call_budget_reason = nested_prev
+                    self.restore_parent_call_budget(nested_prev)
                 else:
                     self.begin_call_budget(None)
             if session_token is not None:
                 from excelmanus.code_mode import reset_code_mode_session as _reset_cm
 
                 _reset_cm(session_token)
+            if sdk_unavailable_token is not None:
+                reset_sdk_unavailable(sdk_unavailable_token)
+        return outcome
 
     async def _dispatch_via_handlers_loop(
         self,
@@ -1104,24 +1654,28 @@ class ToolDispatcher:
             log_tool_call(logger, tool_name, arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
         except ToolNotAllowedError:
+            from excelmanus.engine_core.tool_errors import ToolError, ToolErrorKind
             from excelmanus.engine_core.tool_result import error_result
 
-            permission_error = {
-                "error_code": "TOOL_NOT_ALLOWED",
-                "tool": tool_name,
-                "message": f"工具 '{tool_name}' 不在当前授权范围内。",
-            }
-            result_str = json.dumps(permission_error, ensure_ascii=False)
-            log_tool_call(logger, tool_name, arguments, error=result_str)
-            structured = error_result(
-                permission_error["message"],
-                code="TOOL_NOT_ALLOWED",
-                fields=permission_error,
+            message = f"工具 '{tool_name}' 不在当前授权范围内。"
+            # 与其它工具错误一致，输出 classify/compact 后的 JSON，
+            # 携带 error_kind/summary 供模型决策（未授权为永久错误）。
+            classified = ToolError(
+                kind=ToolErrorKind.PERMANENT,
+                summary=f"工具 {tool_name} 未授权（不在当前授权范围内）",
+                suggestion="请改用当前授权范围内已启用的工具，或提示用户调整工具授权。",
+                original_error=message,
             )
+            structured = error_result(
+                message,
+                code="TOOL_NOT_ALLOWED",
+                fields={"tool": tool_name},
+            )
+            log_tool_call(logger, tool_name, arguments, error=classified.to_compact_str())
             return _ToolExecOutcome(
-                result_str=result_str,
+                result_str=structured.model_text,
                 success=False,
-                error=result_str,
+                error="TOOL_NOT_ALLOWED",
                 structured=structured,
             )
         except Exception as exc:
@@ -1188,21 +1742,50 @@ class ToolDispatcher:
         if cow_reminders:
             result_str = result_str + "\n" + "\n".join(cow_reminders)
 
-        # ── Post-Write Inline Checkpoint（零 LLM 调用回读验证）──
+        # ── 写后语义校验（替代 max_row 维度假象）──
+        from excelmanus.engine_core.spill import (
+            attach_write_verification,
+            compact_write_verification,
+            spill_result_text,
+            verify_write,
+        )
+
+        write_verification: dict[str, Any] | None = None
+        skip_hard_cap = bool(
+            structured is not None
+            and structured.coverage
+            and structured.coverage.get("spill_retrieve")
+        )
         if success and (
-            tool_name in self._EXCEL_WRITE_TOOLS
+            self._is_excel_mutating_call(tool_name, arguments)
             or tool_name in self._WORD_WRITE_TOOLS
         ):
-            _ws_root = getattr(getattr(e, "_config", None), "workspace_root", "")
-            _ckpt = self._post_write_checkpoint(tool_name, arguments, _ws_root)
-            if _ckpt:
-                result_str = result_str + _ckpt
+            verify_args = arguments
+            if structured is not None and isinstance(getattr(structured, "value", None), dict):
+                post_version = (
+                    structured.value.get("content_version")
+                    or structured.value.get("target_content_version")
+                )
+                if post_version:
+                    verify_args = {**arguments, "after_version": str(post_version)}
+            write_verification = verify_write(
+                tool_name, verify_args, workspace_root=self._workspace_root(),
+            )
+            structured, result_str = attach_write_verification(
+                structured, write_verification, result_str,
+            )
 
-        result_str = e._apply_tool_result_hard_cap(result_str)
+        result_str, structured = spill_result_text(
+            result_str,
+            structured,
+            store=self._spill_store(),
+        )
+        if not skip_hard_cap:
+            result_str = e._apply_tool_result_hard_cap(result_str)
+            if error:
+                error = e._apply_tool_result_hard_cap(str(error))
         if structured is not None:
             structured = structured.with_model_text(result_str)
-        if error:
-            error = e._apply_tool_result_hard_cap(str(error))
 
         ui_payload = structured.ui_meta.to_sse_ui() if structured is not None else None
 
@@ -1276,6 +1859,8 @@ class ToolDispatcher:
                     result_chars=len(result_str) if result_str else 0,
                     error_type=error_kind if error_kind else (error[:50] if error else None),
                     error_preview=str(error)[:200] if error else None,
+                    call_id=str(tool_call_id or "") or None,
+                    parent_call_id=getattr(tc, "parent_call_id", None) or None,
                 )
             except Exception:
                 pass
@@ -1297,20 +1882,44 @@ class ToolDispatcher:
             _state = getattr(e, "_state", None)
             if _state is not None:
                 if (
-                    tool_name in self._EXCEL_WRITE_TOOLS
+                    self._is_excel_mutating_call(tool_name, arguments)
                     or tool_name in self._WORD_WRITE_TOOLS
                 ):
                     _afp = (arguments.get("file_path") or "").strip()
                     if _afp:
                         _state.record_affected_file(_afp)
-                    # 写入操作日志（供 Playbook 反思注入）
+                    # 写入操作日志（会话级索引；单元格语义在 meta.write_verification）
+                    _summary = self._extract_write_summary(tool_name, arguments, result_str)
+                    _verify_bit = compact_write_verification(write_verification)
+                    if _verify_bit:
+                        _summary = f"{_summary}; {_verify_bit}".strip("; ")
                     _state.record_write_operation(
                         tool_name=tool_name,
                         file_path=_afp,
                         sheet=(arguments.get("sheet") or "").strip(),
                         cell_range=(arguments.get("range") or "").strip(),
-                        summary=self._extract_write_summary(tool_name, arguments, result_str),
+                        summary=_summary,
                     )
+                elif tool_name == "split_spreadsheet":
+                    # 多文件拆分：源文件只读，产物按结果 files 逐条登记
+                    try:
+                        _split_files: list = []
+                        if structured is not None and isinstance(structured.value, dict):
+                            _split_files = structured.value.get("files") or []
+                        _split_paths: list[str] = []
+                        for _sf in _split_files:
+                            _sfp = str(_sf.get("file_path") or "").strip() if isinstance(_sf, dict) else ""
+                            if _sfp:
+                                _state.record_affected_file(_sfp)
+                                _split_paths.append(_sfp)
+                        _by_col = (arguments.get("by_column") or arguments.get("column") or "").strip()
+                        _state.record_write_operation(
+                            tool_name=tool_name,
+                            file_path=", ".join(_split_paths),
+                            summary=f"split_spreadsheet 按 {_by_col or '?'} 拆出 {len(_split_paths)} 个文件",
+                        )
+                    except Exception:
+                        pass
                 elif tool_name == "run_code":
                     try:
                         _published_paths = ""
@@ -1341,7 +1950,7 @@ class ToolDispatcher:
                                 )
                     except Exception:
                         pass
-                elif e.get_tool_write_effect(tool_name) == "workspace_write":
+                elif self._write_effect_of(tool_name, arguments) == "workspace_write":
                     for _pk in ("file_path", "output_path", "path", "target_path",
                                 "source", "destination"):
                         _pv = (arguments.get(_pk) or "").strip()
@@ -1358,29 +1967,6 @@ class ToolDispatcher:
                         tool_name=tool_name,
                         file_path=_first_path,
                     )
-
-        # ── ErrorSolutionStore：记录错误/解决方案 + 检索历史方案 ──
-        # 配对策略：用 tool_name 作为 pending key（而非 tool_call_id），
-        # 因为同一工具的下一次成功调用自然对应上一次失败的解决方案。
-        _error_store = getattr(e, "_error_solution_store", None)
-        if _error_store is not None:
-            try:
-                if not success and error:
-                    # 记录工具执行错误（等待后续同名工具成功时配对）
-                    await _error_store.record_error(tool_name, tool_name, error)
-                    # 语义检索历史类似错误的解决方案，追加到错误结果中
-                    _guidance = await _error_store.get_guidance_text(error)
-                    if _guidance:
-                        result_str = result_str + "\n\n" + _guidance
-                elif success and tool_name:
-                    # 工具成功 → 尝试配对之前同名工具的错误，记录解决方案
-                    _solution_text = self._extract_write_summary(tool_name, arguments, result_str)
-                    if _solution_text:
-                        await _error_store.record_solution(
-                            tool_name, tool_name, _solution_text, success=True,
-                        )
-            except Exception:
-                logger.debug("ErrorSolutionStore 操作失败", exc_info=True)
 
         # 写后事件记录到 FileRegistry
         if success:
@@ -1400,13 +1986,20 @@ class ToolDispatcher:
 
                     _write_paths: list[str] = []
                     if (
-                        tool_name in self._EXCEL_WRITE_TOOLS
+                        self._is_excel_mutating_call(tool_name, arguments)
                         or tool_name in self._WORD_WRITE_TOOLS
                     ):
                         _wp = (arguments.get("file_path") or "").strip()
                         if _wp:
                             _write_paths.append(_wp)
-                    elif e.get_tool_write_effect(tool_name) == "workspace_write":
+                    elif tool_name == "split_spreadsheet":
+                        # 源文件只读；产物路径在结果 files 里
+                        if structured is not None and isinstance(structured.value, dict):
+                            for _sf2 in structured.value.get("files") or []:
+                                _sf2p = str(_sf2.get("file_path") or "").strip() if isinstance(_sf2, dict) else ""
+                                if _sf2p:
+                                    _write_paths.append(_sf2p)
+                    elif self._write_effect_of(tool_name, arguments) == "workspace_write":
                         for _pk2 in ("file_path", "output_path", "path", "target_path",
                                      "source", "destination"):
                             _pv2 = (arguments.get(_pk2) or "").strip()
@@ -1545,85 +2138,38 @@ class ToolDispatcher:
         arguments: dict,
         workspace_root: str,
     ) -> str:
-        """写入工具成功后执行轻量级回读验证（零 LLM 调用）。
+        """写入工具成功后的轻量回读（零 LLM）。
 
-        返回一行简洁的 checkpoint 结果，如 "✓ 回读确认: Sheet1, 100行×3列"。
-        任何异常静默返回空字符串（不影响主流程）。
+        Excel 路径走语义抽样（值/公式），不再只报 max_row。
+        空路径 / 未知工具 / 文件不存在时静默返回空串（不影响主流程）。
         """
         from pathlib import Path as _P
+
+        from excelmanus.engine_core.spill import format_write_verification_line, verify_write
 
         file_path = (arguments.get("file_path") or "").strip()
         if not file_path:
             return ""
+        if tool_name not in ToolDispatcher._EXCEL_WRITE_TOOLS and tool_name not in ToolDispatcher._WORD_WRITE_TOOLS:
+            return ""
 
         abs_path = _P(file_path) if _P(file_path).is_absolute() else _P(workspace_root) / file_path
-        abs_path = abs_path.resolve()
-
+        try:
+            abs_path = abs_path.resolve()
+        except OSError:
+            return ""
         if not abs_path.is_file():
             return ""
 
         try:
-            if tool_name == "write_word":
-                return ToolDispatcher._checkpoint_write_word(abs_path)
-
-            # .xls/.xlsb → 工具层已转换为 .xlsx，checkpoint 需要打开转换后的文件
-            from excelmanus.tools._helpers import ensure_openpyxl_compatible
-            abs_path = ensure_openpyxl_compatible(abs_path)
-
-            if tool_name == "edit_spreadsheet":
-                return ToolDispatcher._checkpoint_edit_spreadsheet(abs_path, arguments)
-            if tool_name in {"format_spreadsheet", "manage_spreadsheet_objects"}:
-                return ToolDispatcher._checkpoint_insert(abs_path, arguments, tool_name)
+            payload = verify_write(tool_name, arguments, workspace_root=workspace_root)
+            if payload.get("skipped"):
+                return ""
+            return format_write_verification_line(payload)
         except Exception:
             return ""
-        return ""
 
-    @staticmethod
-    def _checkpoint_edit_spreadsheet(abs_path: "Path", arguments: dict) -> str:
-        """edit_spreadsheet 后回读：报告当前 sheet 维度。"""
-        import openpyxl as _opx
-
-        ops = arguments.get("operations")
-        sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
-        if not sheet_name and isinstance(ops, list) and ops and isinstance(ops[0], dict):
-            sheet_name = ops[0].get("sheet") or ops[0].get("sheet_name")
-
-        wb = _opx.load_workbook(str(abs_path), read_only=True)
-        try:
-            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
-            if ws is None:
-                return ""
-            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}, max_col={ws.max_column}"
-        finally:
-            wb.close()
-
-    @staticmethod
-    def _checkpoint_insert(abs_path: "Path", arguments: dict, tool_name: str) -> str:
-        """format_spreadsheet / manage_spreadsheet_objects 后回读：报告当前维度。"""
-        import openpyxl as _opx
-
-        sheet_name = arguments.get("sheet_name") or arguments.get("sheet")
-        wb = _opx.load_workbook(str(abs_path), read_only=True)
-        try:
-            ws = wb[sheet_name] if sheet_name and sheet_name in wb.sheetnames else wb.active
-            if ws is None:
-                return ""
-            return f"\n✓ 回读确认: {ws.title}, max_row={ws.max_row}, max_col={ws.max_column}"
-        finally:
-            wb.close()
-
-    @staticmethod
-    def _checkpoint_write_word(abs_path: "Path") -> str:
-        """write_word 后回读验证：确认文档仍可读取并报告基本结构。"""
-        from docx import Document as _Document
-
-        doc = _Document(str(abs_path))
-        return (
-            f"\n✓ 回读确认: Word 文档可读，"
-            f"当前段落数={len(doc.paragraphs)}，表格数={len(doc.tables)}"
-        )
-
-    # ── 写入操作日志辅助（供 Playbook 反思注入）────────────
+    # ── 写入操作日志辅助 ──────────────────────────────────
 
     @staticmethod
     def _extract_write_summary(tool_name: str, arguments: dict, result_str: str) -> str:
@@ -1662,6 +2208,9 @@ class ToolDispatcher:
         "analyze_spreadsheet",
         "compare_spreadsheets",
         "trace_spreadsheet_formulas",
+    }
+    _SPILL_RETRIEVE_TOOLS = _EXCEL_READ_TOOLS | {
+        "read_text_file",
     }
     _EXCEL_WRITE_TOOLS = {
         "edit_spreadsheet",

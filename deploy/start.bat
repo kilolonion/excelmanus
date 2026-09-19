@@ -28,7 +28,7 @@ REM =======================================================================
 
 setlocal enabledelayedexpansion
 
-REM -- Fast path for help so it does not trigger clone/.env interactive setup --
+REM -- Fast path for help so it does not trigger clone --
 for %%A in (%*) do (
     if /i "%%~A"=="--help" goto :show_help
     if /i "%%~A"=="-h" goto :show_help
@@ -69,45 +69,6 @@ if not exist "%PROJECT_ROOT%\pyproject.toml" (
     xcopy /E /Y /Q "%PROJECT_ROOT%_tmp\*" "%PROJECT_ROOT%\" >nul 2>&1
     rmdir /S /Q "%PROJECT_ROOT%_tmp" >nul 2>&1
     echo [OK] 项目已克隆完成
-)
-
-REM -- Interactive .env setup if missing --
-if not exist "%PROJECT_ROOT%\.env" (
-    echo.
-    echo   ========================================
-    echo     首次启动 - 配置 ExcelManus
-    echo   ========================================
-    echo.
-    echo   需要配置 LLM API 信息才能使用。
-    echo   [直接按回车可跳过, 稍后手动编辑 .env 文件]
-    echo.
-    set "INPUT_API_KEY="
-    set "INPUT_BASE_URL="
-    set "INPUT_MODEL="
-    set /p "INPUT_API_KEY=  API Key: "
-    set /p "INPUT_BASE_URL=  Base URL [例: https://api.openai.com/v1]: "
-    set /p "INPUT_MODEL=  Model [例: gpt-5.2]: "
-    echo.
-    if "!INPUT_API_KEY!"=="" (
-        echo [!!] 未填写 API Key，创建空模板 .env 文件
-        echo [!!] 请稍后编辑 %PROJECT_ROOT%\.env 填入配置
-        (
-            echo # ExcelManus Configuration
-            echo # Please fill in your LLM API settings
-            echo EXCELMANUS_API_KEY=your-api-key
-            echo EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
-            echo EXCELMANUS_MODEL=your-model-id
-        ) > "%PROJECT_ROOT%\.env"
-    ) else (
-        (
-            echo # ExcelManus Configuration
-            echo EXCELMANUS_API_KEY=!INPUT_API_KEY!
-            echo EXCELMANUS_BASE_URL=!INPUT_BASE_URL!
-            echo EXCELMANUS_MODEL=!INPUT_MODEL!
-        ) > "%PROJECT_ROOT%\.env"
-        echo [OK] .env 配置文件已创建
-    )
-    echo.
 )
 
 REM -- Defaults --
@@ -169,32 +130,6 @@ REM -- Mutual exclusion check --
 if "%BACKEND_ONLY%"=="1" if "%FRONTEND_ONLY%"=="1" (
     echo [XX] --backend-only 与 --frontend-only 不能同时使用
     goto :exit_with_pause
-)
-
-REM -- Load .env if exists (strip surrounding quotes from values) --
-if exist "%PROJECT_ROOT%\.env" (
-    for /f "usebackq tokens=1,* delims==" %%a in ("%PROJECT_ROOT%\.env") do (
-        set "line=%%a"
-        if not "!line:~0,1!"=="#" (
-            if not "%%a"=="" if not "%%b"=="" (
-                set "_envval=%%b"
-                if "!_envval:~0,1!"==""^""" if "!_envval:~-1!"==""^""" set "_envval=!_envval:~1,-1!"
-                set "%%a=!_envval!"
-            )
-        )
-    )
-)
-if exist "%PROJECT_ROOT%\.env.local" (
-    for /f "usebackq tokens=1,* delims==" %%a in ("%PROJECT_ROOT%\.env.local") do (
-        set "line=%%a"
-        if not "!line:~0,1!"=="#" (
-            if not "%%a"=="" if not "%%b"=="" (
-                set "_envval=%%b"
-                if "!_envval:~0,1!"==""^""" if "!_envval:~-1!"==""^""" set "_envval=!_envval:~1,-1!"
-                set "%%a=!_envval!"
-            )
-        )
-    )
 )
 
 REM -- Env vars override ports --

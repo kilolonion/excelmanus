@@ -18,7 +18,7 @@ from openpyxl.utils import get_column_letter
 from excelmanus.engine_core.tool_result import ToolResult, from_payload
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools._helpers import get_worksheet
 
 logger = get_logger("tools.format")
@@ -60,30 +60,12 @@ COLOR_NAME_MAP: dict[str, str] = {
     "珊瑚": "FF7F50", "珊瑚色": "FF7F50", "coral": "FF7F50",
 }
 
-# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
-
-_guard: FileAccessGuard | None = None
-
-
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(".")
-    return _guard
+    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。
-
-    Args:
-        workspace_root: 工作目录根路径。
-    """
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 # ── 只读样式探查 ──────────────────────────────────────────
@@ -368,11 +350,25 @@ def _estimate_row_height(
     return round(max_height, 1)
 
 
+def apply_freeze_panes(ws: Any, freeze_panes: str | None) -> str:
+    """在已打开的工作表上设置或取消冻结窗格，不提交文件。
+
+    空字符串 / None 取消冻结。返回实际冻结单元格（如 ``A2``），取消时为空串。
+    """
+    text = "" if freeze_panes is None else str(freeze_panes).strip().replace("$", "")
+    if not text or text.lower() in {"none", "null", "false", "0"}:
+        ws.freeze_panes = None
+        return ""
+    ws.freeze_panes = text
+    applied = getattr(ws, "freeze_panes", None)
+    return str(applied) if applied else text
+
 
 def apply_column_sizes(
     ws: Any,
     columns: dict[str, float] | None = None,
     auto_fit: bool = False,
+    letters: set[str] | None = None,
 ) -> dict[str, float]:
     """在已打开的工作表上调整列宽，不提交文件。"""
     adjusted: dict[str, float] = {}
@@ -396,6 +392,8 @@ def apply_column_sizes(
     for col_cells in ws.iter_cols(min_row=1, max_row=ws.max_row):
         max_w = 0.0
         col_letter = get_column_letter(col_cells[0].column)
+        if letters is not None and col_letter not in letters:
+            continue
         for cell in col_cells:
             coord = f"{col_letter}{cell.row}"
             if coord in merged_non_anchor or cell.value is None:
@@ -642,6 +640,434 @@ def _patch_alignment(existing: Any, config: dict[str, Any]) -> Alignment:
             wrap = config.get("wrapText")
         kwargs["wrap_text"] = wrap
     return Alignment(**kwargs)
+
+
+# ── 条件格式规则构建 ─────────────────────────────────────
+#
+# format_spreadsheet kind=conditional_format 与 workbook_spec
+# conditional_formats 共用的规则构建。输入是模型面 dict（允许
+# 常用别名/大小写混写），输出 openpyxl 规则对象；非法输入抛 ValueError。
+
+_CF_OPERATOR_MAP: dict[str, str] = {
+    "gt": "greaterThan", "greaterthan": "greaterThan",
+    "greater_than": "greaterThan", ">": "greaterThan", "more_than": "greaterThan",
+    "ge": "greaterThanOrEqual", "gte": "greaterThanOrEqual",
+    "greaterthanorequal": "greaterThanOrEqual", "greaterthanorequals": "greaterThanOrEqual",
+    "greater_than_or_equal": "greaterThanOrEqual", "greater_than_or_equals": "greaterThanOrEqual",
+    "greater_or_equal": "greaterThanOrEqual", "greater_or_equal_to": "greaterThanOrEqual",
+    "greater_than_or_equal_to": "greaterThanOrEqual",
+    "greater_than_equal": "greaterThanOrEqual", ">=": "greaterThanOrEqual",
+    "more_than_or_equal": "greaterThanOrEqual",
+    "lt": "lessThan", "lessthan": "lessThan", "less_than": "lessThan",
+    "<": "lessThan",
+    "le": "lessThanOrEqual", "lte": "lessThanOrEqual",
+    "lessthanorequal": "lessThanOrEqual", "lessthanorequals": "lessThanOrEqual",
+    "less_than_or_equal": "lessThanOrEqual", "less_than_or_equals": "lessThanOrEqual",
+    "less_or_equal": "lessThanOrEqual", "less_or_equal_to": "lessThanOrEqual",
+    "less_than_or_equal_to": "lessThanOrEqual",
+    "less_than_equal": "lessThanOrEqual", "<=": "lessThanOrEqual",
+    "eq": "equal", "equal": "equal", "equals": "equal", "equal_to": "equal",
+    "=": "equal", "==": "equal",
+    "ne": "notEqual", "notequal": "notEqual", "not_equal": "notEqual",
+    "not_equals": "notEqual", "not_equal_to": "notEqual", "!=": "notEqual", "<>": "notEqual",
+    "between": "between", "not_between": "notBetween", "notbetween": "notBetween",
+}
+
+
+def _normalize_operator_name(raw_op: Any) -> str | None:
+    """宽松归一化比较操作符（容忍 snake_case、空格、下划线、大小写与常见别名）。"""
+    if not raw_op:
+        return None
+    s = str(raw_op).strip()
+    if s in _CF_OPERATOR_MAP:
+        return _CF_OPERATOR_MAP[s]
+    lower = s.lower()
+    if lower in _CF_OPERATOR_MAP:
+        return _CF_OPERATOR_MAP[lower]
+    clean = lower.replace("_", "").replace(" ", "").replace("-", "")
+    return _CF_OPERATOR_MAP.get(clean)
+
+
+_CF_ICON_STYLE_MAP: dict[str, str] = {
+    "3_arrows": "3Arrows", "3arrows": "3Arrows",
+    "3_arrows_gray": "3ArrowsGray", "3arrowsgray": "3ArrowsGray",
+    "3_flags": "3Flags", "3flags": "3Flags",
+    "3_traffic_lights": "3TrafficLights1",
+    "3_traffic_lights_1": "3TrafficLights1", "3trafficlights1": "3TrafficLights1",
+    "3_traffic_lights_2": "3TrafficLights2", "3trafficlights2": "3TrafficLights2",
+    "3_signs": "3Signs", "3signs": "3Signs",
+    "3_symbols": "3Symbols", "3symbols": "3Symbols",
+    "3_symbols_2": "3Symbols2", "3symbols2": "3Symbols2",
+    "4_arrows": "4Arrows", "4arrows": "4Arrows",
+    "4_arrows_gray": "4ArrowsGray", "4arrowsgray": "4ArrowsGray",
+    "4_traffic_lights": "4TrafficLights", "4trafficlights": "4TrafficLights",
+    "4_ratings": "4Ratings", "4ratings": "4Ratings",
+    "5_arrows": "5Arrows", "5arrows": "5Arrows",
+    "5_arrows_gray": "5ArrowsGray", "5arrowsgray": "5ArrowsGray",
+    "5_ratings": "5Ratings", "5ratings": "5Ratings",
+    "5_quarters": "5Quarters", "5quarters": "5Quarters",
+}
+
+_CF_RULE_TYPES = (
+    "cell_value / text / formula / duplicate / unique / top_n / bottom_n / "
+    "color_scale / data_bar / icon_set"
+)
+
+
+def _cf_differential_kwargs(rule_spec: dict[str, Any]) -> dict[str, Any]:
+    """条件格式命中的字体/填充/边框（dxf 样式），复用 format 构建器。支持顶层扁平样式属性容错。"""
+    out: dict[str, Any] = {}
+    font_cfg = rule_spec.get("font")
+    if font_cfg is None:
+        fc = rule_spec.get("font_color") or rule_spec.get("text_color")
+        if fc:
+            font_cfg = {"color": fc}
+    fill_cfg = rule_spec.get("fill")
+    if fill_cfg is None:
+        bg = rule_spec.get("bg_color") or rule_spec.get("background") or rule_spec.get("fill_color")
+        if bg:
+            fill_cfg = {"color": bg, "fill_type": "solid"}
+    border_cfg = rule_spec.get("border")
+    if font_cfg:
+        out["font"] = _patch_font(None, font_cfg)
+    if fill_cfg:
+        out["fill"] = _build_fill(fill_cfg)
+    if border_cfg:
+        out["border"] = _build_border(border_cfg)
+    return out
+
+
+def _cf_dxf(rule_spec: dict[str, Any]) -> Any:
+    from openpyxl.styles.differential import DifferentialStyle
+
+    kwargs = _cf_differential_kwargs(rule_spec)
+    if not kwargs:
+        return None
+    return DifferentialStyle(**kwargs)
+
+
+def build_conditional_format_rule(
+    rule_spec: dict[str, Any], *, anchor: str = "A1"
+) -> Any:
+    """按模型面 dict 构建 openpyxl 条件格式规则。
+
+    ``anchor`` 为规则范围的左上角单元格，仅 text 类型拼 SEARCH 公式用。
+    非法输入抛 ValueError。
+    """
+    from openpyxl.formatting.rule import (
+        CellIsRule,
+        ColorScaleRule,
+        DataBarRule,
+        FormulaRule,
+        IconSetRule,
+        Rule,
+    )
+
+    if not isinstance(rule_spec, dict):
+        raise ValueError("conditional_format 需要 rule 对象")
+    rtype = str(rule_spec.get("type") or "cell_value").strip().lower()
+    style_kwargs = _cf_differential_kwargs(rule_spec)
+
+    if rtype in {"cell_value", "cellvalue", "cell_is", "value"}:
+        raw_op = str(rule_spec.get("operator") or "ge").strip()
+        operator = _normalize_operator_name(raw_op)
+        if not operator:
+            raise ValueError(
+                f"conditional_format.rule.operator={raw_op!r} 不支持；"
+                f"可用 {sorted(set(_CF_OPERATOR_MAP.values()))}"
+            )
+        v1 = (
+            rule_spec.get("value")
+            if rule_spec.get("value") is not None
+            else rule_spec.get("formula1")
+        )
+        if v1 is None:
+            v1 = rule_spec.get("min")
+        if v1 is None:
+            v1 = rule_spec.get("val")
+        if v1 is None:
+            v1 = rule_spec.get("threshold")
+        if v1 is None:
+            v1 = rule_spec.get("target")
+        if v1 is None:
+            v1 = rule_spec.get("cutoff")
+        if v1 is None:
+            v1 = rule_spec.get("limit")
+
+        v2 = (
+            rule_spec.get("value2")
+            if rule_spec.get("value2") is not None
+            else rule_spec.get("formula2")
+        )
+        if v2 is None:
+            v2 = rule_spec.get("max")
+        formulas = [
+            str(v)
+            for v in (v1, v2)
+            if v is not None and str(v) != ""
+        ]
+        if operator in {"between", "notBetween"}:
+            if len(formulas) < 2:
+                raise ValueError(
+                    f"operator={operator} 需要两个边界值：rule.value 与 rule.value2（或 min 与 max）"
+                )
+        elif not formulas:
+            raise ValueError(
+                f"operator={operator} 需要 rule.value 阈值（between/notBetween 用 value+value2）"
+            )
+        return CellIsRule(operator=operator, formula=formulas[:2], **style_kwargs)
+
+    if rtype in {"formula", "expression"}:
+        formula = str(rule_spec.get("formula") or "").strip().lstrip("=")
+        if not formula:
+            raise ValueError("type=formula 需要 rule.formula")
+        return FormulaRule(formula=[formula], **style_kwargs)
+
+    if rtype in {"text", "contains_text", "containstext", "text_contains"}:
+        text = str(rule_spec.get("text") or rule_spec.get("value") or "")
+        if not text:
+            raise ValueError("type=text 需要 rule.text")
+        rule = Rule(
+            type="containsText",
+            operator="containsText",
+            text=text,
+            dxf=_cf_dxf(rule_spec),
+        )
+        rule.formula = [f'NOT(ISERROR(SEARCH("{text}",{anchor})))']
+        return rule
+
+    if rtype in {"duplicate", "duplicates", "duplicate_values", "duplicatevalues"}:
+        return Rule(type="duplicateValues", dxf=_cf_dxf(rule_spec))
+    if rtype in {"unique", "unique_values", "uniquevalues"}:
+        return Rule(type="uniqueValues", dxf=_cf_dxf(rule_spec))
+
+    if rtype in {"top", "top_n", "topn", "top10", "bottom", "bottom_n", "bottomn"}:
+        n = rule_spec.get("n")
+        if n is None:
+            n = rule_spec.get("value")
+        try:
+            rank = int(n)
+        except (TypeError, ValueError):
+            rank = 10
+        bottom = rtype in {"bottom", "bottom_n", "bottomn"}
+        return Rule(
+            type="top10",
+            rank=max(1, rank),
+            bottom=bottom,
+            percent=bool(rule_spec.get("percent")),
+            dxf=_cf_dxf(rule_spec),
+        )
+
+    if rtype in {"color_scale", "colorscale", "scale", "3_color_scale", "2_color_scale"}:
+        min_c = _resolve_color(rule_spec.get("min_color") or rule_spec.get("start_color") or "F8696B")
+        max_c = _resolve_color(rule_spec.get("max_color") or rule_spec.get("end_color") or "63BE7B")
+        kwargs: dict[str, Any] = {
+            "start_type": "min",
+            "start_color": min_c,
+            "end_type": "max",
+            "end_color": max_c,
+        }
+        mid_c = _resolve_color(rule_spec.get("mid_color"))
+        if mid_c:
+            kwargs["mid_type"] = "percentile"
+            kwargs["mid_value"] = 50
+            kwargs["mid_color"] = mid_c
+        return ColorScaleRule(**kwargs)
+
+    if rtype in {"data_bar", "databar", "bar"}:
+        return DataBarRule(
+            start_type="min",
+            end_type="max",
+            color=_resolve_color(rule_spec.get("bar_color") or rule_spec.get("color") or "638EC6"),
+            showValue=True,
+        )
+
+    if rtype in {"icon_set", "iconset", "icon"}:
+        raw_style = str(rule_spec.get("icon_style") or rule_spec.get("style") or "3_arrows").strip()
+        icon_style = _CF_ICON_STYLE_MAP.get(raw_style.lower()) or _CF_ICON_STYLE_MAP.get(raw_style) or raw_style
+        values = rule_spec.get("values")
+        if not (isinstance(values, list) and values):
+            values = [0, 33, 67] if icon_style.startswith("3") else [0, 25, 50, 75] if icon_style.startswith("4") else [0, 20, 40, 60, 80]
+        return IconSetRule(
+            icon_style=icon_style,
+            type=str(rule_spec.get("value_type") or "percent"),
+            values=values,
+            showValue=True,
+            percent=bool(rule_spec.get("percent", True)),
+        )
+
+    raise ValueError(
+        f"conditional_format.rule.type={rtype!r} 不支持；可用 {_CF_RULE_TYPES}"
+    )
+
+
+# ── 数据验证（data_validation）──────────────────────────────
+
+_DV_TYPE_MAP: dict[str, str] = {
+    "list": "list",
+    "dropdown": "list",
+    "whole": "whole",
+    "int": "whole",
+    "integer": "whole",
+    "decimal": "decimal",
+    "float": "decimal",
+    "number": "decimal",
+    "date": "date",
+    "time": "time",
+    "textlength": "textLength",
+    "text_length": "textLength",
+    "length": "textLength",
+    "custom": "custom",
+    "formula": "custom",
+}
+_DV_TYPES = sorted(set(_DV_TYPE_MAP.values()))
+
+_DV_OPERATOR_MAP: dict[str, str] = {
+    "between": "between",
+    "notbetween": "notBetween",
+    "not_between": "notBetween",
+    "equal": "equal",
+    "eq": "equal",
+    "=": "equal",
+    "==": "equal",
+    "notequal": "notEqual",
+    "not_equal": "notEqual",
+    "ne": "notEqual",
+    "!=": "notEqual",
+    "<>": "notEqual",
+    "greaterthan": "greaterThan",
+    "gt": "greaterThan",
+    ">": "greaterThan",
+    "lessthan": "lessThan",
+    "lt": "lessThan",
+    "<": "lessThan",
+    "greaterthanorequal": "greaterThanOrEqual",
+    "ge": "greaterThanOrEqual",
+    "gte": "greaterThanOrEqual",
+    ">=": "greaterThanOrEqual",
+    "lessthanorequal": "lessThanOrEqual",
+    "le": "lessThanOrEqual",
+    "lte": "lessThanOrEqual",
+    "<=": "lessThanOrEqual",
+}
+
+_DV_ERROR_STYLE_MAP: dict[str, str] = {
+    "stop": "stop",
+    "warning": "warning",
+    "information": "information",
+    "info": "information",
+}
+
+_ISO_DATE_RE = re.compile(r"^(\d{4})-(\d{1,2})-(\d{1,2})$")
+_ISO_TIME_RE = re.compile(r"^(\d{1,2}):(\d{1,2})(?::(\d{1,2}))?$")
+
+
+def _dv_formula_value(raw: Any, *, dv_type: str) -> str:
+    """数值/日期/时间边界值 → Excel 公式串；ISO 日期时间转 DATE/TIME 公式。"""
+    text = str(raw).strip()
+    if dv_type == "date":
+        m = _ISO_DATE_RE.match(text)
+        if m:
+            return f"DATE({m.group(1)},{int(m.group(2))},{int(m.group(3))})"
+    if dv_type == "time":
+        m = _ISO_TIME_RE.match(text)
+        if m:
+            return f"TIME({int(m.group(1))},{int(m.group(2))},{int(m.group(3) or 0)})"
+    return text
+
+
+def build_data_validation(rule_spec: dict[str, Any]) -> Any:
+    """按模型面 dict 构建 openpyxl DataValidation。非法输入抛 ValueError。
+
+    模型面字段：type / operator / values|formula1|formula2（min|max、value|value2）
+    / allow_blank / show_dropdown / error_style / prompt_title|prompt
+    / error_title|error / show_input_message / show_error_message。
+    """
+    from openpyxl.worksheet.datavalidation import DataValidation
+
+    if not isinstance(rule_spec, dict):
+        raise ValueError("data_validation 需要 rule 对象")
+    rtype = _DV_TYPE_MAP.get(str(rule_spec.get("type") or "list").strip().lower())
+    if rtype is None:
+        raise ValueError(
+            f"data_validation.rule.type={rule_spec.get('type')!r} 不支持；可用 {_DV_TYPES}"
+        )
+
+    kwargs: dict[str, Any] = {
+        "type": rtype,
+        "allow_blank": bool(rule_spec.get("allow_blank", rule_spec.get("allowBlank", False))),
+    }
+
+    if rtype == "list":
+        values = rule_spec.get("values")
+        formula1 = rule_spec.get("formula1", rule_spec.get("source"))
+        if isinstance(values, list) and values:
+            formula1 = '"' + ",".join(str(v) for v in values) + '"'
+        elif isinstance(values, str) and values.strip() and not formula1:
+            formula1 = values
+        if formula1 is None or str(formula1).strip() == "":
+            raise ValueError(
+                "type=list 需要 values 数组或 formula1"
+                '（内联形如 "a,b,c"，区域引用形如 Sheet!A1:A5）'
+            )
+        f1 = str(formula1).strip()
+        if not f1.startswith('"') and not f1.startswith("="):
+            f1 = "=" + f1
+        kwargs["formula1"] = f1
+    elif rtype == "custom":
+        formula1 = rule_spec.get("formula1", rule_spec.get("formula"))
+        if formula1 is None or str(formula1).strip() == "":
+            raise ValueError("type=custom 需要 formula1 校验公式")
+        f1 = str(formula1).strip()
+        kwargs["formula1"] = f1 if f1.startswith("=") else "=" + f1
+    else:
+        raw_op = str(rule_spec.get("operator") or "between").strip()
+        operator = _normalize_operator_name(raw_op) or _DV_OPERATOR_MAP.get(raw_op.lower())
+        if not operator:
+            raise ValueError(
+                f"data_validation.rule.operator={raw_op!r} 不支持；"
+                f"可用 {sorted(set(_DV_OPERATOR_MAP.values()))}"
+            )
+        formula1 = rule_spec.get("formula1", rule_spec.get("value", rule_spec.get("min")))
+        formula2 = rule_spec.get("formula2", rule_spec.get("value2", rule_spec.get("max")))
+        if operator in {"between", "notBetween"}:
+            if formula1 is None or formula2 is None:
+                raise ValueError(
+                    f"operator={operator} 需要上下界：value/min 与 value2/max（或 formula1/formula2）"
+                )
+            kwargs["formula1"] = _dv_formula_value(formula1, dv_type=rtype)
+            kwargs["formula2"] = _dv_formula_value(formula2, dv_type=rtype)
+        else:
+            if formula1 is None:
+                raise ValueError(f"operator={operator} 需要 value/formula1")
+            kwargs["formula1"] = _dv_formula_value(formula1, dv_type=rtype)
+        kwargs["operator"] = operator
+
+    show_dropdown = rule_spec.get("show_dropdown", rule_spec.get("showDropDown"))
+    if show_dropdown is not None:
+        # OOXML showDropDown=1 是"隐藏下拉箭头"的遗留语义；模型面 show_dropdown
+        # 保持直觉语义（True=显示下拉），这里取反。
+        kwargs["showDropDown"] = not bool(show_dropdown)
+
+    error_style = rule_spec.get("error_style", rule_spec.get("errorStyle"))
+    if error_style is not None:
+        kwargs["errorStyle"] = _DV_ERROR_STYLE_MAP.get(str(error_style).strip().lower(), "stop")
+    for spec_key, attr in (
+        ("prompt_title", "promptTitle"),
+        ("prompt", "prompt"),
+        ("error_title", "errorTitle"),
+        ("error", "error"),
+    ):
+        if rule_spec.get(spec_key) is not None:
+            kwargs[attr] = str(rule_spec[spec_key])
+    if rule_spec.get("show_input_message") is not None:
+        kwargs["showInputMessage"] = bool(rule_spec["show_input_message"])
+    elif kwargs.get("prompt") or kwargs.get("promptTitle"):
+        kwargs["showInputMessage"] = True
+    if rule_spec.get("show_error_message") is not None:
+        kwargs["showErrorMessage"] = bool(rule_spec["show_error_message"])
+
+    return DataValidation(**kwargs)
 
 
 # ── 样式提取辅助函数（用于 read_cell_styles）──────────────

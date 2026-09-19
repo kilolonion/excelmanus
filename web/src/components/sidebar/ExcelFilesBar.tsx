@@ -31,15 +31,17 @@ import {
   uploadFileToFolder,
   fetchExcelFiles,
   normalizeExcelPath,
-  downloadFile,
   workspaceMkdir,
   workspaceDeleteItem,
 } from "@/lib/api";
 import { mapWithConcurrency } from "@/lib/concurrency";
-import { isExcelFile, isImageFile, isTextPreviewableFile, isWordFile } from "@/lib/file-preview";
-import { CodePreviewModal } from "@/components/chat/CodePreviewModal";
-import { ImagePreviewModal } from "@/components/chat/ImagePreviewModal";
-import { useWordStore } from "@/stores/word-store";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import {
+  recentFilesForWorkspace,
+  workspaceKeyForSessionId,
+} from "@/lib/workspace-file-ref";
+import { WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
+import { formatFileMention } from "@/components/chat/chat-input-insert";
 import {
   buildTree,
   filterWorkspaceFiles,
@@ -51,8 +53,6 @@ import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
 import { FileGroupListView } from "./FileGroupListView";
 import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
-
-const ALL_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.py,.txt,.json,.md,.pdf,.png,.jpg,.jpeg,.gif,.svg,.html,.css,.js,.ts,.xml,.yaml,.yml,.toml,.sh,.sql,.docx";
 
 function isNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
@@ -91,17 +91,11 @@ interface ExcelFilesBarProps {
 
 export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const recentFiles = useExcelStore((s) => s.recentFiles);
+  const activeWorkspaceKey = useExcelStore((s) => s.activeWorkspaceKey);
   const addRecentFile = useExcelStore((s) => s.addRecentFile);
   const removeRecentFile = useExcelStore((s) => s.removeRecentFile);
   const removeRecentFiles = useExcelStore((s) => s.removeRecentFiles);
   const mergeRecentFiles = useExcelStore((s) => s.mergeRecentFiles);
-  const openPanel = useExcelStore((s) => s.openPanel);
-  const openFullView = useExcelStore((s) => s.openFullView);
-  const closeExcelPanel = useExcelStore((s) => s.closePanel);
-  const closeExcelFullView = useExcelStore((s) => s.closeFullView);
-  const closeCompare = useExcelStore((s) => s.closeCompare);
-  const panelOpen = useExcelStore((s) => s.panelOpen);
-  const activeFilePath = useExcelStore((s) => s.activeFilePath);
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const workspaceFiles = useExcelStore((s) => s.workspaceFiles);
   const wsFilesLoaded = useExcelStore((s) => s.wsFilesLoaded);
@@ -112,10 +106,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const groupViewMode = useExcelStore((s) => s.groupViewMode);
   const toggleGroupViewMode = useExcelStore((s) => s.toggleGroupViewMode);
   const createGroupFromSelected = useExcelStore((s) => s.createGroupFromSelected);
-  const openWordPanel = useWordStore((s) => s.openPanel);
-  const openWordFullView = useWordStore((s) => s.openFullView);
-  const closeWordPanel = useWordStore((s) => s.closePanel);
-  const closeWordFullView = useWordStore((s) => s.closeFullView);
 
   // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
   const visibleFiles = useMemo(
@@ -130,17 +120,18 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
   const [dialogOpen, setDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [textPreviewTarget, setTextPreviewTarget] = useState<{ path: string; filename: string } | null>(null);
-  const [textPreviewOpen, setTextPreviewOpen] = useState(false);
-  const [imagePreviewTarget, setImagePreviewTarget] = useState<{ path: string; filename: string } | null>(null);
-  const [imagePreviewOpen, setImagePreviewOpen] = useState(false);
+
+  const scopedRecentFiles = useMemo(
+    () => recentFilesForWorkspace(recentFiles, activeWorkspaceKey),
+    [recentFiles, activeWorkspaceKey],
+  );
 
   // recentFiles 仅用于排序权重（最近使用文件排前面）
   const recentTimestamps = useMemo(() => {
     const m = new Map<string, number>();
-    for (const f of recentFiles) m.set(normalizeExcelPath(f.path), f.lastUsedAt);
+    for (const f of scopedRecentFiles) m.set(normalizeExcelPath(f.path), f.lastUsedAt);
     return m;
-  }, [recentFiles]);
+  }, [scopedRecentFiles]);
 
   // 视图模式：扁平列表 vs 文件夹树（默认列表视图）
   const [treeView, setTreeView] = useState(false);
@@ -191,7 +182,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               path: f.path,
               filename: f.filename,
               modifiedAt: f.modified_at ? f.modified_at * 1000 : 0,
-            }))
+            })),
+            workspaceKeyForSessionId(activeSessionId),
           );
         }
       })
@@ -256,7 +248,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     input.click();
   }, []);
 
-  // Agent 创建/修改文件时自动刷新树（files_changed SSE 事件）
+  // Agent 创建/修改文件时自动刷新树（mutation SSE 事件）
   const loadFileGroups = useExcelStore((s) => s.loadFileGroups);
   const prevVersionRef = useRef(workspaceFilesVersion);
   useEffect(() => {
@@ -302,82 +294,17 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         toggleSelect(path);
         return;
       }
-      // Excel 文件打开侧边面板；文本/图片单击预览；其他文件下载。
-      const filename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
-      if (isExcelFile(filename)) {
-        setTextPreviewOpen(false);
-        setImagePreviewOpen(false);
-        closeWordPanel();
-        closeWordFullView();
-        openPanel(path);
-        return;
-      }
-      if (isWordFile(filename)) {
-        setTextPreviewOpen(false);
-        setImagePreviewOpen(false);
-        closeExcelPanel();
-        openWordPanel(path);
-        return;
-      }
-      if (isImageFile(filename)) {
-        setTextPreviewOpen(false);
-        setImagePreviewTarget({ path, filename });
-        setImagePreviewOpen(true);
-        return;
-      }
-      if (isTextPreviewableFile(filename)) {
-        setImagePreviewOpen(false);
-        setTextPreviewTarget({ path, filename });
-        setTextPreviewOpen(true);
-        return;
-      }
-      downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
+      openWorkspaceFile(path);
     },
-    [
-      activeSessionId,
-      closeExcelPanel,
-      closeWordFullView,
-      closeWordPanel,
-      openPanel,
-      openWordPanel,
-      selectMode,
-      toggleSelect,
-    ]
+    [selectMode, toggleSelect]
   );
 
   const handleDoubleClick = useCallback(
     (path: string) => {
       if (selectMode) return;
-      const filename = path.includes("/") ? path.slice(path.lastIndexOf("/") + 1) : path;
-      if (isExcelFile(filename)) {
-        closeWordPanel();
-        closeWordFullView();
-        openFullView(path);
-        return;
-      }
-      if (isWordFile(filename)) {
-        closeCompare();
-        closeExcelFullView();
-        closeExcelPanel();
-        closeWordPanel();
-        openWordFullView(path);
-        return;
-      }
-      // 文本/图片维持单击预览，双击不触发下载。
-      if (isImageFile(filename) || isTextPreviewableFile(filename)) return;
-      downloadFile(path, filename, activeSessionId ?? undefined).catch(() => {});
+      openWorkspaceFile(path, { intent: "full" });
     },
-    [
-      activeSessionId,
-      closeCompare,
-      closeExcelFullView,
-      closeExcelPanel,
-      closeWordFullView,
-      closeWordPanel,
-      openFullView,
-      openWordFullView,
-      selectMode,
-    ]
+    [selectMode]
   );
 
   // 移除前显示确认对话框
@@ -443,7 +370,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           .map((f) => ({ path: f.path, filename: f.filename }));
         e.dataTransfer.setData(
           "text/plain",
-          selectedFiles.map((f) => `@file:${f.filename}`).join(" ")
+          selectedFiles.map((f) => formatFileMention({ path: f.path })).join(" ")
         );
         e.dataTransfer.setData(
           "application/x-excel-file",
@@ -455,7 +382,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         return;
       }
       if (selectMode) return;
-      e.dataTransfer.setData("text/plain", `@file:${file.filename}`);
+      e.dataTransfer.setData("text/plain", formatFileMention({ path: file.path }));
       e.dataTransfer.setData(
         "application/x-excel-file",
         JSON.stringify(file)
@@ -522,7 +449,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           ref={fileInputRef}
           type="file"
           className="sr-only"
-          accept={ALL_EXTENSIONS}
+          accept={WORKSPACE_FILE_INPUT_ACCEPT}
           multiple
           onChange={handleUpload}
         />
@@ -711,7 +638,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           <div
             draggable
             onDragStart={(e) => {
-              e.dataTransfer.setData("text/plain", `@file:${demoFile.filename}`);
+              e.dataTransfer.setData("text/plain", formatFileMention({ path: demoFile.path }));
               e.dataTransfer.setData(
                 "application/x-excel-file",
                 JSON.stringify(demoFile),
@@ -722,7 +649,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             onDragEnd={() => {
               useExcelStore.getState().draggingFileCount = 0;
             }}
-            onClick={() => openPanel(demoFile.path)}
+            onClick={() => openWorkspaceFile(demoFile.path)}
             className="flex items-center gap-2.5 pl-5 pr-2 py-2 cursor-pointer transition-colors duration-100 hover:bg-accent/40"
           >
             <FileSpreadsheet className="h-4.5 w-4.5 flex-shrink-0" style={{ color: "var(--em-primary)" }} />
@@ -770,13 +697,13 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
               {selectedPaths.size === 2 && (() => {
                 const pair = visibleFiles
                   .filter((f) => !f.is_dir && selectedPaths.has(f.path))
-                  .map((f) => f.filename);
+                  .map((f) => f.path);
                 return pair.length === 2 ? (
                   <>
                     <button
                       onClick={() => {
                         useExcelStore.getState().setPendingTemplateMessage(
-                          `请将 @file:${pair[0]} 与 @file:${pair[1]} 进行合并`
+                          `请将 ${formatFileMention({ path: pair[0] })} 与 ${formatFileMention({ path: pair[1] })} 进行合并`
                         );
                         exitSelectMode();
                       }}
@@ -890,8 +817,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           <FileTreeView
             files={visibleFiles}
             sessionId={activeSessionId ?? undefined}
-            panelOpen={panelOpen}
-            activeFilePath={activeFilePath}
             draggingPath={draggingPath}
             selectMode={selectMode}
             selectedPaths={selectedPaths}
@@ -909,8 +834,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
           files={visibleFiles}
           recentTimestamps={recentTimestamps}
           sessionId={activeSessionId ?? undefined}
-          panelOpen={panelOpen}
-          activeFilePath={activeFilePath}
           draggingPath={draggingPath}
           selectMode={selectMode}
           selectedPaths={selectedPaths}
@@ -935,29 +858,12 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
       {dialogOpen && (
         <ExcelFilesDialog
-          files={recentFiles}
+          files={scopedRecentFiles}
           sessionId={activeSessionId ?? undefined}
           onClose={() => setDialogOpen(false)}
           onClickFile={handleClick}
           onDoubleClickFile={handleDoubleClick}
           onRemoveFile={(path) => requestRemove([path])}
-        />
-      )}
-
-      {textPreviewTarget && (
-        <CodePreviewModal
-          filePath={textPreviewTarget.path}
-          filename={textPreviewTarget.filename}
-          open={textPreviewOpen}
-          onOpenChange={setTextPreviewOpen}
-        />
-      )}
-      {imagePreviewTarget && (
-        <ImagePreviewModal
-          imagePath={imagePreviewTarget.path}
-          filename={imagePreviewTarget.filename}
-          open={imagePreviewOpen}
-          onOpenChange={setImagePreviewOpen}
         />
       )}
 
@@ -967,7 +873,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         ref={fileInputRef}
         type="file"
         className="sr-only"
-        accept={ALL_EXTENSIONS}
+        accept={WORKSPACE_FILE_INPUT_ACCEPT}
         multiple
         onChange={handleUpload}
       />
@@ -993,8 +899,6 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 interface TreeViewProps {
   files: { path: string; filename: string; is_dir?: boolean }[];
   sessionId?: string;
-  panelOpen: boolean;
-  activeFilePath: string | null;
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
@@ -1051,8 +955,6 @@ function FileTreeView(props: TreeViewProps) {
           node={node}
           sessionId={props.sessionId}
           depth={0}
-          panelOpen={props.panelOpen}
-          activeFilePath={props.activeFilePath}
           draggingPath={props.draggingPath}
           selectMode={props.selectMode}
           selectedPaths={props.selectedPaths}

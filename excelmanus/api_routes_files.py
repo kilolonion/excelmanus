@@ -10,11 +10,12 @@ from __future__ import annotations
 import os
 import re
 import uuid
+from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from excelmanus.api_app_state import (
     UnicodeJSONResponse,
@@ -24,28 +25,159 @@ from excelmanus.api_app_state import (
     get_session_manager,
     make_content_disposition as _make_content_disposition,
     resolve_excel_path as _resolve_excel_path,
-    resolve_workspace as _resolve_workspace,
-    resolve_workspace_root as _resolve_workspace_root,
-    safe_uploads_path as _safe_uploads_path,
-    uploads_create_file as _uploads_create_file,
-    uploads_delete as _uploads_delete,
-    uploads_mkdir as _uploads_mkdir,
-    uploads_rename as _uploads_rename,
+    resolve_workspace as _resolve_workspace_impl,
+    resolve_workspace_root as _resolve_workspace_root_impl,
 )
 from excelmanus.logger import get_logger
-from excelmanus.workbook_commit import content_version_of
 
 logger = get_logger("api.files")
 
 router = APIRouter()
 
+_TEXT_PREVIEW_SUFFIXES = frozenset({
+    ".txt", ".md", ".markdown", ".json", ".js", ".jsx", ".ts", ".tsx",
+    ".py", ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
+    ".cs", ".php", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh",
+    ".sql", ".html", ".css", ".scss", ".less", ".xml", ".yaml", ".yml",
+    ".toml", ".ini", ".cfg", ".conf", ".log", ".env", ".gitignore",
+    ".dockerignore", ".graphql", ".gql", ".vue", ".svelte", ".ex",
+    ".exs", ".erl", ".hs", ".ml", ".fs", ".clj", ".lua", ".r", ".dart",
+    ".groovy", ".tsv",
+})
+_TEXT_PREVIEW_NAMES = frozenset({".gitignore", ".dockerignore", ".env"})
+_NOT_TEXT_SUFFIXES = frozenset({
+    ".xlsx", ".xls", ".xlsm", ".xlsb", ".csv",
+    ".docx", ".doc", ".pptx", ".ppt",
+    ".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg",
+    ".pdf", ".zip", ".gz", ".tar", ".tgz", ".7z", ".rar", ".bin", ".exe",
+})
+_NO_STORE_HEADERS = {"Cache-Control": "private, no-store"}
 
-def _bind_file_bytes(path: str) -> tuple[bytes, str]:
-    """同一份 bytes 既用于解析也用于 content_version。"""
-    from pathlib import Path as _Path
 
-    data = _Path(path).read_bytes()
-    return data, content_version_of(data)
+def is_text_preview_file(file_path: Path) -> bool:
+    """Whether /files/read may return this path as UTF-8 text.
+
+    Known text suffixes and special names pass. Spreadsheet/word/image/archive
+    suffixes fail. Unknown suffixes are sniffed (no NUL, UTF-8) so Makefile
+    and .env.local 不会因为 suffix 漂移 404.
+    """
+    name = file_path.name.lower()
+    suffix = file_path.suffix.lower()
+    if name in _TEXT_PREVIEW_NAMES or name.startswith(".env."):
+        return True
+    if suffix in _TEXT_PREVIEW_SUFFIXES:
+        return True
+    if suffix in _NOT_TEXT_SUFFIXES:
+        return False
+    try:
+        sample = file_path.read_bytes()[:8192]
+    except OSError:
+        return False
+    if b"\x00" in sample:
+        return False
+    try:
+        sample.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+
+def _resolve_workspace_root(
+    request: Request,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+    *,
+    require_scope: bool = True,
+) -> str:
+    """File-module workspace root: fail-closed. Tests may monkeypatch this name."""
+    from fastapi import HTTPException
+
+    try:
+        return _resolve_workspace_root_impl(
+            request,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            require_scope=require_scope,
+        )
+    except TypeError:
+        return _resolve_workspace_root_impl(request, session_id=session_id)
+    except HTTPException as exc:
+        detail = exc.detail
+        message = (
+            str(detail.get("error") or "无法确定工作区，请从会话重新打开文件")
+            if isinstance(detail, dict)
+            else str(detail)
+        )
+        code = (
+            str(detail.get("code") or "FILE_SCOPE_REQUIRED")
+            if isinstance(detail, dict)
+            else "FILE_SCOPE_REQUIRED"
+        )
+        raise HTTPException(
+            status_code=exc.status_code,
+            detail={"error": message, "code": code},
+        ) from exc
+
+
+def _resolve_workspace(
+    request: Request,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+    *,
+    require_scope: bool = True,
+) -> Any:
+    from fastapi import HTTPException
+
+    try:
+        return _resolve_workspace_impl(
+            request,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            require_scope=require_scope,
+        )
+    except TypeError:
+        return _resolve_workspace_impl(request, session_id=session_id)
+    except HTTPException:
+        raise
+
+
+def _file_workspace_root(
+    request: Request,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+) -> tuple[str | None, JSONResponse | None]:
+    from fastapi import HTTPException
+
+    try:
+        return _resolve_workspace_root(request, session_id=session_id, workspace_id=workspace_id), None
+    except TypeError:
+        return _resolve_workspace_root(request, session_id=session_id), None
+    except HTTPException as exc:
+        detail = exc.detail if isinstance(exc.detail, dict) else {}
+        return None, _error_json_response(
+            exc.status_code,
+            str(detail.get("error") or exc.detail),
+            code=str(detail.get("code") or "FILE_SCOPE_REQUIRED"),
+        )
+
+
+def _open_route_snapshot(
+    resolved: str,
+    display_path: str,
+    ws_root: str,
+    workspace_id: str | None = None,
+):
+    """HTTP 开簿：吸收原 _bind_file_bytes，与工具层共用 open_snapshot_at。"""
+    from excelmanus.workbook.snapshot import open_snapshot_at
+    from excelmanus.workspace.refs import WorkspaceRef
+
+    workspace = WorkspaceRef.from_root(ws_root, workspace_id=workspace_id)
+    try:
+        rel = str(Path(resolved).resolve().relative_to(Path(ws_root).resolve())).replace("\\", "/")
+    except ValueError:
+        rel = str(display_path or Path(resolved).name).replace("\\", "/")
+    return open_snapshot_at(resolved, relative=rel, workspace=workspace)
 
 
 def _with_bound_version(payload: dict[str, Any], version: str) -> dict[str, Any]:
@@ -63,12 +195,6 @@ def _apply_cell_write(ws: Any, cell_ref: str, value: Any) -> None:
         cell.value = None
     else:
         cell.value = value
-
-
-def _record_commit_history(session_id: str | None, user_id: str | None, rel_path: str, content_version: str) -> None:
-    """History is recorded by AtomicPublish / RevisionStore. This is a no-op."""
-    _ = (session_id, user_id, rel_path, content_version)
-    return
 
 
 @router.get("/api/v1/files/excel")
@@ -118,7 +244,10 @@ async def get_excel_file(request: Request) -> StreamingResponse:
     return StreamingResponse(
         _iter_file(),
         media_type=content_type,
-        headers={"Content-Disposition": _make_content_disposition(file_path.name)},
+        headers={
+            "Content-Disposition": _make_content_disposition(file_path.name),
+            **_NO_STORE_HEADERS,
+        },
     )
 
 @router.get("/api/v1/files/excel/snapshot")
@@ -138,13 +267,16 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
     sheet = request.query_params.get("sheet")
     max_rows = int(request.query_params.get("max_rows", "50"))
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     all_sheets = request.query_params.get("all_sheets", "").strip() in ("1", "true")
     with_styles = request.query_params.get("with_styles", "1").strip() in ("1", "true")
 
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")
@@ -154,7 +286,8 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         try:
             import csv as _csv
 
-            csv_bytes, bound_version = _bind_file_bytes(resolved)
+            snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
+            csv_bytes, bound_version = snap.read_bytes(), snap.content_version
             _enc = "utf-8"
             decoded = ""
             for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
@@ -170,12 +303,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
             import io as _io
 
             reader = _csv.reader(_io.StringIO(decoded))
-            all_rows_raw: list[list[str]] = []
-            for row in reader:
-                all_rows_raw.append(row)
-                if len(all_rows_raw) > max_rows + 1:
-                    break
-
+            all_rows_raw: list[list[str]] = list(reader)
             total_rows = len(all_rows_raw)
             total_cols = max((len(r) for r in all_rows_raw), default=0)
             headers = all_rows_raw[0] if all_rows_raw else []
@@ -200,6 +328,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
 
             snap_csv: dict[str, Any] = {
                 "file": os.path.basename(resolved),
+                "deprecated_for_editor": True,
                 "sheet": "Sheet1",
                 "sheets": ["Sheet1"],
                 "shape": {"rows": total_rows, "columns": total_cols},
@@ -226,19 +355,10 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
 
         from excelmanus.tools._style_extract import extract_cell_style as _extract_cell_style
 
-        # .xls/.xlsb → 透明转换为 xlsx 后再用 openpyxl 打开
-        from excelmanus.xls_converter import needs_conversion as _nc, ensure_xlsx as _ensure
-        _actual_path = resolved
-        if _nc(resolved):
-            try:
-                _xlsx_p, _ = _ensure(resolved, workspace_root=ws_root)
-                _actual_path = str(_xlsx_p)
-            except Exception:
-                logger.warning("snapshot 转换失败，尝试直接打开: %s", resolved)
-
         from io import BytesIO
 
-        file_bytes, bound_version = _bind_file_bytes(_actual_path)
+        snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
+        file_bytes, bound_version = snap.read_bytes(), snap.content_version
         wb = load_workbook(BytesIO(file_bytes), data_only=True, read_only=not with_styles)
         sheet_names = wb.sheetnames
 
@@ -341,6 +461,7 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
             wb.close()
             return JSONResponse(content=_with_bound_version({
                 "file": os.path.basename(resolved),
+                "deprecated_for_editor": True,
                 "sheets": sheet_names,
                 "all_snapshots": snapshots,
             }, bound_version))
@@ -355,9 +476,85 @@ async def get_excel_snapshot(request: Request) -> JSONResponse:
         snap["file"] = os.path.basename(resolved)
         snap["sheets"] = sheet_names
         wb.close()
-        return JSONResponse(content=_with_bound_version(snap, bound_version))
+        payload = _with_bound_version(snap, bound_version)
+        payload["deprecated_for_editor"] = True
+        return JSONResponse(content=payload)
     except Exception as exc:
         logger.error("Excel snapshot 生成失败: %s", exc, exc_info=True)
+        return _error_json_response(500, f"读取文件失败: {exc}")
+
+
+@router.get("/api/v1/files/excel/view")
+async def get_excel_view(request: Request) -> JSONResponse:
+    """可编辑工作簿的范围投影。第 1 行是 R1，不是分析 headers。"""
+    assert get_config() is not None, "服务未初始化"
+
+    from dataclasses import replace
+
+    from excelmanus.workbook.refs import InvalidRefError, parse_rect
+    from excelmanus.workbook.snapshot import SnapshotError, SnapshotStale, project_view
+
+    path = request.query_params.get("path", "")
+    sheet = request.query_params.get("sheet") or None
+    session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
+    rect_text = (request.query_params.get("rect") or "A1:AX200").strip()
+    with_styles = request.query_params.get("with_styles", "1").strip() in ("1", "true")
+    expected_version = (request.query_params.get("expected_version") or "").strip() or None
+    if not path:
+        return _error_json_response(400, "缺少 path 参数")
+
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error
+    resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
+    if resolved is None:
+        return _error_json_response(404, f"文件不存在或路径非法: {path}")
+
+    try:
+        base = parse_rect(rect_text, default_sheet=sheet)
+    except InvalidRefError as exc:
+        return _error_json_response(400, str(exc), code="INVALID_REF")
+
+    try:
+        snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
+        if expected_version and expected_version != snap.content_version:
+            return UnicodeJSONResponse(
+                status_code=409,
+                content={
+                    "error": "视图版本已变化，请重新加载",
+                    "code": "STALE_VIEW",
+                    "content_version": snap.content_version,
+                    "expected_version": expected_version,
+                },
+            )
+        if snap.is_csv():
+            windows = [replace(base, sheet=base.sheet or "Sheet1")]
+        else:
+            from openpyxl import load_workbook
+
+            wb_names = load_workbook(snap.backing_path, read_only=True, data_only=True)
+            try:
+                names = list(wb_names.sheetnames)
+            finally:
+                wb_names.close()
+            if sheet:
+                windows = [replace(base, sheet=sheet)]
+            else:
+                windows = [replace(base, sheet=name) for name in names]
+        view = project_view(snap, windows, with_styles=with_styles)
+        view["deprecated_for_editor"] = False
+        return JSONResponse(content=view)
+    except SnapshotStale as exc:
+        return UnicodeJSONResponse(
+            status_code=409,
+            content={"error": str(exc), "code": exc.code, **exc.fields},
+        )
+    except SnapshotError as exc:
+        status = 404 if exc.code in {"PATH_INVALID", "SHEET_NOT_FOUND"} else 400
+        return _error_json_response(status, str(exc), code=exc.code)
+    except Exception as exc:
+        logger.error("Excel view 生成失败: %s", exc, exc_info=True)
         return _error_json_response(500, f"读取文件失败: {exc}")
 
 
@@ -366,32 +563,39 @@ class ExcelWriteRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     session_id: str | None = None
+    workspace_id: str | None = None
     path: str
     sheet: str | None = None
-    changes: list[dict[str, Any]]
+    changes: list[dict[str, Any]] = Field(default_factory=list)
+    operations: list[dict[str, Any]] | None = None
     expected_version: str | None = None
+    operation_id: str | None = None
 
 
 @router.post("/api/v1/files/excel/write")
 async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) -> JSONResponse:
-    """侧边面板编辑回写：将单元格变更写入文件。"""
+    """工作台编辑回写：一组 operations 一次 CAS。"""
     assert get_config() is not None, "服务未初始化"
 
-    ws_root = _resolve_workspace_root(raw_request, session_id=request.session_id)
-
-    # 先解析工作区路径
+    ws_root, scope_error = _file_workspace_root(
+        raw_request, request.session_id, request.workspace_id,
+    )
+    if scope_error is not None:
+        return scope_error
     resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {request.path}")
 
+    from io import BytesIO
     from pathlib import Path as _Path
 
-    from excelmanus.security.guard import FileAccessGuard
-    from excelmanus.tools._helpers import MutationAborted, unwrap_mutation_abort
-    from excelmanus.workbook_commit import CommitError, commit_workbook
+    from openpyxl import load_workbook
+
+    from excelmanus.workbook.view_mutate import apply_workbook_operations, changes_to_operations
+    from excelmanus.workbook_commit import CommitError
+    from excelmanus.workspace.file_service import WorkspaceFileService
 
     try:
-        # .xls/.xlsb → 透明转换为 xlsx
         from excelmanus.xls_converter import needs_conversion as _nc3, ensure_xlsx as _ensure3
         if _nc3(resolved):
             try:
@@ -400,29 +604,17 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
             except Exception:
                 pass
 
-        guard = FileAccessGuard(ws_root)
         dest = _Path(resolved).resolve()
         try:
-            rel = str(dest.relative_to(guard.workspace_root))
+            rel = str(dest.relative_to(_Path(ws_root).resolve())).replace("\\", "/")
         except ValueError:
             return _error_json_response(400, f"写入路径不在工作区内: {resolved}")
 
-        captured: dict[str, Any] = {}
-
-        def mutate(wb) -> None:
-            sheet_names = wb.sheetnames
-            cells_written = 0
-            for change in request.changes:
-                cell_ref = change.get("cell", "")
-                if not cell_ref:
-                    continue
-                sheet_name = change.get("sheet") or request.sheet
-                ws = wb[sheet_name] if sheet_name and sheet_name in sheet_names else wb.active
-                if ws is None:
-                    raise MutationAborted({"error": "工作表不存在"})
-                _apply_cell_write(ws, cell_ref, change.get("value"))
-                cells_written += 1
-            captured["cells_written"] = cells_written
+        ops = list(request.operations or [])
+        if request.changes:
+            ops.extend(changes_to_operations(request.changes, request.sheet))
+        if not ops:
+            return _error_json_response(400, "缺少 changes 或 operations")
 
         if request.expected_version is None:
             error_id = str(uuid.uuid4())
@@ -434,39 +626,65 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
                     "code": "VERSION_CONFLICT",
                 },
             )
-        try:
-            cr = commit_workbook(
-                guard=guard,
-                file_path=rel,
-                mutate_fn=mutate,
-                expected_version=request.expected_version,
+
+        captured: dict[str, Any] = {"cells_written": sum(len(op.get("cells") or []) for op in ops if op.get("op") in {"set_values", "set_styles"})}
+
+        def builder(prev: bytes | None) -> bytes:
+            wb = load_workbook(BytesIO(prev or b""), keep_vba=dest.suffix.lower() == ".xlsm")
+            try:
+                captured["cells_written"] = apply_workbook_operations(wb, ops)
+                out = BytesIO()
+                wb.save(out)
+                return out.getvalue()
+            finally:
+                wb.close()
+
+        svc = WorkspaceFileService(ws_root)
+        receipt = svc.update_with_builder(
+            rel,
+            builder,
+            expected_version=request.expected_version,
+            operation_id=request.operation_id,
+            intent={"operations": ops},
+        )
+        if receipt.state == "conflict" or receipt.error_code == "VERSION_CONFLICT":
+            return UnicodeJSONResponse(
+                status_code=409,
+                content={
+                    "error": receipt.message or "版本冲突",
+                    "code": receipt.error_code or "VERSION_CONFLICT",
+                    **receipt.to_dict(),
+                },
             )
-        except CommitError as exc:
-            aborted = unwrap_mutation_abort(exc)
-            if aborted is not None:
-                return _error_json_response(404, "工作表不存在")
-            status = 409 if exc.code == "VERSION_CONFLICT" else 400 if exc.code == "PATH_INVALID" else 500
-            error_id = str(uuid.uuid4())
+        if receipt.state != "committed":
+            status = 409 if receipt.state == "conflict" else 400
             return UnicodeJSONResponse(
                 status_code=status,
-                content={"error": exc.message, "error_id": error_id, "code": exc.code},
+                content={
+                    "error": receipt.message or receipt.state,
+                    "code": receipt.error_code or receipt.state,
+                    **receipt.to_dict(),
+                },
             )
-
-        _record_commit_history(
-            request.session_id, None, cr.path, cr.content_version,
-        )
-        return JSONResponse(content={
+        body = receipt.to_dict()
+        body.update({
             "status": "success",
             "cells_written": captured.get("cells_written", 0),
-            "content_version": cr.content_version,
+            "content_version": receipt.primary_version(),
         })
+        return JSONResponse(content=body)
     except CommitError as exc:
         status = 409 if exc.code == "VERSION_CONFLICT" else 400 if exc.code == "PATH_INVALID" else 500
         error_id = str(uuid.uuid4())
+        fields = exc.fields if isinstance(getattr(exc, "fields", None), dict) else {}
         return UnicodeJSONResponse(
             status_code=status,
-            content={"error": exc.message, "error_id": error_id, "code": exc.code},
+            content={"error": exc.message, "error_id": error_id, "code": exc.code, **fields},
         )
+    except KeyError as exc:
+        return _error_json_response(404, "工作表不存在")
+    except ValueError as exc:
+        return _error_json_response(400, str(exc), code="INVALID_ARGS")
     except Exception as exc:
         logger.error("Excel write 失败: %s", exc, exc_info=True)
         return _error_json_response(500, f"写入失败: {exc}")
@@ -840,6 +1058,32 @@ async def get_spec_file(request: Request) -> JSONResponse:
 
     return JSONResponse(content=data)
 
+class AdmitAttachmentRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    data: str
+    media_type: str = "image/png"
+    name: str | None = None
+
+
+@router.post("/api/v1/attachments")
+async def admit_attachment(body: AdmitAttachmentRequest) -> JSONResponse:
+    """Admit one image into the content-addressed store. Chat then sends attachment_id."""
+    from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+    from excelmanus.attachments.types import AttachmentError
+
+    if not (body.data or "").strip():
+        return _error_json_response(400, "缺少图片数据")
+    try:
+        raw = decode_image_payload(body.data)
+        ref = admit_image_bytes(raw, media_type=body.media_type, name=body.name)
+    except AttachmentError as exc:
+        return _error_json_response(400, str(exc))
+    except Exception as exc:
+        logger.warning("附件准入失败", exc_info=True)
+        return _error_json_response(400, f"图片无法读取: {exc}")
+    return JSONResponse(content={"attachment": ref.to_dict()})
+
+
 @router.get("/api/v1/files/image")
 async def get_image_file(request: Request) -> StreamingResponse:
     """返回 workspace 内图片文件的二进制流。"""
@@ -876,7 +1120,10 @@ async def get_image_file(request: Request) -> StreamingResponse:
     return StreamingResponse(
         _iter_image(),
         media_type=content_type,
-        headers={"Cache-Control": "public, max-age=3600"},
+        headers={
+            "Content-Disposition": _make_content_disposition(file_path.name),
+            **_NO_STORE_HEADERS,
+        },
     )
 
 @router.get("/api/v1/files/read")
@@ -900,19 +1147,7 @@ async def read_text_file(request: Request) -> JSONResponse:
 
     file_path = _Path(resolved)
 
-    # 支持的文本文件扩展名
-    _TEXT_EXTENSIONS = {
-        ".txt", ".md", ".markdown", ".json", ".js", ".jsx", ".ts", ".tsx",
-        ".py", ".rb", ".go", ".rs", ".java", ".c", ".cpp", ".h", ".hpp",
-        ".cs", ".php", ".swift", ".kt", ".scala", ".sh", ".bash", ".zsh",
-        ".sql", ".html", ".css", ".scss", ".less", ".xml", ".yaml", ".yml",
-        ".toml", ".ini", ".cfg", ".conf", ".log", ".env", ".gitignore",
-        ".dockerignore", ".graphql", ".gql", ".vue", ".svelte", ".ex",
-        ".exs", ".erl", ".hs", ".ml", ".fs", ".clj", ".lua", ".r", ".dart",
-        ".groovy", ".txt", ".csv", ".tsv",
-    }
-
-    if not file_path.is_file() or file_path.suffix.lower() not in _TEXT_EXTENSIONS:
+    if not file_path.is_file() or not is_text_preview_file(file_path):
         return _error_json_response(404, f"文本文件不存在: {path}")  # type: ignore[return-value]
 
     # 限制文件大小（最大 1MB）
@@ -921,7 +1156,7 @@ async def read_text_file(request: Request) -> JSONResponse:
 
     try:
         content = file_path.read_text(encoding="utf-8")
-        return JSONResponse(content={"content": content})
+        return JSONResponse(content={"content": content}, headers=dict(_NO_STORE_HEADERS))
     except UnicodeDecodeError:
         return _error_json_response(400, "文件编码不支持，请使用 UTF-8 编码")  # type: ignore[return-value]
     except Exception as exc:
@@ -1002,7 +1237,8 @@ async def get_excel_compare(request: Request) -> JSONResponse:
                 import csv as _csv
                 import io as _io
 
-                csv_bytes, bound_version = _bind_file_bytes(resolved)
+                snap = _open_route_snapshot(resolved, basename, ws_root)
+                csv_bytes, bound_version = snap.read_bytes(), snap.content_version
                 decoded = ""
                 for _try_enc in ("utf-8-sig", "utf-8", "gbk", "gb18030", "latin-1"):
                     try:
@@ -1053,17 +1289,7 @@ async def get_excel_compare(request: Request) -> JSONResponse:
                 logger.error("Compare CSV snapshot 失败: %s — %s", resolved, exc)
                 return {"file": basename, "sheets": [], "all_snapshots": [], "error": str(exc)}
 
-        # ── xls/xlsb 格式转换 ──
-        _actual_path = resolved
-        if ext in (".xls", ".xlsb"):
-            try:
-                from excelmanus.xls_converter import ensure_xlsx as _ensure_cmp
-                _xlsx_cmp, _ = _ensure_cmp(resolved, workspace_root=ws_root)
-                _actual_path = str(_xlsx_cmp)
-            except Exception:
-                logger.warning("Compare 格式转换失败，尝试直接打开: %s", resolved)
-
-        # ── xlsx/xlsm 主路径 ──
+        # ── xlsx/xlsm 主路径（xls 转换由 open_snapshot_at 完成）──
         from openpyxl import load_workbook as _lwb
 
         def _read_ws(ws_obj: Any, _max_rows: int = max_rows) -> dict[str, Any]:
@@ -1104,7 +1330,8 @@ async def get_excel_compare(request: Request) -> JSONResponse:
         try:
             from io import BytesIO
 
-            file_bytes, bound_version = _bind_file_bytes(_actual_path)
+            snap = _open_route_snapshot(resolved, basename, ws_root)
+            file_bytes, bound_version = snap.read_bytes(), snap.content_version
             wb = _lwb(BytesIO(file_bytes), data_only=True, read_only=True)
             sheet_names = wb.sheetnames
             snapshots = []
@@ -1131,11 +1358,13 @@ async def get_excel_compare(request: Request) -> JSONResponse:
     # ── 跨文件关系检测 ──
     relationships: dict[str, Any] = {"shared_columns": []}
     try:
+        from excelmanus.tools.context import use_workspace
         from excelmanus.workbook.data import discover_file_relationships as _dfr
 
-        rel_result = await asyncio.to_thread(
-            _dfr, file_paths=[resolved_a, resolved_b], max_files=2
-        )
+        with use_workspace(ws_root):
+            rel_result = await asyncio.to_thread(
+                _dfr, file_paths=[resolved_a, resolved_b], max_files=2
+            )
         rel_data = rel_result.value if isinstance(getattr(rel_result, "value", None), dict) else {}
         pairs = rel_data.get("file_pairs", [])
         if pairs:
@@ -1169,9 +1398,11 @@ async def get_file_relationships(request: Request) -> JSONResponse:
     import asyncio
 
     try:
+        from excelmanus.tools.context import use_workspace
         from excelmanus.workbook.data import discover_file_relationships as _dfr
 
-        rel_result = await asyncio.to_thread(_dfr, directory=directory, max_files=5)
+        with use_workspace(ws_root):
+            rel_result = await asyncio.to_thread(_dfr, directory=directory, max_files=5)
         rel_data = rel_result.value if isinstance(getattr(rel_result, "value", None), dict) else {}
         return JSONResponse(content=rel_data)
     except Exception as exc:
@@ -1200,7 +1431,7 @@ def _resolve_supported_word_file(
 
 @router.get("/api/v1/files/word")
 async def get_word_file(request: Request) -> StreamingResponse:
-    """返回 .docx 文件二进制流供前端 Univer Doc 加载。"""
+    """返回 .docx 文件二进制流（下载用）。"""
     assert get_config() is not None, "服务未初始化"
 
     path = request.query_params.get("path", "")
@@ -1227,16 +1458,19 @@ async def get_word_file(request: Request) -> StreamingResponse:
 
 @router.get("/api/v1/files/word/snapshot")
 async def get_word_snapshot(request: Request) -> JSONResponse:
-    """返回 Word 文档的 JSON 快照（段落+样式+表格），供前端 Univer Doc 渲染。"""
+    """返回 Word 文档的 JSON 快照（段落+样式+表格），供前端只读快照预览。"""
     assert get_config() is not None, "服务未初始化"
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     max_paragraphs = int(request.query_params.get("max_paragraphs", "500"))
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
     file_path, error_response = _resolve_supported_word_file(path, resolved)
     if error_response is not None:
@@ -1244,8 +1478,10 @@ async def get_word_snapshot(request: Request) -> JSONResponse:
 
     try:
         import asyncio
+        snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
         snapshot = await asyncio.to_thread(_build_word_snapshot, str(file_path), max_paragraphs)
         snapshot["file"] = path
+        snapshot["content_version"] = snap.content_version
         return JSONResponse(content=snapshot)
     except Exception as exc:
         logger.error("Word snapshot 生成失败: %s", exc, exc_info=True)
@@ -1255,7 +1491,7 @@ def _build_word_snapshot(file_path: str, max_paragraphs: int = 500) -> dict[str,
     """构建 Word 文档 JSON 快照。
 
     返回结构化数据，包含段落列表（含文本、样式、行内格式）和表格，
-    供前端转换为 Univer Doc IDocumentData。
+    供前端只读快照渲染（正文 + 表格）。
     """
     from docx import Document
     from docx.enum.text import WD_ALIGN_PARAGRAPH
@@ -1440,90 +1676,110 @@ def _apply_word_write(
 
 # ── 文件管理 API ─────────────────────────────────────
 
+def _workspace_file_service(
+    request: Request,
+    session_id: str | None,
+    workspace_id: str | None = None,
+):
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    ws = _resolve_workspace(request, session_id=session_id, workspace_id=workspace_id)
+    return ws, WorkspaceFileService(ws.root_dir)
+
+
+def _commit_http_error(exc: Exception) -> JSONResponse:
+    from excelmanus.workbook_commit import CommitError
+
+    if not isinstance(exc, CommitError):
+        return _error_json_response(400, str(exc))
+    if exc.code in {"NOT_FOUND"}:
+        return _error_json_response(404, exc.message)
+    if exc.code in {"VERSION_CONFLICT", "FILE_EXISTS", "PATH_OCCUPIED"}:
+        return _error_json_response(409, exc.message)
+    return _error_json_response(400, exc.message)
+
+
 @router.post("/api/v1/files/workspace/mkdir")
 async def workspace_mkdir(request: Request) -> JSONResponse:
-    """在 uploads/ 下创建子目录。"""
+    """在工作区相对路径创建目录。"""
     assert get_config() is not None, "服务未初始化"
     body = await request.json()
     path = body.get("path", "").strip()
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
-    uploads = ws.get_upload_dir()
-    existing = _safe_uploads_path(uploads, path)
-    if existing is not None:
-        try:
-            os.lstat(existing)
-            return _error_json_response(409, "目录已存在")
-        except FileNotFoundError:
-            pass
-    target = _uploads_mkdir(uploads, path)
-    if target is None:
-        return _error_json_response(400, "非法目标路径")
+    _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
+    dest = svc.root / path.replace("\\", "/").lstrip("./")
+    if dest.exists():
+        return _error_json_response(409, "目录已存在" if dest.is_dir() else "目标已存在")
+    try:
+        svc.raise_if_failed(svc.mkdir(path))
+    except Exception as exc:
+        return _commit_http_error(exc)
     return JSONResponse(content={"status": "created", "path": path})
 
 @router.post("/api/v1/files/workspace/create")
 async def workspace_create_file(request: Request) -> JSONResponse:
-    """在 uploads/ 下创建空文件。"""
+    """在工作区相对路径创建空文件。"""
     assert get_config() is not None, "服务未初始化"
     body = await request.json()
     path = body.get("path", "").strip()
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
-    uploads = ws.get_upload_dir()
-    target = _uploads_create_file(uploads, path)
-    if target is None:
-        existing = _safe_uploads_path(uploads, path)
-        if existing is not None:
-            try:
-                os.lstat(existing)
-                return _error_json_response(409, "文件已存在")
-            except FileNotFoundError:
-                pass
-        return _error_json_response(400, "非法目标路径")
+    _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
+    try:
+        svc.raise_if_failed(svc.create(path, b""))
+    except Exception as exc:
+        return _commit_http_error(exc)
     return JSONResponse(content={"status": "created", "path": path})
 
 @router.delete("/api/v1/files/workspace/item")
 async def workspace_delete_item(request: Request) -> JSONResponse:
-    """删除 uploads/ 下的文件或文件夹。"""
+    """删除工作区相对路径上的文件或文件夹。"""
     assert get_config() is not None, "服务未初始化"
     body = await request.json()
     path = body.get("path", "").strip()
     if not path:
         return _error_json_response(400, "缺少 path 参数")
 
-    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
-    uploads = ws.get_upload_dir()
-    target, err = _uploads_delete(uploads, path)
-    if err == "路径不存在":
-        return _error_json_response(404, err)
-    if target is None:
-        return _error_json_response(400, err or "非法目标路径")
-    if get_session_manager() is not None:
-        get_session_manager().notify_file_deleted(str(target))
+    _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
+    dest = svc.root / path.replace("\\", "/").lstrip("./")
+    try:
+        if dest.is_dir():
+            receipt = svc.delete_tree(path, observe_live=True)
+        else:
+            receipt = svc.delete(path, expected_version=None, observe_live=True)
+        svc.raise_if_failed(receipt)
+    except Exception as exc:
+        return _commit_http_error(exc)
+    manager = get_session_manager()
+    if manager is not None:
+        manager.notify_mutation(receipt.to_dict())
     return JSONResponse(content={"status": "deleted", "path": path})
 
 @router.post("/api/v1/files/workspace/rename")
 async def workspace_rename_item(request: Request) -> JSONResponse:
-    """重命名 uploads/ 下的文件或文件夹。"""
+    """重命名工作区相对路径上的文件或文件夹。"""
     assert get_config() is not None, "服务未初始化"
     body = await request.json()
     old_path = body.get("old_path", "").strip()
     new_path = body.get("new_path", "").strip()
-    ws = _resolve_workspace(request, session_id=(body.get("session_id") or None))
-    uploads = ws.get_upload_dir()
-    src, dst, err = _uploads_rename(uploads, old_path, new_path)
-    if err == "源路径不存在":
-        return _error_json_response(404, err)
-    if err == "目标路径已存在":
-        return _error_json_response(409, err)
-    if src is None or dst is None:
-        return _error_json_response(400, err or "非法路径")
-    if get_session_manager() is not None:
-        get_session_manager().notify_file_renamed(str(src), str(dst))
+    if not old_path or not new_path:
+        return _error_json_response(400, "缺少路径参数")
+    _ws, svc = _workspace_file_service(request, body.get("session_id") or None, body.get("workspace_id") or None)
+    src = svc.root / old_path.replace("\\", "/").lstrip("./")
+    try:
+        if src.is_dir():
+            receipt = svc.move_tree(old_path, new_path, observe_live=True)
+        else:
+            receipt = svc.move(old_path, new_path, expected_version=None, observe_live=True)
+        svc.raise_if_failed(receipt)
+    except Exception as exc:
+        return _commit_http_error(exc)
+    manager = get_session_manager()
+    if manager is not None:
+        manager.notify_mutation(receipt.to_dict())
     return JSONResponse(content={"status": "renamed", "old_path": old_path, "new_path": new_path})
 
 @router.post("/api/v1/files/reveal")

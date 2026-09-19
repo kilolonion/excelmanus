@@ -67,7 +67,7 @@ class TestListDirectory:
 
     def test_invalid_directory(self, workspace: Path) -> None:
         result = _payload(file_tools.list_directory("nonexistent"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_path_traversal_rejected(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -102,7 +102,7 @@ class TestListDirectory:
 
     def test_invalid_cursor(self, workspace: Path) -> None:
         result = _payload(file_tools.list_directory(depth=0, cursor="bad_cursor"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_default_excludes_noise_directories(self, workspace: Path) -> None:
         (workspace / "outputs").mkdir()
@@ -130,9 +130,9 @@ class TestListDirectory:
 
     def test_pagination_invalid_args(self, workspace: Path) -> None:
         result = _payload(file_tools.list_directory(offset=-1, limit=10, depth=0))
-        assert "error" in result
+        assert result.get("status") == "error"
         result = _payload(file_tools.list_directory(offset=0, limit=0, depth=0))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     # ── 递归树模式 ──
 
@@ -166,6 +166,37 @@ class TestListDirectory:
         names = [e["name"] for e in result["tree"]]
         assert ".hidden" in names
 
+    def test_empty_visible_listing_has_stop_note(self, tmp_path: Path) -> None:
+        root = tmp_path / "ws"
+        root.mkdir()
+        (root / "outputs").mkdir()
+        (root / ".excelmanus").mkdir()
+        file_tools.init_guard(str(root))
+        result = _payload(file_tools.list_directory())
+        assert result["total"] == 0
+        assert "note" in result
+        assert "拖入" in result["note"]
+
+    def test_missing_uploads_dir_says_not_uploaded(self, workspace: Path) -> None:
+        result = _payload(file_tools.list_directory("uploads"))
+        assert result.get("status") == "error"
+        assert "尚未" in result["message"]
+
+
+class TestRegistryPathJail:
+    def test_execution_error_maps_path_jail_to_human_message(self) -> None:
+        from excelmanus.tools.registry import ToolRegistry
+
+        result = ToolRegistry._format_execution_error(
+            tool_name="list_directory",
+            exc=SecurityViolationError("路径越界：'C:\\\\Users\\\\a1560\\\\Desktop'"),
+        )
+        payload = _payload(result)
+        assert payload["error_code"] == "PATH_INVALID"
+        assert "路径越界" not in payload["message"]
+        assert "工作区" in payload["message"]
+        assert "桌面" in payload["message"]
+        assert "不要改用" in payload["remediation"]
 
 
 # ── get_file_info ────────────────────────────────────────
@@ -188,7 +219,7 @@ class TestGetFileInfo:
 
     def test_nonexistent(self, workspace: Path) -> None:
         result = _payload(file_tools.get_file_info("no_such_file"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_path_traversal_rejected(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -226,7 +257,7 @@ class TestFindFiles:
 
     def test_invalid_directory(self, workspace: Path) -> None:
         result = _payload(file_tools.find_files("*", directory="nonexistent"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
 
 # ── read_text_file ───────────────────────────────────────
@@ -235,7 +266,7 @@ class TestFindFiles:
 class TestReadTextFile:
     def test_read_txt(self, workspace: Path) -> None:
         result = _payload(file_tools.read_text_file("hello.txt"))
-        assert result["file"] == "hello.txt"
+        assert result["file_path"] == "hello.txt"
         assert "你好" in result["content"]
         assert result["lines_read"] == 3
 
@@ -256,15 +287,15 @@ class TestReadTextFile:
     def test_read_binary_file_error(self, workspace: Path) -> None:
         result = _payload(file_tools.read_text_file("report.xlsx"))
         # 二进制文件可能不报错（取决于内容），但不会崩溃
-        assert "file" in result or "error" in result
+        assert "file_path" in result or result.get("status") == "error"
 
     def test_nonexistent_file(self, workspace: Path) -> None:
         result = _payload(file_tools.read_text_file("no_such.txt"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_directory_rejected(self, workspace: Path) -> None:
         result = _payload(file_tools.read_text_file("subdir"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_path_traversal_rejected(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -291,12 +322,12 @@ class TestCopyFile:
 
     def test_copy_source_not_file(self, workspace: Path) -> None:
         result = _payload(file_tools.copy_file("subdir", "subdir_copy"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_copy_destination_exists(self, workspace: Path) -> None:
         result = _payload(file_tools.copy_file("hello.txt", "data.csv"))
-        assert "error" in result
-        assert "已存在" in result["error"]
+        assert result.get("status") == "error"
+        assert "已存在" in result["message"]
 
     def test_copy_path_traversal(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -322,12 +353,12 @@ class TestRenameFile:
 
     def test_rename_source_not_file(self, workspace: Path) -> None:
         result = _payload(file_tools.rename_file("subdir", "subdir_new"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_rename_destination_exists(self, workspace: Path) -> None:
         ver = content_version_of_file(workspace / "hello.txt")
         result = _payload(file_tools.rename_file("hello.txt", "data.csv", expected_version=ver))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_rename_path_traversal(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -335,7 +366,7 @@ class TestRenameFile:
 
     def test_rename_missing_version_conflicts(self, workspace: Path) -> None:
         result = _payload(file_tools.rename_file("hello.txt", "greeting.txt"))
-        assert result.get("code") == "VERSION_CONFLICT"
+        assert result.get("error_code") == "VERSION_CONFLICT"
         assert (workspace / "hello.txt").exists()
 
 
@@ -345,8 +376,14 @@ class TestRenameFile:
 class TestDeleteFile:
     def test_delete_without_confirm(self, workspace: Path) -> None:
         result = _payload(file_tools.delete_file("hello.txt"))
-        assert result["status"] == "pending_confirmation"
+        assert result["status"] == "confirmation_required"
         assert (workspace / "hello.txt").exists()  # 未实际删除
+
+    def test_delete_ack_alias_confirms(self, workspace: Path) -> None:
+        ver = content_version_of_file(workspace / "hello.txt")
+        result = _payload(file_tools.delete_file("hello.txt", ack=True, expected_version=ver))
+        assert result["status"] == "success"
+        assert not (workspace / "hello.txt").exists()
 
     def test_delete_with_confirm(self, workspace: Path) -> None:
         ver = content_version_of_file(workspace / "hello.txt")
@@ -356,17 +393,17 @@ class TestDeleteFile:
 
     def test_delete_missing_version_conflicts(self, workspace: Path) -> None:
         result = _payload(file_tools.delete_file("hello.txt", confirm=True))
-        assert result.get("code") == "VERSION_CONFLICT"
+        assert result.get("error_code") == "VERSION_CONFLICT"
         assert (workspace / "hello.txt").exists()
 
     def test_delete_directory_rejected(self, workspace: Path) -> None:
         result = _payload(file_tools.delete_file("subdir"))
-        assert "error" in result
-        assert "目录" in result["error"]
+        assert result.get("status") == "error"
+        assert "目录" in result["message"]
 
     def test_delete_nonexistent(self, workspace: Path) -> None:
         result = _payload(file_tools.delete_file("no_such.txt"))
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_delete_path_traversal(self, workspace: Path) -> None:
         with pytest.raises(SecurityViolationError):
@@ -396,3 +433,27 @@ class TestGetTools:
     def test_list_directory_disables_global_truncation(self) -> None:
         tools = {tool.name: tool for tool in file_tools.get_tools()}
         assert tools["list_directory"].max_result_chars == 0
+
+
+class TestEmLockHidden:
+    """<file>.em-lock 为工作簿建议锁残留（内部工件），不得出现在模型可见列举中。"""
+
+    def test_em_lock_hidden_from_flat_listing(self, workspace: Path) -> None:
+        (workspace / "report.xlsx.em-lock").write_bytes(b"")
+        result = _payload(file_tools.list_directory(depth=0))
+        names = [e["name"] for e in result["entries"]]
+        assert "report.xlsx.em-lock" not in names
+        assert "report.xlsx" in names
+
+    def test_em_lock_hidden_from_tree(self, workspace: Path) -> None:
+        (workspace / "report.xlsx.em-lock").write_bytes(b"")
+        result = _payload(file_tools.list_directory(depth=2, mode="tree"))
+        rendered = str(result)
+        assert "report.xlsx.em-lock" not in rendered
+
+    def test_em_lock_hidden_from_find_files(self, workspace: Path) -> None:
+        (workspace / "report.xlsx.em-lock").write_bytes(b"")
+        result = _payload(file_tools.find_files(pattern="**/*"))
+        names = [m["name"] for m in result["matches"]]
+        assert "report.xlsx.em-lock" not in names
+        assert "report.xlsx" in names

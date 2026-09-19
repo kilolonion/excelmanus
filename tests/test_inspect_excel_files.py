@@ -73,6 +73,7 @@ class TestInspectExcelFiles:
     def test_basic_scan(self, workspace: Path) -> None:
         """recursive=True 默认，应找到根目录 + 子目录的文件。"""
         result = data_tools.inspect_excel_files().value
+        assert result["status"] == "success"
         assert result["excel_files_found"] == 4
         names = [f["file"] for f in result["files"]]
         assert "sales.xlsx" in names
@@ -101,7 +102,7 @@ class TestInspectExcelFiles:
         assert sheet["name"] == "销售数据"
         assert sheet["rows"] == 5  # 1 标题 + 4 数据
         assert sheet["columns"] == 3
-        assert sheet["header_row_hint"] == 0
+        assert sheet["header_row"] == 1
         assert sheet["business_columns"] == 3
         assert sheet["header"] == ["姓名", "金额", "日期"]
 
@@ -132,7 +133,7 @@ class TestInspectExcelFiles:
 
     def test_invalid_directory(self, workspace: Path) -> None:
         result = data_tools.inspect_excel_files(directory="nonexistent").value
-        assert "error" in result
+        assert result.get("status") == "error"
 
     def test_empty_directory(self, workspace: Path) -> None:
         empty_dir = workspace / "empty_dir"
@@ -156,7 +157,7 @@ class TestInspectExcelFiles:
         result = data_tools.inspect_excel_files().value
         merged = next(f for f in result["files"] if f["file"] == "merged_header.xlsx")
         sheet = merged["sheets"][0]
-        assert sheet["header_row_hint"] == 1
+        assert sheet["header_row"] == 2
         assert sheet["business_columns"] == 5
         # header 应为真正列名，且尾部 null 被裁剪
         assert sheet["header"] == ["姓名", "部门", "金额", "日期", "备注"]

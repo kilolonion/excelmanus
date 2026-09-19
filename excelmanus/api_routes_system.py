@@ -13,9 +13,11 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict
 
 import excelmanus
 from excelmanus.api_app_state import (
+    _user_config_store,
     error_json_response as _error_json_response,
     get_config,
     get_config_incomplete,
@@ -28,7 +30,6 @@ from excelmanus.api_app_state import (
     get_tool_registry,
     resolve_workspace as _resolve_workspace,
     resolve_workspace_root as _resolve_workspace_root,
-    uploads_mkdir as _uploads_mkdir,
 )
 from excelmanus.logger import get_logger
 
@@ -64,28 +65,24 @@ async def upload_file(raw_request: Request) -> JSONResponse:
 
     content = await file.read()
 
-    upload_dir = ws.get_upload_dir()
-
     # 支持可选的 folder= 表单字段或查询参数
     folder = raw_request.query_params.get("folder", "")
     if not folder:
         folder = str(form.get("folder", ""))
 
-    if folder:
-        target_dir = _uploads_mkdir(upload_dir, folder)
-        if target_dir is None:
-            return _error_json_response(400, "非法目标路径")
-    else:
-        target_dir = upload_dir
-
     from excelmanus.api_app_state import sanitize_upload_filename
+    from excelmanus.workbook_commit import CommitError
+    from excelmanus.workspace.file_service import WorkspaceFileService
 
     safe_name = f"{uuid.uuid4().hex[:8]}_{sanitize_upload_filename(filename)}"
-    dest_path = target_dir / safe_name
-
-    from excelmanus.api_app_state import write_new_file_nofollow
-
-    write_new_file_nofollow(dest_path, content)
+    folder_rel = str(folder or "").replace("\\", "/").strip("/")
+    rel = f"uploads/{folder_rel}/{safe_name}" if folder_rel else f"uploads/{safe_name}"
+    svc = WorkspaceFileService(ws.root_dir)
+    try:
+        svc.raise_if_failed(svc.create(rel, content))
+    except CommitError as exc:
+        return _error_json_response(400, exc.message)
+    dest_path = svc.root / rel
 
     # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
     converted = False
@@ -102,8 +99,12 @@ async def upload_file(raw_request: Request) -> JSONResponse:
             converted = True
             # 清理原始 .xls/.xlsb 文件，避免双倍磁盘占用
             try:
-                _original_dest.unlink(missing_ok=True)
-            except OSError:
+                svc.delete(
+                    str(_original_dest.relative_to(svc.root)).replace("\\", "/"),
+                    expected_version=None,
+                    observe_live=True,
+                )
+            except Exception:
                 pass
             logger.info("上传文件自动转换: %s → %s", original_filename, filename)
         except (ConversionError, Exception) as exc:
@@ -186,11 +187,17 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
         return _error_json_response(400, "下载到空文件")
 
     ws = _resolve_workspace(raw_request, session_id=(body.get("session_id") or None))
-    dest_path = upload_dir / safe_name
+    safe_name = f"{uuid.uuid4().hex[:8]}_{raw_filename}"
+    rel = f"uploads/{safe_name}"
+    from excelmanus.workbook_commit import CommitError
+    from excelmanus.workspace.file_service import WorkspaceFileService
 
-    from excelmanus.api_app_state import write_new_file_nofollow
-
-    write_new_file_nofollow(dest_path, content)
+    svc = WorkspaceFileService(ws.root_dir)
+    try:
+        svc.raise_if_failed(svc.create(rel, content))
+    except CommitError as exc:
+        return _error_json_response(400, exc.message)
+    dest_path = svc.root / rel
 
     # .xls/.xlsb → 自动转换为 .xlsx，转换成功后删除原始文件节省空间
     converted = False
@@ -206,8 +213,12 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
             raw_filename = xlsx_path.name
             converted = True
             try:
-                _original_dest_url.unlink(missing_ok=True)
-            except OSError:
+                svc.delete(
+                    str(_original_dest_url.relative_to(svc.root)).replace("\\", "/"),
+                    expected_version=None,
+                    observe_live=True,
+                )
+            except Exception:
                 pass
             logger.info("URL 上传文件自动转换: %s → %s", original_filename, raw_filename)
         except (_CE_url, Exception) as exc:
@@ -303,10 +314,11 @@ async def execute_command(request: Request) -> JSONResponse:
         lines = ["### ExcelManus 命令帮助\n"]
         lines.append("| 命令 | 说明 |")
         lines.append("|------|------|")
+        # /clear 已由 CONTROL_COMMAND_SPECS 注册，base 表不再重复
         base = [
             ("/help", "显示帮助"), ("/skills", "查看技能包"), ("/history", "对话历史摘要"),
-            ("/clear", "清除对话历史"), ("/mcp", "MCP Server 状态"), ("/save", "保存对话记录"),
-            ("/config", "环境变量配置"),
+            ("/mcp", "MCP Server 状态"), ("/save", "保存对话记录"),
+            ("/config", "运行时配置"),
         ]
         for cmd, desc in base:
             lines.append(f"| `{cmd}` | {desc} |")
@@ -431,9 +443,14 @@ async def execute_command(request: Request) -> JSONResponse:
         except Exception:
             return JSONResponse(content={"result": "会话状态获取失败", "format": "text"})
 
+    # /subagent run 必须走 chat SSE，才能投影子代理卡片
+    _cmd_lower = command.lower()
+    if _cmd_lower.startswith("/subagent run") or _cmd_lower.startswith("/sub_agent run"):
+        return JSONResponse(content={"result": f"未知命令: {command}", "format": "text"})
+
     # ── 会话级命令：需要 engine 实例 ──
     # 当前端传入 session_id 时，委托给 command_handler 处理会话级控制命令
-    # （如 /fullaccess on, /subagent off, /compact, /rules, /memory, /playbook 等）
+    # （如 /fullaccess on, /subagent off, /compact, /rules, /memory 等）
     session_id = body.get("session_id") or ""
     if session_id and _session_manager is not None:
         engine = _session_manager.get_engine(session_id)
@@ -451,9 +468,35 @@ async def execute_command(request: Request) -> JSONResponse:
     return JSONResponse(content={"result": f"未知命令: {command}", "format": "text"})
 
 
+class OnboardingPut(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+    wizard_completed: bool = False
+    coach_marks_completed: bool = False
+    advanced_guide_completed: bool = False
+    settings_guide_completed: bool = False
+    skipped_at: str | None = None
+    coach_phase: str = "basic"
+    coach_step_index: int = 0
+
+
+@router.put("/api/v1/onboarding")
+async def put_onboarding(body: OnboardingPut) -> JSONResponse:
+    """把新手引导进度写到 config_kv，换浏览器不再重复配置向导。"""
+    from excelmanus.onboarding_state import save_onboarding_state
+
+    store = _user_config_store()
+    if store is None:
+        return _error_json_response(503, "配置存储未初始化")
+    try:
+        state = save_onboarding_state(store, body.model_dump())
+    except RuntimeError:
+        return _error_json_response(503, "配置存储未初始化")
+    return JSONResponse(content=state)
+
+
 @router.get("/api/v1/health")
 async def health(request: Request) -> dict:
-    """健康检查：返回版本号和已加载的工具/技能包。"""
+    """健康检查：返回版本号和已加载的工具/技能包计数。"""
     if get_draining():
         return {
             "status": "draining",
@@ -461,16 +504,25 @@ async def health(request: Request) -> dict:
             "restart_reason": get_restart_reason(),
         }
 
+    details = request.query_params.get("details", "").strip() in {"1", "true", "yes"}
     tools: list[str] = []
     skillpacks: list[str] = []
     _tool_registry = get_tool_registry()
     _skillpack_loader = get_skillpack_loader()
     _session_manager = get_session_manager()
     _config = get_config()
+    tool_count = 0
+    skillpack_count = 0
     if _tool_registry is not None:
-        tools = sorted(_tool_registry.get_tool_names())
+        tool_names = _tool_registry.get_tool_names()
+        tool_count = len(tool_names)
+        if details:
+            tools = sorted(tool_names)
     if _skillpack_loader is not None:
-        skillpacks = sorted(_skillpack_loader.get_skillpacks().keys())
+        skill_names = _skillpack_loader.get_skillpacks().keys()
+        skillpack_count = len(skill_names)
+        if details:
+            skillpacks = sorted(skill_names)
 
     active_sessions = 0
     if _session_manager is not None:
@@ -479,13 +531,19 @@ async def health(request: Request) -> dict:
     # 发布清单摘要（供前端版本轮询使用）。不得开库：fingerprint 只读文件 / git。
     from excelmanus.auth.manage_token import manage_token_configured
     from excelmanus.api_routes_version import get_manifest_data, _API_SCHEMA_VERSION
+    from excelmanus.onboarding_state import load_onboarding_state
     _manifest = get_manifest_data()
+    configured = not get_config_incomplete()
+    onboarding = load_onboarding_state(_user_config_store(), configured=configured)
 
     return {
         "status": "ok",
         "version": excelmanus.__version__,
-        "configured": not get_config_incomplete(),
+        "configured": configured,
+        "onboarding": onboarding,
         "model": _config.model if _config is not None else "",
+        "tool_count": tool_count,
+        "skillpack_count": skillpack_count,
         "tools": tools,
         "skillpacks": skillpacks,
         "active_sessions": active_sessions,

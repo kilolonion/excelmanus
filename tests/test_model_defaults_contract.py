@@ -4,7 +4,6 @@ import re
 from pathlib import Path
 
 from excelmanus.config import (
-    DEFAULT_EMBEDDING_MODEL,
     _infer_context_tokens_for_model,
     get_deprecated_model_replacement,
 )
@@ -17,23 +16,26 @@ _PRESETS = _ROOT / "web" / "src" / "components" / "settings" / "model" / "consta
 _PROVIDER_GUIDES = _ROOT / "web" / "src" / "components" / "onboarding" / "provider-guides.ts"
 
 
-def test_default_embedding_model_is_current_openai_name() -> None:
-    assert DEFAULT_EMBEDDING_MODEL == "text-embedding-3-small"
+_BARE_ENV_KEYS = (
+    "API_KEY",
+    "BASE_URL",
+    "MODEL",
+    "IMAGE_PIXEL_BUDGET",
+    "SESSION_SUMMARY_ENABLED",
+    "SESSION_SUMMARY_MIN_TURNS",
+)
 
 
 def test_readme_quick_config_uses_prefixed_env_keys() -> None:
     cn = _README_CN.read_text(encoding="utf-8")
     en = _README_EN.read_text(encoding="utf-8")
 
-    assert "`EXCELMANUS_EMBEDDING_MODEL`" in cn
-    assert "`EXCELMANUS_SESSION_SUMMARY_MIN_TURNS`" in cn
-    assert "`EMBEDDING_MODEL`" not in cn
-    assert "`SESSION_SUMMARY_MIN_TURNS`" not in cn
-
-    assert "`EXCELMANUS_EMBEDDING_MODEL`" in en
-    assert "`EXCELMANUS_SESSION_SUMMARY_MIN_TURNS`" in en
-    assert "`EMBEDDING_MODEL`" not in en
-    assert "`SESSION_SUMMARY_MIN_TURNS`" not in en
+    for text in (cn, en):
+        assert "`GUARD_MODE`" not in text
+        assert "`EXCELMANUS_GUARD_MODE`" not in text
+        for key in _BARE_ENV_KEYS:
+            assert f"`{key}`" not in text, key
+            assert f"`EXCELMANUS_{key}`" in text, key
 
 
 def test_frontend_anthropic_presets_use_latest_sonnet_alias() -> None:

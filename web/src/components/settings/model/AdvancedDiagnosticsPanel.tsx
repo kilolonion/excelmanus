@@ -1,10 +1,11 @@
 "use client";
 
-import { Brain, Loader2, Save, CheckCircle2 } from "lucide-react";
+import { Brain, Loader2, Save, CheckCircle2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { useAdminModel } from "./admin-model-context";
 import { ConfigTransferPanel } from "./ConfigTransferPanel";
+import { ModelCapabilitiesPanel } from "./ModelCapabilitiesPanel";
 
 export function AdvancedDiagnosticsPanel() {
   const {
@@ -21,6 +22,13 @@ export function AdvancedDiagnosticsPanel() {
 
   return (
     <div className="space-y-6">
+      <div>
+        <h3 className="font-semibold text-sm flex items-center gap-1.5 mb-2">
+          <Zap className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
+          模型能力
+        </h3>
+        <ModelCapabilitiesPanel />
+      </div>
       <div>
         <h3 className="font-semibold text-sm flex items-center gap-1.5 mb-2">
           <Brain className="h-4 w-4" style={{ color: "var(--em-primary)" }} />

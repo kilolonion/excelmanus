@@ -44,7 +44,9 @@ def test_token_matches_constant_time() -> None:
 def test_middleware_requires_bearer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("EXCELMANUS_MANAGE_TOKEN", "manage-token-value-ok")
     from excelmanus.api import create_app
+    from excelmanus.api_app_state import set_draining
 
+    set_draining(False)
     client = TestClient(create_app())
     health = client.get("/api/v1/health")
     assert health.status_code == 200

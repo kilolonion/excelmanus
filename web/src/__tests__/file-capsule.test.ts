@@ -38,6 +38,8 @@ describe("RelatedFilesCard", () => {
 
   it("classifies spreadsheet names as excel", () => {
     expect(isExcelFilename("区域汇总.xlsx")).toBe(true);
+    expect(isExcelFilename("sales.csv")).toBe(true);
+    expect(isExcelFilename("data.tsv")).toBe(false);
     expect(isExcelFilename("notes.py")).toBe(false);
   });
 });

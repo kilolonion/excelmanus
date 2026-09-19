@@ -93,8 +93,8 @@ export default function PrivacyPage() {
           <h2>六、您的权利及行使方式</h2>
           <p>您对个人信息享有以下权利：</p>
           <ol>
-            <li><strong>查阅与导出</strong>：您可以通过设置页或 CLI <code>/config export</code> 命令查看和导出配置与数据。</li>
-            <li><strong>删除</strong>：您可以通过侧边栏删除会话记录，或使用 CLI <code>/clear</code> 命令清除对话历史。</li>
+            <li><strong>查阅与导出</strong>：您可以通过设置页查看和导出配置与数据。</li>
+            <li><strong>删除</strong>：您可以通过侧边栏删除会话记录。</li>
             <li><strong>撤回同意</strong>：您可以在设置中关闭特定功能（如对话历史记录）。</li>
             <li><strong>投诉与反馈</strong>：如您认为我们的个人信息处理侵害了您的权益，可发邮件至 kilolonion@gmail.com，或向网信部门投诉举报。</li>
           </ol>

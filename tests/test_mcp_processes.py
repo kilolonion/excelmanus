@@ -20,19 +20,20 @@ def test_workspace_marker_defaults_to_workspace_dir(tmp_path: Path) -> None:
     assert marker.endswith("/.excelmanus/mcp/")
 
 
-def test_workspace_marker_respects_env_state_dir(
+def test_workspace_marker_respects_settings_state_dir(
     tmp_path: Path,
-    monkeypatch,
 ) -> None:
+    from excelmanus.settings_runtime import override_settings
+
     custom_dir = tmp_path / "custom-mcp-state"
-    monkeypatch.setenv("EXCELMANUS_MCP_STATE_DIR", str(custom_dir))
+    override_settings({"EXCELMANUS_MCP_STATE_DIR": str(custom_dir)})
     marker = _workspace_mcp_marker(str(tmp_path))
-    assert marker == f"{custom_dir.resolve(strict=False)}/"
+    assert marker == f"{custom_dir.resolve(strict=False).as_posix()}/"
 
 
 def test_list_workspace_mcp_processes_filters_by_marker(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    marker = (workspace / ".excelmanus" / "mcp").resolve(strict=False)
+    marker = (workspace / ".excelmanus" / "mcp").resolve(strict=False).as_posix()
     output = (
         f"100 1 /usr/bin/node {marker}/npm/server-a/index.js\n"
         "101 1 /usr/bin/node /tmp/other/.excelmanus/mcp/npm/server-b/index.js\n"
@@ -44,8 +45,8 @@ def test_list_workspace_mcp_processes_filters_by_marker(tmp_path: Path) -> None:
 
 def test_snapshot_supports_custom_state_dir(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
-    custom_state = (tmp_path / "runtime/mcp").resolve(strict=False)
-    default_state = (workspace / ".excelmanus" / "mcp").resolve(strict=False)
+    custom_state = (tmp_path / "runtime/mcp").resolve(strict=False).as_posix()
+    default_state = (workspace / ".excelmanus" / "mcp").resolve(strict=False).as_posix()
     output = (
         f"201 1 /usr/bin/node {custom_state}/npm/server-a/index.js\n"
         f"202 1 /usr/bin/node {default_state}/npm/server-b/index.js\n"

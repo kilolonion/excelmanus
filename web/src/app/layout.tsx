@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import { AppShell } from "./app-shell";
 import { RuntimeConfigScript } from "@/components/RuntimeConfigScript";
+import { SPLASH_CRITICAL_CSS } from "@/components/ui/splash-critical";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -37,6 +38,7 @@ export default function RootLayout({
   return (
     <html lang="zh-CN">
       <head>
+        <style dangerouslySetInnerHTML={{ __html: SPLASH_CRITICAL_CSS }} />
         <RuntimeConfigScript />
       </head>
       <body

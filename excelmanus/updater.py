@@ -1,6 +1,6 @@
 """ExcelManus 更新器 — 版本检查、数据备份、代码更新、依赖重装、远程部署。
 
-提供统一的更新逻辑，供 CLI / API / GUI / 独立脚本调用。
+提供统一的更新逻辑，供 API / GUI / 独立脚本调用。
 """
 
 from __future__ import annotations
@@ -172,6 +172,8 @@ def _run_cmd(
         r = subprocess.run(
             cmd, cwd=str(cwd) if cwd else None,
             capture_output=True, text=True, timeout=timeout,
+            encoding="utf-8", errors="replace",
+            stdin=subprocess.DEVNULL,
             env={**os.environ, "GIT_TERMINAL_PROMPT": "0"},
         )
         return r.returncode, r.stdout.strip(), r.stderr.strip()
@@ -802,7 +804,7 @@ def perform_update(
     use_mirror: bool = False,
     progress_cb: Callable[[str, int], None] | None = None,
 ) -> UpdateResult:
-    """CLI 停机更新入口。与 helper 共用 apply_on_stopped_tree 的结果枚举。"""
+    """停机更新入口。与 helper 共用 apply_on_stopped_tree 的结果枚举。"""
     if not _update_lock.acquire(blocking=False):
         return UpdateResult(
             outcome=UpgradeOutcome.IN_PROGRESS,
@@ -818,7 +820,7 @@ def perform_update(
         if api_is_running():
             return UpdateResult(
                 outcome=UpgradeOutcome.API_RUNNING,
-                error="API 仍在运行。请使用设置页升级，或先停止服务再执行 CLI 更新。",
+                error="API 仍在运行。请使用设置页升级，或先停止服务再执行命令行更新。",
             )
         if not skip_backup:
             bk = backup_user_data(project_root)

@@ -1,6 +1,6 @@
 # Skillpack Protocol Specification (SSOT)
 
-> Last updated: 2026-09-11  
+> Last updated: 2026-09-15  
 > Scope: `excelmanus/skillpacks`, README, tests, and task documentation
 
 ## 1. Goals
@@ -26,7 +26,7 @@ Strict protocol notes:
 
 ## 4. Routing Semantics
 - Slash commands: `/<skill_name> args...` directly invoke the skill (`slash_direct`).
-- Non-slash messages: enter the step loop with all tools visible. Slash and `@skill` are explicit control plane, not lexical task routing.
+- Non-slash messages: enter the step loop. Visible tools come from `EffectiveToolCatalog` by session mode: `read` / `plan` do not see pure-write tools; `write` sees the full catalog; `code` sees only `run_code`. Slash and `@skill` are explicit control plane, not lexical task routing.
 
 ## 5. Built-in system Skillpacks (Authoritative List)
 - `data_basic`

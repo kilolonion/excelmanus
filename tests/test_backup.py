@@ -14,9 +14,7 @@ def test_workspace_transaction_removed() -> None:
 
 def test_isolated_workspace_has_no_overlay(tmp_path) -> None:
     iso = IsolatedWorkspace(tmp_path)
-    assert iso.transaction_enabled is False
-    iso.transaction_enabled = True
-    assert iso.transaction_enabled is False
+    assert not hasattr(iso, "transaction_enabled")
     env = iso.create_sandbox_env()
     assert env.get_tmp_dir().is_dir()
     assert not hasattr(env, "get_cow_log_path")

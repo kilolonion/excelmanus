@@ -20,7 +20,10 @@ def _payload(result):
         if result.error is not None:
             data.setdefault("error", result.error.message)
             data.setdefault("message", result.error.message)
-            data.setdefault("status", "error")
+            data.setdefault("error_code", result.error.code)
+            # 保留 run_code 已有 status（timed_out / failed），不要踩成 "error"
+            if not data.get("status"):
+                data["status"] = "error"
         return data
     if isinstance(result, str):
         return json.loads(result)
@@ -46,7 +49,7 @@ class TestWriteTextFile:
             )
         )
         assert result["status"] == "success"
-        assert result["file"] == "scripts/temp/job.py"
+        assert result["file_path"] == "scripts/temp/job.py"
         assert (workspace / "scripts" / "temp" / "job.py").exists()
         assert result["content_version"].startswith("sha256:")
 
@@ -56,7 +59,7 @@ class TestWriteTextFile:
         result = _payload(
             code_tools.write_text_file("scripts/temp/job.py", "new")
         )
-        assert result.get("code") == "VERSION_CONFLICT"
+        assert result.get("error_code") == "VERSION_CONFLICT"
         assert target.read_text(encoding="utf-8") == "old"
 
     def test_write_existing_with_version(self, workspace: Path) -> None:
@@ -78,7 +81,7 @@ class TestWriteTextFile:
         result = _payload(
             code_tools.write_text_file("book.xlsx", "not-excel")
         )
-        assert result.get("code") == "PATH_INVALID"
+        assert result.get("error_code") == "PATH_INVALID"
         assert not (workspace / "book.xlsx").exists()
 
     def test_write_reject_when_overwrite_false(self, workspace: Path) -> None:
@@ -111,7 +114,7 @@ class TestEditTextFile:
                 "print('new')",
             )
         )
-        assert result.get("code") == "VERSION_CONFLICT"
+        assert result.get("error_code") == "VERSION_CONFLICT"
         assert target.read_text(encoding="utf-8") == "print('old')\n"
 
     def test_edit_with_version(self, workspace: Path) -> None:
@@ -148,6 +151,17 @@ class TestRunCodeInline:
         assert "hello" in result["stdout_tail"]
         assert result["sandbox_tier"] == "RED"
 
+    def test_inline_stdout_utf8_chinese(self, workspace: Path) -> None:
+        result = _payload(
+            code_tools.run_code(
+                code="print('中文核对')\n",
+                python_command=sys.executable,
+                require_excel_deps=False,
+            )
+        )
+        assert result["status"] == "success"
+        assert "中文核对" in result["stdout_tail"]
+
     def test_inline_cleans_temp_file(self, workspace: Path) -> None:
         code_tools.run_code(
             code="print(1)",
@@ -170,14 +184,16 @@ class TestRunCodeInline:
         assert result["return_code"] != 0
 
     def test_inline_timeout(self, workspace: Path) -> None:
-        result = _payload(
-            code_tools.run_code(
-                code="import time; time.sleep(5)",
-                timeout_seconds=1,
-                python_command=sys.executable,
-                require_excel_deps=False,
-            )
+        packed = code_tools.run_code(
+            code="import time; time.sleep(5)",
+            timeout_seconds=1,
+            python_command=sys.executable,
+            require_excel_deps=False,
         )
+        assert packed.success is False
+        assert packed.error is not None
+        assert packed.error.code == "RUN_CODE_TIMEOUT"
+        result = _payload(packed)
         assert result["status"] == "timed_out"
         assert result["timed_out"] is True
         assert result["return_code"] == 124
@@ -534,6 +550,58 @@ class TestGetTools:
         assert run_code_tool.max_result_chars == 8000
         assert run_code_tool.truncate_head_chars == 5000
         assert run_code_tool.truncate_tail_chars == 3000
+
+
+class TestPackRunCodeResult:
+    """_pack_run_code_result：超时与发布冲突不得伪装成功。"""
+
+    def test_timed_out_is_not_success(self) -> None:
+        packed = code_tools._pack_run_code_result({
+            "status": "timed_out",
+            "timed_out": True,
+            "published": [],
+            "stderr_tail": "",
+        })
+        assert packed.success is False
+        assert packed.error is not None
+        assert packed.error.code == "RUN_CODE_TIMEOUT"
+        assert packed.value["status"] == "timed_out"
+        assert packed.value["timed_out"] is True
+        assert packed.value["published"] == []
+
+    def test_publish_version_conflict_is_not_success(self) -> None:
+        published = [
+            {"path": "ok.xlsx", "status": "committed", "content_version": "sha256:aaa"},
+            {
+                "path": "conflict.xlsx",
+                "status": "error",
+                "error": "VERSION_CONFLICT",
+                "message": "stale",
+            },
+        ]
+        packed = code_tools._pack_run_code_result({
+            "status": "success",
+            "timed_out": False,
+            "published": published,
+        })
+        assert packed.success is False
+        assert packed.error is not None
+        assert packed.error.code == "VERSION_CONFLICT"
+        assert packed.value["status"] == "success"
+        assert packed.value["published"] == published
+
+    def test_all_committed_is_success(self) -> None:
+        packed = code_tools._pack_run_code_result({
+            "status": "success",
+            "timed_out": False,
+            "published": [
+                {"path": "ok.xlsx", "status": "committed", "content_version": "sha256:aaa"},
+            ],
+        })
+        assert packed.success is True
+        assert packed.error is None
+        assert packed.value["status"] == "success"
+        assert packed.value["published"][0]["status"] == "committed"
 
 
 class TestForgedSandboxSaveVersion:

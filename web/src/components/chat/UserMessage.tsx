@@ -6,28 +6,78 @@ import { Badge } from "@/components/ui/badge";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { formatFileMention } from "./chat-input-insert";
+import {
+  formatFileMention,
+  insertTokensIntoText,
+  scheduleTextareaCursor,
+  toDisplayMentionTokens,
+  trackRecentExcelFile,
+} from "./chat-input-insert";
 import { MentionHighlighter } from "./MentionHighlighter";
 import { downloadFile, buildApiUrl, getAuthHeaders } from "@/lib/api";
-import { ImagePreviewModal } from "./ImagePreviewModal";
-import { CodePreviewModal, isCodeFile } from "./CodePreviewModal";
+import { classifyWorkspaceFile } from "@/lib/file-kind";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import type { FileAttachment } from "@/lib/types";
 
 const MAX_COLLAPSED_HEIGHT = 200; // px
 
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"]);
-function isExcelFile(filename: string): boolean {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  return EXCEL_EXTS.has(ext);
-}
-
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
-function isImageFile(filename: string): boolean {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  return IMAGE_EXTS.has(ext);
-}
-
 const ACCEPTED_EDIT_EXTENSIONS = ".xlsx,.xls,.xlsm,.xlsb,.csv,.png,.jpg,.jpeg";
+
+/** 提交前把编辑区短标签还原为发送协议。 */
+export function restoreFullMentions(
+  text: string,
+  map: Map<string, string>,
+): string {
+  let next = text;
+  const entries = [...map.entries()].sort((a, b) => b[0].length - a[0].length);
+  const slots: string[] = [];
+  for (const [display, full] of entries) {
+    if (!next.includes(display)) continue;
+    const mark = `\0${slots.length}\0`;
+    next = next.replaceAll(display, mark);
+    slots.push(full);
+  }
+  for (let i = 0; i < slots.length; i++) {
+    next = next.replaceAll(`\0${i}\0`, slots[i]);
+  }
+  return next;
+}
+
+export function insertEditMentionTokens(
+  text: string,
+  cursorPos: number,
+  fullTokens: string[],
+  tokenMap: Map<string, string>,
+): { newText: string; newCursorPos: number; displayTokens: string[] } {
+  const displayTokens = toDisplayMentionTokens(fullTokens, tokenMap);
+  const inserted = insertTokensIntoText(text, cursorPos, displayTokens);
+  return { ...inserted, displayTokens };
+}
+
+export function findAtomicMentionDeletion(
+  text: string,
+  cursor: number,
+  key: "Backspace" | "Delete",
+  confirmedTokens: Iterable<string>,
+): { newText: string; token: string; newCursor: number } | null {
+  for (const token of confirmedTokens) {
+    const idx = text.indexOf(token);
+    if (idx < 0) continue;
+    const tokenEnd = idx + token.length;
+    const hit =
+      key === "Backspace"
+        ? cursor > idx && cursor <= tokenEnd
+        : cursor >= idx && cursor < tokenEnd;
+    if (!hit) continue;
+    const trailSpace = text[tokenEnd] === " " ? 1 : 0;
+    return {
+      newText: text.slice(0, idx) + text.slice(tokenEnd + trailSpace),
+      token,
+      newCursor: idx,
+    };
+  }
+  return null;
+}
 
 interface UserMessageProps {
   content: string;
@@ -62,6 +112,23 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const editFileInputRef = useRef<HTMLInputElement>(null);
   const wsPickerRef = useRef<HTMLDivElement>(null);
+  const editTokenMapRef = useRef<Map<string, string>>(new Map());
+  const [editConfirmedTokens, setEditConfirmedTokens] = useState<Set<string>>(
+    () => new Set(),
+  );
+
+  const rememberDisplayTokens = useCallback((tokens: string[]) => {
+    setEditConfirmedTokens((prev) => {
+      const next = new Set(prev);
+      tokens.forEach((token) => next.add(token));
+      return next;
+    });
+  }, []);
+
+  const clearEditMentionState = useCallback(() => {
+    editTokenMapRef.current.clear();
+    setEditConfirmedTokens(new Set());
+  }, []);
 
   // 监听来自 excel-store 的已确认 Excel 范围选择（在编辑模式下）
   const pendingSelection = useExcelStore((s) => s.pendingSelection);
@@ -100,11 +167,12 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     const bubbleEl = columnRef.current?.querySelector(".user-bubble") as HTMLElement | null;
     const measured = (bubbleEl ?? columnRef.current)?.getBoundingClientRect().width ?? 0;
     setEditWidth(Math.max(Math.ceil(measured), 260));
+    clearEditMentionState();
     setEditText(content);
     setRetainedFiles(files ?? []);
     setFilesExpanded(false);
     setEditing(true);
-  }, [content, files, isStreaming]);
+  }, [content, files, isStreaming, clearEditMentionState]);
 
   const cancelEdit = useCallback(() => {
     setEditing(false);
@@ -115,7 +183,8 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     setWsPickerOpen(false);
     setWsFiles([]);
     setWsFilter("");
-  }, [content]);
+    clearEditMentionState();
+  }, [content, clearEditMentionState]);
 
   // 监听来自 excel-store 的已确认 Excel 范围选择（在编辑模式下）
   useEffect(() => {
@@ -125,37 +194,24 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     const { filePath, sheet, range } = pendingSelection;
     const filename = filePath.split("/").pop() || filePath;
     const version = useExcelStore.getState().getContentVersion(filePath);
-    const token = formatFileMention({ path: filePath, sheet, range, version });
 
     const textarea = textareaRef.current;
     // 使用 textarea 的当前值，而不是 editText 状态（避免闭包问题）
     const currentText = textarea?.value ?? "";
     const cursorPos = textarea?.selectionStart ?? currentText.length;
-    const before = currentText.slice(0, cursorPos);
-    const after = currentText.slice(cursorPos);
-    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
-    const prefix = needsSpace ? " " : "";
-    const newText = before + prefix + token + " " + after;
+    const { newText, newCursorPos, displayTokens } = insertEditMentionTokens(
+      currentText,
+      cursorPos,
+      [formatFileMention({ path: filePath, sheet, range, version })],
+      editTokenMapRef.current,
+    );
     setEditText(newText);
-
-    // 将光标移动到插入内容之后
-    const newCursorPos = (before + prefix + token + " ").length;
-    requestAnimationFrame(() => {
-      textarea?.focus();
-      textarea?.setSelectionRange(newCursorPos, newCursorPos);
-    });
-
-    // 记录到最近文件
-    const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-    if (EXCEL_EXTS.has(extLower)) {
-      useExcelStore.getState().addRecentFile({
-        path: filePath,
-        filename,
-      });
-    }
+    rememberDisplayTokens(displayTokens);
+    scheduleTextareaCursor(textarea, newCursorPos);
+    trackRecentExcelFile(filePath, filename);
 
     clearPendingSelection();
-  }, [editing, pendingSelection, clearPendingSelection]);
+  }, [editing, pendingSelection, clearPendingSelection, rememberDisplayTokens]);
 
   const fetchWorkspaceFiles = useCallback(async () => {
     try {
@@ -180,19 +236,22 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     setWsFilter("");
   }, [wsPickerOpen, fetchWorkspaceFiles]);
 
-  const selectWsFile = useCallback((filename: string) => {
-    const mention = `@file:${filename}`;
+  const selectWsFile = useCallback((path: string) => {
     const textarea = textareaRef.current;
-    const cursorPos = textarea?.selectionStart ?? editText.length;
-    const before = editText.slice(0, cursorPos);
-    const after = editText.slice(cursorPos);
-    const needsSpace = before.length > 0 && !before.endsWith(" ") && !before.endsWith("\n");
-    const prefix = needsSpace ? " " : "";
-    setEditText(before + prefix + mention + " " + after);
+    const currentText = textarea?.value ?? editText;
+    const cursorPos = textarea?.selectionStart ?? currentText.length;
+    const { newText, newCursorPos, displayTokens } = insertEditMentionTokens(
+      currentText,
+      cursorPos,
+      [formatFileMention({ path })],
+      editTokenMapRef.current,
+    );
+    setEditText(newText);
+    rememberDisplayTokens(displayTokens);
     setWsPickerOpen(false);
     setWsFilter("");
-    requestAnimationFrame(() => textarea?.focus());
-  }, [editText]);
+    scheduleTextareaCursor(textarea, newCursorPos);
+  }, [editText, rememberDisplayTokens]);
 
   // 点击外部时关闭工作区选择器
   useEffect(() => {
@@ -207,10 +266,11 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
   }, [wsPickerOpen]);
 
   const confirmEdit = useCallback(() => {
-    const trimmed = editText.trim();
+    const trimmed = restoreFullMentions(editText, editTokenMapRef.current).trim();
     if (!trimmed && editFiles.length === 0 && retainedFiles.length === 0) return;
     setEditing(false);
     setEditWidth(null);
+    clearEditMentionState();
     onEditAndResend?.(
       trimmed,
       editFiles.length > 0 ? editFiles : undefined,
@@ -218,18 +278,43 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
     );
     setEditFiles([]);
     setRetainedFiles([]);
-  }, [editText, editFiles, retainedFiles, onEditAndResend]);
+  }, [editText, editFiles, retainedFiles, onEditAndResend, clearEditMentionState]);
 
   const handleKeyDown = useCallback(
     (e: React.KeyboardEvent) => {
       if (e.key === "Escape") {
         cancelEdit();
-      } else if (e.key === "Enter" && !e.shiftKey) {
+        return;
+      }
+      if (e.key === "Backspace" || e.key === "Delete") {
+        const textarea = textareaRef.current;
+        if (textarea && textarea.selectionStart === textarea.selectionEnd) {
+          const hit = findAtomicMentionDeletion(
+            editText,
+            textarea.selectionStart,
+            e.key,
+            editConfirmedTokens,
+          );
+          if (hit) {
+            e.preventDefault();
+            setEditText(hit.newText);
+            setEditConfirmedTokens((prev) => {
+              const next = new Set(prev);
+              next.delete(hit.token);
+              return next;
+            });
+            editTokenMapRef.current.delete(hit.token);
+            scheduleTextareaCursor(textarea, hit.newCursor);
+            return;
+          }
+        }
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
         e.preventDefault();
         confirmEdit();
       }
     },
-    [cancelEdit, confirmEdit]
+    [cancelEdit, confirmEdit, editText, editConfirmedTokens]
   );
 
   const clock = formatClock(timestamp);
@@ -263,8 +348,8 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
             />
             {(retainedFiles.length > 0 || editFiles.length > 0) && (() => {
               const allEditBadges = [
-                ...retainedFiles.map((f, i) => ({ key: `retained-${i}`, filename: f.filename, isImage: isImageFile(f.filename), onRemove: () => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
-                ...editFiles.map((f, i) => ({ key: `new-${i}`, filename: f.name, isImage: isImageFile(f.name), onRemove: () => setEditFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+                ...retainedFiles.map((f, i) => ({ key: `retained-${i}`, filename: f.filename, isImage: classifyWorkspaceFile(f.filename) === "image", onRemove: () => setRetainedFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
+                ...editFiles.map((f, i) => ({ key: `new-${i}`, filename: f.name, isImage: classifyWorkspaceFile(f.name) === "image", onRemove: () => setEditFiles((prev) => prev.filter((_, idx) => idx !== i)) })),
               ];
               const shouldCollapse = isMobile && allEditBadges.length > MOBILE_FILE_LIMIT && !filesExpanded;
               const visible = shouldCollapse ? allEditBadges.slice(0, MOBILE_FILE_LIMIT) : allEditBadges;
@@ -450,33 +535,19 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
           return (
           <div className={`flex max-w-full flex-wrap gap-1 ${content ? "mt-1.5" : ""}`}>
             {visibleFiles.map((f, i) => {
-              const excel = isExcelFile(f.filename);
-              const image = isImageFile(f.filename);
-              const code = isCodeFile(f.filename);
-              
-              // 直接渲染，不使用 DialogTrigger，让移动端也能点击
-              const attachment = (
+              const kind = classifyWorkspaceFile(f.filename);
+              return (
                 <Badge
                   key={i}
                   variant="secondary"
-                  className={`text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px] touch-show ${
-                    excel ? "cursor-pointer hover:bg-secondary/70" : ""
-                  }`}
-                  onClick={
-                    excel
-                      ? () => {
-                          useExcelStore.getState().addRecentFile({
-                            path: f.path,
-                            filename: f.filename,
-                          });
-                          useExcelStore.getState().openPanel(f.path);
-                        }
-                      : undefined
-                  }
+                  className="text-[11px] leading-4 gap-0.5 pl-2 pr-0.5 py-0 max-w-[200px] touch-show cursor-pointer hover:bg-secondary/70"
+                  onClick={() => openWorkspaceFile(f.path)}
                 >
-                  {image ? (
+                  {kind === "image" ? (
                     <ImageIcon className="h-3 w-3 flex-shrink-0" />
-                  ) : code ? (
+                  ) : kind === "spreadsheet" ? (
+                    <FileSpreadsheet className="h-3 w-3 flex-shrink-0" />
+                  ) : kind === "text" || kind === "word" ? (
                     <FileText className="h-3 w-3 flex-shrink-0" />
                   ) : null}
                   <span className="truncate">{f.filename}</span>
@@ -497,31 +568,6 @@ export const UserMessage = React.memo(function UserMessage({ content, files, onE
                   </button>
                 </Badge>
               );
-
-              // 移动端直接渲染预览组件，让 onClick 触发
-              if (image) {
-                return (
-                  <ImagePreviewModal
-                    key={i}
-                    imagePath={f.path}
-                    filename={f.filename}
-                    trigger={attachment}
-                  />
-                );
-              }
-
-              if (code) {
-                return (
-                  <CodePreviewModal
-                    key={i}
-                    filePath={f.path}
-                    filename={f.filename}
-                    trigger={attachment}
-                  />
-                );
-              }
-
-              return attachment;
             })}
             {hiddenFileCount > 0 && (
               <button

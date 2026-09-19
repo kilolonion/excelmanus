@@ -96,11 +96,17 @@ class TestHasPending:
 class TestCleanupDone:
     @pytest.mark.asyncio
     async def test_cleanup_removes_done(self, registry: InteractionRegistry) -> None:
+        """resolve 即时清理已完成 Future；cleanup_done 兜底清理取消项。"""
         registry.create("q1")
         registry.create("q2")
         registry.resolve("q1", "done")
-        cleaned = registry.cleanup_done()
-        assert cleaned == 1
+        # 新契约：resolve 内部已即时清理，q1 不在册
+        assert registry.pending_count == 1
+        assert registry.cleanup_done() == 0
+        # 外部取消的 Future 由 cleanup_done 兜底回收
+        fut = registry.create("q3")
+        fut.cancel()
+        assert registry.cleanup_done() == 1
         assert registry.pending_count == 1
 
 

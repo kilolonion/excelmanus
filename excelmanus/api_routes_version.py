@@ -52,15 +52,30 @@ def _require_control_plane(request: Request) -> JSONResponse | None:
     return None
 
 
+_GIT_COMMIT_UNSET = object()
+_git_commit_cache: object = _GIT_COMMIT_UNSET
+
+
+def reset_git_commit_cache() -> None:
+    """测试用：清空 git commit 进程缓存。"""
+    global _git_commit_cache
+    _git_commit_cache = _GIT_COMMIT_UNSET
+
+
 def _get_git_commit(root: Path) -> str | None:
+    global _git_commit_cache
+    if _git_commit_cache is not _GIT_COMMIT_UNSET:
+        return _git_commit_cache  # type: ignore[return-value]
     try:
         r = subprocess.run(
             ["git", "rev-parse", "--short", "HEAD"],
             cwd=str(root), capture_output=True, text=True, timeout=5,
         )
-        return r.stdout.strip() or None if r.returncode == 0 else None
+        value = r.stdout.strip() or None if r.returncode == 0 else None
     except Exception:
-        return None
+        value = None
+    _git_commit_cache = value
+    return value
 
 
 def _get_frontend_build_id(root: Path, deploy_meta: dict | None = None) -> str | None:

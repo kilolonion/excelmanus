@@ -78,19 +78,11 @@ def test_run_code_openpyxl_save_publishes_to_user_path(tmp_path: Path) -> None:
             sandbox_tier="GREEN",
         )
     )
-    assert result["status"] == "success", result
-    assert "cow_mapping" not in result
-    published = result.get("published") or []
-    assert any(
-        item.get("path") == "book.xlsx" and item.get("status") == "committed"
-        for item in published
-    )
+    assert result["status"] == "failed", result
+    assert "工作区表格禁止直接保存" in (result.get("stderr_tail") or "")
     wb2 = load_workbook(str(target))
-    assert wb2.active["A1"].value == "updated"
+    assert wb2.active["A1"].value == "original"
     wb2.close()
-    recs = RevisionStore(tmp_path).list("book.xlsx")
-    assert any(r.reason == "afterEdit" for r in recs)
-    assert not (tmp_path / "outputs" / "backups").exists()
     pending = tmp_path / ".excelmanus" / "pending"
     if pending.is_dir():
         assert not any(pending.iterdir())

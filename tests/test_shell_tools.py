@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -26,8 +27,18 @@ def workspace(tmp_path: Path) -> Path:
     return tmp_path
 
 
+def test_run_shell_cross_platform_executable(workspace: Path) -> None:
+    result = _payload(shell_tools.run_shell("whoami"))
+    assert result["status"] == "success"
+    assert result["return_code"] == 0
+
+
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="POSIX shell=False 可执行文件集成；Windows 别名不是可执行文件",
+)
 class TestRunShellAllowed:
-    """白名单命令正常执行。"""
+    """POSIX 白名单命令正常执行。"""
 
     def test_echo(self, workspace: Path) -> None:
         result = _payload(shell_tools.run_shell("echo hello"))
@@ -63,6 +74,11 @@ class TestRunShellAllowed:
         result = _payload(shell_tools.run_shell("find . -name '*.csv'"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
+
+    def test_preflight_rejects_find_before_execution(self) -> None:
+        ok, reason = shell_tools.preflight_command("find . -name '*.csv'")
+        assert not ok
+        assert "白名单" in reason
 
     def test_pwd(self, workspace: Path) -> None:
         result = _payload(shell_tools.run_shell("pwd"))
@@ -249,23 +265,26 @@ class TestRunShellTimeout:
 class TestSensitivePathBlocking:
     """敏感路径访问拦截。"""
 
-    def test_cat_excelmanus_dir_blocked(self, workspace: Path) -> None:
-        """cat ~/.excelmanus/config.env 被拦截。"""
-        result = _payload(shell_tools.run_shell("cat ~/.excelmanus/config.env"))
-        assert result["status"] == "blocked"
-        assert "敏感目录" in result["reason"]
+    def test_excelmanus_dir_blocked(self, workspace: Path) -> None:
+        allowed, reason = shell_tools._check_sensitive_paths(
+            "cat ~/.excelmanus/config.env", workspace, workspace,
+        )
+        assert allowed is False
+        assert "敏感目录" in reason
 
-    def test_cat_excelmanus_db_blocked(self, workspace: Path) -> None:
-        """cat ~/.excelmanus/excelmanus.db 被拦截。"""
-        result = _payload(shell_tools.run_shell("cat ~/.excelmanus/excelmanus.db"))
-        assert result["status"] == "blocked"
-        assert "敏感目录" in result["reason"]
+    def test_excelmanus_db_blocked(self, workspace: Path) -> None:
+        allowed, reason = shell_tools._check_sensitive_paths(
+            "cat ~/.excelmanus/excelmanus.db", workspace, workspace,
+        )
+        assert allowed is False
+        assert "敏感目录" in reason
 
-    def test_head_secret_key_blocked(self, workspace: Path) -> None:
-        """head ~/.excelmanus/data/.secret_key 被拦截。"""
-        result = _payload(shell_tools.run_shell("head ~/.excelmanus/data/.secret_key"))
-        assert result["status"] == "blocked"
-        assert "敏感目录" in result["reason"]
+    def test_secret_key_blocked(self, workspace: Path) -> None:
+        allowed, reason = shell_tools._check_sensitive_paths(
+            "head ~/.excelmanus/data/.secret_key", workspace, workspace,
+        )
+        assert allowed is False
+        assert "敏感目录" in reason
 
     def test_find_excelmanus_blocked(self, workspace: Path) -> None:
         """find ~/.excelmanus/ 被拦截。"""
@@ -273,11 +292,12 @@ class TestSensitivePathBlocking:
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"] or "敏感目录" in result["reason"]
 
-    def test_grep_in_excelmanus_blocked(self, workspace: Path) -> None:
-        """grep pattern ~/.excelmanus/config.env 被拦截。"""
-        result = _payload(shell_tools.run_shell("grep API_KEY ~/.excelmanus/config.env"))
-        assert result["status"] == "blocked"
-        assert "敏感目录" in result["reason"]
+    def test_file_in_excelmanus_blocked(self, workspace: Path) -> None:
+        allowed, reason = shell_tools._check_sensitive_paths(
+            "grep API_KEY ~/.excelmanus/config.env", workspace, workspace,
+        )
+        assert allowed is False
+        assert "敏感目录" in reason
 
     def test_cat_dotenv_outside_workspace_blocked(self, workspace: Path) -> None:
         """工作区外的 .env 文件被敏感路径检查拦截。"""
@@ -304,10 +324,11 @@ class TestSensitivePathBlocking:
 
     def test_pipe_sensitive_blocked(self, workspace: Path) -> None:
         """管道中包含敏感路径也被拦截。"""
-        result = _payload(
-            shell_tools.run_shell("grep key ~/.excelmanus/config.env | head -1")
+        allowed, reason = shell_tools._check_sensitive_paths(
+            "grep key ~/.excelmanus/config.env | head -1", workspace, workspace,
         )
-        assert result["status"] == "blocked"
+        assert allowed is False
+        assert "敏感目录" in reason
 
 
 class TestEnvPrintenvRemoved:

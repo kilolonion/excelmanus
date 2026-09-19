@@ -42,6 +42,7 @@ class TestSearchExcelValuesContains:
 
     def test_basic_search(self, sample_xlsx: Path) -> None:
         data = search_excel_values(file_path=str(sample_xlsx), query="张三丰").value
+        assert data["status"] == "success"
         assert data["total_matches"] >= 2  # 订单表2次 + 客户表1次
         assert len(data["matches"]) >= 2
 
@@ -103,7 +104,7 @@ class TestSearchExcelValuesRegex:
         data = search_excel_values(
             file_path=str(sample_xlsx), query="[invalid", match_mode="regex",
         ).value
-        assert "error" in data
+        assert data.get("status") == "error"
 
 
 class TestSearchExcelValuesFilters:
@@ -150,7 +151,7 @@ class TestSearchExcelValuesEdgeCases:
         data = search_excel_values(
             file_path=str(tmp_path / "nonexistent.xlsx"), query="test",
         ).value
-        assert "error" in data
+        assert data.get("status") == "error"
 
     def test_no_matches(self, sample_xlsx: Path) -> None:
         data = search_excel_values(
@@ -164,4 +165,4 @@ class TestSearchExcelValuesEdgeCases:
             file_path=str(sample_xlsx), query="",
         ).value
         # 空 query 应该返回错误或空结果
-        assert data.get("total_matches", 0) == 0 or "error" in data
+        assert data.get("total_matches", 0) == 0 or data.get("status") == "error"

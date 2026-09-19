@@ -78,7 +78,7 @@ def save_plan_markdown(
 
     path = output_dir / filename
     path.write_text(markdown, encoding="utf-8")
-    return str(path.relative_to(root))
+    return path.relative_to(root).as_posix()
 
 
 def parse_plan_markdown(markdown: str) -> tuple[str, list[str | dict]]:
@@ -194,34 +194,112 @@ def _safe_str(value: object) -> str:
     return text
 
 
-def set_plan_active(engine: object, active: bool) -> None:
-    engine._plan_active = bool(active)  # type: ignore[attr-defined]
-    engine._current_chat_mode = "plan" if active else "write"  # type: ignore[attr-defined]
+CHAT_MODES: frozenset[str] = frozenset({"read", "plan", "write"})
+
+
+def normalize_chat_mode(value: object) -> str:
+    mode = str(value or "write").strip().lower() or "write"
+    if mode not in CHAT_MODES:
+        return "write"
+    return mode
+
+
+def migrate_legacy_plan_flag(engine: object) -> str:
+    """旧双旗标快照：``_plan_active=True`` 且 chat_mode 不是 plan 时提升一次。
+
+    运行时 ``is_plan_active`` 只读 ``_current_chat_mode``，不再并行写这个旗标。
+    """
+    if bool(getattr(engine, "_plan_active", False)):
+        if normalize_chat_mode(getattr(engine, "_current_chat_mode", "write")) != "plan":
+            engine._current_chat_mode = "plan"  # type: ignore[attr-defined]
+        engine._plan_active = False  # type: ignore[attr-defined]
+    return normalize_chat_mode(getattr(engine, "_current_chat_mode", "write"))
+
+
+def apply_chat_mode(
+    engine: object,
+    next_mode: str,
+    *,
+    source: str,
+    on_event: object | None = None,
+) -> str:
+    """唯一权限出口：改 ``_current_chat_mode`` → bind catalog → ``MODE_CHANGED``。
+
+    ``source``: ``request``（UI tab / 请求体）、``slash``（``/plan``）、
+    ``plan_exit``（批准退出）。离开 plan 时清 pending。
+    用户 tab / ``/plan off`` 是显式退出；模型写入仍须走 ``exit_plan_mode``。
+    """
+    nxt = normalize_chat_mode(next_mode)
+    prev = normalize_chat_mode(getattr(engine, "_current_chat_mode", "write"))
+    leaving_plan = prev == "plan" and nxt != "plan"
+    engine._current_chat_mode = nxt  # type: ignore[attr-defined]
+    if hasattr(engine, "_plan_active"):
+        engine._plan_active = False  # type: ignore[attr-defined]
     engine._tools_cache = None  # type: ignore[attr-defined]
-    if not active:
+    if leaving_plan:
         engine._pending_plan_exit = None  # type: ignore[attr-defined]
+    from excelmanus.tools.catalog import bind_engine_catalog
+
+    bind_engine_catalog(engine)
+    changed = prev != nxt
+    should_emit = changed or source in {"slash", "plan_exit"}
+    if should_emit and on_event is not None:
+        from excelmanus.events import EventType, ToolCallEvent
+
+        on_event(  # type: ignore[operator]
+            ToolCallEvent(
+                event_type=EventType.MODE_CHANGED,
+                mode_name="chat_mode",
+                mode_enabled=True,
+                mode_value=nxt,
+            )
+        )
+    return nxt
 
 
-def handle_plan_command(engine: object, action: str) -> str:
+def set_plan_active(
+    engine: object,
+    active: bool,
+    *,
+    on_event: object | None = None,
+    source: str = "slash",
+) -> None:
+    """兼容入口：进入/离开 plan，最终走 ``apply_chat_mode``。"""
+    apply_chat_mode(
+        engine,
+        "plan" if active else "write",
+        source=source,
+        on_event=on_event,
+    )
+
+
+def handle_plan_command(
+    engine: object,
+    action: str,
+    *,
+    on_event: object | None = None,
+) -> str:
     """``/plan`` ``/plan off`` 控制面命令，不进模型历史。"""
+    from excelmanus.security.policy import is_plan_active
+
     key = (action or "").strip().lower()
     if key in {"", "on"}:
-        set_plan_active(engine, True)
+        apply_chat_mode(engine, "plan", source="slash", on_event=on_event)
         return "已开启计划模式。先探查并写计划；改表须批准 exit_plan_mode，或使用 /plan off。"
     if key == "off":
-        set_plan_active(engine, False)
+        apply_chat_mode(engine, "write", source="slash", on_event=on_event)
         return "已关闭计划模式，回到写入模式。"
     if key == "status":
-        active = bool(getattr(engine, "_plan_active", False) or getattr(engine, "_current_chat_mode", "") == "plan")
+        active = is_plan_active(engine)
         pending = getattr(engine, "_pending_plan_exit", None)
         line = "计划模式: **开启**" if active else "计划模式: **关闭**"
         if pending:
             line += "\n有一份待批准的退出请求。使用 `/plan approve` 退出，或 `/plan off` 直接关闭。"
         return line
     if key == "approve":
-        if not getattr(engine, "_pending_plan_exit", None) and getattr(engine, "_current_chat_mode", "") != "plan":
+        if not getattr(engine, "_pending_plan_exit", None) and not is_plan_active(engine):
             return "没有待批准的计划退出。"
-        set_plan_active(engine, False)
+        apply_chat_mode(engine, "write", source="slash", on_event=on_event)
         return "已批准计划并退出计划模式。"
     if key == "reject":
         engine._pending_plan_exit = None  # type: ignore[attr-defined]

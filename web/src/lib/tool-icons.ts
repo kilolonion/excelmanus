@@ -78,6 +78,7 @@ const TOOL_ICONS: Record<string, LucideIcon> = {
   task_update: ListChecks,
   manage_skills: Wrench,
   delegate: Users,
+  delegate_to_subagent: Users,
   list_subagents: GitBranch,
   introspect: Cpu,
 };

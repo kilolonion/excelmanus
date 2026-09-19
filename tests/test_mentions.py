@@ -280,6 +280,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from tests.conftest import symlink_or_skip
 
 from excelmanus.mentions.parser import Mention, ResolvedMention
 from excelmanus.mentions.resolver import MentionResolver
@@ -382,16 +383,16 @@ class TestResolverExcelRange:
         assert cell_range == "A1:C10"
 
     def test_parse_range_spec_single_cell(self) -> None:
-        """_parse_range_spec 单格扩展为 A1:A1。"""
+        """_parse_range_spec 单格保持 A1，不再扩成 A1:A1。"""
         sheet, cell_range = MentionResolver._parse_range_spec("Sheet1!A1")
         assert sheet == "Sheet1"
-        assert cell_range == "A1:A1"
+        assert cell_range == "A1"
 
     def test_parse_range_spec_single_cell_no_sheet(self) -> None:
         """_parse_range_spec 无 sheet 单格。"""
         sheet, cell_range = MentionResolver._parse_range_spec("B5")
         assert sheet is None
-        assert cell_range == "B5:B5"
+        assert cell_range == "B5"
 
     def test_excel_range_reads_correct_cells(self, tmp_path: Path) -> None:
         """_resolve_excel_range 读取正确的单元格数据。"""
@@ -465,7 +466,8 @@ class TestResolverExcelRange:
         result = resolver._resolve_file(mention)
 
         assert result.error is not None
-        assert "工作表不存在" in result.error
+        assert result.error_code == "SHEET_NOT_FOUND"
+        assert "NoSuchSheet" in result.error
 
     def test_excel_range_pipe_table_format(self, tmp_path: Path) -> None:
         """范围读取结果为管道分隔表格格式。"""
@@ -773,7 +775,7 @@ class TestResolverSecurity:
     def test_dangling_symlink_rejection(self, tmp_path: Path) -> None:
         """悬空符号链接被拒绝。"""
         link = tmp_path / "dangling_link"
-        link.symlink_to(tmp_path / "nonexistent_target")
+        symlink_or_skip(link, tmp_path / "nonexistent_target")
 
         resolver = _make_resolver(str(tmp_path))
         mention = _make_mention("file", "dangling_link")
@@ -1021,346 +1023,3 @@ class TestSkillMentionRouting:
         assert result.mentions[1].kind == "skill"
         assert result.mentions[1].value == "data_basic"
 
-
-# ══════════════════════════════════════════════════════════
-# 单元测试：MentionCompleter
-# **验证：需求 7.1–7.8, 8.1–8.3**
-# ══════════════════════════════════════════════════════════
-
-from prompt_toolkit.completion import CompleteEvent
-from prompt_toolkit.document import Document
-
-from excelmanus.mentions.completer import MentionCompleter
-
-
-def _make_completer(
-    workspace_root: str,
-    engine=None,
-    max_scan_depth: int = 2,
-) -> MentionCompleter:
-    """构造 MentionCompleter 实例。"""
-    return MentionCompleter(
-        workspace_root=workspace_root,
-        engine=engine,
-        max_scan_depth=max_scan_depth,
-    )
-
-
-def _get_completions(completer: MentionCompleter, text: str) -> list:
-    """获取补全结果列表。"""
-    doc = Document(text, cursor_position=len(text))
-    event = CompleteEvent()
-    return list(completer.get_completions(doc, event))
-
-
-def _display_text(completion) -> str:
-    """从 Completion 的 display 字段提取纯文本。"""
-    d = completion.display
-    if isinstance(d, str):
-        return d
-    # FormattedText：(style, text) 元组列表
-    try:
-        return "".join(t for _, t in d)
-    except Exception:
-        return str(d)
-
-
-# ── 阶段一：@ 触发分类菜单 ───────────────────────────────
-
-
-class TestCompleterCategoryMenu:
-    """@ 触发分类菜单测试。"""
-
-    def test_at_triggers_category_menu(self, tmp_path: Path) -> None:
-        """输入 @ 后显示 5 个分类候选项。"""
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@")
-
-        assert len(completions) == 5
-        display_texts = [_display_text(c) for c in completions]
-        assert "@file" in display_texts
-        assert "@folder" in display_texts
-        assert "@skill" in display_texts
-        assert "@mcp" in display_texts
-        assert "@img" in display_texts
-
-    def test_partial_category_filters(self, tmp_path: Path) -> None:
-        """输入 @fi 过滤出 file 分类。"""
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@fi")
-
-        assert len(completions) == 1
-        assert _display_text(completions[0]) == "@file"
-
-    def test_partial_category_fo(self, tmp_path: Path) -> None:
-        """输入 @fo 过滤出 folder 分类。"""
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@fo")
-
-        assert len(completions) == 1
-        assert _display_text(completions[0]) == "@folder"
-
-    def test_no_at_no_completions(self, tmp_path: Path) -> None:
-        """无 @ 输入不触发补全。"""
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "hello")
-
-        assert len(completions) == 0
-
-
-# ── 阶段二：@file: 文件补全 ──────────────────────────────
-
-
-class TestCompleterFileCompletions:
-    """@file: 文件补全测试。"""
-
-    def test_file_lists_workspace_files(self, tmp_path: Path) -> None:
-        """@file: 列出工作区文件。"""
-        (tmp_path / "data.xlsx").write_text("")
-        (tmp_path / "readme.md").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@file:")
-
-        texts = [c.text for c in completions]
-        assert "data.xlsx" in texts
-        assert "readme.md" in texts
-
-    def test_file_excludes_hidden(self, tmp_path: Path) -> None:
-        """@file: 排除隐藏文件。"""
-        (tmp_path / ".hidden").write_text("")
-        (tmp_path / "visible.txt").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@file:")
-
-        texts = [c.text for c in completions]
-        assert ".hidden" not in texts
-        assert "visible.txt" in texts
-
-    def test_file_excludes_venv_and_node_modules(self, tmp_path: Path) -> None:
-        """@file: 排除 .venv 和 node_modules 目录内容。"""
-        (tmp_path / ".venv").mkdir()
-        (tmp_path / ".venv" / "lib.py").write_text("")
-        (tmp_path / "node_modules").mkdir()
-        (tmp_path / "node_modules" / "pkg.js").write_text("")
-        (tmp_path / "app.py").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@file:")
-
-        texts = [c.text for c in completions]
-        assert "app.py" in texts
-        # .venv 和 node_modules 内的文件不应出现
-        assert not any(".venv" in t for t in texts)
-        assert not any("node_modules" in t for t in texts)
-
-    def test_file_depth_limit(self, tmp_path: Path) -> None:
-        """@file: 深度限制 ≤ 2（逐级浏览模式）。"""
-        deep = tmp_path / "a" / "b" / "c"
-        deep.mkdir(parents=True)
-        (deep / "deep.txt").write_text("")
-        (tmp_path / "a" / "b" / "shallow.txt").write_text("")
-        (tmp_path / "top.txt").write_text("")
-
-        completer = _make_completer(str(tmp_path), max_scan_depth=2)
-
-        # 根目录层级：能看到 top.txt 和 a/ 目录
-        root_completions = _get_completions(completer, "@file:")
-        root_texts = [c.text for c in root_completions]
-        assert "top.txt" in root_texts
-        assert "a/" in root_texts
-
-        # depth 2 层级（a/b/）：能看到 shallow.txt 和 c/ 目录
-        depth2_completions = _get_completions(completer, "@file:a/b/")
-        depth2_texts = [c.text for c in depth2_completions]
-        assert "a/b/shallow.txt" in depth2_texts
-        assert "a/b/c/" in depth2_texts
-
-        # depth 3 层级（a/b/c/）：超过限制，不应返回任何条目
-        depth3_completions = _get_completions(completer, "@file:a/b/c/")
-        depth3_texts = [c.text for c in depth3_completions]
-        assert "a/b/c/deep.txt" not in depth3_texts
-
-    def test_file_prefix_filter(self, tmp_path: Path) -> None:
-        """@file:da 过滤以 da 开头的文件。"""
-        (tmp_path / "data.xlsx").write_text("")
-        (tmp_path / "readme.md").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@file:da")
-
-        texts = [c.text for c in completions]
-        assert "data.xlsx" in texts
-        assert "readme.md" not in texts
-
-
-# ── 阶段二：@folder: 目录补全 ────────────────────────────
-
-
-class TestCompleterFolderCompletions:
-    """@folder: 目录补全测试。"""
-
-    def test_folder_lists_directories(self, tmp_path: Path) -> None:
-        """@folder: 列出工作区目录。"""
-        (tmp_path / "src").mkdir()
-        (tmp_path / "docs").mkdir()
-        (tmp_path / "file.txt").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@folder:")
-
-        texts = [c.text for c in completions]
-        assert "src/" in texts
-        assert "docs/" in texts
-        # 文件不应出现在 folder 补全中
-        assert "file.txt" not in texts
-
-    def test_folder_excludes_hidden(self, tmp_path: Path) -> None:
-        """@folder: 排除隐藏目录。"""
-        (tmp_path / ".git").mkdir()
-        (tmp_path / "src").mkdir()
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@folder:")
-
-        texts = [c.text for c in completions]
-        assert ".git/" not in texts
-        assert "src/" in texts
-
-
-# ── 阶段二：@skill: 技能补全 ─────────────────────────────
-
-
-class TestCompleterSkillCompletions:
-    """@skill: 技能补全测试。"""
-
-    def test_skill_lists_names(self, tmp_path: Path) -> None:
-        """@skill: 列出 user_invocable 的技能名称。"""
-        mock_engine = MagicMock()
-        mock_engine._skill_resolver.list_manual_invocable_skill_names.return_value = [
-            "data_basic",
-            "chart_basic",
-            "format_basic",
-        ]
-
-        completer = _make_completer(str(tmp_path), engine=mock_engine)
-        completions = _get_completions(completer, "@skill:")
-
-        texts = [c.text for c in completions]
-        assert "data_basic" in texts
-        assert "chart_basic" in texts
-        assert "format_basic" in texts
-
-    def test_skill_prefix_filter(self, tmp_path: Path) -> None:
-        """@skill:da 过滤以 da 开头的技能。"""
-        mock_engine = MagicMock()
-        mock_engine._skill_resolver.list_manual_invocable_skill_names.return_value = [
-            "data_basic",
-            "chart_basic",
-        ]
-
-        completer = _make_completer(str(tmp_path), engine=mock_engine)
-        completions = _get_completions(completer, "@skill:da")
-
-        texts = [c.text for c in completions]
-        assert "data_basic" in texts
-        assert "chart_basic" not in texts
-
-    def test_skill_no_engine(self, tmp_path: Path) -> None:
-        """无 engine 时 @skill: 返回空。"""
-        completer = _make_completer(str(tmp_path), engine=None)
-        completions = _get_completions(completer, "@skill:")
-
-        assert len(completions) == 0
-
-
-# ── 阶段二：@mcp: MCP 补全 ──────────────────────────────
-
-
-class TestCompleterMCPCompletions:
-    """@mcp: MCP 服务补全测试。"""
-
-    def test_mcp_lists_servers(self, tmp_path: Path) -> None:
-        """@mcp: 列出已连接的 MCP 服务名称。"""
-        mock_engine = MagicMock()
-        mock_engine.mcp_server_info.return_value = [
-            {"name": "mongodb", "status": "ready"},
-            {"name": "postgres", "status": "ready"},
-        ]
-
-        completer = _make_completer(str(tmp_path), engine=mock_engine)
-        completions = _get_completions(completer, "@mcp:")
-
-        texts = [c.text for c in completions]
-        assert "mongodb" in texts
-        assert "postgres" in texts
-
-    def test_mcp_no_engine(self, tmp_path: Path) -> None:
-        """无 engine 时 @mcp: 返回空。"""
-        completer = _make_completer(str(tmp_path), engine=None)
-        completions = _get_completions(completer, "@mcp:")
-
-        assert len(completions) == 0
-
-
-# ── @img 补全 ────────────────────────────────────────────
-
-
-class TestCompleterImgCompletions:
-    """@img 图片补全测试。"""
-
-    def test_img_lists_image_files(self, tmp_path: Path) -> None:
-        """@img 列出图片文件。"""
-        (tmp_path / "chart.png").write_text("")
-        (tmp_path / "photo.jpg").write_text("")
-        (tmp_path / "data.xlsx").write_text("")
-
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@img ")
-
-        texts = [c.text for c in completions]
-        assert "chart.png" in texts
-        assert "photo.jpg" in texts
-        assert "data.xlsx" not in texts
-
-
-# ── CLI 集成测试（向后兼容验证）─────────────────────────
-
-
-class TestCLIBackwardCompatibility:
-    """CLI 集成向后兼容测试。"""
-
-    def test_img_syntax_backward_compatible(self) -> None:
-        """@img path.png 语法保持向后兼容。"""
-        result = MentionParser.parse("@img chart.png")
-        assert len(result.mentions) == 1
-        assert result.mentions[0].kind == "img"
-        assert result.mentions[0].value == "chart.png"
-
-    def test_slash_command_still_works(self) -> None:
-        """/skill_name 斜杠命令不被 @ 解析器干扰。"""
-        result = MentionParser.parse("/data_basic 分析数据")
-        assert len(result.mentions) == 0
-        assert result.clean_text == "/data_basic 分析数据"
-
-    def test_no_at_input_unchanged(self) -> None:
-        """无 @ 输入行为不变。"""
-        result = MentionParser.parse("帮我分析这个文件")
-        assert len(result.mentions) == 0
-        assert result.clean_text == "帮我分析这个文件"
-        assert result.original == "帮我分析这个文件"
-
-    def test_completer_handles_empty_workspace(self, tmp_path: Path) -> None:
-        """空工作区不崩溃。"""
-        completer = _make_completer(str(tmp_path))
-        completions = _get_completions(completer, "@file:")
-        assert isinstance(completions, list)
-
-    def test_completer_handles_no_engine(self, tmp_path: Path) -> None:
-        """无 engine 时补全器不崩溃。"""
-        completer = _make_completer(str(tmp_path), engine=None)
-        # 所有分类都应正常工作（skill/mcp 返回空）
-        for prefix in ["@", "@file:", "@folder:", "@skill:", "@mcp:", "@img "]:
-            completions = _get_completions(completer, prefix)
-            assert isinstance(completions, list)

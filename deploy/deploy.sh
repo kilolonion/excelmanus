@@ -19,7 +19,7 @@ set -euo pipefail
 #    rollback-to          回滚到指定 commit / release（checkout + 重启）
 #    status               查看当前部署状态
 #    check                检查部署环境依赖（含前后端互联检测）
-#    init-env             首次部署：推送 .env 模板到远程服务器
+#    init-env             首次部署：写入前端 Next.js 的 web/.env.local（BACKEND_ORIGIN）
 #    history              查看部署历史
 #    logs                 查看部署日志
 #
@@ -488,7 +488,7 @@ _show_help() {
   echo "  ./deploy/deploy.sh --backend-host 10.0.0.1 --frontend-host 10.0.0.2 \\"
   echo "      --backend-key ~/.ssh/backend.pem --frontend-key ~/.ssh/frontend.pem"
   echo ""
-  echo "  # 首次部署：推送 .env 模板到远程服务器"
+  echo "  # 首次部署：写入前端 Next.js 运行时 origin（web/.env.local）"
   echo "  ./deploy/deploy.sh init-env --host 192.168.1.100"
 }
 
@@ -1125,7 +1125,7 @@ After=network.target
 [Service]
 Type=simple
 WorkingDirectory=${BACKEND_DIR}
-EnvironmentFile=-${BACKEND_DIR}/.env
+Environment=EXCELMANUS_DEPLOY_MODE=server
 ExecStart=${BACKEND_DIR}/${VENV_DIR}/bin/python -c 'import uvicorn; uvicorn.run("excelmanus.api:app", host="127.0.0.1", port=${BACKEND_PORT}, log_level="info")'
 Restart=on-failure
 RestartSec=5
@@ -1138,6 +1138,7 @@ SVCEOF
       sudo systemctl start '${PM2_BACKEND}'; }"
   else
     _remote_backend "
+      export EXCELMANUS_DEPLOY_MODE=server
       if pm2 describe '${PM2_BACKEND}' >/dev/null 2>&1; then
         pm2 reload '${PM2_BACKEND}' --update-env
       else
@@ -1337,7 +1338,7 @@ _preflight() {
     warn "--cold-build 与 --skip-build 同时使用时，--cold-build 不生效"
   fi
 
-  # SSH 密钥检查（非本地/Docker 模式）
+  # SSH 密钥检查（非本地模式）
   if [[ "$TOPOLOGY" != "local" ]]; then
     for _key_path in "$BACKEND_SSH_KEY_PATH" "$FRONTEND_SSH_KEY_PATH"; do
       if [[ -n "$_key_path" && ! -f "$_key_path" ]]; then
@@ -1625,44 +1626,9 @@ _check_cross_connectivity() {
     fi
   fi
 
-  # 3) 检查后端 CORS 配置是否包含前端域名（加超时防挂起）
+  # 3) CORS / OAuth 在 Web 设置页 / 主数据库
   if [[ -n "$BACKEND_HOST" && ${#_SITE_URLS[@]} -gt 0 ]]; then
-    info "检查后端 CORS 配置..."
-    local cors_check
-    cors_check=$(_remote_backend "timeout 5 grep -i CORS_ALLOW_ORIGINS ${BACKEND_DIR}/.env 2>/dev/null || echo __NO_CORS__" 2>&1 || echo "__NO_CORS__")
-    if echo "$cors_check" | grep -q '__NO_CORS__'; then
-      warn "后端 .env 中未找到 EXCELMANUS_CORS_ALLOW_ORIGINS 配置"
-      warn "  如果前端通过浏览器直连后端，需要配置 CORS 允许前端域名"
-    else
-      for _su in "${_SITE_URLS[@]}"; do
-        if echo "$cors_check" | grep -qi "$_su"; then
-          log "CORS 配置包含 ${_su}"
-        else
-          warn "CORS 配置可能未包含前端域名 ${_su}"
-          warn "  当前配置: $(echo "$cors_check" | head -1)"
-        fi
-      done
-    fi
-  fi
-
-  # 4) 检查 OAuth 回调白名单配置
-  if [[ -n "$BACKEND_HOST" && ${#_SITE_URLS[@]} -gt 0 ]]; then
-    info "检查 OAuth 回调白名单..."
-    local oauth_check
-    oauth_check=$(_remote_backend "timeout 5 grep -i ALLOWED_OAUTH_ORIGINS ${BACKEND_DIR}/.env 2>/dev/null || echo __NO_OAUTH__" 2>&1 || echo "__NO_OAUTH__")
-    if echo "$oauth_check" | grep -q '__NO_OAUTH__'; then
-      info "未设置 EXCELMANUS_ALLOWED_OAUTH_ORIGINS（将自动从 CORS origins 派生）"
-    else
-      for _su in "${_SITE_URLS[@]}"; do
-        if echo "$oauth_check" | grep -qi "$_su"; then
-          log "OAuth 白名单包含 ${_su}"
-        else
-          warn "OAuth 白名单可能未包含前端域名 ${_su}"
-          warn "  当前配置: $(echo "$oauth_check" | head -1)"
-          warn "  OAuth 登录可能无法正确跳转回 ${_su}"
-        fi
-      done
-    fi
+    info "公网站点 CORS / OAuth 白名单请在 Web 设置页配置（主数据库）"
   fi
 
   # 5) 检查前端 BACKEND_ORIGIN 配置（加超时防挂起）
@@ -1691,34 +1657,9 @@ _check_cross_connectivity() {
 
 # ── 命令: init-env ──
 _cmd_init_env() {
-  step "📝 初始化远程 .env 配置..."
+  step "📝 初始化前端 Next.js 运行时 origin（web/.env.local）..."
+  info "后端模型与运行时设置在 Web 设置页写入主数据库"
 
-  local env_template="${PROJECT_ROOT}/.env.example"
-  if [[ ! -f "$env_template" ]]; then
-    error "未找到 .env.example 模板: $env_template"
-    return 1
-  fi
-
-  # 后端 .env
-  if [[ "$MODE" != "frontend" && -n "$BACKEND_HOST" ]]; then
-    local be_env_path="${BACKEND_DIR}/.env"
-    local be_env_exists
-    be_env_exists=$(_remote_backend "[[ -f '${be_env_path}' ]] && echo 'exists' || echo 'missing'" 2>&1 || echo "missing")
-
-    if echo "$be_env_exists" | grep -q 'exists'; then
-      if [[ "$FORCE" != true ]]; then
-        warn "后端 ${be_env_path} 已存在，跳过（使用 --force 覆盖）"
-      else
-        warn "后端 ${be_env_path} 已存在，--force 覆盖中..."
-        _remote_backend "cp '${be_env_path}' '${be_env_path}.bak.$(date +%Y%m%dT%H%M%S)'" || true
-        _push_env_to_backend
-      fi
-    else
-      _push_env_to_backend
-    fi
-  fi
-
-  # 前端 .env.local
   if [[ "$MODE" != "backend" && -n "$FRONTEND_HOST" ]]; then
     local fe_env_path="${FRONTEND_DIR}/web/.env.local"
     local fe_env_exists
@@ -1739,44 +1680,7 @@ _cmd_init_env() {
 
   echo ""
   log "init-env 完成"
-  info "请登录远程服务器编辑 .env 文件，填入真实的 API Key 等配置"
-  [[ -n "$BACKEND_HOST" ]]  && info "  后端: ssh ${SSH_USER}@${BACKEND_HOST} 'vi ${BACKEND_DIR}/.env'" || true
-  [[ -n "$FRONTEND_HOST" ]] && info "  前端: ssh ${SSH_USER}@${FRONTEND_HOST} 'vi ${FRONTEND_DIR}/web/.env.local'" || true
-}
-
-_push_env_to_backend() {
-  local env_template="${PROJECT_ROOT}/.env.example"
-  info "推送 .env 模板到后端 ${BACKEND_HOST}:${BACKEND_DIR}/.env ..."
-
-  local tmp_env
-  tmp_env=$(mktemp)
-  cp "$env_template" "$tmp_env"
-
-  # 自动填充已知的部署配置（支持多站点 URL）
-  if [[ ${#_SITE_URLS[@]} -gt 0 ]]; then
-    # 将所有站点 URL 拼接为逗号分隔字符串
-    local _all_sites
-    _all_sites=$(IFS=','; echo "${_SITE_URLS[*]}")
-    local _cors_origins="${_all_sites},http://localhost:3000"
-    sed -i.bak "s|^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*|EXCELMANUS_CORS_ALLOW_ORIGINS=${_cors_origins}|" "$tmp_env"
-    # OAuth 回调白名单（未显式设置时后端会自动从 CORS origins 派生，此处显式设置更清晰）
-    if ! grep -q 'EXCELMANUS_ALLOWED_OAUTH_ORIGINS' "$tmp_env"; then
-      echo "" >> "$tmp_env"
-      echo "# OAuth 回调允许跳转的前端来源（逗号分隔，支持完整 URL 或裸域名）" >> "$tmp_env"
-      echo "EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${_all_sites}" >> "$tmp_env"
-    else
-      sed -i.bak "s|^# EXCELMANUS_ALLOWED_OAUTH_ORIGINS=.*|EXCELMANUS_ALLOWED_OAUTH_ORIGINS=${_all_sites}|" "$tmp_env"
-    fi
-  fi
-
-  if [[ "$TOPOLOGY" == "local" ]]; then
-    run "cp '$tmp_env' '${BACKEND_DIR}/.env'"
-  else
-    local rsync_ssh="ssh $(_ssh_opts "$BACKEND_SSH_KEY_PATH")"
-    run "rsync -az -e \"$rsync_ssh\" '$tmp_env' '${SSH_USER}@${BACKEND_HOST}:${BACKEND_DIR}/.env'"
-  fi
-  rm -f "$tmp_env" "${tmp_env}.bak"
-  log "后端 .env 已推送"
+  info "打开 Web 设置页添加模型档案。前端 origin 见 web/.env.local（Next.js）。"
 }
 
 _push_env_to_frontend() {
@@ -1873,14 +1777,7 @@ _cmd_check() {
       _remote_backend "git --version 2>&1 || echo 'Git: 未安装'" || true
       _remote_backend "df -h '${BACKEND_DIR}' 2>/dev/null | tail -1 || echo '磁盘: 无法检查'" || true
       _remote_backend "free -h 2>/dev/null | head -2 || echo '内存: 无法检查 (非 Linux)'" || true
-      # 检查后端 .env 是否存在
-      local be_env_exists
-      be_env_exists=$(_remote_backend "[[ -f '${BACKEND_DIR}/.env' ]] && echo 'exists' || echo 'missing'" 2>&1 || echo "missing")
-      if echo "$be_env_exists" | grep -q 'exists'; then
-        log "后端 .env: 存在"
-      else
-        warn "后端 .env: 不存在（使用 'init-env' 命令推送模板）"
-      fi
+      info "后端模型与设置在 Web 设置页 / 主数据库"
     else
       error "SSH 连接: 失败"
       ok=false

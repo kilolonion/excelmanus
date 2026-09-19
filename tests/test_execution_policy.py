@@ -41,19 +41,19 @@ def test_write_mode_is_workspace_write() -> None:
 
 
 def test_plan_mode_keeps_workspace_write_sandbox() -> None:
-    e = _eng(_current_chat_mode="plan", _plan_active=True)
+    e = _eng(_current_chat_mode="plan")
     assert resolve_execution_policy(e).mode == "workspace-write"
     assert not writes_denied(e)
     assert is_plan_active(e)
     assert resolve_approval_policy(e) == "ask"
 
 
-def test_plan_plus_write_chat_is_still_workspace_write() -> None:
-    """Plan is not sandbox: even when plan is active, write chat stays workspace-write."""
+def test_stale_plan_flag_does_not_override_write_chat_mode() -> None:
+    """Runtime no longer treats leftover _plan_active as plan when chat_mode is write."""
     e = _eng(_current_chat_mode="write", _plan_active=True)
     assert resolve_execution_policy(e).mode == "workspace-write"
     assert not writes_denied(e)
-    assert is_plan_active(e)
+    assert not is_plan_active(e)
 
 
 def test_full_access_is_workspace_write_not_escape() -> None:

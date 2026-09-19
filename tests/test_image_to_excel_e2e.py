@@ -9,11 +9,19 @@ from pathlib import Path
 import pytest
 
 
-# 最小有效 PNG（1x1 白色像素）
+# 最小有效 PNG（1x1 红色像素）
 _MINIMAL_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-    "nGP4z8BQDwAEgAF/pooBPQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attachment_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+    from excelmanus.attachments.store import reset_attachment_store
+    reset_attachment_store()
+    yield
+    reset_attachment_store()
 
 _FULL_SPEC = {
     "version": "1.0",
@@ -99,8 +107,8 @@ class TestImageToExcelPipeline:
         assert out.success
         injection = out.ui_meta.image
         assert injection["mime_type"] == "image/png"
-        decoded = base64.b64decode(injection["base64"])
-        assert decoded == png_data
+        assert injection.get("attachment", {}).get("attachmentId", "").startswith("sha256:")
+        assert "base64" not in injection
         assert "__tool_result_image__" not in out.model_text
 
     def test_rebuild_with_merged_cells_and_styles(self, tmp_path: Path) -> None:
@@ -154,24 +162,33 @@ class TestImageToExcelPipeline:
         assert len(spec.sheets[0].cells) == len(spec2.sheets[0].cells)
         assert spec.uncertainties[0].location == spec2.uncertainties[0].location
 
-    def test_multimodal_memory_integration(self) -> None:
+    def test_multimodal_memory_integration(self, tmp_path, monkeypatch) -> None:
         """Memory 层多模态消息与 TokenCounter 集成。"""
         from excelmanus.config import ExcelManusConfig
         from excelmanus.memory import ConversationMemory, TokenCounter, IMAGE_TOKEN_ESTIMATE
+        from excelmanus.attachments.store import reset_attachment_store
 
+        monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+        reset_attachment_store()
         config = ExcelManusConfig(
             api_key="test", base_url="https://test.example.com/v1", model="test",
         )
         mem = ConversationMemory(config)
 
         # 添加图片消息
-        mem.add_image_message(base64_data="abc123", mime_type="image/png")
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+
+        ref = admit_image_bytes(decode_image_payload(png), media_type="image/png")
+        mem.add_user_message([{"type": "image", "attachment": ref.to_dict()}])
         msgs = mem.get_messages()
         last = msgs[-1]
         assert last["role"] == "user"
         assert isinstance(last["content"], list)
+        assert last["content"][0]["type"] == "image"
 
-        # token 计数包含图片估算
         count = TokenCounter.count_message(last)
         assert count >= IMAGE_TOKEN_ESTIMATE
 

@@ -24,7 +24,7 @@ class FailureGuidance:
 
     category: str = "unknown"       # model | transport | config | quota | unknown
     code: str = "internal_error"    # 机器可读错误码
-    title: str = "内部错误"          # 一句话标题（≤15 字）
+    title: str = "回复未完成"          # 一句话标题（≤15 字）
     message: str = ""               # 用户可见描述（≤80 字）
     stage: str = ""                 # 失败阶段（取自 pipeline_progress）
     retryable: bool = False
@@ -44,11 +44,20 @@ _ACTION_OPEN_SETTINGS = {"type": "open_settings", "label": "检查模型设置"}
 _ACTION_COPY_DIAGNOSTIC = {"type": "copy_diagnostic", "label": "复制诊断 ID"}
 
 
-def _actions_for(retryable: bool) -> list[dict[str, str]]:
-    """根据是否可重试生成默认 action 列表。"""
+_NO_RETRY_CODES = frozenset({"session_not_found"})
+
+
+def _actions_for(retryable: bool, code: str = "") -> list[dict[str, str]]:
+    """生成恢复动作。
+
+    session_not_found 无法重试；其余一律给出「立即重试」。
+    retryable 只影响主按钮顺序：暂态失败重试在前，配置类失败设置在前。
+    """
+    if code in _NO_RETRY_CODES:
+        return [_ACTION_COPY_DIAGNOSTIC]
     if retryable:
         return [_ACTION_RETRY, _ACTION_OPEN_SETTINGS, _ACTION_COPY_DIAGNOSTIC]
-    return [_ACTION_OPEN_SETTINGS, _ACTION_COPY_DIAGNOSTIC]
+    return [_ACTION_OPEN_SETTINGS, _ACTION_RETRY, _ACTION_COPY_DIAGNOSTIC]
 
 
 # ── 状态码提取 ────────────────────────────────────────────────
@@ -376,7 +385,7 @@ def classify_failure(
             stage=stage,
             retryable=retryable,
             diagnostic_id=diagnostic_id,
-            actions=_actions_for(retryable) if code != "session_not_found" else [_ACTION_COPY_DIAGNOSTIC],
+            actions=_actions_for(retryable, code),
             provider=provider,
             model=model,
         )
@@ -432,7 +441,7 @@ def classify_failure(
             stage=stage,
             retryable=False,
             diagnostic_id=diagnostic_id,
-            actions=_actions_for(False),
+            actions=_actions_for(False, "quota_exceeded"),
             provider=provider,
             model=model,
         )
@@ -464,7 +473,7 @@ def classify_failure(
                 stage=stage,
                 retryable=False,
                 diagnostic_id=diagnostic_id,
-                actions=_actions_for(False),
+                actions=_actions_for(False, "base_url_misconfigured"),
                 provider=provider,
                 model=model,
             )
@@ -476,7 +485,7 @@ def classify_failure(
             stage=stage,
             retryable=False,
             diagnostic_id=diagnostic_id,
-            actions=_actions_for(False),
+            actions=_actions_for(False, "model_not_found"),
             provider=provider,
             model=model,
         )
@@ -591,7 +600,7 @@ def classify_failure(
             stage=stage,
             retryable=False,
             diagnostic_id=diagnostic_id,
-            actions=[_ACTION_COPY_DIAGNOSTIC],
+            actions=_actions_for(False, "session_not_found"),
             provider=provider,
             model=model,
         )
@@ -734,22 +743,22 @@ def classify_failure(
                 stage=stage,
                 retryable=retryable,
                 diagnostic_id=diagnostic_id,
-                actions=_actions_for(retryable),
+                actions=_actions_for(retryable, code),
                 provider=provider,
                 model=model,
             )
 
-    # ── 4. 兜底 ──
+    # ── 4. 兜底：未知错误按暂态处理，必须给出重试 ──
 
     return FailureGuidance(
         category="unknown",
         code="internal_error",
-        title="内部错误",
-        message="服务处理出现异常，请稍后重试。如问题持续，请联系管理员。",
+        title="回复未完成",
+        message="服务处理出现异常，请稍后重试。",
         stage=stage,
-        retryable=False,
+        retryable=True,
         diagnostic_id=diagnostic_id,
-        actions=[_ACTION_COPY_DIAGNOSTIC],
+        actions=_actions_for(True, "internal_error"),
         provider=provider,
         model=model,
     )

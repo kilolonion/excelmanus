@@ -26,6 +26,7 @@ def _make_result_dict(
     tool_call_count: int = 3,
     tool_successes: int = 3,
     tool_failures: int = 0,
+    model_tool_failures: int | None = None,
     total_tokens: int = 12000,
     skills_used: list[str] | None = None,
     route_mode: str = "fallback",
@@ -70,6 +71,7 @@ def _make_result_dict(
             "tool_call_count": tool_call_count,
             "tool_successes": tool_successes,
             "tool_failures": tool_failures,
+            **({"model_tool_failures": model_tool_failures} if model_tool_failures is not None else {}),
             "total_tokens": total_tokens,
         },
         "artifacts": {
@@ -663,3 +665,168 @@ class TestMinMatchRate:
         v = validate_case(r, {"min_match_rate": 0.95})
         assert v.failed == 1
         assert "未找到" in v.results[0].message
+
+
+# ── 效率预算 warn-only ────────────────────────────────────
+
+
+class TestEfficiencyWarnOnly:
+    """max_* 效率预算超限只记 warning，不判 error（不影响退出码）。"""
+
+    def test_max_llm_calls_exceeded_is_warning(self):
+        r = _make_result_dict(llm_call_count=10)
+        v = validate_case(r, {"max_llm_calls": 6})
+        assert v.total == 1
+        assert v.failed == 1
+        assert v.results[0].severity == "warning"
+        assert v.errors == 0
+        assert v.warnings == 1
+
+    def test_max_tool_failures_exceeded_is_warning(self):
+        r = _make_result_dict(tool_failures=3)
+        v = validate_case(r, {"max_tool_failures": 2})
+        assert v.failed == 1
+        assert v.results[0].severity == "warning"
+        assert v.errors == 0
+
+    def test_max_tool_failures_prefers_model_visible_field(self):
+        """model_tool_failures 在场时优先——内层 run_code SDK 失败不重复计入预算。"""
+        r = _make_result_dict(tool_failures=5, model_tool_failures=0)
+        v = validate_case(r, {"max_tool_failures": 2})
+        assert v.results[0].passed is True
+
+    def test_max_tool_failures_model_visible_exceeded(self):
+        r = _make_result_dict(tool_failures=4, model_tool_failures=3)
+        v = validate_case(r, {"max_tool_failures": 2})
+        assert v.failed == 1
+        assert v.results[0].severity == "warning"
+        assert v.results[0].actual == 3
+
+    def test_error_rule_still_error(self):
+        r = _make_result_dict(status="error")
+        v = validate_case(r, {"status": "ok"})
+        assert v.failed == 1
+        assert v.results[0].severity == "error"
+        assert v.errors == 1
+        assert v.warnings == 0
+
+    def test_mixed_error_and_warning(self):
+        r = _make_result_dict(status="error", llm_call_count=10)
+        v = validate_case(r, {"status": "ok", "max_llm_calls": 6})
+        assert v.total == 2  # status + max_llm_calls（无 no_cheat_read flag）
+        assert v.errors == 1
+        assert v.warnings == 1
+
+    def test_aggregate_splits_errors_warnings(self):
+        from excelmanus.bench_validator import AssertionResult as AR
+
+        v1 = ValidationSummary(total=2, passed=1, failed=1, results=[
+            AR(rule="status", passed=False, severity="error"),
+            AR(rule="max_llm_calls", passed=True),
+        ])
+        v2 = ValidationSummary(total=1, passed=0, failed=1, results=[
+            AR(rule="max_llm_calls", passed=False, severity="warning"),
+        ])
+        sv = aggregate_suite_validation([("c1", v1), ("c2", v2)])
+        assert sv.total_assertions == 3
+        assert sv.errors == 1
+        assert sv.warnings == 1
+        assert sv.error_failed_cases == ["c1"]
+        assert sv.failed_cases == ["c1", "c2"]
+
+
+# ── forbidden_tools 代码绕过扫描 ─────────────────────────
+
+
+class TestForbiddenBypass:
+    def test_run_code_bypass_detected(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "run_code", "success": True,
+             "arguments": {"code": "em.edit_spreadsheet(operations=[...])"}},
+        ])
+        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        assert v.failed == 1
+        assert "run_code" in v.results[0].message
+
+    def test_em_shorthand_bypass_detected(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "run_code", "success": True,
+             "arguments": {"code": "em.edit(workbook='x.xlsx', operations=[])"}},
+        ])
+        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        assert v.failed == 1
+
+    def test_clean_run_code_passes(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "run_code", "success": True,
+             "arguments": {"code": "em.inspect_spreadsheet(path='x.xlsx')"}},
+        ])
+        v = validate_case(r, {"forbidden_tools": ["edit_spreadsheet"]})
+        assert v.passed == 1
+
+
+# ── no_cheat_read 作弊围栏 ───────────────────────────────
+
+
+class TestNoCheatRead:
+    def test_read_answers_fails(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "read_text_file", "success": True,
+             "arguments": {"path": "bench/fixtures/realistic/answers.json"}},
+        ])
+        v = validate_case(r, {"status": "ok", "no_cheat_read": True})
+        assert v.errors == 1
+        assert any(rr.rule == "no_cheat_read" and not rr.passed for rr in v.results)
+
+    def test_normal_file_passes(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "read_text_file", "success": True,
+             "arguments": {"path": "outputs/report.xlsx"}},
+        ])
+        v = validate_case(r, {"status": "ok", "no_cheat_read": True})
+        assert v.errors == 0
+
+    def test_flag_off_skips_check(self):
+        r = _make_result_dict(tool_calls=[
+            {"tool_name": "read_text_file", "success": True,
+             "arguments": {"path": "bench/fixtures/realistic/answers.json"}},
+        ])
+        v = validate_case(r, {"status": "ok"})
+        assert v.total == 1  # 只有 status，无 cheat 检查
+        assert v.passed == 1
+
+
+class TestOutputCheckSeverityAdoption:
+    def test_output_check_warning_counts_as_warning_not_error(self, tmp_path):
+        r = _make_result_dict(reply="这是自然语言表达，没有包含特定词汇")
+        # 默认 severity 是 error
+        v_default = validate_case(
+            r,
+            {
+                "status": "ok",
+                "output_checks": [
+                    {"type": "reply_regex", "pattern": "特定关键词"}
+                ]
+            },
+            workfile_dir=tmp_path,
+        )
+        assert v_default.errors == 1
+        assert v_default.warnings == 0
+
+        # 指定 severity: warning 时只计 warning，不计 error
+        v_warning = validate_case(
+            r,
+            {
+                "status": "ok",
+                "output_checks": [
+                    {"type": "reply_regex", "pattern": "特定关键词", "severity": "warning"}
+                ]
+            },
+            workfile_dir=tmp_path,
+        )
+        assert v_warning.errors == 0
+        assert v_warning.warnings == 1
+        assert v_warning.failed == 1
+        # 结果列表中有且仅有一个 severity=warning
+        assert any(res.severity == "warning" and not res.passed for res in v_warning.results)
+

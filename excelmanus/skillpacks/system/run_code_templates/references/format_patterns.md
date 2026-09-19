@@ -1,6 +1,6 @@
 # 格式化、图表与打印模板
 
-工作区 xlsx 的改写必须走 SDK（`format_spreadsheet` / `edit_spreadsheet` / `manage_spreadsheet_objects`）。不要 `wb.save`，也不要指望 `Font(color="red")` 在 openpyxl 里识别中文/英文颜色名。
+工作区 xlsx 的改写必须走 SDK（`format_spreadsheet` / `edit_spreadsheet` / `split_spreadsheet` / `manage_spreadsheet_objects`）。不要 `wb.save`，也不要指望 `Font(color="red")` 在 openpyxl 里识别中文/英文颜色名。
 
 ## 格式化样式
 

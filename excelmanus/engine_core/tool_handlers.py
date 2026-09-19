@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import time
 from collections.abc import Sequence
 from typing import TYPE_CHECKING, Any
 
@@ -21,6 +20,26 @@ if TYPE_CHECKING:
     from excelmanus.engine_core.tool_dispatcher import ToolDispatcher, _ToolExecOutcome
 
 logger = get_logger("tool_handlers")
+
+
+def _jev_denied_outcome(tool_name: str, arguments: dict[str, Any], reason: str) -> Any:
+    """片 E applied deny：拒绝该调用，不 create_pending。"""
+    from excelmanus.engine_core.error_payload import PRE_EXECUTE_DENIED
+    from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+    from excelmanus.engine_core.tool_result import error_result
+
+    structured = error_result(
+        f"工具调用被拒绝：{reason}",
+        code=PRE_EXECUTE_DENIED,
+        fields={"tool": tool_name},
+    )
+    log_tool_call(logger, tool_name, arguments, error=PRE_EXECUTE_DENIED)
+    return _ToolExecOutcome(
+        result_str=structured.model_text,
+        success=False,
+        error=PRE_EXECUTE_DENIED,
+        structured=structured,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -83,29 +102,7 @@ class SkillActivationHandler(BaseToolHandler):
 # ---------------------------------------------------------------------------
 
 class SkillManagementHandler(BaseToolHandler):
-    """处理 manage_skills 工具调用：搜索/安装/卸载/查看技能。"""
-
-    _VERSION_CACHE_TTL = 300  # 5 分钟
-
-    def __init__(self, engine: "AgentEngine", dispatcher: "ToolDispatcher") -> None:
-        super().__init__(engine, dispatcher)
-        self._version_cache: dict[str, tuple[str, float]] = {}  # slug → (version, timestamp)
-
-    def _cache_version(self, slug: str, version: str | None) -> None:
-        """缓存 slug→version 映射。"""
-        if slug and version:
-            self._version_cache[slug] = (version, time.monotonic())
-
-    def _get_cached_version(self, slug: str) -> str | None:
-        """获取缓存的版本号，过期返回 None。"""
-        entry = self._version_cache.get(slug)
-        if entry is None:
-            return None
-        version, ts = entry
-        if time.monotonic() - ts > self._VERSION_CACHE_TTL:
-            self._version_cache.pop(slug, None)
-            return None
-        return version
+    """处理 manage_skills 工具调用：安装/卸载/查看技能。"""
 
     def can_handle(self, tool_name: str, **kwargs: Any) -> bool:
         return tool_name == "manage_skills"
@@ -115,115 +112,26 @@ class SkillManagementHandler(BaseToolHandler):
 
         action = str(arguments.get("action", "")).strip()
         dispatch = {
-            "search": self._handle_search,
-            "detail": self._handle_detail,
             "install": self._handle_install,
             "list": self._handle_list,
             "uninstall": self._handle_uninstall,
-            "update": self._handle_update,
         }
         handler_fn = dispatch.get(action)
         if handler_fn is None:
-            result_str = f"不支持的操作: {action}（支持 search/install/detail/list/uninstall/update）"
+            result_str = f"不支持的操作: {action}（支持 install/list/uninstall）"
             log_tool_call(logger, tool_name, arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
         return await handler_fn(arguments)
 
-    # ── search ────────────────────────────────────────────
-
-    async def _handle_search(self, arguments: dict[str, Any]):
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-
-        query = str(arguments.get("query", "")).strip()
-        if not query:
-            result_str = "参数错误: search 操作需要提供 query 参数。"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-        manager = self._get_manager()
-        if manager is None:
-            return self._manager_unavailable(arguments)
-
-        try:
-            results = await manager.clawhub_search(query, limit=10)
-        except Exception as exc:
-            result_str = f"ClawHub 搜索失败: {exc}"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-        if not results:
-            result_str = f"未找到与 '{query}' 相关的技能。"
-            log_tool_call(logger, "manage_skills", arguments, result=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=True)
-
-        lines = [f"找到 {len(results)} 个相关技能：\n"]
-        for r in results:
-            slug = r.get("slug", "")
-            display_name = r.get("display_name", slug)
-            summary = r.get("summary", "")
-            version = r.get("version", "")
-            line = f"  - {display_name} (slug={slug}, v{version})"
-            if summary:
-                line += f" — {summary}"
-            lines.append(line)
-        # P2: 缓存搜索结果中的版本号，供后续 install 跳过版本解析
-        for r in results:
-            self._cache_version(r.get("slug", ""), r.get("version"))
-
-        lines.append("\n可使用 action=install, slug=<slug> 安装感兴趣的技能。")
-        result_str = "\n".join(lines)
-        log_tool_call(logger, "manage_skills", arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True)
-
-    # ── detail ────────────────────────────────────────────
-
-    async def _handle_detail(self, arguments: dict[str, Any]):
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-
-        slug = str(arguments.get("slug", "")).strip()
-        if not slug:
-            result_str = "参数错误: detail 操作需要提供 slug 参数。"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-        manager = self._get_manager()
-        if manager is None:
-            return self._manager_unavailable(arguments)
-
-        try:
-            detail = await manager.clawhub_skill_detail(slug)
-        except Exception as exc:
-            result_str = f"获取技能详情失败: {exc}"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-        parts = [
-            f"技能: {detail.get('display_name', slug)}",
-            f"标识: {detail.get('slug', slug)}",
-            f"版本: {detail.get('latest_version', '未知')}",
-        ]
-        summary = detail.get("summary", "")
-        if summary:
-            parts.append(f"简介: {summary}")
-        tags = detail.get("tags")
-        if tags:
-            parts.append(f"标签: {', '.join(tags)}")
-        owner = detail.get("owner_display_name") or detail.get("owner_handle")
-        if owner:
-            parts.append(f"作者: {owner}")
-        changelog = detail.get("latest_changelog", "")
-        if changelog:
-            parts.append(f"更新日志: {changelog}")
-        stats = detail.get("stats")
-        if isinstance(stats, dict):
-            dl = stats.get("downloads")
-            if dl is not None:
-                parts.append(f"下载量: {dl}")
-
-        result_str = "\n".join(parts)
-        log_tool_call(logger, "manage_skills", arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True)
+    @staticmethod
+    def _resolve_install_source(value: str) -> str | None:
+        lowered = value.lower()
+        if lowered.startswith("http://") or lowered.startswith("https://"):
+            return "github_url"
+        if value.endswith((".md", ".MD")) or "/" in value or "\\" in value:
+            return "local_path"
+        return None
 
     # ── install ───────────────────────────────────────────
 
@@ -232,7 +140,13 @@ class SkillManagementHandler(BaseToolHandler):
 
         slug = str(arguments.get("slug", "")).strip()
         if not slug:
-            result_str = "参数错误: install 操作需要提供 slug 参数（ClawHub 标识符或 GitHub URL）。"
+            result_str = "参数错误: install 操作需要提供 slug 参数（GitHub URL 或本地 SKILL.md 路径）。"
+            log_tool_call(logger, "manage_skills", arguments, error=result_str)
+            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
+
+        source = self._resolve_install_source(slug)
+        if source is None:
+            result_str = "参数错误: install 需要 GitHub URL 或本地 SKILL.md 路径。"
             log_tool_call(logger, "manage_skills", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
@@ -243,20 +157,12 @@ class SkillManagementHandler(BaseToolHandler):
 
         overwrite = bool(arguments.get("overwrite", False))
 
-        # 自动检测来源：GitHub URL vs ClawHub slug
-        source = "github_url" if slug.startswith("http") else "clawhub"
-
-        # P2: 从缓存获取版本号，跳过版本解析
-        cached_version = self._get_cached_version(slug) if source == "clawhub" else None
-
         try:
             result = await manager.import_skillpack_async(
                 source=source, value=slug, actor="agent", overwrite=overwrite,
-                version=cached_version,
             )
         except Exception as exc:
             exc_str = str(exc)
-            # 对冲突错误提供更友好的提示
             if "已存在" in exc_str or "conflict" in exc_str.lower():
                 result_str = f"技能已存在: {exc_str}\n如需覆盖安装，请传入 overwrite=true。"
             else:
@@ -264,7 +170,6 @@ class SkillManagementHandler(BaseToolHandler):
             log_tool_call(logger, "manage_skills", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
-        # 安装成功 → 失效工具缓存，使新技能出现在 skill.name enum 中
         e._tools_cache = None
 
         name = result.get("name", slug)
@@ -348,84 +253,18 @@ class SkillManagementHandler(BaseToolHandler):
         # 移除已激活的该技能（防止过期引用）
         deleted_name = result.get("name", slug)
         if hasattr(e, "_active_skills"):
+            before = len(e._active_skills)
             e._active_skills = [
                 s for s in e._active_skills if s.name != deleted_name
             ]
+            if len(e._active_skills) != before:
+                from excelmanus.request.series import series_of
+
+                series_of(e).note("catalog/change")
         if hasattr(e, "_loaded_skill_names"):
             e._loaded_skill_names.pop(deleted_name, None)
-        # 清理 ClawHub lockfile 残留条目
-        lockfile = getattr(manager, "_clawhub_lockfile", None)
-        if lockfile is not None:
-            try:
-                lockfile.remove(deleted_name)
-            except Exception:
-                logger.debug("清理 ClawHub lockfile 条目失败: %s", deleted_name, exc_info=True)
 
         result_str = f"OK 技能 '{deleted_name}' 已卸载。"
-        log_tool_call(logger, "manage_skills", arguments, result=result_str)
-        return _ToolExecOutcome(result_str=result_str, success=True)
-
-    # ── update ─────────────────────────────────────────────
-
-    async def _handle_update(self, arguments: dict[str, Any]):
-        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
-
-        e = self._engine
-        manager = self._get_manager()
-        if manager is None:
-            return self._manager_unavailable(arguments)
-
-        slug = str(arguments.get("slug", "")).strip()
-
-        # 无 slug → 检查可用更新
-        if not slug:
-            try:
-                updates = await manager.clawhub_check_updates()
-            except Exception as exc:
-                result_str = f"检查更新失败: {exc}"
-                log_tool_call(logger, "manage_skills", arguments, error=result_str)
-                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-            if not updates:
-                result_str = "所有已安装的 ClawHub 技能均为最新版本。"
-                log_tool_call(logger, "manage_skills", arguments, result=result_str)
-                return _ToolExecOutcome(result_str=result_str, success=True)
-
-            available = [u for u in updates if u.get("update_available")]
-            if not available:
-                result_str = "所有已安装的 ClawHub 技能均为最新版本。"
-                log_tool_call(logger, "manage_skills", arguments, result=result_str)
-                return _ToolExecOutcome(result_str=result_str, success=True)
-
-            lines = [f"发现 {len(available)} 个可更新技能：\n"]
-            for u in available:
-                lines.append(
-                    f"  - {u.get('slug')} : {u.get('installed_version', '?')} → {u.get('latest_version', '?')}"
-                )
-            lines.append("\n可使用 action=update, slug=<slug> 更新指定技能。")
-            result_str = "\n".join(lines)
-            log_tool_call(logger, "manage_skills", arguments, result=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=True)
-
-        # 有 slug → 执行更新
-        try:
-            results = await manager.clawhub_update(slug=slug)
-        except Exception as exc:
-            result_str = f"更新失败: {exc}"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-        e._tools_cache = None
-
-        if results and results[0].get("success"):
-            version = results[0].get("version", "")
-            result_str = f"OK 技能 '{slug}' 已更新到 v{version}。"
-        else:
-            error = results[0].get("error", "未知错误") if results else "未知错误"
-            result_str = f"更新失败: {error}"
-            log_tool_call(logger, "manage_skills", arguments, error=result_str)
-            return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
         log_tool_call(logger, "manage_skills", arguments, result=result_str)
         return _ToolExecOutcome(result_str=result_str, success=True)
 
@@ -494,74 +333,19 @@ class DelegationHandler(BaseToolHandler):
             log_tool_call(logger, "delegate", arguments, error=result_str)
             return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
 
-        delegate_outcome = await e.delegate_to_subagent(
+        from excelmanus.subagent.result import format_parent_reply
+
+        sub_result = await e.delegate_to_subagent(
             task=task_value.strip(),
             agent_name=agent_name_value.strip() if isinstance(agent_name_value, str) else None,
             file_paths=raw_file_paths,
             on_event=on_event,
         )
-        result_str = delegate_outcome.reply
-        success = delegate_outcome.success
+        result_str = format_parent_reply(sub_result)
+        success = sub_result.success
         error = None if success else result_str
-
-        # 写入传播
-        sub_result = delegate_outcome.subagent_result
-        if success and sub_result is not None and sub_result.structured_changes:
+        if success and sub_result.structured_changes:
             e.record_workspace_write_action()
-
-        # 子代理审批问题：阻塞等待用户决策
-        if (
-            not success
-            and sub_result is not None
-            and sub_result.pending_approval_id is not None
-        ):
-            import asyncio
-
-            pending = e.approval.pending
-            approval_id_value = sub_result.pending_approval_id
-            high_risk_tool = (
-                pending.tool_name
-                if pending is not None and pending.approval_id == approval_id_value
-                else "高风险工具"
-            )
-            question = e.enqueue_subagent_approval_question(
-                approval_id=approval_id_value,
-                tool_name=high_risk_tool,
-                picked_agent=delegate_outcome.picked_agent or "subagent",
-                task_text=delegate_outcome.task_text,
-                normalized_paths=delegate_outcome.normalized_paths,
-                tool_call_id=tool_call_id,
-                on_event=on_event,
-                iteration=iteration,
-            )
-            # 阻塞等待用户回答（支持 question_resolver / InteractionRegistry）
-            try:
-                payload = await e.await_question_answer(question)
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                e._question_flow.pop_current()
-                e._interaction_registry.cleanup_done()
-                result_str = "子代理审批问题超时/取消。"
-                log_tool_call(logger, "delegate", arguments, result=result_str)
-                return _ToolExecOutcome(result_str=result_str, success=False, error=result_str)
-
-            e._question_flow.pop_current()
-            e._interaction_registry.cleanup_done()
-
-            # 处理子代理审批回答（accept/fullaccess-retry/reject）
-            if isinstance(payload, dict):
-                result_str, success = await e.process_subagent_approval_inline(
-                    payload=payload,
-                    approval_id=approval_id_value,
-                    picked_agent=delegate_outcome.picked_agent or "subagent",
-                    task_text=delegate_outcome.task_text,
-                    normalized_paths=delegate_outcome.normalized_paths,
-                    on_event=on_event,
-                )
-                error = None if success else result_str
-            else:
-                result_str = str(payload)
-                success = True
-                error = None
 
         log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
         return _ToolExecOutcome(
@@ -591,9 +375,8 @@ class DelegationHandler(BaseToolHandler):
             success = pd_outcome.success
             error = None if success else result_str
 
-            for pd_sub_outcome in pd_outcome.outcomes:
-                sub_result = pd_sub_outcome.subagent_result
-                if pd_sub_outcome.success and sub_result is not None and sub_result.structured_changes:
+            for sub_result in pd_outcome.results:
+                if sub_result.success and sub_result.structured_changes:
                     e.record_workspace_write_action()
         except Exception as exc:
             result_str = f"parallel_delegate 执行异常: {exc}"
@@ -689,16 +472,25 @@ class HighRiskApprovalHandler(BaseToolHandler):
 
         approval = resolve_approval_policy(e)
         if approval == "ask" and not skip_high_risk_approval_by_hook:
-            pending = e.approval.create_pending(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
-            e.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=iteration, tool_call_id=tool_call_id)
-            result_str = e.format_pending_prompt(pending)
-            log_tool_call(logger, tool_name, arguments, result=result_str)
-            return _ToolExecOutcome(
-                result_str=result_str, success=True,
-                pending_approval=True, approval_id=pending.approval_id,
-            )
-        # never：高危自动过，不存在无人应答却放行。
-        elif e.approval.is_mcp_tool(tool_name):
+            from excelmanus.system_one.host import approval_gate_action, maybe_shadow_approval
+
+            decision = await maybe_shadow_approval(e, tool_name=tool_name, arguments=arguments)
+            action = approval_gate_action(decision)
+            if action == "deny":
+                return _jev_denied_outcome(
+                    tool_name, arguments, decision.reason if decision else "deny",
+                )
+            if action != "auto":
+                pending = e.approval.create_pending(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
+                e.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=iteration, tool_call_id=tool_call_id)
+                result_str = e.format_pending_prompt(pending)
+                log_tool_call(logger, tool_name, arguments, result=result_str)
+                return _ToolExecOutcome(
+                    result_str=result_str, success=True,
+                    pending_approval=True, approval_id=pending.approval_id,
+                )
+            # applied auto：仍走下面的 registry + 审计，不 create_pending。
+        if approval == "never" and e.approval.is_mcp_tool(tool_name):
             probe_before, probe_before_partial = self._dispatcher._capture_unknown_write_probe(tool_name)
             structured = await self._dispatcher.call_registry_tool(
                 tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
@@ -714,28 +506,27 @@ class HighRiskApprovalHandler(BaseToolHandler):
                 raw_result_str=raw_result_str,
                 structured=structured,
             )
-        else:
-            result_value, audit_record = await e.execute_tool_with_audit(
-                tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
-                approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
-                undoable=e.approval.is_undoable_tool(tool_name),
-            )
-            structured = self._dispatcher._coerce_tool_result(result_value)
-            result_str = structured.model_text
-            raw_result_str = getattr(self._dispatcher, "_last_call_raw_result", result_str)
-            tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
-            if tool_def is not None:
-                result_str = tool_def.truncate_result(result_str)
-                structured = structured.with_model_text(result_str)
-            log_tool_call(logger, tool_name, arguments, result=result_str)
-            return _ToolExecOutcome(
-                result_str=result_str,
-                success=structured.success,
-                error=structured.error.message if structured.error else None,
-                audit_record=audit_record,
-                raw_result_str=raw_result_str,
-                structured=structured,
-            )
+        result_value, audit_record = await e.execute_tool_with_audit(
+            tool_name=tool_name, arguments=arguments, tool_scope=tool_scope,
+            approval_id=e.approval.new_approval_id(), created_at_utc=e.approval.utc_now(),
+            undoable=e.approval.is_undoable_tool(tool_name),
+        )
+        structured = self._dispatcher._coerce_tool_result(result_value)
+        result_str = structured.model_text
+        raw_result_str = getattr(self._dispatcher, "_last_call_raw_result", result_str)
+        tool_def = getattr(e.registry, "get_tool", lambda _: None)(tool_name)
+        if tool_def is not None:
+            result_str = tool_def.truncate_result(result_str)
+            structured = structured.with_model_text(result_str)
+        log_tool_call(logger, tool_name, arguments, result=result_str)
+        return _ToolExecOutcome(
+            result_str=result_str,
+            success=structured.success,
+            error=structured.error.message if structured.error else None,
+            audit_record=audit_record,
+            raw_result_str=raw_result_str,
+            structured=structured,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -789,6 +580,8 @@ class CodePolicyHandler(BaseToolHandler):
         )
 
         e = self._engine
+        # 模型可能回显结果里的 host 注入字段，真实等级以 analysis 为准。
+        arguments.pop("sandbox_tier", None)
         _code_arg = arguments.get("code") or ""
         _cp_engine = CodePolicyEngine(
             extra_safe_modules=e.config.code_policy_extra_safe_modules,
@@ -830,10 +623,34 @@ class CodePolicyHandler(BaseToolHandler):
                     on_event=on_event, iteration=iteration, label_suffix="(清洗后)",
                 )
 
-        # 无法降级 → /accept 审批流程
+        # 无法降级 → /accept 审批流程；sandbox_tier 落进 pending 参数，
+        # 保证获批后的重放与非审批路径用同一沙箱档。
+        from excelmanus.system_one.host import approval_gate_action, maybe_shadow_approval
+
+        decision = await maybe_shadow_approval(
+            e,
+            tool_name=tool_name,
+            arguments=arguments,
+            code_tier=getattr(_analysis.tier, "value", None),
+        )
+        action = approval_gate_action(decision)
+        if action == "deny":
+            return _jev_denied_outcome(
+                tool_name, arguments, decision.reason if decision else "deny",
+            )
+        if action == "auto":
+            return await self._execute_code_with_policy(
+                code=_code_arg, arguments=arguments, analysis=_analysis,
+                tool_name=tool_name, tool_call_id=tool_call_id, tool_scope=tool_scope,
+                on_event=on_event, iteration=iteration,
+            )
         _caps_detail = ", ".join(sorted(_analysis.capabilities))
         _details_text = "; ".join(_analysis.details[:3])
-        pending = e.approval.create_pending(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
+        pending = e.approval.create_pending(
+            tool_name=tool_name,
+            arguments={**arguments, "sandbox_tier": _analysis.tier.value},
+            tool_scope=tool_scope,
+        )
         result_str = (
             f"⚠️ 代码包含高风险操作，需要人工确认：\n"
             f"- 风险等级: {_analysis.tier.value}\n"

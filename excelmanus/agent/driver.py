@@ -126,6 +126,16 @@ class Driver:
                     on_event=self._on_event,
                     chat_start=turn_started,
                 )
+                try:
+                    from excelmanus.system_one.host import maybe_emit_ui_hint
+
+                    await maybe_emit_ui_hint(
+                        engine,
+                        last_result,
+                        on_event=self._on_event,
+                    )
+                except Exception:
+                    logger.debug("ui_hint hook failed; continuing turn", exc_info=True)
         finally:
             self._emit(
                 ToolCallEvent(
@@ -161,7 +171,14 @@ class Driver:
                     followup_item=followup_item,
                 )
 
-        if await self._run_attachments() == "reject":
+        if followup_item is not None:
+            self.engine._pending_user_text = str(followup_item.content or "")
+        try:
+            rejected = await self._run_attachments() == "reject"
+        finally:
+            if followup_item is not None:
+                self.engine._pending_user_text = None
+        if rejected:
             return PreparedStep(
                 kind="reject",
                 messages=[],
@@ -211,14 +228,22 @@ class Driver:
         route_result = getattr(self.engine, "_last_route_result", None)
         from excelmanus.agent.loop import run_tool_loop
 
-        return await run_tool_loop(
-            self.engine,
-            route_result,
-            on_event,
-            approval_resolver=approval_resolver,
-            question_resolver=question_resolver,
-            skip_initial_inbox_claim=True,
-        )
+        # 挂到引擎：Runtime 的 hook ASK 与 Code Mode 子调用审批等待
+        # 与顶层共用同一决策通道（resolver 或 InteractionRegistry）。
+        engine = self.engine
+        prev_resolver = getattr(engine, "_approval_resolver", None)
+        engine._approval_resolver = approval_resolver
+        try:
+            return await run_tool_loop(
+                engine,
+                route_result,
+                on_event,
+                approval_resolver=approval_resolver,
+                question_resolver=question_resolver,
+                skip_initial_inbox_claim=True,
+            )
+        finally:
+            engine._approval_resolver = prev_resolver
 
     async def consume_next_step(self, *, iteration: int) -> list[InboxItem]:
         """步边界：先跑附件（压缩），再认领 steer / inject。"""

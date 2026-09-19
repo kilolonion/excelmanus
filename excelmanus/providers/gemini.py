@@ -77,6 +77,8 @@ class _Message:
     thinking: str | None = None
     reasoning: str | None = None
     reasoning_content: str | None = None
+    replay_state: Any = None
+    thinking_text: str | None = None
 
 
 @dataclass
@@ -137,8 +139,15 @@ def _openai_messages_to_gemini(
         content = msg.get("content")
 
         if role == "system":
-            # Gemini 使用 systemInstruction 传递系统消息
             if isinstance(content, str) and content.strip():
+                if system_parts:
+                    # 不变量 tripwire：project_for_request 的 sanitize 已把历史内
+                    # system 全部降级为 user，wire 只应有 head system。触发此异常
+                    # 说明某条 wire 生产路径绕过了 sanitize，是 bug 信号。
+                    raise ValueError(
+                        "mid-history system is not representable; "
+                        "wire 出现第二个 system 消息，说明投影层绕过了 sanitize"
+                    )
                 system_parts.append(content)
             continue
 
@@ -154,6 +163,11 @@ def _openai_messages_to_gemini(
                             url = img_info.get("url", "")
                             mime, b64 = _parse_data_uri(url)
                             parts.append({"inlineData": {"mimeType": mime, "data": b64}})
+                        elif item.get("type") == "file":
+                            raise ValueError(
+                                "Gemini provider does not support Files transport; "
+                                "keep request images inline or use an OpenAI-compatible endpoint."
+                            )
                 contents.append({"role": "user", "parts": parts})
             else:
                 contents.append({
@@ -164,6 +178,11 @@ def _openai_messages_to_gemini(
 
         if role == "assistant":
             parts: list[dict[str, Any]] = []
+            replay = msg.get("replay_state")
+            if isinstance(replay, dict):
+                thought_parts = replay.get("thought_parts")
+                if isinstance(thought_parts, list):
+                    parts.extend(item for item in thought_parts if isinstance(item, dict))
             # 文本内容
             if content:
                 parts.append({"text": content})
@@ -181,6 +200,10 @@ def _openai_messages_to_gemini(
                     parts.append({
                         "functionCall": {"name": name, "args": args},
                     })
+                    # Signed functionCall parts were already replayed verbatim.
+                    replayed = [p for p in parts[:-1] if p.get("functionCall") == parts[-1].get("functionCall")]
+                    if replayed:
+                        parts.pop()
             if parts:
                 contents.append({"role": "model", "parts": parts})
             continue
@@ -368,13 +391,18 @@ def _gemini_response_to_openai(
 
     text_parts: list[str] = []
     thinking_parts: list[str] = []
+    thought_parts: list[dict[str, Any]] = []
     tool_calls: list[_ToolCall] = []
 
     for part in parts:
-        if "thought" in part:
-            thought = part["thought"]
-            if thought:
-                thinking_parts.append(thought)
+        if "thought" in part or part.get("thought") is True:
+            thought_parts.append(dict(part))
+            thought = part.get("text") or part.get("thought")
+            if thought and thought is not True:
+                thinking_parts.append(str(thought))
+            sig = part.get("thought_signature") or part.get("thoughtSignature")
+            if sig and not thinking_parts:
+                thought_parts[-1] = dict(part)
         elif "text" in part:
             text_parts.append(part["text"])
         elif "functionCall" in part:
@@ -403,6 +431,8 @@ def _gemini_response_to_openai(
         thinking=thinking_joined,
         reasoning=thinking_joined,
         reasoning_content=thinking_joined,
+        thinking_text=thinking_joined,
+        replay_state={"thought_parts": thought_parts} if thought_parts else None,
     )
 
     # 确定 finish_reason
@@ -513,6 +543,7 @@ class _GeminiChatCompletions:
         thinking_budget = kwargs.pop("_thinking_budget", 0)
         thinking_level = kwargs.pop("_thinking_level", "")
         extra_body = kwargs.pop("extra_body", None)
+        prepared_body = kwargs.pop("_prepared_body", None)
         if stream:
             return await self._client._generate_stream(
                 model=model, messages=messages, tools=tools,
@@ -520,6 +551,7 @@ class _GeminiChatCompletions:
                 thinking_budget=thinking_budget,
                 thinking_level=thinking_level,
                 extra_body=extra_body,
+                prepared_body=prepared_body,
             )
         return await self._client._generate(
             model=model,
@@ -529,6 +561,7 @@ class _GeminiChatCompletions:
             thinking_budget=thinking_budget,
             thinking_level=thinking_level,
             extra_body=extra_body,
+                prepared_body=prepared_body,
         )
 
 
@@ -568,48 +601,20 @@ class GeminiClient:
         thinking_budget: int = 0,
         thinking_level: str = "",
         extra_body: dict[str, Any] | None = None,
+        prepared_body: dict[str, Any] | None = None,
     ) -> _ChatCompletion:
         """执行 Gemini generateContent 请求。"""
         # 如果 URL 中包含模型名，优先使用（允许用户只填完整 URL 不配 MODEL）
         effective_model = self._default_model or model
-        system_instruction, contents = _openai_messages_to_gemini(messages)
+        from excelmanus.providers.request_body import gemini_body
 
-        # 构建请求体
-        body: dict[str, Any] = {"contents": contents}
-        if system_instruction:
-            body["systemInstruction"] = system_instruction
+        body = dict(prepared_body) if prepared_body is not None else gemini_body(
+            effective_model, messages, tools, tool_choice=tool_choice,
+            thinking_budget=thinking_budget, thinking_level=thinking_level, extra_body=extra_body,
+        )
+        contents = body.get("contents", [])
+        gemini_tools = body.get("tools", [])
 
-        # 转换工具定义
-        tools_list = tools if isinstance(tools, list) else None
-        gemini_tools = _openai_tools_to_gemini(tools_list)
-        if gemini_tools:
-            body["tools"] = gemini_tools
-
-        mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
-        if mapped_tool_config is not None:
-            body["toolConfig"] = mapped_tool_config
-
-        # 注入 thinking 配置（与 _generate_stream 保持一致）
-        if thinking_level:
-            gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {
-                "thinkingLevel": _normalize_gemini_thinking_level(effective_model, thinking_level),
-            }
-            body["generationConfig"] = gen_config
-        elif thinking_budget > 0:
-            gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
-            body["generationConfig"] = gen_config
-
-        # 透传 extra_body：过滤非 Gemini 原生字段后合并到 generationConfig
-        if extra_body and isinstance(extra_body, dict):
-            cleaned = _strip_non_gemini_extra_body(extra_body)
-            if cleaned:
-                gen_config = body.get("generationConfig", {})
-                gen_config.update(cleaned)
-                body["generationConfig"] = gen_config
-
-        # 构建请求 URL
         url = f"{self._base_url}/models/{effective_model}:generateContent"
 
         # 认证：Gemini API 支持 key 查询参数或 Authorization header
@@ -676,37 +681,18 @@ class GeminiClient:
         thinking_budget: int = 0,
         thinking_level: str = "",
         extra_body: dict[str, Any] | None = None,
+        prepared_body: dict[str, Any] | None = None,
     ) -> Any:
         """流式执行 Gemini generateContent 请求，返回异步生成器 yield StreamDelta。"""
         effective_model = self._default_model or model
-        system_instruction, contents = _openai_messages_to_gemini(messages)
-        body: dict[str, Any] = {"contents": contents}
-        if system_instruction:
-            body["systemInstruction"] = system_instruction
-        tools_list = tools if isinstance(tools, list) else None
-        gemini_tools = _openai_tools_to_gemini(tools_list)
-        if gemini_tools:
-            body["tools"] = gemini_tools
-        mapped_tool_config = _map_openai_tool_choice_to_gemini(tool_choice)
-        if mapped_tool_config is not None:
-            body["toolConfig"] = mapped_tool_config
-        if thinking_level:
-            gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {
-                "thinkingLevel": _normalize_gemini_thinking_level(effective_model, thinking_level),
-            }
-            body["generationConfig"] = gen_config
-        elif thinking_budget > 0:
-            gen_config = body.get("generationConfig", {})
-            gen_config["thinkingConfig"] = {"thinkingBudget": thinking_budget}
-            body["generationConfig"] = gen_config
-        # 透传 extra_body：过滤非 Gemini 原生字段后合并到 generationConfig
-        if extra_body and isinstance(extra_body, dict):
-            cleaned = _strip_non_gemini_extra_body(extra_body)
-            if cleaned:
-                gen_config = body.get("generationConfig", {})
-                gen_config.update(cleaned)
-                body["generationConfig"] = gen_config
+        from excelmanus.providers.request_body import gemini_body
+
+        body = dict(prepared_body) if prepared_body is not None else gemini_body(
+            effective_model, messages, tools, tool_choice=tool_choice,
+            thinking_budget=thinking_budget, thinking_level=thinking_level, extra_body=extra_body,
+        )
+        contents = body.get("contents", [])
+        gemini_tools = body.get("tools", [])
 
         url = f"{self._base_url}/models/{effective_model}:streamGenerateContent?alt=sse"
         headers = {"Content-Type": "application/json"}
@@ -718,6 +704,8 @@ class GeminiClient:
 
         async def _stream_generator():
             _inline_sm = InlineThinkingStateMachine()
+            replay_parts: list[dict[str, Any]] = []
+            call_index = 0
 
             async with self._http.stream("POST", url, json=body, headers=headers, params=params) as resp:
                 if resp.status_code != 200:
@@ -755,19 +743,23 @@ class GeminiClient:
                     finish = candidate.get("finishReason")
 
                     for part in parts:
-                        if "thought" in part:
-                            yield StreamDelta(thinking_delta=part["thought"])
+                        if part.get("thought") or part.get("thoughtSignature"):
+                            replay_parts.append(dict(part))
+                            yield StreamDelta(replay_state={"thought_parts": list(replay_parts)})
+                        if part.get("thought"):
+                            yield StreamDelta(thinking_delta=part.get("text") or (part["thought"] if isinstance(part["thought"], str) else ""))
                         elif "text" in part:
                             for d in _inline_sm.feed(part["text"]):
                                 yield d
                         elif "functionCall" in part:
                             fc = part["functionCall"]
                             yield StreamDelta(tool_calls_delta=[{
-                                "index": 0,
+                                "index": call_index,
                                 "id": str(uuid.uuid4()),
                                 "name": fc.get("name", ""),
                                 "arguments": json.dumps(fc.get("args", {})),
                             }])
+                            call_index += 1
 
                     if finish:
                         mapped_finish = "stop"

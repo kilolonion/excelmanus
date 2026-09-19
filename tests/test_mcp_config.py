@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from excelmanus.mcp.config import MCPConfigLoader, MCPServerConfig
+from excelmanus.settings_runtime import clear_setting, override_settings
 
 
 # ── 辅助工具 ──────────────────────────────────────────────────────
@@ -55,11 +56,11 @@ def _valid_sse_config() -> dict:
 class TestConfigSearchPriority:
     """测试配置文件搜索优先级（Requirements 1.2, 1.7）。
 
-    优先级：环境变量 > config_path 参数 > workspace_root/mcp.json > ~/.excelmanus/mcp.json
+    优先级：EXCELMANUS_MCP_CONFIG 设置 > config_path 参数 > workspace_root/mcp.json > ~/.excelmanus/mcp.json
     """
 
     def test_env_var_highest_priority(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """环境变量 EXCELMANUS_MCP_CONFIG 优先级最高。"""
+        """设置项 EXCELMANUS_MCP_CONFIG 优先级最高。"""
         # 准备：环境变量指向的配置（stdio）
         env_config_path = tmp_path / "env" / "mcp.json"
         _write_mcp_json(env_config_path, {
@@ -76,7 +77,7 @@ class TestConfigSearchPriority:
             }
         })
 
-        monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(env_config_path))
+        override_settings({"EXCELMANUS_MCP_CONFIG": str(env_config_path)})
 
         result = MCPConfigLoader.load(
             workspace_root=str(tmp_path / "workspace"),
@@ -88,7 +89,7 @@ class TestConfigSearchPriority:
 
     def test_config_path_over_workspace(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """config_path 参数优先于 workspace_root/mcp.json。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         # 准备：config_path 指向的配置
         explicit_path = tmp_path / "explicit" / "mcp.json"
@@ -116,7 +117,7 @@ class TestConfigSearchPriority:
 
     def test_workspace_root_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """workspace_root/mcp.json 优先于 ~/.excelmanus/mcp.json。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         # 准备：workspace 配置
         ws_dir = tmp_path / "workspace"
@@ -142,7 +143,7 @@ class TestConfigSearchPriority:
 
     def test_fallback_to_home_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """所有高优先级路径不存在时，回退到 ~/.excelmanus/mcp.json。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         # workspace 目录存在但无 mcp.json
         ws_dir = tmp_path / "workspace"
@@ -164,7 +165,7 @@ class TestConfigSearchPriority:
         assert result[0].url == "http://home:9090/sse"
 
     def test_env_var_overrides_config_path(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """环境变量同时存在 config_path 时，环境变量优先。"""
+        """EXCELMANUS_MCP_CONFIG 同时存在 config_path 时，设置项优先。"""
         env_config_path = tmp_path / "env_mcp.json"
         _write_mcp_json(env_config_path, {
             "mcpServers": {
@@ -179,7 +180,7 @@ class TestConfigSearchPriority:
             }
         })
 
-        monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(env_config_path))
+        override_settings({"EXCELMANUS_MCP_CONFIG": str(env_config_path)})
 
         result = MCPConfigLoader.load(config_path=str(explicit_path))
 
@@ -195,7 +196,7 @@ class TestConfigFileMissing:
 
     def test_no_config_returns_empty_list(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """所有候选路径均不存在时，返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
         # 指向一个空目录作为 workspace
         ws_dir = tmp_path / "empty_workspace"
         ws_dir.mkdir()
@@ -210,7 +211,7 @@ class TestConfigFileMissing:
 
     def test_env_var_points_to_nonexistent_file(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """环境变量指向不存在的文件时，继续搜索后续候选路径。"""
-        monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(tmp_path / "nonexistent.json"))
+        override_settings({"EXCELMANUS_MCP_CONFIG": str(tmp_path / "nonexistent.json")})
 
         # workspace 有配置
         ws_dir = tmp_path / "workspace"
@@ -223,7 +224,7 @@ class TestConfigFileMissing:
 
     def test_config_path_nonexistent_falls_through(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """config_path 指向不存在的文件时，继续搜索 workspace。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(ws_dir / "mcp.json", _valid_sse_config())
@@ -247,7 +248,7 @@ class TestJsonErrorHandling:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """JSON 格式错误时记录 ERROR 日志并返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         ws_dir.mkdir()
@@ -269,7 +270,7 @@ class TestJsonErrorHandling:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """顶层不是 JSON 对象时记录 ERROR 并返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         ws_dir.mkdir()
@@ -294,7 +295,7 @@ class TestMissingMcpServersField:
 
     def test_missing_mcp_servers_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """配置文件缺少 mcpServers 字段时返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(ws_dir / "mcp.json", {"someOtherKey": {}})
@@ -309,7 +310,7 @@ class TestMissingMcpServersField:
 
     def test_mcp_servers_not_dict_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """mcpServers 不是字典时返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(ws_dir / "mcp.json", {"mcpServers": "not_a_dict"})
@@ -324,7 +325,7 @@ class TestMissingMcpServersField:
 
     def test_empty_mcp_servers_returns_empty(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """mcpServers 为空字典时返回空列表。"""
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
 
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(ws_dir / "mcp.json", {"mcpServers": {}})
@@ -347,7 +348,7 @@ class TestPlaintextSecretWarning:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(
             ws_dir / "mcp.json",
@@ -383,7 +384,7 @@ class TestPlaintextSecretWarning:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        monkeypatch.delenv("EXCELMANUS_MCP_CONFIG", raising=False)
+        clear_setting("EXCELMANUS_MCP_CONFIG")
         ws_dir = tmp_path / "workspace"
         _write_mcp_json(
             ws_dir / "mcp.json",

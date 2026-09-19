@@ -52,7 +52,8 @@ class InteractionRegistry:
     def resolve(self, interaction_id: str, payload: Any) -> bool:
         """提交用户回答/决策，resolve 对应的 Future。
 
-        Future 在 resolve 后仍保留在 dict 中，由 cleanup_done() 统一清理。
+        resolve 成功后立即清理该 Future（含其它已完成项），避免长生命周期
+        session 中的内存泄漏；cleanup_done 供取消/兜底路径使用。
 
         Returns:
             True 表示成功 resolve；False 表示 ID 不存在或已完成。

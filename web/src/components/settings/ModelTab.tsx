@@ -1,25 +1,33 @@
 "use client";
 
-import { useState, type ReactNode } from "react";
-import { Loader2, CheckCircle2, AlertTriangle, X, Server, Zap, Crown, Download } from "lucide-react";
+import { useEffect, useState, type ReactNode } from "react";
+import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown, Download } from "lucide-react";
 import { AdminModelContext } from "./model/admin-model-context";
 import { useAdminModelSettings } from "./model/useAdminModelSettings";
-import { ConnectionConfigPanel } from "./model/ConnectionConfigPanel";
-import { ModelCapabilitiesPanel } from "./model/ModelCapabilitiesPanel";
+import { ProviderSection } from "./model/ProviderSection";
+import { JevProviderSection } from "./model/JevProviderSection";
+import { RoleModelSection } from "./model/RoleModelSection";
+import { JevRoleSection } from "./model/JevRoleSection";
 import { SubscriptionOAuthPanel } from "./model/SubscriptionOAuthPanel";
 import { AdvancedDiagnosticsPanel } from "./model/AdvancedDiagnosticsPanel";
-type ModelSubTab = "connection" | "capabilities" | "subscription" | "diagnostics";
+import {
+  subscribeModelSubTab,
+  takePendingModelSubTab,
+  type ModelSubTab,
+} from "./model/model-subtab";
 
-const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode }[] = [
-  { key: "connection", label: "连接配置", icon: <Server className="h-3 w-3" /> },
-  { key: "capabilities", label: "模型能力", icon: <Zap className="h-3 w-3" /> },
-  { key: "subscription", label: "订阅与 OAuth", icon: <Crown className="h-3 w-3" /> },
-  { key: "diagnostics", label: "高级诊断", icon: <Download className="h-3 w-3" /> },
+const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode; coachId: string }[] = [
+  { key: "providers", label: "供应商", icon: <Database className="h-3 w-3" />, coachId: "coach-settings-subtab-providers" },
+  { key: "roles", label: "模型配置", icon: <Settings2 className="h-3 w-3" />, coachId: "coach-settings-subtab-roles" },
+  { key: "subscription", label: "订阅与 OAuth", icon: <Crown className="h-3 w-3" />, coachId: "coach-settings-subtab-subscription" },
+  { key: "diagnostics", label: "高级诊断", icon: <Download className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
 ];
 
 export function ModelTab() {
   const ctx = useAdminModelSettings();
-  const [subTab, setSubTab] = useState<ModelSubTab>("connection");
+  const [subTab, setSubTab] = useState<ModelSubTab>(() => takePendingModelSubTab() ?? "providers");
+
+  useEffect(() => subscribeModelSubTab(setSubTab), []);
 
   if (ctx.loading) {
     return (
@@ -55,6 +63,7 @@ export function ModelTab() {
               <button
                 key={tab.key}
                 type="button"
+                data-coach-id={tab.coachId}
                 className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
                   isActive
                     ? "text-white border-transparent"
@@ -70,8 +79,18 @@ export function ModelTab() {
           })}
         </div>
 
-        {subTab === "connection" && <ConnectionConfigPanel />}
-        {subTab === "capabilities" && <ModelCapabilitiesPanel />}
+        {subTab === "providers" && (
+          <div className="flex flex-col gap-3">
+            <ProviderSection />
+            <JevProviderSection />
+          </div>
+        )}
+        {subTab === "roles" && (
+          <div className="flex flex-col gap-3">
+            <RoleModelSection />
+            <JevRoleSection />
+          </div>
+        )}
         {subTab === "subscription" && <SubscriptionOAuthPanel />}
         {subTab === "diagnostics" && <AdvancedDiagnosticsPanel />}
       </div>

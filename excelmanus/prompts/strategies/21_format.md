@@ -1,10 +1,12 @@
 ---
 name: tool:format
-version: "9.0.0"
+version: "10.0.0"
 priority: 106
 order: 106
 layer: strategy
-max_tokens: 250
-conditions: {}
+max_tokens: 80
+conditions:
+  catalog_mode: [write, code]
+  tool: format_spreadsheet
 ---
-工作表必须用 sheet，或在 range 里写 表!A1。range 写 A1:C5，也接受 区域汇总!A5:C5。合并区的填充、边框、对齐以锚点格为准。非锚点回读为空或 fill 为空不是缺陷。边框是整对象替换。font/alignment 按传入键叠加。工具回报已应用不等于每个格子都写下了。
+随数据变化的规则用条件格式；一次性指定某格外观用直接 format。批量固定样式可按范围操作，不必改成条件格式。单表可省略 sheet；多表必须带 sheet 或 表!A1。合并区以锚点为准。

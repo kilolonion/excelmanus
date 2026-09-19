@@ -196,6 +196,56 @@ class TestGenerateSuiteReport:
         assert "150K" in report
 
 
+class TestErrorWarningSplit:
+    """error 与 warn-only 效率告警分开展示。"""
+
+    @staticmethod
+    def _with_validation(severity: str, rule: str = "max_llm_calls") -> dict:
+        summary = _make_suite_summary()
+        summary["artifacts"]["cases"][0]["validation"] = {
+            "total": 2,
+            "passed": 1,
+            "failed": 1,
+            "errors": 0 if severity == "warning" else 1,
+            "warnings": 1 if severity == "warning" else 0,
+            "results": [
+                {"rule": "status", "passed": True},
+                {
+                    "rule": rule,
+                    "passed": False,
+                    "expected": "<= 6",
+                    "actual": 10,
+                    "message": f"{rule} 超过上限",
+                    "severity": severity,
+                },
+            ],
+        }
+        return summary
+
+    def test_warning_only_badge_and_section(self):
+        report = generate_suite_report(self._with_validation("warning"))
+        assert "⚠W1" in report
+        assert "## 效率告警" in report
+        assert "## 断言违规" not in report
+
+    def test_error_goes_to_violations(self):
+        report = generate_suite_report(self._with_validation("error", "expected_skill"))
+        assert "❌E1" in report
+        assert "## 断言违规" in report
+        assert "## 效率告警" not in report
+
+    def test_suite_header_shows_error_warning_split(self):
+        summary = _make_suite_summary()
+        sv = SuiteValidationSummary(
+            total_assertions=4, passed=2, failed=2,
+            errors=1, warnings=1, pass_rate=50.0,
+            failed_cases=["case_read"], error_failed_cases=["case_read"],
+        )
+        report = generate_suite_report(summary, suite_validation=sv)
+        assert "50.0%" in report
+        assert "error 1 / warning 1" in report
+
+
 # ── save_suite_report ────────────────────────────────────
 
 

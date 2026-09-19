@@ -12,8 +12,10 @@ from excelmanus.compaction import compact_for_pre_step, recover_request_overflow
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
 from excelmanus.plan_mode import handle_plan_command, request_exit_plan_approval
+from excelmanus.security.policy import is_plan_active
 from excelmanus.prompt.skill_catalog import (
     attach_skill_catalog,
+    is_warmup_ping,
     parse_skill_gesture,
     prepare_skill_followup,
     render_available_skills,
@@ -95,6 +97,43 @@ def test_catalog_is_user_message_when_digest_changes() -> None:
     assert engine._memory.messages.count(first) == 1
 
 
+def test_warmup_ping_defers_skill_catalog_until_real_task() -> None:
+    recorded: list[str] = []
+
+    def _add(text: str, **kwargs: object) -> None:
+        recorded.append(text)
+        engine._memory.messages.append(
+            {"role": "user", "content": text, "_prompt_kind": kwargs.get("prompt_kind")},
+        )
+
+    engine = SimpleNamespace(
+        _skill_router=SimpleNamespace(
+            _loader=SimpleNamespace(
+                get_skillpacks=lambda: {
+                    "data-basic": SimpleNamespace(
+                        description="分析表格",
+                        disable_model_invocation=False,
+                    )
+                }
+            )
+        ),
+        _skill_resolver=None,
+        _full_access_enabled=True,
+        _skill_catalog_digest=None,
+        _pending_user_text="在吗",
+        _memory=SimpleNamespace(messages=[], add_user_message=_add),
+    )
+    assert is_warmup_ping("在吗")
+    assert is_warmup_ping("hello")
+    assert not is_warmup_ping("那就看这个，我也不知道要啥")
+    assert attach_skill_catalog(engine) == ""
+    assert recorded == []
+    engine._pending_user_text = "[已上传文件: ./uploads/a.xlsx]\n\n那就看这个，我也不知道要啥"
+    injected = attach_skill_catalog(engine)
+    assert "<available_skills>" in injected
+    assert recorded == [injected]
+
+
 def test_prepare_skill_followup_does_not_set_tool_scope() -> None:
     memory = SimpleNamespace(messages=[], add_user_message=lambda text: memory.messages.append(text))
     engine = SimpleNamespace(_memory=memory, _skill_router=None)
@@ -123,8 +162,7 @@ async def test_plan_command_not_in_model_history() -> None:
     engine = _make_engine()
     engine._client.chat.completions.create = AsyncMock(return_value=_text_response("ok"))
     await engine.followup("/plan")
-    await engine.followup("继续分析这张表")
-    assert engine._plan_active is True
+    await engine.followup("继续分析这张表", chat_mode="plan")
     assert engine._current_chat_mode == "plan"
     user_blobs = [
         str(item.get("content"))
@@ -139,13 +177,13 @@ async def test_plan_command_not_in_model_history() -> None:
 
 
 @pytest.mark.asyncio
-async def test_default_write_chat_does_not_undo_plan_command() -> None:
+async def test_write_chat_mode_exits_plan_command() -> None:
     engine = _make_engine()
     engine._client.chat.completions.create = AsyncMock(return_value=_text_response("ok"))
     await engine.followup("/plan on")
     await engine.followup("下一步", chat_mode="write")
-    assert engine._plan_active is True
-    assert engine._current_chat_mode == "plan"
+    assert engine._current_chat_mode == "write"
+    assert not is_plan_active(engine)
 
 
 def test_exit_plan_mode_enqueues_ask_user() -> None:
@@ -224,9 +262,10 @@ async def test_recover_overflow_retries_only_when_surface_advances() -> None:
         return SimpleNamespace(success=True)
 
     engine._compaction_manager.auto_compact = _advance
-    trimmed = await recover_request_overflow(engine, messages)
-    assert trimmed is not None
-    assert trimmed[0]["role"] == "system"
+    prepared = await recover_request_overflow(engine, messages)
+    assert prepared is not None
+    assert getattr(prepared, "header", None) is not None
+    assert getattr(prepared, "provider_body", None) is not None
 
 
 def test_explorer_write_guard_rejects_mutating_tools() -> None:

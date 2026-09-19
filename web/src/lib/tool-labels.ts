@@ -199,6 +199,8 @@ const STATIC_TITLES: Record<string, string> = {
   search_word: "搜索文档",
   write_word: "写入文档",
   list_subagents: "查看子代理",
+  delegate: "委派子任务",
+  delegate_to_subagent: "委派子任务",
   memory_read_topic: "读取记忆",
   memory_save: "保存记忆",
   write_plan: "编写计划",

@@ -6,7 +6,7 @@ import logging
 import re
 from typing import Any
 
-from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
+from excelmanus.engine_utils import _NO_THINKING_EXTRA_BODY
 
 logger = logging.getLogger(__name__)
 
@@ -90,7 +90,7 @@ async def generate_session_title(
             ],
             max_tokens=48,
             temperature=0.3,
-            extra_body=_AUX_NO_THINKING_EXTRA_BODY,
+            extra_body=_NO_THINKING_EXTRA_BODY,
         )
         raw = (resp.choices[0].message.content or "").strip().strip("\"'")
         if not raw:

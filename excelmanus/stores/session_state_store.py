@@ -1,11 +1,13 @@
 """SessionStateStore：会话状态快照持久化。
 
 职责：
-- 保存会话状态快照（SessionState + TaskStore）到 session_checkpoints 表
+- 保存会话状态快照（SessionState + TaskStore）到 session_state_snapshots 表
 - 加载最新快照用于会话恢复
 - 按 session_id 清理旧快照
 
-表名仍为 session_checkpoints（历史兼容）；这不是文件检查点。
+表名仍为 session_state_snapshots（历史兼容）；这不是文件检查点。
+state_json 原样保存 SessionState.to_dict()（含 pin / fingerprint / generation / wire_epoch）；
+加载后按字段恢复，不重算派生状态。旧快照缺字段由 SessionState.from_dict 填默认值。
 """
 
 from __future__ import annotations
@@ -58,7 +60,7 @@ class SessionStateStore:
             state_json = json.dumps(state_dict, ensure_ascii=False, default=str)
             task_json = json.dumps(task_list_dict, ensure_ascii=False, default=str)
             cursor = self._conn.execute(
-                "INSERT INTO session_checkpoints "
+                "INSERT INTO session_state_snapshots "
                 "(session_id, checkpoint_type, state_json, task_list_json, turn_number, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -95,7 +97,7 @@ class SessionStateStore:
         try:
             row = self._conn.execute(
                 "SELECT state_json, task_list_json, turn_number, created_at "
-                "FROM session_checkpoints "
+                "FROM session_state_snapshots "
                 "WHERE session_id = ? "
                 "ORDER BY turn_number DESC, id DESC "
                 "LIMIT 1",
@@ -119,7 +121,7 @@ class SessionStateStore:
         """删除指定会话的所有 checkpoint，返回删除行数。"""
         try:
             cursor = self._conn.execute(
-                "DELETE FROM session_checkpoints WHERE session_id = ?",
+                "DELETE FROM session_state_snapshots WHERE session_id = ?",
                 (session_id,),
             )
             self._conn.commit()
@@ -132,9 +134,9 @@ class SessionStateStore:
         """保留最新 N 条 checkpoint，删除更早的。"""
         try:
             self._conn.execute(
-                "DELETE FROM session_checkpoints "
+                "DELETE FROM session_state_snapshots "
                 "WHERE session_id = ? AND id NOT IN ("
-                "  SELECT id FROM session_checkpoints "
+                "  SELECT id FROM session_state_snapshots "
                 "  WHERE session_id = ? "
                 "  ORDER BY turn_number DESC, id DESC "
                 f"  LIMIT {_MAX_CHECKPOINTS_PER_SESSION}"

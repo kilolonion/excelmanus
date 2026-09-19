@@ -5,8 +5,10 @@ import { fetchFileBlob, uploadFile, uploadFileFromUrl } from "@/lib/api";
 import { identityKey, toPublicFileIdentity } from "@/lib/file-identity";
 import type { AttachedFile } from "@/lib/types";
 import { getActiveSessionId } from "@/stores/session-store";
-import { detectFileUrl, friendlyUploadError, isImageFile } from "./chat-input-constants";
+import { isVisionImageFile } from "@/lib/file-kind";
+import { detectFileUrl, friendlyUploadError } from "./chat-input-constants";
 import {
+  formatFileMention,
   insertTokensIntoText,
   scheduleTextareaCursor,
   toDisplayMentionTokens,
@@ -32,6 +34,32 @@ function attachmentIdentity(path: string | undefined, filename: string): string 
     return identityKey(ident ?? path);
   }
   return filename;
+}
+
+/** 本地选择/粘贴时上传尚未返回工作区路径，至少写入可解析的 `@file:` + basename。 */
+function mentionForPendingUpload(filename: string): string {
+  return formatFileMention({ path: filename });
+}
+
+/**
+ * 上传成功后按 value 把 `@file:basename` 回填为 `@file:uploads/{hash}_{name}`。
+ * display 不变；命中返回 true，未命中返回 false（幂等，不抛错）。
+ */
+export function backfillPendingUploadFull(
+  tokenMap: Map<string, string>,
+  originalName: string,
+  resolvedPath: string,
+): boolean {
+  const pendingFull = formatFileMention({ path: originalName });
+  const resolvedFull = formatFileMention({ path: resolvedPath });
+  let hit = false;
+  for (const [display, full] of tokenMap) {
+    if (full === pendingFull) {
+      tokenMap.set(display, resolvedFull);
+      hit = true;
+    }
+  }
+  return hit;
 }
 
 export function useChatUpload({
@@ -96,6 +124,9 @@ export function useChatUpload({
           f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
         )
       );
+      if (result.path) {
+        backfillPendingUploadFull(tokenMapRef.current, file.name, result.path);
+      }
     } catch (err) {
       const error = friendlyUploadError(err);
       setFiles((prev) =>
@@ -104,7 +135,7 @@ export function useChatUpload({
         )
       );
     }
-  }, []);
+  }, [tokenMapRef]);
 
   const hydrateWorkspaceImage = useCallback(async (id: string, path: string, filename: string) => {
     try {
@@ -166,7 +197,7 @@ export function useChatUpload({
     for (const af of attached) {
       void triggerUpload(af.id, af.file);
     }
-    insertDocMentions(newFiles.filter((f) => !isImageFile(f.name)).map((f) => `@${f.name}`));
+    insertDocMentions(newFiles.filter((f) => !isVisionImageFile(f.name)).map((f) => mentionForPendingUpload(f.name)));
   }, [insertDocMentions, triggerUpload]);
 
   const attachWorkspaceFiles = useCallback((incoming: WorkspaceDroppedFile[]) => {
@@ -180,7 +211,7 @@ export function useChatUpload({
     if (unique.length === 0) return;
 
     const attached: AttachedFile[] = unique.map((file) => {
-      const image = isImageFile(file.filename);
+      const image = isVisionImageFile(file.filename);
       return {
         id: newAttachmentId("ws-"),
         file: new File([], file.filename),
@@ -192,14 +223,14 @@ export function useChatUpload({
     setFiles((prev) => [...prev, ...attached]);
     for (const af of attached) {
       const result = af.uploadResult!;
-      if (isImageFile(result.filename)) {
+      if (isVisionImageFile(result.filename)) {
         void hydrateWorkspaceImage(af.id, result.path, result.filename);
       } else {
         trackRecentExcelFile(result.path, result.filename);
       }
     }
     insertDocMentions(
-      unique.filter((file) => !isImageFile(file.filename)).map((file) => workspaceFileMention(file)),
+      unique.filter((file) => !isVisionImageFile(file.filename)).map((file) => workspaceFileMention(file)),
     );
   }, [files, hydrateWorkspaceImage, insertDocMentions]);
 
@@ -215,11 +246,11 @@ export function useChatUpload({
     }
 
     tokenMapRef.current.clear();
-    const docFiles = newFiles.filter((f) => !isImageFile(f.name));
+    const docFiles = newFiles.filter((f) => !isVisionImageFile(f.name));
     let nextText = draftText.trim();
     if (docFiles.length > 0) {
       const displayTokens = toDisplayMentionTokens(
-        docFiles.map((f) => `@${f.name}`),
+        docFiles.map((f) => mentionForPendingUpload(f.name)),
         tokenMapRef.current,
       );
       setConfirmedTokens(new Set(displayTokens));
@@ -248,10 +279,17 @@ export function useChatUpload({
           f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
         )
       );
-      if (!isImageFile(result.filename)) {
-        setConfirmedTokens((prev) => new Set(prev).add(`@${result.filename}`));
+      if (!isVisionImageFile(result.filename)) {
+        const mention = formatFileMention({ path: result.path });
+        const displayTokens = toDisplayMentionTokens([mention], tokenMapRef.current);
+        setConfirmedTokens((prev) => {
+          const next = new Set(prev);
+          displayTokens.forEach((token) => next.add(token));
+          return next;
+        });
         setText((prev) => {
-          const replaced = prev.replace(url, `@${result.filename}`);
+          const replacement = displayTokens[0] ?? mention;
+          const replaced = prev.replace(url, replacement);
           return replaced !== prev ? replaced : prev;
         });
       }
@@ -263,7 +301,7 @@ export function useChatUpload({
         )
       );
     }
-  }, [setConfirmedTokens, setText]);
+  }, [setConfirmedTokens, setText, tokenMapRef]);
 
   const handlePaste = useCallback(
     (e: React.ClipboardEvent) => {

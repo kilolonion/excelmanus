@@ -12,7 +12,6 @@ import {
   RefreshCw,
   Zap,
   ChevronDown,
-  ChevronRight,
   Terminal,
   Globe,
   Radio,
@@ -36,6 +35,7 @@ import { Separator } from "@/components/ui/separator";
 import { apiGet, apiPost, apiPut, apiDelete } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useConnectionStore } from "@/stores/connection-store";
+import { SettingsEntityCard } from "@/components/settings/SettingsEntityCard";
 
 interface MCPServer {
   name: string;
@@ -742,7 +742,7 @@ export function MCPTab() {
       {/* Header */}
       <div className="flex items-center justify-between gap-2">
         <div className="min-w-0">
-          <p className="text-xs text-muted-foreground truncate" title={configPath}>
+          <p className="text-xs text-muted-foreground break-all" title={configPath}>
             配置文件: {configPath ? configPath.split("/").slice(-2).join("/") : "mcp.json"}
           </p>
         </div>
@@ -784,7 +784,7 @@ export function MCPTab() {
       {(showCreate || editingServer) && (
         <div className="rounded-lg border border-dashed border-border p-3 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <span className="text-xs font-medium truncate min-w-0">
+            <span className="text-xs font-medium break-words min-w-0">
               {editingServer ? `编辑: ${editingServer}` : "新增 MCP Server"}
             </span>
             <div className="flex gap-1 shrink-0">
@@ -975,53 +975,17 @@ export function MCPTab() {
             </p>
           )}
           {servers.map((server) => (
-            <div key={server.name} className="rounded-lg border border-border overflow-hidden">
-              {/* Card header */}
-              <div
-                className="px-3 py-3 sm:py-2.5 cursor-pointer hover:bg-muted/50 active:bg-muted/60 transition-colors"
-                onClick={() =>
-                  setExpandedServer(expandedServer === server.name ? null : server.name)
-                }
-              >
-                {/* Row 1: status dot + name + action buttons */}
-                <div className="flex items-center gap-2">
-                  {STATUS_ICONS[server.status] || STATUS_ICONS.not_connected}
-                  <span className="text-sm font-medium truncate flex-1 min-w-0">{server.name}</span>
-                  <div className="flex gap-0.5 shrink-0" onClick={(e) => e.stopPropagation()}>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      disabled={testing === server.name}
-                      onClick={() => handleTest(server.name)}
-                      title="测试连接"
-                    >
-                      {testing === server.name ? (
-                        <Loader2 className="h-3 w-3 animate-spin" />
-                      ) : (
-                        <Zap className="h-3 w-3" />
-                      )}
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6"
-                      onClick={() => startEdit(server)}
-                    >
-                      <Pencil className="h-3 w-3" />
-                    </Button>
-                    <Button
-                      variant="ghost"
-                      size="icon"
-                      className="h-6 w-6 text-destructive"
-                      onClick={() => handleDelete(server.name)}
-                    >
-                      <Trash2 className="h-3 w-3" />
-                    </Button>
-                  </div>
-                </div>
-                {/* Row 2: transport + tool count + status */}
-                <div className="flex items-center gap-1.5 mt-1 ml-[22px]">
+            <SettingsEntityCard
+              key={server.name}
+              expandable
+              expanded={expandedServer === server.name}
+              onClick={() =>
+                setExpandedServer(expandedServer === server.name ? null : server.name)
+              }
+              icon={STATUS_ICONS[server.status] || STATUS_ICONS.not_connected}
+              name={server.name}
+              meta={
+                <div className="flex items-center gap-1.5 flex-wrap">
                   <Badge variant="secondary" className="text-[10px] px-1.5 py-0 font-mono">
                     {TRANSPORT_ICONS[server.transport]}
                     <span className="ml-1">{server.transport}</span>
@@ -1035,7 +999,42 @@ export function MCPTab() {
                     {STATUS_LABELS[server.status] || server.status}
                   </span>
                 </div>
-              </div>
+              }
+              actions={
+                <>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    disabled={testing === server.name}
+                    onClick={() => handleTest(server.name)}
+                    title="测试连接"
+                  >
+                    {testing === server.name ? (
+                      <Loader2 className="h-3 w-3 animate-spin" />
+                    ) : (
+                      <Zap className="h-3 w-3" />
+                    )}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6"
+                    onClick={() => startEdit(server)}
+                  >
+                    <Pencil className="h-3 w-3" />
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-6 w-6 text-destructive"
+                    onClick={() => handleDelete(server.name)}
+                  >
+                    <Trash2 className="h-3 w-3" />
+                  </Button>
+                </>
+              }
+            >
 
               {/* Test result banner */}
               {testResult[server.name] && (
@@ -1102,7 +1101,7 @@ export function MCPTab() {
                   </div>
                 </div>
               )}
-            </div>
+            </SettingsEntityCard>
           ))}
       </div>
     </div>

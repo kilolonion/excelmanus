@@ -102,20 +102,20 @@ def _commit_converted_xlsx(
 ) -> None:
     """Publish converted xlsx bytes through FileAccessGuard + commit_bytes."""
     from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
-    from excelmanus.tools._guard_ctx import get_guard as get_ctx_guard
+    from excelmanus.tools.context import current_call
     from excelmanus.workbook_commit import CommitError, commit_bytes, resolve_expected_version
 
-    guard = None
     if workspace_root is not None:
         guard = FileAccessGuard(str(workspace_root))
     else:
-        guard = get_ctx_guard()
-    if guard is None:
-        guard = FileAccessGuard(str(dst.parent.resolve()))
+        call = current_call()
+        if call is None:
+            raise ConversionError("转换写入缺少工作区上下文")
+        guard = FileAccessGuard(str(call.binding.workspace.root))
     try:
         dest = guard.resolve_and_validate(str(dst))
         rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
-        seen = resolve_expected_version(rel, None, exists=dest.is_file())
+        seen = resolve_expected_version(rel, None, exists=dest.is_file(), abs_path=dest)
         commit_bytes(guard=guard, file_path=rel, data=data, expected_version=seen)
     except (CommitError, SecurityViolationError) as exc:
         raise ConversionError(str(exc)) from exc

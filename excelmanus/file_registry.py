@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.excel_extensions import EXCEL_EXTENSIONS as _EXCEL_EXTENSIONS_BASE
-from excelmanus.security.path_utils import resolve_in_workspace, to_workspace_relative
+from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+from excelmanus.workspace.identity import is_hidden_name
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -238,6 +239,7 @@ class FileRegistry:
         self._store = FileRegistryStore(database)
         self._workspace_root = Path(workspace_root).resolve()
         self._workspace_key = str(self._workspace_root)
+        self._guard = FileAccessGuard(self._workspace_key)
 
         # 内存热缓存（启动时从 DB 加载）
         self._path_cache: dict[str, FileEntry] = {}  # canonical_path → entry
@@ -288,10 +290,15 @@ class FileRegistry:
     # ── 路径工具 ─────────────────────────────────────────────
 
     def _resolve(self, file_path: str) -> Path:
-        return resolve_in_workspace(file_path, self._workspace_root)
+        try:
+            return self._guard.resolve_and_validate(file_path)
+        except SecurityViolationError as exc:
+            raise ValueError(str(exc)) from exc
 
     def _to_rel(self, abs_path: Path) -> str:
-        return to_workspace_relative(abs_path, self._workspace_root)
+        # canonical 一律 POSIX 风格：模型/DB/测试都以 / 传路径，
+        # Windows 上 str(relative) 会给反斜杠导致 get_by_path 查不到。
+        return abs_path.relative_to(self._workspace_root).as_posix()
 
     # ── 注册入口 ─────────────────────────────────────────────
 
@@ -310,8 +317,15 @@ class FileRegistry:
             file_type = _detect_file_type(canonical_path)
         now = _now_iso()
 
-        # 复用已有记录的 ID，避免缓存/DB 不一致
+        # 活文件复用 id；软删后再注册必须新 id（不能把 registry 当 lineage）
         existing = self._path_cache.get(canonical_path)
+        if existing is not None and existing.deleted_at:
+            try:
+                self._store.purge_path(self._workspace_key, canonical_path)
+            except Exception:
+                logger.debug("purge soft-deleted registry row failed", exc_info=True)
+            self._invalidate_entry(canonical_path)
+            existing = None
         entry = FileEntry(
             id=existing.id if existing else _new_id(),
             workspace=self._workspace_key,
@@ -459,10 +473,23 @@ class FileRegistry:
             from excelmanus.reference_graph.scanner import Tier1Scanner
             from excelmanus.tools.reference_tools import get_cache
 
+            from excelmanus.workbook.snapshot import open_snapshot_at
+            from excelmanus.workspace.refs import WorkspaceRef
+
             cache = get_cache()
-            if cache.get_tier1(canonical_path) is None:
-                index = Tier1Scanner().scan(canonical_path)
-                cache.put_tier1(canonical_path, index)
+            try:
+                rel = str(Path(canonical_path).resolve().relative_to(self._workspace_root)).replace("\\", "/")
+            except ValueError:
+                rel = Path(canonical_path).name
+            snap = open_snapshot_at(
+                canonical_path,
+                relative=rel,
+                workspace=WorkspaceRef.from_root(self._workspace_root),
+            )
+            key = snap.id.key()
+            if cache.get_tier1(key) is None:
+                index = Tier1Scanner().scan(str(snap.backing_path))
+                cache.put_tier1(key, index)
                 logger.info("Tier 1 reference scan completed for %s", canonical_path)
         except Exception:
             logger.debug("Tier 1 reference scan skipped for %s", canonical_path, exc_info=True)
@@ -857,7 +884,7 @@ class FileRegistry:
         for walk_root, dirs, files in os.walk(uploads_dir):
             dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
             for name in files:
-                if name.startswith((".", "~$")):
+                if is_hidden_name(name):
                     continue
                 fp = Path(walk_root, name)
                 try:
@@ -936,7 +963,7 @@ class FileRegistry:
             if rel_dir == "outputs":
                 dirs[:] = [d for d in dirs if d not in {"backups", "audits", ".versions"}]
             for name in files:
-                if name.startswith((".", "~$")):
+                if is_hidden_name(name):
                     continue
                 _, ext = os.path.splitext(name)
                 ext_lower = ext.lower()
@@ -1042,6 +1069,8 @@ class FileRegistry:
             "rows": total_rows,
             "columns": total_cols,
             "headers": headers,
+            "header_heuristic": True,
+            "header_row": (best_idx + 1) if rows_raw else None,
         }]
 
     @staticmethod
@@ -1093,6 +1122,7 @@ class FileRegistry:
                     "rows": total_rows,
                     "columns": total_cols,
                     "headers": headers,
+                    "header_heuristic": True,
                 })
         finally:
             xls_wb.release_resources()
@@ -1147,6 +1177,7 @@ class FileRegistry:
                     "rows": total_rows,
                     "columns": total_cols,
                     "headers": headers,
+                    "header_heuristic": True,
                 })
         finally:
             xlsb_wb.close()
@@ -1200,6 +1231,7 @@ class FileRegistry:
                     "rows": total_rows,
                     "columns": total_cols,
                     "headers": headers,
+                    "header_heuristic": True,
                 })
         finally:
             wb.close()

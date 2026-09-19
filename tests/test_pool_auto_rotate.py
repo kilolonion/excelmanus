@@ -357,7 +357,7 @@ class TestFallback:
         self.svc.refresh_snapshots()
 
         self.auto.upsert_policy()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         # 没有当前激活 → 应该激活 B
@@ -466,7 +466,7 @@ class TestCooldown:
         )
 
         self.auto.upsert_policy(rate_limit_threshold=3, cooldown_seconds=300)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "none"
@@ -529,7 +529,7 @@ class TestIntegration:
             self.svc.log_usage(pool_account_id=acct_a.id, outcome="error", error_code="429")
 
         self.auto.upsert_policy(rate_limit_threshold=3)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "rotate"
@@ -547,7 +547,7 @@ class TestIntegration:
         self.svc.refresh_snapshots()
 
         self.auto.upsert_policy(fallback_to_default=True)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "fallback"
@@ -562,7 +562,7 @@ class TestIntegration:
         self.svc.refresh_snapshots()
 
         self.auto.upsert_policy()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "rotate"
@@ -576,7 +576,7 @@ class TestIntegration:
 
         # A 健康正常，余额充足 → 不应触发
         self.auto.upsert_policy()
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             self.auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "none"

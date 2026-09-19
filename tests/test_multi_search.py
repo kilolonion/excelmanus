@@ -308,11 +308,11 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
             "EXCELMANUS_SEARCH_DEFAULT": "tavily",
         }
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.search_default_provider == "tavily"
+        config = load_config(values=env)
+        assert config.search_default_provider == "tavily"
 
     def test_search_default_provider_invalid_fallback(self):
         """无效的 EXCELMANUS_SEARCH_DEFAULT 回退到 exa。"""
@@ -321,11 +321,11 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
             "EXCELMANUS_SEARCH_DEFAULT": "invalid_engine",
         }
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.search_default_provider == "exa"
+        config = load_config(values=env)
+        assert config.search_default_provider == "exa"
 
     def test_exa_api_key_env(self):
         """EXCELMANUS_EXA_API_KEY 环境变量。"""
@@ -334,11 +334,11 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
             "EXCELMANUS_EXA_API_KEY": "exa-secret",
         }
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.exa_api_key == "exa-secret"
+        config = load_config(values=env)
+        assert config.exa_api_key == "exa-secret"
 
     def test_tavily_api_key_env(self):
         """EXCELMANUS_TAVILY_API_KEY 环境变量。"""
@@ -347,11 +347,11 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
             "EXCELMANUS_TAVILY_API_KEY": "tavily-secret",
         }
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.tavily_api_key == "tavily-secret"
+        config = load_config(values=env)
+        assert config.tavily_api_key == "tavily-secret"
 
     def test_brave_api_key_env(self):
         """EXCELMANUS_BRAVE_API_KEY 环境变量。"""
@@ -360,11 +360,11 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
             "EXCELMANUS_BRAVE_API_KEY": "brave-secret",
         }
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.brave_api_key == "brave-secret"
+        config = load_config(values=env)
+        assert config.brave_api_key == "brave-secret"
 
     def test_no_api_keys_default_none(self):
         """未设置 API 密钥环境变量时默认为 None。"""
@@ -373,15 +373,12 @@ class TestConfigEnvVarParsing:
         env = {
             "EXCELMANUS_API_KEY": "test",
             "EXCELMANUS_MODEL": "test-model",
+            "EXCELMANUS_BASE_URL": "https://example.com/v1",
         }
-        # 清除可能存在的搜索密钥环境变量
-        for key in ("EXCELMANUS_EXA_API_KEY", "EXCELMANUS_TAVILY_API_KEY", "EXCELMANUS_BRAVE_API_KEY"):
-            os.environ.pop(key, None)
-        with patch.dict(os.environ, env, clear=False):
-            config = load_config()
-            assert config.exa_api_key is None
-            assert config.tavily_api_key is None
-            assert config.brave_api_key is None
+        config = load_config(values=env)
+        assert config.exa_api_key is None
+        assert config.tavily_api_key is None
+        assert config.brave_api_key is None
 
 
 # ── 合并逻辑（用户覆盖） ──────────────────────────────────
@@ -433,7 +430,6 @@ def test_mcp_usage_hints_not_in_system():
     engine._transient_hook_contexts = []
     engine.full_access_enabled = False
     engine.max_context_tokens = 100000
-    engine._effective_system_mode.return_value = "multi"
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine._current_chat_mode = "write"

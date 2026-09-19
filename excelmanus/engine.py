@@ -7,7 +7,6 @@ from excelmanus.agent.session import (
 )
 from excelmanus.engine_types import (
     ChatResult,
-    DelegateSubagentOutcome,
     ToolCallResult,
     _AuditedExecutionError,
     _EFFORT_RATIOS,
@@ -18,7 +17,6 @@ from excelmanus.message_serialization import to_plain as _to_plain
 __all__ = [
     "AgentEngine",
     "ChatResult",
-    "DelegateSubagentOutcome",
     "ToolCallResult",
     "_AuditedExecutionError",
     "_EFFORT_RATIOS",

@@ -54,7 +54,6 @@ export interface ProbeJobSnapshot {
 }
 
 export interface ModelConfig {
-  embedding: ModelSection & { enabled?: boolean };
   profiles: ProfileEntry[];
   active?: string | null;
 }

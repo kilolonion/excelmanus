@@ -187,32 +187,6 @@ class TestB4ThresholdParsing:
         assert _parse_threshold("1.0", 0.3) == 1.0
         assert _parse_threshold("0.5", 0.3) == 0.5
 
-    def test_property8_config_integration(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """集成验证：通过环境变量设置合法值，config 正确加载。"""
-        monkeypatch.setenv("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "0.5")
-        monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "0.6")
-        monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
-        monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
-        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL", "30")
-
-        from excelmanus.config import load_config
-        config = load_config()
-        assert config.memory_semantic_threshold == 0.5
-        assert config.registry_semantic_threshold == 0.6
-
-    def test_property4_config_invalid_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """集成验证：非法值回退到默认值，不抛出异常。"""
-        monkeypatch.setenv("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD", "not_a_number")
-        monkeypatch.setenv("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD", "2.0")
-        monkeypatch.setenv("EXCELMANUS_WORKSPACE_ROOT", "/tmp")
-        monkeypatch.setenv("EXCELMANUS_OPENAI_API_KEY", "test-key")
-        monkeypatch.setenv("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL", "30")
-
-        from excelmanus.config import load_config
-        config = load_config()
-        assert config.memory_semantic_threshold == 0.3   # 默认值
-        assert config.registry_semantic_threshold == 0.25  # 默认值
-
 
 # ---------------------------------------------------------------------------
 # B1 测试 — _tool_calling_loop 退出路径调用 registry 刷新
@@ -282,7 +256,7 @@ class TestB1RegistryRefreshOnExit:
         source = inspect.getsource(run_tool_loop)
 
         # max_iter 路径在函数末尾
-        max_iter_block = source[source.rfind("达到迭代上限"):]
+        max_iter_block = source[source.rfind("已达到最大迭代次数"):]
         assert "return _finalize_result(" in max_iter_block
         helper_block = source[source.find("def _finalize_result"):source.find("max_iter =")]
         assert "_try_refresh_registry()" in helper_block

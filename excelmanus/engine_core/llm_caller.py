@@ -2,16 +2,13 @@
 
 从 AgentEngine 提取的 LLM API 交互逻辑，包括：
 - 流式响应消费与事件发射
-- 系统消息兼容性兜底（replace → merge 自动回退）
 - 异常链遍历与 Retry-After 提取
 """
 
 from __future__ import annotations
 
-import asyncio
 import random
 import time
-from collections.abc import Sequence
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -24,17 +21,107 @@ if TYPE_CHECKING:
 
 logger = get_logger("llm_caller")
 
+_DEGRADED_PARAMS: dict[tuple[str, str], set[str]] = {}
+_DEGRADED_WARNED: set[tuple[str, str, str]] = set()
+_DEGRADE_SUSPECT_KEYS = frozenset({
+    "prompt_cache_key", "stream_options",
+    "top_logprobs", "logprobs", "parallel_tool_calls",
+    "service_tier",
+})
 
-def _patch_reasoning_content(messages: list[dict]) -> list[dict]:
-    """为所有 assistant 消息补充 reasoning_content 字段（DeepSeek thinking mode 兼容）。"""
-    patched = []
-    for msg in messages:
-        if isinstance(msg, dict) and msg.get("role") == "assistant":
-            if "reasoning_content" not in msg:
-                msg = dict(msg)
-                msg["reasoning_content"] = ""
-        patched.append(msg)
-    return patched
+
+def _degrade_bucket(protocol: str, model: str) -> tuple[str, str]:
+    return (str(protocol or ""), str(model or ""))
+
+
+def degraded_params(protocol: str, model: str) -> frozenset[str]:
+    """本会话已对 (protocol, model) 降级、不再试探的出网参数。"""
+    return frozenset(_DEGRADED_PARAMS.get(_degrade_bucket(protocol, model), ()))
+
+
+def mark_degraded(protocol: str, model: str, param: str) -> None:
+    """记录 (protocol, model) 已降级参数；warning 每个三元组只打一次。"""
+    name = str(param or "").strip()
+    if not name:
+        return
+    key = _degrade_bucket(protocol, model)
+    _DEGRADED_PARAMS.setdefault(key, set()).add(name)
+    warn_key = (key[0], key[1], name)
+    if warn_key in _DEGRADED_WARNED:
+        return
+    _DEGRADED_WARNED.add(warn_key)
+    logger.warning(
+        "出网参数已降级，本会话不再试探: protocol=%s model=%s param=%s",
+        protocol,
+        model,
+        name,
+    )
+
+
+def reset_degraded_params() -> None:
+    """测试辅助：清空粘性降级记录。"""
+    _DEGRADED_PARAMS.clear()
+    _DEGRADED_WARNED.clear()
+
+
+def _protocol_of_engine(engine: Any) -> str:
+    from excelmanus.prompt.envelope import protocol_from_engine
+
+    return protocol_from_engine(engine)
+
+
+def _model_of_kwargs(engine: Any, kwargs: dict[str, Any]) -> str:
+    model = kwargs.get("model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    config = getattr(engine, "_config", None)
+    return str(getattr(engine, "_active_model", None) or getattr(config, "model", "") or "")
+
+
+def _strip_degraded(kwargs: dict[str, Any], protocol: str, model: str) -> dict[str, Any]:
+    skip = degraded_params(protocol, model)
+    if not skip:
+        return kwargs
+    return {key: value for key, value in kwargs.items() if key not in skip}
+
+
+async def _recompile_after_degrade(
+    engine: Any,
+    current: dict[str, Any],
+    stripped: set[str],
+    protocol: str,
+    model: str,
+    *,
+    original: dict[str, Any],
+) -> dict[str, Any]:
+    """Unsupported params go back through compile; strip only if compile cannot run."""
+    from excelmanus.request.compiler import compile_request
+    from excelmanus.request.series import series_of
+
+    series_of(engine).note("request/degrade", params=sorted(stripped))
+    prepared = None
+    try:
+        prepared, error = await compile_request(
+            engine,
+            extra=getattr(engine, "_compile_extra", None),
+        )
+        if error is not None:
+            prepared = None
+    except Exception:
+        prepared = None
+    if prepared is None:
+        from excelmanus.request.types import PreparedRequest
+
+        if isinstance(getattr(engine, "_prepared_request", None), PreparedRequest):
+            raise ValueError("请求重编译失败，不能沿旧载荷重试")
+        return {key: value for key, value in current.items() if key not in stripped}
+    retry = _strip_degraded(prepared.create_kwargs(), protocol, model)
+    if original.get("stream"):
+        retry["stream"] = True
+    skip = degraded_params(protocol, model)
+    if "stream_options" in original and "stream_options" not in skip:
+        retry["stream_options"] = original["stream_options"]
+    return retry
 
 
 # ── 纯函数 / 静态工具 ──────────────────────────────────────
@@ -83,9 +170,6 @@ def is_retryable_llm_error(exc: Exception) -> bool:
         "stream interrupted",
         "premature end",
         "response ended prematurely",
-        "json decode",
-        "jsondecodeerror",
-        "expecting value",
     )
     for candidate in iter_exception_chain(exc):
         status_code = getattr(candidate, "status_code", None)
@@ -105,9 +189,15 @@ def is_retryable_llm_error(exc: Exception) -> bool:
             "transporterror",
             "incompleteread",
             "remotedisconnected",
-            "jsondecodeerror",
         }:
             return True
+
+        if name == "jsondecodeerror":
+            if {"incompleteread", "remotedisconnected", "connectionerror", "connecterror", "timeouterror", "apitimeouterror"} & {
+                c.__class__.__name__.lower() for c in iter_exception_chain(exc)
+            }:
+                return True
+            continue
 
         text = f"{candidate} {candidate!r}".lower()
         if any(keyword in text for keyword in transient_keywords):
@@ -199,39 +289,6 @@ def compute_retry_delay(
     return min(max_delay, delay)
 
 
-def merge_leading_system_messages(messages: Sequence[dict[str, Any]]) -> list[dict[str, Any]]:
-    """将开头连续的多条 system 消息合并为一条，保持其余消息不变。"""
-    normalized: list[dict[str, Any]] = []
-    for msg in messages:
-        if isinstance(msg, dict):
-            normalized.append(dict(msg))
-        else:
-            normalized.append({"role": "user", "content": str(msg)})
-
-    if not normalized:
-        return normalized
-
-    idx = 0
-    parts: list[str] = []
-    while idx < len(normalized):
-        msg = normalized[idx]
-        if msg.get("role") != "system":
-            break
-        content = msg.get("content")
-        if isinstance(content, str) and content.strip():
-            parts.append(content.strip())
-        elif content is not None:
-            parts.append(str(content))
-        idx += 1
-
-    if idx <= 1:
-        return normalized
-
-    merged_content = "\n\n".join(parts).strip()
-    merged_message = {"role": "system", "content": merged_content}
-    return [merged_message, *normalized[idx:]]
-
-
 def is_unsupported_param_error(exc: Exception) -> bool:
     """检测是否为 provider 不支持某参数的错误（如 prompt_cache_key、stream_options）。"""
     text = str(exc).lower()
@@ -249,21 +306,28 @@ def is_unsupported_param_error(exc: Exception) -> bool:
 
 def _is_context_length_error(exc: Exception) -> bool:
     """检测是否为上下文长度超限错误（400 context_length_exceeded 等）。"""
-    keywords = (
+    strong_keywords = (
         "context_length_exceeded",
         "context length",
         "maximum context",
-        "token limit",
+        "context window",
         "too many tokens",
-        "max_tokens",
         "reduce the length",
         "reduce your prompt",
+    )
+    loose_keywords = (
+        "token limit",
         "request too large",
         "payload too large",
     )
     for candidate in iter_exception_chain(exc):
         text = f"{candidate} {candidate!r}".lower()
-        if any(kw in text for kw in keywords):
+        if any(kw in text for kw in strong_keywords):
+            return True
+        # 只有同时提到 prompt/context/history，才把宽泛的 size 错误看作上下文超限。
+        if any(kw in text for kw in loose_keywords) and any(
+            marker in text for marker in ("prompt", "context", "history")
+        ):
             return True
     return False
 
@@ -289,18 +353,6 @@ def is_content_filter_error(exc: Exception) -> bool:
     return False
 
 
-def is_system_compatibility_error(exc: Exception) -> bool:
-    text = str(exc).lower()
-    keywords = [
-        "multiple system",
-        "at most one system",
-        "only one system",
-        "system messages",
-        "role 'system'",
-    ]
-    return any(keyword in text for keyword in keywords)
-
-
 # ── LLMCaller 类 ──────────────────────────────────────────
 
 
@@ -312,6 +364,32 @@ class LLMCaller:
 
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
+
+    async def _send_attempt(self, **kwargs: Any) -> Any:
+        from excelmanus.request.types import PreparedRequest
+        from excelmanus.attachments.files_api import lease_file_ids, release_file_ids
+
+        e = self._engine
+        prepared = getattr(e, "_prepared_request", None)
+        if isinstance(prepared, PreparedRequest):
+            expected = prepared.create_kwargs()
+            # 粘性降级参数在发送口剥离（_strip_degraded），比较时同样排除，
+            # 否则降级标记后的每次编译尝试都会被守卫误判。
+            skip = set(degraded_params(prepared.route.protocol, prepared.route.model))
+            skip |= set(degraded_params(prepared.route.protocol_label(), prepared.route.model))
+            if any(
+                kwargs.get(key) != value
+                for key, value in expected.items()
+                if key not in skip
+            ):
+                raise ValueError("outbound request differs from compiled attempt")
+            old_id = getattr(e, "_open_request_id", None)
+            if old_id and old_id != prepared.request_id:
+                release_file_ids(old_id)
+            lease_file_ids(prepared.request_id, prepared.file_leases)
+            e._open_request_id = prepared.request_id
+            e._sent_prepared_request = prepared
+        return await e._client.chat.completions.create(**kwargs)
 
     # ── 流式消费 ──────────────────────────────────────────
 
@@ -334,6 +412,7 @@ class LLMCaller:
         e = self._engine
         content_parts: list[str] = []
         thinking_parts: list[str] = []
+        replay_state = None
         _thinking_streamed = False  # 标记是否已通过 THINKING_DELTA 流式发射过
         tool_calls_accumulated: dict[int, dict] = {}
         finish_reason: str | None = None
@@ -364,6 +443,8 @@ class LLMCaller:
 
                 # ── 自定义 provider 的 _StreamDelta ──
                 if hasattr(chunk, "content_delta"):
+                    if getattr(chunk, "replay_state", None) is not None:
+                        replay_state = chunk.replay_state
                     if chunk.content_delta:
                         content_parts.append(chunk.content_delta)
                         e._emit(on_event, ToolCallEvent(
@@ -528,6 +609,7 @@ class LLMCaller:
             reasoning_content=thinking if thinking else None,
             _thinking_streamed=_thinking_streamed,
             _stream_truncated=_consecutive_chunk_errors >= _max_chunk_errors,
+            replay_state=replay_state,
         )
 
         # 附加 TTFT 和 cache 统计到 usage（供 TurnDiagnostic 提取）
@@ -543,20 +625,21 @@ class LLMCaller:
 
     # ── LLM 调用兜底 ──────────────────────────────────────
 
-    async def create_chat_completion_with_system_fallback(
+    async def create_chat_completion_with_retry(
         self,
         kwargs: dict[str, Any],
     ) -> Any:
         e = self._engine
-        # 过滤 SDK 不兼容参数：_thinking_* / prompt_cache_key / stream_options
-        # 这些参数在旧版 openai SDK 中会直接触发 TypeError，
-        # 必须在首次调用前移除，而非依赖 retry 路径。
+        # 只剥内部 _thinking_*；prompt_cache_key / stream_options 必须首次出网，
+        # 旧 SDK TypeError 或 provider 拒参再走下面的剥离重试。
         _strip_keys = {k for k in kwargs if k.startswith("_thinking")}
-        _strip_keys |= {"prompt_cache_key", "stream_options"} & set(kwargs)
         if _strip_keys:
             kwargs = {k: v for k, v in kwargs.items() if k not in _strip_keys}
+        protocol = _protocol_of_engine(e)
+        model = _model_of_kwargs(e, kwargs)
+        kwargs = _strip_degraded(kwargs, protocol, model)
         try:
-            return await e._client.chat.completions.create(**kwargs)
+            return await self._send_attempt(**kwargs)
         except Exception as exc:
 
             # 404 路由错误诊断：最常见原因是 base_url 路径不正确
@@ -575,33 +658,47 @@ class LLMCaller:
                     _client_base, e._config.model,
                 )
 
-            # DeepSeek thinking mode: assistant 消息必须包含 reasoning_content 字段
             if "reasoning_content" in str(exc).lower():
-                source_messages = kwargs.get("messages")
-                if isinstance(source_messages, list):
-                    logger.warning("检测到 reasoning_content 缺失，自动补全后重试")
-                    patched = _patch_reasoning_content(source_messages)
-                    retry_kwargs = dict(kwargs)
-                    retry_kwargs["messages"] = patched
-                    retry_kwargs.pop("prompt_cache_key", None)
-                    return await e._client.chat.completions.create(**retry_kwargs)
+                from excelmanus.request.compiler import compile_request
 
-            # W5: 不支持参数错误 → 自动剥离可疑参数后重试
+                logger.warning("reasoning_content 被拒，回到编译口重试（不补空串）")
+                prepared, err = await compile_request(
+                    e,
+                    extra=getattr(e, "_compile_extra", None),
+                )
+                if err is not None or prepared is None:
+                    raise
+                retry_kwargs = _strip_degraded(prepared.create_kwargs(), protocol, model)
+                return await self._send_attempt(**retry_kwargs)
+
+            # W5: 不支持参数错误 → 分轮剥离可疑参数后重试，并粘性记录，
+            # 同一 (protocol, model) 后续请求不再试探。
             if is_unsupported_param_error(exc):
-                # 识别并剥离 provider 不支持的可选参数
-                _suspect_keys = {
-                    "prompt_cache_key", "stream_options",
-                    "top_logprobs", "logprobs", "parallel_tool_calls",
-                    "service_tier",
-                }
-                stripped = _suspect_keys & set(kwargs)
-                if stripped:
-                    logger.warning(
-                        "检测到不支持参数错误，自动剥离 %s 后重试: %s",
-                        stripped, exc,
+                retry_kwargs = dict(kwargs)
+                last_exc: Exception = exc
+                while True:
+                    present = [k for k in _DEGRADE_SUSPECT_KEYS if k in retry_kwargs]
+                    if not present:
+                        raise last_exc
+                    text = str(last_exc).lower()
+                    mentioned = [k for k in present if k in text]
+                    stripped = set(mentioned or present)
+                    for name in sorted(stripped):
+                        mark_degraded(protocol, model, name)
+                    retry_kwargs = await _recompile_after_degrade(
+                        e,
+                        retry_kwargs,
+                        stripped,
+                        protocol,
+                        model,
+                        original=kwargs,
                     )
-                    retry_kwargs = {k: v for k, v in kwargs.items() if k not in stripped}
-                    return await e._client.chat.completions.create(**retry_kwargs)
+                    try:
+                        return await self._send_attempt(**retry_kwargs)
+                    except Exception as retry_exc:
+                        if not is_unsupported_param_error(retry_exc):
+                            raise
+                        last_exc = retry_exc
 
             # 溢出走 request-error：只有 surface 代数推进才重试。
             if _is_context_length_error(exc):
@@ -622,40 +719,14 @@ class LLMCaller:
                     if _cm is not None:
                         _cm.max_context_tokens = _new_budget
 
-                source_messages = kwargs.get("messages")
-                trimmed = await recover_request_overflow(
+                recovered = await recover_request_overflow(
                     e,
-                    source_messages if isinstance(source_messages, list) else None,
+                    kwargs.get("messages") if isinstance(kwargs.get("messages"), list) else None,
                 )
-                if trimmed is None:
+                if recovered is None:
                     raise
-                logger.warning(
-                    "request-error：surface 已推进，使用压缩后的 %d 条消息重试",
-                    len(trimmed),
-                )
-                retry_kwargs = dict(kwargs)
-                retry_kwargs["messages"] = trimmed
-                retry_kwargs.pop("prompt_cache_key", None)
-                return await e._client.chat.completions.create(**retry_kwargs)
+                logger.warning("request-error：surface 已推进，使用重编译请求重试")
+                retry_kwargs = _strip_degraded(recovered.create_kwargs(), protocol, model)
+                return await self._send_attempt(**retry_kwargs)
 
-            if (
-                e._config.system_message_mode == "auto"
-                and e._effective_system_mode() == "replace"
-                and is_system_compatibility_error(exc)
-            ):
-                logger.warning("检测到 replace(system 分段) 兼容性错误，自动回退到 merge 模式")
-                _cache = type(e)._system_mode_fallback_cache
-                _cache[e._system_mode_cache_key] = "merge"
-                while len(_cache) > e._SYSTEM_MODE_CACHE_MAX:
-                    _cache.popitem(last=False)
-                e._system_mode_fallback = "merge"
-                source_messages = kwargs.get("messages")
-                if not isinstance(source_messages, list):
-                    raise
-                merged_messages = merge_leading_system_messages(source_messages)
-                retry_kwargs = dict(kwargs)
-                retry_kwargs["messages"] = merged_messages
-                # 同样移除可能不支持的 prompt_cache_key
-                retry_kwargs.pop("prompt_cache_key", None)
-                return await e._client.chat.completions.create(**retry_kwargs)
             raise

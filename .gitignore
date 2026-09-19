@@ -3,7 +3,7 @@
 # ==============================
 .env
 .env.*
-!.env.example
+test.env
 mcp.json
 *.pem
 client_secret*.json
@@ -103,13 +103,31 @@ RELEASE_*.md
 # ==============================
 # 锁文件
 # ==============================
-# uv.lock 必须入库：deploy/Dockerfile 通过 `COPY uv.lock` + `uv sync --frozen`
-# 复现生产依赖；忽略它会导致干净 clone 构建失败。
+# uv.lock 必须入库：启动/部署脚本通过 `uv sync --frozen` 复现生产依赖；
+# 忽略它会导致干净 clone 构建失败。
 
 # ==============================
-# Benchmark 数据与脚本
+# 多协调者协作状态（本地运行时产物）
 # ==============================
-bench/
+# .dsh/project/ 的其余部分（brief/plan/log/context/artifacts）由用户决定是否入库；
+# 下面两项是协调者之间的临时协调状态：心跳、占用锁、点对点消息、各自的计划与日志。
+# 它们随运行产生、对别人没有价值，不入库。
+.dsh/project/agents/
+.dsh/project/locks/
+
+# ==============================
+# Benchmark 运行产物
+# ==============================
+# 套件 JSON / 说明 / 生成器入库；生成夹具不入库。
+bench/fixtures/experiential/
+bench/fixtures/realistic/
+# Jev live 对照原文（含中文 user_text）只留本机，不入库。
+bench/fixtures/jev_calibration/local/
+bench/reports/jev_live/
+
+# ==============================
+# 本地脚本（保留白名单）
+# ==============================
 scripts/
 !scripts/
 scripts/*
@@ -158,10 +176,6 @@ deploy/.env.deploy
 .deploy_meta.json
 
 RELEASE_v1.6.4.md
-
-# ==============================
-# Docker images
-# ==============================
 
 # web/public assets needed for frontend
 !web/public/icon.png

@@ -1,62 +1,58 @@
 "use client";
 
-import { useEffect, useRef, useCallback, useState } from "react";
+import { readActiveRange } from "@/lib/excel-selection";
+
+import { useEffect, useRef, useCallback, useState, type ReactNode } from "react";
+import { createPortal } from "react-dom";
 import { useExcelStore } from "@/stores/excel-store";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useTouchGesture } from "@/hooks/use-touch-gesture";
-import { fetchAllSheetsSnapshot, type ExcelSnapshot } from "@/lib/api";
+import { fetchWorkbookView } from "@/lib/api";
+import { ExcelRibbonCommands } from "@/components/excel/ExcelRibbonCommands";
 import {
-  colIndexToLetter,
-  extractCellEditsFromSheetValueChanged,
+  enqueueWorkbookCommand,
+  hasPendingWorkbookEdits,
+  extractWorkbookOpsFromMutation,
   isDemoExcelPath,
+  isUnsupportedWorkbookMutation,
 } from "@/lib/excel-cell-edit";
+import { cellToUniver, demoWorkbookView, viewMatchesLease, viewSnapshotToUniver, type WorkbookViewSnapshot } from "@/lib/workbook-view";
+import { pageForCell, rangeIsLoaded, mergeViewWindows, firstUnloadedCell } from "@/lib/workbook-window";
+import type { WorkspaceFileRef } from "@/lib/workspace-file-ref";
+import { activateWorkbookSheet } from "@/lib/excel-univer-lifecycle";
+import {
+  ensureHistoryRibbonStyle,
+  ensureRibbonCommandHost,
+  findRibbonToolbar,
+  readNativeRibbonTab,
+  removeRibbonCommandHost,
+  setHistoryRibbonMode,
+  setRibbonToolbarHidden,
+  type NativeRibbonTab,
+} from "@/lib/excel-ribbon-actions";
+import { getUniverModules } from "@/lib/univer-modules";
 
-// ── Univer 模块预加载缓存（全局单例，只加载一次） ──
-let _univerModuleCache: Promise<{
-  createUniver: any;
-  LocaleType: any;
-  UniverSheetsCorePreset: any;
-  sheetsCoreZhCN: any;
-}> | null = null;
-
-function getUniverModules() {
-  if (!_univerModuleCache) {
-    _univerModuleCache = Promise.all([
-      import("@univerjs/presets"),
-      import("@univerjs/preset-sheets-core"),
-      import("@univerjs/preset-sheets-core/locales/zh-CN"),
-      import("@univerjs/preset-sheets-core/lib/index.css"),
-    ]).then(([presetsMod, sheetCoreMod, zhCNMod]) => ({
-      createUniver: presetsMod.createUniver,
-      LocaleType: presetsMod.LocaleType,
-      UniverSheetsCorePreset: sheetCoreMod.UniverSheetsCorePreset,
-      sheetsCoreZhCN: zhCNMod.default,
-    }));
-  }
-  return _univerModuleCache;
-}
-
-/**
- * 预加载 Univer 库。在应用启动后调用，让后续打开面板时无需等待模块下载。
- */
-export function prefetchUniverModules() {
-  if (typeof window !== "undefined") {
-    // 使用 requestIdleCallback（或 setTimeout 兜底）在空闲时加载
-    const schedule = (window as any).requestIdleCallback ?? ((cb: () => void) => setTimeout(cb, 2000));
-    schedule(() => { getUniverModules(); });
-  }
-}
+export { prefetchUniverModules, warmUniverModules } from "@/lib/univer-modules";
 
 interface UniverSheetProps {
   fileUrl: string;
+  fileRef?: WorkspaceFileRef | null;
+  sessionId?: string | null;
+  viewGeneration?: number;
   highlightCells?: string[];
   onCellEdit?: (cell: string, value: unknown, sheet?: string) => void;
   initialSheet?: string;
   selectionMode?: boolean;
-  onRangeSelected?: (range: string, sheet: string) => void;
+  onRangeSelected?: (range: string, sheet: string, cellValue?: string) => void;
   withStyles?: boolean;
   /** 对比视图等只读场景：禁止编辑且不写回 */
   readOnly?: boolean;
+  /** 注入 Univer 功能区 tablist（历史 / 操作 / 关闭） */
+  ribbonSlot?: ReactNode;
+  /** 与 开始 / 公式 / 数据 互斥：选中时隐藏原生命令栏 */
+  historyActive?: boolean;
+  /** 点到 Univer 自带的 开始 / 公式 / 数据 时回调 */
+  onNativeRibbonTab?: () => void;
 }
 
 function createPreviewWorkbookId(): string {
@@ -86,139 +82,76 @@ function isDemoPath(path: string): boolean {
   return isDemoExcelPath(path);
 }
 
-/** Generate mock snapshot data for the onboarding demo file. */
-function buildDemoSnapshots(): ExcelSnapshot[] {
-  return [
-    {
-      file: "__demo__/示例销售数据.xlsx",
-      sheet: "Sheet1",
-      sheets: ["Sheet1"],
-      shape: { rows: 12, columns: 5 },
-      column_letters: ["A", "B", "C", "D", "E"],
-      headers: ["月份", "产品", "销售额", "成本", "利润"],
-      rows: [
-        ["2024-01", "产品A", 12500, 8200, 4300],
-        ["2024-02", "产品A", 13800, 8500, 5300],
-        ["2024-03", "产品A", 15200, 9100, 6100],
-        ["2024-04", "产品B", 9800, 6400, 3400],
-        ["2024-05", "产品B", 11200, 7000, 4200],
-        ["2024-06", "产品B", 13800, 7800, 6000],
-        ["2024-07", "产品A", 16500, 9800, 6700],
-        ["2024-08", "产品A", 18200, 10500, 7700],
-        ["2024-09", "产品B", 14500, 8200, 6300],
-        ["2024-10", "产品A", 19800, 11200, 8600],
-        ["2024-11", "产品B", 16200, 9500, 6700],
-        ["2024-12", "产品A", 22000, 12500, 9500],
-      ],
-      total_rows: 12,
-      truncated: false,
-    },
-  ];
-}
-
-/**
- * Convert an ExcelSnapshot into Univer IWorkbookData.
- */
-function snapshotToWorkbookData(
-  snapshots: ExcelSnapshot[],
-  workbookId: string
-): Record<string, any> {
-  const sheetMap: Record<string, any> = {};
-  const sheetOrder: string[] = [];
-
-  for (const snap of snapshots) {
-    const sheetId = `sheet-${snap.sheet}`;
-    sheetOrder.push(sheetId);
-
-    const cellData: Record<number, Record<number, any>> = {};
-    // 表头行（第 0 行）
-    const headerRow: Record<number, any> = {};
-    snap.headers.forEach((h, ci) => {
-      const cell: any = { v: h };
-      // 若有样式则应用
-      const styleKey = `0,${ci}`;
-      if ((snap as any).cell_styles?.[styleKey]) {
-        cell.s = (snap as any).cell_styles[styleKey];
-      }
-      headerRow[ci] = cell;
-    });
-    cellData[0] = headerRow;
-
-    // 数据行（第 1 行起）
-    snap.rows.forEach((row, ri) => {
-      const rowData: Record<number, any> = {};
-      row.forEach((val, ci) => {
-        if (val !== null && val !== undefined) {
-          const cell: any = { v: val };
-          const styleKey = `${ri + 1},${ci}`;
-          if ((snap as any).cell_styles?.[styleKey]) {
-            cell.s = (snap as any).cell_styles[styleKey];
-          }
-          rowData[ci] = cell;
-        } else {
-          // 即使空单元格也可能有样式（如背景色）
-          const styleKey = `${ri + 1},${ci}`;
-          if ((snap as any).cell_styles?.[styleKey]) {
-            rowData[ci] = { v: null, s: (snap as any).cell_styles[styleKey] };
-          }
-        }
-      });
-      cellData[ri + 1] = rowData;
-    });
-
-    const colCount = Math.max(snap.headers.length, snap.column_letters.length, 26);
-    const rowCount = snap.rows.length + 1 + 50; // 额外行数供编辑
-
-    const sheetData: any = {
-      id: sheetId,
-      name: snap.sheet,
-      cellData,
-      rowCount: Math.max(rowCount, 100),
-      columnCount: Math.max(colCount, 26),
-    };
-
-    // 应用合并单元格
-    if ((snap as any).merged_cells?.length) {
-      sheetData.mergeData = (snap as any).merged_cells.map((m: any) => ({
-        startRow: m.startRow,
-        startColumn: m.startColumn,
-        endRow: m.endRow,
-        endColumn: m.endColumn,
-      }));
-    }
-
-    // 应用列宽
-    if ((snap as any).column_widths) {
-      const colInfo: Record<number, any> = {};
-      for (const [colIdx, width] of Object.entries((snap as any).column_widths)) {
-        colInfo[Number(colIdx)] = { w: (width as number) * 7.5 }; // Excel 列宽单位近似换算为像素
-      }
-      sheetData.columnData = colInfo;
-    }
-
-    // 应用行高
-    if ((snap as any).row_heights) {
-      const rowInfo: Record<number, any> = {};
-      for (const [rowIdx, height] of Object.entries((snap as any).row_heights)) {
-        rowInfo[Number(rowIdx)] = { h: height as number };
-      }
-      sheetData.rowData = rowInfo;
-    }
-
-    sheetMap[sheetId] = sheetData;
+function stringifyCellValue(value: unknown): string | undefined {
+  if (value == null) return undefined;
+  if (typeof value === "string") {
+    const text = value.replace(/\s+/g, " ").trim();
+    return text || undefined;
   }
-
-  return {
-    id: workbookId,
-    sheets: sheetMap,
-    sheetOrder,
-  };
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? String(value) : undefined;
+  }
+  if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+  if (typeof value === "object") {
+    const rec = value as { toPlainText?: () => string; v?: unknown };
+    if (typeof rec.toPlainText === "function") {
+      return stringifyCellValue(rec.toPlainText());
+    }
+    if ("v" in rec) return stringifyCellValue(rec.v);
+  }
+  return undefined;
 }
 
-function rememberSnapshotVersion(filePath: string, version: unknown) {
+type RangeValueReader = {
+  getDisplayValue?: () => unknown;
+  getValue?: () => unknown;
+};
+
+function readCellValueFromRange(range: RangeValueReader): string | undefined {
+  try {
+    if (typeof range.getDisplayValue === "function") {
+      const display = stringifyCellValue(range.getDisplayValue());
+      if (display) return display;
+    }
+  } catch {
+    /* Facade 无 getDisplayValue 或调用失败 */
+  }
+  try {
+    if (typeof range.getValue === "function") {
+      return stringifyCellValue(range.getValue());
+    }
+  } catch {
+    /* getValue 不可用 */
+  }
+  return undefined;
+}
+
+/** 仅单格：优先 FRange.getDisplayValue / getValue，失败再试 worksheet.getRange(row, col)。 */
+function readSingleCellValue(
+  range: RangeValueReader,
+  sheet?: { getRange?: (row: number, column: number) => unknown },
+  row?: number,
+  col?: number,
+): string | undefined {
+  const fromRange = readCellValueFromRange(range);
+  if (fromRange) return fromRange;
+  try {
+    if (sheet && typeof sheet.getRange === "function" && row != null && col != null) {
+      const cell = sheet.getRange(row, col);
+      if (cell && typeof cell === "object") {
+        return readCellValueFromRange(cell as RangeValueReader);
+      }
+    }
+  } catch {
+    /* worksheet cell 读取不可用 */
+  }
+  return undefined;
+}
+
+function rememberSnapshotVersion(filePath: string, version: unknown, workspaceKey?: string | null) {
   if (!filePath || isDemoPath(filePath)) return;
   if (typeof version === "string" && version) {
-    useExcelStore.getState().setContentVersion(filePath, version);
+    useExcelStore.getState().setContentVersion(filePath, version, workspaceKey);
   }
 }
 
@@ -230,39 +163,7 @@ function applyWorkbookEditable(api: any, readOnly: boolean) {
   }
 }
 
-function subscribeSheetValueChanged(api: any, onEvent: (params: unknown) => void): (() => void) | null {
-  const eventName = api?.Event?.SheetValueChanged ?? "SheetValueChanged";
-  if (typeof api?.addEvent === "function") {
-    try {
-      const sub = api.addEvent(eventName, onEvent);
-      if (sub && typeof sub.dispose === "function") {
-        return () => {
-          try { sub.dispose(); } catch { /* 忽略 */ }
-        };
-      }
-    } catch {
-      // 回退到 workbook.onCellDataChange
-    }
-  }
-  try {
-    const wb = api?.getActiveWorkbook?.();
-    if (wb && typeof wb.onCellDataChange === "function") {
-      const sub = wb.onCellDataChange(() => {
-        onEvent({ payload: { id: "sheet.mutation.set-range-values" }, effectedRanges: [] });
-      });
-      if (sub && typeof sub.dispose === "function") {
-        return () => {
-          try { sub.dispose(); } catch { /* 忽略 */ }
-        };
-      }
-    }
-  } catch {
-    // 该版本 Univer 无可用监听 API
-  }
-  return null;
-}
-
-export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false }: UniverSheetProps) {
+export function UniverSheet({ fileUrl, fileRef, sessionId, viewGeneration, highlightCells, onCellEdit, initialSheet, selectionMode, onRangeSelected, withStyles = true, readOnly = false, ribbonSlot, historyActive = false, onNativeRibbonTab }: UniverSheetProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const univerRef = useRef<any>(null);
   const workbookIdRef = useRef<string>(createPreviewWorkbookId());
@@ -270,12 +171,25 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
   const onCellEditRef = useRef(onCellEdit);
   const readOnlyRef = useRef(readOnly);
   const suppressEditsRef = useRef(false);
+  const viewRef = useRef<WorkbookViewSnapshot | null>(null);
+  const identityRef = useRef({ fileRef, sessionId, viewGeneration });
+  identityRef.current = { fileRef, sessionId, viewGeneration };
+  const loadedPagesRef = useRef(new Set<string>());
+  const sheetNamesRef = useRef(new Map<string, string>());
   const filePathRef = useRef("");
+  const initialSheetRef = useRef(initialSheet);
   const refreshCounter = useExcelStore((s) => s.refreshCounter);
   onCellEditRef.current = onCellEdit;
   readOnlyRef.current = readOnly;
+  initialSheetRef.current = initialSheet;
+  const [engineReady, setEngineReady] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [ribbonTablist, setRibbonTablist] = useState<HTMLElement | null>(null);
+  const [nativeRibbonTab, setNativeRibbonTab] = useState<NativeRibbonTab | null>(null);
+  const [ribbonCommandHost, setRibbonCommandHost] = useState<HTMLElement | null>(null);
+  const onNativeRibbonTabRef = useRef(onNativeRibbonTab);
+  onNativeRibbonTabRef.current = onNativeRibbonTab;
 
   const isMobile = useIsMobile();
   // 4 秒后自动隐藏提示条
@@ -433,16 +347,93 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     }
   };
 
-  const emitCellEdits = (params: unknown) => {
-    if (suppressEditsRef.current || readOnlyRef.current) return;
-    const cb = onCellEditRef.current;
-    if (!cb) return;
-    if (isDemoPath(filePathRef.current)) return;
-    const edits = extractCellEditsFromSheetValueChanged(params as Parameters<typeof extractCellEditsFromSheetValueChanged>[0]);
-    for (const edit of edits) {
-      cb(edit.cell, edit.value, edit.sheet || undefined);
+  const loadVisibleWindow = async (sheetOverride?: any, cell?: { row: number; col: number }) => {
+    const api = univerRef.current;
+    const identity = identityRef.current;
+    const file = identity.fileRef;
+    const view = viewRef.current;
+    if (!api || !file || !view || suppressEditsRef.current || hasPendingWorkbookEdits(file)) return;
+    const sheet = sheetOverride || api.getActiveWorkbook?.()?.getActiveSheet?.();
+    const visible = sheet?.getVisibleRange?.();
+    const row = cell?.row ?? visible?.startRow;
+    const col = cell?.col ?? visible?.startColumn;
+    if (row == null || col == null) return;
+    const name = sheet.getSheetName?.() || sheet.getName?.();
+    const page = pageForCell(row, col);
+    if (rangeIsLoaded(view, name, page.rect)) return;
+    const requestKey = `${file.workspaceKey}|${file.relative}|${name}|${page.address}`;
+    if (loadedPagesRef.current.has(requestKey)) return;
+    loadedPagesRef.current.add(requestKey);
+    const loadVersion = loadVersionRef.current;
+    const version = useExcelStore.getState().getContentVersion(file.relative, file.workspaceKey) || view.content_version;
+    try {
+      const next = await fetchWorkbookView({ path: file.relative, workspaceKey: file.workspaceKey,
+        workspaceId: file.workspaceId, sessionId: identity.sessionId || undefined,
+        expectedVersion: version, sheet: name, rect: page.address, withStyles: true,
+        viewGeneration: identity.viewGeneration });
+      if (loadVersion !== loadVersionRef.current || identityRef.current.fileRef?.workspaceKey !== file.workspaceKey || identityRef.current.fileRef?.relative !== file.relative || hasPendingWorkbookEdits(file)) return;
+      if (useExcelStore.getState().getContentVersion(file.relative, file.workspaceKey) !== version) return;
+      const current = viewRef.current;
+      if (!current) return;
+      suppressEditsRef.current = true;
+      for (const win of next.windows) {
+        const target = api.getActiveWorkbook()?.getSheetByName?.(win.sheet);
+        if (!target) continue;
+        const cellValue: Record<number, Record<number, unknown>> = {};
+        for (const [key, fact] of Object.entries(win.cells)) {
+          const [r, c] = key.split(",").map(Number);
+          cellValue[r - 1] ??= {};
+          cellValue[r - 1][c - 1] = { ...cellToUniver(fact), custom: null };
+        }
+        await api.executeCommand("sheet.mutation.set-range-values", {
+          unitId: workbookIdRef.current, subUnitId: target.getSheetId(), cellValue,
+        }, { onlyLocal: true });
+      }
+      viewRef.current = mergeViewWindows({ ...current, content_version: version }, next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "加载范围失败");
+    } finally {
+      loadedPagesRef.current.delete(requestKey);
+      if (loadVersion === loadVersionRef.current) endSuppressEdits();
     }
   };
+  const loadWindowRef = useRef(loadVisibleWindow);
+  loadWindowRef.current = loadVisibleWindow;
+
+  const emitCellEdits = (event: any) => {
+    if (suppressEditsRef.current || readOnlyRef.current || event.options?.onlyLocal) return;
+    if (!event.id?.startsWith("sheet.mutation.")) return;
+    const api = univerRef.current;
+    const wb = api?.getActiveWorkbook?.();
+    const payload = { ...(event.params || {}) };
+    if (payload.unitId && payload.unitId !== workbookIdRef.current) return;
+    const sheet = wb?.getSheetBySheetId?.(payload.subUnitId);
+    const name = sheet?.getSheetName?.() || sheet?.getName?.() || sheetNamesRef.current.get(payload.subUnitId);
+    if (sheet && name) sheetNamesRef.current.set(payload.subUnitId, name);
+    if (payload.cellValue) {
+      const styles = wb?.getSnapshot?.()?.styles || {};
+      payload.cellValue = Object.fromEntries(Object.entries(payload.cellValue).map(([r, row]) => [r,
+        Object.fromEntries(Object.entries((row || {}) as Record<string, any>).flatMap(([c, raw]) => {
+          if (!raw) return [[c, raw]];
+          const cell = { ...raw };
+          const existing = sheet?.getRange?.(Number(r), Number(c))?.getCellData?.();
+          if (existing?.f && !("f" in cell) && "v" in cell) delete cell.v;
+          if (typeof cell.s === "string") cell.s = styles[cell.s];
+          return [[c, cell]];
+        })),
+      ]));
+    }
+    const ops = extractWorkbookOpsFromMutation({ id: event.id, params: payload, sheet: name });
+    const identity = identityRef.current;
+    if (!ops.length || !identity.fileRef) return;
+    enqueueWorkbookCommand({ path: identity.fileRef.relative, operations: ops, file: identity.fileRef,
+      sessionId: identity.sessionId, viewGeneration: identity.viewGeneration ?? useExcelStore.getState().viewGeneration,
+      onConflict: () => setError("文件版本已变化，请重新加载后编辑"),
+      onError: (message) => setError(message),
+    });
+  };
+  const emitMutationRef = useRef(emitCellEdits);
+  emitMutationRef.current = emitCellEdits;
 
   const loadData = useCallback(
     async (api: any) => {
@@ -451,23 +442,44 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         setLoading(false);
         return;
       }
+      if (!isDemoPath(filePath) && (!fileRef?.workspaceKey || (!sessionId && !fileRef.workspaceId))) {
+        setError("无法确定工作区，请从会话重新打开文件");
+        setLoading(false);
+        return;
+      }
 
       const loadVersion = ++loadVersionRef.current;
+      const generation = viewGeneration ?? useExcelStore.getState().viewGeneration;
       beginSuppressEdits();
       try {
         setLoading(true);
         setError(null);
 
-        // 单次请求拉取所有 sheet，避免 N 次串行 HTTP 往返
-        const resp = isDemoPath(filePath)
-          ? { file: filePath, sheets: ["Sheet1"], all_snapshots: buildDemoSnapshots() }
-          : await fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles });
+        const view = isDemoPath(filePath)
+          ? demoWorkbookView(filePath)
+          : await fetchWorkbookView({
+              path: filePath,
+              workspaceKey: fileRef!.workspaceKey,
+              sessionId: sessionId ?? undefined,
+              workspaceId: fileRef?.workspaceId,
+              withStyles,
+              viewGeneration: generation,
+            });
         if (loadVersion !== loadVersionRef.current) return;
+        if (
+          (viewGeneration ?? useExcelStore.getState().viewGeneration) !== generation
+        ) {
+          return;
+        }
+        if (!isDemoPath(filePath) && fileRef && !viewMatchesLease(view, fileRef)) {
+          return;
+        }
 
-        rememberSnapshotVersion(filePath, (resp as { content_version?: string }).content_version);
+        viewRef.current = view;
+        loadedPagesRef.current.clear();
+        rememberSnapshotVersion(filePath, view.content_version, fileRef?.workspaceKey);
 
-        const allSnapshots: ExcelSnapshot[] = resp.all_snapshots;
-        if (!allSnapshots.length) {
+        if (!view.sheets.length) {
           setError("文件无工作表");
           setLoading(false);
           return;
@@ -482,41 +494,26 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           // 忽略过期的 workbook 清理错误
         }
 
-        // 每次重新加载时轮换 workbook id，避免单元冲突。
         let workbookId = createPreviewWorkbookId();
         workbookIdRef.current = workbookId;
-        let workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
+        let workbookData = viewSnapshotToUniver(view, workbookId);
         try {
           api.createWorkbook(workbookData);
         } catch (createErr) {
           if (!isDuplicateUnitIdError(createErr)) {
             throw createErr;
           }
-          // 使用新 id 重试一次以从过期运行时状态恢复
           workbookId = createPreviewWorkbookId();
           workbookIdRef.current = workbookId;
-          workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
+          workbookData = viewSnapshotToUniver(view, workbookId);
           api.createWorkbook(workbookData);
         }
         if (loadVersion !== loadVersionRef.current) return;
 
+        sheetNamesRef.current.clear();
+        for (const meta of view.sheets) sheetNamesRef.current.set(`sheet-${meta.name}`, meta.name);
         applyWorkbookEditable(api, readOnlyRef.current);
-
-        // 若指定了初始 sheet 则切换过去
-        if (initialSheet) {
-          try {
-            const wb = api.getActiveWorkbook();
-            if (wb) {
-              const sheets = wb.getSheets();
-              const target = sheets?.find((s: any) => s.getName?.() === initialSheet);
-              if (target) {
-                target.activate();
-              }
-            }
-          } catch {
-            // 忽略切换 sheet 错误
-          }
-        }
+        activateWorkbookSheet(api, initialSheetRef.current);
 
         if (loadVersion !== loadVersionRef.current) return;
 
@@ -530,8 +527,24 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         if (loadVersion === loadVersionRef.current) endSuppressEdits();
       }
     },
-    [filePath, initialSheet, withStyles]
+    [filePath, fileRef, sessionId, viewGeneration, withStyles]
   );
+
+  const loadDataRef = useRef(loadData);
+  loadDataRef.current = loadData;
+
+  useEffect(() => {
+    if (!filePath || isDemoPath(filePath) || !fileRef?.workspaceKey) return;
+    if (!sessionId && !fileRef.workspaceId) return;
+    void fetchWorkbookView({
+      path: filePath,
+      workspaceKey: fileRef.workspaceKey,
+      sessionId: sessionId ?? undefined,
+      workspaceId: fileRef.workspaceId,
+      withStyles,
+      viewGeneration: viewGeneration ?? useExcelStore.getState().viewGeneration,
+    }).catch(() => null);
+  }, [filePath, fileRef, sessionId, viewGeneration, withStyles]);
 
   useEffect(() => {
     if (!containerRef.current) return;
@@ -542,17 +555,10 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
     const init = async () => {
       try {
-        // 与 Univer 引擎加载并行预取数据
-        const dataPromise = isDemoPath(filePath)
-          ? Promise.resolve({ file: filePath, sheets: ["Sheet1"], all_snapshots: buildDemoSnapshots() })
-          : filePath
-            ? fetchAllSheetsSnapshot(filePath, { maxRows: 500, withStyles }).catch(() => null)
-            : Promise.resolve(null);
-
         const { createUniver, LocaleType, UniverSheetsCorePreset, sheetsCoreZhCN } =
           await getUniverModules();
 
-        if (disposed) return;
+        if (disposed || !containerRef.current) return;
 
         const { univerAPI } = createUniver({
           locale: LocaleType.ZH_CN,
@@ -561,7 +567,8 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
           },
           presets: [
             UniverSheetsCorePreset({
-              container: containerRef.current!,
+              container: containerRef.current,
+              ribbonType: "classic",
               footer: {
                 sheetBar: true,
                 statisticBar: false,
@@ -579,52 +586,46 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
 
         api = univerAPI;
         univerRef.current = univerAPI;
-        unsubscribeValueChanged = subscribeSheetValueChanged(univerAPI, emitCellEdits);
-
-        // 注意：此处只初始化 Univer 实例；工作簿创建与交互策略在后续流程处理。
-
-        // 若有预取数据则使用，否则 loadData 会再次请求
-        const prefetchedData = await dataPromise;
-        if (prefetchedData && prefetchedData.all_snapshots?.length) {
-          // 直接注入预取数据
-          const loadVersion = ++loadVersionRef.current;
-          beginSuppressEdits();
-          try {
-            rememberSnapshotVersion(filePath, (prefetchedData as { content_version?: string }).content_version);
-            const allSnapshots = prefetchedData.all_snapshots;
-            let workbookId = createPreviewWorkbookId();
-            workbookIdRef.current = workbookId;
-            let workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
-            try {
-              univerAPI.createWorkbook(workbookData);
-            } catch (createErr) {
-              if (!isDuplicateUnitIdError(createErr)) throw createErr;
-              workbookId = createPreviewWorkbookId();
-              workbookIdRef.current = workbookId;
-              workbookData = snapshotToWorkbookData(allSnapshots, workbookId);
-              univerAPI.createWorkbook(workbookData);
-            }
-            applyWorkbookEditable(univerAPI, readOnlyRef.current);
-            if (initialSheet) {
-              try {
-                const wb = univerAPI.getActiveWorkbook();
-                if (wb) {
-                  const sheets = wb.getSheets();
-                  const target = sheets?.find((s: any) => s.getName?.() === initialSheet);
-                  if (target) target.activate();
-                }
-              } catch { /* 忽略 */ }
-            }
-            if (loadVersion === loadVersionRef.current) setLoading(false);
-          } catch {
-            // 预取失败，回退到正常 loadData
-            await loadData(univerAPI);
-          } finally {
-            if (loadVersion === loadVersionRef.current) endSuppressEdits();
+        const subscriptions: any[] = [];
+        subscriptions.push(univerAPI.addEvent(univerAPI.Event.CommandExecuted, (event: any) => emitMutationRef.current(event)));
+        let windowTimer: ReturnType<typeof setTimeout> | undefined;
+        const requestWindow = (event: any) => {
+          if (windowTimer) clearTimeout(windowTimer);
+          windowTimer = setTimeout(() => { void loadWindowRef.current(event.worksheet); }, 100);
+        };
+        subscriptions.push(univerAPI.addEvent(univerAPI.Event.Scroll, requestWindow));
+        subscriptions.push(univerAPI.addEvent(univerAPI.Event.SelectionChanged, requestWindow));
+        unsubscribeValueChanged = () => {
+          if (windowTimer) clearTimeout(windowTimer);
+          for (const sub of subscriptions) sub?.dispose?.();
+        };
+        try {
+          const before = univerAPI.Event?.BeforeCommandExecute;
+          if (before && typeof univerAPI.addEvent === "function") {
+            subscriptions.push(univerAPI.addEvent(before, (evt: any) => {
+              if (suppressEditsRef.current || evt.options?.onlyLocal) return;
+              const id = String(evt?.id || "");
+              if (isUnsupportedWorkbookMutation(id)) { evt.cancel = true; setError("此操作尚不能保存，请通过聊天完成"); return; }
+              if (!id.startsWith("sheet.mutation.")) return;
+              if (id !== "sheet.mutation.set-range-values" && !id.includes("worksheet-merge")) return;
+              const wb = univerAPI.getActiveWorkbook?.();
+              const sheet = wb?.getSheetBySheetId?.(evt.params?.subUnitId);
+              const name = sheet?.getSheetName?.() || sheet?.getName?.();
+              const view = viewRef.current;
+              if (!view || !sheet) return;
+              const matrix = evt.params?.cellValue || {};
+              const range = evt.params?.range;
+              const ranges = evt.params?.ranges || (range && typeof range === "object" ? [range] : []);
+              const positions = ranges.map((r: any) => ({ r0: r.startRow + 1, c0: r.startColumn + 1, r1: r.endRow + 1, c1: r.endColumn + 1 }));
+              for (const [r, row] of Object.entries(matrix)) for (const c of Object.keys((row || {}) as object)) positions.push({ r0: Number(r) + 1, c0: Number(c) + 1, r1: Number(r) + 1, c1: Number(c) + 1 });
+              const missing = positions.map((r: any) => firstUnloadedCell(view, name, r)).find(Boolean);
+              if (missing) { evt.cancel = true; void loadWindowRef.current(sheet, missing); }
+            }));
           }
-        } else {
-          await loadData(univerAPI);
+        } catch {
+          /* 该版本无 BeforeCommandExecute */
         }
+        setEngineReady(true);
       } catch (err) {
         console.error("Univer initialization error:", err);
         setError("Univer 引擎初始化失败");
@@ -646,15 +647,26 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         }
       }
       univerRef.current = null;
+      setEngineReady(false);
     };
-  }, [loadData]);
+  }, []);
+
+  useEffect(() => {
+    if (!engineReady || !univerRef.current) return;
+    void loadData(univerRef.current);
+  }, [engineReady, filePath, fileRef?.workspaceKey, withStyles, loadData]);
+
+  useEffect(() => {
+    if (!engineReady || loading || !univerRef.current) return;
+    activateWorkbookSheet(univerRef.current, initialSheet);
+  }, [engineReady, loading, initialSheet]);
 
   // refreshCounter 变化时重新加载（写操作之后）
   useEffect(() => {
     if (refreshCounter > 0 && univerRef.current) {
-      loadData(univerRef.current);
+      void loadDataRef.current(univerRef.current);
     }
-  }, [refreshCounter, loadData]);
+  }, [refreshCounter]);
 
   useEffect(() => {
     if (loading || !univerRef.current) return;
@@ -702,14 +714,16 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         const numRows = range.getNumRows?.() ?? 1;
         const numCols = range.getNumColumns?.() ?? 1;
 
-        const startLetter = colIndexToLetter(startCol);
-        const endLetter = colIndexToLetter(startCol + numCols - 1);
-        const startRowNum = startRow + 1;  // Excel 行号为从 1 开始
-        const endRowNum = startRow + numRows;
-
-        const rangeStr = `${startLetter}${startRowNum}:${endLetter}${endRowNum}`;
-        const sheetName = sheet.getName?.() || "Sheet1";
-        onRangeSelected(rangeStr, sheetName);
+        const selection = readActiveRange(api);
+        if (!selection.sheet || !selection.range) {
+          onRangeSelected("", "");
+          return;
+        }
+        const isSingleCell = numRows === 1 && numCols === 1;
+        const cellValue = isSingleCell
+          ? readSingleCellValue(range, sheet, startRow, startCol)
+          : undefined;
+        onRangeSelected(selection.range, selection.sheet, cellValue);
       } catch {
         // 忽略选区读取错误
       }
@@ -744,8 +758,53 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
     };
   }, [selectionMode, onRangeSelected]);
 
-  // 是否显示选区指示器
-  const showSelectionIndicator = selectionMode;
+  useEffect(() => {
+    const root = containerRef.current;
+    if (!root) return;
+    ensureHistoryRibbonStyle();
+    const pick = () => {
+      const el = root.querySelector('[role="tablist"]') as HTMLElement | null;
+      setRibbonTablist((prev) => (prev === el ? prev : el));
+      setHistoryRibbonMode(el, historyActive);
+      const tab = readNativeRibbonTab(el, historyActive);
+      setNativeRibbonTab((prev) => (prev === tab ? prev : tab));
+      const toolbar = findRibbonToolbar(root);
+      setRibbonToolbarHidden(toolbar, historyActive);
+      if (!historyActive && (tab === "formula" || tab === "data")) {
+        const host = ensureRibbonCommandHost(toolbar);
+        setRibbonCommandHost((prev) => (prev === host ? prev : host));
+      } else {
+        removeRibbonCommandHost(toolbar);
+        setRibbonCommandHost((prev) => (prev == null ? prev : null));
+      }
+    };
+    pick();
+    const mo = new MutationObserver(pick);
+    mo.observe(root, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ["aria-selected"],
+    });
+    return () => {
+      mo.disconnect();
+      const toolbar = findRibbonToolbar(root);
+      setRibbonToolbarHidden(toolbar, false);
+      removeRibbonCommandHost(toolbar);
+    };
+  }, [fileUrl, loading, historyActive]);
+
+  useEffect(() => {
+    if (!ribbonTablist) return;
+    const onClick = (event: Event) => {
+      const tab = (event.target as HTMLElement | null)?.closest?.("[role='tab']");
+      if (tab && !tab.hasAttribute("data-em-ribbon")) {
+        onNativeRibbonTabRef.current?.();
+      }
+    };
+    ribbonTablist.addEventListener("click", onClick);
+    return () => ribbonTablist.removeEventListener("click", onClick);
+  }, [ribbonTablist]);
 
   // ── 移动端选区模式：长按进入选区 ──
   const { handlers: touchGestureHandlers } = useTouchGesture({
@@ -768,12 +827,6 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
         style={{ position: "relative" }}
         {...(isMobile && selectionMode ? touchGestureHandlers : {})}
       />
-      {/* 选区模式指示（显式按钮或移动端长按） */}
-      {showSelectionIndicator && (
-        <div className="absolute top-0 left-0 right-0 z-20 flex items-center justify-center gap-2 py-1.5 text-xs font-medium text-white pointer-events-none" style={{ backgroundColor: "var(--em-primary)" }}>
-          <span>请在表格中选择一个区域</span>
-        </div>
-      )}
       {/* 移动端提示：首次加载显示，4 秒后自动淡出 */}
       {isMobile && hintVisible && !selectionMode && !loading && !error && (
         <div
@@ -790,9 +843,22 @@ export function UniverSheet({ fileUrl, highlightCells, onCellEdit, initialSheet,
       )}
       {error && (
         <div className="absolute inset-0 flex items-center justify-center bg-background/80 z-10">
-          <span className="text-sm text-destructive">{error}</span>
+          <div className="flex flex-col items-center gap-3"><span className="text-sm text-destructive">{error}</span>
+            <button type="button" onClick={() => { setError(null); if (univerRef.current) void loadDataRef.current(univerRef.current); }}>重新加载</button></div>
         </div>
       )}
+      {ribbonSlot && ribbonTablist ? createPortal(ribbonSlot, ribbonTablist) : null}
+      {nativeRibbonTab && ribbonCommandHost && filePath
+        ? createPortal(
+            <ExcelRibbonCommands
+              tab={nativeRibbonTab}
+              filePath={filePath}
+              fallbackSheet={initialSheet}
+              getSelection={() => readActiveRange(univerRef.current)}
+            />,
+            ribbonCommandHost,
+          )
+        : null}
       {/* 水波纹 CSS 动画 */}
       <style jsx>{`
         @keyframes mobile-hint-fade {

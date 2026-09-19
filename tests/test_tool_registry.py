@@ -212,3 +212,28 @@ class TestToolDefTruncate:
             func=lambda: None,
         )
         assert tool.max_result_chars == 3000
+
+
+class TestCatalogDigest:
+    def test_schema_change_without_new_name_changes_digest(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tool(_tool("alpha"))
+        first = registry.catalog_digest()
+        registry.get_tool("alpha").input_schema["properties"]["y"] = {"type": "string"}
+        assert registry.catalog_digest() != first
+
+    def test_register_bumps_digest(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tool(_tool("alpha"))
+        first = registry.catalog_digest()
+        registry.register_tool(_tool("beta"))
+        assert registry.catalog_digest() != first
+
+    def test_remove_tools_bumps_digest(self) -> None:
+        registry = ToolRegistry()
+        registry.register_tool(_tool("alpha"))
+        registry.register_tool(_tool("beta"))
+        first = registry.catalog_digest()
+        assert registry.remove_tools(["beta"]) == 1
+        assert registry.catalog_digest() != first
+        assert registry.get_tool("beta") is None

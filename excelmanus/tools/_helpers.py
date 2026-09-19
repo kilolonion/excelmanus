@@ -7,13 +7,28 @@ from pathlib import Path
 from difflib import SequenceMatcher
 from typing import Any, Sequence
 
-from excelmanus.engine_core.tool_result import ToolResult, from_payload
+from excelmanus.engine_core.tool_result import ToolResult, error_result, from_payload
 
 _logger = logging.getLogger(__name__)
 
 # 文件存在性检查时，最多列出的可用文件数量
 _MAX_SUGGESTION_FILES = 15
 _EXCEL_SUFFIXES: frozenset[str] = frozenset({".xlsx", ".xls", ".xlsm", ".xlsb"})
+OUTSIDE_WORKSPACE_MESSAGE = (
+    "只能访问工作区里的文件，打不开电脑桌面或工作区外路径。"
+    "把文件拖进对话后再说一次文件名。"
+)
+OUTSIDE_WORKSPACE_REMEDIATION = (
+    "使用工作区相对路径。不要改用 shell、绝对路径或工作区外位置绕过权限。"
+)
+MISSING_NAMED_FILE_HINT = (
+    "工作区没有这个相对路径。下列同目录文件仅供核对拼写；不要擅自替换目标。"
+    "任务允许查找时可用 list_directory 或 analyze_spreadsheet(mode=files)。确实未上传时请用户提供。"
+)
+MISSING_NAMED_FILE_REMEDIATION = (
+    "核对相对路径拼写；任务允许查找时用 list_directory 或 analyze_spreadsheet(mode=\"files\") 列候选，"
+    "候选不唯一时问一个问题；确实未上传时请用户提供。不要擅自换成另一份表。"
+)
 
 
 def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> ToolResult | None:
@@ -24,7 +39,7 @@ def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> ToolResult
     workspace_root: Path = guard.workspace_root
     suggestions: list[str] = []
 
-    # 1) 列出目标目录下的 Excel 文件
+    # 只列同目录下的兄弟文件，供文件名打错时对照；不要扫整个工作区。
     parent = safe_path.parent
     if parent.is_dir():
         try:
@@ -34,43 +49,27 @@ def check_file_exists(safe_path: Path, user_path: str, guard: Any) -> ToolResult
                         suggestions.append(str(f.relative_to(workspace_root)))
                     except ValueError:
                         suggestions.append(f.name)
-        except OSError:
-            pass
-
-    # 2) 若目标目录下没找到，扫描工作区根目录（仅第一层）
-    if not suggestions:
-        try:
-            for f in sorted(workspace_root.iterdir()):
-                if f.is_file() and f.suffix.lower() in _EXCEL_SUFFIXES:
-                    suggestions.append(f.name)
                 if len(suggestions) >= _MAX_SUGGESTION_FILES:
                     break
         except OSError:
             pass
 
-    # 3) 若仍为空，递归扫描工作区（限深度 2）
-    if not suggestions:
-        try:
-            for f in sorted(workspace_root.rglob("*")):
-                if f.is_file() and f.suffix.lower() in _EXCEL_SUFFIXES:
-                    try:
-                        suggestions.append(str(f.relative_to(workspace_root)))
-                    except ValueError:
-                        suggestions.append(str(f))
-                    if len(suggestions) >= _MAX_SUGGESTION_FILES:
-                        break
-        except OSError:
-            pass
-
-    payload: dict[str, Any] = {
-        "error": f"文件不存在: {user_path}",
-        "code": "PATH_INVALID",
-        "hint": "请检查文件路径是否正确，或使用 inspect_spreadsheet / list_directory 确认可用文件。",
+    extra: dict[str, Any] = {
+        "hint": MISSING_NAMED_FILE_HINT,
     }
     if suggestions:
-        payload["available_excel_files"] = suggestions[:_MAX_SUGGESTION_FILES]
+        extra["available_excel_files"] = suggestions[:_MAX_SUGGESTION_FILES]
+        extra["hint"] = (
+            MISSING_NAMED_FILE_HINT
+            + " 候选不是自动替换目标。"
+        )
 
-    return from_payload(payload)
+    return error_result(
+        f"文件不存在: {user_path}",
+        code="PATH_INVALID",
+        remediation=MISSING_NAMED_FILE_REMEDIATION,
+        fields=extra,
+    )
 
 
 # fuzzy matching 相似度阈值：≥ 此值时自动纠正
@@ -108,15 +107,15 @@ def resolve_sheet_name(
         if name.lower() == lower:
             return name
 
-    # 第三级：fuzzy matching（SequenceMatcher）
+    # 不做静默 fuzzy 自动纠正：改写表名会让 agent 以为错误拼写可用，
+    # 并把错误名称传播给用户。近似名只作为错误提示（见 check_sheet_name
+    # 的 closest_match），全链路（数据操作与结构操作）行为一致。
     best_name, best_ratio = _find_closest_sheet_name(requested, available)
     if best_name is not None and best_ratio >= _FUZZY_MATCH_THRESHOLD:
         _logger.info(
-            "sheet 名 fuzzy 纠正: '%s' → '%s' (相似度 %.2f)",
-            requested, best_name, best_ratio,
+            "sheet 名未精确匹配，最接近 '%s'（相似度 %.2f），已拒绝并建议纠正",
+            best_name, best_ratio,
         )
-        return best_name
-
     return None
 
 
@@ -189,24 +188,22 @@ def check_sheet_name(safe_path: Path, sheet_name: str | None) -> tuple[str | Non
                         sheet_name, resolved,
                     )
                 return resolved, None
-            # 未找到：构造含可用 sheet 列表的结构化错误
-            payload: dict[str, Any] = {
-                "error": f"工作表 '{sheet_name}' 不存在",
-                "available_sheets": available,
-            }
-            # 附加最相似的 sheet 名建议（即使低于自动纠正阈值）
+            extra: dict[str, Any] = {"available_sheets": available}
             closest, ratio = _find_closest_sheet_name(sheet_name, available)
             if closest is not None and ratio > 0.3:
-                payload["closest_match"] = closest
-                payload["similarity"] = round(ratio, 2)
-                payload["hint"] = (
+                extra["closest_match"] = closest
+                extra["similarity"] = round(ratio, 2)
+                extra["hint"] = (
                     f"该文件包含以下工作表: {available}。"
                     f"最接近的是 '{closest}'（相似度 {ratio:.0%}），请确认后重试。"
                 )
             else:
-                payload["hint"] = f"该文件包含以下工作表: {available}。请使用正确的工作表名称重试。"
-            payload["code"] = "RANGE_INVALID"
-            return None, from_payload(payload)
+                extra["hint"] = f"该文件包含以下工作表: {available}。请使用正确的工作表名称重试。"
+            return None, error_result(
+                f"工作表 '{sheet_name}' 不存在",
+                code="SHEET_NOT_FOUND",
+                fields=extra,
+            )
         finally:
             wb.close()
     except Exception as exc:
@@ -233,10 +230,12 @@ def ensure_openpyxl_compatible(safe_path: Path) -> Path:
         return safe_path
 
     try:
-        from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+        from excelmanus.tools.context import current_call
 
-        ctx = _get_ctx_guard()
-        workspace_root = str(ctx.workspace_root) if ctx is not None else None
+        call = current_call()
+        workspace_root = (
+            str(call.binding.workspace.root) if call is not None else None
+        )
         xlsx_path, converted = ensure_xlsx(safe_path, workspace_root=workspace_root)
         if converted:
             _logger.info("工具层自动转换: %s → %s", safe_path.name, xlsx_path.name)
@@ -265,7 +264,17 @@ def workspace_relpath(guard: Any, path: Path | str) -> str:
 def prepare_excel_commit_path(guard: Any, file_path: str) -> tuple[Path, str]:
     """解析用户路径、必要时转 xlsx，返回 (绝对路径, 工作区相对路径)。"""
     safe_path = ensure_openpyxl_compatible(guard.resolve_and_validate(file_path))
-    return safe_path, workspace_relpath(guard, safe_path)
+    rel = workspace_relpath(guard, safe_path)
+    rel_posix = rel.replace("\\", "/").lstrip("./")
+    if rel_posix == "uploads" or rel_posix.startswith("uploads/"):
+        from excelmanus.workbook_commit import CommitError
+
+        raise CommitError(
+            "PATH_INVALID",
+            "uploads/ 是只读附件。请 copy_file 到 outputs/ 再改副本。",
+            fields={"path": rel_posix},
+        )
+    return safe_path, rel
 
 
 def commit_workbook_tool(
@@ -275,9 +284,11 @@ def commit_workbook_tool(
     mutate_fn: Any,
     expected_version: str | None = None,
     create: bool = False,
+    selection_bound: bool = False,
 ) -> Any:
     """工具写入入口：优先使用本轮已读到的 content_version，再原子提交。"""
     from excelmanus.workbook_commit import (
+        CommitError,
         commit_workbook,
         peek_seen_content_version,
         remember_content_version,
@@ -289,7 +300,16 @@ def commit_workbook_tool(
     except Exception:
         dest = None
     if dest is not None and dest.is_file():
-        seen = expected_version or peek_seen_content_version(file_path)
+        if selection_bound:
+            seen = (expected_version or "").strip()
+            if not seen:
+                raise CommitError(
+                    "SELECTION_STALE",
+                    f"{file_path} 带 selection/source_rows 的写入必须提供该选择的 content_version，不能使用最新 seen",
+                    fields={"path": file_path},
+                )
+        else:
+            seen = expected_version or peek_seen_content_version(file_path)
     result = commit_workbook(
         guard=guard,
         file_path=file_path,
@@ -336,16 +356,13 @@ def commit_bytes_tool(
 
 def commit_error_result(exc: Any) -> ToolResult:
     """把 ``CommitError`` 映射为工具层错误结果。"""
-    payload: dict[str, Any] = {
-        "status": "error",
-        "code": getattr(exc, "code", "SAVE_FAILED"),
-        "message": getattr(exc, "message", str(exc)),
-    }
     fields = getattr(exc, "fields", None)
-    if isinstance(fields, dict):
-        for key, value in fields.items():
-            payload.setdefault(key, value)
-    return from_payload(payload)
+    extra = dict(fields) if isinstance(fields, dict) else {}
+    return error_result(
+        getattr(exc, "message", str(exc)),
+        code=getattr(exc, "code", "SAVE_FAILED"),
+        fields=extra or None,
+    )
 
 
 def unwrap_mutation_abort(exc: BaseException) -> MutationAborted | None:

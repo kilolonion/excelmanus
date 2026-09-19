@@ -30,29 +30,33 @@ class RuleUpdateRequest(BaseModel):
 # ── 辅助函数 ──────────────────────────────────────────
 
 def _get_rules_manager():
-    from excelmanus.api import _rules_manager
+    from excelmanus.api_app_state import get_runtime
+    _rules_manager = get_runtime().rules_manager
     return _rules_manager
 
 
 def _get_api_persistent_memory():
-    from excelmanus.api import _api_persistent_memory
+    from excelmanus.api_app_state import get_runtime
+    _api_persistent_memory = get_runtime().persistent_memory
     return _api_persistent_memory
 
 
 
 async def _check_session_access(session_id: str, request: Request) -> bool:
-    from excelmanus.api import _has_session_access
+    from excelmanus.api_app_state import has_session_access as _has_session_access
     return await _has_session_access(session_id, request)
 
 
 
 def _get_database():
-    from excelmanus.api import _database
+    from excelmanus.api_app_state import get_runtime
+    _database = get_runtime().database
     return _database
 
 
 def _get_config():
-    from excelmanus.api import _config
+    from excelmanus.api_app_state import get_runtime
+    _config = get_runtime().config
     return _config
 
 

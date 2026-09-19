@@ -163,7 +163,7 @@ class TestModeGuard:
         auto = _create_auto_svc(db, svc)
         auto.upsert_policy(provider="openai-codex")
         auto.set_scope_mode("openai-codex", "*", "auto")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         # No accounts → no_active_no_candidates
@@ -177,7 +177,7 @@ class TestModeGuard:
         auto = _create_auto_svc(db, svc)
         auto.upsert_policy(provider="openai-codex")
         auto.set_scope_mode("openai-codex", "*", "manual_locked")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "none"
@@ -196,7 +196,7 @@ class TestModeGuard:
         svc.update_health_signal(acct.id, "depleted", 0.9)
         # Create a second account as candidate
         _make_account(svc, "B")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "dry_run"
@@ -252,7 +252,7 @@ class TestHysteresis:
             )
             svc._conn.commit()
         # Both have similar budget → delta < 0.20
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         # Should be blocked by hysteresis (or no_trigger if soft not hit)
@@ -268,7 +268,7 @@ class TestHysteresis:
         )
         # Hard trigger: depleted
         svc.update_health_signal(a.id, "depleted", 0.9)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] in ("rotate", "fallback")
@@ -280,7 +280,7 @@ class TestHysteresis:
         svc = _create_svc(db)
         auto = _create_auto_svc(db, svc)
         auto.upsert_policy(provider="openai-codex", hysteresis_delta=0.12)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "none"  # No accounts at all
@@ -313,7 +313,7 @@ class TestDwellTime:
             current_score=0.5,
             activated_at=datetime.now(tz=timezone.utc).isoformat(),
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["reason"] in ("dwell_blocked", "no_trigger", "soft_trigger_in_cooldown")
@@ -339,7 +339,7 @@ class TestDwellTime:
             current_score=0.0,
             activated_at=(datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat(),
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         # Could trigger or not depending on soft trigger
@@ -361,7 +361,7 @@ class TestDwellTime:
         )
         # Hard trigger
         svc.update_health_signal(a.id, "depleted", 0.9)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] in ("rotate", "fallback")
@@ -649,7 +649,7 @@ class TestIntegrationE2E:
             current_score=0.0,
             activated_at=(datetime.now(tz=timezone.utc) - timedelta(hours=1)).isoformat(),
         )
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         # With low_watermark=0.99 and default budget, soft should trigger and rotate
@@ -690,7 +690,7 @@ class TestIntegrationE2E:
         svc.set_manual_active("openai-codex", "*", a.id)
         svc.update_health_signal(a.id, "depleted", 0.9)
         auto.set_scope_mode("openai-codex", "*", "frozen")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "dry_run"
@@ -710,7 +710,7 @@ class TestIntegrationE2E:
         svc.set_manual_active("openai-codex", "*", a.id)
         svc.update_health_signal(a.id, "depleted", 0.9)
         auto.set_scope_mode("openai-codex", "*", "manual_locked")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         assert result["action"] == "none"
@@ -752,7 +752,7 @@ class TestApiEndpoints:
         svc = _create_svc(db)
         auto = _create_auto_svc(db, svc)
         auto.upsert_policy(provider="openai-codex")
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*", dry_run=True)
         )
         # No accounts → none (even in dry_run)
@@ -768,7 +768,7 @@ class TestApiEndpoints:
         b = _make_account(svc, "B")
         svc.set_manual_active("openai-codex", "*", a.id)
         svc.update_health_signal(a.id, "depleted", 0.9)
-        result = asyncio.get_event_loop().run_until_complete(
+        result = asyncio.run(
             auto.evaluate_scope("openai-codex", "*")
         )
         if result["action"] == "rotate":

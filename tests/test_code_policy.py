@@ -313,12 +313,14 @@ class TestAllowsAutoRun:
         assert allows_auto_run(result, green_auto=True, yellow_auto=True) is True
         assert allows_auto_run(result, green_auto=True, yellow_auto=False) is False
 
-    def test_fs_write_never_auto_even_if_yellow_on(self) -> None:
+    def test_fs_write_auto_run_confined_by_sandbox(self) -> None:
+        """FS_WRITE 由沙箱 pending 重定向+发布管线承载，不额外要审批。"""
         result = CodePolicyEngine().analyze(
             "from pathlib import Path\nPath('a.csv').write_text('x')"
         )
         assert result.tier == CodeRiskTier.YELLOW
-        assert allows_auto_run(result, green_auto=True, yellow_auto=True) is False
+        assert allows_auto_run(result, green_auto=True, yellow_auto=True) is True
+        assert allows_auto_run(result, green_auto=True, yellow_auto=False) is True
 
     def test_red_never_auto(self) -> None:
         result = CodePolicyEngine().analyze("import pickle")

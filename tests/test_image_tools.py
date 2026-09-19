@@ -10,11 +10,19 @@ from pathlib import Path
 import pytest
 
 
-# 最小有效 PNG（1x1 白色像素）
+# 最小有效 PNG（1x1 红色像素）
 _MINIMAL_PNG_B64 = (
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4"
-    "nGP4z8BQDwAEgAF/pooBPQAAAABJRU5ErkJggg=="
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
 )
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attachment_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+    from excelmanus.attachments.store import reset_attachment_store
+    reset_attachment_store()
+    yield
+    reset_attachment_store()
 
 
 class TestReadImage:
@@ -31,8 +39,9 @@ class TestReadImage:
         assert out.value["status"] == "ok"
         assert out.value["mime_type"] == "image/png"
         assert out.value["size_bytes"] > 0
+        assert out.value["attachment_id"].startswith("sha256:")
         assert "__tool_result_image__" not in out.model_text
-        assert out.ui_meta.image and out.ui_meta.image["base64"]
+        assert out.ui_meta.image and out.ui_meta.image.get("attachment")
 
     def test_read_nonexistent_file(self, tmp_path: Path) -> None:
         """读取不存在的文件返回错误。"""
@@ -77,7 +86,8 @@ class TestReadImage:
         injection = out.ui_meta.image
         assert injection["mime_type"] == "image/png"
         assert injection["detail"] == "auto"
-        assert len(injection["base64"]) > 0
+        assert injection["attachment"]["attachmentId"].startswith("sha256:")
+        assert "base64" not in injection
         assert "__tool_result_image__" not in out.model_text
 
     def test_get_tools_returns_read_image(self) -> None:
@@ -87,6 +97,42 @@ class TestReadImage:
         tools = get_tools()
         names = [t.name for t in tools]
         assert "read_image" in names
+
+    def test_read_by_attachment_id_from_history(self, tmp_path: Path) -> None:
+        from excelmanus.tools.context import ToolCallContext, bind_call, current_call, reset_call
+        from excelmanus.tools.image_tools import init_guard, read_image
+
+        png_data = base64.b64decode(_MINIMAL_PNG_B64)
+        img_path = tmp_path / "hist.png"
+        img_path.write_bytes(png_data)
+        init_guard(str(tmp_path))
+        first = read_image(file_path=str(img_path))
+        assert first.success
+        attach_id = first.value["attachment_id"]
+        current = current_call()
+        assert current is not None
+        token = bind_call(ToolCallContext(
+            binding=current.binding,
+            durable_attachment_ids=frozenset({attach_id}),
+        ))
+        try:
+            out = read_image(attachment_id=attach_id)
+        finally:
+            reset_call(token)
+        assert out.success
+        assert out.value["attachment_id"] == attach_id
+
+    def test_attachment_id_without_history_denied(self, tmp_path: Path) -> None:
+        from excelmanus.tools.image_tools import init_guard, read_image
+
+        png_data = base64.b64decode(_MINIMAL_PNG_B64)
+        img_path = tmp_path / "hist.png"
+        img_path.write_bytes(png_data)
+        init_guard(str(tmp_path))
+        first = read_image(file_path=str(img_path))
+        out = read_image(attachment_id=first.value["attachment_id"])
+        assert not out.success
+        assert out.error.code == "permission_denied"
 
     def test_rejects_outside_workspace_path(self, tmp_path: Path) -> None:
         """workspace 外图片路径应被拒绝。"""
@@ -141,12 +187,13 @@ class TestUiMetaImageInjection:
             ui_meta=ToolUiMeta(image={"base64": b64, "mime_type": "image/png", "detail": "auto"}),
         )
         dispatcher._apply_ui_meta_effects(tr)
-        engine.memory.add_image_message.assert_not_called()
+        engine.memory.add_user_message.assert_not_called()
         assert len(dispatcher._deferred_image_injections) == 1
         dispatcher.flush_deferred_images()
-        engine.memory.add_image_message.assert_called_once_with(
-            base64_data=b64, mime_type="image/png", detail="auto",
-        )
+        engine.memory.add_user_message.assert_called_once()
+        content = engine.memory.add_user_message.call_args.args[0]
+        assert content[0]["type"] == "image"
+        assert content[0]["attachment"]["attachmentId"].startswith("sha256:")
 
     def test_legacy_json_magic_field_is_lifted_at_dispatcher(self) -> None:
         """消费边界把未迁移工具的 JSON 魔法字段提升到 ui_meta 并注入。"""
@@ -162,7 +209,7 @@ class TestUiMetaImageInjection:
         assert tr.ui_meta.image["base64"] == b64
         assert "__tool_result_image__" not in tr.model_text
         assert len(dispatcher._deferred_image_injections) == 1
-        engine.memory.add_image_message.assert_not_called()
+        engine.memory.add_user_message.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_call_registry_tool_injects_before_truncate(self) -> None:
@@ -216,7 +263,7 @@ class TestUiMetaImageInjection:
         assert out.ui_meta.image["base64"] == "A" * 5000
         assert "__tool_result_image__" not in out.model_text
         assert len(out.model_text) <= 100
-        engine.memory.add_image_message.assert_not_called()
+        engine.memory.add_user_message.assert_not_called()
         assert len(dispatcher._deferred_image_injections) == 1
 
 

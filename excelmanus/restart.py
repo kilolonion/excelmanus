@@ -8,7 +8,7 @@
     from excelmanus.restart import schedule_restart
     await schedule_restart()
 
-    # 同步（CLI / 脚本）
+    # 同步（脚本）
     from excelmanus.restart import schedule_restart_sync
     schedule_restart_sync()
 """
@@ -147,7 +147,8 @@ def _do_restart(port: int, entry: str, *, deploy_mode: str = "standalone") -> No
 def _get_deploy_mode() -> str:
     """从已加载的配置中获取 deploy_mode，回退到环境变量。"""
     try:
-        from excelmanus.api import _config
+        from excelmanus.api_app_state import get_runtime
+        _config = get_runtime().config
         if _config is not None:
             return _config.deploy_mode
     except Exception:
@@ -206,7 +207,7 @@ def schedule_restart_sync(
     port: int = 8000,
     entry: str = "from excelmanus.api import main; main()",
 ) -> None:
-    """同步触发服务重启。适用于 CLI / 脚本场景。
+    """同步触发服务重启。适用于脚本场景。
 
     注意：此函数不会返回 —— 内部调用 os._exit(0)。
     """

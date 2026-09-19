@@ -133,3 +133,39 @@ class TestValidateWorkbookSpec:
         names = {t.name for t in get_tools()}
         assert names == {"read_image"}
         assert "extract_table_spec" not in names
+
+
+def test_workbook_spec_commit_includes_verification(tmp_path: Path) -> None:
+    from excelmanus.security import FileAccessGuard
+    from excelmanus.tools import intent_tools, reference_tools
+    from excelmanus.tools._guard_ctx import set_guard
+    from excelmanus.tools.intent_tools import edit_spreadsheet
+
+    workspace = str(tmp_path)
+    set_guard(FileAccessGuard(workspace))
+    intent_tools.init_guard(workspace)
+    reference_tools.init_guard(workspace)
+    result = edit_spreadsheet(
+        file_path=str(tmp_path / "created.xlsx"),
+        workbook_spec=_minimal_workbook_spec(),
+    )
+    assert result.success, result.model_text
+    verification = result.value["verification"]
+    assert "mismatches" in verification
+    assert verification["ok"] is True
+    assert verification["mismatches"] == []
+
+
+def test_truncated_json_string_reports_chunking_guidance() -> None:
+    """JSON 字符串在末尾被截断时给出分块/替代路径指引，而非泛化"非法 JSON"。"""
+    truncated = '{"name":"x","sheets":[{"name":"S1","dimensions":{"rows":2,"cols":2'
+    with pytest.raises(SpecValidationError) as excinfo:
+        validate_workbook_spec(truncated)
+    message = str(excinfo.value)
+    assert "截断" in message
+    assert "source_csv" in message or "operations" in message
+
+    # 中段语法错误仍是普通非法 JSON 文案
+    with pytest.raises(SpecValidationError) as excinfo2:
+        validate_workbook_spec('{"name":"x" bad}')
+    assert "截断" not in str(excinfo2.value)

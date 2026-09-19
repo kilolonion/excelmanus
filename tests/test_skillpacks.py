@@ -126,6 +126,8 @@ class TestSkillpackLoader:
             d.mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setenv("HOME", str(home_dir))
+        # Windows 上 Path.home()/expanduser 读 USERPROFILE，不认 HOME
+        monkeypatch.setenv("USERPROFILE", str(home_dir))
         monkeypatch.chdir(workspace)
 
         _write_skillpack(
@@ -235,6 +237,8 @@ class TestSkillpackLoader:
             d.mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setenv("HOME", str(home_dir))
+        # Windows 上 Path.home()/expanduser 读 USERPROFILE，不认 HOME
+        monkeypatch.setenv("USERPROFILE", str(home_dir))
         monkeypatch.chdir(workspace)
 
         _write_skillpack(
@@ -274,6 +278,8 @@ class TestSkillpackLoader:
             d.mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setenv("HOME", str(home_dir))
+        # Windows 上 Path.home()/expanduser 读 USERPROFILE，不认 HOME
+        monkeypatch.setenv("USERPROFILE", str(home_dir))
         monkeypatch.chdir(workspace)
 
         _write_skillpack(
@@ -507,7 +513,7 @@ class TestSkillpackLoader:
         loaded = loader.load_all()
         assert "excel_code_runner" not in loaded
         assert any("context: fork" in warning for warning in loader.warnings)
-        assert any("delegate_to_subagent" in warning for warning in loader.warnings)
+        assert any("`delegate(agent_name=...)" in warning for warning in loader.warnings)
 
     def test_agent_field_is_rejected_with_migration_hint(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
@@ -532,7 +538,7 @@ class TestSkillpackLoader:
         loaded = loader.load_all()
         assert "excel_code_runner" not in loaded
         assert any("字段 'agent' 已移除" in warning for warning in loader.warnings)
-        assert any("delegate_to_subagent" in warning for warning in loader.warnings)
+        assert any("`delegate(agent_name=...)" in warning for warning in loader.warnings)
 
     def test_kebab_case_fields_are_loaded(self, tmp_path: Path) -> None:
         system_dir = tmp_path / "system"
@@ -813,9 +819,6 @@ class TestSkillRouter:
 
         skill_names = router.list_skill_names()
         assert skill_names == ["chart_basic", "data_basic"]
-        catalog_text, catalog_names = router.build_skill_catalog()
-        assert catalog_text == ""
-        assert catalog_names == skill_names
 
     @pytest.mark.asyncio
     async def test_list_skill_names_keeps_blocked(self, tmp_path: Path) -> None:
@@ -861,3 +864,10 @@ class TestSkillRouter:
 
         result = await router.parse_slash_skill(None)
         assert result.route_mode == "no_skillpack"
+
+
+def test_skill_router_has_no_legacy_catalog_fallback() -> None:
+    """旧 build_skill_catalog 兼容回退已删除，模型面只走 list_skill_names。"""
+    from excelmanus.skillpacks.router import SkillRouter
+
+    assert not hasattr(SkillRouter, "build_skill_catalog")

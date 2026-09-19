@@ -1,4 +1,7 @@
+import React from "react";
 import { describe, expect, it } from "vitest";
+import { renderToStaticMarkup } from "react-dom/server";
+import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { formatThinkingDuration, thinkingPreview } from "@/lib/thinking";
 
 describe("formatThinkingDuration", () => {
@@ -11,6 +14,21 @@ describe("formatThinkingDuration", () => {
     expect(formatThinkingDuration(12)).toBe("12s");
     expect(formatThinkingDuration(60)).toBe("1m");
     expect(formatThinkingDuration(75)).toBe("1m 15s");
+  });
+});
+
+describe("ThinkingBlock chrome", () => {
+  it("keeps the heading and status badge from wrapping", () => {
+    const html = renderToStaticMarkup(
+      React.createElement(ThinkingBlock, {
+        content: "先探查工作区，再生成示例数据",
+        duration: 1,
+      }),
+    );
+    expect(html).toContain("思考完成");
+    expect(html).toContain("已完成");
+    expect(html).toContain("whitespace-nowrap");
+    expect(html).toContain("shrink-0");
   });
 });
 

@@ -50,6 +50,15 @@ def _normalize_server_name(server_name: str) -> str:
     return server_name.replace("-", "_")
 
 
+def _canonicalize_schema(value: Any) -> Any:
+    """递归按 key 排序，保证 MCP schema 跨重启/升级字节稳定。"""
+    if isinstance(value, dict):
+        return {key: _canonicalize_schema(value[key]) for key in sorted(value, key=str)}
+    if isinstance(value, list):
+        return [_canonicalize_schema(item) for item in value]
+    return value
+
+
 def add_tool_prefix(server_name: str, tool_name: str) -> str:
     """为远程工具名添加 MCP 前缀。
 
@@ -184,6 +193,16 @@ _EXCEL_SERVER_NAME = "excel"
 _EXCEL_ABSOLUTE_PATH_ARG = "fileAbsolutePath"
 
 
+def _caller_workspace_root() -> str:
+    """路径权威来自当前 ToolCallContext，禁止用 MCP 闭包根或参数 fallback。"""
+    from excelmanus.tools.context import current_call, ToolContextMissing
+
+    call = current_call()
+    if call is None:
+        raise ToolContextMissing("MCP 调用缺少工作区上下文；入口必须显式 bind ToolCallContext。")
+    return str(call.binding.workspace.root)
+
+
 def _normalize_excel_mcp_absolute_path(path_value: Any, *, workspace_root: str) -> Any:
     """把 Excel MCP 路径收到工作区 FileAccessGuard 内。
 
@@ -211,10 +230,12 @@ def _adapt_mcp_call_arguments(
     if _normalize_server_name(server_name) != _EXCEL_SERVER_NAME:
         return arguments
 
+    # workspace_root 只保留调用签名兼容，路径只信 current_call()。
+    root = _caller_workspace_root()
     raw_path = arguments.get(_EXCEL_ABSOLUTE_PATH_ARG)
     normalized_path = _normalize_excel_mcp_absolute_path(
         raw_path,
-        workspace_root=workspace_root,
+        workspace_root=root,
     )
     if normalized_path == raw_path:
         return arguments
@@ -244,10 +265,17 @@ def _make_async_tool_func(
     """
 
     async def async_tool_func(**kwargs: Any) -> str:
+        from excelmanus.engine_core.tool_result import error_result
+        from excelmanus.tools.context import ToolContextMissing
+
+        try:
+            root = _caller_workspace_root()
+        except ToolContextMissing as exc:
+            return error_result(str(exc), code="TOOL_CONTEXT_MISSING")
         safe_kwargs = _adapt_mcp_call_arguments(
             server_name=server_name,
             arguments=kwargs,
-            workspace_root=workspace_root,
+            workspace_root=root,
         )
         # client.call_tool 内部已有 asyncio.wait_for(timeout) 保护
         result = await client.call_tool(original_name, safe_kwargs)
@@ -281,10 +309,17 @@ def _make_tool_func(
 
     def tool_func(**kwargs: Any) -> str:
         async def _call() -> str:
+            from excelmanus.engine_core.tool_result import error_result
+            from excelmanus.tools.context import ToolContextMissing
+
+            try:
+                root = _caller_workspace_root()
+            except ToolContextMissing as exc:
+                return error_result(str(exc), code="TOOL_CONTEXT_MISSING")
             safe_kwargs = _adapt_mcp_call_arguments(
                 server_name=server_name,
                 arguments=kwargs,
-                workspace_root=workspace_root,
+                workspace_root=root,
             )
             result = await asyncio.wait_for(
                 client.call_tool(original_name, safe_kwargs),
@@ -430,7 +465,11 @@ def make_tool_def(
     raw_schema = getattr(mcp_tool, "input_schema", None) or getattr(
         mcp_tool, "inputSchema", None,
     )
-    input_schema: dict[str, Any] = raw_schema if isinstance(raw_schema, dict) else {}
+    # 递归排序 schema key：wire 字节顺序取决于 dict 插入序，
+    # MCP server 跨重启/升级可能改变序列化顺序 → tools 前缀漂移 → 缓存全量 miss。
+    input_schema: dict[str, Any] = (
+        _canonicalize_schema(raw_schema) if isinstance(raw_schema, dict) else {}
+    )
 
     timeout: int = getattr(getattr(client, "_config", None), "timeout", 30)
 
@@ -468,6 +507,7 @@ def make_tool_def(
         async_func=async_func,
         max_result_chars=5000,
         write_effect=write_effect,  # type: ignore[arg-type]
+        consistency="external_unverified",
     )
 
 
@@ -538,6 +578,14 @@ class MCPManager:
         self._registry: "ToolRegistry | None" = None
         # 内置 Server 重试成功后的回调（engine 用于补注册 parallel_search 等）
         self._on_builtin_retry_success: list[Callable[[], Any]] = []
+        self._on_tools_registered: list[Callable[[], Any]] = []
+
+    def _emit_tools_registered(self) -> None:
+        for cb in self._on_tools_registered:
+            try:
+                cb()
+            except Exception as exc:
+                logger.warning("MCP 工具注册回调异常: %s", exc)
 
     async def initialize(self, registry: "ToolRegistry") -> None:
         """加载配置 → 连接所有 Server → 注册远程工具到 ToolRegistry。
@@ -599,22 +647,45 @@ class MCPManager:
                     )
                     deferred_configs.append(cfg)
 
-            # ── 连接缓存命中的 Server 并注册工具 ──────────
+            # ── 连接缓存命中的 Server 并注册工具（并行） ──────────
             all_tool_defs: list[ToolDef] = []
             auto_approved_names: list[str] = []
-            batch_pending_names: set[str] = set()
 
-            for cfg in ready_configs:
-                tool_defs, approved = await self._connect_and_register_server(
-                    cfg, registry, batch_pending_names=batch_pending_names,
+            if ready_configs:
+                connect_results = await asyncio.gather(
+                    *(
+                        self._connect_and_register_server(cfg, registry)
+                        for cfg in ready_configs
+                    ),
+                    return_exceptions=True,
                 )
-                all_tool_defs.extend(tool_defs)
-                auto_approved_names.extend(approved)
-                batch_pending_names.update(td.name for td in tool_defs)
+                seen_names = set(registry.get_tool_names())
+                for item in connect_results:
+                    if isinstance(item, asyncio.CancelledError):
+                        raise item
+                    if isinstance(item, BaseException):
+                        logger.error("MCP Server 连接任务异常: %s", item)
+                        continue
+                    tool_defs, approved = item
+                    kept_names: set[str] = set()
+                    for tool_def in tool_defs:
+                        if tool_def.name in seen_names:
+                            logger.warning(
+                                "MCP 工具 '%s' 与已注册工具冲突，跳过",
+                                tool_def.name,
+                            )
+                            continue
+                        seen_names.add(tool_def.name)
+                        kept_names.add(tool_def.name)
+                        all_tool_defs.append(tool_def)
+                    auto_approved_names.extend(
+                        name for name in approved if name in kept_names
+                    )
 
             # 批量注册
             if all_tool_defs:
                 registry.register_tools(all_tool_defs)
+                self._emit_tools_registered()
 
             self._auto_approved_tools = auto_approved_names
             self._initialized = True
@@ -707,7 +778,12 @@ class MCPManager:
             )
         try:
             await client.connect()
-        except (Exception, asyncio.CancelledError) as exc:
+        except asyncio.CancelledError:
+            state.status = "connect_failed"
+            state.last_error = "cancelled"
+            state.init_ms = int((time.monotonic() - started) * 1000)
+            raise
+        except Exception as exc:
             state.status = "connect_failed"
             state.last_error = _short_error(exc)
             state.init_ms = int((time.monotonic() - started) * 1000)
@@ -736,7 +812,21 @@ class MCPManager:
         # 发现远程工具
         try:
             mcp_tools = await client.discover_tools()
-        except (Exception, asyncio.CancelledError) as exc:
+        except asyncio.CancelledError:
+            state.status = "discover_failed"
+            state.last_error = "cancelled"
+            state.init_ms = int((time.monotonic() - started) * 1000)
+            try:
+                await client.close()
+            except BaseException:
+                logger.debug(
+                    "discover 取消后关闭 MCP Server '%s' 时异常，加入待清理列表",
+                    cfg.name,
+                    exc_info=True,
+                )
+                self._leaked_clients.append(client)
+            raise
+        except Exception as exc:
             state.status = "discover_failed"
             state.last_error = _short_error(exc)
             state.init_ms = int((time.monotonic() - started) * 1000)
@@ -866,6 +956,7 @@ class MCPManager:
             )
             if tool_defs:
                 registry.register_tools(tool_defs)
+                self._emit_tools_registered()
             if approved:
                 self._auto_approved_tools.extend(approved)
 
@@ -922,6 +1013,7 @@ class MCPManager:
                 if tool_defs:
                     registry.register_tools(tool_defs)
                     self._auto_approved_tools.extend(approved)
+                    self._emit_tools_registered()
                     logger.info(
                         "内置 MCP Server '%s' 重试成功，注册 %d 个工具",
                         cfg.name,
@@ -985,6 +1077,9 @@ class MCPManager:
             return user_configs
 
         from excelmanus.mcp.builtin import get_builtin_mcp_configs
+
+        if getattr(self, "_skip_builtin_search", False):
+            return user_configs
 
         builtin_configs = get_builtin_mcp_configs(self._app_config)
         if not builtin_configs:

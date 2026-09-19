@@ -127,7 +127,7 @@ firewall-cmd --reload                             # Apply
 ./deploy/start.sh --prod                   # Production mode (npm run start)
 ./deploy/start.sh --backend-port 9000      # Custom backend port
 ./deploy/start.sh --frontend-port 8080     # Custom frontend port
-./deploy/start.sh --workers 4 --prod       # Multi-worker production
+./deploy/start.sh --prod                   # Production (default 1 worker; >1 rebuilds session envelopes across processes and silently busts prompt cache)
 ./deploy/start.sh --backend-only           # Backend only
 ./deploy/start.sh --frontend-only          # Frontend only
 ./deploy/start.sh --log-dir ./logs         # Log output to files
@@ -142,7 +142,7 @@ firewall-cmd --reload                             # Apply
 # PowerShell
 .\deploy\start.ps1
 .\deploy\start.ps1 -Production
-.\deploy\start.ps1 -BackendPort 9000 -Production -Workers 4
+.\deploy\start.ps1 -BackendPort 9000 -Production
 
 # CMD
 deploy\start.bat
@@ -150,9 +150,9 @@ deploy\start.bat --prod
 deploy\start.bat --backend-port 9000
 ```
 
-> Scripts auto-detect OS (macOS / Linux / Windows) and on Linux identify apt / dnf / yum / pacman / zypper / apk package managers, providing install commands when dependencies are missing. Supports graceful shutdown (SIGTERM first, SIGKILL after 5s), .env auto-loading, and auto-opening browser.
+> Scripts auto-detect OS (macOS / Linux / Windows) and on Linux identify apt / dnf / yum / pacman / zypper / apk package managers, providing install commands when dependencies are missing. Supports graceful shutdown (SIGTERM first, SIGKILL after 5s) and auto-opening the browser. Model setup is in Web Settings and stored in the main database.
 
-### 5.2 Remote One-Click Deployment
+### 5.2 Remote deploy (ops-machine `deploy.sh`)
 
 `deploy/deploy.sh` supports separate frontend/backend deployment:
 
@@ -340,24 +340,26 @@ systemctl restart nginx  # Full restart
 
 ---
 
-## 7. Environment Variables (.env)
+## 7. Configuration
 
-The backend `.env` is located at `/opt/excelmanus/.env`. Key configurations:
+User settings and model profiles live only in `config_kv` / `model_profiles` (`$EXCELMANUS_HOME/excelmanus.db`), via Web Settings or `/config`.
 
-| Variable | Purpose | Notes |
+`deploy.sh` writes `EXCELMANUS_DEPLOY_MODE=server` into the systemd / PM2 process (a locator). Frontend `web/.env.local` is Next.js-only (`NEXT_PUBLIC_BACKEND_ORIGIN`).
+
+Key settings (Settings UI / database keys):
+
+| Setting key | Purpose | Notes |
 |----------|---------|-------|
-| `EXCELMANUS_API_KEY` | Bootstrap model API Key (overridden by the active profile) | Required |
-| `EXCELMANUS_BASE_URL` | Bootstrap model endpoint | Required |
-| `EXCELMANUS_MODEL` | Bootstrap model name | Required |
+| Model profile (Settings) | API Key / Base URL / model name | Required; stored in `model_profiles` |
 | `EXCELMANUS_PROTOCOL` | Model protocol type | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`) | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`) | `deploy.sh` writes `server` on systemd/PM2 |
 | `EXCELMANUS_MAIN_MODEL_VISION` | Whether the active model accepts image attachments (`auto`/`true`/`false`) | `auto` |
-| `EXCELMANUS_EMBEDDING_*` | Embedding model (semantic search/skill routing/error solutions) | |
-| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Auto-generated if empty |
-| `EXCELMANUS_PLAYBOOK_ENABLED` | Enable Playbook self-evolving tactical handbook | `false` |
-| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Must include frontend domain |
+| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Usually empty; auto-generates `.secret_key` |
+| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Public deploys must include the frontend origin |
 
-Set `EXCELMANUS_DEPLOY_MODE=server` on production. The API then rejects `/version/upgrade` and `/deploy/execute`; upgrade and rollback run on an ops machine via `./deploy/deploy.sh` (`rollback-to --commit` is checkout + restart). Local Git installs use the Settings stop-then-upgrade flow. See [Upgrade & deploy](hot-update-design.md).
+Production is `EXCELMANUS_DEPLOY_MODE=server` (set by `deploy.sh`). The API then rejects `/version/upgrade` and `/deploy/execute`; upgrade and rollback run on an ops machine via `./deploy/deploy.sh` (`rollback-to --commit` is checkout + restart). Local Git installs use the Settings stop-then-upgrade flow. See [Upgrade & deploy](hot-update-design.md).
+
+Local standalone upgrades never silently `git reset --hard` (conflicts must be resolved by hand). Server `./deploy/deploy.sh rollback` does run `git reset --hard`.
 
 ---
 
@@ -382,7 +384,7 @@ certbot renew --dry-run
 certbot renew
 ```
 
-Certificate expiry date: **2026-05-25**
+Use the live output of `certbot certificates` for the expiry date. Do not reuse a historical date from this manual.
 
 ---
 
@@ -422,8 +424,7 @@ pm2 logs excelmanus-api --lines 30 --nostream
 ```bash
 ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
 pm2 logs excelmanus-api --lines 50 --nostream
-# Check .env configuration
-cat /opt/excelmanus/.env
+# Model and runtime settings are in Web Settings / the main database
 ```
 
 ### Nginx Configuration Error
@@ -448,7 +449,7 @@ pm2 list    # Check process memory
 
 If you need to rebuild the backend environment on a new server, follow these steps.
 
-> **Note**: The example below uses Python 3.11, but any version `>=3.10` will work (Docker deployment defaults to 3.12).
+> **Note**: The example below uses Python 3.11, but any version `>=3.10` will work (deploy scripts do not pin a Python micro version).
 
 ```bash
 # 1. Install build dependencies
@@ -488,7 +489,7 @@ uv pip install 'httpx[socks]'
 # pip install -e '.[all]'
 # pip install 'httpx[socks]'
 
-# 6. Configure .env (copy from old server and modify)
+# 6. Open Web Settings and add a model profile (main database)
 # 7. Configure mcp.json
 
 # 8. Start the backend
@@ -524,17 +525,11 @@ Project Root/
 │   ├── nginx.conf         # Nginx reverse proxy config (127.0.0.1 sample; see this manual for production)
 │   └── certs/             # TLS certificates
 ├── excelmanus/
-│   ├── config.py           # Environment variables & config loading
+│   ├── config.py           # Runtime config (database settings + defaults)
 │   ├── context_budget.py   # Context budget manager
 │   ├── model_probe.py      # Model metadata probing (context window auto-correction)
-│   ├── security/
-│   │   └── cipher.py       # Fernet symmetric encryption (API Key / Token encrypted storage)
-│   └── embedding/
-│       ├── client.py               # Embedding API client
-│       ├── semantic_memory.py      # Semantic memory retrieval
-│       ├── semantic_registry.py    # Semantic file registry
-│       └── error_solution_store.py  # Error→solution vector index
-├── .env                   # Local development environment variables
+│   └── security/
+│       └── cipher.py       # Fernet symmetric encryption (API Key / Token encrypted storage)
 ├── mcp.json               # MCP server configuration
 └── docs/
     └── ops-manual.md      # This manual

@@ -76,13 +76,21 @@ def _init_guard(tmp_path: Path) -> None:
 
 
 def _format(path: Path, operations: list[dict]) -> ToolResult:
+    # 注入文件里真实的活动表名；硬编码 "Sheet1" 会依赖已被移除的静默纠错
+    from openpyxl import load_workbook
+
+    wb = load_workbook(path, read_only=True)
+    try:
+        active = wb.active.title if wb.active is not None else ""
+    finally:
+        wb.close()
     filled = []
     for op in operations:
         item = dict(op)
         if "sheet" not in item and "sheet_name" not in item:
             raw_range = str(item.get("range") or "")
-            if "!" not in raw_range:
-                item["sheet"] = "Sheet1"
+            if "!" not in raw_range and active:
+                item["sheet"] = active
         filled.append(item)
     return format_spreadsheet(
         file_path=str(path),
@@ -343,3 +351,287 @@ class TestFormatCellsColorName:
         a1 = styles["styled_cells"][0]
         assert a1["font"]["bold"] is True
         assert a1["font"]["color"] == "FF0000"
+
+
+class TestFormatFreezeAndWholeColumn:
+    def test_freeze_first_row_and_appearance_echo(self, tmp_path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "h"
+        ws["A2"] = 1
+        path = tmp_path / "freeze.xlsx"
+        wb.save(path)
+        wb.close()
+        result = _format(
+            path,
+            [{"kind": "freeze", "sheet": "Sheet1", "freeze_panes": "A2"}],
+        )
+        assert result.success
+        payload = result.value
+        assert any(str(item).startswith("freeze:") for item in payload["applied"])
+        sheets = payload["appearance"]["sheets"]
+        assert sheets[0]["freeze_panes"] == "A2"
+        from openpyxl import load_workbook
+
+        check = load_workbook(path)
+        assert check.active.freeze_panes == "A2"
+        check.close()
+
+    def test_whole_column_clips_to_used_range(self, tmp_path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["B1"] = "金额"
+        ws["B2"] = 100
+        ws["B3"] = 200
+        path = tmp_path / "col.xlsx"
+        wb.save(path)
+        wb.close()
+        result = _format(
+            path,
+            [{"kind": "format", "sheet": "Sheet1", "range": "B:B", "number_format": "#,##0"}],
+        )
+        assert result.success, result.model_text
+        from openpyxl import load_workbook
+
+        check = load_workbook(path)
+        assert check.active["B2"].number_format == "#,##0"
+        assert check.active["B3"].number_format == "#,##0"
+        check.close()
+
+    def test_auto_fit_and_freeze_same_batch(self, tmp_path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "Sheet1"
+        ws["A1"] = "很长的表头标题"
+        ws["A2"] = 1
+        path = tmp_path / "both.xlsx"
+        wb.save(path)
+        wb.close()
+        result = _format(
+            path,
+            [
+                {"kind": "size", "sheet": "Sheet1", "auto_fit": True},
+                {"kind": "freeze", "sheet": "Sheet1", "freeze_panes": "A2"},
+            ],
+        )
+        assert result.success
+        freeze = result.value["appearance"]["sheets"][0]["freeze_panes"]
+        assert freeze == "A2"
+        widths = result.value["appearance"]["sheets"][0]["column_widths"]
+        assert widths
+
+
+
+def test_size_columns_name_list_means_autofit(tmp_path: Path) -> None:
+    """kind=size 的 columns 传列名列表 ["A","B"] 时按"选列自适应"处理。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sheet1"
+    ws["A1"] = "非常长非常长的表头标题文字"
+    ws["B1"] = "x"
+    path = tmp_path / "size_names.xlsx"
+    wb.save(path)
+    wb.close()
+    result = _format(
+        path,
+        [{"kind": "size", "sheet": "Sheet1", "columns": ["A", "B"]}],
+    )
+    assert result.success, result.model_text
+    widths = result.value["appearance"]["sheets"][0]["column_widths"]
+    assert widths.get("A")
+    # 列名列表语义是自适应选列，不应报缺 columns/rows
+    assert "size:auto_fit" in str(result.model_text) or widths
+
+
+def test_conditional_format_cell_value_rule(tmp_path: Path) -> None:
+    """kind=conditional_format 把 cell_value 规则落盘为真条件格式（R27 用例）。"""
+    from openpyxl import load_workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "订单"
+    ws["A1"] = "金额"
+    for i, v in enumerate([500, 12000, 300], start=2):
+        ws.cell(row=i, column=1, value=v)
+    path = tmp_path / "cf.xlsx"
+    wb.save(path)
+    wb.close()
+
+    result = _format(
+        path,
+        [{
+            "kind": "conditional_format",
+            "sheet": "订单",
+            "range": "A2:A4",
+            "rule": {
+                "type": "cell_value",
+                "operator": "ge",
+                "value": 10000,
+                "fill": {"color": "浅红"},
+                "font": {"color": "深红", "bold": True},
+            },
+        }],
+    )
+    assert result.success, result.model_text
+
+    wb2 = load_workbook(path)
+    rules = list(wb2["订单"].conditional_formatting)
+    wb2.close()
+    assert len(rules) == 1
+    cf = rules[0]
+    assert cf.rules[0].type == "cellIs"
+    assert cf.rules[0].operator == "greaterThanOrEqual"
+    assert cf.rules[0].formula == ["10000"]
+
+
+def test_conditional_format_union_and_rule_types(tmp_path: Path) -> None:
+    """并集 sqref + data_bar / duplicate / top_n / formula 类型可用。"""
+    from openpyxl import load_workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    for i in range(1, 8):
+        ws.cell(row=i, column=1, value=i)
+        ws.cell(row=i, column=3, value=i * 10)
+    path = tmp_path / "cf2.xlsx"
+    wb.save(path)
+    wb.close()
+
+    result = _format(
+        path,
+        [
+            {"kind": "conditional_format", "sheet": "S", "range": "A1:A3,A5:A7",
+             "rule": {"type": "data_bar", "bar_color": "638EC6"}},
+            {"kind": "conditional_format", "sheet": "S", "range": "C1:C7",
+             "rule": {"type": "duplicate", "fill": {"color": "浅黄"}}},
+            {"kind": "conditional_format", "sheet": "S", "range": "A1:A7",
+             "rule": {"type": "top_n", "n": 3}},
+        ],
+    )
+    assert result.success, result.model_text
+
+    wb2 = load_workbook(path)
+    rules = list(wb2["S"].conditional_formatting)
+    wb2.close()
+    types = sorted(cf.rules[0].type for cf in rules)
+    assert types == ["dataBar", "duplicateValues", "top10"]
+
+
+def test_conditional_format_bad_rule_is_invalid_args(tmp_path: Path) -> None:
+    """缺 value 阈值 / 未知 type 报 INVALID_ARGS，不写盘。"""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "S"
+    ws["A1"] = 1
+    path = tmp_path / "cf3.xlsx"
+    wb.save(path)
+    wb.close()
+
+    result = _format(
+        path,
+        [{"kind": "conditional_format", "sheet": "S", "range": "A1:A5",
+          "rule": {"type": "cell_value", "operator": "ge"}}],
+    )
+    assert not result.success
+    assert "value" in result.model_text
+
+    result2 = _format(
+        path,
+        [{"kind": "conditional_format", "sheet": "S", "range": "A1:A5",
+          "rule": {"type": "wat"}}],
+    )
+    assert not result2.success
+    assert "type" in result2.model_text
+
+
+def _two_sheet_book(tmp_path: Path, name: str = "two.xlsx") -> Path:
+    wb = Workbook()
+    wb.active.title = "明细"
+    wb.create_sheet("汇总")
+    path = tmp_path / name
+    wb.save(path)
+    wb.close()
+    return path
+
+
+class TestFormatSheetContract:
+    """P0.1 / P0.3：单表绑定、多表 available_sheets、错误列全缺失。"""
+
+    def test_single_sheet_omit_sheet_with_range_succeeds(self, sample_xlsx: Path) -> None:
+        result = format_spreadsheet(
+            file_path=str(sample_xlsx),
+            operations=[{"kind": "format", "range": "A1:B1", "font": {"bold": True}}],
+            expected_version=content_version_of_file(sample_xlsx),
+        )
+        assert result.success, result.model_text
+
+    def test_two_sheet_omit_sheet_fails_with_available_sheets(self, tmp_path: Path) -> None:
+        path = _two_sheet_book(tmp_path)
+        result = format_spreadsheet(
+            file_path=str(path),
+            operations=[{"kind": "format", "range": "A1:B1", "font": {"bold": True}}],
+            expected_version=content_version_of_file(path),
+        )
+        assert not result.success
+        payload = result.value if isinstance(result.value, dict) else {}
+        assert "available_sheets" in payload
+        assert set(payload["available_sheets"]) >= {"明细", "汇总"}
+        assert payload.get("error_code") == "SHEET_REQUIRED"
+        assert "sheet" in (result.model_text or "")
+
+    def test_missing_kind_range_sheet_lists_all_and_example(self, tmp_path: Path) -> None:
+        path = _two_sheet_book(tmp_path, "triple.xlsx")
+        result = format_spreadsheet(
+            file_path=str(path),
+            operations=[{"font": {"bold": True}}],
+            expected_version=content_version_of_file(path),
+        )
+        assert not result.success
+        text = result.model_text or ""
+        assert "sheet" in text
+        assert "range" in text
+        assert "kind" in text or "缺省" in text
+        assert "最小合法示例" in text
+        assert "必须提供 sheet" not in text or "range" in text
+        payload = result.value if isinstance(result.value, dict) else {}
+        assert payload.get("example")
+        assert "available_sheets" in payload
+        missing = payload.get("missing_fields") or []
+        assert "range" in missing
+        assert "sheet" in missing
+
+    def test_single_sheet_omit_sheet_and_range_names_range(self, sample_xlsx: Path) -> None:
+        result = format_spreadsheet(
+            file_path=str(sample_xlsx),
+            operations=[{"font": {"bold": True}}],
+            expected_version=content_version_of_file(sample_xlsx),
+        )
+        assert not result.success
+        text = result.model_text or ""
+        assert "range" in text
+        payload = result.value if isinstance(result.value, dict) else {}
+        missing = payload.get("missing_fields") or []
+        assert "range" in missing
+        assert "sheet" not in missing
+
+    def test_size_omit_sheet_on_single_sheet_with_columns(self, tmp_path: Path) -> None:
+        """R30-1：kind=size 把表名塞进 range，单表应绑定成功。"""
+        wb = Workbook()
+        wb.active.title = "区域月度汇总"
+        wb.active["A1"] = 1
+        path = tmp_path / "size.xlsx"
+        wb.save(path)
+        wb.close()
+        result = format_spreadsheet(
+            file_path=str(path),
+            operations=[{
+                "kind": "size",
+                "range": "区域月度汇总",
+                "columns": {"A": 10, "B": 12},
+            }],
+            expected_version=content_version_of_file(path),
+        )
+        assert result.success, result.model_text

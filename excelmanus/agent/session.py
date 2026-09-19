@@ -4,13 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections import OrderedDict
 from collections.abc import Sequence
 from pathlib import Path
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-
-import openai
 
 from excelmanus.approval import AppliedApprovalRecord, ApprovalManager, PendingApproval
 from excelmanus.compaction import CompactionManager
@@ -34,7 +31,16 @@ from excelmanus.skillpacks import (
     Skillpack,
     SkillpackManager,
 )
-from excelmanus.subagent import SubagentRegistry, SubagentResult
+from excelmanus.subagent import (
+    ParallelOutcome,
+    ParallelTask,
+    SubagentError,
+    SubagentRegistry,
+    SubagentResult,
+    SubagentRuntime,
+    SubagentStartRequest,
+    normalize_file_paths,
+)
 from excelmanus.task_list import TaskStore
 from excelmanus.tools import task_tools
 from excelmanus.tools.introspection_tools import register_introspection_tools
@@ -45,7 +51,6 @@ from excelmanus.prompt.assemble import (
     build_stable_system_prompt,
     prepare_system_prompts_for_request,
 )
-from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
 from excelmanus.engine_core.llm_caller import LLMCaller
 from excelmanus.engine_core.interaction_handler import InteractionHandler
 from excelmanus.engine_core.meta_tools import MetaToolBuilder
@@ -59,21 +64,15 @@ from excelmanus.engine_types import (
     ToolCallResult,
     TurnDiagnostic,
     ChatResult,
-    DelegateSubagentOutcome,
     _AuditedExecutionError,
     ApprovalResolver,
     QuestionResolver,
     _EFFORT_RATIOS,
 )
-from excelmanus.engine_utils import (
-    _WRITE_EFFECT_VALUES,
-    _summarize_text,
-    build_mention_context_block,
-)
+from excelmanus.engine_utils import _WRITE_EFFECT_VALUES
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
-    from excelmanus.engine_core.subagent_orchestrator import ParallelDelegateOutcome
     from excelmanus.memory_extractor import MemoryExtractor
     from excelmanus.persistent_memory import PersistentMemory
 
@@ -81,7 +80,11 @@ logger = get_logger("engine")
 
 
 def _tool_access_from_chat_mode(chat_mode: str) -> str:
-    """发给模型的 tools 数组不再随 plan/read 缩短。只读靠执行器拒绝写入。"""
+    """tool_access 轴不再随 plan/read 缩短（恒为 may_write）。
+
+    可见集仍由 catalog 按 ``chat_mode`` 投影：read/plan 隐藏纯写工具。
+    执行期只读拦截走 ``writes_denied``；plan 写拦截走 ``is_plan_active``。
+    """
     return "may_write"
 
 
@@ -95,11 +98,6 @@ def _ui_tool_access_from_chat_mode(chat_mode: str) -> str:
 class AgentEngine:
     """核心代理引擎，驱动 LLM 与工具之间的 Tool Calling 循环。"""
 
-    # auto 模式系统消息兼容性探测结果（key-based 缓存，按 model+base_url 隔离）
-    # 使用 OrderedDict 限制最大条目数，防止长期运行无界增长
-    _SYSTEM_MODE_CACHE_MAX = 64
-    _system_mode_fallback_cache: "OrderedDict[tuple[str, str], str]" = OrderedDict()
-
     def __init__(
         self,
         config: ExcelManusConfig,
@@ -112,6 +110,7 @@ class AgentEngine:
         database: "Database | None" = None,
         shared_backup_path_map: dict[str, str] | None = None,
         workspace: IsolatedWorkspace | None = None,
+        workspace_ref: Any | None = None,
         role: str = "host",
     ) -> None:
         # ── 核心组件初始化（必须在所有 property 代理字段赋值之前）──
@@ -143,6 +142,11 @@ class AgentEngine:
         # fork 出 per-session registry，避免多会话共享同一实例时
         # 会话级工具（task_tools / skill_tools）重复注册抛出 ToolRegistryError
         self._registry = registry.fork() if hasattr(registry, "fork") else registry
+        from excelmanus.tools.meta_tool_defs import get_meta_tools
+
+        for _meta in get_meta_tools():
+            if self._registry.get_tool(_meta.name) is None:
+                self._registry.register_tool(_meta)
         if hasattr(self._registry, "configure_schema_validation"):
             try:
                 self._registry.configure_schema_validation(
@@ -162,11 +166,12 @@ class AgentEngine:
             else None
         )
         self._memory = ConversationMemory(config)
-        # 运行时变量注入系统提示词
+        # 运行时变量：唯一来源是 prompt_variables（切模型时重新渲染）。
+        # 注意不要在 __init__ 里把 {{model}} 钉死成 config.model——那会让
+        # 后续切换模型时 system 仍渲染旧模型名，且因与 head 一致而断言全绿。
         resolved_root = str(Path(config.workspace_root).resolve())
         self._runtime_vars: dict[str, str] = {
             "workspace_root": resolved_root,
-            "model": str(config.model or ""),
         }
         for _var_key, _var_val in self._runtime_vars.items():
             self._memory.system_prompt = self._memory.system_prompt.replace(
@@ -183,15 +188,13 @@ class AgentEngine:
             self._registry.register_tools(task_tools.get_tools(self._task_store))
             # 计划文档工具：绑定 TaskStore + workspace，write_plan 一次调用生成文档+TaskList
             from excelmanus.plan_mode import request_exit_plan_approval
+            from excelmanus.security.policy import is_plan_active as _is_plan_active
             from excelmanus.tools import plan_tools
             self._registry.register_tools(
                 plan_tools.get_tools(
                     self._task_store,
                     config.workspace_root,
-                    is_plan_active=lambda: bool(
-                        getattr(self, "_plan_active", False)
-                        or getattr(self, "_current_chat_mode", "write") == "plan"
-                    ),
+                    is_plan_active=lambda: _is_plan_active(self),
                     on_exit_submitted=lambda plan: request_exit_plan_approval(self, plan),
                 )
             )
@@ -210,10 +213,24 @@ class AgentEngine:
         self._active_skills: list[Skillpack] = []
         # ── 工具 schema 缓存（同 turn 内 chat_mode/skill 集合不变则复用）──
         self._tools_cache: list[dict[str, Any]] | None = None
-        self._tools_cache_key: tuple[str, str, frozenset[str], bool, str] | None = None
-        _cache_key = (config.model, config.base_url)
-        self._system_mode_cache_key = _cache_key
-        self._system_mode_fallback: str | None = type(self)._system_mode_fallback_cache.get(_cache_key)
+        self._tools_cache_key: tuple[Any, ...] | None = None
+        self._compaction_generation: int = 0
+        self._projection_generation: int = 0
+        self._image_wire_pin_seq: tuple[str, ...] = ()
+        self._files_wire_mode: str | None = None
+        self._last_wire_messages: list[dict[str, Any]] | None = None
+        self._mention_flush_digest: str | None = None
+        self._last_envelope: Any = None
+        self._envelope_system_head: str | None = None
+        self._envelope_system_effective: str | None = None
+        self._envelope_prefix_snapshot: dict[str, Any] | None = None
+        self._restored_envelope_prefix: dict[str, Any] | None = None
+        self._wire_epoch: Any = None
+        self._wire_digest_payload: list[dict[str, Any]] | None = None
+        self._wire_epoch_needs_restore: bool = False
+        from excelmanus.request.series import RequestSeries
+
+        self._request_series = RequestSeries()
         # ── 状态变量由 self._state 统一管理 ──
         # self._state 在 __init__ 顶部初始化，以下属性通过 @property 代理访问：
         # _session_turn, _last_iteration_count, _last_tool_call_count,
@@ -222,7 +239,7 @@ class AgentEngine:
         self._credential_resolver: Any = None  # CredentialResolver，由 SessionManager 注入
         self._pool_account_id: str | None = None  # 号池账号 ID（pool_oauth 来源时设置）
         self._pool_profile_name: str | None = None  # 号池 profile 名称
-        self._subagent_orchestrator: SubagentOrchestrator | None = None  # 延迟初始化（需要 self）
+        self._subagent_runtime: SubagentRuntime | None = None
         self._tool_dispatcher: ToolDispatcher | None = None  # 延迟初始化（需要 registry fork）
         self._approval = ApprovalManager(config.workspace_root, database=database)
         # ── IsolatedWorkspace + 事务层 ──────────────────────
@@ -250,6 +267,12 @@ class AgentEngine:
         # 会话级 FileAccessGuard，绑定到当前引擎的工作区根目录。
         from excelmanus.security import FileAccessGuard as _FAG
         self._file_access_guard = _FAG(str(self._workspace.root_dir))
+        from excelmanus.workspace.refs import WorkspaceRef as _WorkspaceRef
+
+        if workspace_ref is not None:
+            self._workspace_ref = workspace_ref
+        else:
+            self._workspace_ref = _WorkspaceRef.from_root(self._workspace.root_dir)
         self._hook_runner = SkillHookRunner(config)
         self._transient_hook_contexts: list[str] = []
         self._hook_started_skills: set[str] = set()
@@ -263,9 +286,9 @@ class AgentEngine:
         self._interaction_registry = InteractionRegistry()
         self._question_resolver: QuestionResolver | None = None
         self._turn_dirty_files: set[str] = set()  # 当前轮次被写的文件路径
-        self._bench_mode: bool = False
         self._mention_contexts: list[ResolvedMention] | None = None
         self._current_chat_mode: str = "write"
+        # 已废弃双旗标。运行时只写 ``_current_chat_mode``；保留属性以免旧 getattr 爆炸。
         self._plan_active: bool = False
         self._pending_plan_exit: str | None = None
         self._last_compact_failed: bool = False
@@ -273,9 +296,13 @@ class AgentEngine:
         self._present_as: str = (
             self._load_persisted_present_as(database) if self._is_host_session else "native"
         )
+        self._turn_exposure: dict[str, Any] | None = None
+        self._exposure_sticky: dict[str, Any] | None = None
+        self._exposure_last_tools: list[str] = []
+        self._turn_present_as: str | None = None
+        self._turn_image_count: int = 0
         self._prompt_user_contexts: list[str] = []
         self._prompt_tool_snapshot: list[Any] | None = None
-        self._prompt_last_assembly: Any = None
 
         # ── 上下文自动压缩（Compaction）──────────────────────
         self._compaction_manager = CompactionManager(config)
@@ -292,8 +319,11 @@ class AgentEngine:
                 if _prompts_dir.is_dir():
                     self._prompt_composer = _PC(_prompts_dir)
                     self._prompt_composer.load_all()
-            except Exception:
-                logger.debug("PromptComposer 初始化失败，策略注入不可用", exc_info=True)
+                    self._prompt_composer.validate_runtime()
+                else:
+                    raise ValueError("提示词目录不存在")
+            except Exception as exc:
+                raise RuntimeError(f"提示词初始化失败：{exc}") from exc
 
         # ── FileRegistry（工作区文件注册表） ─────────────
         self._database = database
@@ -319,60 +349,6 @@ class AgentEngine:
         # ── 持久记忆集成 ────────────────────────
         self._persistent_memory = persistent_memory
         self._memory_extractor = memory_extractor
-        # ── Embedding 客户端（独立于 persistent_memory，供多个语义增强层共享） ──
-        self._embedding_client: Any = None  # 类型：EmbeddingClient | None
-        if self._is_host_session and config.embedding_enabled:
-            try:
-                from excelmanus.embedding.client import EmbeddingClient
-                _emb_openai_client = openai.AsyncOpenAI(
-                    api_key=config.embedding_api_key or config.api_key,
-                    base_url=config.embedding_base_url or config.base_url,
-                )
-                self._embedding_client = EmbeddingClient(
-                    client=_emb_openai_client,
-                    model=config.embedding_model,
-                    dimensions=config.embedding_dimensions,
-                    timeout_seconds=config.embedding_timeout_seconds,
-                )
-            except Exception:
-                logger.debug("Embedding 客户端初始化失败", exc_info=True)
-                self._embedding_client = None
-        # 语义记忆增强层（延迟初始化，待首轮 chat 时异步同步索引）
-        self._semantic_memory: Any = None  # 类型：SemanticMemory | None
-        if self._is_host_session and persistent_memory is not None and self._embedding_client is not None:
-            try:
-                from excelmanus.embedding.semantic_memory import SemanticMemory
-                self._semantic_memory = SemanticMemory(
-                    persistent_memory=persistent_memory,
-                    embedding_client=self._embedding_client,
-                    top_k=config.memory_semantic_top_k,
-                    threshold=config.memory_semantic_threshold,
-                    fallback_recent=config.memory_semantic_fallback_recent,
-                    database=database,
-                )
-            except Exception:
-                logger.debug("语义记忆初始化失败，回退到传统加载", exc_info=True)
-                self._semantic_memory = None
-        # 错误解决方案语义存储：历史错误→解决方案对的向量索引
-        self._error_solution_store: Any = None  # 类型：ErrorSolutionStore | None
-        if self._is_host_session and self._embedding_client is not None:
-            try:
-                from excelmanus.embedding.error_solution_store import ErrorSolutionStore
-                _error_store_dir = Path(config.workspace_root) / ".excelmanus" / "error_solutions"
-                self._error_solution_store = ErrorSolutionStore(
-                    embedding_client=self._embedding_client,
-                    store_dir=_error_store_dir,
-                )
-            except Exception:
-                logger.debug("错误解决方案存储初始化失败", exc_info=True)
-                self._error_solution_store = None
-        # 将 embedding 客户端注入 CompactionManager（延迟注入，因为 compaction 先于 embedding 初始化）
-        if self._embedding_client is not None:
-            self._compaction_manager._embedding_client = self._embedding_client
-        # 将 embedding 客户端和语义记忆注入 MemoryExtractor（延迟注入，用于记忆语义去重）
-        if self._embedding_client is not None and self._semantic_memory is not None and memory_extractor is not None:
-            memory_extractor._embedding_client = self._embedding_client
-            memory_extractor._semantic_memory = self._semantic_memory
         # 会话启动时清理过期记忆
         if self._is_host_session and persistent_memory is not None and config.memory_expire_days > 0:
             try:
@@ -392,24 +368,6 @@ class AgentEngine:
             except Exception:
                 logger.debug("RulesManager 初始化失败", exc_info=True)
 
-        # ── Playbook 存储（仅供 /playbook 命令查阅，默认路径不再自动注入）──
-        self._playbook_store: Any = None
-        if self._is_host_session and config.playbook_enabled:
-            try:
-                from excelmanus.playbook import PlaybookStore
-                _pb_db_path = config.playbook_db_path
-                if not _pb_db_path:
-                    _pb_db_path = str(Path(config.workspace_root) / ".excelmanus" / "playbook.db")
-                Path(_pb_db_path).parent.mkdir(parents=True, exist_ok=True)
-                self._playbook_store = PlaybookStore(_pb_db_path)
-                logger.info(
-                    "Playbook 已启用: db=%s, bullets=%d",
-                    _pb_db_path, self._playbook_store.count(),
-                )
-            except Exception:
-                logger.debug("Playbook 初始化失败", exc_info=True)
-                self._playbook_store = None
-
         # ── MCP Client 集成 ──────────────────────────────────
         self._mcp_manager = mcp_manager or MCPManager(
             config.workspace_root, app_config=config,
@@ -426,7 +384,8 @@ class AgentEngine:
 
         # ── 上下文预算管理（切换模型时自动更新） ──
         # base_tokens（锁定值，不随模型切换变化）仅在用户显式指定时设置。
-        # 环境变量存在即锁定；否则用「配置值 ≠ 模型推断值」兼容编程传入。
+        # 设置项 EXCELMANUS_MAX_CONTEXT_TOKENS 存在即锁定；否则用
+        # 「配置值 ≠ 模型推断值」兼容编程传入。
         # 未锁定时由 model_tokens 驱动，切换模型时自动更新。
         from excelmanus.config import is_context_window_user_pinned
         _user_pinned = is_context_window_user_pinned(
@@ -459,7 +418,7 @@ class AgentEngine:
         from excelmanus.tools.runtime import ToolRuntime
         self._tool_runtime = ToolRuntime(self._tool_dispatcher, engine=self)
         self._tool_dispatcher._runtime = self._tool_runtime
-        self._subagent_orchestrator = SubagentOrchestrator(self)
+        self._subagent_runtime = SubagentRuntime(self)
         self._command_handler = CommandHandler(self)
         self._llm_caller = LLMCaller(self)
         self._skill_resolver = SkillResolver(self)
@@ -623,6 +582,27 @@ class AgentEngine:
     def _session_diagnostics(self, value: list) -> None:
         self._state.session_diagnostics = value
 
+    @property
+    def _image_wire_pin_seq(self) -> tuple[str, ...]:
+        pins = getattr(self._state, "image_wire_pin_seq", ()) or ()
+        return tuple(pins)
+
+    @_image_wire_pin_seq.setter
+    def _image_wire_pin_seq(self, value: Any) -> None:
+        if isinstance(value, (list, tuple)):
+            self._state.image_wire_pin_seq = tuple(str(item) for item in value)
+        else:
+            self._state.image_wire_pin_seq = ()
+
+    @property
+    def _injected_context_fingerprint(self) -> str | None:
+        fp = getattr(self._state, "injected_context_fingerprint", None)
+        return fp if isinstance(fp, str) else None
+
+    @_injected_context_fingerprint.setter
+    def _injected_context_fingerprint(self, value: str | None) -> None:
+        self._state.injected_context_fingerprint = value if isinstance(value, str) else None
+
     def _get_tool_write_effect(self, tool_name: str) -> str:
         """读取工具声明的写入语义；缺失时回退 unknown。"""
         tool = self._registry.get_tool(tool_name)
@@ -782,9 +762,10 @@ class AgentEngine:
         # SessionState 中与已回退轮次相关的累积状态
         self._state.affected_files.clear()
         self._state.write_operations_log.clear()
-        # 图片追踪：清理已移除消息相关的图片状态
-        self._memory.reset_image_tracking()
+        # 历史被截断，旧信封前缀已失效；不丢弃会 fail-closed 粘死会话
+        from excelmanus.prompt.envelope import invalidate_envelope
 
+        invalidate_envelope(self)
         return {
             "removed_messages": removed,
             "turn_index": turn_index,
@@ -915,9 +896,6 @@ class AgentEngine:
                 protocol=self._active_protocol,
             )
             extractor = MemoryExtractor(client=client, model=self._active_model)
-            if self._embedding_client is not None and self._semantic_memory is not None:
-                extractor._embedding_client = self._embedding_client
-                extractor._semantic_memory = self._semantic_memory
             self._memory_extractor = extractor
             return extractor
         except Exception:
@@ -946,11 +924,6 @@ class AgentEngine:
             if entries:
                 self._persistent_memory.save_entries(entries)
                 logger.info("持久记忆提取完成 (trigger=%s)，保存了 %d 条记忆条目", trigger, len(entries))
-                if self._semantic_memory is not None:
-                    try:
-                        await self._semantic_memory.index_entries(entries)
-                    except Exception:
-                        logger.debug("增量向量索引失败", exc_info=True)
                 self._emit(
                     on_event,
                     ToolCallEvent(
@@ -1002,11 +975,17 @@ class AgentEngine:
     async def initialize_mcp(self) -> None:
         """异步初始化 MCP 连接（需在 event loop 中调用）。
 
-        由 CLI 或 API 入口在启动时显式调用。
+        由 API 或 bench 入口在启动时显式调用。
 
         注意：
         MCP 仅负责工具注册；Skill 仅负责策略与授权。
         """
+        from excelmanus.tools.catalog import inspect_workspace_catalog
+
+        root = getattr(getattr(self, "config", None), "workspace_root", None)
+        flags = inspect_workspace_catalog(str(root) if root else None)
+        if "docx" not in flags["families"]:
+            self._mcp_manager._skip_builtin_search = True
         await self._mcp_manager.initialize(self._registry)
         self.sync_mcp_auto_approve()
         # 注册并发搜索工具（依赖 MCPManager 已初始化）
@@ -1015,11 +994,23 @@ class AgentEngine:
         self._mcp_manager._on_builtin_retry_success.append(
             self._on_mcp_retry_success,
         )
+        listeners = getattr(self._mcp_manager, "_on_tools_registered", None)
+        if not isinstance(listeners, list):
+            self._mcp_manager._on_tools_registered = []
+            listeners = self._mcp_manager._on_tools_registered
+        listeners.append(self._invalidate_tool_catalog)
+
+    def _invalidate_tool_catalog(self) -> None:
+        """MCP / 目录变更后丢掉 tools 缓存与信封快照，下一封信封按新指纹重建。"""
+        self._tools_cache = None
+        self._tools_cache_key = None
+        self._prompt_tool_snapshot = None
 
     def _on_mcp_retry_success(self) -> None:
         """MCP 内置 Server 重试成功后的回调。"""
         self.sync_mcp_auto_approve()
         self._register_search_tools()
+        self._invalidate_tool_catalog()
 
     def _register_search_tools(self) -> None:
         """注册并发搜索工具（需在 MCP 初始化后调用，幂等）。
@@ -1049,29 +1040,28 @@ class AgentEngine:
             self._approval.register_mcp_auto_approve(auto_approved)
 
     async def warmup_prompt_cache(self) -> None:
-        """异步预热 Anthropic prompt cache（fire-and-forget）。
-
-        仅对 ClaudeClient 实例生效。发送一个只含稳定 system prompt 前缀
-        + 最小 user 消息的请求（max_tokens=1），使稳定前缀进入 cache。
-        后续真实请求即可 cache HIT，大幅降低首次 TTFT。
-        """
+        """预热真实前缀。无真实 user 则跳过，禁止假 user: hi。不更新 last_accepted。"""
         from excelmanus.providers.claude import ClaudeClient
+        from excelmanus.request.compiler import compile_request
+
         if not isinstance(self._client, ClaudeClient):
             return
-        stable_prompt = self._build_stable_system_prompt()
-        if not stable_prompt or len(stable_prompt) < 100:
+        memory = getattr(self, "_memory", None)
+        messages = getattr(memory, "messages", None) or []
+        if not any(isinstance(item, dict) and item.get("role") == "user" for item in messages):
             return
-        messages = [
-            {"role": "system", "content": stable_prompt},
-            {"role": "user", "content": "hi"},
-        ]
         try:
-            await self._client.chat.completions.create(
-                model=self._active_model,
-                messages=messages,
-                max_tokens=1,
+            prepared, error = await compile_request(self, persist_surface=False)
+            if error is not None or prepared is None:
+                return
+            kwargs = prepared.create_kwargs()
+            kwargs["max_tokens"] = 1
+            await self._client.chat.completions.create(**kwargs)
+            logger.info(
+                "prompt cache 预热完成: series=%s messages=%d",
+                prepared.series_id,
+                len(kwargs.get("messages") or []),
             )
-            logger.info("prompt cache 预热完成: stable_prefix=%d chars", len(stable_prompt))
         except Exception:
             logger.debug("prompt cache 预热失败，跳过", exc_info=True)
 
@@ -1111,8 +1101,27 @@ class AgentEngine:
             await self._mcp_manager.shutdown()
 
     def mcp_server_info(self) -> list[dict[str, Any]]:
-        """返回 MCP Server 连接状态摘要，供 CLI 展示。"""
+        """返回 MCP Server 连接状态摘要，供前端展示。"""
         return self._mcp_manager.get_server_info()
+
+    async def reload_mcp(self) -> dict[str, int]:
+        """热重载 MCP：关闭现有连接 → 重新初始化。
+
+        对齐 Web ``POST /api/v1/mcp/reload`` 语义：shutdown 已重置
+        ``_initialized``，随后 manager.initialize 重新发现并注册工具
+        （ToolRegistry 按名覆盖，重复注册幂等）。返回就绪统计。
+        """
+        manager = self._mcp_manager
+        await manager.shutdown()
+        await manager.initialize(self._registry)
+        self.sync_mcp_auto_approve()
+        self._register_search_tools()
+        self._invalidate_tool_catalog()
+        info = manager.get_server_info()
+        return {
+            "servers_total": len(info),
+            "servers_ready": sum(1 for s in info if s.get("status") == "ready"),
+        }
 
     @property
     def mcp_connected_count(self) -> int:
@@ -1185,9 +1194,24 @@ class AgentEngine:
             from excelmanus.tools.runtime import preferred_present_as
 
             self._state.present_as = preferred_present_as(getattr(self, "_present_as", "native"))
+            memory_generation = getattr(self._memory, "_compaction_generation", 0) if self._memory is not None else 0
+            self._state.compaction_generation = int(
+                getattr(self, "_compaction_generation", 0) or memory_generation or 0
+            )
+            from excelmanus.engine_core.session_state import snapshot_wire_epoch
+            from excelmanus.request.series import series_of
+
+            self._state.wire_epoch = snapshot_wire_epoch(getattr(self, "_wire_epoch", None))
+            self._state.request_series = series_of(self).to_dict()
+            from excelmanus.prompt.cache_restore import attach_prefix_to_state_dict
+
+            state_dict = attach_prefix_to_state_dict(
+                self._state.to_dict(),
+                getattr(self, "_envelope_prefix_snapshot", None),
+            )
             self._checkpoint_store.save_session_snapshot(
                 session_id=self._session_id,
-                state_dict=self._state.to_dict(),
+                state_dict=state_dict,
                 task_list_dict=self._task_store.to_dict(),
                 turn_number=self._state.session_turn,
             )
@@ -1204,8 +1228,11 @@ class AgentEngine:
             cp = self._checkpoint_store.load_latest_checkpoint(self._session_id)
             if cp is None:
                 return False
-            from excelmanus.engine_core.session_state import SessionState
+            from excelmanus.engine_core.session_state import SessionState, epoch_identity_from_dict
+            from excelmanus.prompt.cache_restore import extract_restored_prefix
+
             restored_state = SessionState.from_dict(cp["state_dict"])
+            self._restored_envelope_prefix = extract_restored_prefix(cp["state_dict"])
             # 保留 _file_registry 引用（不序列化）
             restored_state._file_registry = self._state._file_registry
             self._state = restored_state
@@ -1213,6 +1240,16 @@ class AgentEngine:
 
             self._present_as = preferred_present_as(restored_state.present_as)
             self._tools_cache = None
+            self._compaction_generation = int(restored_state.compaction_generation or 0)
+            if self._memory is not None:
+                self._memory._compaction_generation = self._compaction_generation
+            restored_epoch = epoch_identity_from_dict(restored_state.wire_epoch)
+            self._wire_epoch = restored_epoch if restored_epoch is not None else restored_state.wire_epoch
+            self._wire_digest_payload = None
+            self._wire_epoch_needs_restore = False
+            from excelmanus.request.series import RequestSeries
+
+            self._request_series = RequestSeries.from_dict(restored_state.request_series)
 
             from excelmanus.task_list import TaskStore
             restored_store = TaskStore.from_dict(cp["task_list_dict"])
@@ -1237,6 +1274,10 @@ class AgentEngine:
     def replace_user_message(self, msg_index: int, content: str) -> None:
         """替换指定位置的消息内容。"""
         self._memory.replace_message_content(msg_index, content)
+        # 编辑重发改写了已发出的历史消息，旧信封前缀失效
+        from excelmanus.prompt.envelope import invalidate_envelope
+
+        invalidate_envelope(self)
 
     @property
     def session_turn(self) -> int:
@@ -1442,6 +1483,23 @@ class AgentEngine:
         return self._file_access_guard
 
     @property
+    def workspace_ref(self) -> Any:
+        return getattr(self, "_workspace_ref", None)
+
+    @property
+    def session_binding(self) -> Any:
+        from excelmanus.tools.context import SessionBinding, capability_from_engine
+
+        cap = getattr(self, "_fixed_capability", None) or capability_from_engine(self)
+        actor = "child" if not getattr(self, "_is_host_session", True) else "host"
+        return SessionBinding(
+            session_id=str(getattr(self, "_session_id", None) or ""),
+            workspace=self._workspace_ref,
+            capability=cap,
+            actor=actor,
+        )
+
+    @property
     def active_model(self) -> str:
         """当前活跃模型标识符（Protocol: EngineConfig）。"""
         return self._active_model
@@ -1554,22 +1612,6 @@ class AgentEngine:
         """向用户提问（Protocol: DelegationContext）。"""
         return self._interaction_handler.handle_ask_user(**kwargs)
 
-    def enqueue_subagent_approval_question(self, **kwargs: Any) -> Any:
-        """入队子代理审批问题（Protocol: DelegationContext）。"""
-        return self._interaction_handler.enqueue_subagent_approval_question(**kwargs)
-
-    def enable_bench_sandbox(self) -> None:
-        """启用 benchmark 沙盒模式：解除所有交互式阻塞。
-
-        - fullaccess = True：高风险工具直接执行，不弹确认
-        - subagent 启用：允许委派子代理
-        - bench 模式标志：用于 activate_skill 短路非 Excel 类 skill
-        """
-        self._full_access_enabled = True
-        self._subagent_enabled = True
-        self._bench_mode = True
-
-
     def has_pending_question(self) -> bool:
         """当前会话是否存在待回答问题。"""
         return self._question_flow.has_pending()
@@ -1591,6 +1633,37 @@ class AgentEngine:
         """返回当前待确认操作。"""
         return self._approval.pending
 
+    def web_actionable_pending_approval(self) -> "PendingApproval | None":
+        """仅当 Web ``/approve`` 仍能 resolve 对应 Future 时返回待审批。
+
+        ``_approval.pending`` 在决策已提交、工具仍在执行时会继续存在；
+        此时 InteractionRegistry 中的 Future 已清理，再对前端暴露会让
+        刷新后的弹窗无法提交（「不存在或已处理」）且卡死。
+        """
+        pending = self._approval.pending
+        if pending is None:
+            return None
+        if self._interaction_registry.has_pending(pending.approval_id):
+            return pending
+        return None
+
+    def discard_stale_web_approval(self, *, in_flight: bool) -> bool:
+        """丢弃已无法通过 ``/approve`` resolve 的过期待审批。
+
+        in_flight 时不清理：可能正处于 create_pending → registry.create
+        的短暂窗口，或决策已提交、工具仍在执行。
+        """
+        pending = self._approval.pending
+        if pending is None:
+            return False
+        if self._interaction_registry.has_pending(pending.approval_id):
+            return False
+        if in_flight:
+            return False
+        logger.warning("丢弃无法 resolve 的过期待审批: %s", pending.approval_id)
+        self._approval.clear_pending()
+        return True
+
     def list_loaded_skillpacks(self) -> list[str]:
         """返回当前已加载的 Skillpack 名称。"""
         if self._skillpack_manager is not None:
@@ -1604,7 +1677,7 @@ class AgentEngine:
         return sorted(skillpacks.keys())
 
     def list_skillpack_commands(self) -> list[tuple[str, str]]:
-        """返回可用于 CLI 展示的 Skillpack 斜杠命令与参数提示。"""
+        """返回可用于前端展示的 Skillpack 斜杠命令与参数提示。"""
         if self._skillpack_manager is not None:
             rows = self._skillpack_manager.list_skillpacks()
             commands = [
@@ -1735,6 +1808,8 @@ class AgentEngine:
 
         if mention_contexts:
             for rm in mention_contexts:
+                if getattr(rm, "error", None):
+                    continue
                 mention = getattr(rm, "mention", None)
                 if mention is None or getattr(mention, "kind", None) != "file":
                     continue
@@ -1753,12 +1828,28 @@ class AgentEngine:
                 event.turn_id = driver.turn_id
             if not event.step_id:
                 event.step_id = driver.step_id
+        self._record_tool_call_audit(event)
         if on_event is None:
             return
         try:
             on_event(event)
         except Exception as exc:
             logger.warning("事件回调异常: %s", exc)
+
+    def _record_tool_call_audit(self, event: ToolCallEvent) -> None:
+        """TOOL_CALL_START/END 写入既有 session_events（非 surface），不另起全文日志。"""
+        if event.event_type not in (EventType.TOOL_CALL_START, EventType.TOOL_CALL_END):
+            return
+        memory = getattr(self, "_memory", None)
+        log = getattr(memory, "event_log", None) if memory is not None else None
+        if log is None:
+            return
+        try:
+            from excelmanus.session_log import append_tool_call_event
+
+            append_tool_call_event(log, event)
+        except Exception:
+            logger.debug("tool call 审计事件写入失败", exc_info=True)
 
     async def followup(
         self,
@@ -1876,6 +1967,11 @@ class AgentEngine:
         self._loaded_skill_names[selected.name] = self._session_turn
         # 技能集合变化 → 失效工具 schema 缓存
         self._tools_cache = None
+        # 目录内容已变化（skill_names 进入 catalog digest / tools），下一次请求
+        # 允许重写信封前缀——否则前缀不变量 fail-closed 中止回合。
+        from excelmanus.request.series import series_of
+
+        series_of(self).note("catalog/change")
 
         context_text = selected.render_context()
         return f"OK\n{context_text}"
@@ -1959,9 +2055,7 @@ class AgentEngine:
 
     @staticmethod
     def _normalize_subagent_file_paths(file_paths: list[Any] | None) -> list[str]:
-        """规范化 subagent 输入文件路径。委托给 SubagentOrchestrator。"""
-        from excelmanus.engine_core.subagent_orchestrator import SubagentOrchestrator
-        return SubagentOrchestrator.normalize_file_paths(file_paths)
+        return normalize_file_paths(file_paths)
 
     async def run_subagent(
         self,
@@ -1970,15 +2064,15 @@ class AgentEngine:
         prompt: str,
         on_event: EventCallback | None = None,
     ) -> SubagentResult:
-        """启动子 Driver，等结束。"""
-        from excelmanus.subagent.child import start_child_driver
-
-        return await start_child_driver(
-            self,
-            task=prompt,
-            agent_name=agent_name,
-            on_event=on_event,
+        """发布 one-shot Run 并等待终态。"""
+        run = await self._subagent_runtime.start(
+            SubagentStartRequest(
+                task=prompt,
+                agent_name=agent_name,
+                on_event=on_event,
+            )
         )
+        return await run.result  # type: ignore[return-value]
 
     @staticmethod
     def _render_task_brief(brief: dict[str, Any]) -> str:
@@ -2029,20 +2123,45 @@ class AgentEngine:
         agent_name: str | None = None,
         file_paths: list[Any] | None = None,
         on_event: EventCallback | None = None,
-    ) -> DelegateSubagentOutcome:
-        """执行 delegate_to_subagent 并返回结构化结果。
+    ) -> SubagentResult:
+        """执行 delegate 并返回终态。"""
+        paths = self._normalize_subagent_file_paths(file_paths)
+        try:
+            run = await self._subagent_runtime.start(
+                SubagentStartRequest(
+                    task=task,
+                    agent_name=agent_name,
+                    file_paths=paths,
+                    on_event=on_event,
+                )
+            )
+            return await run.result  # type: ignore[return-value]
+        except SubagentError as exc:
+            from excelmanus.engine_core.error_payload import dumps_error_payload, payload_from_subagent_error
 
-        委托给 SubagentOrchestrator 组件。
-        """
-        return await self._subagent_orchestrator.delegate(
-            task=task,
-            agent_name=agent_name,
-            file_paths=file_paths,
-            on_event=on_event,
-        )
+            registry = getattr(self, "_subagent_registry", None)
+            picked = (agent_name or "subagent").strip() or "subagent"
+            config = None
+            if registry is not None:
+                try:
+                    config = registry.get(picked)
+                except Exception:
+                    config = None
+            payload = payload_from_subagent_error(
+                exc,
+                published=False,
+                subagent_name=config.name if config is not None else picked,
+            )
+            text = dumps_error_payload(payload)
+            return SubagentResult(
+                stop_reason="error",
+                output=text,
+                diagnostic=text,
+                subagent_name=config.name if config is not None else picked,
+                permission_mode=config.permission_mode if config is not None else "default",
+                conversation_id="",
+            )
 
-    # 待办：过渡期残余，待测试迁移后删除
-    # 当前调用方：test_pbt_llm_routing.py:477, test_engine.py:2691, engine.py:3233
     async def _handle_delegate_to_subagent(
         self,
         *,
@@ -2051,65 +2170,52 @@ class AgentEngine:
         file_paths: list[Any] | None = None,
         on_event: EventCallback | None = None,
     ) -> str:
-        """处理 delegate_to_subagent 元工具。"""
-        outcome = await self._delegate_to_subagent(
+        from excelmanus.subagent.result import format_parent_reply
+
+        result = await self._delegate_to_subagent(
             task=task,
             agent_name=agent_name,
             file_paths=file_paths,
             on_event=on_event,
         )
-        return outcome.reply
+        return format_parent_reply(result)
 
     async def _parallel_delegate_to_subagents(
         self,
         *,
         tasks: list[dict[str, Any]],
         on_event: EventCallback | None = None,
-    ) -> "ParallelDelegateOutcome":
-        """执行 parallel_delegate 并返回聚合结果。
-
-        委托给 SubagentOrchestrator.delegate_parallel。
-        """
-        from excelmanus.engine_core.subagent_orchestrator import (
-            ParallelDelegateOutcome,
-            ParallelDelegateTask,
-        )
-
-        parsed_tasks: list[ParallelDelegateTask] = []
+    ) -> ParallelOutcome:
+        parsed: list[ParallelTask] = []
         for item in tasks:
             if not isinstance(item, dict):
-                return ParallelDelegateOutcome(
+                return ParallelOutcome(
                     reply="工具参数错误: tasks 中每个元素必须为对象。",
                     success=False,
                 )
             task_text = item.get("task", "")
             if not isinstance(task_text, str) or not task_text.strip():
-                return ParallelDelegateOutcome(
+                return ParallelOutcome(
                     reply="工具参数错误: 每个子任务的 task 必须为非空字符串。",
                     success=False,
                 )
-            raw_paths = item.get("file_paths")
-            normalized = self._normalize_subagent_file_paths(raw_paths)
-            parsed_tasks.append(ParallelDelegateTask(
-                task=task_text.strip(),
-                agent_name=item.get("agent_name"),
-                file_paths=normalized,
-            ))
+            parsed.append(
+                ParallelTask(
+                    task=task_text.strip(),
+                    agent_name=item.get("agent_name"),
+                    file_paths=self._normalize_subagent_file_paths(item.get("file_paths")),
+                )
+            )
+        try:
+            return await self._subagent_runtime.start_parallel(parsed, on_event=on_event)
+        except SubagentError as exc:
+            from excelmanus.engine_core.error_payload import dumps_error_payload, payload_from_subagent_error
 
-        return await self._subagent_orchestrator.delegate_parallel(
-            tasks=parsed_tasks,
-            on_event=on_event,
-        )
+            text = dumps_error_payload(payload_from_subagent_error(exc, published=False))
+            return ParallelOutcome(reply=text, success=False, conflict_error=text)
 
     def _handle_list_subagents(self) -> str:
-        """列出可用子代理。"""
-        agents = self._subagent_registry.list_all()
-        if not agents:
-            return "当前没有可用子代理。"
-        lines: list[str] = [f"共 {len(agents)} 个可用子代理：\n"]
-        for agent in agents:
-            lines.append(f"- {agent.name} ({agent.permission_mode})：{agent.description}")
-        return "\n".join(lines)
+        return self._subagent_runtime.list_catalog()
 
     # ── 问答与审批交互（委托到 InteractionHandler）──────────
 
@@ -2122,9 +2228,6 @@ class AgentEngine:
     @property
     def interaction_registry(self) -> InteractionRegistry:
         return self._interaction_registry
-
-    async def process_subagent_approval_inline(self, **kwargs: Any) -> tuple[str, bool]:
-        return await self._interaction_handler.process_subagent_approval_inline(**kwargs)
 
     def _try_refresh_registry(self) -> None:
         """写入操作后增量刷新 FileRegistry（debounce：每轮最多一次）。"""
@@ -2247,12 +2350,11 @@ class AgentEngine:
     def _format_pending_prompt(self, pending: PendingApproval) -> str:
         """构造待确认提示。"""
         return (
-            "检测到高风险操作，已进入待确认队列。\n"
+            "检测到高风险操作，已提交用户审批，正在等待审批结果。\n"
             f"- ID: `{pending.approval_id}`\n"
             f"- 工具: `{pending.tool_name}`\n"
-            "请执行以下命令之一：\n"
-            f"- `/accept {pending.approval_id}` 执行\n"
-            f"- `/reject {pending.approval_id}` 拒绝"
+            "不要重试同一调用，也不要改参数规避审批；审批结果会以后续事件返回。"
+            "（用户在客户端决定：`/accept <id>` 执行、`/reject <id>` 拒绝）"
         )
 
     @staticmethod
@@ -2433,11 +2535,88 @@ class AgentEngine:
         返回 (success, result_text, record)。
         共享逻辑：同时被 _handle_accept_command 和循环内联审批使用。
         """
+        from excelmanus.attachments.offload import attachment_ids_from_engine
+        from excelmanus.tools.context import (
+            ToolCallContext,
+            bind_call,
+            binding_from_engine,
+            reset_call,
+        )
+
+        # 审批后的重执行不经过 dispatcher._execute_call，必须自行绑定
+        # ToolCallContext，否则 require_call() 的工具（如 run_shell）会抛
+        # ToolContextMissing——网页 /approve 与 bench 走同一入口。
+        parent_id = getattr(pending, "parent_call_id", None)
+        cm_existing = getattr(self, "_active_code_mode_session", None)
+        if not parent_id and cm_existing is not None and pending.tool_name != "run_code":
+            parent_id = getattr(cm_existing, "root_call_id", None)
+        ctx_token = bind_call(
+            ToolCallContext(
+                binding=binding_from_engine(self),
+                call_id=str(pending.approval_id or ""),
+                tool_name=str(pending.tool_name or ""),
+                parent_call_id=parent_id,
+                durable_attachment_ids=attachment_ids_from_engine(self),
+            )
+        )
+        # run_code 的审批重放必须与直接执行同样建立 Code Mode 会话，
+        # 否则沙箱内没有 em SDK（EXCELMANUS_CODE_MODE_SDK 不注入），
+        # 凡含 import em / em.xxx 的获批脚本必失败。
+        cm_session = None
+        cm_session_token = None
+        cm_unavailable_token = None
+        cm_budget_prev = None
+        if pending.tool_name == "run_code":
+            from excelmanus.code_mode import (
+                attach_sdk_calls,
+                build_session_for_run_code,
+                get_code_mode_session,
+                reset_code_mode_session,
+                reset_sdk_unavailable,
+                script_uses_sdk,
+                set_code_mode_session,
+                set_sdk_unavailable,
+                timeout_seconds_from_args,
+            )
+
+            if get_code_mode_session() is None:
+                try:
+                    cm_session = build_session_for_run_code(
+                        self._tool_dispatcher,
+                        root_call_id=str(tool_call_id or pending.approval_id or "run"),
+                        tool_scope=list(pending.tool_scope) or None,
+                        on_event=on_event,
+                        timeout_seconds=timeout_seconds_from_args(dict(pending.arguments or {})),
+                    )
+                    cm_session_token = set_code_mode_session(cm_session)
+                    cm_session.start()
+                    # 子调用协程在不同 context 运行，经引擎句柄读取消事件。
+                    self._active_code_mode_session = cm_session
+                    cm_budget_prev = self._tool_dispatcher.begin_nested_call_budget()
+                except Exception as exc:
+                    logger.debug("审批重放 Code Mode 桥启动失败", exc_info=True)
+                    if cm_session_token is not None:
+                        reset_code_mode_session(cm_session_token)
+                    if cm_session is not None:
+                        try:
+                            cm_session.stop()
+                        except Exception:
+                            pass
+                    cm_session = None
+                    cm_session_token = None
+                    cm_budget_prev = None
+                    ws_root = getattr(getattr(self, "config", None), "workspace_root", None)
+                    if script_uses_sdk(dict(pending.arguments or {}), workspace_root=ws_root):
+                        self._approval.clear_pending()
+                        return False, f"accept 执行失败：Code Mode 桥启动失败且脚本依赖 em SDK：{exc}", None
+                    cm_unavailable_token = set_sdk_unavailable(str(exc))
+        payload = None
+        record = None
         try:
             payload, record = await self._execute_tool_with_audit(
                 tool_name=pending.tool_name,
                 arguments=pending.arguments,
-                tool_scope=None,
+                tool_scope=list(pending.tool_scope) or None,
                 approval_id=pending.approval_id,
                 created_at_utc=pending.created_at_utc,
                 undoable=self._approval.is_undoable_tool(pending.tool_name),
@@ -2450,6 +2629,36 @@ class AgentEngine:
         except Exception as exc:  # noqa: BLE001
             self._approval.clear_pending()
             return False, f"accept 执行失败：{exc}", None
+        finally:
+            if cm_session is not None:
+                try:
+                    cm_session.stop()
+                except Exception:
+                    logger.debug("审批重放 Code Mode 桥停止失败", exc_info=True)
+                try:
+                    await cm_session.wait_settlement(timeout=2.0)
+                except Exception:
+                    logger.debug("审批重放 Code Mode 桥结算等待失败", exc_info=True)
+                if payload is not None:
+                    payload = attach_sdk_calls(payload, cm_session)
+                settled = not cm_session.has_unsettled_work()
+                if settled and getattr(self, "_active_code_mode_session", None) is cm_session:
+                    self._active_code_mode_session = None
+                inflight_ids = getattr(self, "_inflight_approval_ids", None)
+                if inflight_ids:
+                    leftover = getattr(getattr(self, "_approval", None), "pending", None)
+                    if leftover is not None and getattr(leftover, "approval_id", None) in inflight_ids:
+                        self._approval.clear_pending()
+                    inflight_ids.clear()
+                if cm_budget_prev is not None:
+                    self._tool_dispatcher.restore_parent_call_budget(cm_budget_prev)
+                else:
+                    self._tool_dispatcher.begin_call_budget(None)
+            if cm_session_token is not None:
+                reset_code_mode_session(cm_session_token)
+            if cm_unavailable_token is not None:
+                reset_sdk_unavailable(cm_unavailable_token)
+            reset_call(ctx_token)
 
         from excelmanus.engine_core.tool_result import coerce_legacy_result
 
@@ -2466,7 +2675,7 @@ class AgentEngine:
                 0,
             )
             from excelmanus.workspace.identity import collect_public_identities
-            from excelmanus.events import mutations_from_identities
+            from excelmanus.events import changed_mutations
             changed: list[str] = list(structured.ui_meta.files or [])
             if structured.ui_meta.text_diff:
                 fp = structured.ui_meta.text_diff.get("file_path")
@@ -2486,11 +2695,14 @@ class AgentEngine:
                 self._emit(
                     on_event,
                     ToolCallEvent(
-                        event_type=EventType.FILES_CHANGED,
+                        event_type=EventType.MUTATION,
                         tool_call_id=tool_call_id or pending.approval_id,
                         iteration=0,
                         changed_files=changed,
-                        mutations=mutations_from_identities(changed),
+                        mutations=changed_mutations(
+                            changed,
+                            workspace_root=self._workspace.root_dir,
+                        ),
                     ),
                 )
 
@@ -2512,6 +2724,10 @@ class AgentEngine:
             self._tool_dispatcher._record_files_from_run_code(self, extra_changed_paths=extra or None)
 
         self._approval.clear_pending()
+        # 供调用内审批恢复路径（Code Mode 子调用）取回完整结构化结果：
+        # 本函数经 registry.call_tool 直达，不会更新 dispatcher 的
+        # _last_call_structured，子调用需要 value 做链式传参。
+        self._last_approved_structured = structured
         result_text = structured.model_text or record.result_preview or f"已执行 `{pending.tool_name}`。"
         return True, result_text, record
 
@@ -2530,6 +2746,18 @@ class AgentEngine:
                 payload={"reason": "clear_memory"},
             )
         self._memory.clear()
+        from excelmanus.prompt.envelope import reset_system_projection
+
+        reset_system_projection(self)
+        self._last_envelope = None
+        self._envelope_prefix_snapshot = None
+        self._restored_envelope_prefix = None
+        self._wire_epoch = None
+        self._wire_digest_payload = None
+        self._wire_epoch_needs_restore = False
+        from excelmanus.request.series import RequestSeries
+
+        self._request_series = RequestSeries()
         self._loaded_skill_names.clear()
         self._hook_started_skills.clear()
         self._active_skills.clear()
@@ -2544,7 +2772,6 @@ class AgentEngine:
         self._approval.clear_pending()
         # 重置轮级状态变量，防止跨对话污染
         self._state.reset_session()
-        self._system_mode_fallback = type(self)._system_mode_fallback_cache.get(self._system_mode_cache_key)
         self._last_route_result = SkillMatchResult(
             skills_used=[],
             route_mode="fallback",
@@ -2552,7 +2779,7 @@ class AgentEngine:
 
     @property
     def turn_count(self) -> int:
-        """当前会话轮次计数，供 CLI 提示符展示。"""
+        """当前会话轮次计数，供前端提示展示。"""
         return self._state.session_turn
 
     def conversation_summary(self) -> str:
@@ -2874,14 +3101,6 @@ class AgentEngine:
             images=images,
         )
 
-
-    def _effective_system_mode(self) -> str:
-        configured = self._config.system_message_mode
-        if configured != "auto":
-            return configured
-        if type(self)._system_mode_fallback_cache.get(self._system_mode_cache_key) == "merge":
-            return "merge"
-        return "replace"
 
     def _format_html_endpoint_error(self, raw_text: str) -> str:
         """将 HTML 错配响应转换为可操作的配置提示。"""

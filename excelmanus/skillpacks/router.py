@@ -92,13 +92,6 @@ class SkillRouter:
             key=str.lower,
         )
 
-    def build_skill_catalog(
-        self,
-        blocked_skillpacks: set[str] | None = None,
-    ) -> tuple[str, list[str]]:
-        """兼容旧调用：只返回名称，正文走 user-role 目录。"""
-        return ("", self.list_skill_names(blocked_skillpacks=blocked_skillpacks))
-
     def _build_result(
         self,
         selected: list[Skillpack],

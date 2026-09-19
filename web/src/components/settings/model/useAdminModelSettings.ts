@@ -7,7 +7,12 @@ import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
 import { useUIStore } from "@/stores/ui-store";
 import { SECTION_META } from "./constants";
-import { isMaskedApiKey, normalizeFetchedCapabilities } from "./helpers";
+import {
+  isMaskedApiKey,
+  normalizeFetchedCapabilities,
+  siblingDraftFromProfile,
+  uniqueSiblingProfileName,
+} from "./helpers";
 import type { ModelConfig, ModelSection, ModelCapabilities, ProfileEntry, ProbeJobSnapshot } from "./types";
 import type { ProviderPreset } from "./types";
 
@@ -21,6 +26,7 @@ export function useAdminModelSettings() {
   const [enabledDrafts, setEnabledDrafts] = useState<Record<string, boolean>>({});
   const [newProfile, setNewProfile] = useState(false);
   const [editingProfile, setEditingProfile] = useState<string | null>(null);
+  const [siblingSourceName, setSiblingSourceName] = useState<string | null>(null);
   const [profileError, setProfileError] = useState<string | null>(null);
   const [highlightProfile, setHighlightProfile] = useState<string | null>(null);
   const [addingProfile, setAddingProfile] = useState(false);
@@ -28,6 +34,7 @@ export function useAdminModelSettings() {
   const [remoteModels, setRemoteModels] = useState<RemoteModelItem[]>([]);
   const [modelDropdownTarget, setModelDropdownTarget] = useState<string | null>(null);
   const [remoteModelError, setRemoteModelError] = useState<string | null>(null);
+  const [remoteModelHint, setRemoteModelHint] = useState<string | null>(null);
   const modelDropdownRef = useRef<HTMLDivElement>(null);
   const profileCardRefs = useRef<Record<string, HTMLDivElement | null>>({});
   const [profileDraft, setProfileDraft] = useState<ProfileEntry>({
@@ -105,6 +112,10 @@ export function useAdminModelSettings() {
       custom_extra_body: "",
       custom_extra_headers: "",
     });
+    setSiblingSourceName(null);
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
     scrollToForm();
   }, [scrollToForm]);
 
@@ -252,7 +263,8 @@ export function useAdminModelSettings() {
     setTestingKey(key);
     setTestResult((prev) => ({ ...prev, [key]: null }));
     try {
-      const result = await testModelConnection(opts);
+      const apiKey = opts.api_key && !isMaskedApiKey(opts.api_key) ? opts.api_key : undefined;
+      const result = await testModelConnection({ ...opts, api_key: apiKey });
       setTestResult((prev) => ({ ...prev, [key]: result }));
     } catch (e) {
       setTestResult((prev) => ({ ...prev, [key]: { ok: false, error: e instanceof Error ? e.message : "测试失败", model: opts.model || "" } }));
@@ -261,43 +273,75 @@ export function useAdminModelSettings() {
     }
   }, []);
 
-  const handleFetchRemoteModels = useCallback(async (target: string, baseUrl?: string, apiKey?: string, protocol?: string) => {
+  const handleFetchRemoteModels = useCallback(async (
+    target: string,
+    baseUrl?: string,
+    apiKey?: string,
+    protocol?: string,
+    name?: string,
+  ) => {
     setFetchingModels(true);
     setRemoteModelError(null);
+    setRemoteModelHint(null);
     setRemoteModels([]);
     setModelDropdownTarget(null);
     try {
+      const usableKey = apiKey && !isMaskedApiKey(apiKey) ? apiKey : undefined;
       const result = await listRemoteModels({
+        name: name || undefined,
         base_url: baseUrl || undefined,
-        api_key: apiKey || undefined,
+        api_key: usableKey,
         protocol: protocol || undefined,
       });
       if (result.error) {
         setRemoteModelError(result.error);
+        setRemoteModelHint(result.hint || null);
       } else if (result.models.length === 0) {
         setRemoteModelError("未检测到可用模型");
+        setRemoteModelHint("请确认地址和协议是否正确，或直接填写 Model ID。");
       } else {
         setRemoteModels(result.models);
-        setModelDropdownTarget(target);
       }
     } catch (e) {
       setRemoteModelError(e instanceof Error ? e.message : "检测失败");
+      setRemoteModelHint(null);
     } finally {
       setFetchingModels(false);
     }
   }, []);
 
-  // 点击外部关闭模型下拉
-  useEffect(() => {
-    if (!modelDropdownTarget) return;
-    const handler = (e: MouseEvent) => {
-      if (modelDropdownRef.current && !modelDropdownRef.current.contains(e.target as Node)) {
-        setModelDropdownTarget(null);
-      }
-    };
-    document.addEventListener("mousedown", handler);
-    return () => document.removeEventListener("mousedown", handler);
-  }, [modelDropdownTarget]);
+  const resetProfileFormUi = useCallback(() => {
+    setNewProfile(false);
+    setEditingProfile(null);
+    setSiblingSourceName(null);
+    setProfileError(null);
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
+  }, []);
+
+  const beginAddSiblingProfile = useCallback((source: ProfileEntry) => {
+    setNewProfile(true);
+    setEditingProfile(null);
+    setSiblingSourceName(source.name);
+    setProfileDraft(siblingDraftFromProfile(source));
+    setProfileError(null);
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
+    scrollToForm();
+    void handleFetchRemoteModels(
+      "_profile",
+      source.base_url || undefined,
+      undefined,
+      source.protocol || undefined,
+      source.name,
+    );
+  }, [handleFetchRemoteModels, scrollToForm]);
 
   const handleCapToggle = useCallback(async (profileName: string, model: string, base_url: string, field: string, value: boolean) => {
     try {
@@ -330,9 +374,7 @@ export function useAdminModelSettings() {
       drafts[section.key]["protocol"] = sectionData?.protocol || "auto";
     }
     setEditDrafts(drafts);
-    setEnabledDrafts({
-      embedding: data.embedding?.enabled === true,
-    });
+    setEnabledDrafts({});
   }, []);
 
   const fetchConfig = useCallback(async (force = false) => {
@@ -390,11 +432,7 @@ export function useAdminModelSettings() {
       const body: Record<string, unknown> = {};
       for (const [field, value] of Object.entries(draft)) {
         if (field === "api_key" && isMaskedApiKey(value)) continue;
-        if (field === "protocol" && sectionKey === "embedding") continue;
         body[field] = value;
-      }
-      if (sectionKey === "embedding" && enabledDrafts[sectionKey] !== undefined) {
-        body.enabled = enabledDrafts[sectionKey];
       }
       await apiPut(`/config/models/${sectionKey}`, body, { direct: true });
       setSaved(sectionKey);
@@ -426,14 +464,24 @@ export function useAdminModelSettings() {
   const handleAddProfile = async () => {
     setProfileError(null);
     setAddingProfile(true);
-    const newName = profileDraft.name;
-    const draftSnapshot = { ...profileDraft };
+    const existingNames = (config?.profiles || []).map((profile) => profile.name);
+    const newName = profileDraft.name.trim() || uniqueSiblingProfileName(profileDraft.model, existingNames);
+    const draftSnapshot = {
+      ...profileDraft,
+      name: newName,
+      ...(siblingSourceName && !profileDraft.api_key.trim()
+        ? { clone_from: siblingSourceName }
+        : {}),
+    };
 
     // 乐观插入：先在前端列表添加，避免等待网络请求。
+    const sourceKey = siblingSourceName
+      ? (config?.profiles || []).find((profile) => profile.name === siblingSourceName)?.api_key || ""
+      : "";
     const optimisticEntry: ProfileEntry = {
-      name: draftSnapshot.name,
+      name: newName,
       model: draftSnapshot.model,
-      api_key: draftSnapshot.api_key,
+      api_key: draftSnapshot.api_key || sourceKey,
       base_url: draftSnapshot.base_url,
       description: draftSnapshot.description,
       protocol: draftSnapshot.protocol || "auto",
@@ -451,8 +499,13 @@ export function useAdminModelSettings() {
     });
     setNewProfile(false);
     setEditingProfile(null);
+    setSiblingSourceName(null);
     setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
     useUIStore.getState().bumpModelProfiles();
     setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
     setHighlightProfile(newName);
@@ -509,8 +562,13 @@ export function useAdminModelSettings() {
     });
     setEditingProfile(null);
     setNewProfile(false);
+    setSiblingSourceName(null);
     setProfileDraft({ name: "", model: "", api_key: "", base_url: "", description: "", protocol: "auto", thinking_mode: "auto", model_family: "", custom_extra_body: "", custom_extra_headers: "" });
     setTestResult((prev) => ({ ...prev, _profile_form: null }));
+    setRemoteModelError(null);
+    setRemoteModelHint(null);
+    setRemoteModels([]);
+    setModelDropdownTarget(null);
     useUIStore.getState().bumpModelProfiles();
     setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
     setHighlightProfile(updatedName);
@@ -611,6 +669,9 @@ export function useAdminModelSettings() {
     setNewProfile,
     editingProfile,
     setEditingProfile,
+    siblingSourceName,
+    setSiblingSourceName,
+    beginAddSiblingProfile,
     profileError,
     setProfileError,
     highlightProfile,
@@ -620,6 +681,9 @@ export function useAdminModelSettings() {
     modelDropdownTarget,
     setModelDropdownTarget,
     remoteModelError,
+    remoteModelHint,
+    setRemoteModelError,
+    setRemoteModelHint,
     modelDropdownRef,
     profileDraft,
     setProfileDraft,
@@ -659,6 +723,8 @@ export function useAdminModelSettings() {
     handleAddProfile,
     handleUpdateProfile,
     handleDeleteProfile,
+    resetProfileFormUi,
+    setRemoteModels,
     updateDraft,
     scrollToForm,
   };

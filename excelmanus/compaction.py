@@ -5,25 +5,21 @@
 - 增强的 ExcelManus 场景化摘要提示词
 - 用户可通过 /compact 手动触发
 - 可通过配置或命令开关关闭自动压缩
-- 此为唯一的默认上下文压缩层；旧式 memory.summarize_and_trim 默认关闭，
-  不再作为 compaction 之后的第二层摘要（见 summarization_enabled=False）
+- 此为唯一的上下文压缩层
 """
 
 from __future__ import annotations
 
-import asyncio
-import re
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from excelmanus.engine_utils import _AUX_NO_THINKING_EXTRA_BODY
+from excelmanus.engine_utils import _NO_THINKING_EXTRA_BODY
 from excelmanus.logger import get_logger
-from excelmanus.memory import ConversationMemory, TokenCounter, is_visible_user_turn
+from excelmanus.memory import ConversationMemory, TokenCounter
 
 if TYPE_CHECKING:
     from excelmanus.config import ExcelManusConfig
-    from excelmanus.embedding.client import EmbeddingClient
 
 logger = get_logger("compaction")
 
@@ -76,15 +72,6 @@ COMPACTION_SYSTEM_PROMPT = """\
 - 如果用户提供了自定义压缩指令，优先遵循用户指令"""
 
 
-COMPACTION_USER_TEMPLATE = "请压缩以下对话历史：\n\n{formatted_history}"
-
-COMPACTION_USER_TEMPLATE_WITH_INSTRUCTION = (
-    "请压缩以下对话历史。\n\n"
-    "用户自定义压缩指令：{custom_instruction}\n\n"
-    "对话历史：\n\n{formatted_history}"
-)
-
-
 @dataclass
 class CompactionStats:
     """Compaction 统计信息。"""
@@ -109,25 +96,48 @@ class CompactionResult:
     pruned_tool_results: int = 0
 
 
-_TOOL_RESULT_PRUNE_CHARS = 4000
-_TOOL_RESULT_PRUNE_MARKER = "\n…（工具结果已截断）"
+def _bump_compaction_generation(memory: ConversationMemory) -> None:
+    memory._compaction_generation = int(getattr(memory, "_compaction_generation", 0) or 0) + 1
 
 
-def prune_overlong_tool_results(
-    memory: ConversationMemory,
+_SUMMARY_BUDGET_CHARS = 120_000
+_SUMMARY_OMITTED_MARKER = "\n…（更早 {} 条消息已省略，不参与摘要）"
+
+
+def _cap_projected_for_summary(
+    projected: list[dict[str, Any]],
     *,
-    max_chars: int = _TOOL_RESULT_PRUNE_CHARS,
-) -> int:
-    """步前先剪过长 tool 结果，再决定要不要摘要。"""
-    pruned = 0
-    for msg in memory.messages:
-        if msg.get("role") != "tool":
-            continue
-        content = msg.get("content")
-        if isinstance(content, str) and len(content) > max_chars:
-            msg["content"] = content[:max_chars] + _TOOL_RESULT_PRUNE_MARKER
-            pruned += 1
-    return pruned
+    budget_chars: int = _SUMMARY_BUDGET_CHARS,
+) -> list[dict[str, Any]]:
+    """给摘要请求的被压区间加体积上限，防止摘要请求自身溢出。
+
+    保留最新（靠近 keep_recent）的部分；超预算的最旧消息整条省略，
+    并在头部补一条省略说明。
+    """
+    sizes: list[int] = []
+    for msg in projected:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        sizes.append(len(content) if isinstance(content, str) else 0)
+
+    total = sum(sizes)
+    if total <= budget_chars:
+        return projected
+
+    kept_chars = 0
+    keep_from = len(projected)
+    for idx in range(len(projected) - 1, -1, -1):
+        if kept_chars + sizes[idx] > budget_chars and keep_from < len(projected):
+            keep_from = idx + 1
+            break
+        kept_chars += sizes[idx]
+        keep_from = idx
+    omitted = keep_from
+    kept = projected[keep_from:]
+    note = {
+        "role": "user",
+        "content": _SUMMARY_OMITTED_MARKER.format(omitted),
+    }
+    return [note, *kept]
 
 
 class CompactionManager:
@@ -142,15 +152,15 @@ class CompactionManager:
     def __init__(
         self,
         config: "ExcelManusConfig",
-        embedding_client: "EmbeddingClient | None" = None,
     ) -> None:
         self._config = config
         self._stats = CompactionStats()
         # 会话级动态开关，初始值继承配置
         self._enabled: bool = config.compaction_enabled
         self._token_counter = TokenCounter()
-        # 可选：embedding 客户端，用于语义相关性评分
-        self._embedding_client = embedding_client
+        # 连续空摘要计数：达到 compaction_empty_summary_max_retries 后
+        # pre_step 跳过 LLM 摘要直接回落硬截断。
+        self._empty_streak: int = 0
         # 运行时可变的上下文窗口大小（切换模型时由 engine 更新）
         self._max_context_tokens_override: int = 0
 
@@ -211,6 +221,8 @@ class CompactionManager:
         *,
         client: object,
         summary_model: str,
+        tools: list[dict[str, Any]] | None = None,
+        vision_capable: bool | None = None,
     ) -> CompactionResult:
         """自动压缩：后台静默执行，对话不中断。"""
         return await self._do_compact(
@@ -220,6 +232,8 @@ class CompactionManager:
             summary_model=summary_model,
             custom_instruction=None,
             source="auto",
+            tools=tools,
+            vision_capable=vision_capable,
         )
 
     async def manual_compact(
@@ -230,6 +244,8 @@ class CompactionManager:
         client: object,
         summary_model: str,
         custom_instruction: str | None = None,
+        tools: list[dict[str, Any]] | None = None,
+        vision_capable: bool | None = None,
     ) -> CompactionResult:
         """手动压缩：由 /compact 命令触发。"""
         return await self._do_compact(
@@ -239,6 +255,8 @@ class CompactionManager:
             summary_model=summary_model,
             custom_instruction=custom_instruction,
             source="manual",
+            tools=tools,
+            vision_capable=vision_capable,
         )
 
     def get_status(
@@ -262,62 +280,52 @@ class CompactionManager:
             "message_count": len(memory.messages),
         }
 
-    async def _score_message_relevance(
+    def _find_split_index(
         self,
-        old_messages: list[dict[str, Any]],
-        recent_messages: list[dict[str, Any]],
-    ) -> list[float] | None:
-        """用 embedding 计算旧消息与最近任务上下文的语义相关性。
+        memory: ConversationMemory,
+        all_msgs: list[dict],
+        user_floor_idx: int,
+    ) -> int:
+        """token 定价切点 + tool 配对配平。
 
-        返回每条旧消息的相关性分数 (0.0~1.0)，无 embedding 客户端时返回 None。
+        从尾部向前累计 token，保留尾段不超过 retain_tokens 预算
+        （默认 max_context 的 25%）；``user_floor_idx``（最近 N 个可见
+        用户轮的起点）是保留下限——取两者中保留更多者（更小的索引）。
+        切点落在连续 tool 结果段时向前越过整段，保证 tool_call/result
+        配对整体落入被压区，retained 尾部不出现孤儿 tool result。
         """
-        if self._embedding_client is None:
-            return None
+        retain_tokens = int(getattr(self._config, "compaction_retain_tokens", 0) or 0)
+        if retain_tokens <= 0:
+            retain_tokens = int(self.max_context_tokens * 0.25)
 
-        # 从最近消息中提取任务上下文（user 消息拼接作为 query）
-        recent_user_texts = []
-        for msg in recent_messages:
-            if not is_visible_user_turn(msg):
-                continue
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                recent_user_texts.append(content.strip()[:300])
-        if not recent_user_texts:
-            return None
+        acc = 0
+        token_split = 0
+        for i in range(len(all_msgs) - 1, -1, -1):
+            acc += memory._count_message(all_msgs[i])
+            if acc > retain_tokens:
+                token_split = i + 1
+                break
+            token_split = i
 
-        query_text = " ".join(recent_user_texts[-3:])  # 最近 3 条 user 消息
+        # token_split=0 表示全部历史都在 retain 预算内（如手动 compact）：
+        # 回落到用户轮数下限，保证有可压区间。否则取两者中保留更多者。
+        split_idx = min(token_split, user_floor_idx) if token_split > 0 else user_floor_idx
+        while split_idx < len(all_msgs) and all_msgs[split_idx].get("role") == "tool":
+            split_idx += 1
+        return split_idx
 
-        # 提取旧消息文本（user + assistant 的文本内容）
-        old_texts: list[str] = []
-        for msg in old_messages:
-            content = msg.get("content", "")
-            if isinstance(content, str) and content.strip():
-                old_texts.append(content.strip()[:300])
-            else:
-                old_texts.append("")
-
-        if not any(old_texts):
-            return None
-
+    @staticmethod
+    def _emit_bookkeeping(
+        memory: ConversationMemory, kind: str, payload: dict[str, Any],
+    ) -> None:
+        """压缩审计事件（non-surface 记账，不进模型可见面）。"""
+        log = getattr(memory, "_event_log", None)
+        if log is None:
+            return
         try:
-            import numpy as np
-
-            # 并行 embed query 和 old_texts
-            query_vec, old_vecs = await asyncio.gather(
-                self._embedding_client.embed_single(query_text),
-                self._embedding_client.embed(old_texts),
-            )
-            # 计算 cosine similarity
-            query_norm = np.linalg.norm(query_vec)
-            if query_norm < 1e-9:
-                return None
-            old_norms = np.linalg.norm(old_vecs, axis=1)
-            safe_norms = np.where(old_norms < 1e-9, 1.0, old_norms)
-            scores = (old_vecs @ query_vec) / (safe_norms * query_norm)
-            return [float(s) for s in scores]
+            log.append(kind, payload)
         except Exception:
-            logger.debug("Compaction 语义评分失败，跳过相关性标注", exc_info=True)
-            return None
+            logger.warning("compaction 审计事件写入失败: %s", kind, exc_info=True)
 
     async def _do_compact(
         self,
@@ -328,164 +336,214 @@ class CompactionManager:
         summary_model: str,
         custom_instruction: str | None,
         source: str,
+        tools: list[dict[str, Any]] | None = None,
+        vision_capable: bool | None = None,
     ) -> CompactionResult:
-        """执行压缩的核心逻辑。"""
+        """执行压缩的核心逻辑。
+
+        vision_capable=None 时保持历史行为（按视觉模型处理被压区间）；
+        调用方应传摘要模型的实际视觉能力，避免纯文本模型收到图片 parts。
+        """
         messages_before = len(memory.messages)
         tokens_before = memory._total_tokens_with_system_messages(system_msgs)
-        pruned = prune_overlong_tool_results(memory)
-        tokens_after_prune = memory._total_tokens_with_system_messages(system_msgs)
 
         if messages_before == 0:
             return CompactionResult(
                 success=False,
                 error="没有可压缩的对话历史。",
-                pruned_tool_results=pruned,
-            )
-
-        threshold = int(self.max_context_tokens * self._config.compaction_threshold_ratio)
-        if pruned and tokens_after_prune <= threshold:
-            return CompactionResult(
-                success=False,
-                messages_before=messages_before,
-                messages_after=len(memory.messages),
-                tokens_before=tokens_before,
-                tokens_after=tokens_after_prune,
-                error="已剪过长工具结果，压力已下降，未做摘要。",
-                pruned_tool_results=pruned,
             )
 
         keep_recent = self._config.compaction_keep_recent_turns
 
-        # 找到最近 keep_recent 个 user 消息的起始索引
+        from excelmanus.memory import is_visible_user_turn
+
+        # 只按可见用户轮次切分，mention/hook 追加不得挤掉 keep_recent。
         user_indices = [
             i for i, m in enumerate(memory.messages)
-            if m.get("role") == "user"
+            if is_visible_user_turn(m)
         ]
-        if len(user_indices) <= keep_recent:
-            # 消息太少，不值得压缩
+        if not user_indices:
             return CompactionResult(
                 success=False,
                 messages_before=messages_before,
                 error="对话轮次不足，无需压缩。",
-                pruned_tool_results=pruned,
             )
+        # 可见用户轮不足 keep_recent 时（单轮任务也可能堆积大量
+        # tool 结果），保留下限收缩为当前用户轮的起点：当前问题
+        # 原文不被摘要，此前轮次仍可压缩。
+        user_floor_idx = (
+            user_indices[-keep_recent]
+            if len(user_indices) > keep_recent
+            else user_indices[-1]
+        )
 
-        split_idx = user_indices[-keep_recent]
-        old_messages = memory.messages[:split_idx]
-        recent_messages = memory.messages[split_idx:]
-
-        if not old_messages:
+        # token 定价切点：保留尾段 ≤ retain_tokens，且至少保留到保留下限
+        split_idx = self._find_split_index(
+            memory, memory.messages, user_floor_idx
+        )
+        if split_idx <= 0:
             return CompactionResult(
                 success=False,
                 messages_before=messages_before,
                 error="无早期消息可压缩。",
             )
+        old_messages = memory.messages[:split_idx]
+        shadowed_tokens = sum(memory._count_message(m) for m in old_messages)
+        self._emit_bookkeeping(memory, "compaction/start", {
+            "source": source,
+            "shadowed_count": len(old_messages),
+            "shadowed_tokens": shadowed_tokens,
+            "source_seqs": [
+                m["_seq"] for m in old_messages
+                if isinstance(m.get("_seq"), int)
+            ],
+        })
 
-        # 格式化旧消息供摘要模型消费
-        # 如果 embedding 客户端可用，为消息标注语义相关性
-        relevance_scores = await self._score_message_relevance(
-            old_messages, recent_messages,
+        from excelmanus.attachments.project import (
+            assemble_model_request,
+            content_has_image,
+            strip_projection_meta,
         )
-        formatted = _format_messages_for_compaction(
-            old_messages, relevance_scores=relevance_scores,
-        )
-        if not formatted.strip():
-            return CompactionResult(
-                success=False,
-                messages_before=messages_before,
-                error="旧消息格式化为空，跳过压缩。",
-            )
 
-        # 构建摘要请求
+        instruction = COMPACTION_SYSTEM_PROMPT
         if custom_instruction:
-            user_content = COMPACTION_USER_TEMPLATE_WITH_INSTRUCTION.format(
-                custom_instruction=custom_instruction,
-                formatted_history=formatted,
-            )
-        else:
-            user_content = COMPACTION_USER_TEMPLATE.format(
-                formatted_history=formatted,
-            )
+            instruction = f"{instruction}\n\n用户自定义压缩指令：{custom_instruction}"
+        # /no_think：qwen 系模板的文本级禁思考指令，对不认该指令的模型是无害文本
+        instruction += "\n\n只输出文本摘要，不要输出图片。\n/no_think"
+
+        live_config = self._config
+        try:
+            from excelmanus.api_app_state import get_config
+            current = get_config()
+            if current is not None:
+                live_config = current
+        except Exception:
+            pass
+
+        prefix = list(system_msgs or memory.build_system_messages())
+        from excelmanus.memory import _sanitize_messages_for_api
+
+        projected_old = assemble_model_request(
+            _sanitize_messages_for_api(
+                [{k: v for k, v in m.items() if not str(k).startswith("_")} for m in old_messages]
+            ),
+            vision_capable=bool(vision_capable if vision_capable is not None else True),
+            config=live_config,
+        )
+        projected_old = _cap_projected_for_summary(projected_old)
+        compact_messages = strip_projection_meta(
+            prefix + projected_old + [{"role": "user", "content": instruction}],
+        )
 
         max_summary_tokens = self._config.compaction_max_summary_tokens
 
         try:
-            response = await client.chat.completions.create(
-                model=summary_model,
-                messages=[
-                    {"role": "system", "content": COMPACTION_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_content},
-                ],
-                max_tokens=max_summary_tokens,
-                temperature=0.0,
-                extra_body=_AUX_NO_THINKING_EXTRA_BODY,
-            )
-            summary_text = (response.choices[0].message.content or "").strip()
+            create_kwargs: dict[str, Any] = {
+                "model": summary_model,
+                "messages": compact_messages,
+                "max_tokens": max_summary_tokens,
+                "temperature": 0.0,
+                "extra_body": _NO_THINKING_EXTRA_BODY,
+            }
+            if tools:
+                create_kwargs["tools"] = tools
+            response = await client.chat.completions.create(**create_kwargs)
+            summary_message = response.choices[0].message
+            if content_has_image(getattr(summary_message, "content", None)):
+                raise ValueError("compaction summary cannot contain image output")
+            summary_text = (getattr(summary_message, "content", None) or "").strip()
         except Exception as exc:
             logger.warning("Compaction 摘要调用失败 (source=%s): %s", source, exc)
-            # 降级：规则化极简摘要 + 硬截断
-            rule_summary = _extract_rule_based_summary(old_messages)
-            if rule_summary:
-                synthetic = [
-                    {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
-                    {"role": "assistant", "content": f"[对话摘要-规则提取]\n{rule_summary}"},
-                ]
-                memory._messages = synthetic + recent_messages
-            target_threshold = int(
-                self.max_context_tokens
-                * (self._config.compaction_threshold_ratio - 0.1)
-            )
-            memory._truncate_history_to_threshold(target_threshold, system_msgs)
-            messages_after = len(memory.messages)
-            tokens_after = memory._total_tokens_with_system_messages(system_msgs)
+            self._emit_bookkeeping(memory, "compaction/end", {
+                "source": source, "success": False, "reason": "summary_call_failed",
+            })
             return CompactionResult(
                 success=False,
                 messages_before=messages_before,
-                messages_after=messages_after,
+                messages_after=messages_before,
                 tokens_before=tokens_before,
-                tokens_after=tokens_after,
-                error=f"摘要失败，已规则提取+硬截断兜底: {exc}",
+                tokens_after=tokens_before,
+                error=f"摘要失败，未改写历史: {exc}",
             )
 
         if not summary_text:
-            logger.warning("Compaction 摘要为空 (source=%s)，回退到规则提取+硬截断", source)
-            rule_summary = _extract_rule_based_summary(old_messages)
-            if rule_summary:
-                synthetic = [
-                    {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
-                    {"role": "assistant", "content": f"[对话摘要-规则提取]\n{rule_summary}"},
-                ]
-                memory._messages = synthetic + recent_messages
-            target_threshold = int(
-                self.max_context_tokens
-                * (self._config.compaction_threshold_ratio - 0.1)
+            self._empty_streak += 1
+            logger.warning(
+                "Compaction 摘要为空 (source=%s)，未改写历史（连续 %d 次）",
+                source, self._empty_streak,
             )
-            memory._truncate_history_to_threshold(target_threshold, system_msgs)
-            messages_after = len(memory.messages)
-            tokens_after = memory._total_tokens_with_system_messages(system_msgs)
+            self._emit_bookkeeping(memory, "compaction/end", {
+                "source": source, "success": False, "reason": "empty_summary",
+                "streak": self._empty_streak,
+            })
             return CompactionResult(
                 success=False,
                 messages_before=messages_before,
-                messages_after=messages_after,
+                messages_after=messages_before,
                 tokens_before=tokens_before,
-                tokens_after=tokens_after,
-                error="摘要为空，已规则提取+硬截断兜底。",
+                tokens_after=tokens_before,
+                error="摘要为空，未改写历史。",
             )
 
-        # 用合成消息替换旧历史
-        synthetic: list[dict] = [
-            {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
-            {"role": "assistant", "content": f"[对话摘要]\n{summary_text}"},
-        ]
-        memory._messages = synthetic + recent_messages
+        # 摘要必须比被压内容小，否则拒绝替换（保留原文）
+        summary_tokens = memory._count_message(
+            {"role": "assistant", "content": summary_text}
+        )
+        if summary_tokens >= shadowed_tokens:
+            logger.warning(
+                "Compaction 摘要未小于被压区间 (source=%s): %d >= %d tokens，未改写历史",
+                source, summary_tokens, shadowed_tokens,
+            )
+            self._emit_bookkeeping(memory, "compaction/end", {
+                "source": source, "success": False,
+                "reason": "summary_not_smaller",
+            })
+            return CompactionResult(
+                success=False,
+                messages_before=messages_before,
+                messages_after=messages_before,
+                tokens_before=tokens_before,
+                tokens_after=tokens_before,
+                error="摘要未小于原文，未改写历史。",
+            )
 
-        # 如果替换后仍然超限，硬截断兜底
+        # 用合成消息替换旧历史（事件日志路径：原文保留在 session_events）
+        synthetic: list[dict] = [
+            {
+                "role": "user",
+                "content": "[系统] 请基于以下对话摘要继续工作。",
+                "_prompt_kind": "compaction",
+            },
+            {
+                "role": "assistant",
+                "content": f"[对话摘要]\n{summary_text}",
+                "_prompt_kind": "compaction",
+                "_source_message_ids": [
+                    m.get("message_id") for m in old_messages if m.get("message_id")
+                ],
+            },
+        ]
+        memory.apply_compaction_summary(synthetic, split_idx)
+        self._empty_streak = 0
+        self._emit_bookkeeping(memory, "compaction/summary", {
+            "source": source,
+            "shadowed_token_count": shadowed_tokens,
+            "summary_tokens": summary_tokens,
+        })
+        self._emit_bookkeeping(memory, "compaction/end", {
+            "source": source, "success": True,
+        })
+        _bump_compaction_generation(memory)
+
+        # 如果替换后仍然超限，硬截断兜底；头部两条合成摘要必须保住
         target_threshold = int(
             self.max_context_tokens
             * (self._config.compaction_threshold_ratio - 0.1)
         )
         if memory._total_tokens_with_system_messages(system_msgs) > target_threshold:
-            memory._truncate_history_to_threshold(target_threshold, system_msgs)
+            memory._truncate_history_to_threshold(
+                target_threshold, system_msgs, protect_first=len(synthetic)
+            )
 
         messages_after = len(memory.messages)
         tokens_after = memory._total_tokens_with_system_messages(system_msgs)
@@ -513,314 +571,8 @@ class CompactionManager:
             tokens_before=tokens_before,
             tokens_after=tokens_after,
             summary_text=summary_text,
-            pruned_tool_results=pruned,
+            pruned_tool_results=0,
         )
-
-
-def _format_messages_for_compaction(
-    messages: list[dict[str, Any]],
-    *,
-    max_content_chars: int = 800,
-    max_total_chars: int = 60000,
-    relevance_scores: list[float] | None = None,
-) -> str:
-    """将消息列表格式化为可读文本，供摘要模型消费。
-
-    单条消息上限 800 字符，总量上限 60K，
-    以便在大窗口场景下保留更多上下文供摘要。
-
-    工具调用和工具结果会被特殊格式化，保留工具名和关键参数。
-    当 relevance_scores 可用时，高相关性消息会获得更大的截断上限，
-    低相关性消息会被更积极地截断，并添加相关性标记。
-    """
-    parts: list[str] = []
-    total_chars = 0
-
-    for idx, msg in enumerate(messages):
-        # 语义相关性自适应截断：高相关消息保留更多内容
-        _score = relevance_scores[idx] if relevance_scores and idx < len(relevance_scores) else -1.0
-        if _score >= 0.6:
-            _effective_max = min(max_content_chars * 2, 1600)  # 高相关：翻倍上限
-            _relevance_tag = "[★高相关] "
-        elif _score >= 0.3:
-            _effective_max = max_content_chars
-            _relevance_tag = ""
-        elif _score >= 0:
-            _effective_max = max(max_content_chars // 2, 200)  # 低相关：减半上限
-            _relevance_tag = "[低相关] "
-        else:
-            _effective_max = max_content_chars
-            _relevance_tag = ""
-        role = msg.get("role", "unknown")
-        content = msg.get("content", "")
-        tool_calls = msg.get("tool_calls")
-
-        line = ""
-
-        # 工具调用消息：提取工具名和参数摘要
-        if tool_calls and isinstance(tool_calls, list):
-            call_parts = []
-            for tc in tool_calls:
-                func = tc.get("function", {}) if isinstance(tc, dict) else {}
-                name = func.get("name", "?") if isinstance(func, dict) else getattr(func, "name", "?")
-                args = func.get("arguments", "") if isinstance(func, dict) else getattr(func, "arguments", "")
-                if isinstance(args, str) and len(args) > 200:
-                    args = args[:200] + "..."
-                call_parts.append(f"  → {name}({args})")
-            line = f"[{role}] 工具调用:\n" + "\n".join(call_parts)
-
-        # 工具结果消息
-        elif role == "tool":
-            tool_call_id = msg.get("tool_call_id", "")
-            text = str(content).strip() if content else ""
-            if len(text) > _effective_max:
-                text = text[:_effective_max] + "...[截断]"
-            line = f"{_relevance_tag}[tool result:{tool_call_id}] {text}"
-
-        # 普通文本消息
-        elif isinstance(content, str) and content.strip():
-            text = content.strip()
-            if len(text) > _effective_max:
-                text = text[:_effective_max] + "...[截断]"
-            line = f"{_relevance_tag}[{role}] {text}"
-
-        elif isinstance(content, list):
-            # 多模态 content parts
-            text_parts = []
-            for item in content:
-                if isinstance(item, dict):
-                    if item.get("type") == "text":
-                        text_parts.append(item.get("text", ""))
-                    elif item.get("type") == "image_url":
-                        text_parts.append("[图片]")
-            combined = " ".join(text_parts).strip()
-            if combined:
-                if len(combined) > _effective_max:
-                    combined = combined[:_effective_max] + "...[截断]"
-                line = f"{_relevance_tag}[{role}] {combined}"
-
-        if not line:
-            continue
-
-        if total_chars + len(line) > max_total_chars:
-            parts.append("[..后续消息省略..]")
-            break
-        parts.append(line)
-        total_chars += len(line)
-
-    return "\n".join(parts)
-
-
-# 写入类工具名集合（用于规则摘要提取写入操作记录）
-# 与 policy.MUTATING_ALL_TOOLS 保持语义一致，但硬编码避免循环依赖
-_WRITE_TOOLS: frozenset[str] = frozenset({
-    "run_shell", "delete_file",
-    "write_text_file", "edit_text_file", "rename_file", "copy_file",
-    "edit_spreadsheet", "format_spreadsheet", "manage_spreadsheet_objects",
-    "manage_spreadsheet_versions", "write_word",
-    "run_code",
-})
-
-# 错误关键词模式（用于提取工具执行错误）
-_ERROR_KEYWORDS_PATTERN = re.compile(
-    r"工具执行错误|Error|Exception|Traceback|失败|FileNotFoundError"
-    r"|PermissionError|ValueError|KeyError|IndexError|TypeError",
-    re.IGNORECASE,
-)
-
-_RULE_SUMMARY_FILE_PATTERN = re.compile(
-    r'(?:file_path|path|file|io)["\s:=]+["\']?'
-    r'([^\s"\',}\]]+\.(?:xlsx|xls|xlsm|xlsb|csv|tsv|txt|py|json|md))',
-    re.IGNORECASE,
-)
-
-
-def _extract_rule_based_summary(
-    messages: list[dict[str, Any]],
-    *,
-    max_total_chars: int = 2000,
-) -> str:
-    """从消息列表中用纯规则提取结构化摘要（不依赖 LLM）。
-
-    提取维度（按优先级）：
-    1. 涉及的文件路径
-    2. 已执行的工具调用列表
-    3. 写入操作记录（哪些工具修改了哪些文件）
-    4. 任务状态（从 task_create/task_update 调用重放）
-    5. 用户最近的意图（最后几条 user 消息）
-    6. 助手结论（最后几条 assistant 文本回复摘要）
-    7. 工具执行错误（最近的未解决错误）
-
-    Args:
-        messages: 待提取的消息列表。
-        max_total_chars: 摘要总长度软限（字符），超出时截断低优先级维度。
-
-    Returns:
-        摘要文本，无可提取内容时返回空字符串。
-    """
-    import json as _json
-
-    file_paths: set[str] = set()
-    tool_calls_summary: list[str] = []
-    user_intents: list[str] = []
-    # 新维度：写入操作记录
-    write_ops: list[str] = []
-    # 新维度：任务状态重放
-    task_title: str = ""
-    task_items: list[dict[str, str]] = []  # [{title, status}]
-    # 新维度：助手结论
-    assistant_conclusions: list[str] = []
-    # 新维度：工具执行错误
-    tool_errors: list[str] = []
-    # tool_call_id → tool_name 映射（用于关联 tool result 中的错误）
-    tc_id_to_name: dict[str, str] = {}
-
-    for msg in messages:
-        role = msg.get("role", "")
-        content = msg.get("content", "")
-        tool_calls = msg.get("tool_calls")
-
-        # 提取文件路径
-        if isinstance(content, str):
-            for m in _RULE_SUMMARY_FILE_PATTERN.finditer(content):
-                file_paths.add(m.group(1))
-
-        # 提取工具调用
-        if tool_calls and isinstance(tool_calls, list):
-            for tc in tool_calls:
-                func = tc.get("function", {}) if isinstance(tc, dict) else {}
-                name = func.get("name", "?") if isinstance(func, dict) else getattr(func, "name", "?")
-                args_str = func.get("arguments", "") if isinstance(func, dict) else getattr(func, "arguments", "")
-                tc_id = tc.get("id", "") if isinstance(tc, dict) else getattr(tc, "id", "")
-                if tc_id and name:
-                    tc_id_to_name[tc_id] = name
-                args_dict: dict[str, Any] = {}
-                # 从参数中提取文件路径
-                if isinstance(args_str, str):
-                    for m in _RULE_SUMMARY_FILE_PATTERN.finditer(args_str):
-                        file_paths.add(m.group(1))
-                    try:
-                        args_dict = _json.loads(args_str)
-                        fp = args_dict.get("file_path") or args_dict.get("path") or ""
-                        if fp:
-                            file_paths.add(str(fp))
-                    except (ValueError, TypeError):
-                        pass
-                tool_calls_summary.append(name)
-
-                # ── 写入操作记录 ──
-                if name in _WRITE_TOOLS and args_dict:
-                    wp = args_dict.get("file_path") or args_dict.get("path") or args_dict.get("destination") or ""
-                    sheet = args_dict.get("sheet", "")
-                    cell_range = args_dict.get("range", "")
-                    desc = name
-                    if wp:
-                        desc += f" → {wp}"
-                    if sheet:
-                        desc += f" / {sheet}"
-                    if cell_range:
-                        desc += f" / {cell_range}"
-                    write_ops.append(desc)
-
-                # ── 任务状态重放 ──
-                if name == "task_create" and args_dict:
-                    task_title = str(args_dict.get("title", ""))
-                    subtasks = args_dict.get("subtasks") or args_dict.get("subtask_titles") or []
-                    task_items = []
-                    for st in subtasks:
-                        if isinstance(st, dict):
-                            task_items.append({
-                                "title": str(st.get("title", "")),
-                                "status": "pending",
-                            })
-                        elif isinstance(st, str):
-                            task_items.append({"title": st, "status": "pending"})
-                elif name == "task_update" and args_dict:
-                    idx = args_dict.get("index")
-                    new_status = args_dict.get("new_status") or args_dict.get("status", "")
-                    if isinstance(idx, int) and 0 <= idx < len(task_items) and new_status:
-                        task_items[idx]["status"] = str(new_status)
-
-        # 提取用户意图
-        if role == "user" and isinstance(content, str):
-            text = content.strip()
-            if text and not text.startswith("[系统]"):
-                user_intents.append(text[:200])
-
-        # ── 助手结论 ──
-        if role == "assistant" and isinstance(content, str):
-            text = content.strip()
-            if text and len(text) > 10:
-                assistant_conclusions.append(text[:300])
-
-        # ── 工具执行错误 ──
-        if role == "tool" and isinstance(content, str):
-            text = content.strip()
-            if text and _ERROR_KEYWORDS_PATTERN.search(text):
-                tc_id = msg.get("tool_call_id", "")
-                tool_name = tc_id_to_name.get(tc_id, "unknown")
-                err_snippet = text[:150]
-                tool_errors.append(f"{tool_name}: {err_snippet}")
-
-    # ── 组装摘要（按优先级排列，高优先级先输出） ──
-    parts: list[str] = []
-    total_chars = 0
-
-    def _append_if_fits(section: str) -> bool:
-        nonlocal total_chars
-        if total_chars + len(section) > max_total_chars:
-            return False
-        parts.append(section)
-        total_chars += len(section)
-        return True
-
-    # P0: 涉及文件
-    if file_paths:
-        paths_list = sorted(file_paths)[:20]
-        _append_if_fits("**涉及文件**：" + "、".join(paths_list))
-
-    # P0: 已执行工具
-    if tool_calls_summary:
-        from collections import Counter as _Counter
-        counts = _Counter(tool_calls_summary)
-        top_tools = counts.most_common(10)
-        tool_lines = [f"{name}×{cnt}" for name, cnt in top_tools]
-        _append_if_fits("**已执行工具**：" + "、".join(tool_lines))
-
-    # P0: 写入操作记录
-    if write_ops:
-        unique_ops = list(dict.fromkeys(write_ops))[:10]
-        section = "**写入操作**：\n" + "\n".join(f"- {op}" for op in unique_ops)
-        _append_if_fits(section)
-
-    # P0: 任务状态
-    if task_items:
-        status_counts = _Counter(item["status"] for item in task_items)
-        progress = "、".join(f"{s}: {c}" for s, c in status_counts.most_common())
-        section = f"**任务进度**：「{task_title}」 — {progress}"
-        pending = [item["title"] for item in task_items if item["status"] in ("pending", "in_progress")]
-        if pending:
-            section += "\n待完成: " + "、".join(pending[:5])
-        _append_if_fits(section)
-
-    # P0: 用户意图
-    if user_intents:
-        latest = user_intents[-3:]
-        _append_if_fits("**用户意图**：\n" + "\n".join(f"- {i}" for i in latest))
-
-    # P1: 助手结论
-    if assistant_conclusions:
-        latest = assistant_conclusions[-2:]
-        section = "**助手结论**：\n" + "\n".join(f"- {c}" for c in latest)
-        _append_if_fits(section)
-
-    # P2: 工具执行错误（仅保留最后 3 条，避免已修复的错误干扰）
-    if tool_errors:
-        latest = tool_errors[-3:]
-        section = "**近期错误**：\n" + "\n".join(f"- {e}" for e in latest)
-        _append_if_fits(section)
-
-    return "\n".join(parts)
 
 
 # ── Wave D：挂在 pre_step / request-error 上 ─────────────────
@@ -842,56 +594,165 @@ def surface_fingerprint(memory: Any) -> tuple[int, int]:
     return (len(messages), size)
 
 
+async def _apply_tool_result_pruning(engine: Any, memory: Any) -> int:
+    """L1 机械修剪前可先走片 P。未签字时 maybe_prune 为零。
+
+    返回修剪条数。已 spill/已修剪的内容自动跳过（幂等）。
+    只在压缩边界内由 compact_for_pre_step 调用——与摘要共用同一次
+    ``surface/compact`` series 重写，一次触发至多一次 cache miss。
+    """
+    jev_edits = 0
+    try:
+        from excelmanus.system_one.host import maybe_prune_observations
+
+        jev_edits = await maybe_prune_observations(engine, memory)
+    except Exception:
+        logger.debug("observation.prune skipped", exc_info=True)
+    from excelmanus.compaction_pruner import prune_messages
+
+    msgs = list(getattr(memory, "messages", None) or [])
+    edits = prune_messages(msgs)
+    for idx, new_content in edits.items():
+        msg = msgs[idx]
+        msg["content"] = new_content
+        emit = getattr(memory, "_emit_replace", None)
+        if callable(emit):
+            emit(msg, kind="tool/result")
+    return jev_edits + len(edits)
+
+
+def _fallback_truncate(
+    engine: Any,
+    manager: "CompactionManager",
+    memory: "ConversationMemory",
+    system_msgs: list[dict] | None,
+) -> None:
+    """连续空摘要的最后手段：硬截断到阈值，牺牲旧上下文换取窗口保证。
+
+    截断经 ``compaction/truncate`` void 事件上账，surface 指纹推进后由
+    调用方统一提交 ``surface/compact`` series 重写。头部已存在的合成
+    摘要受保护（protect_first），保住压缩连续性。
+    """
+    # 与 _do_compact 摘要后截断一致：ratio-0.1 留余量，避免下一边界立即重触发
+    threshold = int(
+        manager.max_context_tokens
+        * (getattr(manager._config, "compaction_threshold_ratio", 0.85) - 0.1)
+    )
+    # 头部合成摘要是 [user 指令, assistant 摘要] 成对出现，需整体保护
+    protect = 0
+    if memory.messages and memory.messages[0].get("_prompt_kind") == "compaction":
+        protect = 1
+        if (
+            len(memory.messages) > 1
+            and memory.messages[1].get("_prompt_kind") == "compaction"
+        ):
+            protect = 2
+    streak = getattr(manager, "_empty_streak", 0)
+    CompactionManager._emit_bookkeeping(memory, "compaction/fallback-truncate", {
+        "streak": streak, "threshold": threshold,
+    })
+    memory._truncate_history_to_threshold(
+        threshold, system_msgs, protect_first=protect,
+    )
+    manager._empty_streak = 0
+    logger.info(
+        "pre_step 连续空摘要 %d 次，回落硬截断（threshold=%d）",
+        streak, threshold,
+    )
+
+
 async def compact_for_pre_step(engine: Any) -> str:
-    """pre_step 附件：先 prune 再 summarize。失败也 enter，不重跑工具。"""
+    """pre_step 附件：重放当前信封 leading system + tools + 被压区间。失败也 enter。"""
     manager = getattr(engine, "_compaction_manager", None)
     memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
     if manager is None or memory is None:
         return "enter"
-    system_msgs = getattr(engine, "_last_system_msgs", None)
-    if system_msgs is None:
-        try:
-            from excelmanus.prompt.assemble import prepare_system_prompts_for_request
+    from excelmanus.prompt.envelope import compaction_wire_context
 
-            prompts, _err = prepare_system_prompts_for_request(engine)
-            system_only = [prompts[0]] if prompts else []
-            contexts = list(getattr(engine, "_prompt_user_contexts", None) or [])
-            system_msgs = memory.build_system_messages(system_only) if system_only else []
-            system_msgs = system_msgs + [
-                {"role": "user", "content": text}
-                for text in contexts
-                if isinstance(text, str) and text.strip()
-            ]
-            engine._last_system_msgs = system_msgs
+    system_msgs, tools = compaction_wire_context(engine)
+    if not system_msgs:
+        try:
+            from excelmanus.prompt.assemble import build_stable_system_prompt
+
+            stable = build_stable_system_prompt(engine)
+            system_msgs = (
+                [{"role": "system", "content": stable}] if stable.strip() else []
+            )
         except Exception:
             system_msgs = []
     if not manager.should_compact(memory, system_msgs):
         return "enter"
+    config = getattr(engine, "_config", None) or getattr(engine, "config", None)
+    before = surface_fingerprint(memory)
+    # L1：无模型修剪先行——error 载荷瘦身 + head/marker/tail。
+    # 修剪后降到阈值下则跳过 LLM 摘要（省一次模型调用）。
+    engine._last_pruned_tool_results = 0
+    if getattr(config, "compaction_pruner_enabled", True):
+        try:
+            pruned = await _apply_tool_result_pruning(engine, memory)
+            engine._last_pruned_tool_results = pruned
+            if pruned:
+                logger.info("pre_step 无模型修剪 %d 条 tool 结果", pruned)
+                CompactionManager._emit_bookkeeping(memory, "compaction/prune", {
+                    "pruned_count": pruned,
+                })
+        except Exception:
+            logger.warning("pre_step 工具结果修剪失败", exc_info=True)
+    if not manager.should_compact(memory, system_msgs):
+        # 修剪已降到阈值下：只提交 surface 重写，跳过 LLM 摘要
+        if surface_fingerprint(memory) != before:
+            from excelmanus.prompt.envelope import invalidate_envelope
+            from excelmanus.request.series import series_of
+
+            setattr(engine, "_history_snapshot_index", 0)
+            engine._compaction_generation = int(getattr(memory, "_compaction_generation", 0) or 0)
+            series_of(engine).start_new("surface/compact")
+            invalidate_envelope(engine)
+        engine._last_compact_failed = False
+        return "enter"
     client = getattr(engine, "_client", None)
     if client is None:
         return "enter"
-    config = getattr(engine, "_config", None) or getattr(engine, "config", None)
-    summary_model = getattr(engine, "_active_model", "") or getattr(config, "model", "") or "dummy"
-    before = surface_fingerprint(memory)
-    try:
-        result = await manager.auto_compact(
-            memory=memory,
-            system_msgs=system_msgs,
-            client=client,
-            summary_model=str(summary_model),
-        )
-    except Exception as exc:
-        logger.warning("pre_step 压缩失败，不重跑工具: %s", exc)
-        engine._last_compact_failed = True
-        return "enter"
-    engine._last_compact_failed = not bool(result.success)
+    max_empty = int(getattr(config, "compaction_empty_summary_max_retries", 3) or 0)
+    if max_empty > 0 and getattr(manager, "_empty_streak", 0) >= max_empty:
+        # 连续空摘要：跳过本次 LLM 摘要调用，直接硬截断释放压力
+        _fallback_truncate(engine, manager, memory, system_msgs)
+        engine._last_compact_failed = False
+    else:
+        summary_model = getattr(engine, "_active_model", "") or getattr(config, "model", "") or "dummy"
+        try:
+            result = await manager.auto_compact(
+                memory=memory,
+                system_msgs=system_msgs,
+                client=client,
+                summary_model=str(summary_model),
+                tools=tools,
+                vision_capable=bool(getattr(engine, "_is_vision_capable", True)),
+            )
+        except Exception as exc:
+            logger.warning("pre_step 压缩失败，不重跑工具: %s", exc)
+            engine._last_compact_failed = True
+            return "enter"
+        if not result.success:
+            logger.info("pre_step 压缩未执行: %s", getattr(result, "error", ""))
+            if max_empty > 0 and getattr(manager, "_empty_streak", 0) >= max_empty:
+                # 本次失败使 streak 达标：同一边界内立即截断，不等下一步
+                _fallback_truncate(engine, manager, memory, system_msgs)
+        engine._last_compact_failed = not bool(result.success)
     if surface_fingerprint(memory) != before:
+        from excelmanus.prompt.envelope import invalidate_envelope
+        from excelmanus.request.series import series_of
+
         setattr(engine, "_history_snapshot_index", 0)
+        engine._compaction_generation = int(getattr(memory, "_compaction_generation", 0) or 0)
+        series_of(engine).start_new("surface/compact")
+        invalidate_envelope(engine)
     return "enter"
 
 
-async def recover_request_overflow(engine: Any, messages: list[dict[str, Any]] | None) -> list[dict[str, Any]] | None:
-    """溢出走 request-error。只有 surface 推进才返回可重试消息，否则 None。"""
+async def recover_request_overflow(engine: Any, messages: list[dict[str, Any]] | None) -> Any:
+    """溢出走 request-error。只有 surface 推进后才重装信封，禁止静默砍前缀。"""
+    _ = messages
     memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
     if memory is None:
         return None
@@ -900,9 +761,15 @@ async def recover_request_overflow(engine: Any, messages: list[dict[str, Any]] |
     if surface_fingerprint(memory) == before:
         logger.warning("request-error：surface 未推进，不重试模型请求")
         return None
-    if not isinstance(messages, list) or not messages:
+    from excelmanus.request.compiler import compile_request
+
+    prepared, error = await compile_request(
+        engine,
+        tool_access=str(getattr(engine, "_tool_access", None) or "may_write"),
+        vision_capable=bool(getattr(engine, "_is_vision_capable", True)),
+        extra=getattr(engine, "_compile_extra", None),
+    )
+    if error is not None or prepared is None:
+        logger.warning("request-error：编译失败，不重试: %s", error)
         return None
-    sys_msgs = [item for item in messages if isinstance(item, dict) and item.get("role") == "system"]
-    non_sys = [item for item in messages if not (isinstance(item, dict) and item.get("role") == "system")]
-    keep = max(2, len(non_sys) // 3)
-    return sys_msgs + non_sys[-keep:]
+    return prepared

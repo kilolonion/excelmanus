@@ -18,15 +18,15 @@ def _make_app():
     import excelmanus.api as api_mod
 
     # 确保 _config 不为 None
-    api_mod._config = MagicMock()
-    api_mod._config.cors_allow_origins = ["*"]
+    api_mod.app.state.runtime.config = MagicMock()
+    api_mod.app.state.runtime.config.cors_allow_origins = ["*"]
     from excelmanus.api_app_state import set_config
-    set_config(api_mod._config)
+    set_config(api_mod.app.state.runtime.config)
 
     app = api_mod._app if hasattr(api_mod, "_app") else None
     if app is None:
         from excelmanus.api import create_app
-        app = create_app(api_mod._config)
+        app = create_app(api_mod.app.state.runtime.config)
 
     # mock auth
     app.state.auth_enabled = False

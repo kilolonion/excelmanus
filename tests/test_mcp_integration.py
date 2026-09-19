@@ -328,6 +328,9 @@ class TestExcelMCPPathAdaptation:
 
     def test_excel_relative_path_auto_resolved(self, tmp_path):
         """Excel MCP 相对路径应自动转为工作区绝对路径。"""
+        from excelmanus.tools.context import bind_workspace
+
+        bind_workspace(tmp_path)
         captured: dict[str, object] = {}
         client = self._make_call_tool_client(captured)
         tool_def = make_tool_def(
@@ -350,9 +353,12 @@ class TestExcelMCPPathAdaptation:
         """Excel MCP 工作区外路径一律拒绝，不得 basename 回落。"""
         from excelmanus.security.guard import SecurityViolationError
 
+        from excelmanus.tools.context import bind_workspace
+
         workbook = tmp_path / "mcp_fallback_demo.xlsx"
         workbook.write_bytes(b"placeholder")
 
+        bind_workspace(tmp_path)
         captured: dict[str, object] = {}
         client = self._make_call_tool_client(captured)
         tool_def = make_tool_def(
@@ -373,8 +379,11 @@ class TestExcelMCPPathAdaptation:
         """工作区外已存在的文件不得原样交给 Excel MCP。"""
         from excelmanus.security.guard import SecurityViolationError
 
+        from excelmanus.tools.context import bind_workspace
+
         outside = tmp_path.parent / "excel_mcp_escape.xlsx"
         outside.write_bytes(b"secret")
+        bind_workspace(tmp_path)
         captured: dict[str, object] = {}
         client = self._make_call_tool_client(captured)
         tool_def = make_tool_def(
@@ -392,6 +401,9 @@ class TestExcelMCPPathAdaptation:
 
     def test_non_excel_server_keeps_arguments_unchanged(self, tmp_path):
         """非 Excel MCP 工具不应改写参数。"""
+        from excelmanus.tools.context import bind_workspace
+
+        bind_workspace(tmp_path)
         captured: dict[str, object] = {}
         client = self._make_call_tool_client(captured)
         mcp_tool = SimpleNamespace(

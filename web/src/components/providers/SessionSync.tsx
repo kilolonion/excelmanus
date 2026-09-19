@@ -1,16 +1,20 @@
 "use client";
 
-import { useEffect } from "react";
-import { useSessionStore } from "@/stores/session-store";
+import { useEffect, useRef, useState } from "react";
+import { useSessionStore, waitForSessionHydration } from "@/stores/session-store";
 import {
   refreshSessionMessagesFromBackend,
   useChatStore,
 } from "@/stores/chat-store";
 import { subscribeToSession } from "@/lib/chat-actions";
 import { useUIStore } from "@/stores/ui-store";
+import { useJevStore } from "@/stores/jev-store";
+import { jevChatEnabledFromRuntime } from "@/lib/jev-settings";
 import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
+import { parseChatMode, shouldHydrateChatMode } from "@/lib/chat-mode-hydrate";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
 import { isPlaceholderModelId } from "@/lib/model-display";
+import { ensureLandingSession } from "@/lib/session-actions";
 import type { Session } from "@/lib/types";
 import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
 
@@ -49,11 +53,13 @@ export function SessionSync() {
   const setStreaming = useChatStore((s) => s.setStreaming);
   const setFullAccessEnabled = useUIStore((s) => s.setFullAccessEnabled);
   const setVisionCapable = useUIStore((s) => s.setVisionCapable);
-  const setChatMode = useUIStore((s) => s.setChatMode);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
   const setThinkingEffort = useUIStore((s) => s.setThinkingEffort);
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
+  const hydratedChatModeSessionRef = useRef<string | null>(null);
+  const landingEnsuredRef = useRef(false);
+  const [sessionsReady, setSessionsReady] = useState(false);
 
   // 启动时拉取 thinking config 同步到 store
   useEffect(() => {
@@ -65,10 +71,28 @@ export function SessionSync() {
   }, [setThinkingEffort]);
 
   useEffect(() => {
+    apiGet<{
+      jev_enabled?: string;
+      jev_active_provider?: string;
+      ai_gateway?: { configured?: boolean };
+      typesafe?: { configured?: boolean };
+      jev_providers?: { id?: string; protocol?: string; configured?: boolean }[];
+    }>("/config/runtime")
+      .then((data) => {
+        useJevStore.getState().setChatEnabled(jevChatEnabledFromRuntime(data));
+      })
+      .catch(() => {
+        useJevStore.getState().setChatEnabled(false);
+      });
+  }, []);
+
+  useEffect(() => {
     let cancelled = false;
 
     const syncSessions = async () => {
       try {
+        await waitForSessionHydration();
+        if (cancelled) return;
         const raw = await fetchSessions();
         if (cancelled) return;
         const mapped: Session[] = (raw as Record<string, unknown>[]).map((s) => ({
@@ -112,6 +136,20 @@ export function SessionSync() {
             }
           }
         }
+
+        setSessionsReady(true);
+        const afterActive = useSessionStore.getState().activeSessionId;
+        if (afterActive?.startsWith(DEMO_SESSION_PREFIX)) {
+          return;
+        }
+        if (!landingEnsuredRef.current || !afterActive) {
+          try {
+            await ensureLandingSession();
+            if (!cancelled) landingEnsuredRef.current = true;
+          } catch {
+            // 下次轮询再补建空白新对话
+          }
+        }
       } catch {
         // 蹇界暐
       }
@@ -129,6 +167,13 @@ export function SessionSync() {
   }, [mergeSessions, setActiveSession]);
 
   useEffect(() => {
+    if (!sessionsReady) return;
+    if (activeSessionId?.startsWith(DEMO_SESSION_PREFIX)) return;
+    if (activeSessionId) return;
+    void ensureLandingSession().catch(() => {});
+  }, [sessionsReady, activeSessionId]);
+
+  useEffect(() => {
     // 本地 SSE 流活跃时不自动切换会话；等流结束再切换，避免清空乐观进行中的消息。
     if (abortController) return;
 
@@ -143,9 +188,10 @@ export function SessionSync() {
   useEffect(() => {
     if (!activeSessionId) {
       setFullAccessEnabled(false);
-      // 姝ゅ涓嶉噸缃?chatMode锛屽叾涓虹敤鎴烽┍鍔ㄧ姸鎬侊紙ChatModeTabs锛夛紱閲嶇疆浼氬鑷寸敤鎴峰垏鍒?read/plan 鍚庡嚑绉掑張寮瑰洖 write銆?
-      // 姝ゅ涓嶉噸缃?currentModel锛汿opModelSelector 閫氳繃 /models API 鐙珛绠＄悊鍏ㄥ眬妯″瀷鍚嶏紝娓呯┖浼氬鑷村伐鍏锋爮鐭殏鏄剧ず銆屾ā鍨嬨€嶅啀琚噸鏂版媺鍙栥€?
-      // 浠呭湪娌℃湁娲昏穬 SSE 杩炴帴鏃舵竻闄ゆ祦寮忕姸鎬侊紝鍚﹀垯娴佸洖璋冧細缁х画鍐欏叆宸层€屽仠姝€嶇殑 store銆?
+      // 不重置 chatMode：它是用户点选（ChatModeTabs）。轮询覆盖会把 read/plan 弹回 write。
+      // 后端主动切换（/plan、批准退出）走 SSE mode_changed（mode_name=chat_mode, value）。
+      // 不重置 currentModel：TopModelSelector 通过 /models API 独立管理全局模型名。
+      // 仅在没有活跃 SSE 连接时清除流式状态，否则流回调会继续写入已「停止」的 store。
       if (!useChatStore.getState().abortController) {
         setStreaming(false);
       }
@@ -160,6 +206,25 @@ export function SessionSync() {
     let snapshotValidated = false;
     let notFoundCount = 0;
     const NOT_FOUND_THRESHOLD = 2;
+    if (hydratedChatModeSessionRef.current !== activeSessionId) {
+      useUIStore.getState().releaseChatModeOwnership();
+    }
+    const hydrateChatModeOnce = (chatMode: unknown) => {
+      const ui = useUIStore.getState();
+      if (
+        !shouldHydrateChatMode({
+          sessionId: activeSessionId,
+          hydratedSessionId: hydratedChatModeSessionRef.current,
+          owned: ui.chatModeOwned,
+        })
+      ) {
+        return;
+      }
+      const mode = parseChatMode(chatMode);
+      if (!mode) return;
+      ui.hydrateChatMode(mode);
+      hydratedChatModeSessionRef.current = activeSessionId;
+    };
     const pollDetail = async () => {
       try {
         const detail = await fetchSessionDetail(activeSessionId);
@@ -198,11 +263,8 @@ export function SessionSync() {
         if (detail.currentModel != null && typeof detail.visionCapable === "boolean") {
           setVisionCapable(detail.visionCapable);
         }
-        // 娉ㄦ剰锛氫笉瑕佸湪杞涓敤鍚庣 chatMode 瑕嗙洊鍓嶇鐘舵€併€?
-        // chatMode 鐨勬潈濞佹潵婧愭槸鍓嶇鐢ㄦ埛鎿嶄綔锛圕hatModeTabs 鐐瑰嚮锛夛紝
-        // 鍚庣 _current_chat_mode 鍙湪 engine.chat() 璋冪敤鏃舵洿鏂帮紝
-        // 杞瑕嗙洊浼氬鑷寸敤鎴峰垏鎹㈡ā寮忓悗鍑犵琚噸缃洖鏃у€笺€?
-        // 鍚庣涓诲姩鎺ㄩ€佺殑妯″紡鍙樻洿锛圫SE mode_changed 浜嬩欢锛変粛鐒剁敓鏁堛€?
+        // 每个 session 只 hydrate 一次 chat_mode。轮询不得覆盖用户点选；/plan 走 SSE。
+        hydrateChatModeOnce(detail.chatMode);
         const modelName = detail.currentModelName || detail.currentModel;
         if (modelName && !isPlaceholderModelId(modelName)) setCurrentModel(modelName);
 
@@ -267,13 +329,13 @@ export function SessionSync() {
             const dismissed = freshChat._lastDismissedApprovalId;
             const incomingId = (detail.pendingApproval as { id?: string })?.id
               ?? (detail.pendingApproval as { approval_id?: string })?.approval_id;
-            if (!dismissed || dismissed !== incomingId) {
+            // 后端只应返回仍可提交的审批；本地再拦一次已关闭单据。
+            if (incomingId && dismissed !== incomingId) {
               freshChat.setPendingApproval(detail.pendingApproval);
-              // 鍚屾椂灏嗘渶鍚庝竴涓尮閰嶇殑 tool_call block 鏍囪涓?pending
               _markLastToolCallPending(useChatStore.getState());
             }
           } else if (!detail.pendingApproval && freshChat.pendingApproval) {
-            freshChat.setPendingApproval(null);
+            freshChat.dismissApproval(freshChat.pendingApproval.id);
           }
 
           // 鎭㈠寰呭鐞嗛棶棰樺脊绐?
@@ -302,6 +364,11 @@ export function SessionSync() {
     const POLL_INITIAL_DELAY = 800;
     let currentInterval = POLL_FAST;
     let consecutiveErrors = 0;
+    // chat_mode 首次 hydrate 不等轮询延迟，避免 F5 后 tab 先闪回 write。
+    void fetchSessionDetail(activeSessionId).then((detail) => {
+      if (cancelled || !detail) return;
+      hydrateChatModeOnce(detail.chatMode);
+    }).catch(() => {});
     let timer = window.setTimeout(function schedule() {
       void pollDetail().then(() => {
         if (cancelled) return;
@@ -327,7 +394,6 @@ export function SessionSync() {
     setCurrentModel,
     setFullAccessEnabled,
     setVisionCapable,
-    setChatMode,
   ]);
 
   return null;

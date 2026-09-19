@@ -61,40 +61,40 @@ def derive_fernet_key() -> bytes | None:
     """派生 Fernet 加密密钥。优先级：
 
     1. EXCELMANUS_SECRET_KEY 环境变量
-    2. ``{data_home}/.secret_key``（跟随 EXCELMANUS_HOME / DATA_ROOT）
-    3. 旧路径 ``~/.excelmanus/data/.secret_key``（复制到正式路径后使用）
+    2. ``{EXCELMANUS_HOME}/.secret_key``（不跟随 DATA_ROOT）
+    3. 历史路径 ``DATA_ROOT/.secret_key`` / ``~/.excelmanus/data/.secret_key``
+       （读取后迁移到正式路径）
     4. 在正式路径自动生成
     """
     env_key = _secret_from_env()
     if env_key is not None:
         return env_key
 
-    from excelmanus.data_home import get_legacy_secret_key_path, get_secret_key_path
+    from excelmanus.data_home import get_legacy_secret_key_paths, get_secret_key_path
 
     key_file = get_secret_key_path()
     if key_file.exists():
-        return key_file.read_bytes().strip() or None
+        payload = key_file.read_bytes().strip()
+        if payload:
+            return payload
 
-    legacy = get_legacy_secret_key_path()
-    try:
-        same = legacy.exists() and legacy.resolve() == key_file.resolve()
-    except OSError:
-        same = False
-    if legacy.exists() and not same:
+    for legacy in get_legacy_secret_key_paths():
+        if not legacy.exists():
+            continue
         try:
             payload = legacy.read_bytes().strip()
-            if payload:
-                key_file.parent.mkdir(parents=True, exist_ok=True)
-                key_file.write_bytes(payload)
-                _restrict_file_permissions(key_file)
-                logger.info("已将加密密钥迁移到正式路径: %s", key_file)
-                return payload
+        except OSError:
+            continue
+        if not payload:
+            continue
+        try:
+            key_file.parent.mkdir(parents=True, exist_ok=True)
+            key_file.write_bytes(payload)
+            _restrict_file_permissions(key_file)
+            logger.info("已将加密密钥迁移到正式路径: %s -> %s", legacy, key_file)
         except Exception:
-            logger.warning("迁移加密密钥失败，回退旧路径", exc_info=True)
-            try:
-                return legacy.read_bytes().strip() or None
-            except OSError:
-                pass
+            logger.warning("迁移加密密钥失败，回退旧路径: %s", legacy, exc_info=True)
+        return payload
 
     try:
         from cryptography.fernet import Fernet

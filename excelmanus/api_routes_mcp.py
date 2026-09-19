@@ -25,19 +25,26 @@ router = APIRouter()
 
 def _get_config():
     """延迟导入获取全局 config。"""
-    from excelmanus.api import _config
+    from excelmanus.api_app_state import get_runtime
+    _config = get_runtime().config
     return _config
 
 
 def _get_error_response(status_code: int, message: str) -> JSONResponse:
     """延迟导入获取统一错误响应构造器。"""
-    from excelmanus.api import _error_json_response
+    from excelmanus.api_app_state import error_json_response as _error_json_response
     return _error_json_response(status_code, message)
 
 
 def _find_mcp_config_path() -> str:
     """定位 mcp.json 配置文件路径（写操作目标）。"""
-    env_path = os.environ.get("EXCELMANUS_MCP_CONFIG")
+    env_path = ""
+    try:
+        from excelmanus.settings_runtime import get_setting
+
+        env_path = get_setting("EXCELMANUS_MCP_CONFIG") or ""
+    except Exception:
+        env_path = ""
     if env_path and os.path.isfile(env_path):
         return env_path
     config = _get_config()
@@ -77,7 +84,8 @@ def _write_mcp_json(path: str, data: dict) -> None:
 
 def _get_shared_mcp_manager():
     """获取共享 MCP 管理器实例。"""
-    from excelmanus.api import _session_manager
+    from excelmanus.api_app_state import get_runtime
+    _session_manager = get_runtime().session_manager
     if _session_manager is None:
         return None
     return getattr(_session_manager, "_shared_mcp_manager", None)
@@ -225,7 +233,9 @@ async def delete_mcp_server(name: str) -> JSONResponse:
 @router.post("/api/v1/mcp/reload")
 async def reload_mcp() -> JSONResponse:
     """热重载所有 MCP 连接：关闭现有连接 → 重新初始化。"""
-    from excelmanus.api import _session_manager, _tool_registry
+    from excelmanus.api_app_state import get_runtime
+    _session_manager = get_runtime().session_manager
+    _tool_registry = get_runtime().tool_registry
 
     manager = _get_shared_mcp_manager()
     if manager is None:

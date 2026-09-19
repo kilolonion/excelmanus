@@ -55,33 +55,21 @@ vi.mock("@/stores/word-store", () => ({
     }),
 }));
 
+vi.mock("@/lib/open-workspace-file", () => ({
+  openWorkspaceFile: vi.fn(),
+}));
+
 vi.mock("@/lib/api", () => ({
   uploadFile: vi.fn(),
   uploadFileToFolder: vi.fn(),
   fetchExcelFiles: vi.fn().mockResolvedValue([]),
   normalizeExcelPath: (path: string) => path,
-  downloadFile: vi.fn(),
   workspaceMkdir: vi.fn(),
   workspaceDeleteItem: vi.fn(),
 }));
 
 vi.mock("@/lib/concurrency", () => ({
   mapWithConcurrency: vi.fn(),
-}));
-
-vi.mock("@/lib/file-preview", () => ({
-  isExcelFile: vi.fn().mockReturnValue(false),
-  isImageFile: vi.fn().mockReturnValue(false),
-  isTextPreviewableFile: vi.fn().mockReturnValue(false),
-  isWordFile: vi.fn().mockReturnValue(false),
-}));
-
-vi.mock("@/components/chat/CodePreviewModal", () => ({
-  CodePreviewModal: () => null,
-}));
-
-vi.mock("@/components/chat/ImagePreviewModal", () => ({
-  ImagePreviewModal: () => null,
 }));
 
 vi.mock("@/components/sidebar/file-tree-helpers", () => ({
@@ -156,5 +144,19 @@ describe("ExcelFilesBar", () => {
     const src = readFileSync(join(sidebarDir, "ExcelFilesBar.tsx"), "utf8");
     expect(src).not.toContain("文件关系");
     expect(src).not.toContain("FileRelationshipGraph");
+  });
+
+  it("mention templates and drag text use formatFileMention paths, not bare filenames", () => {
+    const files = [
+      "ExcelFilesBar.tsx",
+      "TreeNodeItem.tsx",
+      "FlatFileListView.tsx",
+    ];
+    for (const file of files) {
+      const src = readFileSync(join(sidebarDir, file), "utf8");
+      expect(src).toContain("formatFileMention");
+      expect(src).not.toMatch(/@file:\$\{(?:file\.)?filename\}/);
+      expect(src).not.toMatch(/@file:\$\{pair\[0\]\}/);
+    }
   });
 });

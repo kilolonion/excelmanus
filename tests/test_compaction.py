@@ -16,9 +16,6 @@ from excelmanus.compaction import (
     CompactionManager,
     CompactionResult,
     CompactionStats,
-    _extract_rule_based_summary,
-    _format_messages_for_compaction,
-    prune_overlong_tool_results,
 )
 from excelmanus.config import ExcelManusConfig
 from excelmanus.memory import ConversationMemory
@@ -38,7 +35,6 @@ def _make_config(**overrides: Any) -> ExcelManusConfig:
         "compaction_threshold_ratio": 0.85,
         "compaction_keep_recent_turns": 2,
         "compaction_max_summary_tokens": 500,
-        "summarization_enabled": False,
     }
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -119,29 +115,6 @@ class TestShouldCompact:
         assert mgr.should_compact(memory, None) is False
 
 
-# ── 步前剪枝 ──────────────────────────────────────────────
-
-
-class TestPruneOverlongToolResults:
-    def test_truncates_overlong_tool_content(self) -> None:
-        config = _make_config()
-        memory = _make_memory(config)
-        memory.add_user_message("看表")
-        memory.add_tool_result("call-1", "Z" * 500)
-        pruned = prune_overlong_tool_results(memory, max_chars=50)
-        assert pruned == 1
-        content = memory.messages[-1]["content"]
-        assert content.startswith("Z" * 50)
-        assert "已截断" in content
-
-    def test_leaves_short_tool_results(self) -> None:
-        config = _make_config()
-        memory = _make_memory(config)
-        memory.add_tool_result("call-1", "short")
-        assert prune_overlong_tool_results(memory, max_chars=50) == 0
-        assert memory.messages[-1]["content"] == "short"
-
-
 # ── auto_compact 测试 ────────────────────────────────────
 
 
@@ -195,7 +168,8 @@ class TestAutoCompact:
         memory = _make_memory(config)
         client = _mock_client()
 
-        # 只有 3 轮 user 消息，不够 keep_recent_turns=5
+        # 只有 3 轮 user 消息，不够 keep_recent_turns=5：
+        # 保留下限收缩为当前用户轮起点，此前轮次仍可压缩。
         for i in range(3):
             memory.add_user_message(f"用户消息 {i}")
             memory.add_assistant_message(f"助手回复 {i}")
@@ -207,9 +181,32 @@ class TestAutoCompact:
             summary_model="test-model",
         )
 
+        assert result.success is True
+        # 当前用户轮（第 3 轮）原文必须保留，此前轮次被摘要替换
+        roles = [m.get("role") for m in memory.messages]
+        assert memory.messages[-2].get("content") == "用户消息 2"
+        assert memory.messages[-1].get("content") == "助手回复 2"
+        assert roles[0] == "user"
+
+    @pytest.mark.asyncio
+    async def test_no_user_turns_refuses(self) -> None:
+        config = _make_config(max_context_tokens=500_000)
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        client = _mock_client()
+
+        # 没有可见用户轮次（纯注入/工具历史）时仍拒绝压缩
+        memory._messages.append({"role": "tool", "tool_call_id": "t1", "content": "x"})
+
+        result = await mgr.auto_compact(
+            memory=memory,
+            system_msgs=None,
+            client=client,
+            summary_model="test-model",
+        )
+
         assert result.success is False
         assert "不足" in result.error
-        # 不应调用 LLM
         client.chat.completions.create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -257,6 +254,9 @@ class TestAutoCompact:
 
         assert result.success is False
         assert "摘要失败" in result.error
+        assert "未改写历史" in result.error
+        assert len(memory._messages) == 20
+        assert getattr(memory, "_compaction_generation", 0) in (0, None)
         # 压缩次数不应增加
         assert mgr.stats.compaction_count == 0
 
@@ -283,9 +283,12 @@ class TestAutoCompact:
 
         assert result.success is False
         assert "摘要为空" in result.error
+        assert "未改写历史" in result.error
+        assert len(memory._messages) == 20
+        assert getattr(memory, "_compaction_generation", 0) in (0, None)
 
     @pytest.mark.asyncio
-    async def test_prune_only_is_not_summary_success(self) -> None:
+    async def test_auto_compact_does_not_prune_durable_before_summary(self) -> None:
         config = _make_config(
             max_context_tokens=8000,
             compaction_threshold_ratio=0.15,
@@ -293,28 +296,27 @@ class TestAutoCompact:
         )
         mgr = CompactionManager(config)
         memory = _make_memory(config)
-        client = _mock_client("不该用到")
-        for i in range(4):
+        memory.system_prompt = "sys"
+        client = _mock_client("摘要")
+        memory.add_user_message("用户 0")
+        memory.add_assistant_message("助手 0")
+        long_tool = "X" * 20000
+        memory.add_tool_result("call-1", long_tool)
+        for i in range(1, 4):
             memory.add_user_message(f"用户 {i}")
             memory.add_assistant_message(f"助手 {i}")
-        memory.add_tool_result("call-1", "X" * 20000)
 
-        def _aggressive(mem, *, max_chars: int = 4000) -> int:
-            return prune_overlong_tool_results(mem, max_chars=80)
+        result = await mgr.auto_compact(
+            memory=memory,
+            system_msgs=[{"role": "system", "content": "sys"}],
+            client=client,
+            summary_model="test-model",
+        )
 
-        with patch("excelmanus.compaction.prune_overlong_tool_results", _aggressive):
-            result = await mgr.auto_compact(
-                memory=memory,
-                system_msgs=None,
-                client=client,
-                summary_model="test-model",
-            )
-
-        assert result.success is False
-        assert result.pruned_tool_results >= 1
-        assert "未做摘要" in result.error
-        client.chat.completions.create.assert_not_called()
-        assert mgr.stats.compaction_count == 0
+        client.chat.completions.create.assert_called_once()
+        sent = client.chat.completions.create.call_args.kwargs["messages"]
+        assert any(long_tool in str(m.get("content", "")) for m in sent)
+        assert result.pruned_tool_results == 0
 
 
 # ── manual_compact 测试 ──────────────────────────────────
@@ -346,10 +348,12 @@ class TestManualCompact:
         )
 
         assert result.success is True
-        # 验证自定义指令被传入
         call_args = client.chat.completions.create.call_args
-        user_msg = call_args.kwargs["messages"][1]["content"]
-        assert "只保留文件操作记录" in user_msg
+        compact_msgs = call_args.kwargs["messages"]
+        assert compact_msgs[0]["role"] == "system"
+        assert compact_msgs[-1]["role"] == "user"
+        assert "只保留文件操作记录" in compact_msgs[-1]["content"]
+        assert "只输出文本摘要" in compact_msgs[-1]["content"]
 
     @pytest.mark.asyncio
     async def test_manual_compact_without_instruction(self) -> None:
@@ -374,6 +378,101 @@ class TestManualCompact:
 
         assert result.success is True
         assert mgr.stats.compaction_count == 1
+
+    @pytest.mark.asyncio
+    async def test_compaction_reuses_session_system_prefix(self) -> None:
+        config = _make_config(
+            max_context_tokens=500_000,
+            compaction_keep_recent_turns=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        client = _mock_client("前缀摘要")
+        for i in range(8):
+            memory.add_user_message(f"用户消息 {i}")
+            memory.add_assistant_message(f"助手回复 {i}")
+
+        system_msgs = [{"role": "system", "content": "你是会话助手"}]
+        result = await mgr.manual_compact(
+            memory=memory,
+            system_msgs=system_msgs,
+            client=client,
+            summary_model="test-model",
+        )
+        assert result.success is True
+        compact_msgs = client.chat.completions.create.call_args.kwargs["messages"]
+        assert compact_msgs[0] == system_msgs[0]
+        assert compact_msgs[-1]["role"] == "user"
+        assert compact_msgs[-1]["content"].startswith("你是 ExcelManus 对话压缩助手")
+        assert not any(
+            part.get("type") in {"image", "image_url"}
+            for msg in compact_msgs
+            if isinstance(msg.get("content"), list)
+            for part in msg["content"]
+            if isinstance(part, dict)
+        )
+
+    @pytest.mark.asyncio
+    async def test_compaction_forwards_tools(self) -> None:
+        config = _make_config(
+            max_context_tokens=500_000,
+            compaction_keep_recent_turns=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        client = _mock_client("工具前缀")
+        for i in range(8):
+            memory.add_user_message(f"用户消息 {i}")
+            memory.add_assistant_message(f"助手回复 {i}")
+        tools = [{"type": "function", "function": {"name": "read_excel"}}]
+        result = await mgr.manual_compact(
+            memory=memory,
+            system_msgs=[{"role": "system", "content": "会话助手"}],
+            client=client,
+            summary_model="test-model",
+            tools=tools,
+        )
+        assert result.success is True
+        assert client.chat.completions.create.call_args.kwargs["tools"] == tools
+
+    @pytest.mark.asyncio
+    async def test_compaction_rejects_image_summary(self) -> None:
+        config = _make_config(
+            max_context_tokens=500_000,
+            compaction_keep_recent_turns=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        for i in range(8):
+            memory.add_user_message(f"用户消息 {i}")
+            memory.add_assistant_message(f"助手回复 {i}")
+
+        client = AsyncMock()
+        mock_response = MagicMock()
+        mock_response.choices = [
+            MagicMock(message=MagicMock(content=[
+                {"type": "text", "text": "带图摘要"},
+                {"type": "image", "attachment": {"attachmentId": "sha256:deadbeef"}},
+            ])),
+        ]
+        client.chat.completions.create = AsyncMock(return_value=mock_response)
+        result = await mgr.auto_compact(
+            memory=memory,
+            system_msgs=None,
+            client=client,
+            summary_model="test-model",
+        )
+        assert result.success is False
+        assert "图片" in (result.error or "") or "image" in (result.error or "").lower()
+        assert len(memory.messages) == 16
+        assert getattr(memory, "_compaction_generation", 0) in (0, None)
+        assert all(
+            not (isinstance(m.get("content"), list) and any(
+                isinstance(p, dict) and p.get("type") == "image"
+                for p in m["content"]
+            ))
+            for m in memory.messages
+        )
 
 
 # ── get_status 测试 ──────────────────────────────────────
@@ -442,653 +541,160 @@ class TestTokenUsageRatio:
         assert ratio > 0
 
 
-# ── _format_messages_for_compaction 测试 ─────────────────
+# ── 空摘要 streak / fallback 截断 / no-think 参数 ──────────
 
 
-class TestFormatMessages:
-    """_format_messages_for_compaction 格式化测试。"""
-
-    def test_basic_messages(self) -> None:
-        messages = [
-            {"role": "user", "content": "你好"},
-            {"role": "assistant", "content": "你好！有什么可以帮助你的？"},
-        ]
-        result = _format_messages_for_compaction(messages)
-        assert "[user] 你好" in result
-        assert "[assistant] 你好！" in result
-
-    def test_tool_call_messages(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    {
-                        "id": "tc_1",
-                        "function": {
-                            "name": "read_excel",
-                            "arguments": '{"file_path": "/data/test.xlsx"}',
-                        },
-                    }
-                ],
-            },
-        ]
-        result = _format_messages_for_compaction(messages)
-        assert "read_excel" in result
-        assert "工具调用" in result
-
-    def test_tool_result_messages(self) -> None:
-        messages = [
-            {
-                "role": "tool",
-                "tool_call_id": "tc_1",
-                "content": "工具执行结果：成功读取 100 行数据",
-            },
-        ]
-        result = _format_messages_for_compaction(messages)
-        assert "[tool result:tc_1]" in result
-        assert "成功读取" in result
-
-    def test_long_content_truncation(self) -> None:
-        messages = [
-            {"role": "user", "content": "x" * 2000},
-        ]
-        result = _format_messages_for_compaction(messages, max_content_chars=100)
-        assert "...[截断]" in result
-        assert len(result) < 2000
-
-    def test_total_chars_limit(self) -> None:
-        messages = [
-            {"role": "user", "content": f"消息 {i}" * 10}
-            for i in range(1000)
-        ]
-        result = _format_messages_for_compaction(messages, max_total_chars=500)
-        assert len(result) <= 600  # 允许一点溢出（最后一条 + 省略标记）
-        assert "省略" in result
-
-    def test_empty_messages(self) -> None:
-        result = _format_messages_for_compaction([])
-        assert result == ""
-
-    def test_multimodal_content(self) -> None:
-        messages = [
-            {
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": "请看这张图片"},
-                    {"type": "image_url", "image_url": {"url": "data:..."}},
-                ],
-            },
-        ]
-        result = _format_messages_for_compaction(messages)
-        assert "请看这张图片" in result
-        assert "[图片]" in result
-
-
-# ── 多次压缩统计测试 ────────────────────────────────────
-
-
-class TestMultipleCompactions:
-    """测试多次压缩的统计累积。"""
+class TestEmptySummaryFallback:
+    """连续空摘要 → 跳过 LLM 直接硬截断；thinking 禁用参数出网。"""
 
     @pytest.mark.asyncio
-    async def test_stats_accumulate(self) -> None:
+    async def test_no_think_extra_body_and_directive(self) -> None:
         config = _make_config(
             max_context_tokens=500_000,
             compaction_keep_recent_turns=2,
         )
         mgr = CompactionManager(config)
-        client = _mock_client("摘要内容")
+        memory = _make_memory(config)
+        client = _mock_client("摘要")
 
-        for round_num in range(3):
-            memory = _make_memory(config)
-            for i in range(10):
-                memory.add_user_message(f"轮次{round_num} 用户消息 {i}")
-                memory.add_assistant_message(f"轮次{round_num} 助手回复 {i}")
-
-            result = await mgr.auto_compact(
-                memory=memory,
-                system_msgs=None,
-                client=client,
-                summary_model="test-model",
-            )
-            assert result.success is True
-
-        assert mgr.stats.compaction_count == 3
-
-
-# ── 提示词质量验证 ───────────────────────────────────────
-
-
-class TestPromptQuality:
-    """验证压缩提示词包含必要的 ExcelManus 场景关键词。"""
-
-    def test_system_prompt_contains_key_categories(self) -> None:
-        """确保系统提示词涵盖了 ExcelManus 关键信息类别。"""
-        assert "文件" in COMPACTION_SYSTEM_PROMPT
-        assert "工作表" in COMPACTION_SYSTEM_PROMPT
-        assert "操作" in COMPACTION_SYSTEM_PROMPT
-        assert "任务" in COMPACTION_SYSTEM_PROMPT
-        assert "数据" in COMPACTION_SYSTEM_PROMPT
-        assert "列名" in COMPACTION_SYSTEM_PROMPT
-        assert "skill" in COMPACTION_SYSTEM_PROMPT.lower()
-        assert "备份" in COMPACTION_SYSTEM_PROMPT
-        assert "fullaccess" in COMPACTION_SYSTEM_PROMPT.lower()
-
-    def test_system_prompt_contains_rules(self) -> None:
-        """确保包含防止幻觉的规则。"""
-        assert "不要编造" in COMPACTION_SYSTEM_PROMPT
-        assert "精确" in COMPACTION_SYSTEM_PROMPT
-
-
-# ── _extract_rule_based_summary 专项测试 ──────────────────
-
-
-def _tc(tc_id: str, name: str, arguments: str) -> dict:
-    """构造 tool_call 字典的辅助函数。"""
-    return {
-        "id": tc_id,
-        "function": {"name": name, "arguments": arguments},
-    }
-
-
-class TestExtractRuleBasedSummaryOriginal:
-    """测试原有 3 个维度（文件路径、工具调用、用户意图）。"""
-
-    def test_empty_messages(self) -> None:
-        assert _extract_rule_based_summary([]) == ""
-
-    def test_file_path_extraction_from_content(self) -> None:
-        messages = [
-            {"role": "user", "content": '打开 file_path: "/data/report.xlsx" 进行处理'},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "/data/report.xlsx" in result
-        assert "**涉及文件**" in result
-
-    def test_file_path_extraction_from_tool_args(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "/data/sales.xlsx" in result
-
-    def test_tool_calls_summary(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/a.xlsx"}'),
-                    _tc("tc_2", "read_excel", '{"file_path": "/b.xlsx"}'),
-                    _tc("tc_3", "list_sheets", '{"file_path": "/a.xlsx"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**已执行工具**" in result
-        assert "read_excel×2" in result
-        assert "list_sheets×1" in result
-
-    def test_user_intents(self) -> None:
-        messages = [
-            {"role": "user", "content": "帮我整理销售数据"},
-            {"role": "user", "content": "按月份汇总"},
-            {"role": "user", "content": "生成图表"},
-            {"role": "user", "content": "导出为PDF"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**用户意图**" in result
-        # 只保留最后 3 条
-        assert "按月份汇总" in result
-        assert "生成图表" in result
-        assert "导出为PDF" in result
-
-    def test_system_user_messages_excluded(self) -> None:
-        messages = [
-            {"role": "user", "content": "[系统] 请基于以下对话摘要继续工作。"},
-            {"role": "user", "content": "真正的用户消息"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "[系统]" not in result
-        assert "真正的用户消息" in result
-
-
-class TestExtractRuleBasedSummaryWriteOps:
-    """测试新增维度：写入操作记录。"""
-
-    def test_write_text_file_recorded(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "write_text_file", '{"file_path": "/scripts/process.py", "content": "print(1)"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**写入操作**" in result
-        assert "write_text_file" in result
-        assert "/scripts/process.py" in result
-
-    def test_run_code_with_sheet_and_range(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_1",
-                        "run_code",
-                        '{"file_path": "/data/report.xlsx", "sheet": "Sheet1", "range": "A1:D100"}',
-                    ),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**写入操作**" in result
-        assert "run_code → /data/report.xlsx / Sheet1 / A1:D100" in result
-
-    def test_read_only_tools_not_in_write_ops(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/data/report.xlsx"}'),
-                    _tc("tc_2", "list_sheets", '{"file_path": "/data/report.xlsx"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**写入操作**" not in result
-
-    def test_duplicate_write_ops_deduped(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "write_text_file", '{"file_path": "/a.py", "content": "v1"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_2", "write_text_file", '{"file_path": "/a.py", "content": "v1"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        # 相同的写入描述应被去重
-        assert result.count("write_text_file → /a.py") == 1
-
-
-class TestExtractRuleBasedSummaryTaskStatus:
-    """测试新增维度：任务状态重放。"""
-
-    def test_task_create_and_update(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_1",
-                        "task_create",
-                        '{"title": "整理销售数据", "subtasks": ["读取数据", "清洗数据", "生成报表"]}',
-                    ),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_2", "task_update", '{"index": 0, "new_status": "completed"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_3", "task_update", '{"index": 1, "new_status": "in_progress"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**任务进度**" in result
-        assert "整理销售数据" in result
-        assert "completed: 1" in result
-        assert "待完成" in result
-        assert "清洗数据" in result  # in_progress
-        assert "生成报表" in result  # pending
-
-    def test_task_create_with_dict_subtasks(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_1",
-                        "task_create",
-                        '{"title": "测试任务", "subtasks": [{"title": "子任务1"}, {"title": "子任务2"}]}',
-                    ),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**任务进度**" in result
-        assert "测试任务" in result
-        assert "pending: 2" in result
-
-    def test_no_task_create_no_section(self) -> None:
-        messages = [
-            {"role": "user", "content": "帮我做个任务"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**任务进度**" not in result
-
-    def test_task_update_out_of_range_ignored(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "task_create", '{"title": "T", "subtasks": ["A"]}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_2", "task_update", '{"index": 99, "new_status": "completed"}'),
-                ],
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**任务进度**" in result
-        assert "pending: 1" in result
-
-
-class TestExtractRuleBasedSummaryAssistantConclusions:
-    """测试新增维度：助手结论。"""
-
-    def test_assistant_conclusions_extracted(self) -> None:
-        messages = [
-            {"role": "assistant", "content": "分析完成，合计销售额为 ¥1,234,567，其中华东地区占比最高。"},
-            {"role": "assistant", "content": "已将结果写入 Sheet2 的 E 列，数据格式为人民币。"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**助手结论**" in result
-        assert "合计销售额" in result
-        assert "Sheet2" in result
-
-    def test_short_assistant_messages_skipped(self) -> None:
-        messages = [
-            {"role": "assistant", "content": "好的"},
-            {"role": "assistant", "content": "收到"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**助手结论**" not in result
-
-    def test_only_last_two_kept(self) -> None:
-        messages = [
-            {"role": "assistant", "content": "第一条较长的助手回复内容，包含分析结论"},
-            {"role": "assistant", "content": "第二条较长的助手回复内容，包含操作记录"},
-            {"role": "assistant", "content": "第三条较长的助手回复内容，包含最终结果"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "第一条" not in result
-        assert "第二条" in result
-        assert "第三条" in result
-
-
-class TestExtractRuleBasedSummaryToolErrors:
-    """测试新增维度：工具执行错误。"""
-
-    def test_tool_error_extracted(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/missing.xlsx"}'),
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "tc_1",
-                "content": "工具执行错误: FileNotFoundError: /missing.xlsx 不存在",
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**近期错误**" in result
-        assert "read_excel" in result
-        assert "FileNotFoundError" in result
-
-    def test_successful_tool_result_not_in_errors(self) -> None:
-        messages = [
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/data.xlsx"}'),
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "tc_1",
-                "content": "成功读取 100 行数据",
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**近期错误**" not in result
-
-    def test_only_last_three_errors_kept(self) -> None:
-        messages = []
         for i in range(5):
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [_tc(f"tc_{i}", "run_code", "{}")],
+            memory.add_user_message(f"用户消息 {i}")
+            memory.add_assistant_message(f"助手回复 {i}")
+
+        await mgr.auto_compact(
+            memory=memory, system_msgs=None,
+            client=client, summary_model="test-model",
+        )
+
+        kwargs = client.chat.completions.create.call_args.kwargs
+        extra = kwargs["extra_body"]
+        assert extra["chat_template_kwargs"]["enable_thinking"] is False
+        instruction = kwargs["messages"][-1]["content"]
+        assert "/no_think" in instruction
+
+    @pytest.mark.asyncio
+    async def test_empty_streak_then_fallback_truncate(self) -> None:
+        """streak 达标后 pre_step 跳过 LLM 摘要，直接硬截断到阈值内。"""
+        from excelmanus.compaction import compact_for_pre_step
+        from excelmanus.session_log import SessionEventLog
+
+        config = _make_config(
+            max_context_tokens=3000,
+            compaction_threshold_ratio=0.5,
+            compaction_keep_recent_turns=2,
+            compaction_empty_summary_max_retries=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+        memory.attach_event_log(SessionEventLog("s1"))
+        # 空摘要 client
+        client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content=""))]
+        client.chat.completions.create = AsyncMock(return_value=resp)
+
+        # 堆积超阈值历史（每条约百 token 级 content）
+        memory.add_user_message("任务开始")
+        for i in range(8):
+            memory._messages.append({
+                "role": "assistant", "content": None,
+                "tool_calls": [{"id": f"tc{i}", "type": "function",
+                                "function": {"name": "t", "arguments": "{}"}}],
             })
-            messages.append({
-                "role": "tool",
-                "tool_call_id": f"tc_{i}",
-                "content": f"工具执行错误: ValueError: 错误编号{i}",
+            memory._messages.append({
+                "role": "tool", "tool_call_id": f"tc{i}",
+                "content": "x" * 2000,
             })
-        result = _extract_rule_based_summary(messages)
-        assert "错误编号2" in result
-        assert "错误编号3" in result
-        assert "错误编号4" in result
-        assert "错误编号0" not in result
-        assert "错误编号1" not in result
+        memory.add_user_message("继续任务")
+        assert mgr.should_compact(memory, None)
 
-    def test_unknown_tool_name_for_orphan_result(self) -> None:
-        messages = [
-            {
-                "role": "tool",
-                "tool_call_id": "orphan_id",
-                "content": "工具执行错误: TypeError: 未知错误",
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
-        assert "**近期错误**" in result
-        assert "unknown:" in result
+        engine = SimpleNamespace(
+            _compaction_manager=mgr, _memory=memory, _config=config,
+            _client=client, _is_vision_capable=False,
+        )
 
+        # 第 1 次：LLM 摘要返回空 → streak=1，历史不变
+        out = await compact_for_pre_step(engine)
+        assert out == "enter"
+        assert mgr._empty_streak == 1
 
-class TestExtractRuleBasedSummaryLengthControl:
-    """测试总长度软限控制。"""
+        # 第 2 次：空摘要使 streak=2 达标 → 同一边界内立即硬截断
+        before_tokens = memory._total_tokens_with_system_messages(None)
+        out = await compact_for_pre_step(engine)
+        assert out == "enter"
+        assert client.chat.completions.create.call_count == 2  # 共 2 次摘要调用
+        assert mgr._empty_streak == 0  # 截断后复位
+        after_tokens = memory._total_tokens_with_system_messages(None)
+        assert after_tokens < before_tokens
+        assert len(memory.messages) < 18  # 头部旧消息被截掉
 
-    def test_max_total_chars_truncates_low_priority(self) -> None:
-        messages = [
-            {"role": "user", "content": "用户意图消息 " * 20},
-            {"role": "assistant", "content": "助手结论内容 " * 50},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/very/long/path/to/file.xlsx"}'),
-                    _tc("tc_2", "write_text_file", '{"file_path": "/output.py", "content": "x"}'),
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "tc_99",
-                "content": "工具执行错误: ValueError: 一个很长的错误信息",
-            },
-        ]
-        # 设置极小的 max_total_chars
-        result = _extract_rule_based_summary(messages, max_total_chars=200)
-        # 高优先级维度应被保留
-        assert "**涉及文件**" in result
-        # 低优先级维度可能被截断
-        # 总长度应合理控制
-        assert len(result) <= 400  # 允许最后一个 section 溢出
+        kinds = [e.kind for e in memory._event_log.events]
+        assert "compaction/fallback-truncate" in kinds
+        assert "compaction/truncate" in kinds
 
-    def test_default_limit_allows_rich_summary(self) -> None:
-        messages = [
-            {"role": "user", "content": "处理销售数据"},
-            {"role": "assistant", "content": "好的，我来帮你处理销售数据，首先读取文件了解结构。"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_2", "run_code", '{"file_path": "/data/sales.xlsx", "sheet": "Sheet1"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_3",
-                        "task_create",
-                        '{"title": "销售数据处理", "subtasks": ["读取", "清洗", "汇总"]}',
-                    ),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_4", "task_update", '{"index": 0, "new_status": "completed"}'),
-                ],
-            },
-            {"role": "assistant", "content": "数据读取完成，共 1000 行，10 列。接下来进行数据清洗。"},
-        ]
-        result = _extract_rule_based_summary(messages)
-        # 默认 2000 字符限制下应包含所有维度
-        assert "**涉及文件**" in result
-        assert "**已执行工具**" in result
-        assert "**写入操作**" in result
-        assert "**任务进度**" in result
-        assert "**用户意图**" in result
-        assert "**助手结论**" in result
+    @pytest.mark.asyncio
+    async def test_streak_gate_skips_llm_call(self) -> None:
+        """streak 已达标时 pre_step 完全跳过 LLM 摘要调用。"""
+        from excelmanus.compaction import compact_for_pre_step
 
+        config = _make_config(
+            max_context_tokens=3000,
+            compaction_threshold_ratio=0.5,
+            compaction_keep_recent_turns=2,
+            compaction_empty_summary_max_retries=2,
+        )
+        mgr = CompactionManager(config)
+        mgr._empty_streak = 2  # 预置达标 streak
+        memory = _make_memory(config)
 
-class TestExtractRuleBasedSummaryIntegration:
-    """端到端集成测试：模拟真实对话流。"""
+        memory.add_user_message("任务")
+        for i in range(6):
+            memory._messages.append({
+                "role": "tool", "tool_call_id": f"tc{i}",
+                "content": "x" * 2000,
+            })
+        memory.add_user_message("继续")
+        assert mgr.should_compact(memory, None)
 
-    def test_realistic_conversation(self) -> None:
-        """模拟一个真实的 ExcelManus 对话，验证摘要覆盖度。"""
-        messages = [
-            {"role": "user", "content": "帮我把 sales.xlsx 的数据按月份汇总到 summary.xlsx"},
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_1", "read_excel", '{"file_path": "/data/sales.xlsx"}'),
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "tc_1",
-                "content": "成功读取：Sheet1，1000行×5列（日期、产品、数量、单价、金额）",
-            },
-            {
-                "role": "assistant",
-                "content": "文件包含 1000 行销售数据，我来按月份汇总并写入新文件。",
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_2",
-                        "task_create",
-                        '{"title": "按月汇总销售数据", "subtasks": ["读取源数据", "按月聚合", "写入目标文件"]}',
-                    ),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_3", "task_update", '{"index": 0, "new_status": "completed"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc(
-                        "tc_4",
-                        "run_code",
-                        '{"file_path": "/data/summary.xlsx", "sheet": "月度汇总"}',
-                    ),
-                ],
-            },
-            {
-                "role": "tool",
-                "tool_call_id": "tc_4",
-                "content": "代码执行成功：已生成 12 行月度汇总数据并写入 summary.xlsx",
-            },
-            {
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [
-                    _tc("tc_5", "task_update", '{"index": 1, "new_status": "completed"}'),
-                    _tc("tc_6", "task_update", '{"index": 2, "new_status": "completed"}'),
-                ],
-            },
-            {
-                "role": "assistant",
-                "content": "已完成所有任务：按月汇总了 1000 行销售数据，结果写入 summary.xlsx 的「月度汇总」工作表。",
-            },
-        ]
-        result = _extract_rule_based_summary(messages)
+        client = AsyncMock()
+        engine = SimpleNamespace(
+            _compaction_manager=mgr, _memory=memory, _config=config,
+            _client=client, _is_vision_capable=False,
+        )
+        before = len(memory.messages)
+        out = await compact_for_pre_step(engine)
+        assert out == "enter"
+        client.chat.completions.create.assert_not_called()  # 零 LLM 调用
+        assert mgr._empty_streak == 0
+        assert len(memory.messages) < before
 
-        # 文件路径
-        assert "sales.xlsx" in result
-        assert "summary.xlsx" in result
-        # 工具调用
-        assert "read_excel" in result
-        assert "run_code" in result
-        assert "task_update" in result
-        # 写入操作
-        assert "**写入操作**" in result
-        assert "月度汇总" in result
-        # 任务状态
-        assert "**任务进度**" in result
-        assert "completed: 3" in result
-        # 用户意图
-        assert "按月份汇总" in result
-        # 助手结论
-        assert "**助手结论**" in result
+    @pytest.mark.asyncio
+    async def test_empty_streak_resets_on_success(self) -> None:
+        config = _make_config(
+            max_context_tokens=500_000, compaction_keep_recent_turns=2,
+        )
+        mgr = CompactionManager(config)
+        memory = _make_memory(config)
+
+        empty_client = AsyncMock()
+        resp = MagicMock()
+        resp.choices = [MagicMock(message=MagicMock(content=""))]
+        empty_client.chat.completions.create = AsyncMock(return_value=resp)
+
+        for i in range(5):
+            memory.add_user_message(f"用户消息 {i}")
+            memory.add_assistant_message(f"助手回复 {i}")
+
+        r1 = await mgr.auto_compact(
+            memory=memory, system_msgs=None,
+            client=empty_client, summary_model="m",
+        )
+        assert r1.success is False
+        assert mgr._empty_streak == 1
+
+        r2 = await mgr.auto_compact(
+            memory=memory, system_msgs=None,
+            client=_mock_client("摘要"), summary_model="m",
+        )
+        assert r2.success is True
+        assert mgr._empty_streak == 0

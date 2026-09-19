@@ -16,8 +16,17 @@ from excelmanus.mcp.config import MCPServerConfig
 
 logger = logging.getLogger(__name__)
 
-# 持久化缓存目录
-_DEFAULT_CACHE_DIR = Path.home() / ".excelmanus" / "mcp_npx_cache"
+# 持久化缓存目录（尊重 EXCELMANUS_HOME；回退 ~/.excelmanus）
+
+
+def _get_default_cache_dir() -> Path:
+    home = os.environ.get("EXCELMANUS_HOME", "").strip()
+    if home:
+        return Path(home).expanduser() / "mcp_npx_cache"
+    return Path.home() / ".excelmanus" / "mcp_npx_cache"
+
+
+_DEFAULT_CACHE_DIR = _get_default_cache_dir()
 
 
 # ---------------------------------------------------------------------------
@@ -251,7 +260,7 @@ async def _npm_install(package: str, prefix: Path, *, env: dict[str, str] | None
     """运行 npm install 将包安装到指定目录。"""
     prefix.mkdir(parents=True, exist_ok=True)
 
-    # 继承当前环境，合并 config.env
+    # 继承当前环境，合并 MCP 条目的 env 字典
     run_env = dict(os.environ)
     if env:
         run_env.update(env)

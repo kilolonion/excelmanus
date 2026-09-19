@@ -1,11 +1,17 @@
 import {
-  invalidateSnapshotCache,
+  invalidateWorkbookCaches,
   normalizeExcelPath,
   writeExcelCells,
   type ExcelWriteResponse,
 } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
+import {
+  activeSession,
+  fileRefKey,
+  workspaceKeyFromSession,
+  type WorkspaceFileRef,
+} from "@/lib/workspace-file-ref";
 
 export const SET_RANGE_VALUES_MUTATION_ID = "sheet.mutation.set-range-values";
 
@@ -24,9 +30,9 @@ export type PersistExcelCellEditsResult =
 export interface PersistExcelCellEditsDeps {
   writeExcelCells: typeof writeExcelCells;
   getSessionId: () => string | null | undefined;
-  getExpectedVersion: (path: string) => string | null;
-  setContentVersion: (path: string, version: string | null | undefined) => void;
-  invalidateSnapshotCache: (path?: string) => void;
+  getExpectedVersion: (path: string, workspaceKey?: string | null) => string | null;
+  setContentVersion: (path: string, version: string | null | undefined, workspaceKey?: string | null) => void;
+  invalidateCaches: (identity: { workspaceKey: string; relative: string }) => void;
 }
 
 type CellDataLike = {
@@ -61,7 +67,17 @@ export type SheetValueChangedLike = {
 const FLUSH_MS = 80;
 
 type PersistFn = (
-  opts: { path: string; sheet?: string; changes: { cell: string; value: unknown }[] },
+  opts: {
+    path: string;
+    sheet?: string;
+    changes: { cell: string; value: unknown; sheet?: string }[];
+    operations?: WorkbookOp[];
+    sessionId?: string | null;
+    workspaceId?: string | null;
+    workspaceKey?: string | null;
+    expectedVersion?: string | null;
+    viewGeneration?: number;
+  },
   deps?: Partial<PersistExcelCellEditsDeps>,
 ) => Promise<PersistExcelCellEditsResult>;
 
@@ -75,6 +91,12 @@ interface PendingBatch {
   path: string;
   sheet?: string;
   changes: { cell: string; value: unknown; sheet?: string }[];
+  operations: WorkbookOp[];
+  sessionId?: string | null;
+  workspaceId?: string | null;
+  workspaceKey: string;
+  expectedVersion?: string | null;
+  viewGeneration: number;
   onConflict?: () => void;
   onError?: (message: string) => void;
   timer: ReturnType<typeof setTimeout> | null;
@@ -83,6 +105,7 @@ interface PendingBatch {
 const pendingByPath = new Map<string, PendingBatch>();
 const inFlightByPath = new Map<string, Promise<void>>();
 const pausedByPath = new Set<string>();
+const acknowledgedVersions = new Map<string, { before: string; after: string }>();
 
 /** 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。 */
 export function colIndexToLetter(index: number): string {
@@ -206,53 +229,174 @@ export function extractCellEditsFromSheetValueChanged(
   return changes;
 }
 
+const UNSUPPORTED_COMMANDS = [
+  "filter", "chart", "pivot", "conditional-format", "data-validation", "comment", "image",
+  "drawing", "move-range", "reorder-range", "move-rows", "move-columns", "copy-sheet",
+];
+
+export function isUnsupportedWorkbookMutation(id?: string): boolean {
+  const text = (id || "").toLowerCase();
+  return UNSUPPORTED_COMMANDS.some((item) => text.includes(item));
+}
+
+type MutationRect = { startRow: number; endRow: number; startColumn: number; endColumn: number };
+
+function rangeA1(range: MutationRect): string {
+  return `${cellRefFromIndex(range.startRow, range.startColumn)}:${cellRefFromIndex(range.endRow, range.endColumn)}`;
+}
+
+export function extractWorkbookOpsFromMutation(params: {
+  id?: string;
+  params?: Record<string, unknown>;
+  sheet?: string;
+} | null | undefined): WorkbookOp[] {
+  if (!params?.id || !params.id.startsWith("sheet.mutation.")) return [];
+  const id = params.id;
+  const payload = params.params || {};
+  const ranges = (payload.ranges || (payload.range && typeof payload.range === "object" ? [payload.range] : [])) as MutationRect[];
+  const sheet = params.sheet;
+  if (id === "sheet.mutation.add-worksheet-merge" || id === "sheet.mutation.remove-worksheet-merge") {
+    return ranges.map((range) => ({ op: id.includes("add-") ? "merge" : "unmerge", sheet, range: rangeA1(range) }));
+  }
+  if (id === "sheet.mutation.set-worksheet-col-width" || id === "sheet.mutation.set-worksheet-row-height") {
+    const columns: Record<string, number> = {};
+    const rows: Record<string, number> = {};
+    for (const range of ranges) {
+      const col = id.includes("col-width");
+      const value = col ? payload.colWidth : payload.rowHeight;
+      for (let i = col ? range.startColumn : range.startRow; i <= (col ? range.endColumn : range.endRow); i++) {
+        const size = typeof value === "number" ? value : (value as Record<number, number>)?.[i];
+        if (typeof size !== "number") continue;
+        if (col) columns[colIndexToLetter(i)] = size / 7.5;
+        else rows[String(i + 1)] = size * 0.75;
+      }
+    }
+    return [{ op: "set_dims", sheet, columns, rows }];
+  }
+  if (id === SET_RANGE_VALUES_MUTATION_ID) {
+    const values: { cell: string; value: unknown; style?: unknown }[] = [];
+    const styles: { cell: string; style: unknown }[] = [];
+    const matrix = payload.cellValue as Record<string, Record<string, CellDataLike & { s?: unknown }>> | undefined;
+    for (const [rowKey, row] of Object.entries(matrix || {})) {
+      for (const [colKey, cell] of Object.entries(row || {})) {
+        const address = cellRefFromIndex(Number(rowKey), Number(colKey));
+        const parsed = cellDataToWriteValue(cell);
+        const style = cell && typeof cell === "object" && "s" in cell ? { style: cell.s } : {};
+        if (!parsed.skip) values.push({ cell: address, value: parsed.value, ...style });
+        else if ("style" in style) styles.push({ cell: address, style: style.style });
+      }
+    }
+    return [...(values.length ? [{ op: "set_values", sheet, cells: values }] : []),
+      ...(styles.length ? [{ op: "set_styles", sheet, cells: styles }] : [])];
+  }
+  if (["sheet.mutation.insert-row", "sheet.mutation.insert-col", "sheet.mutation.remove-rows", "sheet.mutation.remove-col"].includes(id)) {
+    return ranges.map((range) => {
+      const col = id.includes("col");
+      const start = col ? range.startColumn : range.startRow;
+      const end = col ? range.endColumn : range.endRow;
+      return { op: id.includes("remove") ? "delete_axis" : "insert_axis", sheet, axis: col ? "col" : "row", index: start + 1, count: end - start + 1 };
+    });
+  }
+  if (id === "sheet.mutation.insert-sheet") {
+    const inserted = payload.sheet as { name?: string } | undefined;
+    return [{ op: "sheet_add", name: inserted?.name }];
+  }
+  if (id === "sheet.mutation.remove-sheet") return [{ op: "sheet_delete", name: sheet }];
+  if (id === "sheet.mutation.set-worksheet-name") return [{ op: "sheet_rename", from: sheet, to: payload.name }];
+  return [];
+}
+
+export function hasPendingWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): boolean {
+  const key = fileRefKey(file);
+  return pendingByPath.has(key) || inFlightByPath.has(key);
+}
+
 function defaultDeps(): PersistExcelCellEditsDeps {
   return {
     writeExcelCells,
     getSessionId: () => useSessionStore.getState().activeSessionId,
-    getExpectedVersion: (path) => useExcelStore.getState().getContentVersion(path),
-    setContentVersion: (path, version) => useExcelStore.getState().setContentVersion(path, version),
-    invalidateSnapshotCache,
+    getExpectedVersion: (path, workspaceKey) =>
+      useExcelStore.getState().getContentVersion(path, workspaceKey),
+    setContentVersion: (path, version, workspaceKey) =>
+      useExcelStore.getState().setContentVersion(path, version, workspaceKey),
+    invalidateCaches: invalidateWorkbookCaches,
   };
+}
+
+export type WorkbookOp = Record<string, unknown>;
+
+export function changesToSetValuesOps(
+  changes: { cell: string; value: unknown; sheet?: string; style?: unknown }[],
+  defaultSheet?: string,
+): WorkbookOp[] {
+  const grouped = new Map<string, { cell: string; value: unknown; style?: unknown }[]>();
+  for (const change of changes) {
+    const sheet = String(change.sheet || defaultSheet || "");
+    const list = grouped.get(sheet) ?? [];
+    list.push({ cell: change.cell, value: change.value, style: change.style });
+    grouped.set(sheet, list);
+  }
+  return [...grouped.entries()].map(([sheet, cells]) => ({
+    op: "set_values",
+    sheet: sheet || undefined,
+    cells,
+  }));
 }
 
 export async function persistExcelCellEdits(
   opts: {
     path: string;
     sheet?: string;
-    changes: { cell: string; value: unknown; sheet?: string }[];
+    changes?: { cell: string; value: unknown; sheet?: string; style?: unknown }[];
+    operations?: WorkbookOp[];
+    sessionId?: string | null;
+    workspaceId?: string | null;
+    workspaceKey?: string | null;
+    expectedVersion?: string | null;
+    viewGeneration?: number;
   },
   deps?: Partial<PersistExcelCellEditsDeps>,
 ): Promise<PersistExcelCellEditsResult> {
-  if (!opts.path || opts.changes.length === 0) return { kind: "skipped" };
+  const changes = opts.changes ?? [];
+  const operations = [...changesToSetValuesOps(changes, opts.sheet), ...(opts.operations || [])];
+  if (!opts.path || (changes.length === 0 && operations.length === 0)) return { kind: "skipped" };
   if (isDemoExcelPath(opts.path)) return { kind: "skipped" };
 
+  const currentGen = useExcelStore.getState().viewGeneration;
+  if (opts.viewGeneration != null && opts.viewGeneration !== currentGen) {
+    return { kind: "skipped" };
+  }
+
   const resolved = { ...defaultDeps(), ...deps };
-  const sessionId = resolved.getSessionId() ?? undefined;
-  const expectedVersion = resolved.getExpectedVersion(opts.path);
+  const session = activeSession();
+  const workspaceKey = opts.workspaceKey ?? workspaceKeyFromSession(session);
+  const sessionId = opts.sessionId ?? resolved.getSessionId() ?? undefined;
+  const expectedVersion =
+    opts.expectedVersion ?? resolved.getExpectedVersion(opts.path, workspaceKey);
   if (!expectedVersion) {
     return { kind: "conflict", code: "VERSION_CONFLICT" };
+  }
+  if (!sessionId && !opts.workspaceId) {
+    return { kind: "error", message: "无法确定工作区，请从会话重新打开文件" };
   }
 
   try {
     const result = await resolved.writeExcelCells({
       path: opts.path,
       sheet: opts.sheet,
-      changes: opts.changes.map((change) => ({
-        cell: change.cell,
-        value: change.value,
-        sheet: change.sheet ?? opts.sheet,
-      })),
+      changes: [],
+      operations,
       sessionId,
+      workspaceId: opts.workspaceId ?? session?.workspaceId ?? null,
       expectedVersion,
     });
     if (isExcelWriteConflict(result)) {
       return { kind: "conflict", code: result.code || "VERSION_CONFLICT" };
     }
     if (result.content_version) {
-      resolved.setContentVersion(opts.path, result.content_version);
+      resolved.setContentVersion(opts.path, result.content_version, workspaceKey);
     }
-    resolved.invalidateSnapshotCache(opts.path);
+    resolved.invalidateCaches({ workspaceKey, relative: opts.path });
     useExcelStore.getState().bumpWorkspaceFilesVersion();
     return { kind: "ok", contentVersion: result.content_version };
   } catch (err) {
@@ -265,18 +409,37 @@ export async function persistExcelCellEdits(
 }
 
 function runPersist(
-  opts: { path: string; sheet?: string; changes: { cell: string; value: unknown }[] },
+  opts: Parameters<PersistFn>[0],
   deps?: Partial<PersistExcelCellEditsDeps>,
 ): Promise<PersistExcelCellEditsResult> {
   return (persistImpl ?? persistExcelCellEdits)(opts, deps);
 }
 
+function queueKey(path: string, workspaceKey?: string | null): string {
+  return fileRefKey({
+    workspaceKey: workspaceKey || workspaceKeyFromSession(activeSession()),
+    relative: path,
+  });
+}
+
+function isPaused(key: string, path: string): boolean {
+  const norm = normalizeExcelPath(path);
+  return pausedByPath.has(key) || pausedByPath.has(norm);
+}
+
 export function pauseExcelCellEdits(path: string): void {
-  pausedByPath.add(normalizeExcelPath(path));
+  const norm = normalizeExcelPath(path);
+  pausedByPath.add(norm);
+  pausedByPath.add(queueKey(path));
 }
 
 export function resumeExcelCellEdits(path: string): void {
-  pausedByPath.delete(normalizeExcelPath(path));
+  const norm = normalizeExcelPath(path);
+  pausedByPath.delete(norm);
+  pausedByPath.delete(queueKey(path));
+  for (const key of [...pausedByPath]) {
+    if (key.endsWith(`|${norm}`)) pausedByPath.delete(key);
+  }
 }
 
 export function enqueueExcelCellEdit(opts: {
@@ -284,13 +447,19 @@ export function enqueueExcelCellEdit(opts: {
   sheet?: string;
   cell: string;
   value: unknown;
+  file?: WorkspaceFileRef;
+  sessionId?: string | null;
+  viewGeneration?: number;
+  expectedVersion?: string | null;
   onConflict?: () => void;
   onError?: (message: string) => void;
 }): void {
   if (!opts.path || !opts.cell) return;
   if (isDemoExcelPath(opts.path)) return;
-  const key = normalizeExcelPath(opts.path);
-  if (pausedByPath.has(key)) return;
+  const session = activeSession();
+  const workspaceKey = opts.file?.workspaceKey ?? workspaceKeyFromSession(session);
+  const key = queueKey(opts.path, workspaceKey);
+  if (isPaused(key, opts.path)) return;
 
   let batch = pendingByPath.get(key);
   if (!batch) {
@@ -298,6 +467,14 @@ export function enqueueExcelCellEdit(opts: {
       path: opts.path,
       sheet: opts.sheet,
       changes: [],
+      operations: [],
+      sessionId: opts.sessionId ?? useSessionStore.getState().activeSessionId,
+      workspaceId: opts.file?.workspaceId ?? session?.workspaceId ?? null,
+      workspaceKey,
+      expectedVersion:
+        opts.expectedVersion ??
+        useExcelStore.getState().getContentVersion(opts.path, workspaceKey),
+      viewGeneration: opts.viewGeneration ?? useExcelStore.getState().viewGeneration,
       onConflict: opts.onConflict,
       onError: opts.onError,
       timer: null,
@@ -322,6 +499,50 @@ export function enqueueExcelCellEdit(opts: {
   }, FLUSH_MS);
 }
 
+export function enqueueWorkbookCommand(opts: {
+  path: string;
+  operations: WorkbookOp[];
+  file?: WorkspaceFileRef;
+  sessionId?: string | null;
+  viewGeneration?: number;
+  expectedVersion?: string | null;
+  onConflict?: () => void;
+  onError?: (message: string) => void;
+}): void {
+  if (!opts.path || opts.operations.length === 0) return;
+  if (isDemoExcelPath(opts.path)) return;
+  const session = activeSession();
+  const workspaceKey = opts.file?.workspaceKey ?? workspaceKeyFromSession(session);
+  const key = queueKey(opts.path, workspaceKey);
+  if (isPaused(key, opts.path)) return;
+  let batch = pendingByPath.get(key);
+  if (!batch) {
+    batch = {
+      path: opts.path,
+      changes: [],
+      operations: [],
+      sessionId: opts.sessionId ?? useSessionStore.getState().activeSessionId,
+      workspaceId: opts.file?.workspaceId ?? session?.workspaceId ?? null,
+      workspaceKey,
+      expectedVersion:
+        opts.expectedVersion ??
+        useExcelStore.getState().getContentVersion(opts.path, workspaceKey),
+      viewGeneration: opts.viewGeneration ?? useExcelStore.getState().viewGeneration,
+      onConflict: opts.onConflict,
+      onError: opts.onError,
+      timer: null,
+    };
+    pendingByPath.set(key, batch);
+  }
+  if (opts.onConflict) batch.onConflict = opts.onConflict;
+  if (opts.onError) batch.onError = opts.onError;
+  batch.operations.push(...opts.operations);
+  if (batch.timer) clearTimeout(batch.timer);
+  batch.timer = setTimeout(() => {
+    void flushPath(key);
+  }, FLUSH_MS);
+}
+
 async function flushPath(key: string): Promise<void> {
   const batch = pendingByPath.get(key);
   if (!batch) return;
@@ -330,18 +551,31 @@ async function flushPath(key: string): Promise<void> {
     clearTimeout(batch.timer);
     batch.timer = null;
   }
-  if (pausedByPath.has(key) || batch.changes.length === 0) return;
+  if (isPaused(key, batch.path) || (batch.changes.length === 0 && batch.operations.length === 0)) return;
 
   const run = async () => {
+    if (isPaused(key, batch.path)) return;
+    let expected = batch.expectedVersion;
+    const ack = acknowledgedVersions.get(key);
+    if (ack && expected === ack.before) expected = ack.after;
     const result = await runPersist({
       path: batch.path,
       sheet: batch.sheet,
       changes: batch.changes,
+      operations: batch.operations.length ? batch.operations : undefined,
+      sessionId: batch.sessionId,
+      workspaceId: batch.workspaceId,
+      workspaceKey: batch.workspaceKey,
+      expectedVersion: expected,
+      viewGeneration: batch.viewGeneration,
     });
-    if (result.kind === "conflict") {
-      pauseExcelCellEdits(batch.path);
+    if (result.kind === "ok" && result.contentVersion && expected) {
+      acknowledgedVersions.set(key, { before: batch.expectedVersion || expected, after: result.contentVersion });
+    } else if (result.kind === "conflict") {
+      pausedByPath.add(key);
       batch.onConflict?.();
     } else if (result.kind === "error") {
+      pausedByPath.add(key);
       batch.onError?.(result.message);
     }
   };
@@ -362,7 +596,11 @@ async function flushPath(key: string): Promise<void> {
 
 /** 测试用：立刻冲刷队列并等待在途写入。 */
 export async function flushExcelCellEditsForTests(path?: string): Promise<void> {
-  const keys = path ? [normalizeExcelPath(path)] : [...pendingByPath.keys()];
+  const norm = path ? normalizeExcelPath(path) : "";
+  const keys = path
+    ? [...pendingByPath.keys()].filter((key) => key === norm || key.endsWith(`|${norm}`))
+    : [...pendingByPath.keys()];
+  if (path && keys.length === 0) keys.push(queueKey(path));
   await Promise.all(keys.map((key) => flushPath(key)));
   await Promise.all([...inFlightByPath.values()]);
 }
@@ -376,4 +614,5 @@ export function resetExcelCellEditStateForTests(): void {
   pendingByPath.clear();
   inFlightByPath.clear();
   pausedByPath.clear();
+  acknowledgedVersions.clear();
 }

@@ -12,10 +12,8 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from excelmanus.security.guard import FileAccessGuard
 from excelmanus.workbook_commit import (
     CommitResult,
-    commit_bytes,
     content_version_of,
     normalize_version_path,
 )
@@ -54,6 +52,45 @@ def prepare_pending_run_dir(workspace_root: str | Path, run_id: str) -> Path:
     except OSError:
         pass
     return run_dir
+
+
+def discard_orphan_pending_dirs(workspace_root: str | Path) -> int:
+    """Startup: leftover pending dirs are unpublished orphans. Never auto-publish."""
+    root = Path(workspace_root).resolve() / ".excelmanus" / "pending"
+    if not root.is_dir():
+        return 0
+    removed = 0
+    try:
+        children = list(root.iterdir())
+    except OSError:
+        return 0
+    for child in children:
+        if not child.is_dir():
+            continue
+        shutil.rmtree(child, ignore_errors=True)
+        removed += 1
+    return removed
+
+
+def discard_pending_run_dir(workspace_root: str | Path, run_id: str) -> int:
+    """只读执行：丢弃本次 run_code 的全部 pending 写入，返回丢弃条数。
+
+    只读引擎的 run_code 允许执行计算，但其工作区写入尝试一律不发布；
+    清掉整个 per-run 目录，发布步骤据此知道没有任何文件落盘。
+    """
+    import shutil
+
+    if not run_id or not _SAFE_RUN_ID.match(run_id):
+        return 0
+    run_dir = pending_run_dir(workspace_root, run_id)
+    if not run_dir.is_dir():
+        return 0
+    try:
+        rows = len(_read_pending_manifest(run_dir))
+    except Exception:
+        rows = 0
+    shutil.rmtree(run_dir, ignore_errors=True)
+    return rows
 
 
 def _contained_file(root: Path, candidate: Path) -> Path | None:
@@ -104,16 +141,18 @@ def publish_bytes(
     record_history: bool = True,
 ) -> CommitResult:
     """Resolve identity then atomically publish bytes onto the live user path."""
+    del record_history
+    from excelmanus.workspace.file_service import receipt_to_commit_result, WorkspaceFileService
+
     root = Path(workspace_root)
     canon = resolve_canonical(root, file_path)
-    guard = FileAccessGuard(str(root))
-    return commit_bytes(
-        guard=guard,
-        file_path=canon.relative,
-        data=data,
-        expected_version=expected_version,
-        record_history=record_history,
-    )
+    dest = root / canon.relative
+    svc = WorkspaceFileService(root)
+    if dest.is_file():
+        receipt = svc.update(canon.relative, data, expected_version=expected_version)
+    else:
+        receipt = svc.create(canon.relative, data)
+    return receipt_to_commit_result(receipt, bytes_written=len(data))
 
 
 def publish_pending_writes(
@@ -179,7 +218,17 @@ def publish_pending_writes(
                 })
                 continue
             try:
-                result = publish_bytes(root, rel, data, expected_version=expected)
+                from excelmanus.workspace.file_service import (
+                    WorkspaceFileService,
+                    receipt_to_commit_result,
+                )
+
+                svc = WorkspaceFileService(root)
+                if dest.is_file():
+                    receipt = svc.update(rel, data, expected_version=expected)
+                else:
+                    receipt = svc.create(rel, data)
+                result = receipt_to_commit_result(receipt, bytes_written=len(data))
                 published.append({
                     "path": result.path,
                     "content_version": result.content_version,

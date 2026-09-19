@@ -138,7 +138,8 @@ class DelegationContext(Protocol):
         self,
         *,
         task: str,
-        tool_scope: Sequence[str] | None = None,
+        agent_name: str | None = None,
+        file_paths: list | None = None,
         on_event: EventCallback | None = None,
     ) -> Any: ...
 
@@ -146,7 +147,6 @@ class DelegationContext(Protocol):
         self,
         *,
         tasks: list[dict[str, Any]],
-        tool_scope: Sequence[str] | None = None,
         on_event: EventCallback | None = None,
     ) -> Any: ...
 
@@ -159,13 +159,6 @@ class DelegationContext(Protocol):
         on_event: EventCallback | None = None,
     ) -> tuple[str, str | None]: ...
 
-    def enqueue_subagent_approval_question(
-        self,
-        *,
-        pending: Any,
-        delegate_outcome: Any,
-    ) -> Any: ...
-
 
 # ---------------------------------------------------------------------------
 # 记忆访问（MemoryAccess）— 受控的 Memory 操作
@@ -174,14 +167,6 @@ class DelegationContext(Protocol):
 @runtime_checkable
 class MemoryAccess(Protocol):
     """外部消费者对 Memory 的合法操作接口。"""
-
-    def add_image_message(
-        self,
-        *,
-        base64_data: str,
-        mime_type: str = "image/png",
-        detail: str = "auto",
-    ) -> None: ...
 
     def replace_tool_result(self, tool_call_id: str, content: str) -> bool: ...
 

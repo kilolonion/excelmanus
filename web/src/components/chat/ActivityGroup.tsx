@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import { ToolCallCard } from "./ToolCallCard";
 import { activityGroupTitle, toolActionTitle } from "@/lib/tool-labels";
+import { nestToolCallsByParent } from "@/lib/tool-call-tree";
 import type { AssistantBlock } from "@/lib/types";
 
 type ToolBlock = Extract<AssistantBlock, { type: "tool_call" }>;
@@ -34,10 +35,13 @@ export function ActivityGroup({
   defaultCollapsed: boolean;
 }) {
   const [collapsed, setCollapsed] = useState(defaultCollapsed);
-  const blocks = tools.map((t) => t.block);
-  const status = groupStatus(blocks);
-  const title = activityGroupTitle(blocks);
-  const titles = blocks.map((b) => toolActionTitle(b.name, b.args));
+  const nests = nestToolCallsByParent(tools.map((t) => t.block));
+  const rootBlocks = nests.map((n) => n.item);
+  const allBlocks = tools.map((t) => t.block);
+  const status = groupStatus(allBlocks);
+  const title = activityGroupTitle(rootBlocks.length > 0 ? rootBlocks : allBlocks);
+  const titles = rootBlocks.map((b) => toolActionTitle(b.name, b.args));
+  const stepCount = Math.max(rootBlocks.length, 1);
 
   if (collapsed) {
     const CollapsedIcon =
@@ -45,9 +49,9 @@ export function ActivityGroup({
       : status === "pending" ? Clock
       : CheckCircle2;
     const collapsedLabel =
-      status === "error" ? `已完成 ${blocks.length} 个步骤，有失败`
-      : status === "pending" ? `等待授权 · ${blocks.length} 个步骤`
-      : `已完成 ${blocks.length} 个步骤`;
+      status === "error" ? `已完成 ${stepCount} 个步骤，有失败`
+      : status === "pending" ? `等待授权 · ${stepCount} 个步骤`
+      : `已完成 ${stepCount} 个步骤`;
     return (
       <button
         type="button"
@@ -95,8 +99,8 @@ export function ActivityGroup({
             : "text-[var(--em-primary)]"
           }`}
         />
-        <span className="text-[13px] font-semibold text-foreground truncate">{title}</span>
-        <span className={`text-[11px] font-medium px-1.5 py-px rounded-full ${badge.cls}`}>
+        <span className="min-w-0 truncate text-[13px] font-semibold text-foreground">{title}</span>
+        <span className={`text-[11px] font-medium px-1.5 py-px rounded-full whitespace-nowrap shrink-0 ${badge.cls}`}>
           {badge.text}
         </span>
         <button
@@ -110,18 +114,38 @@ export function ActivityGroup({
         </button>
       </div>
       <div className="px-3 sm:px-3.5 pb-2">
-        {tools.map((item, i) => (
-          <ToolCallCard
-            key={item.block.toolCallId || `${item.origIndex}-${item.block.name}`}
-            toolCallId={item.block.toolCallId}
-            name={item.block.name}
-            args={item.block.args}
-            status={item.block.status}
-            result={item.block.result}
-            error={item.block.error}
-            isLast={i === tools.length - 1}
-          />
-        ))}
+        {nests.map((node, i) => {
+          const isLastRoot = i === nests.length - 1;
+          const childCount = node.children.length;
+          return (
+            <div key={node.item.toolCallId || `${i}-${node.item.name}`}>
+              <ToolCallCard
+                toolCallId={node.item.toolCallId}
+                name={node.item.name}
+                args={node.item.args}
+                status={node.item.status}
+                result={node.item.result}
+                error={node.item.error}
+                parentCallId={node.item.parentCallId}
+                isLast={isLastRoot && childCount === 0}
+              />
+              {node.children.map((child, j) => (
+                <ToolCallCard
+                  key={child.toolCallId || `${i}-${j}-${child.name}`}
+                  toolCallId={child.toolCallId}
+                  name={child.name}
+                  args={child.args}
+                  status={child.status}
+                  result={child.result}
+                  error={child.error}
+                  parentCallId={child.parentCallId}
+                  nested
+                  isLast={isLastRoot && j === childCount - 1}
+                />
+              ))}
+            </div>
+          );
+        })}
       </div>
     </div>
   );

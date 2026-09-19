@@ -343,7 +343,8 @@ async def upsert_auto_policy(
     body = await request.json()
 
     # 从 app config 读取 P3 默认值（未配置时回退硬编码值）
-    _cfg = getattr(request.app.state, "config", None)
+    from excelmanus.api_app_state import get_config
+    _cfg = get_config()
     _def_hysteresis = getattr(_cfg, "pool_auto_hysteresis_delta", 0.12) if _cfg else 0.12
     _def_dwell = getattr(_cfg, "pool_auto_min_dwell_seconds", 180) if _cfg else 180
     _def_breaker_open = getattr(_cfg, "pool_auto_breaker_open_seconds", 120) if _cfg else 120

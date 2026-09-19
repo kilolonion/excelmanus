@@ -9,7 +9,6 @@ if TYPE_CHECKING:
     from excelmanus.approval import AppliedApprovalRecord, PendingApproval
     from excelmanus.engine_core.tool_result import ToolResult
     from excelmanus.question_flow import PendingQuestion
-    from excelmanus.subagent import SubagentResult
 
 # ── Thinking 配置 ──────────────────────────────────────────────
 _EFFORT_RATIOS: dict[str, float] = {
@@ -114,7 +113,7 @@ class TurnDiagnostic:
     prompt_tokens: int = 0
     completion_tokens: int = 0
     # provider 缓存命中的 token 数（OpenAI prompt_tokens_details.cached_tokens）
-    cached_tokens: int = 0
+    cached_tokens: int | None = None
     # Anthropic 提示词缓存专用字段
     cache_creation_input_tokens: int = 0
     cache_read_input_tokens: int = 0
@@ -133,7 +132,7 @@ class TurnDiagnostic:
             "prompt_tokens": self.prompt_tokens,
             "completion_tokens": self.completion_tokens,
         }
-        if self.cached_tokens:
+        if self.cached_tokens is not None:
             d["cached_tokens"] = self.cached_tokens
         if self.cache_creation_input_tokens:
             d["cache_creation_input_tokens"] = self.cache_creation_input_tokens
@@ -171,24 +170,12 @@ class ChatResult:
     skills_used: list[str] = field(default_factory=list)
 
 
-@dataclass
-class DelegateSubagentOutcome:
-    """委派子代理的结构化返回。"""
-
-    reply: str
-    success: bool
-    picked_agent: str | None = None
-    task_text: str = ""
-    normalized_paths: list[str] = field(default_factory=list)
-    subagent_result: "SubagentResult | None" = None
-
-
 # ── 审批解析器回调类型 ──────────────────────────────────────
 # 返回值为 "accept" / "reject" / "fullaccess" / None（None 等同 reject）。
-# CLI 传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
+# bench 等同步前端传入交互式选择器实现，Web API 不传则回退到现有行为（退出循环）。
 ApprovalResolver = Callable[["PendingApproval"], Awaitable[str | None]]
 
 # ── 问题解析器回调类型 ──────────────────────────────────────
-# CLI/bench 传入交互式问答实现；Web API 不传则使用 InteractionRegistry Future。
+# bench 等同步前端传入交互式问答实现；Web API 不传则使用 InteractionRegistry Future。
 # 回调接收 PendingQuestion，返回用户原始回答文本。
 QuestionResolver = Callable[["PendingQuestion"], Awaitable[str]]

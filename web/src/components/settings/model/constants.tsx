@@ -1,7 +1,6 @@
 "use client";
 
 import type { ReactNode } from "react";
-import { Brain } from "lucide-react";
 import type { ProviderPreset, CodexModelEntry } from "./types";
 
 export const SECTION_META: {
@@ -10,15 +9,7 @@ export const SECTION_META: {
   icon: ReactNode;
   fields: ("api_key" | "base_url" | "model")[];
   desc: string;
-}[] = [
-  {
-    key: "embedding",
-    label: "Embedding 词嵌入",
-    icon: <Brain className="h-4 w-4" />,
-    fields: ["model", "base_url", "api_key"],
-    desc: "语义检索 / 记忆 / 技能路由",
-  },
-];
+}[] = [];
 
 export const FIELD_LABELS: Record<string, string> = {
   api_key: "API Key",

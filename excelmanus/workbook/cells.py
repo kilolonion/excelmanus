@@ -7,14 +7,11 @@ from __future__ import annotations
 
 from typing import Any
 
-from excelmanus.security import FileAccessGuard
-
-_guard: FileAccessGuard | None = None
+from excelmanus.tools.context import bind_workspace
 
 
 def init_guard(workspace_root: str) -> None:
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 def _coerce_value(raw: Any) -> Any:

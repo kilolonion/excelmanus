@@ -9,7 +9,7 @@ import {
   ChevronDown,
 } from "lucide-react";
 import { useIsMobile } from "@/hooks/use-mobile";
-import { isImageFile } from "./chat-input-constants";
+import { isImageFile, isVisionImageFile } from "@/lib/file-kind";
 import type { AttachedFile } from "@/lib/types";
 
 interface FileAttachmentChipsProps {
@@ -40,7 +40,7 @@ export function FileAttachmentChips({
   return (
     <div className="flex flex-col gap-1 px-3 pt-1.5 pb-0">
       {/* 视觉能力不可用警告 */}
-      {files.some((af) => isImageFile(af.file.name)) && visionCapable === false && (
+      {files.some((af) => isVisionImageFile(af.file.name)) && visionCapable === false && (
         <div className="flex items-center gap-1.5 text-[11px] text-amber-600 dark:text-amber-400 bg-amber-50 dark:bg-amber-950/30 rounded-md px-2 py-1">
           <AlertCircle className="h-3 w-3 flex-shrink-0" />
           <span>当前模型不支持图片识别，图片将无法被分析</span>

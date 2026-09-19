@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING, Annotated, Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, model_validator, Field, StringConstraints
 
 from excelmanus import api_app_state as _app_state
 from excelmanus.api_app_state import (
@@ -31,9 +31,14 @@ from excelmanus.api_sse import (
 )
 from excelmanus.engine import ChatResult, ToolCallResult
 from excelmanus.error_guidance import FailureGuidance, classify_failure
-from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.events import TRANSIENT_SSE_TYPES, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
-from excelmanus.mentions import MentionParser, MentionResolver
+from excelmanus.chat_turn import (
+    resolve_mentions,
+    run_engine_followup,
+    submit_approval,
+    submit_question_answer,
+)
 from excelmanus.mentions.parser import ResolvedMention
 from excelmanus.output_guard import (
     guard_public_reply,
@@ -66,11 +71,18 @@ def _fire_and_forget(coro: Any, *, name: str = "bridge_notify") -> None:
 
 
 class ImageAttachment(BaseModel):
-    """图片附件。"""
+    """图片附件：只接受已准入 durable store 的 attachment_id。"""
 
-    data: str  # base64 编码
+    attachment_id: str = ""
     media_type: str = "image/png"
     detail: Literal["auto", "low", "high"] = "auto"
+    name: str | None = None
+
+    @model_validator(mode="after")
+    def _require_attachment_id(self) -> "ImageAttachment":
+        if not (self.attachment_id or "").strip():
+            raise ValueError("image requires attachment_id; admit first via /api/v1/attachments")
+        return self
 
 
 class ChatRequest(BaseModel):
@@ -186,7 +198,7 @@ def _public_excel_path(path: str) -> str:
 
 
 def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
-    """将 EXCEL_DIFF / EXCEL_PREVIEW / FILES_CHANGED 事件持久化到 SQLite。"""
+    """将 EXCEL_DIFF / EXCEL_PREVIEW / MUTATION 事件持久化到 SQLite。"""
     if get_session_manager() is None or get_session_manager().chat_history is None:
         return
     ch = get_session_manager().chat_history
@@ -216,7 +228,23 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
                 cell_styles=list(event.excel_cell_styles or [])[:51],
             )
             ch.save_affected_file(session_id, pub_path)
+        elif event.event_type == EventType.MUTATION:
+            seen: set[str] = set()
+            for f in (event.changed_files or [])[:50]:
+                pub = _public_excel_path(f)
+                if pub and pub not in seen:
+                    seen.add(pub)
+                    ch.save_affected_file(session_id, pub)
+            for item in (event.mutations or [])[:50]:
+                if not isinstance(item, dict):
+                    continue
+                ident = str(item.get("identity") or "")
+                pub = _public_excel_path(ident)
+                if pub and pub not in seen:
+                    seen.add(pub)
+                    ch.save_affected_file(session_id, pub)
         elif event.event_type == EventType.FILES_CHANGED:
+            # 历史 replay / 旧客户端兼容；新写入统一发 MUTATION。
             for f in (event.changed_files or [])[:50]:
                 pub = _public_excel_path(f)
                 if pub:
@@ -227,7 +255,11 @@ def _persist_excel_event(session_id: str, event: ToolCallEvent) -> None:
 
 def _serialize_images(images: list[ImageAttachment]) -> list[dict[str, str]]:
     """将请求中的图片附件标准化为引擎可消费的字典列表。"""
-    return [img.model_dump() for img in images]
+    rows: list[dict[str, str]] = []
+    for img in images:
+        payload = img.model_dump(exclude_none=True)
+        rows.append({str(k): ("" if v is None else str(v)) for k, v in payload.items()})
+    return rows
 
 
 def _public_tool_calls(tool_calls: list[ToolCallResult]) -> list[dict]:
@@ -372,35 +404,8 @@ async def _resolve_mentions(
     message: str,
     engine: Any,
 ) -> tuple[str, list[ResolvedMention] | None]:
-    """解析用户消息中的 @ 提及标记，返回 (display_text, mention_contexts)。
-
-    display_text 将 ``@file:name`` 替换为 ``name``，确保 LLM 看到的文本不含 @ 前缀。
-    """
-    try:
-        parse_result = MentionParser.parse(message)
-        if not parse_result.mentions:
-            return message, None
-
-        from excelmanus.security.guard import FileAccessGuard
-
-        guard = FileAccessGuard(engine.get_config().workspace_root)
-        skill_loader = getattr(engine, "_skill_loader", None)
-        if skill_loader is None:
-            _router = getattr(engine, "_skill_router", None)
-            if _router is not None:
-                skill_loader = getattr(_router, "_loader", None)
-        mcp_manager = getattr(engine, "_mcp_manager", None)
-        resolver = MentionResolver(
-            workspace_root=engine.get_config().workspace_root,
-            guard=guard,
-            skill_loader=skill_loader,
-            mcp_manager=mcp_manager,
-        )
-        mention_contexts = await resolver.resolve(list(parse_result.mentions))
-        return parse_result.display_text, mention_contexts
-    except Exception:
-        logger.debug("API 层 @ 提及解析失败，回退到原始消息", exc_info=True)
-        return message, None
+    """解析用户消息中的 @ 提及标记，返回 (display_text, mention_contexts)。"""
+    return await resolve_mentions(message, engine)
 
 
 @router.post("/api/v1/chat", response_model=ChatResponse, responses=_error_responses)
@@ -411,7 +416,7 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
     if get_config_incomplete():
         raise HTTPException(
             status_code=503,
-            detail="模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+            detail="模型尚未配置，请先在设置页面添加模型档案。",
         )
 
     try:
@@ -446,6 +451,8 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             route_mode="control_command",
         )
 
+    from excelmanus.attachments.types import AttachmentError
+
     try:
         display_text, mention_contexts = await _resolve_mentions(
             request.message, engine,
@@ -454,14 +461,19 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
         def _on_event_sync(event: ToolCallEvent) -> None:
             _persist_excel_event(session_id, event)
 
-        chat_result = await engine.followup(
-                display_text,
-                on_event=_on_event_sync,
-                mention_contexts=mention_contexts,
-                images=_serialize_images(request.images),
-                chat_mode=request.chat_mode,
-                present_as=request.present_as,
-            )
+        chat_turn = await run_engine_followup(
+            engine,
+            request.message,
+            on_event=_on_event_sync,
+            images=_serialize_images(request.images),
+            chat_mode=request.chat_mode,
+            present_as=request.present_as,
+            display_text=display_text,
+            mention_contexts=mention_contexts,
+        )
+        chat_result = chat_turn.result
+    except AttachmentError as _attachment_exc:
+        raise HTTPException(status_code=400, detail=str(_attachment_exc))
     except Exception as _chat_exc:
         # 非流式路径：池健康信号更新 + 即时评估
         _pool_aid_err_json = getattr(engine, "_pool_account_id", None)
@@ -566,7 +578,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
     if get_config_incomplete():
         raise HTTPException(
             status_code=503,
-            detail="模型尚未配置，请先在设置页面或 .env 文件中配置 API Key、Base URL 和 Model。",
+            detail="模型尚未配置，请先在设置页面添加模型档案。",
         )
     if not (request.message or "").strip() and not request.images:
         raise HTTPException(status_code=400, detail="消息内容不能为空。")
@@ -673,15 +685,15 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             if request.images:
                 logger.info(
-                    "chat_stream 收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
+                    "chat_stream 收到 %d 张图片附件 (media_types=%s, attachment_ids=%s)",
                     len(request.images),
                     [img.media_type for img in request.images],
-                    [len(img.data) for img in request.images],
+                    [img.attachment_id for img in request.images],
                 )
 
             # ── 设置事件流管道 ──
             stream_state = _SessionStreamState()
-            _app_state._session_stream_states[session_id] = stream_state
+            _app_state.get_runtime().session_stream_states[session_id] = stream_state
             event_queue = stream_state.attach()
 
             yield _sse_format("stream_init", {
@@ -743,17 +755,19 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     _schedule_flush()
 
             async def _run_chat_inner() -> ChatResult:
-                """后台执行 engine.chat，完成后释放会话锁。"""
+                """后台执行与非流式相同的 followup，完成后释放会话锁。"""
                 try:
-                    result = await engine.followup(
-                        display_text,
+                    outcome = await run_engine_followup(
+                        engine,
+                        request.message,
                         on_event=_on_event,
-                        mention_contexts=mention_contexts,
                         images=_serialize_images(request.images),
                         chat_mode=request.chat_mode,
                         present_as=request.present_as,
+                        display_text=display_text,
+                        mention_contexts=mention_contexts,
                     )
-                    return result
+                    return outcome.result
                 finally:
                     await get_session_manager().release_for_chat(session_id)
                     nonlocal acquired
@@ -761,12 +775,12 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
 
             # ── 启动 chat 任务 ──
             chat_task = asyncio.create_task(_run_chat_inner())
-            _app_state._active_chat_tasks[session_id] = chat_task
+            _app_state.get_runtime().active_chat_tasks[session_id] = chat_task
 
             def _cleanup_active_chat_task(done_task: asyncio.Task[Any]) -> None:
                 """后台 chat 任务完成后清理活跃任务映射与流状态。"""
-                if _app_state._active_chat_tasks.get(session_id) is done_task:
-                    _app_state._active_chat_tasks.pop(session_id, None)
+                if _app_state.get_runtime().active_chat_tasks.get(session_id) is done_task:
+                    _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
                 try:
                     done_task.result()
                 except asyncio.CancelledError:
@@ -939,9 +953,9 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             if stream_state is not None:
                 stream_state.detach()
             if chat_task is not None and chat_task.done():
-                if _app_state._active_chat_tasks.get(session_id) is chat_task:
-                    _app_state._active_chat_tasks.pop(session_id, None)
-                _app_state._session_stream_states.pop(session_id, None)
+                if _app_state.get_runtime().active_chat_tasks.get(session_id) is chat_task:
+                    _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
+                _app_state.get_runtime().session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
             # 安全网：确保 in_flight 锁被释放（正常路径已在 _run_chat_inner 中释放）
             if acquired and session_id is not None:
@@ -1124,12 +1138,13 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
         EventType.ITERATION_START,
         EventType.RETRACT_THINKING,
     }
+    _REPLAY_SKIP_TYPES = TRANSIENT_SSE_TYPES
 
     if not await _has_session_access(session_id, raw_request):
         return _error_json_response(404, f"会话 '{session_id}' 不存在。")  # type: ignore[return-value]
 
-    chat_task = _app_state._active_chat_tasks.get(session_id)
-    stream_state = _app_state._session_stream_states.get(session_id)
+    chat_task = _app_state.get_runtime().active_chat_tasks.get(session_id)
+    stream_state = _app_state.get_runtime().session_stream_states.get(session_id)
     after_seq = request.after_seq
 
     def _streaming_response(gen: AsyncIterator[str]) -> StreamingResponse:
@@ -1153,7 +1168,7 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             })
             yield _sse_format("done", {})
 
-        _app_state._active_chat_tasks.pop(session_id, None)
+        _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
         return _streaming_response(_done_stream())
 
     _sid = stream_state.stream_id
@@ -1192,6 +1207,8 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                     "buffered_count": len(replay_items),
                 })
                 for seq, event in replay_items:
+                    if event.event_type in _REPLAY_SKIP_TYPES:
+                        continue
                     if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                         continue
                     sse = _sse_event_to_sse(event)
@@ -1199,8 +1216,8 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
                         yield _inject_seq(sse, seq, _sid)
                 yield _sse_format("done", {})
             finally:
-                _app_state._active_chat_tasks.pop(session_id, None)
-                _app_state._session_stream_states.pop(session_id, None)
+                _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
+                _app_state.get_runtime().session_stream_states.pop(session_id, None)
 
         return _streaming_response(_completed_stream())
 
@@ -1243,6 +1260,8 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
             })
 
             for seq, event in replay_items:
+                if event.event_type in _REPLAY_SKIP_TYPES:
+                    continue
                 if skip_replay and event.event_type not in _REPLAY_KEEP_TYPES:
                     continue
                 sse = _sse_event_to_sse(event)
@@ -1334,8 +1353,8 @@ async def chat_subscribe(request: _SubscribeRequest, raw_request: Request) -> St
         finally:
             stream_state.detach()
             if chat_task.done():
-                _app_state._active_chat_tasks.pop(session_id, None)
-                _app_state._session_stream_states.pop(session_id, None)
+                _app_state.get_runtime().active_chat_tasks.pop(session_id, None)
+                _app_state.get_runtime().session_stream_states.pop(session_id, None)
             await _cancel_task(queue_get_task)
 
     return _streaming_response(_subscribe_generator())
@@ -1348,7 +1367,7 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
             status_code=200,
             content={"status": "no_active_task"},
         )
-    task = _app_state._active_chat_tasks.get(request.session_id)
+    task = _app_state.get_runtime().active_chat_tasks.get(request.session_id)
     if task is None or task.done():
         return JSONResponse(
             status_code=200,
@@ -1389,7 +1408,7 @@ async def chat_guide(
         return _error_json_response(404, f"会话 '{session_id}' 不存在或未加载")
 
     engine.push_guide_message(request.message)
-    in_flight = session_id in _app_state._active_chat_tasks and not _app_state._active_chat_tasks[session_id].done()
+    in_flight = session_id in _app_state.get_runtime().active_chat_tasks and not _app_state.get_runtime().active_chat_tasks[session_id].done()
     logger.info(
         "Guide 消息已投递: session=%s, in_flight=%s, len=%d",
         session_id[:8], in_flight, len(request.message),
@@ -1416,20 +1435,7 @@ async def chat_answer(
     if engine is None:
         return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
 
-    registry = engine.interaction_registry
-    # 构造 payload：兼容 QuestionFlowManager 的 parse_answer 格式
-    payload = {"raw_input": request.answer, "question_id": request.question_id}
-
-    # 尝试解析选项（如果 question_flow 中有对应问题）
-    try:
-        pending_q = engine._question_flow.current()
-        if pending_q is not None and pending_q.question_id == request.question_id:
-            parsed = engine._question_flow.parse_answer(request.answer, pending_q)
-            payload = parsed.to_tool_result()
-    except Exception:
-        logger.debug("解析回答失败，使用原始文本", exc_info=True)
-
-    ok = registry.resolve(request.question_id, payload)
+    ok = submit_question_answer(engine, request.question_id, request.answer)
     if not ok:
         return JSONResponse(
             status_code=404,
@@ -1455,19 +1461,40 @@ async def chat_approve(
     if engine is None:
         return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
 
-    registry = engine.interaction_registry
-    payload = {"decision": request.decision, "approval_id": request.approval_id}
-    ok = registry.resolve(request.approval_id, payload)
-    if not ok:
-        return JSONResponse(
-            status_code=404,
-            content={"error": f"审批 {request.approval_id} 不存在或已处理"},
+    ok = submit_approval(engine, request.approval_id, request.decision)
+    if ok:
+        logger.info(
+            "审批已决策: session=%s approval=%s decision=%s",
+            session_id, request.approval_id, request.decision,
         )
-    logger.info(
-        "审批已决策: session=%s approval=%s decision=%s",
-        session_id, request.approval_id, request.decision,
+        return JSONResponse(status_code=200, content={"status": "resolved"})
+
+    # Future 已不在：可能刚提交成功、工具仍在执行，或刷新后重复提交。
+    # 对前端必须幂等，不能 404 把弹窗锁在错误态。
+    pending = engine.current_pending_approval()
+    if pending is not None and pending.approval_id == request.approval_id:
+        logger.info(
+            "审批已在处理中（幂等）: session=%s approval=%s decision=%s",
+            session_id, request.approval_id, request.decision,
+        )
+        return JSONResponse(status_code=200, content={"status": "already_resolved"})
+
+    applied = None
+    try:
+        applied = engine.approval.get_applied(request.approval_id)
+    except Exception:
+        logger.debug("查询已执行审批失败: %s", request.approval_id, exc_info=True)
+    if applied is not None:
+        logger.info(
+            "审批已执行（幂等）: session=%s approval=%s",
+            session_id, request.approval_id,
+        )
+        return JSONResponse(status_code=200, content={"status": "already_resolved"})
+
+    return JSONResponse(
+        status_code=404,
+        content={"error": f"审批 {request.approval_id} 不存在或已处理"},
     )
-    return JSONResponse(status_code=200, content={"status": "resolved"})
 
 
 

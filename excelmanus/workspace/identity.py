@@ -27,6 +27,23 @@ RESERVED_FIRST_SEGMENTS: frozenset[str] = frozenset({
     ".versions",
 })
 
+SENSITIVE_BASENAMES: frozenset[str] = frozenset({
+    ".secret_key",
+    ".env",
+    "config.env",
+    "excelmanus.db",
+    "installations.json",
+})
+
+
+def is_sensitive_relative(rel: str) -> bool:
+    """True if the workspace-relative path names a product secret file."""
+    normalized = _normalize_slashes(rel).removeprefix("./").strip("/")
+    if not normalized:
+        return False
+    return Path(normalized).name in SENSITIVE_BASENAMES
+
+
 RESERVED_PREFIXES: tuple[str, ...] = (
     ".excelmanus",
     "outputs/backups",
@@ -75,8 +92,12 @@ def display_name_for(relative: str) -> str:
 
 
 def is_hidden_name(name: str) -> bool:
-    """CatalogFilter: hide ``.`` and ``~$`` names."""
-    return name.startswith(".") or name.startswith("~$")
+    """CatalogFilter: hide dotfiles, Office temp files, and internal lock artifacts."""
+    return (
+        name.startswith(".")
+        or name.startswith("~$")
+        or name.lower().endswith(".em-lock")
+    )
 
 
 def is_reserved_relative(rel: str) -> bool:
@@ -148,8 +169,7 @@ def resolve_canonical(workspace_root: str | Path | None, raw: str) -> CanonicalP
 def public_identity(path: str, workspace_root: str | Path | None) -> str:
     """SSE-suitable public identity (``./rel``), or ``""`` if it must be omitted.
 
-    Overlay leftovers map to the logical original when that file exists
-    (uploads/ or root). If mapping fails, skip — never emit the backup path.
+    Live path never basename-maps overlay leftovers; that mapping is migrate-only.
     """
     raw = str(path or "").strip()
     if not raw:
@@ -160,11 +180,9 @@ def public_identity(path: str, workspace_root: str | Path | None) -> str:
             return ""
 
     root = Path(workspace_root).expanduser().resolve() if workspace_root else None
-    mapped = _map_overlay_leftover(raw, root)
-    if mapped is _SKIP:
+    probe = _normalize_slashes(raw).removeprefix("./").strip("/")
+    if is_overlay_leftover(probe):
         return ""
-    if mapped:
-        raw = mapped
 
     try:
         return resolve_canonical(root, raw).public

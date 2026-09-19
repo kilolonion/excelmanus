@@ -131,8 +131,39 @@ class MentionResolver:
                 mention=mention, error=f"路径不是文件：{mention.value}"
             )
 
-        # 根据文件类型选择解析方式
         suffix = resolved_path.suffix.lower()
+        snap = None
+        if suffix in _EXCEL_EXTENSIONS:
+            from excelmanus.workbook.snapshot import SnapshotError, SnapshotStale, open_snapshot_at
+            from excelmanus.workspace.refs import WorkspaceRef
+
+            try:
+                try:
+                    rel = resolved_path.relative_to(Path(self._workspace_root)).as_posix()
+                except ValueError:
+                    rel = str(mention.value).replace("\\", "/")
+                snap = open_snapshot_at(
+                    resolved_path,
+                    relative=rel,
+                    workspace=WorkspaceRef.from_root(self._workspace_root),
+                    expected_version=mention.content_version,
+                )
+            except SnapshotStale as exc:
+                return ResolvedMention(
+                    mention=mention,
+                    error=str(exc),
+                    # 注册表里的正名是 STALE_READ（失败类别 conflict）。
+                    error_code="STALE_READ",
+                    error_fields=exc.fields,
+                )
+            except SnapshotError as exc:
+                return ResolvedMention(
+                    mention=mention,
+                    error=str(exc),
+                    error_code=exc.code,
+                    error_fields=exc.fields,
+                )
+            resolved_path = snap.backing_path
         if suffix in _EXCEL_EXTENSIONS:
             if mention.range_spec:
                 resolved = self._resolve_excel_range(mention, resolved_path)
@@ -140,8 +171,9 @@ class MentionResolver:
                 resolved = self._resolve_excel_file(mention, resolved_path)
         else:
             resolved = self._resolve_text_file(mention, resolved_path)
-        if not resolved.error:
-            self._remember_file_version(mention, resolved_path)
+        if not resolved.error and snap is not None:
+            resolved.content_version = snap.content_version
+            self._remember_file_version(mention, Path(mention.value))
         return resolved
 
     def _resolve_excel_file(
@@ -150,8 +182,6 @@ class MentionResolver:
         """解析 Excel 文件：丰富的结构化摘要（工作表列表、行列数、列结构、数据类型）。"""
         try:
             from openpyxl import load_workbook
-            from excelmanus.tools._helpers import ensure_openpyxl_compatible
-            path = ensure_openpyxl_compatible(path)
 
             wb = load_workbook(str(path), read_only=True, data_only=True)
             try:
@@ -204,18 +234,23 @@ class MentionResolver:
         支持格式：
         - "Sheet1!A1:C10" → ("Sheet1", "A1:C10")
         - "A1:C10" → (None, "A1:C10")
-        - "Sheet1!A1" → ("Sheet1", "A1:A1")
-        - "A1" → (None, "A1:A1")
+        - "Sheet1!A1" → ("Sheet1", "A1")
+        - "A1" → (None, "A1")
+        命名区域保持名称本身，禁止扩成 Name:Name。
         """
-        if "!" in range_spec:
-            sheet_name, cell_range = range_spec.split("!", 1)
-        else:
-            sheet_name = None
-            cell_range = range_spec
-        # 单格 → 扩展为 A1:A1
-        if ":" not in cell_range:
-            cell_range = f"{cell_range}:{cell_range}"
-        return sheet_name, cell_range
+        from excelmanus.workbook.refs import CellRef, NamedRef, RectRef, TableRef, parse_ref
+
+        area = parse_ref(range_spec)
+        part = area.areas[0]
+        if isinstance(part, NamedRef):
+            return part.sheet, part.name
+        if isinstance(part, TableRef):
+            return part.sheet, part.to_a1(include_sheet=False)
+        if isinstance(part, CellRef):
+            return part.sheet, part.to_a1(include_sheet=False)
+        if isinstance(part, RectRef):
+            return part.sheet, part.to_a1(include_sheet=False)
+        return None, range_spec
 
     @staticmethod
     def _infer_col_type(values: list[str]) -> str:
@@ -257,36 +292,81 @@ class MentionResolver:
         try:
             from openpyxl import load_workbook
             from openpyxl.utils import get_column_letter
-            from openpyxl.utils.cell import range_boundaries
-            from excelmanus.tools._helpers import ensure_openpyxl_compatible
-            path = ensure_openpyxl_compatible(path)
+            from excelmanus.workbook.data import WorkbookRefBindError, _bind_area_in_workbook
+            from excelmanus.workbook.refs import parse_ref
+            from excelmanus.workbook.snapshot import (
+                RefUnsupported,
+                SheetRequired,
+                SnapshotError,
+                require_default_sheet,
+            )
 
-            sheet_name, cell_range = self._parse_range_spec(mention.range_spec)  # type: ignore[arg-type]
-
-            wb = load_workbook(str(path), read_only=True, data_only=True)
+            wb = load_workbook(str(path), read_only=False, data_only=True)
             try:
-                # 定位 sheet
-                if sheet_name:
-                    if sheet_name not in wb.sheetnames:
-                        return ResolvedMention(
-                            mention=mention,
-                            error=f"工作表不存在：{sheet_name}",
-                        )
-                    ws = wb[sheet_name]
-                else:
-                    ws = wb.active
-                    sheet_name = ws.title if ws else wb.sheetnames[0]
-                    if ws is None:
-                        ws = wb[wb.sheetnames[0]]
+                range_spec = str(mention.range_spec or "")
+                try:
+                    area = parse_ref(range_spec)
+                except Exception as exc:
+                    return ResolvedMention(
+                        mention=mention,
+                        error=f"无法解析引用：{exc}",
+                        error_code="RANGE_INVALID",
+                    )
+                default_sheet = None
+                if len(area.areas) == 1 and getattr(area.areas[0], "sheet", None):
+                    default_sheet = area.areas[0].sheet
+                try:
+                    if default_sheet is None:
+                        default_sheet = require_default_sheet(list(wb.sheetnames), None)
+                    rects = _bind_area_in_workbook(wb, area, default_sheet=default_sheet)
+                except SheetRequired as exc:
+                    return ResolvedMention(mention=mention, error=str(exc), error_code="SHEET_REQUIRED")
+                except (WorkbookRefBindError, SnapshotError, RefUnsupported) as exc:
+                    code = getattr(exc, "code", "REF_UNSUPPORTED")
+                    return ResolvedMention(
+                        mention=mention,
+                        error=str(exc),
+                        error_code=str(code),
+                        error_fields=dict(getattr(exc, "fields", None) or {}),
+                    )
+                if not rects:
+                    return ResolvedMention(mention=mention, error="引用没有可绑定区域", error_code="RANGE_INVALID")
+                if len(rects) > 1:
+                    return ResolvedMention(
+                        mention=mention,
+                        error="mention 范围不支持并集，请改用单一矩形。",
+                        error_code="REF_UNSUPPORTED",
+                    )
+                rect = rects[0]
+                if rect.whole_column or rect.whole_row:
+                    return ResolvedMention(
+                        mention=mention,
+                        error="mention 不支持整轴引用。请写有限矩形，例如 A1:A100。",
+                        error_code="REF_UNSUPPORTED",
+                    )
+                sheet_name = rect.sheet
+                if sheet_name not in wb.sheetnames:
+                    return ResolvedMention(
+                        mention=mention,
+                        error=f"工作表不存在：{sheet_name}",
+                        error_code="SHEET_NOT_FOUND",
+                        error_fields={"requested_sheet": sheet_name, "available_sheets": list(wb.sheetnames)},
+                    )
+                ws = wb[sheet_name]
+                min_col, min_row, max_col, max_row = rect.min_col, rect.min_row, rect.max_col, rect.max_row
+                cell_range = rect.to_a1(include_sheet=False)
 
                 # ── 工作表全局信息 ──
                 sheet_total_rows = ws.max_row or 0
                 sheet_total_cols = ws.max_column or 0
                 sheet_index = wb.sheetnames.index(sheet_name) if sheet_name in wb.sheetnames else 0
                 total_sheets = len(wb.sheetnames)
-
-                # 解析单元格范围
-                min_col, min_row, max_col, max_row = range_boundaries(cell_range)
+                requested_range = cell_range
+                requested_rows = max_row - min_row + 1
+                requested_cols = max_col - min_col + 1
+                # 先限制读取量，再做文本预算；避免巨大选区先整块载入内存。
+                max_col = min(max_col, min_col + 99)
+                max_row = min(max_row, min_row + max(1, 2000 // (max_col - min_col + 1)) - 1)
 
                 # 构建列头（字母标识）
                 col_headers = [
@@ -339,7 +419,10 @@ class MentionResolver:
                 lines: list[str] = []
 
                 # 1) 选区定位摘要
-                lines.append(f"[Selection] {range_label} ({num_cols}列×{num_rows}行)")
+                lines.append(f"[Selection] {sheet_name}!{requested_range} ({requested_cols}列×{requested_rows}行)")
+                if requested_rows != num_rows or requested_cols != num_cols:
+                    lines.append(f"[Preview] 已截断：仅展示 {range_label}，不是完整选区内容。")
+                lines.append(f"[Requested] {requested_range}；数据为磁盘缓存值，公式可能尚未重算。")
                 lines.append(
                     f"[Sheet] \"{sheet_name}\" (第{sheet_index + 1}/{total_sheets}个工作表, "
                     f"全表{sheet_total_rows}行×{sheet_total_cols}列)"
@@ -400,6 +483,7 @@ class MentionResolver:
             return ResolvedMention(
                 mention=mention,
                 error=f"范围读取失败：{mention.value}[{mention.range_spec}]：{exc}",
+                error_code="RANGE_INVALID" if isinstance(exc, ValueError) else "TOOL_ERROR",
             )
 
     def _resolve_text_file(

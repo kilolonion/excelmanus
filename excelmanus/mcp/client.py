@@ -16,20 +16,51 @@ from contextlib import AsyncExitStack
 from typing import Any
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.sse import sse_client
-from mcp.client.stdio import stdio_client
-from mcp.types import CallToolResult
-
-try:
-    from mcp.client.streamable_http import streamable_http_client
-except Exception:  # pragma: no cover - 兼容旧版 MCP SDK
-    streamable_http_client = None  # type: ignore[assignment]
 
 from excelmanus.mcp.config import MCPServerConfig
 
 logger = logging.getLogger("excelmanus.mcp.client")
 _DEFAULT_TOOL_CACHE_TTL_SECONDS = 30.0
+
+# MCP SDK 在首次 connect() 时再加载，避免拖慢 API 进程导入。
+_SDK_UNSET = object()
+ClientSession: Any = _SDK_UNSET
+StdioServerParameters: Any = _SDK_UNSET
+stdio_client: Any = _SDK_UNSET
+sse_client: Any = _SDK_UNSET
+streamable_http_client: Any = _SDK_UNSET
+
+
+def _placeholder_stdio_params(**kwargs: Any) -> dict[str, Any]:
+    """测试已 patch ClientSession 时，避免为参数对象再拉 MCP SDK。"""
+    return kwargs
+
+
+def _ensure_mcp_sdk() -> None:
+    """按需加载 MCP SDK，且不覆盖测试已 patch 的模块属性。"""
+    global ClientSession, StdioServerParameters, stdio_client, sse_client, streamable_http_client
+    if ClientSession is not _SDK_UNSET:
+        if StdioServerParameters is _SDK_UNSET:
+            StdioServerParameters = _placeholder_stdio_params
+        return
+    from mcp import ClientSession as _cs
+    from mcp import StdioServerParameters as _params
+    from mcp.client.sse import sse_client as _sse
+    from mcp.client.stdio import stdio_client as _stdio
+
+    try:
+        from mcp.client.streamable_http import streamable_http_client as _http
+    except Exception:  # pragma: no cover - 兼容旧版 MCP SDK
+        _http = None
+    ClientSession = _cs
+    if StdioServerParameters is _SDK_UNSET:
+        StdioServerParameters = _params
+    if stdio_client is _SDK_UNSET:
+        stdio_client = _stdio
+    if sse_client is _SDK_UNSET:
+        sse_client = _sse
+    if streamable_http_client is _SDK_UNSET:
+        streamable_http_client = _http
 
 
 class MCPClientWrapper:
@@ -48,8 +79,10 @@ class MCPClientWrapper:
 
     def __init__(self, config: MCPServerConfig) -> None:
         self._config = config
-        self._session: ClientSession | None = None
+        self._session: Any = None
         self._exit_stack: AsyncExitStack | None = None
+        self._owner_task: asyncio.Task[None] | None = None
+        self._owner_close: asyncio.Event | None = None
         self._tools: list[dict] = []  # 最近一次 tools/list 结果快照
         self._tools_cached_at: float | None = None
         self._managed_pids: set[int] = set()
@@ -62,14 +95,51 @@ class MCPClientWrapper:
         - ``sse``：连接到 HTTP SSE 端点
         - ``streamable_http``：连接到 MCP Streamable HTTP 端点
 
-        使用 ``AsyncExitStack`` 保持上下文管理器的生命周期，
-        直到调用 ``close()`` 时统一释放。
+        连接上下文由常驻 owner task 持有并释放；调用 ``connect()`` 与
+        ``close()`` 的 task 可以不同。
 
         Raises:
             Exception: 连接失败时抛出底层异常。
         """
-        self._exit_stack = AsyncExitStack()
+        if self._owner_task is not None and not self._owner_task.done():
+            if self.is_connected:
+                return
+            await self.close()
 
+        _ensure_mcp_sdk()
+        loop = asyncio.get_running_loop()
+        ready: asyncio.Future[None] = loop.create_future()
+        close_requested = asyncio.Event()
+        owner = asyncio.create_task(
+            self._run_connection_owner(ready, close_requested),
+            name=f"mcp-client-{self._config.name}",
+        )
+        self._owner_task = owner
+        self._owner_close = close_requested
+        try:
+            await asyncio.shield(ready)
+        except asyncio.CancelledError:
+            if not ready.done():
+                ready.cancel()
+            close_requested.set()
+            owner.cancel()
+            await asyncio.gather(owner, return_exceptions=True)
+            self._owner_task = None
+            self._owner_close = None
+            raise
+        except BaseException:
+            close_requested.set()
+            await asyncio.gather(owner, return_exceptions=True)
+            self._owner_task = None
+            self._owner_close = None
+            raise
+
+    async def _run_connection_owner(
+        self,
+        ready: asyncio.Future[None],
+        close_requested: asyncio.Event,
+    ) -> None:
+        self._exit_stack = AsyncExitStack()
         try:
             if self._config.transport == "stdio":
                 read_stream, write_stream = await self._connect_stdio()
@@ -78,23 +148,25 @@ class MCPClientWrapper:
             else:
                 read_stream, write_stream = await self._connect_streamable_http()
 
-            # 创建并进入 ClientSession 上下文
             session = await self._exit_stack.enter_async_context(
                 ClientSession(read_stream, write_stream)
             )
-            # 初始化 MCP 会话（握手）
             await session.initialize()
             self._session = session
-
             logger.info(
                 "已连接 MCP Server '%s' (transport=%s)",
                 self._config.name,
                 self._config.transport,
             )
-        except Exception:
-            # 连接失败时清理已进入的上下文
+            if not ready.done():
+                ready.set_result(None)
+            await close_requested.wait()
+        except BaseException as exc:
+            if not ready.done():
+                ready.set_exception(exc)
+        finally:
+            self._session = None
             await self._cleanup_exit_stack()
-            raise
 
     async def _connect_stdio(self) -> tuple[Any, Any]:
         """建立 stdio 传输连接，返回 (read_stream, write_stream)。"""
@@ -123,7 +195,7 @@ class MCPClientWrapper:
 
     async def _connect_streamable_http(self) -> tuple[Any, Any]:
         """建立 Streamable HTTP 传输连接，返回 (read_stream, write_stream)。"""
-        if streamable_http_client is None:
+        if streamable_http_client is None or streamable_http_client is _SDK_UNSET:
             raise RuntimeError("当前 mcp SDK 不支持 streamable_http 传输")
 
         http_client = await self._exit_stack.enter_async_context(
@@ -197,7 +269,7 @@ class MCPClientWrapper:
 
     async def call_tool(
         self, tool_name: str, arguments: dict[str, Any]
-    ) -> CallToolResult:
+    ) -> Any:
         """调用远程工具并返回 MCP CallToolResult。
 
         ``tool_name`` 为原始名称（不含前缀）。
@@ -245,12 +317,23 @@ class MCPClientWrapper:
     async def close(self) -> None:
         """关闭连接，释放资源。
 
-        安全调用：即使未连接或已关闭也不会抛出异常。
+        安全调用：即使未连接或已关闭也不会抛出异常。返回时 owner task
+        已退出，连接上下文已由其创建 task 释放。
         """
+        owner = self._owner_task
+        close_requested = self._owner_close
+        if close_requested is not None:
+            close_requested.set()
+        if owner is not None and owner is not asyncio.current_task():
+            await asyncio.gather(owner, return_exceptions=True)
+        elif owner is None:
+            await self._cleanup_exit_stack()
+
+        self._owner_task = None
+        self._owner_close = None
         self._session = None
         self._tools = []
         self._tools_cached_at = None
-        await self._cleanup_exit_stack()
         self._managed_pids.clear()
         logger.debug("已关闭 MCP Server '%s' 连接", self._config.name)
 
@@ -333,7 +416,7 @@ def _truncate_args(arguments: dict[str, Any], max_len: int = 200) -> str:
     return text
 
 
-def _extract_error_text(result: CallToolResult) -> str:
+def _extract_error_text(result: Any) -> str:
     """从 CallToolResult 中提取错误文本。"""
     parts: list[str] = []
     for item in getattr(result, "content", []):

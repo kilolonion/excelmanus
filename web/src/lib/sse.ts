@@ -1,4 +1,5 @@
 import { directFetch } from "./api";
+import { formatApiErrorMessage } from "./api-error";
 
 export interface SSEEvent {
   event: string;
@@ -43,8 +44,7 @@ export async function consumeSSE(
     let errorMsg = `SSE error: ${response.status}`;
     try {
       const data = JSON.parse(text);
-      if (data.error) errorMsg = data.error;
-      else if (data.detail) errorMsg = data.detail;
+      errorMsg = formatApiErrorMessage(data, response.status);
     } catch { /* not JSON, use status text */ }
     throw new SSEError(response.status, errorMsg, text);
   }

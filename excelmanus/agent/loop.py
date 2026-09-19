@@ -8,8 +8,6 @@ from dataclasses import replace
 from itertools import count
 from typing import Any
 
-import openai
-
 from excelmanus.engine_core.llm_caller import (
     compute_retry_delay,
     is_content_filter_error,
@@ -26,7 +24,6 @@ from excelmanus.engine_types import (
 )
 from excelmanus.engine_utils import (
     _extract_anthropic_cache_tokens,
-    _extract_cached_tokens,
     _extract_completion_message,
     _extract_ttft_ms,
     _looks_like_html_document,
@@ -34,19 +31,320 @@ from excelmanus.engine_utils import (
     _normalize_tool_calls,
     _summarize_text,
     _usage_token,
-    build_mention_context_block,
 )
+from excelmanus.request.compiler import compile_request, header_from_sealed
+from excelmanus.request.series import series_of
+from excelmanus.request.usage import extract_cache_usage
 from excelmanus.error_guidance import classify_failure as _classify_failure
 from excelmanus.events import EventCallback, EventType, ToolCallEvent
 from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
 from excelmanus.logger import get_logger
+from excelmanus.tools.policy import write_effect_for_call
 from excelmanus.message_serialization import (
     assistant_message_to_dict as _assistant_message_to_dict,
+    sanitize_tool_call_arguments as _sanitize_tool_call_arguments,
     to_plain as _to_plain,
 )
 from excelmanus.skillpacks import SkillMatchResult
 
 logger = get_logger("agent.loop")
+
+
+# ── 并行批同因折叠（P3-a）──────────────────────────────────
+#
+# 同 iteration、同并行批内 N 个失败若同因（同 error_code + 同文件 +
+# 同可用表清单），durable 全部保留全文，第 2 条起仅在出网投影时折叠。
+# all_tool_results（内存）、审计与熔断计数保持全文不变。
+# 指针内联 remediation + available_sheets，模型无需跳转即可纠正；
+# 不用 spill: 前缀、不设 spill 键，与 spill 取回通道隔离。
+
+_DEDUP_POINTER_MAX_CHARS = 400
+_DEDUP_ARGS_HINT_MAX_CHARS = 120
+
+
+def _dedup_parse_result(result: Any) -> dict[str, Any]:
+    """从 ToolCallResult.result 文本解析规范错误 JSON，失败返回 {}。"""
+    import json
+
+    if isinstance(result, dict):
+        return result
+    if not isinstance(result, str):
+        return {}
+    text = result.strip()
+    if not text.startswith("{"):
+        return {}
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def _dedup_error_info(tc_result: Any) -> dict[str, Any] | None:
+    """提取 (error_code, failure_class, fields, remediation, sheets)。"""
+    from excelmanus.engine_core.error_payload import (
+        failure_class_for_error_code,
+        remediation_for,
+    )
+
+    structured = getattr(tc_result, "structured", None)
+    code: str | None = None
+    fields: dict[str, Any] = {}
+    err = getattr(structured, "error", None) if structured is not None else None
+    if err is not None:
+        code = getattr(err, "code", None)
+        raw_fields = getattr(err, "fields", None)
+        if isinstance(raw_fields, dict):
+            fields = raw_fields
+    parsed = _dedup_parse_result(getattr(tc_result, "result", ""))
+    if not code:
+        raw_code = parsed.get("error_code") or parsed.get("code")
+        code = str(raw_code) if raw_code else None
+    if not code:
+        return None
+    if not fields:
+        raw_fields = parsed.get("fields")
+        if isinstance(raw_fields, dict):
+            fields = raw_fields
+    sheets = fields.get("available_sheets") or parsed.get("available_sheets") or []
+    sheets = [str(s) for s in sheets if str(s).strip()][:5]
+    remediation = (
+        parsed.get("remediation")
+        or remediation_for(code, extra={**fields, "available_sheets": sheets} if sheets else fields)
+    )
+    return {
+        "code": code,
+        "failure_class": failure_class_for_error_code(code),
+        "fields": fields,
+        "remediation": str(remediation or ""),
+        "sheets": sheets,
+        "message": str(parsed.get("message") or getattr(tc_result, "error", "") or "")[:80],
+    }
+
+
+def _dedup_norm_file(arguments: Any) -> str:
+    args = arguments if isinstance(arguments, dict) else {}
+    raw = args.get("file_path") or args.get("path") or ""
+    return str(raw).replace("\\", "/").strip().lower()
+
+
+def _dedup_group_key(tc_result: Any) -> tuple[str, str, str, str] | None:
+    """同因分组键 (error_code, file, sheets指纹, failure_class)，缺一不可。"""
+    if getattr(tc_result, "success", True):
+        return None
+    if getattr(tc_result, "defer_tool_result", False):
+        return None
+    if getattr(tc_result, "pending_approval", False) or getattr(tc_result, "pending_question", False):
+        return None
+    info = _dedup_error_info(tc_result)
+    if info is None:
+        return None
+    norm_file = _dedup_norm_file(getattr(tc_result, "arguments", {}))
+    sheets = info["sheets"]
+    if not norm_file and not sheets:
+        return None
+    if sheets:
+        sheets_fp = "|".join(sorted(sheets))
+    else:
+        sheets_fp = f"msg:{info['message'][:80]}"
+    return (info["code"], norm_file, sheets_fp, info["failure_class"])
+
+
+def _dedup_args_hint(first_args: Any, args: Any) -> str:
+    """两组参数的差异摘要（≤120字），完全相同写“同参”。"""
+    fa = first_args if isinstance(first_args, dict) else {}
+    ga = args if isinstance(args, dict) else {}
+    if fa == ga:
+        return "同参"
+    parts: list[str] = []
+    for key in list(fa.keys()) + [k for k in ga.keys() if k not in fa]:
+        fv, gv = fa.get(key), ga.get(key)
+        if fv == gv:
+            continue
+        parts.append(f"{key}: {str(fv)[:24]} vs {str(gv)[:24]}")
+        if sum(len(p) for p in parts) > _DEDUP_ARGS_HINT_MAX_CHARS:
+            break
+    text = "; ".join(parts)[:_DEDUP_ARGS_HINT_MAX_CHARS] or "参数不同"
+    return text
+
+
+def _build_dedup_pointer(
+    *,
+    code: str,
+    failure_class: str,
+    group: str,
+    ref_tool_call_id: str,
+    first_tool: str,
+    position: str,
+    remediation: str,
+    sheets: list[str],
+    args_hint: str,
+) -> str:
+    """构造折叠指针 JSON（不用 spill: 前缀、不设 spill 键）。"""
+    import json
+
+    payload = {
+        "status": "error",
+        "error_code": code,
+        "dedup": "same-batch",
+        "ref_tool_call_id": ref_tool_call_id,
+        "group": group,
+        "message": f"与同批 {first_tool} 同因失败（{position}），详情见该条。",
+        "failure_class": failure_class,
+        "remediation": remediation,
+        "available_sheets": sheets,
+        "args_hint": args_hint,
+    }
+    text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    # 超预算时只压缩 remediation（表清单独立字段保留），仍超则放弃折叠由调用方决定。
+    while len(text) > _DEDUP_POINTER_MAX_CHARS and len(payload["remediation"]) > 24:
+        overflow = len(text) - _DEDUP_POINTER_MAX_CHARS + 3
+        payload["remediation"] = payload["remediation"][: max(0, len(payload["remediation"]) - overflow)] + "…"
+        text = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    return text
+
+
+def plan_parallel_dedup(
+    items: list[tuple[Any, Any]],
+) -> dict[int, str]:
+    """为并行批结果计算折叠计划：{下标: 指针文本}。
+
+    输入为保序的 [(tc, tc_result)]；首条保留全文，其余同组折叠。
+    只读不写 memory，调用方决定入库文本。
+    """
+    groups: dict[tuple[str, str, str, str], list[int]] = {}
+    for index, (_tc, tc_result) in enumerate(items):
+        key = _dedup_group_key(tc_result)
+        if key is None:
+            continue
+        groups.setdefault(key, []).append(index)
+    plan: dict[int, str] = {}
+    for key, indices in groups.items():
+        if len(indices) < 2:
+            continue
+        code, norm_file, sheets_fp, fclass = key
+        first_index = indices[0]
+        first_tc, first_result = items[first_index]
+        first_id = str(getattr(first_tc, "id", "") or "")
+        first_tool = str(getattr(first_result, "tool_name", "") or "")
+        first_args = getattr(first_result, "arguments", {})
+        group_label = f"{code}|{norm_file or '-'}|{sheets_fp[:48]}"
+        total = len(indices)
+        for rank, index in enumerate(indices[1:], start=2):
+            _tc, tc_result = items[index]
+            info = _dedup_error_info(tc_result) or {}
+            pointer = _build_dedup_pointer(
+                code=code,
+                failure_class=fclass,
+                group=group_label,
+                ref_tool_call_id=first_id,
+                first_tool=first_tool or "同批首条",
+                position=f"第{rank}/{total}条",
+                remediation=str(info.get("remediation") or ""),
+                sheets=[str(s) for s in (info.get("sheets") or [])][:5],
+                args_hint=_dedup_args_hint(first_args, getattr(tc_result, "arguments", {})),
+            )
+            if len(pointer) > _DEDUP_POINTER_MAX_CHARS:
+                continue
+            plan[index] = pointer
+    return plan
+
+
+def _approval_reject_fields(reject_msg: str, *, timeout: bool) -> dict[str, Any]:
+    """把审批拒绝/超时收成模型可读的 ToolCallResult 字段。"""
+    import json
+
+    from excelmanus.engine_core.error_payload import APPROVAL_DENIED, APPROVAL_TIMEOUT
+    from excelmanus.engine_core.tool_result import error_result, from_payload
+
+    code = APPROVAL_TIMEOUT if timeout else APPROVAL_DENIED
+    structured = None
+    text = reject_msg
+    try:
+        parsed = json.loads(reject_msg)
+    except (json.JSONDecodeError, TypeError, ValueError):
+        parsed = None
+    if isinstance(parsed, dict):
+        structured = from_payload(parsed)
+        text = structured.model_text
+    else:
+        structured = error_result(reject_msg, code=code)
+        text = structured.model_text
+    return {
+        "pending_approval": False,
+        "success": False,
+        "result": text,
+        "error": code,
+        "structured": structured,
+    }
+
+
+def _release_open_attempt(engine: Any) -> None:
+    from excelmanus.attachments.files_api import release_file_ids
+
+    request_id = getattr(engine, "_open_request_id", None)
+    if request_id:
+        release_file_ids(request_id)
+        engine._open_request_id = None
+
+
+def _bind_prepared_outbound(engine: Any, prepared: Any) -> tuple[Any, dict[str, Any], dict[str, Any]]:
+    import openai
+    from excelmanus.attachments.files_api import lease_file_ids
+    from excelmanus.engine_core.llm_caller import degraded_params
+
+    route = prepared.route
+    lease_file_ids(prepared.request_id, prepared.file_leases)
+    engine._open_request_id = prepared.request_id
+    kwargs = prepared.create_kwargs()
+    stream_kwargs = dict(kwargs)
+    stream_kwargs["stream"] = True
+    skip = set(degraded_params(route.protocol_label(), route.model))
+    skip |= set(degraded_params(route.protocol, route.model))
+    if isinstance(getattr(engine, "_client", None), openai.AsyncOpenAI) and "stream_options" not in skip:
+        stream_kwargs["stream_options"] = {"include_usage": True}
+    return route, kwargs, stream_kwargs
+
+
+def apply_outbound_epoch(
+    engine: Any,
+    envelope: Any,
+    *,
+    model: str,
+    protocol: str,
+    call_config: dict[str, Any] | None = None,
+) -> tuple[list[dict[str, Any]], Any, str | None]:
+    """兼容入口：只做系列前缀检查，不写 last_accepted。"""
+    _ = (model, protocol, call_config)
+    from excelmanus.prompt.envelope import compute_epoch_identity, call_config_from_engine
+    from excelmanus.request.route import resolve_route
+
+    wire = list(getattr(envelope, "wire_messages", None) or [])
+    route = resolve_route(engine)
+    engine._resolved_route = route
+    header = header_from_sealed(engine, envelope)
+    prefix_error = series_of(engine).check_prefix(header)
+    if prefix_error:
+        logger.error("request series prefix invariant broken: %s", prefix_error)
+    identity = getattr(envelope, "identity", None)
+    catalog_digest = ""
+    if identity is not None:
+        catalog_digest = str(getattr(identity, "catalog_digest", "") or "")
+    system = getattr(envelope, "system_head", None) or getattr(envelope, "system", None) or ""
+    resolved_config = call_config
+    if resolved_config is None:
+        resolved_config = call_config_from_engine(engine)
+    epoch = compute_epoch_identity(
+        session_id=str(getattr(engine, "_session_id", "") or ""),
+        model=str(model or route.model or ""),
+        protocol=str(protocol or route.protocol_label() or ""),
+        call_config=resolved_config,
+        tools=list(getattr(envelope, "tools", None) or []),
+        system=system if isinstance(system, str) else "",
+        catalog_digest=catalog_digest,
+        wire_payload=wire,
+    )
+    return wire, epoch, prefix_error
 
 
 def _failure_guidance_event(guidance: Any) -> ToolCallEvent:
@@ -100,7 +398,9 @@ def _handle_text_reply(
             total_tokens=total_prompt_tokens + total_completion_tokens,
         )
 
-    engine._memory.add_assistant_message(reply_text)
+    payload = _assistant_message_to_dict(message)
+    payload["content"] = reply_text
+    engine._memory.add_assistant_tool_message(payload)
     engine._last_iteration_count = iteration
     logger.info("最终结果摘要: %s", _summarize_text(reply_text))
     return "return", _finalize_result(
@@ -134,32 +434,37 @@ async def run_tool_loop(
             route_mode="all_tools",
             system_contexts=[],
         )
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider as _OpenAICodexProvider
-
     def _finalize_result(**kwargs: Any) -> ChatResult:
-        """统一出口：刷新 registry + checkpoint + 自动发射 FILES_CHANGED 事件。"""
+        """统一出口：刷新 registry + checkpoint + 自动发射 MUTATION 事件。"""
         engine._try_refresh_registry()
         # 每轮结束保存会话快照（SessionState + TaskStore，不是文件检查点）
         engine.save_session_snapshot()
-        # 自动发射 FILES_CHANGED 事件（写入路径由 Host 追踪，不靠结束工具申报）
+        # 自动发射 MUTATION 事件（写入路径由 Host 追踪，不靠结束工具申报）
         if engine._state.affected_files and on_event is not None:
-            from excelmanus.events import EventType, ToolCallEvent, mutations_from_identities
+            from excelmanus.events import EventType, ToolCallEvent, changed_mutations
             from excelmanus.workspace.identity import (
                 collect_public_identities,
                 workspace_root_of,
             )
+            root = workspace_root_of(engine)
             changed = collect_public_identities(
                 engine._state.affected_files,
-                workspace_root_of(engine),
+                root,
             )
             engine.emit(
                 on_event,
                 ToolCallEvent(
-                    event_type=EventType.FILES_CHANGED,
+                    event_type=EventType.MUTATION,
                     changed_files=changed,
-                    mutations=mutations_from_identities(changed),
+                    mutations=changed_mutations(changed, workspace_root=root),
                 ),
             )
+        from excelmanus.workspace.scratch import leftover_reminder
+
+        reminder = leftover_reminder(getattr(engine.config, "workspace_root", None))
+        if reminder:
+            reply = str(kwargs.get("reply") or "")
+            kwargs["reply"] = f"{reply}\n\n{reminder}" if reply else reminder
         return ChatResult(**kwargs)
 
     max_failures = engine._config.max_consecutive_failures
@@ -256,18 +561,31 @@ async def run_tool_loop(
                 ),
             )
 
+        # 步前压缩挂在 Driver 附件上，不在循环体里分支。
+        _claim_step = iteration > start_iteration or not skip_initial_inbox_claim
+        if driver is not None and _claim_step:
+            _step_claimed = await driver.consume_next_step(iteration=iteration)
+            if _step_claimed:
+                logger.info("下一步认领 %d 条 steer/inject", len(_step_claimed))
+
         _ctx_start = time.monotonic()
-        prepared_prompts, context_error = engine._prepare_system_prompts_for_request()
+        prepared, context_error = await compile_request(
+            engine,
+            tool_access=tool_access,
+            vision_capable=engine._is_vision_capable,
+        )
+        envelope = getattr(engine, "_last_envelope", None)
         if iteration == start_iteration:
             logger.debug("perf.loop: context_build %.0fms", (time.monotonic() - _ctx_start) * 1000)
-        if context_error is not None:
+
+        def _fail_closed_context(error_text: str) -> ChatResult:
             engine._last_iteration_count = iteration
             engine._last_failure_count += 1
-            engine._memory.add_assistant_message(context_error)
-            logger.warning("系统上下文预算检查失败，终止执行: %s", context_error)
+            engine._memory.add_assistant_message(error_text)
+            logger.warning("系统上下文预算检查失败，终止执行: %s", error_text)
             _emit_step_end()
             return _finalize_result(
-                reply=context_error,
+                reply=error_text,
                 tool_calls=list(all_tool_results),
                 iterations=iteration,
                 truncated=False,
@@ -276,315 +594,290 @@ async def run_tool_loop(
                 total_tokens=total_prompt_tokens + total_completion_tokens,
             )
 
-        system_prompts = [prepared_prompts[0]] if prepared_prompts else []
-        user_contexts = list(getattr(engine, "_prompt_user_contexts", None) or [])
-        mention_block = build_mention_context_block(
-            getattr(engine, "_mention_contexts", None) or [],
-        )
-        if mention_block:
-            user_contexts.append(mention_block)
+        if context_error is not None or prepared is None or envelope is None:
+            return _fail_closed_context(context_error or "系统上下文组装失败")
 
-        # 步前压缩挂在 Driver 附件上，不在循环体里分支。
-        engine._last_system_msgs = (
-            engine._memory.build_system_messages(system_prompts)
-            + [{"role": "user", "content": text} for text in user_contexts if text.strip()]
+        from excelmanus.attachments.files_api import (
+            accept_file_leases,
+            collect_wire_file_ids,
+            extract_file_ids_from_error,
+            invalidate_file_ids,
+            invalidate_scope,
+            is_stale_file_error,
         )
 
-        # 步边界认领 next-step（steer / inject）。next-turn 不在这里排干。
-        _claim_step = iteration > start_iteration or not skip_initial_inbox_claim
-        if driver is not None and _claim_step:
-            _step_claimed = await driver.consume_next_step(iteration=iteration)
-            if _step_claimed:
-                logger.info("下一步认领 %d 条 steer/inject", len(_step_claimed))
-
-        messages = engine._memory.trim_for_request(
-            system_prompts=system_prompts,
-            max_context_tokens=engine.max_context_tokens,
-            context_prompts=user_contexts,
-        )
-
-        # PromptRegistry.tools() 快照优先；仍由 ToolRegistry/MetaToolBuilder 生成。
-        tools = getattr(engine, "_prompt_tool_snapshot", None)
-        if not tools:
-            tools = engine._meta_tool_builder.build_v5_tools(
-                tool_access=tool_access,
-            )
+        tools = envelope.tools
         tool_scope = None
+        route, kwargs, stream_kwargs = _bind_prepared_outbound(engine, prepared)
+        _files_base_url = route.endpoint
+        _files_api_key = route.api_key
+        _files_attempted = bool(prepared.file_leases)
 
-        # 安全网：确保发送到 API 的 model 是实际模型 ID，不含 provider 前缀
-        _api_model = engine._active_model
-        if _OpenAICodexProvider.is_codex_profile_name(_api_model):
-            _api_model = _OpenAICodexProvider.model_from_profile_name(_api_model) or _api_model
+        try:
+            # 尝试流式调用
+            if iteration == start_iteration:
+                engine._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="calling_llm",
+                        pipeline_message="正在与模型通信...",
+                    ),
+                )
+            else:
+                engine._emit(
+                    on_event,
+                    ToolCallEvent(
+                        event_type=EventType.PIPELINE_PROGRESS,
+                        pipeline_stage="calling_model",
+                        pipeline_message="正在调用模型",
+                    ),
+                )
+            _llm_start_ts = time.monotonic()
 
-        kwargs: dict[str, Any] = {
-            "model": _api_model,
-            "messages": messages,
-        }
-        if tools:
-            kwargs["tools"] = tools
-
-        # 注入 thinking 参数
-        # 优先级：profile.thinking_mode > caps.thinking_type > 默认
-        caps = engine._model_capabilities
-        tc = engine._thinking_config
-        _profile = engine._active_profile
-        _profile_thinking_mode = getattr(_profile, "thinking_mode", "auto") if _profile else "auto"
-
-        if _profile_thinking_mode not in ("auto", ""):
-            # 用户显式指定了 thinking_mode
-            _effective_ttype = _profile_thinking_mode if _profile_thinking_mode != "disabled" else ""
-        elif caps and caps.supports_thinking:
-            _effective_ttype = caps.thinking_type
-        else:
-            _effective_ttype = ""
-
-        budget = tc.effective_budget()
-        if _effective_ttype == "claude":
-            kwargs["_thinking_enabled"] = not tc.is_disabled
-            kwargs["_thinking_budget"] = budget if not tc.is_disabled else 0
-            kwargs["_thinking_effort"] = tc.claude_effort
-        elif not tc.is_disabled:
-            if _effective_ttype == "claude_compat":
-                extra = kwargs.get("extra_body", {})
-                from excelmanus.providers.claude import uses_adaptive_thinking
-                if uses_adaptive_thinking(str(_api_model)):
-                    extra["thinking"] = {"type": "adaptive"}
-                    extra["output_config"] = {"effort": tc.claude_effort}
-                else:
-                    extra["thinking"] = {"type": "enabled", "budget_tokens": budget}
-                kwargs["extra_body"] = extra
-            elif _effective_ttype == "gemini":
-                kwargs["_thinking_budget"] = budget
-            elif _effective_ttype == "gemini_level":
-                kwargs["_thinking_level"] = tc.gemini_level
-            elif _effective_ttype == "openai_reasoning":
-                kwargs["reasoning_effort"] = tc.openai_effort
-            elif _effective_ttype == "enable_thinking":
-                extra = kwargs.get("extra_body", {})
-                extra["enable_thinking"] = True
-                extra["thinking_budget"] = budget
-                kwargs["extra_body"] = extra
-            elif _effective_ttype == "glm_thinking":
-                extra = kwargs.get("extra_body", {})
-                extra["thinking"] = {"type": "enabled"}
-                extra["reasoning_effort"] = tc.openai_effort
-                kwargs["extra_body"] = extra
-            elif _effective_ttype == "openrouter":
-                extra = kwargs.get("extra_body", {})
-                extra["reasoning"] = {
-                    "effort": tc.openai_effort,
-                    "max_tokens": budget,
-                }
-                kwargs["extra_body"] = extra
-            # "deepseek" / "reasoning_content_auto" → 模型自动输出推理内容，无需额外参数
-
-        # 注入 profile 自定义 extra_body / extra_headers
-        if _profile:
-            import json as _json
-            if _profile.custom_extra_body:
+            # ── LLM 调用 + 5xx/429 自动重试 ──
+            _retry_max = engine._config.llm_retry_max_attempts
+            _retry_base = engine._config.llm_retry_base_delay_seconds
+            _retry_cap = engine._config.llm_retry_max_delay_seconds
+            _auth_refresh_attempted = False  # 401 时仅尝试一次凭证刷新重试
+            _stale_file_retried = False
+            # while 而非 for：stale file_id / 401 刷新是一次性恢复（各有标志位），
+            # 不应消耗重试预算，也不允许在预算耗尽时带着未绑定的 message 掉出循环。
+            message: Any = None
+            usage: Any = None
+            _retry_attempt = 0
+            while True:
+                _retry_attempt += 1
                 try:
-                    _ceb = _json.loads(_profile.custom_extra_body)
-                    if isinstance(_ceb, dict):
-                        merged = kwargs.get("extra_body", {})
-                        merged.update(_ceb)
-                        kwargs["extra_body"] = merged
-                except (ValueError, TypeError):
-                    pass
-            if _profile.custom_extra_headers:
-                try:
-                    _ceh = _json.loads(_profile.custom_extra_headers)
-                    if isinstance(_ceh, dict):
-                        merged = kwargs.get("extra_headers", {})
-                        merged.update(_ceh)
-                        kwargs["extra_headers"] = merged
-                except (ValueError, TypeError):
-                    pass
-
-        # 提示词缓存优化：同一 session_turn 内共享 cache key，
-        # 确保 OpenAI 路由到同一缓存机器，最大化系统提示前缀 cache hit。
-        if engine._config.prompt_cache_key_enabled:
-            kwargs["prompt_cache_key"] = f"em_s{engine._session_turn}"
-
-        # 尝试流式调用
-        if iteration == start_iteration:
-            engine._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.PIPELINE_PROGRESS,
-                    pipeline_stage="calling_llm",
-                    pipeline_message="正在与模型通信...",
-                ),
-            )
-        else:
-            engine._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.PIPELINE_PROGRESS,
-                    pipeline_stage="calling_model",
-                    pipeline_message="正在调用模型",
-                ),
-            )
-        _llm_start_ts = time.monotonic()
-        stream_kwargs = dict(kwargs)
-        stream_kwargs["stream"] = True
-        if isinstance(engine._client, openai.AsyncOpenAI):
-            stream_kwargs["stream_options"] = {"include_usage": True}
-
-        # ── LLM 调用 + 5xx/429 自动重试 ──
-        _retry_max = engine._config.llm_retry_max_attempts
-        _retry_base = engine._config.llm_retry_base_delay_seconds
-        _retry_cap = engine._config.llm_retry_max_delay_seconds
-        _auth_refresh_attempted = False  # 401 时仅尝试一次凭证刷新重试
-        for _retry_attempt in range(1, _retry_max + 1):
-            try:
-                try:
-                    stream_or_response = await engine._llm_caller.create_chat_completion_with_system_fallback(stream_kwargs)
-                    # 检查返回值是否为异步迭代器（支持流式）
-                    if hasattr(stream_or_response, "__aiter__"):
-                        message, usage = await engine._llm_caller.consume_stream(
-                            stream_or_response, on_event, iteration,
-                            _llm_start_ts=_llm_start_ts,
-                        )
-                    else:
-                        # provider 不支持 stream，返回了普通 response 对象
-                        message, usage = _extract_completion_message(stream_or_response)
-                except Exception as stream_exc:
-                    # 可重试的瞬时错误 → 跳过非流式回退，直接进入重试
-                    if is_retryable_llm_error(stream_exc):
-                        raise
-                    # 认证/权限错误回退无意义：同样会在非流式再次失败
-                    if is_nonretryable_auth_error(stream_exc):
-                        raise
-                    # 内容安全策略拦截回退无意义：非流式同样会被拦截
-                    if is_content_filter_error(stream_exc):
-                        raise
-                    # 流式调用失败时回退到非流式
-                    logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
-                    response = await engine._llm_caller.create_chat_completion_with_system_fallback(kwargs)
-                    message, usage = _extract_completion_message(response)
-
-                # 成功 — 若经历过重试则通知前端
-                if _retry_attempt > 1:
-                    engine._emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.LLM_RETRY,
-                            retry_status="succeeded",
-                            retry_attempt=_retry_attempt,
-                            retry_max_attempts=_retry_max,
-                        ),
-                    )
-                break  # 成功，退出重试循环
-
-            except Exception as _retry_exc:
-                # ── 内容安全策略拦截：不可重试，立即通知前端 ──
-                if is_content_filter_error(_retry_exc):
-                    engine._emit(
-                        on_event,
-                        _failure_guidance_event(_classify_failure(
-                            _retry_exc,
-                            stage="calling_llm",
-                            provider=engine._extract_provider_label(),
-                            model=engine._active_model or "",
-                        )),
-                    )
-                    raise
-
-                # ── 401/403 认证错误：尝试刷新凭证后重试一次 ──
-                if is_nonretryable_auth_error(_retry_exc) and not _auth_refresh_attempted:
-                    _auth_refresh_attempted = True
-                    # 诊断日志：记录当前使用的凭证信息
-                    _key_preview = (engine._active_api_key or "")[:20]
-                    logger.warning(
-                        "401 诊断: model=%s, base_url=%s, api_key_prefix=%s..., "
-                        "has_resolver=%s",
-                        engine._active_model, engine._active_base_url,
-                        _key_preview, engine._credential_resolver is not None,
-                    )
-                    _old_key = engine._active_api_key
                     try:
-                        await engine._refresh_credential_if_needed(on_event=on_event)
-                    except Exception:
-                        logger.debug("401 后凭证刷新失败", exc_info=True)
-                    if engine._active_api_key != _old_key:
-                        logger.info(
-                            "401 后凭证已刷新，重试 LLM 调用 (attempt=%d)",
-                            _retry_attempt,
+                        stream_or_response = await engine._llm_caller.create_chat_completion_with_retry(stream_kwargs)
+                        # 检查返回值是否为异步迭代器（支持流式）
+                        if hasattr(stream_or_response, "__aiter__"):
+                            message, usage = await engine._llm_caller.consume_stream(
+                                stream_or_response, on_event, iteration,
+                                _llm_start_ts=_llm_start_ts,
+                            )
+                        else:
+                            # provider 不支持 stream，返回了普通 response 对象
+                            message, usage = _extract_completion_message(stream_or_response)
+                    except Exception as stream_exc:
+                        # 可重试的瞬时错误 → 跳过非流式回退，直接进入重试
+                        if is_retryable_llm_error(stream_exc):
+                            raise
+                        # 认证/权限错误回退无意义：同样会在非流式再次失败
+                        if is_nonretryable_auth_error(stream_exc):
+                            raise
+                        # 内容安全策略拦截回退无意义：非流式同样会被拦截
+                        if is_content_filter_error(stream_exc):
+                            raise
+                        # 流式调用失败时回退到非流式
+                        logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
+                        response = await engine._llm_caller.create_chat_completion_with_retry(kwargs)
+                        message, usage = _extract_completion_message(response)
+
+                    # 成功 — 若经历过重试则通知前端
+                    if _retry_attempt > 1:
+                        engine._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="succeeded",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                            ),
+                        )
+                    break  # 成功，退出重试循环
+
+                except Exception as _retry_exc:
+                    if (
+                        _files_attempted
+                        and not _stale_file_retried
+                        and is_stale_file_error(_retry_exc)
+                    ):
+                        _stale_file_retried = True
+                        named = extract_file_ids_from_error(_retry_exc)
+                        used = list(prepared.file_leases) or collect_wire_file_ids(
+                            list(kwargs.get("messages") or [])
+                        )
+                        target_ids = [fid for fid in used if fid in named] if named else used
+                        if target_ids:
+                            invalidate_file_ids(
+                                target_ids,
+                                base_url=_files_base_url,
+                                api_key=_files_api_key,
+                                route=route,
+                            )
+                        else:
+                            invalidate_scope(
+                                base_url=_files_base_url,
+                                api_key=_files_api_key,
+                                route=route,
+                            )
+                        logger.warning("Files file_id 失效，失效索引后整请求重编译一次")
+                        _release_open_attempt(engine)
+                        series_of(engine).note("transport/renew")
+                        try:
+                            prepared, rebound_error = await compile_request(
+                                engine,
+                                tool_access=tool_access,
+                                vision_capable=engine._is_vision_capable,
+                                extra=getattr(engine, "_compile_extra", None),
+                            )
+                            if rebound_error is not None or prepared is None:
+                                return _fail_closed_context(
+                                    rebound_error or "系统上下文组装失败"
+                                )
+                            envelope = getattr(engine, "_last_envelope", None)
+                            route, kwargs, stream_kwargs = _bind_prepared_outbound(engine, prepared)
+                            _files_base_url = route.endpoint
+                            _files_api_key = route.api_key
+                            _files_attempted = bool(prepared.file_leases)
+                        except Exception:
+                            logger.warning("Files 重传失败，沿用最近一次编译体", exc_info=True)
+                        continue
+
+                    # ── 内容安全策略拦截：不可重试，立即通知前端 ──
+                    if is_content_filter_error(_retry_exc):
+                        engine._emit(
+                            on_event,
+                            _failure_guidance_event(_classify_failure(
+                                _retry_exc,
+                                stage="calling_llm",
+                                provider=engine._extract_provider_label(),
+                                model=engine._active_model or "",
+                            )),
+                        )
+                        raise
+
+                    # ── 401/403 认证错误：尝试刷新凭证后重试一次 ──
+                    if is_nonretryable_auth_error(_retry_exc) and not _auth_refresh_attempted:
+                        _auth_refresh_attempted = True
+                        # 诊断日志：记录当前使用的凭证信息
+                        _key_preview = (engine._active_api_key or "")[:20]
+                        logger.warning(
+                            "401 诊断: model=%s, base_url=%s, api_key_prefix=%s..., "
+                            "has_resolver=%s",
+                            engine._active_model, engine._active_base_url,
+                            _key_preview, engine._credential_resolver is not None,
+                        )
+                        _old_key = engine._active_api_key
+                        try:
+                            await engine._refresh_credential_if_needed(on_event=on_event)
+                        except Exception:
+                            logger.debug("401 后凭证刷新失败", exc_info=True)
+                        if engine._active_api_key != _old_key:
+                            logger.info(
+                                "401 后凭证已刷新，重试 LLM 调用 (attempt=%d)",
+                                _retry_attempt,
+                            )
+                            engine._emit(
+                                on_event,
+                                ToolCallEvent(
+                                    event_type=EventType.PIPELINE_PROGRESS,
+                                    pipeline_stage="credential_refreshed_retrying",
+                                    pipeline_message="认证失败，已自动刷新凭证，正在重试...",
+                                ),
+                            )
+                            _release_open_attempt(engine)
+                            series_of(engine).note("route/change")
+                            prepared, rebound_error = await compile_request(
+                                engine,
+                                tool_access=tool_access,
+                                vision_capable=engine._is_vision_capable,
+                                extra=getattr(engine, "_compile_extra", None),
+                                event="route/change",
+                            )
+                            if rebound_error is not None or prepared is None:
+                                return _fail_closed_context(
+                                    rebound_error or "凭证刷新后请求重编译失败"
+                                )
+                            envelope = getattr(engine, "_last_envelope", None)
+                            route, kwargs, stream_kwargs = _bind_prepared_outbound(engine, prepared)
+                            _files_base_url = route.endpoint
+                            _files_api_key = route.api_key
+                            _files_attempted = bool(prepared.file_leases)
+                            continue
+                        # 凭证未变化，无法恢复
+                        logger.warning(
+                            "401 后凭证刷新未产生新 token，无法恢复: %s",
+                            str(_retry_exc)[:200],
+                        )
+                        raise
+
+                    if _retry_attempt < _retry_max and is_retryable_llm_error(_retry_exc):
+                        _delay = compute_retry_delay(
+                            _retry_attempt, _retry_base, _retry_cap, _retry_exc,
+                        )
+                        _err_brief = str(_retry_exc)[:200]
+                        logger.warning(
+                            "LLM 调用失败（可重试），%0.1f 秒后第 %d/%d 次重试: %s",
+                            _delay, _retry_attempt, _retry_max - 1, _err_brief,
+                        )
+                        # 通知前端：正在重试
+                        engine._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="retrying",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                                retry_delay_seconds=_delay,
+                                retry_error_message=_err_brief,
+                            ),
                         )
                         engine._emit(
                             on_event,
                             ToolCallEvent(
                                 event_type=EventType.PIPELINE_PROGRESS,
-                                pipeline_stage="credential_refreshed_retrying",
-                                pipeline_message="认证失败，已自动刷新凭证，正在重试...",
+                                pipeline_stage="llm_retrying",
+                                pipeline_message=(
+                                    f"模型服务暂时不可用，{_delay:.0f}秒后"
+                                    f"第 {_retry_attempt}/{_retry_max - 1} 次重试..."
+                                ),
                             ),
                         )
-                        # 用新凭证重建请求参数中的客户端引用
+                        await asyncio.sleep(_delay)
+                        # 重试前重新发射 calling_llm 进度
+                        engine._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.PIPELINE_PROGRESS,
+                                pipeline_stage="calling_llm",
+                                pipeline_message=f"正在重试与模型通信（第 {_retry_attempt + 1}/{_retry_max} 次尝试）...",
+                            ),
+                        )
                         continue
-                    # 凭证未变化，无法恢复
-                    logger.warning(
-                        "401 后凭证刷新未产生新 token，无法恢复: %s",
-                        str(_retry_exc)[:200],
-                    )
+
+                    # 不可重试或重试次数耗尽
+                    if _retry_attempt >= _retry_max and is_retryable_llm_error(_retry_exc):
+                        engine._emit(
+                            on_event,
+                            ToolCallEvent(
+                                event_type=EventType.LLM_RETRY,
+                                retry_status="exhausted",
+                                retry_attempt=_retry_attempt,
+                                retry_max_attempts=_retry_max,
+                                retry_error_message=str(_retry_exc)[:200],
+                            ),
+                        )
                     raise
 
-                if _retry_attempt < _retry_max and is_retryable_llm_error(_retry_exc):
-                    _delay = compute_retry_delay(
-                        _retry_attempt, _retry_base, _retry_cap, _retry_exc,
-                    )
-                    _err_brief = str(_retry_exc)[:200]
-                    logger.warning(
-                        "LLM 调用失败（可重试），%0.1f 秒后第 %d/%d 次重试: %s",
-                        _delay, _retry_attempt, _retry_max - 1, _err_brief,
-                    )
-                    # 通知前端：正在重试
-                    engine._emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.LLM_RETRY,
-                            retry_status="retrying",
-                            retry_attempt=_retry_attempt,
-                            retry_max_attempts=_retry_max,
-                            retry_delay_seconds=_delay,
-                            retry_error_message=_err_brief,
-                        ),
-                    )
-                    engine._emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.PIPELINE_PROGRESS,
-                            pipeline_stage="llm_retrying",
-                            pipeline_message=(
-                                f"模型服务暂时不可用，{_delay:.0f}秒后"
-                                f"第 {_retry_attempt}/{_retry_max - 1} 次重试..."
-                            ),
-                        ),
-                    )
-                    await asyncio.sleep(_delay)
-                    # 重试前重新发射 calling_llm 进度
-                    engine._emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.PIPELINE_PROGRESS,
-                            pipeline_stage="calling_llm",
-                            pipeline_message=f"正在重试与模型通信（第 {_retry_attempt + 1}/{_retry_max} 次尝试）...",
-                        ),
-                    )
-                    continue
+            from excelmanus.request.types import PreparedRequest
 
-                # 不可重试或重试次数耗尽
-                if _retry_attempt >= _retry_max and is_retryable_llm_error(_retry_exc):
-                    engine._emit(
-                        on_event,
-                        ToolCallEvent(
-                            event_type=EventType.LLM_RETRY,
-                            retry_status="exhausted",
-                            retry_attempt=_retry_attempt,
-                            retry_max_attempts=_retry_max,
-                            retry_error_message=str(_retry_exc)[:200],
-                        ),
-                    )
-                raise
+            sent = getattr(engine, "_sent_prepared_request", None)
+            if isinstance(sent, PreparedRequest):
+                prepared = sent
+                route = sent.route
+            if not getattr(message, "_stream_truncated", False):
+                series_of(engine).accept(prepared.header)
+                accept_file_leases(prepared.file_leases)
+            if getattr(message, "replay_state", None) is not None:
+                message.replay_source = {"protocol": route.protocol, "model": route.model}
+        except asyncio.CancelledError:
+            series_of(engine).cancel()
+            raise
+        finally:
+            _release_open_attempt(engine)
 
         # 流式截断检测：consume_stream 因连续 chunk 解析错误而中止
         if getattr(message, "_stream_truncated", False):
@@ -617,11 +910,7 @@ async def run_tool_loop(
                 iteration, _llm_elapsed_ms, _tc_names or "text_reply",
             )
 
-        # 图片生命周期：视觉模型保留图片利用 Provider 缓存，非视觉模型立即降级
-        if engine._is_vision_capable:
-            engine._memory.manage_image_lifecycle()
-        else:
-            engine._memory.mark_images_sent()
+        # 图片：历史保持 append-only ref，投影只发生在本次请求。
 
         # 累计 token 使用量
         if usage is not None:
@@ -658,14 +947,21 @@ async def run_tool_loop(
         # ── 收集本轮迭代诊断快照 ──
         iter_prompt = _usage_token(usage, "prompt_tokens") if usage else 0
         iter_completion = _usage_token(usage, "completion_tokens") if usage else 0
-        iter_cached = _extract_cached_tokens(usage)
+        # provider 真实计量锚定：下一次压力测量直接以 prompt_tokens 为基准
+        if iter_prompt > 0:
+            try:
+                engine._memory.note_provider_prompt_tokens(iter_prompt)
+            except Exception:
+                logger.debug("usage 锚点记录失败", exc_info=True)
+        cache_usage = extract_cache_usage(usage)
+        iter_cached = cache_usage.hit if cache_usage.hit is not None else 0
         iter_cache_creation, iter_cache_read = _extract_anthropic_cache_tokens(usage)
         iter_ttft = _extract_ttft_ms(usage)
         diag = TurnDiagnostic(
             iteration=iteration,
             prompt_tokens=iter_prompt,
             completion_tokens=iter_completion,
-            cached_tokens=iter_cached,
+            cached_tokens=cache_usage.hit,
             cache_creation_input_tokens=iter_cache_creation,
             cache_read_input_tokens=iter_cache_read,
             ttft_ms=iter_ttft,
@@ -678,10 +974,44 @@ async def run_tool_loop(
         )
         engine._turn_diagnostics.append(diag)
 
+        # ── 缓存命中观测：每步可见 + 持续 miss 告警 ──
+        # 前缀稳定是设计目标，命中退化必须可观测（DSH 以 e2e 断言保证；
+        # 这里用运行时比率告警兜底：长历史 + 连续低命中 = 前缀在某处漂移）。
+        if cache_usage.hit is None:
+            logger.info(
+                "cache: hit=unknown / prompt=%d iter=%d reason=%s",
+                iter_prompt, iteration, cache_usage.miss_reason,
+            )
+            engine._cache_miss_streak = 0
+        elif iter_prompt >= 2000:
+            iter_cache_read_total = max(cache_usage.hit, iter_cache_read)
+            ratio = iter_cache_read_total / iter_prompt
+            logger.info(
+                "cache: read=%d / prompt=%d (%.0f%%) iter=%d",
+                iter_cache_read_total, iter_prompt, ratio * 100, iteration,
+            )
+            if ratio < 0.1:
+                engine._cache_miss_streak = int(getattr(engine, "_cache_miss_streak", 0)) + 1
+            else:
+                engine._cache_miss_streak = 0
+            if int(getattr(engine, "_cache_miss_streak", 0)) >= 3 and not getattr(
+                engine, "_cache_miss_warned", False
+            ):
+                engine._cache_miss_warned = True
+                logger.warning(
+                    "会话 %s 连续 %d 次请求缓存命中近零（prompt>=%d tokens）。"
+                    "前缀可能不稳定：检查工具目录变化 / system 渲染漂移 / "
+                    "多 worker 会话漂移。",
+                    getattr(engine, "_session_id", "?"),
+                    engine._cache_miss_streak,
+                    iter_prompt,
+                )
+        else:
+            engine._cache_miss_streak = 0
+
         # ── LLM 调用审计日志 ──
         if engine._llm_call_store is not None:
             try:
-                _llm_latency = (time.monotonic() - _llm_start_ts) * 1000 if _llm_start_ts else 0.0
                 engine._llm_call_store.log(
                     session_id=getattr(engine, "_session_id", None),
                     turn=engine._session_turn,
@@ -693,7 +1023,7 @@ async def run_tool_loop(
                     has_tool_calls=bool(tool_calls),
                     thinking_chars=len(thinking_content),
                     stream=True,
-                    latency_ms=_llm_latency,
+                    latency_ms=_llm_elapsed_ms,
                     ttft_ms=iter_ttft,
                     cache_creation_tokens=iter_cache_creation,
                     cache_read_tokens=iter_cache_read,
@@ -713,12 +1043,12 @@ async def run_tool_loop(
                 "cache_hit_ratio=%.1f%% latency=%.0fms",
                 iteration, iter_ttft,
                 iter_cache_read, iter_cache_creation, iter_prompt,
-                _cache_ratio, _llm_latency,
+                _cache_ratio, _llm_elapsed_ms,
             )
         elif iter_ttft > 0:
             logger.debug(
                 "LLM 诊断: iter=%d ttft=%.0fms prompt=%d latency=%.0fms (no cache)",
-                iteration, iter_ttft, iter_prompt, _llm_latency,
+                iteration, iter_ttft, iter_prompt, _llm_elapsed_ms,
             )
 
         # 无工具调用 → 纯文本回复处理（仅 HTML 端点错误检测）
@@ -740,7 +1070,9 @@ async def run_tool_loop(
 
         assistant_msg = _assistant_message_to_dict(message)
         if tool_calls:
-            assistant_msg["tool_calls"] = [_to_plain(tc) for tc in tool_calls]
+            assistant_msg["tool_calls"] = _sanitize_tool_call_arguments(
+                [_to_plain(tc) for tc in tool_calls]
+            )
         engine._memory.add_assistant_tool_message(assistant_msg)
 
         # 遍历工具调用
@@ -802,7 +1134,10 @@ async def run_tool_loop(
                     _batch.tool_calls, tool_scope, on_event, iteration,
                     route_result=current_route_result,
                 )
-                for tc, tc_result in _parallel_results:
+                # P3-a 同批同因折叠：durable 存全文，wire 投影存指针。
+                _dedup_plan = plan_parallel_dedup(list(_parallel_results))
+                for _p_index, (_p_tc, _p_tc_result) in enumerate(_parallel_results):
+                    tc, tc_result = _p_tc, _p_tc_result
                     function = getattr(tc, "function", None)
                     tool_name = getattr(function, "name", "")
                     tool_call_id = getattr(tc, "id", "")
@@ -811,7 +1146,15 @@ async def run_tool_loop(
 
                     # 按序写入 memory
                     if not tc_result.defer_tool_result and tool_call_id:
-                        engine._memory.add_tool_result(tool_call_id, tc_result.result)
+                        _pointer = _dedup_plan.get(_p_index)
+                        if _pointer is not None and not breaker_triggered:
+                            engine._memory.add_tool_result(
+                                tool_call_id,
+                                tc_result.result,
+                                projection_content=_pointer,
+                            )
+                        else:
+                            engine._memory.add_tool_result(tool_call_id, tc_result.result)
 
                     # 统计更新（只读工具不触发 write_effect 分支）
                     engine._last_tool_call_count += 1
@@ -893,25 +1236,25 @@ async def run_tool_loop(
                                     fut, timeout=DEFAULT_INTERACTION_TIMEOUT,
                                 )
                             except asyncio.TimeoutError:
-                                reject_msg = engine._approval.reject_pending(approval_id)
-                                if tool_call_id:
-                                    engine._memory.replace_tool_result(tool_call_id, reject_msg)
-                                tc_result = replace(
-                                    tc_result,
-                                    pending_approval=False, success=False,
-                                    result=reject_msg, error=reject_msg,
+                                reject_msg = engine._approval.reject_pending(
+                                    approval_id, timeout=True,
                                 )
+                                fields = _approval_reject_fields(reject_msg, timeout=True)
+                                if tool_call_id:
+                                    engine._memory.replace_tool_result(
+                                        tool_call_id, fields["result"],
+                                    )
+                                tc_result = replace(tc_result, **fields)
                                 logger.info("审批等待超时，自动拒绝: %s", approval_id)
                                 engine._interaction_registry.cleanup_done()
                             except asyncio.CancelledError:
                                 reject_msg = engine._approval.reject_pending(approval_id)
+                                fields = _approval_reject_fields(reject_msg, timeout=False)
                                 if tool_call_id:
-                                    engine._memory.replace_tool_result(tool_call_id, reject_msg)
-                                tc_result = replace(
-                                    tc_result,
-                                    pending_approval=False, success=False,
-                                    result=reject_msg, error=reject_msg,
-                                )
+                                    engine._memory.replace_tool_result(
+                                        tool_call_id, fields["result"],
+                                    )
+                                tc_result = replace(tc_result, **fields)
                                 engine._interaction_registry.cleanup_done()
                             else:
                                 decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
@@ -928,7 +1271,11 @@ async def run_tool_loop(
                         engine._last_success_count += 1
                         consecutive_failures = 0
                         # 计划/只读 PERMISSION_DENIED 为失败，不会走到这里。
-                        _write_effect = engine._get_tool_write_effect(tc_result.tool_name)
+                        _write_effect = write_effect_for_call(
+                            tc_result.tool_name,
+                            tc_result.arguments,
+                            declared=engine._get_tool_write_effect(tc_result.tool_name),
+                        )
                         if _write_effect == "workspace_write":
                             engine._record_workspace_write_action()
                         elif _write_effect == "external_write":

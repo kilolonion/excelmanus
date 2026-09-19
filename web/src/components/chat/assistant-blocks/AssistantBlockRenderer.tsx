@@ -1,14 +1,6 @@
 "use client";
 
-import {
-  Info,
-  Zap,
-  CircleStop,
-  ChevronsUpDown,
-  CheckCircle2,
-  XCircle,
-  Wrench,
-} from "lucide-react";
+import { CheckCircle2, ChevronsUpDown, CircleStop, Info, Repeat, Wrench, XCircle, Zap } from "lucide-react";
 import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
 import { ThinkingBlock } from "../ThinkingBlock";
 import { ToolCallCard } from "../ToolCallCard";
@@ -31,14 +23,6 @@ import {
 
 const SAVE_PATH_RE = /对话已保存至[：:]\s*`(.+?)`/;
 
-export type VerificationReportInline = {
-  verdict: "pass" | "fail" | "unknown";
-  confidence: "high" | "medium" | "low";
-  checks: string[];
-  issues: string[];
-  mode: "advisory" | "blocking";
-};
-
 export interface AssistantBlockRendererProps {
   block: AssistantBlock;
   blockIndex: number;
@@ -48,7 +32,6 @@ export interface AssistantBlockRendererProps {
   showCollapseButton?: boolean;
   onCollapse?: () => void;
   defaultExpanded?: boolean;
-  verificationReport?: VerificationReportInline;
   skipRender?: boolean;
   onRetry?: () => void;
   onRetryWithModel?: (modelName: string) => void;
@@ -63,7 +46,6 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
   showCollapseButton,
   onCollapse,
   defaultExpanded,
-  verificationReport,
   skipRender,
   onRetry,
   onRetryWithModel,
@@ -104,6 +86,7 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
           status={block.status}
           result={block.result}
           error={block.error}
+          parentCallId={block.parentCallId}
         />
       );
     }
@@ -118,7 +101,8 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
           summary={block.summary}
           success={block.success}
           tools={block.tools}
-          verificationReport={verificationReport}
+          stopReason={block.stopReason}
+          diagnostic={block.diagnostic}
         />
       );
     case "task_list":
@@ -126,14 +110,14 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
     case "iteration":
       return null;
     case "status": {
-      const isStopped = block.label === "对话已停止";
+      const isStopped = block.label === "对话已停止" || block.label === "Conversation Stopped";
       if (isStopped) {
         return (
-          <div className="flex items-center gap-2 my-3 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400">
-            <CircleStop className="h-4 w-4 flex-shrink-0" />
-            <span className="font-medium">{block.label}</span>
+          <div className="my-1.5 flex items-center gap-2.5">
+            <CircleStop className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+            <span className="text-[13px] font-medium text-foreground">对话已停止</span>
             {block.detail && (
-              <span className="text-amber-600/70 dark:text-amber-500/70 text-xs">{block.detail}</span>
+              <span className="text-[12px] text-muted-foreground">{block.detail === "Generation was manually stopped by the user." ? "已手动停止生成" : block.detail}</span>
             )}
           </div>
         );
@@ -214,16 +198,17 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
     case "llm_retry": {
       if (block.retryStatus === "retrying") {
         return (
-          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-amber-500/30 bg-amber-500/5 text-sm text-amber-700 dark:text-amber-400 animate-pulse">
-            <Repeat className="h-4 w-4 flex-shrink-0 animate-spin" style={{ animationDuration: "2s" }} />
-            <div className="flex flex-col gap-0.5">
-              <span className="font-medium">
-                模型服务暂时不可用，正在第 {block.retryAttempt}/{block.retryMaxAttempts - 1} 次重试...
-              </span>
-              {block.retryErrorMessage && (
-                <span className="text-xs text-amber-600/70 dark:text-amber-500/70 truncate max-w-md">
-                  {block.retryErrorMessage}
+          <div className="my-1.5 flex items-start gap-2.5">
+            <Repeat className="h-4 w-4 flex-shrink-0 text-muted-foreground animate-spin mt-0.5" style={{ animationDuration: "2s" }} />
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">
+                正在重试模型请求
+                <span className="ml-2 text-[11px] font-medium text-muted-foreground">
+                  {block.retryAttempt}/{Math.max(block.retryMaxAttempts - 1, 1)}
                 </span>
+              </p>
+              {block.retryErrorMessage && (
+                <p className="text-[12px] text-muted-foreground mt-0.5 truncate">{block.retryErrorMessage}</p>
               )}
             </div>
           </div>
@@ -231,23 +216,23 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
       }
       if (block.retryStatus === "succeeded") {
         return (
-          <div className="flex items-center gap-2 my-2 px-3 py-1.5 rounded-lg border border-emerald-500/30 bg-emerald-500/5 text-xs text-emerald-700 dark:text-emerald-400">
-            <CheckCircle2 className="h-3.5 w-3.5 flex-shrink-0" />
-            <span>模型服务已恢复，第 {block.retryAttempt} 次尝试成功</span>
+          <div className="my-1.5 flex items-center gap-2.5">
+            <CheckCircle2 className="h-4 w-4 flex-shrink-0 text-[var(--em-primary)]" />
+            <span className="text-[13px] font-medium text-foreground">模型服务已恢复</span>
+            <span className="text-[12px] text-muted-foreground">第 {block.retryAttempt} 次尝试成功</span>
           </div>
         );
       }
       if (block.retryStatus === "exhausted") {
         return (
-          <div className="flex items-center gap-2 my-2 px-3 py-2 rounded-lg border border-red-500/30 bg-red-500/5 text-sm text-red-700 dark:text-red-400">
-            <XCircle className="h-4 w-4 flex-shrink-0" />
-            <div className="flex flex-col gap-0.5">
-              <span className="font-medium">模型服务持续不可用，已重试 {block.retryAttempt} 次</span>
-              {block.retryErrorMessage && (
-                <span className="text-xs text-red-600/70 dark:text-red-500/70 truncate max-w-md">
-                  {block.retryErrorMessage}
-                </span>
-              )}
+          <div className="my-1.5 flex items-start gap-2.5">
+            <XCircle className="h-4 w-4 flex-shrink-0 text-red-500 mt-0.5" />
+            <div className="min-w-0">
+              <p className="text-[13px] font-medium text-foreground">模型服务持续不可用</p>
+              <p className="text-[12px] text-muted-foreground mt-0.5">
+                已重试 {block.retryAttempt} 次
+                {block.retryErrorMessage ? ` · ${block.retryErrorMessage}` : ""}
+              </p>
             </div>
           </div>
         );

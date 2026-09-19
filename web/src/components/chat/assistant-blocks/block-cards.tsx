@@ -5,18 +5,17 @@ import {
   Copy,
   Brain,
 } from "lucide-react";
-import { CodePreviewModal, isCodeFile } from "../CodePreviewModal";
-import { RelatedFilesCard, isExcelFilename } from "../FileCapsule";
+import { RelatedFilesCard } from "../FileCapsule";
 import { UndoableCard } from "../UndoableCard";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
-import { useExcelStore } from "@/stores/excel-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl, downloadFile, normalizeExcelPath } from "@/lib/api";
+import { buildApiUrl, downloadFile } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import type { AssistantBlock } from "@/lib/types";
 import { useCallback, useState } from "react";
 import { motion } from "framer-motion";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 
 export function SaveResultCard({ path }: { path: string }) {
   const filename = path.split("/").pop() || path;
@@ -183,25 +182,10 @@ export function MemoryExtractedBlock({
 
 export function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { type: "file_download" }> }) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const openPanel = useExcelStore((s) => s.openPanel);
-  const addRecentFile = useExcelStore((s) => s.addRecentFile);
-  const [previewOpen, setPreviewOpen] = useState(false);
-  const excel = isExcelFilename(block.filename);
-  const previewable = !excel && isCodeFile(block.filename);
 
   const handleOpen = useCallback(() => {
-    if (excel) {
-      const normalized = normalizeExcelPath(block.filePath);
-      addRecentFile({ path: normalized, filename: block.filename });
-      openPanel(normalized);
-      return;
-    }
-    if (previewable) {
-      setPreviewOpen(true);
-      return;
-    }
-    downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
-  }, [excel, previewable, block.filePath, block.filename, activeSessionId, addRecentFile, openPanel]);
+    openWorkspaceFile(block.filePath);
+  }, [block.filePath]);
 
   const handleDownload = useCallback(() => {
     downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
@@ -220,14 +204,6 @@ export function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { t
           },
         ]}
       />
-      {previewable && (
-        <CodePreviewModal
-          filePath={block.filePath}
-          filename={block.filename}
-          open={previewOpen}
-          onOpenChange={setPreviewOpen}
-        />
-      )}
     </div>
   );
 }

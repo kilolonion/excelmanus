@@ -111,9 +111,9 @@ class TestTailPreview:
         assert "tail_preview" in result
         assert "tail_note" in result
         assert len(result["tail_preview"]) == 5
-        # tail 应包含最后几行数据
+        # tail 应包含最后几行数据（读取层文本保真：单元格值以字符串返回）
         last_ids = [row["ID"] for row in result["tail_preview"]]
-        assert 30 in last_ids
+        assert "30" in last_ids
 
     def test_no_tail_preview_for_small_table(self, small_excel: Path):
         """5 行表格不应出现 tail_preview。"""
@@ -192,9 +192,9 @@ class TestOffset:
         """offset 跳过前 N 行。"""
         result = _tool_payload(data_tools.read_excel(str(sample_excel), offset=25, max_rows=5))
         assert result["shape"]["rows"] == 5
-        # 第一行预览应是 ID=26 附近
+        # 第一行预览应是 ID=26 附近（文本保真：字符串返回）
         first_id = result["preview"][0]["ID"]
-        assert first_id == 26
+        assert first_id == "26"
 
     def test_offset_without_max_rows(self, sample_excel: Path):
         """offset 不配合 max_rows 时读取剩余全部。"""
@@ -284,7 +284,8 @@ class TestFilterOperators:
         ).value
         assert result["filtered_rows"] > 0
         for row in result["data"]:
-            assert 500 <= row["金额"] <= 1500
+            # 筛选按数值强制比较；返回行保留原始文本值
+            assert 500 <= float(row["金额"]) <= 1500
 
     def test_isnull_operator(self, sample_excel: Path):
         """isnull 运算符：值为空。"""
@@ -308,6 +309,54 @@ class TestFilterOperators:
         assert result["filtered_rows"] > 0
         for row in result["data"]:
             assert str(row["姓名"]).startswith("用户1")
+
+    def test_ge_with_numeric_string_on_numeric_column(self, sample_excel: Path):
+        """数值列 + 字符串边界 '2500' 必须按数值比较，不得字典序静默错配。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="金额", operator="ge", value="2500",
+        ).value
+        # i*100 >= 2500 → i=25..30 共 6 行；字典序会得到错误集合
+        assert result["filtered_rows"] == 6
+        for row in result["data"]:
+            assert float(row["金额"]) >= 2500
+
+    def test_ge_with_non_numeric_string_on_numeric_column_errors(self, sample_excel: Path):
+        """数值列 + 不可解析边界 'abc' 应 fail-loud，而非字典序比较。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="金额", operator="ge", value="abc",
+        )
+        assert result.success is False
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
+
+    def test_between_with_numeric_strings(self, sample_excel: Path):
+        """between 的字符串边界同样按数值比较。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="金额", operator="between", value=["1000", "2000"],
+        ).value
+        assert result["filtered_rows"] == 11  # i=10..20
+
+    def test_eq_with_numeric_string(self, sample_excel: Path):
+        """eq 的字符串值在数值列上按数值等值（'1500' 应命中 1500.0）。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="金额", operator="eq", value="1500",
+        ).value
+        assert result["filtered_rows"] == 1
+
+    def test_in_with_numeric_strings(self, sample_excel: Path):
+        """in 列表中的数字字符串在数值列上按数值匹配。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="金额", operator="in", value=["1500", "1600"],
+        ).value
+        assert result["filtered_rows"] == 2
+
+    def test_ord_on_text_column_unchanged(self, sample_excel: Path):
+        """文本列上的序比较保持字符串语义，不报错。"""
+        result = data_tools.filter_data(
+            str(sample_excel), column="城市", operator="ge", value="上海",
+        )
+        assert result.success
+        assert result.value["filtered_rows"] > 0
 
     def test_endswith_operator(self, sample_excel: Path):
         """endswith 运算符。"""

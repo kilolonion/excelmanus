@@ -161,10 +161,31 @@ _COL_RE = re.compile(r"^([A-Z]+)(\d+)$")
 
 
 def _parse_cell(addr: str) -> tuple[str, int] | None:
-    """解析 'A1' 为 ('A', 1)，失败返回 None。"""
-    m = _COL_RE.match(addr)
-    if m:
-        return m.group(1), int(m.group(2))
+    """解析 'A1' 为 ('A', 1)，失败返回 None。候选地址经 parse_ref 校验。"""
+    from excelmanus.workbook.refs import CellRef, InvalidRefError, RectRef, parse_ref
+    from openpyxl.utils import get_column_letter
+
+    try:
+        area = parse_ref(addr)
+    except (InvalidRefError, ValueError):
+        m = _COL_RE.match(addr)
+        if m:
+            return m.group(1), int(m.group(2))
+        return None
+    if len(area.areas) != 1:
+        return None
+    part = area.areas[0]
+    if isinstance(part, CellRef):
+        return get_column_letter(part.col), part.row
+    # parse_ref 把单格规范化为 1x1 RectRef。
+    if (
+        isinstance(part, RectRef)
+        and not part.whole_column
+        and not part.whole_row
+        and part.min_row == part.max_row
+        and part.min_col == part.max_col
+    ):
+        return get_column_letter(part.min_col), part.min_row
     return None
 
 

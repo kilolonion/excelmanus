@@ -20,6 +20,7 @@ import {
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
 import { useExcelStore } from "@/stores/excel-store";
 import { updateFileGroup, type FileGroup } from "@/lib/api";
+import { formatFileMention } from "../chat/chat-input-insert";
 import { InlineRenameInput } from "./InlineInputs";
 
 interface FileGroupListViewProps {
@@ -115,7 +116,7 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
                   }));
                   e.dataTransfer.setData(
                     "text/plain",
-                    files.map((f) => `@file:${f.filename}`).join(" "),
+                    files.map((f) => formatFileMention({ path: f.path })).join(" "),
                   );
                   e.dataTransfer.setData(
                     "application/x-excel-file",
@@ -222,7 +223,10 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
                     key={member.file_id}
                     draggable
                     onDragStart={(e) => {
-                      e.dataTransfer.setData("text/plain", `@file:${member.original_name}`);
+                      e.dataTransfer.setData(
+                        "text/plain",
+                        formatFileMention({ path: member.canonical_path }),
+                      );
                       e.dataTransfer.setData(
                         "application/x-excel-file",
                         JSON.stringify({ path: member.canonical_path, filename: member.original_name }),

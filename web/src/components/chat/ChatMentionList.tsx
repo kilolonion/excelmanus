@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
-import { FileSpreadsheet, FolderOpen, Sparkles, Wrench } from "lucide-react";
+import { FileSpreadsheet, FolderOpen, Sparkles } from "lucide-react";
 import { buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
@@ -9,6 +9,7 @@ import { AT_TOP_LEVEL, type MentionData, type PopoverMode } from "./chat-input-c
 import { CommandPopover, type PopoverItem } from "./CommandPopover";
 import {
   detectAtMentionTrigger,
+  formatFileMention,
   scheduleTextareaCursor,
   trackRecentExcelFile,
   truncateMention,
@@ -64,17 +65,12 @@ export function buildMentionPopoverItems(
     if (filter && mentionData) {
       for (const f of mentionData.files) {
         if (f.toLowerCase().includes(filter)) {
-          items.push({ command: `@${f}`, description: "文件", icon: <FileSpreadsheet className="h-3.5 w-3.5" /> });
-        }
-      }
-      for (const t of mentionData.tools) {
-        if (t.toLowerCase().includes(filter)) {
-          items.push({ command: `@${t}`, description: "工具", icon: <Wrench className="h-3.5 w-3.5" /> });
+          items.push({ command: formatFileMention({ path: f }), description: "文件", icon: <FileSpreadsheet className="h-3.5 w-3.5" /> });
         }
       }
       for (const s of mentionData.skills) {
         if (s.name.toLowerCase().includes(filter)) {
-          items.push({ command: `@${s.name}`, description: s.description || "技能", icon: <Sparkles className="h-3.5 w-3.5" /> });
+          items.push({ command: `@skill:${s.name}`, description: s.description || "技能", icon: <Sparkles className="h-3.5 w-3.5" /> });
         }
       }
     }
@@ -91,17 +87,11 @@ export function buildMentionPopoverItems(
           const icon = f.endsWith("/")
             ? <FolderOpen className="h-3.5 w-3.5" />
             : <FileSpreadsheet className="h-3.5 w-3.5" />;
-          items.push({ command: `@file:${f}`, description: f.endsWith("/") ? "目录" : "文件", icon });
+          items.push({ command: formatFileMention({ path: f }), description: f.endsWith("/") ? "目录" : "文件", icon });
         }
       }
       if (items.length === 0) {
         items.push({ command: "", description: "工作区无匹配文件", icon: <FileSpreadsheet className="h-3.5 w-3.5 opacity-30" /> });
-      }
-    } else if (atCategory === "tool") {
-      for (const t of mentionData.tools) {
-        if (!filter || t.toLowerCase().includes(filter)) {
-          items.push({ command: `@tool:${t}`, description: "工具", icon: <Wrench className="h-3.5 w-3.5" /> });
-        }
       }
     } else if (atCategory === "skill") {
       for (const s of mentionData.skills) {
@@ -172,7 +162,7 @@ export function applyMentionSelection(ctx: MentionSelectContext): boolean {
     const lastAtIdx = text.lastIndexOf("@");
     const before = text.slice(0, lastAtIdx);
     setText(before + displayCmd + " ");
-    const mentionName = item.command.replace(/^@(?:file:|folder:|skill:|mcp:|tool:)?/, "");
+    const mentionName = item.command.replace(/^@(?:file:|folder:|skill:|mcp:)?/, "");
     trackRecentExcelFile(mentionName, mentionName.split("/").pop() || mentionName);
     closePopover();
     textareaRef.current?.focus();
@@ -234,7 +224,7 @@ function ChatMentionSync({
   useEffect(() => {
     if (!pendingFileMention) return;
     const { path, filename } = pendingFileMention;
-    insertMentionTokens([`@file:${filename}`], autoResize);
+    insertMentionTokens([formatFileMention({ path })], autoResize);
     trackRecentExcelFile(path, filename);
     clearPendingFileMention();
   }, [pendingFileMention, clearPendingFileMention, autoResize, insertMentionTokens]);
@@ -243,7 +233,7 @@ function ChatMentionSync({
     if (!pendingFileMentions || pendingFileMentions.length === 0) return;
     const displayTokens: string[] = [];
     for (const { path, filename } of pendingFileMentions) {
-      displayTokens.push(`@file:${filename}`);
+      displayTokens.push(formatFileMention({ path }));
       trackRecentExcelFile(path, filename);
     }
     insertMentionTokens(displayTokens, autoResize);

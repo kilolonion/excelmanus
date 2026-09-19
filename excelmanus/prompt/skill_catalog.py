@@ -30,8 +30,8 @@ def collect_skill_entries(
         clipped: list[tuple[str, str]] = []
         for name, desc in items:
             if name in blocked:
-                suffix = "（需要更高权限）"
-                clipped.append((name, (desc + suffix).strip() if desc else suffix.strip()))
+                label = "（当前禁用，需 /fullaccess on；与单次工具审批不同）"
+                clipped.append((name, label + desc))
             else:
                 clipped.append((name, desc))
         return clipped
@@ -42,29 +42,37 @@ def render_available_skills(
     skills: Mapping[str, Any] | Iterable[tuple[str, str]],
     *,
     blocked: set[str] | None = None,
+    pin: str | None = None,
 ) -> str:
-    """渲染 ``<system-reminder>`` 目录。digest 只看 (name, desc)。"""
+    """渲染 ``<system-reminder>`` 目录。digest 只看 (name, desc)；pin 只改展示顺序与标记。"""
     items = collect_skill_entries(skills, blocked=blocked)
     if not items:
         return ""
+    if pin:
+        pinned = [item for item in items if item[0] == pin]
+        rest = [item for item in items if item[0] != pin]
+        items = pinned + rest
 
     lines = [
         "<system-reminder>",
         "A skill is a reusable set of task-specific instructions. The following skills are available in this session:",
+        "This is the complete current catalog and replaces earlier available-skills lists.",
         "",
         "<available_skills>",
     ]
     for name, desc in items:
         clipped = desc if len(desc) <= _SKILL_DESC_MAX else desc[: _SKILL_DESC_MAX - 1] + "…"
+        suffix = " (likely match)" if pin == name else ""
         if clipped:
-            lines.append(f"- `{name}`: {clipped}")
+            lines.append(f"- `{name}`: {clipped}{suffix}")
         else:
-            lines.append(f"- `{name}`")
+            lines.append(f"- `{name}`{suffix}")
     lines.extend(
         [
             "</available_skills>",
             "",
             "This catalog contains summaries only; do not treat a summary as the skill's instructions.",
+            "When a task clearly matches a listed skill, load its full instructions with the skill tool before using that workflow.",
             "If the user already invoked a skill with /name and its body is in this conversation, "
             "do not load that skill again.",
             "</system-reminder>",
@@ -89,6 +97,11 @@ def catalog_entries_digest(entries: Iterable[tuple[str, str]]) -> str:
 
 
 _SKILL_GESTURE_RE = re.compile(r"(?:^|\s)/([A-Za-z][A-Za-z0-9_-]*)(?=\s|$)")
+_UPLOAD_MARK = "[已上传"
+_WARMUP_PING_RE = re.compile(
+    r"^(?:在吗|在么|在不在|你好呀?|您好|嗨|哈喽|hi+|hello|hey)[\s?？!！.。,~～]*$",
+    re.IGNORECASE,
+)
 
 
 def parse_skill_gesture(text: str) -> str | None:
@@ -163,6 +176,61 @@ def prepare_skill_followup(
     return rewritten, render_skill_invocation(name, body)
 
 
+def is_warmup_ping(text: str) -> bool:
+    """纯寒暄（在吗/你好/hi），不含附件通知。"""
+    raw = (text or "").strip()
+    if not raw or _UPLOAD_MARK in raw:
+        return False
+    return bool(_WARMUP_PING_RE.fullmatch(raw))
+
+
+def _message_text(item: Any) -> str:
+    if isinstance(item, str):
+        return item
+    if not isinstance(item, dict):
+        return ""
+    content = item.get("content")
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for part in content:
+            if isinstance(part, dict) and part.get("type") == "text":
+                parts.append(str(part.get("text") or ""))
+            elif isinstance(part, str):
+                parts.append(part)
+        return "\n".join(parts)
+    return str(content or "")
+
+
+def _last_visible_user_text(memory: Any) -> str:
+    messages = getattr(memory, "messages", None) or []
+    for item in reversed(list(messages)):
+        if isinstance(item, str):
+            if "<available_skills>" in item:
+                continue
+            return item
+        if not isinstance(item, dict):
+            continue
+        if item.get("role") not in (None, "user"):
+            continue
+        if item.get("_ui_hidden") or item.get("_prompt_kind") == "skill_catalog":
+            continue
+        text = _message_text(item).strip()
+        if text:
+            return text
+    return ""
+
+
+def should_defer_skill_catalog(engine: Any) -> bool:
+    """寒暄回合不注入技能目录，避免能力清单抢在「在吗」前面。"""
+    pending = getattr(engine, "_pending_user_text", None)
+    if isinstance(pending, str) and pending.strip():
+        return is_warmup_ping(pending)
+    memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    return is_warmup_ping(_last_visible_user_text(memory))
+
+
 def attach_skill_catalog(engine: Any) -> str:
     """digest 变化时把技能目录作为 user 消息追加。digest 只看 (name, desc)。"""
     router = getattr(engine, "_skill_router", None)
@@ -182,16 +250,49 @@ def attach_skill_catalog(engine: Any) -> str:
         if raw:
             blocked = set(raw)
     entries = collect_skill_entries(packs, blocked=blocked)
-    if not entries:
-        return ""
-    digest = catalog_entries_digest(entries)
-    if digest == getattr(engine, "_skill_catalog_digest", None):
-        return ""
-    text = render_available_skills(entries)
-    if not text:
-        return ""
-    engine._skill_catalog_digest = digest
     memory = getattr(engine, "_memory", None) or getattr(engine, "memory", None)
+    history = getattr(memory, "messages", []) if memory is not None else []
+    previous = [
+        item.get("content", "") if isinstance(item, dict) else item
+        for item in history
+        if (isinstance(item, dict) and item.get("_prompt_kind") == "skill_catalog")
+        or (isinstance(item, str) and "<available_skills>" in item)
+    ]
+    if not entries and not previous and not getattr(engine, "_skill_catalog_digest", None):
+        return ""
+    from excelmanus.system_one.host import should_skip_skill_catalog_snapshot
+
+    if (
+        (should_defer_skill_catalog(engine) or should_skip_skill_catalog_snapshot(engine))
+        and not previous
+    ):
+        return ""
+    pin = str(getattr(engine, "_skill_pin", "") or "") or None
+    digest = catalog_entries_digest(entries)
+    text = render_available_skills(entries, pin=pin) if entries else (
+        "<system-reminder><available_skills></available_skills>\n"
+        "当前技能目录为空，替代之前的目录；不要调用旧目录中的技能。</system-reminder>"
+    )
+    if previous and previous[-1] == text:
+        return ""
+    # 审计：上次注入的目录是否被压缩遮蔽（seq 级精确判定）。
+    last_seq = getattr(engine, "_skill_catalog_seq", None)
+    shadowed = (
+        isinstance(last_seq, int)
+        and memory is not None
+        and hasattr(memory, "surface_contains_seq")
+        and not memory.surface_contains_seq(last_seq)
+    )
+    engine._skill_catalog_digest = digest
     if memory is not None:
         memory.add_user_message(text, hidden=True, prompt_kind="skill_catalog")
+        last = memory.messages[-1] if memory.messages else None
+        seq = last.get("_seq") if isinstance(last, dict) else None
+        engine._skill_catalog_seq = seq if isinstance(seq, int) else None
+        if shadowed:
+            import logging
+
+            logging.getLogger("excelmanus.skill_catalog").info(
+                "技能目录 seq=%s 已被压缩遮蔽，确定性重注", last_seq,
+            )
     return text

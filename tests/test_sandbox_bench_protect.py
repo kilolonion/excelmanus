@@ -260,10 +260,9 @@ class TestOpenpyxlSandboxSave:
             f"print('saved')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "saved" in result.stdout
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
         assert not target.exists()
-        assert "EXCELMANUS_PENDING_WRITE" in result.stderr
 
     def test_openpyxl_save_existing_file_in_sandbox(self, workspace: Path) -> None:
         """覆盖已有 xlsx 文件（走 _atomic_save 路径）应成功。"""
@@ -286,8 +285,8 @@ class TestOpenpyxlSandboxSave:
             f"print(wb2.active['A1'].value)\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, f"stderr: {result.stderr}"
-        assert "updated" in result.stdout
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
 
     def test_openpyxl_save_bench_protected_blocked(self, workspace: Path) -> None:
         """openpyxl wb.save() 写入 bench/external 触发 Auto-CoW。"""
@@ -359,9 +358,6 @@ class TestWrapperTemplateContent:
         assert "_SENSITIVE_DIRS" in wrapper
 
     def test_red_save_also_emits_content_version(self, workspace: Path) -> None:
-        import hashlib
-        import os as _os
-
         output = workspace / "outputs"
         output.mkdir()
         target = output / "red.xlsx"
@@ -373,18 +369,7 @@ class TestWrapperTemplateContent:
             "print('saved')\n"
         )
         result = _run_in_sandbox(workspace, code, "RED")
-        assert result.returncode == 0, result.stderr
-        marker = "EXCELMANUS_SAVE_VERSION\t"
-        lines = [ln for ln in result.stderr.splitlines() if ln.startswith(marker)]
-        assert len(lines) == 1
-        _, path, ver = lines[0].split("\t")
-        assert path == _os.path.realpath(str(target))
-        pending_lines = [
-            ln for ln in result.stderr.splitlines()
-            if ln.startswith("EXCELMANUS_PENDING_WRITE\t")
-        ]
-        assert pending_lines
-        pending_path = pending_lines[0].split("\t")[2]
-        expect = "sha256:" + hashlib.sha256(Path(pending_path).read_bytes()).hexdigest()
-        assert ver == expect
+        assert result.returncode != 0
+        assert "工作区表格禁止直接保存" in result.stderr or "em.format_spreadsheet" in result.stderr
+        assert "EXCELMANUS_PENDING_WRITE\t" not in result.stderr
         assert not target.exists()

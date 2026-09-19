@@ -1,16 +1,13 @@
-"""配置管理模块：加载环境变量、.env 文件和默认值。"""
+"""配置管理模块：从主库设置与默认值构建运行时配置。"""
 
 from __future__ import annotations
 
-import json
 import logging
 import os
 import re
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
-
-
-
 class ConfigError(Exception):
     """配置缺失或校验失败时抛出的异常。"""
 
@@ -36,8 +33,6 @@ _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
 _ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 _ALLOWED_PROTOCOLS = {"auto", "openai", "openai_responses", "anthropic", "gemini"}
-DEFAULT_EMBEDDING_MODEL = "text-embedding-3-small"
-DEFAULT_EMBEDDING_DIMENSIONS = 1536
 logger = logging.getLogger(__name__)
 
 # ── 模型 → 上下文窗口大小映射（token 数） ──────────────────────────
@@ -467,11 +462,13 @@ def _infer_context_tokens_for_model(model: str) -> int:
 def is_context_window_user_pinned(max_context_tokens: int, model: str) -> bool:
     """用户是否显式锁定了上下文窗口。
 
-    设置页保存会写入 EXCELMANUS_MAX_CONTEXT_TOKENS；只要该环境变量存在
+    设置页保存会写入 ``EXCELMANUS_MAX_CONTEXT_TOKENS``；只要该设置存在
     即视为锁定（即使数值恰好等于模型推断值）。否则回退到
     「配置值 ≠ 当前模型推断值」——兼容测试和编程方式传入的 Config。
     """
-    if os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS"):
+    from excelmanus.settings_runtime import get_setting
+
+    if get_setting("EXCELMANUS_MAX_CONTEXT_TOKENS"):
         return True
     return max_context_tokens != _infer_context_tokens_for_model(model)
 
@@ -501,14 +498,10 @@ class ExcelManusConfig:
     skills_discovery_include_agents: bool = True
     skills_discovery_scan_external_tool_dirs: bool = True
     skills_discovery_extra_dirs: tuple[str, ...] = ()
-    clawhub_enabled: bool = True
-    clawhub_registry_url: str = "https://clawhub.ai"
-    clawhub_prefer_cli: bool = True
-    system_message_mode: str = "auto"
     tool_result_hard_cap_chars: int = 12000
-    large_excel_threshold_bytes: int = 8 * 1024 * 1024
     cors_allow_origins: tuple[str, ...] = (
         "http://localhost:3000",
+        "http://127.0.0.1:3000",
     )
     mcp_shared_manager: bool = False
     pool_enabled: bool = False  # 号池功能开关（默认关闭，灰度上线）
@@ -546,7 +539,6 @@ class ExcelManusConfig:
     memory_enabled: bool = True
     memory_dir: str = "~/.excelmanus/memory"
     memory_auto_load_lines: int = 200
-    memory_auto_extract_interval: int = 0  # 每 N 轮后台静默提取记忆（0 = 禁用，默认关）
     memory_expire_days: int = 90  # 记忆过期天数（0 = 不过期）
     # 记忆维护代理配置
     memory_maintenance_enabled: bool = False  # LLM 记忆维护（默认关，显式开启）
@@ -562,24 +554,27 @@ class ExcelManusConfig:
     max_context_tokens: int = 128_000
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
-    # 对话历史摘要：超阈值时用激活模型压缩早期对话
-    summarization_enabled: bool = False  # 旧式 summarize_and_trim（默认关，compaction 已覆盖）
-    summarization_threshold_ratio: float = 0.8
-    summarization_keep_recent_turns: int = 3
     # 上下文自动压缩（Compaction）：增强版对话摘要，后台静默执行
     compaction_enabled: bool = True
     compaction_threshold_ratio: float = 0.85
     compaction_keep_recent_turns: int = 5
-    compaction_max_summary_tokens: int = 1500
+    # thinking 模型会把推理计入 completion 预算，1500 易被烧光导致空摘要
+    compaction_max_summary_tokens: int = 4096
+    # 连续空摘要重试上限；达到后跳过 LLM 摘要回落硬截断（0 = 禁用回落）
+    compaction_empty_summary_max_retries: int = 3
+    # 压缩时按 token 保留的尾段预算；0 = 自动（max_context 的 25%）
+    compaction_retain_tokens: int = 0
+    # L1 无模型修剪：压缩边界内先于 LLM 摘要瘦身超大 tool 结果
+    compaction_pruner_enabled: bool = True
     # hooks 配置
     hooks_command_enabled: bool = False
     hooks_command_allowlist: tuple[str, ...] = ()
     hooks_command_timeout_seconds: int = 10
     hooks_output_max_chars: int = 32000
-    # 视觉：图片只交给激活模型
-    image_keep_rounds: int = 3  # 图片保持完整 base64 的最小轮数
-    image_max_active: int = 2  # 同时保持高清的最大图片数（LRU 淘汰）
-    image_token_budget: int = 6000  # 图片 token 总预算
+    # 视觉：图片只交给激活模型；请求投影预算（不改写历史）
+    image_pixel_budget: int | str = 640_000
+    image_max_bytes: int = 1_048_576
+    image_files_api: str = "auto"
     main_model_vision: str = "auto"  # 激活模型视觉能力：auto/true/false
     # 代码策略引擎配置
     code_policy_enabled: bool = True
@@ -588,37 +583,19 @@ class ExcelManusConfig:
     code_policy_extra_safe_modules: tuple[str, ...] = ()
     code_policy_extra_blocked_modules: tuple[str, ...] = ()
     # 工具参数 schema 校验（off/shadow/enforce）
-    tool_schema_validation_mode: str = "off"
+    tool_schema_validation_mode: str = "shadow"
     tool_schema_validation_canary_percent: int = 100
     tool_schema_strict_path: bool = False
-    # Embedding 语义检索配置（需独立配置 embedding API，未配置时功能关闭）
-    embedding_enabled: bool = False
-    embedding_api_key: str | None = None
-    embedding_base_url: str | None = None
-    embedding_model: str = DEFAULT_EMBEDDING_MODEL
-    embedding_dimensions: int = DEFAULT_EMBEDDING_DIMENSIONS
-    embedding_timeout_seconds: float = 30.0
-    memory_semantic_top_k: int = 10
-    memory_semantic_threshold: float = 0.3
-    memory_semantic_fallback_recent: int = 5
-    # 历史会话感知（Session Summary）配置
-    session_summary_enabled: bool = False  # 会话结束摘要（默认关，可手动/API 触发）
-    session_summary_min_turns: int = 3  # 最少轮次才生成摘要
-    session_summary_inject_top_k: int = 3  # 新会话注入的历史摘要条数
-    session_summary_max_tokens: int = 800  # 注入的历史摘要总 token 预算
-    # Playbook（自进化战术手册）配置
-    playbook_enabled: bool = False  # 默认关闭，渐进开启
-    playbook_db_path: str = ""  # 空 = 使用 db_path 同目录下 playbook.db
-    playbook_max_bullets: int = 500  # 条目上限，超出时按 helpful_ratio 淘汰
-    registry_semantic_top_k: int = 5
-    registry_semantic_threshold: float = 0.25
-    # 统一数据库路径（聊天记录、记忆、向量、审批均存于此）
+    # 会话结束摘要落库（不注入新会话；检索/注入未接入）
+    session_summary_enabled: bool = False  # 仅控制会话结束摘要落库，默认关；不注入新会话
+    session_summary_min_turns: int = 3  # 最少轮次才生成摘要；仅约束落库，不注入新会话
+    # 统一数据库路径（聊天记录、记忆、审批、用户设置均存于此）
     db_path: str = "~/.excelmanus/excelmanus.db"
     # 聊天记录持久化
     chat_history_enabled: bool = True
-    chat_history_db_path: str = ""  # 废弃，运行时回退到 db_path
-    # CLI 显示模式：dashboard（默认三段布局）或 classic（传统流式输出）
-    cli_layout_mode: str = "dashboard"
+    chat_history_db_path: str = ""  # 废弃别名，始终与 db_path 相同
+    # 会话事件日志（session_events append-only 事实源 + surface fold）
+    session_log_enabled: bool = True
     # Thinking（推理深度）配置
     thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
     thinking_budget: int = 0  # 精确 token 预算（>0 时覆盖 effort 换算值）
@@ -626,6 +603,20 @@ class ExcelManusConfig:
     friendly_error_messages: bool = True
     # 多模型配置档案（可选，通过 /model 命令切换）
     models: tuple[ModelProfile, ...] = ()
+    # Jev / TypeSafe System One（可选 extra；走运行时设置 / config_kv，不进 model_profiles）
+    jev_enabled: str = "off"  # off | shadow | enforce
+    jev_exposure: str = "off"
+    jev_mode_hint: bool = False
+    jev_present_as_auto: bool = False
+    jev_observation: str = "off"
+    jev_ui_hint: bool = False
+    jev_model: str = "jev-1.13.0"
+    typesafe_api_key: str | None = None
+    ai_gateway_api_key: str | None = None
+    jev_active_provider: str = ""
+    jev_providers: tuple = ()  # EXCELMANUS_JEV_PROVIDERS 解析出的 JevProviderRecord
+    jev_timeout_seconds: float = 1.5
+    jev_calibrated: bool = False  # 中文对照未签字时即使 enforce 也不得 applied
 
     @property
     def is_standalone(self) -> bool:
@@ -644,9 +635,6 @@ class _ContextOptimizationConfig:
 
     max_context_tokens: int
     prompt_cache_key_enabled: bool
-    summarization_enabled: bool
-    summarization_threshold_ratio: float
-    summarization_keep_recent_turns: int
     compaction_enabled: bool
     compaction_threshold_ratio: float
     compaction_keep_recent_turns: int
@@ -654,13 +642,20 @@ class _ContextOptimizationConfig:
 
 
 def load_runtime_env() -> None:
-    """加载配置文件。空字符串视为未设置。
-
-    优先级: 非空进程环境 > cwd .env > 项目根 .env > $EXCELMANUS_HOME/config.env
-    """
+    """启动探测。"""
     from excelmanus.data_home import load_runtime_env as _load_runtime_env
 
     _load_runtime_env()
+
+
+def _s(name: str, default: str | None = None) -> str | None:
+    """读取产品设置；未设置时返回 default。"""
+    from excelmanus.settings_runtime import get_setting
+
+    raw = get_setting(name)
+    if raw is None:
+        return default
+    return raw
 
 
 def _parse_int(value: str | None, name: str, default: int) -> int:
@@ -676,6 +671,15 @@ def _parse_int(value: str | None, name: str, default: int) -> int:
     return result
 
 
+def _parse_image_pixel_budget(value: str | None) -> int | str:
+    if value is None or not str(value).strip():
+        return 640_000
+    raw = str(value).strip().lower()
+    if raw == "low":
+        return "low"
+    return _parse_int(raw, "EXCELMANUS_IMAGE_PIXEL_BUDGET", 640_000)
+
+
 def _parse_int_allow_zero(value: str | None, name: str, default: int) -> int:
     """将字符串解析为非负整数，0 表示不限制。"""
     if value is None:
@@ -686,6 +690,19 @@ def _parse_int_allow_zero(value: str | None, name: str, default: int) -> int:
         raise ConfigError(f"配置项 {name} 必须为整数，当前值: {value!r}")
     if result < 0:
         raise ConfigError(f"配置项 {name} 必须为非负整数，当前值: {result}")
+    return result
+
+
+def _parse_positive_float(value: str | None, name: str, default: float) -> float:
+    """将字符串解析为正浮点数。空字符串视为未设置。"""
+    if value is None or not str(value).strip():
+        return default
+    try:
+        result = float(value)
+    except (ValueError, TypeError):
+        raise ConfigError(f"配置项 {name} 必须为浮点数，当前值: {value!r}")
+    if result <= 0:
+        raise ConfigError(f"配置项 {name} 必须为正数，当前值: {result}")
     return result
 
 
@@ -700,20 +717,6 @@ def _parse_float_between_zero_and_one(value: str | None, name: str, default: flo
     if not 0 < result < 1:
         raise ConfigError(f"配置项 {name} 必须在 (0, 1) 区间内，当前值: {result}")
     return result
-
-
-def _parse_threshold(env_value: str | None, default: float) -> float:
-    """解析语义阈值，非法值静默回退到默认值并记录警告。"""
-    if env_value is None:
-        return default
-    try:
-        result = float(env_value)
-        if 0.0 <= result <= 1.0:
-            return result
-    except (ValueError, TypeError):
-        pass
-    logger.warning("阈值配置非法，使用默认值 %s（原值: %r）", default, env_value)
-    return default
 
 
 def _validate_base_url(url: str) -> None:
@@ -869,6 +872,20 @@ def _parse_bool(value: str | None, name: str, default: bool) -> bool:
     raise ConfigError(f"配置项 {name} 必须为布尔值，当前值: {value!r}")
 
 
+_ALLOWED_JEV_GATES = frozenset({"off", "shadow", "enforce"})
+
+
+def _parse_jev_gate(value: str | None, name: str, default: str = "off") -> str:
+    if value is None or not str(value).strip():
+        return default
+    normalized = value.strip().lower()
+    if normalized in _ALLOWED_JEV_GATES:
+        return normalized
+    raise ConfigError(
+        f"配置项 {name} 必须是 ['off', 'shadow', 'enforce'] 之一，当前值: {value!r}"
+    )
+
+
 def _parse_log_level(value: str | None) -> str:
     """解析日志级别。"""
     if value is None:
@@ -882,24 +899,10 @@ def _parse_log_level(value: str | None) -> str:
     return normalized
 
 
-def _parse_system_message_mode(value: str | None) -> str:
-    """解析 system_message_mode。"""
-    if value is None:
-        return "auto"
-    normalized = value.strip().lower()
-    if normalized not in {"auto", "merge", "replace"}:
-        raise ConfigError(
-            "配置项 EXCELMANUS_SYSTEM_MESSAGE_MODE 必须是 "
-            "['auto', 'merge', 'replace'] 之一，当前值: "
-            f"{value!r}"
-        )
-    return normalized
-
-
 def _parse_tool_schema_validation_mode(value: str | None) -> str:
     """解析工具参数 schema 校验模式。"""
     if value is None:
-        return "off"
+        return "shadow"
     normalized = value.strip().lower()
     if normalized in {"off", "shadow", "enforce"}:
         return normalized
@@ -908,39 +911,6 @@ def _parse_tool_schema_validation_mode(value: str | None) -> str:
         "['off', 'shadow', 'enforce'] 之一，"
         f"当前值: {value!r}"
     )
-
-
-_ALLOWED_CLI_LAYOUT_MODES = {"dashboard", "classic"}
-
-
-def _parse_cli_layout_mode(value: str | None) -> str:
-    """解析 CLI 布局模式，非法值自动回退 dashboard。"""
-    if value is None:
-        return "dashboard"
-    normalized = value.strip().lower()
-    if normalized in _ALLOWED_CLI_LAYOUT_MODES:
-        return normalized
-    logger.warning(
-        "配置项 EXCELMANUS_CLI_LAYOUT_MODE 非法(%r)，已回退为 dashboard",
-        value,
-    )
-    return "dashboard"
-
-
-def _extract_first_model(raw: str | None) -> dict | None:
-    """从 EXCELMANUS_MODELS JSON 数组中提取第一个模型配置（用于继承默认值）。
-
-    解析失败或为空时返回 None，不抛异常。
-    """
-    if not raw or not raw.strip():
-        return None
-    try:
-        items = json.loads(raw)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    if isinstance(items, list) and len(items) > 0 and isinstance(items[0], dict):
-        return items[0]
-    return None
 
 
 def _parse_protocol(value: str | None, name: str = "protocol") -> str:
@@ -957,72 +927,66 @@ def _parse_protocol(value: str | None, name: str = "protocol") -> str:
     return "auto"
 
 
-def _parse_models(raw: str | None, default_api_key: str, default_base_url: str) -> tuple[ModelProfile, ...]:
-    """解析 EXCELMANUS_MODELS 环境变量（JSON 数组）。
-
-    每个元素必须包含 name 和 model；省略的 api_key/base_url 使用
-    EXCELMANUS_API_KEY / EXCELMANUS_BASE_URL（仅用于首次启动迁移）。
-    """
-    if not raw or not raw.strip():
-        return ()
-    try:
-        items = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ConfigError(f"EXCELMANUS_MODELS JSON 解析失败：{exc}")
-    if not isinstance(items, list):
-        raise ConfigError("EXCELMANUS_MODELS 必须为 JSON 数组。")
-
-    profiles: list[ModelProfile] = []
-    seen_names: set[str] = set()
-    for i, item in enumerate(items):
-        if not isinstance(item, dict):
-            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 必须为 JSON 对象。")
-        name = item.get("name")
-        model = item.get("model")
-        if not name or not isinstance(name, str):
-            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 缺少 name 字段。")
-        if not model or not isinstance(model, str):
-            raise ConfigError(f"EXCELMANUS_MODELS[{i}] 缺少 model 字段。")
-        name = name.strip()
-        model = model.strip()
-        if name in seen_names:
-            raise ConfigError(f"EXCELMANUS_MODELS 中 name 重复：{name!r}。")
-        seen_names.add(name)
-        _log_deprecated_model_warning(f"EXCELMANUS_MODELS[{i}].model", model)
-        api_key = item.get("api_key", "").strip() or default_api_key
-        base_url = item.get("base_url", "").strip() or default_base_url
-        _validate_base_url(base_url)
-        description = item.get("description", "").strip()
-        protocol = _parse_protocol(item.get("protocol"), f"EXCELMANUS_MODELS[{i}].protocol")
-        profiles.append(ModelProfile(
-            name=name,
-            model=model,
-            api_key=api_key,
-            base_url=base_url,
-            description=description,
-            protocol=protocol,
-        ))
-    return tuple(profiles)
-
-
 def _detect_deploy_mode() -> str:
-    """自动推断部署模式。默认 standalone；server 只能通过环境变量显式指定。"""
+    """自动推断部署模式。默认 standalone；server 只能通过进程定位符显式指定。"""
     return "standalone"
 
 
+DEFAULT_FRONTEND_PORT = "3000"
+# 浏览器把 localhost / 127.0.0.1 / ::1 视为不同源，缺一则直连 :8000 的 health/SSE 会被拦。
+LOOPBACK_CORS_HOSTS = ("localhost", "127.0.0.1", "[::1]")
+_LOOPBACK_HOST_ALIASES = frozenset({"localhost", "127.0.0.1", "::1", "[::1]"})
+
+
+def parse_frontend_ports(raw: str | None = None) -> tuple[str, ...]:
+    """解析 EXCELMANUS_FRONTEND_PORT（逗号分隔）。空值回退 3000。"""
+    text = DEFAULT_FRONTEND_PORT if raw is None else raw.strip()
+    ports = tuple(item.strip() for item in text.split(",") if item.strip())
+    return ports or (DEFAULT_FRONTEND_PORT,)
+
+
+def _http_origin(host: str, port: str) -> str:
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return f"http://{host}:{port}"
+
+
+def expand_cors_origins(
+    configured: Iterable[str],
+    *,
+    frontend_ports: Iterable[str] | None = None,
+    extra_hosts: Iterable[str] = (),
+) -> list[str]:
+    """合并显式 CORS 来源与本机 loopback / 局域网前端源。
+
+    只写 localhost 时，用 127.0.0.1 打开前端会被浏览器判为跨域。
+    启动时固定补上 loopback，再按需叠加 LAN IP。
+    """
+    origins = {item.strip() for item in configured if item and item.strip()}
+    ports = tuple(str(port).strip() for port in (frontend_ports or ()) if str(port).strip())
+    ports = ports or (DEFAULT_FRONTEND_PORT,)
+    hosts: list[str] = list(LOOPBACK_CORS_HOSTS)
+    for host in extra_hosts:
+        cleaned = (host or "").strip()
+        if not cleaned or cleaned.startswith("127.") or cleaned.lower() in _LOOPBACK_HOST_ALIASES:
+            continue
+        hosts.append(cleaned)
+    for host in hosts:
+        for port in ports:
+            origins.add(_http_origin(host, port))
+    return sorted(origins)
+
+
 def _parse_cors_allow_origins() -> tuple[str, ...]:
-    """从已加载的环境变量中解析 CORS 允许来源列表（不触发 .env 加载）。"""
-    cors_raw = os.environ.get("EXCELMANUS_CORS_ALLOW_ORIGINS")
+    """解析 CORS 允许来源列表。"""
+    cors_raw = _s("EXCELMANUS_CORS_ALLOW_ORIGINS")
     if cors_raw is not None:
         return tuple(o.strip() for o in cors_raw.split(",") if o.strip())
-    return ("http://localhost:3000",)
+    return ("http://localhost:3000", "http://127.0.0.1:3000")
 
 
 def load_cors_allow_origins() -> tuple[str, ...]:
-    """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。
-
-    可独立调用（如 api.py 模块级），内部确保 .env 已加载。
-    """
+    """解析 CORS 允许来源列表（逗号分隔，空字符串将被忽略）。"""
     load_runtime_env()
     return _parse_cors_allow_origins()
 
@@ -1036,104 +1000,87 @@ def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
 def _load_context_optimization_config(model: str = "") -> _ContextOptimizationConfig:
     """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。
 
-    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 环境变量 > 模型自动推断 > 默认 128k。
+    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 模型自动推断 > 默认 128k。
     """
-    env_max_ctx = os.environ.get("EXCELMANUS_MAX_CONTEXT_TOKENS")
+    env_max_ctx = _s("EXCELMANUS_MAX_CONTEXT_TOKENS")
     if env_max_ctx:
-        # 用户显式配置，尊重用户意愿
         max_context_tokens = _parse_int(env_max_ctx, "EXCELMANUS_MAX_CONTEXT_TOKENS", _DEFAULT_CONTEXT_TOKENS)
     elif model:
-        # 根据模型名自动推断
         max_context_tokens = _infer_context_tokens_for_model(model)
     else:
         max_context_tokens = _DEFAULT_CONTEXT_TOKENS
     return _ContextOptimizationConfig(
         max_context_tokens=max_context_tokens,
         prompt_cache_key_enabled=_parse_bool(
-            os.environ.get("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED"),
+            _s("EXCELMANUS_PROMPT_CACHE_KEY_ENABLED"),
             "EXCELMANUS_PROMPT_CACHE_KEY_ENABLED",
             True,
         ),
-        summarization_enabled=_parse_bool(
-            os.environ.get("EXCELMANUS_SUMMARIZATION_ENABLED"),
-            "EXCELMANUS_SUMMARIZATION_ENABLED",
-            False,
-        ),
-        summarization_threshold_ratio=_parse_float_between_zero_and_one(
-            os.environ.get("EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO"),
-            "EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO",
-            0.8,
-        ),
-        summarization_keep_recent_turns=_parse_int(
-            os.environ.get("EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS"),
-            "EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS",
-            3,
-        ),
         compaction_enabled=_parse_bool(
-            os.environ.get("EXCELMANUS_COMPACTION_ENABLED"),
+            _s("EXCELMANUS_COMPACTION_ENABLED"),
             "EXCELMANUS_COMPACTION_ENABLED",
             True,
         ),
         compaction_threshold_ratio=_parse_float_between_zero_and_one(
-            os.environ.get("EXCELMANUS_COMPACTION_THRESHOLD_RATIO"),
+            _s("EXCELMANUS_COMPACTION_THRESHOLD_RATIO"),
             "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
             0.85,
         ),
         compaction_keep_recent_turns=_parse_int(
-            os.environ.get("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS"),
+            _s("EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS"),
             "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
             5,
         ),
         compaction_max_summary_tokens=_parse_int(
-            os.environ.get("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS"),
+            _s("EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS"),
             "EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS",
-            1500,
+            4096,
         ),
     )
 
 
-def load_config() -> ExcelManusConfig:
-    """加载配置。优先级：非空进程环境 > cwd .env > 项目 .env > config.env > 默认值。
+def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
+    """加载配置。用户设置以主库 / 覆盖层为准；缺省用默认值。
 
-    API Key 为必填项，缺失时抛出 ConfigError。空的 ``KEY=`` 不会挡住正式仓里的值。
+    模型凭证以数据库档案为准；缺失时抛出 ConfigError。
+    ``values`` 仅供单元测试传入一份临时映射。
     """
+    from excelmanus.settings_runtime import credentials_from_store, models_from_store, using_values
+
+    if values is not None:
+        with using_values(values):
+            return load_config(None)
+
     load_runtime_env()
 
-    # 读取各配置项（允许从 EXCELMANUS_MODELS 的第一个模型继承）
-    api_key = os.environ.get("EXCELMANUS_API_KEY") or ""
-    base_url = os.environ.get("EXCELMANUS_BASE_URL") or ""
-    model = os.environ.get("EXCELMANUS_MODEL") or ""
+    api_key = _s("EXCELMANUS_API_KEY") or ""
+    base_url = _s("EXCELMANUS_BASE_URL") or ""
+    model = _s("EXCELMANUS_MODEL") or ""
+    protocol = _parse_protocol(_s("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL")
 
-    # 当必填项缺失时，尝试从 EXCELMANUS_MODELS 的第一个模型继承
     if not api_key or not base_url or not model:
-        first_model = _extract_first_model(os.environ.get("EXCELMANUS_MODELS"))
-        if first_model is not None:
-            api_key = api_key or first_model.get("api_key", "")
-            base_url = base_url or first_model.get("base_url", "")
-            model = model or first_model.get("model", "")
+        creds = credentials_from_store()
+        api_key = api_key or creds.get("api_key", "")
+        base_url = base_url or creds.get("base_url", "")
+        model = model or creds.get("model", "")
+        if not _s("EXCELMANUS_PROTOCOL") and creds.get("protocol"):
+            protocol = _parse_protocol(creds.get("protocol"), "EXCELMANUS_PROTOCOL")
 
     if not api_key:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_API_KEY。"
-            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
+            "请在设置页面添加模型档案。"
         )
     if not base_url:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_BASE_URL。"
-            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
+            "请在设置页面添加模型档案。"
         )
     _validate_base_url(base_url)
 
-    # 模型协议类型（提前解析，供 _normalize_base_url 使用）
-    protocol = _parse_protocol(
-        os.environ.get("EXCELMANUS_PROTOCOL"), "EXCELMANUS_PROTOCOL"
-    )
-
-    # 规范化 base_url：去尾斜杠、检测缺失 /v1 并自动修正
     base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL", model=model, api_key=api_key)
 
     if not model:
-        # 尝试从 Gemini 完整 URL 中提取模型名
         from excelmanus.providers.gemini import _extract_model_from_url
         extracted = _extract_model_from_url(base_url)
         if extracted:
@@ -1141,30 +1088,30 @@ def load_config() -> ExcelManusConfig:
     if not model:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_MODEL。"
-            "请通过环境变量、.env 文件或 EXCELMANUS_MODELS 设置该值。"
+            "请在设置页面添加模型档案。"
             "（Gemini 用户也可在 BASE_URL 中包含模型名，如 .../models/gemini-3.8-flash:generateContent）"
         )
     _log_deprecated_model_warning("EXCELMANUS_MODEL", model)
 
     max_iterations = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
+        _s("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
     )
     max_consecutive_failures = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_CONSECUTIVE_FAILURES"),
+        _s("EXCELMANUS_MAX_CONSECUTIVE_FAILURES"),
         "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
         6,
     )
     session_ttl_seconds = _parse_int(
-        os.environ.get("EXCELMANUS_SESSION_TTL_SECONDS"),
+        _s("EXCELMANUS_SESSION_TTL_SECONDS"),
         "EXCELMANUS_SESSION_TTL_SECONDS",
         1800,
     )
     max_sessions = _parse_int(
-        os.environ.get("EXCELMANUS_MAX_SESSIONS"), "EXCELMANUS_MAX_SESSIONS", 1000
+        _s("EXCELMANUS_MAX_SESSIONS"), "EXCELMANUS_MAX_SESSIONS", 1000
     )
 
-    workspace_root = os.environ.get("EXCELMANUS_WORKSPACE_ROOT", ".")
-    data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "")
+    workspace_root = _s("EXCELMANUS_WORKSPACE_ROOT") or "."
+    data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "").strip()
 
     # 部署模式推断
     deploy_mode_raw = os.environ.get("EXCELMANUS_DEPLOY_MODE", "auto").strip().lower()
@@ -1173,215 +1120,250 @@ def load_config() -> ExcelManusConfig:
     else:
         # auto / 未知值（含已废弃的 docker）都走 standalone
         deploy_mode = _detect_deploy_mode()
-    log_level = _parse_log_level(os.environ.get("EXCELMANUS_LOG_LEVEL"))
+    log_level = _parse_log_level(_s("EXCELMANUS_LOG_LEVEL"))
     default_system_skill_dir = (
         Path(__file__).resolve().parent / "skillpacks" / "system"
     )
     default_project_skill_dir = Path(workspace_root) / ".excelmanus" / "skillpacks"
-    skills_system_dir = os.environ.get(
+    skills_system_dir = _s(
         "EXCELMANUS_SKILLS_SYSTEM_DIR", str(default_system_skill_dir)
     )
-    skills_user_dir = os.environ.get(
+    skills_user_dir = _s(
         "EXCELMANUS_SKILLS_USER_DIR", "~/.excelmanus/skillpacks"
     )
-    skills_project_dir = os.environ.get(
+    skills_project_dir = _s(
         "EXCELMANUS_SKILLS_PROJECT_DIR", str(default_project_skill_dir)
     )
     skills_context_char_budget = _parse_int_allow_zero(
-        os.environ.get("EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET"),
+        _s("EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET"),
         "EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET",
         12000,
     )
     skills_discovery_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_ENABLED"),
+        _s("EXCELMANUS_SKILLS_DISCOVERY_ENABLED"),
         "EXCELMANUS_SKILLS_DISCOVERY_ENABLED",
         True,
     )
     skills_discovery_scan_workspace_ancestors = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS"),
+        _s("EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS"),
         "EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS",
         True,
     )
     skills_discovery_include_agents = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS"),
+        _s("EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS"),
         "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
         True,
     )
     skills_discovery_scan_external_tool_dirs = _parse_bool(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS"),
+        _s("EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS"),
         "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS",
         True,
     )
     skills_discovery_extra_dirs = _parse_csv_tuple(
-        os.environ.get("EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS")
-    )
-    clawhub_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_CLAWHUB_ENABLED"),
-        "EXCELMANUS_CLAWHUB_ENABLED",
-        True,
-    )
-    clawhub_registry_url = (
-        os.environ.get("EXCELMANUS_CLAWHUB_REGISTRY_URL", "https://clawhub.ai").strip()
-    )
-    clawhub_prefer_cli = _parse_bool(
-        os.environ.get("EXCELMANUS_CLAWHUB_PREFER_CLI"),
-        "EXCELMANUS_CLAWHUB_PREFER_CLI",
-        True,
-    )
-    system_message_mode = _parse_system_message_mode(
-        os.environ.get("EXCELMANUS_SYSTEM_MESSAGE_MODE")
+        _s("EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS")
     )
     tool_result_hard_cap_chars = _parse_int_allow_zero(
-        os.environ.get("EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS"),
+        _s("EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS"),
         "EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS",
         12000,
     )
-    large_excel_threshold_bytes = _parse_int(
-        os.environ.get("EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES"),
-        "EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES",
-        8 * 1024 * 1024,
-    )
     cors_allow_origins = _parse_cors_allow_origins()
     mcp_shared_manager = _parse_bool(
-        os.environ.get("EXCELMANUS_MCP_SHARED_MANAGER"),
+        _s("EXCELMANUS_MCP_SHARED_MANAGER"),
         "EXCELMANUS_MCP_SHARED_MANAGER",
         False,
     )
     pool_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_POOL_ENABLED"),
+        _s("EXCELMANUS_POOL_ENABLED"),
         "EXCELMANUS_POOL_ENABLED",
         False,
     )
     pool_auto_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_POOL_AUTO_ENABLED"),
+        _s("EXCELMANUS_POOL_AUTO_ENABLED"),
         "EXCELMANUS_POOL_AUTO_ENABLED",
         False,
     )
     pool_auto_interval_seconds = int(
-        os.environ.get("EXCELMANUS_POOL_AUTO_INTERVAL", "60"),
+        _s("EXCELMANUS_POOL_AUTO_INTERVAL", "60"),
     )
     pool_auto_default_cooldown_seconds = int(
-        os.environ.get("EXCELMANUS_POOL_AUTO_COOLDOWN", "300"),
+        _s("EXCELMANUS_POOL_AUTO_COOLDOWN", "300"),
     )
     pool_auto_hysteresis_delta = float(
-        os.environ.get("EXCELMANUS_POOL_AUTO_HYSTERESIS_DELTA", "0.12"),
+        _s("EXCELMANUS_POOL_AUTO_HYSTERESIS_DELTA", "0.12"),
     )
     pool_auto_min_dwell_seconds = int(
-        os.environ.get("EXCELMANUS_POOL_AUTO_MIN_DWELL", "180"),
+        _s("EXCELMANUS_POOL_AUTO_MIN_DWELL", "180"),
     )
     pool_auto_breaker_open_seconds = int(
-        os.environ.get("EXCELMANUS_POOL_AUTO_BREAKER_OPEN", "120"),
+        _s("EXCELMANUS_POOL_AUTO_BREAKER_OPEN", "120"),
     )
     pool_auto_breaker_threshold = int(
-        os.environ.get("EXCELMANUS_POOL_AUTO_BREAKER_THRESHOLD", "5"),
+        _s("EXCELMANUS_POOL_AUTO_BREAKER_THRESHOLD", "5"),
     )
     exa_search_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_EXA_SEARCH"),
+        _s("EXCELMANUS_EXA_SEARCH"),
         "EXCELMANUS_EXA_SEARCH",
         True,
     )
     _allowed_search_providers = {"exa", "tavily", "brave"}
     search_default_provider = (
-        os.environ.get("EXCELMANUS_SEARCH_DEFAULT", "exa").strip().lower()
+        _s("EXCELMANUS_SEARCH_DEFAULT", "exa").strip().lower()
     )
     if search_default_provider not in _allowed_search_providers:
         logger.warning(
-            "环境变量 EXCELMANUS_SEARCH_DEFAULT 值无效(%r)，回退默认值 exa",
+            "配置项 EXCELMANUS_SEARCH_DEFAULT 值无效(%r)，回退默认值 exa",
             search_default_provider,
         )
         search_default_provider = "exa"
-    exa_api_key = os.environ.get("EXCELMANUS_EXA_API_KEY") or None
-    tavily_api_key = os.environ.get("EXCELMANUS_TAVILY_API_KEY") or None
-    brave_api_key = os.environ.get("EXCELMANUS_BRAVE_API_KEY") or None
+    exa_api_key = _s("EXCELMANUS_EXA_API_KEY") or None
+    tavily_api_key = _s("EXCELMANUS_TAVILY_API_KEY") or None
+    brave_api_key = _s("EXCELMANUS_BRAVE_API_KEY") or None
 
     # 能力探测任务配置
-    cap_probe_job_concurrency = int(os.environ.get("CAP_PROBE_JOB_CONCURRENCY", "2"))
-    cap_probe_provider_concurrency = int(os.environ.get("CAP_PROBE_PROVIDER_CONCURRENCY", "1"))
-    cap_probe_health_timeout = float(os.environ.get("CAP_PROBE_HEALTH_TIMEOUT", "8"))
-    cap_probe_tool_timeout = float(os.environ.get("CAP_PROBE_TOOL_TIMEOUT", "20"))
-    cap_probe_vision_timeout = float(os.environ.get("CAP_PROBE_VISION_TIMEOUT", "20"))
-    cap_probe_thinking_total_timeout = float(os.environ.get("CAP_PROBE_THINKING_TOTAL_TIMEOUT", "30"))
-    cap_probe_thinking_strategy_timeout = float(os.environ.get("CAP_PROBE_THINKING_STRATEGY_TIMEOUT", "8"))
+    cap_probe_job_concurrency = int(_s("CAP_PROBE_JOB_CONCURRENCY", "2"))
+    cap_probe_provider_concurrency = int(_s("CAP_PROBE_PROVIDER_CONCURRENCY", "1"))
+    cap_probe_health_timeout = float(_s("CAP_PROBE_HEALTH_TIMEOUT", "8"))
+    cap_probe_tool_timeout = float(_s("CAP_PROBE_TOOL_TIMEOUT", "20"))
+    cap_probe_vision_timeout = float(_s("CAP_PROBE_VISION_TIMEOUT", "20"))
+    cap_probe_thinking_total_timeout = float(_s("CAP_PROBE_THINKING_TOTAL_TIMEOUT", "30"))
+    cap_probe_thinking_strategy_timeout = float(_s("CAP_PROBE_THINKING_STRATEGY_TIMEOUT", "8"))
 
     # subagent 执行配置
     subagent_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_SUBAGENT_ENABLED"),
+        _s("EXCELMANUS_SUBAGENT_ENABLED"),
         "EXCELMANUS_SUBAGENT_ENABLED",
         True,
     )
     parallel_readonly_tools = _parse_bool(
-        os.environ.get("EXCELMANUS_PARALLEL_READONLY_TOOLS"),
+        _s("EXCELMANUS_PARALLEL_READONLY_TOOLS"),
         "EXCELMANUS_PARALLEL_READONLY_TOOLS",
         True,
     )
     subagent_max_iterations = _parse_int(
-        os.environ.get("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
+        _s("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
         120,
     )
     subagent_max_consecutive_failures = _parse_int(
-        os.environ.get("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
+        _s("EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES"),
         "EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES",
         6,
     )
     subagent_timeout_seconds = _parse_int(
-        os.environ.get("EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS"),
+        _s("EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS"),
         "EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS",
         600,
     )
     parallel_subagent_max = _parse_int(
-        os.environ.get("EXCELMANUS_PARALLEL_SUBAGENT_MAX"),
+        _s("EXCELMANUS_PARALLEL_SUBAGENT_MAX"),
         "EXCELMANUS_PARALLEL_SUBAGENT_MAX",
         3,
     )
-    subagent_user_dir = os.environ.get(
+    subagent_user_dir = _s(
         "EXCELMANUS_SUBAGENT_USER_DIR",
         "~/.excelmanus/agents",
     )
-    subagent_project_dir = os.environ.get(
+    subagent_project_dir = _s(
         "EXCELMANUS_SUBAGENT_PROJECT_DIR",
         str(Path(workspace_root) / ".excelmanus" / "agents"),
     )
 
     # 跨会话持久记忆配置
     memory_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_MEMORY_ENABLED"),
+        _s("EXCELMANUS_MEMORY_ENABLED"),
         "EXCELMANUS_MEMORY_ENABLED",
         True,
     )
-    memory_dir = os.environ.get("EXCELMANUS_MEMORY_DIR", "~/.excelmanus/memory")
+    memory_dir = _s("EXCELMANUS_MEMORY_DIR", "~/.excelmanus/memory")
     memory_auto_load_lines = _parse_int(
-        os.environ.get("EXCELMANUS_MEMORY_AUTO_LOAD_LINES"),
+        _s("EXCELMANUS_MEMORY_AUTO_LOAD_LINES"),
         "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
         200,
     )
-    memory_auto_extract_interval = _parse_int_allow_zero(
-        os.environ.get("EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL"),
-        "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
-        0,
+    memory_expire_days = _parse_int_allow_zero(
+        _s("EXCELMANUS_MEMORY_EXPIRE_DAYS"),
+        "EXCELMANUS_MEMORY_EXPIRE_DAYS",
+        90,
+    )
+    memory_maintenance_enabled = _parse_bool(
+        _s("EXCELMANUS_MEMORY_MAINTENANCE_ENABLED"),
+        "EXCELMANUS_MEMORY_MAINTENANCE_ENABLED",
+        False,
+    )
+    memory_maintenance_min_entries = _parse_int(
+        _s("EXCELMANUS_MEMORY_MAINTENANCE_MIN_ENTRIES"),
+        "EXCELMANUS_MEMORY_MAINTENANCE_MIN_ENTRIES",
+        10,
+    )
+    memory_maintenance_new_threshold = _parse_int(
+        _s("EXCELMANUS_MEMORY_MAINTENANCE_NEW_THRESHOLD"),
+        "EXCELMANUS_MEMORY_MAINTENANCE_NEW_THRESHOLD",
+        5,
+    )
+    memory_maintenance_interval_hours = _parse_positive_float(
+        _s("EXCELMANUS_MEMORY_MAINTENANCE_INTERVAL_HOURS"),
+        "EXCELMANUS_MEMORY_MAINTENANCE_INTERVAL_HOURS",
+        4.0,
+    )
+    _memory_maintenance_model = (_s("EXCELMANUS_MEMORY_MAINTENANCE_MODEL") or "").strip()
+    memory_maintenance_model = _memory_maintenance_model or None
+    llm_retry_max_attempts = _parse_int(
+        _s("EXCELMANUS_LLM_RETRY_MAX_ATTEMPTS"),
+        "EXCELMANUS_LLM_RETRY_MAX_ATTEMPTS",
+        3,
+    )
+    llm_retry_base_delay_seconds = _parse_positive_float(
+        _s("EXCELMANUS_LLM_RETRY_BASE_DELAY_SECONDS"),
+        "EXCELMANUS_LLM_RETRY_BASE_DELAY_SECONDS",
+        2.0,
+    )
+    llm_retry_max_delay_seconds = _parse_positive_float(
+        _s("EXCELMANUS_LLM_RETRY_MAX_DELAY_SECONDS"),
+        "EXCELMANUS_LLM_RETRY_MAX_DELAY_SECONDS",
+        30.0,
+    )
+    image_pixel_budget = _parse_image_pixel_budget(
+        _s("EXCELMANUS_IMAGE_PIXEL_BUDGET"),
+    )
+    image_max_bytes = _parse_int(
+        _s("EXCELMANUS_IMAGE_MAX_BYTES"),
+        "EXCELMANUS_IMAGE_MAX_BYTES",
+        1_048_576,
+    )
+    image_files_api = (
+        _s("EXCELMANUS_IMAGE_FILES_API", "auto").strip().lower() or "auto"
+    )
+    if image_files_api not in ("auto", "true", "false"):
+        logger.warning("EXCELMANUS_IMAGE_FILES_API=%r 无效，回退到 auto", image_files_api)
+        image_files_api = "auto"
+    friendly_error_messages = _parse_bool(
+        _s("EXCELMANUS_FRIENDLY_ERROR_MESSAGES"),
+        "EXCELMANUS_FRIENDLY_ERROR_MESSAGES",
+        True,
     )
     context_optimization = _load_context_optimization_config(model=model)
     hooks_command_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
+        _s("EXCELMANUS_HOOKS_COMMAND_ENABLED"),
         "EXCELMANUS_HOOKS_COMMAND_ENABLED",
         False,
     )
     hooks_command_allowlist = _parse_csv_tuple(
-        os.environ.get("EXCELMANUS_HOOKS_COMMAND_ALLOWLIST")
+        _s("EXCELMANUS_HOOKS_COMMAND_ALLOWLIST")
     )
     hooks_command_timeout_seconds = _parse_int(
-        os.environ.get("EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS"),
+        _s("EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS"),
         "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
         10,
     )
     hooks_output_max_chars = _parse_int(
-        os.environ.get("EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS"),
+        _s("EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS"),
         "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
         32000,
     )
 
     main_model_vision = (
-        os.environ.get("EXCELMANUS_MAIN_MODEL_VISION", "auto").strip().lower()
+        _s("EXCELMANUS_MAIN_MODEL_VISION", "auto").strip().lower()
     )
     if main_model_vision not in ("auto", "true", "false"):
         logger.warning(
@@ -1392,31 +1374,31 @@ def load_config() -> ExcelManusConfig:
 
     # 代码策略引擎配置
     code_policy_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_CODE_POLICY_ENABLED"),
+        _s("EXCELMANUS_CODE_POLICY_ENABLED"),
         "EXCELMANUS_CODE_POLICY_ENABLED",
         True,
     )
     code_policy_green_auto_approve = _parse_bool(
-        os.environ.get("EXCELMANUS_CODE_POLICY_GREEN_AUTO"),
+        _s("EXCELMANUS_CODE_POLICY_GREEN_AUTO"),
         "EXCELMANUS_CODE_POLICY_GREEN_AUTO",
         True,
     )
     code_policy_yellow_auto_approve = _parse_bool(
-        os.environ.get("EXCELMANUS_CODE_POLICY_YELLOW_AUTO"),
+        _s("EXCELMANUS_CODE_POLICY_YELLOW_AUTO"),
         "EXCELMANUS_CODE_POLICY_YELLOW_AUTO",
         False,
     )
     code_policy_extra_safe_modules = _parse_csv_tuple(
-        os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_SAFE")
+        _s("EXCELMANUS_CODE_POLICY_EXTRA_SAFE")
     )
     code_policy_extra_blocked_modules = _parse_csv_tuple(
-        os.environ.get("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
+        _s("EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED")
     )
     tool_schema_validation_mode = _parse_tool_schema_validation_mode(
-        os.environ.get("EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE")
+        _s("EXCELMANUS_TOOL_SCHEMA_VALIDATION_MODE")
     )
     tool_schema_validation_canary_percent = _parse_int_allow_zero(
-        os.environ.get("EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT"),
+        _s("EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT"),
         "EXCELMANUS_TOOL_SCHEMA_VALIDATION_CANARY_PERCENT",
         100,
     )
@@ -1426,115 +1408,40 @@ def load_config() -> ExcelManusConfig:
             f"当前值: {tool_schema_validation_canary_percent}"
         )
     tool_schema_strict_path = _parse_bool(
-        os.environ.get("EXCELMANUS_TOOL_SCHEMA_STRICT_PATH"),
+        _s("EXCELMANUS_TOOL_SCHEMA_STRICT_PATH"),
         "EXCELMANUS_TOOL_SCHEMA_STRICT_PATH",
         False,
     )
 
-    # Embedding 语义检索配置（需独立配置 API，未配置时功能关闭）
-    embedding_api_key = os.environ.get("EXCELMANUS_EMBEDDING_API_KEY") or None
-    embedding_base_url = os.environ.get("EXCELMANUS_EMBEDDING_BASE_URL") or None
-    if embedding_base_url:
-        _validate_base_url(embedding_base_url)
-    # 显式启用：仅 EXCELMANUS_EMBEDDING_ENABLED=true 时构造客户端
-    embedding_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_EMBEDDING_ENABLED"),
-        "EXCELMANUS_EMBEDDING_ENABLED",
-        False,
-    )
-    embedding_model = (
-        os.environ.get("EXCELMANUS_EMBEDDING_MODEL")
-        or DEFAULT_EMBEDDING_MODEL
-    )
-    _log_deprecated_model_warning("EXCELMANUS_EMBEDDING_MODEL", embedding_model)
-    embedding_dimensions = _parse_int(
-        os.environ.get("EXCELMANUS_EMBEDDING_DIMENSIONS"),
-        "EXCELMANUS_EMBEDDING_DIMENSIONS",
-        DEFAULT_EMBEDDING_DIMENSIONS,
-    )
-    embedding_timeout_seconds = float(
-        os.environ.get("EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS", "30.0")
-    )
-    memory_semantic_top_k = _parse_int(
-        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_TOP_K"),
-        "EXCELMANUS_MEMORY_SEMANTIC_TOP_K",
-        10,
-    )
-    memory_semantic_threshold = _parse_threshold(
-        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD"), 0.3
-    )
-    memory_semantic_fallback_recent = _parse_int(
-        os.environ.get("EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT"),
-        "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
-        5,
-    )
     # 历史会话感知（Session Summary）配置
     session_summary_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_SESSION_SUMMARY_ENABLED"),
+        _s("EXCELMANUS_SESSION_SUMMARY_ENABLED"),
         "EXCELMANUS_SESSION_SUMMARY_ENABLED",
         False,
     )
     session_summary_min_turns = _parse_int(
-        os.environ.get("EXCELMANUS_SESSION_SUMMARY_MIN_TURNS"),
+        _s("EXCELMANUS_SESSION_SUMMARY_MIN_TURNS"),
         "EXCELMANUS_SESSION_SUMMARY_MIN_TURNS",
         3,
     )
-    session_summary_inject_top_k = _parse_int(
-        os.environ.get("EXCELMANUS_SESSION_SUMMARY_INJECT_TOP_K"),
-        "EXCELMANUS_SESSION_SUMMARY_INJECT_TOP_K",
-        3,
-    )
-    session_summary_max_tokens = _parse_int(
-        os.environ.get("EXCELMANUS_SESSION_SUMMARY_MAX_TOKENS"),
-        "EXCELMANUS_SESSION_SUMMARY_MAX_TOKENS",
-        800,
-    )
-    # Playbook（自进化战术手册）配置
-    playbook_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_PLAYBOOK_ENABLED"),
-        "EXCELMANUS_PLAYBOOK_ENABLED",
-        False,
-    )
-    playbook_db_path = os.environ.get("EXCELMANUS_PLAYBOOK_DB_PATH", "")
-    playbook_max_bullets = _parse_int(
-        os.environ.get("EXCELMANUS_PLAYBOOK_MAX_BULLETS"),
-        "EXCELMANUS_PLAYBOOK_MAX_BULLETS",
-        500,
-    )
-    registry_semantic_top_k = _parse_int(
-        os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_TOP_K"),
-        "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
-        5,
-    )
-    registry_semantic_threshold = _parse_threshold(
-        os.environ.get("EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD"), 0.25
-    )
-
     # 聊天记录持久化
     chat_history_enabled = _parse_bool(
-        os.environ.get("EXCELMANUS_CHAT_HISTORY_ENABLED"),
+        _s("EXCELMANUS_CHAT_HISTORY_ENABLED"),
         "EXCELMANUS_CHAT_HISTORY_ENABLED",
         True,
     )
-    from excelmanus.data_home import get_default_db_path
+    from excelmanus.data_home import resolve_db_path
 
-    db_path = os.environ.get("EXCELMANUS_DB_PATH", "").strip() or str(get_default_db_path())
     leftover_pg_url = os.environ.get("EXCELMANUS_DATABASE_URL", "").strip()
     if leftover_pg_url:
         logger.warning(
             "EXCELMANUS_DATABASE_URL 已废弃并被忽略；ExcelManus 仅使用 SQLite（EXCELMANUS_DB_PATH）"
         )
-    chat_history_db_path = os.environ.get(
-        "EXCELMANUS_CHAT_HISTORY_DB_PATH", ""
-    )
-
-    # CLI 布局模式
-    cli_layout_mode = _parse_cli_layout_mode(
-        os.environ.get("EXCELMANUS_CLI_LAYOUT_MODE")
-    )
+    db_path = resolve_db_path()
+    chat_history_db_path = db_path
 
     # Thinking（推理深度）配置
-    thinking_effort_raw = (os.environ.get("EXCELMANUS_THINKING_EFFORT", "medium").strip().lower())
+    thinking_effort_raw = (_s("EXCELMANUS_THINKING_EFFORT") or "medium").strip().lower()
     if thinking_effort_raw not in _ALLOWED_THINKING_EFFORTS:
         logger.warning(
             "EXCELMANUS_THINKING_EFFORT=%r 无效，回退到 'medium'",
@@ -1542,16 +1449,54 @@ def load_config() -> ExcelManusConfig:
         )
         thinking_effort_raw = "medium"
     thinking_budget = _parse_int_allow_zero(
-        os.environ.get("EXCELMANUS_THINKING_BUDGET"),
+        _s("EXCELMANUS_THINKING_BUDGET"),
         "EXCELMANUS_THINKING_BUDGET",
         0,
     )
 
-    # 多模型配置档案
-    models = _parse_models(
-        os.environ.get("EXCELMANUS_MODELS"),
-        default_api_key=api_key,
-        default_base_url=base_url,
+    models = models_from_store()
+
+    jev_enabled = _parse_jev_gate(
+        _s("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "off"
+    )
+    jev_exposure = _parse_jev_gate(
+        _s("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "off"
+    )
+    jev_mode_hint = _parse_bool(
+        _s("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", False
+    )
+    jev_present_as_auto = _parse_bool(
+        _s("EXCELMANUS_JEV_PRESENT_AS_AUTO"),
+        "EXCELMANUS_JEV_PRESENT_AS_AUTO",
+        False,
+    )
+    jev_observation = _parse_jev_gate(
+        _s("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "off"
+    )
+    jev_ui_hint = _parse_bool(
+        _s("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", False
+    )
+    jev_model = (_s("EXCELMANUS_JEV_MODEL") or "jev-1.13.0").strip() or "jev-1.13.0"
+    typesafe_api_key = (_s("EXCELMANUS_TYPESAFE_API_KEY") or "").strip() or None
+    ai_gateway_api_key = (_s("EXCELMANUS_AI_GATEWAY_API_KEY") or "").strip() or None
+    jev_active_provider = (_s("EXCELMANUS_JEV_ACTIVE_PROVIDER") or "").strip()
+    from excelmanus.system_one.providers import parse_jev_providers_json
+
+    jev_providers = tuple(
+        parse_jev_providers_json(_s("EXCELMANUS_JEV_PROVIDERS"))
+    )
+    jev_timeout_seconds = min(
+        10.0,
+        _parse_positive_float(
+            _s("EXCELMANUS_JEV_TIMEOUT_SECONDS"),
+            "EXCELMANUS_JEV_TIMEOUT_SECONDS",
+            1.5,
+        ),
+    )
+    jev_calibrated = _parse_bool(
+        _s("EXCELMANUS_JEV_CALIBRATED"),
+        "EXCELMANUS_JEV_CALIBRATED",
+        False,
     )
 
     return ExcelManusConfig(
@@ -1576,12 +1521,7 @@ def load_config() -> ExcelManusConfig:
         skills_discovery_include_agents=skills_discovery_include_agents,
         skills_discovery_scan_external_tool_dirs=skills_discovery_scan_external_tool_dirs,
         skills_discovery_extra_dirs=skills_discovery_extra_dirs,
-        clawhub_enabled=clawhub_enabled,
-        clawhub_registry_url=clawhub_registry_url,
-        clawhub_prefer_cli=clawhub_prefer_cli,
-        system_message_mode=system_message_mode,
         tool_result_hard_cap_chars=tool_result_hard_cap_chars,
-        large_excel_threshold_bytes=large_excel_threshold_bytes,
         cors_allow_origins=cors_allow_origins,
         mcp_shared_manager=mcp_shared_manager,
         pool_enabled=pool_enabled,
@@ -1615,12 +1555,21 @@ def load_config() -> ExcelManusConfig:
         memory_enabled=memory_enabled,
         memory_dir=memory_dir,
         memory_auto_load_lines=memory_auto_load_lines,
-        memory_auto_extract_interval=memory_auto_extract_interval,
+        memory_expire_days=memory_expire_days,
+        memory_maintenance_enabled=memory_maintenance_enabled,
+        memory_maintenance_min_entries=memory_maintenance_min_entries,
+        memory_maintenance_new_threshold=memory_maintenance_new_threshold,
+        memory_maintenance_interval_hours=memory_maintenance_interval_hours,
+        memory_maintenance_model=memory_maintenance_model,
+        llm_retry_max_attempts=llm_retry_max_attempts,
+        llm_retry_base_delay_seconds=llm_retry_base_delay_seconds,
+        llm_retry_max_delay_seconds=llm_retry_max_delay_seconds,
+        image_pixel_budget=image_pixel_budget,
+        image_max_bytes=image_max_bytes,
+        image_files_api=image_files_api,
+        friendly_error_messages=friendly_error_messages,
         max_context_tokens=context_optimization.max_context_tokens,
         prompt_cache_key_enabled=context_optimization.prompt_cache_key_enabled,
-        summarization_enabled=context_optimization.summarization_enabled,
-        summarization_threshold_ratio=context_optimization.summarization_threshold_ratio,
-        summarization_keep_recent_turns=context_optimization.summarization_keep_recent_turns,
         compaction_enabled=context_optimization.compaction_enabled,
         compaction_threshold_ratio=context_optimization.compaction_threshold_ratio,
         compaction_keep_recent_turns=context_optimization.compaction_keep_recent_turns,
@@ -1638,29 +1587,25 @@ def load_config() -> ExcelManusConfig:
         tool_schema_validation_mode=tool_schema_validation_mode,
         tool_schema_validation_canary_percent=tool_schema_validation_canary_percent,
         tool_schema_strict_path=tool_schema_strict_path,
-        embedding_enabled=embedding_enabled,
-        embedding_api_key=embedding_api_key,
-        embedding_base_url=embedding_base_url,
-        embedding_model=embedding_model,
-        embedding_dimensions=embedding_dimensions,
-        embedding_timeout_seconds=embedding_timeout_seconds,
-        memory_semantic_top_k=memory_semantic_top_k,
-        memory_semantic_threshold=memory_semantic_threshold,
-        memory_semantic_fallback_recent=memory_semantic_fallback_recent,
         session_summary_enabled=session_summary_enabled,
         session_summary_min_turns=session_summary_min_turns,
-        session_summary_inject_top_k=session_summary_inject_top_k,
-        session_summary_max_tokens=session_summary_max_tokens,
-        playbook_enabled=playbook_enabled,
-        playbook_db_path=playbook_db_path,
-        playbook_max_bullets=playbook_max_bullets,
-        registry_semantic_top_k=registry_semantic_top_k,
-        registry_semantic_threshold=registry_semantic_threshold,
         db_path=db_path,
         chat_history_enabled=chat_history_enabled,
         chat_history_db_path=chat_history_db_path,
-        cli_layout_mode=cli_layout_mode,
         thinking_effort=thinking_effort_raw,
         thinking_budget=thinking_budget,
         models=models,
+        jev_enabled=jev_enabled,
+        jev_exposure=jev_exposure,
+        jev_mode_hint=jev_mode_hint,
+        jev_present_as_auto=jev_present_as_auto,
+        jev_observation=jev_observation,
+        jev_ui_hint=jev_ui_hint,
+        jev_model=jev_model,
+        typesafe_api_key=typesafe_api_key,
+        ai_gateway_api_key=ai_gateway_api_key,
+        jev_active_provider=jev_active_provider,
+        jev_providers=jev_providers,
+        jev_timeout_seconds=jev_timeout_seconds,
+        jev_calibrated=jev_calibrated,
     )

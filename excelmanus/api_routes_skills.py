@@ -1,4 +1,4 @@
-"""Skillpack 与 ClawHub API。
+"""Skillpack API。
 
 从 api.py 抽出的独立路由模块。运行时状态只从 api_app_state 读取，
 禁止 ``from excelmanus.api import _skillpack_manager`` 反向导入。
@@ -17,16 +17,12 @@ from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
     get_skillpack_manager,
 )
-from excelmanus.logger import get_logger
 from excelmanus.skillpacks import (
     SkillpackConflictError,
     SkillpackInputError,
     SkillpackNotFoundError,
 )
-from excelmanus.skillpacks.clawhub import ClawHubError, ClawHubNotFoundError
 from excelmanus.skillpacks.importer import SkillImportError
-
-logger = get_logger("api.skills")
 
 router = APIRouter()
 
@@ -107,7 +103,7 @@ class SkillpackImportRequest(BaseModel):
     """导入 skillpack 请求体。"""
 
     model_config = ConfigDict(extra="forbid")
-    source: Literal["local_path", "github_url", "clawhub"]
+    source: Literal["local_path", "github_url"]
     value: Annotated[
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=2048)
     ]
@@ -137,20 +133,6 @@ class SkillpackMutationResponse(BaseModel):
     status: str
     name: str
     detail: dict[str, Any] | None = None
-
-
-class ClawHubInstallRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    slug: str
-    version: str | None = None
-    overwrite: bool = False
-
-
-class ClawHubUpdateRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    slug: str | None = None
-    version: str | None = None
-    all: bool = False
 
 
 def _require_skillpack_manager():
@@ -413,96 +395,3 @@ async def import_skill(
         name=str(result.get("name", "")),
         detail=result,
     )
-
-
-@router.get("/api/v1/clawhub/search")
-async def clawhub_search(
-    q: str = "",
-    limit: int = 15,
-) -> dict[str, Any]:
-    """搜索 ClawHub 技能市场。"""
-    if not q.strip():
-        return {"results": []}
-    manager = _require_skillpack_manager()
-    try:
-        results = await manager.clawhub_search(q.strip(), limit=limit)
-    except ClawHubError as exc:
-        raise HTTPException(status_code=502, detail=f"ClawHub 请求失败：{exc}")
-    return {"results": results}
-
-
-@router.get("/api/v1/clawhub/skill/{slug}")
-async def clawhub_skill_detail(slug: str) -> dict[str, Any]:
-    """获取 ClawHub 技能详情。"""
-    manager = _require_skillpack_manager()
-    try:
-        detail = await manager.clawhub_skill_detail(slug)
-    except ClawHubNotFoundError as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-    except ClawHubError as exc:
-        raise HTTPException(status_code=502, detail=f"ClawHub 请求失败：{exc}")
-    return detail
-
-
-@router.post("/api/v1/clawhub/install", status_code=201)
-async def clawhub_install(
-    request: ClawHubInstallRequest,
-) -> dict[str, Any]:
-    """从 ClawHub 安装技能。"""
-    manager = _require_skillpack_manager()
-    try:
-        result = await manager.import_skillpack_async(
-            source="clawhub",
-            value=request.slug,
-            actor="api",
-            overwrite=request.overwrite,
-        )
-    except ClawHubNotFoundError as exc:
-        return _error_json_response(404, str(exc))
-    except ClawHubError as exc:
-        logger.warning("ClawHub 安装失败 slug=%s: %s", request.slug, exc, exc_info=True)
-        return _error_json_response(502, f"ClawHub 安装失败：{exc}")
-    except SkillpackInputError as exc:
-        return _error_json_response(422, str(exc))
-    return {"status": "installed", **result}
-
-
-@router.get("/api/v1/clawhub/updates")
-async def clawhub_check_updates() -> dict[str, Any]:
-    """检查已安装 ClawHub 技能的可用更新。"""
-    manager = _require_skillpack_manager()
-    try:
-        updates = await manager.clawhub_check_updates()
-    except ClawHubError as exc:
-        return _error_json_response(502, f"ClawHub 请求失败：{exc}")
-    return {"updates": updates}
-
-
-@router.post("/api/v1/clawhub/update")
-async def clawhub_update(
-    request: ClawHubUpdateRequest,
-) -> dict[str, Any]:
-    """更新 ClawHub 技能。"""
-    manager = _require_skillpack_manager()
-    try:
-        results = await manager.clawhub_update(
-            slug=request.slug,
-            version=request.version,
-            update_all=request.all,
-        )
-    except SkillpackInputError as exc:
-        return _error_json_response(422, str(exc))
-    except ClawHubError as exc:
-        return _error_json_response(502, f"ClawHub 更新失败：{exc}")
-    return {"results": results}
-
-
-@router.get("/api/v1/clawhub/installed")
-async def clawhub_list_installed() -> dict[str, Any]:
-    """列出已安装的 ClawHub 技能。"""
-    manager = _require_skillpack_manager()
-    try:
-        installed = await manager.clawhub_list_installed()
-    except ClawHubError as exc:
-        return _error_json_response(502, str(exc))
-    return {"installed": installed}

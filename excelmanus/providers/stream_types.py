@@ -14,6 +14,7 @@ class StreamDelta:
     tool_calls_delta: list[Any] = field(default_factory=list)
     finish_reason: str | None = None
     usage: Any | None = None
+    replay_state: Any | None = None
 
 
 # ── 内联 <think> / <thinking> 标签提取（共享工具） ─────────────────

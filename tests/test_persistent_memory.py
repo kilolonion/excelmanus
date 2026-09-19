@@ -28,6 +28,8 @@ class TestInit:
     def test_expands_tilde(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """验证 ~ 路径被正确展开。"""
         monkeypatch.setenv("HOME", str(tmp_path))
+        # Windows 上 expanduser 读 USERPROFILE
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         pm = PersistentMemory("~/my_memory")
         expected = tmp_path / "my_memory"
         assert pm.memory_dir == expected

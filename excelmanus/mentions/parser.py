@@ -7,7 +7,7 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 
 # ── 数据模型 ──────────────────────────────────────────────
@@ -42,6 +42,9 @@ class ResolvedMention:
     mention: Mention
     context_block: str = ""   # 注入系统提示词的内容块
     error: str | None = None  # 解析失败时的错误信息
+    error_code: str | None = None
+    error_fields: dict = field(default_factory=dict)
+    content_version: str | None = None
 
 
 # ── 正则常量 ──────────────────────────────────────────────
@@ -125,7 +128,10 @@ class MentionParser:
         for mention in reversed(mentions):
             before = display_text[: mention.start]
             after = display_text[mention.end :]
-            display_text = before + mention.value + after
+            label = mention.value
+            if mention.range_spec:
+                label += f" · {mention.range_spec}"
+            display_text = before + label + after
         display_text = re.sub(r"  +", " ", display_text).strip()
 
         return ParseResult(

@@ -14,9 +14,10 @@ from excelmanus.api_app_state import (
 )
 from excelmanus.logger import get_logger
 from excelmanus.session import SessionBusyError
-from excelmanus.workbook_commit import CommitError, commit_bytes, content_version_of_file
+from excelmanus.workbook_commit import CommitError, content_version_of_file
+from excelmanus.workspace.file_service import WorkspaceFileService
 from excelmanus.workspace.identity import IdentityError, is_reserved_relative, resolve_canonical
-from excelmanus.workspace.revisions import RevisionIntegrityError, RevisionStore
+from excelmanus.workspace.revisions import RevisionIntegrityError
 
 logger = get_logger("api.revisions")
 router = APIRouter()
@@ -27,7 +28,40 @@ class RevisionRestoreRequest(BaseModel):
     session_id: str | None = None
     path: str
     revision_id: str
-    expected_version: str
+    expected_version: str | None = None
+
+
+class TransactionRecoveryRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    session_id: str
+    operation_id: str
+    action: str = "resume"
+
+
+@router.post("/api/v1/transactions/recover")
+async def recover_transaction(request: TransactionRecoveryRequest) -> JSONResponse:
+    """Retry remaining prepared writes, or explicitly abandon them without undo."""
+    if request.action not in {"resume", "abort"}:
+        raise HTTPException(400, "action 必须是 resume 或 abort")
+    manager = get_session_manager()
+    if manager is None:
+        raise HTTPException(503, "服务未初始化")
+    try:
+        await manager.get_engine_if_idle(request.session_id)
+    except SessionBusyError:
+        raise HTTPException(409, "会话正在处理中")
+    svc = WorkspaceFileService(_workspace_root(request.session_id))
+    try:
+        if request.action == "abort":
+            receipt = svc.abort_recovery(request.operation_id).to_dict()
+        else:
+            svc.recover()
+            receipt = svc.txlog.read_receipt(request.operation_id)
+        if not receipt:
+            raise HTTPException(404, "找不到操作")
+        return JSONResponse(content=receipt)
+    except CommitError as exc:
+        raise HTTPException(409, detail={"code": exc.code, "message": str(exc)}) from exc
 
 
 def _workspace_root(session_id: str | None = None) -> Path:
@@ -51,8 +85,7 @@ async def list_revisions(path: str, session_id: str | None = None) -> JSONRespon
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     dest = root / ident.relative
     current = content_version_of_file(dest) if dest.is_file() else None
-    store = RevisionStore(root)
-    items = [rec.to_public_dict() for rec in store.list(ident.relative)]
+    items = [rec.to_public_dict() for rec in WorkspaceFileService(root).list_history(ident.relative)]
     return JSONResponse(content={
         "path": ident.public,
         "content_version": current,
@@ -80,51 +113,36 @@ async def restore_revision(request: RevisionRestoreRequest) -> JSONResponse:
     if is_reserved_relative(ident.relative):
         raise HTTPException(status_code=400, detail=f"reserved namespace: {ident.relative}")
     dest = root / ident.relative
-    if not dest.is_file():
-        raise HTTPException(status_code=404, detail="文件不存在，无法恢复")
-    if not request.expected_version.strip():
+    live = dest.is_file()
+    expected = (request.expected_version or "").strip()
+    if live and not expected:
         raise HTTPException(status_code=400, detail="restore 必须提供 expected_version")
-    store = RevisionStore(root)
-    current_bytes = dest.read_bytes()
+    svc = WorkspaceFileService(root)
     try:
-        tx, before_rec, restore_blob = store.restore_prepare(
-            ident.relative, request.revision_id, current_bytes
+        receipt = svc.restore(
+            ident.relative,
+            request.revision_id,
+            expected_version=expected or None,
+            restore_missing=not live,
         )
+        svc.raise_if_failed(receipt)
     except RevisionIntegrityError:
         raise HTTPException(status_code=404, detail="检查点快照损坏")
-    except (KeyError, FileNotFoundError):
-        raise HTTPException(status_code=404, detail="找不到 revision")
-    from excelmanus.security.guard import FileAccessGuard
-    guard = FileAccessGuard(str(root))
-    try:
-        cr = commit_bytes(
-            guard=guard,
-            file_path=ident.relative,
-            data=restore_blob,
-            expected_version=request.expected_version,
-            record_history=False,
-        )
     except CommitError as exc:
-        store.discard_transaction(tx)
-        status = 409 if exc.code == "VERSION_CONFLICT" else 400
+        if exc.code == "NOT_FOUND":
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        status = 409 if exc.code in {"VERSION_CONFLICT", "PATH_OCCUPIED"} else 400
         return JSONResponse(status_code=status, content={
             "status": "error",
             "error": exc.code,
             "message": str(exc),
             "fields": exc.fields,
         })
-    try:
-        store.finish_restore(
-            ident.relative,
-            transaction_id=tx,
-            after_bytes=restore_blob,
-            parent_revision_id=before_rec.id if before_rec is not None else None,
-        )
-    except Exception:
-        logger.warning("restore afterEdit 记录失败，文件已写回 %s", ident.relative, exc_info=True)
     return JSONResponse(content={
         "status": "ok",
-        "path": cr.path,
-        "content_version": cr.content_version,
+        "path": receipt.primary_path(),
+        "content_version": receipt.primary_version(),
         "restored_revision": request.revision_id,
+        "lineage_id": receipt.targets[-1].lineage_id if receipt.targets else None,
+        "exists_after": True,
     })

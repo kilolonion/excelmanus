@@ -100,11 +100,19 @@ class FileAccessGuard:
                 f"路径越界：{user_path!r} 解析后位于工作目录之外"
             )
 
-        from excelmanus.workspace.identity import is_reserved_relative
+        from excelmanus.workspace.identity import (
+            is_reserved_relative,
+            is_sensitive_relative,
+        )
 
         if is_reserved_relative(rel):
             raise SecurityViolationError(
                 f"保留命名空间禁止访问：{user_path!r}"
+            )
+
+        if is_sensitive_relative(rel):
+            raise SecurityViolationError(
+                f"敏感文件禁止访问：{user_path!r}"
             )
 
         from excelmanus.security.source_isolation import (

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { buildApiUrl } from "@/lib/api";
+import { buildApiUrl, getAuthHeaders } from "@/lib/api";
 
 /**
  * 通过 fetch + Authorization header 加载图片为 blob URL。
@@ -41,7 +41,7 @@ export function useAuthImage(apiPath: string | undefined, enabled = true) {
       setError(false);
 
       try {
-        const res = await fetch(url);
+        const res = await fetch(url, { headers: { ...getAuthHeaders() } });
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
 
         const blob = await res.blob();

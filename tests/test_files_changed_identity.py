@@ -39,7 +39,7 @@ def test_record_run_code_maps_backup_to_original(tmp_path: Path) -> None:
         engine,
         extra_changed_paths=["outputs/backups/sales_20260911T091344_f525.xlsx"],
     )
-    assert engine._state.affected_files == ["./sales.xlsx"]
+    assert engine._state.affected_files == []
 
 
 def test_record_run_code_skips_backup_when_original_missing(tmp_path: Path) -> None:

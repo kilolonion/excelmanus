@@ -130,7 +130,7 @@ class TestScanExcelSnapshotEdgeCases:
 
     def test_file_not_found(self, tmp_path: Path) -> None:
         data = scan_excel_snapshot(file_path=str(tmp_path / "nonexistent.xlsx")).value
-        assert "error" in data
+        assert data.get("status") == "error"
 
     def test_empty_sheet(self, tmp_path: Path) -> None:
         wb = Workbook()
@@ -223,3 +223,46 @@ class TestScanExcelSnapshotMixedTypes:
         cols = {c["name"]: c for c in data["sheets"][0]["columns"]}
         assert cols["名称"]["inferred_type"] == "string"
         assert "mixed_type_counts" not in cols["名称"]
+
+
+class TestMissingDimension:
+    """导出器不写 <dimension> 的工作簿：read_only 下 max_row/max_column 为 None。"""
+
+    @staticmethod
+    def _strip_dimension(fp: Path) -> None:
+        import re
+        import zipfile
+
+        with zipfile.ZipFile(fp, "r") as zin:
+            entries = {i.filename: zin.read(i.filename) for i in zin.infolist()}
+        for name in list(entries):
+            if name.startswith("xl/worksheets/") and name.endswith(".xml"):
+                entries[name] = re.sub(
+                    rb'<dimension ref="[^"]*"\s*/?>', b"", entries[name]
+                )
+        with zipfile.ZipFile(fp, "w", zipfile.ZIP_DEFLATED) as zout:
+            for name, blob in entries.items():
+                zout.writestr(name, blob)
+
+    def test_sheet_meta_recovers_rows_cols(self, tmp_path: Path) -> None:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = "流水"
+        ws.append(["单号", "金额"])
+        for i in range(50):
+            ws.append([f"A{i}", i * 1.5])
+        fp = tmp_path / "no_dim.xlsx"
+        wb.save(fp)
+        wb.close()
+        self._strip_dimension(fp)
+
+        from openpyxl import load_workbook
+
+        probe = load_workbook(fp, read_only=True)
+        assert probe.active.max_row in (None, 0)
+        probe.close()
+
+        data = scan_excel_snapshot(file_path=str(fp)).value
+        sheet = data["sheets"][0]
+        assert sheet["rows"] == 51
+        assert sheet["cols"] == 2

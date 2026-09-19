@@ -31,17 +31,27 @@ def _api_transport(tmp_path: Path):
         yield _make_transport()
 
 
+async def _session_scope(client: AsyncClient) -> dict[str, str]:
+    response = await client.post("/api/v1/sessions", json={})
+    assert response.status_code == 200
+    return {"session_id": response.json()["id"]}
+
+
 class TestWordSnapshot:
     async def test_snapshot_returns_document_json(self, tmp_path: Path) -> None:
         _make_test_doc(tmp_path / "report.docx", ["Intro", "Summary"])
 
         with _api_transport(tmp_path) as transport:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/api/v1/files/word/snapshot", params={"path": "report.docx"})
+                response = await client.get(
+                    "/api/v1/files/word/snapshot",
+                    params={"path": "report.docx", **await _session_scope(client)},
+                )
 
         data = response.json()
         assert response.status_code == 200
         assert data["file"] == "report.docx"
+        assert isinstance(data.get("content_version"), str) and data["content_version"].startswith("sha256:")
         assert data["total_paragraphs"] == 2
         assert data["paragraphs"][0]["text"] == "Intro"
 
@@ -50,7 +60,10 @@ class TestWordSnapshot:
 
         with _api_transport(tmp_path) as transport:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/api/v1/files/word/snapshot", params={"path": "empty.docx"})
+                response = await client.get(
+                    "/api/v1/files/word/snapshot",
+                    params={"path": "empty.docx", **await _session_scope(client)},
+                )
 
         data = response.json()
         assert response.status_code == 200
@@ -60,7 +73,10 @@ class TestWordSnapshot:
     async def test_snapshot_missing_file_returns_error(self, tmp_path: Path) -> None:
         with _api_transport(tmp_path) as transport:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/api/v1/files/word/snapshot", params={"path": "missing.docx"})
+                response = await client.get(
+                    "/api/v1/files/word/snapshot",
+                    params={"path": "missing.docx", **await _session_scope(client)},
+                )
 
         data = response.json()
         assert response.status_code == 404
@@ -72,7 +88,10 @@ class TestWordSnapshot:
 
         with _api_transport(tmp_path) as transport:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/api/v1/files/word/snapshot", params={"path": "legacy.doc"})
+                response = await client.get(
+                    "/api/v1/files/word/snapshot",
+                    params={"path": "legacy.doc", **await _session_scope(client)},
+                )
 
         data = response.json()
         assert response.status_code == 404
@@ -89,6 +108,7 @@ class TestWordWrite:
                     "/api/v1/files/word/write",
                     json={
                         "path": "report.docx",
+                        "session_id": (await _session_scope(client))["session_id"],
                         "expected_version": content_version_of_file(path),
                         "operations": [{"action": "replace", "index": 0, "text": "Updated"}],
                     },
@@ -107,6 +127,7 @@ class TestWordWrite:
                     "/api/v1/files/word/write",
                     json={
                         "path": "insert.docx",
+                        "session_id": (await _session_scope(client))["session_id"],
                         "expected_version": content_version_of_file(path),
                         "operations": [{"action": "insert_after", "index": 0, "text": "Inserted"}],
                     },
@@ -125,6 +146,7 @@ class TestWordWrite:
                     "/api/v1/files/word/write",
                     json={
                         "path": "bounds.docx",
+                        "session_id": (await _session_scope(client))["session_id"],
                         "expected_version": content_version_of_file(path),
                         "operations": [{"action": "replace", "index": 9, "text": "Never"}],
                     },
@@ -145,6 +167,7 @@ class TestWordWrite:
                     "/api/v1/files/word/write",
                     json={
                         "path": "legacy.doc",
+                        "session_id": (await _session_scope(client))["session_id"],
                         "expected_version": "sha256:unused",
                         "operations": [{"action": "append", "text": "Never"}],
                     },
@@ -173,7 +196,10 @@ class TestWordFile:
 
         with _api_transport(tmp_path) as transport:
             async with AsyncClient(transport=transport, base_url="http://test") as client:
-                response = await client.get("/api/v1/files/word", params={"path": "legacy.doc"})
+                response = await client.get(
+                    "/api/v1/files/word",
+                    params={"path": "legacy.doc", **await _session_scope(client)},
+                )
 
         data = response.json()
         assert response.status_code == 404

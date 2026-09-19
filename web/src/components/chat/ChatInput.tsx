@@ -19,7 +19,8 @@ import { Textarea } from "@/components/ui/textarea";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl, apiGet, apiPut, getAuthHeaders } from "@/lib/api";
+import { buildApiUrl, apiGet, apiPut, getAuthHeaders, fetchWorkspaceFiles } from "@/lib/api";
+import { extractTypedFileMentions, findMissingFileMentions, shouldBlockMissingFileMentions } from "@/lib/mention-existence";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { applyVisionFromModel } from "@/lib/vision-capability";
 import { UndoPanel } from "@/components/modals/UndoPanel";
@@ -28,6 +29,7 @@ import {
   SLASH_COMMANDS,
   DISPLAY_COMMANDS,
   FRONTEND_ACTIONS,
+  isStreamedSlashCommand,
   AUTO_EXEC_ARGS,
   type PopoverMode,
 } from "./chat-input-constants";
@@ -39,7 +41,7 @@ import { FileAttachmentChips } from "./FileAttachmentChips";
 import { CommandPopover } from "./CommandPopover";
 import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
 import { answerQuestion } from "@/lib/api";
-import { useInsertMentionTokens } from "./chat-input-insert";
+import { applyDisplayReplacements, useInsertMentionTokens } from "./chat-input-insert";
 import {
   ChatMentionList,
   applyMentionSelection,
@@ -51,7 +53,9 @@ import { ChatDropzone, ChatUploadButton } from "./ChatUploadButton";
 import { ChatSelectionChip } from "./ChatSelectionChip";
 import { useChatUpload } from "./use-chat-upload";
 import { shouldCancelComposerNativeDrop } from "./chat-drop";
+import { ComposerRecoveryBar } from "./ComposerRecoveryBar";
 import { useExcelStore } from "@/stores/excel-store";
+import { findLastRetryableFailure } from "@/lib/failure-recovery";
 
 interface ChatInputProps {
   onSend: (text: string, files?: AttachedFile[]) => void;
@@ -91,7 +95,28 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const isComposingRef = useRef(false);
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const hasMessages = useChatStore((s) => s.messageOrder.length > 0);
+  const messages = useChatStore((s) => s.messages);
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
+  const lastFailure = useMemo(
+    () => (isStreaming ? null : findLastRetryableFailure(messages)),
+    [isStreaming, messages],
+  );
+
+  const handleRetryLastFailed = useCallback(() => {
+    if (!lastFailure) return;
+    const sessionId = useSessionStore.getState().activeSessionId;
+    void import("@/lib/chat-actions").then(({ retryAssistantMessage }) => {
+      retryAssistantMessage(lastFailure.messageId, sessionId);
+    });
+  }, [lastFailure]);
+
+  const handleRetryLastFailedWithModel = useCallback((modelName: string) => {
+    if (!lastFailure) return;
+    const sessionId = useSessionStore.getState().activeSessionId;
+    void import("@/lib/chat-actions").then(({ retryAssistantMessage }) => {
+      retryAssistantMessage(lastFailure.messageId, sessionId, modelName);
+    });
+  }, [lastFailure]);
   const [questionSelected, setQuestionSelected] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -205,17 +230,19 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
               <span
                 key={i}
                 style={{
-                  backgroundColor: "color-mix(in srgb, var(--em-primary) 18%, transparent)",
+                  backgroundColor: "color-mix(in srgb, var(--em-primary) 14%, transparent)",
                   color: "var(--em-primary)",
                   display: "inline",
                   padding: 0,
                   margin: 0,
                   border: "none",
-                  borderRadius: 0,
+                  borderRadius: "9999px",
                   lineHeight: "inherit",
                   fontFamily: "inherit",
                   fontSize: "inherit",
                   letterSpacing: "inherit",
+                  boxDecorationBreak: "clone",
+                  WebkitBoxDecorationBreak: "clone",
                 }}
               >
                 {part}
@@ -524,7 +551,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       if (onCommandResult) onCommandResult("/clear", "对话历史已清除", "text");
       return;
     }
-    if (onCommandResult && trimmed.startsWith("/")) {
+    if (onCommandResult && trimmed.startsWith("/") && !isStreamedSlashCommand(trimmed)) {
       const sessionId = useSessionStore.getState().activeSessionId;
       try {
         const res = await fetch(buildApiUrl("/command"), {
@@ -559,7 +586,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       return;
     }
     if (hasUploadingFiles) {
-      nudgeInput("文件仍在上传，请等待上传完成后再发送");
+      nudgeInput("附件上传中，请稍候再发送");
       return;
     }
     if (hasFailedFiles) {
@@ -629,7 +656,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
         }
       }
 
-      if (onCommandResult) {
+      if (onCommandResult && !isStreamedSlashCommand(trimmed)) {
         const sessionId = useSessionStore.getState().activeSessionId;
         try {
           const res = await fetch(buildApiUrl("/command"), {
@@ -694,12 +721,21 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       }
       return;
     }
-    let finalText = trimmed;
-    tokenMapRef.current.forEach((full, display) => {
-      if (finalText.includes(display)) {
-        finalText = finalText.replaceAll(display, full);
+    const finalText = applyDisplayReplacements(trimmed, tokenMapRef.current);
+    try {
+      if (extractTypedFileMentions(finalText).length > 0) {
+        const sessionId = useSessionStore.getState().activeSessionId;
+        const workspaceFiles = await fetchWorkspaceFiles(sessionId);
+        const knownPaths = workspaceFiles.map((f) => f.path);
+        const missing = findMissingFileMentions(finalText, knownPaths);
+        if (shouldBlockMissingFileMentions(knownPaths, missing)) {
+          nudgeInput(`找不到引用的文件：${missing[0]}，请检查后重试`);
+          return;
+        }
       }
-    });
+    } catch {
+      /* fail-open：工作区列表不可用时跳过校验放行 */
+    }
     const validFiles = files.filter((af) => af.status === "success");
     onSend(finalText, validFiles.length > 0 ? validFiles : undefined);
     setText("");
@@ -786,6 +822,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   };
 
   return (
+    <>
+      {lastFailure && !pendingQuestion && (
+        <ComposerRecoveryBar
+          hint={lastFailure.title}
+          onRetry={handleRetryLastFailed}
+          onRetryWithModel={handleRetryLastFailedWithModel}
+        />
+      )}
     <ChatDropzone
       onNativeFiles={insertFileMentions}
       onExcelFiles={attachWorkspaceFiles}
@@ -1084,5 +1128,6 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       </div>
       <UndoPanel open={undoPanelOpen} onClose={() => setUndoPanelOpen(false)} />
     </ChatDropzone>
+    </>
   );
 }

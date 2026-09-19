@@ -349,7 +349,9 @@ class TestClassifyFallback:
         g = classify_failure(ValueError("some random error"))
         assert g.category == "unknown"
         assert g.code == "internal_error"
-        assert g.retryable is False
+        assert g.retryable is True
+        assert "retry" in [a["type"] for a in g.actions]
+        assert g.actions[0]["type"] == "retry"
 
 
 # ── 输出验证 ──────────────────────────────────────────────────
@@ -366,7 +368,8 @@ class TestOutputShape:
         g = classify_failure(_FakeHTTPError(401))
         assert g.retryable is False
         action_types = [a["type"] for a in g.actions]
-        assert "retry" not in action_types
+        assert "retry" in action_types
+        assert action_types[0] == "open_settings"
         assert "open_settings" in action_types
 
     def test_diagnostic_id_is_uuid(self):
@@ -442,6 +445,7 @@ class TestClassifySessionErrors:
         assert g.category == "config"
         assert g.code == "session_not_found"
         assert g.retryable is False
+        assert "retry" not in [a["type"] for a in g.actions]
 
     def test_real_session_busy_error(self):
         """使用真实的 SessionBusyError 类。"""

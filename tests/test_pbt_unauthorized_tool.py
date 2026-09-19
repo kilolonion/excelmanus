@@ -170,29 +170,19 @@ async def test_property_2_unauthorized_tool_error_response_format(
         f"未授权工具调用应返回 success=False，实际: {result.success}"
     )
 
-    # 验证 error 字段非空
-    assert result.error is not None, "未授权工具调用的 error 字段不应为 None"
-
-    # 验证 error 是合法 JSON
+    # RC5：error 顶层是 error_code；failure_class 在结果 JSON。
+    assert result.error == "TOOL_NOT_ALLOWED", (
+        f"error 应为 TOOL_NOT_ALLOWED，实际: {result.error!r}"
+    )
     try:
-        error_data = json.loads(result.error)
+        error_data = json.loads(result.result)
     except (json.JSONDecodeError, TypeError) as exc:
-        pytest.fail(f"error 字段不是合法 JSON: {result.error!r}, 异常: {exc}")
+        pytest.fail(f"result 字段不是合法 JSON: {result.result!r}, 异常: {exc}")
 
-    # 当前实现经 classify_tool_error + compact_error 后返回新格式：error_kind / summary / suggestion
-    required_keys = {"error_kind", "summary"}
-    missing_keys = required_keys - set(error_data.keys())
-    assert not missing_keys, (
-        f"错误响应 JSON 缺少必需键: {missing_keys}，实际键: {set(error_data.keys())}"
-    )
-
-    # 未授权工具被分类为永久错误
-    assert error_data["error_kind"] == "permanent", (
-        f"error_kind 应为 'permanent'，实际: {error_data['error_kind']!r}"
-    )
-
-    # summary 中应包含工具名或授权相关语义
-    summary = error_data.get("summary", "")
-    assert tool_name in summary or "授权" in summary or "不在" in summary, (
-        f"summary 应包含工具名或授权语义，实际: {summary!r}"
+    assert error_data.get("status") == "error"
+    assert error_data.get("error_code") == "TOOL_NOT_ALLOWED"
+    assert error_data.get("failure_class") == "permission_denied"
+    summary = str(error_data.get("message", ""))
+    assert tool_name in summary or error_data.get("tool") == tool_name or "授权" in summary, (
+        f"message/tool 应包含工具名或授权语义，实际: {error_data!r}"
     )

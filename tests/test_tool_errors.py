@@ -91,9 +91,6 @@ class TestClassifyToolError:
         "remote end closed connection",
         "stream ended unexpectedly",
         "premature end of data",
-        "json decode error",
-        "Expecting value: line 1",
-        "invalid json from server",
     ])
     def test_retryable_by_string(self, error_str: str):
         result = classify_tool_error(error_str)
@@ -129,6 +126,10 @@ class TestClassifyToolError:
         result = classify_tool_error(FileNotFoundError("missing.xlsx"))
         assert result.kind == ToolErrorKind.PERMANENT
         assert "文件" in result.suggestion or "路径" in result.suggestion
+
+    def test_permanent_by_json_decode_error(self):
+        result = classify_tool_error(json.JSONDecodeError("Expecting value", "doc", 0))
+        assert result.kind == ToolErrorKind.PERMANENT
 
     # --- CONTEXT_OVERFLOW ---
 
@@ -180,6 +181,11 @@ class TestClassifyToolError:
         "invalid start byte at position 0",
         "charmap codec can't encode",
         "文件编码异常",
+        # JSON 解析失败对工具而言是参数/数据问题，不是瞬时传输故障；
+        # 归为 retryable 会让 dispatcher 空重试并误导"系统将自动重试"。
+        "json decode error",
+        "Expecting value: line 1",
+        "invalid json from server",
     ])
     def test_permanent_by_string(self, error_str: str):
         result = classify_tool_error(error_str)

@@ -16,8 +16,8 @@ from excelmanus.workbook_commit import content_version_of_file
 
 def _harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     cfg = SimpleNamespace(workspace_root=str(tmp_path), data_root="")
-    monkeypatch.setattr(api_app_state, "_config", cfg)
-    monkeypatch.setattr(api_app_state, "_session_manager", MagicMock())
+    api_app_state.set_config(cfg)
+    api_app_state.set_session_manager(MagicMock())
     import excelmanus.api_routes_files as files_mod
 
     monkeypatch.setattr(

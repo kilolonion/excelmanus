@@ -44,14 +44,21 @@ class ToolCallStore:
         result_chars: int = 0,
         error_type: str | None = None,
         error_preview: str | None = None,
+        call_id: str | None = None,
+        parent_call_id: str | None = None,
     ) -> None:
-        """写入一条工具调用记录。"""
+        """写入一条工具调用记录。
+
+        ``call_id`` 为本调用身份；``parent_call_id`` 仅 Code Mode SDK
+        子调用携带，值为外层 ``run_code`` 的 tool_call_id。
+        """
         try:
             self._conn.execute(
                 "INSERT INTO tool_call_log "
                 "(session_id, turn, iteration, tool_name, arguments_hash, "
-                " success, duration_ms, result_chars, error_type, error_preview, created_at, user_id) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                " success, duration_ms, result_chars, error_type, error_preview, "
+                " call_id, parent_call_id, created_at, user_id) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (
                     session_id,
                     turn,
@@ -63,6 +70,8 @@ class ToolCallStore:
                     result_chars,
                     error_type,
                     (error_preview or "")[:200] if error_preview else None,
+                    call_id,
+                    parent_call_id,
                     self._now_iso(),
                     None,
                 ),

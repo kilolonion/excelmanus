@@ -3,29 +3,43 @@
 import { useCallback, useEffect, useMemo, useState, useRef } from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { X, RefreshCw, Clock, Maximize2, MousePointerSquareDashed, Check, XCircle, Download, Paintbrush, MoreHorizontal, History, FileSpreadsheet } from "lucide-react";
-import { OperationTimeline } from "./OperationTimeline";
-import {
-  DropdownMenu,
-  DropdownMenuTrigger,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuCheckboxItem,
-} from "@/components/ui/dropdown-menu";
+import { X, Check, XCircle, FileSpreadsheet } from "lucide-react";
+import { FileHistoryWorkspace } from "@/components/history/FileHistoryWorkspace";
+import { fileBaseName } from "@/lib/revision-display";
 import { panelSlideVariants, panelSlideVariantsMobile, panelSlideVariantsMedium } from "@/lib/sidebar-motion";
+import { ExcelRibbonChrome } from "@/components/excel/ExcelRibbonChrome";
+import { HistoryPaneOverlay } from "@/components/excel/HistoryPaneOverlay";
 import { useShallow } from "zustand/react/shallow";
 import { useIsMobile, useIsTablet, useIsDesktop, useIsMediumScreen } from "@/hooks/use-mobile";
 import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl, downloadFile, invalidateSnapshotCache } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile, invalidateWorkbookCaches } from "@/lib/api";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
+import { fileRefFromSession, recentFilesForWorkspace, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
   { ssr: false, loading: () => <div className="flex items-center justify-center h-full text-sm text-muted-foreground">加载 Excel 引擎...</div> }
 );
+
+function formatSelectionConfirmLabel(
+  fileName: string,
+  sheet: string,
+  range: string,
+  cellValue?: string,
+): string {
+  const colon = range.indexOf(":");
+  const start = colon === -1 ? range : range.slice(0, colon);
+  const end = colon === -1 ? range : range.slice(colon + 1);
+  const isSingle = start === end;
+  const addr = isSingle ? start : range;
+  const label = `引用 ${fileName} · ${sheet}!${addr}`;
+  if (!isSingle || !cellValue) return label;
+  const shown = cellValue.length > 40 ? `${cellValue.slice(0, 40)}…` : cellValue;
+  return `${label}（值：${shown}）`;
+}
 
 export function ExcelSidePanel() {
   const isMobile = useIsMobile();
@@ -37,7 +51,8 @@ export function ExcelSidePanel() {
     panelOpen, activeFilePath, activeSheet, diffs, closePanel,
     openFullView, selectionMode, enterSelectionMode,
     exitSelectionMode, confirmSelection, draftRange, setDraftRange,
-    recentFiles, openPanel, removeRecentFile,
+    recentFiles, activeWorkspaceKey, openPanel, removeRecentFile,
+    panelTab, historySubview, setPanelTab, setHistorySubview, operations,
   } = useExcelStore(useShallow((s) => ({
     panelOpen: s.panelOpen,
     activeFilePath: s.activeFilePath,
@@ -52,11 +67,21 @@ export function ExcelSidePanel() {
     draftRange: s.draftRange,
     setDraftRange: s.setDraftRange,
     recentFiles: s.recentFiles,
+    activeWorkspaceKey: s.activeWorkspaceKey,
     openPanel: s.openPanel,
     removeRecentFile: s.removeRecentFile,
+    panelTab: s.panelTab,
+    historySubview: s.historySubview,
+    setPanelTab: s.setPanelTab,
+    setHistorySubview: s.setHistorySubview,
+    operations: s.operations,
   })));
 
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
+  const viewGeneration = useExcelStore((s) => s.viewGeneration);
+  const workspaceKey = activeWorkspaceKey ?? workspaceKeyFromSession(session);
+  const visibleRecentFiles = recentFilesForWorkspace(recentFiles, workspaceKey);
   const {
     handleCellEdit,
     conflict: writeConflict,
@@ -121,7 +146,7 @@ export function ExcelSidePanel() {
   }, []);
 
   const [withStyles, setWithStyles] = useState(true);
-  const [activeTab, setActiveTab] = useState<"sheet" | "timeline">("sheet");
+  const [draftCellValue, setDraftCellValue] = useState<string | undefined>(undefined);
 
   // 移动端下滑关闭
   const touchRef = useRef<{ startY: number; startTime: number } | null>(null);
@@ -139,12 +164,13 @@ export function ExcelSidePanel() {
     }
   }, [isMobile, closePanel]);
 
-  const handleRangeSelected = useCallback((range: string, sheet: string) => {
+  const handleRangeSelected = useCallback((range: string, sheet: string, cellValue?: string) => {
     const path = activeFilePath || undefined;
     const contentVersion = path
       ? useExcelStore.getState().getContentVersion(path) ?? undefined
       : undefined;
     setDraftRange({ range, sheet, path, contentVersion });
+    setDraftCellValue(cellValue);
   }, [setDraftRange, activeFilePath]);
 
   const handleConfirmRange = useCallback(() => {
@@ -155,9 +181,11 @@ export function ExcelSidePanel() {
         range: draftRange.range,
       });
     }
+    setDraftCellValue(undefined);
   }, [draftRange, activeFilePath, confirmSelection]);
 
   const handleCancelRange = useCallback(() => {
+    setDraftCellValue(undefined);
     exitSelectionMode();
   }, [exitSelectionMode]);
 
@@ -174,7 +202,10 @@ export function ExcelSidePanel() {
     [activeFilePath, activeSessionId]
   );
 
-  const fileName = activeFilePath?.split("/").pop() || "未知文件";
+  const fileName = fileBaseName(activeFilePath) || "工作表";
+  const confirmLabel = draftRange
+    ? formatSelectionConfirmLabel(fileName, draftRange.sheet, draftRange.range, draftCellValue)
+    : "";
 
   const fileDiffs = useMemo(
     () => diffs.filter((d) => d.filePath === activeFilePath).slice(-20),
@@ -182,12 +213,13 @@ export function ExcelSidePanel() {
   );
 
   const handleRefresh = useCallback(() => {
-    // 清除 snapshot 缓存后递增计数器强制刷新
-    if (activeFilePath) invalidateSnapshotCache(activeFilePath);
+    if (activeFilePath) {
+      invalidateWorkbookCaches({ workspaceKey, relative: activeFilePath });
+    }
     useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
-  }, [activeFilePath]);
+  }, [activeFilePath, workspaceKey]);
 
-  const isOpen = panelOpen && !!activeFilePath;
+  const isOpen = panelOpen;
 
   // 面板首次打开后保持挂载，关闭时用 CSS 隐藏，避免 Univer 实例被销毁重建
   const [hasEverMounted, setHasEverMounted] = useState(false);
@@ -218,6 +250,7 @@ export function ExcelSidePanel() {
       <motion.div
         key="excel-side-panel"
         data-coach-id="coach-excel-panel"
+        aria-hidden={!isOpen}
         variants={isResizing ? undefined : getAnimationVariants()}
         initial={isResizing ? false : "initial"}
         animate={isResizing ? undefined : isOpen ? "animate" : "exit"}
@@ -265,9 +298,9 @@ export function ExcelSidePanel() {
             )}
 
           {/* 多文件 Tab 栏 */}
-          {recentFiles.length > 1 && (
+          {visibleRecentFiles.length > 1 && (
             <div ref={tabBarRef} className="flex items-center bg-muted/20 border-b border-border min-h-[32px] select-none overflow-x-auto scrollbar-none flex-shrink-0">
-              {recentFiles.slice(0, 10).map((file) => {
+              {visibleRecentFiles.slice(0, 10).map((file) => {
                 const isActive = file.path === activeFilePath;
                 return (
                   <div
@@ -289,7 +322,7 @@ export function ExcelSidePanel() {
                         e.stopPropagation();
                         removeRecentFile(file.path);
                         if (isActive) {
-                          const remaining = recentFiles.filter((f) => f.path !== file.path);
+                          const remaining = visibleRecentFiles.filter((f) => f.path !== file.path);
                           if (remaining.length > 0) {
                             openPanel(remaining[0].path);
                           } else {
@@ -308,160 +341,69 @@ export function ExcelSidePanel() {
             </div>
           )}
 
-          {/* 头部 */}
-          <div className={`flex items-center justify-between px-3 border-b border-border bg-muted/30 ${isMobile ? "py-1" : "py-2"}`}>
-            <div className="flex items-center gap-2 min-w-0 flex-1">
-              <span className="text-sm font-medium truncate">{fileName}</span>
-              {activeSheet && (
-                <span className="text-xs text-muted-foreground flex-shrink-0">/ {activeSheet}</span>
-              )}
-            </div>
-            <div className="flex items-center gap-1 flex-shrink-0">
-              {/* 桌面端/中等屏幕：全部按钮直接显示 */}
-              {!isMobile && (
-                <>
-                  <button
-                    onClick={toggleSelectionMode}
-                    className={`p-1.5 rounded transition-colors ${selectionMode
-                        ? "bg-[var(--em-primary)]/20 text-[var(--em-primary)]"
-                        : "hover:bg-muted text-muted-foreground hover:text-foreground"
-                      }`}
-                    title={selectionMode ? "退出选区模式" : "选区引用"}
-                  >
-                    <MousePointerSquareDashed className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={handleRefresh}
-                    className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                    title="刷新"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={() => setWithStyles((v) => !v)}
-                    className={`p-1.5 rounded transition-colors ${withStyles
-                        ? "text-[var(--em-primary)]"
-                        : "text-muted-foreground hover:text-foreground"
-                      } hover:bg-muted`}
-                    title={withStyles ? "关闭样式渲染" : "开启样式渲染"}
-                  >
-                    <Paintbrush className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={() => activeFilePath && downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => { })}
-                    className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                    title="下载文件"
-                  >
-                    <Download className="h-3.5 w-3.5" />
-                  </button>
-                  <button
-                    onClick={() => openFullView(activeFilePath!, activeSheet ?? undefined)}
-                    className="p-1.5 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                    title="展开到聊天区域"
-                  >
-                    <Maximize2 className="h-3.5 w-3.5" />
-                  </button>
-                </>
-              )}
-
-              {/* 移动端：刷新 + 溢出菜单 + 关闭 */}
-              {isMobile && (
-                <>
-                  <button
-                    onClick={handleRefresh}
-                    className="p-2 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                    title="刷新"
-                  >
-                    <RefreshCw className="h-3.5 w-3.5" />
-                  </button>
-                  <DropdownMenu>
-                    <DropdownMenuTrigger asChild>
-                      <button
-                        className="p-2 rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground"
-                        title="更多操作"
-                      >
-                        <MoreHorizontal className="h-3.5 w-3.5" />
-                      </button>
-                    </DropdownMenuTrigger>
-                    <DropdownMenuContent align="end" sideOffset={4}>
-                      <DropdownMenuItem onClick={toggleSelectionMode}>
-                        <MousePointerSquareDashed className="h-4 w-4" />
-                        {selectionMode ? "退出选区模式" : "选区引用（也可长按表格）"}
-                      </DropdownMenuItem>
-                      <DropdownMenuCheckboxItem
-                        checked={withStyles}
-                        onCheckedChange={() => setWithStyles((v) => !v)}
-                      >
-                        样式渲染
-                      </DropdownMenuCheckboxItem>
-                      <DropdownMenuItem
-                        onClick={() => activeFilePath && downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => { })}
-                      >
-                        <Download className="h-4 w-4" />
-                        下载文件
-                      </DropdownMenuItem>
-                      <DropdownMenuItem
-                        onClick={() => openFullView(activeFilePath!, activeSheet ?? undefined)}
-                      >
-                        <Maximize2 className="h-4 w-4" />
-                        展开到聊天区域
-                      </DropdownMenuItem>
-                    </DropdownMenuContent>
-                  </DropdownMenu>
-                </>
-              )}
-
+          {!activeFilePath && (
+            <div className="flex items-center justify-end px-1 h-9 border-b border-border bg-muted/20 shrink-0">
               <button
+                type="button"
                 onClick={closePanel}
-                className={`${isMobile ? "p-2" : "p-1.5"} rounded hover:bg-muted transition-colors text-muted-foreground hover:text-foreground`}
                 title="关闭"
+                aria-label="关闭"
+                className="inline-flex items-center justify-center size-7 rounded-md text-muted-foreground hover:bg-muted hover:text-foreground"
               >
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
-          </div>
+          )}
 
-          {/* Tab 切换栏 */}
-          <div className="flex border-b border-border bg-muted/20 px-1">
-            <button
-              onClick={() => setActiveTab("sheet")}
-              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
-                activeTab === "sheet"
-                  ? "border-[var(--em-primary)] text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <FileSpreadsheet className="h-3 w-3" />
-              表格
-            </button>
-            <button
-              onClick={() => setActiveTab("timeline")}
-              className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
-                activeTab === "timeline"
-                  ? "border-[var(--em-primary)] text-foreground"
-                  : "border-transparent text-muted-foreground hover:text-foreground"
-              }`}
-            >
-              <History className="h-3 w-3" />
-              操作历史
-            </button>
-          </div>
-
-          {/* 内容区 */}
-          {activeTab === "sheet" ? (
-            <div className="flex-1 overflow-hidden">
+          {panelTab === "sheet" && !activeFilePath && (
+            <div className="flex-1 flex flex-col items-center justify-center gap-2 px-6 text-center text-sm text-muted-foreground">
+              <FileSpreadsheet className="h-8 w-8 opacity-40" />
+              <p>从左侧文件栏打开一个工作簿</p>
+            </div>
+          )}
+          {!!activeFilePath && (
+            <div className="relative flex-1 min-h-0 overflow-hidden">
               <UniverSheet
                 fileUrl={fileUrl}
+                fileRef={activeFilePath ? fileRefFromSession(activeFilePath, session) : null}
+                sessionId={activeSessionId}
+                viewGeneration={viewGeneration}
                 initialSheet={activeSheet || undefined}
                 selectionMode={selectionMode}
                 onRangeSelected={handleRangeSelected}
                 withStyles={withStyles}
                 onCellEdit={handleCellEdit}
+                historyActive={panelTab === "history"}
+                onNativeRibbonTab={() => setPanelTab("sheet")}
+                ribbonSlot={
+                  <ExcelRibbonChrome
+                    historyActive={panelTab === "history"}
+                    selectionMode={selectionMode}
+                    withStyles={withStyles}
+                    isMobile={isMobile}
+                    onHistory={() => setPanelTab("history")}
+                    onToggleSelection={toggleSelectionMode}
+                    onCancelSelection={handleCancelRange}
+                    onToggleStyles={() => setWithStyles((v) => !v)}
+                    onRefresh={handleRefresh}
+                    onDownload={() => downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => { })}
+                    onExpand={() => openFullView(activeFilePath, activeSheet ?? undefined)}
+                    onClose={closePanel}
+                  />
+                }
               />
-            </div>
-          ) : (
-            <div className="flex-1 overflow-hidden">
-              <OperationTimeline />
+              {panelTab === "history" && (
+                <HistoryPaneOverlay>
+                  <FileHistoryWorkspace
+                    filePath={activeFilePath}
+                    active={isOpen && panelTab === "history"}
+                    view={historySubview}
+                    onViewChange={setHistorySubview}
+                    operationCount={operations.length}
+                    cellDiffs={fileDiffs}
+                  />
+                </HistoryPaneOverlay>
+              )}
             </div>
           )}
 
@@ -475,8 +417,12 @@ export function ExcelSidePanel() {
           {/* 选区确认栏 */}
           {selectionMode && draftRange && (
             <div className="border-t border-border bg-muted/40 px-3 py-2 flex items-center gap-2">
-              <span className="text-xs font-mono flex-1 truncate" style={{ color: "var(--em-primary)" }}>
-                {draftRange.sheet}!{draftRange.range}
+              <span
+                className="text-xs flex-1 min-w-0 truncate"
+                style={{ color: "var(--em-primary)" }}
+                title={confirmLabel}
+              >
+                {confirmLabel}
               </span>
               <button
                 onClick={handleConfirmRange}
@@ -496,32 +442,6 @@ export function ExcelSidePanel() {
             </div>
           )}
 
-          {/* 变更历史（底栏） */}
-          {fileDiffs.length > 0 && (
-            <div className="border-t border-border bg-muted/20 max-h-[120px] overflow-y-auto">
-              <div className="px-3 py-1.5 text-[10px] text-muted-foreground font-medium flex items-center gap-1">
-                <Clock className="h-3 w-3" />
-                变更历史
-              </div>
-              {fileDiffs.map((d, i) => {
-                const time = new Date(d.timestamp).toLocaleTimeString("zh-CN", {
-                  hour: "2-digit",
-                  minute: "2-digit",
-                  second: "2-digit",
-                });
-                return (
-                  <div
-                    key={i}
-                    className="px-3 py-0.5 text-[10px] text-muted-foreground hover:bg-muted/30 cursor-default"
-                  >
-                    <span className="text-foreground/70">{time}</span>{" "}
-                    <span>{d.affectedRange}</span>{" "}
-                    <span>({d.changes.length} cells)</span>
-                  </div>
-                );
-              })}
-            </div>
-          )}
       </motion.div>
     </>
   );

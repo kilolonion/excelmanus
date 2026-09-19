@@ -39,7 +39,12 @@ def prompt_variables(engine: Any) -> dict[str, str]:
 
 
 def all_tool_names(engine: Any) -> list[str]:
-    registry = getattr(engine, "registry", None)
+    from excelmanus.tools.catalog import catalog_from_engine
+
+    catalog = catalog_from_engine(engine)
+    if catalog is not None:
+        return catalog.names()
+    registry = getattr(engine, "registry", None) or getattr(engine, "_registry", None)
     if registry is None:
         return []
     get_tool_names = getattr(registry, "get_tool_names", None)
@@ -74,53 +79,83 @@ def minimize_skill_context(text: str) -> str:
 
 
 def build_stable_system_prompt(engine: Any) -> str:
-    """稳定 system 前缀：identity + persona + 工具段（+ plan 仅激活时）。"""
+    """稳定 system 前缀：identity + persona + 按目录模式门控的策略段。"""
     child_prompt = getattr(engine, "_child_system_prompt", None)
     if isinstance(child_prompt, str) and child_prompt.strip():
-        engine._prompt_tool_snapshot = None
         return child_prompt.strip()
     composer = getattr(engine, "_prompt_composer", None)
     if composer is None:
-        engine._prompt_tool_snapshot = None
         memory = getattr(engine, "memory", None)
         return str(getattr(memory, "system_prompt", "") or "")
+    from excelmanus.tools.catalog import catalog_from_engine
     from excelmanus.tools.runtime import present_as_of
+
+    from excelmanus.prompt.load import PromptComposer
+
+    if isinstance(composer, PromptComposer):
+        if composer.reload_if_changed():
+            binder = getattr(engine, "_bind_prompt_registry_runtime", None)
+            if callable(binder):
+                binder()
+        composer.validate_runtime()
 
     chat_mode = getattr(engine, "_current_chat_mode", "write") or "write"
     present_as = present_as_of(engine)
+    catalog = catalog_from_engine(engine)
     sdk_section = ""
     if present_as == "code":
         runtime = getattr(engine, "_tool_runtime", None)
         renderer = getattr(runtime, "render_sdk_section", None)
         if callable(renderer):
             sdk_section = renderer() or ""
+        if not str(sdk_section).strip():
+            raise RuntimeError(
+                "Code Mode 请求组装失败：SDK 段为空（present_as=code 必须能生成声明的 SDK）"
+            )
+    # 导航/能力地图走 L2 执行目录。present_as=code 只坍缩 envelope.tools。
+    nav_catalog = catalog
+    visible_names: frozenset[str] | None = (
+        frozenset(catalog.names()) if catalog is not None else None
+    )
     assemble_ctx = AssembleContext(
         plan_active=chat_mode == "plan",
         present_as=present_as,
         variables=prompt_variables(engine),
         chat_mode=chat_mode,
         sdk_section=sdk_section,
+        visible_tools=visible_names,
+        new_workbook=bool(getattr(engine, "_catalog_new_workbook", True)),
     )
     assembly = composer.registry.assemble(assemble_ctx)
-    engine._prompt_last_assembly = assembly
     engine._prompt_tool_snapshot = list(assembly.tools)
-    return composer.registry.render_system(assembly)
+    text = composer.registry.render_system(assembly)
+    if nav_catalog is not None:
+        nav = nav_catalog.capability_map_text()
+        if nav:
+            text = f"{text}\n\n{nav}" if text.strip() else nav
+        engine._effective_catalog = catalog
+    return text
 
 
 def prepare_system_prompts_for_request(
     engine: Any,
     skill_contexts: list[str] | None = None,
+    *,
+    consume_dynamic: bool = True,
 ) -> tuple[list[str], str | None]:
     """构建本步请求的 system prompts。
 
     稳定前缀始终作为第一条。文件列表、策略段、任务清单、核心记忆、
     MCP 指南不再默认注入。斜杠技能正文与一次性 hook 只在快照变化时追加。
+    consume_dynamic=False 只返回稳定前缀，不消费 hook / 技能快照。
     """
     skill_contexts = skill_contexts or []
     try:
         stable_prompt = build_stable_system_prompt(engine)
-    except UnknownPromptVariable as exc:
+    except (UnknownPromptVariable, ValueError, OSError, RuntimeError) as exc:
         return [], f"系统提示词组装失败: {exc}"
+    if not consume_dynamic:
+        return [stable_prompt] if stable_prompt.strip() else [], None
 
     hook_notice = ""
     transient = getattr(engine, "_transient_hook_contexts", None)
@@ -156,15 +191,6 @@ def prepare_system_prompts_for_request(
         system = [stable_prompt]
         contexts: list[str] = []
         if not inject_dynamic:
-            return system, contexts
-        effective_mode = getattr(engine, "_effective_system_mode", None)
-        mode = effective_mode() if callable(effective_mode) else "multi"
-        if mode == "merge":
-            merged_parts = [dynamic_prompt] if dynamic_prompt else []
-            if inject_snapshot:
-                merged_parts.extend(current_skill_contexts)
-            if merged_parts:
-                contexts.append("\n\n".join(merged_parts))
             return system, contexts
         if dynamic_prompt:
             contexts.append(dynamic_prompt)
@@ -239,4 +265,4 @@ def prepare_system_prompts_for_request(
 
     _system, request_contexts = _compose_layers()
     engine._prompt_user_contexts = request_contexts
-    return prompts, None
+    return _system, None

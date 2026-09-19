@@ -125,16 +125,6 @@ def apply_on_stopped_tree(
     rc, _, err = _run_cmd(
         ["git", "merge", f"{git_remote}/{branch}", "--ff-only"], cwd=project_root,
     )
-    if rc != 0 and git_remote == "origin":
-        _p("origin 合并失败，尝试 GitHub 备用源...", 33)
-        _ensure_github_remote(project_root)
-        rc2, _, _ = _run_cmd(
-            ["git", "fetch", "github", branch], cwd=project_root, timeout=120,
-        )
-        if rc2 == 0:
-            rc, _, err = _run_cmd(
-                ["git", "merge", f"github/{branch}", "--ff-only"], cwd=project_root,
-            )
     if rc != 0:
         if has_stash:
             _run_cmd(["git", "stash", "pop"], cwd=project_root)

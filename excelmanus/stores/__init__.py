@@ -6,7 +6,6 @@ from excelmanus.stores.llm_call_store import LLMCallStore
 from excelmanus.stores.memory_store import MemoryStore
 from excelmanus.stores.rules_store import RulesStore
 from excelmanus.stores.tool_call_store import ToolCallStore
-from excelmanus.stores.vector_store_db import VectorStoreDB
 
 __all__ = [
     "ApprovalStore",
@@ -16,5 +15,4 @@ __all__ = [
     "MemoryStore",
     "RulesStore",
     "ToolCallStore",
-    "VectorStoreDB",
 ]

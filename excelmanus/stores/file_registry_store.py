@@ -173,6 +173,15 @@ class FileRegistryStore:
         ).fetchall()
         return [self._row_to_dict(r) for r in rows]
 
+    def purge_path(self, workspace: str, canonical_path: str) -> bool:
+        """Hard-delete a path row so a later register can take a new id."""
+        cur = self._conn.execute(
+            "DELETE FROM file_registry WHERE workspace = ? AND canonical_path = ?",
+            (workspace, canonical_path),
+        )
+        self._conn.commit()
+        return cur.rowcount > 0
+
     def soft_delete(self, workspace: str, canonical_path: str) -> bool:
         """软删除文件记录。"""
         now = _now_iso()

@@ -1,10 +1,11 @@
 ---
 name: tool:inspect
-version: "9.0.0"
+version: "12.0.0"
 priority: 100
 order: 100
 layer: strategy
-max_tokens: 300
-conditions: {}
+max_tokens: 120
+conditions:
+  tool: inspect_spreadsheet
 ---
-不要凭记忆编 sheet 或 range。range 可用 A1:F20 或 表名!A1:F20。header_row 从 0 起（Excel 第 1 行 = 0）。截断、采样、推断或缓存只是有条件证据。range 的行列是该窗口，不是整表。range 的 include 仅 formulas；其他值会 INVALID_ARGS。overview 的 include 被丢掉时以返回正文里的警告为准，不要当成「没有样式」。
+按任务选择 overview 看结构，或 range 读精确窗口。截断、采样不是全表事实；coverage 与 spill 取回决定是否继续读。resolved_range 只说明本次解析范围，不能代替完整性判断。大结果可能外置为 spill: 句柄；需要原文时把句柄当作 file_path 传给 read_text_file。默认读缓存值；null 且带 formula 是未计算，不是空白。range 的 include 仅 formulas。单表可省略 sheet。

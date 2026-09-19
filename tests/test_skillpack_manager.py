@@ -98,7 +98,7 @@ def test_create_skillpack_success(tmp_path: Path) -> None:
             "description": "报表生成",
             "instructions": "先读后画图",
         },
-        actor="cli",
+        actor="http",
     )
 
     assert created["name"] == "reporter"
@@ -134,7 +134,7 @@ def test_patch_project_skillpack_success(tmp_path: Path) -> None:
             "description": "图表",
             "instructions": "默认说明",
         },
-        actor="cli",
+        actor="http",
     )
 
     updated = manager.patch_skillpack(
@@ -143,7 +143,7 @@ def test_patch_project_skillpack_success(tmp_path: Path) -> None:
             "description": "图表分析",
             "argument_hint": "<file> <type>",
         },
-        actor="cli",
+        actor="http",
     )
     assert updated["description"] == "图表分析"
     assert updated["argument_hint"] == "<file> <type>"
@@ -189,12 +189,12 @@ def test_delete_project_skillpack_archives_and_unloads(tmp_path: Path) -> None:
             "description": "临时",
             "instructions": "临时说明",
         },
-        actor="cli",
+        actor="http",
     )
 
     deleted = manager.delete_skillpack(
         name="temp_skill",
-        actor="cli",
+        actor="http",
         reason="测试删除",
     )
     assert deleted["name"] == "temp_skill"
@@ -204,7 +204,7 @@ def test_delete_project_skillpack_archives_and_unloads(tmp_path: Path) -> None:
     assert archive_dir.exists()
     meta = json.loads((archive_dir / "meta.json").read_text(encoding="utf-8"))
     assert meta["reason"] == "测试删除"
-    assert meta["actor"] == "cli"
+    assert meta["actor"] == "http"
 
 
 def test_resources_path_traversal_rejected(tmp_path: Path) -> None:

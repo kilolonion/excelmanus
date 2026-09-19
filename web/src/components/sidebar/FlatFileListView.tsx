@@ -22,18 +22,18 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
+import { FileTypeIcon } from "@/components/ui/file-type-icon";
+import { isSpreadsheetFile, workspaceFileOpenHint } from "@/lib/file-kind";
+import { useOpenWorkspacePathSet } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
 import { downloadFile, normalizeExcelPath, fetchFileRegistry, updateFileGroupMembers } from "@/lib/api";
-import { isPreviewableWorkspaceFile } from "@/lib/file-preview";
+import { formatFileMention } from "@/components/chat/chat-input-insert";
 import { normalizePath } from "./file-tree-helpers";
 
 export interface FlatFileListViewProps {
   files: { path: string; filename: string; is_dir?: boolean }[];
   recentTimestamps: Map<string, number>;
   sessionId?: string;
-  panelOpen: boolean;
-  activeFilePath: string | null;
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
@@ -45,7 +45,8 @@ export interface FlatFileListViewProps {
 }
 
 export function FlatFileListView(props: FlatFileListViewProps) {
-  const { files, recentTimestamps, sessionId, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove } = props;
+  const { files, recentTimestamps, sessionId, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove } = props;
+  const openPaths = useOpenWorkspacePathSet();
 
   // 最近使用的文件排前面，其余按文件名字母序
   const flatFiles = useMemo(() => {
@@ -69,9 +70,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
   return (
     <div className="space-y-0.5">
       {flatFiles.map((file) => {
-        const excel = isExcelFile(file.filename);
-        const previewable = isPreviewableWorkspaceFile(file.filename);
-        const isFileActive = excel && panelOpen && activeFilePath === file.path;
+        const isFileActive = openPaths.has(file.path);
         const isDragging = draggingPath === file.path;
         const isSelected = selectedPaths.has(file.path);
         const normalized = normalizePath(file.path);
@@ -91,11 +90,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
             title={
               selectMode
                 ? "点击选择"
-                : excel
-                  ? `单击: 侧边面板 | 双击: 全屏\n${file.path}`
-                  : previewable
-                    ? `单击: 预览 | 菜单: 下载\n${file.path}`
-                    : `单击: 下载\n${file.path}`
+                : `${workspaceFileOpenHint(file.filename)}\n${file.path}`
             }
           >
             {selectMode ? (
@@ -152,7 +147,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                     <DropdownMenuItem onClick={(e) => {
                       e.stopPropagation();
                       useExcelStore.getState().setPendingTemplateMessage(
-                        `请将 @file:${file.filename} 与 进行合并`
+                        `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
                       );
                     }}>
                       <Combine className="h-4 w-4" />
@@ -160,7 +155,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                     </DropdownMenuItem>
                     {(() => {
                       const otherExcels = flatFiles.filter(
-                        (f) => f.path !== file.path && isExcelFile(f.filename),
+                        (f) => f.path !== file.path && isSpreadsheetFile(f.filename),
                       );
                       if (otherExcels.length > 0) {
                         return (
@@ -189,7 +184,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                         <DropdownMenuItem onClick={(e) => {
                           e.stopPropagation();
                           useExcelStore.getState().setPendingTemplateMessage(
-                            `请对比 @file:${file.filename} 和 的差异`
+                            `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
                           );
                         }}>
                           <ArrowLeftRight className="h-4 w-4" />

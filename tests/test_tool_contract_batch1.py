@@ -133,11 +133,13 @@ def test_overlapping_copy_uses_snapshot(tmp_path: Path) -> None:
 
 
 def test_copy_whole_column_rejected(tmp_path: Path) -> None:
+    """有意破坏：copy 的 A:A 改为按已用范围裁剪后复制，不再拒绝。"""
     _bind(tmp_path)
     path = tmp_path / "cols.xlsx"
     wb = Workbook()
     wb.active.title = "Sheet1"
     wb.active["A1"] = 1
+    wb.active["A2"] = 2
     wb.save(path)
     wb.close()
     result = edit_spreadsheet(
@@ -151,8 +153,13 @@ def test_copy_whole_column_rejected(tmp_path: Path) -> None:
             "target_start": "B1",
         }],
     )
-    assert not result.success
-    assert "INVALID_ARGS" in _err(result) or "整列" in _err(result)
+    assert result.success, _err(result)
+    loaded = load_workbook(path)
+    try:
+        assert loaded.active["B1"].value == 1
+        assert loaded.active["B2"].value == 2
+    finally:
+        loaded.close()
 
 
 def test_copy_sheet_conflict_rejected(tmp_path: Path) -> None:

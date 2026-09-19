@@ -127,7 +127,7 @@ firewall-cmd --reload                             # 生效
 ./deploy/start.sh --prod                   # 生产模式（npm run start）
 ./deploy/start.sh --backend-port 9000      # 自定义后端端口
 ./deploy/start.sh --frontend-port 8080     # 自定义前端端口
-./deploy/start.sh --workers 4 --prod       # 多 worker 生产模式
+./deploy/start.sh --prod                   # 生产模式（默认 1 worker；>1 会跨进程重建会话信封，prompt cache 静默失效）
 ./deploy/start.sh --backend-only           # 仅启动后端
 ./deploy/start.sh --frontend-only          # 仅启动前端
 ./deploy/start.sh --log-dir ./logs         # 日志输出到文件
@@ -142,7 +142,7 @@ firewall-cmd --reload                             # 生效
 # PowerShell
 .\deploy\start.ps1
 .\deploy\start.ps1 -Production
-.\deploy\start.ps1 -BackendPort 9000 -Production -Workers 4
+.\deploy\start.ps1 -BackendPort 9000 -Production
 
 # CMD
 deploy\start.bat
@@ -150,11 +150,11 @@ deploy\start.bat --prod
 deploy\start.bat --backend-port 9000
 ```
 
-> 脚本自动检测操作系统（macOS / Linux / Windows），在 Linux 上识别 apt / dnf / yum / pacman / zypper / apk 等包管理器，缺少依赖时自动给出对应安装命令。支持优雅关闭（先 SIGTERM，5s 后 SIGKILL）、.env 自动加载、自动打开浏览器。
+> 脚本自动检测操作系统（macOS / Linux / Windows），在 Linux 上识别 apt / dnf / yum / pacman / zypper / apk 等包管理器，缺少依赖时自动给出对应安装命令。支持优雅关闭（先 SIGTERM，5s 后 SIGKILL）、自动打开浏览器。模型配置在 Web 设置页，写入主数据库。
 
-### 5.2 远程一键部署 (v2.0.0)
+### 5.2 远程部署（运维机 `deploy.sh`）
 
-`deploy/deploy.sh`（和 Windows 版 `deploy/deploy.ps1`）在**本地机器**运行，通过 SSH 操作远程服务器。支持单机 / 前后端分离 / Docker / 本地四种拓扑。
+`deploy/deploy.sh`（和 Windows 版 `deploy/deploy.ps1`）在**本地机器**运行，通过 SSH 操作远程服务器。支持单机 / 前后端分离 / 本地三种拓扑。
 
 **首次部署建议流程：**
 
@@ -162,13 +162,13 @@ deploy\start.bat --backend-port 9000
 # 1. 检查环境依赖（本地 + 远程工具、前后端互联、磁盘/内存）
 ./deploy/deploy.sh check
 
-# 2. 推送 .env 模板到远程服务器（自动填充 CORS 和前端 BACKEND_ORIGIN）
+# 2. 写入前端 Next.js 的 web/.env.local（BACKEND_ORIGIN；不是产品设置仓）
 ./deploy/deploy.sh init-env
-# 然后 SSH 登录远程服务器，编辑 .env 填入真实 API Key
+# 打开 Web 设置页添加模型档案；CORS 等运行时项也在设置页
 
 # 3. 执行部署
 ./deploy/deploy.sh
-# 部署后自动执行：健康检查 + 前后端互联检测 + CORS 配置验证
+# 部署后自动执行：健康检查 + 前后端互联检测
 ```
 
 **日常部署：**
@@ -221,7 +221,7 @@ tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static pu
 
 ```powershell
 .\deploy\deploy.ps1                        # 完整部署
-.\deploy\deploy.ps1 init-env               # 推送 .env 模板
+.\deploy\deploy.ps1 init-env               # 写入前端 Next.js web/.env.local
 .\deploy\deploy.ps1 check                  # 环境检查
 .\deploy\deploy.ps1 rollback -Force        # 回滚（跳过确认）
 .\deploy\deploy.ps1 -ServiceManager nssm   # 使用 NSSM 管理 Windows 服务
@@ -384,24 +384,26 @@ systemctl restart nginx  # 完全重启
 
 ---
 
-## 7. 环境变量 (.env)
+## 7. 配置
 
-后端的 `.env` 位于 `/opt/excelmanus/.env`，关键配置：
+用户设置与模型档案只在主库 `config_kv` / `model_profiles`（`$EXCELMANUS_HOME/excelmanus.db`），通过 Web 设置页或 `/config` 管理。
 
-| 变量 | 用途 | 备注 |
+服务器部署由 `deploy.sh` 把 `EXCELMANUS_DEPLOY_MODE=server` 写入 systemd / PM2 进程（定位符）。前端 `web/.env.local` 只给 Next.js 用（`NEXT_PUBLIC_BACKEND_ORIGIN`）。
+
+关键配置（设置页 / 主库键）：
+
+| 配置键 | 用途 | 备注 |
 |------|------|------|
-| `EXCELMANUS_API_KEY` | 启动时的模型 API Key（可被激活档案覆盖） | 必填 |
-| `EXCELMANUS_BASE_URL` | 启动时的模型端点 | 必填 |
-| `EXCELMANUS_MODEL` | 启动时的模型名称 | 必填 |
+| 模型档案（设置页） | API Key / Base URL / 模型名 | 必填；存在 `model_profiles` |
 | `EXCELMANUS_PROTOCOL` | 模型协议类型 | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`） | `auto` |
+| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`） | `deploy.sh` 在 systemd/PM2 写入 `server` |
 | `EXCELMANUS_MAIN_MODEL_VISION` | 激活模型是否接受图片附件（`auto`/`true`/`false`） | `auto` |
-| `EXCELMANUS_EMBEDDING_*` | Embedding 模型（语义检索/技能路由/错误方案） | |
-| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 留空自动生成 |
-| `EXCELMANUS_PLAYBOOK_ENABLED` | 启用 Playbook 自进化战术手册 | `false` |
-| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 必须包含前端域名 |
+| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 通常留空，自动生成 `.secret_key` |
+| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 公网部署须包含前端域名 |
 
-服务器部署请设 `EXCELMANUS_DEPLOY_MODE=server`。此时 API 拒绝 `/version/upgrade` 与 `/deploy/execute`；升级与回滚只在运维机跑 `./deploy/deploy.sh`（`rollback-to --commit` 为 checkout + 重启）。本机 Git 安装用设置页停机更新，详见 [升级与部署](hot-update-design.md)。
+服务器模式由 `deploy.sh` 写入 `EXCELMANUS_DEPLOY_MODE=server`。此时 API 拒绝 `/version/upgrade` 与 `/deploy/execute`；升级与回滚只在运维机跑 `./deploy/deploy.sh`（`rollback-to --commit` 为 checkout + 重启）。本机 Git 安装用设置页停机更新，详见 [升级与部署](hot-update-design.md)。
+
+本机 standalone 升级禁止静默 `git reset --hard`（冲突需手工解决）。服务器上 `./deploy/deploy.sh rollback` 会执行 `git reset --hard`。
 
 ---
 
@@ -426,7 +428,7 @@ certbot renew --dry-run
 certbot renew
 ```
 
-证书到期日: **2026-05-25**
+证书到期日请以 `certbot certificates` 的现场输出为准，不要沿用手册里的历史日期。
 
 ---
 
@@ -466,8 +468,7 @@ pm2 logs excelmanus-api --lines 30 --nostream
 ```bash
 ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
 pm2 logs excelmanus-api --lines 50 --nostream
-# 检查 .env 配置
-cat /opt/excelmanus/.env
+# 模型与运行时设置在 Web 设置页 / 主数据库
 ```
 
 ### Nginx 配置错误
@@ -492,7 +493,7 @@ pm2 list    # 检查进程内存
 
 如果需要在新服务器上重建后端环境，按以下步骤操作。
 
-> **注意**: 下方以 Python 3.11 为例，实际可使用任何 `>=3.10` 的版本（Docker 部署默认使用 3.12）。
+> **注意**: 下方以 Python 3.11 为例，实际可使用任何 `>=3.10` 的版本（部署脚本不绑定 Python 小版本）。
 
 ```bash
 # 1. 安装编译依赖
@@ -532,7 +533,7 @@ uv pip install 'httpx[socks]'
 # pip install -e '.[all]'
 # pip install 'httpx[socks]'
 
-# 6. 配置 .env（从旧服务器复制并修改）
+# 6. 打开 Web 设置页添加模型档案（写入主数据库）
 # 7. 配置 mcp.json
 
 # 8. 启动后端
@@ -570,17 +571,11 @@ firewall-cmd --reload
 │   ├── nginx.conf         # Nginx 反向代理配置（127.0.0.1 示例；生产见本手册）
 │   └── certs/             # TLS 证书
 ├── excelmanus/
-│   ├── config.py           # 环境变量与配置加载
+│   ├── config.py           # 运行时配置（主库设置 + 默认值）
 │   ├── context_budget.py   # 上下文预算管理器
 │   ├── model_probe.py      # 模型元数据探测（上下文窗口自动校正）
-│   ├── security/
-│   │   └── cipher.py       # Fernet 对称加密（API Key / Token 加密存储）
-│   └── embedding/
-│       ├── client.py               # Embedding API 客户端
-│       ├── semantic_memory.py      # 语义记忆检索
-│       ├── semantic_registry.py    # 语义文件注册
-│       └── error_solution_store.py  # 错误→解决方案向量索引
-├── .env                   # 本地开发环境变量
+│   └── security/
+│       └── cipher.py       # Fernet 对称加密（API Key / Token 加密存储）
 ├── mcp.json               # MCP 服务器配置
 └── docs/
     └── ops-manual.md      # 本手册

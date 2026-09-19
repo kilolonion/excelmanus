@@ -1,5 +1,5 @@
 import { create } from "zustand";
-import { buildApiUrl } from "@/lib/api";
+import { buildDirectHealthUrl } from "@/lib/backend-origin";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 
 export type DeployMode = "standalone" | "server";
@@ -20,15 +20,20 @@ export const useAuthConfigStore = create<AuthConfigState>((set, get) => ({
   checkBackendHealth: async () => {
     if (get().checked) return true;
     try {
-      const res = await fetch(buildApiUrl("/health"), { cache: "no-store" });
+      const res = await fetch(buildDirectHealthUrl(), { cache: "no-store" });
       if (res.ok) {
         const data = await res.json();
         const deployMode: DeployMode =
           data.deploy_mode === "server" ? "server" : "standalone";
         const authRequired = Boolean(data.auth_required);
         set({ deployMode, checked: true, authRequired });
-        if (typeof data.configured === "boolean") {
-          useOnboardingStore.getState().setBackendConfigured(data.configured);
+        if (data.status === "ok" || data.status == null) {
+          const configured = data.configured === true;
+          const onboarding = useOnboardingStore.getState();
+          onboarding.applyServerState(data.onboarding, configured);
+          if (typeof data.configured === "boolean") {
+            onboarding.setBackendConfigured(data.configured);
+          }
         }
         return true;
       }

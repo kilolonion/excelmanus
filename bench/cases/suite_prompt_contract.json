@@ -1,0 +1,166 @@
+{
+  "suite_name": "prompt_contract",
+  "include_in_all": false,
+  "trace": true,
+  "turn_timeout": 900,
+  "auto_approve": "accept",
+  "description": "提示词分层改造（docs/prompt-layering.md §7）的真实模型对照套件：只收录 suite_realistic 未覆盖的场景，已有用例不复制。映射：S01→R19、S03→R11/R12、S05→R26、S13→tests/test_write_contract.py（中途改盘 bench 表达不了）。script 检查在 bench/prompt_contract_checks.py，期望值运行时从夹具现算。",
+  "assertions": {
+    "status": "ok",
+    "uploads_unchanged": true,
+    "no_silent_first_turn": true,
+    "no_cheat_read": true,
+    "max_tool_failures": 2
+  },
+  "cases": [
+    {
+      "id": "S04",
+      "name": "契约：指定文件缺失且有相似文件",
+      "tags": ["prompt-contract", "boundary", "missing-file"],
+      "attachments": ["bench/fixtures/realistic/订单明细_2024.xlsx"],
+      "message": "把「四季度订单汇总.xlsx」里华东区的销售额算给我",
+      "assertions": {
+        "max_llm_calls": 4,
+        "max_tool_calls": 4,
+        "forbidden_tools": ["edit_spreadsheet", "format_spreadsheet", "split_spreadsheet", "manage_spreadsheet_objects"],
+        "output_checks": [
+          {
+            "type": "reply_regex",
+            "pattern": "找不到|没有.*文件|不存在|未找到|哪份|哪个文件|确认一下|是不是|指的是|订单明细_2024|四季度"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "缺文件时报缺失、给候选或澄清",
+        "review_focus": [
+          "是否说明指定文件不存在，而不是沉默换成订单明细_2024 继续算",
+          "给候选时是否让用户确认，而不是直接替换成相似文件",
+          "没有任何写入"
+        ]
+      }
+    },
+    {
+      "id": "S07",
+      "name": "契约：Code Mode 下 SDK 数据 + pandas 滚动聚合",
+      "tags": ["prompt-contract", "code-mode", "aggregate", "qa"],
+      "present_as": "code",
+      "attachments": ["bench/fixtures/realistic/订单明细_2024.xlsx"],
+      "message": "算一下：只取「已完成」订单，按月汇总金额之后，最后一个月份往前 3 个月的移动平均销售额是多少？",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "script",
+            "path": "bench/prompt_contract_checks.py",
+            "scenario": "s07_moving_avg",
+            "rel_tolerance": 0.005
+          }
+        ]
+      },
+      "expected": {
+        "lens": "复杂计算走 run_code + pandas 是否被放行且算对",
+        "review_focus": [
+          "是否用 em.* 取数后在程序内做 pandas 计算，而不是宣称被禁止",
+          "月汇总口径（已完成、按月）与移动平均窗口是否正确",
+          "答案应≈9月 MA3（7/8/9 月均值，夹具现算）"
+        ]
+      }
+    },
+    {
+      "id": "S10",
+      "name": "契约：复杂 WorkbookSpec 新建（合并/边框/下拉/列宽/公式）",
+      "tags": ["prompt-contract", "create", "workbook-spec", "write"],
+      "message": "帮我新建一张客户跟进记录表：第一行跨列合并写标题「客户跟进记录表」；第二行表头依次是 客户名称、联系人、最近跟进日期、跟进人、状态、备注，表头加粗并加边框；状态列做成下拉选择（未开始/跟进中/已成交/已流失）；下面留 15 行空白；列宽设置合理别太挤；最底行用公式统计已填写的客户数（显示成「共N位客户」）。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "file_exists",
+            "glob": "outputs/**/*.xlsx"
+          },
+          {
+            "type": "formula",
+            "range": "A1:Z60",
+            "regex": "COUNTA|COUNTIF|COUNT"
+          },
+          {
+            "type": "script",
+            "path": "bench/prompt_contract_checks.py",
+            "scenario": "s10_spec"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "字段靠 schema/introspection 发现后一次编译 WorkbookSpec",
+        "review_focus": [
+          "是否经 edit_spreadsheet 的 workbook_spec 一次建出，而不是空表后反复 operations",
+          "合并标题、表头边框、list 数据验证、列宽是否真的落了",
+          "不确定的字段是否查了 introspect_capability 而不是编造"
+        ]
+      }
+    },
+    {
+      "id": "S11",
+      "name": "契约：已有工作簿再另建一本",
+      "tags": ["prompt-contract", "create", "write"],
+      "attachments": ["bench/fixtures/realistic/订单明细_2024.xlsx"],
+      "message": "工作区里那份订单明细保持原样，别改它。另外帮我新建一张供应商登记表：供应商名称、联系人、电话、地址、合作状态，先留 10 行空白。",
+      "assertions": {
+        "max_llm_calls": 8,
+        "output_checks": [
+          {
+            "type": "file_exists",
+            "glob": "outputs/**/*.xlsx"
+          },
+          {
+            "type": "cell_exists",
+            "value": "联系人"
+          },
+          {
+            "type": "cell_exists",
+            "value": "合作状态"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "非空工作区下新建不被 new_workbook 门控误阻断",
+        "review_focus": [
+          "新建工具是否可用、规格是否可发现",
+          "原订单表未被改动或覆盖（uploads_unchanged 兜底）",
+          "新表落在 outputs/ 而不是覆盖 uploads"
+        ]
+      }
+    },
+    {
+      "id": "S14",
+      "name": "契约：6 万行大表全量合计与覆盖声明",
+      "tags": ["prompt-contract", "large-table", "coverage", "qa"],
+      "attachments": ["bench/fixtures/realistic/大表_交易流水.xlsx"],
+      "message": "把这张流水表里状态为「成功」的交易金额全部加起来，告诉我总额。注意要覆盖整张表，别只读前面一部分。",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "script",
+            "path": "bench/prompt_contract_checks.py",
+            "scenario": "s14_full_sum",
+            "rel_tolerance": 0.005
+          },
+          {
+            "type": "reply_regex",
+            "pattern": "全表|全部|覆盖|逐行|所有|整张表|60,?000|58175|5\\.8\\s*万|流水",
+            "severity": "warning"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "大表按覆盖与资源选择路径，截断不冒充全表事实",
+        "review_focus": [
+          "合计是否覆盖全表（期望≈13.76亿，夹具现算），漏行会直接算错",
+          "是否如实说明覆盖范围/行数，而不是用 resolved_range 或截断成功冒充完整",
+          "分页期间版本变化有无处理"
+        ]
+      }
+    }
+  ]
+}

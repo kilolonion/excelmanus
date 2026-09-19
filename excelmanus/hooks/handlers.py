@@ -148,7 +148,7 @@ def run_command_handler(
         completed = subprocess.run(
             args,
             shell=False,
-            input=json.dumps(payload, ensure_ascii=False),
+            input=json.dumps(payload, ensure_ascii=False, default=str),
             capture_output=True,
             text=True,
             timeout=config.hooks_command_timeout_seconds,

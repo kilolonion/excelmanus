@@ -3,7 +3,6 @@ import {
   Terminal,
   AtSign,
   FileSpreadsheet,
-  Wrench,
   Bot,
   ShieldCheck,
   Layers,
@@ -23,19 +22,14 @@ import {
   CornerDownLeft,
   ScrollText,
   Brain,
-  BookOpen,
 } from "lucide-react";
 
 // 不限制上传文件类型 — 后端仅做大小限制
 export const ACCEPTED_EXTENSIONS: Record<string, string[]> | undefined = undefined;
 
-const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
-export function isImageFile(name: string): boolean {
-  const ext = name.slice(name.lastIndexOf(".")).toLowerCase();
-  return IMAGE_EXTS.has(ext);
-}
+export { isVisionImageFile } from "@/lib/file-kind";
 
-// 斜杠命令（对应 CLI _STATIC_SLASH_COMMANDS + control_commands）
+// 斜杠命令（对应后端 control_commands 注册表）
 export const SLASH_COMMANDS: { command: string; description: string; icon: React.ReactNode; args?: string[] }[] = [
   // 基础命令
   { command: "/help", description: "显示帮助", icon: React.createElement(HelpCircle, { className: "h-3.5 w-3.5" }) },
@@ -44,7 +38,7 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/clear", description: "清除对话历史", icon: React.createElement(Trash2, { className: "h-3.5 w-3.5" }) },
   { command: "/mcp", description: "MCP Server 状态", icon: React.createElement(Terminal, { className: "h-3.5 w-3.5" }) },
   { command: "/save", description: "保存对话记录", icon: React.createElement(Save, { className: "h-3.5 w-3.5" }) },
-  { command: "/config", description: "环境变量配置", icon: React.createElement(Settings, { className: "h-3.5 w-3.5" }), args: ["list", "set", "get", "delete"] },
+  { command: "/config", description: "运行时配置", icon: React.createElement(Settings, { className: "h-3.5 w-3.5" }), args: ["list", "set", "get", "delete"] },
   // 控制命令
   { command: "/model", description: "查看/切换模型", icon: React.createElement(Sparkles, { className: "h-3.5 w-3.5" }), args: ["list"] },
   { command: "/subagent", description: "子代理控制", icon: React.createElement(Bot, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "list", "run"] },
@@ -56,7 +50,6 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/rollback", description: "回退对话轮次", icon: React.createElement(CornerDownLeft, { className: "h-3.5 w-3.5" }), args: ["list"] },
   { command: "/rules", description: "自定义规则管理", icon: React.createElement(ScrollText, { className: "h-3.5 w-3.5" }), args: ["add", "delete", "toggle", "session"] },
   { command: "/memory", description: "持久记忆管理", icon: React.createElement(Brain, { className: "h-3.5 w-3.5" }), args: ["file_pattern", "user_pref", "error_solution", "general", "delete", "clear"] },
-  { command: "/playbook", description: "历史经验管理", icon: React.createElement(BookOpen, { className: "h-3.5 w-3.5" }), args: ["list", "search", "stats", "delete", "reset"] },
   { command: "/accept", description: "确认操作", icon: React.createElement(CheckCircle2, { className: "h-3.5 w-3.5" }) },
   { command: "/reject", description: "拒绝操作", icon: React.createElement(XCircle, { className: "h-3.5 w-3.5" }) },
   { command: "/undo", description: "回滚操作", icon: React.createElement(Undo2, { className: "h-3.5 w-3.5" }) },
@@ -73,7 +66,6 @@ export interface MentionCategory {
 
 export const AT_TOP_LEVEL: MentionCategory[] = [
   { key: "file", label: "文件", icon: React.createElement(FileSpreadsheet, { className: "h-3.5 w-3.5" }), description: "引用工作区文件" },
-  { key: "tool", label: "工具", icon: React.createElement(Wrench, { className: "h-3.5 w-3.5" }), description: "指定使用的工具" },
   { key: "skill", label: "技能", icon: React.createElement(Sparkles, { className: "h-3.5 w-3.5" }), description: "调用技能包" },
 ];
 
@@ -95,10 +87,15 @@ export const DISPLAY_COMMANDS = new Set([
   "/undo", "/undo list",
   "/rules",
   "/memory",
-  "/playbook", "/playbook list", "/playbook stats",
 ]);
 
 // 直接执行前端操作的命令（不会发送到聊天）
+/** `/subagent run` 必须走 chat SSE，才能投影子代理卡片。 */
+export function isStreamedSlashCommand(command: string): boolean {
+  const lower = command.trim().toLowerCase();
+  return lower.startsWith("/subagent run") || lower.startsWith("/sub_agent run");
+}
+
 export const FRONTEND_ACTIONS: Record<string, string> = {
   "/stop": "stop",
   "/clear": "clear",

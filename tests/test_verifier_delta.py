@@ -104,32 +104,34 @@ class TestRenderWriteOperationsLog:
 
 
 class TestExtractWriteSummary:
+    """写入摘要提取（工具合并后的新契约）。"""
+
     def _call(self, tool_name, arguments, result_str=""):
         from excelmanus.engine_core.tool_dispatcher import ToolDispatcher
         return ToolDispatcher._extract_write_summary(tool_name, arguments, result_str)
 
-    def test_write_cells_with_values(self):
-        args = {"values": [[1, 2, 3], [4, 5, 6], [7, 8, 9]]}
-        result = self._call("write_cells", args)
-        assert "3 行" in result
-        assert "3 列" in result
+    def test_edit_spreadsheet_with_operations(self):
+        args = {"operations": [{"op": "write_cells"}, {"op": "create_sheet"}]}
+        result = self._call("edit_spreadsheet", args)
+        assert result == "edit_spreadsheet 2 项操作"
 
-    def test_write_cells_without_values(self):
-        result = self._call("write_cells", {})
-        assert result == "写入数据"
+    def test_edit_spreadsheet_without_operations(self):
+        result = self._call("edit_spreadsheet", {})
+        assert result == "edit_spreadsheet"
 
-    def test_create_sheet(self):
-        result = self._call("create_sheet", {"sheet_name": "汇总"})
-        assert "汇总" in result
+    def test_format_spreadsheet(self):
+        result = self._call("format_spreadsheet", {"operations": [{"op": "bold"}]})
+        assert result == "format_spreadsheet 1 项操作"
 
-    def test_delete_sheet(self):
-        result = self._call("delete_sheet", {"sheet_name": "临时"})
-        assert "删除" in result
-        assert "临时" in result
+    def test_manage_objects_and_versions(self):
+        result = self._call("manage_spreadsheet_objects", {"operations": [1, 2]})
+        assert result == "manage_spreadsheet_objects 2 项操作"
+        result = self._call("manage_spreadsheet_versions", {"action": "delete"})
+        assert result == "manage_spreadsheet_versions delete"
 
-    def test_insert_rows(self):
-        result = self._call("insert_rows", {"count": 5})
-        assert "5 行" in result
+    def test_write_word(self):
+        result = self._call("write_word", {"operations": [1, 2]})
+        assert result == "Word 文档写入 2 项操作"
 
     def test_unknown_tool(self):
         result = self._call("some_other_tool", {})

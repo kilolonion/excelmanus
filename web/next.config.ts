@@ -3,13 +3,26 @@ import os from "os";
 import fs from "fs";
 import path from "path";
 
+function getDevFrontendPort(): number {
+  const raw = process.env.PORT || process.env.EXCELMANUS_FRONTEND_PORT || "3000";
+  const parsed = Number.parseInt(raw.split(",")[0] ?? "3000", 10);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 3000;
+}
+
 function getLocalNetworkOrigins(port = 3000): string[] {
-  const origins: string[] = [];
+  const origins: string[] = [
+    "localhost",
+    "127.0.0.1",
+    "[::1]",
+    `http://localhost:${port}`,
+    `http://127.0.0.1:${port}`,
+    `http://[::1]:${port}`,
+  ];
   for (const addrs of Object.values(os.networkInterfaces())) {
     if (!addrs) continue;
     for (const addr of addrs) {
       if (!addr.internal && addr.family === "IPv4") {
-        origins.push(`http://${addr.address}:${port}`);
+        origins.push(addr.address, `http://${addr.address}:${port}`);
       }
     }
   }
@@ -30,7 +43,7 @@ function getProjectVersion(): string {
 const nextConfig: NextConfig = {
   output: "standalone",
   typescript: { ignoreBuildErrors: false },
-  allowedDevOrigins: getLocalNetworkOrigins(),
+  allowedDevOrigins: getLocalNetworkOrigins(getDevFrontendPort()),
   env: {
     NEXT_PUBLIC_APP_VERSION: getProjectVersion(),
   },

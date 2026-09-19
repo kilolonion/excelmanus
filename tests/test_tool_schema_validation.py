@@ -418,3 +418,226 @@ class TestConfigureValidation:
             registry.configure_schema_validation(
                 mode="shadow", canary_percent=-1, strict_path=False,
             )
+
+
+class TestRunCodeSandboxTierStrip:
+    """sandbox_tier 对 schema 校验豁免（仅 run_code），执行参数原样透传。"""
+
+    def _run_code_registry(self) -> ToolRegistry:
+        registry = _make_registry(mode="enforce")
+        registry.register_tool(
+            ToolDef(
+                name="run_code",
+                description="run code",
+                input_schema={
+                    "type": "object",
+                    "properties": {"code": {"type": "string"}},
+                    "required": ["code"],
+                    "additionalProperties": False,
+                },
+                func=lambda code, sandbox_tier=None: f"ran:{code}:{sandbox_tier}",
+            )
+        )
+        return registry
+
+    def test_sandbox_tier_ignored_by_validation_but_passed_through(self) -> None:
+        registry = self._run_code_registry()
+        result = registry.call_tool(
+            "run_code",
+            {"code": "print(1)", "sandbox_tier": "YELLOW"},
+        )
+        # 校验不报警，且审批重放注入的档位原样到达执行函数
+        assert result.model_text == "ran:print(1):YELLOW"
+
+    def test_other_tool_same_field_still_rejected(self) -> None:
+        registry = _make_registry(mode="enforce")
+        registry.register_tool(_tool_with_schema(name="other_tool"))
+        result = registry.call_tool(
+            "other_tool",
+            {"file_path": "a.xlsx", "sandbox_tier": "host"},
+        )
+        assert result.value["error_code"] == "TOOL_ARGUMENT_VALIDATION_ERROR"
+
+
+class TestIntentSchemaCompat:
+    """intent 工具 schema 必须覆盖处理器已接受的兼容输入（_maybe_json/_op_get/别名）。
+
+    处理器在 enforce 之前就支持 JSON 字符串、spill 句柄与别名键；
+    schema 若更窄，合法调用会被 enforce 拦死，属契约回归。
+    """
+
+    def _violations(self, tool_name: str, arguments: dict) -> list[str]:
+        from excelmanus.tools.intent_tools import get_tools
+
+        tools = {t.name: t for t in get_tools()}
+        registry = _make_registry(mode="enforce")
+        out: list[str] = []
+        registry._collect_schema_violations(
+            value=arguments,
+            schema=tools[tool_name].input_schema,
+            path="$",
+            violations=out,
+        )
+        return out
+
+    # ── format_spreadsheet.rule：条件格式 ∪ 数据验证 ──
+
+    def test_dv_list_rule_accepted(self) -> None:
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
+                            "rule": {"type": "list", "values": ["A", "B"], "allow_blank": True}}],
+        })
+        assert not bad, bad
+
+    def test_dv_numeric_and_alias_fields_accepted(self) -> None:
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
+                            "rule": {"type": "whole", "operator": "between", "value": 1, "value2": 10}}],
+        })
+        assert not bad, bad
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "data_validation", "sheet": "S", "range": "D2:D10",
+                            "rule": {"type": "list", "source": "Sheet2!A1:A5"}}],
+        })
+        assert not bad, bad
+
+    def test_cf_rule_still_accepted(self) -> None:
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "conditional_format", "sheet": "S", "range": "B2:B10",
+                            "rule": {"type": "cell_value", "operator": "greater_than", "value": 100,
+                                     "font": {"bold": True}}}],
+        })
+        assert not bad, bad
+
+    def test_dv_bogus_type_still_rejected(self) -> None:
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "data_validation", "range": "A1",
+                            "rule": {"type": "bogus"}}],
+        })
+        assert any("rule.type" in m for m in bad)
+
+    def test_format_alias_fields_accepted(self) -> None:
+        bad = self._violations("format_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "format", "sheet": "S", "cell_range": "A1",
+                            "numberFormat": "0.00"},
+                           {"kind": "size", "sheet": "S", "column_widths": {"A": 18}, "autoFit": True},
+                           {"kind": "freeze", "sheet": "S", "panes": "A2"},
+                           {"kind": "data_validation", "sheet": "S", "range": "A2",
+                            "validation": {"type": "list", "values": ["x"]}, "delete": True}],
+        })
+        assert not bad, bad
+
+    # ── edit_spreadsheet：JSON 字符串 / spill / 别名 ──
+
+    def test_edit_values_matrix_json_and_spill(self) -> None:
+        base = {"kind": "write", "sheet": "S", "start_cell": "A1"}
+        for values in ([[1, 2]], "[[1,2]]", "spill:abc"):
+            bad = self._violations("edit_spreadsheet", {
+                "file_path": "a.xlsx", "operations": [dict(base, values=values)],
+            })
+            assert not bad, f"values={values!r}: {bad}"
+
+    def test_edit_values_dict_still_rejected(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "write", "start_cell": "A1", "values": {"r": 1}}],
+        })
+        assert any("values" in m for m in bad)
+
+    def test_edit_pivot_values_are_column_names(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "pivot", "sheet": "S", "values": ["金额"],
+                            "index": ["区域"], "target_sheet": "T"}],
+        })
+        assert not bad, bad
+
+    def test_edit_operations_json_string(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": '[{"kind":"write","sheet":"S","start_cell":"A1","values":[[1]]}]',
+        })
+        assert not bad, bad
+
+    def test_edit_selection_json_string(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "delete_rows", "sheet": "S",
+                            "selection": '{"rows":[2],"file":"a.xlsx"}',
+                            "content_version": "sha256:x"}],
+        })
+        assert not bad, bad
+
+    def test_edit_workbook_spec_json_string(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "n.xlsx",
+            "workbook_spec": '{"sheets":[{"name":"S","dimensions":{"rows":3,"cols":2}}],"uncertainties":[]}',
+        })
+        assert not bad, bad
+
+    def test_edit_alias_fields_accepted(self) -> None:
+        bad = self._violations("edit_spreadsheet", {
+            "file_path": "a.xlsx",
+            "operations": [{"kind": "write", "sheet": "S", "cell": "A1", "values": [[1]]},
+                           {"kind": "transform", "sheet": "S", "transform": "trim", "column": "c"},
+                           {"kind": "insert", "sheet": "S", "row": 2},
+                           {"kind": "transform", "sheet": "S", "transform": "split",
+                            "column": "c", "sep": ","}],
+        })
+        assert not bad, bad
+
+    # ── analyze_spreadsheet：join 单键 + JSON 兼容 ──
+
+    def test_join_single_key_and_header_row(self) -> None:
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "aggregate", "group_by": ["区域"],
+            "aggregations": {"金额": "sum"},
+            "join": {"file_path": "b.xlsx", "on": "键", "header_row": 2},
+        })
+        assert not bad, bad
+
+    def test_join_multi_key_list_rejected(self) -> None:
+        # _normalize_join 只支持单键：schema 不得宣称数组键
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
+            "join": {"on": ["a", "b"]},
+        })
+        assert any("join.on" in m for m in bad)
+
+    def test_join_json_string(self) -> None:
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "aggregate", "aggregations": {"x": "sum"},
+            "join": '{"sheet":"R","on":"键"}',
+        })
+        assert not bad, bad
+
+    def test_analyze_aggregations_shapes(self) -> None:
+        for aggs in ({"金额": "sum"}, [{"column": "金额", "func": "sum"}], '{"金额":"sum"}'):
+            bad = self._violations("analyze_spreadsheet", {
+                "file_path": "a.xlsx", "mode": "aggregate",
+                "group_by": ["区域"], "aggregations": aggs,
+            })
+            assert not bad, f"aggregations={aggs!r}: {bad}"
+
+    def test_analyze_conditions_and_paths_json_string(self) -> None:
+        bad = self._violations("analyze_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "filter",
+            "conditions": '[{"column":"c","operator":"eq","value":1}]',
+        })
+        assert not bad, bad
+        bad = self._violations("analyze_spreadsheet", {
+            "mode": "files", "file_paths": '["a.xlsx","b.xlsx"]',
+        })
+        assert not bad, bad
+
+    def test_inspect_include_json_string(self) -> None:
+        bad = self._violations("inspect_spreadsheet", {
+            "file_path": "a.xlsx", "mode": "overview", "include": '["columns"]',
+        })
+        assert not bad, bad

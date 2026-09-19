@@ -53,6 +53,7 @@ describe("writeExcelCells", () => {
       session_id: "sess-1",
       expected_version: "sha256:old",
     });
+    expect(body.operations).toBeNull();
   });
 
   it("sends expected_version null when omitted (API will reject)", async () => {

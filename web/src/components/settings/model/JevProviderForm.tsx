@@ -1,0 +1,173 @@
+"use client";
+
+import { useState } from "react";
+import { ExternalLink } from "lucide-react";
+import { Input } from "@/components/ui/input";
+import {
+  JEV_PROVIDER_PRESETS,
+  draftFromJevPreset,
+  jevPresetById,
+  type JevProviderDraft,
+  type JevProtocol,
+} from "@/lib/jev-settings";
+
+const FIELD = "h-9 text-xs rounded-lg";
+
+export function JevProviderForm({
+  draft,
+  onChange,
+  configured,
+}: {
+  draft: JevProviderDraft;
+  onChange: (next: JevProviderDraft) => void;
+  configured: boolean;
+}) {
+  const [keyVisible, setKeyVisible] = useState(false);
+  const preset = jevPresetById(draft.id);
+
+  return (
+    <div className="rounded-xl border border-border/70 bg-background p-3 space-y-2.5">
+      <div className="space-y-1">
+        <label className="text-[11px] font-medium text-foreground/80">供应商名称</label>
+        <Input
+          className={FIELD}
+          value={draft.name}
+          placeholder="例如 TypeSafe"
+          onChange={(event) => onChange({ ...draft, name: event.target.value })}
+        />
+      </div>
+      <div className="space-y-1">
+        <label className="text-[11px] font-medium text-foreground/80">API Key</label>
+        <div className="relative">
+          <Input
+            type={keyVisible ? "text" : "password"}
+            autoComplete="off"
+            className={`${FIELD} font-mono pr-16`}
+            value={draft.api_key}
+            placeholder={configured ? "已配置，粘贴新密钥以更换" : "粘贴密钥"}
+            onChange={(event) => onChange({ ...draft, api_key: event.target.value })}
+          />
+          <button
+            type="button"
+            className="absolute right-2 top-1/2 -translate-y-1/2 text-[11px] text-muted-foreground hover:text-foreground"
+            onClick={() => setKeyVisible((value) => !value)}
+          >
+            {keyVisible ? "隐藏" : "显示"}
+          </button>
+        </div>
+        {preset && (
+          <a
+            href={preset.purchaseUrl}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="inline-flex items-center gap-0.5 text-[11px] hover:underline"
+            style={{ color: "var(--em-primary)" }}
+          >
+            获取密钥 <ExternalLink className="h-2.5 w-2.5" />
+          </a>
+        )}
+      </div>
+      <div className="space-y-1">
+        <label className="text-[11px] font-medium text-foreground/80">API 请求地址</label>
+        <Input
+          className={`${FIELD} font-mono`}
+          value={draft.base_url}
+          placeholder="https://"
+          onChange={(event) => onChange({ ...draft, base_url: event.target.value })}
+        />
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+        <div className="space-y-1">
+          <label className="text-[11px] font-medium text-foreground/80">协议</label>
+          <select
+            className="w-full h-9 text-xs rounded-lg border border-input bg-background px-2"
+            value={draft.protocol}
+            disabled={Boolean(preset)}
+            onChange={(event) => onChange({ ...draft, protocol: event.target.value as JevProtocol })}
+          >
+            <option value="typesafe">typesafe（官方 System One）</option>
+            <option value="gateway">gateway（Vercel Evaluate）</option>
+          </select>
+        </div>
+        <div className="space-y-1">
+          <label className="text-[11px] font-medium text-foreground/80">Model ID</label>
+          <Input
+            className={`${FIELD} font-mono`}
+            value={draft.model}
+            placeholder={preset?.model || "jev-1.13.0"}
+            onChange={(event) => onChange({ ...draft, model: event.target.value })}
+          />
+        </div>
+      </div>
+      {!preset && (
+        <p className="text-[11px] text-muted-foreground">
+          自定义端点请选择协议：TypeSafe 直连走 System One；Vercel 兼容口走 Evaluate。
+        </p>
+      )}
+    </div>
+  );
+}
+
+export function JevPresetPicker({
+  draft,
+  onSelectPreset,
+  onSelectCustom,
+}: {
+  draft: JevProviderDraft;
+  onSelectPreset: (presetId: string) => void;
+  onSelectCustom: () => void;
+}) {
+  const isCustom = !JEV_PROVIDER_PRESETS.some((preset) => preset.id === draft.id);
+  return (
+    <div className="rounded-xl border border-border/70 bg-muted/20 p-2.5 space-y-2">
+      <p className="text-[11px] font-medium text-foreground/80">从预设开始</p>
+      <p className="text-[11px] text-muted-foreground -mt-1">
+        TypeSafe 与 Vercel 预填连接，或点「自定义」填写自己的服务
+      </p>
+      <div className="grid grid-cols-2 sm:grid-cols-3 gap-1.5">
+        {JEV_PROVIDER_PRESETS.map((preset) => {
+          const selected = draft.id === preset.id;
+          return (
+            <button
+              key={preset.id}
+              type="button"
+              className={`text-left rounded-xl border px-2.5 py-2 transition-all ${
+                selected
+                  ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/5 shadow-[0_0_0_1px_var(--em-primary-alpha-15)]"
+                  : "border-border bg-background hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5"
+              }`}
+              onClick={() => onSelectPreset(preset.id)}
+            >
+              <span className="text-[11px] sm:text-xs font-medium truncate block">{preset.label}</span>
+              <p className="text-[10px] font-mono text-muted-foreground truncate mt-0.5">{preset.model}</p>
+              <a
+                href={preset.purchaseUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="items-center gap-0.5 text-[10px] mt-1 hover:underline hidden sm:inline-flex"
+                style={{ color: "var(--em-primary)" }}
+                onClick={(event) => event.stopPropagation()}
+              >
+                获取 Key <ExternalLink className="h-2.5 w-2.5" />
+              </a>
+            </button>
+          );
+        })}
+        <button
+          type="button"
+          className={`text-left rounded-xl border px-2.5 py-2 transition-all ${
+            isCustom
+              ? "border-[var(--em-primary)]/60 bg-[var(--em-primary)]/5 shadow-[0_0_0_1px_var(--em-primary-alpha-15)]"
+              : "border-dashed border-border bg-background hover:border-[var(--em-primary)]/40 hover:bg-[var(--em-primary)]/5"
+          }`}
+          onClick={onSelectCustom}
+        >
+          <span className="text-[11px] sm:text-xs font-medium truncate block">自定义</span>
+          <p className="text-[10px] text-muted-foreground truncate mt-0.5">填写自己的服务</p>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+export { draftFromJevPreset };

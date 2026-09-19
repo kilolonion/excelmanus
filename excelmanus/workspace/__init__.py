@@ -16,6 +16,7 @@ from excelmanus.workspace.identity import (
     public_identity,
     resolve_canonical,
 )
+from excelmanus.workspace.file_service import WorkspaceFileService
 from excelmanus.workspace.runtime import publish_bytes, publish_pending_writes, read_version_bytes
 from excelmanus.workspace.isolated import (
     IsolatedWorkspace,
@@ -27,7 +28,10 @@ from excelmanus.workspace.revisions import (
     RevisionRecord,
     RevisionStore,
 )
-from excelmanus.workspace.migrate import migrate_overlay_backups
+from excelmanus.workspace.migrate import (
+    ensure_overlay_migrated,
+    migrate_overlay_backups,
+)
 
 __all__ = [
     "CanonicalPath",
@@ -41,9 +45,11 @@ __all__ = [
     "SandboxEnv",
     "StaleVersionError",
     "WorkbookVersionRef",
+    "WorkspaceFileService",
     "catalog",
     "collect_public_identities",
     "display_name_for",
+    "ensure_overlay_migrated",
     "migrate_overlay_backups",
     "public_identity",
     "publish_bytes",

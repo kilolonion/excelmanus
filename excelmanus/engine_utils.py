@@ -16,30 +16,16 @@ from excelmanus.message_serialization import to_plain as _to_plain
 
 # ── 常量 ──────────────────────────────────────────────────────
 
-_ALWAYS_AVAILABLE_TOOLS_READONLY = (
-    "task_create", "task_update",
-    "ask_user",
-    "memory_save", "memory_read_topic",
-)
-_ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY = (
-    "write_plan", "edit_text_file",
-    "delegate", "delegate_to_subagent", "parallel_delegate",
-)
-_ALWAYS_AVAILABLE_TOOLS_SET = frozenset(
-    _ALWAYS_AVAILABLE_TOOLS_READONLY + _ALWAYS_AVAILABLE_TOOLS_WRITE_ONLY
-)
-_ALWAYS_AVAILABLE_TOOLS_READONLY_SET = frozenset(_ALWAYS_AVAILABLE_TOOLS_READONLY)
 _SYSTEM_Q_SUBAGENT_APPROVAL = "subagent_high_risk_approval"
 _SYSTEM_Q_PLAN_EXIT = "plan_exit_approval"
-_SUBAGENT_APPROVAL_OPTION_ACCEPT = "立即接受并执行"
-_SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY = "开启 fullaccess 后重试（推荐）"
-_SUBAGENT_APPROVAL_OPTION_REJECT = "拒绝本次操作"
+_SYSTEM_Q_MODE_SWITCH = "mode_switch_suggestion"
 
-# ── AUX 模型 "禁用思考" 通用 extra_body ─────────────────────
+# ── 辅助性调用"禁用思考"通用 extra_body ─────────────────────
 # 覆盖所有已知 provider 的思考模式关闭参数，
 # 各自定义 provider 会过滤掉不属于自身的字段。
-_AUX_NO_THINKING_EXTRA_BODY: dict[str, Any] = {
+_NO_THINKING_EXTRA_BODY: dict[str, Any] = {
     "enable_thinking": False,                   # dashscope / siliconflow / deepseek / volcengine
+    "chat_template_kwargs": {"enable_thinking": False},  # vLLM / sglang（qwen 系）
     "thinking": {"type": "disabled"},           # claude_compat (OpenAI 代理) / GLM
     "reasoning": {"effort": "none"},            # openrouter
 }
@@ -82,7 +68,7 @@ _MENTION_XML_TAG_MAP: dict[str, tuple[str, str]] = {
 
 
 def normalize_path(path: Any) -> str:
-    """规范化路径字符串，供 FILES_CHANGED 等路径收集使用。"""
+    """规范化路径字符串，供 MUTATION 等路径收集使用。"""
     if not isinstance(path, str):
         return ""
     normalized = path.strip().replace("\\", "/")
@@ -109,6 +95,9 @@ def build_mention_context_block(
     - img 类型跳过（不生成 context block）
     - 列表为空时返回空字符串
     """
+    import json
+    from html import escape
+
     if not mention_contexts:
         return ""
 
@@ -119,8 +108,10 @@ def build_mention_context_block(
             continue
 
         if rm.error:
+            details = json.dumps(rm.error_fields, ensure_ascii=False) if rm.error_fields else ""
             parts.append(
-                f'<error ref="{rm.mention.raw}">\n  {rm.error}\n</error>'
+                f'<error ref="{escape(rm.mention.raw, quote=True)}">\n  '
+                f'{escape(rm.error_code or "")} {escape(rm.error)}\n{escape(details)}\n</error>'
             )
         elif rm.context_block:
             tag_info = _MENTION_XML_TAG_MAP.get(rm.mention.kind)
@@ -129,10 +120,12 @@ def build_mention_context_block(
                 # 为带 range_spec 的文件引用添加 range 属性
                 range_attr = ""
                 if rm.mention.range_spec:
-                    range_attr = f' range="{rm.mention.range_spec}"'
+                    range_attr = f' range="{escape(rm.mention.range_spec, quote=True)}"'
+                version = rm.content_version or rm.mention.content_version
+                version_attr = f' content_version="{escape(version, quote=True)}"' if version else ""
                 parts.append(
-                    f'<{tag} {attr}="{rm.mention.value}"{range_attr}>\n'
-                    f"{rm.context_block}\n"
+                    f'<{tag} {attr}="{escape(rm.mention.value, quote=True)}"{range_attr}{version_attr}>\n'
+                    f"{escape(rm.context_block)}\n"
                     f"</{tag}>"
                 )
 
@@ -265,9 +258,11 @@ def _usage_token(usage: Any, key: str) -> int:
 
 
 def _extract_cached_tokens(usage: Any) -> int:
-    """从 usage.prompt_tokens_details.cached_tokens 提取缓存命中 token 数。
+    """从 usage 提取缓存命中 token 数。
 
-    兼容 OpenAI SDK 对象和 dict 两种格式。非 OpenAI provider 无此字段时返回 0。
+    兼容 OpenAI/Gemini 的 ``prompt_tokens_details.cached_tokens``，以及
+    DeepSeek 顶层 ``prompt_cache_hit_tokens``（dict 与对象均可）。
+    多个字段同时可解释时取最大正值，不相加。
     """
     if usage is None:
         return 0
@@ -276,17 +271,10 @@ def _extract_cached_tokens(usage: Any) -> int:
         if isinstance(usage, dict)
         else getattr(usage, "prompt_tokens_details", None)
     )
-    if details is None:
-        return 0
-    raw = (
-        details.get("cached_tokens")
-        if isinstance(details, dict)
-        else getattr(details, "cached_tokens", 0)
-    )
-    try:
-        return int(raw or 0)
-    except (TypeError, ValueError):
-        return 0
+    details_cached = _usage_token(details, "cached_tokens")
+    hit = _usage_token(usage, "prompt_cache_hit_tokens")
+    positives = [value for value in (details_cached, hit) if value > 0]
+    return max(positives) if positives else 0
 
 
 def _extract_anthropic_cache_tokens(usage: Any) -> tuple[int, int]:

@@ -101,7 +101,12 @@ class TestPresentAsCollapse:
                 structured=ToolResult(
                     success=True,
                     model_text='{"status":"success"}',
-                    value={"status": "success"},
+                    value={
+                        "status": "success",
+                        "file_path": "a.xlsx",
+                        "content_version": "v1",
+                        "applied": [],
+                    },
                 ),
             )
         )

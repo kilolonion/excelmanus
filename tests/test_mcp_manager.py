@@ -274,6 +274,52 @@ class TestMCPManagerToolConflict:
         assert tool_names.count("mcp_server_a_do_stuff") == 1
 
 
+class TestMCPManagerParallelConnect:
+    """缓存命中的 MCP Server 应并行连接，而不是串行累加等待。"""
+
+    @pytest.mark.asyncio
+    async def test_ready_servers_connect_concurrently(self):
+        in_connect = 0
+        max_in = 0
+
+        class _SlowClient:
+            def __init__(self, config):
+                self._config = config
+                self.managed_pids = set()
+
+            async def connect(self):
+                nonlocal in_connect, max_in
+                in_connect += 1
+                max_in = max(max_in, in_connect)
+                await asyncio.sleep(0.05)
+                in_connect -= 1
+
+            async def discover_tools(self):
+                return [_make_mcp_tool("ping")]
+
+            async def close(self):
+                return None
+
+        registry = ToolRegistry()
+        cfg_a = _make_config(name="server-a")
+        cfg_b = _make_config(name="server-b")
+        manager = MCPManager()
+        with (
+            patch("excelmanus.mcp.config.MCPConfigLoader") as mock_loader_cls,
+            patch(
+                "excelmanus.mcp.manager.MCPClientWrapper",
+                side_effect=_SlowClient,
+            ),
+        ):
+            mock_loader_cls.load.return_value = [cfg_a, cfg_b]
+            await manager.initialize(registry)
+
+        assert max_in == 2
+        names = registry.get_tool_names()
+        assert "mcp_server_a_ping" in names
+        assert "mcp_server_b_ping" in names
+
+
 # ── 日志输出（Requirements 7.1, 7.3）────────────────────────────
 
 

@@ -86,7 +86,7 @@ export function CapabilityRow({
             </Badge>
           )}
         </div>
-        <p className="text-[11px] text-muted-foreground truncate">{desc}</p>
+        <p className="text-[11px] text-muted-foreground leading-relaxed break-words">{desc}</p>
         {error && (
           <p className="text-[10px] text-destructive truncate mt-0.5" title={error}>
             {error}

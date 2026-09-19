@@ -271,3 +271,17 @@ class TestAutoFitIntegration:
         rows = apply_row_sizes(wb["Test"], auto_fit=True)
         wb.close()
         assert float(rows["1"]) >= float(rows["2"])
+
+
+def test_apply_freeze_panes_sets_and_clears(tmp_path: Path) -> None:
+    from openpyxl import Workbook
+
+    from excelmanus.workbook.styles import apply_freeze_panes
+
+    wb = Workbook()
+    ws = wb.active
+    assert apply_freeze_panes(ws, "A2") == "A2"
+    assert ws.freeze_panes == "A2"
+    assert apply_freeze_panes(ws, "") == ""
+    assert not ws.freeze_panes
+    wb.close()

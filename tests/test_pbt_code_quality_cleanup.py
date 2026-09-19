@@ -1,6 +1,6 @@
-"""Bug 条件探索测试 — 代码质量低优先级清理（R10 + Y6 + Y7 + I10）。
+"""Bug 条件探索测试 — 代码质量低优先级清理（R10 + Y7 + I10）。
 
-任务 1：在未修复代码上运行，确认四个 bug 条件确实存在。
+任务 1：在未修复代码上运行，确认 bug 条件确实存在。
 - 测试 FAILS on unfixed code → 证明 bug 存在（这是预期结果）
 - 测试 PASSES after fix → 验证修复正确
 
@@ -107,24 +107,6 @@ class TestFaultCondition:
             f" 存在版本漂移风险。"
         )
 
-    def test_y6_semantic_search_does_not_exist(self):
-        """Y6：semantic_search 冗余 async 包装函数应不存在（修复后）。
-
-        未修复时：semantic_search 是 async 函数 → 测试 FAILS（证明冗余包装 bug 存在）
-        修复后：函数被删除，导入时抛出 ImportError → 测试 PASSES
-
-        **验证：需求 1.3**
-        """
-        import importlib
-        import excelmanus.embedding.search as search_module
-
-        # 修复后期望：semantic_search 不存在于模块中
-        assert not hasattr(search_module, "semantic_search"), (
-            "Y6 Bug 条件确认：semantic_search 仍存在于 excelmanus.embedding.search 模块中，"
-            f" 且 asyncio.iscoroutinefunction(semantic_search) = "
-            f"{asyncio.iscoroutinefunction(search_module.semantic_search)}"
-        )
-
     def test_y7_stream_recorder_finalize_no_delta_chars(self):
         """Y7：_StreamRecorder._finalize 不应写入 delta_chars 字段（修复后）。
 
@@ -193,26 +175,8 @@ class TestFaultCondition:
 # ═══════════════════════════════════════════════════════════
 
 
-import numpy as np
 from hypothesis import given, settings
 from hypothesis import strategies as st
-
-
-# ── Hypothesis 策略：生成合法的向量输入 ──────────────────
-
-
-def _finite_floats():
-    """生成有限浮点数（排除 NaN/Inf）。"""
-    return st.floats(min_value=-1e6, max_value=1e6, allow_nan=False, allow_infinity=False)
-
-
-def _nonzero_vector(dim: int):
-    """生成非零向量（至少一个分量绝对值 > 1e-9）。"""
-    return (
-        st.lists(_finite_floats(), min_size=dim, max_size=dim)
-        .map(lambda xs: np.array(xs, dtype=np.float64))
-        .filter(lambda v: np.linalg.norm(v) > 1e-9)
-    )
 
 
 # ── 辅助：构造带 usage 的 mock chunk ─────────────────────
@@ -277,41 +241,6 @@ class TestPreservation:
 
     **验证：需求 3.1, 3.2, 3.3, 3.4, 3.5, 3.6**
     """
-
-    # ── P5a: cosine_top_k 结果正确性属性 ────
-
-    @given(
-        dim=st.integers(min_value=2, max_value=32),
-        n_corpus=st.integers(min_value=1, max_value=20),
-        k=st.integers(min_value=1, max_value=10),
-    )
-    @settings(max_examples=30)
-    def test_cosine_top_k_result_properties(self, dim, n_corpus, k):
-        """cosine_top_k 返回结果满足基本正确性属性。
-
-        使用 Hypothesis 生成随机维度、语料库大小和 k 值，
-        验证：结果数量 <= k、按 score 降序、index 在有效范围内。
-
-        **验证：需求 3.2**
-        """
-        from excelmanus.embedding.search import cosine_top_k
-
-        rng = np.random.default_rng(42)
-        query = rng.standard_normal(dim)
-        if np.linalg.norm(query) < 1e-9:
-            query[0] = 1.0
-        corpus = rng.standard_normal((n_corpus, dim))
-
-        results = cosine_top_k(query, corpus, k=k)
-
-        # 结果数量 <= k
-        assert len(results) <= k
-        # 按 score 降序
-        scores = [r.score for r in results]
-        assert scores == sorted(scores, reverse=True)
-        # index 在有效范围内
-        for r in results:
-            assert 0 <= r.index < n_corpus
 
     # ── P5b: _StreamRecorder 透传所有 chunk 且正确累计指标 ──
 

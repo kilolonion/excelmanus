@@ -1,14 +1,13 @@
 "use client";
 
-import { Download, ChevronDown, ChevronUp } from "lucide-react";
+import { ChevronDown, ChevronUp } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { MentionHighlighter } from "../MentionHighlighter";
 import { baseMarkdownComponents } from "../MarkdownComponents";
-import { CodePreviewModal, isCodeFile } from "../CodePreviewModal";
-import { downloadFile } from "@/lib/api";
-import { useSessionStore } from "@/stores/session-store";
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import { isWorkspaceFileHref } from "@/lib/file-kind";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import React, { useEffect, useRef, useState } from "react";
 
 /**
  * Recursively process React children: replace plain string nodes
@@ -25,36 +24,26 @@ function processChildren(children: React.ReactNode): React.ReactNode {
 
 const remarkPluginsStable = [remarkGfm];
 
-// 识别为可下载工作区文件的扩展名
-const DOWNLOADABLE_EXTENSIONS = /\.(xlsx|xlsm|xlsb|xls|csv|tsv|pdf|zip|tar|gz|docx|pptx|txt|json|xml|html|md)$/i;
-
 function isWorkspaceFileLink(href: string): boolean {
   if (!href) return false;
-  // 相对路径：./foo.xlsx、foo.xlsx、subdir/foo.xlsx
   if (href.startsWith("./") || href.startsWith("../") || !href.includes("://")) {
-    return DOWNLOADABLE_EXTENSIONS.test(href);
+    return isWorkspaceFileHref(href);
   }
   return false;
 }
 
-function FileDownloadLink({ href, children }: { href: string; children: React.ReactNode }) {
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+function WorkspaceFileLink({ href, children }: { href: string; children: React.ReactNode }) {
   const filename = href.split("/").pop() || href;
-  const handleDownload = useCallback(
-    (e: React.MouseEvent) => {
-      e.preventDefault();
-      downloadFile(href, filename, activeSessionId ?? undefined).catch(() => {});
-    },
-    [href, filename, activeSessionId],
-  );
   return (
     <button
       type="button"
-      onClick={handleDownload}
+      onClick={(e) => {
+        e.preventDefault();
+        openWorkspaceFile(href);
+      }}
       className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)] text-[var(--em-primary)]"
-      title={`下载 ${filename}`}
+      title={`打开 ${filename}`}
     >
-      <Download className="h-3 w-3 flex-shrink-0" />
       <span className="break-all">{children}</span>
     </button>
   );
@@ -71,21 +60,7 @@ const markdownComponents: React.ComponentProps<typeof ReactMarkdown>["components
   // 拦截链接：工作区文件链接 → 预览/下载按钮，其他 → 普通 <a>
   a({ href, children }) {
     if (href && isWorkspaceFileLink(href)) {
-      // 代码/文本文件 → 点击弹出预览
-      if (isCodeFile(href)) {
-        const filename = href.split("/").pop() || href;
-        const trigger = (
-          <button
-            type="button"
-            className="inline-flex items-center gap-1.5 rounded-md px-2 py-1 text-xs font-medium cursor-pointer transition-all border border-[var(--em-primary-alpha-15)] bg-[var(--em-primary-alpha-06)] hover:bg-[var(--em-primary-alpha-15)] hover:border-[var(--em-primary-alpha-20)] text-[var(--em-primary)]"
-            title={`预览 ${filename}`}
-          >
-            <span className="break-all">{children}</span>
-          </button>
-        );
-        return <CodePreviewModal filePath={href} filename={filename} trigger={trigger} />;
-      }
-      return <FileDownloadLink href={href}>{children}</FileDownloadLink>;
+      return <WorkspaceFileLink href={href}>{children}</WorkspaceFileLink>;
     }
     return (
       <a href={href} target="_blank" rel="noopener noreferrer" className="text-[var(--em-primary)] underline">

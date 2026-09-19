@@ -50,7 +50,14 @@ def _resolve_state_dir(workspace_root: str, state_dir: str | None = None) -> Pat
     else:
         root = root.resolve(strict=False)
 
-    raw = (state_dir or os.environ.get(_ENV_MCP_STATE_DIR) or "").strip()
+    setting = ""
+    try:
+        from excelmanus.settings_runtime import get_setting
+
+        setting = get_setting(_ENV_MCP_STATE_DIR) or ""
+    except Exception:
+        setting = ""
+    raw = (state_dir or setting or "").strip()
     if raw:
         resolved = Path(raw).expanduser()
         if not resolved.is_absolute():
@@ -63,8 +70,8 @@ def _resolve_state_dir(workspace_root: str, state_dir: str | None = None) -> Pat
 
 
 def _workspace_mcp_marker(workspace_root: str, state_dir: str | None = None) -> str:
-    """返回工作区 MCP 状态目录标记串（以 `/` 结尾）。"""
-    marker = str(_resolve_state_dir(workspace_root, state_dir=state_dir))
+    """返回工作区 MCP 状态目录标记串（统一 POSIX 分隔符，以 `/` 结尾）。"""
+    marker = _resolve_state_dir(workspace_root, state_dir=state_dir).as_posix()
     if not marker.endswith("/"):
         marker += "/"
     return marker

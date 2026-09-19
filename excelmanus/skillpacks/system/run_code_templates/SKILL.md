@@ -1,6 +1,6 @@
 ---
 name: run_code_templates
-description: 已有大表的 run_code 模板（批量写入、格式、图表、跨表）。
+description: 已有大表的 run_code 模板（批量写入、格式、图表、跨表）。常规聚合、去重、筛选直接用 analyze_spreadsheet 的 aggregate/distinct/filter，不必加载本技能。
 file_patterns:
   - "*.xlsx"
   - "*.xlsm"

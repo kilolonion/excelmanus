@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 import pytest
+from tests.conftest import symlink_or_skip
 
 from excelmanus.security import FileAccessGuard, SecurityViolationError
 
@@ -100,7 +101,7 @@ class TestResolveAndValidate:
         real_file = workspace / "real.xlsx"
         real_file.touch()
         link = workspace / "link.xlsx"
-        link.symlink_to(real_file)
+        symlink_or_skip(link, real_file)
         result = guard.resolve_and_validate("link.xlsx")
         assert result == real_file
 
@@ -119,7 +120,7 @@ class TestResolveAndValidate:
         guard = FileAccessGuard(str(restricted))
 
         link = restricted / "escape_link.xlsx"
-        link.symlink_to(evil_file)
+        symlink_or_skip(link, evil_file)
         with pytest.raises(SecurityViolationError, match="路径越界"):
             guard.resolve_and_validate("escape_link.xlsx")
 
@@ -129,7 +130,7 @@ class TestResolveAndValidate:
         """悬空符号链接应被拒绝，避免 strict=False 导致的目标判断不准确。"""
         target = workspace / "missing.xlsx"
         link = workspace / "dangling_link.xlsx"
-        link.symlink_to(target)
+        symlink_or_skip(link, target)
         with pytest.raises(SecurityViolationError, match="符号链接|不存在"):
             guard = FileAccessGuard(str(workspace))
             guard.resolve_and_validate("dangling_link.xlsx")

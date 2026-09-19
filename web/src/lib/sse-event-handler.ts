@@ -10,8 +10,14 @@ import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
 import { useExcelStore, type ExcelCellDiff, type ExcelDiffEntry, type ExcelPreviewData, type MergeRange } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
+import { useFilePreviewStore } from "@/stores/file-preview-store";
+import { useJevStore } from "@/stores/jev-store";
+import { classifyWorkspaceFile } from "@/lib/file-kind";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
+import { getIsMobile } from "@/hooks/use-mobile";
 import type { AssistantBlock, TaskItem } from "@/lib/types";
 import { instantSessionTitle } from "@/lib/session-title";
+import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -43,6 +49,12 @@ export interface SSEHandlerContext {
   hadStreamError: boolean;
   /** 本轮是否出现过会写入历史的工具副作用（diff / 改文件），用于结束后补同步。 */
   hadPersistedToolWork?: boolean;
+  /** 高置信 stay：抑制 done 内全部自动导航（含本轮自动 openCompare）。 */
+  suppressAutoOpen?: boolean;
+  /** 本轮 excel_diff 是否已自动打开对比视图（供 stay 撤回）。 */
+  autoOpenedCompareThisTurn?: boolean;
+  /** subscribe 回放：ui_hint 不重放。 */
+  fromReplay?: boolean;
 }
 
 /** DeltaBatcher 接口（从 chat-actions.ts 复用）。 */
@@ -57,6 +69,25 @@ export interface DeltaBatcher {
 // ---------------------------------------------------------------------------
 // Helpers (从 chat-actions.ts 提升为模块级共享)
 // ---------------------------------------------------------------------------
+
+function workbenchBusy(): boolean {
+  const excelStore = useExcelStore.getState();
+  const wordStore = useWordStore.getState();
+  const previewStore = useFilePreviewStore.getState();
+  return Boolean(
+    excelStore.panelOpen
+    || excelStore.compareMode
+    || wordStore.panelOpen
+    || previewStore.textOpen
+    || previewStore.imageOpen
+  );
+}
+
+function pathIsDismissed(path: string): boolean {
+  if (!path) return false;
+  const dismissed = useExcelStore.getState().dismissedPaths;
+  return Boolean(dismissed && dismissed.has(path));
+}
 
 /** 将后端 snake_case diff changes 映射为前端 camelCase ExcelCellDiff[] */
 export function _mapDiffChanges(raw: unknown[]): ExcelCellDiff[] {
@@ -129,6 +160,28 @@ export function getLastAssistantMessage(
 // ---------------------------------------------------------------------------
 
 const S = () => useChatStore.getState();
+
+/** Apply one changed-files batch from either MUTATION or legacy FILES_CHANGED. */
+function applyChangedFiles(
+  ctx: SSEHandlerContext,
+  msgId: string,
+  changedFiles: string[],
+): void {
+  if (changedFiles.length === 0) return;
+  ctx.hadPersistedToolWork = true;
+  const excelStore = useExcelStore.getState();
+  const wordStore = useWordStore.getState();
+  // 文件事件属于产生它的会话工作区，按事件会话键入桶，避免会话切换期间错挂到当前工作区。
+  const sourceWorkspaceKey = workspaceKeyForSessionId(ctx.effectiveSessionId);
+  for (const filePath of changedFiles) {
+    if (!filePath) continue;
+    const filename = filePath.split("/").pop() || filePath;
+    excelStore.addRecentFileIfNotDismissed({ path: filePath, filename }, sourceWorkspaceKey);
+  }
+  wordStore.handleFilesChanged(changedFiles);
+  S().addAffectedFiles(msgId, changedFiles);
+  excelStore.bumpWorkspaceFilesVersion();
+}
 
 function _getLastBlockOfType(msgId: string, type: string) {
   const msg = getLastAssistantMessage(S().messages, msgId);
@@ -366,6 +419,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const toolCallId = typeof toolCallIdRaw === "string" && toolCallIdRaw.length > 0
         ? toolCallIdRaw
         : undefined;
+      const parentCallIdRaw = data.parent_call_id;
+      const parentCallId = typeof parentCallIdRaw === "string" && parentCallIdRaw.length > 0
+        ? parentCallIdRaw
+        : undefined;
       const msgForStart = getLastAssistantMessage(S().messages, msgId);
       const streamingExists = toolCallId && msgForStart?.blocks.some(
         (b) => b.type === "tool_call" && b.toolCallId === toolCallId && (b.status as string) === "streaming",
@@ -378,6 +435,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
               args: (data.arguments as Record<string, unknown>) || b.args,
               status: "running",
               iteration: (data.iteration as number) || undefined,
+              parentCallId: parentCallId ?? b.parentCallId,
             } as AssistantBlock;
           }
           return b;
@@ -390,6 +448,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           args: (data.arguments as Record<string, unknown>) || {},
           status: "running",
           iteration: (data.iteration as number) || undefined,
+          parentCallId,
         });
       }
       break;
@@ -550,6 +609,8 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
             ...b,
             status: "done",
             success: (data.success as boolean) ?? true,
+            stopReason: (data.stop_reason as string) || (data.reason as string) || "",
+            diagnostic: (data.diagnostic as string) || "",
             iterations: (data.iterations as number) || b.iterations,
             toolCalls: (data.tool_calls as number) || b.toolCalls,
           };
@@ -577,6 +638,11 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "pending_approval": {
+      const approvalId = (data.approval_id as string) || "";
+      // 用户已提交/关闭同一单据后，忽略重放或迟到的 pending_approval，避免弹窗复活。
+      if (approvalId && S()._lastDismissedApprovalId === approvalId) {
+        break;
+      }
       const approvalToolCallId = (data.tool_call_id as string) || null;
       S().updateToolCallBlock(msgId, approvalToolCallId, (b) => {
         if (b.type === "tool_call") {
@@ -585,7 +651,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         return b;
       });
       S().setPendingApproval({
-        id: (data.approval_id as string) || "",
+        id: approvalId,
         toolName: (data.approval_tool_name as string) || "",
         arguments: {},
         riskLevel: (data.risk_level as "high" | "medium" | "low") || "high",
@@ -605,13 +671,20 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const undoable = Boolean(data.undoable);
       const hasChanges = Boolean(data.has_changes);
       const arResult = (data.result as string) || undefined;
-      S().setPendingApproval(null);
+      if (approvalId) {
+        S().dismissApproval(approvalId);
+      } else {
+        S().setPendingApproval(null);
+      }
       useSessionStore.getState().patchSession(ctx.effectiveSessionId, {
         pendingApproval: false,
       });
       const arToolCallId = (data.tool_call_id as string) || null;
       S().updateToolCallBlock(msgId, arToolCallId, (b) => {
-        if (b.type === "tool_call" && b.status === "pending") {
+        if (
+          b.type === "tool_call"
+          && (b.status === "pending" || b.status === "running" || b.status === "streaming")
+        ) {
           return {
             ...b,
             status: success ? ("success" as const) : ("error" as const),
@@ -677,7 +750,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       });
       if (epFilePath) {
         const fn = epFilePath.split("/").pop() || epFilePath;
-        useExcelStore.getState().addRecentFileIfNotDismissed({ path: epFilePath, filename: fn });
+        useExcelStore.getState().addRecentFileIfNotDismissed(
+          { path: epFilePath, filename: fn },
+          workspaceKeyForSessionId(ctx.effectiveSessionId),
+        );
       }
       break;
     }
@@ -717,14 +793,18 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       useExcelStore.getState().addDiff(edEntry);
       if (edFilePath) {
         const fn = edFilePath.split("/").pop() || edFilePath;
-        useExcelStore.getState().addRecentFileIfNotDismissed({ path: edFilePath, filename: fn });
+        useExcelStore.getState().addRecentFileIfNotDismissed(
+          { path: edFilePath, filename: fn },
+          workspaceKeyForSessionId(ctx.effectiveSessionId),
+        );
         S().addAffectedFiles(msgId, [edFilePath]);
       }
       // 跨文件差异自动打开对比视图
       if (edDiffMode === "cross_file" && edEntry.filePathB && edEntry.diffSummary) {
         const es = useExcelStore.getState();
-        if (!es.compareMode && !es.panelOpen) {
+        if (!ctx.suppressAutoOpen && !es.compareMode && !es.panelOpen) {
           es.openCompare(edFilePath, edEntry.filePathB);
+          ctx.autoOpenedCompareThisTurn = true;
         }
       }
       break;
@@ -759,22 +839,14 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
+    case "mutation": {
+      applyChangedFiles(ctx, msgId, (data.files as string[]) || []);
+      break;
+    }
+
     case "files_changed": {
-      ctx.hadPersistedToolWork = true;
-      const changedFiles = (data.files as string[]) || [];
-      const excelStore = useExcelStore.getState();
-      const wordStore = useWordStore.getState();
-      for (const filePath of changedFiles) {
-        if (filePath) {
-          const filename = filePath.split("/").pop() || filePath;
-          excelStore.addRecentFileIfNotDismissed({ path: filePath, filename });
-        }
-      }
-      if (changedFiles.length > 0) {
-        wordStore.handleFilesChanged(changedFiles);
-        S().addAffectedFiles(msgId, changedFiles);
-        excelStore.bumpWorkspaceFilesVersion();
-      }
+      // 历史 replay / 旧客户端兼容；新写入统一发 mutation。
+      applyChangedFiles(ctx, msgId, (data.files as string[]) || []);
       break;
     }
 
@@ -893,6 +965,46 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       break;
     }
 
+    case "ui_hint": {
+      if (ctx.fromReplay) break;
+      const surface = String(data.surface || "");
+      const suppress = Boolean(data.suppress_auto_open);
+      if (suppress) {
+        ctx.suppressAutoOpen = true;
+        if (ctx.autoOpenedCompareThisTurn) {
+          useExcelStore.getState().closeCompare();
+        }
+      }
+      if (surface === "stay" || surface === "none" || !surface) break;
+      if (getIsMobile()) break;
+      if (surface === "files_tab") {
+        useUIStore.getState().setSidebarTab("files");
+        break;
+      }
+      if (workbenchBusy()) break;
+      const filePath = String(data.file_path || "");
+      const sheetRaw = String(data.sheet || "");
+      const sheet = sheetRaw || undefined;
+      if (filePath && pathIsDismissed(filePath)) break;
+      if (surface === "side_panel") {
+        if (filePath) openWorkspaceFile(filePath, { intent: "preview", sheet });
+      } else if (surface === "sheet_full") {
+        if (filePath) openWorkspaceFile(filePath, { intent: "full", sheet });
+      } else if (surface === "compare") {
+        const fileB = String(data.file_path_b || "");
+        if (filePath && fileB) {
+          useExcelStore.getState().openCompare(filePath, fileB);
+        }
+      }
+      break;
+    }
+
+    case "jev_trace": {
+      if (ctx.fromReplay) break;
+      useJevStore.getState().appendFromEvent(data);
+      break;
+    }
+
     case "done": {
       // 仅清除流水线进度指示器。
       // 不要在此处调用 setStreaming(false) / setAbortController(null) / saveCurrentSession()；
@@ -901,19 +1013,30 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       // 触发 refreshSessionMessagesFromBackend 读到后端尚未持久化的数据，造成消息丢失。
       S().setPipelineStatus(null);
 
-      // ── 自动打开 Excel 预览面板 ──
-      // 任务完成后，如本轮对话涉及 Excel 文件变更，自动打开最后一个文件的预览
-      {
-        const EXCEL_RE = /\.(xlsx|xlsm|xls|csv)$/i;
+      // ── 自动打开工作台文档 ──
+      // 本轮若改了 spreadsheet / word，且用户没在看别的工作台面板，打开最后一个。
+      // 高置信 stay 的 ui_hint 会置 suppressAutoOpen，跳过全部自动导航。
+      if (!ctx.suppressAutoOpen) {
         const doneMsg = getLastAssistantMessage(S().messages, msgId);
         const affected = doneMsg?.affectedFiles ?? [];
-        const excelFiles = affected.filter((f) => EXCEL_RE.test(f));
-        if (excelFiles.length > 0) {
-          const lastFile = excelFiles[excelFiles.length - 1];
+        const lastSpreadsheet = [...affected].reverse().find(
+          (f) => classifyWorkspaceFile(f) === "spreadsheet",
+        );
+        const lastWord = [...affected].reverse().find(
+          (f) => classifyWorkspaceFile(f) === "word",
+        );
+        const target = lastSpreadsheet ?? lastWord;
+        if (target) {
           const excelStore = useExcelStore.getState();
-          // 只在面板未打开时自动打开，避免覆盖用户正在查看的内容
-          if (!excelStore.panelOpen) {
-            excelStore.openPanel(lastFile);
+          const wordStore = useWordStore.getState();
+          const previewStore = useFilePreviewStore.getState();
+          if (
+            !excelStore.panelOpen
+            && !wordStore.panelOpen
+            && !previewStore.textOpen
+            && !previewStore.imageOpen
+          ) {
+            openWorkspaceFile(target);
           }
         }
       }

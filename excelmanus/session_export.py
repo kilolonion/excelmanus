@@ -23,7 +23,7 @@ def _extract_text_content(msg: dict) -> str:
             if isinstance(part, dict):
                 if part.get("type") == "text":
                     parts.append(part.get("text", ""))
-                elif part.get("type") == "image_url":
+                elif part.get("type") in {"image_url", "image"}:
                     parts.append("[图片]")
             elif isinstance(part, str):
                 parts.append(part)

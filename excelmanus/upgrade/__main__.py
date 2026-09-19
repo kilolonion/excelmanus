@@ -1,7 +1,7 @@
 """python -m excelmanus.upgrade
 
 无参数：helper 模式（读取 upgrade-request.json，停机更新再拉起）。
---offline：CLI 更新，服务在跑则拒绝。
+--offline：命令行停机更新，服务在跑则拒绝。
 --check：只检查是否有更新。
 """
 
@@ -25,7 +25,7 @@ def _project_root(explicit: str | None) -> Path:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="excelmanus.upgrade")
     parser.add_argument("--project-root", default="")
-    parser.add_argument("--offline", action="store_true", help="CLI 停机更新（服务在跑则退出）")
+    parser.add_argument("--offline", action="store_true", help="停机更新（服务在跑则退出）")
     parser.add_argument("--check", action="store_true")
     parser.add_argument("--skip-backup", action="store_true")
     parser.add_argument("--skip-deps", action="store_true")
@@ -86,7 +86,7 @@ def main(argv: list[str] | None = None) -> int:
                 return 0
         runtime = read_runtime()
         if runtime:
-            stop_supervised(runtime)
+            stop_supervised(runtime, project_root=root)
         write_request({
             "action": "upgrade",
             "skip_backup": args.skip_backup,

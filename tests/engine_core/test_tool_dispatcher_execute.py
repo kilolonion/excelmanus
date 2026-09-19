@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from excelmanus.config import ExcelManusConfig
-from excelmanus.engine import AgentEngine, DelegateSubagentOutcome
+from excelmanus.engine import AgentEngine
 from excelmanus.events import EventType
 from excelmanus.skillpacks import Skillpack
 from excelmanus.subagent.models import SubagentFileChange, SubagentResult
@@ -226,28 +226,21 @@ class TestToolDispatcherExecute:
         engine._has_write_tool_call = False
 
         sub_result = SubagentResult(
-            success=True,
-            summary="ok",
+            stop_reason="completed",
+            output="ok",
             subagent_name="writer",
             permission_mode="default",
             conversation_id="sub_1",
             structured_changes=[
-                SubagentFileChange(path="outputs/test.xlsx", tool_name="write_excel")
+                SubagentFileChange(path="outputs/test.xlsx", tool_name="edit_spreadsheet")
             ],
         )
-        outcome = DelegateSubagentOutcome(
-            reply="子代理已写入",
-            success=True,
-            picked_agent="writer",
-            task_text="写入测试",
-            subagent_result=sub_result,
-        )
-        engine._delegate_to_subagent = AsyncMock(return_value=outcome)
+        engine._delegate_to_subagent = AsyncMock(return_value=sub_result)
 
         tc = SimpleNamespace(
             id="call_delegate",
             function=SimpleNamespace(
-                name="delegate_to_subagent",
+                name="delegate",
                 arguments=json.dumps({"task": "写入测试", "agent_name": "writer"}),
             ),
         )
@@ -261,7 +254,7 @@ class TestToolDispatcherExecute:
         )
 
         assert result.success is True
-        assert result.result == "子代理已写入"
+        assert result.result == "ok"
         assert engine._has_write_tool_call is True
 
     @pytest.mark.asyncio
@@ -620,10 +613,11 @@ class TestCallBudgetAndCodePolicy:
         assert "上限" in second.result
 
     @pytest.mark.asyncio
-    async def test_fs_write_run_code_needs_approval_when_yellow_auto(self) -> None:
+    async def test_fs_write_run_code_auto_runs_under_sandbox_confinement(self) -> None:
+        """FS_WRITE 由沙箱 pending+发布管线承载：YELLOW 也直接执行，不进审批。"""
         engine = _make_engine(
             code_policy_enabled=True,
-            code_policy_yellow_auto_approve=True,
+            code_policy_yellow_auto_approve=False,
         )
         events: list = []
         tc = SimpleNamespace(
@@ -642,6 +636,132 @@ class TestCallBudgetAndCodePolicy:
             iteration=1,
             route_result=None,
         )
-        assert result.pending_approval is True
-        assert engine._approval.pending is not None
-        assert any(event.event_type == EventType.PENDING_APPROVAL for event in events)
+        assert result.pending_approval is False
+        assert engine._approval.pending is None
+        assert not any(event.event_type == EventType.PENDING_APPROVAL for event in events)
+
+
+class TestIdenticalFailedArgsIntercept:
+    @pytest.mark.asyncio
+    async def test_second_identical_failure_does_not_reexecute(self) -> None:
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.engine_core.tool_result import error_result
+
+        engine = _make_engine()
+        dispatcher = engine._tool_dispatcher
+        calls: list[dict] = []
+
+        async def fail_dispatch(**kwargs):
+            calls.append(dict(kwargs.get("arguments") or {}))
+            err = error_result(
+                "缺 sheet",
+                code="INVALID_ARGS",
+                fields={"example": {"kind": "format", "sheet": "S", "range": "A1"}},
+            )
+            return _ToolExecOutcome(
+                result_str=err.model_text,
+                success=False,
+                error="INVALID_ARGS",
+                structured=err,
+            )
+
+        dispatcher._dispatch_via_handlers = fail_dispatch
+        args = {"file_path": "a.xlsx", "operations": [{"font": {"bold": True}}]}
+
+        def _tc(call_id: str, payload: dict) -> SimpleNamespace:
+            return SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(
+                    name="add_numbers",
+                    arguments=json.dumps(payload),
+                ),
+            )
+
+        first = await dispatcher.execute(
+            tc=_tc("c1", args), tool_scope=["add_numbers"], on_event=None, iteration=1,
+        )
+        assert first.success is False
+        assert len(calls) == 1
+
+        second = await dispatcher.execute(
+            tc=_tc("c2", args), tool_scope=["add_numbers"], on_event=None, iteration=2,
+        )
+        assert second.success is False
+        assert "参数与上次失败完全相同" in (second.result or "")
+        assert "缺 sheet" in (second.result or "")
+        assert len(calls) == 1
+
+        different = {**args, "operations": [{"kind": "format", "sheet": "S", "range": "A1"}]}
+        third = await dispatcher.execute(
+            tc=_tc("c3", different), tool_scope=["add_numbers"], on_event=None, iteration=3,
+        )
+        assert len(calls) == 2
+        assert third.success is False
+
+    @pytest.mark.asyncio
+    async def test_identical_successful_inspect_both_execute(self) -> None:
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
+        engine = _make_engine()
+        dispatcher = engine._tool_dispatcher
+        calls: list[int] = []
+
+        async def ok_dispatch(**kwargs):
+            calls.append(1)
+            return _ToolExecOutcome(result_str="overview ok", success=True)
+
+        dispatcher._dispatch_via_handlers = ok_dispatch
+        args = {"mode": "overview", "file_path": "a.xlsx"}
+
+        def _tc(call_id: str) -> SimpleNamespace:
+            return SimpleNamespace(
+                id=call_id,
+                function=SimpleNamespace(
+                    name="add_numbers",
+                    arguments=json.dumps(args),
+                ),
+            )
+
+        first = await dispatcher.execute(
+            tc=_tc("i1"), tool_scope=["add_numbers"], on_event=None, iteration=1,
+        )
+        second = await dispatcher.execute(
+            tc=_tc("i2"), tool_scope=["add_numbers"], on_event=None, iteration=2,
+        )
+        assert first.success is True
+        assert second.success is True
+        assert len(calls) == 2
+
+    @pytest.mark.asyncio
+    async def test_subcall_identical_failure_is_intercepted(self) -> None:
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.engine_core.tool_result import error_result
+
+        engine = _make_engine()
+        dispatcher = engine._tool_dispatcher
+        calls: list[int] = []
+
+        async def fail_dispatch(**kwargs):
+            calls.append(1)
+            err = error_result("缺 sheet", code="INVALID_ARGS")
+            return _ToolExecOutcome(
+                result_str=err.model_text,
+                success=False,
+                error="INVALID_ARGS",
+                structured=err,
+            )
+
+        dispatcher._dispatch_via_handlers = fail_dispatch
+        args = {"file_path": "a.xlsx", "operations": [{"kind": "size"}]}
+        first = await dispatcher.execute_subcall(
+            tool_name="add_numbers", arguments=args, tool_scope=["add_numbers"],
+            root_call_id="run1",
+        )
+        second = await dispatcher.execute_subcall(
+            tool_name="add_numbers", arguments=args, tool_scope=["add_numbers"],
+            root_call_id="run1",
+        )
+        assert first.success is False
+        assert second.success is False
+        assert "参数与上次失败完全相同" in (second.model_text or "")
+        assert len(calls) == 1

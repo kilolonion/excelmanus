@@ -134,8 +134,15 @@ def _chat_messages_to_responses_input(
         content = msg.get("content")
 
         if role == "system":
-            # system 消息 → instructions 参数传递
             if isinstance(content, str) and content.strip():
+                if instructions_parts:
+                    # 不变量 tripwire：project_for_request 的 sanitize 已把历史内
+                    # system 全部降级为 user，wire 只应有 head system。触发此异常
+                    # 说明某条 wire 生产路径绕过了 sanitize，是 bug 信号。
+                    raise ValueError(
+                        "mid-history system is not representable; "
+                        "wire 出现第二个 system 消息，说明投影层绕过了 sanitize"
+                    )
                 instructions_parts.append(content)
             continue
 
@@ -154,6 +161,12 @@ def _chat_messages_to_responses_input(
                         url = img_info.get("url", "") if isinstance(img_info, dict) else str(img_info)
                         detail = img_info.get("detail", "auto") if isinstance(img_info, dict) else "auto"
                         converted_parts.append({"type": "input_image", "image_url": url, "detail": detail})
+                    elif part_type == "file":
+                        file_id = part.get("file_id")
+                        if not file_id and isinstance(part.get("file"), dict):
+                            file_id = part["file"].get("file_id")
+                        if file_id:
+                            converted_parts.append({"type": "input_file", "file_id": file_id})
                     else:
                         converted_parts.append(part)
                 input_items.append({
@@ -295,6 +308,13 @@ def _apply_chat_kwargs_to_responses_body(body: dict[str, Any], kwargs: dict[str,
         # "auto" 在部分模型（如 codex）上仅返回一行标题。
         reasoning_payload.setdefault("summary", "detailed")
         body["reasoning"] = reasoning_payload
+
+    prompt_cache_key = kwargs.get("prompt_cache_key")
+    if isinstance(prompt_cache_key, str) and prompt_cache_key.strip():
+        # Responses API 与 Chat Completions 使用同名字段；必须在首次请求出网，
+        # 由 llm_caller 在 provider 明确拒绝该参数时再剥离重试。
+        # extra_body 若显式给出同名 key，则尊重用户覆盖。
+        body.setdefault("prompt_cache_key", prompt_cache_key)
 
     max_tokens = kwargs.get("max_tokens")
     if isinstance(max_tokens, int) and max_tokens > 0 and "max_output_tokens" not in body:
@@ -565,26 +585,14 @@ class OpenAIResponsesClient:
         注意：backend-api 强制要求 stream=true，因此即使调用方请求非流式，
         内部也走流式请求并收集完整结果后返回。
         """
-        instructions, input_items = _chat_messages_to_responses_input(messages)
+        from excelmanus.providers.request_body import responses_body
 
-        body: dict[str, Any] = {
-            "model": model,
-            "input": input_items,
-            "stream": True,
-            "store": False,
-        }
-        if instructions:
-            body["instructions"] = instructions
-
-        tools_list = tools if isinstance(tools, list) else None
-        responses_tools = _chat_tools_to_responses_tools(tools_list)
-        if responses_tools:
-            body["tools"] = responses_tools
-
-        mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
-        if mapped_tool_choice is not None:
-            body["tool_choice"] = mapped_tool_choice
-        _apply_chat_kwargs_to_responses_body(body, extra_kwargs or {})
+        prepared = (extra_kwargs or {}).get("_prepared_body")
+        body = dict(prepared) if prepared is not None else responses_body(
+            model, messages, tools, tool_choice=tool_choice, extra_kwargs=extra_kwargs,
+        )
+        input_items = body.get("input", [])
+        responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
         headers = {
@@ -647,23 +655,14 @@ class OpenAIResponsesClient:
         extra_kwargs: dict[str, Any] | None = None,
     ) -> Any:
         """流式执行 Responses API 请求，返回异步生成器 yield StreamDelta。"""
-        instructions, input_items = _chat_messages_to_responses_input(messages)
-        body: dict[str, Any] = {
-            "model": model,
-            "input": input_items,
-            "stream": True,
-            "store": False,
-        }
-        if instructions:
-            body["instructions"] = instructions
-        tools_list = tools if isinstance(tools, list) else None
-        responses_tools = _chat_tools_to_responses_tools(tools_list)
-        if responses_tools:
-            body["tools"] = responses_tools
-        mapped_tool_choice = _map_chat_tool_choice_to_responses(tool_choice)
-        if mapped_tool_choice is not None:
-            body["tool_choice"] = mapped_tool_choice
-        _apply_chat_kwargs_to_responses_body(body, extra_kwargs or {})
+        from excelmanus.providers.request_body import responses_body
+
+        prepared = (extra_kwargs or {}).get("_prepared_body")
+        body = dict(prepared) if prepared is not None else responses_body(
+            model, messages, tools, tool_choice=tool_choice, extra_kwargs=extra_kwargs,
+        )
+        input_items = body.get("input", [])
+        responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
         headers = {

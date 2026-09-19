@@ -8,6 +8,8 @@ export interface HealthData {
   model: string;
   tools: string[];
   skillpacks: string[];
+  tool_count?: number;
+  skillpack_count?: number;
   active_sessions: number;
   restart_reason?: string;
 }
@@ -28,7 +30,7 @@ interface HealthHubState {
   refreshNow: () => void;
 }
 
-const INIT_DELAY_MS = 2_000;
+const INIT_DELAY_MS = 200;
 const QUICK_CONFIRM_MS = 15_000;
 const STEADY_INTERVAL_MS = 30_000;
 const ERROR_INTERVAL_MS = 15_000;
@@ -58,9 +60,19 @@ const normalizeHealthData = (raw: HealthPayload): HealthData => ({
   model: typeof raw.model === "string" ? raw.model : "",
   tools: Array.isArray(raw.tools) ? raw.tools : [],
   skillpacks: Array.isArray(raw.skillpacks) ? raw.skillpacks : [],
+  tool_count: typeof raw.tool_count === "number" ? raw.tool_count : undefined,
+  skillpack_count: typeof raw.skillpack_count === "number" ? raw.skillpack_count : undefined,
   active_sessions: typeof raw.active_sessions === "number" ? raw.active_sessions : 0,
   restart_reason: typeof raw.restart_reason === "string" ? raw.restart_reason : undefined,
 });
+
+export function healthToolCount(health: HealthData): number {
+  return typeof health.tool_count === "number" ? health.tool_count : health.tools.length;
+}
+
+export function healthSkillpackCount(health: HealthData): number {
+  return typeof health.skillpack_count === "number" ? health.skillpack_count : health.skillpacks.length;
+}
 
 function schedulePoll(delayMs: number): void {
   if (pollTimer) {

@@ -11,6 +11,7 @@ import {
   buildExcelFileUrl,
   fetchExcelCompare,
 } from "@/lib/api";
+import { activeFileRef } from "@/lib/workspace-file-ref";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
@@ -207,9 +208,9 @@ export function ExcelCompareView() {
           ) : error ? (
             <div className="flex items-center justify-center h-full text-sm text-destructive">{error}</div>
           ) : mobilePane === "A" ? (
-            <UniverSheet fileUrl={fileUrlA} initialSheet={activeTabA ?? undefined} readOnly />
+            <UniverSheet fileUrl={fileUrlA} fileRef={compareFileA ? activeFileRef(compareFileA) : null} sessionId={activeSessionId} initialSheet={activeTabA ?? undefined} readOnly />
           ) : (
-            <UniverSheet fileUrl={fileUrlB} initialSheet={activeTabB ?? undefined} readOnly />
+            <UniverSheet fileUrl={fileUrlB} fileRef={compareFileB ? activeFileRef(compareFileB) : null} sessionId={activeSessionId} initialSheet={activeTabB ?? undefined} readOnly />
           )}
         </div>
 
@@ -283,7 +284,7 @@ export function ExcelCompareView() {
               <span className="truncate font-normal text-foreground/70">{fileNameA}</span>
             </div>
             <div className="flex-1 min-h-0">
-              <UniverSheet fileUrl={fileUrlA} initialSheet={activeTabA ?? undefined} readOnly />
+              <UniverSheet fileUrl={fileUrlA} fileRef={compareFileA ? activeFileRef(compareFileA) : null} sessionId={activeSessionId} initialSheet={activeTabA ?? undefined} readOnly />
             </div>
           </div>
 
@@ -311,7 +312,7 @@ export function ExcelCompareView() {
               <span className="truncate font-normal text-foreground/70">{fileNameB}</span>
             </div>
             <div className="flex-1 min-h-0">
-              <UniverSheet fileUrl={fileUrlB} initialSheet={activeTabB ?? undefined} readOnly />
+              <UniverSheet fileUrl={fileUrlB} fileRef={compareFileB ? activeFileRef(compareFileB) : null} sessionId={activeSessionId} initialSheet={activeTabB ?? undefined} readOnly />
             </div>
           </div>
         </div>

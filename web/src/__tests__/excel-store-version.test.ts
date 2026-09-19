@@ -8,6 +8,10 @@ function resetVersionState() {
     draftRange: null,
     pendingSelection: null,
     selectionMode: false,
+    activeWorkspaceKey: null,
+    viewGeneration: 0,
+    fullViewPath: null,
+    activeFilePath: null,
   });
 }
 
@@ -98,5 +102,41 @@ describe("excel-store contentVersion", () => {
       timestamp: Date.now(),
     });
     expect(useExcelStore.getState().getContentVersion("./book.xlsx")).toBeNull();
+  });
+
+  it("opens the workbook panel without replacing the last file", () => {
+    useExcelStore.setState({
+      panelOpen: false,
+      activeFilePath: "./kept.xlsx",
+      activeSheet: "Sheet1",
+    });
+    useExcelStore.getState().openPanel();
+    expect(useExcelStore.getState().panelOpen).toBe(true);
+    expect(useExcelStore.getState().panelTab).toBe("sheet");
+    expect(useExcelStore.getState().activeFilePath).toBe("./kept.xlsx");
+    expect(useExcelStore.getState().activeSheet).toBe("Sheet1");
+  });
+
+  it("isolates versions across workspaces", () => {
+    useExcelStore.getState().setContentVersion("./report.xlsx", "sha256:a", "id:ws-a");
+    useExcelStore.getState().setContentVersion("./report.xlsx", "sha256:b", "id:ws-b");
+    expect(useExcelStore.getState().getContentVersion("./report.xlsx", "id:ws-a")).toBe("sha256:a");
+    expect(useExcelStore.getState().getContentVersion("./report.xlsx", "id:ws-b")).toBe("sha256:b");
+    useExcelStore.getState().rebindSession("id:ws-a", "id:ws-b");
+    expect(useExcelStore.getState().getContentVersion("./report.xlsx", "id:ws-a")).toBeNull();
+    expect(useExcelStore.getState().getContentVersion("./report.xlsx")).toBe("sha256:b");
+  });
+
+  it("opens the history surface on the current workbook", () => {
+    useExcelStore.setState({
+      panelOpen: false,
+      panelTab: "sheet",
+      activeFilePath: "./kept.xlsx",
+    });
+    useExcelStore.getState().openHistory(undefined, "operations");
+    expect(useExcelStore.getState().panelOpen).toBe(true);
+    expect(useExcelStore.getState().panelTab).toBe("history");
+    expect(useExcelStore.getState().historySubview).toBe("operations");
+    expect(useExcelStore.getState().activeFilePath).toBe("./kept.xlsx");
   });
 });

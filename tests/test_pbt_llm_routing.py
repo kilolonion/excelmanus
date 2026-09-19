@@ -17,7 +17,7 @@ from hypothesis import strategies as st
 
 from excelmanus.config import ExcelManusConfig
 from excelmanus.engine import AgentEngine
-from excelmanus.subagent import SubagentResult
+from excelmanus.subagent import SubagentResult, SubagentRun
 from excelmanus.skillpacks import SkillpackLoader, SkillRouter
 from excelmanus.tools import ToolDef, ToolRegistry
 
@@ -460,25 +460,25 @@ class TestDelegateSubagentConstraint:
                 ],
             )
 
-            captured: dict[str, str] = {}
+            captured: dict[str, object] = {}
 
-            async def _fake_run_subagent(
-                *,
-                agent_name: str,
-                prompt: str,
-                on_event=None,
-            ) -> SubagentResult:
-                captured["agent_name"] = agent_name
-                captured["prompt"] = prompt
-                return SubagentResult(
-                    success=True,
-                    summary="子代理摘要",
-                    subagent_name=agent_name,
-                    permission_mode="readOnly",
-                    conversation_id="c1",
+            async def _fake_start(request):
+                captured["agent_name"] = request.agent_name
+                captured["task"] = request.task
+                captured["file_paths"] = list(request.file_paths)
+                run = SubagentRun("c1")
+                run.set_result(
+                    SubagentResult(
+                        stop_reason="completed",
+                        output="子代理摘要",
+                        subagent_name=request.agent_name or "subagent",
+                        permission_mode="readOnly",
+                        conversation_id="c1",
+                    )
                 )
+                return run
 
-            engine.run_subagent = AsyncMock(side_effect=_fake_run_subagent)
+            engine._subagent_runtime.start = AsyncMock(side_effect=_fake_start)
             result = asyncio.run(
                 engine._handle_delegate_to_subagent(
                     task=task,
@@ -489,5 +489,7 @@ class TestDelegateSubagentConstraint:
             assert result == "子代理摘要"
 
             assert captured.get("agent_name") == "explorer"
-            prompt = captured.get("prompt", "")
-            assert task.strip() in prompt
+            assert task.strip() in str(captured.get("task") or "")
+            assert captured.get("file_paths") == [
+                item.strip() for item in file_paths if isinstance(item, str) and item.strip()
+            ]

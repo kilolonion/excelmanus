@@ -1,9 +1,13 @@
-"""Bench 测试运行器：加载用例 JSON → 调用 engine.followup() → 收集事件轨迹 → 输出 JSON 日志。
+"""Bench 测试运行器：加载用例 JSON → 走与前端直聊相同的会话链路 → 输出 JSON 日志。
+
+每轮与网页聊天一致：SessionManager.acquire_for_chat → 提及解析 →
+``engine.followup(..., mention_contexts, chat_mode, present_as)`` →
+release_for_chat。问答/审批走 InteractionRegistry（同 ``/answer`` ``/approve``）。
 
 运行方式：
     python -m excelmanus.bench --all
-    python -m excelmanus.bench --suite bench/cases/suite_basic.json
-    python -m excelmanus.bench bench/cases/suite_basic.json
+    python -m excelmanus.bench --suite bench/cases/suite_smoke.json
+    python -m excelmanus.bench --suite bench/cases/suite_experiential.json
     python -m excelmanus.bench --message "读取销售明细前10行"
     python -m excelmanus.bench "读取销售明细前10行"
 """
@@ -14,7 +18,6 @@ import asyncio
 import argparse
 import json
 import os
-import re
 import shutil
 import time
 import uuid
@@ -29,13 +32,6 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 from rich.table import Table
 
-from excelmanus.config import ExcelManusConfig, load_config
-from excelmanus.engine import AgentEngine, ChatResult
-from excelmanus.events import EventType, ToolCallEvent
-from excelmanus.logger import get_logger, setup_logging
-from excelmanus.renderer import StreamRenderer
-from excelmanus.skillpacks import SkillpackLoader, SkillRouter
-from excelmanus.tools import ToolRegistry
 from excelmanus.bench_validator import (
     ValidationSummary,
     aggregate_suite_validation,
@@ -43,11 +39,24 @@ from excelmanus.bench_validator import (
     validate_case,
 )
 from excelmanus.bench_reporter import save_suite_report
+from excelmanus.chat_runtime import ChatRuntime, build_chat_runtime
+from excelmanus.config import ConfigError, ExcelManusConfig, load_config
+from excelmanus.engine import AgentEngine, ChatResult
+from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.fake_frontend import FakeFrontend
+from excelmanus.logger import get_logger, setup_logging
+from excelmanus.renderer import StreamRenderer
+from excelmanus.session import SessionManager
+from excelmanus.stores.workspace_store import WorkspacePathError
 
 logger = get_logger("bench")
 
 # 工具结果最大保留字符数（避免日志过大）
 _TOOL_RESULT_MAX_CHARS = 8000
+
+
+class TurnTimeoutError(RuntimeError):
+    """单轮超出硬超时被中止（防止无人值守卡死）。"""
 
 # trace 模式下系统提示最大保留字符数
 _TRACE_SYSTEM_PROMPT_MAX_CHARS = 50000
@@ -56,13 +65,22 @@ _TRACE_SYSTEM_PROMPT_MAX_CHARS = 50000
 
 
 @dataclass
+class BenchTurn:
+    """伪造前端的一轮输入。"""
+
+    text: str
+    attachments: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
+
+
+@dataclass
 class BenchCase:
     """单个测试用例。
 
-    支持单轮和多轮两种格式：
-    - 单轮：仅设置 ``message``
-    - 多轮：设置 ``messages`` 列表，按顺序发送给同一个 engine 实例
-    加载时会统一归一化为 ``messages`` 列表。
+    支持单轮和多轮：
+    - 单轮：``message``
+    - 多轮：``messages``（字符串或 ``{text, attachments, images}``）
+    附件按前端上传，不走评分。
     """
 
     id: str
@@ -71,9 +89,18 @@ class BenchCase:
     messages: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     expected: dict[str, Any] = field(default_factory=dict)
-    source_files: list[str] = field(default_factory=list)
-    auto_replies: list[str] = field(default_factory=list)
+    # 声明式断言规则（suite 级默认 + case 级覆盖，加载时已合并）
     assertions: dict[str, Any] = field(default_factory=dict)
+    source_files: list[str] = field(default_factory=list)
+    attachments: list[str] = field(default_factory=list)
+    images: list[str] = field(default_factory=list)
+    auto_replies: list[str] = field(default_factory=list)
+    chat_mode: str = "write"
+    present_as: str | None = None
+    auto_approve: str = "fullaccess"
+    # 单轮硬超时（秒），0 = 不限制；防止审批/网络挂起导致无人值守卡死
+    turn_timeout: float = 0.0
+    turns: list[BenchTurn] = field(default_factory=list)
 
 
 @dataclass
@@ -87,6 +114,8 @@ class ToolCallLog:
     error: str | None
     iteration: int
     duration_ms: float = 0.0
+    # 非空表示 run_code 内层 SDK 调用（parent 为外层 run_code 的 call_id）
+    parent_call_id: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,7 +126,73 @@ class ToolCallLog:
             "error": self.error,
             "iteration": self.iteration,
             "duration_ms": round(self.duration_ms, 1),
+            "parent_call_id": self.parent_call_id,
         }
+
+
+def _tc_get(tc: Any, name: str, default: Any = "") -> Any:
+    if isinstance(tc, dict):
+        return tc.get(name, default)
+    return getattr(tc, name, default)
+
+
+def normalize_tool_error_message(text: str) -> str:
+    """把 traceback / HostToolError / JSON 错误收成同一条 root message。"""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+    if raw.startswith("{") or raw.startswith("["):
+        try:
+            payload = json.loads(raw)
+        except (json.JSONDecodeError, TypeError, ValueError):
+            payload = None
+        if isinstance(payload, dict):
+            msg = str(payload.get("message") or payload.get("error") or "").strip()
+            code = str(payload.get("error_code") or payload.get("code") or "").strip()
+            if msg:
+                return f"{code}:{msg}" if code else msg
+    if "Traceback" in raw or "HostToolError" in raw:
+        lines = [line.strip() for line in raw.splitlines() if line.strip()]
+        for line in reversed(lines):
+            if line.startswith("File ") or line.startswith("Traceback"):
+                continue
+            if "HostToolError" in line:
+                _, _, rest = line.partition("HostToolError")
+                rest = rest.lstrip(": ").strip()
+                if rest.startswith("(") and ")" in rest:
+                    inner = rest[1:rest.index(")")]
+                    first = inner.split(",", 1)[0].strip().strip("'\"")
+                    if first:
+                        return first
+                return rest or line
+            return line
+        return lines[-1] if lines else raw
+    return " ".join(raw.split())
+
+
+def _is_wrapper_tool_failure(tc: Any) -> bool:
+    if _tc_get(tc, "parent_call_id"):
+        return False
+    if str(_tc_get(tc, "tool_name") or "") != "run_code":
+        return False
+    blob = f"{_tc_get(tc, 'error') or ''}\n{_tc_get(tc, 'result') or ''}"
+    return "Traceback" in blob or "HostToolError" in blob
+
+
+def count_distinct_tool_errors(tool_calls: list[Any] | None) -> int:
+    """root contracts：内层⊕traceback 计 1；同一 (tool, 规范化 message) 重试计 1。"""
+    failed = [tc for tc in (tool_calls or []) if not _tc_get(tc, "success", True)]
+    inner_failed = [tc for tc in failed if _tc_get(tc, "parent_call_id")]
+    keys: set[tuple[str, str]] = set()
+    for tc in failed:
+        if not _tc_get(tc, "parent_call_id") and inner_failed and _is_wrapper_tool_failure(tc):
+            continue
+        name = str(_tc_get(tc, "tool_name") or "")
+        msg = normalize_tool_error_message(
+            str(_tc_get(tc, "error") or _tc_get(tc, "result") or "")
+        )
+        keys.add((name, msg))
+    return len(keys)
 
 
 @dataclass
@@ -135,6 +230,12 @@ class TurnResult:
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
         tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
+        inner_tool_calls = sum(1 for tc in self.tool_calls if tc.parent_call_id)
+        model_tool_failures = sum(
+            1 for tc in self.tool_calls if not tc.success and not tc.parent_call_id
+        )
+        internal_tool_failures = tool_failures - model_tool_failures
+        distinct_tool_errors = count_distinct_tool_errors(self.tool_calls)
         result = {
             "turn_index": self.turn_index,
             "message": self.message,
@@ -160,6 +261,10 @@ class TurnResult:
                 "tool_call_count": len(self.tool_calls),
                 "tool_successes": tool_successes,
                 "tool_failures": tool_failures,
+                "inner_tool_calls": inner_tool_calls,
+                "model_tool_failures": model_tool_failures,
+                "internal_tool_failures": internal_tool_failures,
+                "distinct_tool_errors": distinct_tool_errors,
                 "llm_call_count": len(self.llm_calls),
                 "reasoning_metrics": self.reasoning_metrics,
             },
@@ -220,10 +325,21 @@ class BenchResult:
     approval_events: list[dict[str, Any]] = field(default_factory=list)
     # Think-Act 推理质量指标（聚合）
     reasoning_metrics: dict[str, Any] = field(default_factory=dict)
+    session_id: str = ""
+    pipeline: str = "fake_frontend"
+    conversation_export: dict[str, Any] = field(default_factory=dict)
+    # 声明式断言校验结果（suite/case 声明了 assertions 或 golden 时有值）
+    validation: ValidationSummary | None = None
 
     def to_dict(self) -> dict[str, Any]:
         tool_successes = sum(1 for tc in self.tool_calls if tc.success)
         tool_failures = sum(1 for tc in self.tool_calls if not tc.success)
+        inner_tool_calls = sum(1 for tc in self.tool_calls if tc.parent_call_id)
+        model_tool_failures = sum(
+            1 for tc in self.tool_calls if not tc.success and not tc.parent_call_id
+        )
+        internal_tool_failures = tool_failures - model_tool_failures
+        distinct_tool_errors = count_distinct_tool_errors(self.tool_calls)
         result: dict[str, Any] = {
             "schema_version": 3,
             "kind": "case_result",
@@ -235,6 +351,8 @@ class BenchResult:
                 "turn_count": len(self.turns) if self.turns else 1,
                 "active_model": self.active_model,
                 "config_snapshot": self.config_snapshot,
+                "session_id": self.session_id,
+                "pipeline": self.pipeline,
             },
             "execution": {
                 "duration_seconds": round(self.duration_seconds, 2),
@@ -252,6 +370,7 @@ class BenchResult:
                 "subagent_events": self.subagent_events,
                 "llm_calls": self.llm_calls,
                 "conversation_messages": self.conversation_messages,
+                "conversation_export": self.conversation_export,
             },
             "result": {
                 "reply": self.reply,
@@ -263,6 +382,10 @@ class BenchResult:
                 "tool_call_count": len(self.tool_calls),
                 "tool_successes": tool_successes,
                 "tool_failures": tool_failures,
+                "inner_tool_calls": inner_tool_calls,
+                "model_tool_failures": model_tool_failures,
+                "internal_tool_failures": internal_tool_failures,
+                "distinct_tool_errors": distinct_tool_errors,
                 "llm_call_count": len(self.llm_calls),
                 "reasoning_metrics": self.reasoning_metrics,
             },
@@ -270,6 +393,9 @@ class BenchResult:
         # 多轮对话时输出各轮次详情
         if self.turns:
             result["turns"] = [t.to_dict() for t in self.turns]
+        # 声明式断言校验结果
+        if self.validation is not None:
+            result["validation"] = self.validation.to_dict()
         # engine 内部交互轨迹
         if self.engine_trace:
             result["engine_trace"] = self.engine_trace
@@ -376,7 +502,7 @@ class _EventCollector:
 
     def on_event(self, event: ToolCallEvent) -> None:
         """引擎事件回调：实时渲染 + 收集日志。"""
-        # 实时渲染到终端（和 CLI 一样的效果）
+        # 实时渲染到终端
         if self._render_enabled:
             self._renderer.handle_event(event)
 
@@ -408,6 +534,7 @@ class _EventCollector:
                 error=event.error,
                 iteration=event.iteration,
                 duration_ms=duration_ms,
+                parent_call_id=getattr(event, "parent_call_id", "") or "",
             ))
 
         elif event.event_type == EventType.ROUTE_END:
@@ -643,8 +770,13 @@ class _StreamRecorder:
 class _LLMCallInterceptor:
     """拦截 engine 的 LLM API 调用，记录完整的请求和响应。
 
-    通过 monkey-patch engine._client.chat.completions.create 实现，
+    通过 monkey-patch ``engine._client.chat.completions.create`` 实现，
     无需修改 engine 源代码。
+
+    模型切换（``switch_model`` → ``_sync_from_llm_clients``）和 OAuth
+    凭证热更新（``_refresh_credential_if_needed``）都会重建
+    ``engine._client``；拦截器包装这两个入口并在每轮开始时通过
+    ``ensure_patched`` 重新挂接，避免切换后静默漏记调用。
     """
 
     def __init__(self, engine: AgentEngine) -> None:
@@ -655,11 +787,50 @@ class _LLMCallInterceptor:
                 "bench requires engine._client (openai AsyncOpenAI client); "
                 "engine may have been refactored"
             )
-        self._original_create = engine._client.chat.completions.create
-        # 猴子补丁：拦截 LLM API 调用
-        engine._client.chat.completions.create = self._intercepted_create
+        # id(client) → (client, 原始 create)；保留 client 强引用确保 id 不复用
+        self._patched: dict[int, tuple[Any, Any]] = {}
+        # 包装客户端重建的两个入口，替换后立即重新挂接
+        self._orig_sync_clients: Any = None
+        self._orig_refresh_credential: Any = None
+        if hasattr(engine, "_sync_from_llm_clients"):
+            self._orig_sync_clients = engine._sync_from_llm_clients
+            engine._sync_from_llm_clients = self._synced_repatch  # type: ignore[method-assign]
+        if hasattr(engine, "_refresh_credential_if_needed"):
+            self._orig_refresh_credential = engine._refresh_credential_if_needed
+            engine._refresh_credential_if_needed = self._refreshed_repatch  # type: ignore[method-assign]
+        self._patch_current_client()
 
-    async def _intercepted_create(self, **kwargs: Any) -> Any:
+    def _patch_current_client(self) -> None:
+        """给当前 engine._client 挂接拦截（已挂接的 client 跳过）。"""
+        client = getattr(self._engine, "_client", None)
+        if client is None or id(client) in self._patched:
+            return
+        original_create = client.chat.completions.create
+
+        async def _intercepted_create(**kwargs: Any) -> Any:
+            return await self._record_and_call(original_create, kwargs)
+
+        self._intercepted_create = _intercepted_create
+        self._patched[id(client)] = (client, original_create)
+        client.chat.completions.create = _intercepted_create
+
+    def ensure_patched(self) -> None:
+        """每轮开始时调用：客户端可能已被切换/热更新，重新挂接拦截器。"""
+        self._patch_current_client()
+
+    def _synced_repatch(self, *args: Any, **kwargs: Any) -> Any:
+        result = self._orig_sync_clients(*args, **kwargs)
+        self._patch_current_client()
+        return result
+
+    async def _refreshed_repatch(self, *args: Any, **kwargs: Any) -> Any:
+        result = await self._orig_refresh_credential(*args, **kwargs)
+        self._patch_current_client()
+        return result
+
+    async def _record_and_call(
+        self, original_create: Any, kwargs: dict[str, Any],
+    ) -> Any:
         """拦截 LLM API 调用，记录请求和响应。"""
         call_record: dict[str, Any] = {
             "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -684,7 +855,7 @@ class _LLMCallInterceptor:
 
         start = time.monotonic()
         try:
-            response = await self._original_create(**kwargs)
+            response = await original_create(**kwargs)
         except Exception as exc:
             call_record["error"] = str(exc)
             call_record["duration_ms"] = round(
@@ -708,8 +879,24 @@ class _LLMCallInterceptor:
             return response
 
     def restore(self) -> None:
-        """恢复原始的 create 方法。"""
-        self._engine._client.chat.completions.create = self._original_create
+        """恢复原始的 create 方法与被包装的引擎方法。"""
+        for client, original_create in self._patched.values():
+            try:
+                client.chat.completions.create = original_create
+            except Exception:
+                logger.debug("恢复 LLM client create 失败", exc_info=True)
+        self._patched.clear()
+        for attr, original in (
+            ("_sync_from_llm_clients", self._orig_sync_clients),
+            ("_refresh_credential_if_needed", self._orig_refresh_credential),
+        ):
+            if original is None:
+                continue
+            try:
+                # 移除实例级包装，恢复类上的原始方法
+                delattr(self._engine, attr)
+            except AttributeError:
+                pass
 
 
 class _EngineTracer:
@@ -820,23 +1007,119 @@ class _EngineTracer:
 
 
 def _create_engine(config: ExcelManusConfig) -> AgentEngine:
-    """创建独立的 AgentEngine 实例（不复用 session）。
-
-    自动启用 bench sandbox 模式，解除所有交互式阻塞
-    （fullAccess / plan 拦截 / 确认门禁）。
-    """
-    registry = ToolRegistry()
-    registry.register_builtin_tools(config.workspace_root)
-    loader = SkillpackLoader(config, registry)
-    loader.load_all()
-    router = SkillRouter(config, loader)
+    """兼容旧测试的薄封装；正式路径请走 SessionManager。"""
+    runtime = build_chat_runtime(config)
     engine = AgentEngine(
         config=config,
-        registry=registry,
-        skill_router=router,
+        registry=runtime.manager._registry,
+        skill_router=runtime.manager._skill_router,
     )
-    engine.enable_bench_sandbox()
     return engine
+
+
+@dataclass
+class _CaseSession:
+    """单个用例对应的伪造前端会话。"""
+
+    session_id: str
+    manager: SessionManager
+    workdir: Path | None
+    owns_runtime: bool
+    runtime: ChatRuntime | None
+
+
+def _case_turns(case: BenchCase) -> list[BenchTurn]:
+    """把用例归一化为伪造前端的输入轮次。"""
+    if case.turns:
+        turns = [
+            BenchTurn(
+                text=turn.text,
+                attachments=list(turn.attachments),
+                images=list(turn.images),
+            )
+            for turn in case.turns
+        ]
+    else:
+        texts = list(case.messages) if case.messages else (
+            [case.message] if case.message else []
+        )
+        turns = [BenchTurn(text=str(text)) for text in texts]
+    if not turns:
+        return []
+    first = turns[0]
+    attachments = list(first.attachments)
+    images = list(first.images)
+    if not attachments:
+        attachments = list(case.attachments or case.source_files)
+    if not images:
+        images = list(case.images)
+    turns[0] = BenchTurn(text=first.text, attachments=attachments, images=images)
+    return turns
+
+
+async def _open_case_session(
+    case: BenchCase,
+    config: ExcelManusConfig,
+    *,
+    output_dir: Path | None,
+    suite_name: str,
+    session_manager: SessionManager | None,
+) -> _CaseSession:
+    """创建空白会话并绑定独立工作区（附件稍后由伪造前端上传）。"""
+    owns_runtime = session_manager is None
+    runtime: ChatRuntime | None = None
+    if session_manager is None:
+        runtime = build_chat_runtime(config)
+        session_manager = runtime.manager
+
+    workdir: Path | None = None
+    if output_dir is not None:
+        workdir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
+        workdir.mkdir(parents=True, exist_ok=True)
+        # 每次运行从干净工作区开始：上次运行的产物会让
+        # "文件已存在"/golden 比对等断言出现不可复现的失败
+        for child in workdir.iterdir():
+            try:
+                if child.is_dir() and not child.is_symlink():
+                    shutil.rmtree(child, ignore_errors=True)
+                else:
+                    child.unlink()
+            except OSError:
+                logger.debug("清理工作区残留失败: %s", child, exc_info=True)
+
+    workspace_path: str | None = None
+    if workdir is not None:
+        workspace_path = str(workdir.resolve())
+        try:
+            session_manager.register_workspace(workspace_path, title=f"bench:{case.id}")
+        except WorkspacePathError as exc:
+            logger.warning("工作区登记失败，回退默认工作区: %s", exc)
+            workspace_path = None
+        except Exception:
+            logger.warning("工作区登记异常，回退默认工作区", exc_info=True)
+            workspace_path = None
+
+    session = await session_manager.create_or_reuse_session(
+        workspace_path=workspace_path,
+        title=case.name or case.id,
+    )
+    session_id = str(session.get("id") or "")
+    if not session_id:
+        raise RuntimeError("创建评测会话失败：缺少 session_id")
+    if workspace_path:
+        session_manager.remember_session_workspace(session_id, workspace_path)
+    return _CaseSession(
+        session_id=session_id,
+        manager=session_manager,
+        workdir=workdir,
+        owns_runtime=owns_runtime,
+        runtime=runtime,
+    )
+
+
+async def _close_case_session(case_session: _CaseSession) -> None:
+    if case_session.owns_runtime and case_session.runtime is not None:
+        await case_session.runtime.aclose()
 
 
 def _dump_conversation_messages(
@@ -861,74 +1144,20 @@ def _dump_conversation_messages(
         return []
 
 
-# ── 文件隔离 ──────────────────────────────────────────────
-
-# 从 message 文本中自动提取文件路径的正则（支持 .xlsx / .csv / .xls）
-_FILE_PATH_RE = re.compile(
-    r"""(?:^|[\s"'(])"""           # 前导：行首 / 空白 / 引号 / 括号
-    r"""((?:[\w./\\-]+/)*"""       # 目录部分
-    r"""[\w.()-]+"""               # 文件名
-    r"""\.(?:xlsx|csv|xls))""",    # 扩展名
-    re.IGNORECASE,
-)
-
-
-def _extract_file_paths(text: str) -> list[str]:
-    """从文本中提取可能的文件路径。"""
-    return list(dict.fromkeys(_FILE_PATH_RE.findall(text)))
-
-
-def _isolate_source_files(
-    case: BenchCase,
-    workdir: Path,
-) -> list[str]:
-    """将 case 引用的源文件复制到工作目录，返回替换后的 messages。
-
-    优先使用 case.source_files（显式声明），否则从 messages 中
-    自动提取文件路径作为 fallback。
-
-    复制后将 messages 中的原始路径替换为副本路径。
-    """
-    messages = list(case.messages) if case.messages else [case.message]
-
-    # 收集需要隔离的文件路径
-    source_files = list(case.source_files) if case.source_files else []
-    if not source_files:
-        for msg in messages:
-            source_files.extend(_extract_file_paths(msg))
-        # 去重保序
-        source_files = list(dict.fromkeys(source_files))
-
-    if not source_files:
-        return messages
-
-    workdir.mkdir(parents=True, exist_ok=True)
-
-    # 复制文件并构建路径映射
-    path_map: dict[str, str] = {}
-    for src_path_str in source_files:
-        src = Path(src_path_str)
-        if not src.exists():
-            logger.warning("源文件不存在，跳过隔离: %s", src)
-            continue
-        dst = workdir / src.name
-        shutil.copy2(src, dst)
-        path_map[src_path_str] = str(dst)
-        logger.debug("隔离复制: %s → %s", src, dst)
-
-    if not path_map:
-        return messages
-
-    # 替换 messages 中的路径（按路径长度降序替换，避免短路径误匹配长路径的子串）
-    sorted_paths = sorted(path_map.keys(), key=len, reverse=True)
-    replaced: list[str] = []
-    for msg in messages:
-        for old_path in sorted_paths:
-            msg = msg.replace(old_path, path_map[old_path])
-        replaced.append(msg)
-
-    logger.info("文件隔离完成: %d 个文件 → %s", len(path_map), workdir)
-    return replaced
+def _write_conversation_export(
+    export: dict[str, Any],
+    output_dir: Path | None,
+    case_id: str,
+) -> Path | None:
+    """把伪造前端对话历史单独落盘，便于事后阅读。"""
+    if output_dir is None:
+        return None
+    conv_dir = output_dir / "conversations"
+    conv_dir.mkdir(parents=True, exist_ok=True)
+    path = conv_dir / f"{case_id}.json"
+    _write_json(path, export)
+    logger.info("  对话历史已导出: %s", path)
+    return path
 
 
 async def run_case(
@@ -939,52 +1168,55 @@ async def run_case(
     trace_enabled: bool = True,
     output_dir: Path | None = None,
     suite_name: str = "",
+    session_manager: SessionManager | None = None,
 ) -> BenchResult:
-    """执行单个测试用例，返回完整结果（含完整 LLM 交互日志）。
-
-    支持多轮对话：当 case.messages 包含多条消息时，依次发送给同一个
-    engine 实例，ConversationMemory 自然保持上下文。
-
-    Args:
-        trace_enabled: 启用 engine 内部交互轨迹记录（系统提示注入、
-            工具范围决策等）。默认开启，可通过 ``--no-trace`` 或
-            ``EXCELMANUS_BENCH_TRACE=0`` 禁用。
-        output_dir: 日志输出目录，用于构建文件隔离工作目录。
-    """
-    engine = _create_engine(config)
+    """用伪造前端跑完一个用例，只记录结果、不评分。"""
+    case_session = await _open_case_session(
+        case,
+        config,
+        output_dir=output_dir,
+        suite_name=suite_name,
+        session_manager=session_manager,
+    )
     collector = _EventCollector(render_enabled=render_enabled)
-    interceptor = _LLMCallInterceptor(engine)
+    interceptor: _LLMCallInterceptor | None = None
     tracer: _EngineTracer | None = None
-    if trace_enabled:
-        try:
-            tracer = _EngineTracer(engine)
-        except AttributeError as exc:
-            logger.debug("trace 已降级：engine 不支持完整 tracer 钩子（%s）", exc)
+    engine: AgentEngine | None = None
     timestamp = datetime.now(timezone.utc).isoformat()
+    turns = _case_turns(case)
+    is_multi_turn = len(turns) > 1
 
-    # 文件隔离：将源文件复制到工作目录，替换 messages 中的路径
-    if output_dir is not None:
-        workdir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
-        messages = _isolate_source_files(case, workdir)
-    else:
-        messages = list(case.messages) if case.messages else [case.message]
-    # SpreadsheetBench 写入引导：对 spreadsheetbench 用例追加温和的写入提示
-    if case.tags and "spreadsheetbench" in case.tags:
-        _sb_hint = (
-            "\n\nPlease implement your solution by writing the formula or values "
-            "directly into the file, then verify the result."
-        )
-        messages = [m + _sb_hint if i == 0 else m for i, m in enumerate(messages)]
+    def _on_engine(ready: AgentEngine) -> None:
+        nonlocal interceptor, tracer, engine
+        engine = ready
+        if interceptor is None:
+            interceptor = _LLMCallInterceptor(ready)
+            if trace_enabled:
+                try:
+                    tracer = _EngineTracer(ready)
+                except AttributeError as exc:
+                    logger.debug("trace 已降级：engine 不支持完整 tracer 钩子（%s）", exc)
+        else:
+            # 多轮会话中引擎客户端可能已被切换/热更新，重新挂接拦截器
+            interceptor.ensure_patched()
 
-    is_multi_turn = len(messages) > 1
+    frontend = FakeFrontend(
+        manager=case_session.manager,
+        session_id=case_session.session_id,
+        auto_replies=case.auto_replies,
+        auto_approve=case.auto_approve,
+        chat_mode=case.chat_mode,
+        present_as=case.present_as,
+        on_event=collector.on_event,
+        on_engine=_on_engine,
+    )
 
     logger.info(
-        "▶ 开始执行用例: %s (%s) [%d 轮]",
-        case.id, case.name, len(messages),
+        "▶ 伪造前端开始: %s (%s) [%d 轮] session=%s",
+        case.id, case.name, len(turns), case_session.session_id,
     )
     case_start = time.monotonic()
 
-    # 累计统计
     all_turns: list[TurnResult] = []
     all_tool_calls: list[ToolCallLog] = []
     all_thinking_log: list[str] = []
@@ -999,30 +1231,35 @@ async def run_case(
     last_tool_scope: list[str] = []
     case_status = "ok"
     case_error: dict[str, Any] | None = None
-
-    # 自动回复队列（用于 ask_user 自动应答）
-    _AUTO_REPLY_DEFAULT = "1"
-    _MAX_AUTO_REPLY_ROUNDS = 10
-    auto_reply_queue = list(case.auto_replies)
-    auto_reply_count = 0
-    chat_result: ChatResult | None = None  # 安全默认值，避免异常路径 UnboundLocalError
+    chat_result: ChatResult | None = None
+    conversation_export: dict[str, Any] = {}
 
     try:
-        for turn_idx, msg in enumerate(messages):
+        for turn_idx, turn in enumerate(turns):
+            msg = turn.text
             if is_multi_turn:
                 logger.info(
-                    "  ── 轮次 %d/%d ──", turn_idx + 1, len(messages),
+                    "  ── 轮次 %d/%d ──", turn_idx + 1, len(turns),
                 )
 
-            # 每轮开始前记录 interceptor 的调用数，用于切分本轮的 llm_calls
-            llm_calls_before = len(interceptor.calls)
+            llm_calls_before = len(interceptor.calls) if interceptor else 0
             turn_start = time.monotonic()
 
             try:
-                chat_result: ChatResult = await engine.followup(
-                    msg,
-                    on_event=collector.on_event,
-                )
+                try:
+                    chat_result = await asyncio.wait_for(
+                        frontend.send(
+                            turn.text,
+                            attachments=turn.attachments,
+                            images=turn.images,
+                        ),
+                        timeout=case.turn_timeout if case.turn_timeout > 0 else None,
+                    )
+                except (asyncio.TimeoutError, TimeoutError) as timeout_exc:
+                    raise TurnTimeoutError(
+                        f"单轮硬超时（turn_timeout={case.turn_timeout:.0f}s），"
+                        "已中止以防空挂"
+                    ) from timeout_exc
             except Exception as exc:
                 logger.error(
                     "用例 %s 轮次 %d 执行异常: %s",
@@ -1031,7 +1268,9 @@ async def run_case(
                 turn_elapsed = time.monotonic() - turn_start
                 # 快照本轮收集器数据
                 snap = collector.snapshot_and_reset()
-                turn_llm_calls = list(interceptor.calls[llm_calls_before:])
+                turn_llm_calls = list(
+                    interceptor.calls[llm_calls_before:]
+                ) if interceptor else []
 
                 turn_result = TurnResult(
                     turn_index=turn_idx,
@@ -1054,7 +1293,7 @@ async def run_case(
                     engine_trace=(
                         tracer.snapshot_and_reset() if tracer else []
                     ) if is_multi_turn else [],
-                    active_model=engine.current_model,
+                    active_model=engine.current_model if engine is not None else "",
                     task_events=snap["task_events"],
                     question_events=snap["question_events"],
                     approval_events=snap["approval_events"],
@@ -1072,42 +1311,11 @@ async def run_case(
                 # 某轮异常后中止后续轮次
                 break
 
-            # ── 自动回复 ask_user 问题 ──
-            while (
-                engine.has_pending_question()
-                and auto_reply_count < _MAX_AUTO_REPLY_ROUNDS
-            ):
-                reply_text = (
-                    auto_reply_queue.pop(0)
-                    if auto_reply_queue
-                    else _AUTO_REPLY_DEFAULT
-                )
-                auto_reply_count += 1
-                pending_q = engine.current_pending_question()
-                q_header = getattr(pending_q, "header", "") if pending_q else ""
-                logger.info(
-                    "  ⤷ 自动回复 ask_user #%d: %r → %r",
-                    auto_reply_count, q_header, reply_text,
-                )
-                if render_enabled:
-                    _console.print(
-                        f"  [dim]⤷ 自动回复 ask_user:[/dim] {reply_text}"
-                    )
-                try:
-                    chat_result = await engine.followup(
-                        reply_text,
-                        on_event=collector.on_event,
-                    )
-                except Exception as exc:
-                    logger.warning(
-                        "自动回复 ask_user 异常: %s", exc, exc_info=True,
-                    )
-                    break
-
             turn_elapsed = time.monotonic() - turn_start
-            # 快照本轮收集器数据
             snap = collector.snapshot_and_reset()
-            turn_llm_calls = list(interceptor.calls[llm_calls_before:])
+            turn_llm_calls = list(
+                interceptor.calls[llm_calls_before:]
+            ) if interceptor else []
 
             # 回退路由信息
             last_route = getattr(engine, "last_route_result", None)
@@ -1138,7 +1346,7 @@ async def run_case(
                 engine_trace=(
                     tracer.snapshot_and_reset() if tracer else []
                 ) if is_multi_turn else [],
-                active_model=engine.current_model,
+                active_model=engine.current_model if engine is not None else "",
                 task_events=snap["task_events"],
                 question_events=snap["question_events"],
                 approval_events=snap["approval_events"],
@@ -1165,20 +1373,29 @@ async def run_case(
                 _console.print(
                     Panel(
                         Markdown(chat_result.reply),
-                        title=f"轮次 {turn_idx + 1}/{len(messages)}",
+                        title=f"轮次 {turn_idx + 1}/{len(turns)}",
                         border_style="#5f875f",
                         padding=(1, 2),
                         expand=False,
                     )
                 )
     finally:
-        interceptor.restore()
+        if interceptor is not None:
+            interceptor.restore()
         if tracer is not None:
             tracer.restore()
+        try:
+            conversation_export = frontend.export_conversation()
+            _write_conversation_export(conversation_export, output_dir, case.id)
+        except Exception:
+            logger.debug("导出对话失败", exc_info=True)
+        try:
+            await _close_case_session(case_session)
+        except Exception:
+            logger.debug("关闭用例会话失败", exc_info=True)
 
     case_elapsed = time.monotonic() - case_start
 
-    # 单轮用例的 engine_trace 直接从 tracer 获取（多轮已在各 turn 中记录）
     case_engine_trace: list[dict[str, Any]] = []
     if tracer is not None and not is_multi_turn:
         case_engine_trace = tracer.snapshot_and_reset()
@@ -1189,16 +1406,18 @@ async def run_case(
     if _result_access:
         _tool_access = str(_result_access)
 
-    # 采集关键 config 快照
     _config_snapshot = {
-        "model": config.model,
-        "base_url": config.base_url,
+        "model": getattr(config, "model", ""),
+        "base_url": getattr(config, "base_url", ""),
+        "pipeline": "fake_frontend",
+        "chat_mode": case.chat_mode,
+        "auto_approve": case.auto_approve,
     }
 
     result = BenchResult(
         case_id=case.id,
         case_name=case.name,
-        message=case.message or (messages[0] if messages else ""),
+        message=case.message or (turns[0].text if turns else ""),
         timestamp=timestamp,
         duration_seconds=case_elapsed,
         iterations=total_iterations,
@@ -1212,17 +1431,39 @@ async def run_case(
         completion_tokens=total_completion_tokens,
         total_tokens=total_total_tokens,
         subagent_events=all_subagent_events,
-        llm_calls=interceptor.calls,
-        conversation_messages=_dump_conversation_messages(engine, interceptor),
+        llm_calls=interceptor.calls if interceptor is not None else [],
+        conversation_messages=conversation_export.get("transcript") or (
+            _dump_conversation_messages(engine, interceptor) if engine is not None else []
+        ),
         turns=all_turns if is_multi_turn else [],
         status=case_status,
         error=case_error,
         engine_trace=case_engine_trace,
-        active_model=engine.current_model,
+        active_model=engine.current_model if engine is not None else "",
         tool_access=_tool_access,
         config_snapshot=_config_snapshot,
         reasoning_metrics=getattr(chat_result, "reasoning_metrics", {}) if chat_result is not None else {},
+        session_id=case_session.session_id,
+        pipeline="fake_frontend",
+        conversation_export=conversation_export,
     )
+
+    # 声明式断言校验（suite/case 声明了 assertions 或 golden 时产生结果）
+    try:
+        result.validation = validate_case(
+            result.to_dict(),
+            case.assertions,
+            expected=case.expected,
+            workfile_dir=case_session.workdir,
+        )
+        if result.validation.failed:
+            logger.warning(
+                "✗ 用例 %s 断言未通过 %d/%d（error=%d warning=%d）",
+                case.id, result.validation.failed, result.validation.total,
+                result.validation.errors, result.validation.warnings,
+            )
+    except Exception:
+        logger.warning("用例 %s 断言校验异常", case.id, exc_info=True)
 
     # 单轮时打印最终回复（多轮已在循环中逐轮打印）
     if render_enabled and not is_multi_turn and result.reply:
@@ -1237,59 +1478,123 @@ async def run_case(
         )
 
     failures = sum(1 for tc in result.tool_calls if not tc.success)
-    turn_info = f" ({len(messages)} 轮)" if is_multi_turn else ""
-    auto_reply_info = f" │ {auto_reply_count} 次自动回复" if auto_reply_count else ""
+    model_failures = sum(
+        1 for tc in result.tool_calls if not tc.success and not tc.parent_call_id
+    )
+    distinct_failures = count_distinct_tool_errors(result.tool_calls)
+    turn_info = f" ({len(turns)} 轮)" if is_multi_turn else ""
+    extra = ""
+    if frontend.auto_reply_count:
+        extra += f" │ {frontend.auto_reply_count} 次问答"
+    if frontend.auto_approve_count:
+        extra += f" │ {frontend.auto_approve_count} 次审批"
     logger.info(
-        "✓ 用例 %s 完成%s: %d 迭代 │ %d 工具调用(失败%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用%s",
+        "✓ 用例 %s 完成%s: %d 迭代 │ %d 工具调用(失败%d/可见%d/root%d) │ %d tokens │ %.1fs │ %d 次 LLM 调用%s",
         case.id,
         turn_info,
         result.iterations,
         len(result.tool_calls),
         failures,
+        model_failures,
+        distinct_failures,
         result.total_tokens,
         result.duration_seconds,
         len(result.llm_calls),
-        auto_reply_info,
+        extra,
     )
     return result
 
 
+def _as_str_list(value: Any) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        return [value]
+    return [str(item) for item in value if item]
+
+
+def _parse_turn_item(item: Any) -> BenchTurn | None:
+    """解析一轮伪造前端输入。"""
+    if isinstance(item, str):
+        text = item.strip()
+        return BenchTurn(text=text) if text else None
+    if not isinstance(item, dict):
+        return None
+    text = str(item.get("text") or item.get("message") or "").strip()
+    if not text:
+        return None
+    return BenchTurn(
+        text=text,
+        attachments=_as_str_list(item.get("attachments")),
+        images=_as_str_list(item.get("images")),
+    )
+
+
+def suite_include_in_all(path: str | Path) -> bool:
+    """``--all`` 是否收录该套件。显式 ``include_in_all: false`` 的长评测需手动指定。"""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, UnicodeError):
+        return True
+    if not isinstance(data, dict):
+        return True
+    return data.get("include_in_all", True) is not False
+
+
+def list_default_suite_paths(cases_dir: str | Path) -> list[Path]:
+    """列出 ``bench/cases`` 下会被 ``--all`` 执行的套件。"""
+    return sorted(
+        path
+        for path in Path(cases_dir).glob("*.json")
+        if suite_include_in_all(path)
+    )
+
+
 def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
-    """从 JSON 文件加载测试套件。
-
-    兼容两种 case 格式：
-    - 单轮：``{"message": "..."}``
-    - 多轮：``{"messages": ["...", "..."]}``
-    加载时统一归一化为 messages 列表。
-
-    suite 级 ``assertions`` 会与每个 case 的 ``assertions`` 合并
-    （case 级覆盖 suite 级同名字段）。
-
-    返回 (suite_name, cases, trace)。
-    """
+    """从 JSON 加载套件，并把 suite 级断言合并进各 case（case 级覆盖同名规则）。"""
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
 
     suite_name = data.get("suite_name", Path(path).stem)
     suite_trace = bool(data.get("trace", True))
-    suite_assertions = data.get("assertions", {})
+    suite_assertions_raw = data.get("assertions")
+    suite_assertions: dict[str, Any] = (
+        suite_assertions_raw if isinstance(suite_assertions_raw, dict) else {}
+    )
+    try:
+        suite_turn_timeout = max(0.0, float(data.get("turn_timeout") or 0.0))
+    except (TypeError, ValueError):
+        suite_turn_timeout = 0.0
+    # suite 级审批默认（case 可覆盖）；网页默认是 ask，对应这里的 accept
+    suite_auto_approve = str(data.get("auto_approve") or "fullaccess")
     cases: list[BenchCase] = []
     for item in data.get("cases", []):
-        # 多轮格式优先
         raw_messages = item.get("messages")
         raw_message = item.get("message", "")
+        turns: list[BenchTurn] = []
+        messages: list[str] = []
         if raw_messages and isinstance(raw_messages, list):
-            messages = [str(m) for m in raw_messages if m]
+            for raw in raw_messages:
+                parsed = _parse_turn_item(raw)
+                if parsed is None:
+                    continue
+                turns.append(parsed)
+                messages.append(parsed.text)
             message = messages[0] if messages else ""
         else:
-            message = raw_message
+            message = str(raw_message or "")
             messages = [message] if message else []
+            if message:
+                turns.append(BenchTurn(text=message))
 
-        # 合并 suite 级 + case 级 assertions
-        case_assertions = merge_assertions(
-            suite_assertions, item.get("assertions"),
+        case_assertions_raw = item.get("assertions")
+        case_assertions: dict[str, Any] = (
+            case_assertions_raw if isinstance(case_assertions_raw, dict) else {}
         )
-
+        try:
+            case_turn_timeout = float(item.get("turn_timeout") or 0.0)
+        except (TypeError, ValueError):
+            case_turn_timeout = 0.0
         cases.append(BenchCase(
             id=item["id"],
             name=item.get("name", item["id"]),
@@ -1297,89 +1602,377 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
             messages=messages,
             tags=item.get("tags", []),
             expected=item.get("expected", {}),
-            source_files=item.get("source_files", []),
-            auto_replies=item.get("auto_replies", []),
-            assertions=case_assertions,
+            assertions=merge_assertions(suite_assertions, case_assertions),
+            source_files=_as_str_list(item.get("source_files")),
+            attachments=_as_str_list(item.get("attachments")),
+            images=_as_str_list(item.get("images")),
+            auto_replies=_as_str_list(item.get("auto_replies")),
+            chat_mode=str(item.get("chat_mode") or "write"),
+            present_as=item.get("present_as"),
+            auto_approve=str(item.get("auto_approve") or suite_auto_approve),
+            turn_timeout=case_turn_timeout if case_turn_timeout > 0 else suite_turn_timeout,
+            turns=turns,
         ))
     return suite_name, cases, suite_trace
 
 
-def _save_result(
-    result: BenchResult,
-    output_dir: Path,
-    assertions: dict[str, Any] | None = None,
+def _filter_cases(
+    cases: list[BenchCase],
     *,
-    expected: dict[str, Any] | None = None,
-    workfile_dir: Path | None = None,
-) -> tuple[Path, ValidationSummary | None]:
-    """保存单个用例结果到 JSON 文件。
+    wave: str = "",
+    case_ids: list[str] | None = None,
+) -> list[BenchCase]:
+    """按 wave 标签 / case id 裁剪用例（与 bench/fixtures/filter_suite.py 同语义）。"""
+    wanted_ids = {item.strip() for item in (case_ids or []) if item.strip()}
+    wave_tag = f"wave-{wave.strip()}" if wave.strip() else ""
+    filtered = []
+    for case in cases:
+        if wanted_ids and case.id not in wanted_ids:
+            continue
+        if wave_tag and wave_tag not in [str(tag) for tag in case.tags]:
+            continue
+        filtered.append(case)
+    return filtered
 
-    如果提供了 assertions，会自动执行断言校验并将结果嵌入输出 JSON。
-    当 expected 包含 golden_file / answer_position 时，自动追加 golden_cells 断言。
 
-    Returns:
-        (filepath, validation_summary) — validation_summary 仅在有 assertions 时非 None。
-    """
+def _write_json(path: Path, payload: Any) -> None:
+    """把 bench 工件原子写成 UTF-8 JSON；日期等工具值转为展示字符串。"""
+    text = json.dumps(payload, ensure_ascii=False, indent=2, default=str)
+    temp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    try:
+        temp.write_text(text, encoding="utf-8")
+        os.replace(temp, path)
+    finally:
+        try:
+            temp.unlink(missing_ok=True)
+        except OSError:
+            pass
+
+
+def _save_result(result: BenchResult, output_dir: Path) -> Path:
+    """保存单个用例结果到 JSON，只记录执行结果，不做评分。"""
     output_dir.mkdir(parents=True, exist_ok=True)
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     short_id = uuid.uuid4().hex[:6]
     filename = f"run_{ts}_{result.case_id}_{short_id}.json"
     filepath = output_dir / filename
-
-    result_dict = result.to_dict()
-
-    # 执行断言校验（同步版本，保留用于兼容）
-    validation: ValidationSummary | None = None
-    has_golden = bool(
-        expected and expected.get("golden_file") and expected.get("answer_position")
-    )
-    if assertions or has_golden:
-        validation = _validate_result_sync(
-            result_dict,
-            assertions or {},
-            expected=expected,
-            workfile_dir=workfile_dir,
-        )
-
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(result_dict, f, ensure_ascii=False, indent=2)
-    return filepath, validation
+    _write_json(filepath, result.to_dict())
+    return filepath
 
 
-def _validate_result_sync(
-    result_dict: dict[str, Any],
-    assertions: dict[str, Any],
-    *,
-    expected: dict[str, Any] | None = None,
-    workfile_dir: Path | None = None,
-) -> ValidationSummary | None:
-    """同步执行断言校验（不推荐，推荐使用异步版本）。"""
-    has_golden = bool(
-        expected and expected.get("golden_file") and expected.get("answer_position")
-    )
-    if not assertions and not has_golden:
-        return None
+# ── 用例分析摘要（digest）──────────────────────────────────
+#
+# conversations/{case_id}.digest.md 是给人/子代理做设计复盘用的紧凑视图：
+# 一轮一节，含回复全文、工具调用（参数/返回截断）、LLM 调用指标、思考摘要、
+# 交互事件与系统提示注入概况。全量数据仍在 run_*.json 与 conversations/*.json。
+_DIGEST_ARG_MAX_CHARS = 300
+_DIGEST_RESULT_MAX_CHARS = 500
+_DIGEST_THINKING_MAX_CHARS = 800
 
-    validation = validate_case(
-        result_dict,
-        assertions,
-        expected=expected,
-        workfile_dir=workfile_dir,
-    )
-    result_dict["validation"] = validation.to_dict()
-    if validation.failed > 0:
-        logger.warning(
-            "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
-            result_dict.get("case_id", "unknown"),
-            validation.passed, validation.total, validation.failed,
-        )
+
+def _compact_inline(value: Any, limit: int) -> str:
+    """把任意值压成单行截断文本。"""
+    if value is None:
+        text = ""
+    elif isinstance(value, str):
+        text = value
     else:
-        logger.info(
-            "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
-            result_dict.get("case_id", "unknown"),
-            validation.passed, validation.total,
+        try:
+            text = json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            text = str(value)
+    text = " ".join(str(text).split())
+    if len(text) > limit:
+        text = text[:limit] + "…"
+    return text
+
+
+def _digest_tool_call_lines(tool_calls: list[ToolCallLog]) -> list[str]:
+    lines: list[str] = []
+    for i, tc in enumerate(tool_calls, 1):
+        args = _compact_inline(tc.arguments, _DIGEST_ARG_MAX_CHARS)
+        head = f"{i}. iter{tc.iteration} `{tc.tool_name}` `{args}`"
+        if tc.success:
+            head += f" → ok ({tc.duration_ms:.0f}ms)"
+        else:
+            err = _compact_inline(tc.error or "", 200)
+            head += f" → **FAIL** {err} ({tc.duration_ms:.0f}ms)"
+        lines.append(head)
+        if tc.result:
+            lines.append(
+                f"   返回: {_compact_inline(tc.result, _DIGEST_RESULT_MAX_CHARS)}"
+            )
+    return lines
+
+
+def _digest_llm_call_lines(llm_calls: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for i, call in enumerate(llm_calls, 1):
+        request = call.get("request") or {}
+        response = call.get("response") or {}
+        usage = response.get("usage") or {}
+        parts = [
+            f"#{i}",
+            f"{call.get('duration_ms', 0):.0f}ms",
+            f"prompt={usage.get('prompt_tokens', 0):,}",
+            f"completion={usage.get('completion_tokens', 0):,}",
+            f"msgs={len(request.get('messages') or [])}",
+            f"tools={len(request.get('tool_names') or [])}",
+        ]
+        finish = response.get("finish_reason")
+        if finish:
+            parts.append(f"finish={finish}")
+        req_tools = [
+            (tc.get("function") or {}).get("name", "")
+            for tc in (response.get("tool_calls") or [])
+            if isinstance(tc, dict)
+        ]
+        if req_tools:
+            parts.append(f"→ {','.join(t for t in req_tools if t)}")
+        if call.get("error"):
+            parts.append(f"ERROR={_compact_inline(call['error'], 120)}")
+        lines.append("- " + " ".join(parts))
+    return lines
+
+
+def _digest_trace_lines(engine_trace: list[dict[str, Any]]) -> list[str]:
+    lines: list[str] = []
+    for entry in engine_trace:
+        data = entry.get("data") or {}
+        comps = data.get("components") or []
+        labels = ", ".join(
+            f"{c.get('label', '?')}({c.get('char_count', 0)}字"
+            + (",同前" if c.get("same_as_iter") else "")
+            + ("…" if c.get("truncated") else "")
+            + ")"
+            for c in comps
         )
-    return validation
+        lines.append(
+            f"- iter{entry.get('iteration', '?')}: "
+            f"{data.get('prompt_count', 0)} 个组件 "
+            f"{data.get('total_chars', 0):,} 字 │ {labels}"
+        )
+    return lines
+
+
+def _digest_event_lines(turn: TurnResult) -> list[str]:
+    lines: list[str] = []
+    for q in turn.question_events:
+        lines.append(
+            f"- 问答 {q.get('question_id', '')}: "
+            f"{_compact_inline(q.get('question_text', ''), 200)}"
+        )
+    for a in turn.approval_events:
+        lines.append(
+            f"- 审批 {a.get('approval_id', '')}: {a.get('approval_tool_name', '')}"
+        )
+    for t in turn.task_events:
+        if t.get("event_type") == "task_list_created":
+            lines.append(f"- 任务清单创建: {_compact_inline(t.get('task_list_data'), 200)}")
+        else:
+            lines.append(
+                f"- 任务[{t.get('task_index')}] {t.get('task_status', '')}: "
+                f"{_compact_inline(t.get('task_result'), 150)}"
+            )
+    return lines
+
+
+def _build_case_digest(
+    result: BenchResult,
+    case: BenchCase,
+    *,
+    suite_name: str,
+    output_dir: Path,
+    run_file: Path | None,
+) -> str:
+    """生成单用例 Markdown 摘要，供事后评审/子代理分析快速定位问题。"""
+    lines: list[str] = []
+    tool_failures = sum(1 for tc in result.tool_calls if not tc.success)
+    model_tool_failures = sum(
+        1 for tc in result.tool_calls if not tc.success and not tc.parent_call_id
+    )
+    distinct_tool_errors = count_distinct_tool_errors(result.tool_calls)
+
+    lines.append(f"# {result.case_id} {result.case_name}")
+    lines.append("")
+    meta = [
+        f"套件 {suite_name or '∅'}",
+        f"标签 {','.join(case.tags) or '∅'}",
+        f"chat_mode={case.chat_mode}",
+        f"present_as={case.present_as or '∅'}",
+        f"auto_approve={case.auto_approve}",
+        f"model={result.active_model or '∅'}",
+    ]
+    lines.append("- " + " · ".join(meta))
+    lines.append(
+        "- "
+        f"status={result.status} · {result.duration_seconds:.1f}s · "
+        f"{result.iterations} 迭代 · "
+        f"{len(result.tool_calls)} 工具(失败 {tool_failures}/可见 {model_tool_failures}/root {distinct_tool_errors}) · "
+        f"{len(result.llm_calls)} LLM · {result.total_tokens:,} tok"
+    )
+    if result.error:
+        lines.append(f"- 错误: {_compact_inline(result.error, 300)}")
+
+    conv_rel = f"conversations/{result.case_id}.json"
+    workdir = output_dir / "workfiles" / (suite_name or "adhoc") / result.case_id
+    pointers = [f"run={run_file.name if run_file else '∅'}", f"conv={conv_rel}", f"workdir={workdir}"]
+    lines.append("- 全量数据: " + " · ".join(pointers))
+
+    expected = case.expected or {}
+    review_focus = expected.get("review_focus") or []
+    if expected.get("lens"):
+        lines.append(f"- 评测视角: {expected['lens']}")
+    if review_focus:
+        lines.append("")
+        lines.append("## 评测点 (review_focus)")
+        lines.extend(f"- {item}" for item in review_focus)
+
+    attachments = (result.conversation_export or {}).get("attachments") or []
+    if attachments:
+        lines.append("")
+        lines.append("## 附件")
+        for att in attachments:
+            lines.append(
+                f"- {att.get('path')} ({att.get('kind')}, {att.get('size', 0)}B, "
+                f"源: {att.get('source', '∅')})"
+            )
+
+    # 统一成「轮次列表」：多轮用 turns，单轮用 case 级字段合成
+    if result.turns:
+        turns: list[tuple[str, TurnResult]] = [
+            (t.message, t) for t in result.turns
+        ]
+    else:
+        pseudo = TurnResult(
+            turn_index=0,
+            message=result.message,
+            reply=result.reply,
+            duration_seconds=result.duration_seconds,
+            iterations=result.iterations,
+            route_mode=result.route_mode,
+            skills_used=result.skills_used,
+            tool_scope=result.tool_scope,
+            tool_calls=result.tool_calls,
+            thinking_log=result.thinking_log,
+            subagent_events=result.subagent_events,
+            llm_calls=result.llm_calls,
+            prompt_tokens=result.prompt_tokens,
+            completion_tokens=result.completion_tokens,
+            total_tokens=result.total_tokens,
+            status=result.status,
+            error=result.error,
+            engine_trace=result.engine_trace,
+            task_events=result.task_events,
+            question_events=result.question_events,
+            approval_events=result.approval_events,
+            reasoning_metrics=result.reasoning_metrics,
+        )
+        turns = [(result.message, pseudo)]
+
+    for turn in turns:
+        msg, t = turn
+        lines.append("")
+        lines.append(f"## 轮次 {t.turn_index + 1} · 用户: 「{_compact_inline(msg, 200)}」")
+        lines.append("")
+        lines.append(
+            f"{t.duration_seconds:.1f}s · {t.iterations} 迭代 · "
+            f"route={t.route_mode or '∅'} · "
+            f"skills={','.join(t.skills_used) or '∅'} · "
+            f"scope={','.join(t.tool_scope) or '∅'} · "
+            f"{t.total_tokens:,} tok"
+        )
+        if t.status != "ok" and t.error:
+            lines.append(f"**轮次错误**: {_compact_inline(t.error, 300)}")
+
+        lines.append("")
+        lines.append("### 回复")
+        lines.append("")
+        lines.append(t.reply or "∅")
+
+        if t.tool_calls:
+            lines.append("")
+            lines.append(f"### 工具调用 ({len(t.tool_calls)})")
+            lines.append("")
+            lines.extend(_digest_tool_call_lines(t.tool_calls))
+
+        if t.llm_calls:
+            lines.append("")
+            lines.append(f"### LLM 调用 ({len(t.llm_calls)})")
+            lines.append("")
+            lines.extend(_digest_llm_call_lines(t.llm_calls))
+
+        if t.thinking_log:
+            lines.append("")
+            lines.append(f"### 思考 ({len(t.thinking_log)})")
+            lines.append("")
+            lines.extend(
+                f"- {_compact_inline(item, _DIGEST_THINKING_MAX_CHARS)}"
+                for item in t.thinking_log
+            )
+
+        event_lines = _digest_event_lines(t)
+        if event_lines:
+            lines.append("")
+            lines.append("### 交互事件")
+            lines.append("")
+            lines.extend(event_lines)
+
+        if t.subagent_events:
+            lines.append("")
+            lines.append("### 子代理事件")
+            lines.append("")
+            for ev in t.subagent_events:
+                lines.append(
+                    f"- {ev.get('event_type', '')} {ev.get('name', '')}: "
+                    f"{_compact_inline(ev.get('summary') or ev.get('reason'), 200)}"
+                )
+
+        trace_lines = _digest_trace_lines(t.engine_trace or [])
+        if trace_lines:
+            lines.append("")
+            lines.append("### 系统提示注入")
+            lines.append("")
+            lines.extend(trace_lines)
+
+        if t.reasoning_metrics:
+            lines.append("")
+            lines.append(
+                "### 推理指标\n\n- "
+                + _compact_inline(t.reasoning_metrics, 400)
+            )
+
+    lines.append("")
+    return "\n".join(lines)
+
+
+def _write_case_digest(
+    result: BenchResult,
+    case: BenchCase,
+    *,
+    suite_name: str,
+    output_dir: Path | None,
+    run_file: Path | None,
+) -> Path | None:
+    """把单用例 Markdown 摘要落盘到 conversations/{case_id}.digest.md。"""
+    if output_dir is None:
+        return None
+    try:
+        digest = _build_case_digest(
+            result,
+            case,
+            suite_name=suite_name,
+            output_dir=output_dir,
+            run_file=run_file,
+        )
+        conv_dir = output_dir / "conversations"
+        conv_dir.mkdir(parents=True, exist_ok=True)
+        path = conv_dir / f"{result.case_id}.digest.md"
+        path.write_text(digest, encoding="utf-8")
+        return path
+    except Exception:
+        logger.debug("用例 %s digest 落盘失败", result.case_id, exc_info=True)
+        return None
 
 
 def _save_suite_summary(
@@ -1409,10 +2002,17 @@ def _save_suite_summary(
     total_tool_failures = sum(
         sum(1 for tc in r.tool_calls if not tc.success) for r in results
     )
+    total_model_tool_failures = sum(
+        sum(1 for tc in r.tool_calls if not tc.success and not tc.parent_call_id)
+        for r in results
+    )
+    total_distinct_tool_errors = sum(
+        count_distinct_tool_errors(r.tool_calls) for r in results
+    )
     failed_case_ids = [r.case_id for r in results if r.status != "ok"]
     suite_status = "ok" if not failed_case_ids else "completed_with_errors"
 
-    summary = {
+    summary: dict[str, Any] = {
         "schema_version": 3,
         "kind": "suite_summary",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -1420,6 +2020,7 @@ def _save_suite_summary(
             "suite_name": suite_name,
             "suite_path": str(suite_path),
             "case_count": len(results),
+            "pipeline": "fake_frontend",
         },
         "execution": {
             "concurrency": concurrency,
@@ -1440,11 +2041,29 @@ def _save_suite_summary(
             "average_iterations": round(avg_iterations, 2),
             "tool_call_count": total_tool_calls,
             "tool_failures": total_tool_failures,
+            "model_tool_failures": total_model_tool_failures,
+            "internal_tool_failures": total_tool_failures - total_model_tool_failures,
+            "distinct_tool_errors": total_distinct_tool_errors,
         },
     }
+    # 断言校验聚合（仅当 suite 声明了 assertions/golden 时存在）
+    validations = [
+        (r.case_id, r.validation) for r in results if r.validation is not None
+    ]
+    suite_validation = aggregate_suite_validation(validations) if validations else None
+    if suite_validation is not None:
+        summary["validation"] = suite_validation.to_dict()
 
-    with open(filepath, "w", encoding="utf-8") as f:
-        json.dump(summary, f, ensure_ascii=False, indent=2)
+    _write_json(filepath, summary)
+
+    # 自动 Markdown 报告（bench_reporter）：失败也不影响主流程
+    try:
+        report_path = save_suite_report(
+            summary, output_dir, suite_validation=suite_validation,
+        )
+        logger.info("套件报告: %s", report_path)
+    except Exception:
+        logger.warning("套件 Markdown 报告生成失败", exc_info=True)
     return filepath
 
 
@@ -1456,12 +2075,27 @@ async def run_suite(
     concurrency: int = 1,
     trace_enabled: bool = True,
     on_progress: ProgressCallback | None = None,
+    turn_timeout: float = 0.0,
+    case_ids: list[str] | None = None,
+    wave: str = "",
 ) -> list[BenchResult]:
-    """运行整个测试套件。"""
+    """运行整个测试套件（可按 case id / wave 标签裁剪）。"""
     if concurrency < 1:
         raise ValueError("concurrency 必须 >= 1")
 
     suite_name, cases, suite_trace = _load_suite(suite_path)
+    if case_ids or wave:
+        total_before = len(cases)
+        cases = _filter_cases(cases, wave=wave, case_ids=case_ids)
+        if not cases:
+            raise ValueError(
+                f"过滤后没有用例: suite={suite_path} "
+                f"case={case_ids or []} wave={wave or '∅'}"
+            )
+        logger.info(
+            "用例过滤: %d/%d 命中 (case=%s wave=%s)",
+            len(cases), total_before, case_ids or "∅", wave or "∅",
+        )
     # suite JSON 中的 trace 字段与参数取 OR
     trace_enabled = trace_enabled or suite_trace
     logger.info("═" * 50)
@@ -1474,9 +2108,14 @@ async def run_suite(
     )
     logger.info("═" * 50)
 
-    # 收集每个 case 的 validation 结果（用于 suite 级聚合）
-    case_validations: list[tuple[str, ValidationSummary]] = []
-    _validations_lock = asyncio.Lock()
+    runtime: ChatRuntime | None = None
+    shared_manager: SessionManager | None = None
+    if hasattr(config, "workspace_root"):
+        try:
+            runtime = build_chat_runtime(config)
+            shared_manager = runtime.manager
+        except Exception:
+            logger.warning("共享 ChatRuntime 初始化失败，各用例独立建会话", exc_info=True)
 
     async def _execute_case(
         index: int,
@@ -1484,7 +2123,9 @@ async def run_suite(
         *,
         render_enabled: bool,
     ) -> tuple[int, BenchResult, Path]:
-        # 通知开始执行
+        # CLI 级默认只在 case/suite 未声明时生效
+        if case.turn_timeout <= 0 and turn_timeout > 0:
+            case.turn_timeout = turn_timeout
         if on_progress:
             on_progress(case.id, case.name, None)
         try:
@@ -1494,6 +2135,7 @@ async def run_suite(
                 trace_enabled=trace_enabled,
                 output_dir=output_dir,
                 suite_name=suite_name,
+                session_manager=shared_manager,
             )
         except Exception as exc:  # pragma: no cover - 兜底保护
             logger.error("用例 %s 执行崩溃: %s", case.id, exc, exc_info=True)
@@ -1518,78 +2160,22 @@ async def run_suite(
                     "type": type(exc).__name__,
                     "message": str(exc),
                 },
+                pipeline="fake_frontend",
             )
-        # 构建 workfile 目录路径（与 _isolate_source_files 一致）
-        workfile_dir = output_dir / "workfiles" / (suite_name or "adhoc") / case.id
-        
-        # 先保存结果（不含验证）
-        output_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
-        short_id = uuid.uuid4().hex[:6]
-        filename = f"run_{ts}_{result.case_id}_{short_id}.json"
-        filepath = output_dir / filename
-        
-        result_dict = result.to_dict()
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(result_dict, f, ensure_ascii=False, indent=2)
+        filepath = _save_result(result, output_dir)
         logger.info("  日志已保存: %s", filepath)
-        
-        # 异步在后台执行验证（不阻塞任务结束）
-        if case.assertions or (case.expected and case.expected.get("golden_file") and case.expected.get("answer_position")):
-            asyncio.create_task(
-                _run_validation_async(
-                    filepath, result_dict,
-                    case.assertions or {},
-                    case.expected or {},
-                    workfile_dir if workfile_dir.is_dir() else None,
-                    _validations_lock, case_validations
-                )
-            )
-        
-        # 通知完成
+        digest_path = _write_case_digest(
+            result,
+            case,
+            suite_name=suite_name,
+            output_dir=output_dir,
+            run_file=filepath,
+        )
+        if digest_path is not None:
+            logger.info("  分析摘要: %s", digest_path)
         if on_progress:
             on_progress(case.id, case.name, result)
         return index, result, filepath
-
-    async def _run_validation_async(
-        filepath: Path,
-        result_dict: dict[str, Any],
-        assertions: dict[str, Any],
-        expected: dict[str, Any],
-        workfile_dir: Path | None,
-        lock: asyncio.Lock,
-        case_validations: list,
-    ):
-        """后台异步执行验证，不阻塞主流程。"""
-        try:
-            validation = validate_case(
-                result_dict,
-                assertions,
-                expected=expected if expected.get("golden_file") or expected.get("answer_position") else None,
-                workfile_dir=workfile_dir,
-            )
-            # 更新文件（追加验证结果）
-            result_dict["validation"] = validation.to_dict()
-            with open(filepath, "w", encoding="utf-8") as f:
-                json.dump(result_dict, f, ensure_ascii=False, indent=2)
-            
-            async with lock:
-                case_validations.append((result_dict.get("case_id", "unknown"), validation))
-            
-            if validation.failed > 0:
-                logger.warning(
-                    "  ⚠ 用例 %s 断言校验: %d/%d 通过 (%d 失败)",
-                    result_dict.get("case_id", "unknown"),
-                    validation.passed, validation.total, validation.failed,
-                )
-            else:
-                logger.info(
-                    "  ✓ 用例 %s 断言校验: %d/%d 全部通过",
-                    result_dict.get("case_id", "unknown"),
-                    validation.passed, validation.total,
-                )
-        except Exception as exc:
-            logger.error("用例 %s 验证失败: %s", result_dict.get("case_id", "unknown"), exc, exc_info=True)
 
     results: list[BenchResult | None] = [None] * len(cases)
     case_log_files: list[Path | None] = [None] * len(cases)
@@ -1687,43 +2273,137 @@ async def run_suite(
         total_failures,
         case_errors,
     )
-
-    # ── 断言校验汇总 + 自动报告 ──
-    suite_validation = None
-    if case_validations:
-        suite_validation = aggregate_suite_validation(case_validations)
-        logger.info(
-            "  断言校验: %d/%d 通过 (%.1f%%) │ 失败案例: %s",
-            suite_validation.passed,
-            suite_validation.total_assertions,
-            suite_validation.pass_rate,
-            ", ".join(suite_validation.failed_cases) or "无",
-        )
-
-    # 自动生成 Markdown 报告
-    try:
-        # 读取刚保存的 suite summary JSON 用于生成报告
-        with open(summary_path, encoding="utf-8") as f:
-            suite_summary_dict = json.load(f)
-        # 将 validation 信息注入到 suite summary 的各 case 中
-        if case_validations:
-            validation_map = dict(case_validations)
-            for case_dict in suite_summary_dict.get("artifacts", {}).get("cases", []):
-                cid = case_dict.get("meta", {}).get("case_id")
-                if cid and cid in validation_map:
-                    case_dict["validation"] = validation_map[cid].to_dict()
-            suite_summary_dict["validation"] = suite_validation.to_dict()
-        report_path = save_suite_report(
-            suite_summary_dict,
-            output_dir,
-            suite_validation=suite_validation,
-        )
-        logger.info("  📄 报告已生成: %s", report_path)
-    except Exception as exc:
-        logger.warning("  报告生成失败: %s", exc)
-
     logger.info("═" * 50)
-    return normalized_results
+    try:
+        return normalized_results
+    finally:
+        if runtime is not None:
+            await runtime.aclose()
+
+
+# ── 凭据导入（test.env → model_profiles）──────────────────
+
+
+def _parse_env_file(path: str | Path) -> dict[str, str]:
+    """解析 .env 风格文件：KEY=VALUE，跳过注释与空行。"""
+    rows: dict[str, str] = {}
+    for raw_line in Path(path).read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        key, _, value = line.partition("=")
+        value = value.strip()
+        if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+            value = value[1:-1]
+        rows[key.strip()] = value
+    return rows
+
+
+def _normalize_gateway_url(raw: str) -> str:
+    """把网关 URL 规范化为 OpenAI 兼容 base（去掉补全端点后缀与尾斜杠）。"""
+    url = (raw or "").strip().rstrip("/")
+    for suffix in ("/chat/completions", "/completions", "/embeddings"):
+        if url.endswith(suffix):
+            url = url[: -len(suffix)]
+    return url
+
+
+def import_env_to_database(
+    env_path: str | Path,
+    *,
+    profile_name: str = "bench-test-gateway",
+    model: str = "",
+    activate: bool = True,
+    db_path: str | Path | None = None,
+) -> dict[str, Any]:
+    """把 .env 风格凭据文件导入 model_profiles，并（默认）设为激活模型。
+
+    识别的键：``url``/``base_url``/``EXCELMANUS_BASE_URL``、
+    ``key``/``api_key``/``EXCELMANUS_API_KEY``、``model``/``EXCELMANUS_MODEL``。
+    已存在同名档案时做更新（幂等），因此重复导入安全。
+
+    Returns:
+        导入摘要 dict（profile_name/model/base_url/db_path/action/activated）。
+    """
+    from excelmanus.data_home import get_default_db_path
+    from excelmanus.database import Database
+    from excelmanus.stores.config_store import GlobalConfigStore, UserConfigStore
+
+    rows = _parse_env_file(env_path)
+    base_url = _normalize_gateway_url(
+        rows.get("base_url") or rows.get("EXCELMANUS_BASE_URL") or rows.get("url") or ""
+    )
+    api_key = (
+        rows.get("api_key") or rows.get("EXCELMANUS_API_KEY") or rows.get("key") or ""
+    ).strip()
+    model_name = (
+        model or rows.get("model") or rows.get("EXCELMANUS_MODEL") or ""
+    ).strip()
+    if not base_url or not api_key:
+        raise ValueError(
+            f"凭据文件 {env_path} 缺少 url/key（或 base_url/api_key）键，无法导入"
+        )
+    if not model_name:
+        raise ValueError(
+            f"凭据文件 {env_path} 未提供模型名，请通过 --model 指定（如 mimo-v2.5-pro）"
+        )
+
+    resolved_db = str(db_path) if db_path else (
+        os.environ.get("EXCELMANUS_DB_PATH", "").strip() or str(get_default_db_path())
+    )
+    database = Database(resolved_db)
+    try:
+        store = GlobalConfigStore(database)
+        existing = store.get_profile(profile_name)
+        if existing is not None:
+            store.update_profile(
+                profile_name, model=model_name, api_key=api_key, base_url=base_url,
+            )
+            action = "updated"
+        else:
+            store.add_profile(
+                profile_name,
+                model_name,
+                api_key=api_key,
+                base_url=base_url,
+                description=f"imported from {env_path}",
+            )
+            action = "added"
+        if activate:
+            UserConfigStore(database.conn).set_active_model(profile_name)
+    finally:
+        database.close()
+
+    summary = {
+        "profile_name": profile_name,
+        "model": model_name,
+        "base_url": base_url,
+        "db_path": resolved_db,
+        "action": action,
+        "activated": activate,
+    }
+    logger.info(
+        "已导入模型档案 %s (%s)：model=%s base_url=%s db=%s",
+        profile_name, action, model_name, base_url, resolved_db,
+    )
+    return summary
+
+
+def _load_config_for_bench() -> ExcelManusConfig:
+    """加载配置；设置未配凭证时回退到数据库激活档案。"""
+    from excelmanus.data_home import resolve_db_path
+    from excelmanus.database import Database
+    from excelmanus.settings_persist import bind_settings_store
+
+    try:
+        return load_config()
+    except ConfigError:
+        resolved = resolve_db_path()
+        if not Path(resolved).is_file():
+            raise
+        database = Database(resolved)
+        bind_settings_store(database)
+        return load_config()
 
 
 # ── 入口 ──────────────────────────────────────────────────
@@ -1735,6 +2415,7 @@ async def run_single(
     output_dir: Path,
     *,
     trace_enabled: bool = True,
+    turn_timeout: float = 0.0,
 ) -> BenchResult:
     """直接运行一条用户消息作为测试用例。"""
     case = BenchCase(
@@ -1742,6 +2423,7 @@ async def run_single(
         name="临时用例",
         message=message,
         messages=[message],
+        turn_timeout=turn_timeout,
     )
     result = await run_case(
         case, config,
@@ -1749,8 +2431,17 @@ async def run_single(
         trace_enabled=trace_enabled,
         output_dir=output_dir,
     )
-    filepath, _ = _save_result(result, output_dir)
+    filepath = _save_result(result, output_dir)
     logger.info("日志已保存: %s", filepath)
+    digest_path = _write_case_digest(
+        result,
+        case,
+        suite_name="adhoc",
+        output_dir=output_dir,
+        run_file=filepath,
+    )
+    if digest_path is not None:
+        logger.info("分析摘要: %s", digest_path)
     return result
 
 
@@ -1761,6 +2452,14 @@ class _RunPlan:
     mode: str
     suite_paths: list[Path] = field(default_factory=list)
     message: str = ""
+    env_path: str = ""
+    model: str = ""
+    profile_name: str = "bench-test-gateway"
+    activate: bool = True
+    turn_timeout: float = 0.0
+    case_ids: list[str] = field(default_factory=list)
+    wave: str = ""
+    strict_efficiency: bool = False
 
 
 def _positive_int(raw: str) -> int:
@@ -1795,11 +2494,40 @@ def _build_parser() -> argparse.ArgumentParser:
     group.add_argument(
         "--all",
         action="store_true",
-        help="运行 bench/cases/ 下所有 suite",
+        help="运行 bench/cases/ 下默认套件（跳过 include_in_all=false）",
     )
     group.add_argument(
         "--message",
         help="显式指定单条消息作为用例",
+    )
+    group.add_argument(
+        "--import-env",
+        metavar="PATH",
+        help="把本地凭据清单（如 test.env 的 url/key）导入主库 "
+        "model_profiles 并设为激活模型，然后退出。",
+    )
+    parser.add_argument(
+        "--model",
+        default="",
+        help="与 --import-env 搭配：档案使用的模型名（清单未提供 model 键时必填）",
+    )
+    parser.add_argument(
+        "--profile-name",
+        default="bench-test-gateway",
+        help="与 --import-env 搭配：导入的档案名（默认 bench-test-gateway）",
+    )
+    parser.add_argument(
+        "--no-activate",
+        action="store_true",
+        help="与 --import-env 搭配：只导入不设为激活模型",
+    )
+    parser.add_argument(
+        "--turn-timeout",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="单轮硬超时（秒），防止审批/网络挂起导致卡死；0 = 不限制（默认）。"
+        "suite/case 级 turn_timeout 优先于该值",
     )
     parser.add_argument(
         "--concurrency",
@@ -1817,6 +2545,25 @@ def _build_parser() -> argparse.ArgumentParser:
         "--output-dir",
         default="outputs/bench",
         help="日志输出目录（默认 outputs/bench）",
+    )
+    parser.add_argument(
+        "--case",
+        action="append",
+        default=[],
+        metavar="ID",
+        help="只运行指定用例 id（可多次传入）；替代 filter_suite 中间产物",
+    )
+    parser.add_argument(
+        "--wave",
+        default="",
+        metavar="N",
+        help="只运行带 wave-N 标签的用例",
+    )
+    parser.add_argument(
+        "--strict-efficiency",
+        action="store_true",
+        help="严格模式：效率预算（max_llm_calls 等 warn-only 项）超限也判 fail。"
+        "默认关闭（只告警）；nightly 回归收紧时可用。",
     )
     trace_group = parser.add_mutually_exclusive_group()
     trace_group.add_argument(
@@ -1845,23 +2592,48 @@ def _resolve_run_mode(args: argparse.Namespace) -> _RunPlan:
     """将 argparse 结果映射为执行计划。"""
     targets = list(args.targets or [])
 
+    # 新增 CLI 参数在旧测试桩的 Namespace 中可能缺失，统一 getattr 兜底
+    common: dict[str, Any] = {
+        "turn_timeout": float(getattr(args, "turn_timeout", 0.0) or 0.0),
+        "case_ids": [
+            str(item).strip()
+            for item in (getattr(args, "case", None) or [])
+            if str(item).strip()
+        ],
+        "wave": str(getattr(args, "wave", "") or "").strip(),
+        "strict_efficiency": bool(getattr(args, "strict_efficiency", False)),
+    }
+    import_env = getattr(args, "import_env", None)
+    if import_env is not None:
+        if targets:
+            raise ValueError("使用 --import-env 时不应再传入位置参数。")
+        return _RunPlan(
+            mode="import_env",
+            env_path=import_env,
+            model=getattr(args, "model", "") or "",
+            profile_name=getattr(args, "profile_name", "") or "bench-test-gateway",
+            activate=not getattr(args, "no_activate", False),
+            **common,
+        )
+
     if args.suite is not None:
         if targets:
             raise ValueError("使用 --suite 时不应再传入位置参数。")
         return _RunPlan(
             mode="suite",
             suite_paths=[Path(p) for p in args.suite],
+            **common,
         )
 
     if args.all:
         if targets:
             raise ValueError("使用 --all 时不应再传入位置参数。")
-        return _RunPlan(mode="all")
+        return _RunPlan(mode="all", **common)
 
     if args.message is not None:
         if targets:
             raise ValueError("使用 --message 时不应再传入位置参数。")
-        return _RunPlan(mode="message", message=args.message)
+        return _RunPlan(mode="message", message=args.message, **common)
 
     if not targets:
         return _RunPlan(mode="help")
@@ -1871,9 +2643,10 @@ def _resolve_run_mode(args: argparse.Namespace) -> _RunPlan:
         return _RunPlan(
             mode="suite",
             suite_paths=[Path(item) for item in targets],
+            **common,
         )
 
-    return _RunPlan(mode="message", message=" ".join(targets))
+    return _RunPlan(mode="message", message=" ".join(targets), **common)
 
 
 async def _run_suites(
@@ -1884,10 +2657,15 @@ async def _run_suites(
     concurrency: int = 1,
     suite_concurrency: int = 1,
     trace_enabled: bool = True,
+    turn_timeout: float = 0.0,
+    case_ids: list[str] | None = None,
+    wave: str = "",
+    strict_efficiency: bool = False,
 ) -> int:
     """并发运行多个 suite，带 Rich Live 进度面板和全局汇总。
 
     返回 shell 退出码（0 = 全部成功，1 = 存在失败）。
+    ``strict_efficiency`` 为真时效率 warn 也判 fail（见 --strict-efficiency）。
     """
     total_suites = len(suite_paths)
     global_start = time.monotonic()
@@ -1900,12 +2678,12 @@ async def _run_suites(
     def _short_name(p: Path) -> str:
         return p.stem
 
-    # 预加载 suite 获取 case 数量
+    # 预加载 suite 获取 case 数量（与 run_suite 同样的过滤口径）
     for p in suite_paths:
         name = _short_name(p)
         try:
             _, cases, _ = _load_suite(p)
-            total = len(cases)
+            total = len(_filter_cases(cases, wave=wave, case_ids=case_ids))
         except Exception:
             total = 0
         progress_map[name] = _SuiteProgress(suite_name=name, total_cases=total)
@@ -2007,6 +2785,9 @@ async def _run_suites(
                         concurrency=concurrency,
                         trace_enabled=trace_enabled,
                         on_progress=_make_progress_cb(name),
+                        turn_timeout=turn_timeout,
+                        case_ids=case_ids,
+                        wave=wave,
                     )
                 except TypeError as exc:
                     if "on_progress" not in str(exc):
@@ -2018,6 +2799,7 @@ async def _run_suites(
                         output_dir,
                         concurrency=concurrency,
                         trace_enabled=trace_enabled,
+                        turn_timeout=turn_timeout,
                     )
                 ok_count = sum(1 for r in results if r.status == "ok")
                 fail_count = len(results) - ok_count
@@ -2068,6 +2850,28 @@ async def _run_suites(
 
     # ── 全局汇总报告 ──
     all_results = [r for _, results in suite_results for r in results]
+
+    def _case_failed(r: BenchResult) -> bool:
+        """执行失败或 error 级断言失败视为未通过；warn-only 效率告警不影响退出码。
+
+        strict_efficiency 模式下 warn 也判 fail（nightly 收紧用）。
+        """
+        if r.status != "ok":
+            return True
+        v = r.validation
+        if v is None:
+            return False
+        if v.results:
+            def _failed(res: Any) -> bool:
+                passed = res.passed if hasattr(res, "passed") else res.get("passed", True)
+                return not passed
+            def _sev(res: Any) -> str:
+                return res.severity if hasattr(res, "severity") else res.get("severity", "error")
+            if strict_efficiency:
+                return any(_failed(res) for res in v.results)
+            return any(_failed(res) and _sev(res) == "error" for res in v.results)
+        return v.failed > 0
+
     if all_results:
         total_cases = len(all_results)
         total_ok = sum(1 for r in all_results if r.status == "ok")
@@ -2076,6 +2880,19 @@ async def _run_suites(
         total_duration = sum(r.duration_seconds for r in all_results)
         total_tool_failures = sum(
             sum(1 for tc in r.tool_calls if not tc.success) for r in all_results
+        )
+        total_model_tool_failures = sum(
+            sum(1 for tc in r.tool_calls if not tc.success and not tc.parent_call_id)
+            for r in all_results
+        )
+        total_distinct_tool_errors = sum(
+            count_distinct_tool_errors(r.tool_calls) for r in all_results
+        )
+        validation_failed_assertions = sum(
+            r.validation.failed for r in all_results if r.validation is not None
+        )
+        assertion_failed_cases = sum(
+            1 for r in all_results if r.validation is not None and r.validation.failed > 0
         )
 
         # 保存全局汇总 JSON
@@ -2097,6 +2914,11 @@ async def _run_suites(
                 "total_tokens": total_tokens,
                 "total_duration_seconds": round(total_duration, 2),
                 "tool_failures": total_tool_failures,
+                "model_tool_failures": total_model_tool_failures,
+                "internal_tool_failures": total_tool_failures - total_model_tool_failures,
+                "distinct_tool_errors": total_distinct_tool_errors,
+                "validation_failed_assertions": validation_failed_assertions,
+                "assertion_failed_cases": assertion_failed_cases,
             },
             "suites": [
                 {
@@ -2110,8 +2932,7 @@ async def _run_suites(
         }
         output_dir.mkdir(parents=True, exist_ok=True)
         global_path = output_dir / f"global_{ts}_{short_id}.json"
-        with open(global_path, "w", encoding="utf-8") as f:
-            json.dump(global_summary, f, ensure_ascii=False, indent=2)
+        _write_json(global_path, global_summary)
 
         logger.info("═" * 60)
         logger.info("全局汇总")
@@ -2124,15 +2945,23 @@ async def _run_suites(
             total_fail,
         )
         logger.info(
-            "  总 %d tokens │ 总 %.1fs │ 工具失败 %d 次",
+            "  总 %d tokens │ 总 %.1fs │ 工具失败 %d 次（模型可见 %d，root %d）",
             total_tokens,
             total_duration,
             total_tool_failures,
+            total_model_tool_failures,
+            total_distinct_tool_errors,
         )
+        if validation_failed_assertions:
+            logger.info(
+                "  断言失败: %d 条（涉及 %d 个用例）",
+                validation_failed_assertions,
+                assertion_failed_cases,
+            )
         logger.info("  全局汇总: %s", global_path)
         logger.info("═" * 60)
 
-    return 0 if all(r.status == "ok" for r in all_results) else 1
+    return 1 if any(_case_failed(r) for r in all_results) else 0
 
 
 async def _main(argv: list[str] | None = None) -> int:
@@ -2152,12 +2981,32 @@ async def _main(argv: list[str] | None = None) -> int:
 
     # trace 模式：默认开启，可通过 --no-trace 或 EXCELMANUS_BENCH_TRACE=0 禁用
     trace_enabled = args.trace and os.environ.get("EXCELMANUS_BENCH_TRACE", "1") != "0"
+    turn_timeout = max(0.0, float(plan.turn_timeout or 0.0))
+
+    if plan.mode == "import_env":
+        try:
+            import_env_to_database(
+                plan.env_path,
+                profile_name=plan.profile_name,
+                model=plan.model,
+                activate=plan.activate,
+            )
+        except (OSError, ValueError) as exc:
+            logger.error("导入失败：%s", exc)
+            return 1
+        return 0
 
     if plan.mode == "message":
-        config = load_config()
+        config = _load_config_for_bench()
         setup_logging(config.log_level)
         output_dir = Path(args.output_dir)
-        await run_single(plan.message, config, output_dir, trace_enabled=trace_enabled)
+        await run_single(
+            plan.message,
+            config,
+            output_dir,
+            trace_enabled=trace_enabled,
+            turn_timeout=turn_timeout,
+        )
         return 0
 
     if plan.mode == "suite":
@@ -2166,7 +3015,7 @@ async def _main(argv: list[str] | None = None) -> int:
             for p in missing_paths:
                 logger.error("未找到 suite 文件: %s", p)
             return 1
-        config = load_config()
+        config = _load_config_for_bench()
         setup_logging(config.log_level)
         output_dir = Path(args.output_dir)
         return await _run_suites(
@@ -2176,20 +3025,24 @@ async def _main(argv: list[str] | None = None) -> int:
             concurrency=args.concurrency,
             suite_concurrency=args.suite_concurrency,
             trace_enabled=trace_enabled,
+            turn_timeout=turn_timeout,
+            case_ids=plan.case_ids,
+            wave=plan.wave,
+            strict_efficiency=plan.strict_efficiency,
         )
 
-    # all 模式
+    # all 模式：只跑默认套件，体验向长套件需显式 --suite
     cases_dir = Path("bench/cases")
     if not cases_dir.is_dir():
         logger.error("未找到测试用例目录: %s", cases_dir)
         return 1
 
-    suite_paths = sorted(cases_dir.glob("*.json"))
+    suite_paths = list_default_suite_paths(cases_dir)
     if not suite_paths:
-        logger.error("目录 %s 下无 JSON 用例文件", cases_dir)
+        logger.error("目录 %s 下无默认 JSON 用例文件", cases_dir)
         return 1
 
-    config = load_config()
+    config = _load_config_for_bench()
     setup_logging(config.log_level)
     output_dir = Path(args.output_dir)
     return await _run_suites(
@@ -2199,6 +3052,10 @@ async def _main(argv: list[str] | None = None) -> int:
         concurrency=args.concurrency,
         suite_concurrency=args.suite_concurrency,
         trace_enabled=trace_enabled,
+        turn_timeout=turn_timeout,
+        case_ids=plan.case_ids,
+        wave=plan.wave,
+        strict_efficiency=plan.strict_efficiency,
     )
 
 

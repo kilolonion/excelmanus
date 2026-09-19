@@ -10,8 +10,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Literal, Sequence
 
-from excelmanus.engine_core.tool_result import ToolResult, from_payload
+from excelmanus.engine_core.tool_result import ToolResult, error_result
 from excelmanus.logger import get_logger
+from excelmanus.security import SecurityViolationError
+from excelmanus.tools._helpers import (
+    OUTSIDE_WORKSPACE_MESSAGE,
+    OUTSIDE_WORKSPACE_REMEDIATION,
+)
 
 logger = get_logger("tools")
 
@@ -44,6 +49,8 @@ WriteEffect = Literal[
     "dynamic",
     "unknown",
 ]
+ToolVisibility = Literal["always", "hide_in_read"]
+ToolConsistency = Literal["local_commit", "external_unverified", "none"]
 
 # 内置工具模块清单（单一事实源）：
 # 1) 该顺序即注册顺序；
@@ -75,6 +82,18 @@ _ALIAS_FOLDS: tuple[tuple[str, str], ...] = (
     ("sheet", "sheet_name"),
     ("content_version", "expected_version"),
 )
+
+# 工具名兼容别名：模型常见的近名误称 → 规范名。
+# 只在查找时折叠，不进入 _tools 字典——catalog/schema/digest 仍以规范名面示，
+# 别名工具不会作为独立条目出现在工具目录中。
+_TOOL_NAME_ALIASES: dict[str, str] = {
+    "write_text": "write_text_file",
+}
+
+
+def canonical_tool_name(tool_name: str) -> str:
+    """把已知的工具名别名折到规范名；未知名原样返回。"""
+    return _TOOL_NAME_ALIASES.get(tool_name, tool_name)
 
 
 def _schema_property_names(schema: dict[str, Any] | None) -> set[str] | None:
@@ -109,15 +128,15 @@ def normalize_tool_aliases(
             and src_val not in (None, "")
             and dest_val != src_val
         ):
-            payload = {
-                "status": "error",
-                "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
-                "message": f"别名冲突：{src} 与 {dest} 值不同",
-                "violations": [f"{src}={src_val!r} 与 {dest}={dest_val!r}"],
-                "accepted_fields": [dest],
-                "required_fields": [],
-            }
-            return from_payload(payload)
+            return error_result(
+                f"别名冲突：{src} 与 {dest} 值不同",
+                code="TOOL_ARGUMENT_VALIDATION_ERROR",
+                fields={
+                    "violations": [f"{src}={src_val!r} 与 {dest}={dest_val!r}"],
+                    "accepted_fields": [dest],
+                    "required_fields": [],
+                },
+            )
         if dest not in args or args[dest] in (None, ""):
             args[dest] = src_val
         args.pop(src, None)
@@ -155,6 +174,9 @@ class ToolDef:
     truncate_tail_chars: int = 0
     # 写入语义声明（用于写入追踪，不用于审批/审计策略判定）
     write_effect: WriteEffect = "unknown"
+    visibility: ToolVisibility = "always"
+    consistency: ToolConsistency = "local_commit"
+    actions: dict[str, Any] = field(default_factory=dict)
 
     def truncate_result(self, text: str) -> str:
         """若文本超过 max_result_chars 则截断并附加提示。
@@ -375,6 +397,15 @@ class ToolRegistry:
         self._schema_validation_mode: SchemaValidationMode = "off"
         self._schema_validation_canary_percent: int = 100
         self._schema_strict_path: bool = False
+        self._catalog_revision: int = 0
+        self._catalog_mode: str = "write"
+        self._catalog_allowed: tuple[str, ...] | None = None
+        self._catalog_disallowed: tuple[str, ...] = ()
+        self._catalog_extra_tools: tuple[ToolDef, ...] = ()
+        self._catalog_skill_names: tuple[str, ...] = ()
+        self._catalog_allow_run_code: bool = False
+        self._catalog_families: frozenset[str] | None = None
+        self._catalog_execution_mode: str | None = None
 
     def fork(self) -> "ToolRegistry":
         """创建一个 per-session 的 overlay registry。
@@ -388,7 +419,64 @@ class ToolRegistry:
         child._schema_validation_mode = self._schema_validation_mode
         child._schema_validation_canary_percent = self._schema_validation_canary_percent
         child._schema_strict_path = self._schema_strict_path
+        child._catalog_revision = self._catalog_revision
+        child._catalog_mode = self._catalog_mode
+        child._catalog_allowed = self._catalog_allowed
+        child._catalog_disallowed = self._catalog_disallowed
+        child._catalog_extra_tools = self._catalog_extra_tools
+        child._catalog_skill_names = self._catalog_skill_names
+        child._catalog_allow_run_code = self._catalog_allow_run_code
+        child._catalog_families = self._catalog_families
+        child._catalog_execution_mode = self._catalog_execution_mode
         return child
+
+    def _bump_catalog(self) -> None:
+        self._catalog_revision += 1
+
+    def bind_catalog(
+        self,
+        *,
+        mode: str = "write",
+        allowed: Sequence[str] | None = None,
+        disallowed: Sequence[str] = (),
+        extra_tools: Sequence[ToolDef] = (),
+        skill_names: Sequence[str] = (),
+        allow_run_code: bool = False,
+        families: frozenset[str] | None = None,
+        execution_mode: str | None = None,
+    ) -> None:
+        """绑定有效目录投影参数。digest / schemas 都读这组参数。
+
+        ``execution_mode`` 是剥离 wire 坍缩后的执行目录模式；仅当 ``mode``
+        为展示态（code）时与 ``mode`` 不同，供 introspect 换绑执行目录。
+        """
+        self._catalog_mode = str(mode or "write")
+        self._catalog_allowed = tuple(allowed) if allowed is not None else None
+        self._catalog_disallowed = tuple(str(name) for name in disallowed)
+        self._catalog_extra_tools = tuple(extra_tools)
+        self._catalog_skill_names = tuple(str(name) for name in skill_names if str(name).strip())
+        self._catalog_allow_run_code = bool(allow_run_code)
+        self._catalog_families = families
+        self._catalog_execution_mode = execution_mode
+
+    def effective_catalog(self) -> Any:
+        """当前绑定参数下的 EffectiveToolCatalog。"""
+        from excelmanus.tools.catalog import derive_effective_catalog
+
+        return derive_effective_catalog(
+            tools=self.get_all_tools(),
+            mode=self._catalog_mode,
+            allowed=self._catalog_allowed,
+            disallowed=self._catalog_disallowed,
+            extra_tools=self._catalog_extra_tools,
+            skill_names=self._catalog_skill_names,
+            allow_run_code=self._catalog_allow_run_code,
+            families=self._catalog_families,
+        )
+
+    def catalog_digest(self) -> str:
+        """有效目录的稳定内容摘要，供 EpochIdentity.catalog_digest。"""
+        return str(self.effective_catalog().digest())
 
     def restrict(
         self,
@@ -401,9 +489,20 @@ class ToolRegistry:
         if allowed is not None:
             keep = set(allowed) - blocked
             self._tools = {name: tool for name, tool in self._tools.items() if name in keep}
-            return
-        for name in blocked:
-            self._tools.pop(name, None)
+        else:
+            for name in blocked:
+                self._tools.pop(name, None)
+        self._bump_catalog()
+
+    def remove_tools(self, names: Sequence[str]) -> int:
+        """按名移除工具并 bump catalog。返回实际移除数量。"""
+        removed = 0
+        for name in names:
+            if self._tools.pop(name, None) is not None:
+                removed += 1
+        if removed:
+            self._bump_catalog()
+        return removed
 
     def configure_schema_validation(
         self,
@@ -581,7 +680,12 @@ class ToolRegistry:
                 and isinstance(field_value, str)
                 and field_value.strip()
             ):
-                if Path(field_value).is_absolute():
+                if (
+                    Path(field_value).is_absolute()
+                    # Windows 上 '/etc/passwd' 不算绝对路径，但模型传的
+                    # POSIX 风格绝对路径同样不是相对路径，一并拒绝。
+                    or field_value.startswith(("/", "\\"))
+                ):
                     violations.append(f"{field_path}: 必须使用相对路径，不允许绝对路径")
                 if self._contains_parent_traversal(field_value):
                     violations.append(f"{field_path}: 不允许包含 '..' 路径穿越片段")
@@ -685,6 +789,7 @@ class ToolRegistry:
         if tool.name in self._tools:
             raise ToolRegistryError(f"工具 '{tool.name}' 已注册，不允许重复。")
         self._tools[tool.name] = tool
+        self._bump_catalog()
         logger.info("已注册工具 '%s'", tool.name)
 
     def register_tools(self, tools: Iterable[ToolDef]) -> None:
@@ -700,11 +805,12 @@ class ToolRegistry:
         for tool in tools_list:
             self._tools[tool.name] = tool
         if tools_list:
+            self._bump_catalog()
             logger.info("已批量注册 %d 个工具", len(tools_list))
 
     def get_tool(self, tool_name: str) -> ToolDef | None:
-        """按名称查找工具定义，未找到返回 None。"""
-        return self._tools.get(tool_name)
+        """按名称查找工具定义，未找到返回 None。别名先折到规范名。"""
+        return self._tools.get(canonical_tool_name(tool_name))
 
     def get_all_tools(self) -> list[ToolDef]:
         """返回全部工具定义。"""
@@ -719,20 +825,21 @@ class ToolRegistry:
         mode: OpenAISchemaMode = "responses",
         tool_scope: Sequence[str] | None = None,
     ) -> list[dict[str, Any]]:
-        """返回 OpenAI 工具 schema，可按 scope 过滤。"""
+        """返回 OpenAI 工具 schema，可按 scope 过滤。按工具名排序。"""
         if tool_scope is None:
-            tools = self._tools.values()
+            tools = list(self._tools.values())
         else:
             scope = set(tool_scope)
             tools = [tool for name, tool in self._tools.items() if name in scope]
+        tools.sort(key=lambda tool: tool.name)
         return [tool.to_openai_schema(mode=mode) for tool in tools]
 
     def get_tiered_schemas(
         self,
         mode: OpenAISchemaMode = "responses",
     ) -> list[dict[str, Any]]:
-        """返回所有工具的完整 schema。"""
-        return [tool.to_openai_schema(mode=mode) for tool in self._tools.values()]
+        """有效目录的完整 schema（按名排序）。分层裁剪由 EffectiveToolCatalog 负责。"""
+        return list(self.effective_catalog().tool_schemas(schema_mode=mode))
 
     def call_tool(
         self,
@@ -744,7 +851,7 @@ class ToolRegistry:
         if tool_scope is not None and tool_name not in set(tool_scope):
             raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
 
-        tool = self._tools.get(tool_name)
+        tool = self._tools.get(canonical_tool_name(tool_name))
         if tool is None:
             raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
 
@@ -753,9 +860,15 @@ class ToolRegistry:
             return normalized
         arguments = normalized
 
+        validation_args = arguments
+        if tool_name == "run_code" and "sandbox_tier" in arguments:
+            # sandbox_tier 由宿主按代码策略注入（或模型回显），不在模型面 schema；
+            # 校验时忽略，但执行参数原样传递——审批重放依赖它恢复审批时的沙箱档。
+            validation_args = {k: v for k, v in arguments.items() if k != "sandbox_tier"}
+
         schema_error = self.validate_arguments_by_schema(
             tool_name=tool_name,
-            arguments=arguments,
+            arguments=validation_args,
             schema=tool.input_schema,
         )
         if schema_error is not None:
@@ -787,6 +900,29 @@ class ToolRegistry:
         try:
             from excelmanus.engine_core.tool_result import coerce_legacy_result
 
+            if tool_name == "introspect_capability":
+                from excelmanus.tools.introspection_tools import _call_catalog
+                from excelmanus.tools.catalog import derive_effective_catalog
+
+                catalog = self.effective_catalog()
+                if catalog.mode == "code":
+                    # wire 坍缩为 run_code-only；发现入口换绑执行目录，
+                    # 投影参数与绑定目录完全一致（families / allow_run_code / 执行 mode）。
+                    catalog = derive_effective_catalog(
+                        tools=self.get_all_tools(),
+                        mode=self._catalog_execution_mode or "write",
+                        allowed=self._catalog_allowed,
+                        disallowed=self._catalog_disallowed,
+                        extra_tools=self._catalog_extra_tools,
+                        skill_names=self._catalog_skill_names,
+                        allow_run_code=self._catalog_allow_run_code,
+                        families=self._catalog_families,
+                    )
+                token = _call_catalog.set(catalog)
+                try:
+                    return coerce_legacy_result(tool.func(**arguments))
+                finally:
+                    _call_catalog.reset(token)
             return coerce_legacy_result(tool.func(**arguments))
         except Exception as exc:
             logger.warning(
@@ -814,7 +950,7 @@ class ToolRegistry:
         if tool_scope is not None and tool_name not in set(tool_scope):
             raise ToolNotAllowedError(f"工具 '{tool_name}' 不在授权范围内。")
 
-        tool = self._tools.get(tool_name)
+        tool = self._tools.get(canonical_tool_name(tool_name))
         if tool is None:
             raise ToolNotFoundError(f"工具 '{tool_name}' 未注册。")
 
@@ -886,17 +1022,17 @@ class ToolRegistry:
         required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
         properties_raw = schema.get("properties")
         accepted_fields = sorted(str(item) for item in properties_raw.keys()) if isinstance(properties_raw, dict) else []
-        payload = {
-            "status": "error",
-            "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
-            "tool": tool.name,
-            "message": "工具参数不完整或不匹配，请根据工具 schema 补齐后重试。",
-            "detail": detail,
-            "required_fields": required,
-            "accepted_fields": accepted_fields,
-            "provided_fields": sorted(arguments.keys()),
-        }
-        return from_payload(payload)
+        return error_result(
+            "工具参数不完整或不匹配，请根据工具 schema 补齐后重试。",
+            code="TOOL_ARGUMENT_VALIDATION_ERROR",
+            fields={
+                "tool": tool.name,
+                "detail": detail,
+                "required_fields": required,
+                "accepted_fields": accepted_fields,
+                "provided_fields": sorted(arguments.keys()),
+            },
+        )
 
     @staticmethod
     def _format_argument_schema_validation_error(
@@ -911,18 +1047,18 @@ class ToolRegistry:
         required = [item for item in required_raw if isinstance(item, str)] if isinstance(required_raw, list) else []
         properties_raw = schema.get("properties")
         accepted_fields = sorted(str(item) for item in properties_raw.keys()) if isinstance(properties_raw, dict) else []
-        payload = {
-            "status": "error",
-            "error_code": "TOOL_ARGUMENT_VALIDATION_ERROR",
-            "tool": tool_name,
-            "message": "工具参数与 schema 不匹配，请修正后重试。",
-            "detail": "; ".join(violations[:5]),
-            "violations": violations[:20],
-            "required_fields": required,
-            "accepted_fields": accepted_fields,
-            "provided_fields": sorted(arguments.keys()),
-        }
-        return from_payload(payload)
+        return error_result(
+            "工具参数与 schema 不匹配，请修正后重试。",
+            code="TOOL_ARGUMENT_VALIDATION_ERROR",
+            fields={
+                "tool": tool_name,
+                "detail": "; ".join(violations[:5]),
+                "violations": violations[:20],
+                "required_fields": required,
+                "accepted_fields": accepted_fields,
+                "provided_fields": sorted(arguments.keys()),
+            },
+        )
 
     @staticmethod
     def _format_execution_error(
@@ -930,18 +1066,21 @@ class ToolRegistry:
         tool_name: str,
         exc: Exception,
     ) -> ToolResult:
-        """构造统一的工具执行错误，透传原始异常信息。"""
-        payload = {
-            "status": "error",
-            "error_code": "TOOL_EXECUTION_ERROR",
+        """路径越界返回人话；其他未捕获异常仍透传。"""
+        extra: dict[str, Any] = {
             "tool": tool_name,
             "exception": type(exc).__name__,
-            "message": str(exc),
         }
-        # 如果有链式异常（__cause__），也透传
         if exc.__cause__ is not None and str(exc.__cause__) != str(exc):
-            payload["cause"] = str(exc.__cause__)
-        return from_payload(payload)
+            extra["cause"] = str(exc.__cause__)
+        if isinstance(exc, SecurityViolationError):
+            return error_result(
+                OUTSIDE_WORKSPACE_MESSAGE,
+                code="PATH_INVALID",
+                remediation=OUTSIDE_WORKSPACE_REMEDIATION,
+                fields=extra,
+            )
+        return error_result(str(exc), code="TOOL_EXECUTION_ERROR", fields=extra)
     @staticmethod
     def is_error_result(result: Any) -> bool:
         """检测工具返回值是否为失败。优先认 ToolResult.success。"""
@@ -975,24 +1114,11 @@ class ToolRegistry:
 
         其中 task_tools 和 skill_tools 需要会话级实例，由 AgentEngine.__init__ 单独注册。
         """
-        from excelmanus.security import FileAccessGuard
-        from excelmanus.tools._guard_ctx import set_guard
-
-        # 设置 contextvar fallback，确保 CLI 模式下直接调用工具函数
-        # （不经过 tool_dispatcher.execute）也能拿到正确的 guard
-        set_guard(FileAccessGuard(workspace_root))
-
-        for module_path in _WORKBOOK_IMPL_MODULE_PATHS + _GUARD_ONLY_MODULE_PATHS:
-            module = import_module(module_path)
-            init_guard = getattr(module, "init_guard", None)
-            if callable(init_guard):
-                init_guard(workspace_root)
-
         for module_path in _BUILTIN_TOOL_MODULE_PATHS:
             module = import_module(module_path)
-            init_guard = getattr(module, "init_guard", None)
-            if callable(init_guard):
-                init_guard(workspace_root)
             get_tools = getattr(module, "get_tools", None)
             if callable(get_tools):
                 self.register_tools(get_tools())
+        from excelmanus.tools.meta_tool_defs import get_meta_tools
+
+        self.register_tools(get_meta_tools())

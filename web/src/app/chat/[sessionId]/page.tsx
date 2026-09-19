@@ -1,31 +1,23 @@
 "use client";
 
 import { useEffect } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import { useParams } from "next/navigation";
 import { MessageStream } from "@/components/chat/MessageStream";
 import { ChatInput } from "@/components/chat/ChatInput";
 import { CommandResultDialog, useCommandResult } from "@/components/modals/CommandResultDialog";
-import { ExcelFullView } from "@/components/excel/ExcelFullView";
-import { ExcelCompareView } from "@/components/excel/ExcelCompareView";
-import { WordFullView } from "@/components/word/WordFullView";
+import { WorkspaceViewHost } from "@/components/workspace/WorkspaceViewHost";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { useWordStore } from "@/stores/word-store";
 import { sendMessage, stopGeneration, rollbackAndResend, retryAssistantMessage } from "@/lib/chat-actions";
 import type { AttachedFile, FileAttachment } from "@/lib/types";
-
-const viewTransition = { duration: 0.2, ease: "easeOut" as const };
 
 function ChatPage() {
   const params = useParams();
   const sessionId = params.sessionId as string;
   const isStreaming = useChatStore((s) => s.isStreaming);
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
-  const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const compareMode = useExcelStore((s) => s.compareMode);
-  const wordFullViewPath = useWordStore((s) => s.fullViewPath);
   const cmdResult = useCommandResult();
 
   useEffect(() => {
@@ -38,39 +30,23 @@ function ChatPage() {
 
   return (
     <div className="flex flex-col h-full">
-      <AnimatePresence mode="wait" initial={false}>
-        {wordFullViewPath ? (
-          <motion.div key="word" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
-            <WordFullView />
-          </motion.div>
-        ) : compareMode ? (
-          <motion.div key="compare" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
-            <ExcelCompareView />
-          </motion.div>
-        ) : fullViewPath ? (
-          <motion.div key="excel" className="flex-1 min-h-0" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
-            <ExcelFullView />
-          </motion.div>
-        ) : (
-          <motion.div key={`chat-${sessionId}`} className="flex-1 min-h-0 flex flex-col" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={viewTransition}>
-            <MessageStream
-              isStreaming={isStreaming}
-              onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
-                rollbackAndResend(messageId, newContent, sessionId, files, retainedFiles);
-              }}
-              onRetry={(assistantMessageId: string) => {
-                retryAssistantMessage(assistantMessageId, sessionId);
-              }}
-              onRetryWithModel={(assistantMessageId: string, modelName: string) => {
-                retryAssistantMessage(assistantMessageId, sessionId, modelName);
-              }}
-            />
-          </motion.div>
-        )}
-      </AnimatePresence>
+      <WorkspaceViewHost>
+        <MessageStream
+          isStreaming={isStreaming}
+          onEditAndResend={(messageId: string, newContent: string, files?: File[], retainedFiles?: FileAttachment[]) => {
+            rollbackAndResend(messageId, newContent, sessionId, files, retainedFiles);
+          }}
+          onRetry={(assistantMessageId: string) => {
+            retryAssistantMessage(assistantMessageId, sessionId);
+          }}
+          onRetryWithModel={(assistantMessageId: string, modelName: string) => {
+            retryAssistantMessage(assistantMessageId, sessionId, modelName);
+          }}
+        />
+      </WorkspaceViewHost>
 
       {!compareMode && (
-        <div className="relative z-30 px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
+        <div className="relative z-30 px-3 sm:px-4 pb-4 pt-6 -mt-6 bg-gradient-to-t from-background from-70% to-transparent pointer-events-none flex-shrink-0" style={{ paddingBottom: "max(1rem, var(--sab, 0px))" }}>
           <div className="max-w-3xl mx-auto pointer-events-auto">
             <ChatInput
               onSend={handleSend}

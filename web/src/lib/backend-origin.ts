@@ -6,7 +6,16 @@ function trimTrailingSlash(value: string): string {
 
 function isLoopback(hostname: string): boolean {
   const h = hostname.toLowerCase();
-  return h === "localhost" || h === "127.0.0.1" || h.startsWith("127.") || h === "::1";
+  return h === "localhost" || h === "127.0.0.1" || h.startsWith("127.") || h === "::1" || h === "[::1]";
+}
+
+function canonicalHost(hostname: string): string {
+  const h = hostname.toLowerCase();
+  return h === "[::1]" ? "::1" : h;
+}
+
+function formatHostForUrl(hostname: string): string {
+  return hostname.includes(":") && !hostname.startsWith("[") ? `[${hostname}]` : hostname;
 }
 
 function isPrivateIpv4(hostname: string): boolean {
@@ -50,10 +59,14 @@ export function resolveDirectBackendOrigin(): string {
         if (window.location.protocol === "https:" && cfgUrl.protocol === "http:") {
           return "";
         }
-        // 配置成 loopback 但页面并非本机访问时，改用当前主机名 + 原端口。
-        if (isLoopback(cfgUrl.hostname) && !isLoopback(window.location.hostname)) {
+        // 配置成 loopback 时对齐到当前页面主机名：
+        // 局域网访问要避开写死的 localhost；localhost 与 127.0.0.1 也是不同源。
+        if (
+          isLoopback(cfgUrl.hostname)
+          && canonicalHost(cfgUrl.hostname) !== canonicalHost(window.location.hostname)
+        ) {
           const port = cfgUrl.port || "8000";
-          return `${cfgUrl.protocol}//${window.location.hostname}:${port}`;
+          return `${cfgUrl.protocol}//${formatHostForUrl(window.location.hostname)}:${port}`;
         }
       } catch {
         // 非 URL 字符串（如裸主机名）按原值使用
@@ -65,7 +78,7 @@ export function resolveDirectBackendOrigin(): string {
 
   if (typeof window !== "undefined") {
     if (shouldUseLocalPortFallback(window.location.hostname, window.location.protocol)) {
-      return `http://${window.location.hostname}:8000`;
+      return `http://${formatHostForUrl(window.location.hostname)}:8000`;
     }
   }
   return "";

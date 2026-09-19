@@ -5,10 +5,15 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.conftest import symlink_or_skip
 
 from excelmanus.api_app_state import sanitize_upload_filename, set_config
 from excelmanus.api_app_state import resolve_excel_path, safe_uploads_path
-from excelmanus.security.guard import SecurityViolationError, contained_in
+from excelmanus.security.guard import (
+    FileAccessGuard,
+    SecurityViolationError,
+    contained_in,
+)
 from excelmanus.security.url_fetch import UnsafeURLError, assert_public_http_url
 
 
@@ -51,19 +56,24 @@ def test_safe_uploads_rejects_existing_symlink(tmp_path: Path) -> None:
     real = tmp_path / "secret.txt"
     real.write_text("secret", encoding="utf-8")
     link = uploads / "link.txt"
-    link.symlink_to(real)
+    symlink_or_skip(link, real)
     assert safe_uploads_path(uploads, "link.txt") is None
 
 
-def test_uploads_mkdir_does_not_follow_symlink_parent(tmp_path: Path) -> None:
-    from excelmanus.api_app_state import uploads_mkdir
+def test_file_service_mkdir_does_not_follow_symlink_parent(tmp_path: Path) -> None:
+    from excelmanus.workbook_commit import CommitError
+    from excelmanus.workspace.file_service import WorkspaceFileService
 
     uploads = tmp_path / "uploads"
     uploads.mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
-    (uploads / "trap").symlink_to(outside)
-    assert uploads_mkdir(uploads, "trap/child") is None
+    symlink_or_skip(uploads / "trap", outside)
+    svc = WorkspaceFileService(tmp_path)
+    try:
+        svc.mkdir("uploads/trap/child")
+    except (CommitError, OSError):
+        pass
     assert not (outside / "child").exists()
 
 
@@ -71,6 +81,7 @@ def test_sanitize_upload_filename_strips_paths() -> None:
     assert ".." not in sanitize_upload_filename("../../etc/passwd")
     assert "/" not in sanitize_upload_filename("a/b/c.xlsx")
     assert sanitize_upload_filename("ok_file.xlsx") == "ok_file.xlsx"
+    assert sanitize_upload_filename("产品目录.csv") == "产品目录.csv"
 
 
 def test_resolve_excel_path_uses_guard(tmp_path: Path) -> None:
@@ -83,6 +94,30 @@ def test_resolve_excel_path_uses_guard(tmp_path: Path) -> None:
     assert resolve_excel_path("book.xlsx", workspace_root=str(ws))
     assert resolve_excel_path(str(outside), workspace_root=str(ws)) is None
     assert resolve_excel_path("../outside.xlsx", workspace_root=str(ws)) is None
+
+
+def test_resolve_excel_path_does_not_guess_uploads(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    uploads = ws / "uploads"
+    uploads.mkdir(parents=True)
+    (uploads / "hidden.xlsx").write_bytes(b"xl")
+    (ws / "outputs").mkdir()
+    (ws / "outputs" / "hidden.xlsx").write_bytes(b"xl")
+    set_config(type("C", (), {"workspace_root": str(ws)})())
+    assert resolve_excel_path("hidden.xlsx", workspace_root=str(ws)) is None
+    found = resolve_excel_path("uploads/hidden.xlsx", workspace_root=str(ws))
+    assert found is not None
+    assert found.endswith("hidden.xlsx")
+    assert "uploads" in found.replace("\\", "/")
+
+
+def test_file_guard_blocks_product_secrets(tmp_path: Path) -> None:
+    ws = tmp_path / "workspace"
+    ws.mkdir()
+    guard = FileAccessGuard(str(ws))
+    for name in (".secret_key", ".env", "config.env", "excelmanus.db"):
+        with pytest.raises(SecurityViolationError):
+            guard.resolve_and_validate(name)
 
 
 def test_assert_public_http_url_blocks_loopback() -> None:

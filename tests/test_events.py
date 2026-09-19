@@ -4,12 +4,18 @@
 """
 
 from datetime import datetime
+from pathlib import Path
 
 import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.events import (
+    EventType,
+    ToolCallEvent,
+    changed_mutations,
+    mutations_from_identities,
+)
 
 # ---------------------------------------------------------------------------
 # 自定义 hypothesis strategies
@@ -146,6 +152,8 @@ class TestEventTypeEnum:
             "STEP_START",
             "STEP_END",
             "INBOX_CLAIMED",
+            "UI_HINT",
+            "JEV_TRACE",
         }
         actual = {member.name for member in EventType}
         assert actual == expected
@@ -210,6 +218,8 @@ class TestEventTypeEnum:
             ("STEP_START", "step_start"),
             ("STEP_END", "step_end"),
             ("INBOX_CLAIMED", "inbox_claimed"),
+            ("UI_HINT", "ui_hint"),
+            ("JEV_TRACE", "jev_trace"),
         ]
 
 
@@ -335,6 +345,7 @@ class TestToolCallEventFields:
             "thinking_delta",
             "mode_name",
             "mode_enabled",
+            "mode_value",
             "excel_file_path",
             "excel_sheet",
             "excel_columns",
@@ -401,5 +412,33 @@ class TestToolCallEventFields:
             "turn_id",
             "step_id",
             "inbox_claimed",
+            "ui_hint_surface",
+            "ui_hint_file_path",
+            "ui_hint_sheet",
+            "ui_hint_reason",
+            "ui_hint_suppress_auto_open",
+            "jev_trace",
         }
         assert set(annotations.keys()) == expected_fields
+
+
+def test_mutations_from_identities_uses_per_identity_version() -> None:
+    result = mutations_from_identities(
+        ["a.xlsx", "b.xlsx"],
+        content_version="fallback",
+        content_versions={"a.xlsx": "v-a"},
+    )
+    by_identity = {item["identity"]: item for item in result}
+    assert by_identity["a.xlsx"]["contentVersion"] == "v-a"
+    assert by_identity["b.xlsx"]["contentVersion"] == "fallback"
+
+
+def test_changed_mutations_does_not_hash_disk(tmp_path: Path) -> None:
+    from excelmanus.workbook_commit import seed_seen_versions
+
+    seed_seen_versions({})
+    target = tmp_path / "a.xlsx"
+    target.write_bytes(b"bytes")
+    result = changed_mutations(["a.xlsx"], workspace_root=str(tmp_path))
+    assert result[0]["identity"] == "a.xlsx"
+    assert "contentVersion" not in result[0]

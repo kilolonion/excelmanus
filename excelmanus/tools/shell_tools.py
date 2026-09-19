@@ -4,36 +4,26 @@ from __future__ import annotations
 
 import re
 import shlex
+import shutil
 import subprocess
 import time
+import os
+import inspect
 from pathlib import Path
 from typing import Any
 
-from excelmanus.engine_core.tool_result import ToolResult, from_payload
-from excelmanus.security import FileAccessGuard
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.engine_core.tool_result import ToolResult, error_result, from_payload
+from excelmanus.security import FileAccessGuard, SecurityViolationError
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools.registry import ToolDef
-
-# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
-
-_guard: FileAccessGuard | None = None
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(".")
-    return _guard
+    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。"""
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 # ── 白名单 / 黑名单 ─────────────────────────────────────
@@ -323,6 +313,68 @@ def _validate_command(command: str) -> tuple[bool, str]:
     return True, "ok"
 
 
+def preflight_command(command: str) -> tuple[bool, str]:
+    """在审批或执行前验证命令契约与主机可用性。
+
+    ``ls`` 等 PowerShell 别名不是 ``shell=False`` 下的可执行文件；提前给出
+    可行动的提示，避免用户先批准一个必然失败的调用。
+    """
+    if not isinstance(command, str):
+        return False, "command 必须是字符串"
+    valid, reason = _validate_command(command)
+    if not valid:
+        return False, reason
+    for chain_text, _ in _split_chain_simple(command.strip()):
+        for segment in _split_pipeline(chain_text.strip()):
+            tokens = shlex.split(segment.strip())
+            if not tokens:
+                continue
+            name = Path(tokens[0]).name
+            if shutil.which(tokens[0]) is None:
+                if os.name == "nt":
+                    return False, (
+                        f"当前 Windows 主机没有可执行命令: {name}（PowerShell 别名不能由 shell=False 执行）。"
+                        "文件浏览请使用 list_directory；需要文本处理请使用已安装的可执行命令。"
+                    )
+                return False, f"当前主机找不到可执行命令: {name}"
+    return True, "ok"
+
+
+def preflight_shell(arguments: dict[str, Any], guard: FileAccessGuard) -> ToolResult | None:
+    """共用审批前校验，不运行子进程、不创建审批记录。"""
+    try:
+        inspect.signature(run_shell).bind(**arguments)
+    except TypeError as exc:
+        return error_result(f"run_shell 参数不匹配：{exc}", code="INVALID_ARGS", fields={"preflight": True})
+    command = arguments.get("command", "")
+    valid, reason = preflight_command(command)
+    if valid:
+        try:
+            timeout = arguments.get("timeout_seconds", 30)
+            tail = arguments.get("tail_lines", 80)
+            if not isinstance(timeout, int) or isinstance(timeout, bool) or not 1 <= timeout <= 120:
+                raise ValueError("timeout_seconds 必须为 1~120 的整数")
+            if not isinstance(tail, int) or isinstance(tail, bool) or tail < 0:
+                raise ValueError("tail_lines 必须为非负整数")
+            workdir = guard.resolve_and_validate(arguments.get("workdir", "."))
+            if not workdir.is_dir():
+                raise ValueError("workdir 必须是存在的目录")
+            from excelmanus.security.source_isolation import command_touches_product_source
+
+            if command_touches_product_source(command):
+                raise ValueError("禁止用 shell 读取产品源码")
+            valid, reason = _check_sensitive_paths(command, workdir, guard.workspace_root)
+        except (ValueError, TypeError, OSError, SecurityViolationError) as exc:
+            valid, reason = False, str(exc)
+    if valid:
+        return None
+    return error_result(
+        f"run_shell 预检失败：{reason}", code="INVALID_ARGS",
+        fields={"command": command, "preflight": True,
+                "remediation": "目录浏览用 list_directory，文本读取用 read_text_file；确认参数与主机命令后重试。"},
+    )
+
+
 def _check_sensitive_paths(
     command: str, workdir: Path, workspace_root: Path,
 ) -> tuple[bool, str]:
@@ -414,7 +466,7 @@ def run_shell(
     )
 
     # 安全校验
-    valid, reason = _validate_command(command)
+    valid, reason = preflight_command(command)
     if not valid:
         return from_payload(
             {"status": "blocked", "reason": reason, "command": command},
@@ -552,12 +604,10 @@ def run_shell(
         )
     except FileNotFoundError:
         seg0 = _split_pipeline(chain_segments[0][0].strip())
-        return from_payload(
-            {
-                "status": "error",
-                "error": f"命令未找到: {shlex.split(seg0[0].strip())[0]}",
-                "command": command,
-            },
+        return error_result(
+            f"命令未找到: {shlex.split(seg0[0].strip())[0]}",
+            code="NOT_FOUND",
+            fields={"command": command},
         )
 
     if timed_out:
@@ -599,7 +649,9 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="run_shell",
             description=(
-                "执行受限 shell 命令（仅白名单只读命令如 ls/cat/head/tail/grep/wc/file/du/stat）。"
+                "执行本机已安装的白名单只读可执行文件；不解释 PowerShell 别名或 cmd 内置命令。"
+                f"白名单：{', '.join(sorted(ALLOWED_COMMANDS))}。"
+                "目录浏览优先用 list_directory，文本读取用 read_text_file。参数与主机可用性在审批前校验。"
                 "适用场景：文件探查、搜索、环境信息查询等只读操作。"
                 "不适用：写入操作和网络请求（严格禁止）。"
             ),

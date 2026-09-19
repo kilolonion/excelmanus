@@ -136,20 +136,20 @@ def api_state(tmp_workspace):
     config = _test_config(tmp_workspace)
     manager = MagicMock()
 
-    old_config = api_module._config
-    old_manager = api_module._session_manager
+    old_config = api_module.app.state.runtime.config
+    old_manager = api_module.app.state.runtime.session_manager
     old_app_config = _get_app_config()
     old_app_sm = _get_app_sm()
 
-    api_module._config = config
-    api_module._session_manager = manager
+    api_module.app.state.runtime.config = config
+    api_module.app.state.runtime.session_manager = manager
     _set_app_config(config)
     _set_app_sm(manager)
 
     yield {"config": config, "manager": manager, "workspace": tmp_workspace}
 
-    api_module._config = old_config
-    api_module._session_manager = old_manager
+    api_module.app.state.runtime.config = old_config
+    api_module.app.state.runtime.session_manager = old_manager
     _set_app_config(old_app_config)
     _set_app_sm(old_app_sm)
 

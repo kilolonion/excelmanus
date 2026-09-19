@@ -74,7 +74,7 @@ class TestResolverProtocol:
         store.get_active_profile.return_value = self._make_profile()
         resolver = CredentialResolver(credential_store=store)
 
-        result = resolver.resolve_sync("user_1", "gpt-5.3-codex")
+        result = resolver.resolve_sync("gpt-5.3-codex")
         assert result is not None
         assert result.protocol == "openai_responses"
         assert result.source == "oauth"
@@ -86,7 +86,7 @@ class TestResolverProtocol:
         store.get_active_profile.return_value = None
         resolver = CredentialResolver(credential_store=store)
 
-        result = resolver.resolve_sync("user_1", "deepseek-v3")
+        result = resolver.resolve_sync("deepseek-v3")
         assert result is None
 
     def test_resolve_async_codex_returns_openai_responses(self):
@@ -94,9 +94,7 @@ class TestResolverProtocol:
         store.get_active_profile.return_value = self._make_profile()
         resolver = CredentialResolver(credential_store=store)
 
-        result = asyncio.get_event_loop().run_until_complete(
-            resolver.resolve("user_1", "codex-mini-latest")
-        )
+        result = asyncio.run(resolver.resolve("codex-mini-latest"))
         assert result is not None
         assert result.protocol == "openai_responses"
 
@@ -144,37 +142,6 @@ class TestCreateClientRouting:
             protocol="openai",
         )
         assert isinstance(client, openai.AsyncOpenAI)
-
-
-class TestApiModelResolution:
-    """api._resolve_model_info 对 Codex 前缀模型的解析。"""
-
-    def test_codex_prefixed_model_resolves_openai_responses_protocol(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import excelmanus.api as api_module
-
-        monkeypatch.setattr(
-            api_module,
-            "_config",
-            SimpleNamespace(
-                protocol="openai",
-                model="deepseek-chat",
-                base_url="https://api.deepseek.com/v1",
-                api_key="cfg-key",
-            ),
-            raising=False,
-        )
-        monkeypatch.setattr(api_module, "_config_store", None, raising=False)
-
-        model, base_url, api_key, protocol = api_module._resolve_model_info(
-            "openai-codex/gpt-5.3-codex", None, None
-        )
-
-        assert model == "gpt-5.3-codex"
-        assert base_url == OpenAICodexProvider.BASE_URL
-        assert api_key == "cfg-key"
-        assert protocol == "openai_responses"
 
 
 # ── P3: store: false in request body ──────────────────────
@@ -330,9 +297,16 @@ class TestSessionCodexProfiles:
         manager.set_credential_store(credential_store)
 
         engine = MagicMock()
-        engine._config.models = ()
+        # 生产实现遍历 engine._config.models 找 openai-codex/ 前缀档案，
+        # 需要真实 dataclass（内部用 dataclasses.replace）
+        from excelmanus.config import ModelProfile
 
-        manager.sync_user_subscription_profiles(engine, user_id="user-1")
+        engine._config.models = (
+            ModelProfile(name="openai-codex/main", model="gpt-5.3", api_key="", base_url=""),
+            ModelProfile(name="main", model="gpt-5.1", api_key="k", base_url="https://api.openai.com/v1"),
+        )
+
+        manager.sync_user_subscription_profiles(engine)
 
         profiles = engine.sync_model_profiles.call_args.args[0]
         codex_profiles = [p for p in profiles if p.name.startswith("openai-codex/")]

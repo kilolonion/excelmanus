@@ -1,9 +1,4 @@
-"""通过 contextvar 实现每会话的 FileAccessGuard。
-
-工具分发器在每次工具调用前设置 contextvar，
-工具函数即可自动获得对应用户的 guard。
-模块级 _guard 单例仍作为 CLI 模式下的回退。
-"""
+"""兼容薄包装：委托 ToolCallContext，不再作为路径权威。"""
 
 from __future__ import annotations
 
@@ -13,21 +8,27 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from excelmanus.security import FileAccessGuard
 
-_current_guard: contextvars.ContextVar["FileAccessGuard | None"] = contextvars.ContextVar(
-    "_current_guard", default=None,
-)
-
 
 def set_guard(guard: "FileAccessGuard") -> contextvars.Token:
-    """设置每会话的 FileAccessGuard，返回用于恢复的 token。"""
-    return _current_guard.set(guard)
+    """从 guard 根绑定 ToolCallContext。"""
+    from excelmanus.tools.context import bind_workspace
+
+    root = getattr(guard, "workspace_root", None)
+    return bind_workspace(str(root))
 
 
 def get_guard() -> "FileAccessGuard | None":
-    """获取每会话的 FileAccessGuard，为 None 时使用模块级回退。"""
-    return _current_guard.get(None)
+    """从当前调用上下文派生守卫；缺失则 None。"""
+    from excelmanus.security.guard import FileAccessGuard
+    from excelmanus.tools.context import current_call
+
+    call = current_call()
+    if call is None:
+        return None
+    return FileAccessGuard(str(call.binding.workspace.root))
 
 
 def reset_guard(token: contextvars.Token) -> None:
-    """将 contextvar 恢复为先前值。"""
-    _current_guard.reset(token)
+    from excelmanus.tools.context import reset_call
+
+    reset_call(token)

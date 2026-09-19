@@ -67,11 +67,11 @@ class TestReadExcelDatetimeSafe:
     """read_excel 在 datetime 列名场景下不崩溃。"""
 
     def test_wrong_header_row_no_crash(self, excel_with_datetime_header: Path) -> None:
-        """header_row=2 导致 datetime 值成为列名，应返回有效 JSON 而非崩溃。"""
+        """header_row=3 导致 datetime 值成为列名，应返回有效 JSON 而非崩溃。"""
         result = data_tools.read_excel(
             str(excel_with_datetime_header),
             sheet_name="员工花名册",
-            header_row=2,
+            header_row=3,
         )
         parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "columns" in parsed
@@ -80,27 +80,28 @@ class TestReadExcelDatetimeSafe:
             assert isinstance(col, str)
 
     def test_auto_detect_header_row(self, excel_with_datetime_header: Path) -> None:
-        """不指定 header_row 时，应自动检测到 header_row=1。"""
+        """不指定 header_row 时，应自动检测到 Excel 第 2 行。"""
         result = data_tools.read_excel(
             str(excel_with_datetime_header),
             sheet_name="员工花名册",
         )
         parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
-        # 自动检测 header_row=1 后，列名应为中文字段名
+        # 自动检测 Excel 第 2 行后，列名应为中文字段名
+        assert parsed.get("detected_header_row") == 2
         assert "工号" in parsed["columns"]
         assert "姓名" in parsed["columns"]
         assert "部门" in parsed["columns"]
 
     def test_explicit_header_row_0_still_works(self, excel_with_datetime_header: Path) -> None:
-        """显式指定 header_row=0 时不应触发自动检测。"""
+        """显式指定 header_row=1（Excel 第 1 行）时不应触发自动检测。"""
         result = data_tools.read_excel(
             str(excel_with_datetime_header),
             sheet_name="员工花名册",
-            header_row=0,
+            header_row=1,
         )
         parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
         assert "columns" in parsed
-        # header_row=0 时第一列是"员工花名册（机密）"
+        # header_row=1 时第一列是"员工花名册（机密）"
         assert any("员工花名册" in col for col in parsed["columns"])
 
 
@@ -108,19 +109,19 @@ class TestFilterDataDatetimeSafe:
     """filter_data 在列名不存在时不崩溃。"""
 
     def test_wrong_header_returns_error_json(self, excel_with_datetime_header: Path) -> None:
-        """header_row=2 导致列名匹配失败，应返回错误 JSON 而非异常。"""
+        """header_row=3 导致列名匹配失败，应返回错误 JSON 而非异常。"""
         result = data_tools.filter_data(
             str(excel_with_datetime_header),
             column="部门",
             operator="eq",
             value="技术部",
             sheet_name="员工花名册",
-            header_row=2,
+            header_row=3,
         )
         parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
-        assert "error" in parsed
+        assert parsed.get("status") == "error"
         # 错误消息中的列名应为字符串
-        assert isinstance(parsed["error"], str)
+        assert isinstance(parsed["message"], str)
 
     def test_auto_detect_filter_success(self, excel_with_datetime_header: Path) -> None:
         """不指定 header_row 时自动检测后，filter_data 应成功筛选。"""
@@ -233,8 +234,22 @@ class TestDeepHeaderRead:
             max_rows=5,
         )
         parsed = result.value if hasattr(result, "value") and isinstance(result.value, dict) else json.loads(result)
-        assert parsed.get("detected_header_row") == 7
+        assert parsed.get("detected_header_row") == 8
         assert parsed["columns"][:3] == ["月份", "营收", "成本"]
+
+    def test_detected_header_row_roundtrip(self, excel_with_deep_header: Path) -> None:
+        first = data_tools.read_excel(str(excel_with_deep_header), sheet_name="KPI", max_rows=5)
+        parsed = first.value if hasattr(first, "value") and isinstance(first.value, dict) else json.loads(first)
+        detected = parsed.get("detected_header_row")
+        assert detected == 8
+        second = data_tools.read_excel(
+            str(excel_with_deep_header),
+            sheet_name="KPI",
+            header_row=detected,
+            max_rows=5,
+        )
+        again = second.value if hasattr(second, "value") and isinstance(second.value, dict) else json.loads(second)
+        assert again["columns"][:3] == ["月份", "营收", "成本"]
 
 
 class TestUnnamedFallback:

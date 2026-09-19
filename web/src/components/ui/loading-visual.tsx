@@ -8,11 +8,14 @@ const PROGRESS_TO = 66;
 const PROGRESS_MS = 4200;
 let progressStartedAt: number | null = null;
 
+const SHEET_FILL = "#ffffff";
+const SHEET_STROKE = "#e4e8e5";
+const SHEET_PRIMARY = "#217346";
+
 function SheetPreview({ highlight = false }: { highlight?: boolean }) {
   return (
     <svg
       viewBox="0 0 148 108"
-      className="h-auto w-full"
       aria-hidden="true"
     >
       <rect
@@ -21,12 +24,12 @@ function SheetPreview({ highlight = false }: { highlight?: boolean }) {
         width="146.5"
         height="106.5"
         rx="14"
-        fill="var(--card)"
-        stroke="var(--em-hairline)"
+        fill={SHEET_FILL}
+        stroke={SHEET_STROKE}
       />
       <path
         d="M14.75 0.75h118.5a14 14 0 0 1 14 14V22H0.75V14.75a14 14 0 0 1 14-14Z"
-        fill="var(--em-primary)"
+        fill={SHEET_PRIMARY}
       />
       {[29.6, 58.4, 87.2, 116].map((x) => (
         <line
@@ -35,7 +38,7 @@ function SheetPreview({ highlight = false }: { highlight?: boolean }) {
           y1="22"
           x2={x}
           y2="107.25"
-          stroke="var(--em-hairline)"
+          stroke={SHEET_STROKE}
           strokeWidth="1"
         />
       ))}
@@ -46,7 +49,7 @@ function SheetPreview({ highlight = false }: { highlight?: boolean }) {
           y1={y}
           x2="147.25"
           y2={y}
-          stroke="var(--em-hairline)"
+          stroke={SHEET_STROKE}
           strokeWidth="1"
         />
       ))}
@@ -57,7 +60,7 @@ function SheetPreview({ highlight = false }: { highlight?: boolean }) {
           width="27"
           height="18.2"
           rx="3"
-          fill="var(--em-primary)"
+          fill={SHEET_PRIMARY}
           opacity="0.88"
         />
       ) : null}
@@ -67,30 +70,24 @@ function SheetPreview({ highlight = false }: { highlight?: boolean }) {
 
 export function LoadingBrandMark({ className }: { className?: string }) {
   return (
-    <div
-      className={cn(
-        "relative h-[214px] w-[272px] md:h-[236px] md:w-[308px]",
-        className,
-      )}
-      aria-hidden="true"
-    >
-      <div className="pointer-events-none absolute left-1/2 top-[48%] h-[250px] w-[250px] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[var(--em-primary)] opacity-[0.08] blur-[58px] md:h-[300px] md:w-[300px]" />
+    <div className={cn("em-splash-mark", className)} aria-hidden="true">
+      <div className="em-splash-mark-glow" />
 
-      <div className="absolute left-[8px] top-[58px] w-[128px] rotate-[-16deg] opacity-90 shadow-[0_16px_32px_-18px_rgba(33,115,70,0.28)] md:left-[16px] md:top-[62px] md:w-[140px]">
+      <div className="em-splash-sheet em-splash-sheet-left">
         <SheetPreview />
       </div>
-      <div className="absolute right-[4px] top-[34px] w-[128px] rotate-[13deg] opacity-90 shadow-[0_16px_32px_-18px_rgba(33,115,70,0.28)] md:right-[8px] md:top-[30px] md:w-[140px]">
+      <div className="em-splash-sheet em-splash-sheet-right">
         <SheetPreview highlight />
       </div>
 
-      <div className="absolute left-1/2 top-[48%] flex size-[148px] -translate-x-1/2 -translate-y-1/2 items-center justify-center md:size-[162px]">
-        <svg className="loading-arc-spin absolute inset-0" viewBox="0 0 162 162">
+      <div className="em-splash-logo-wrap">
+        <svg className="em-splash-arc" viewBox="0 0 162 162">
           <circle
             cx="81"
             cy="81"
             r="73"
             fill="none"
-            stroke="var(--em-primary-alpha-12)"
+            stroke="rgba(33,115,70,0.12)"
             strokeWidth="3"
           />
           <circle
@@ -98,21 +95,20 @@ export function LoadingBrandMark({ className }: { className?: string }) {
             cy="81"
             r="73"
             fill="none"
-            stroke="var(--em-primary)"
+            stroke={SHEET_PRIMARY}
             strokeWidth="3.5"
             strokeLinecap="round"
             strokeDasharray="118 340"
             transform="rotate(-22 81 81)"
           />
         </svg>
-        <div className="relative z-10 flex size-[92px] items-center justify-center overflow-hidden rounded-full bg-card shadow-[0_10px_28px_rgba(33,115,70,0.16)] ring-1 ring-[var(--em-primary-alpha-10)] md:size-[102px]">
+        <div className="em-splash-logo">
           {/* eslint-disable-next-line @next/next/no-img-element */}
           <img
             src="/icon.png"
             alt=""
             width={80}
             height={80}
-            className="size-[72%] object-contain"
           />
         </div>
       </div>
@@ -150,15 +146,10 @@ export function LoadingProgressBar({ className }: { className?: string }) {
   }, []);
 
   return (
-    <div
-      className={cn(
-        "h-[5px] overflow-hidden rounded-full bg-[var(--em-hairline)]",
-        className,
-      )}
-    >
+    <div className={cn("em-splash-progress", className)}>
       <div
         ref={fillRef}
-        className="h-full rounded-full bg-[var(--em-primary)]"
+        className="em-splash-progress-fill"
         style={{ width: `${PROGRESS_FROM}%` }}
       />
     </div>
@@ -168,7 +159,7 @@ export function LoadingProgressBar({ className }: { className?: string }) {
 export function LoadingStatusSpinner({ className }: { className?: string }) {
   return (
     <span
-      className={cn("loading-status-spinner shrink-0", className)}
+      className={cn("em-splash-spinner", className)}
       aria-hidden="true"
     />
   );
@@ -177,16 +168,15 @@ export function LoadingStatusSpinner({ className }: { className?: string }) {
 /** 等待页/品牌条用的轻量字标：5KB PNG + 文字，避免 351KB 描边 SVG。 */
 export function BrandWordmark({ className }: { className?: string }) {
   return (
-    <span className={cn("inline-flex items-center gap-2", className)}>
+    <span className={cn("em-splash-wordmark", className)}>
       {/* eslint-disable-next-line @next/next/no-img-element */}
       <img
         src="/icon.png"
         alt=""
         width={28}
         height={28}
-        className="size-7 object-contain"
       />
-      <span className="text-[17px] font-semibold tracking-tight text-[var(--em-primary)]">
+      <span className="em-splash-wordmark-text">
         ExcelManus
       </span>
     </span>

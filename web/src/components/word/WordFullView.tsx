@@ -2,19 +2,19 @@
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
-import { ArrowLeft, Download, RefreshCw } from "lucide-react";
+import { ArrowLeft, Download, History, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { buildWordFileUrl, downloadFile } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 
-const UniverDoc = dynamic(
-  () => import("./UniverDoc").then((module) => ({ default: module.UniverDoc })),
+const WordSnapshotView = dynamic(
+  () => import("./WordSnapshotView").then((module) => ({ default: module.WordSnapshotView })),
   {
     ssr: false,
     loading: () => (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        加载文档引擎...
+        加载文档快照...
       </div>
     ),
   }
@@ -23,6 +23,7 @@ const UniverDoc = dynamic(
 export function WordFullView() {
   const fullViewPath = useWordStore((state) => state.fullViewPath);
   const closeFullView = useWordStore((state) => state.closeFullView);
+  const openHistory = useWordStore((state) => state.openHistory);
   const triggerRefresh = useWordStore((state) => state.triggerRefresh);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const [refreshKey, setRefreshKey] = useState(0);
@@ -60,6 +61,12 @@ export function WordFullView() {
     );
   }, [activeSessionId, fileName, fullViewPath]);
 
+  const handleOpenHistory = useCallback(() => {
+    if (!fullViewPath) return;
+    openHistory(fullViewPath);
+    closeFullView();
+  }, [closeFullView, fullViewPath, openHistory]);
+
   if (!fullViewPath) return null;
 
   return (
@@ -76,17 +83,20 @@ export function WordFullView() {
         <Button variant="ghost" size="icon" onClick={handleDownload} title="下载">
           <Download className="h-4 w-4" />
         </Button>
+        <Button variant="ghost" size="icon" onClick={handleOpenHistory} title="历史">
+          <History className="h-4 w-4" />
+        </Button>
       </div>
 
       <div className="border-b border-border bg-muted/30 px-4 py-2">
         <p className="text-xs text-muted-foreground">
-          预览模式：这里的输入不会自动保存到文档，请以刷新后的后端结果为准。
+          只读快照预览（正文 + 表格）：不会写回文档；内容由 Agent 写入，精调版式请下载后用 Word 打开。
         </p>
         {actionError && <p className="mt-1 text-xs text-destructive">{actionError}</p>}
       </div>
 
       <div className="flex-1 overflow-hidden">
-        <UniverDoc key={`fullview-${fileUrl}-${refreshKey}`} fileUrl={fileUrl} />
+        <WordSnapshotView key={`fullview-${fileUrl}-${refreshKey}`} fileUrl={fileUrl} />
       </div>
     </div>
   );

@@ -6,7 +6,6 @@ import sqlite3
 from datetime import datetime
 from pathlib import Path
 
-import numpy as np
 import pytest
 
 from excelmanus.database import Database, migrate_legacy_data
@@ -65,64 +64,6 @@ class TestMigrateMemoryFiles:
         db = Database(str(tmp_path / "test.db"))
         # 不应抛异常
         migrate_legacy_data(db, memory_dir=str(tmp_path / "nonexistent"))
-        db.close()
-
-
-class TestMigrateVectorFiles:
-    """从旧 JSONL + npy 向量文件迁移。"""
-
-    def test_migrate_vectors(self, tmp_path: Path) -> None:
-        vectors_dir = tmp_path / "vectors"
-        vectors_dir.mkdir()
-
-        # 创建旧格式向量文件
-        records = [
-            {"content_hash": "abc123", "text": "hello world", "metadata": {"k": "v"}},
-            {"content_hash": "def456", "text": "foo bar", "metadata": {}},
-        ]
-        (vectors_dir / "vectors.jsonl").write_text(
-            "\n".join(json.dumps(r) for r in records),
-            encoding="utf-8",
-        )
-        vecs = np.array([[1.0, 2.0, 3.0], [4.0, 5.0, 6.0]], dtype=np.float32)
-        np.save(str(vectors_dir / "vectors.npy"), vecs)
-
-        db = Database(str(tmp_path / "test.db"))
-        migrate_legacy_data(db, vectors_dir=str(vectors_dir))
-
-        count = db.conn.execute(
-            "SELECT COUNT(*) as cnt FROM vector_records"
-        ).fetchone()["cnt"]
-        assert count == 2
-
-        # 验证向量精度
-        row = db.conn.execute(
-            "SELECT vector, dimensions FROM vector_records WHERE content_hash = 'abc123'"
-        ).fetchone()
-        vec = np.frombuffer(row["vector"], dtype=np.float32)
-        np.testing.assert_allclose(vec, [1.0, 2.0, 3.0])
-        assert row["dimensions"] == 3
-        db.close()
-
-    def test_migrate_vectors_no_npy(self, tmp_path: Path) -> None:
-        """只有 JSONL 没有 npy 时仍应迁移文本和元数据。"""
-        vectors_dir = tmp_path / "vectors"
-        vectors_dir.mkdir()
-        records = [
-            {"content_hash": "abc123", "text": "hello", "metadata": {}},
-        ]
-        (vectors_dir / "vectors.jsonl").write_text(
-            json.dumps(records[0]),
-            encoding="utf-8",
-        )
-
-        db = Database(str(tmp_path / "test.db"))
-        migrate_legacy_data(db, vectors_dir=str(vectors_dir))
-
-        count = db.conn.execute(
-            "SELECT COUNT(*) as cnt FROM vector_records"
-        ).fetchone()["cnt"]
-        assert count == 1
         db.close()
 
 

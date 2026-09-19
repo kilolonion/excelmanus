@@ -26,6 +26,19 @@ def test_image_content_part_to_gemini():
     assert inline["inlineData"]["data"] == "iVBORw0KGgo="
 
 
+def test_later_system_is_rejected_not_demoted():
+    import pytest
+    from excelmanus.providers.gemini import _openai_messages_to_gemini
+
+    messages = [
+        {"role": "system", "content": "HEAD"},
+        {"role": "user", "content": "hello"},
+        {"role": "system", "content": "PLAN overlay"},
+    ]
+    with pytest.raises(ValueError, match="mid-history system is not representable"):
+        _openai_messages_to_gemini(messages)
+
+
 def test_text_only_message_unchanged():
     """纯文本 user 消息保持不变。"""
     from excelmanus.providers.gemini import _openai_messages_to_gemini

@@ -15,7 +15,6 @@ import {
   Clock,
   Users,
   AlertCircle,
-  RefreshCw,
   Brain,
   BookOpen,
   Layers,
@@ -51,13 +50,10 @@ interface RuntimeConfig {
   max_consecutive_failures: number;
   // 执行与安全
   subagent_enabled: boolean;
-  max_iterations: number;
   friendly_error_messages: boolean;
   // 上下文与记忆
   max_context_tokens: number;
   memory_enabled: boolean;
-  memory_auto_extract_interval: number;
-  memory_auto_load_lines: number;
   memory_expire_days: number;
   chat_history_enabled: boolean;
   // 记忆维护
@@ -66,20 +62,13 @@ interface RuntimeConfig {
   memory_maintenance_new_threshold: number;
   memory_maintenance_interval_hours: number;
   memory_maintenance_model: string;
-  // 摘要与压缩
-  summarization_enabled: boolean;
-  summarization_threshold_ratio: number;
-  summarization_keep_recent_turns: number;
+  // 压缩与缓存
   compaction_enabled: boolean;
   compaction_threshold_ratio: number;
   compaction_keep_recent_turns: number;
   compaction_max_summary_tokens: number;
   prompt_cache_key_enabled: boolean;
-  // 推理配置
-  thinking_effort: string;
-  thinking_budget: number;
   // 子代理
-  subagent_max_iterations: number;
   subagent_timeout_seconds: number;
   subagent_max_consecutive_failures: number;
   parallel_subagent_max: number;
@@ -89,13 +78,11 @@ interface RuntimeConfig {
   llm_retry_max_delay_seconds: number;
   // 视觉
   main_model_vision: string;
-  image_keep_rounds: number;
-  image_max_active: number;
-  image_token_budget: number;
-  // 系统消息与工具
-  system_message_mode: string;
+  image_pixel_budget: number | string;
+  image_max_bytes: number;
+  image_files_api: string;
+  // 工具与 Hook
   tool_result_hard_cap_chars: number;
-  large_excel_threshold_bytes: number;
   parallel_readonly_tools: boolean;
   hooks_command_enabled: boolean;
   hooks_command_timeout_seconds: number;
@@ -114,19 +101,6 @@ interface RuntimeConfig {
   skills_discovery_scan_workspace_ancestors: boolean;
   skills_discovery_include_agents: boolean;
   skills_discovery_scan_external_tool_dirs: boolean;
-  // Embedding / 语义检索
-  embedding_enabled: boolean;
-  embedding_model: string;
-  embedding_dimensions: number;
-  embedding_timeout_seconds: number;
-  memory_semantic_top_k: number;
-  memory_semantic_threshold: number;
-  memory_semantic_fallback_recent: number;
-  // Playbook
-  playbook_enabled: boolean;
-  playbook_max_bullets: number;
-  registry_semantic_top_k: number;
-  registry_semantic_threshold: number;
 }
 
 interface SelectOption {
@@ -153,66 +127,13 @@ interface ItemGroup {
 
 const BASIC_GROUPS: ItemGroup[] = [
   {
-    title: "会话",
-    icon: <Users className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "max_sessions",
-        label: "最大会话数",
-        desc: "系统允许的最大并发会话数量",
-        icon: <Users className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10000,
-      },
-      {
-        key: "session_ttl_seconds",
-        label: "会话超时",
-        desc: "会话无活动后自动过期的时间（秒）",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 60,
-        max: 86400,
-      },
-      {
-        key: "max_consecutive_failures",
-        label: "最大连续失败",
-        desc: "连续工具调用失败达到此次数后停止",
-        icon: <AlertCircle className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-    ],
-  },
-  {
-    title: "执行与安全",
-    icon: <Shield className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "subagent_enabled",
-        label: "子代理",
-        desc: "启用 Explorer / Verifier 等子代理",
-        icon: <Bot className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "friendly_error_messages",
-        label: "友好错误消息",
-        desc: "将内部错误映射为更友好的用户可见消息",
-        icon: <AlertCircle className="h-4 w-4" />,
-        type: "bool",
-      },
-    ],
-  },
-  {
-    title: "上下文与记忆",
+    title: "对话与上下文",
     icon: <Layers className="h-3.5 w-3.5" />,
     items: [
       {
         key: "max_context_tokens",
-        label: "上下文窗口",
-        desc: "最大上下文 token 数。保存后立即同步到已打开的对话并锁定；未手动保存时按当前激活模型推断。",
+        label: "默认上下文窗口",
+        desc: "对话可用的 token 上限。保存后立即同步到已打开的对话并锁定；未保存时按当前模型自动推断。",
         icon: <Layers className="h-4 w-4" />,
         type: "int",
         min: 1000,
@@ -221,371 +142,53 @@ const BASIC_GROUPS: ItemGroup[] = [
       {
         key: "compaction_enabled",
         label: "上下文压缩",
-        desc: "Token 超阈值时自动摘要压缩",
+        desc: "占用超过窗口乘以阈值时，自动摘要旧消息并保留最近几轮。保存后立即同步到已打开的对话。",
         icon: <Shrink className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "summarization_enabled",
-        label: "对话摘要",
-        desc: "超阈值时用激活模型压缩早期对话",
-        icon: <BookOpen className="h-4 w-4" />,
         type: "bool",
       },
       {
         key: "memory_enabled",
         label: "跨会话记忆",
-        desc: "启用跨会话持久记忆功能",
+        desc: "关闭后不再读写持久记忆，也不再自动提取。已有记录会保留。新开对话后完全生效。",
         icon: <Brain className="h-4 w-4" />,
         type: "bool",
       },
       {
         key: "chat_history_enabled",
         label: "聊天记录持久化",
-        desc: "将聊天记录保存到数据库",
+        desc: "将会话写入本地数据库以便下次恢复。关闭后服务端不再保存或恢复。保存后将重启服务。",
         icon: <MessageSquare className="h-4 w-4" />,
         type: "bool",
       },
-      {
-        key: "memory_auto_load_lines",
-        label: "记忆自动加载行数",
-        desc: "会话开始时自动加载的记忆条目数",
-        icon: <Brain className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 1000,
-      },
-      {
-        key: "memory_expire_days",
-        label: "记忆过期天数",
-        desc: "记忆过期天数（0 = 不过期）",
-        icon: <Clock className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 3650,
-      },
     ],
   },
   {
-    title: "感知与视觉",
-    icon: <Eye className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "main_model_vision",
-        label: "视觉能力",
-        desc: "激活模型视觉能力：auto 自动检测 / true 强制开启 / false 关闭。图片只交给当前模型阅读，随后用 edit_spreadsheet(workbook_spec) 建表。",
-        icon: <ScanEye className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "auto", label: "自动 (auto)" },
-          { value: "true", label: "开启 (true)" },
-          { value: "false", label: "关闭 (false)" },
-        ],
-      },
-      {
-        key: "image_keep_rounds",
-        label: "图片保持轮次",
-        desc: "图片保持完整 base64 的最小轮次",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "image_max_active",
-        label: "活跃图片上限",
-        desc: "同时保持高清的最大图片数",
-        icon: <Eye className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10,
-      },
-      {
-        key: "image_token_budget",
-        label: "图片 token 预算",
-        desc: "图片总 token 预算上限",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 1000,
-        max: 50000,
-      },
-    ],
-  },
-];
-
-const ADVANCED_GROUPS: ItemGroup[] = [
-  {
-    title: "推理配置",
-    icon: <Brain className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "thinking_effort",
-        label: "推理深度",
-        desc: "模型推理思考的深度等级",
-        icon: <Brain className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "none", label: "关闭 (none)" },
-          { value: "minimal", label: "最小 (minimal)" },
-          { value: "low", label: "低 (low)" },
-          { value: "medium", label: "中等 (medium)" },
-          { value: "high", label: "高 (high)" },
-          { value: "xhigh", label: "极高 (xhigh)" },
-          { value: "max", label: "最深 (max)" },
-        ],
-      },
-      {
-        key: "thinking_budget",
-        label: "推理 Token 预算",
-        desc: "精确推理 token 预算（>0 时覆盖推理深度换算值）",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100000,
-      },
-    ],
-  },
-  {
-    title: "子代理",
-    icon: <Bot className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "subagent_timeout_seconds",
-        label: "子代理超时",
-        desc: "单个子代理执行超时时间（秒）",
-        icon: <Timer className="h-4 w-4" />,
-        type: "int",
-        min: 10,
-        max: 3600,
-      },
-      {
-        key: "parallel_subagent_max",
-        label: "并行子代理上限",
-        desc: "最大并发子代理数量",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10,
-      },
-      {
-        key: "subagent_max_consecutive_failures",
-        label: "子代理最大连续失败",
-        desc: "子代理连续工具调用失败达到此次数后停止",
-        icon: <AlertCircle className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-    ],
-  },
-  {
-    title: "LLM 重试",
-    icon: <RotateCcw className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "llm_retry_max_attempts",
-        label: "最大重试次数",
-        desc: "LLM 调用失败时的最大尝试次数（含首次）",
-        icon: <RotateCcw className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 10,
-      },
-      {
-        key: "llm_retry_base_delay_seconds",
-        label: "重试基准延迟",
-        desc: "指数退避基准延迟（秒）",
-        icon: <Timer className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "llm_retry_max_delay_seconds",
-        label: "重试最大延迟",
-        desc: "单次重试最大延迟上限（秒）",
-        icon: <Timer className="h-4 w-4" />,
-        type: "float",
-      },
-    ],
-  },
-  {
-    title: "压缩与缓存",
-    icon: <Shrink className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "compaction_threshold_ratio",
-        label: "压缩阈值比例",
-        desc: "Token 使用率超过此比例触发自动压缩 (0-1)",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "memory_auto_extract_interval",
-        label: "记忆提取间隔",
-        desc: "每 N 轮自动提取记忆（0 = 禁用）",
-        icon: <Brain className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100,
-      },
-      {
-        key: "memory_maintenance_enabled",
-        label: "记忆自动维护",
-        desc: "启用 LLM 驱动的记忆清理、合并与改进",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "memory_maintenance_min_entries",
-        label: "维护最少条目数",
-        desc: "记忆条目少于此数时不触发维护",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 200,
-      },
-      {
-        key: "memory_maintenance_new_threshold",
-        label: "维护新增阈值",
-        desc: "新增条目达到此数后触发维护",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-      {
-        key: "memory_maintenance_interval_hours",
-        label: "维护最小间隔",
-        desc: "两次维护之间的最小间隔（小时）",
-        icon: <Clock className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "memory_maintenance_model",
-        label: "维护模型",
-        desc: "用于记忆维护的模型 ID（留空使用激活模型）",
-        icon: <Brain className="h-4 w-4" />,
-        type: "string",
-      },
-      {
-        key: "prompt_cache_key_enabled",
-        label: "提示词缓存",
-        desc: "向 API 发送缓存键提升 prompt 缓存命中率",
-        icon: <Zap className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "summarization_threshold_ratio",
-        label: "摘要触发比例",
-        desc: "Token 使用率超过此比例触发对话摘要 (0-1)",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-      },
-      {
-        key: "summarization_keep_recent_turns",
-        label: "摘要保留轮次",
-        desc: "摘要时保留的最近对话轮次数",
-        icon: <History className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "compaction_keep_recent_turns",
-        label: "压缩保留轮次",
-        desc: "压缩时保留的最近对话轮次数",
-        icon: <History className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 20,
-      },
-      {
-        key: "compaction_max_summary_tokens",
-        label: "压缩摘要上限",
-        desc: "压缩摘要最大 token 数",
-        icon: <Shrink className="h-4 w-4" />,
-        type: "int",
-        min: 100,
-        max: 10000,
-      },
-    ],
-  },
-  {
-    title: "安全与策略",
-    icon: <Shield className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "code_policy_enabled",
-        label: "代码策略",
-        desc: "启用代码安全策略引擎（沙盒限制）",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "tool_schema_validation_mode",
-        label: "Schema 校验",
-        desc: "工具参数结构校验模式",
-        icon: <Shield className="h-4 w-4" />,
-        type: "select",
-        options: [
-          { value: "off", label: "关闭 (off)" },
-          { value: "shadow", label: "影子 (shadow)" },
-          { value: "enforce", label: "强制 (enforce)" },
-        ],
-      },
-      {
-        key: "tool_schema_validation_canary_percent",
-        label: "Schema 校验灰度",
-        desc: "Schema 校验生效的请求百分比 (0-100)",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 0,
-        max: 100,
-      },
-      {
-        key: "tool_schema_strict_path",
-        label: "Schema 严格路径",
-        desc: "启用工具参数路径的严格校验",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_green_auto_approve",
-        label: "绿区自动审批",
-        desc: "安全代码（绿区）自动审批执行",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "code_policy_yellow_auto_approve",
-        label: "黄区自动审批",
-        desc: "中风险代码（黄区）自动审批。默认关闭；打开后仍不会自动批准文件系统写入",
-        icon: <Shield className="h-4 w-4" />,
-        type: "bool",
-      },
-    ],
-  },
-  {
-    title: "工具与系统",
+    title: "能力",
     icon: <Zap className="h-3.5 w-3.5" />,
     items: [
       {
-        key: "parallel_readonly_tools",
-        label: "只读工具并发",
-        desc: "同一轮次中相邻只读工具并发执行",
-        icon: <Zap className="h-4 w-4" />,
-        type: "bool",
+        key: "main_model_vision",
+        label: "图片识别",
+        desc: "控制当前对话模型能否处理图片。自动：按模型能力判断；开启：一律允许；关闭：不接受图片。图片由当前模型直接阅读，不会另开视觉模型。",
+        icon: <ScanEye className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "auto", label: "自动" },
+          { value: "true", label: "开启" },
+          { value: "false", label: "关闭" },
+        ],
       },
       {
-        key: "hooks_command_enabled",
-        label: "Hook 命令",
-        desc: "启用外部命令 Hook（工具调用后触发自定义脚本）",
-        icon: <Terminal className="h-4 w-4" />,
+        key: "subagent_enabled",
+        label: "子代理",
+        desc: "允许主模型把子任务委派出去。未指定名称时用通用子代理；只读探查需显式指定 explorer。关闭后工具仍可见，但执行会被拒绝。已打开的对话需新开，或使用 /subagent on|off。",
+        icon: <Bot className="h-4 w-4" />,
         type: "bool",
       },
       {
         key: "log_level",
         label: "日志级别",
-        desc: "后端日志输出级别",
+        desc: "后端模块日志详细程度。保存后立即生效，不影响访问日志。",
         icon: <FileText className="h-4 w-4" />,
         type: "select",
         options: [
@@ -596,40 +199,316 @@ const ADVANCED_GROUPS: ItemGroup[] = [
           { value: "CRITICAL", label: "CRITICAL" },
         ],
       },
+    ],
+  },
+];
+
+const ADVANCED_GROUPS: ItemGroup[] = [
+  {
+    title: "会话与熔断",
+    icon: <Users className="h-3.5 w-3.5" />,
+    items: [
       {
-        key: "system_message_mode",
-        label: "系统消息模式",
-        desc: "system message 处理方式：auto / merge / replace",
-        icon: <MessageSquare className="h-4 w-4" />,
+        key: "max_sessions",
+        label: "内存会话上限",
+        desc: "同时留在内存里的会话数量上限（含正在创建的）。超出后无法新建。不影响历史记录。保存后将重启服务。",
+        icon: <Users className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10000,
+      },
+      {
+        key: "session_ttl_seconds",
+        label: "空闲会话回收",
+        desc: "内存中空闲且未在处理的会话，超过此秒数后从内存移除（历史仍保留）。保存后将重启服务。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 60,
+        max: 86400,
+      },
+      {
+        key: "max_consecutive_failures",
+        label: "工具连续失败上限",
+        desc: "同一条用户消息处理中，连续工具失败达到此次数后结束本轮剩余工具。成功一次即重新计数。不含模型调用失败，也不作用于子代理。已打开的对话需新开后生效。",
+        icon: <AlertCircle className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "friendly_error_messages",
+        label: "友好错误消息",
+        desc: "将接口返回的内部错误改成更易读的提示（如 404 / 429 / 500）。不影响对话里的工具错误。",
+        icon: <AlertCircle className="h-4 w-4" />,
+        type: "bool",
+      },
+    ],
+  },
+  {
+    title: "压缩与缓存",
+    icon: <Shrink className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "compaction_threshold_ratio",
+        label: "压缩阈值比例",
+        desc: "占用超过窗口乘以此比例时触发自动压缩。保存后立即同步到已打开的对话。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "compaction_keep_recent_turns",
+        label: "压缩保留轮次",
+        desc: "压缩时保留的最近对话轮数。已打开的对话需新开后生效。",
+        icon: <History className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 20,
+      },
+      {
+        key: "compaction_max_summary_tokens",
+        label: "压缩摘要上限",
+        desc: "压缩摘要的最大 token 数。已打开的对话需新开后生效。",
+        icon: <Shrink className="h-4 w-4" />,
+        type: "int",
+        min: 100,
+        max: 10000,
+      },
+      {
+        key: "prompt_cache_key_enabled",
+        label: "提示词缓存",
+        desc: "向模型接口发送缓存键，提高重复提示词命中率。已打开的对话需新开后生效。",
+        icon: <Zap className="h-4 w-4" />,
+        type: "bool",
+      },
+    ],
+  },
+  {
+    title: "记忆维护",
+    icon: <Sparkles className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "memory_maintenance_enabled",
+        label: "记忆自动维护",
+        desc: "提取新记忆后，按条目数、增量和间隔合并清理。需先开启跨会话记忆。",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "memory_maintenance_min_entries",
+        label: "维护最少条目数",
+        desc: "记忆少于此数时不触发维护。",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 200,
+      },
+      {
+        key: "memory_maintenance_new_threshold",
+        label: "维护新增阈值",
+        desc: "新增条目达到此数后才可能触发维护。",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+      {
+        key: "memory_maintenance_interval_hours",
+        label: "维护最小间隔",
+        desc: "两次维护之间的最短间隔（小时）。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "memory_maintenance_model",
+        label: "维护模型",
+        desc: "用于记忆维护的模型 ID，留空则使用当前激活模型。",
+        icon: <Brain className="h-4 w-4" />,
+        type: "string",
+      },
+      {
+        key: "memory_expire_days",
+        label: "记忆过期天数",
+        desc: "会话启动时清理超过此天数的记忆。0 表示不过期。",
+        icon: <Clock className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 3650,
+      },
+    ],
+  },
+  {
+    title: "图片请求投影",
+    icon: <Eye className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "image_pixel_budget",
+        label: "请求像素预算",
+        desc: "发给模型的请求版总像素上限。填正整数，或 low（512×512）。不改写历史，只影响当次请求。",
+        icon: <Eye className="h-4 w-4" />,
+        type: "string",
+      },
+      {
+        key: "image_max_bytes",
+        label: "请求编码上限",
+        desc: "单张请求版图片的编码字节上限（默认 1MiB）。超出走质量阶梯，历史仍保留规范化附件。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 1024,
+        max: 20971520,
+      },
+      {
+        key: "image_files_api",
+        label: "Files API 传输",
+        desc: "auto 仅在 DeepSeek 等声明支持的端点上传 file_id；其余走同一请求版本的 inline。失败回退 inline。",
+        icon: <Eye className="h-4 w-4" />,
         type: "select",
         options: [
-          { value: "auto", label: "自动 (auto)" },
-          { value: "merge", label: "合并 (merge)" },
-          { value: "replace", label: "替换 (replace)" },
+          { value: "auto", label: "自动" },
+          { value: "true", label: "强制开启" },
+          { value: "false", label: "关闭" },
+        ],
+      },
+    ],
+  },
+  {
+    title: "子代理",
+    icon: <Bot className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "subagent_timeout_seconds",
+        label: "子代理超时",
+        desc: "单个子代理同步执行的最长等待时间（秒）。超时后终止并返回。已打开的对话需新开后生效。",
+        icon: <Timer className="h-4 w-4" />,
+        type: "int",
+        min: 10,
+        max: 3600,
+      },
+      {
+        key: "parallel_subagent_max",
+        label: "并行子代理上限",
+        desc: "单次并行委派的子任务数量上限。两个写入子代理不能同时跑。",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "subagent_max_consecutive_failures",
+        label: "子代理连续失败上限",
+        desc: "自定义子代理未指定时使用此默认值。内置通用子代理和 explorer 固定为 3，不受此项影响。",
+        icon: <AlertCircle className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 50,
+      },
+    ],
+  },
+  {
+    title: "模型重试",
+    icon: <RotateCcw className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "llm_retry_max_attempts",
+        label: "最大重试次数",
+        desc: "模型调用失败时的最大尝试次数（含首次）。遇限流或网络错误会自动重试。已打开的对话需新开后生效。",
+        icon: <RotateCcw className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 10,
+      },
+      {
+        key: "llm_retry_base_delay_seconds",
+        label: "重试基准延迟",
+        desc: "指数退避的起始等待时间（秒）。",
+        icon: <Timer className="h-4 w-4" />,
+        type: "float",
+      },
+      {
+        key: "llm_retry_max_delay_seconds",
+        label: "重试最大延迟",
+        desc: "单次重试等待上限（秒）。若接口返回 Retry-After，则优先采用。",
+        icon: <Timer className="h-4 w-4" />,
+        type: "float",
+      },
+    ],
+  },
+  {
+    title: "代码与校验",
+    icon: <Shield className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "code_policy_enabled",
+        label: "代码风险分级",
+        desc: "对程序内执行的代码做绿 / 黄 / 红分级，决定自动运行还是先确认。关闭后仍在本机子进程运行，只保留基础文件围栏。写入历史在 .excelmanus/revisions。已打开的对话需新开后生效。",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "code_policy_green_auto_approve",
+        label: "绿区自动执行",
+        desc: "判定为低风险的代码自动执行。绿区会额外限制网络、起进程和写出工作区。",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "code_policy_yellow_auto_approve",
+        label: "黄区自动执行",
+        desc: "中风险代码自动执行。默认关闭；打开后仍不会自动批准写入文件系统。",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "tool_schema_validation_mode",
+        label: "参数结构校验",
+        desc: "关闭：不检查。影子：只记日志不拦截。强制：参数不合规则拒绝。仅对新开对话生效。",
+        icon: <Shield className="h-4 w-4" />,
+        type: "select",
+        options: [
+          { value: "off", label: "关闭" },
+          { value: "shadow", label: "影子" },
+          { value: "enforce", label: "强制" },
         ],
       },
       {
-        key: "tool_result_hard_cap_chars",
-        label: "工具结果截断",
-        desc: "工具返回结果的字符数上限（0 = 不限制）",
-        icon: <Shrink className="h-4 w-4" />,
+        key: "tool_schema_validation_canary_percent",
+        label: "强制校验比例",
+        desc: "强制模式下实际拦截的请求百分比。未命中的请求按影子模式处理。",
+        icon: <Gauge className="h-4 w-4" />,
         type: "int",
         min: 0,
-        max: 100000,
+        max: 100,
       },
       {
-        key: "large_excel_threshold_bytes",
-        label: "大表格阈值",
-        desc: "Excel 文件超过此字节数视为大文件",
-        icon: <FileText className="h-4 w-4" />,
-        type: "int",
-        min: 1048576,
-        max: 104857600,
+        key: "tool_schema_strict_path",
+        label: "严格路径校验",
+        desc: "拒绝工具参数里的绝对路径和上级目录穿越。",
+        icon: <Shield className="h-4 w-4" />,
+        type: "bool",
+      },
+    ],
+  },
+  {
+    title: "工具与 Hook",
+    icon: <Zap className="h-3.5 w-3.5" />,
+    items: [
+      {
+        key: "parallel_readonly_tools",
+        label: "只读工具并发",
+        desc: "同一轮回复中，相邻的读文件、列目录等只读工具可以并发。写入和多数外部工具始终串行。已打开的对话需新开后生效。",
+        icon: <Zap className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "hooks_command_enabled",
+        label: "技能 Hook 外部命令",
+        desc: "允许技能包在会话开始、用户提交、工具前后、子代理起止时运行外部命令。默认关闭，需授权。已打开的对话需新开后生效。",
+        icon: <Terminal className="h-4 w-4" />,
+        type: "bool",
       },
       {
         key: "hooks_command_timeout_seconds",
         label: "Hook 命令超时",
-        desc: "Hook 命令执行超时时间（秒）",
+        desc: "外部命令最长执行时间（秒）。超时则跳过，不影响主流程。",
         icon: <Timer className="h-4 w-4" />,
         type: "int",
         min: 1,
@@ -638,10 +517,19 @@ const ADVANCED_GROUPS: ItemGroup[] = [
       {
         key: "hooks_output_max_chars",
         label: "Hook 输出上限",
-        desc: "Hook 命令输出的最大字符数",
+        desc: "外部命令返回内容注入对话的最大字符数。",
         icon: <Shrink className="h-4 w-4" />,
         type: "int",
         min: 1000,
+        max: 100000,
+      },
+      {
+        key: "tool_result_hard_cap_chars",
+        label: "工具结果全局截断",
+        desc: "工具返回内容的全局字符上限。0 表示关闭这一层；各工具自己的上限和上下文压缩仍可能截断。已打开的对话需新开后生效。",
+        icon: <Shrink className="h-4 w-4" />,
+        type: "int",
+        min: 0,
         max: 100000,
       },
     ],
@@ -652,107 +540,40 @@ const ADVANCED_GROUPS: ItemGroup[] = [
     items: [
       {
         key: "skills_discovery_enabled",
-        label: "技能发现",
-        desc: "启用自动技能包发现",
-        icon: <Sparkles className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "skills_discovery_scan_workspace_ancestors",
-        label: "扫描祖先目录",
-        desc: "技能发现时扫描工作区祖先目录",
+        label: "自动发现兼容目录",
+        desc: "除内置和用户 / 项目目录外，还扫描 Claude、OpenClaw、Cursor 等常用技能文件夹。关闭后只加载内置以及 .excelmanus/skillpacks。",
         icon: <Sparkles className="h-4 w-4" />,
         type: "bool",
       },
       {
         key: "skills_discovery_include_agents",
-        label: "包含代理",
-        desc: "技能发现时包含代理包",
+        label: "加载 .agents/skills",
+        desc: "扫描项目里的 .agents/skills 文件夹（Cursor 等工具常用位置）。与子代理无关。",
         icon: <Bot className="h-4 w-4" />,
         type: "bool",
       },
       {
+        key: "skills_discovery_scan_workspace_ancestors",
+        label: "扫描上级目录中的技能",
+        desc: "从当前工作目录到项目根，逐层查找 .agents/skills。仅在当前目录位于项目工作区内时生效。",
+        icon: <Sparkles className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
         key: "skills_discovery_scan_external_tool_dirs",
-        label: "扫描外部工具目录",
-        desc: "技能发现时扫描外部工具目录",
+        label: "兼容 Claude 与 OpenClaw",
+        desc: "从 ~/.claude/skills、~/.openclaw/skills 及项目内同名文件夹加载技能。未使用这些工具时可关闭。",
         icon: <Sparkles className="h-4 w-4" />,
         type: "bool",
       },
       {
         key: "skills_context_char_budget",
-        label: "技能字符预算",
-        desc: "技能正文字符预算（0 = 不限制）",
+        label: "技能注入长度上限",
+        desc: "用 /技能名 激活技能时，注入对话的正文总字符上限。0 表示不限制。不影响技能列表扫描。",
         icon: <Gauge className="h-4 w-4" />,
         type: "int",
         min: 0,
         max: 100000,
-      },
-    ],
-  },
-  {
-    title: "Embedding / 语义检索",
-    icon: <Brain className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "embedding_enabled",
-        label: "语义检索",
-        desc: "启用 embedding 语义检索功能",
-        icon: <Brain className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "embedding_model",
-        label: "Embedding 模型",
-        desc: "语义检索使用的 embedding 模型",
-        icon: <Brain className="h-4 w-4" />,
-        type: "string",
-      },
-      {
-        key: "embedding_dimensions",
-        label: "Embedding 维度",
-        desc: "Embedding 向量维度",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "int",
-        min: 64,
-        max: 8192,
-      },
-      {
-        key: "memory_semantic_top_k",
-        label: "语义检索 Top-K",
-        desc: "语义检索返回的最大条目数",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 1,
-        max: 50,
-      },
-      {
-        key: "memory_semantic_threshold",
-        label: "语义相似度阈值",
-        desc: "低于此阈值的结果将被过滤 (0-1)",
-        icon: <Gauge className="h-4 w-4" />,
-        type: "float",
-      },
-    ],
-  },
-  {
-    title: "Playbook",
-    icon: <BookOpen className="h-3.5 w-3.5" />,
-    items: [
-      {
-        key: "playbook_enabled",
-        label: "Playbook",
-        desc: "启用自进化战术手册",
-        icon: <BookOpen className="h-4 w-4" />,
-        type: "bool",
-      },
-      {
-        key: "playbook_max_bullets",
-        label: "最大条目数",
-        desc: "Playbook 条目上限",
-        icon: <Layers className="h-4 w-4" />,
-        type: "int",
-        min: 10,
-        max: 5000,
       },
     ],
   },
@@ -807,26 +628,6 @@ const GUIDE_SECTIONS: GuideSection[] = [
   },
 ];
 
-function StatusDot({ ok }: { ok: boolean }) {
-  return (
-    <span
-      className={`inline-block h-2 w-2 rounded-full flex-shrink-0 ${ok ? "bg-green-500" : "bg-red-400"}`}
-    />
-  );
-}
-
-function LocalSandboxNote() {
-  return (
-    <div className="rounded-lg border border-border p-4">
-      <div className="text-sm font-medium">本机代码围栏</div>
-      <div className="mt-1 text-[11px] sm:text-xs text-muted-foreground">
-        本机受限子进程：禁网络、禁起进程、禁出工作区。
-        文件历史在 .excelmanus/revisions，不写 outputs/backups。
-      </div>
-    </div>
-  );
-}
-
 function CodeModeCard() {
   const presentAs = useUIStore((s) => s.presentAs);
   const setPresentAs = useUIStore((s) => s.setPresentAs);
@@ -861,8 +662,9 @@ function CodeModeCard() {
           <div className="min-w-0">
             <div className="text-sm font-medium">代码模式</div>
             <div className="mt-1 text-[11px] sm:text-xs text-muted-foreground">
-              只向模型暴露 run_code，其余能力在程序内通过 SDK 调用。观察/计划模式仍使用原生工具。
+              只向模型暴露写代码入口，其余能力在程序内调用。观察 / 计划模式仍使用原生工具。
               也可用 <code className="font-mono">/code on</code> 或 <code className="font-mono">/code off</code>。
+              此开关只影响当前对话，与下方代码风险分级无关。
             </div>
           </div>
         </div>
@@ -956,7 +758,7 @@ function OnboardingReplayCard() {
                     {section.category}
                   </span>
                 </div>
-                <p className="text-[11px] text-muted-foreground leading-relaxed line-clamp-1">
+                <p className="text-[11px] text-muted-foreground leading-relaxed break-words">
                   {section.description}
                 </p>
               </div>
@@ -1141,8 +943,6 @@ export function RuntimeTab() {
 
   return (
     <div className="space-y-5">
-      <OnboardingReplayCard />
-      <LocalSandboxNote />
       <CodeModeCard />
       <Separator />
       {renderGroups(BASIC_GROUPS)}
@@ -1161,6 +961,8 @@ export function RuntimeTab() {
       </button>
 
       {showAdvanced && renderGroups(ADVANCED_GROUPS)}
+
+      <OnboardingReplayCard />
 
       <div className="flex justify-end pt-2">
         <Button

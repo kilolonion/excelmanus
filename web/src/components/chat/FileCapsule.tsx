@@ -3,13 +3,12 @@
 import { useState } from "react";
 import { Download } from "lucide-react";
 import { FileTypeIcon } from "@/components/ui/file-type-icon";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv", ".tsv"]);
 const COLLAPSED_COUNT = 4;
 
 export function isExcelFilename(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  return dot >= 0 && EXCEL_EXTS.has(name.slice(dot).toLowerCase());
+  return isSpreadsheetFile(name);
 }
 
 export interface RelatedFileItem {

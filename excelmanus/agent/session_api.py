@@ -85,32 +85,28 @@ async def followup(
     for item in images or []:
         if not isinstance(item, dict):
             continue
-        data = str(item.get("data", "") or "").strip()
-        if not data:
+        attachment_id = str(item.get("attachment_id") or "").strip()
+        if not attachment_id:
             continue
         media_type = str(item.get("media_type", "image/png") or "image/png").strip() or "image/png"
         detail_raw = str(item.get("detail", "auto") or "auto").strip().lower()
         detail = detail_raw if detail_raw in {"auto", "low", "high"} else "auto"
-        normalized_images.append({
-            "data": data,
+        row: dict[str, str] = {
+            "attachment_id": attachment_id,
             "media_type": media_type,
             "detail": detail,
-        })
+        }
+        normalized_images.append(row)
 
     if normalized_images:
         logger.info(
-            "收到 %d 张图片附件 (media_types=%s, data_lens=%s)",
+            "收到 %d 张图片附件 (media_types=%s, attachment_ids=%s)",
             len(normalized_images),
             [img["media_type"] for img in normalized_images],
-            [len(img["data"]) for img in normalized_images],
+            [img.get("attachment_id", "") for img in normalized_images],
         )
-        # 前端附件图片 hash 注册到 dispatcher，
-        # 后续 read_image 同一文件时可跳过重复注入
-        from excelmanus.engine_core.tool_dispatcher import _image_content_hash_b64
         for img in normalized_images:
-            _h = _image_content_hash_b64(img["data"])
-            engine._tool_dispatcher._injected_image_hashes.add(_h)
-            logger.debug("前端附件 hash 已注册: %s", _h)
+            engine._tool_dispatcher._injected_image_hashes.add(img["attachment_id"])
 
     # ── 视觉能力前置检查：附件只交给激活模型阅读 ──
     if normalized_images and not engine._is_vision_capable:
@@ -130,6 +126,8 @@ async def followup(
         logger.info("修复了 %d 个中断遗留的悬空 tool_call", _repaired)
 
     if engine._question_flow.has_pending():
+        engine._mention_contexts = mention_contexts or []
+        engine._ingest_mention_versions(mention_contexts)
         pending_chat_start = time.monotonic()
         pending_result = await engine._interaction_handler.handle_pending_question_answer(
             user_message=user_message,
@@ -191,38 +189,45 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     present_as = extra.get("present_as")
     chat_start = time.monotonic()
 
-    requested_mode = str(chat_mode or "write")
-    if requested_mode == "read":
-        engine._current_chat_mode = "read"
-    elif requested_mode == "plan":
-        from excelmanus.plan_mode import set_plan_active
-        set_plan_active(engine, True)
-    elif getattr(engine, "_plan_active", False):
-        engine._current_chat_mode = "plan"
-    else:
-        engine._current_chat_mode = requested_mode
+    # 认领后先替换引用快照；技能短路分支也不能留下上一轮的待注入引用。
+    engine._mention_contexts = mention_contexts or []
+    engine._ingest_mention_versions(mention_contexts)
+
+    from excelmanus.plan_mode import apply_chat_mode
     from excelmanus.tools.runtime import set_present_as_preference
 
     if present_as is not None:
         set_present_as_preference(engine, present_as)
-    else:
-        engine._tools_cache = None
+    # 请求体 chat_mode 是权威：点「编辑」必须能离开 plan，禁止被旧 _plan_active 粘住。
+    # tab / 请求切到 read 也是用户显式退出（清 pending），与 /plan off 等价。
+    apply_chat_mode(
+        engine,
+        str(chat_mode or "write"),
+        source="request",
+        on_event=on_event,
+    )
 
     def _add_user_turn_to_memory(text: str) -> None:
         if not normalized_images:
             engine._memory.add_user_message(text)
             return
+        from excelmanus.attachments.store import get_attachment_store
+        from excelmanus.attachments.types import AttachmentError
+
         parts: list[dict[str, Any]] = []
         if text:
             parts.append({"type": "text", "text": text})
+        store = get_attachment_store()
         for image in normalized_images:
-            parts.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:{image['media_type']};base64,{image['data']}",
-                    "detail": image["detail"],
-                },
-            })
+            attachment_id = image.get("attachment_id") or ""
+            ref = store.get_ref(attachment_id)
+            if ref is None:
+                raise AttachmentError(
+                    f"附件不存在或已过期: {attachment_id}",
+                    "ATTACHMENT_MISSING",
+                )
+            parts.append({"type": "image", "attachment": ref.to_dict()})
+            engine._tool_dispatcher._injected_image_hashes.add(ref.attachment_id)
         engine._memory.add_user_message(parts if parts else text)
 
     effective_slash_command = slash_command
@@ -325,6 +330,11 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
             engine._emit_short_circuit_summary(on_event, chat_start)
             return ChatResult(reply=reply, tool_calls=[], iterations=1, truncated=False)
 
+    engine._turn_image_count = len(normalized_images)
+    from excelmanus.system_one.host import maybe_record_turn_exposure
+
+    await maybe_record_turn_exposure(engine, user_message, on_event=on_event)
+
     from excelmanus.prompt.skill_catalog import prepare_skill_followup
     route_result, skill_invocation = prepare_skill_followup(
         engine,
@@ -355,8 +365,6 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
         _summarize_text(user_message),
         route_result.skills_used,
     )
-    engine._mention_contexts = mention_contexts
-    engine._ingest_mention_versions(mention_contexts)
     item.content = user_message
     return None
 
@@ -430,6 +438,16 @@ def finalize_driver_turn(
             total_tokens=chat_result.total_tokens,
         ),
     )
+    from excelmanus.system_one.host import (
+        clear_turn_exposure,
+        clear_turn_present_as,
+        remember_turn_tools,
+    )
+
+    remember_turn_tools(engine, chat_result)
+    clear_turn_exposure(engine)
+    clear_turn_present_as(engine)
+
 
 # ── Skill 解析与 Hook 管理（委托到 SkillResolver）──────────
 

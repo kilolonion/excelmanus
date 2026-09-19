@@ -35,8 +35,6 @@ class IsolatedWorkspace:
         root_dir: str | Path,
         *,
         sandbox_config: SandboxConfig | None = None,
-        transaction_enabled: bool = False,
-        transaction_scope: str = "all",
         create_missing: bool = True,
     ) -> None:
         self._root_dir = Path(root_dir).expanduser().resolve()
@@ -45,7 +43,6 @@ class IsolatedWorkspace:
         elif not self._root_dir.is_dir():
             raise FileNotFoundError(f"工作区目录不存在: {self._root_dir}")
         self._sandbox_config = sandbox_config or SandboxConfig()
-        _ = (transaction_enabled, transaction_scope)
 
     @property
     def root_dir(self) -> Path:
@@ -59,16 +56,7 @@ class IsolatedWorkspace:
     def sandbox_config(self, value: SandboxConfig) -> None:
         self._sandbox_config = value
 
-    @property
-    def transaction_enabled(self) -> bool:
-        return False
-
-    @transaction_enabled.setter
-    def transaction_enabled(self, value: bool) -> None:
-        return
-
-    def create_sandbox_env(self, transaction: object | None = None) -> SandboxEnv:
-        _ = transaction
+    def create_sandbox_env(self) -> SandboxEnv:
         return SandboxEnv(workspace=self)
 
     def get_upload_dir(self) -> Path:
@@ -81,8 +69,6 @@ class IsolatedWorkspace:
         global_workspace_root: str,
         *,
         sandbox_config: SandboxConfig | None = None,
-        transaction_enabled: bool = False,
-        transaction_scope: str = "all",
         data_root: str = "",
     ) -> "IsolatedWorkspace":
         root = data_root if data_root else global_workspace_root

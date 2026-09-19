@@ -8,7 +8,7 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useSessionStore } from "@/stores/session-store";
-import { buildApiUrl } from "@/lib/api";
+import { useExcelStore } from "@/stores/excel-store";
 import { useAuthImage } from "@/hooks/use-auth-image";
 
 /* ─── types ─── */
@@ -67,9 +67,10 @@ export function ImagePreviewModal({
   const [dragging, setDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
 
   // ── authenticated image loading ──
-  const imageApiPath = `/files/image?path=${encodeURIComponent(imagePath)}&session_id=${activeSessionId || ""}`;
+  const imageApiPath = `/files/image?path=${encodeURIComponent(imagePath)}&session_id=${activeSessionId || ""}&v=${workspaceFilesVersion}`;
   const { blobUrl, loading: fetchLoading, error: fetchError } = useAuthImage(imageApiPath, open);
   const loading = fetchLoading || (!imgLoaded && !fetchError && open);
   const error = fetchError;
@@ -160,7 +161,6 @@ export function ImagePreviewModal({
     setDragging(false);
   }, []);
 
-  const rawImageUrl = buildApiUrl(imageApiPath);
   const isPanned = zoom > 1;
   const zoomPercent = Math.round(zoom * 100);
   const breadcrumb = useMemo(() => pathToBreadcrumb(imagePath), [imagePath]);
@@ -267,16 +267,18 @@ export function ImagePreviewModal({
                   <Download className="w-3.5 h-3.5" />
                   <span>下载</span>
                 </ToolBtn>
-                <a
-                  href={rawImageUrl}
-                  target="_blank"
-                  rel="noopener noreferrer"
-                  onClick={(e) => e.stopPropagation()}
-                  className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-200/80 dark:hover:bg-gray-700"
-                  title="新窗口打开"
-                >
-                  <ExternalLink className="w-3.5 h-3.5" />
-                </a>
+                {blobUrl && (
+                  <a
+                    href={blobUrl}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    onClick={(e) => e.stopPropagation()}
+                    className="flex items-center gap-1.5 px-2.5 py-1 rounded-md text-[11px] font-medium transition-all bg-gray-100 dark:bg-gray-800 text-gray-600 dark:text-gray-300 border border-gray-200 dark:border-gray-700 hover:bg-gray-200/80 dark:hover:bg-gray-700"
+                    title="新窗口打开"
+                  >
+                    <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                )}
               </div>
             </div>
 

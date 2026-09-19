@@ -1,5 +1,6 @@
 import type { Dispatch, MutableRefObject, RefObject, SetStateAction } from "react";
 import { useCallback } from "react";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 import { useExcelStore } from "@/stores/excel-store";
 
 export function formatFileMention(opts: {
@@ -59,6 +60,83 @@ export function truncateMention(
   return [display, token];
 }
 
+const FILE_MENTION_RE =
+  /^@file:([^\s\[\]@]+)(?:\[([^\]]*)\])?(?:@(sha256:[0-9a-fA-F]+))?$/;
+
+interface ParsedFileMention {
+  path: string;
+  rangeSpec: string | null;
+}
+
+function parseFileMention(token: string): ParsedFileMention | null {
+  const m = token.match(FILE_MENTION_RE);
+  if (!m) return null;
+  return {
+    path: m[1].replace(/\\/g, "/").replace(/^\.\//, ""),
+    rangeSpec: m[2] ? m[2] : null,
+  };
+}
+
+function collapseSingleCellRange(rangeSpec: string): string {
+  const bang = rangeSpec.lastIndexOf("!");
+  const sheetPrefix = bang >= 0 ? rangeSpec.slice(0, bang + 1) : "";
+  const cells = bang >= 0 ? rangeSpec.slice(bang + 1) : rangeSpec;
+  const single = cells.match(/^([A-Za-z]+[0-9]+):\1$/i);
+  return `${sheetPrefix}${single ? single[1] : cells}`;
+}
+
+function mentionFileLabel(fileLabel: string, rangeSpec: string | null): string {
+  if (!rangeSpec) return fileLabel;
+  return `${fileLabel} · ${collapseSingleCellRange(rangeSpec)}`;
+}
+
+function basenameOf(path: string): string {
+  const slash = path.lastIndexOf("/");
+  return slash >= 0 ? path.slice(slash + 1) : path;
+}
+
+function withParentDir(path: string): string | null {
+  const parts = path.split("/").filter((p) => p && p !== ".");
+  if (parts.length < 2) return null;
+  return `${parts[parts.length - 2]}/${parts[parts.length - 1]}`;
+}
+
+/**
+ * 可见层标签：basename + 可选 ` · Sheet!Range`（单格 B1:B1 → B1）。
+ * 不含 `@file:` / 目录 / sha256。无法解析时 display 与 full 均为原文。
+ */
+export function formatMentionDisplay(fullToken: string): { display: string; full: string } {
+  const parsed = parseFileMention(fullToken);
+  if (!parsed) return { display: fullToken, full: fullToken };
+  return {
+    display: mentionFileLabel(basenameOf(parsed.path), parsed.rangeSpec),
+    full: fullToken,
+  };
+}
+
+function resolveUniqueDisplay(
+  fullToken: string,
+  preferred: string,
+  taken: Set<string>,
+  tokenMap: Map<string, string>,
+): string {
+  const available = (label: string) =>
+    tokenMap.get(label) === fullToken || !taken.has(label);
+
+  if (available(preferred)) return preferred;
+
+  const parsed = parseFileMention(fullToken);
+  if (!parsed) return preferred;
+
+  const dirSegment = withParentDir(parsed.path);
+  if (dirSegment) {
+    const withDir = mentionFileLabel(dirSegment, parsed.rangeSpec);
+    if (available(withDir)) return withDir;
+  }
+
+  return mentionFileLabel(parsed.path, parsed.rangeSpec);
+}
+
 export function insertTokensIntoText(
   text: string,
   cursorPos: number,
@@ -89,21 +167,46 @@ export function scheduleTextareaCursor(
   });
 }
 
-export const EXCEL_FILE_EXTS = [".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"];
-
 export function trackRecentExcelFile(path: string, filename: string) {
-  const extLower = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  if (EXCEL_FILE_EXTS.includes(extLower)) {
+  if (isSpreadsheetFile(filename)) {
     useExcelStore.getState().addRecentFile({ path, filename });
   }
+}
+
+/**
+ * 发送前把可见 display 还原为协议串。按 display 长度降序替换，
+ * 避免短标签成为长标签的子串（如 `订单与产品.xlsx` 命中
+ * `uploads/订单与产品.xlsx · Sheet1!B1`）。占位符两趟是为了防止
+ * 已替换的 full token 内部再次命中短 display。
+ */
+export function applyDisplayReplacements(
+  text: string,
+  tokenMap: Map<string, string>,
+): string {
+  if (tokenMap.size === 0) return text;
+  const entries = [...tokenMap.entries()].sort((a, b) => b[0].length - a[0].length);
+  const marks = entries.map((_, i) => `\u0000EM${i}\u0000`);
+  let result = text;
+  for (let i = 0; i < entries.length; i++) {
+    const display = entries[i][0];
+    if (!display) continue;
+    result = result.replaceAll(display, marks[i]);
+  }
+  for (let i = 0; i < entries.length; i++) {
+    result = result.replaceAll(marks[i], entries[i][1]);
+  }
+  return result;
 }
 
 export function toDisplayMentionTokens(
   fullTokens: string[],
   tokenMap: Map<string, string>,
 ): string[] {
+  const taken = new Set(tokenMap.keys());
   return fullTokens.map((fullToken) => {
-    const [display, full] = truncateMention(fullToken);
+    const { display: preferred, full } = formatMentionDisplay(fullToken);
+    const display = resolveUniqueDisplay(fullToken, preferred, taken, tokenMap);
+    taken.add(display);
     if (display !== full) tokenMap.set(display, full);
     return display;
   });

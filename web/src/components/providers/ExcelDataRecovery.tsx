@@ -3,6 +3,12 @@
 import { useEffect, useRef } from "react";
 import { useExcelStore } from "@/stores/excel-store";
 import { useChatStore } from "@/stores/chat-store";
+import { useSessionStore } from "@/stores/session-store";
+import { useWordStore } from "@/stores/word-store";
+import {
+  workspaceKeyForSessionId,
+  workspaceKeyFromSession,
+} from "@/lib/workspace-file-ref";
 
 /**
  * ExcelDataRecovery 组件
@@ -19,7 +25,14 @@ export function ExcelDataRecovery() {
 
     // 会话切换时先清理旧会话的瞬态数据，防止跨会话 diff 泄漏
     if (prevSessionRef.current && prevSessionRef.current !== loadedSessionId) {
-      useExcelStore.getState().clearSession();
+      const sessions = useSessionStore.getState().sessions;
+      const prev = sessions.find((item) => item.id === prevSessionRef.current);
+      const next = sessions.find((item) => item.id === loadedSessionId);
+      useExcelStore.getState().rebindSession(
+        workspaceKeyFromSession(prev),
+        workspaceKeyFromSession(next),
+      );
+      useWordStore.getState().rebindWorkspace(workspaceKeyFromSession(next));
     }
     prevSessionRef.current = loadedSessionId;
 
@@ -39,11 +52,12 @@ export function ExcelDataRecovery() {
 
         const excelStore = useExcelStore.getState();
 
-        // 恢复文件列表
+        // 恢复文件列表（按来源会话的工作区键入桶）
+        const sourceWorkspaceKey = workspaceKeyForSessionId(loadedSessionId);
         for (const fp of affected_files) {
           if (!fp) continue;
           const filename = fp.split("/").pop() || fp;
-          excelStore.addRecentFileIfNotDismissed({ path: fp, filename });
+          excelStore.addRecentFileIfNotDismissed({ path: fp, filename }, sourceWorkspaceKey);
         }
 
         // 恢复 diff 数据

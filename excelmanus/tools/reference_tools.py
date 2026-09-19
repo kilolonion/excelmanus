@@ -10,39 +10,41 @@ from excelmanus.reference_graph.cache import RefCache, get_session_cache
 from excelmanus.reference_graph.formula_parser import FormulaRefExtractor, address_in_ref
 from excelmanus.reference_graph.models import WorkbookRefIndex
 from excelmanus.reference_graph.scanner import Tier1Scanner, Tier2Resolver
+from excelmanus.workbook.refs import InvalidRefError
 
-_workspace_root: str | None = None
 _scanner = Tier1Scanner()
 _resolver = Tier2Resolver()
 
 
 def init_guard(workspace_root: str) -> None:
-    """设置工具的工作空间根目录。"""
-    global _workspace_root
-    _workspace_root = workspace_root
+    from excelmanus.tools.context import bind_workspace
+
+    bind_workspace(workspace_root)
 
 
-def _resolve_path(file_path: str) -> str:
-    """将相对路径解析为绝对路径。"""
-    if _workspace_root and not Path(file_path).is_absolute():
-        return str(Path(_workspace_root) / file_path)
-    return file_path
+def _open_ref_snapshot(file_path: str):
+    from excelmanus.workbook.data import _open_tool_snapshot
+
+    return _open_tool_snapshot(file_path)
 
 
 def _ensure_index(file_path: str) -> WorkbookRefIndex:
-    """确保 Tier 1 索引已缓存。"""
-    abs_path = _resolve_path(file_path)
+    """确保 Tier 1 索引已缓存。扫描快照 backing，键含 workspace+版本。"""
+    snap, snap_err = _open_ref_snapshot(file_path)
+    if snap_err is not None or snap is None:
+        raise RuntimeError(snap_err.model_text if snap_err is not None else "无法打开快照")
     cache = get_session_cache()
-    cached = cache.get_tier1(abs_path)
+    key = snap.id.key()
+    cached = cache.get_tier1(key)
     if cached is not None:
         return cached
-    index = _scanner.scan(abs_path)
-    cache.put_tier1(abs_path, index)
+    index = _scanner.scan(str(snap.backing_path))
+    cache.put_tier1(key, index)
     return index
 
 
-def _error_json(message: str) -> ToolResult:
-    return error_result(message, code="EXECUTION_FAILED")
+def _error_json(message: str, *, code: str = "EXECUTION_FAILED") -> ToolResult:
+    return error_result(message, code=code)
 
 
 def _parse_target(target: str) -> tuple[str | None, str]:
@@ -105,20 +107,27 @@ def trace_references(
     depth: int = 2,
 ) -> ToolResult:
     """追踪单元格引用链。"""
+    from excelmanus.workbook.snapshot import SnapshotError, require_default_sheet
+
     try:
-        abs_path = _resolve_path(file_path)
+        snap, snap_err = _open_ref_snapshot(file_path)
+        if snap_err is not None or snap is None:
+            return snap_err or _error_json("无法打开快照")
+        backing = str(snap.backing_path)
         sheet_name, address = _parse_target(target)
 
-        if sheet_name is None:
-            from openpyxl import load_workbook
-            wb = load_workbook(abs_path, data_only=False, read_only=True)
-            try:
-                sheet_name = wb.sheetnames[0]
-            finally:
-                wb.close()
+        from openpyxl import load_workbook
+
+        wb = load_workbook(backing, data_only=False, read_only=True)
+        try:
+            sheet_name = require_default_sheet(list(wb.sheetnames), sheet_name)
+        except SnapshotError as exc:
+            return error_result(str(exc), code=exc.code, fields=exc.fields or None)
+        finally:
+            wb.close()
 
         node = _resolver.resolve(
-            abs_path, sheet_name, address,
+            backing, sheet_name, address,
             direction=direction, depth=depth,
         )
 
@@ -151,6 +160,8 @@ def trace_references(
                 f"{target}: precedents={len(precedents)}, dependents={len(dependents)}"
             ),
         )
+    except InvalidRefError as e:
+        return _error_json(str(e), code="RANGE_INVALID")
     except Exception as e:
         return _error_json(f"追踪引用失败: {e}")
 
@@ -161,15 +172,20 @@ def get_impact_analysis(
     scope: str = "all",
 ) -> ToolResult:
     """分析修改影响范围。"""
+    from excelmanus.workbook.snapshot import SnapshotError, require_default_sheet
+
     try:
-        abs_path = _resolve_path(file_path)
+        snap, snap_err = _open_ref_snapshot(file_path)
+        if snap_err is not None or snap is None:
+            return snap_err or _error_json("无法打开快照")
+        backing = str(snap.backing_path)
         sheet_name, address = _parse_target(target)
 
         from openpyxl import load_workbook
-        wb = load_workbook(abs_path, data_only=False, read_only=True)
+
+        wb = load_workbook(backing, data_only=False, read_only=True)
         try:
-            if sheet_name is None:
-                sheet_name = wb.sheetnames[0]
+            sheet_name = require_default_sheet(list(wb.sheetnames), sheet_name)
 
             extractor = FormulaRefExtractor()
             direct: list[dict[str, Any]] = []
@@ -209,6 +225,10 @@ def get_impact_analysis(
                 f"{target}: {len(direct)} cells across {len(affected_sheets)} sheets"
             ),
         )
+    except InvalidRefError as e:
+        return _error_json(str(e), code="RANGE_INVALID")
+    except SnapshotError as e:
+        return error_result(str(e), code=e.code, fields=e.fields or None)
     except Exception as e:
         return _error_json(f"影响分析失败: {e}")
 

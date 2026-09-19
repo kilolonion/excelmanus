@@ -6,6 +6,8 @@
 
 from __future__ import annotations
 
+from excelmanus.api_app_state import get_runtime as api_runtime
+
 import asyncio
 import json
 from contextlib import contextmanager
@@ -41,7 +43,8 @@ def _test_config(**overrides) -> ExcelManusConfig:
         model="test-model",
         session_ttl_seconds=60,
         max_sessions=5,
-        workspace_root="/tmp/excelmanus-test-api",
+        workspace_root=str(Path.cwd()),
+        db_path=str(Path.cwd() / "test-api.db"),
     )
     defaults.update(overrides)
     return ExcelManusConfig(**defaults)
@@ -52,8 +55,9 @@ def _make_transport():
     return ASGITransport(app=app, raise_app_exceptions=False)
 
 
-def test_create_app_uses_config_cors_for_middleware() -> None:
-    """create_app 应只从传入 config 读取 CORS allow_origins。"""
+def test_create_app_uses_config_cors_for_middleware(monkeypatch: pytest.MonkeyPatch) -> None:
+    """create_app 保留显式 CORS，并自动补上 loopback 前端源。"""
+    monkeypatch.setenv("EXCELMANUS_FRONTEND_PORT", "3000")
     config = _test_config(
         cors_allow_origins=("http://a.example", "http://b.example")
     )
@@ -69,10 +73,34 @@ def test_create_app_uses_config_cors_for_middleware() -> None:
         layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
     assert len(cors_layers) == 1
-    assert sorted(cors_layers[0].kwargs["allow_origins"]) == [
+    assert set(cors_layers[0].kwargs["allow_origins"]) == {
         "http://a.example",
         "http://b.example",
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+        "http://[::1]:3000",
+    }
+
+
+def test_create_app_adds_lan_and_custom_frontend_port_cors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """自定义前端端口与局域网 IP 都应进入 CORS，且 loopback 始终保留。"""
+    monkeypatch.setenv("EXCELMANUS_FRONTEND_PORT", "3001,4173")
+    config = _test_config(cors_allow_origins=("http://a.example",))
+    mock_sock = MagicMock()
+    mock_sock.getsockname.return_value = ("192.168.1.10", 0)
+    with patch("socket.getaddrinfo", return_value=[]), \
+         patch("socket.socket", return_value=mock_sock):
+        local_app = api_module.create_app(config=config)
+
+    cors_layers = [
+        layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
+    origins = set(cors_layers[0].kwargs["allow_origins"])
+    assert "http://a.example" in origins
+    assert "http://192.168.1.10:3001" in origins
+    assert "http://192.168.1.10:4173" in origins
+    assert "http://127.0.0.1:3001" in origins
+    assert "http://localhost:4173" in origins
 
 
 @pytest.mark.asyncio
@@ -83,7 +111,17 @@ async def test_lifespan_uses_bootstrap_config_without_reloading(
     """lifespan 启动期间不应再调用 load_config() 二次加载配置。"""
     config = _test_config(
         workspace_root=str(tmp_path),
+        db_path=str(tmp_path / "lifespan.db"),
+        data_root=str(tmp_path / "data"),
         cors_allow_origins=("http://a.example",),
+    )
+    monkeypatch.setenv("EXCELMANUS_SECRET_KEY", "isolated-lifespan-test")
+    monkeypatch.setattr("excelmanus.mcp.manager.MCPManager.initialize", AsyncMock())
+    # lifespan 会对真实仓库根跑 outputs/uploads 迁移复制（bench 产物累积后
+    # 超过单测 60s 超时）；本测试只验证不再调用 load_config，迁移路径无关。
+    monkeypatch.setattr(
+        "excelmanus.data_home.has_project_local_data",
+        lambda *a, **k: False,
     )
     local_app = api_module.create_app(config=config)
 
@@ -92,8 +130,11 @@ async def test_lifespan_uses_bootstrap_config_without_reloading(
 
     monkeypatch.setattr(api_module, "load_config", _should_not_be_called)
 
-    async with local_app.router.lifespan_context(local_app):
-        assert api_module._config is config
+    try:
+        async with local_app.router.lifespan_context(local_app):
+            assert local_app.state.runtime.config is config
+    finally:
+        api_module.set_draining(False)
 
 
 @contextmanager
@@ -143,14 +184,14 @@ def _setup_api_globals(config=None, *, chat_history=None):
         chat_history=chat_history,
     )
 
-    old_config = api_module._config
-    old_registry = api_module._tool_registry
-    old_loader = api_module._skillpack_loader
-    old_router = api_module._skill_router
-    old_sk_manager = api_module._skillpack_manager
-    old_manager = api_module._session_manager
-    old_probe_job_manager = getattr(api_module, "_cap_probe_job_manager", None)
-    old_config_store = api_module._config_store
+    old_config = api_module.app.state.runtime.config
+    old_registry = api_module.app.state.runtime.tool_registry
+    old_loader = api_module.app.state.runtime.skillpack_loader
+    old_router = api_module.app.state.runtime.skill_router
+    old_sk_manager = api_module.app.state.runtime.skillpack_manager
+    old_manager = api_module.app.state.runtime.session_manager
+    old_probe_job_manager = getattr(api_module.app.state.runtime, "cap_probe_job_manager", None)
+    old_config_store = api_module.app.state.runtime.config_store
 
     from excelmanus.api_app_state import (
         get_cap_probe_job_manager as _get_app_probe,
@@ -172,12 +213,12 @@ def _setup_api_globals(config=None, *, chat_history=None):
     old_app_db = _get_app_db()
     old_app_probe = _get_app_probe()
 
-    api_module._config = config
-    api_module._tool_registry = registry
-    api_module._skillpack_loader = loader
-    api_module._skill_router = router
-    api_module._skillpack_manager = sk_manager
-    api_module._session_manager = manager
+    api_module.app.state.runtime.config = config
+    api_module.app.state.runtime.tool_registry = registry
+    api_module.app.state.runtime.skillpack_loader = loader
+    api_module.app.state.runtime.skill_router = router
+    api_module.app.state.runtime.skillpack_manager = sk_manager
+    api_module.app.state.runtime.session_manager = manager
     _set_app_config(config)
     _set_app_sm(manager)
     _set_app_cs(None)
@@ -185,23 +226,23 @@ def _setup_api_globals(config=None, *, chat_history=None):
     _set_app_probe(None)
     _set_app_spl(loader)
     _set_app_spm(sk_manager)
-    if hasattr(api_module, "_cap_probe_job_manager"):
-        api_module._cap_probe_job_manager = None
+    if hasattr(api_module.app.state.runtime, "cap_probe_job_manager"):
+        api_module.app.state.runtime.cap_probe_job_manager = None
     # 重置跨测试污染的全局状态
-    api_module._config_store = None
-    old_draining = api_module._draining
-    api_module._draining = False
+    api_module.app.state.runtime.config_store = None
+    old_draining = api_module.app.state.runtime.draining
+    api_module.app.state.runtime.draining = False
 
     try:
         yield {"config": config, "registry": registry, "manager": manager}
     finally:
         initialize_mcp_patcher.stop()
-        api_module._config = old_config
-        api_module._tool_registry = old_registry
-        api_module._skillpack_loader = old_loader
-        api_module._skill_router = old_router
-        api_module._skillpack_manager = old_sk_manager
-        api_module._session_manager = old_manager
+        api_module.app.state.runtime.config = old_config
+        api_module.app.state.runtime.tool_registry = old_registry
+        api_module.app.state.runtime.skillpack_loader = old_loader
+        api_module.app.state.runtime.skill_router = old_router
+        api_module.app.state.runtime.skillpack_manager = old_sk_manager
+        api_module.app.state.runtime.session_manager = old_manager
         _set_app_config(old_app_config)
         _set_app_sm(old_app_sm)
         _set_app_cs(old_app_cs)
@@ -209,10 +250,10 @@ def _setup_api_globals(config=None, *, chat_history=None):
         _set_app_probe(old_app_probe)
         _set_app_spl(old_loader)
         _set_app_spm(old_sk_manager)
-        if hasattr(api_module, "_cap_probe_job_manager"):
-            api_module._cap_probe_job_manager = old_probe_job_manager
-        api_module._config_store = old_config_store
-        api_module._draining = old_draining
+        if hasattr(api_module.app.state.runtime, "cap_probe_job_manager"):
+            api_module.app.state.runtime.cap_probe_job_manager = old_probe_job_manager
+        api_module.app.state.runtime.config_store = old_config_store
+        api_module.app.state.runtime.draining = old_draining
         # 恢复工具模块的 _guard 状态
         for _mod_name, _saved in _saved_guards.items():
             try:
@@ -615,7 +656,7 @@ class TestProperty14SessionDeletion:
         assert detail_resp.json()["pending_approval"] is None
         assert detail_resp.json()["pending_question"] is None
 
-        # 注入 pending approval
+        # 注入仍可提交的 pending approval（必须带 live Future）
         fake_pa = PendingApproval(
             approval_id="test-approval-001",
             tool_name="run_code",
@@ -623,9 +664,12 @@ class TestProperty14SessionDeletion:
             tool_scope=["run_code"],
             created_at_utc="2026-02-23T14:00:00Z",
         )
-        with (
-            patch("excelmanus.engine.AgentEngine.has_pending_approval", return_value=True),
-            patch("excelmanus.engine.AgentEngine.current_pending_approval", return_value=fake_pa),
+        with patch(
+            "excelmanus.engine.AgentEngine.web_actionable_pending_approval",
+            return_value=fake_pa,
+        ), patch(
+            "excelmanus.engine.AgentEngine.discard_stale_web_approval",
+            return_value=False,
         ):
             detail_resp2 = await client.get(f"/api/v1/sessions/{sid}")
         assert detail_resp2.status_code == 200
@@ -635,6 +679,105 @@ class TestProperty14SessionDeletion:
         assert pa["tool_name"] == "run_code"
         assert "risk_level" in pa
         assert "args_summary" in pa
+
+    @pytest.mark.asyncio
+    async def test_session_detail_hides_pending_without_live_future(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """已提交但仍占着 _approval.pending 的单据，刷新后不应再弹出。"""
+        from excelmanus.approval import PendingApproval
+
+        with patch(
+            "excelmanus.engine.AgentEngine.followup",
+            new_callable=AsyncMock,
+            return_value=ChatResult(reply="审批测试"),
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+        engine = setup_api_state["manager"].get_engine(sid)
+        assert engine is not None
+        engine._approval._pending = PendingApproval(
+            approval_id="apv_stale_001",
+            tool_name="run_code",
+            arguments={"code": "print(1)"},
+            tool_scope=["run_code"],
+            created_at_utc="2026-09-13T00:00:00Z",
+        )
+        assert engine.has_pending_approval() is True
+        assert engine.web_actionable_pending_approval() is None
+
+        detail = await client.get(f"/api/v1/sessions/{sid}")
+        assert detail.status_code == 200
+        assert detail.json()["pending_approval"] is None
+        assert engine.has_pending_approval() is False
+
+    @pytest.mark.asyncio
+    async def test_chat_approve_resolves_and_is_idempotent(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        """首次 approve resolve Future；重复提交返回 already_resolved 而不是 404。"""
+        from excelmanus.approval import PendingApproval
+
+        with patch(
+            "excelmanus.engine.AgentEngine.followup",
+            new_callable=AsyncMock,
+            return_value=ChatResult(reply="审批测试"),
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+        engine = setup_api_state["manager"].get_engine(sid)
+        assert engine is not None
+        pending = PendingApproval(
+            approval_id="apv_live_001",
+            tool_name="run_code",
+            arguments={"code": "print(1)"},
+            tool_scope=["run_code"],
+            created_at_utc="2026-09-13T00:00:00Z",
+        )
+        engine._approval._pending = pending
+        fut = engine.interaction_registry.create(pending.approval_id)
+
+        first = await client.post(
+            f"/api/v1/chat/{sid}/approve",
+            json={"approval_id": pending.approval_id, "decision": "accept"},
+        )
+        assert first.status_code == 200
+        assert first.json()["status"] == "resolved"
+        assert fut.done()
+        assert fut.result()["decision"] == "accept"
+
+        # 执行完成后 pending 会被清掉；已执行记录仍应让重复提交幂等成功。
+        engine._approval._applied[pending.approval_id] = MagicMock()
+        second = await client.post(
+            f"/api/v1/chat/{sid}/approve",
+            json={"approval_id": pending.approval_id, "decision": "accept"},
+        )
+        assert second.status_code == 200
+        assert second.json()["status"] == "already_resolved"
+
+    @pytest.mark.asyncio
+    async def test_chat_approve_unknown_id_returns_404(
+        self, client: AsyncClient, setup_api_state: dict
+    ) -> None:
+        with patch(
+            "excelmanus.engine.AgentEngine.followup",
+            new_callable=AsyncMock,
+            return_value=ChatResult(reply="审批测试"),
+        ):
+            create_resp = await client.post(
+                "/api/v1/chat", json={"message": "创建会话"},
+            )
+        sid = create_resp.json()["session_id"]
+        resp = await client.post(
+            f"/api/v1/chat/{sid}/approve",
+            json={"approval_id": "apv_missing_001", "decision": "accept"},
+        )
+        assert resp.status_code == 404
+        assert "不存在或已处理" in resp.json()["error"]
 
     @pytest.mark.asyncio
     async def test_get_session_detail_includes_pending_question(
@@ -1189,16 +1332,79 @@ class TestHealthEndpoint:
     async def test_health_returns_status_and_version(
         self, client: AsyncClient
     ) -> None:
-        """健康检查返回 status、version、tools、skillpacks。"""
+        """健康检查返回 status、version、计数；默认不携带全量名称列表。"""
         resp = await client.get("/api/v1/health")
         assert resp.status_code == 200
         data = resp.json()
         assert data["status"] == "ok"
         assert "version" in data
-        assert "tools" in data
+        assert isinstance(data["tool_count"], int)
+        assert isinstance(data["skillpack_count"], int)
+        assert data["tools"] == []
+        assert data["skillpacks"] == []
+        assert "onboarding" in data
+        assert "wizard_completed" in data["onboarding"]
+
+    @pytest.mark.asyncio
+    async def test_onboarding_put_roundtrip(
+        self, client: AsyncClient, tmp_path: Path
+    ) -> None:
+        from excelmanus.api_app_state import get_config_incomplete, set_config_incomplete
+        from excelmanus.database import Database
+        from excelmanus.onboarding_state import load_onboarding_state
+        from excelmanus.stores.config_store import UserConfigStore
+
+        db = Database(str(tmp_path / "onboarding.db"))
+        store = UserConfigStore(db.conn)
+        previous_incomplete = get_config_incomplete()
+        set_config_incomplete(False)
+        try:
+            with patch("excelmanus.api_routes_system._user_config_store", return_value=store):
+                health = await client.get("/api/v1/health")
+                assert health.status_code == 200
+                body = health.json()
+                assert body["configured"] is True
+                assert body["onboarding"]["wizard_completed"] is True
+                assert body["onboarding"]["coach_marks_completed"] is False
+
+                put = await client.put(
+                    "/api/v1/onboarding",
+                    json={
+                        "wizard_completed": True,
+                        "coach_marks_completed": True,
+                        "advanced_guide_completed": True,
+                        "settings_guide_completed": True,
+                        "coach_phase": "done",
+                        "coach_step_index": 0,
+                    },
+                )
+                assert put.status_code == 200
+                assert put.json()["coach_marks_completed"] is True
+
+                health2 = await client.get("/api/v1/health")
+                assert health2.json()["onboarding"]["coach_marks_completed"] is True
+                assert health2.json()["onboarding"]["coach_phase"] == "done"
+
+                replay = await client.put(
+                    "/api/v1/onboarding",
+                    json={"wizard_completed": False, "coach_phase": "basic"},
+                )
+                assert replay.status_code == 200
+                assert replay.json()["wizard_completed"] is False
+                assert load_onboarding_state(store, configured=True)["wizard_completed"] is False
+        finally:
+            set_config_incomplete(previous_incomplete)
+
+    @pytest.mark.asyncio
+    async def test_health_details_includes_tool_names(
+        self, client: AsyncClient
+    ) -> None:
+        resp = await client.get("/api/v1/health?details=1")
+        assert resp.status_code == 200
+        data = resp.json()
         assert isinstance(data["tools"], list)
-        assert "skillpacks" in data
         assert isinstance(data["skillpacks"], list)
+        assert data["tool_count"] == len(data["tools"])
 
 
 class TestSkillpackCrudEndpoints:
@@ -1949,7 +2155,7 @@ class TestPBTProperty15ErrorNoLeak:
     ) -> None:
         """任意异常消息都不应在 500 响应中泄露。"""
         # 固定的公开错误消息——如果 error_msg 恰好是其子串则不算泄露
-        _PUBLIC_ERROR = "服务内部错误，请联系管理员。"
+        _PUBLIC_ERROR = "服务处理出现异常，请稍后重试。"
 
         with _setup_api_globals():
             transport = _make_transport()
@@ -2097,7 +2303,12 @@ class TestImageAttachment:
 
         req = ChatRequest(
             message="复刻这个表格",
-            images=[ImageAttachment(data="iVBOR...", media_type="image/png")],
+            images=[
+                ImageAttachment(
+                    attachment_id="sha256:" + "ab" * 32,
+                    media_type="image/png",
+                )
+            ],
         )
         assert len(req.images) == 1
         assert req.images[0].media_type == "image/png"
@@ -2125,9 +2336,27 @@ class TestImageAttachment:
         """ImageAttachment 默认值。"""
         from excelmanus.api import ImageAttachment
 
-        img = ImageAttachment(data="abc123")
+        img = ImageAttachment(attachment_id="sha256:" + "ab" * 32)
         assert img.media_type == "image/png"
         assert img.detail == "auto"
+
+    def test_image_attachment_requires_attachment_id(self) -> None:
+        from excelmanus.api import ImageAttachment
+        from pydantic import ValidationError
+
+        with pytest.raises(ValidationError, match="attachment_id"):
+            ImageAttachment()
+
+    def test_image_attachment_accepts_attachment_id(self) -> None:
+        from excelmanus.api import ChatRequest, ImageAttachment
+
+        img = ImageAttachment(attachment_id="sha256:" + "ab" * 32)
+        assert img.attachment_id.startswith("sha256:")
+        req = ChatRequest(
+            message="看这张图",
+            images=[img],
+        )
+        assert req.images[0].attachment_id.startswith("sha256:")
 
     @pytest.mark.asyncio
     async def test_chat_endpoint_forwards_images_to_engine(self, client: AsyncClient) -> None:
@@ -2139,7 +2368,11 @@ class TestImageAttachment:
                 json={
                     "message": "复刻这张图",
                     "images": [
-                        {"data": "iVBOR...", "media_type": "image/png", "detail": "high"},
+                        {
+                            "attachment_id": "sha256:" + "ab" * 32,
+                            "media_type": "image/png",
+                            "detail": "high",
+                        },
                     ],
                 },
             )
@@ -2148,7 +2381,11 @@ class TestImageAttachment:
         kwargs = mock_chat.await_args.kwargs
         assert "images" in kwargs
         assert kwargs["images"] == [
-            {"data": "iVBOR...", "media_type": "image/png", "detail": "high"},
+            {
+                "attachment_id": "sha256:" + "ab" * 32,
+                "media_type": "image/png",
+                "detail": "high",
+            },
         ]
 
     @pytest.mark.asyncio
@@ -2161,7 +2398,11 @@ class TestImageAttachment:
                 json={
                     "message": "流式复刻",
                     "images": [
-                        {"data": "abcd", "media_type": "image/jpeg", "detail": "low"},
+                        {
+                            "attachment_id": "sha256:" + "cd" * 32,
+                            "media_type": "image/jpeg",
+                            "detail": "low",
+                        },
                     ],
                 },
             )
@@ -2170,7 +2411,11 @@ class TestImageAttachment:
         kwargs = mock_chat.await_args.kwargs
         assert "images" in kwargs
         assert kwargs["images"] == [
-            {"data": "abcd", "media_type": "image/jpeg", "detail": "low"},
+            {
+                "attachment_id": "sha256:" + "cd" * 32,
+                "media_type": "image/jpeg",
+                "detail": "low",
+            },
         ]
 
     @pytest.mark.asyncio
@@ -2293,7 +2538,7 @@ class TestImageAttachment:
             await asyncio.wait_for(chat_started.wait(), timeout=5)
 
             # 从 _active_chat_tasks 获取 session_id
-            from excelmanus.api import _active_chat_tasks
+            _active_chat_tasks = api_runtime().active_chat_tasks
             assert len(_active_chat_tasks) == 1
             session_id = next(iter(_active_chat_tasks))
 
@@ -2470,7 +2715,7 @@ class TestImageAttachment:
                     pass
 
                 await asyncio.sleep(0.02)
-                active_task = api_module._active_chat_tasks.get(session_id)
+                active_task = api_module.app.state.runtime.active_chat_tasks.get(session_id)
                 assert active_task is not None
                 assert not active_task.done()
                 assert chat_cancelled.is_set() is False
@@ -2479,7 +2724,7 @@ class TestImageAttachment:
                 allow_finish.set()
                 await asyncio.wait_for(active_task, timeout=2)
                 await asyncio.sleep(0.02)
-                assert session_id not in api_module._active_chat_tasks
+                assert session_id not in api_module.app.state.runtime.active_chat_tasks
 
 
 class TestMCPServerEndpoints:
@@ -2620,6 +2865,105 @@ class TestAdminGuardForModelConfig:
         )
         assert not data.get("error")
 
+    @pytest.mark.asyncio
+    async def test_list_remote_models_uses_named_profile_key(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """编辑已保存档案时，未再填 Key 应使用该档案自己的凭证。"""
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = {
+            "name": "acme-demo",
+            "model": "acme/model-2",
+            "api_key": "sk-test-secret-aaaaaaaa",
+            "base_url": "https://api.example.com/v1",
+            "protocol": "openai",
+        }
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
+
+        mock_get = AsyncMock(return_value=httpx.Response(
+            200,
+            json={"data": [{"id": "acme/model-2"}]},
+            request=httpx.Request("GET", "https://api.example.com/v1/models"),
+        ))
+        with patch("httpx.AsyncClient.get", new=mock_get):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={
+                    "name": "acme-demo",
+                    "base_url": "https://api.example.com/v1",
+                },
+            )
+
+        assert resp.status_code == 200
+        assert resp.json()["models"][0]["id"] == "acme/model-2"
+        assert mock_get.call_args.kwargs["headers"]["Authorization"] == (
+            "Bearer sk-test-secret-aaaaaaaa"
+        )
+
+    @pytest.mark.asyncio
+    async def test_list_remote_models_does_not_borrow_foreign_active_key(
+        self, client: AsyncClient,
+    ) -> None:
+        """目标端点与当前激活档案不同时，不得拿激活 Key 去打远端。"""
+        mock_get = AsyncMock()
+        with patch("httpx.AsyncClient.get", new=mock_get):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={"base_url": "https://api.example.com/v1"},
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["models"] == []
+        assert "API Key" in (data.get("error") or "")
+        mock_get.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_list_remote_models_401_returns_clean_error(
+        self, client: AsyncClient,
+    ) -> None:
+        """401 应返回可读文案，不能把 httpx / MDN 链接抛到 UI。"""
+        url = "https://api.example.com/v1/models"
+        mock_request = httpx.Request("GET", url)
+        mock_response = httpx.Response(401, request=mock_request, text="Unauthorized")
+        error = httpx.HTTPStatusError(
+            "Client error '401 Unauthorized' for url 'https://api.example.com/v1/models' "
+            "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/401",
+            request=mock_request,
+            response=mock_response,
+        )
+        with patch("httpx.AsyncClient.get", new=AsyncMock(side_effect=error)):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={"base_url": "https://api.example.com/v1", "api_key": "wrong-key"},
+            )
+        data = resp.json()
+        assert resp.status_code == 200
+        assert data["models"] == []
+        assert "401" in (data.get("error") or "")
+        assert "developer.mozilla.org" not in (data.get("error") or "")
+        assert "Client error" not in (data.get("error") or "")
+        assert "API Key" in (data.get("hint") or "")
+
+    @pytest.mark.asyncio
+    async def test_list_remote_models_reuses_active_key_when_url_matches(
+        self, client: AsyncClient,
+    ) -> None:
+        """未填 Key 但 Base URL 与当前激活快照相同时，可复用当前 Key。"""
+        mock_get = AsyncMock(return_value=httpx.Response(
+            200,
+            json={"data": [{"id": "test-model"}]},
+            request=httpx.Request("GET", "https://test.example.com/v1/models"),
+        ))
+        with patch("httpx.AsyncClient.get", new=mock_get):
+            resp = await client.post(
+                "/api/v1/config/models/list-remote",
+                json={"base_url": "https://test.example.com/v1"},
+            )
+        assert resp.status_code == 200
+        assert mock_get.call_args.kwargs["headers"]["Authorization"] == "Bearer test-key"
+
 
     @pytest.mark.asyncio
     async def test_probe_job_codex_profile_uses_runtime_resolver(
@@ -2652,8 +2996,8 @@ class TestAdminGuardForModelConfig:
     ) -> None:
         mock_cfg_store = MagicMock()
         mock_cfg_store.get_profile.return_value = {"name": "legacy", "model": "gemini-2.0-flash"}
-        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
-        monkeypatch.setattr("excelmanus.api_app_state._config_store", mock_cfg_store)
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
 
         resp = await client.put("/api/v1/models/active", json={"name": "legacy"})
 
@@ -2667,8 +3011,8 @@ class TestAdminGuardForModelConfig:
     ) -> None:
         mock_cfg_store = MagicMock()
         mock_cfg_store.get_profile.return_value = None
-        monkeypatch.setattr(api_module, "_config_store", mock_cfg_store)
-        monkeypatch.setattr("excelmanus.api_app_state._config_store", mock_cfg_store)
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
 
         resp = await client.post(
             "/api/v1/config/models/profiles",
@@ -2686,14 +3030,93 @@ class TestAdminGuardForModelConfig:
         mock_cfg_store.add_profile.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_add_model_profile_clone_from_copies_api_key(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """同端点新增模型未填 Key 时，从 clone_from 档案复制凭证。"""
+        source = {
+            "name": "acme-demo",
+            "model": "acme/model-2",
+            "api_key": "sk-test-secret-aaaaaaaa",
+            "base_url": "https://api.example.com/v1",
+            "protocol": "openai",
+        }
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.side_effect = (
+            lambda name: source if name == "acme-demo" else None
+        )
+        mock_cfg_store.list_profiles.return_value = []
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
+        monkeypatch.setattr("excelmanus.api_routes_config._user_config_store", lambda: None)
+        monkeypatch.setattr("excelmanus.api_routes_config._sync_config_profiles_from_db", lambda: None)
+        monkeypatch.setattr("excelmanus.api_routes_config.get_session_manager", lambda: None)
+
+        resp = await client.post(
+            "/api/v1/config/models/profiles",
+            json={
+                "name": "model-2-extra",
+                "model": "acme/other",
+                "base_url": "https://api.example.com/v1",
+                "clone_from": "acme-demo",
+            },
+        )
+
+        assert resp.status_code == 201
+        kwargs = mock_cfg_store.add_profile.call_args.kwargs
+        assert kwargs["api_key"] == "sk-test-secret-aaaaaaaa"
+        assert kwargs["name"] == "model-2-extra"
+        assert kwargs["model"] == "acme/other"
+
+    @pytest.mark.asyncio
+    async def test_add_model_profile_reports_store_failure(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = None
+        mock_cfg_store.add_profile.return_value = False
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
+
+        resp = await client.post(
+            "/api/v1/config/models/profiles",
+            json={"name": "broken", "model": "acme/other", "api_key": "sk-test"},
+        )
+
+        assert resp.status_code == 500
+        assert "保存模型档案失败" in (resp.json().get("error") or "")
+
+    @pytest.mark.asyncio
+    async def test_add_model_profile_clone_from_missing_source(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        mock_cfg_store = MagicMock()
+        mock_cfg_store.get_profile.return_value = None
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", mock_cfg_store)
+        monkeypatch.setattr(api_runtime(), "config_store", mock_cfg_store)
+
+        resp = await client.post(
+            "/api/v1/config/models/profiles",
+            json={
+                "name": "orphan",
+                "model": "acme/other",
+                "clone_from": "missing-source",
+            },
+        )
+
+        assert resp.status_code == 404
+        assert "missing-source" in (resp.json().get("error") or "")
+        mock_cfg_store.add_profile.assert_not_called()
+
+    @pytest.mark.asyncio
     async def test_switch_model_accepts_codex_prefixed_profile_name(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """切换模型接口应支持 openai-codex 前缀 profile 名称。"""
 
         # 不依赖全局 profile，走 Codex 用户私有模型解析路径。
-        monkeypatch.setattr(api_module, "_config_store", None)
-        monkeypatch.setattr("excelmanus.api_app_state._config_store", None)
+        monkeypatch.setattr(api_module.app.state.runtime, "config_store", None)
+        monkeypatch.setattr(api_runtime(), "config_store", None)
         mock_cred_store = MagicMock()
         mock_cred_store.get_active_profile.return_value = SimpleNamespace(
             access_token="eyJcodex",
@@ -2725,7 +3148,7 @@ class TestAdminGuardForModelConfig:
         resp = await client.get("/api/v1/config/models")
         assert resp.status_code == 200
         data = resp.json()
-        assert set(data) == {"embedding", "profiles", "active"}
+        assert set(data) == {"profiles", "active"}
         assert "main" not in data
         assert "aux" not in data
 

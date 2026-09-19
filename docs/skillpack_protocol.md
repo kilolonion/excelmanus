@@ -1,6 +1,6 @@
 # Skillpack 协议规范（SSOT）
 
-> 最后更新：2026-09-11  
+> 最后更新：2026-09-15  
 > 适用范围：`excelmanus/skillpacks`、README、测试与任务文档
 
 ## 1. 目标
@@ -26,7 +26,7 @@
 
 ## 4. 路由语义
 - 斜杠命令：`/<skill_name> args...` 直连技能（`slash_direct`）。
-- 非斜杠消息：进入步循环，所有工具始终可见。斜杠与 `@skill` 是显式控制面，不是词法任务路由。
+- 非斜杠消息：进入步循环。可见工具由 `EffectiveToolCatalog` 按会话模式推导：`read` / `plan` 看不到纯写工具；`write` 看见完整目录；`code` 仅 `run_code`。斜杠与 `@skill` 是显式控制面，不是词法任务路由。
 
 ## 5. 内置 system Skillpacks（权威清单）
 - `data_basic`

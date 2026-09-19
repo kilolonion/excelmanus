@@ -1,19 +1,10 @@
 "use client";
 
 import { useCallback, type ReactNode } from "react";
-import { useExcelStore } from "@/stores/excel-store";
-import { normalizeExcelPath } from "@/lib/api";
 import { FilePathLink, isFilePath } from "./FilePathLink";
-import { isCodeFile } from "./CodePreviewModal";
+import { classifyWorkspaceFile } from "@/lib/file-kind";
 import { extractMentions, mentionCapsuleLabel } from "./mention-tokens";
-
-const EXCEL_EXTS = new Set([".xlsx", ".xls", ".xlsm", ".xlsb", ".csv"]);
-
-function isExcel(name: string): boolean {
-  const dot = name.lastIndexOf(".");
-  if (dot < 0) return false;
-  return EXCEL_EXTS.has(name.slice(dot).toLowerCase());
-}
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 
 interface MentionHighlighterProps {
   text: string;
@@ -22,29 +13,13 @@ interface MentionHighlighterProps {
 
 /**
  * Renders text with @mention tokens as inline capsules.
- * Excel file mentions are clickable and open the side panel.
+ * Workspace file mentions all go through openWorkspaceFile.
  */
 export function MentionHighlighter({ text, className }: MentionHighlighterProps) {
-  const openPanel = useExcelStore((s) => s.openPanel);
-  const addRecentFile = useExcelStore((s) => s.addRecentFile);
-
-  const handleExcelClick = useCallback(
-    (value: string, rangeSpec?: string) => {
-      const normalized = normalizeExcelPath(value);
-      const filename = normalized.split("/").pop() || normalized;
-
-      const recentFiles = useExcelStore.getState().recentFiles;
-      const existing = recentFiles.find(
-        (f) => normalizeExcelPath(f.path) === normalized,
-      );
-      const resolvedPath = existing ? existing.path : normalized;
-
-      addRecentFile({ path: resolvedPath, filename });
-      const sheet = rangeSpec?.split("!")[0];
-      openPanel(resolvedPath, sheet);
-    },
-    [openPanel, addRecentFile],
-  );
+  const handleSpreadsheetClick = useCallback((value: string, rangeSpec?: string) => {
+    const sheet = rangeSpec?.split("!")[0];
+    openWorkspaceFile(value, { sheet });
+  }, []);
 
   const tokens = extractMentions(text).filter(
     (token) => token.kind !== "path" || isFilePath(token.value),
@@ -75,11 +50,29 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
     }
 
     const isFileMention = token.kind === "file" || token.kind === "bare-file";
-    const isExcelMention = isFileMention && isExcel(token.value);
-    const isPreviewable = isFileMention && !isExcelMention && isCodeFile(token.value);
+    const kind = isFileMention ? classifyWorkspaceFile(token.value) : null;
     const label = mentionCapsuleLabel(token);
 
-    if (isPreviewable) {
+    if (isFileMention && kind === "spreadsheet") {
+      parts.push(
+        <span
+          key={`m-${token.start}`}
+          className="inline-flex items-center max-w-[220px] rounded-full px-1.5 py-0 text-[11px] font-medium leading-4 align-middle cursor-pointer hover:opacity-80"
+          style={{
+            backgroundColor: "color-mix(in srgb, var(--em-primary) 14%, transparent)",
+            color: "var(--em-primary)",
+          }}
+          onClick={() => handleSpreadsheetClick(token.value, token.rangeSpec)}
+          title="点击预览表格"
+        >
+          <span className="truncate">{label}</span>
+        </span>
+      );
+      cursor = token.end;
+      continue;
+    }
+
+    if (isFileMention && kind && kind !== "binary") {
       parts.push(
         <FilePathLink key={`m-${token.start}`} filePath={token.value} variant="text">
           {label}
@@ -92,15 +85,12 @@ export function MentionHighlighter({ text, className }: MentionHighlighterProps)
     parts.push(
       <span
         key={`m-${token.start}`}
-        className={`inline-flex items-center max-w-[220px] rounded-full px-1.5 py-0 text-[11px] font-medium leading-4 align-middle ${
-          isExcelMention ? "cursor-pointer hover:opacity-80" : ""
-        }`}
+        className="inline-flex items-center max-w-[220px] rounded-full px-1.5 py-0 text-[11px] font-medium leading-4 align-middle"
         style={{
           backgroundColor: "color-mix(in srgb, var(--em-primary) 14%, transparent)",
           color: "var(--em-primary)",
         }}
-        onClick={isExcelMention ? () => handleExcelClick(token.value, token.rangeSpec) : undefined}
-        title={isExcelMention ? "点击预览表格" : token.raw}
+        title={token.version ? `${label}（已钉版本）` : label}
       >
         <span className="truncate">{label}</span>
       </span>

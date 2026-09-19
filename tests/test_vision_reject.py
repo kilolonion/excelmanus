@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -25,7 +26,7 @@ def _make_config(**overrides) -> ExcelManusConfig:
     return ExcelManusConfig(**defaults)
 
 
-_FAKE_IMAGE = [{"data": "iVBORw0KGgo=", "media_type": "image/png", "detail": "auto"}]
+_FAKE_IMAGE = [{"attachment_id": "sha256:deadbeef", "media_type": "image/png", "detail": "auto"}]
 
 
 class TestVisionRejectGuard:
@@ -59,8 +60,16 @@ class TestVisionRejectGuard:
         engine = AgentEngine(config, ToolRegistry())
         assert engine._is_vision_capable
 
-        # patch _tool_calling_loop 避免实际 LLM 调用，只验证不命中拒绝分支
-        with patch("excelmanus.agent.loop.run_tool_loop", new_callable=AsyncMock, return_value=ChatResult(reply="ok")):
+        # 附件只按 attachment_id 准入；假 ref 避免进 LLM。
+        ref = SimpleNamespace(
+            attachment_id="sha256:deadbeef",
+            to_dict=lambda: {"attachment_id": "sha256:deadbeef", "media_type": "image/png"},
+        )
+        store = SimpleNamespace(get_ref=lambda _id: ref)
+        with (
+            patch("excelmanus.attachments.store.get_attachment_store", return_value=store),
+            patch("excelmanus.agent.loop.run_tool_loop", new_callable=AsyncMock, return_value=ChatResult(reply="ok")),
+        ):
             result = await engine.followup("分析图片", images=_FAKE_IMAGE)
         assert "不支持图片识别" not in result.reply
 

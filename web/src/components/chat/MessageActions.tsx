@@ -100,10 +100,11 @@ export const MessageActions = React.memo(function MessageActions({
   }, [modelsLoaded]);
 
   const hasText = blocks.some((b) => b.type === "text");
-  if (!hasText || isStreaming) return null;
+  const hasFailure = blocks.some((b) => b.type === "failure_guidance");
+  if (isStreaming || (!hasText && !hasFailure)) return null;
 
   const groups = groupByProvider(models);
-  const canRetry = !!onRetry && !isStreaming;
+  const canRetry = !!onRetry && !isStreaming && !hasFailure;
 
   return (
     <div
@@ -111,14 +112,16 @@ export const MessageActions = React.memo(function MessageActions({
       role="toolbar"
       aria-label="消息操作"
     >
-      <ActionButton
-        onClick={handleCopy}
-        active={copied}
-        activeColor="text-emerald-500"
-        label={copied ? "已复制" : "复制"}
-      >
-        {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
-      </ActionButton>
+      {hasText && (
+        <ActionButton
+          onClick={handleCopy}
+          active={copied}
+          activeColor="text-emerald-500"
+          label={copied ? "已复制" : "复制"}
+        >
+          {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+        </ActionButton>
+      )}
 
       {canRetry && (
         <ActionButton

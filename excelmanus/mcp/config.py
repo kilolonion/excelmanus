@@ -119,7 +119,13 @@ class MCPConfigLoader:
         # 按优先级构建候选路径列表
         candidates: list[Path] = []
 
-        env_path = os.environ.get(_ENV_MCP_CONFIG)
+        env_path = ""
+        try:
+            from excelmanus.settings_runtime import get_setting
+
+            env_path = get_setting(_ENV_MCP_CONFIG) or ""
+        except Exception:
+            env_path = ""
         if env_path:
             candidates.append(Path(env_path))
 
@@ -167,14 +173,22 @@ class MCPConfigLoader:
     ) -> _UndefinedEnvPolicy:
         if value is not None:
             return value
-        raw = (os.environ.get(_ENV_MCP_UNDEFINED_ENV) or "").strip().lower()
+        raw = ""
+        try:
+            from excelmanus.settings_runtime import get_setting
+
+            raw = (get_setting(_ENV_MCP_UNDEFINED_ENV) or "").strip().lower()
+        except Exception:
+            raw = ""
         if raw in {"keep", "empty", "error"}:
             return raw  # type: ignore[return-value]
         return "keep"
 
     @staticmethod
     def _parse_bool_env(name: str, *, default: bool) -> bool:
-        raw = os.environ.get(name)
+        from excelmanus.settings_runtime import get_setting
+
+        raw = get_setting(name)
         if raw is None:
             return default
         normalized = raw.strip().lower()
@@ -183,7 +197,7 @@ class MCPConfigLoader:
         if normalized in {"0", "false", "no", "off"}:
             return False
         logger.warning(
-            "环境变量 %s 值无效(%r)，回退默认值 %s",
+            "配置项 %s 值无效(%r)，回退默认值 %s",
             name,
             raw,
             default,

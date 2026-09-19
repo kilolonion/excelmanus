@@ -39,6 +39,9 @@ _SAFE_COMPUTE_MODULES: frozenset[str] = frozenset({
     "bisect", "heapq", "array",
     "contextlib", "weakref",
     "sys", "builtins", "types",
+    # 自家 SDK shim：由沙箱启动时注入 sys.modules（sandbox_hook），
+    # import 不写盘不触网；判 UNKNOWN_MODULE 会把官方写法必送进审批。
+    "em", "excelmanus_sdk", "excelmanus",
 })
 
 _SAFE_IO_MODULES: frozenset[str] = frozenset({
@@ -71,9 +74,31 @@ _FS_WRITE_EXPORTS: frozenset[str] = frozenset({
     "copy", "copy2", "copyfile", "copytree", "move", "rmtree",
     "copyfileobj", "make_archive", "unpack_archive",
     "write_text", "write_bytes", "touch", "symlink_to", "hardlink_to",
-    "to_csv", "to_json", "to_pickle", "to_parquet", "to_html",
+    "to_csv", "to_excel", "to_json", "to_pickle", "to_parquet", "to_html",
     "to_markdown", "to_xml", "to_feather", "to_hdf", "to_stata",
 })
+
+# x.<attr>() 调用里语义模糊的方法名：os/shutil/pathlib 上是写操作，
+# 但 pandas DataFrame.copy()/Series.rename() 是纯内存操作——
+# 仅当 receiver 解析到 FS 模块或 Path 类时才记 FS_WRITE。
+_FS_WRITE_AMBIGUOUS_ATTRS: frozenset[str] = frozenset({
+    "remove", "unlink", "rmdir", "removedirs", "mkdir", "makedirs",
+    "rename", "renames", "replace",
+    "symlink", "link", "chmod", "chown", "chroot",
+    "mkfifo", "mknod", "writev", "pwrite",
+    "copy", "copy2", "copyfile", "copytree", "move", "rmtree",
+    "copyfileobj", "make_archive", "unpack_archive",
+    "symlink_to", "hardlink_to",
+})
+
+# 无论 receiver 都记 FS_WRITE：落盘语义强（文件对象写入、pandas to_* 写出）。
+_FS_WRITE_STRONG_ATTRS: frozenset[str] = frozenset({
+    "truncate", "write", "writelines", "write_text", "write_bytes", "touch",
+    "to_csv", "to_excel", "to_json", "to_pickle", "to_parquet", "to_html",
+    "to_markdown", "to_xml", "to_feather", "to_hdf", "to_stata",
+})
+
+_FS_RECEIVER_ROOTS: frozenset[str] = frozenset({"os", "shutil", "pathlib"})
 
 _FS_ESCAPE_ATTRS: frozenset[str] = frozenset({
     "symlink", "link", "symlink_to", "hardlink_to",
@@ -94,7 +119,6 @@ _DANGEROUS_ATTR_CALLS: frozenset[tuple[str, str]] = frozenset({
     ("os", "spawnv"), ("os", "spawnve"), ("os", "spawnvp"), ("os", "spawnvpe"),
     ("os", "kill"), ("os", "_exit"),
     ("sys", "exit"),
-    ("importlib", "import_module"),
 })
 
 
@@ -216,7 +240,10 @@ class _ASTVisitor(ast.NodeVisitor):
             if attr_name in _FS_ESCAPE_ATTRS:
                 self.capabilities.add("SYSTEM_CONTROL")
                 self.details.append(f"fs escape call: {attr_name}()")
-            elif attr_name in _FS_WRITE_EXPORTS:
+            elif attr_name in _FS_WRITE_STRONG_ATTRS:
+                self.capabilities.add("FS_WRITE")
+                self.details.append(f"fs write call: {attr_name}()")
+            elif attr_name in _FS_WRITE_AMBIGUOUS_ATTRS and self._receiver_is_fs(node.func.value):
                 self.capabilities.add("FS_WRITE")
                 self.details.append(f"fs write call: {attr_name}()")
             if isinstance(node.func.value, ast.Name):
@@ -231,6 +258,26 @@ class _ASTVisitor(ast.NodeVisitor):
                     self.details.append("os.open() write flags")
 
         self.generic_visit(node)
+
+    def _receiver_is_fs(self, value: ast.expr) -> bool:
+        """receiver 是否解析到文件系统模块/Path 类（区分 df.copy() 与 shutil.copy()）。"""
+        name: str | None = None
+        if isinstance(value, ast.Name):
+            name = value.id
+        elif isinstance(value, ast.Attribute):
+            node: ast.expr = value
+            while isinstance(node, ast.Attribute):
+                node = node.value
+            if isinstance(node, ast.Name):
+                name = node.id
+            elif isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+                name = node.func.id
+        elif isinstance(value, ast.Call) and isinstance(value.func, ast.Name):
+            name = value.func.id
+        if name is None:
+            return False
+        resolved = self._imported_names.get(name, name)
+        return _module_root(resolved) in _FS_RECEIVER_ROOTS
 
     @staticmethod
     def _open_mode_is_write(node: ast.Call) -> bool:
@@ -472,16 +519,20 @@ def allows_auto_run(
 ) -> bool:
     """Whether run_code may execute without a confirmation dialog.
 
-    Filesystem writes are never auto-approved: Yellow auto-approve only
-    covers NETWORK (and similar non-FS) Yellow. ApprovalPolicy.never is
-    applied by the caller, not here.
+    FS_WRITE auto-approves: the sandbox wrapper physically confines workspace
+    writes — ``open()``/``os.*``/openpyxl saves redirect to
+    ``.excelmanus/pending/<run>`` and publish through the versioned commit
+    pipeline, while out-of-workspace writes raise PermissionError. Approval
+    cannot add safety the boundary does not already provide. NETWORK has no
+    equivalent confinement (module blocklists only), so it stays gated by
+    ``yellow_auto``. ApprovalPolicy.never is applied by the caller, not here.
     """
     if analysis.tier == CodeRiskTier.GREEN:
         return bool(green_auto)
     if analysis.tier == CodeRiskTier.YELLOW:
-        if "FS_WRITE" in analysis.capabilities:
-            return False
-        return bool(yellow_auto)
+        if "NETWORK" in analysis.capabilities:
+            return bool(yellow_auto)
+        return True
     return False
 
 

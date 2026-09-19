@@ -6,6 +6,7 @@ import logging
 from typing import TYPE_CHECKING, Any, overload
 
 from excelmanus.db_adapter import ConnectionAdapter
+from excelmanus.json_typed import em_json_default, revive_typed_args
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -45,7 +46,8 @@ class ApprovalStore:
             (
                 record["id"],
                 record.get("tool_name", ""),
-                json.dumps(record.get("arguments", {}), ensure_ascii=False),
+                # arguments 可携带 datetime 等非 JSON 值；$em_type 标记保类型，读回还原。
+                json.dumps(record.get("arguments", {}), ensure_ascii=False, default=em_json_default),
                 json.dumps(record.get("tool_scope", []), ensure_ascii=False),
                 record.get("created_at_utc", ""),
                 record.get("applied_at_utc"),
@@ -133,6 +135,8 @@ class ApprovalStore:
                 d[json_field] = json.loads(raw) if raw else ([] if json_field != "arguments" else {})
             except (json.JSONDecodeError, TypeError):
                 d[json_field] = [] if json_field != "arguments" else {}
+        if isinstance(d["arguments"], dict):
+            d["arguments"] = revive_typed_args(d["arguments"])
 
         d["created_at_utc"] = row["created_at_utc"]  # type: ignore[index]
         d["applied_at_utc"] = row["applied_at_utc"]  # type: ignore[index]

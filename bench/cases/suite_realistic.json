@@ -1,0 +1,1411 @@
+{
+  "suite_name": "realistic_office",
+  "include_in_all": false,
+  "trace": true,
+  "turn_timeout": 900,
+  "auto_approve": "accept",
+  "description": "真实办公任务套件：普通用户每天真正会丢给表格助手的确定性任务。夹具由 bench/fixtures/build_realistic.py 生成，标准答案在 answers.json；断言用 @answers:key 引用。评审同时看效率（LLM 调用数、工具失败数、token）与交付正确性。auto_approve=accept 对应网页默认的 ask（用户逐次点允许）。效率预算（max_llm_calls/max_tool_calls/max_tool_failures/max_tokens/max_duration_seconds/max_iterations）为 warn-only 告警：只影响复盘，不判 fail、不影响退出码；正确性由 output_checks 与 error 级断言判定。",
+  "assertions": {
+    "status": "ok",
+    "answers_file": "bench/fixtures/realistic/answers.json",
+    "uploads_unchanged": true,
+    "no_silent_first_turn": true,
+    "no_cheat_read": true,
+    "max_tool_failures": 2
+  },
+  "cases": [
+    {
+      "id": "R01",
+      "name": "只读问答：华东 8 月销售额",
+      "tags": [
+        "wave-r1",
+        "qa",
+        "readonly",
+        "efficiency"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "华东区 8 月的销售额是多少？",
+      "assertions": {
+        "max_llm_calls": 6,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet",
+          "write_text_file"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "any_of": [
+              "@answers:orders_east_aug_completed",
+              "@answers:orders_east_aug_all_status"
+            ],
+            "rel_tolerance": 0.002
+          },
+          {
+            "type": "reply_regex",
+            "pattern": "口径|状态|取消|退货|包含|不含|已完成|全部",
+            "label": "口径声明",
+            "severity": "warning"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "一问一答的效率与准确",
+        "review_focus": [
+          "几次工具调用拿到数字（理想 ≤3）",
+          "有没有注意到状态列（已取消/退货）并说明口径",
+          "工具路径与任务是否匹配：常规汇总优先领域工具；若用 run_code/pandas，看结果对不对、任务是否确需复杂计算（不罚路径本身）",
+          "回复是否一句话给数，而不是倒工具日志"
+        ]
+      }
+    },
+    {
+      "id": "R02",
+      "name": "只读问答：销售员排名前五",
+      "tags": [
+        "wave-r1",
+        "qa",
+        "readonly",
+        "aggregate"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "哪个销售卖得最好？把前五名和金额列一下",
+      "assertions": {
+        "max_llm_calls": 7,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "@answers:orders_top_salesperson"
+            ]
+          },
+          {
+            "type": "reply_contains_any",
+            "values": "@answers:orders_top5_salespeople",
+            "min": 5,
+            "label": "top5"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "分组汇总能否一次完成",
+        "review_focus": [
+          "analyze_spreadsheet 是否有 group-by 能力；没有的话模型走了什么路",
+          "金额是否与 answers 一致（含/不含已取消需说明）"
+        ]
+      }
+    },
+    {
+      "id": "R03",
+      "name": "只读问答：重复订单号",
+      "tags": [
+        "wave-r1",
+        "qa",
+        "quality"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "订单表里是不是有重复的订单号？有几个，哪几个",
+      "assertions": {
+        "max_llm_calls": 6,
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "value": "@answers:orders_dup_row_count",
+            "tolerance": 0
+          },
+          {
+            "type": "reply_contains_any",
+            "values": "@answers:orders_dup_order_ids",
+            "min": 3
+          }
+        ]
+      },
+      "expected": {
+        "lens": "数据质量探查",
+        "review_focus": [
+          "quality 模式能否直接给出重复键",
+          "是否把数字和具体单号都给出"
+        ]
+      }
+    },
+    {
+      "id": "R04",
+      "name": "公式：加毛利列（跨表查成本）",
+      "tags": [
+        "wave-r1",
+        "formula",
+        "lookup",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "订单表最后加一列\"毛利\"，用公式算：金额减去数量乘成本，成本要从产品目录那张表按产品编码查。公式要能下拉的那种，别直接填死数。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "formula",
+            "sheet": "订单",
+            "range": "N2:N2407",
+            "regex": "VLOOKUP|XLOOKUP|INDEX|SUMIF",
+            "min": 2000
+          },
+          {
+            "type": "formula",
+            "sheet": "订单",
+            "range": "N2",
+            "regex": "产品目录"
+          },
+          {
+            "type": "cell_value",
+            "sheet": "订单",
+            "cell": "N1",
+            "equals": "毛利"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "Excel 原生公式素养",
+        "review_focus": [
+          "是否写 Excel 公式而不是 Python 算完写死值",
+          "2400 行公式是一次 write 还是多批",
+          "有没有先读产品目录确认列位置",
+          "是否在 uploads 副本 outputs/ 上改，并告知路径"
+        ]
+      }
+    },
+    {
+      "id": "R05",
+      "name": "公式：目标表加完成率",
+      "tags": [
+        "wave-r1",
+        "formula",
+        "format",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "区域目标那张表，帮我加一列实际完成金额和一列完成率。实际金额按订单表汇总，完成率用公式，显示成百分比。",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "formula",
+            "sheet": "区域目标",
+            "range": "D2:F60",
+            "regex": "/|SUMIFS?",
+            "min": 30
+          },
+          {
+            "type": "sheet_props",
+            "sheet": "区域目标",
+            "number_format": {
+              "column": "完成率",
+              "contains": "%"
+            }
+          },
+          {
+            "type": "matrix_contains",
+            "sheet": "区域目标",
+            "row_label": "华东",
+            "value": "@answers:orders_region_month_completed.华东.8",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          }
+        ]
+      },
+      "expected": {
+        "lens": "汇总 + 公式 + 数字格式一次交付",
+        "review_focus": [
+          "实际金额是 SUMIFS 公式还是写死值（两者都可，但要说明）",
+          "百分比格式是否真的落到单元格",
+          "有没有考虑月份列是数字 8 而订单日期是日期类型"
+        ]
+      }
+    },
+    {
+      "id": "R06",
+      "name": "汇总：区域×月份透视表",
+      "tags": [
+        "wave-r2",
+        "aggregate",
+        "pivot",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "按区域和月份把销售额汇总一下，做成一张新表：一行一个区域，一列一个月，最后加合计。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "sheet_exists",
+            "name_regex": "汇总|透视|区域|月"
+          },
+          {
+            "type": "matrix_contains",
+            "row_label": "华东",
+            "value": "@answers:orders_region_month_completed.华东.8",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "matrix_contains",
+            "row_label": "华北",
+            "value": "@answers:orders_region_month_completed.华北.3",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          }
+        ]
+      },
+      "expected": {
+        "lens": "最常见的二维汇总",
+        "review_focus": [
+          "用了几次工具、几次 LLM",
+          "是否对状态列做了处理并告知",
+          "合计行/列是公式还是值",
+          "新表是否有表头样式"
+        ]
+      }
+    },
+    {
+      "id": "R07",
+      "name": "汇总：类别占比",
+      "tags": [
+        "wave-r2",
+        "aggregate",
+        "readonly"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "各产品类别分别占总销售额多少比例？",
+      "assertions": {
+        "max_llm_calls": 6,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "@answers:orders_top_category"
+            ]
+          },
+          {
+            "type": "reply_number",
+            "value": "@answers:orders_top_category_share_pct",
+            "tolerance": 0.6
+          }
+        ]
+      },
+      "expected": {
+        "lens": "需要先关联产品目录再分组",
+        "review_focus": [
+          "类别在另一张表，是否想到关联",
+          "占比口径说明"
+        ]
+      }
+    },
+    {
+      "id": "R08",
+      "name": "清洗：客户去重（按手机号）",
+      "tags": [
+        "wave-r2",
+        "cleanup",
+        "dedupe",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/客户名单_脏.xlsx"
+      ],
+      "message": "客户名单去个重，手机号一样就算同一个客户，保留注册最早的那条。手机号格式乱，注意别被格式骗了。",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "row_count",
+            "equals": "@answers:customers_unique_by_phone"
+          },
+          {
+            "type": "reply_number",
+            "any_of": [
+              "@answers:customers_unique_by_phone",
+              "@answers:customers_duplicate_rows"
+            ],
+            "tolerance": 0
+          }
+        ]
+      },
+      "expected": {
+        "lens": "真实脏数据清洗",
+        "review_focus": [
+          "手机号归一化（去 -、空格、+86）是否做对",
+          "日期六种写法能否比较出最早",
+          "走 run_code 还是表格工具；哪条路更省",
+          "结果写到哪里、原件是否保留"
+        ]
+      }
+    },
+    {
+      "id": "R09",
+      "name": "清洗：日期格式统一",
+      "tags": [
+        "wave-r2",
+        "cleanup",
+        "dates",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/客户名单_脏.xlsx"
+      ],
+      "message": "注册日期那列格式乱七八糟，全部统一成 2024-01-31 这种样子",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "column_values",
+            "column": "注册日期",
+            "all_match_regex": "\\d{4}-\\d{2}-\\d{2}( 00:00:00)?"
+          },
+          {
+            "type": "row_count",
+            "equals": "@answers:customers_total_rows"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "格式规范化",
+        "review_focus": [
+          "20221222 这种紧凑写法与 2022年4月23日 是否都解析对",
+          "写回时是真日期还是字符串（都可，但应说明）",
+          "不能丢行"
+        ]
+      }
+    },
+    {
+      "id": "R10",
+      "name": "清洗：拆分姓名-工号列",
+      "tags": [
+        "wave-r2",
+        "cleanup",
+        "split",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/员工信息.xlsx"
+      ],
+      "message": "\"导入原始\"那张表里姓名和工号挤在一列了，中间是短横线，帮我拆成两列",
+      "assertions": {
+        "max_llm_calls": 8,
+        "output_checks": [
+          {
+            "type": "cell_exists",
+            "value": "@answers:employees_import_first.id",
+            "label": "工号单独成格"
+          },
+          {
+            "type": "cell_exists",
+            "value": "@answers:employees_import_first.name",
+            "label": "姓名单独成格"
+          },
+          {
+            "type": "row_contains",
+            "sheet": "~导入|拆",
+            "values": "@answers:employees_import_pairs",
+            "label": "姓名工号逐行配对"
+          },
+          {
+            "type": "row_count",
+            "sheet": "~导入|拆",
+            "equals": "@answers:employees_import_rows"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "小而常见的列操作",
+        "review_focus": [
+          "是插入新列还是覆盖原列，是否说明",
+          "用公式（LEFT/FIND）还是直接写值",
+          "几次调用完成"
+        ]
+      }
+    },
+    {
+      "id": "R11",
+      "name": "合并：三个月 CSV 合成一张表",
+      "tags": [
+        "wave-r2",
+        "merge",
+        "csv",
+        "encoding",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/1月销售.csv",
+        "bench/fixtures/realistic/2月销售.csv",
+        "bench/fixtures/realistic/3月销售.csv"
+      ],
+      "message": "把这三个月的门店销售合到一个 excel 里，加一列标是几月的。2 月那个文件是财务系统导出来的，列的顺序不太一样。",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "row_count",
+            "equals": "@answers:csv_total_rows"
+          },
+          {
+            "type": "column_values",
+            "column": "月份",
+            "unique_count": 3
+          }
+        ]
+      },
+      "expected": {
+        "lens": "多文件合并 + 编码/列序差异",
+        "review_focus": [
+          "GBK 的 2 月文件读出来是否乱码，工具有没有帮忙探测编码",
+          "列序不同是否按表头对齐而不是按位置",
+          "3 月多出的备注列如何处理",
+          "月份列的取值是否一致（1/2/3 或 1月/2月/3月）"
+        ]
+      }
+    },
+    {
+      "id": "R12",
+      "name": "合并：两家门店库存按 SKU 汇总",
+      "tags": [
+        "wave-r2",
+        "merge",
+        "lookup",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/库存_门店A.xlsx",
+        "bench/fixtures/realistic/库存_门店B.xlsx"
+      ],
+      "message": "两家门店的库存合成一张，按 SKU 对齐，两边都有的数量加起来，只在一边的也要留着，并标一下在哪个门店。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "row_count",
+            "min": "@answers:inventory_union_sku_count",
+            "max": 271
+          },
+          {
+            "type": "matrix_contains",
+            "row_label": "SKU-0100",
+            "value": "@answers:inventory_sku_0100_total",
+            "tolerance": 0
+          }
+        ]
+      },
+      "expected": {
+        "lens": "外连接语义",
+        "review_focus": [
+          "是否真做了全外连接而不是只取交集",
+          "compare_spreadsheets 是否被误用来做合并",
+          "门店来源列是否合理"
+        ]
+      }
+    },
+    {
+      "id": "R13",
+      "name": "格式：报表可读性处理",
+      "tags": [
+        "wave-r3",
+        "format",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "订单表整理一下：表头加粗加个底色，金额和单价千分位，日期显示成 2024-08-01 这种，列宽调到能看全，第一行冻结。",
+      "assertions": {
+        "max_llm_calls": 8,
+        "output_checks": [
+          {
+            "type": "sheet_props",
+            "sheet": "订单",
+            "freeze_panes": "A2",
+            "header_bold": true,
+            "number_format": {
+              "column": "金额",
+              "contains": "#,##0"
+            },
+            "column_width_min": {
+              "G": 14,
+              "I": 14,
+              "B": 11
+            }
+          },
+          {
+            "type": "sheet_props",
+            "sheet": "订单",
+            "number_format": {
+              "column": "日期",
+              "contains": "-"
+            },
+            "label": "日期格式"
+          },
+          {
+            "type": "row_count",
+            "sheet": "订单",
+            "equals": "@answers:orders_rows_with_dups"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "一次请求里的多项格式",
+        "review_focus": [
+          "是否一次 format_spreadsheet 批量完成还是拆很多次",
+          "整列 range 写法是否被工具接受",
+          "是否误改了数据",
+          "回复是否只讲做了什么"
+        ]
+      }
+    },
+    {
+      "id": "R14",
+      "name": "模板填充：8 月月报",
+      "tags": [
+        "wave-r3",
+        "template",
+        "aggregate",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/月报模板.xlsx",
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "用月报模板做 8 月的月报：各区域的实际金额从订单表算出来填进去，模板里的格式、公式和合计别动。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.华东",
+            "approx": "@answers:orders_region_aug_completed.华东",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.华南",
+            "approx": "@answers:orders_region_aug_completed.华南",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.华北",
+            "approx": "@answers:orders_region_aug_completed.华北",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.华中",
+            "approx": "@answers:orders_region_aug_completed.华中",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.西南",
+            "approx": "@answers:orders_region_aug_completed.西南",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "cell_value",
+            "sheet": "月报",
+            "cell": "@answers:template_actual_cells.东北",
+            "approx": "@answers:orders_region_aug_completed.东北",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "formula",
+            "sheet": "月报",
+            "range": "B10:E10",
+            "regex": "SUM",
+            "min": 2
+          },
+          {
+            "type": "formula",
+            "sheet": "月报",
+            "range": "D4:D9",
+            "regex": "IF\\(",
+            "min": 6
+          }
+        ]
+      },
+      "expected": {
+        "lens": "只填空、不破坏模板",
+        "review_focus": [
+          "合并单元格、公式、边框是否保留",
+          "是否先读模板结构再写",
+          "写入是否只落在 C4:C9",
+          "已取消/退货口径是否说明"
+        ]
+      }
+    },
+    {
+      "id": "R15",
+      "name": "图表：月趋势折线 + 区域占比饼图",
+      "tags": [
+        "wave-r3",
+        "chart",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "画两个图：一个按月的销售额趋势折线图，一个各区域占比的饼图，放在一张新 sheet 里",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "charts",
+            "min": 2,
+            "types": [
+              "line",
+              "pie"
+            ],
+            "min_series": 1
+          }
+        ]
+      },
+      "expected": {
+        "lens": "图表前的数据准备",
+        "review_focus": [
+          "是否先建汇总区再画图（图不能直接指向明细）",
+          "data_range/categories_range 是否正确",
+          "两张图是否一次提交",
+          "图表标题是否有意义"
+        ]
+      }
+    },
+    {
+      "id": "R16",
+      "name": "大表：6 万行按客户汇总 Top20",
+      "tags": [
+        "wave-r3",
+        "large",
+        "aggregate",
+        "run_code"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/大表_交易流水.xlsx"
+      ],
+      "message": "这个流水表太大了我打不开，帮我按客户汇总一下成功交易的总金额，前 20 大客户列出来就行",
+      "assertions": {
+        "max_llm_calls": 10,
+        "max_duration_seconds": 600,
+        "output_checks": [
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "@answers:ledger_top1_customer_name"
+            ]
+          },
+          {
+            "type": "reply_number",
+            "value": "@answers:ledger_top1_customer_amount",
+            "rel_tolerance": 0.002
+          }
+        ]
+      },
+      "expected": {
+        "lens": "大文件路径选择",
+        "review_focus": [
+          "是否直接对 6 万行做 inspect range 导致 spill/截断",
+          "有没有及时切到 run_code / analyze",
+          "状态=失败的交易是否排除",
+          "耗时"
+        ]
+      }
+    },
+    {
+      "id": "R17",
+      "name": "大表：6 月成功交易总额",
+      "tags": [
+        "wave-r3",
+        "large",
+        "qa",
+        "efficiency"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/大表_交易流水.xlsx"
+      ],
+      "message": "流水表里 2024 年 6 月成功的交易一共多少钱",
+      "assertions": {
+        "max_llm_calls": 6,
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "value": "@answers:ledger_total_2024_06_success",
+            "rel_tolerance": 0.002
+          }
+        ]
+      },
+      "expected": {
+        "lens": "大表上的单点问答",
+        "review_focus": [
+          "filter 模式能否一步到位",
+          "日期是字符串 2024-06-xx，工具/模型如何处理"
+        ]
+      }
+    },
+    {
+      "id": "R18",
+      "name": "公式诊断：预算表哪里算错了",
+      "tags": [
+        "wave-r3",
+        "formula",
+        "diagnose",
+        "readonly"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/预算_有公式.xlsx"
+      ],
+      "message": "这个预算表合计对不上，帮我查一下公式哪里有问题，先别改，告诉我就行",
+      "assertions": {
+        "max_llm_calls": 8,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "O4",
+              "合计范围",
+              "漏"
+            ],
+            "label": "范围过窄"
+          },
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "H6",
+              "硬编码",
+              "写死",
+              "常量",
+              "数字覆盖"
+            ],
+            "label": "硬编码"
+          },
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "B9",
+              "E7",
+              "空单元格",
+              "为空"
+            ],
+            "label": "引用空参数"
+          },
+          {
+            "type": "reply_contains_any",
+            "values": [
+              "B11",
+              "B12",
+              "DIV",
+              "除零",
+              "除以"
+            ],
+            "label": "除零错误"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "公式审计能力",
+        "review_focus": [
+          "trace_spreadsheet_formulas 是否有用，还是模型得逐格读公式",
+          "四类问题（范围漏月、硬编码、引用空、除零）找到几个",
+          "有没有遵守先别改"
+        ]
+      }
+    },
+    {
+      "id": "R19",
+      "name": "新建：差旅报销单模板",
+      "tags": [
+        "wave-r4",
+        "create",
+        "template",
+        "write"
+      ],
+      "message": "做一个空的差旅报销单模板给我：报销人、部门、日期，然后是明细表（日期、事项、金额、备注）大概 10 行，底下合计用公式，打印在一张 A4 上。",
+      "assertions": {
+        "max_llm_calls": 8,
+        "output_checks": [
+          {
+            "type": "file_exists",
+            "glob": "outputs/**/*.xlsx"
+          },
+          {
+            "type": "formula",
+            "range": "A1:H40",
+            "regex": "SUM"
+          },
+          {
+            "type": "sheet_props",
+            "print_ready": true
+          }
+        ]
+      },
+      "expected": {
+        "lens": "从零建表",
+        "review_focus": [
+          "workbook_spec 路径是否顺畅（一次成功？）",
+          "有无合并标题、边框、列宽",
+          "打印区域/页面设置是否真的做了"
+        ]
+      }
+    },
+    {
+      "id": "R20",
+      "name": "多轮迭代：汇总→加图→筛选→导出",
+      "tags": [
+        "wave-r4",
+        "multi-turn",
+        "mention",
+        "aggregate",
+        "chart",
+        "write"
+      ],
+      "messages": [
+        {
+          "text": "@file:bench/fixtures/realistic/订单明细_2024.xlsx 先按区域把销售额汇总一下",
+          "attachments": [
+            "bench/fixtures/realistic/订单明细_2024.xlsx"
+          ]
+        },
+        "在汇总旁边加个柱状图",
+        "只保留华东和华南两行，其他的删掉",
+        "把这个汇总单独存成一个文件给我，文件名叫 华东华南汇总"
+      ],
+      "assertions": {
+        "max_llm_calls": 24,
+        "output_checks": [
+          {
+            "type": "file_exists",
+            "glob": "outputs/**/*华东华南*.xlsx"
+          },
+          {
+            "type": "cell_exists",
+            "file": "outputs/**/*华东华南*.xlsx",
+            "value": "华东"
+          },
+          {
+            "type": "row_count",
+            "file": "outputs/**/*华东华南*.xlsx",
+            "min": 2,
+            "max": 4,
+            "label": "只剩两行(可含合计)"
+          },
+          {
+            "type": "charts",
+            "file": "outputs/**/*.xlsx",
+            "min": 1,
+            "types": [
+              "bar"
+            ],
+            "min_series": 1
+          }
+        ]
+      },
+      "expected": {
+        "lens": "在同一产物上连续修改",
+        "review_focus": [
+          "第 2-4 轮是否记得上一轮的文件与版本号（content_version 链）",
+          "删行时图表引用是否被工具拒绝（有公式/图表不允许 delete_rows）——模型如何绕",
+          "@提及是否正确注入",
+          "每轮回复长度"
+        ]
+      }
+    },
+    {
+      "id": "R21",
+      "name": "多轮：改完撤回",
+      "tags": [
+        "wave-r4",
+        "multi-turn",
+        "undo",
+        "version"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/客户名单_脏.xlsx"
+      ],
+      "messages": [
+        "手机号那列统一成 11 位纯数字，去掉横线空格和 +86",
+        "算了，还是要原来的样子，改回去"
+      ],
+      "assertions": {
+        "max_llm_calls": 14,
+        "output_checks": [
+          {
+            "type": "reply_regex",
+            "pattern": "恢复|还原|撤|回退|版本|原[件样状貌始来]|重置|初始|已是原",
+            "severity": "warning"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "版本/恢复链路",
+        "review_focus": [
+          "第二轮走 manage_spreadsheet_versions restore 还是重写一遍",
+          "恢复的是 outputs 副本还是把 uploads 当目标",
+          "有没有谎称已还原"
+        ]
+      }
+    },
+    {
+      "id": "R22",
+      "name": "Word：按模板出销售简报",
+      "tags": [
+        "wave-r4",
+        "word",
+        "template",
+        "aggregate",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/报告模板.docx",
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "按这个 word 模板写一份 8 月的销售简报，数据从订单表算，占位符都填上，表格也填好",
+      "assertions": {
+        "max_llm_calls": 12,
+        "output_checks": [
+          {
+            "type": "docx",
+            "no_placeholder": true,
+            "contains": [
+              "华东",
+              "华南",
+              "8月",
+              "销售简报"
+            ]
+          },
+          {
+            "type": "docx",
+            "contains_number": "@answers:orders_region_aug_completed.华东",
+            "rel_tolerance": 0.02,
+            "label": "华东金额进表格"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "Excel→Word 搬运",
+        "review_focus": [
+          "fill_template 是否一次成功",
+          "表格 6 行区域金额是否填了",
+          "数字格式（千分位）是否友好"
+        ]
+      }
+    },
+    {
+      "id": "R23",
+      "name": "只读模式下要求改数",
+      "tags": [
+        "wave-r4",
+        "boundary",
+        "read-mode"
+      ],
+      "chat_mode": "read",
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "把所有单价上调 5%，金额也跟着重算，直接保存",
+      "assertions": {
+        "max_llm_calls": 4,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet",
+          "run_code",
+          "write_text_file"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_regex",
+            "pattern": "只读|read|不能|无法|不支持|拒绝|切换|写入模式|编辑模式|write"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "模式边界",
+        "review_focus": [
+          "是否假装已改",
+          "是否用一句话说明并给出切换方式，而不是长篇解释"
+        ]
+      }
+    },
+    {
+      "id": "R24",
+      "name": "审批链路：用 Python 按省份拆文件",
+      "tags": [
+        "wave-r4",
+        "approval",
+        "run_code",
+        "split"
+      ],
+      "auto_approve": "accept",
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "按省份把订单拆成一个省一个文件，放到一个文件夹里",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "file_exists",
+            "glob": "outputs/**/*.xlsx",
+            "min": 15,
+            "max": 19,
+            "min_rows": 20,
+            "label": "19省拆分且非空"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "批量产出与审批摩擦",
+        "review_focus": [
+          "run_code 是否触发审批、审批文案是否让用户看懂要做什么",
+          "拆出的文件是否保留表头",
+          "有没有为每个省调用一次 edit_spreadsheet（低效）"
+        ]
+      }
+    },
+    {
+      "id": "R25",
+      "name": "缺附件：引用不存在的表",
+      "tags": [
+        "wave-r4",
+        "boundary",
+        "missing-file"
+      ],
+      "message": "把上个季度那份订单表也按区域汇总一下，跟这次的对比看看",
+      "assertions": {
+        "max_llm_calls": 3,
+        "max_tool_calls": 2,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "run_code"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_regex",
+            "pattern": "上传|发我|提供|拖|附件|没有.*文件|找不到|未找到|不存在|哪个文件|哪份文件"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "缺少输入时的停下",
+        "review_focus": [
+          "是否空转扫目录",
+          "是否一句话要文件"
+        ]
+      }
+    },
+    {
+      "id": "R26",
+      "name": "口径歧义：总销售额（含自动答复）",
+      "tags": [
+        "wave-r4",
+        "ambiguity",
+        "ask-user",
+        "qa"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "auto_replies": [
+        "不算已取消和退货的"
+      ],
+      "message": "今年到现在总销售额多少",
+      "assertions": {
+        "max_llm_calls": 7,
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "any_of": [
+              "@answers:orders_total_completed",
+              "@answers:orders_total_all_status"
+            ],
+            "rel_tolerance": 0.002
+          },
+          {
+            "type": "reply_regex",
+            "pattern": "不算|排除|取消|退货|口径",
+            "label": "口径声明",
+            "severity": "warning"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "什么时候该问",
+        "review_focus": [
+          "发现状态列后是问一次（ask_user）还是直接给两个口径——两者都可接受，重点看有没有沉默地只给一个数",
+          "若问了，问题是否只有一句、选项是否具体"
+        ]
+      }
+    },
+    {
+      "id": "R27",
+      "name": "格式：大额订单标红（条件格式）",
+      "tags": [
+        "wave-r5",
+        "format",
+        "conditional",
+        "write"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "订单表里金额大于等于 10000 的单元格标个红色底纹，用条件格式做，别一个个手涂",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "sheet_props",
+            "sheet": "订单",
+            "conditional_formatting_min": 1
+          },
+          {
+            "type": "row_count",
+            "sheet": "订单",
+            "equals": "@answers:orders_rows_with_dups"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "条件格式是否真落盘",
+        "review_focus": [
+          "规则范围是否覆盖整列而不是只涂前几行",
+          "阈值 10000 是否正确",
+          "有没有误删数据行"
+        ]
+      }
+    },
+    {
+      "id": "R28",
+      "name": "过滤汇总：华东8月高单价销售额",
+      "tags": [
+        "wave-r5",
+        "aggregate",
+        "filter",
+        "qa"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "华东区 8 月份、单价 1000 及以上的已完成订单，一共多少销售额？",
+      "assertions": {
+        "max_llm_calls": 8,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "value": "@answers:orders_east_aug_highprice_completed",
+            "rel_tolerance": 0.002
+          }
+        ]
+      },
+      "expected": {
+        "lens": "多条件过滤（区域+月份+单价+状态缺一不可）",
+        "review_focus": [
+          "四个条件是否都生效（只答华东8月总额算错）",
+          "analyze filter/group 条件写法",
+          "口径是否说明"
+        ]
+      }
+    },
+    {
+      "id": "R29",
+      "name": "汇总：销售额前三的省份",
+      "tags": [
+        "wave-r5",
+        "aggregate",
+        "qa"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "按省份汇总已完成订单的销售额，哪三个省最高，各多少",
+      "assertions": {
+        "max_llm_calls": 8,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_contains_any",
+            "values": "@answers:orders_top3_provinces",
+            "min": 3,
+            "label": "top3省份"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "分组键从区域换成省份（防背 R02 路径）",
+        "review_focus": [
+          "是否按省份而非区域分组",
+          "已取消/退货是否排除并说明"
+        ]
+      }
+    },
+    {
+      "id": "R30",
+      "name": "代码模式：区域×月份透视",
+      "tags": [
+        "wave-r5",
+        "aggregate",
+        "pivot",
+        "code-mode",
+        "write"
+      ],
+      "present_as": "code",
+      "attachments": [
+        "bench/fixtures/realistic/订单明细_2024.xlsx"
+      ],
+      "message": "按区域和月份把销售额汇总一下，做成一张新表：一行一个区域，一列一个月，最后加合计。",
+      "assertions": {
+        "max_llm_calls": 10,
+        "output_checks": [
+          {
+            "type": "sheet_exists",
+            "name_regex": "汇总|透视|区域|月"
+          },
+          {
+            "type": "matrix_contains",
+            "row_label": "华东",
+            "value": "@answers:orders_region_month_completed.华东.8",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          },
+          {
+            "type": "matrix_contains",
+            "row_label": "华北",
+            "value": "@answers:orders_region_month_completed.华北.3",
+            "rel_tolerance": 0.02,
+            "or_formula": true
+          }
+        ]
+      },
+      "expected": {
+        "lens": "同一任务走 code 路径（与 R06 对照）",
+        "review_focus": [
+          "run_code+SDK 路径是否一次走通",
+          "与 R06 的工具路径/轮数对比",
+          "合计是公式还是值"
+        ]
+      }
+    },
+    {
+      "id": "R31",
+      "name": "多轮长程：去重→日期统一→撤回",
+      "tags": [
+        "wave-r5",
+        "multi-turn",
+        "undo",
+        "version",
+        "cleanup"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/客户名单_脏.xlsx"
+      ],
+      "messages": [
+        "客户名单按手机号去重，保留注册最早的那条",
+        "注册日期那列也统一成 2024-01-31 这种格式",
+        "算了，这两步都不要了，恢复成我刚发你的样子"
+      ],
+      "assertions": {
+        "max_llm_calls": 24,
+        "output_checks": [
+          {
+            "type": "row_count",
+            "equals": "@answers:customers_total_rows",
+            "label": "恢复后行数"
+          },
+          {
+            "type": "reply_regex",
+            "pattern": "恢复|还原|撤|回退|版本|原[件样状貌始来]|重置|初始|已是原",
+            "severity": "warning"
+          }
+        ]
+      },
+      "expected": {
+        "lens": "跨多轮的复合修改再整体撤销",
+        "review_focus": [
+          "第三轮走版本 restore 还是逐项改回去",
+          "恢复的是 outputs 副本还是 uploads 原件",
+          "有没有谎称已还原（行数是最硬的证据）"
+        ]
+      }
+    },
+    {
+      "id": "R32",
+      "name": "多条件问答：销售部P6以上均薪",
+      "tags": [
+        "wave-r5",
+        "qa",
+        "filter",
+        "readonly"
+      ],
+      "attachments": [
+        "bench/fixtures/realistic/员工信息.xlsx"
+      ],
+      "message": "销售部里 P6 及以上职级的人，基本工资平均是多少",
+      "assertions": {
+        "max_llm_calls": 8,
+        "forbidden_tools": [
+          "edit_spreadsheet",
+          "format_spreadsheet"
+        ],
+        "output_checks": [
+          {
+            "type": "reply_number",
+            "value": "@answers:employees_sales_p6plus_avg_salary",
+            "rel_tolerance": 0.02
+          }
+        ]
+      },
+      "expected": {
+        "lens": "双条件过滤+平均（部门+职级）",
+        "review_focus": [
+          "P6/P7/P8 是否都算入（只算 P6 算错）",
+          "是否误用了全公司或销售部整体均值"
+        ]
+      }
+    }
+  ]
+}

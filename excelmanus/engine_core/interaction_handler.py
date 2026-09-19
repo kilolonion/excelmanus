@@ -3,7 +3,6 @@
 包括：
 - ask_user 工具处理（非阻塞/阻塞模式）
 - 问题队列管理与事件发射
-- 子代理高风险审批问题的创建与处理
 - 待回答问题的用户输入解析与路由恢复
 """
 
@@ -14,9 +13,7 @@ import json
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_utils import (
-    _SUBAGENT_APPROVAL_OPTION_ACCEPT,
-    _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
-    _SUBAGENT_APPROVAL_OPTION_REJECT,
+    _SYSTEM_Q_MODE_SWITCH,
     _SYSTEM_Q_PLAN_EXIT,
     _SYSTEM_Q_SUBAGENT_APPROVAL,
 )
@@ -87,7 +84,7 @@ class InteractionHandler:
         iteration: int,
         tool_call_id: str = "",
     ) -> None:
-        """发射待确认审批事件，供 CLI 渲染审批卡片。"""
+        """发射待确认审批事件，供前端渲染审批卡片。"""
         from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.tools.policy import get_tool_risk_level, sanitize_approval_args_summary
 
@@ -158,7 +155,7 @@ class InteractionHandler:
 
         逐个等待每个问题的回答，收集后返回合并结果字符串给 LLM。
 
-        - CLI/bench 模式：使用 _question_resolver 回调（同步交互）。
+        - bench/同步前端模式：使用 _question_resolver 回调（同步交互）。
         - Web 模式：使用 InteractionRegistry Future（等待 /answer API）。
         超时 DEFAULT_INTERACTION_TIMEOUT 秒后返回超时消息。
         """
@@ -191,7 +188,7 @@ class InteractionHandler:
             )
 
             if resolver is not None:
-                # ── CLI/bench 模式：通过回调获取回答 ──
+                # ── bench/同步前端模式：通过回调获取回答 ──
                 try:
                     raw_answer = await resolver(pending_q)
                 except Exception as _qr_exc:
@@ -265,230 +262,47 @@ class InteractionHandler:
             fut = e._interaction_registry.create(pending_q.question_id)
             return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
 
-    # ── 子代理审批问题 ──────────────────────────────────────
-
-    def enqueue_subagent_approval_question(
+    def handle_plan_exit_answer(
         self,
         *,
-        approval_id: str,
-        tool_name: str,
-        picked_agent: str,
-        task_text: str,
-        normalized_paths: list[str],
-        tool_call_id: str,
-        on_event: "EventCallback | None",
-        iteration: int,
-    ) -> "PendingQuestion":
-        """创建"子代理高风险审批"系统问题并入队。"""
-        e = self._engine
-        question_payload = {
-            "header": "高风险确认",
-            "text": (
-                f"子代理 `{picked_agent}` 请求执行高风险工具 `{tool_name}`"
-                f"（审批 ID: {approval_id}）。请选择后续动作。"
-            ),
-            "options": [
-                {
-                    "label": _SUBAGENT_APPROVAL_OPTION_ACCEPT,
-                    "description": f"立即执行 `/accept {approval_id}`。",
-                },
-                {
-                    "label": _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY,
-                    "description": "先开启 fullaccess，再重试子代理任务。",
-                },
-                {
-                    "label": _SUBAGENT_APPROVAL_OPTION_REJECT,
-                    "description": f"执行 `/reject {approval_id}` 并停止本次高风险步骤。",
-                },
-            ],
-            "multiSelect": False,
-        }
-        pending = e._question_flow.enqueue(
-            question_payload=question_payload,
-            tool_call_id=tool_call_id,
-        )
-        e._system_question_actions[pending.question_id] = {
-            "type": _SYSTEM_Q_SUBAGENT_APPROVAL,
-            "approval_id": approval_id,
-            "picked_agent": picked_agent,
-            "task_text": task_text,
-            "normalized_paths": list(normalized_paths),
-        }
-        self.emit_user_question_event(
-            question=pending,
-            on_event=on_event,
-            iteration=iteration,
-        )
-        return pending
-
-    async def process_subagent_approval_inline(
-        self,
-        *,
-        payload: dict[str, Any],
-        approval_id: str,
-        picked_agent: str,
-        task_text: str,
-        normalized_paths: list[str],
-        on_event: "EventCallback | None",
-    ) -> tuple[str, bool]:
-        """处理子代理审批回答（阻塞模式下内联调用）。
-
-        返回 (result_str, success)。
-        """
-        e = self._engine
-        selected_options = payload.get("selected_options", [])
-        selected_label = (
-            str(selected_options[0].get("label", "")).strip()
-            if selected_options
-            else ""
-        )
-        file_paths = normalized_paths if isinstance(normalized_paths, list) else []
-
-        if not approval_id:
-            return ("系统问题上下文缺失：approval_id 为空。", False)
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_ACCEPT:
-            accept_reply = await e._command_handler._handle_accept_command(
-                ["/accept", approval_id], on_event=on_event,
-            )
-            reply = (
-                f"{accept_reply}\n"
-                "若需要子代理自动继续执行，建议选择「开启 fullaccess 后重试（推荐）」。"
-            )
-            return (reply, True)
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY:
-            lines: list[str] = []
-            if not e._full_access_enabled:
-                e._full_access_enabled = True
-                e._persist_full_access(True)
-                lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
-            else:
-                lines.append("fullaccess 已开启。")
-
-            reject_reply = e._command_handler._handle_reject_command(
-                ["/reject", approval_id], on_event=on_event,
-            )
-            lines.append(reject_reply)
-
-            rerun_reply = await e._handle_delegate_to_subagent(
-                task=task_text,
-                agent_name=picked_agent or None,
-                file_paths=file_paths,
-                on_event=on_event,
-            )
-            lines.append("已按当前权限重新执行子代理任务：")
-            lines.append(rerun_reply)
-            return ("\n".join(lines), True)
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_REJECT:
-            e._command_handler._handle_reject_command(
-                ["/reject", approval_id], on_event=on_event,
-            )
-            return ("已拒绝该操作。\n如需自动执行高风险步骤，可先使用 `/fullaccess on` 后重新发起任务。", True)
-
-        # 兜底：手动模式
-        manual = (
-            "已记录你的回答。\n"
-            f"当前审批 ID: `{approval_id}`\n"
-            "你可以手动执行以下命令：\n"
-            f"- `/accept {approval_id}`\n"
-            "- `/fullaccess on`（可选）\n"
-            f"- `/reject {approval_id}`"
-        )
-        return (manual, True)
-
-    async def handle_subagent_approval_answer(
-        self,
-        *,
-        action: dict[str, Any],
         parsed: Any,
-        on_event: "EventCallback | None",
+        on_event: "EventCallback | None" = None,
     ) -> "ChatResult":
-        """处理"子代理高风险审批"系统问题的回答。"""
         from excelmanus.engine_types import ChatResult
-
-        e = self._engine
-        selected_options = parsed.selected_options if hasattr(parsed, "selected_options") else []
-        selected_label = (
-            str(selected_options[0].get("label", "")).strip()
-            if selected_options
-            else ""
-        )
-        approval_id = str(action.get("approval_id", "")).strip()
-        picked_agent = str(action.get("picked_agent", "")).strip()
-        task_text = str(action.get("task_text", "")).strip()
-        normalized_paths = action.get("normalized_paths")
-        file_paths = normalized_paths if isinstance(normalized_paths, list) else []
-
-        if not approval_id:
-            return ChatResult(reply="系统问题上下文缺失：approval_id 为空。")
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_ACCEPT:
-            accept_reply = await e._command_handler._handle_accept_command(
-                ["/accept", approval_id],
-                on_event=on_event,
-            )
-            reply = (
-                f"{accept_reply}\n"
-                "若需要子代理自动继续执行，建议选择「开启 fullaccess 后重试（推荐）」。"
-            )
-            return ChatResult(reply=reply)
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_FULLACCESS_RETRY:
-            lines: list[str] = []
-            if not e._full_access_enabled:
-                e._full_access_enabled = True
-                e._persist_full_access(True)
-                lines.append("已开启 fullaccess。当前代码技能权限：full_access。")
-            else:
-                lines.append("fullaccess 已开启。")
-
-            reject_reply = e._command_handler._handle_reject_command(["/reject", approval_id], on_event=on_event)
-            lines.append(reject_reply)
-
-            rerun_reply = await e._handle_delegate_to_subagent(
-                task=task_text,
-                agent_name=picked_agent or None,
-                file_paths=file_paths,
-                on_event=on_event,
-            )
-            lines.append("已按当前权限重新执行子代理任务：")
-            lines.append(rerun_reply)
-            return ChatResult(reply="\n".join(lines))
-
-        if selected_label == _SUBAGENT_APPROVAL_OPTION_REJECT:
-            e._command_handler._handle_reject_command(["/reject", approval_id], on_event=on_event)
-            reply = (
-                "已拒绝该操作。\n"
-                "如需自动执行高风险步骤，可先使用 `/fullaccess on` 后重新发起任务。"
-            )
-            return ChatResult(reply=reply)
-
-        manual = (
-            "已记录你的回答。\n"
-            f"当前审批 ID: `{approval_id}`\n"
-            "你可以手动执行以下命令：\n"
-            f"- `/accept {approval_id}`\n"
-            "- `/fullaccess on`（可选）\n"
-            f"- `/reject {approval_id}`"
-        )
-        return ChatResult(reply=manual)
-
-    def handle_plan_exit_answer(self, *, parsed: Any) -> "ChatResult":
-        from excelmanus.engine_types import ChatResult
-        from excelmanus.plan_mode import set_plan_active
+        from excelmanus.plan_mode import apply_chat_mode
 
         e = self._engine
         selected = ""
         options = getattr(parsed, "selected_options", None) or []
         if options:
             selected = str(options[0].get("label", "") or "")
+        emit = on_event or getattr(getattr(e, "_driver", None), "_on_event", None)
         if "批准" in selected:
-            set_plan_active(e, False)
+            apply_chat_mode(e, "write", source="plan_exit", on_event=emit)
             return ChatResult(reply="已批准计划并退出计划模式。")
         e._pending_plan_exit = None
         return ChatResult(reply="已拒绝退出，仍留在计划模式。")
+
+    def handle_mode_switch_answer(
+        self,
+        *,
+        parsed: Any,
+        target: str,
+        on_event: "EventCallback | None" = None,
+    ) -> "ChatResult":
+        from excelmanus.engine_types import ChatResult
+        from excelmanus.plan_mode import apply_chat_mode
+
+        e = self._engine
+        selected = ""
+        options = getattr(parsed, "selected_options", None) or []
+        if options:
+            selected = str(options[0].get("label", "") or "")
+        emit = on_event or getattr(getattr(e, "_driver", None), "_on_event", None)
+        if "切换" in selected or "进入" in selected:
+            nxt = apply_chat_mode(e, target, source="request", on_event=emit)
+            return ChatResult(reply=f"已切换到{nxt}模式。")
+        return ChatResult(reply="已保持当前模式。")
 
     # ── 待回答问题处理 ──────────────────────────────────────
 
@@ -583,13 +397,20 @@ class InteractionHandler:
         if system_action is not None:
             e._pending_question_route_result = None
             if action_type == _SYSTEM_Q_SUBAGENT_APPROVAL:
-                action_result = await self.handle_subagent_approval_answer(
-                    action=system_action,
+                action_result = ChatResult(
+                    reply="子代理高风险审批冒泡已移除。子会话审批钉死 never，被拒由主模型处理。",
+                )
+            elif action_type == _SYSTEM_Q_PLAN_EXIT:
+                action_result = self.handle_plan_exit_answer(
                     parsed=parsed,
                     on_event=on_event,
                 )
-            elif action_type == _SYSTEM_Q_PLAN_EXIT:
-                action_result = self.handle_plan_exit_answer(parsed=parsed)
+            elif action_type == _SYSTEM_Q_MODE_SWITCH:
+                action_result = self.handle_mode_switch_answer(
+                    parsed=parsed,
+                    target=str(system_action.get("target") or "write"),
+                    on_event=on_event,
+                )
             else:
                 action_result = ChatResult(reply="已记录你的回答。")
 

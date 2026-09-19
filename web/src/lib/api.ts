@@ -1,5 +1,6 @@
 import type { SessionDetail, WorkspaceFolder } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
+import { formatApiErrorMessage } from "@/lib/api-error";
 
 const API_BASE_PATH = "/api/v1";
 const MANAGE_TOKEN_STORAGE_KEY = "excelmanus_manage_token";
@@ -152,7 +153,7 @@ export async function directFetch(
 
 async function handleAuthError(res: Response): Promise<never> {
   const data = await res.json().catch(() => ({}));
-  throw new Error(data.error || data.detail || `API error: ${res.status}`);
+  throw new Error(formatApiErrorMessage(data, res.status));
 }
 
 export async function apiGet<T = unknown>(path: string, opts?: { direct?: boolean }): Promise<T> {
@@ -167,13 +168,13 @@ export async function apiGet<T = unknown>(path: string, opts?: { direct?: boolea
 export async function apiPost<T = unknown>(
   path: string,
   body: unknown,
-  opts?: { direct?: boolean },
+  opts?: { direct?: boolean; timeoutMs?: number },
 ): Promise<T> {
   const res = await fetch(buildApiUrl(path, opts), {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+    signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) return handleAuthError(res);
   return res.json();
@@ -283,9 +284,7 @@ export async function fetchSessionDetail(
   }
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(
-      body.error || body.detail || `API error: ${res.status}`
-    );
+    throw new Error(formatApiErrorMessage(body, res.status));
   }
   const data = (await res.json()) as Record<string, unknown>;
 
@@ -357,7 +356,7 @@ export async function clearAllSessions(): Promise<{
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || data.error || `API error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -453,7 +452,7 @@ export async function exportSession(
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_UPLOAD_TIMEOUT_MS) });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.detail || `导出失败: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   const blob = await res.blob();
   const filename = filenameFromDisposition(
@@ -563,7 +562,7 @@ export async function togglePresentAs(
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Toggle present-as error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -581,7 +580,7 @@ export async function toggleFullAccess(
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Toggle full-access error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -596,7 +595,7 @@ export async function abortChat(sessionId: string): Promise<{ status: string }> 
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `Abort error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -697,13 +696,6 @@ export function normalizeExcelPath(path: string): string {
   return p;
 }
 
-function extractSanitizedPathBasename(path: string): string | null {
-  const raw = String(path ?? "").trim();
-  if (!raw.startsWith("<path>/")) return null;
-  const basename = raw.slice("<path>/".length).trim();
-  return basename || null;
-}
-
 function buildExcelSnapshotUrl(
   path: string,
   opts?: { sheet?: string; maxRows?: number; sessionId?: string },
@@ -741,6 +733,7 @@ function buildWordSnapshotUrl(
 
 export interface WordSnapshotResponse {
   file: string;
+  content_version?: string;
   total_paragraphs: number;
   returned_paragraphs: number;
   truncated: boolean;
@@ -1021,7 +1014,7 @@ export async function workspaceMkdir(path: string, sessionId?: string | null): P
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `mkdir error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
 }
 
@@ -1035,7 +1028,7 @@ export async function workspaceCreateFile(path: string, sessionId?: string | nul
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `create error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
 }
 
@@ -1049,7 +1042,7 @@ export async function workspaceDeleteItem(path: string, sessionId?: string | nul
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `delete error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
 }
 
@@ -1063,7 +1056,7 @@ export async function workspaceRenameItem(oldPath: string, newPath: string, sess
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || data.detail || `rename error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
 }
 
@@ -1097,44 +1090,111 @@ export interface AllSheetsSnapshotResponse {
 
 // ── Snapshot 缓存（TTL 30s，避免重复请求同一文件） ──
 const _snapshotCache = new Map<string, { data: AllSheetsSnapshotResponse; ts: number }>();
+const _snapshotInflight = new Map<string, Promise<AllSheetsSnapshotResponse>>();
 const _SNAPSHOT_TTL_MS = 30_000;
 
-function _snapshotCacheKey(path: string, opts?: { maxRows?: number; withStyles?: boolean }): string {
-  return `${normalizeExcelPath(path)}|${opts?.maxRows ?? ""}|${opts?.withStyles !== false ? "1" : "0"}`;
+export function fileCachePrefix(workspaceKey: string, relative: string): string {
+  return `${workspaceKey}|${normalizeExcelPath(relative)}`;
+}
+
+export function matchesFileCacheKey(
+  key: string,
+  opts?: { workspaceKey?: string; relative?: string },
+): boolean {
+  if (!opts?.workspaceKey && !opts?.relative) return true;
+  const parts = key.split("|");
+  const keyWs = parts[0] ?? "";
+  const keyPath = parts[1] ?? "";
+  if (opts.workspaceKey && keyWs !== opts.workspaceKey) return false;
+  if (opts.relative && keyPath !== normalizeExcelPath(opts.relative)) return false;
+  return true;
+}
+
+function dropCacheKeys(
+  maps: Array<Map<string, unknown>>,
+  opts?: { workspaceKey?: string; relative?: string },
+): void {
+  if (!opts?.workspaceKey && !opts?.relative) {
+    for (const map of maps) map.clear();
+    return;
+  }
+  for (const map of maps) {
+    for (const key of [...map.keys()]) {
+      if (matchesFileCacheKey(key, opts)) map.delete(key);
+    }
+  }
+}
+
+export function snapshotCacheKey(
+  path: string,
+  opts?: { maxRows?: number; withStyles?: boolean; sessionId?: string; workspaceKey?: string },
+): string {
+  return [
+    fileCachePrefix(opts?.workspaceKey || "_", path),
+    opts?.maxRows ?? "",
+    opts?.withStyles !== false ? "1" : "0",
+  ].join("|");
 }
 
 /** 使指定文件的 snapshot 缓存失效（文件变更后调用） */
-export function invalidateSnapshotCache(path?: string) {
-  if (!path) { _snapshotCache.clear(); return; }
-  const norm = normalizeExcelPath(path);
-  for (const key of _snapshotCache.keys()) {
-    if (key.startsWith(norm + "|")) _snapshotCache.delete(key);
-  }
+export function invalidateSnapshotCache(opts?: { workspaceKey?: string; relative?: string }) {
+  dropCacheKeys(
+    [_snapshotCache as Map<string, unknown>, _snapshotInflight as Map<string, unknown>],
+    opts,
+  );
+}
+
+/** @deprecated 编辑器请用 prefetchWorkbookView */
+export function prefetchExcelSnapshot(
+  path: string,
+  opts?: { maxRows?: number; withStyles?: boolean; sessionId?: string; workspaceKey?: string },
+) {
+  if (!path || !opts?.sessionId) return;
+  void fetchAllSheetsSnapshot(path, {
+    maxRows: opts?.maxRows ?? 500,
+    withStyles: opts?.withStyles !== false,
+    sessionId: opts.sessionId,
+    workspaceKey: opts.workspaceKey,
+  }).catch(() => null);
 }
 
 export async function fetchAllSheetsSnapshot(
   path: string,
-  opts?: { maxRows?: number; sessionId?: string; withStyles?: boolean }
+  opts?: { maxRows?: number; sessionId?: string; withStyles?: boolean; workspaceKey?: string }
 ): Promise<AllSheetsSnapshotResponse> {
-  const cacheKey = _snapshotCacheKey(path, opts);
+  const cacheKey = snapshotCacheKey(path, opts);
   const cached = _snapshotCache.get(cacheKey);
   if (cached && Date.now() - cached.ts < _SNAPSHOT_TTL_MS) {
     return cached.data;
   }
 
-  const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
-  if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-  if (opts?.sessionId) params.set("session_id", opts.sessionId);
-  params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
-  const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
-  const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Snapshot error: ${res.status}`);
+  const inflight = _snapshotInflight.get(cacheKey);
+  if (inflight) return inflight;
+
+  const pending = (async () => {
+    const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
+    if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
+    if (opts?.sessionId) params.set("session_id", opts.sessionId);
+    params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
+    const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
+    const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(data.error || `Snapshot error: ${res.status}`);
+    }
+    const result: AllSheetsSnapshotResponse = await res.json();
+    _snapshotCache.set(cacheKey, { data: result, ts: Date.now() });
+    return result;
+  })();
+
+  _snapshotInflight.set(cacheKey, pending);
+  try {
+    return await pending;
+  } finally {
+    if (_snapshotInflight.get(cacheKey) === pending) {
+      _snapshotInflight.delete(cacheKey);
+    }
   }
-  const result: AllSheetsSnapshotResponse = await res.json();
-  _snapshotCache.set(cacheKey, { data: result, ts: Date.now() });
-  return result;
 }
 
 export async function fetchExcelSnapshot(
@@ -1146,25 +1206,150 @@ export async function fetchExcelSnapshot(
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
-    // 兼容历史脱敏路径 "<path>/foo.xlsx"：尝试按 basename 回查 workspace 文件并重试
-    const maskedBasename = extractSanitizedPathBasename(path);
-    if (maskedBasename) {
-      const files = await fetchWorkspaceFiles(opts?.sessionId).catch(() => []);
-      const matches = files.filter((f) => f.filename === maskedBasename);
-      if (matches.length === 1) {
-        const retryRes = await fetch(buildExcelSnapshotUrl(matches[0].path, opts), {
-          headers: { ...getAuthHeaders() },
-          signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-        });
-        if (retryRes.ok) {
-          return retryRes.json();
-        }
-      }
-    }
     const data = await res.json().catch(() => ({}));
     throw new Error(data.error || `Snapshot error: ${res.status}`);
   }
   return res.json();
+}
+
+export type WorkbookViewResponse = import("@/lib/workbook-view").WorkbookViewSnapshot;
+
+const _viewCache = new Map<string, { data: WorkbookViewResponse; ts: number }>();
+const _viewInflight = new Map<string, Promise<WorkbookViewResponse>>();
+const _VIEW_TTL_MS = 30_000;
+
+export function viewCacheKey(opts: {
+  workspaceKey: string;
+  relative: string;
+  version?: string;
+  sheet?: string;
+  rect?: string;
+  withStyles?: boolean;
+}): string {
+  return [
+    fileCachePrefix(opts.workspaceKey, opts.relative),
+    opts.version || "unknown",
+    opts.sheet || "*",
+    opts.rect || "A1:AX200",
+    opts.withStyles !== false ? "1" : "0",
+  ].join("|");
+}
+
+export function invalidateWorkbookViewCache(opts?: {
+  workspaceKey?: string;
+  relative?: string;
+}): void {
+  dropCacheKeys(
+    [_viewCache as Map<string, unknown>, _viewInflight as Map<string, unknown>],
+    opts,
+  );
+}
+
+/** 写入/恢复后同时清 snapshot 与 view，键空间与读取一致。 */
+export function invalidateWorkbookCaches(opts?: {
+  workspaceKey?: string;
+  relative?: string;
+}): void {
+  invalidateSnapshotCache(opts);
+  invalidateWorkbookViewCache(opts);
+}
+
+export async function fetchWorkbookView(opts: {
+  path: string;
+  workspaceKey: string;
+  sessionId?: string;
+  workspaceId?: string | null;
+  sheet?: string;
+  rect?: string;
+  withStyles?: boolean;
+  expectedVersion?: string;
+  viewGeneration?: number;
+}): Promise<WorkbookViewResponse> {
+  if (!opts.sessionId && !opts.workspaceId) {
+    throw new Error("无法确定工作区，请从会话重新打开文件");
+  }
+  const cacheKey = viewCacheKey({
+    workspaceKey: opts.workspaceKey,
+    relative: opts.path,
+    version: opts.expectedVersion,
+    sheet: opts.sheet,
+    rect: opts.rect,
+    withStyles: opts.withStyles,
+  });
+  const inflightKey = `${cacheKey}|g${opts.viewGeneration ?? 0}`;
+  if (opts.expectedVersion) {
+    const cached = _viewCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < _VIEW_TTL_MS) {
+      return cached.data;
+    }
+  }
+  const inflight = _viewInflight.get(inflightKey);
+  if (inflight) return inflight;
+
+  let pending!: Promise<WorkbookViewResponse>;
+  pending = (async () => {
+    const params = new URLSearchParams({ path: normalizeExcelPath(opts.path) });
+    if (opts.sessionId) params.set("session_id", opts.sessionId);
+    if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+    if (opts.sheet) params.set("sheet", opts.sheet);
+    if (opts.rect) params.set("rect", opts.rect);
+    params.set("with_styles", opts.withStyles !== false ? "1" : "0");
+    if (opts.expectedVersion) params.set("expected_version", opts.expectedVersion);
+    const res = await fetch(buildApiUrl(`/files/excel/view?${params.toString()}`), {
+      headers: { ...getAuthHeaders() },
+      signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+    });
+    const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    if (res.status === 409) {
+      const err = new Error((data.error as string) || "STALE_VIEW");
+      (err as Error & { code?: string }).code = String(data.code || "STALE_VIEW");
+      throw err;
+    }
+    if (!res.ok) {
+      const err = new Error(
+        (typeof data.error === "string" && data.error) || `View error: ${res.status}`,
+      ) as Error & { status?: number; code?: string };
+      err.status = res.status;
+      if (typeof data.code === "string") err.code = data.code;
+      if (res.status === 404) {
+        // 后端确认文件不存在：剔除该工作区桶里的陈旧 recentFiles 条目，
+        // 否则侧栏/工作表面板会持续指向已删除路径反复 404。
+        void import("@/stores/excel-store")
+          .then(({ useExcelStore }) => {
+            useExcelStore.getState().evictRecentFile(opts.path, opts.workspaceKey);
+          })
+          .catch(() => {});
+      }
+      throw err;
+    }
+    const result = data as WorkbookViewResponse;
+    if (_viewInflight.get(inflightKey) !== pending) {
+      throw new Error("STALE_VIEW: 请求已失效");
+    }
+    if (result.content_version) {
+      _viewCache.set(cacheKey, { data: result, ts: Date.now() });
+    }
+    return result;
+  })();
+
+  _viewInflight.set(inflightKey, pending);
+  try {
+    return await pending;
+  } finally {
+    if (_viewInflight.get(inflightKey) === pending) {
+      _viewInflight.delete(inflightKey);
+    }
+  }
+}
+
+export function prefetchWorkbookView(opts: {
+  path: string;
+  workspaceKey: string;
+  sessionId?: string;
+  workspaceId?: string | null;
+}): void {
+  if (!opts.path || (!opts.sessionId && !opts.workspaceId)) return;
+  void fetchWorkbookView(opts).catch(() => null);
 }
 
 export interface ExcelWriteResponse {
@@ -1172,14 +1357,19 @@ export interface ExcelWriteResponse {
   cells_written: number;
   content_version?: string;
   code?: string;
+  operation_id?: string;
+  state?: string;
 }
 
 export async function writeExcelCells(opts: {
   path: string;
   sheet?: string;
-  changes: { cell: string; value: unknown; sheet?: string }[];
+  changes?: { cell: string; value: unknown; sheet?: string; style?: unknown }[];
+  operations?: Record<string, unknown>[];
   sessionId?: string;
+  workspaceId?: string | null;
   expectedVersion?: string | null;
+  operationId?: string;
 }): Promise<ExcelWriteResponse> {
   const url = buildApiUrl("/files/excel/write");
   const res = await fetch(url, {
@@ -1188,9 +1378,12 @@ export async function writeExcelCells(opts: {
     body: JSON.stringify({
       path: normalizeExcelPath(opts.path),
       sheet: opts.sheet ?? null,
-      changes: opts.changes,
+      changes: opts.changes ?? [],
+      operations: opts.operations ?? null,
       session_id: opts.sessionId ?? null,
+      workspace_id: opts.workspaceId ?? null,
       expected_version: opts.expectedVersion ?? null,
+      operation_id: opts.operationId ?? null,
     }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
@@ -1426,6 +1619,7 @@ export interface ListRemoteModelsResult {
 }
 
 export async function listRemoteModels(opts: {
+  name?: string;
   base_url?: string;
   api_key?: string;
   protocol?: string;
@@ -1440,84 +1634,6 @@ export interface PlaceholderCheckResult {
 
 export async function checkModelPlaceholder(): Promise<PlaceholderCheckResult> {
   return apiGet<PlaceholderCheckResult>("/config/models/check-placeholder");
-}
-
-// ── ClawHub API ──────────────────────────────────────────
-
-export interface ClawHubSearchResult {
-  slug: string;
-  display_name: string;
-  summary: string;
-  version: string | null;
-  score: number;
-  updated_at: number | null;
-}
-
-export interface ClawHubSkillDetail {
-  slug: string;
-  display_name: string;
-  summary: string;
-  tags: string[];
-  latest_version: string | null;
-  latest_changelog: string;
-  owner_handle: string | null;
-  owner_display_name: string | null;
-  stats: Record<string, unknown>;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface ClawHubUpdateInfo {
-  slug: string;
-  installed_version: string | null;
-  latest_version: string | null;
-  update_available: boolean;
-}
-
-export interface ClawHubInstalled {
-  slug: string;
-  version: string | null;
-}
-
-export async function clawhubSearch(
-  query: string,
-  limit = 15
-): Promise<{ results: ClawHubSearchResult[] }> {
-  return apiGet(`/clawhub/search?q=${encodeURIComponent(query)}&limit=${limit}`);
-}
-
-export async function clawhubSkillDetail(
-  slug: string
-): Promise<ClawHubSkillDetail> {
-  return apiGet(`/clawhub/skill/${encodeURIComponent(slug)}`);
-}
-
-export async function clawhubInstall(opts: {
-  slug: string;
-  version?: string;
-  overwrite?: boolean;
-}): Promise<Record<string, unknown>> {
-  return apiPost("/clawhub/install", opts);
-}
-
-export async function clawhubCheckUpdates(): Promise<{
-  updates: ClawHubUpdateInfo[];
-}> {
-  return apiGet("/clawhub/updates");
-}
-
-export async function clawhubUpdate(opts: {
-  slug?: string;
-  version?: string;
-  all?: boolean;
-}): Promise<{ results: Record<string, unknown>[] }> {
-  return apiPost("/clawhub/update", opts);
-}
-
-export async function clawhubListInstalled(): Promise<{
-  installed: ClawHubInstalled[];
-}> {
-  return apiGet("/clawhub/installed");
 }
 
 // ── Chat Turns API ───────────────────────────────────────

@@ -26,14 +26,28 @@ def _case_status_icon(status: str) -> str:
 
 
 def _validation_badge(v: dict[str, Any] | None) -> str:
-    """生成断言结果的简短 badge，如 '3/3 ✅' 或 '5/6 ⚠'。"""
+    """生成断言结果的简短 badge，如 '3/3 ✅'、'5/6 ⚠W1'（仅效率告警）或 '5/6 ❌E1'。
+
+    severity 缺失按 error 计（兼容旧 run_*.json）。
+    """
     if not v or v.get("total", 0) == 0:
         return "-"
     total = v["total"]
     passed = v["passed"]
     if passed == total:
         return f"{passed}/{total} ✅"
-    return f"{passed}/{total} ⚠"
+    errs = sum(
+        1 for r in v.get("results", [])
+        if not r.get("passed", True) and r.get("severity", "error") == "error"
+    )
+    warns = sum(
+        1 for r in v.get("results", [])
+        if not r.get("passed", True) and r.get("severity", "error") != "error"
+    )
+    if errs == 0:
+        return f"{passed}/{total} ⚠W{warns}"
+    suffix = f"+W{warns}" if warns else ""
+    return f"{passed}/{total} ❌E{errs}{suffix}"
 
 
 def _format_tokens(n: int) -> str:
@@ -48,7 +62,7 @@ def _format_tokens(n: int) -> str:
 def _render_case_table(cases: list[dict[str, Any]]) -> str:
     """渲染用例明细表格。"""
     lines = [
-        "| ID | 状态 | 断言 | 耗时 | 迭代 | 工具 | 失败 | Token | LLM | 技能 |",
+        "| ID | 状态 | 断言 | 耗时 | 迭代 | 工具 | 失败/root | Token | LLM | 技能 |",
         "|:---|:-----|:-----|-----:|-----:|-----:|-----:|------:|----:|:-----|",
     ]
     for c in cases:
@@ -64,6 +78,9 @@ def _render_case_table(cases: list[dict[str, Any]]) -> str:
         iters = str(exe.get("iterations", 0))
         tools = str(stats.get("tool_call_count", 0))
         fails = str(stats.get("tool_failures", 0))
+        distinct = stats.get("distinct_tool_errors")
+        if distinct is not None:
+            fails = f"{fails}/{distinct}"
         tokens = _format_tokens(stats.get("total_tokens", 0))
         llm = str(stats.get("llm_call_count", 0))
         skills = ", ".join(exe.get("skills_used", [])) or "-"
@@ -78,8 +95,9 @@ def _render_case_table(cases: list[dict[str, Any]]) -> str:
 
 
 def _render_violations(cases: list[dict[str, Any]]) -> str:
-    """渲染断言违规明细（仅有失败的 case）。"""
-    sections: list[str] = []
+    """渲染断言违规明细（仅有失败的 case），error 与 warn-only 效率告警分开展示。"""
+    err_sections: list[str] = []
+    warn_sections: list[str] = []
     for c in cases:
         validation = c.get("validation")
         if not validation or validation.get("failed", 0) == 0:
@@ -88,27 +106,39 @@ def _render_violations(cases: list[dict[str, Any]]) -> str:
         cid = meta.get("case_id", "?")
         cname = meta.get("case_name", "")
 
-        section_lines = [f"### {cid}" + (f" — {cname}" if cname else "")]
-        for r in validation.get("results", []):
-            if r.get("passed"):
-                continue
-            rule = r.get("rule", "?")
-            msg = r.get("message", "")
-            expected = r.get("expected", "")
-            actual = r.get("actual", "")
-            section_lines.append(f"- ❌ **`{rule}`**: {msg}")
-            if expected:
-                section_lines.append(f"  - 期望: `{expected}`")
-            if actual:
-                actual_str = str(actual)
-                if len(actual_str) > 120:
-                    actual_str = actual_str[:120] + "..."
-                section_lines.append(f"  - 实际: `{actual_str}`")
-        sections.append("\n".join(section_lines))
+        errs = [r for r in validation.get("results", []) if not r.get("passed", True) and r.get("severity", "error") == "error"]
+        warns = [r for r in validation.get("results", []) if not r.get("passed", True) and r.get("severity", "error") != "error"]
 
-    if not sections:
-        return ""
-    return "## 断言违规\n\n" + "\n\n".join(sections)
+        def _block(items: list[dict[str, Any]]) -> list[str]:
+            lines: list[str] = []
+            for r in items:
+                rule = r.get("rule", "?")
+                msg = r.get("message", "")
+                expected = r.get("expected", "")
+                actual = r.get("actual", "")
+                icon = "⚠" if r.get("severity", "error") != "error" else "❌"
+                lines.append(f"- {icon} **`{rule}`**: {msg}")
+                if expected:
+                    lines.append(f"  - 期望: `{expected}`")
+                if actual:
+                    actual_str = str(actual)
+                    if len(actual_str) > 120:
+                        actual_str = actual_str[:120] + "..."
+                    lines.append(f"  - 实际: `{actual_str}`")
+            return lines
+
+        title = f"### {cid}" + (f" — {cname}" if cname else "")
+        if errs:
+            err_sections.append("\n".join([title] + _block(errs)))
+        if warns:
+            warn_sections.append("\n".join([title] + _block(warns)))
+
+    parts: list[str] = []
+    if err_sections:
+        parts.append("## 断言违规\n\n" + "\n\n".join(err_sections))
+    if warn_sections:
+        parts.append("## 效率告警（warn-only，不影响通过）\n\n" + "\n\n".join(warn_sections))
+    return "\n\n".join(parts)
 
 
 # ── 质量检查 ─────────────────────────────────────────────
@@ -134,7 +164,16 @@ def _render_quality_checks(cases: list[dict[str, Any]]) -> str:
     total_tool_failures = sum(
         c.get("stats", {}).get("tool_failures", 0) for c in cases
     )
-    lines.append(f"- **工具调用失败**: {total_tool_failures} 例")
+    total_model_failures = sum(
+        c.get("stats", {}).get("model_tool_failures", 0) for c in cases
+    )
+    total_distinct = sum(
+        c.get("stats", {}).get("distinct_tool_errors", 0) for c in cases
+    )
+    lines.append(
+        f"- **工具调用失败**: {total_tool_failures} 例"
+        f"（模型可见 {total_model_failures}，root {total_distinct}）"
+    )
 
     # 用例失败统计
     case_errors = sum(
@@ -230,10 +269,22 @@ def generate_suite_report(
         parts.append(
             f"| 断言通过率 | {suite_validation.passed}/{suite_validation.total_assertions} ({suite_validation.pass_rate}%) |"
         )
+        if suite_validation.errors or suite_validation.warnings:
+            parts.append(
+                f"| 其中 | error {suite_validation.errors} / warning {suite_validation.warnings} |"
+            )
 
     parts.append(f"| 总 Token | {_format_tokens(total_tokens)} |")
     parts.append(f"| 总耗时 | {total_duration:.1f}s |")
-    parts.append(f"| 工具调用 | {total_tool_calls} (失败 {total_tool_failures}) |")
+    model_failures = stats.get("model_tool_failures", total_tool_failures)
+    internal_failures = stats.get(
+        "internal_tool_failures", total_tool_failures - model_failures
+    )
+    parts.append(
+        f"| 工具调用 | {total_tool_calls} (失败 {total_tool_failures}，"
+        f"模型可见 {model_failures}，root {stats.get('distinct_tool_errors', 0)}，"
+        f"内层 {internal_failures}) |"
+    )
     parts.append(f"| 执行状态 | {status} |")
 
     if case_count > 0:

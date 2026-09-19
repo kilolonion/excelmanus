@@ -11,7 +11,7 @@ import json
 import re
 from typing import TYPE_CHECKING, Any
 
-from excelmanus.engine_core.tool_result import ToolResult, from_payload
+from excelmanus.engine_core.tool_result import ToolResult, error_result, from_payload
 from excelmanus.logger import get_logger
 from excelmanus.mcp.manager import format_tool_result
 from excelmanus.tools.registry import ToolDef
@@ -178,14 +178,16 @@ async def _parallel_search_impl(
     num_queries = max(1, min(num_queries, 5))
     client = mcp_manager._clients.get(_EXA_SERVER_NAME)
     if client is None:
-        return from_payload(
-            {"error": "Exa 搜索服务不可用，请稍后重试或使用其他搜索工具"},
+        return error_result(
+            "Exa 搜索服务不可用，请稍后重试或使用其他搜索工具",
+            code="EXECUTION_FAILED",
         )
 
     search_tool = _find_exa_search_tool(mcp_manager)
     if search_tool is None:
-        return from_payload(
-            {"error": "未找到 Exa 搜索工具，Exa 可能尚未完成初始化"},
+        return error_result(
+            "未找到 Exa 搜索工具，Exa 可能尚未完成初始化",
+            code="NOT_FOUND",
         )
 
     # 生成查询变体

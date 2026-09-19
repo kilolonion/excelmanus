@@ -10,7 +10,7 @@ import json
 import uuid as _uuid
 from typing import Any, Callable
 
-from excelmanus.events import EventType, ToolCallEvent
+from excelmanus.events import TRANSIENT_SSE_TYPES, EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.output_guard import (
     sanitize_external_data,
@@ -95,6 +95,9 @@ class SessionStreamState:
         q = self.subscriber_queue
         if q is not None:
             q.put_nowait(item)
+        elif event.event_type in TRANSIENT_SSE_TYPES:
+            # 瞬态建议 / Jev 时间线：不进缓冲，刷新 / subscribe 不回放
+            return seq
         else:
             if self._buffer_limit <= 0:
                 if not self._overflow_warned:
@@ -220,7 +223,8 @@ def sse_event_to_sse(
         EventType.EXCEL_DIFF: "excel_diff",
         EventType.TEXT_DIFF: "text_diff",
         EventType.TEXT_PREVIEW: "text_preview",
-        EventType.FILES_CHANGED: "files_changed",
+        EventType.FILES_CHANGED: "files_changed",  # 历史 replay only
+        EventType.MUTATION: "mutation",
         EventType.PIPELINE_PROGRESS: "pipeline_progress",
         EventType.MEMORY_EXTRACTED: "memory_extracted",
         EventType.FILE_DOWNLOAD: "file_download",
@@ -244,6 +248,8 @@ def sse_event_to_sse(
         EventType.STEP_START: "step_start",
         EventType.STEP_END: "step_end",
         EventType.INBOX_CLAIMED: "inbox_claimed",
+        EventType.UI_HINT: "ui_hint",
+        EventType.JEV_TRACE: "jev_trace",
     }
     sse_type = event_map.get(event.event_type, event.event_type.value)
 
@@ -358,7 +364,9 @@ def sse_event_to_sse(
     elif event.event_type == EventType.SUBAGENT_END:
         data = {
             "name": sanitize_external_text(event.subagent_name, max_len=100),
-            "reason": sanitize_external_text(event.subagent_reason, max_len=500),
+            "reason": sanitize_external_text(event.subagent_reason, max_len=40),
+            "stop_reason": sanitize_external_text(event.subagent_reason, max_len=40),
+            "diagnostic": sanitize_external_text(event.error or "", max_len=500),
             "success": event.subagent_success,
             "tools": event.subagent_tools,
             "permission_mode": sanitize_external_text(
@@ -522,13 +530,59 @@ def sse_event_to_sse(
             "line_count": event.text_preview_line_count,
             "truncated": event.text_preview_truncated,
         }
+    elif event.event_type == EventType.MUTATION:
+        mutations = []
+        for item in (event.mutations or [])[:50]:
+            if not isinstance(item, dict):
+                continue
+            identity = str(item.get("identity") or "")
+            version = str(
+                item.get("contentVersion") or item.get("content_version") or ""
+            )
+            mutations.append({
+                "identity": public_path_fn(identity),
+                "content_version": sanitize_external_text(version, max_len=100),
+                "source": sanitize_external_text(str(item.get("source") or ""), max_len=40),
+            })
+        data = {
+            "mutations": mutations,
+            "files": [
+                public_path_fn(f)
+                for f in (event.changed_files or [])[:50]
+            ],
+        }
     elif event.event_type == EventType.FILES_CHANGED:
+        # 历史 replay / 旧客户端兼容；新写入统一发 MUTATION。
         data = {
             "files": [
                 public_path_fn(f)
                 for f in (event.changed_files or [])[:50]
             ],
         }
+    elif event.event_type == EventType.UI_HINT:
+        data = {
+            "surface": sanitize_external_text(event.ui_hint_surface, max_len=40),
+            "file_path": public_path_fn(event.ui_hint_file_path) if event.ui_hint_file_path else "",
+            "sheet": sanitize_external_text(event.ui_hint_sheet, max_len=120),
+            "reason": sanitize_external_text(event.ui_hint_reason, max_len=200),
+            "suppress_auto_open": bool(event.ui_hint_suppress_auto_open),
+        }
+        if event.excel_file_b:
+            data["file_path_b"] = public_path_fn(event.excel_file_b)
+    elif event.event_type == EventType.JEV_TRACE:
+        raw = event.jev_trace if isinstance(event.jev_trace, dict) else {}
+        data = sanitize_external_data(dict(raw), max_len=240)
+        if not isinstance(data, dict):
+            data = {}
+        data.pop("api_key", None)
+        data.pop("typesafe_api_key", None)
+        data.pop("authorization", None)
+        data.pop("user_text", None)
+        data.pop("state", None)
+        data.pop("result_head", None)
+        answers = data.get("answers")
+        if not isinstance(answers, dict):
+            data["answers"] = {}
     elif event.event_type == EventType.PIPELINE_PROGRESS:
         data = {
             "stage": sanitize_external_text(event.pipeline_stage, max_len=60),
@@ -565,6 +619,7 @@ def sse_event_to_sse(
         data = {
             "mode_name": event.mode_name,
             "enabled": event.mode_enabled,
+            "value": event.mode_value,
         }
     elif event.event_type == EventType.BATCH_PROGRESS:
         data = {

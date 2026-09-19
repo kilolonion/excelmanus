@@ -451,3 +451,55 @@ def test_resolve_target_paths_covers_mutating_tools_with_path_rules(tmp_path: Pa
         resolved = manager._resolve_target_paths(tool_name, arguments)
         relative = [str(path.relative_to(tmp_path)) for path in resolved]
         assert relative == expected
+
+
+def test_manifest_survives_non_json_typed_arguments(tmp_path: Path) -> None:
+    """arguments 携带 datetime 时 manifest/DB 不得因裸 json.dumps 崩溃。
+
+    Code Mode 桥会把 {"$em_type":"datetime"} 还原成真 datetime 再下发；
+    审计落盘用同一标记编码，读回经 revive_typed_args 还原，保持类型保真。
+    """
+    import datetime as dt
+
+    manager = ApprovalManager(str(tmp_path))
+    target = tmp_path / "book.xlsx"
+    approval_id = manager.new_approval_id()
+
+    def execute(tool_name: str, arguments: dict, tool_scope: list[str]) -> str:
+        target.write_bytes(b"\x00XLSX")
+        return '{"status":"success"}'
+
+    args = {
+        "file_path": "book.xlsx",
+        "workbook_spec": {
+            "sheets": [
+                {
+                    "name": "订单",
+                    "value_blocks": [
+                        {"start": "A1", "values": [["日期"], [dt.datetime(2024, 1, 15)]]}
+                    ],
+                }
+            ]
+        },
+    }
+    _, record = manager.execute_and_audit(
+        approval_id=approval_id,
+        tool_name="edit_spreadsheet",
+        arguments=args,
+        tool_scope=["edit_spreadsheet"],
+        execute=execute,
+        undoable=True,
+        created_at_utc=manager.utc_now(),
+    )
+    assert target.exists()
+
+    manifest = json.loads((tmp_path / record.manifest_file).read_text(encoding="utf-8"))
+    stored = manifest["approval"]["arguments"]["workbook_spec"]["sheets"][0]["value_blocks"][0]["values"][1][0]
+    assert stored == {"$em_type": "datetime", "v": "2024-01-15T00:00:00"}
+
+    # 重新从 manifest 加载：arguments 还原回真实 datetime，与传入值类型一致
+    fresh = ApprovalManager(str(tmp_path))
+    loaded = fresh.get_applied(approval_id)
+    assert loaded is not None
+    revived = loaded.arguments["workbook_spec"]["sheets"][0]["value_blocks"][0]["values"][1][0]
+    assert revived == dt.datetime(2024, 1, 15)

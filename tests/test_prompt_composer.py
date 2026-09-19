@@ -146,14 +146,14 @@ class TestPromptComposerCompose:
         ctx = PromptContext(chat_mode="write")
         text = composer.compose_system_text(ctx)
         assert "身份。" in text
+        assert "公式策略。" in text
         assert "跨表策略。" not in text
-        assert "公式策略。" not in text
 
     def test_conditional_strategies_are_skipped(self, tmp_path: Path) -> None:
         d = _make_prompts_dir(tmp_path)
         composer = PromptComposer(d)
         composer.load_all(auto_repair=False)
-        ctx = PromptContext(chat_mode="write")
+        ctx = PromptContext(chat_mode="read")
         text = composer.compose_system_text(ctx)
         assert "身份。" in text
         assert "公式策略。" not in text
@@ -235,7 +235,7 @@ class TestUnconditionalStrategy:
             pytest.skip("16_inspect.md 不存在")
         inspect_seg = parse_prompt_file(inspect_file)
         assert inspect_seg.name == "tool:inspect"
-        assert inspect_seg.conditions == {}
+        assert inspect_seg.conditions == {"tool": "inspect_spreadsheet"}
         assert "inspect_spreadsheet" not in inspect_seg.content
         spec_seg = parse_prompt_file(spec_file)
         assert "WorkbookSpec" in spec_seg.content
@@ -460,12 +460,19 @@ class TestInheritStrategies:
         )
         assert result is not None
         assert "WorkbookSpec" in result
+        assert "写入串行" in result
         result = composer.compose_for_subagent(
             "explorer", inherit_strategies=["tool:inspect", "tool:analyze"]
         )
         assert result is not None
         assert "WorkbookSpec" not in result
         assert "overview" in result
+        explorer_with_run = composer.compose_for_subagent(
+            "explorer",
+            inherit_strategies=["tool:inspect", "tool:analyze", "tool:run_code"],
+        )
+        assert explorer_with_run is not None
+        assert "写入串行" in explorer_with_run
         full = composer.compose_for_subagent(
             "subagent",
             inherit_strategies=["spreadsheet:workbook_spec", "tool:edit"],
@@ -493,8 +500,9 @@ class TestPromptArchitectureNoTagStrategies:
             PromptContext(chat_mode="plan")
         )
         write_text = composer.compose_system_text(PromptContext(chat_mode="write"))
-        assert "WorkbookSpec" in worthy_text
-        assert "WorkbookSpec" in not_needed_text
+        assert "WorkbookSpec" not in worthy_text
+        assert "WorkbookSpec" not in not_needed_text
+        assert "WorkbookSpec" in write_text
         assert "当前是计划模式" in worthy_text
         assert "当前是计划模式" in not_needed_text
         assert "当前是计划模式" not in write_text
@@ -509,11 +517,16 @@ class TestPromptArchitectureNoTagStrategies:
 
         composer = PromptComposer(prompts_dir)
         composer.load_all()
-        text = composer.compose_system_text(PromptContext(chat_mode="plan"))
-        assert "VERSION_CONFLICT" in text
-        assert "run_code" in text
-        assert "当前是计划模式" in text
-        assert "快速模式" not in text
+        plan_text = composer.compose_system_text(PromptContext(chat_mode="plan"))
+        write_text = composer.compose_system_text(PromptContext(chat_mode="write"))
+        assert "VERSION_CONFLICT" not in plan_text
+        assert "写入串行" not in plan_text
+        assert "WorkbookSpec" not in plan_text
+        assert "当前是计划模式" in plan_text
+        assert "快速模式" not in plan_text
+        assert "VERSION_CONFLICT" in write_text
+        assert "写入串行" in write_text
+        assert "WorkbookSpec" in write_text
 
     def test_plan_policy_segment_order(self) -> None:
         prompts_dir = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
@@ -530,6 +543,8 @@ class TestPromptArchitectureNoTagStrategies:
         assert names["tool:format"] == 106
         assert names["spreadsheet:workbook_spec"] == 110
         assert names["tool:run_code"] == 150
+        core_names = {seg.name: seg.order for seg in composer.core_segments}
+        assert core_names["spreadsheet:invariants"] == 50
         assert "spreadsheet:invariants" not in names
 
 

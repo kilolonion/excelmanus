@@ -4,6 +4,7 @@ import { loadCachedMessages, saveCachedMessages, deleteCachedMessages, clearAllC
 import { fetchSessionMessages, fetchSessionExcelEvents, clearAllSessions } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { useJevStore } from "@/stores/jev-store";
 import type { ExcelDiffEntry } from "@/stores/excel-store";
 import {
   deriveSessionTitleFromMessages,
@@ -19,6 +20,12 @@ import {
   mergeAffectedFiles,
   toPublicFileIdentity,
 } from "@/lib/file-identity";
+import { workspaceKeyForSessionId } from "@/lib/workspace-file-ref";
+import {
+  blocksHaveProgress,
+  hydrateFailureGuidanceFromText,
+  isFailureGuidanceBlock,
+} from "@/lib/failure-recovery";
 
 // 内存快速缓存（扩展 IndexedDB）
 const _sessionMessages = new Map<string, Message[]>();
@@ -176,7 +183,12 @@ function _preserveSseOnlyBlocks(
       }
     }
 
-    const sseBlocks = oldBlocks.filter((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type));
+    const recovered = blocksHaveProgress(msg.blocks);
+    const sseBlocks = oldBlocks.filter((b) => {
+      if (!_SSE_ONLY_BLOCK_TYPES.has(b.type)) return false;
+      if (recovered && isFailureGuidanceBlock(b)) return false;
+      return true;
+    });
     if (sseBlocks.length === 0 && oldToolCallMap.size === 0) return msg;
 
     // 浠ユ棫鍧楅『搴忎负妯℃澘锛氫繚鐣欎粎 SSE 鐨勫潡涓嶅姩锛岀敤鍒锋柊鍚庣殑鍧楁浛鎹㈠悗绔寔涔呭寲鐨勫潡銆?
@@ -212,6 +224,7 @@ function _preserveSseOnlyBlocks(
 
     for (const ob of oldBlocks) {
       if (_SSE_ONLY_BLOCK_TYPES.has(ob.type)) {
+        if (recovered && isFailureGuidanceBlock(ob)) continue;
         merged.push(ob);
         // failure_guidance 鏈夊悗绔寔涔呭寲瀵瑰簲鐨?text block锛屾秷璐瑰畠浠ラ伩鍏嶉噸澶?
         if (_SSE_ONLY_HAS_BACKEND_COUNTERPART.has(ob.type) && ni < newBackendBlocks.length) {
@@ -251,7 +264,14 @@ function _preserveSseOnlyBlocks(
         (tm) => tm.role === "assistant" && tm.blocks.some((b) => _SSE_ONLY_BLOCK_TYPES.has(b.type)),
       );
       if (hasPreservable) {
-        result.push(...trailing);
+        const lastNew = [...newMessages].reverse().find((m) => m.role === "assistant");
+        const dropStaleFailure = lastNew ? blocksHaveProgress(lastNew.blocks) : false;
+        result.push(
+          ...trailing.filter((tm) => {
+            if (!dropStaleFailure || tm.role !== "assistant") return true;
+            return !tm.blocks.some(isFailureGuidanceBlock) || blocksHaveProgress(tm.blocks);
+          }),
+        );
       }
       break;
     }
@@ -441,12 +461,12 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
         for (const part of msg.content as Record<string, unknown>[]) {
           if (part.type === "text" && typeof part.text === "string") {
             textParts.push(part.text as string);
-          } else if (part.type === "image_url") {
+          } else if (part.type === "image_url" || part.type === "image") {
             imageCount++;
           }
         }
         const hasText = textParts.some((t) => t.trim().length > 0);
-        // 璺宠繃绯荤粺娉ㄥ叆鐨勭函鍥剧墖娑堟伅锛圕 閫氶亾 add_image_message 浜х墿锛夛細
+        // 璺宠繃绯荤粺娉ㄥ叆鐨勭函鍥剧墖娑堟伅锛圕 閫氶亾 add_user_message 浜х墿锛夛細
         // 杩欎簺娑堟伅浠呭惈 image_url 閮ㄥ垎銆佹棤鏂囨湰锛岀敱宸ュ叿鎵ц鏃惰嚜鍔ㄦ敞鍏ワ紝
         // 涓嶅簲鍦?UI 涓樉绀轰负鐢ㄦ埛鍙戦€佺殑姘旀场銆?
         if (imageCount > 0 && !hasText) {
@@ -469,7 +489,8 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
       const blocks: AssistantBlock[] = [];
       const affectedFilePaths = new Set<string>();
       if (msg.content && typeof msg.content === "string") {
-        blocks.push({ type: "text", content: msg.content });
+        const hydrated = hydrateFailureGuidanceFromText(msg.content);
+        blocks.push(hydrated ?? { type: "text", content: msg.content });
       }
       if (Array.isArray(msg.tool_calls)) {
         for (const tc of msg.tool_calls as Record<string, unknown>[]) {
@@ -484,6 +505,9 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             args = {};
           }
           const isError = tcId ? toolErrorCallIds.has(tcId) : false;
+          const parentCallId = typeof tc.parent_call_id === "string" && tc.parent_call_id
+            ? tc.parent_call_id
+            : undefined;
           blocks.push({
             type: "tool_call",
             toolCallId: tcId,
@@ -491,6 +515,7 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
             args,
             status: hasResult ? (isError ? "error" : "success") : "error",
             result: hasResult && tcId ? toolResultByCallId.get(tcId) : undefined,
+            parentCallId,
           });
           // 从 offer_download 结果恢复 file_download 块（兼容旧 _file_download 与提升后的顶层字段）
           if (toolName === "offer_download" && hasResult && tcId) {
@@ -591,14 +616,17 @@ function _convertBackendMessages(raw: unknown[]): BackendConversionResult {
 function _mergeRecoveredExcelState(
   recoveredDiffs: ExcelDiffEntry[],
   recoveredFilePaths: string[],
+  sessionId: string,
 ): void {
   if (recoveredDiffs.length === 0 && recoveredFilePaths.length === 0) return;
   const excelStore = useExcelStore.getState();
+  // 文件路径相对来源会话的工作区，按来源会话键入桶，避免会话切换期间错挂。
+  const sourceWorkspaceKey = workspaceKeyForSessionId(sessionId);
   for (const filePath of recoveredFilePaths) {
     const normalized = _normalizeRecoveredPath(filePath);
     if (!normalized) continue;
     const filename = normalized.split("/").pop() || normalized;
-    excelStore.addRecentFileIfNotDismissed({ path: normalized, filename });
+    excelStore.addRecentFileIfNotDismissed({ path: normalized, filename }, sourceWorkspaceKey);
   }
   if (recoveredDiffs.length === 0) return;
   useExcelStore.setState((state) => {
@@ -629,10 +657,11 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
     if (useChatStore.getState().loadedSessionId !== sessionId) return;
 
     const excelStore = useExcelStore.getState();
+    const sourceWorkspaceKey = workspaceKeyForSessionId(sessionId);
     for (const fp of affected_files) {
       if (!fp) continue;
       const filename = fp.split("/").pop() || fp;
-      excelStore.addRecentFileIfNotDismissed({ path: fp, filename });
+      excelStore.addRecentFileIfNotDismissed({ path: fp, filename }, sourceWorkspaceKey);
     }
 
     if (diffs.length > 0) {
@@ -648,7 +677,7 @@ async function _loadPersistedExcelEvents(sessionId: string): Promise<void> {
         })),
         timestamp: d.timestamp ? new Date(d.timestamp).getTime() : Date.now(),
       }));
-      _mergeRecoveredExcelState(converted, []);
+      _mergeRecoveredExcelState(converted, [], sessionId);
     }
 
     // 鎭㈠棰勮鏁版嵁鍒?excel-store
@@ -784,7 +813,7 @@ async function _loadMessagesAsyncWithOptions(
       recoveredDiffs,
       recoveredFilePaths,
     } = _convertBackendMessages(raw);
-    _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths);
+    _mergeRecoveredExcelState(recoveredDiffs, recoveredFilePaths, sessionId);
     // 鏇挎崲鍙娑堟伅鏃讹紝浠庡綋鍓?store 甯﹀嚭浠?SSE 鐨勫潡锛坱hinking銆乮teration銆乤pproval_action锛夛紝
     // 閬垮厤鍚庣鍒锋柊鏃惰涓㈠純銆?
     const store = useChatStore.getState();
@@ -1237,6 +1266,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
       _sessionMessages.set(state.loadedSessionId, [...state.messages]);
       saveCachedMessages(state.loadedSessionId, state.messages).catch(() => {});
     }
+
+    useJevStore.getState().reset();
 
     const memCached = sessionId ? _sessionMessages.get(sessionId) : undefined;
     if (memCached && memCached.length > 0) {

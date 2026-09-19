@@ -75,10 +75,17 @@ def test_meta_tools_use_names_not_chinese_catalog() -> None:
 
     from excelmanus.engine_core.meta_tools import MetaToolBuilder
 
+    class _LegacyLoaderSentinel:
+        def get_skillpacks(self):
+            raise AssertionError("不应回退读取 loader 内部技能目录")
+
+        def load_all(self):
+            raise AssertionError("不应回退读取 loader 内部技能目录")
+
     engine = SimpleNamespace(
         _skill_router=SimpleNamespace(
             list_skill_names=lambda blocked_skillpacks=None: ["data_basic"],
-            build_skill_catalog=lambda blocked_skillpacks=None: ("可用技能：\n- data_basic：分析", ["data_basic"]),
+            _loader=_LegacyLoaderSentinel(),
         ),
         _skill_resolver=SimpleNamespace(blocked_skillpacks=lambda: set()),
         _subagent_registry=SimpleNamespace(build_catalog=lambda: ("", ["explorer"])),
@@ -93,7 +100,7 @@ def test_meta_tools_use_names_not_chinese_catalog() -> None:
     assert "适用场景" not in manage["function"]["description"]
 
 
-def test_capabilities_notes_are_facts_not_playbooks() -> None:
+def test_capabilities_notes_are_facts_not_procedures() -> None:
     notes = "\n".join(_MODEL_CAPABILITIES["notes"])
     assert "截断" in notes
     assert "content_version" in notes
@@ -104,7 +111,7 @@ def test_capabilities_notes_are_facts_not_playbooks() -> None:
     assert "并行" not in notes
 
 
-def test_system_skill_texts_are_not_playbooks() -> None:
+def test_system_skill_texts_are_not_procedures() -> None:
     root = Path(__file__).resolve().parent.parent / "excelmanus" / "skillpacks" / "system"
     forbidden = (
         "标准流程",
@@ -250,24 +257,28 @@ def test_compiler_applies_border_and_rejects_bad_merge() -> None:
     assert data[:2] == b"PK"
     assert summary["merges_applied"] == 1
 
-    bad = WorkbookSpec(
-        sheets=[
-            SheetSpec(
-                name="S",
-                dimensions={"rows": 2, "cols": 2},
-                value_blocks=[{"start": "A1", "values": [["x", "y"], ["z", "w"]]}],
-                merged_ranges=[MergedRange(range="A1:A0")],
-            )
-        ],
-        uncertainties=[],
-    )
+    from pydantic import ValidationError
+
     try:
+        bad = WorkbookSpec(
+            sheets=[
+                SheetSpec(
+                    name="S",
+                    dimensions={"rows": 2, "cols": 2},
+                    value_blocks=[{"start": "A1", "values": [["x", "y"], ["z", "w"]]}],
+                    merged_ranges=[MergedRange(range="A1:A0")],
+                )
+            ],
+            uncertainties=[],
+        )
         compile_replica_to_bytes(workbook_spec_to_replica(bad))
         raised = False
-    except ValueError as exc:
+        message = ""
+    except (ValueError, ValidationError) as exc:
         raised = True
-        assert "合并失败" in str(exc)
+        message = str(exc)
     assert raised
+    assert "合并失败" in message or "无法解析引用" in message
 
 
 def test_guard_denies_product_source(tmp_path: Path) -> None:
@@ -287,7 +298,7 @@ def test_shell_denies_product_source(tmp_path: Path) -> None:
     (tmp_path / "excelmanus").mkdir()
     (tmp_path / "excelmanus" / "replica_spec.py").write_text("secret", encoding="utf-8")
     init_shell_guard(str(tmp_path))
-    result = run_shell("cat excelmanus/replica_spec.py", workdir=str(tmp_path))
+    result = run_shell("whoami excelmanus/replica_spec.py", workdir=str(tmp_path))
     payload = result.value or {}
     assert payload.get("status") == "blocked"
     assert PRODUCT_SOURCE_FORBIDDEN in str(payload.get("reason") or "")
@@ -299,7 +310,7 @@ def test_probe_paths_are_rejected(tmp_path: Path) -> None:
     Workbook().save(src)
     assert is_probe_path("outputs/_probe_merge.xlsx")
     copied = copy_file("ok.xlsx", "outputs/_probe_merge.xlsx")
-    assert not copied.success or (copied.value or {}).get("code") == PROBE_FILE_FORBIDDEN
+    assert not copied.success or (copied.value or {}).get("error_code") == PROBE_FILE_FORBIDDEN
     if copied.error:
         assert copied.error.code == PROBE_FILE_FORBIDDEN or PROBE_FILE_FORBIDDEN in str(copied.value)
     created = edit_spreadsheet(

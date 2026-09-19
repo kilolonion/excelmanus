@@ -1,6 +1,6 @@
 ---
 name: format_basic
-description: 已有工作表上的样式（颜色、字体、边框、填充、合并、行列尺寸）。
+description: 已有工作表上的样式（颜色、字体、边框、填充、合并、列宽、冻结窗格）。
 file_patterns:
   - "*.xlsx"
 resources:
@@ -25,4 +25,4 @@ format_spreadsheet(
 )
 ```
 
-`range` 写 A1:C5，也接受 `区域汇总!A5:C5`。多表时请带 `sheet`。列宽用 `kind=size` 的 `columns={"A":18}`，不要把 inspect 的列宽字典塞进 WorkbookSpec 时再换成另一种形状——两种都接受。
+`range` 写 A1:C5 或整列 `B:B`。多表时请带 `sheet`。列宽用 `kind=size` 的 `columns={"A":18}` 或 `auto_fit=true`。冻结首行：`kind=freeze` 且 `freeze_panes="A2"`。

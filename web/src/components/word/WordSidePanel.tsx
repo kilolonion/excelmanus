@@ -3,29 +3,32 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { motion } from "framer-motion";
-import { Download, FileText, Maximize2, RefreshCw, X } from "lucide-react";
+import { Download, FileText, History, Maximize2, RefreshCw, X } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
+import { RevisionTimelinePanel } from "@/components/chat/CheckpointTimeline";
 import { buildWordFileUrl, downloadFile } from "@/lib/api";
 import { panelSlideVariants } from "@/lib/sidebar-motion";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
 
-const UniverDoc = dynamic(
-  () => import("./UniverDoc").then((module) => ({ default: module.UniverDoc })),
+const WordSnapshotView = dynamic(
+  () => import("./WordSnapshotView").then((module) => ({ default: module.WordSnapshotView })),
   {
     ssr: false,
     loading: () => (
       <div className="flex h-full items-center justify-center text-sm text-muted-foreground">
-        加载文档引擎...
+        加载文档快照...
       </div>
     ),
   }
 );
 
 export function WordSidePanel() {
-  const { panelOpen, activeDocPath, closePanel, openFullView, triggerRefresh } = useWordStore(
+  const { panelOpen, panelTab, setPanelTab, activeDocPath, closePanel, openFullView, triggerRefresh } = useWordStore(
     useShallow((state) => ({
       panelOpen: state.panelOpen,
+      panelTab: state.panelTab,
+      setPanelTab: state.setPanelTab,
       activeDocPath: state.activeDocPath,
       closePanel: state.closePanel,
       openFullView: state.openFullView,
@@ -120,17 +123,58 @@ export function WordSidePanel() {
         </button>
       </div>
 
-      <div className="border-b border-border bg-muted/30 px-3 py-2">
-        <p className="text-[11px] leading-4 text-muted-foreground">
-          预览模式：这里的改动不会自动保存到文档，刷新会重新加载当前快照。
-        </p>
-        {actionError && (
-          <p className="mt-1 text-[11px] leading-4 text-destructive">{actionError}</p>
-        )}
+      <div className="flex border-b border-border bg-muted/20 px-1 shrink-0">
+        <button
+          type="button"
+          onClick={() => setPanelTab("doc")}
+          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+            panelTab === "doc"
+              ? "border-[var(--em-primary)] text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <FileText className="h-3 w-3" />
+          文档
+        </button>
+        <button
+          type="button"
+          onClick={() => setPanelTab("history")}
+          className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium border-b-2 transition-colors ${
+            panelTab === "history"
+              ? "border-[var(--em-primary)] text-foreground"
+              : "border-transparent text-muted-foreground hover:text-foreground"
+          }`}
+        >
+          <History className="h-3 w-3" />
+          历史
+        </button>
       </div>
 
-      <div className="flex-1 overflow-hidden">
-        <UniverDoc key={`${fileUrl}-${refreshKey}`} fileUrl={fileUrl} />
+      {panelTab === "doc" && (
+        <div className="border-b border-border bg-muted/30 px-3 py-2">
+          <p className="text-[11px] leading-4 text-muted-foreground">
+            只读快照预览（正文 + 表格）：不会写回文档；内容由 Agent 写入，精调版式请下载后用 Word 打开。
+          </p>
+          {actionError && (
+            <p className="mt-1 text-[11px] leading-4 text-destructive">{actionError}</p>
+          )}
+        </div>
+      )}
+
+      <div className={`flex-1 overflow-hidden ${panelTab === "doc" ? "" : "hidden"}`}>
+        <WordSnapshotView key={`${fileUrl}-${refreshKey}`} fileUrl={fileUrl} />
+      </div>
+      <div className={`flex-1 min-h-0 overflow-hidden ${panelTab === "history" ? "" : "hidden"}`}>
+        <div className="h-full flex flex-col">
+          <div className="shrink-0 px-3 pt-3 pb-2 border-b border-border/70">
+            <p className="text-[11px] leading-4 text-muted-foreground">
+              整份文档的写入快照。恢复会覆盖当前文件。
+            </p>
+          </div>
+          <div className="flex-1 min-h-0">
+            <RevisionTimelinePanel filePath={activeDocPath} active={panelOpen && panelTab === "history"} />
+          </div>
+        </div>
       </div>
     </motion.div>
   );

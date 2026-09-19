@@ -17,6 +17,7 @@ import {
   cleanupDemoSession,
 } from "./demo-session";
 import { activateSettingsDemo, deactivateSettingsDemo } from "./demo-settings";
+import { requestModelSubTab } from "@/components/settings/model/model-subtab";
 
 type EffectFn = () => void;
 
@@ -122,6 +123,10 @@ const EFFECTS: Record<string, EffectFn> = {
   },
   openSettings_model: () => {
     useUIStore.getState().openSettings("model");
+  },
+  openSettings_model_roles: () => {
+    useUIStore.getState().openSettings("model");
+    requestModelSubTab("roles");
   },
   openSettings_rules: () => {
     useUIStore.getState().openSettings("rules");

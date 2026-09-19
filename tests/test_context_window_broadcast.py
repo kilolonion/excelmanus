@@ -45,9 +45,11 @@ def registry() -> ToolRegistry:
 
 @pytest.fixture(autouse=True)
 def disable_real_mcp_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from excelmanus.settings_runtime import override_settings
+
     config_file = tmp_path / "mcp.empty.json"
     config_file.write_text('{"mcpServers": {}}', encoding="utf-8")
-    monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(config_file))
+    override_settings({"EXCELMANUS_MCP_CONFIG": str(config_file)})
 
 
 @pytest.fixture
@@ -64,7 +66,9 @@ class TestIsContextWindowUserPinned:
     def test_env_pins_even_when_value_matches_inference(
         self, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("EXCELMANUS_MAX_CONTEXT_TOKENS", "128000")
+        from excelmanus.settings_runtime import override_settings
+
+        override_settings({"EXCELMANUS_MAX_CONTEXT_TOKENS": "128000"})
         assert is_context_window_user_pinned(128_000, "test-model") is True
 
     def test_value_mismatch_pins_without_env(self) -> None:
@@ -119,7 +123,9 @@ class TestApplyContextOptimization:
     async def test_pinned_window_survives_model_switch(
         self, manager: SessionManager, monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        monkeypatch.setenv("EXCELMANUS_MAX_CONTEXT_TOKENS", "128000")
+        from excelmanus.settings_runtime import override_settings
+
+        override_settings({"EXCELMANUS_MAX_CONTEXT_TOKENS": "128000"})
         sid, engine = await manager.acquire_for_chat(None)
         await manager.release_for_chat(sid)
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 from openpyxl import load_workbook
@@ -17,9 +18,8 @@ from excelmanus.engine_core.tool_result import (
 )
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools._helpers import check_file_exists, workspace_relpath
-from excelmanus.workbook_commit import content_version_of_file
 
 
 def _collect_compact_merges(ws: Any, *, limit: int = 20) -> dict[str, Any]:
@@ -66,25 +66,15 @@ def _collect_compact_dtypes(ws: Any, *, max_rows: int = 20) -> dict[str, str]:
 
 logger = get_logger("tools.sheet")
 
-_guard: FileAccessGuard | None = None
 _MAX_LIST_PAGE_SIZE = 500
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(".")
-    return _guard
+    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。"""
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_PAGE_SIZE) -> str | None:
@@ -112,6 +102,79 @@ _LIST_SHEETS_DIMENSIONS = (
     "formulas",
 )
 _LIST_SHEETS_LIGHT_DIMS = {"columns", "preview"}
+
+
+def _sheet_state_of(ws: Any) -> str:
+    return str(getattr(ws, "sheet_state", None) or "visible")
+
+
+def _overview_sheet_line(item: dict[str, Any]) -> str:
+    name = str(item.get("name") or "")
+    rows = item.get("rows", 0)
+    cols = item.get("columns", 0)
+    state = str(item.get("sheet_state") or "visible")
+    hidden = "" if state == "visible" else f" {state}"
+    bits: list[str] = []
+    names = item.get("column_names")
+    if names:
+        shown = ",".join("" if c is None else str(c) for c in names[:8])
+        if len(names) > 8:
+            shown += "…"
+        bits.append(f"列={shown}")
+    merges = item.get("merges")
+    if isinstance(merges, dict):
+        bits.append(f"合并{int(merges.get('count') or 0)}")
+        ranges = merges.get("ranges") or []
+        if ranges:
+            bits.append("/".join(str(r) for r in ranges[:3]))
+    formulas = item.get("formulas")
+    if isinstance(formulas, dict):
+        count = int(formulas.get("count") or 0)
+        bits.append(f"公式{count}")
+        sample = formulas.get("sample") or []
+        shown: list[str] = []
+        for entry in sample[:8]:
+            if not isinstance(entry, dict):
+                continue
+            cell = entry.get("cell")
+            formula = entry.get("formula")
+            if not cell or not formula:
+                continue
+            formula_text = str(formula)
+            if len(formula_text) > 48:
+                formula_text = formula_text[:45] + "…"
+            shown.append(f"{cell}{formula_text}")
+        if shown:
+            bits.append("; ".join(shown))
+            rest = count - len(shown)
+            if rest > 0:
+                bits.append(f"等{rest}个")
+    styles = item.get("styles")
+    if isinstance(styles, dict):
+        classes = styles.get("style_classes") or {}
+        bits.append(f"样式类{len(classes)}")
+    freeze = item.get("freeze_panes")
+    if freeze:
+        bits.append(f"冻结={freeze}")
+    extra = f" {' '.join(bits)}" if bits else ""
+    return f"- {name}: {rows}×{cols}{hidden}{extra}"
+
+
+def _overview_model_text(
+    rel: str,
+    total: int,
+    paged_sheets: list[dict[str, Any]],
+    has_more: bool,
+    include_warning: str,
+) -> str:
+    lines = [f"{Path(rel).name}: {total} sheets"]
+    for item in paged_sheets[:12]:
+        lines.append(_overview_sheet_line(item))
+    if len(paged_sheets) > 12 or has_more:
+        lines.append("…")
+    if include_warning:
+        lines.append(f"⚠️ {include_warning}")
+    return "\n".join(lines)
 
 
 def list_sheets(
@@ -148,18 +211,19 @@ def list_sheets(
         return error_result(
             paging_error,
             code="INVALID_ARGS",
-            fields={"error": paging_error},
         )
 
     guard = _get_guard()
-    safe_path = guard.resolve_and_validate(file_path)
-
-    from excelmanus.tools._helpers import ensure_openpyxl_compatible
-    safe_path = ensure_openpyxl_compatible(safe_path)
-
-    not_found = check_file_exists(safe_path, file_path, guard)
+    live_path = guard.resolve_and_validate(file_path)
+    not_found = check_file_exists(live_path, file_path, guard)
     if not_found is not None:
         return not_found
+    from excelmanus.workbook.data import _open_tool_snapshot
+
+    snap, snap_err = _open_tool_snapshot(file_path)
+    if snap_err is not None:
+        return snap_err
+    safe_path = snap.backing_path
 
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_LIST_SHEETS_DIMENSIONS)
@@ -176,11 +240,14 @@ def list_sheets(
         active_name = wb.active.title if wb.active else None
         sheets: list[dict[str, Any]] = []
         for ws in wb.worksheets:
+            state = _sheet_state_of(ws)
             info: dict[str, Any] = {
                 "name": ws.title,
                 "rows": ws.max_row or 0,
                 "columns": ws.max_column or 0,
                 "is_active": ws.title == active_name,
+                "sheet_state": state,
+                "hidden": state != "visible",
             }
 
             if "columns" in include_set:
@@ -241,10 +308,12 @@ def list_sheets(
     paged_sheets = sheets[offset:end]
     has_more = end < total
 
-    rel = workspace_relpath(guard, safe_path)
-    version = content_version_of_file(safe_path)
+    rel = snap.file.relative
+    version = snap.content_version
+    from excelmanus.workbook.snapshot import Coverage, apply_read_contract
+
     result: dict[str, Any] = {
-        "file": safe_path.name,
+        "file": Path(rel).name,
         "file_path": rel,
         "sheet_count": total,
         "offset": offset,
@@ -261,14 +330,23 @@ def list_sheets(
     result["resolved_sheets"] = names
     if len(names) == 1:
         result["resolved_sheet"] = names[0]
-    model_text = f"{safe_path.name}: {total} sheets"
-    if names:
-        shown = ", ".join(names[:12])
-        model_text += f" ({shown})"
-        if len(names) > 12 or has_more:
-            model_text += " …"
-    if include_warning:
-        model_text += f"\n⚠️ {include_warning}"
+    apply_read_contract(
+        result,
+        snapshot=snap,
+        result_kind="matrix",
+        sheet=result.get("resolved_sheet"),
+        coverage=Coverage(
+            kind="truncated" if has_more else "complete",
+            returned_rows=len(paged_sheets),
+            total_rows=total,
+            offset=offset,
+        ),
+        formulas_uncached="unknown",
+        meta_kind="overview",
+    )
+    model_text = _overview_model_text(
+        rel, total, paged_sheets, has_more, include_warning,
+    )
     return ok_result(
         result,
         model_text=model_text,

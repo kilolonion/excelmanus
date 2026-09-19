@@ -204,7 +204,7 @@ export function CoachMarks() {
         if (trigger) {
           const inputEl = findInput(targetEl);
           const current = inputEl?.value ?? "";
-          // Don't clear if current input is already a prefix of the new trigger (e.g. "/" → "/read")
+          // Don't clear if current input is already a prefix of the new trigger (e.g. "/" → "/plan")
           if (!current || !trigger.startsWith(current)) {
             window.dispatchEvent(new Event("coach-clear-input"));
           }

@@ -78,12 +78,12 @@ export function ThinkingBlock({
               : "text-[var(--em-primary)]",
           )}
         />
-        <span className="text-[13px] font-medium text-foreground whitespace-nowrap">
+        <span className="text-[13px] font-medium text-foreground whitespace-nowrap shrink-0">
           {heading}
         </span>
         <span
           className={cn(
-            "text-[11px] font-medium px-1.5 py-px rounded-full",
+            "text-[11px] font-medium px-1.5 py-px rounded-full whitespace-nowrap shrink-0",
             isActive
               ? "bg-[var(--em-fill)] text-[var(--em-text-secondary)]"
               : "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]",

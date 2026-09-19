@@ -1,8 +1,9 @@
 """有序提示词段组装。md 是正文素材，组装走 ``PromptRegistry``。
 
-稳定 system 前缀：identity / persona / 工具自有段 / workbook_spec /
-run_code；``plan:policy`` 仅 plan 激活时非空。动态世界模型不再经
-fingerprint 注入第二条 system。
+稳定 system 前缀：identity / persona / spreadsheet:invariants / 工具自有段 /
+workbook_spec / run_code；strategy 段按 front-matter ``conditions`` 门控
+（``plan:policy`` 仅 plan 激活时非空；写相关段仅 write/code 目录非空）。
+动态世界模型不再经 fingerprint 注入第二条 system。
 """
 
 from __future__ import annotations
@@ -44,6 +45,87 @@ class PromptContext:
     """当前请求的组装开关。"""
 
     chat_mode: str = "write"  # 取值："write" | "read" | "plan"
+
+
+# ── strategy 段门控 ──────────────────────────────────────
+# front-matter ``conditions`` 语法（键之间 AND，同一键的列表为 OR）：
+#   catalog_mode: write | read | plan | code   # 标量或列表，对照目录模式
+#   chat_mode:     write | read | plan          # 标量或列表；plan_active 额外匹配 plan
+#   present_as:    native | code               # 标量或列表
+#   tool:          工具名（可见目录含该名才注入；未传 visible_tools 时不过滤）
+#   new_workbook:  bool                        # 工作区尚无表格文件
+#   full_access:   bool
+# 空 / {} 表示无门控。base_sections 只给子代理，不参与门控。未知键忽略。
+
+
+def _condition_values(value: Any) -> frozenset[str]:
+    """front-matter 标量或列表 → 非空字符串集合。"""
+    if value is None:
+        return frozenset()
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return frozenset(str(item).strip() for item in value if str(item).strip())
+    text = str(value).strip()
+    return frozenset({text}) if text else frozenset()
+
+
+def _catalog_mode_of(ctx: AssembleContext) -> str:
+    from excelmanus.tools.catalog import resolve_catalog_mode
+
+    return resolve_catalog_mode(
+        chat_mode=str(ctx.chat_mode or "write"),
+        present_as=str(ctx.present_as or "native"),
+    )
+
+
+def strategy_conditions_match(
+    conditions: dict[str, Any] | None,
+    ctx: AssembleContext,
+) -> bool:
+    """strategy 段 ``conditions`` 是否匹配本次 ``AssembleContext``。"""
+    if not conditions:
+        return True
+    cond = {
+        key: value
+        for key, value in conditions.items()
+        if key != "base_sections"
+    }
+    if not cond:
+        return True
+
+    if "catalog_mode" in cond:
+        allowed = _condition_values(cond["catalog_mode"])
+        if _catalog_mode_of(ctx) not in allowed:
+            return False
+
+    if "chat_mode" in cond:
+        allowed = _condition_values(cond["chat_mode"])
+        current = {str(ctx.chat_mode or "write")}
+        if ctx.plan_active:
+            current.add("plan")
+        if current.isdisjoint(allowed):
+            return False
+
+    if "present_as" in cond:
+        allowed = _condition_values(cond["present_as"])
+        if str(ctx.present_as or "native") not in allowed:
+            return False
+
+    if "full_access" in cond:
+        if bool(cond["full_access"]) != bool(ctx.full_access):
+            return False
+
+    if "tool" in cond:
+        needed = _condition_values(cond["tool"])
+        visible = getattr(ctx, "visible_tools", None)
+        if visible is not None and visible.isdisjoint(needed):
+            return False
+
+    if "new_workbook" in cond:
+        want = bool(cond["new_workbook"])
+        if bool(getattr(ctx, "new_workbook", True)) != want:
+            return False
+
+    return True
 
 
 # ── Frontmatter 解析 ─────────────────────────────────────
@@ -100,6 +182,30 @@ class PromptComposer:
         self.core_segments: list[PromptSegment] = []
         self.strategy_segments: list[PromptSegment] = []
         self.registry = PromptRegistry()
+        self.load_errors: list[str] = []
+        self._file_stamp: tuple[Any, ...] | None = None
+
+    def _source_stamp(self) -> tuple[Any, ...]:
+        return tuple(
+            (str(path), path.stat().st_mtime_ns, path.stat().st_size)
+            for folder in ("core", "strategies")
+            for path in sorted((self._prompts_dir / folder).glob("*.md"))
+        )
+
+    def reload_if_changed(self) -> bool:
+        if self._source_stamp() == self._file_stamp:
+            return False
+        self.load_all(auto_repair=False)
+        return True
+
+    def validate_runtime(self) -> None:
+        """生产会话不能静默忽略损坏或缺失的核心提示。测试素材可单独加载。"""
+        names = {s.name for s in self.core_segments if s.content.strip()}
+        missing = {"harness:identity", "deployment:persona"} - names
+        if self.load_errors or missing:
+            raise ValueError(
+                "提示词加载不完整：" + "; ".join(self.load_errors + sorted(missing))
+            )
 
     def load_all(self, *, auto_repair: bool = True) -> None:
         """启动时加载 prompts/ 下所有 .md 文件并解析 frontmatter。
@@ -110,6 +216,7 @@ class PromptComposer:
         """
         self.core_segments.clear()
         self.strategy_segments.clear()
+        self.load_errors.clear()
 
         core_dir = self._prompts_dir / "core"
         if auto_repair:
@@ -121,6 +228,7 @@ class PromptComposer:
                     seg = parse_prompt_file(f)
                     self.core_segments.append(seg)
                 except Exception as exc:
+                    self.load_errors.append(f"{f.name}: {exc}")
                     logger.warning("跳过无效提示词文件 %s: %s", f, exc)
 
         strat_dir = self._prompts_dir / "strategies"
@@ -130,9 +238,11 @@ class PromptComposer:
                     seg = parse_prompt_file(f)
                     self.strategy_segments.append(seg)
                 except Exception as exc:
+                    self.load_errors.append(f"{f.name}: {exc}")
                     logger.warning("跳过无效策略文件 %s: %s", f, exc)
 
         self._rebuild_registry()
+        self._file_stamp = self._source_stamp()
         logger.info(
             "PromptComposer: 加载 %d core + %d strategy 段",
             len(self.core_segments),
@@ -140,23 +250,20 @@ class PromptComposer:
         )
 
     def _rebuild_registry(self) -> None:
-        """把已加载的 md 段登记进 PromptRegistry；plan 未激活时 text 为空。"""
+        """把已加载的 md 段登记进 PromptRegistry；条件不匹配时 text 为空。"""
         registry = PromptRegistry()
         for seg in self.core_segments:
             registry.section(seg.name, seg.order, seg.content)
         for seg in self.strategy_segments:
             body = seg.content
             cond = dict(seg.conditions)
-            if seg.name == "plan:policy":
-                registry.section(
-                    seg.name,
-                    seg.order,
-                    lambda ctx, text=body: text if ctx.plan_active or ctx.chat_mode == "plan" else "",
-                )
-            elif cond:
-                logger.warning("忽略带条件的策略段 %s（只保留 plan:policy）", seg.name)
-            else:
-                registry.section(seg.name, seg.order, body)
+            registry.section(
+                seg.name,
+                seg.order,
+                lambda ctx, text=body, conditions=cond: (
+                    text if strategy_conditions_match(conditions, ctx) else ""
+                ),
+            )
         registry.section(
             "tools:code-only",
             99,
@@ -189,7 +296,7 @@ class PromptComposer:
         present_as: str = "native",
         sdk_section: str = "",
     ) -> str:
-        """稳定 system 前缀：identity + persona + 工具段 + 条件 plan 段。"""
+        """稳定 system 前缀：identity + persona + 按目录模式门控的策略段。"""
         assembly = self.registry.assemble(
             AssembleContext(
                 plan_active=ctx.chat_mode == "plan",

@@ -36,25 +36,32 @@ def _tool_registry() -> ToolRegistry:
 
 
 def _extract_readme_skillpack_list(text: str) -> set[str]:
-    marker = "内置 Skillpacks："
-    start = text.find(marker)
-    if start == -1:
-        marker = "当前内置（system）Skillpacks："
-        start = text.find(marker)
-    assert start != -1, "README 缺少内置 Skillpack 清单段落"
+    block = ""
+    details = re.search(
+        r"<summary>\s*📦\s*内置技能\s*</summary>(.*?)</details>",
+        text,
+        re.S,
+    )
+    if details:
+        block = details.group(1)
+    else:
+        for marker in ("内置 Skillpacks：", "当前内置（system）Skillpacks："):
+            start = text.find(marker)
+            if start != -1:
+                block = text[start + len(marker) :]
+                break
+    assert block.strip(), "README 缺少内置 Skillpack 清单段落"
 
     skills: set[str] = set()
-    started = False
-    for line in text[start + len(marker) :].splitlines():
+    for line in block.splitlines():
         stripped = line.strip()
-        if not stripped and started:
-            break
-        match = re.match(r"-\s+`([a-z0-9._/-]+)`", stripped)
-        if match:
-            skills.add(match.group(1))
-            started = True
-        elif started and stripped and not stripped.startswith("-"):
-            break
+        table = re.match(r"\|\s*`([a-z0-9._/-]+)`\s*\|", stripped)
+        if table:
+            skills.add(table.group(1))
+            continue
+        bullet = re.match(r"-\s+`([a-z0-9._/-]+)`", stripped)
+        if bullet:
+            skills.add(bullet.group(1))
     assert skills, "README 内置 Skillpack 清单为空"
     return skills
 
@@ -108,6 +115,8 @@ class TestSkillpackDocsContract:
             d.mkdir(parents=True, exist_ok=True)
 
         monkeypatch.setenv("HOME", str(home_dir))
+        # Windows 上 Path.home()/expanduser 读 USERPROFILE
+        monkeypatch.setenv("USERPROFILE", str(home_dir))
         monkeypatch.chdir(workspace)
 
         cfg = ExcelManusConfig(
@@ -133,11 +142,6 @@ class TestSkillpackDocsContract:
         assert expected_user_openclaw in root_paths
         assert legacy_project_skills not in root_paths
 
-    @pytest.mark.skipif(
-        "内置 Skillpacks" not in README_PATH.read_text(encoding="utf-8")
-        and "当前内置（system）Skillpacks" not in README_PATH.read_text(encoding="utf-8"),
-        reason="README 已精简，不再包含内置 Skillpack 清单",
-    )
     def test_readme_system_skillpack_list_matches_filesystem(self) -> None:
         text = README_PATH.read_text(encoding="utf-8")
         readme_skills = _extract_readme_skillpack_list(text)

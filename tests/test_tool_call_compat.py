@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from openpyxl import Workbook, load_workbook
@@ -105,7 +106,7 @@ def test_workbook_spec_accepts_font_string_and_width_map(tmp_path: Path) -> None
     assert spec.default_font.name == "微软雅黑"
     assert spec.sheets[0].column_widths == [12.0, 16.0, 11.0]
     assert spec.sheets[0].row_heights["1"] == 20.0
-    assert spec.sheets[0].merged_ranges[0].range == "A1:A1"
+    assert spec.sheets[0].merged_ranges[0].range == "A1"
     assert spec.sheets[0].cells[0].value == "=1+1"
     assert spec.sheets[0].cells[0].value_type == "formula"
     assert spec.sheets[0].style_regions[0].range == "A1:C1"
@@ -213,7 +214,7 @@ def test_build_fill_accepts_pattern_and_type() -> None:
     assert from_pattern.start_color.rgb.endswith("DDEBF7")
 
 
-def test_bad_range_returns_invalid_args(tmp_path: Path) -> None:
+def test_bad_range_returns_range_invalid(tmp_path: Path) -> None:
     _bind(tmp_path)
     path = tmp_path / "book.xlsx"
     wb = Workbook()
@@ -224,12 +225,14 @@ def test_bad_range_returns_invalid_args(tmp_path: Path) -> None:
     result = format_spreadsheet(
         file_path=str(path),
         expected_version=content_version_of_file(path),
-        operations=[{"kind": "format", "sheet": "Sheet", "range": "not-a-range", "font": {"bold": True}}],
+        operations=[{"kind": "format", "sheet": "Sheet", "range": "=A1", "font": {"bold": True}}],
     )
     assert not result.success
     assert result.error is not None
-    assert result.error.code == "INVALID_ARGS"
+    assert result.error.code == "RANGE_INVALID"
     assert "SAVE_FAILED" not in result.model_text
+    assert "语法可解析不等于" not in result.model_text
+    assert "write.start_cell" not in result.model_text
 
 
 def test_conflicting_sheet_and_range_is_invalid(tmp_path: Path) -> None:
@@ -290,3 +293,98 @@ def test_inspect_range_without_mode(tmp_path: Path) -> None:
     payload = result.value
     assert isinstance(payload, dict)
     assert payload.get("data") == [["月份"]] or payload.get("range") == "A1:A1"
+
+
+def test_format_union_applies_same_style(tmp_path: Path) -> None:
+    _bind(tmp_path)
+    path = tmp_path / "book.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws["A4"] = "a"
+    ws["A5"] = "skip"
+    ws["A11"] = "b"
+    ws["A12"] = "c"
+    ws["D12"] = "d"
+    wb.save(path)
+    wb.close()
+
+    cells = format_spreadsheet(
+        file_path=str(path),
+        expected_version=content_version_of_file(path),
+        operations=[{"kind": "format", "sheet": "Sheet", "range": "A4,A11", "font": {"bold": True}}],
+    )
+    assert cells.success, cells.model_text
+    blocks = format_spreadsheet(
+        file_path=str(path),
+        expected_version=cells.value["content_version"],
+        operations=[{
+            "kind": "format",
+            "sheet": "Sheet",
+            "range": "A5:D5,A12:D12",
+            "font": {"italic": True},
+        }],
+    )
+    assert blocks.success, blocks.model_text
+    wb = load_workbook(path)
+    try:
+        assert wb.active["A4"].font.bold is True
+        assert wb.active["A11"].font.bold is True
+        assert wb.active["A5"].font.bold is not True
+        assert wb.active["A5"].font.italic is True
+        assert wb.active["D12"].font.italic is True
+        assert wb.active["A11"].font.italic is not True
+    finally:
+        wb.close()
+
+
+def test_format_merge_rejects_union(tmp_path: Path) -> None:
+    _bind(tmp_path)
+    path = tmp_path / "book.xlsx"
+    wb = Workbook()
+    wb.active["A1"] = "x"
+    wb.save(path)
+    wb.close()
+
+    result = format_spreadsheet(
+        file_path=str(path),
+        expected_version=content_version_of_file(path),
+        operations=[{"kind": "merge", "sheet": "Sheet", "range": "A1:B1,C1:D1"}],
+    )
+    assert not result.success
+    assert result.error is not None
+    assert result.error.code == "REF_UNSUPPORTED"
+    assert "只要一个矩形" in result.model_text
+    assert "语法可解析不等于" not in result.model_text
+
+
+def test_edit_sheet_create_accepts_sheet_name_and_json_operations(tmp_path: Path) -> None:
+    _bind(tmp_path)
+    path = tmp_path / "book.xlsx"
+    wb = Workbook()
+    wb.active["A1"] = "x"
+    wb.save(path)
+    wb.close()
+
+    created = edit_spreadsheet(
+        file_path=str(path),
+        expected_version=content_version_of_file(path),
+        operations=json.dumps([{"kind": "sheet", "action": "create", "sheet_name": "摘要"}]),
+    )
+    assert created.success, created.model_text
+    wb = load_workbook(path)
+    try:
+        assert "摘要" in wb.sheetnames
+    finally:
+        wb.close()
+
+    malformed = edit_spreadsheet(
+        file_path=str(path),
+        expected_version=created.value["content_version"],
+        operations='[{"kind": "write", "kind2": null}',
+    )
+    assert not malformed.success
+    assert malformed.error is not None
+    assert malformed.error.code == "INVALID_ARGS"
+    assert "JSON 字符串" in malformed.model_text
+    # 末尾截断的 JSON 给出截断识别与分块指引
+    assert "截断" in malformed.model_text

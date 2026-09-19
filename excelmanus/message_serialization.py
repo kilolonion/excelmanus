@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 _TO_PLAIN_MAX_DEPTH = 32
+_MALFORMED_ARGS_PREVIEW = 500
 
 
 def to_plain(value: Any, _depth: int = 0) -> Any:
@@ -59,4 +61,39 @@ def assistant_message_to_dict(message: Any) -> dict[str, Any]:
     return payload
 
 
-__all__ = ["to_plain", "assistant_message_to_dict"]
+def sanitize_tool_call_arguments(tool_calls: list[Any]) -> list[Any]:
+    """确保每个 tool_call 的 function.arguments 是合法 JSON 字符串。
+
+    模型可能输出截断/非法的 arguments；若原样留在历史里，后续请求会被
+    网关以 400 拒绝（部分网关在渲染模板时重解析 arguments），整个会话
+    随之卡死。非法值替换为保留预览的占位 JSON，tool_result 中的
+    INVALID_ARGS 已告知模型具体错误。
+    """
+    for call in tool_calls or []:
+        if not isinstance(call, dict):
+            continue
+        function = call.get("function")
+        if not isinstance(function, dict):
+            continue
+        arguments = function.get("arguments")
+        if isinstance(arguments, str):
+            try:
+                json.loads(arguments)
+                continue
+            except (json.JSONDecodeError, TypeError):
+                preview = arguments[:_MALFORMED_ARGS_PREVIEW]
+                function["arguments"] = json.dumps(
+                    {"_malformed_arguments": preview, "_truncated_len": len(arguments)},
+                    ensure_ascii=False,
+                )
+        elif arguments is None:
+            function["arguments"] = "{}"
+        else:
+            try:
+                function["arguments"] = json.dumps(arguments, ensure_ascii=False, default=str)
+            except (TypeError, ValueError):
+                function["arguments"] = "{}"
+    return tool_calls
+
+
+__all__ = ["to_plain", "assistant_message_to_dict", "sanitize_tool_call_arguments"]

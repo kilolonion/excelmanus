@@ -8,6 +8,8 @@
 
 from __future__ import annotations
 
+from excelmanus.api_app_state import get_runtime as api_runtime
+
 from dataclasses import dataclass, field
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -227,9 +229,9 @@ class TestProbeAllCodexOAuth:
         mock_session_manager.database = None
         mock_session_manager.broadcast_model_capabilities = AsyncMock()
 
-        with patch("excelmanus.api_app_state._config", mock_config), \
-             patch("excelmanus.api_app_state._config_store", mock_config_store), \
-             patch("excelmanus.api_app_state._session_manager", mock_session_manager), \
+        with patch.object(api_runtime(), "config", mock_config), \
+             patch.object(api_runtime(), "config_store", mock_config_store), \
+             patch.object(api_runtime(), "session_manager", mock_session_manager), \
              patch("excelmanus.model_probe.run_full_probe", new_callable=AsyncMock) as mock_probe:
             mock_caps = MagicMock()
             mock_caps.to_dict.return_value = {"supports_tool_calling": True}
@@ -255,8 +257,8 @@ class TestConnectionCodexOAuth:
     async def test_codex_connection_returns_oauth_note(self):
         request = self._make_request({"model": "openai-codex/gpt-5.1-codex"})
         mock_config = MagicMock()
-        with patch("excelmanus.api_app_state._config", mock_config), \
-             patch("excelmanus.api_app_state._config_store", None):
+        with patch.object(api_runtime(), "config", mock_config), \
+             patch.object(api_runtime(), "config_store", None):
             from excelmanus.api import test_model_connection
             response = await test_model_connection(request)
             import json

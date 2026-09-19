@@ -226,3 +226,72 @@ async def test_gemini_provider_maps_required_none_and_forced_tool_choice() -> No
             "allowedFunctionNames": ["ask_user"],
         }
     }
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_provider_forwards_prompt_cache_key() -> None:
+    """主循环设置的 prompt_cache_key 必须进入 /responses 请求体。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    captured_body: dict[str, Any] = {}
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
+        captured_body.clear()
+        captured_body.update(json)
+        response = _FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}',
+                "data: [DONE]",
+            ],
+        )
+        return _FakeStreamContext(response)
+
+    client._http.stream = _fake_stream
+    try:
+        await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt_cache_key="em_session",
+        )
+    finally:
+        await client.close()
+
+    assert captured_body["prompt_cache_key"] == "em_session"
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_stream_keeps_prompt_cache_key() -> None:
+    """流式 Responses 路径同样透传 prompt_cache_key（首次出网不剥离）。"""
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    captured_bodies: list[dict[str, Any]] = []
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
+        captured_bodies.append(dict(json))
+        response = _FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.output_text.delta","delta":"ok"}',
+                'data: {"type":"response.completed","response":{"output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}',
+                "data: [DONE]",
+            ],
+        )
+        return _FakeStreamContext(response)
+
+    client._http.stream = _fake_stream
+    try:
+        result = await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "hi"}],
+            prompt_cache_key="em_stream_session",
+            stream=True,
+        )
+        if hasattr(result, "__aiter__"):
+            async for _delta in result:
+                pass
+    finally:
+        await client.close()
+
+    assert captured_bodies
+    assert all(body["prompt_cache_key"] == "em_stream_session" for body in captured_bodies)

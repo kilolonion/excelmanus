@@ -12,8 +12,8 @@ import {
 } from "lucide-react";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
-import { submitApproval, abortChat } from "@/lib/api";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { submitApproval } from "@/lib/api";
+import { useCallback, useMemo, useRef, useState } from "react";
 import {
   OverlayCard,
   OverlayCardAction,
@@ -34,6 +34,46 @@ const ACTION_LABELS: Record<string, { ing: string; done: string; idle: string }>
   fullaccess: { idle: "允许本会话全部操作", ing: "授权中…", done: "已全部允许" },
 };
 
+function isApprovalGoneError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  return /不存在或已处理|already.?resolv/i.test(msg);
+}
+
+function markLastPendingToolRunning() {
+  const chat = useChatStore.getState();
+  for (let i = chat.messages.length - 1; i >= 0; i--) {
+    const message = chat.messages[i];
+    if (message.role !== "assistant") continue;
+    for (let j = message.blocks.length - 1; j >= 0; j--) {
+      const block = message.blocks[j];
+      if (block.type === "tool_call" && block.status === "pending") {
+        chat.updateToolCallBlock(message.id, block.toolCallId ?? null, (current) => {
+          if (current.type === "tool_call" && current.status === "pending") {
+            return { ...current, status: "running" as const };
+          }
+          return current;
+        });
+        return;
+      }
+    }
+    break;
+  }
+}
+
+function finishApprovalLocally(
+  approvalId: string,
+  sessionId: string | null,
+  opts?: { executing?: boolean },
+) {
+  useChatStore.getState().dismissApproval(approvalId);
+  if (sessionId) {
+    useSessionStore.getState().patchSession(sessionId, { pendingApproval: false });
+  }
+  if (opts?.executing) {
+    markLastPendingToolRunning();
+  }
+}
+
 export function ApprovalModal() {
   const pendingApproval = useChatStore((s) => s.pendingApproval);
   if (!pendingApproval) return null;
@@ -42,14 +82,13 @@ export function ApprovalModal() {
 
 function ApprovalModalInner() {
   const pendingApproval = useChatStore((s) => s.pendingApproval);
-  const dismissApproval = useChatStore((s) => s.dismissApproval);
   const messages = useChatStore((s) => s.messages);
   const [showDetails, setShowDetails] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const [phase, setPhase] = useState<SubmitPhase>("idle");
   const [chosenAction, setChosenAction] = useState<string | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
-  const autoDismissTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const submittingRef = useRef(false);
 
   const approvalHistory = useMemo(() => {
     if (!pendingApproval) return [];
@@ -72,18 +111,18 @@ function ApprovalModalInner() {
     return history.slice(-3);
   }, [messages, pendingApproval]);
 
-  useEffect(() => {
-    return () => {
-      if (autoDismissTimer.current) clearTimeout(autoDismissTimer.current);
-    };
+  const closeLocally = useCallback((approvalId: string) => {
+    const sessionId = useSessionStore.getState().activeSessionId;
+    finishApprovalLocally(approvalId, sessionId);
   }, []);
 
   const handleAction = useCallback(async (action: "accept" | "reject" | "fullaccess") => {
-    if (!pendingApproval || phase === "submitting") return;
+    if (!pendingApproval || submittingRef.current) return;
     const approvalId = pendingApproval.id;
     const sessionId = useSessionStore.getState().activeSessionId;
     if (!sessionId || !approvalId) return;
 
+    submittingRef.current = true;
     setPhase("submitting");
     setChosenAction(action);
     setErrorMsg(null);
@@ -91,29 +130,42 @@ function ApprovalModalInner() {
     try {
       await submitApproval(sessionId, approvalId, action);
       setPhase("success");
-      autoDismissTimer.current = setTimeout(() => {
-        dismissApproval(approvalId);
-      }, 700);
+      finishApprovalLocally(approvalId, sessionId, {
+        executing: action === "accept" || action === "fullaccess",
+      });
     } catch (err) {
       console.error("[ApprovalModal] submitApproval failed:", err);
+      if (isApprovalGoneError(err)) {
+        finishApprovalLocally(approvalId, sessionId, {
+          executing: action === "accept" || action === "fullaccess",
+        });
+        return;
+      }
       setPhase("error");
       setErrorMsg(err instanceof Error ? err.message : "提交失败，请重试");
+      submittingRef.current = false;
     }
-  }, [pendingApproval, phase, dismissApproval]);
+  }, [pendingApproval]);
 
   const handleDismiss = useCallback(async () => {
-    if (!pendingApproval || phase === "submitting") return;
+    if (!pendingApproval || submittingRef.current || phase === "success") return;
     const sid = useSessionStore.getState().activeSessionId;
     const approvalId = pendingApproval.id;
+    if (phase === "error") {
+      closeLocally(approvalId);
+      return;
+    }
     if (sid && approvalId) {
       try {
         await submitApproval(sid, approvalId, "reject");
-      } catch {
-        abortChat(sid).catch(() => {});
+      } catch (err) {
+        if (!isApprovalGoneError(err)) {
+          console.error("[ApprovalModal] reject on dismiss failed:", err);
+        }
       }
     }
-    dismissApproval(approvalId);
-  }, [pendingApproval, phase, dismissApproval]);
+    closeLocally(approvalId);
+  }, [pendingApproval, phase, closeLocally]);
 
   if (!pendingApproval) return null;
 
@@ -125,9 +177,10 @@ function ApprovalModalInner() {
   const acceptIdle = writeTool ? "允许本次写入" : "允许本次操作";
   const isBusy = phase === "submitting" || phase === "success";
   const acceptMeta = ACTION_LABELS.accept;
+  const canDismiss = phase === "idle" || phase === "error";
 
   const preventWhileBusy = (e: Event) => {
-    e.preventDefault();
+    if (!canDismiss) e.preventDefault();
   };
 
   const primaryLabel =
@@ -143,7 +196,7 @@ function ApprovalModalInner() {
     <OverlayCard
       open
       onOpenChange={(open) => {
-        if (!open) void handleDismiss();
+        if (!open && canDismiss) void handleDismiss();
       }}
       size="md"
       tone="warning"
@@ -157,6 +210,9 @@ function ApprovalModalInner() {
         title={copy.title}
         badge={writeTool ? <OverlayCardBadge>将修改文件</OverlayCardBadge> : undefined}
         description={copy.description}
+        onClose={canDismiss ? () => void handleDismiss() : undefined}
+        closeDisabled={!canDismiss}
+        closeTitle="关闭"
       />
 
       <OverlayCardBody>

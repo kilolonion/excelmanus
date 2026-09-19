@@ -83,6 +83,7 @@ export type AssistantBlock =
       result?: string;
       error?: string;
       iteration?: number;
+      parentCallId?: string;
     }
   | {
       type: "subagent";
@@ -94,6 +95,8 @@ export type AssistantBlock =
       summary?: string;
       conversationId?: string;
       success?: boolean;
+      stopReason?: string;
+      diagnostic?: string;
       tools: SubagentToolCall[];
     }
   | { type: "task_list"; items: TaskItem[] }

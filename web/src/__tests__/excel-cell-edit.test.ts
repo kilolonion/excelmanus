@@ -42,7 +42,7 @@ function mockDeps(writeImpl: (opts: unknown) => Promise<ExcelWriteResponse>) {
     getSessionId: () => "sess-active",
     getExpectedVersion: vi.fn(() => "sha256:current"),
     setContentVersion,
-    invalidateSnapshotCache: invalidate,
+    invalidateCaches: invalidate,
   };
   return { deps, setContentVersion, invalidate };
 }
@@ -136,20 +136,23 @@ describe("isExcelWriteConflict / persistExcelCellEdits", () => {
     }));
 
     const result = await persistExcelCellEdits(
-      { path: "./book.xlsx", sheet: "Sheet1", changes: [{ cell: "A1", value: 3 }] },
+      { path: "./book.xlsx", sheet: "Sheet1", changes: [{ cell: "A1", value: 3 }], workspaceKey: "id:ws-a" },
       deps,
     );
 
     expect(result).toEqual({ kind: "ok", contentVersion: "sha256:next" });
-    expect(deps.writeExcelCells).toHaveBeenCalledWith({
-      path: "./book.xlsx",
-      sheet: "Sheet1",
-      changes: [{ cell: "A1", value: 3, sheet: "Sheet1" }],
-      sessionId: "sess-active",
-      expectedVersion: "sha256:current",
-    });
-    expect(setContentVersion).toHaveBeenCalledWith("./book.xlsx", "sha256:next");
-    expect(invalidate).toHaveBeenCalledWith("./book.xlsx");
+    expect(deps.writeExcelCells).toHaveBeenCalledWith(
+      expect.objectContaining({
+        path: "./book.xlsx",
+        sheet: "Sheet1",
+        changes: [],
+        operations: [{ op: "set_values", sheet: "Sheet1", cells: [{ cell: "A1", value: 3, style: undefined }] }],
+        sessionId: "sess-active",
+        expectedVersion: "sha256:current",
+      }),
+    );
+    expect(setContentVersion).toHaveBeenCalledWith("./book.xlsx", "sha256:next", expect.anything());
+    expect(invalidate).toHaveBeenCalledWith({ workspaceKey: "id:ws-a", relative: "./book.xlsx" });
   });
 
   it("returns conflict on VERSION_CONFLICT and does not update version", async () => {
@@ -208,14 +211,14 @@ describe("enqueueExcelCellEdit", () => {
 
     expect(persist).toHaveBeenCalledTimes(1);
     expect(persist).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         path: "./book.xlsx",
         sheet: "Sheet1",
         changes: [
           { cell: "A1", value: 1, sheet: "Sheet1" },
           { cell: "B1", value: 2, sheet: "Sheet1" },
         ],
-      },
+      }),
       undefined,
     );
   });
@@ -230,14 +233,14 @@ describe("enqueueExcelCellEdit", () => {
 
     expect(persist).toHaveBeenCalledTimes(1);
     expect(persist).toHaveBeenCalledWith(
-      {
+      expect.objectContaining({
         path: "./book.xlsx",
         sheet: "Sheet1",
         changes: [
           { cell: "A1", value: "one", sheet: "Sheet1" },
           { cell: "A1", value: "two", sheet: "Sheet2" },
         ],
-      },
+      }),
       undefined,
     );
   });
@@ -286,7 +289,8 @@ describe("enqueueExcelCellEdit", () => {
     release();
     await Promise.all([first, second]);
     expect(persist).toHaveBeenCalledTimes(2);
-    expect(persist.mock.calls[1]?.[0]).toMatchObject({
+    const persistCalls = persist.mock.calls as unknown as Array<[unknown]>;
+    expect(persistCalls[1]?.[0]).toMatchObject({
       changes: [{ cell: "B1", value: 2 }],
     });
   });

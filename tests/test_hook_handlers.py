@@ -5,6 +5,7 @@ from __future__ import annotations
 import subprocess
 from unittest.mock import Mock
 
+import os
 import pytest
 
 import excelmanus.hooks.handlers as hook_handlers
@@ -42,6 +43,10 @@ def test_command_handler_respects_global_enabled_switch() -> None:
     assert "已禁用" in result.reason
 
 
+@pytest.mark.skipif(
+    os.name == "nt",
+    reason="单引号 shell 引用是 POSIX 语义，Windows cmd.exe 不剥单引号",
+)
 def test_command_handler_allowlist_allows_single_segment_command() -> None:
     config = _config(
         hooks_command_enabled=True,
@@ -164,7 +169,19 @@ def test_command_handler_executes_with_shell_false_and_split_args(
     assert called_kwargs["shell"] is False
 
 
-def test_command_handler_parses_non_json_as_additional_context() -> None:
+def test_command_handler_parses_non_json_as_additional_context(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        hook_handlers.subprocess,
+        "run",
+        Mock(return_value=subprocess.CompletedProcess(
+            args=["printf", "hello-world"],
+            returncode=0,
+            stdout="hello-world",
+            stderr="",
+        )),
+    )
     config = _config(
         hooks_command_enabled=True,
         hooks_command_allowlist=("printf",),

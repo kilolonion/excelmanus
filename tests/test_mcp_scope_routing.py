@@ -175,7 +175,6 @@ def test_mcp_guide_not_injected_into_system():
     engine._transient_hook_contexts = []
     engine.full_access_enabled = False
     engine.max_context_tokens = 100000
-    engine._effective_system_mode.return_value = "multi"
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine._current_chat_mode = "write"

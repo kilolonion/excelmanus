@@ -265,7 +265,16 @@ class TestHardBoundariesRemain:
             tc, tool_scope=["read_excel"], on_event=None, iteration=1,
         )
         assert result.success is False
-        assert "TOOL_NOT_ALLOWED" in (result.error or result.result or "")
+        # RC5：error 顶层是 error_code；failure_class/remediation 在结果 JSON。
+        assert result.error == "TOOL_NOT_ALLOWED"
+        payload = json.loads(result.result)
+        assert payload["status"] == "error"
+        assert payload["error_code"] == "TOOL_NOT_ALLOWED"
+        assert payload["failure_class"] == "permission_denied"
+        assert payload.get("tool") == "add_numbers"
+        assert result.structured is not None
+        assert result.structured.error is not None
+        assert result.structured.error.code == "TOOL_NOT_ALLOWED"
 
     @pytest.mark.asyncio
     async def test_cancelled_error_propagates(self) -> None:
@@ -332,27 +341,20 @@ class TestDelegateSubagentWritePropagation:
 
     @staticmethod
     def _make_outcome(*, success: bool, file_changes: list[str]):
-        from excelmanus.engine import DelegateSubagentOutcome
         from excelmanus.subagent.models import SubagentFileChange, SubagentResult
 
         structured = [
-            SubagentFileChange(path=p, tool_name="write_excel")
+            SubagentFileChange(path=p, tool_name="edit_spreadsheet")
             for p in file_changes
         ]
-        sub = SubagentResult(
-            success=success,
-            summary="test summary",
+        return SubagentResult(
+            stop_reason="completed" if success else "error",
+            output="test summary",
+            diagnostic=None if success else "test summary",
             subagent_name="subagent",
             permission_mode="default",
             conversation_id="conv_test",
             structured_changes=structured,
-        )
-        return DelegateSubagentOutcome(
-            reply="test reply",
-            success=success,
-            picked_agent="subagent",
-            task_text="test task",
-            subagent_result=sub,
         )
 
     @pytest.mark.asyncio
@@ -360,7 +362,7 @@ class TestDelegateSubagentWritePropagation:
         engine = _make_engine()
         engine._has_write_tool_call = False
         outcome = self._make_outcome(success=True, file_changes=["outputs/backups/test.xlsx"])
-        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+        with patch.object(engine, "_delegate_to_subagent", new=AsyncMock(return_value=outcome)):
             result = await engine._execute_tool_call(
                 self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
             )
@@ -372,7 +374,7 @@ class TestDelegateSubagentWritePropagation:
         engine = _make_engine()
         engine._has_write_tool_call = False
         outcome = self._make_outcome(success=True, file_changes=[])
-        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+        with patch.object(engine, "_delegate_to_subagent", new=AsyncMock(return_value=outcome)):
             await engine._execute_tool_call(
                 self._delegate_tc(agent="analyst"), tool_scope=None, on_event=None, iteration=1,
             )
@@ -383,7 +385,7 @@ class TestDelegateSubagentWritePropagation:
         engine = _make_engine()
         engine._has_write_tool_call = False
         outcome = self._make_outcome(success=False, file_changes=["outputs/backups/partial.xlsx"])
-        with patch.object(engine, "_delegate_to_subagent", return_value=outcome):
+        with patch.object(engine, "_delegate_to_subagent", new=AsyncMock(return_value=outcome)):
             await engine._execute_tool_call(
                 self._delegate_tc(), tool_scope=None, on_event=None, iteration=1,
             )
@@ -554,7 +556,7 @@ class TestRegistryRefreshOnRecordedWrite:
 
 
 class TestChatModeToolFiltering:
-    """read/plan 不再改 tools 数组；只读靠执行器拒绝写入。"""
+    """read 目录不含写工具与委派；plan 仍可见委派。"""
 
     def _tool_names(self, engine: AgentEngine, chat_mode: str) -> set[str]:
         from excelmanus.engine import _tool_access_from_chat_mode
@@ -567,13 +569,13 @@ class TestChatModeToolFiltering:
     def test_write_tools_visible_in_read_catalog(self) -> None:
         engine = _make_engine()
         names = self._tool_names(engine, "read")
-        assert "write_plan" in names
-        assert "exit_plan_mode" in names
+        assert "write_plan" not in names
+        assert "exit_plan_mode" not in names
 
-    def test_delegate_visible_in_read_catalog(self) -> None:
+    def test_delegate_hidden_in_read_catalog(self) -> None:
         engine = _make_engine()
         names = self._tool_names(engine, "read")
-        assert "delegate" in names
+        assert "delegate" not in names
 
     def test_read_safe_tools_present(self) -> None:
         engine = _make_engine()
@@ -597,12 +599,14 @@ class TestChatModeToolFiltering:
         engine = _make_engine()
         write_names = self._tool_names(engine, "write")
         plan_names = self._tool_names(engine, "plan")
-        assert write_names == plan_names
         assert "write_plan" in plan_names
+        assert "write_plan" not in write_names
         assert "delegate" in plan_names
 
-    def test_read_catalog_matches_write(self) -> None:
+    def test_read_catalog_hides_delegate_vs_write(self) -> None:
         engine = _make_engine()
         write_names = self._tool_names(engine, "write")
         read_names = self._tool_names(engine, "read")
-        assert write_names == read_names
+        assert "delegate" in write_names
+        assert "delegate" not in read_names
+        assert write_names != read_names

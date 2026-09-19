@@ -9,7 +9,7 @@
 Helper（`python -m excelmanus.upgrade`）顺序：
 
 1. 按 `$EXCELMANUS_HOME/runtime.json` 杀掉 `start.sh` / `start.ps1` 进程组
-2. 备份 `$EXCELMANUS_HOME`（数据库、`config.env`、`data/`、`memory/` 等）到 `$EXCELMANUS_HOME/backups/`
+2. 备份 `$EXCELMANUS_HOME`（数据库、`data/`、`memory/` 等）到 `$EXCELMANUS_HOME/backups/`
 3. `git fetch` + **fast-forward only**（落后当前分支的提交即可更新；冲突则失败并保留备份，**禁止**静默 `reset --hard`）
 4. 安装依赖，必要时 `npm ci` / `npm run build`
 5. `exec` 回 start 脚本
@@ -21,6 +21,8 @@ CLI：`./deploy/update.sh`（服务在跑则拒绝）。配置保存仍走 `rest
 破坏性接口（升级 / 恢复 / 远程部署）仅接受 **loopback**。
 
 落后远程若干 commit 即视为有更新，**不要求** `pyproject.toml` 版本号变大。
+
+> 工作区历史迁移：升级后首次打开工作区会把旧 `outputs/backups` 一次性导入 `.excelmanus/revisions/`，marker 为 `.excelmanus/migrations/overlay-backups.json`。需要重跑时执行 `python -m excelmanus.workspace.migrate <workspace> --force`。
 
 ## 服务器（server）
 

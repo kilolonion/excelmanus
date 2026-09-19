@@ -210,10 +210,7 @@ class SkillpackLoader:
             return {}
 
         loaded: dict[str, Skillpack] = {}
-        skill_files = sorted(
-            root_dir.rglob("SKILL.md"),
-            key=lambda p: str(p.relative_to(root_dir)).lower(),
-        )
+        skill_files = self._list_skill_files(root_dir)
         for skill_md in skill_files:
             skill_dir = skill_md.parent
             try:
@@ -227,6 +224,24 @@ class SkillpackLoader:
                 continue
             loaded[skillpack.name] = skillpack
         return loaded
+
+    @staticmethod
+    def _list_skill_files(root_dir: Path) -> list[Path]:
+        """列出目录树内全部 SKILL.md，忽略无法访问的子树。
+
+        用户目录（~/.claude 等）里可能存在指向不存在目标的符号链接，
+        Windows 上 pathlib.rglob 会对这类条目直接抛 FileNotFoundError，
+        导致整个发现扫描崩溃；os.walk + onerror 跳过即可。
+        """
+        import os
+
+        found: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(
+            root_dir, onerror=lambda _exc: None, followlinks=False,
+        ):
+            if "SKILL.md" in filenames:
+                found.append(Path(dirpath) / "SKILL.md")
+        return sorted(found, key=lambda p: p.relative_to(root_dir).as_posix().lower())
 
     def _parse_skillpack_file(
         self,
@@ -267,7 +282,7 @@ class SkillpackLoader:
             raise SkillpackValidationError(
                 "frontmatter 字段 'agent' 已移除。"
                 "请改为常规技能，并在执行阶段显式调用 "
-                "`delegate_to_subagent(agent_name=...)`。"
+                "`delegate(agent_name=...)`。"
             )
         if context != "normal":
             raise SkillpackValidationError(
@@ -599,7 +614,7 @@ class SkillpackLoader:
             raise SkillpackValidationError(
                 "frontmatter 字段 'context: fork' 已移除。"
                 "请改为常规技能，并在需要时显式调用 "
-                "`delegate_to_subagent(agent_name=...)`。"
+                "`delegate(agent_name=...)`。"
             )
         raise SkillpackValidationError(
             f"frontmatter 字段 '{key}' 仅支持 normal"

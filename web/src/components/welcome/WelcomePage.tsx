@@ -12,7 +12,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { duration } from "@/lib/sidebar-motion";
-import { isImageFile } from "@/components/chat/chat-input-constants";
+import { isImageFile } from "@/lib/file-kind";
 
 const smoothEase: [number, number, number, number] = [0.4, 0, 0.2, 1];
 

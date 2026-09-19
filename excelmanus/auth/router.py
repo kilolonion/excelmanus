@@ -38,7 +38,8 @@ def _auto_add_codex_default_model(request: Request) -> None:
 
     仅写入全局 model_profiles（config_store），不影响用户私有 Codex 动态模型列表。
     """
-    config_store = getattr(request.app.state, "config_store", None)
+    from excelmanus.api_app_state import get_config_store
+    config_store = get_config_store()
     if config_store is None:
         return
     try:

@@ -26,7 +26,7 @@ const HINTS: HintDef[] = [
   {
     anchor: "[data-coach-id='coach-settings-profiles']",
     tab: "model",
-    text: "可创建多个模型配置，一键切换",
+    text: "先在「供应商」添加提供商，再到「模型配置」为任务选模型",
     variant: "tip",
     placement: "right",
   },

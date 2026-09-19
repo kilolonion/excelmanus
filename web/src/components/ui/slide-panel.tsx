@@ -12,11 +12,13 @@ interface SlidePanelProps {
   title: string;
   icon?: React.ReactNode;
   children: React.ReactNode;
+  /** Extra controls between the title and the close button. */
+  headerExtra?: React.ReactNode;
   /** Panel width on desktop, default 520px */
   width?: number;
 }
 
-export function SlidePanel({ open, onClose, title, icon, children, width = 520 }: SlidePanelProps) {
+export function SlidePanel({ open, onClose, title, icon, headerExtra, children, width = 520 }: SlidePanelProps) {
   const isMobile = useIsMobile();
 
   // Escape key to close
@@ -73,7 +75,8 @@ export function SlidePanel({ open, onClose, title, icon, children, width = 520 }
                   {icon}
                 </div>
               )}
-              <h2 className="text-base font-bold tracking-tight flex-1">{title}</h2>
+              <h2 className="text-base font-bold tracking-tight min-w-0 flex-1 truncate">{title}</h2>
+              {headerExtra}
               <Button
                 variant="ghost"
                 size="icon"

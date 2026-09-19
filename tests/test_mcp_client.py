@@ -181,6 +181,22 @@ class _FailingExitStack:
         raise self._exc
 
 
+class _TaskBoundAsyncCM(_FakeAsyncCM):
+    """记录异步上下文是否由同一 task 进入和退出。"""
+
+    def __init__(self):
+        super().__init__()
+        self.enter_task = None
+        self.exit_task = None
+
+    async def __aenter__(self):
+        self.enter_task = asyncio.current_task()
+        return await super().__aenter__()
+
+    async def __aexit__(self, *args):
+        self.exit_task = asyncio.current_task()
+
+
 # ── 未连接时调用 ──────────────────────────────────────────────────
 
 
@@ -246,6 +262,24 @@ class TestCloseSafety:
         client._exit_stack = _FailingExitStack(asyncio.CancelledError())
         await client.close()
         assert client.is_connected is False
+
+    @pytest.mark.asyncio
+    async def test_connection_context_exits_in_owner_task(self):
+        """连接与关闭由不同调用 task 发起时，上下文仍由 owner task 退出。"""
+        transport = _TaskBoundAsyncCM()
+        session = _make_mock_session()
+        client = MCPClientWrapper(_stdio_config())
+        with (
+            patch("excelmanus.mcp.client.stdio_client", return_value=transport),
+            patch(
+                "excelmanus.mcp.client.ClientSession",
+                return_value=_FakeSessionCM(session),
+            ),
+        ):
+            await asyncio.create_task(client.connect())
+            await client.close()
+
+        assert transport.enter_task is transport.exit_task
 
     def test_bind_managed_pids_normalizes_values(self):
         """bind_managed_pids() 应过滤无效 PID 并返回副本。"""
@@ -532,10 +566,9 @@ class TestDiscoverTools:
         ):
             await client.connect()
 
-        with patch(
-            "excelmanus.mcp.client.time.monotonic",
-            side_effect=[100.0, 103.0, 120.0],
-        ):
+        fake_clock = MagicMock()
+        fake_clock.monotonic.side_effect = [100.0, 103.0, 120.0]
+        with patch("excelmanus.mcp.client.time", fake_clock):
             first = await client.discover_tools(cache_ttl_seconds=10)
             second = await client.discover_tools(cache_ttl_seconds=10)
             third = await client.discover_tools(cache_ttl_seconds=10)
@@ -611,7 +644,12 @@ class TestSSEConnect:
             ),
         ):
             await client.connect()
-            mock_sse.assert_called_once_with(config.url, headers=None)
+            mock_sse.assert_called_once_with(
+                config.url,
+                headers=None,
+                timeout=config.timeout,
+                sse_read_timeout=config.timeout * 10,
+            )
 
         assert client.is_connected is True
         await client.close()

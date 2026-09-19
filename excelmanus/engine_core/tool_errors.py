@@ -81,9 +81,10 @@ _RETRYABLE_PATTERNS: list[re.Pattern[str]] = [
         r"remote(\s+end)?\s*(closed|disconnected)",
         r"stream\s*(ended|interrupted)",
         r"premature\s+end",
-        r"json\s*decode",
-        r"expecting\s+value",
-        r"invalid\s+json",
+        # 注意：JSON 解析错误（json decode / expecting value / invalid json）
+        # 不在此列——对工具错误而言它们意味着参数或数据非法，归为 retryable 会
+        # 让 dispatcher 空重试并提示"系统将自动重试"。LLM 响应的瞬时 JSON 错误
+        # 由 llm_caller.is_retryable_llm_error 单独判定（要求链上有传输异常）。
     ]
 ]
 
@@ -166,7 +167,8 @@ _RETRYABLE_EXCEPTION_TYPES: frozenset[str] = frozenset({
     "urllib3.exceptions.ProxyError",
     "http.client.IncompleteRead",
     "http.client.RemoteDisconnected",
-    "json.JSONDecodeError",
+    # json.JSONDecodeError 刻意不在此列：工具执行中的 JSON 错误是参数/数据问题，
+    # 属 permanent；LLM 流式响应的瞬时解析失败由 llm_caller 按异常链单独判断。
 })
 
 # 永久性错误的异常类型名

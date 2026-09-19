@@ -1,7 +1,7 @@
 """run_code 写入操作日志记录回归测试。
 
 验证 run_code 通过 CodePolicyHandler 执行后，write_operations_log 正确记录，
-确保 verifier playbook 能检测到 has_run_code 并注入针对性验证清单。
+确保写入日志能检测到 has_run_code 并注入针对性验证清单。
 """
 
 from __future__ import annotations

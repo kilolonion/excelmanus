@@ -58,9 +58,11 @@ def registry() -> ToolRegistry:
 @pytest.fixture(autouse=True)
 def disable_real_mcp_config(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """为会话测试注入空 MCP 配置，避免连接本机真实 MCP。"""
+    from excelmanus.settings_runtime import override_settings
+
     config_file = tmp_path / "mcp.empty.json"
     config_file.write_text('{"mcpServers": {}}', encoding="utf-8")
-    monkeypatch.setenv("EXCELMANUS_MCP_CONFIG", str(config_file))
+    override_settings({"EXCELMANUS_MCP_CONFIG": str(config_file)})
     monkeypatch.setattr(
         "excelmanus.engine.AgentEngine.initialize_mcp",
         AsyncMock(return_value=None),

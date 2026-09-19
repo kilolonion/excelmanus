@@ -56,7 +56,7 @@ def write_plan(
     filename = _generate_plan_filename()
     file_path = plans_dir / filename
     file_path.write_text(content, encoding="utf-8")
-    rel_path = str(file_path.relative_to(root))
+    rel_path = file_path.relative_to(root).as_posix()
 
     logger.info("计划文档已写入: %s", rel_path)
 
@@ -107,7 +107,7 @@ def exit_plan_mode(
         )
     text = (plan or "").strip()
     if not text:
-        return error_result("需要完整计划正文。", code="INVALID_ARGUMENT")
+        return error_result("需要完整计划正文。", code="INVALID_ARGS")
     if on_submitted is not None:
         on_submitted(text)
     return ToolResult.from_text("计划已呈交，等待用户批准后退出计划模式。")

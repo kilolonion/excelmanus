@@ -73,7 +73,7 @@ class TestRowAlignedMode:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["cells_different"] == 0
         assert result["summary"]["rows_added"] == 0
         assert result["summary"]["rows_deleted"] == 0
@@ -89,7 +89,7 @@ class TestRowAlignedMode:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["cells_different"] > 0
         assert result["summary"]["rows_modified"] == 1
         # sample_diffs 应包含差异
@@ -107,7 +107,7 @@ class TestRowAlignedMode:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["rows_added"] == 1
 
     def test_deleted_rows(self, tmp_path: Path):
@@ -119,7 +119,7 @@ class TestRowAlignedMode:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["rows_deleted"] == 1
 
     def test_column_difference(self, tmp_path: Path):
@@ -131,7 +131,7 @@ class TestRowAlignedMode:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert "班级" in result["summary"]["columns_added"]
         assert "等级" in result["summary"]["columns_deleted"]
         assert "完全相同" not in result.get("hint", "")
@@ -141,7 +141,7 @@ class TestRowAlignedMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": [["id", "value"], [1, 2]]})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": [["value", "id"], [2, 1]]})
         result = _compare_payload(compare_excel(str(fa), str(fb), alignment="position"))
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["cells_different"] > 0
 
     def test_added_column_hint_not_identical(self, tmp_path: Path):
@@ -169,7 +169,7 @@ class TestKeyColumnMode:
             str(fa), str(fb), alignment="key", key_columns=["ID"],
         ))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["rows_modified"] == 1
         assert result["summary"]["rows_added"] == 0
         assert result["summary"]["rows_deleted"] == 0
@@ -181,13 +181,52 @@ class TestKeyColumnMode:
         fa = _make_xlsx(tmp_path / "a.xlsx", {"Sheet1": rows_a})
         fb = _make_xlsx(tmp_path / "b.xlsx", {"Sheet1": rows_b})
 
-        result = _compare_payload(compare_excel(
+        result = compare_excel(
             str(fa), str(fb), alignment="key", key_columns=["ID"],
-        ))
+        )
+        payload = _compare_payload(result)
 
-        assert result["status"] == "ok"
-        assert result["summary"]["rows_added"] == 1    # ID=99
-        assert result["summary"]["rows_deleted"] == 1   # ID=10
+        assert payload["status"] == "success"
+        assert payload["summary"]["rows_added"] == 1    # ID=99
+        assert payload["summary"]["rows_deleted"] == 1   # ID=10
+        assert payload["unmatched_in_a"] == ["10"]
+        assert payload["unmatched_in_b"] == ["99"]
+        assert "仅 A：10" in result.model_text
+        assert "仅 B：99" in result.model_text
+        assert "完整 diff" not in result.model_text
+
+    def test_key_match_projects_sku_unmatched_with_title_row(self, tmp_path: Path):
+        """标题行 + SKU 主键：正文必须点名增删键，不能只报行数。"""
+        v1 = [
+            ["库存快照 盘点前", None, None],
+            ["SKU", "品名", "数量"],
+            ["SKU-A01", "鼠标", 100],
+            ["SKU-C03", "耳机", 40],
+        ]
+        v2 = [
+            ["库存快照 盘点后", None, None],
+            ["SKU", "品名", "数量"],
+            ["SKU-A01", "鼠标", 90],
+            ["SKU-B0", "键盘", 2],
+            ["SKU-E05", "垫腕", 10],
+        ]
+        fa = _make_xlsx(tmp_path / "inventory_v1.xlsx", {"库存": v1})
+        fb = _make_xlsx(tmp_path / "inventory_v2.xlsx", {"库存": v2})
+        result = compare_excel(
+            str(fa), str(fb), sheet_a="库存", sheet_b="库存",
+            alignment="key", key_columns=["SKU"],
+        )
+        payload = _compare_payload(result)
+        assert payload["status"] == "success"
+        assert "SKU-C03" in payload["unmatched_in_a"]
+        assert "SKU-B0" in payload["unmatched_in_b"]
+        assert "SKU-E05" in payload["unmatched_in_b"]
+        assert "仅 A：SKU-C03" in result.model_text
+        assert "SKU-E05" in result.model_text
+        assert result.ui_meta.diff is not None
+        ui_keys = {str(item.get("key") or item.get("cell")) for item in result.ui_meta.diff.get("sample_diffs") or []}
+        assert "SKU-C03" in ui_keys
+        assert "SKU-E05" in ui_keys
 
     def test_invalid_key_is_rejected(self, tmp_path: Path):
         """不存在的关键列应报错，而不是静默回退。"""
@@ -200,7 +239,7 @@ class TestKeyColumnMode:
             str(fa), str(fb), alignment="key", key_columns=["不存在的列"],
         ))
 
-        assert result.get("code") == "INVALID_ARGS" or "key_columns" in str(result.get("error", ""))
+        assert result.get("error_code") == "NOT_FOUND" or "key_columns" in str(result.get("message", ""))
 
 
 # ── 跨 Sheet 对比 ────────────────────────────────────────
@@ -222,7 +261,7 @@ class TestCrossSheet:
             str(fp), str(fp), sheet_a="原始", sheet_b="修改后",
         ))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["diff_mode"] == "cross_sheet"
         assert result["summary"]["cells_different"] > 0
 
@@ -249,7 +288,7 @@ class TestEdgeCases:
             str(tmp_path / "不存在.xlsx"),
             str(tmp_path / "也不存在.xlsx"),
         ))
-        assert "error" in result or "not_found" in json.dumps(result, ensure_ascii=False).lower() or "不存在" in json.dumps(result, ensure_ascii=False)
+        assert result.get("status") == "error" or "not_found" in json.dumps(result, ensure_ascii=False).lower() or "不存在" in json.dumps(result, ensure_ascii=False)
 
     def test_max_diffs_truncation(self, tmp_path: Path):
         """超过 max_diffs 应截断。"""
@@ -260,7 +299,7 @@ class TestEdgeCases:
 
         result = _compare_payload(compare_excel(str(fa), str(fb), max_diffs=5))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["truncated"] is True
         assert len(result["sample_diffs"]) <= 10  # sample_diffs 最多 10 个
 
@@ -271,7 +310,7 @@ class TestEdgeCases:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["cells_different"] == 0
 
     def test_sheets_only_in_one_file(self, tmp_path: Path):
@@ -288,7 +327,7 @@ class TestEdgeCases:
 
         result = _compare_payload(compare_excel(str(fa), str(fb)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert "仅A有" in result["summary"]["sheets_only_in_a"]
         assert "仅B有" in result["summary"]["sheets_only_in_b"]
 
@@ -301,7 +340,7 @@ class TestEdgeCases:
 
         result = _compare_payload(compare_excel(str(csv_a), str(csv_b)))
 
-        assert result["status"] == "ok"
+        assert result["status"] == "success"
         assert result["summary"]["cells_different"] > 0
 
 

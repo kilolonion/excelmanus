@@ -10,8 +10,6 @@ from __future__ import annotations
 import json
 import sqlite3
 
-import numpy as np
-
 # ── SessionSummaryStore 测试 ──────────────────────────────────
 
 
@@ -32,7 +30,6 @@ def _make_memory_db():
         files_involved  TEXT DEFAULT '[]',
         outcome         TEXT DEFAULT '',
         unfinished      TEXT DEFAULT '',
-        embedding       BLOB,
         token_count     INTEGER DEFAULT 0,
         created_at      TEXT NOT NULL,
         updated_at      TEXT NOT NULL
@@ -164,24 +161,6 @@ class TestSessionSummaryStore:
         assert store.count() == 2
         assert store.count(user_id="u") == 2
         assert store.count(user_id="other") == 0
-
-    def test_embedding_roundtrip(self):
-        from excelmanus.stores.session_summary_store import SessionSummary, SessionSummaryStore
-        adapter = _make_memory_db()
-        store = SessionSummaryStore(adapter)
-
-        vec = np.array([0.1, 0.2, 0.3], dtype=np.float32)
-        s = SessionSummary(
-            session_id="s1",
-            summary_text="text",
-            embedding=vec,
-        )
-        store.upsert(s)
-
-        loaded = store.get_by_session("s1")
-        assert loaded is not None
-        assert loaded.embedding is not None
-        np.testing.assert_array_almost_equal(loaded.embedding, vec)
 
 
 # ── SessionSummarizer 解析测试 ────────────────────────────────

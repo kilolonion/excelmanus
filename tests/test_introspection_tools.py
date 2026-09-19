@@ -58,8 +58,25 @@ def registry() -> ToolRegistry:
             )
         )
     register_introspection_tools(reg)
+
+    class _StubCatalog:
+        """最小调用级目录：handlers 只信 _call_catalog，不回退 registry 全表。"""
+
+        mode = "write"
+
+        def introspection_source(self) -> dict:
+            return dict(reg._tools)
+
+        def tool_index_text(self) -> str:
+            return ""
+
+        def digest(self) -> str:
+            return "stub"
+
+    _catalog_token = mod._call_catalog.set(_StubCatalog())
     yield reg
-    # 清理模块级 _registry
+    # 清理调用级 catalog 与模块级 _registry
+    mod._call_catalog.reset(_catalog_token)
     mod._registry = None
 
 
@@ -230,8 +247,14 @@ class TestCanIDo:
     def test_matching_query(self, registry: ToolRegistry) -> None:
         """使用工具描述关键词应匹配到对应工具。"""
         result = introspect_capability("can_i_do", "读取 Excel 数据")
-        assert "支持" in result
+        assert "可见工具可做" in result
         assert "inspect_spreadsheet" in result
+
+    def test_product_diff_term_routes_to_compare(self, registry: ToolRegistry) -> None:
+        """产品术语 diff 不应依赖短描述的词袋命中。"""
+        result = introspect_capability("can_i_do", "diff")
+        assert "可见工具可做" in result
+        assert "compare_spreadsheets" in result
 
     def test_self_match(self, registry: ToolRegistry) -> None:
         """使用工具完整描述作为查询应匹配到该工具。"""
@@ -240,9 +263,9 @@ class TestCanIDo:
         assert "inspect_spreadsheet" in result
 
     def test_no_match(self, registry: ToolRegistry) -> None:
-        """无匹配时应返回"无直接工具支持"。"""
+        """无匹配时应返回当前不可用。"""
         result = introspect_capability("can_i_do", "量子计算模拟")
-        assert "无直接工具支持" in result
+        assert "当前不可用" in result
 
     def test_max_results_per_layer(self, registry: ToolRegistry) -> None:
         """每层匹配结果不应超过 5 个。"""
@@ -263,13 +286,13 @@ class TestCanIDo:
     def test_extended_capabilities_match(self, registry: ToolRegistry) -> None:
         """can_i_do 应能匹配扩展能力（run_code + Python 库）。"""
         result = introspect_capability("can_i_do", "数据透视表 pivot")
-        assert "支持" in result
+        assert "可见工具可做" in result
         assert "扩展能力" in result or "pivot" in result.lower()
 
     def test_subagent_match(self, registry: ToolRegistry) -> None:
         """can_i_do 应能匹配子代理能力。"""
         result = introspect_capability("can_i_do", "只读探索 文件结构分析")
-        assert "支持" in result
+        assert "可见工具可做" in result or "当前不可用" in result
 
 
 # ── related_tools 测试 ────────────────────────────────────
@@ -371,6 +394,66 @@ class TestNoSideEffects:
             result = introspect_capability(qt, "test_query")
             assert isinstance(result, str)
             assert len(result) > 0
+
+
+class TestFreezeFromSchema:
+    def test_freeze_query_routes_to_format_kind(self) -> None:
+        import excelmanus.tools.introspection_tools as mod
+        from excelmanus.tools.catalog import derive_effective_catalog
+
+        reg = ToolRegistry()
+        format_tool = ToolDef(
+            name="format_spreadsheet",
+            description="改外观含冻结",
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "file_path": {"type": "string"},
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "kind": {
+                                    "type": "string",
+                                    "enum": ["format", "merge", "unmerge", "size", "freeze"],
+                                },
+                                "freeze_panes": {"type": "string"},
+                            },
+                        },
+                    },
+                },
+                "required": ["file_path", "operations"],
+            },
+            func=lambda: None,
+        )
+        reg.register_tool(format_tool)
+        catalog = derive_effective_catalog(tools=reg.get_all_tools(), mode="write")
+        token = mod._call_catalog.set(catalog)
+        try:
+            result = introspect_capability("can_i_do", "冻结首行")
+            assert "可见工具可做" in result
+            assert "kind=freeze" in result
+            assert "已有文件不可用" not in result
+            assert "支持" not in result.split("能力判断:", 1)[-1][:20]
+            detail = introspect_capability("tool_detail", "format_spreadsheet")
+            assert "operations.kind" in detail
+            assert "Excel A1 引用语法" not in detail
+            size_detail = introspect_capability(
+                "tool_detail", "format_spreadsheet.operations.size",
+            )
+            assert "字段不存在" not in size_detail
+            assert "columns" in size_detail or "auto_fit" in size_detail
+            freeze_ops = introspect_capability(
+                "tool_detail", "format_spreadsheet.operations.freeze",
+            )
+            freeze_top = introspect_capability("tool_detail", "format_spreadsheet.freeze")
+            for freeze_detail in (freeze_ops, freeze_top):
+                assert "字段不存在" not in freeze_detail
+                assert "freeze_panes" in freeze_detail
+        finally:
+            mod._call_catalog.reset(token)
+
 
 
 # ── ToolRegistry 未初始化测试 ─────────────────────────────

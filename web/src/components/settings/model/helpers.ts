@@ -1,5 +1,26 @@
-import { PROVIDER_COLORS as PROVIDER_BRAND_COLOR } from "@/lib/provider-brand";
+import { formatModelIdForDisplay } from "@/lib/model-display";
+import { getProviderDisplayName, PROVIDER_COLORS as PROVIDER_BRAND_COLOR } from "@/lib/provider-brand";
 import type { ModelCapabilities, ProfileEntry } from "./types";
+
+export const EMPTY_PROFILE_DRAFT: ProfileEntry = {
+  name: "",
+  model: "",
+  api_key: "",
+  base_url: "",
+  description: "",
+  protocol: "auto",
+  thinking_mode: "auto",
+  model_family: "",
+  custom_extra_body: "",
+  custom_extra_headers: "",
+};
+
+export interface ProviderGroup {
+  id: string;
+  label: string;
+  color: string;
+  profiles: ProfileEntry[];
+}
 
 export function withAlpha(hex: string, alphaHex: string): string {
   if (/^#[0-9a-fA-F]{6}$/.test(hex)) return `${hex}${alphaHex}`;
@@ -80,6 +101,161 @@ export function inferProfileProvider(profile: Pick<ProfileEntry, "model" | "base
 export function getProviderBrandColor(provider: string | null): string {
   if (!provider) return "#6b7280";
   return PROVIDER_BRAND_COLOR[provider] || "#6b7280";
+}
+
+export function isCodexProfile(profile: Pick<ProfileEntry, "model">): boolean {
+  return (profile.model || "").startsWith("openai-codex/");
+}
+
+export function isProfileConnected(profile: ProfileEntry): boolean {
+  return isCodexProfile(profile) || Boolean(profile.api_key);
+}
+
+const OFFICIAL_HOST_MARKERS: Record<string, string[]> = {
+  openai: ["api.openai.com"],
+  "openai-codex": ["api.openai.com"],
+  anthropic: ["api.anthropic.com"],
+  gemini: ["generativelanguage.googleapis.com"],
+  deepseek: ["api.deepseek.com"],
+  qwen: ["dashscope.aliyuncs.com"],
+  alibabacloud: ["alibabacloud.com", "aliyuncs.com"],
+  zhipu: ["open.bigmodel.cn"],
+  openrouter: ["openrouter.ai"],
+  moonshot: ["api.moonshot.cn", "api.moonshot.ai"],
+  minimax: ["api.minimax.io", "api.minimax.chat"],
+  xai: ["api.x.ai"],
+  bytedance: ["volces.com", "volcengine.com"],
+  mistral: ["api.mistral.ai"],
+  meta: ["api.llama.com"],
+  perplexity: ["api.perplexity.ai"],
+  baidu: ["qianfan.baidubce.com", "baidubce.com"],
+  tencent: ["tencentcloudapi.com"],
+  siliconflow: ["api.siliconflow.cn", "api.siliconflow.com"],
+  huggingface: ["api-inference.huggingface.co", "router.huggingface.co"],
+  nvidia: ["integrate.api.nvidia.com"],
+  huawei: ["huaweicloud.com"],
+};
+
+export function hostnameOf(url: string): string {
+  try {
+    return new URL(url).hostname.toLowerCase();
+  } catch {
+    return "";
+  }
+}
+
+export function isOfficialProviderEndpoint(baseUrl: string, providerId: string): boolean {
+  const host = hostnameOf(baseUrl);
+  if (!host) return false;
+  const markers = OFFICIAL_HOST_MARKERS[providerId];
+  if (!markers) return false;
+  return markers.some((marker) => host === marker || host.endsWith(`.${marker}`));
+}
+
+export function getProfileProviderId(profile: ProfileEntry): string {
+  if (isCodexProfile(profile)) return "openai-codex";
+  const inferred = inferProfileProvider(profile);
+  if (inferred && (!profile.base_url.trim() || isOfficialProviderEndpoint(profile.base_url, inferred))) {
+    return inferred;
+  }
+  const host = hostnameOf(profile.base_url);
+  if (host) return `custom:${host}`;
+  return `custom:${profile.name || "unnamed"}`;
+}
+
+export function getProviderGroupLabel(id: string, fallbackName?: string): string {
+  if (id.startsWith("custom:")) {
+    return fallbackName || id.slice("custom:".length);
+  }
+  return getProviderDisplayName(id);
+}
+
+export function groupProfilesByProvider(profiles: ProfileEntry[]): ProviderGroup[] {
+  const map = new Map<string, ProfileEntry[]>();
+  for (const profile of profiles) {
+    const id = getProfileProviderId(profile);
+    const list = map.get(id);
+    if (list) list.push(profile);
+    else map.set(id, [profile]);
+  }
+  return Array.from(map.entries()).map(([id, groupProfiles]) => ({
+    id,
+    label: getProviderGroupLabel(id, groupProfiles[0]?.name),
+    color: getProviderBrandColor(id.startsWith("custom:") ? null : id),
+    profiles: groupProfiles,
+  }));
+}
+
+export function formatProviderModelLabel(profile: ProfileEntry): string {
+  const providerId = getProfileProviderId(profile);
+  const providerLabel = getProviderGroupLabel(providerId, profile.name);
+  const model = formatModelIdForDisplay(profile.model) || profile.name;
+  return `${providerLabel} · ${model}`;
+}
+
+export function profileToDraft(profile: ProfileEntry): ProfileEntry {
+  return {
+    name: profile.name,
+    model: profile.model,
+    api_key: "",
+    base_url: profile.base_url,
+    description: profile.description,
+    protocol: profile.protocol || "auto",
+    thinking_mode: profile.thinking_mode || "auto",
+    model_family: profile.model_family || "",
+    custom_extra_body: profile.custom_extra_body || "",
+    custom_extra_headers: profile.custom_extra_headers || "",
+  };
+}
+
+export function findProfileByModelId(
+  profiles: ProfileEntry[],
+  modelId: string,
+): ProfileEntry | undefined {
+  return profiles.find((profile) => profile.model === modelId);
+}
+
+export function pickDefaultProfile(group: ProviderGroup, activeName?: string | null): ProfileEntry | undefined {
+  return group.profiles.find((profile) => profile.name === activeName) || group.profiles[0];
+}
+
+export function uniqueSiblingProfileName(modelId: string, existingNames: string[]): string {
+  const taken = new Set(existingNames);
+  const short = (modelId.split("/").pop() || modelId).trim();
+  const candidates = [short, modelId].filter(Boolean);
+  for (const candidate of candidates) {
+    if (!taken.has(candidate)) return candidate;
+  }
+  const base = short || "model";
+  let index = 2;
+  while (taken.has(`${base} ${index}`)) index += 1;
+  return `${base} ${index}`;
+}
+
+export function siblingDraftFromProfile(profile: ProfileEntry): ProfileEntry {
+  return {
+    name: "",
+    model: "",
+    api_key: "",
+    base_url: profile.base_url,
+    description: profile.description,
+    protocol: profile.protocol || "auto",
+    thinking_mode: profile.thinking_mode || "auto",
+    model_family: profile.model_family || "",
+    custom_extra_body: profile.custom_extra_body || "",
+    custom_extra_headers: profile.custom_extra_headers || "",
+  };
+}
+
+export function filterDetectedModels<T extends { id: string }>(models: T[], query: string): T[] {
+  const needle = query.trim().toLowerCase();
+  if (!needle) return models;
+  return models.filter((model) => model.id.toLowerCase().includes(needle));
+}
+
+export function filterModelPickerList<T extends { id: string }>(models: T[], inputValue: string): T[] {
+  if (models.some((model) => model.id === inputValue)) return models;
+  return filterDetectedModels(models, inputValue);
 }
 
 export function isMaskedApiKey(value: string): boolean {

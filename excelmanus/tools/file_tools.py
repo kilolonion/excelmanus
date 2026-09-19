@@ -7,18 +7,15 @@ from fnmatch import fnmatch
 from pathlib import Path
 from typing import Any
 
-from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, from_payload, ok_result
+from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta, error_result, from_payload, ok_result
 from excelmanus.logger import get_logger
 from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools.registry import ToolDef
 
 logger = get_logger("tools.file")
 
-# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
-
-_guard: FileAccessGuard | None = None
 _MAX_LIST_PAGE_SIZE = 500
 _MAX_TREE_NODES = 2000
 _MAX_OVERVIEW_HOTSPOTS = 10
@@ -32,28 +29,38 @@ _DEFAULT_EXCLUDE_PATTERNS = (
     "dist",
     "build",
     "__pycache__",
+    "*.em-lock",
+)
+_EMPTY_LISTING_NOTE = (
+    "可见文件为 0。默认会藏起 outputs 等噪音目录；隐藏项另计。"
+    "用户点名的表不在这里时停下请用户拖入，不要继续扫别的目录凑数。"
+)
+_MISSING_UPLOADS_MESSAGE = (
+    "工作区还没有 uploads，用户尚未把文件拖进对话。不要继续扫别的目录凑表。"
 )
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(".")
-    return _guard
+    return require_guard()
+
+
+def _attach_empty_listing_note(result: dict[str, Any]) -> dict[str, Any]:
+    """可见文件为 0 时写明：这不是「去翻别的目录」的信号。"""
+    total = int(result.get("total") or 0)
+    if total != 0:
+        return result
+    omitted = result.get("omitted") or {}
+    hidden = int(omitted.get("hidden") or 0)
+    ignored = int(omitted.get("ignored_by_pattern") or 0)
+    note = _EMPTY_LISTING_NOTE
+    if hidden or ignored:
+        note = f"{note} 本次另有 hidden={hidden}、ignored_by_pattern={ignored}。"
+    result["note"] = note
+    return result
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。
-
-    Args:
-        workspace_root: 工作目录根路径。
-    """
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 def _validate_pagination(offset: int, limit: int, *, max_limit: int = _MAX_LIST_PAGE_SIZE) -> str | None:
@@ -182,13 +189,11 @@ def list_directory(
     """
     effective_mode = _resolve_mode(mode, depth)
     if effective_mode is None:
-        return from_payload(
-            {"error": "mode 仅支持 auto、flat、tree、overview"},
-        )
+        return error_result("mode 仅支持 auto、flat、tree、overview", code="INVALID_ARGS")
 
     effective_offset, cursor_error = _resolve_offset(offset, cursor)
     if cursor_error is not None:
-        return from_payload({"error": cursor_error})
+        return error_result(cursor_error, code="INVALID_ARGS")
 
     exclude_patterns = _normalize_exclude_patterns(
         exclude,
@@ -199,9 +204,15 @@ def list_directory(
     safe_path = guard.resolve_and_validate(directory)
 
     if not safe_path.is_dir():
-        return from_payload(
-            {"error": f"路径 '{directory}' 不是一个有效的目录"},
-        )
+        code = "NOT_FOUND" if not safe_path.exists() else "INVALID_ARGS"
+        rel = directory.replace("\\", "/").strip("/")
+        if not safe_path.exists() and rel in {"uploads", "uploads/"}:
+            return error_result(
+                _MISSING_UPLOADS_MESSAGE,
+                code=code,
+                remediation="不要再 list。请用户把文件拖进对话。",
+            )
+        return error_result(f"路径 '{directory}' 不是一个有效的目录", code=code)
 
     if effective_mode == "flat":
         return _list_directory_flat(
@@ -224,11 +235,11 @@ def list_directory(
         )
 
     if max_nodes <= 0:
-        return from_payload({"error": "max_nodes 必须为正整数"})
+        return error_result("max_nodes 必须为正整数", code="INVALID_ARGS")
 
     paging_error = _validate_pagination(effective_offset, limit)
     if paging_error is not None:
-        return from_payload({"error": paging_error})
+        return error_result(paging_error, code="INVALID_ARGS")
 
     stats: dict[str, Any] = {
         "scanned_count": 0,
@@ -273,6 +284,7 @@ def list_directory(
         },
         "exclude_patterns": exclude_patterns,
     }
+    _attach_empty_listing_note(result)
     return from_payload(result)
 
 
@@ -287,7 +299,7 @@ def _list_directory_flat(
     """扁平分页模式（depth=0 时的原有行为）。"""
     paging_error = _validate_pagination(offset, limit)
     if paging_error is not None:
-        return from_payload({"error": paging_error})
+        return error_result(paging_error, code="INVALID_ARGS")
 
     entries: list[dict[str, str]] = []
     omitted = _new_omitted_stats()
@@ -313,16 +325,13 @@ def _list_directory_flat(
                 total_directories += 1
             entries.append(entry)
     except PermissionError:
-        return from_payload(
-            {"error": f"没有权限访问目录 '{directory}'"}
-        )
+        return error_result(f"没有权限访问目录 '{directory}'", code="PERMISSION_DENIED")
 
     total = len(entries)
     end = offset + limit
     paged_entries = entries[offset:end]
     has_more = end < total
-    return from_payload(
-        {
+    payload = {
             "directory": directory,
             "absolute_path": str(safe_path),
             "mode": "flat",
@@ -343,8 +352,9 @@ def _list_directory_flat(
             },
             "exclude_patterns": exclude_patterns,
             "entries": paged_entries,
-        },
-    )
+        }
+    _attach_empty_listing_note(payload)
+    return from_payload(payload)
 
 
 def _build_tree(
@@ -453,7 +463,7 @@ def _list_directory_overview(
 ) -> ToolResult:
     paging_error = _validate_pagination(offset, limit)
     if paging_error is not None:
-        return from_payload({"error": paging_error})
+        return error_result(paging_error, code="INVALID_ARGS")
 
     entries: list[dict[str, Any]] = []
     hotspots: list[dict[str, Any]] = []
@@ -467,9 +477,7 @@ def _list_directory_overview(
     try:
         items = sorted(safe_path.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))
     except PermissionError:
-        return from_payload(
-            {"error": f"没有权限访问目录 '{directory}'"},
-        )
+        return error_result(f"没有权限访问目录 '{directory}'", code="PERMISSION_DENIED")
 
     for item in items:
         scanned_count += 1
@@ -524,8 +532,7 @@ def _list_directory_overview(
         key=lambda row: (-int(row["direct_children"]), str(row["path"])),
     )[:_MAX_OVERVIEW_HOTSPOTS]
 
-    return from_payload(
-        {
+    payload = {
             "directory": directory,
             "absolute_path": str(safe_path),
             "mode": "overview",
@@ -549,8 +556,9 @@ def _list_directory_overview(
                 "scanned_count": scanned_count,
             },
             "exclude_patterns": exclude_patterns,
-        },
-    )
+        }
+    _attach_empty_listing_note(payload)
+    return from_payload(payload)
 
 
 
@@ -577,7 +585,7 @@ def get_file_info(file_path: str) -> ToolResult:
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.exists():
-        return from_payload({"error": f"路径 '{file_path}' 不存在"})
+        return error_result(f"路径 '{file_path}' 不存在", code="NOT_FOUND")
 
     stat = safe_path.stat()
     info: dict[str, Any] = {
@@ -618,15 +626,15 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
     safe_dir = guard.resolve_and_validate(directory)
 
     if not safe_dir.is_dir():
-        return from_payload(
-            {"error": f"路径 '{directory}' 不是一个有效的目录"},
-        )
+        return error_result(f"路径 '{directory}' 不是一个有效的目录", code="NOT_FOUND" if not safe_dir.exists() else "INVALID_ARGS")
 
     matches: list[dict[str, str]] = []
     try:
         for item in safe_dir.glob(pattern):
-            # 跳过隐藏文件/目录
+            # 跳过隐藏文件/目录与工作簿建议锁残留（<file>.em-lock 为内部工件）
             if any(part.startswith(".") for part in item.relative_to(safe_dir).parts):
+                continue
+            if item.name.endswith(".em-lock"):
                 continue
             # 安全校验：确保结果仍在工作区内
             try:
@@ -647,9 +655,7 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
             if len(matches) >= max_results:
                 break
     except PermissionError:
-        return from_payload(
-            {"error": f"没有权限访问目录 '{directory}'"},
-        )
+        return error_result(f"没有权限访问目录 '{directory}'", code="PERMISSION_DENIED")
 
     result = {
         "pattern": pattern,
@@ -662,26 +668,31 @@ def find_files(pattern: str = "*", directory: str = ".", max_results: int = 50) 
 
 
 def read_text_file(
-    file_path: str, encoding: str = "utf-8", max_lines: int = 500
+    file_path: str,
+    encoding: str = "utf-8",
+    max_lines: int = 500,
+    max_rows: int | None = None,
 ) -> ToolResult:
     """读取文本文件内容（CSV、TXT 等）。
 
     Args:
         file_path: 文件路径（相对于工作目录）。
         encoding: 文件编码，默认 utf-8。
-        max_lines: 最大读取行数，默认 500。
+        max_lines: 文本行数上限（规范名），默认 500。max_rows 是同义别名。
 
     Returns:
         JSON 格式的文件内容。
     """
+    if max_rows is not None:
+        max_lines = int(max_rows)
     guard = _get_guard()
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.is_file():
-        return from_payload(
-            {"error": f"路径 '{file_path}' 不是一个有效的文件"},
-        )
+        code = "NOT_FOUND" if not safe_path.exists() else "INVALID_ARGS"
+        return error_result(f"路径 '{file_path}' 不是一个有效的文件", code=code)
 
+    detected: str | None = None
     try:
         with open(safe_path, "r", encoding=encoding) as f:
             lines = []
@@ -693,9 +704,29 @@ def read_text_file(
                     truncated = True
                     break
     except UnicodeDecodeError:
-        return from_payload(
-            {"error": f"无法以 {encoding} 编码读取文件 '{file_path}'，可能是二进制文件"},
-        )
+        # 默认 utf-8 解码失败时按样本探测常见编码（gb18030 覆盖 GBK）；
+        # 显式指定的编码不越权改判，直接报错。
+        if encoding.lower().replace("_", "-") in {"utf-8", "utf8"}:
+            for candidate in ("gb18030", "utf-16"):
+                try:
+                    with open(safe_path, "r", encoding=candidate) as f:
+                        lines = []
+                        truncated = False
+                        for i, line in enumerate(f):
+                            if i < max_lines:
+                                lines.append(line.rstrip("\n"))
+                            else:
+                                truncated = True
+                                break
+                    detected = candidate
+                    break
+                except (UnicodeDecodeError, ValueError):
+                    continue
+        if detected is None:
+            return error_result(
+                f"无法以 {encoding} 编码读取文件 '{file_path}'，可能是二进制文件",
+                code="DECODE_ERROR",
+            )
 
     from excelmanus.workbook_commit import content_version_of_file, remember_content_version
 
@@ -705,8 +736,8 @@ def read_text_file(
     version = content_version_of_file(safe_path)
     remember_content_version(rel_path, version)
     result = {
-        "file": safe_path.name,
-        "encoding": encoding,
+        "file_path": rel_path,
+        "encoding": detected or encoding,
         "lines_read": total_lines,
         "truncated": truncated,
         "content": content_str,
@@ -744,11 +775,9 @@ def copy_file(source: str, destination: str) -> ToolResult:
     )
 
     if is_probe_path(destination):
-        return from_payload(
-            {
-                "error": probe_error_message(destination),
-                "code": PROBE_FILE_FORBIDDEN,
-            },
+        return error_result(
+            probe_error_message(destination),
+            code=PROBE_FILE_FORBIDDEN,
         )
 
     guard = _get_guard()
@@ -756,14 +785,10 @@ def copy_file(source: str, destination: str) -> ToolResult:
     dst_path = guard.resolve_and_validate(destination)
 
     if not src_path.is_file():
-        return from_payload(
-            {"error": f"源路径 '{source}' 不是一个有效的文件"},
-        )
+        return error_result(f"源路径 '{source}' 不是一个有效的文件", code="NOT_FOUND" if not src_path.exists() else "INVALID_ARGS")
 
     if dst_path.exists():
-        return from_payload(
-            {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
-        )
+        return error_result(f"目标路径 '{destination}' 已存在，拒绝覆盖", code="FILE_EXISTS")
 
     dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
     try:
@@ -811,14 +836,10 @@ def rename_file(
     dst_path = guard.resolve_and_validate(destination)
 
     if not src_path.is_file():
-        return from_payload(
-            {"error": f"源路径 '{source}' 不是一个有效的文件"},
-        )
+        return error_result(f"源路径 '{source}' 不是一个有效的文件", code="NOT_FOUND" if not src_path.exists() else "INVALID_ARGS")
 
     if dst_path.exists():
-        return from_payload(
-            {"error": f"目标路径 '{destination}' 已存在，拒绝覆盖"},
-        )
+        return error_result(f"目标路径 '{destination}' 已存在，拒绝覆盖", code="FILE_EXISTS")
 
     src_rel = str(src_path.relative_to(guard.workspace_root)).replace("\\", "/")
     dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
@@ -846,13 +867,15 @@ def rename_file(
 def delete_file(
     file_path: str,
     confirm: bool = False,
+    confirmed: bool | None = None,
+    ack: bool | None = None,
     expected_version: str | None = None,
 ) -> ToolResult:
     """安全删除文件（仅限文件，不删除目录）。
 
     Args:
         file_path: 要删除的文件路径（相对于工作目录）。
-        confirm: 是否确认删除，必须为 True 才执行删除。
+        confirm: 是否确认删除，必须为 True 才执行删除。confirmed / ack 是同义别名。
         expected_version: 本轮已读 content_version。
 
     Returns:
@@ -865,22 +888,22 @@ def delete_file(
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.exists():
-        return from_payload(
-            {"error": f"路径 '{file_path}' 不存在"},
-        )
+        return error_result(f"路径 '{file_path}' 不存在", code="NOT_FOUND")
 
     if safe_path.is_dir():
-        return from_payload(
-            {"error": f"路径 '{file_path}' 是目录，delete_file 仅允许删除文件"},
+        return error_result(
+            f"路径 '{file_path}' 是目录，delete_file 仅允许删除文件",
+            code="INVALID_ARGS",
         )
 
-    if not confirm:
+    accepted = bool(confirm) or bool(confirmed) or bool(ack)
+    if not accepted:
         stat = safe_path.stat()
         return from_payload(
             {
-                "status": "pending_confirmation",
-                "message": "请将 confirm 设为 true 以确认删除",
-                "file": file_path,
+                "status": "confirmation_required",
+                "message": "请将 confirm 设为 true 以确认删除（confirmed / ack 同义）",
+                "file_path": file_path,
                 "size": _format_size(stat.st_size),
                 "modified": datetime.fromtimestamp(
                     stat.st_mtime, tz=timezone.utc
@@ -951,19 +974,16 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="list_directory",
             description=(
-                "列出目录下的文件和子目录，支持扁平分页、递归树、overview 摘要模式。"
-                "适用场景：浏览工作区文件结构、确认文件是否存在、了解目录布局。"
-                "不适用：已知确切文件路径时直接操作，无需先浏览目录。"
-                "工作区特殊目录：uploads/（用户上传的附件）、outputs/（agent 产出物）。"
-                "文件历史在 .excelmanus/revisions/，不是用户目录。"
-                "浏览子目录时指定 directory 参数（如 directory=\"uploads\"）。"
+                "列出工作区内的文件和子目录。"
+                "用户要求查看或汇总工作区时使用；点名文件仍应直接对该相对路径操作。"
+                "桌面和绝对路径不可达。uploads/ 只读；文件历史在 .excelmanus/revisions/。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "directory": {
                         "type": "string",
-                        "description": "目标目录路径（相对于工作目录）",
+                        "description": "工作区相对路径，不要填桌面或绝对路径",
                         "default": ".",
                     },
                     "show_hidden": {
@@ -1045,10 +1065,14 @@ def get_tools() -> list[ToolDef]:
                     },
                     "max_lines": {
                         "type": "integer",
-                        "description": "最大读取行数（默认500）",
+                        "description": "文本行数上限（规范名）。语义等同表格侧 max_rows。",
                         "default": 500,
                         "minimum": 1,
                         "maximum": 1000,
+                    },
+                    "max_rows": {
+                        "type": "integer",
+                        "description": "deprecated 别名，等同 max_lines。",
                     },
                 },
                 "required": ["file_path"],
@@ -1062,9 +1086,9 @@ def get_tools() -> list[ToolDef]:
             name="copy_file",
             description=(
                 "复制文件到工作区内的新位置（不覆盖已有文件）。"
-                "适用场景：创建文件副本、备份原始文件后再修改。"
+                "适用场景：把 uploads/ 只读附件备份到 outputs/ 再改副本。"
                 "目标路径已存在时会报错，需先 delete_file 或使用不同名称。"
-                "相关工具：list_directory（先确认目标路径）、rename_file（移动而非复制）。"
+                "不要改 uploads/ 原件。"
             ),
             input_schema={
                 "type": "object",
@@ -1117,9 +1141,9 @@ def get_tools() -> list[ToolDef]:
         ToolDef(
             name="delete_file",
             description=(
-                "安全删除文件（仅限文件，不删目录），需 confirm=true 二次确认。"
-                "适用场景：清理不需要的文件、删除后重建。"
-                "首次调用不传 confirm 时返回文件信息供确认，第二次调用传 confirm=true 才执行删除。"
+                "安全删除文件（仅限文件，不删目录）。"
+                "执行层强制两段确认：未带 confirm/confirmed/ack 时返回 confirmation_required，不删。"
+                "第二次调用传 confirm=true 才执行删除。"
                 "相关工具：list_directory（先确认文件存在）。"
             ),
             input_schema={
@@ -1133,6 +1157,14 @@ def get_tools() -> list[ToolDef]:
                         "type": "boolean",
                         "description": "是否确认删除，必须为 true 才执行",
                         "default": False,
+                    },
+                    "confirmed": {
+                        "type": "boolean",
+                        "description": "confirm 的同义别名",
+                    },
+                    "ack": {
+                        "type": "boolean",
+                        "description": "confirm 的同义别名",
                     },
                     "expected_version": {
                         "type": "string",

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from excelmanus.database import Database
     from excelmanus.stores.approval_store import ApprovalStore
 
+from excelmanus.json_typed import em_json_default, revive_typed_args
 from excelmanus.logger import get_logger
 
 logger = get_logger("approval")
@@ -63,6 +64,7 @@ class PendingApproval:
     arguments: dict[str, Any]
     tool_scope: list[str]
     created_at_utc: str
+    parent_call_id: str | None = None
 
 
 @dataclass
@@ -211,15 +213,26 @@ class ApprovalManager:
         tool_name: str,
         arguments: dict[str, Any],
         tool_scope: Sequence[str] | None = None,
+        parent_call_id: str | None = None,
     ) -> PendingApproval:
         if self._pending is not None:
             raise ValueError("存在待确认操作，请先执行 `/accept <id>` 或 `/reject <id>`。")
+        if not parent_call_id:
+            try:
+                from excelmanus.tools.context import current_call
+
+                ctx = current_call()
+                raw = getattr(ctx, "parent_call_id", None) if ctx is not None else None
+                parent_call_id = str(raw) if raw else None
+            except Exception:
+                parent_call_id = None
         pending = PendingApproval(
             approval_id=self._new_approval_id(),
             tool_name=tool_name,
             arguments=dict(arguments),
             tool_scope=list(tool_scope) if tool_scope is not None else [],
             created_at_utc=self._utc_now(),
+            parent_call_id=parent_call_id,
         )
         self._pending = pending
         return pending
@@ -230,14 +243,36 @@ class ApprovalManager:
     def utc_now(self) -> str:
         return self._utc_now()
 
-    def reject_pending(self, approval_id: str) -> str:
+    def reject_pending(self, approval_id: str, *, timeout: bool = False) -> str:
         if self._pending is None:
             return "当前没有待确认操作。"
         if self._pending.approval_id != approval_id:
             return f"待确认 ID 不匹配。当前待确认 ID 为 `{self._pending.approval_id}`。"
         tool_name = self._pending.tool_name
         self._pending = None
-        return f"已拒绝待确认操作 `{approval_id}`（工具：{tool_name}）。"
+        from excelmanus.engine_core.error_payload import (
+            APPROVAL_DENIED,
+            APPROVAL_TIMEOUT,
+            dumps_error_payload,
+            make_error_payload,
+        )
+
+        if timeout:
+            message = (
+                f"已拒绝待确认操作 `{approval_id}`（工具：{tool_name}）：审批等待超时。"
+            )
+            error_code = APPROVAL_TIMEOUT
+        else:
+            message = f"已拒绝待确认操作 `{approval_id}`（工具：{tool_name}）。"
+            error_code = APPROVAL_DENIED
+        return dumps_error_payload(
+            make_error_payload(
+                message,
+                error_code=error_code,
+                approval_id=approval_id,
+                tool=tool_name,
+            )
+        )
 
     def clear_pending(self) -> None:
         self._pending = None
@@ -489,7 +524,9 @@ class ApprovalManager:
 
         manifest = self._build_manifest_v2(record, code_policy_info=code_policy_info)
         (audit_dir / "manifest.json").write_text(
-            json.dumps(manifest, ensure_ascii=False, indent=2),
+            # arguments 可携带 datetime 等非 JSON 值（如 Code Mode 桥还原的类型）；
+            # 用 $em_type 标记编码保类型，读回经 revive_typed_args 还原。
+            json.dumps(manifest, ensure_ascii=False, indent=2, default=em_json_default),
             encoding="utf-8",
         )
 
@@ -570,12 +607,10 @@ class ApprovalManager:
         )
 
     def _restore_revision_before(self, record: AppliedApprovalRecord) -> list[str]:
-        from excelmanus.security.guard import FileAccessGuard
-        from excelmanus.workbook_commit import CommitError, commit_bytes, content_version_of_file
+        from excelmanus.workbook_commit import CommitError
         from excelmanus.workspace.revisions import RevisionStore
 
         store = RevisionStore(self.workspace_root)
-        guard = FileAccessGuard(str(self.workspace_root))
         restored: list[str] = []
         for change in record.changes:
             rel = str(change.path or "").replace("\\", "/").removeprefix("./").strip()
@@ -615,14 +650,16 @@ class ApprovalManager:
             if blob is None:
                 continue
             dest = self.workspace_root / rel
-            current = content_version_of_file(dest) if dest.is_file() else None
+            if not dest.is_file():
+                continue
+            expected = f"sha256:{after_rec.sha256}"
             try:
-                commit_bytes(
-                    guard=guard,
-                    file_path=rel,
-                    data=blob,
-                    expected_version=current,
-                    record_history=True,
+                from excelmanus.workspace.file_service import WorkspaceFileService
+
+                WorkspaceFileService(self.workspace_root).restore(
+                    rel,
+                    before.id,
+                    expected_version=expected,
                 )
                 restored.append(rel)
             except (CommitError, ValueError, OSError):
@@ -968,7 +1005,7 @@ class ApprovalManager:
             approval_id=applied_id,
             tool_name=str(approval.get("tool_name", "")),
             arguments=(
-                dict(approval.get("arguments"))
+                revive_typed_args(dict(approval.get("arguments")))
                 if isinstance(approval.get("arguments"), dict)
                 else {}
             ),

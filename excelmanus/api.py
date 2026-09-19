@@ -22,6 +22,7 @@
 - GET    /api/v1/sessions/{sid}/operations/{id} 操作详情（含 diff）
 - POST   /api/v1/sessions/{sid}/operations/{id}/undo 回滚指定操作
 - GET    /api/v1/health                       健康检查
+- PUT    /api/v1/onboarding                   持久化新手引导进度
 """
 
 from __future__ import annotations
@@ -91,20 +92,13 @@ import excelmanus
 from excelmanus.config import (
     ConfigError,
     ExcelManusConfig,
+    expand_cors_origins,
     load_config,
     load_cors_allow_origins,
+    parse_frontend_ports,
 )
-from excelmanus.engine import ChatResult, ToolCallResult
-from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger, setup_logging
-from excelmanus.mentions import MentionParser, MentionResolver
-from excelmanus.mentions.parser import ResolvedMention
 from excelmanus.mcp.manager import MCPManager
-from excelmanus.output_guard import (
-    guard_public_reply,
-    sanitize_external_data,
-    sanitize_external_text,
-)
 from excelmanus.session import (
     SessionBusyError,
     SessionLimitExceededError,
@@ -116,13 +110,6 @@ from excelmanus.skillpacks import (
     SkillRouter,
 )
 from excelmanus.tools import ToolRegistry
-from excelmanus.api_sse import (
-    SessionStreamState as _SessionStreamState,
-    inject_seq_into_sse as _inject_seq,
-    sse_event_to_sse as _sse_event_to_sse_impl,
-    sse_format as _sse_format,
-)
-from excelmanus.error_guidance import FailureGuidance, classify_failure
 
 if TYPE_CHECKING:
     from excelmanus.engine import AgentEngine
@@ -141,29 +128,14 @@ class ErrorResponse(BaseModel):
     error_id: str
 
 
-# ── 全局状态（由 lifespan 初始化） ────────────────────────
-
-_session_manager: SessionManager | None = None
-_tool_registry: ToolRegistry | None = None
-_skillpack_loader: SkillpackLoader | None = None
-_skill_router: SkillRouter | None = None
-_skillpack_manager: "SkillpackManager | None" = None
-_config: ExcelManusConfig | None = None
-_config_incomplete: bool = False  # True when essential config (API key/base_url/model) is missing
-_draining: bool = False  # True during graceful shutdown, health returns "draining"
-_restart_reason: str = ""  # 重启原因，draining 期间通过 health 传递给前端
-_cap_probe_job_manager: Any = None  # 类型：CapabilityProbeJobManager | None
-_rules_manager: Any = None  # 类型：RulesManager | None
-_api_persistent_memory: Any = None  # 类型：PersistentMemory | None（API 层共享）
-_database: Any = None  # 类型：Database | None
-_config_store: Any = None  # 类型：GlobalConfigStore | None
+from excelmanus.api_app_state import AppRuntime, RuntimeMiddleware, get_runtime, bind_runtime, reset_runtime
 
 
 def _get_file_registry(workspace_root: str) -> Any:
     """获取或懒创建指定工作区的 FileRegistry，与引擎共用主库。"""
     from excelmanus.api_app_state import get_file_registry, set_database
 
-    set_database(_database)
+    set_database(get_runtime().database)
     return get_file_registry(workspace_root)
 
 
@@ -193,18 +165,16 @@ def _resolve_workspace_root(request: Request) -> str:
 
 async def _has_session_access(session_id: str, request: Request) -> bool:
     """会话存在时返回 True。"""
-    if _session_manager is None:
+    if get_runtime().session_manager is None:
         return False
     try:
-        await _session_manager.get_session_detail(session_id)
+        await get_runtime().session_manager.get_session_detail(session_id)
     except SessionNotFoundError:
         return False
     return True
 
 
 from excelmanus.api_app_state import (  # noqa: F401
-    _active_chat_tasks,
-    _session_stream_states,
     _get_probe_job_mgr,
     _list_available_model_names,
     _sync_config_profiles_from_db,
@@ -260,15 +230,16 @@ def _make_content_disposition(filename: str) -> str:
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
     """应用生命周期：初始化配置、注册 Skill、启动清理任务。"""
-    global _session_manager, _tool_registry, _skillpack_loader, _skill_router, _skillpack_manager, _config, _database
+
+    set_draining(False)
 
     # create_app 已在构建应用时确定启动配置；lifespan 不再二次加载。
     bootstrap_error: ConfigError | None = app.state.bootstrap_config_error
     if bootstrap_error is not None:
         set_config_incomplete(True)
-        _config_incomplete = True
+        get_runtime().config_incomplete = True
         logger.warning(
             "\n"
             "╔══════════════════════════════════════════════════════════════╗\n"
@@ -278,26 +249,24 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
             "║                                                            ║\n"
             "║  你可以通过以下任一方式完成配置：                          ║\n"
             "║    1. 打开浏览器访问前端页面，按引导填写 API Key           ║\n"
-            "║    2. 编辑项目根目录下的 .env 文件，设置以下必填项：       ║\n"
-            "║       EXCELMANUS_API_KEY=sk-xxx                            ║\n"
-            "║       EXCELMANUS_BASE_URL=https://api.openai.com/v1        ║\n"
-            "║       EXCELMANUS_MODEL=gpt-6-astra                         ║\n"
-            "║    3. 使用 EXCELMANUS_MODELS 环境变量配置多模型            ║\n"
+            "║    2. 在设置页添加模型档案（保存在主数据库）               ║\n"
             "║                                                            ║\n"
             "║  配置完成后，通过前端设置页保存即可生效（无需重启）。      ║\n"
             "╚══════════════════════════════════════════════════════════════╝",
             str(bootstrap_error).ljust(58)[:58] + "║",
         )
 
-    _config = app.state.bootstrap_config
+    get_runtime().config = app.state.bootstrap_config
     from excelmanus.api_app_state import bind_app_state, set_config_store, set_database
-    bind_app_state(app, config=_config)
-    setup_logging(_config.log_level)
+    bind_app_state(app, config=get_runtime().config)
+    setup_logging(get_runtime().config.log_level)
+    from excelmanus.prompt.cache_restore import log_multi_worker_cache_risk
+
+    log_multi_worker_cache_risk()
 
     # ── 集中数据管理：注册安装 + 首次迁移 ──────────────
     from excelmanus.data_home import (
         register_installation,
-        migrate_project_env,
         ensure_data_dirs,
         has_project_local_data,
         migrate_data_from_project,
@@ -305,15 +274,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         scan_once,
     )
     project_root = Path(__file__).resolve().parent.parent
-    logger.info("部署模式: %s", _config.deploy_mode)
+    logger.info("部署模式: %s", get_runtime().config.deploy_mode)
     try:
         register_installation(project_root)
-        scan_once(skip_desktop_scan=_config.is_server)
-        migrate_project_env(project_root)
-        if _config.data_root:
+        if get_runtime().config.data_root:
             ensure_data_dirs()
             # 仅 standalone 模式执行自动迁移；服务器模式由管理员手动触发
-            if _config.is_standalone:
+            if get_runtime().config.is_standalone:
                 if not is_data_centralized() and has_project_local_data(project_root):
                     stats = migrate_data_from_project(project_root)
                     if stats:
@@ -322,158 +289,127 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.debug("集中数据管理初始化失败（非致命）", exc_info=True)
 
     # 初始化工具层
-    _tool_registry = ToolRegistry()
-    _tool_registry.register_builtin_tools(_config.workspace_root)
-    set_tool_registry(_tool_registry)
+    get_runtime().tool_registry = ToolRegistry()
+    get_runtime().tool_registry.register_builtin_tools(get_runtime().config.workspace_root)
+    set_tool_registry(get_runtime().tool_registry)
 
     # 初始化 Skillpack 层
-    _skillpack_loader = SkillpackLoader(_config, _tool_registry)
-    _skillpack_loader.load_all()
-    _skill_router = SkillRouter(_config, _skillpack_loader)
+    get_runtime().skillpack_loader = SkillpackLoader(get_runtime().config, get_runtime().tool_registry)
+    get_runtime().skillpack_loader.load_all()
+    get_runtime().skill_router = SkillRouter(get_runtime().config, get_runtime().skillpack_loader)
     from excelmanus.skillpacks import SkillpackManager
-    _skillpack_manager = SkillpackManager(_config, _skillpack_loader)
+    get_runtime().skillpack_manager = SkillpackManager(get_runtime().config, get_runtime().skillpack_loader)
 
-    set_skillpack_loader(_skillpack_loader)
-    set_skillpack_manager(_skillpack_manager)
+    set_skillpack_loader(get_runtime().skillpack_loader)
+    set_skillpack_manager(get_runtime().skillpack_manager)
 
     # 初始化统一数据库（配置档案必须落库，不能绑在聊天记录开关上）
+    from excelmanus.data_home import resolve_db_path
     from excelmanus.database import Database
+    from excelmanus.settings_persist import bind_settings_store, refresh_config_in_place
 
-    _database = None
+    get_runtime().database = None
     chat_history = None
-    resolved_db_path = os.path.expanduser(
-        _config.chat_history_db_path or _config.db_path
-    )
-    _database = Database(resolved_db_path)
+    resolved_db_path = resolve_db_path()
+    get_runtime().database = Database(resolved_db_path)
     logger.info("统一数据库已启用: %s", resolved_db_path)
-    if _config.chat_history_enabled:
+    if get_runtime().config.chat_history_enabled:
         from excelmanus.chat_history import ChatHistoryStore
-        chat_history = ChatHistoryStore(_database)
+        chat_history = ChatHistoryStore(get_runtime().database)
 
-    # 初始化 GlobalConfigStore 并从 .env 迁移已有 profiles
-    global _config_store
-    if _database is not None:
-        from excelmanus.stores.config_store import GlobalConfigStore
-        _config_store = GlobalConfigStore(_database)
-        set_database(_database)
-        set_config_store(_config_store)
-        app.state.config_store = _config_store
-        existing = _config_store.list_profiles()
-        if not existing:
-            env_models_raw = os.environ.get("EXCELMANUS_MODELS", "")
-            if env_models_raw:
-                n = _config_store.import_profiles_from_env(
-                    env_models_raw, _config.api_key, _config.base_url,
-                )
-                if n:
-                    logger.info("已从 EXCELMANUS_MODELS 迁移 %d 个模型 profile 到数据库", n)
-                    try:
-                        from excelmanus.data_home import delete_env_keys
-
-                        delete_env_keys(["EXCELMANUS_MODELS"])
-                        logger.info("已从正式仓清除 EXCELMANUS_MODELS（数据库为唯一来源）")
-                    except Exception:
-                        logger.debug("清除 EXCELMANUS_MODELS 失败", exc_info=True)
-                    os.environ.pop("EXCELMANUS_MODELS", None)
+    if get_runtime().database is not None:
+        store = bind_settings_store(get_runtime().database)
+        get_runtime().config_store = store
+        if getattr(app.state, "bootstrap_from_settings", True):
+            refresh_config_in_place(get_runtime().config)
+            if get_runtime().config.api_key and get_runtime().config.base_url and get_runtime().config.model:
+                set_config_incomplete(False)
+                app.state.bootstrap_config_error = None
         _sync_config_profiles_from_db()
         ensure_active_model()
         logger.info("GlobalConfigStore 已初始化")
-    set_database(_database)
-    set_config_store(_config_store)
+    set_database(get_runtime().database)
+    set_config_store(get_runtime().config_store)
 
     # 初始化异步能力探测任务管理器
-    global _cap_probe_job_manager
     from excelmanus.capability_probe_jobs import CapabilityProbeJobManager
-    _cap_probe_job_manager = CapabilityProbeJobManager()
-    set_cap_probe_job_manager(_cap_probe_job_manager)
+    get_runtime().cap_probe_job_manager = CapabilityProbeJobManager()
+    set_cap_probe_job_manager(get_runtime().cap_probe_job_manager)
 
-    # 初始化会话管理器
-    # 始终创建共享 MCP 管理器并在启动时自动连接
-    shared_mcp_manager = MCPManager(_config.workspace_root, app_config=_config)
-    try:
-        await shared_mcp_manager.initialize(_tool_registry)
-        mcp_info = shared_mcp_manager.get_server_info()
-        mcp_ready = sum(1 for s in mcp_info if s["status"] == "ready")
-        if mcp_info:
-            logger.info(
-                "MCP 启动自动连接完成: %d/%d 个 Server 就绪",
-                mcp_ready, len(mcp_info),
-            )
-    except Exception:
-        logger.warning("MCP 启动自动连接失败", exc_info=True)
+    # 初始化会话管理器。MCP 连接放到 yield 之后的后台任务，避免卡住 health。
+    shared_mcp_manager = MCPManager(get_runtime().config.workspace_root, app_config=get_runtime().config)
 
-    _session_manager = SessionManager(
-        max_sessions=_config.max_sessions,
-        ttl_seconds=_config.session_ttl_seconds,
-        config=_config,
-        registry=_tool_registry,
-        skill_router=_skill_router,
+    get_runtime().session_manager = SessionManager(
+        max_sessions=get_runtime().config.max_sessions,
+        ttl_seconds=get_runtime().config.session_ttl_seconds,
+        config=get_runtime().config,
+        registry=get_runtime().tool_registry,
+        skill_router=get_runtime().skill_router,
         shared_mcp_manager=shared_mcp_manager,
         chat_history=chat_history,
-        database=_database,
-        config_store=_config_store,
+        database=get_runtime().database,
+        config_store=get_runtime().config_store,
     )
-    bind_app_state(app, session_manager=_session_manager)
+    bind_app_state(app, session_manager=get_runtime().session_manager)
     try:
-        _session_manager.ensure_default_workspace()
+        get_runtime().session_manager.ensure_default_workspace()
     except Exception:
         logger.warning("默认工作区登记失败", exc_info=True)
-    await _session_manager.start_background_cleanup()
+    await get_runtime().session_manager.start_background_cleanup()
 
     # 初始化全局 RulesManager + 共享 PersistentMemory（供 API 层直接使用）
-    global _rules_manager, _api_persistent_memory
     try:
         from excelmanus.rules import RulesManager as _RM
         from excelmanus.stores.rules_store import RulesStore as _RS
-        _rules_db_store = _RS(_database) if _database is not None else None
-        _rules_manager = _RM(db_store=_rules_db_store)
+        _rules_db_store = _RS(get_runtime().database) if get_runtime().database is not None else None
+        get_runtime().rules_manager = _RM(db_store=_rules_db_store)
     except Exception:
         logger.debug("RulesManager 初始化失败", exc_info=True)
 
-    if _config.memory_enabled:
+    if get_runtime().config.memory_enabled:
         try:
             from excelmanus.persistent_memory import PersistentMemory as _PM
-            if _database is not None:
+            if get_runtime().database is not None:
                 from excelmanus.stores.memory_store import MemoryStore as _MS
-                _mem_backend = _MS(_database)
+                _mem_backend = _MS(get_runtime().database)
             else:
                 from excelmanus.stores.file_memory_backend import FileMemoryBackend as _FMB
                 _mem_backend = _FMB(
-                    memory_dir=_config.memory_dir,
-                    auto_load_lines=_config.memory_auto_load_lines,
+                    memory_dir=get_runtime().config.memory_dir,
+                    auto_load_lines=get_runtime().config.memory_auto_load_lines,
                 )
-            _api_persistent_memory = _PM(
+            get_runtime().persistent_memory = _PM(
                 backend=_mem_backend,
-                auto_load_lines=_config.memory_auto_load_lines,
+                auto_load_lines=get_runtime().config.memory_auto_load_lines,
             )
         except Exception:
             logger.debug("API PersistentMemory 初始化失败", exc_info=True)
 
     loaded_skillpacks = (
-        sorted(_skillpack_loader.get_skillpacks().keys())
-        if _skillpack_loader is not None
+        sorted(get_runtime().skillpack_loader.get_skillpacks().keys())
+        if get_runtime().skillpack_loader is not None
         else []
     )
     tool_names = (
-        sorted(_tool_registry.get_tool_names())
-        if _tool_registry is not None
+        sorted(get_runtime().tool_registry.get_tool_names())
+        if get_runtime().tool_registry is not None
         else []
     )
-    app.state.workspace_root = _config.workspace_root
-    app.state.data_root = _config.data_root
-    if _database is not None:
+    app.state.workspace_root = get_runtime().config.workspace_root
+    app.state.data_root = get_runtime().config.data_root
+    if get_runtime().database is not None:
         try:
             from excelmanus.auth.providers.credential_store import CredentialStore as _CredStore
-            _cred_store = _CredStore(_database.conn)
+            _cred_store = _CredStore(get_runtime().database.conn)
             app.state.credential_store = _cred_store
-            if _session_manager is not None:
-                _session_manager.set_credential_store(_cred_store)
+            if get_runtime().session_manager is not None:
+                get_runtime().session_manager.set_credential_store(_cred_store)
             try:
                 from excelmanus.auth.providers.resolver import CredentialResolver as _CredResolver
                 _cred_resolver = _CredResolver(credential_store=_cred_store)
                 app.state.credential_resolver = _cred_resolver
-                if _session_manager is not None:
-                    _session_manager.set_credential_resolver(_cred_resolver)
+                if get_runtime().session_manager is not None:
+                    get_runtime().session_manager.set_credential_resolver(_cred_resolver)
                 logger.info("CredentialResolver 已初始化")
             except Exception:
                 logger.debug("CredentialResolver 初始化失败", exc_info=True)
@@ -485,37 +421,37 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
             from excelmanus.pool.service import PoolService as _PoolService
             _pool_service = _PoolService(
-                conn=_database.conn,
+                conn=get_runtime().database.conn,
                 credential_store=getattr(app.state, "credential_store", None),
             )
             app.state.pool_service = _pool_service
             _cr = getattr(app.state, "credential_resolver", None)
             if _cr is not None:
                 _cr._pool_service = _pool_service
-                _cr._pool_enabled = getattr(_config, "pool_enabled", False)
+                _cr._pool_enabled = getattr(get_runtime().config, "pool_enabled", False)
             logger.info("PoolService 已初始化")
-            if getattr(_config, "pool_auto_enabled", False) and getattr(_config, "pool_enabled", False):
+            if getattr(get_runtime().config, "pool_auto_enabled", False) and getattr(get_runtime().config, "pool_enabled", False):
                 try:
                     from excelmanus.pool.breaker import BreakerManager as _BreakerMgr
                     from excelmanus.pool.metrics import MetricsAggregator as _MetricsAgg
                     from excelmanus.pool.auto_rotate import PoolAutoRotateService as _AutoRotateSvc
                     _breaker_mgr = _BreakerMgr(
-                        conn=_database.conn,
+                        conn=get_runtime().database.conn,
                         failure_threshold=getattr(
-                            _config, "pool_auto_breaker_threshold", 5,
+                            get_runtime().config, "pool_auto_breaker_threshold", 5,
                         ),
                         open_seconds=getattr(
-                            _config, "pool_auto_breaker_open_seconds", 120,
+                            get_runtime().config, "pool_auto_breaker_open_seconds", 120,
                         ),
                     )
                     app.state.pool_breaker_manager = _breaker_mgr
-                    _metrics_agg = _MetricsAgg(conn=_database.conn)
+                    _metrics_agg = _MetricsAgg(conn=get_runtime().database.conn)
                     app.state.pool_metrics_aggregator = _metrics_agg
                     _auto_rotate_svc = _AutoRotateSvc(
-                        conn=_database.conn,
+                        conn=get_runtime().database.conn,
                         pool_service=_pool_service,
                         default_cooldown_seconds=getattr(
-                            _config, "pool_auto_default_cooldown_seconds", 300,
+                            get_runtime().config, "pool_auto_default_cooldown_seconds", 300,
                         ),
                         breaker=_breaker_mgr,
                     )
@@ -560,6 +496,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     _fire_and_forget(_background_update_check(), name="update_check")
 
+    # ── 附件派生缓存清理（非阻塞，只动可再生数据） ─────────
+    async def _background_attachment_sweep() -> None:
+        try:
+            from excelmanus.attachments.store import sweep_stale_caches
+
+            removed = sweep_stale_caches()
+            if any(removed.values()):
+                logger.info("附件缓存清理完成: %s", removed)
+        except Exception:
+            logger.debug("启动时附件缓存清理失败（非致命）", exc_info=True)
+
+    _fire_and_forget(_background_attachment_sweep(), name="attachment_sweep")
+
     # ── 号池快照聚合后台任务（每 5 分钟） ──────────────────
     _pool_snapshot_task: asyncio.Task | None = None
     _pool_svc_bg = getattr(app.state, "pool_service", None)
@@ -581,7 +530,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     _pool_auto_rotate_task: asyncio.Task | None = None
     _auto_rotate_svc_bg = getattr(app.state, "pool_auto_rotate_service", None)
     if _auto_rotate_svc_bg is not None:
-        _auto_interval = getattr(_config, "pool_auto_interval_seconds", 60)
+        _auto_interval = getattr(get_runtime().config, "pool_auto_interval_seconds", 60)
 
         async def _pool_auto_rotate_loop() -> None:
             while True:
@@ -615,9 +564,48 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         _pool_metrics_task = asyncio.create_task(_pool_metrics_loop())
         logger.info("号池指标聚合后台任务已启动（间隔 60s）")
 
+    async def _background_mcp_init() -> None:
+        try:
+            await shared_mcp_manager.initialize(get_runtime().tool_registry)
+            mcp_info = shared_mcp_manager.get_server_info()
+            mcp_ready = sum(1 for s in mcp_info if s["status"] == "ready")
+            if mcp_info:
+                logger.info(
+                    "MCP 启动自动连接完成: %d/%d 个 Server 就绪",
+                    mcp_ready, len(mcp_info),
+                )
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.warning("MCP 启动自动连接失败", exc_info=True)
+
+    mcp_init_task = asyncio.create_task(_background_mcp_init(), name="mcp_initialize")
+
+    def _background_install_scan() -> None:
+        try:
+            scan_once(skip_desktop_scan=get_runtime().config.is_server)
+        except Exception:
+            logger.debug("主动扫描失败（非致命）", exc_info=True)
+
+    scan_task = asyncio.get_running_loop().run_in_executor(
+        None, _background_install_scan,
+    )
+
     yield
 
     # ── Graceful Shutdown ──────────────────────────────────────
+    if not mcp_init_task.done():
+        mcp_init_task.cancel()
+        try:
+            await mcp_init_task
+        except (asyncio.CancelledError, Exception):
+            pass
+    if not scan_task.done():
+        scan_task.cancel()
+        try:
+            await scan_task
+        except (asyncio.CancelledError, Exception):
+            pass
     # 取消号池指标聚合后台任务
     if _pool_metrics_task is not None and not _pool_metrics_task.done():
         _pool_metrics_task.cancel()
@@ -646,10 +634,10 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     set_draining(True)
     logger.info("API 服务进入 draining 状态，等待活跃连接排空...")
 
-    if _session_manager is not None:
+    if get_runtime().session_manager is not None:
         drain_timeout = 30  # 最长等待 30 秒
         for _drain_i in range(drain_timeout):
-            active = await _session_manager.get_active_count()
+            active = await get_runtime().session_manager.get_active_count()
             if active == 0:
                 logger.info("所有活跃连接已排空")
                 break
@@ -657,23 +645,23 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                 logger.info("等待 %d 个活跃连接排空... (%d/%ds)", active, _drain_i, drain_timeout)
             await asyncio.sleep(1)
         else:
-            active = await _session_manager.get_active_count()
+            active = await get_runtime().session_manager.get_active_count()
             if active > 0:
                 logger.warning("排空超时，仍有 %d 个活跃连接，强制关闭", active)
 
     # 停止异步探测任务
-    mgr = get_cap_probe_job_manager() or _cap_probe_job_manager
+    mgr = get_cap_probe_job_manager() or get_runtime().cap_probe_job_manager
     if mgr is not None:
         await mgr.shutdown()
         set_cap_probe_job_manager(None)
 
     # 关闭所有会话与 MCP 连接
-    if _session_manager is not None:
-        await _session_manager.shutdown()
+    if get_runtime().session_manager is not None:
+        await get_runtime().session_manager.shutdown()
 
     # 关闭统一数据库
-    if _database is not None:
-        _database.close()
+    if get_runtime().database is not None:
+        get_runtime().database.close()
 
     logger.info("API 服务已关闭")
 
@@ -717,7 +705,7 @@ _ERROR_MESSAGE_MAP: dict[str, str] = {
     "MemoryError": "内存不足，请减少操作范围后重试。",
     "out of memory": "内存不足，请减少操作范围后重试。",
     # 默认内部错误（当无法映射时）
-    "internal_error": "服务内部错误，请联系管理员。",
+    "internal_error": "服务处理出现异常，请稍后重试。",
 }
 
 
@@ -745,7 +733,7 @@ def _get_friendly_error_message(
             return friendly_msg
 
     # 无法映射时返回通用友好消息
-    return "服务处理出现异常，请稍后重试。如问题持续，请联系管理员。"
+    return "服务处理出现异常，请稍后重试。"
 
 
 
@@ -754,7 +742,7 @@ async def _handle_session_not_found(
 ) -> JSONResponse:
     """会话不存在 → 404。"""
     error_id = str(uuid.uuid4())
-    friendly_enabled = _config.friendly_error_messages if _config else False
+    friendly_enabled = get_runtime().config.friendly_error_messages if get_runtime().config else False
     error_msg = _get_friendly_error_message(exc, friendly_enabled)
     body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=404, content=body.model_dump())
@@ -765,7 +753,7 @@ async def _handle_session_limit(
 ) -> JSONResponse:
     """会话数量超限 → 429。"""
     error_id = str(uuid.uuid4())
-    friendly_enabled = _config.friendly_error_messages if _config else False
+    friendly_enabled = get_runtime().config.friendly_error_messages if get_runtime().config else False
     error_msg = _get_friendly_error_message(exc, friendly_enabled)
     body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=429, content=body.model_dump())
@@ -776,7 +764,7 @@ async def _handle_session_busy(
 ) -> JSONResponse:
     """会话正在处理中 → 409。"""
     error_id = str(uuid.uuid4())
-    friendly_enabled = _config.friendly_error_messages if _config else False
+    friendly_enabled = get_runtime().config.friendly_error_messages if get_runtime().config else False
     error_msg = _get_friendly_error_message(exc, friendly_enabled)
     body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=409, content=body.model_dump())
@@ -790,7 +778,7 @@ async def _handle_unexpected(
     logger.error(
         "未预期异常 [error_id=%s]: %s", error_id, exc, exc_info=True
     )
-    friendly_enabled = _config.friendly_error_messages if _config else False
+    friendly_enabled = get_runtime().config.friendly_error_messages if get_runtime().config else False
     error_msg = _get_friendly_error_message(exc, friendly_enabled)
     body = ErrorResponse(error=error_msg, error_id=error_id)
     return JSONResponse(status_code=500, content=body.model_dump())
@@ -804,15 +792,43 @@ def _register_exception_handlers(application: FastAPI) -> None:
     application.add_exception_handler(Exception, _handle_unexpected)
 
 
+def _discover_lan_ipv4_hosts() -> tuple[str, ...]:
+    """探测本机局域网 IPv4。UDP connect 不发包，避免 Windows 上 gethostname 卡住。"""
+    try:
+        import socket as _sock
+
+        sock = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
+        sock.settimeout(0)
+        sock.connect(("10.254.254.254", 1))
+        ip = sock.getsockname()[0]
+        sock.close()
+        if ip and not ip.startswith("127."):
+            return (ip,)
+    except Exception:
+        return ()
+    return ()
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncIterator[None]:
+    token = bind_runtime(app.state.runtime)
+    try:
+        async with _lifespan_bound(app):
+            yield
+    finally:
+        reset_runtime(token)
+
+
 def create_app(
     config: ExcelManusConfig | None = None,
 ) -> FastAPI:
     """创建 FastAPI 应用，CORS 与运行期配置共享同一来源。
 
     Args:
-        config: 预构建的配置对象；为 None 时自动从环境加载。
+        config: 预构建的配置对象；为 None 时从主库设置加载。
     """
     bootstrap_error: ConfigError | None = None
+    bootstrap_from_settings = config is None
     bootstrap_config = config
     if bootstrap_config is None:
         bootstrap_config, bootstrap_error = _build_bootstrap_config()
@@ -823,41 +839,19 @@ def create_app(
         version=excelmanus.__version__,
         lifespan=lifespan,
     )
+    application.state.runtime = AppRuntime(config=bootstrap_config)
+    application.add_middleware(RuntimeMiddleware)
     application.state.bootstrap_config = bootstrap_config
     application.state.bootstrap_config_error = bootstrap_error
+    application.state.bootstrap_from_settings = bootstrap_from_settings
 
-    # 构建 CORS 允许来源列表：除了显式配置的来源外，自动添加本机 LAN IP
-    # 的前端端口来源，以便浏览器直连后端的 SSE 流式请求不被 CORS 拦截。
-    cors_origins = set(bootstrap_config.cors_allow_origins)
-    lan_ips: set[str] = set()
-    # 方法1: gethostname + getaddrinfo（部分系统可用）
-    try:
-        import socket
-        hostname = socket.gethostname()
-        for info in socket.getaddrinfo(hostname, None, socket.AF_INET):
-            ip = info[4][0]
-            if ip and not ip.startswith("127."):
-                lan_ips.add(ip)
-    except Exception:
-        pass
-    # 方法2: UDP connect trick（不实际发送数据，最可靠的主 IP 获取方式）
-    try:
-        import socket as _sock
-        s = _sock.socket(_sock.AF_INET, _sock.SOCK_DGRAM)
-        s.settimeout(0)
-        s.connect(("10.254.254.254", 1))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip and not ip.startswith("127."):
-            lan_ips.add(ip)
-    except Exception:
-        pass
-    # 从环境变量读取前端端口，支持多端口（逗号分隔）和自定义端口部署（默认 3000）
-    _frontend_ports_raw = os.environ.get("EXCELMANUS_FRONTEND_PORT", "3000").strip()
-    _frontend_ports = [p.strip() for p in _frontend_ports_raw.split(",") if p.strip()]
-    for ip in lan_ips:
-        for _fp in _frontend_ports:
-            cors_origins.add(f"http://{ip}:{_fp}")
+    # 显式配置 + loopback（localhost/127.0.0.1/::1）+ 本机 LAN IP。
+    # 浏览器视 loopback 别名为不同源；缺 127 时直连 health/SSE 会被拦。
+    cors_origins = expand_cors_origins(
+        bootstrap_config.cors_allow_origins,
+        frontend_ports=parse_frontend_ports(os.environ.get("EXCELMANUS_FRONTEND_PORT")),
+        extra_hosts=_discover_lan_ipv4_hosts(),
+    )
 
     from excelmanus.auth.manage_token import ManageTokenMiddleware
     application.add_middleware(ManageTokenMiddleware)
@@ -978,14 +972,17 @@ from excelmanus.api_routes_chat import (  # noqa: F401
     chat_turns,
 )
 from excelmanus.api_routes_files import (  # noqa: F401
+    AdmitAttachmentRequest,
     ExcelWriteRequest,
     WordWriteRequest,
+    admit_attachment,
     create_file_group,
     delete_file_group,
     download_file,
     get_excel_compare,
     get_excel_file,
     get_excel_snapshot,
+    get_excel_view,
     get_file_registry,
     get_file_relationships,
     get_image_file,
@@ -1040,20 +1037,16 @@ from excelmanus.api_routes_config import (  # noqa: F401
     ModelSwitchRequest,
     RuntimeConfigUpdate,
     ThinkingConfigRequest,
-    _MODEL_ENV_KEYS,
+    _LEGACY_MODEL_SECTIONS,
     _build_probe_targets,
     _collect_raw_sections,
     _deprecated_model_error_response,
     _diagnose_connection_error,
-    _find_env_file,
     _get_provider_fallback,
     _mask_api_key,
     _mask_key,
-    _read_env_file,
     _resolve_active_engine_info,
     _resolve_model_info,
-    _update_env_var,
-    _write_env_file,
     add_model_profile,
     cancel_probe_job,
     check_model_placeholder,
@@ -1082,8 +1075,6 @@ from excelmanus.api_routes_config import (  # noqa: F401
     update_runtime_config,
 )
 from excelmanus.api_routes_skills import (  # noqa: F401
-    ClawHubInstallRequest,
-    ClawHubUpdateRequest,
     SkillpackCreateRequest,
     SkillpackDetailResponse,
     SkillpackImportRequest,
@@ -1094,12 +1085,6 @@ from excelmanus.api_routes_skills import (  # noqa: F401
     _to_skill_detail,
     _to_skill_summary,
     _to_standard_skill_detail_dict,
-    clawhub_check_updates,
-    clawhub_install,
-    clawhub_list_installed,
-    clawhub_search,
-    clawhub_skill_detail,
-    clawhub_update,
     create_skill,
     delete_skill,
     get_skill,
@@ -1111,6 +1096,7 @@ from excelmanus.api_routes_system import (  # noqa: F401
     execute_command,
     health,
     list_mentions,
+    put_onboarding,
     upload_file,
     upload_file_from_url,
 )

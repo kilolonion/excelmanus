@@ -27,8 +27,11 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { FileTypeIcon, isExcelFile } from "@/components/ui/file-type-icon";
+import { FileTypeIcon } from "@/components/ui/file-type-icon";
+import { workspaceFileOpenHint } from "@/lib/file-kind";
+import { useWorkspaceFileActive } from "@/lib/open-workspace-file";
 import { useExcelStore } from "@/stores/excel-store";
+import { formatFileMention } from "@/components/chat/chat-input-insert";
 import {
   downloadFile,
   workspaceMkdir,
@@ -36,7 +39,6 @@ import {
   workspaceDeleteItem,
   workspaceRenameItem,
 } from "@/lib/api";
-import { isPreviewableWorkspaceFile } from "@/lib/file-preview";
 import type { TreeNode } from "./file-tree-helpers";
 import {
   countFiles,
@@ -57,8 +59,6 @@ export interface TreeNodeProps {
   node: TreeNode;
   sessionId?: string;
   depth: number;
-  panelOpen: boolean;
-  activeFilePath: string | null;
   draggingPath: string | null;
   selectMode: boolean;
   selectedPaths: Set<string>;
@@ -72,7 +72,7 @@ export interface TreeNodeProps {
 }
 
 export function TreeNodeItem(props: TreeNodeProps) {
-  const { node, sessionId, depth, panelOpen, activeFilePath, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
+  const { node, sessionId, depth, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, onRefresh, onUploadToFolder } = props;
   const [expanded, setExpanded] = useState(depth < 2);
   const [renaming, setRenaming] = useState(false);
   const [creating, setCreating] = useState<"file" | "folder" | null>(null);
@@ -291,9 +291,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
 
   // ── File node ──
   const file = node.file!;
-  const excel = isExcelFile(file.filename);
-  const previewable = isPreviewableWorkspaceFile(file.filename);
-  const isFileActive = excel && panelOpen && activeFilePath === file.path;
+  const isFileActive = useWorkspaceFileActive(file.path, file.filename);
   const isDragging = draggingPath === file.path;
   const isSelected = selectedPaths.has(file.path);
 
@@ -363,11 +361,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
       title={
         selectMode
           ? "点击选择"
-          : excel
-            ? `单击: 侧边面板 | 双击: 全屏\n${file.path}`
-            : previewable
-              ? `单击: 预览 | 菜单: 下载\n${file.path}`
-              : `单击: 下载\n${file.path}`
+          : `${workspaceFileOpenHint(file.filename)}\n${file.path}`
       }
     >
       {selectMode ? (
@@ -421,7 +415,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
               <DropdownMenuItem onClick={(e) => {
                 e.stopPropagation();
                 useExcelStore.getState().setPendingTemplateMessage(
-                  `请将 @file:${file.filename} 与 进行合并`
+                  `请将 ${formatFileMention({ path: file.path })} 与 进行合并`
                 );
               }}>
                 <Combine className="h-4 w-4" />
@@ -430,7 +424,7 @@ export function TreeNodeItem(props: TreeNodeProps) {
               <DropdownMenuItem onClick={(e) => {
                 e.stopPropagation();
                 useExcelStore.getState().setPendingTemplateMessage(
-                  `请对比 @file:${file.filename} 和 的差异`
+                  `请对比 ${formatFileMention({ path: file.path })} 和 的差异`
                 );
               }}>
                 <ArrowLeftRight className="h-4 w-4" />

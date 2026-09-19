@@ -37,6 +37,8 @@ class CommandHandler:
         on_event: "EventCallback | None",
         mode_name: str,
         enabled: bool,
+        *,
+        value: str = "",
     ) -> None:
         """发出模式变更事件。"""
         if on_event is None:
@@ -47,6 +49,7 @@ class CommandHandler:
             event_type=EventType.MODE_CHANGED,
             mode_name=mode_name,
             mode_enabled=enabled,
+            mode_value=value,
         ))
 
     async def handle(
@@ -97,9 +100,14 @@ class CommandHandler:
                 e._persist_full_access(False)
                 # 将受限 skill 从 _active_skills 中驱逐，避免下一轮 scope 泄漏
                 blocked = set(e._restricted_code_skillpacks)
+                before = len(e._active_skills)
                 e._active_skills = [
                     s for s in e._active_skills if s.name not in blocked
                 ]
+                if len(e._active_skills) != before:
+                    from excelmanus.request.series import series_of
+
+                    series_of(e).note("catalog/change")
                 self._emit_mode_changed(on_event, "full_access", False)
                 return "已关闭 fullaccess。当前代码技能权限：restricted。"
             if action == "status" and not too_many_args:
@@ -155,35 +163,14 @@ class CommandHandler:
                 if parse_error is not None:
                     return parse_error
                 assert task is not None
-                outcome = await e.delegate_to_subagent(
+                from excelmanus.subagent.result import format_parent_reply
+
+                result = await e.delegate_to_subagent(
                     task=task,
                     agent_name=agent_name,
                     on_event=on_event,
                 )
-                if (
-                    not outcome.success
-                    and outcome.subagent_result is not None
-                    and outcome.subagent_result.pending_approval_id is not None
-                ):
-                    pending = e.approval.pending
-                    approval_id_value = outcome.subagent_result.pending_approval_id
-                    high_risk_tool = (
-                        pending.tool_name
-                        if pending is not None and pending.approval_id == approval_id_value
-                        else "高风险工具"
-                    )
-                    question = e.enqueue_subagent_approval_question(
-                        approval_id=approval_id_value,
-                        tool_name=high_risk_tool,
-                        picked_agent=outcome.picked_agent or "subagent",
-                        task_text=outcome.task_text or task,
-                        normalized_paths=outcome.normalized_paths,
-                        tool_call_id=f"subagent_run_{int(time.time() * 1000)}",
-                        on_event=on_event,
-                        iteration=0,
-                    )
-                    return e._question_flow.format_prompt(question)
-                return outcome.reply
+                return format_parent_reply(result)
             return (
                 "无效参数。用法：/subagent [on|off|status|list]，"
                 "或 /subagent run -- <task>，"
@@ -193,13 +180,7 @@ class CommandHandler:
         if command == "/plan":
             from excelmanus.plan_mode import handle_plan_command
 
-            reply = handle_plan_command(e, action)
-            self._emit_mode_changed(
-                on_event,
-                "plan",
-                bool(getattr(e, "_plan_active", False)),
-            )
-            return reply
+            return handle_plan_command(e, action, on_event=on_event)
 
         if command == "/model":
             # /model → 显示当前模型
@@ -251,9 +232,6 @@ class CommandHandler:
         if command == "/memory":
             return self._handle_memory_command(parts)
 
-        if command == "/playbook":
-            return await self._handle_playbook_command(parts)
-
         if command == "/tools":
             return self._handle_tools_command(parts, on_event=on_event)
 
@@ -288,9 +266,12 @@ class CommandHandler:
         if compaction_mgr is None:
             return "Compaction 功能未初始化。"
 
+        from excelmanus.prompt.envelope import compaction_wire_context
+
         # /compact status
         if action == "status":
-            sys_msgs = getattr(e, "_last_system_msgs", None) or e.memory.build_system_messages()
+            sys_msgs, _tools = compaction_wire_context(e)
+            sys_msgs = sys_msgs or e.memory.build_system_messages()
             status = compaction_mgr.get_status(e.memory, sys_msgs)
             pct = status["usage_ratio"] * 100
             threshold_pct = status["threshold_ratio"] * 100
@@ -328,22 +309,32 @@ class CommandHandler:
 
         # 确定摘要模型
         summary_model = e.active_model
-        sys_msgs = getattr(e, "_last_system_msgs", None) or e.memory.build_system_messages()
+        sys_msgs, compact_tools = compaction_wire_context(e)
+        sys_msgs = sys_msgs or e.memory.build_system_messages()
 
-        _msgs_before = len(e.memory.messages)
         result = await compaction_mgr.manual_compact(
             memory=e.memory,
             system_msgs=sys_msgs,
             client=e._client,
             summary_model=summary_model,
             custom_instruction=custom_instruction,
+            tools=compact_tools,
+            vision_capable=bool(getattr(e, "_is_vision_capable", True)),
         )
-        # 压缩替换了消息列表，重置快照索引以触发持久化全量重写
-        if len(e.memory.messages) != _msgs_before:
-            e.set_message_snapshot_index(0)
 
         if not result.success:
             return f"压缩未执行: {result.error}"
+
+        # 压缩替换了消息列表（成功即必然改写），重置快照索引以触发持久化全量重写
+        e.set_message_snapshot_index(0)
+        # 信封以 engine 侧 generation 为准（envelope 取值 engine or memory），
+        # 必须与 memory 侧同步，否则旧信封会因 generation 相等而拒绝新历史。
+        e._compaction_generation = int(
+            getattr(e.memory, "_compaction_generation", 0) or 0
+        )
+        from excelmanus.prompt.envelope import invalidate_envelope
+
+        invalidate_envelope(e)
 
         pct_before = (
             result.tokens_before / e.max_context_tokens * 100
@@ -434,6 +425,16 @@ class CommandHandler:
         if pending.approval_id != approval_id:
             return f"待确认 ID 不匹配。当前待确认 ID 为 `{pending.approval_id}`。"
 
+        # 子调用内联等待中的审批：决策注入等待通道，禁止走重放路径
+        # （重放会在原调用之外产生第二次执行）。
+        if approval_id in getattr(e, "_inflight_approval_ids", ()):
+            resolved = e._interaction_registry.resolve(
+                approval_id, {"decision": "accept", "approval_id": approval_id},
+            )
+            if resolved:
+                return f"已批准 `{approval_id}`，等待工具调用继续执行。"
+            return "该审批正在由工具内联通道等待决策，无法通过 /accept 重放。"
+
         # 提前保存并清理状态，确保所有路径（成功/失败）都能正确发射事件
         saved_tool_call_id = e._pending_approval_tool_call_id
         e._pending_approval_tool_call_id = None
@@ -483,7 +484,12 @@ class CommandHandler:
         if saved_tool_call_id and record.result_preview:
             e.memory.replace_tool_result(saved_tool_call_id, record.result_preview)
         # 移除审批提示对应的 assistant 尾部消息（避免 LLM 重复看到审批文本）
-        e.memory.remove_last_assistant_if(lambda c: "待确认队列" in c)
+        if e.memory.remove_last_assistant_if(lambda c: "待确认队列" in c):
+            # 唯一一处「改写 durable 却不失效信封」的风险点：补上失效，
+            # 否则一旦该消息已上过 wire，下一次 assemble 会 fail-closed 粘死。
+            from excelmanus.prompt.envelope import invalidate_envelope
+
+            invalidate_envelope(e)
 
         # ── 恢复主循环，让 LLM 看到工具结果并生成自然语言回复 ──
         if route_to_resume is None:
@@ -516,6 +522,13 @@ class CommandHandler:
             return "无效参数。用法：/reject <id>。"
         approval_id = parts[1].strip()
         pending = e.approval.pending
+        if approval_id in getattr(e, "_inflight_approval_ids", ()):
+            resolved = e._interaction_registry.resolve(
+                approval_id, {"decision": "reject", "approval_id": approval_id},
+            )
+            if resolved:
+                return f"已拒绝 `{approval_id}`。"
+            return "该审批正在由工具内联通道等待决策，无法通过 /reject 处理。"
         saved_tool_call_id = e._pending_approval_tool_call_id
         tool_name = pending.tool_name if pending else ""
         result = e.approval.reject_pending(approval_id)
@@ -856,97 +869,6 @@ class CommandHandler:
             preview = entry.content[:80] + ("..." if len(entry.content) > 80 else "")
             lines.append(f"  `{entry.id}` {preview}")
         return "\n".join(lines)
-
-    # ── /playbook 命令处理 ──────────────────────────────────
-
-    async def _handle_playbook_command(self, parts: list[str]) -> str:
-        """处理 /playbook 命令。
-
-        用法：
-        - /playbook             — 列出所有条目
-        - /playbook list        — 同上
-        - /playbook stats       — 统计信息
-        - /playbook search <q>  — 按关键词搜索
-        - /playbook delete <id> — 删除条目
-        - /playbook reset       — 清空所有条目
-        """
-        e = self._engine
-        store = getattr(e, "_playbook_store", None)
-        if store is None:
-            return "Playbook 未启用。请设置 `EXCELMANUS_PLAYBOOK_ENABLED=true` 并重启。"
-
-        action = parts[1].strip().lower() if len(parts) >= 2 else "list"
-
-        if action in ("list", ""):
-            bullets = store.list_all(limit=20)
-            if not bullets:
-                return "Playbook 为空，暂无历史经验条目。"
-            lines = [f"**Playbook 历史经验** ({store.count()} 条)"]
-            for b in bullets:
-                helpful = f"👍{b.helpful_count}" if b.helpful_count else ""
-                harmful = f"👎{b.harmful_count}" if b.harmful_count else ""
-                score = f" {helpful}{harmful}" if (helpful or harmful) else ""
-                preview = b.content[:60] + ("..." if len(b.content) > 60 else "")
-                lines.append(f"  `{b.id}` **[{b.category}]** {preview}{score}")
-            return "\n".join(lines)
-
-        if action == "stats":
-            stats = store.stats()
-            if stats["total"] == 0:
-                return "Playbook 为空。"
-            lines = [
-                f"**Playbook 统计**",
-                f"- 总条目数: {stats['total']}",
-                f"- 平均有用次数: {stats['avg_helpful']}",
-                f"- 分类分布:",
-            ]
-            for cat, cnt in sorted(stats["categories"].items()):
-                lines.append(f"  - {cat}: {cnt}")
-            return "\n".join(lines)
-
-        if action == "search":
-            query = " ".join(parts[2:]).strip()
-            if not query:
-                return "用法：/playbook search <关键词>"
-            # 优先尝试 embedding 语义搜索
-            matched = []
-            _emb_client = getattr(e, "_embedding_client", None)
-            if _emb_client is not None:
-                try:
-                    _emb = await _emb_client.embed([query])
-                    matched = store.search(_emb[0], top_k=10)
-                except Exception:
-                    matched = []
-            # 降级：子串匹配
-            if not matched:
-                bullets = store.list_all(limit=100)
-                matched = [b for b in bullets if query.lower() in b.content.lower()]
-            if not matched:
-                return f"未找到与「{query}」相关的条目。"
-            lines = [f"**搜索结果** ({len(matched)} 条)"]
-            for b in matched[:10]:
-                lines.append(f"  `{b.id}` **[{b.category}]** {b.content[:80]}")
-            return "\n".join(lines)
-
-        if action == "delete":
-            if len(parts) < 3:
-                return "用法：/playbook delete <id>"
-            bullet_id = parts[2].strip()
-            ok = store.delete(bullet_id)
-            return f"已删除条目 `{bullet_id}`。" if ok else f"条目 `{bullet_id}` 不存在。"
-
-        if action == "reset":
-            count = store.clear()
-            return f"已清空 Playbook，删除 {count} 条。"
-
-        return (
-            "无效参数。用法：\n"
-            "  /playbook             — 列出条目\n"
-            "  /playbook stats       — 统计信息\n"
-            "  /playbook search <q>  — 搜索\n"
-            "  /playbook delete <id> — 删除\n"
-            "  /playbook reset       — 清空"
-        )
 
     # ── /tools 命令处理 ──────────────────────────────────
 

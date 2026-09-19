@@ -67,7 +67,7 @@ class TestPostWriteCheckpointFormat:
             str(tmp_path),
         )
         assert "回读确认" in result
-        assert "max_row" in result
+        assert "Sheet1" in result
 
 
 class TestPostWriteCheckpointEdgeCases:

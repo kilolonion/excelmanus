@@ -40,21 +40,18 @@ _YELLOW_BLOCKED: tuple[str, ...] = (
 )
 
 
-def generate_wrapper_script(
-    tier: str, workspace_root: str, *, docker_mode: bool = False,
-) -> str:
+def generate_wrapper_script(tier: str, workspace_root: str) -> str:
     """生成对应风险等级的沙盒 wrapper Python 脚本源码。
 
     Args:
         tier: 代码风险等级 (GREEN/YELLOW/RED)
         workspace_root: 工作区根目录绝对路径
-        docker_mode: 保留参数，向后兼容。RED tier 现在无论 Docker 与否
-            都注入文件系统守卫（含敏感目录读取保护）。
     """
     if tier == "RED":
         return _RED_FS_GUARD_TEMPLATE.format(
             workspace_root=repr(workspace_root),
             code_mode_inject=_CODE_MODE_INJECT,
+            utf8_stdio=_UTF8_STDIO,
         ).replace("<<<PENDING_WRITE_RUNTIME>>>", _PENDING_WRITE_RUNTIME)
 
     blocked = _GREEN_BLOCKED if tier == "GREEN" else _YELLOW_BLOCKED
@@ -72,6 +69,7 @@ def generate_wrapper_script(
         socket_module_blocked_calls=socket_blocked_calls_repr,
         raw_socket_module_blocked_calls=raw_socket_blocked_calls_repr,
         code_mode_inject=_CODE_MODE_INJECT,
+        utf8_stdio=_UTF8_STDIO,
     ).replace("<<<PENDING_WRITE_RUNTIME>>>", _PENDING_WRITE_RUNTIME)
 
 
@@ -108,46 +106,62 @@ _PENDING_WRITE_RUNTIME = r'''
 import json as _json_mod
 _PENDING = {}
 _SPREADSHEET_EXTS = (".xlsx", ".xlsm", ".xltx", ".xltm", ".xls", ".xlsb")
+_WORKBOOK_SAVE_EXTS = (".xlsx", ".xlsm", ".xltx", ".xltm")
 _SAVE_VERSIONS = {}
 _orig_os_open = os.open
 _orig_os_remove = os.remove
 _orig_os_unlink = os.unlink
 _orig_os_replace = os.replace
 _orig_os_rename = os.rename
+_orig_os_stat = os.stat
+_orig_os_lstat = os.lstat if hasattr(os, "lstat") else None
+
+
+def _safe_realpath(path):
+    # posixpath.realpath 内部会调 os.lstat；当 os.lstat 被守卫后，
+    # 直接调 realpath 会与本守卫互递归。这里临时还原原实现。
+    if _orig_os_lstat is not None and getattr(os, "lstat", None) is not _orig_os_lstat:
+        _cur = os.lstat
+        os.lstat = _orig_os_lstat
+        try:
+            return os.path.realpath(str(path))
+        finally:
+            os.lstat = _cur
+    return os.path.realpath(str(path))
 _PENDING_RUN_ID = "".join(
     c for c in os.environ.get("EXCELMANUS_PENDING_RUN_ID", "")
     if c in "0123456789abcdefABCDEF"
 )[:64]
 if not _PENDING_RUN_ID:
     _PENDING_RUN_ID = "orphan"
-_PENDING_ROOT = os.path.realpath(
+_PENDING_ROOT = _safe_realpath(
     os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending", _PENDING_RUN_ID)
 )
-_PENDING_TREE_ROOT = os.path.realpath(
+_PENDING_TREE_ROOT = _safe_realpath(
     os.path.join(_WORKSPACE_ROOT, ".excelmanus", "pending")
 )
-_EXCELMANUS_ROOT = os.path.realpath(
+_EXCELMANUS_ROOT = _safe_realpath(
     os.path.join(_WORKSPACE_ROOT, ".excelmanus")
 )
 _PENDING_DIR_ENV = os.environ.get("EXCELMANUS_PENDING_DIR", "")
 if _PENDING_DIR_ENV:
-    _got_pending = os.path.realpath(_PENDING_DIR_ENV)
+    _got_pending = _safe_realpath(_PENDING_DIR_ENV)
     if _got_pending == _PENDING_ROOT:
         pass
 
 def _path_is_inside(root, resolved):
-    root = os.path.realpath(str(root))
+    root = _safe_realpath(str(root))
     try:
-        resolved = os.path.realpath(str(resolved))
+        resolved = _safe_realpath(str(resolved))
     except OSError:
         resolved = os.path.normpath(str(resolved))
     prefix = root + os.sep
     return resolved == root or resolved.startswith(prefix)
 
 def _rel_of(resolved):
-    ws = os.path.realpath(_WORKSPACE_ROOT)
+    ws = _safe_realpath(_WORKSPACE_ROOT)
     try:
-        resolved = os.path.realpath(str(resolved))
+        resolved = _safe_realpath(str(resolved))
     except OSError:
         resolved = os.path.normpath(str(resolved))
     prefix = ws + os.sep
@@ -162,9 +176,26 @@ def _rel_of(resolved):
 def _is_spreadsheet(resolved):
     return os.path.splitext(resolved)[1].lower() in _SPREADSHEET_EXTS
 
+def _is_workbook_file(resolved):
+    return os.path.splitext(resolved)[1].lower() in _WORKBOOK_SAVE_EXTS
+
+def _is_file_like(obj):
+    return hasattr(obj, "write") and not isinstance(obj, (str, bytes, bytearray))
+
+_XLSX_BYPASS_MSG = (
+    "工作区表格禁止直接保存。请用 em.format_spreadsheet、em.edit_spreadsheet 或 em.split_spreadsheet [等级: %s]"
+)
+
+def _deny_workbook_bypass(path, label="save"):
+    if path is None or _is_file_like(path):
+        return
+    resolved = _safe_realpath(str(path))
+    if _is_workbook_file(resolved) and _path_is_inside(_WORKSPACE_ROOT, resolved):
+        raise PermissionError(_XLSX_BYPASS_MSG % _TIER)
+
 def _is_sandbox_ephemeral(resolved):
-    tmp = os.path.realpath(os.path.join(_WORKSPACE_ROOT, ".tmp"))
-    scripts_temp = os.path.realpath(os.path.join(_WORKSPACE_ROOT, "scripts", "temp"))
+    tmp = _safe_realpath(os.path.join(_WORKSPACE_ROOT, ".tmp"))
+    scripts_temp = _safe_realpath(os.path.join(_WORKSPACE_ROOT, "scripts", "temp"))
     if _path_is_inside(tmp, resolved) or resolved == tmp:
         return True
     if _path_is_inside(scripts_temp, resolved) or resolved == scripts_temp:
@@ -208,13 +239,17 @@ def _is_excelmanus_write_forbidden(resolved):
         return False
     return not _is_under_pending(resolved)
 
-def _pending_path(resolved):
+def _pending_dest(resolved):
+    """pending 落点的确定性计算（纯函数，无副作用）。"""
     rel = _rel_of(resolved)
-    os.makedirs(_pending_root(), exist_ok=True)
     import hashlib as _hl
     digest = _hl.sha256(rel.encode("utf-8")).hexdigest()[:16]
     base = os.path.basename(rel).replace("/", "_").replace("\\", "_")
     return os.path.join(_pending_root(), digest + "_" + base)
+
+def _pending_path(resolved):
+    os.makedirs(_pending_root(), exist_ok=True)
+    return _pending_dest(resolved)
 
 def _append_pending_manifest(rel, dest):
     name = os.path.basename(dest)
@@ -237,6 +272,8 @@ def _prepare_open_path(resolved, mode):
         raise PermissionError(
             "文件写入被安全策略禁止：路径位于受保护的 bench 目录内 [等级: %s]" % _TIER
         )
+    if writing:
+        _deny_workbook_bypass(resolved, "open")
     if _is_under_pending(resolved):
         return resolved
     if resolved in _PENDING:
@@ -320,8 +357,11 @@ def _patch_openpyxl_save():
         return
     _original_save = _Wb.save
     def _atomic_save(self, filename):
+        if _is_file_like(filename):
+            return _original_save(self, filename)
+        _deny_workbook_bypass(filename, "Workbook.save")
         import tempfile
-        resolved = os.path.realpath(str(filename))
+        resolved = _safe_realpath(str(filename))
         if not (_path_is_inside(_WORKSPACE_ROOT, resolved) or _is_under_pending(resolved)):
             raise PermissionError(
                 "文件写入被安全策略禁止：路径不在工作区内 [等级: %s]" % _TIER
@@ -369,10 +409,150 @@ def _patch_openpyxl_save():
     _Wb.save = _atomic_save
 _patch_openpyxl_save()
 
+def _patch_pandas_excel():
+    try:
+        import pandas as _pd
+    except ImportError:
+        return
+    _orig_to_excel = _pd.DataFrame.to_excel
+    def _guarded_to_excel(self, excel_writer, *args, **kwargs):
+        target = excel_writer
+        if not _is_file_like(target):
+            path = getattr(target, "path", None) or getattr(target, "_path", None) or target
+            _deny_workbook_bypass(path, "DataFrame.to_excel")
+        return _orig_to_excel(self, excel_writer, *args, **kwargs)
+    _pd.DataFrame.to_excel = _guarded_to_excel
+    try:
+        from pandas.io.excel import ExcelWriter as _EW
+    except ImportError:
+        return
+    _orig_ew_init = _EW.__init__
+    def _guarded_ew_init(self, path, *args, **kwargs):
+        _deny_workbook_bypass(path, "ExcelWriter")
+        return _orig_ew_init(self, path, *args, **kwargs)
+    _EW.__init__ = _guarded_ew_init
+_patch_pandas_excel()
+
 def _flags_write(flags):
     return bool(flags & (os.O_WRONLY | os.O_RDWR | os.O_APPEND | os.O_CREAT | os.O_TRUNC))
 
-def _deny_forbidden_read(resolved):
+# ── 数据路径规则（与宿主 FileAccessGuard 同口径）──
+# 读侧：工作区内拒绝保留/敏感/产品源；工作区外仅放行解释器/依赖库与字体等
+# 运行环境文件，用户数据一律拒绝。元数据探查（stat/exists/listdir）对被拒
+# 路径表现为"不存在"，不泄露内部结构；内容读取（open）则抛 PermissionError。
+_SENSITIVE_BASENAMES = (
+    ".secret_key", ".env", "config.env", "excelmanus.db", "installations.json",
+)
+_RESERVED_FIRST_SEGMENTS = (".excelmanus", ".versions")
+_RESERVED_PREFIXES = (
+    ".excelmanus", ".versions",
+    "outputs/backups", "outputs/.versions", "outputs/audits",
+)
+
+
+def _compute_env_read_roots():
+    roots = []
+    for _attr in ("base_prefix", "prefix", "exec_prefix", "base_exec_prefix"):
+        _v = getattr(sys, _attr, "")
+        if _v:
+            roots.append(_v)
+    try:
+        import sysconfig as _sc
+        for _key in (
+            "stdlib", "platstdlib", "purelib", "platlib",
+            "include", "platinclude", "scripts", "data",
+        ):
+            try:
+                _v = _sc.get_path(_key)
+                if _v:
+                    roots.append(_v)
+            except Exception:
+                pass
+    except Exception:
+        pass
+    try:
+        import site as _site_mod
+        try:
+            roots.extend(_site_mod.getsitepackages() or [])
+        except Exception:
+            pass
+        try:
+            roots.append(_site_mod.getusersitepackages())
+        except Exception:
+            pass
+    except Exception:
+        pass
+    _home = os.path.expanduser("~")
+    roots.extend([
+        # 渲染字体与 matplotlib 缓存/配置：图表渲染需要，非工作区数据。
+        os.path.join(os.sep, "System", "Library", "Fonts"),
+        os.path.join(os.sep, "Library", "Fonts"),
+        os.path.join(os.sep, "usr", "share", "fonts"),
+        os.path.join(os.sep, "usr", "local", "share", "fonts"),
+        os.path.join(_home, "Library", "Fonts"),
+        os.path.join(_home, ".local", "share", "fonts"),
+        os.path.join(_home, ".fonts"),
+        os.path.join(_home, ".matplotlib"),
+        os.path.join(_home, ".cache", "matplotlib"),
+        os.path.join(_home, ".cache", "fontconfig"),
+        os.path.join(_home, "Library", "Caches", "matplotlib"),
+    ])
+    seen = set()
+    out = []
+    for _r in roots:
+        try:
+            _rp = _safe_realpath(_r)
+        except Exception:
+            continue
+        if _rp not in seen:
+            seen.add(_rp)
+            out.append(_rp)
+    return out
+
+
+_ENV_READ_ROOTS = tuple(_compute_env_read_roots())
+_DEV_ROOT = os.path.join(os.sep, "dev") + os.sep
+
+
+def _env_read_allowed(resolved):
+    if resolved.startswith(_DEV_ROOT):
+        return True
+    for _root in _ENV_READ_ROOTS:
+        if resolved == _root or resolved.startswith(_root + os.sep):
+            return True
+    return False
+
+
+def _workspace_rel(resolved):
+    ws = _safe_realpath(_WORKSPACE_ROOT)
+    if resolved == ws:
+        return ""
+    prefix = ws + os.sep
+    if resolved.startswith(prefix):
+        return resolved[len(prefix):].replace("\\", "/")
+    return None
+
+
+def _is_reserved_data_path(resolved):
+    if _is_under_pending(resolved):
+        return False
+    rel = _workspace_rel(resolved)
+    if not rel:
+        return False
+    if rel.split("/", 1)[0] in _RESERVED_FIRST_SEGMENTS:
+        return True
+    for _p in _RESERVED_PREFIXES:
+        if rel == _p or rel.startswith(_p + "/"):
+            return True
+    return False
+
+
+def _is_sensitive_data_path(resolved):
+    return os.path.basename(resolved) in _SENSITIVE_BASENAMES
+
+
+def _deny_protected_target(resolved):
+    """读写两侧共用的拒绝规则（不含"区外数据读取"，写侧区外另有 tmpdir 放行）。"""
     for _pd in _PRODUCT_SOURCE_DIRS:
         if _path_is_inside(_pd, resolved):
             raise PermissionError(
@@ -382,10 +562,50 @@ def _deny_forbidden_read(resolved):
         raise PermissionError(
             "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
         )
+    if _is_sensitive_data_path(resolved):
+        raise PermissionError(
+            "SENSITIVE_FILE: 禁止访问敏感文件 %s [等级: %s]"
+            % (os.path.basename(resolved), _TIER)
+        )
+    if _is_reserved_data_path(resolved):
+        raise PermissionError(
+            "RESERVED_NAMESPACE: 禁止访问保留命名空间"
+            "（.excelmanus/.versions/outputs 内部工件）[等级: %s]" % _TIER
+        )
+
+
+def _deny_forbidden_read(resolved):
+    _deny_protected_target(resolved)
+    if not _path_is_inside(_WORKSPACE_ROOT, resolved) and not _env_read_allowed(resolved):
+        raise PermissionError(
+            "PATH_OUTSIDE_WORKSPACE: 数据文件必须在工作区内；"
+            "工作区外仅放行解释器与依赖库文件 [等级: %s]" % _TIER
+        )
+
+
+def _metadata_hidden(resolved):
+    """元数据探查视角的不可见判定：被拒路径表现为不存在。"""
+    if _is_under_pending(resolved) or resolved == _PENDING_TREE_ROOT:
+        return False
+    if _is_under_foreign_pending(resolved):
+        # 不隐藏：stat/exists 继续走 _resolve_pending_read 抛 PermissionError；
+        # listdir 对 pending 根的裁剪另有 _PENDING_TREE_ROOT 分支处理。
+        return False
+    if _path_is_inside(_SYSTEM_TMPDIR, resolved):
+        # 写侧放行系统临时目录；存在性探查保持一致可见，内容读取仍被 open 拒。
+        return False
+    if _is_sensitive_data_path(resolved) or _is_reserved_data_path(resolved):
+        return True
+    for _pd in _PRODUCT_SOURCE_DIRS:
+        if _path_is_inside(_pd, resolved):
+            return True
+    if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+        return not _env_read_allowed(resolved)
+    return False
 
 def _guard_write_target(path):
-    resolved = os.path.realpath(str(path))
-    _deny_forbidden_read(resolved)
+    resolved = _safe_realpath(str(path))
+    _deny_protected_target(resolved)
     if _is_excelmanus_write_forbidden(resolved):
         raise PermissionError(
             "文件写入被安全策略禁止：保留目录 [.excelmanus] [等级: %s]" % _TIER
@@ -399,7 +619,7 @@ def _guard_write_target(path):
     return _prepare_open_path(resolved, "w")
 
 def _guarded_os_open(path, flags, *args, **kwargs):
-    resolved = os.path.realpath(str(path))
+    resolved = _safe_realpath(str(path))
     if _flags_write(flags):
         path = _guard_write_target(path)
     else:
@@ -432,18 +652,18 @@ if hasattr(os, "link"):
     os.link = _blocked_symlink
 
 def _mkdir_allowed(dest):
-    dest = os.path.realpath(str(dest))
+    dest = _safe_realpath(str(dest))
     if dest in (_EXCELMANUS_ROOT, _PENDING_TREE_ROOT, _PENDING_ROOT):
         return True
     if _path_is_inside(_PENDING_ROOT, dest):
         return True
-    if _path_is_inside(_EXCELMANUS_ROOT, dest):
+    if _is_reserved_data_path(dest):
         return False
     return True
 
 _orig_mkdir = os.mkdir
 def _guarded_mkdir(path, *args, **kwargs):
-    parent = os.path.realpath(os.path.dirname(os.path.abspath(str(path))))
+    parent = _safe_realpath(os.path.dirname(os.path.abspath(str(path))))
     dest = os.path.join(parent, os.path.basename(str(path)))
     if not _mkdir_allowed(dest):
         raise PermissionError(
@@ -452,9 +672,131 @@ def _guarded_mkdir(path, *args, **kwargs):
     return _orig_mkdir(path, *args, **kwargs)
 os.mkdir = _guarded_mkdir
 
+def _pending_children(resolved_dir):
+    """resolved_dir 的直接子项中的 pending 投影。
+
+    返回 {子项名: (logical_path, backing)}：backing 为 pending 副本路径；
+    虚拟中间目录（仅 pending 后代、无对应 pending 文件）backing 为 None。
+    """
+    prefix = resolved_dir + os.sep
+    children = {}
+    for logical, pend in _PENDING.items():
+        if not logical.startswith(prefix):
+            continue
+        rest = logical[len(prefix):]
+        head, sep, tail = rest.partition(os.sep)
+        if sep:
+            children.setdefault(head, (os.path.join(resolved_dir, head), None))
+        else:
+            children[head] = (logical, pend)
+    return children
+
+
+class _PendingDirEntry:
+    """os.scandir 兼容条目：把 pending 副本/虚拟目录投影回 logical 名称。"""
+
+    __slots__ = ("name", "path", "_backing")
+
+    def __init__(self, logical, backing):
+        self.name = os.path.basename(logical)
+        self.path = logical
+        self._backing = backing
+
+    def is_dir(self, *, follow_symlinks=True):
+        return os.path.isdir(self._backing)
+
+    def is_file(self, *, follow_symlinks=True):
+        return os.path.isfile(self._backing)
+
+    def is_symlink(self):
+        return False
+
+    def is_junction(self):
+        return False
+
+    def stat(self, *, follow_symlinks=True):
+        return _orig_os_stat(self._backing)
+
+    def inode(self):
+        return _orig_os_stat(self._backing).st_ino
+
+
+def _merge_pending_entries(resolved, names):
+    """把 resolved 目录下的 pending 子项名并入真实列出的名字。"""
+    children = _pending_children(resolved)
+    if not children:
+        return names
+    merged = list(names)
+    existing = {os.path.normcase(n) for n in merged}
+    for name in children:
+        if os.path.normcase(name) not in existing:
+            merged.append(name)
+    return merged
+
+
+def _is_internal_artifact(name):
+    """工作簿建议锁残留 `<file>.em-lock` 等内部工件——枚举层对模型不可见。
+
+    与 file_tools 的 `*.em-lock` 默认排除同口径；只影响枚举结果，
+    单路径访问（exists/stat/open）不拦截。
+    """
+    return str(name).endswith(".em-lock")
+
+
+class _MergedScandir:
+    """os.scandir 兼容迭代器：真实条目之后接续 pending 投影条目。
+
+    os.scandir 结果是带 close() 与上下文管理协议的迭代器，
+    用 list 顶替会破坏 `with os.scandir(...)` 等惯用法。
+    工作区内过滤 .em-lock 内部工件。
+    """
+
+    def __init__(self, it, extras, *, hide_artifacts=True):
+        self._it = it
+        self._extras = extras
+        self._seen = set()
+        self._hide = hide_artifacts
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        while self._it is not None:
+            try:
+                entry = next(self._it)
+            except StopIteration:
+                self._it = None
+                break
+            if self._hide and _is_internal_artifact(entry.name):
+                continue
+            if _metadata_hidden(_safe_realpath(entry.path)):
+                continue
+            self._seen.add(os.path.normcase(entry.name))
+            return entry
+        while self._extras:
+            norm, entry = self._extras.pop(0)
+            if norm not in self._seen:
+                return entry
+        raise StopIteration
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+    def close(self):
+        if self._it is not None:
+            try:
+                self._it.close()
+            finally:
+                self._it = None
+
+
 _orig_listdir = os.listdir
 def _guarded_listdir(path):
-    resolved = os.path.realpath(str(path))
+    resolved = _safe_realpath(str(path))
     if resolved == _PENDING_TREE_ROOT:
         names = _orig_listdir(path)
         return [n for n in names if n == _PENDING_RUN_ID]
@@ -462,20 +804,116 @@ def _guarded_listdir(path):
         raise PermissionError(
             "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
         )
-    return _orig_listdir(path)
+    if _metadata_hidden(resolved):
+        raise FileNotFoundError(2, "路径不存在或不可见", str(path))
+    try:
+        names = _orig_listdir(path)
+    except FileNotFoundError:
+        # 目录尚未物化但可能只有 pending 后代
+        names = []
+    merged = _merge_pending_entries(resolved, names)
+    if _path_is_inside(_WORKSPACE_ROOT, resolved):
+        merged = [
+            n for n in merged
+            if not _is_internal_artifact(n)
+            and not _metadata_hidden(os.path.join(resolved, n))
+        ]
+    return merged
 os.listdir = _guarded_listdir
 if hasattr(os, "scandir"):
     _orig_scandir = os.scandir
     def _guarded_scandir(path="."):
-        resolved = os.path.realpath(str(path))
+        resolved = _safe_realpath(str(path))
         if resolved == _PENDING_TREE_ROOT:
             return [e for e in _orig_scandir(path) if e.name == _PENDING_RUN_ID]
         if _is_under_foreign_pending(resolved):
             raise PermissionError(
                 "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
             )
-        return _orig_scandir(path)
+        if _metadata_hidden(resolved):
+            raise FileNotFoundError(2, "路径不存在或不可见", str(path))
+        # 区外无 pending/锁工件：原样返回真实迭代器，不加包装开销
+        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+            return _orig_scandir(path)
+        children = _pending_children(resolved)
+        if not children:
+            it = _orig_scandir(path)  # 缺失目录照常抛 FileNotFoundError
+            return _MergedScandir(it, [])
+        try:
+            it = _orig_scandir(path)
+        except FileNotFoundError:
+            it = None
+        extras = [
+            (
+                os.path.normcase(name),
+                _PendingDirEntry(logical, pend if pend is not None else _pending_root()),
+            )
+            for name, (logical, pend) in children.items()
+            if not _is_internal_artifact(name)
+        ]
+        return _MergedScandir(it, extras)
     os.scandir = _guarded_scandir
+
+# ── pending 读侧投影 ──
+# 同一 run 内经 open/Path.write_* 落盘的写入都在 pending 副本上；
+# os.stat 家族（exists/isfile/getsize/getmtime、Path.stat/exists/is_file 全走它）
+# 必须看到 pending 副本，否则“写完即验”惯用法（getsize/exists）对刚写的文件报错。
+def _resolve_pending_read(resolved):
+    """logical 路径有本 run 的 pending 写入时，返回 pending 副本路径。"""
+    # 容器目录本身可探（makedirs/exists 会经过它）；foreign 判定留给其子路径。
+    if resolved != _PENDING_TREE_ROOT and _is_under_foreign_pending(resolved):
+        raise PermissionError(
+            "PENDING_ISOLATION: 禁止访问其他 run 的 pending [等级: %s]" % _TIER
+        )
+    try:
+        if resolved in _PENDING:
+            return _PENDING[resolved]
+        if _is_under_pending(resolved):
+            return resolved
+        # pending 落点只可能在工作区内：区外路径早退，避免给
+        # import 期海量 stat（site-packages）叠加 sha256+二次 stat 开销。
+        if not _path_is_inside(_WORKSPACE_ROOT, resolved):
+            return resolved
+        pend = _pending_dest(resolved)
+        _orig_os_stat(pend)
+        return pend
+    except (OSError, PermissionError):
+        pass
+    # 只有 pending 后代（目录尚未物化）：投影到 pending 根这个真实目录，
+    # 使 exists/isdir 为真、isfile 为假，与"目录已存在"语义一致。
+    if _pending_children(resolved):
+        return _pending_root()
+    return resolved
+
+def _guarded_os_stat(path, *args, **kwargs):
+    resolved = _safe_realpath(str(path))
+    if _metadata_hidden(resolved):
+        raise FileNotFoundError(2, "路径不存在或不可见", str(path))
+    return _orig_os_stat(_resolve_pending_read(resolved), *args, **kwargs)
+
+os.stat = _guarded_os_stat
+if _orig_os_lstat is not None:
+    def _guarded_os_lstat(path, *args, **kwargs):
+        resolved = _safe_realpath(str(path))
+        if _metadata_hidden(resolved):
+            raise FileNotFoundError(2, "路径不存在或不可见", str(path))
+        return _orig_os_lstat(_resolve_pending_read(resolved), *args, **kwargs)
+    os.lstat = _guarded_os_lstat
+
+# os.path.exists/isfile/isdir/lexists 在 Windows 走 C 加速实现，不经 Python os.stat，
+# 需逐个投影；getsize/getmtime 等 Python 实现已由上面的 os.stat 补丁覆盖。
+def _wrap_path_probe(fn):
+    def _guarded(path, *args, **kwargs):
+        resolved = _safe_realpath(str(path))
+        if _metadata_hidden(resolved):
+            return False
+        return fn(_resolve_pending_read(resolved), *args, **kwargs)
+    return _guarded
+
+for _probe_name in ("exists", "isfile", "isdir", "lexists"):
+    _probe_fn = getattr(os.path, _probe_name, None)
+    if callable(_probe_fn):
+        setattr(os.path, _probe_name, _wrap_path_probe(_probe_fn))
 
 import shutil as _shutil_mod
 _orig_copy = _shutil_mod.copy
@@ -528,7 +966,8 @@ def _guarded_path_open(self, mode="r", *args, **kwargs):
     if writing:
         target = _path_write_target(self)
         return _orig_path_open(target, mode, *args, **kwargs)
-    resolved = os.path.realpath(str(self))
+    resolved = _safe_realpath(str(self))
+    _deny_forbidden_read(resolved)
     dest = _prepare_open_path(resolved, mode)
     if dest != resolved:
         return _orig_path_open(_OrigPath(dest), mode, *args, **kwargs)
@@ -561,7 +1000,7 @@ _OrigPath.replace = _guarded_path_replace
 _OrigPath.rename = _guarded_path_rename
 _orig_path_mkdir = _OrigPath.mkdir
 def _guarded_path_mkdir(self, *args, **kwargs):
-    parent = os.path.realpath(str(self.parent) if str(self.parent) else ".")
+    parent = _safe_realpath(str(self.parent) if str(self.parent) else ".")
     dest = os.path.join(parent, self.name)
     if not _mkdir_allowed(dest):
         raise PermissionError(
@@ -578,6 +1017,14 @@ if hasattr(_OrigPath, "hardlink_to"):
 
 
 
+_UTF8_STDIO = """\
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
+"""
+
 _RED_FS_GUARD_TEMPLATE = '''\
 """ExcelManus RED 文件系统守卫包装（自动生成）。
 
@@ -590,6 +1037,8 @@ import sys
 import os
 import tempfile as _tmpmod
 import builtins
+
+{utf8_stdio}
 
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
 _TIER = "RED"
@@ -619,13 +1068,11 @@ _BENCH_PROTECTED_DIRS = [
 <<<PENDING_WRITE_RUNTIME>>>
 
 def _guarded_open(file, mode="r", *args, **kwargs):
-    resolved = os.path.realpath(str(file))
-    _deny_forbidden_read(resolved)
-    for _pd in _PRODUCT_SOURCE_DIRS:
-        if _path_is_inside(_pd, resolved):
-            raise PermissionError(
-                "PRODUCT_SOURCE_FORBIDDEN: 禁止读取产品源码 [等级: {{_TIER}}]"
-            )
+    resolved = _safe_realpath(str(file))
+    if any(c in str(mode) for c in "wax+"):
+        _deny_protected_target(resolved)
+    else:
+        _deny_forbidden_read(resolved)
     # ── 敏感路径读取保护 ──
     for _sd in _SENSITIVE_DIRS:
         if _path_is_inside(_sd, resolved):
@@ -684,6 +1131,8 @@ import importlib.abc
 import importlib.machinery
 import builtins
 
+{utf8_stdio}
+
 # ── 配置 ──
 _BLOCKED_MODULES = {blocked_modules}
 _WORKSPACE_ROOT = os.path.realpath({workspace_root})
@@ -733,13 +1182,11 @@ _BENCH_PROTECTED_DIRS = [
 <<<PENDING_WRITE_RUNTIME>>>
 
 def _guarded_open(file, mode="r", *args, **kwargs):
-    resolved = os.path.realpath(str(file))
-    _deny_forbidden_read(resolved)
-    for _pd in _PRODUCT_SOURCE_DIRS:
-        if _path_is_inside(_pd, resolved):
-            raise PermissionError(
-                "PRODUCT_SOURCE_FORBIDDEN: 禁止读取产品源码 [等级: {{_TIER}}]"
-            )
+    resolved = _safe_realpath(str(file))
+    if any(c in str(mode) for c in "wax+"):
+        _deny_protected_target(resolved)
+    else:
+        _deny_forbidden_read(resolved)
     if any(c in str(mode) for c in "wax+"):
         if not _path_is_inside(_WORKSPACE_ROOT, resolved):
             if _path_is_inside(_SYSTEM_TMPDIR, resolved):

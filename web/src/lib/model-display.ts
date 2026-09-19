@@ -2,7 +2,8 @@ const CODEX_OAUTH_MODEL_PREFIX = "openai-codex/";
 const PLACEHOLDER_MODEL_IDS = new Set(["test-model", "dummy-model", "placeholder-model"]);
 
 export function isPlaceholderModelId(id: string | null | undefined): boolean {
-  return Boolean(id) && PLACEHOLDER_MODEL_IDS.has(id.trim().toLowerCase());
+  if (typeof id !== "string") return false;
+  return PLACEHOLDER_MODEL_IDS.has(id.trim().toLowerCase());
 }
 
 /**

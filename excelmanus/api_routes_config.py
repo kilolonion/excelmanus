@@ -31,7 +31,7 @@ from excelmanus.api_app_state import (
 )
 from excelmanus.api_sse import sse_format as _sse_format
 from excelmanus.config import format_deprecated_model_message
-from excelmanus.logger import get_logger
+from excelmanus.logger import get_logger, setup_logging
 
 logger = get_logger("api.config")
 
@@ -234,48 +234,15 @@ async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Reque
     })
 
 
-# ── 模型配置管理 API（正式仓 config.env 持久化） ──────────────────────
+# ── 模型配置管理 API（主库持久化） ──────────────────────
 
-_MODEL_ENV_KEYS = {
-    "embedding": {"api_key": "EXCELMANUS_EMBEDDING_API_KEY", "base_url": "EXCELMANUS_EMBEDDING_BASE_URL", "model": "EXCELMANUS_EMBEDDING_MODEL", "enabled": "EXCELMANUS_EMBEDDING_ENABLED"},
-}
+_LEGACY_MODEL_SECTIONS: dict[str, dict[str, str]] = {}
 
 
-def _find_env_file() -> str:
-    """定位可读的 .env：项目根优先，否则正式仓。保留给调用方探测路径。"""
-    from excelmanus.data_home import get_config_env_path, get_project_env_path
+def _persist_settings(updates: dict[str, str]) -> None:
+    from excelmanus.settings_persist import persist_settings
 
-    project = get_project_env_path()
-    if project.is_file():
-        return str(project)
-    cwd = os.path.join(os.getcwd(), ".env")
-    if os.path.isfile(cwd):
-        return cwd
-    return str(get_config_env_path())
-
-
-def _read_env_file(path: str) -> list[str]:
-    from excelmanus.data_home import read_env_lines
-
-    return read_env_lines(path)
-
-
-def _write_env_file(path: str, lines: list[str]) -> None:
-    from excelmanus.data_home import _atomic_write_text
-
-    _atomic_write_text(path, "".join(lines), private=path.endswith("config.env"))
-
-
-def _update_env_var(lines: list[str], key: str, value: str) -> list[str]:
-    from excelmanus.data_home import update_env_lines
-
-    return update_env_lines(lines, key, value)
-
-
-def _persist_env_updates(updates: dict[str, str]) -> None:
-    from excelmanus.data_home import persist_env_updates
-
-    persist_env_updates(updates)
+    persist_settings(updates)
 
 
 class ModelConfigUpdate(BaseModel):
@@ -299,6 +266,7 @@ class ModelProfileCreate(BaseModel):
     model_family: str = ""
     custom_extra_body: str = ""
     custom_extra_headers: str = ""
+    clone_from: str = ""
 
 
 def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONResponse | None:
@@ -312,16 +280,10 @@ def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONRes
 
 @router.get("/api/v1/config/models")
 async def get_model_config(request: Request) -> JSONResponse:
-    """获取模型配置（embedding + profiles + 当前激活档案）。"""
+    """获取模型配置（profiles + 当前激活档案）。"""
     assert get_config() is not None, "服务未初始化"
     user_cfg = _user_config_store()
     result: dict = {
-        "embedding": {
-            "api_key": _mask_key(get_config().embedding_api_key or ""),
-            "base_url": get_config().embedding_base_url or "",
-            "model": get_config().embedding_model or "",
-            "enabled": get_config().embedding_enabled,
-        },
         "profiles": [
             {
                 "name": p["name"],
@@ -349,6 +311,29 @@ def _mask_key(key: str) -> str:
     return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
 
 
+def _is_masked_api_key(value: str) -> bool:
+    """判断前端回传的是否为脱敏后的 Key，不能当真实凭证使用。"""
+    if not value:
+        return False
+    if value == "****":
+        return True
+    if len(value) <= 12:
+        return False
+    middle = value[4:-4]
+    return bool(middle) and set(middle) <= {"*"}
+
+
+def _usable_api_key(value: str | None) -> str:
+    text = (value or "").strip()
+    if not text or _is_masked_api_key(text):
+        return ""
+    return text
+
+
+def _normalize_base_url(url: str | None) -> str:
+    return (url or "").strip().rstrip("/")
+
+
 
 @router.put("/api/v1/config/models/{section}")
 async def update_model_config(
@@ -356,11 +341,11 @@ async def update_model_config(
     request: ModelConfigUpdate,
     raw_request: Request,
 ) -> JSONResponse:
-    """更新指定模型配置区块并持久化到正式仓。"""
-    if section not in _MODEL_ENV_KEYS:
+    """更新指定模型配置区块并持久化到主库。"""
+    if section not in _LEGACY_MODEL_SECTIONS:
         return _error_json_response(400, f"未知配置区块: {section}")
 
-    key_map = _MODEL_ENV_KEYS[section]
+    key_map = _LEGACY_MODEL_SECTIONS[section]
 
     updates: dict[str, str] = {}
     if request.api_key is not None and "api_key" in key_map:
@@ -383,18 +368,7 @@ async def update_model_config(
     if not updates:
         return _error_json_response(400, "无有效更新字段")
 
-    _persist_env_updates(updates)
-
-    # 同步更新内存中的 _config 实例
-    if get_config() is not None:
-        _SECTION_CONFIG_FIELDS = {
-            "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
-        }
-        field_map = _SECTION_CONFIG_FIELDS.get(section, {})
-        for req_field, config_attr in field_map.items():
-            val = getattr(request, req_field, None)
-            if val is not None:
-                object.__setattr__(get_config(), config_attr, val)
+    _persist_settings(updates)
 
     return JSONResponse(content={"status": "ok", "section": section, "updated": list(updates.keys())})
 
@@ -417,10 +391,17 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
     if deprecated is not None:
         return deprecated
 
-    get_config_store().add_profile(
+    api_key = request.api_key or ""
+    if not api_key and request.clone_from:
+        source = get_config_store().get_profile(request.clone_from)
+        if source is None:
+            return _error_json_response(404, f"未找到可复制凭证的档案: {request.clone_from}")
+        api_key = str(source.get("api_key") or "")
+
+    created = get_config_store().add_profile(
         name=request.name,
         model=request.model,
-        api_key=request.api_key or "",
+        api_key=api_key,
         base_url=request.base_url or "",
         description=request.description or "",
         protocol=request.protocol or "auto",
@@ -429,6 +410,8 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         custom_extra_body=request.custom_extra_body or "",
         custom_extra_headers=request.custom_extra_headers or "",
     )
+    if not created:
+        return _error_json_response(500, f"保存模型档案失败: {request.name}")
     _sync_config_profiles_from_db()
     if get_session_manager() is not None and get_config() is not None:
         await get_session_manager().broadcast_model_profiles(get_config().models)
@@ -514,7 +497,7 @@ async def update_model_profile(
 
 class ConfigExportRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    sections: list[str] = ["embedding", "profiles"]
+    sections: list[str] = ["profiles"]
     mode: Literal["password", "simple"] = "password"
     password: str | None = None
 
@@ -529,13 +512,6 @@ def _collect_raw_sections(section_names: list[str]) -> dict[str, Any]:
     """收集指定区块的原始（未脱敏）配置数据。"""
     assert get_config() is not None
     result: dict[str, Any] = {}
-    if "embedding" in section_names:
-        result["embedding"] = {
-            "api_key": get_config().embedding_api_key or "",
-            "base_url": get_config().embedding_base_url or "",
-            "model": get_config().embedding_model or "",
-            "enabled": get_config().embedding_enabled,
-        }
     if "profiles" in section_names and get_config_store() is not None:
         result["profiles"] = get_config_store().list_profiles()
     return result
@@ -549,7 +525,7 @@ async def export_model_config(
     if get_config() is None:
         return _error_json_response(503, "服务未初始化")
 
-    valid_sections = {"embedding", "profiles"}
+    valid_sections = {"profiles"}
     invalid = set(request.sections) - valid_sections
     if invalid:
         return _error_json_response(400, f"无效的配置区块: {', '.join(invalid)}")
@@ -580,55 +556,6 @@ async def import_model_config(
 
     sections = payload.get("sections", {})
     imported: dict[str, Any] = {}
-    env_updates: dict[str, str] = {}
-
-    for section_key in ("embedding",):
-        section_data = sections.get(section_key)
-        if not isinstance(section_data, dict):
-            continue
-        key_map = _MODEL_ENV_KEYS.get(section_key)
-        if not key_map:
-            continue
-
-        updated_fields: list[str] = []
-        for field_name in ("api_key", "base_url", "model", "protocol"):
-            val = section_data.get(field_name)
-            if val is None or not isinstance(val, str):
-                continue
-            if field_name == "model":
-                deprecated = _deprecated_model_error_response(
-                    val,
-                    prefix=f"导入的 {section_key} 模型配置不可用。",
-                )
-                if deprecated is not None:
-                    return deprecated
-            env_key = key_map.get(field_name)
-            if not env_key:
-                continue
-            env_updates[env_key] = val
-            updated_fields.append(field_name)
-
-        # enabled 字段为 bool，单独处理
-        if "enabled" in section_data and isinstance(section_data["enabled"], bool):
-            env_key = key_map.get("enabled")
-            if env_key:
-                env_updates[env_key] = "true" if section_data["enabled"] else "false"
-                updated_fields.append("enabled")
-
-        if get_config() is not None and updated_fields:
-            field_map = {
-                "embedding": {"api_key": "embedding_api_key", "base_url": "embedding_base_url", "model": "embedding_model", "enabled": "embedding_enabled"},
-            }.get(section_key, {})
-            for f in updated_fields:
-                config_attr = field_map.get(f)
-                if config_attr:
-                    object.__setattr__(get_config(), config_attr, section_data.get(f) if f == "enabled" else (section_data.get(f) or None))
-
-        if updated_fields:
-            imported[section_key] = updated_fields
-
-    if env_updates:
-        _persist_env_updates(env_updates)
 
     profiles_data = sections.get("profiles")
     if isinstance(profiles_data, list) and get_config_store() is not None:
@@ -755,14 +682,17 @@ def _resolve_model_info(
                 model, base_url, api_key, protocol = _profile_connection(
                     p, default_protocol=_default_protocol,
                 )
-                if req_base_url and base_url != req_base_url:
+                if req_base_url and _normalize_base_url(base_url) != _normalize_base_url(req_base_url):
                     continue
                 return model, base_url, api_key, protocol
 
-    # 4) 无匹配档案：使用请求参数，缺省项取当前激活快照
+    # 4) 无匹配档案：使用请求参数。仅当 Base URL 与当前快照相同才借用其 Key。
     model = req_model or get_config().model
     base_url = req_base_url or get_config().base_url
-    return model, base_url, get_config().api_key, _default_protocol
+    api_key = get_config().api_key
+    if req_base_url and _normalize_base_url(req_base_url) != _normalize_base_url(get_config().base_url):
+        api_key = ""
+    return model, base_url, api_key, _default_protocol
 
 
 @router.get("/api/v1/config/models/capabilities")
@@ -1272,8 +1202,9 @@ async def test_model_connection(request: Request) -> JSONResponse:
         })
 
     model, base_url, api_key, resolved_protocol = _resolve_model_info(req_name, req_model, req_base_url)
-    if body.get("api_key"):
-        api_key = body["api_key"]
+    override_key = _usable_api_key(body.get("api_key"))
+    if override_key:
+        api_key = override_key
 
     # 格式校验
     if not model or not model.strip():
@@ -1454,6 +1385,68 @@ def _get_provider_fallback(base_url: str) -> tuple[list[dict], str] | None:
     return None
 
 
+def _profile_for_list_remote(name: str, base_url: str) -> dict[str, Any] | None:
+    """按档案名精确匹配；否则仅当该 Base URL 只对应一个档案时采用。"""
+    store = get_config_store()
+    if store is None:
+        return None
+    if name:
+        profile = store.get_profile(name)
+        if profile is not None:
+            return profile
+    normalized = _normalize_base_url(base_url)
+    if not normalized:
+        return None
+    matches = [
+        p for p in store.list_profiles()
+        if _normalize_base_url(str(p.get("base_url") or "")) == normalized
+    ]
+    if len(matches) == 1:
+        return matches[0]
+    return None
+
+
+def _resolve_list_remote_api_key(
+    *,
+    request_key: str,
+    profile: dict[str, Any] | None,
+    base_url: str,
+) -> str:
+    """显式 Key > 匹配档案 Key > 仅当 Base URL 与当前快照相同才借用。"""
+    if request_key:
+        return request_key
+    if profile:
+        stored = _usable_api_key(profile.get("api_key"))
+        if stored:
+            return stored
+    config = get_config()
+    if config is None:
+        return ""
+    if _normalize_base_url(base_url) == _normalize_base_url(config.base_url):
+        return _usable_api_key(config.api_key)
+    return ""
+
+
+def _list_remote_http_error(status: int, base_url: str, response_text: str) -> tuple[str, str]:
+    """把远端 HTTP 错误收成用户可读文案，避免把 httpx / MDN 链接直接抛到 UI。"""
+    hint = _diagnose_connection_error(f"HTTP {status}", base_url, "")
+    host = _normalize_base_url(base_url).split("//", 1)[-1].split("/", 1)[0] or base_url
+    if status == 401:
+        return (
+            f"{host} 拒绝了当前 API Key（HTTP 401）",
+            hint or "请填写该端点对应的 Key；编辑已保存档案时可留空以使用已存凭证。",
+        )
+    if status == 403:
+        return f"{host} 权限不足（HTTP 403）", hint
+    detail = (response_text or "").strip().replace("\n", " ")
+    if "developer.mozilla.org" in detail.lower():
+        detail = ""
+    if len(detail) > 120:
+        detail = detail[:120]
+    prefix = f"HTTP {status}"
+    return (f"{prefix}: {detail}" if detail else prefix), hint
+
+
 @router.post("/api/v1/config/models/list-remote")
 async def list_remote_models(request: Request) -> JSONResponse:
     """调用远程 API 端点列出可用模型（用于添加模型时自动检测）。"""
@@ -1466,14 +1459,30 @@ async def list_remote_models(request: Request) -> JSONResponse:
     except Exception:
         pass
 
+    req_name = str(body.get("name") or "").strip()
     base_url = (body.get("base_url") or "").strip() or get_config().base_url
-    api_key = (body.get("api_key") or "").strip() or get_config().api_key
     protocol = (body.get("protocol") or "auto").strip().lower()
+    profile = _profile_for_list_remote(req_name, base_url)
+    if profile and not (body.get("base_url") or "").strip():
+        base_url = str(profile.get("base_url") or base_url)
+    if profile and protocol == "auto":
+        stored_protocol = str(profile.get("protocol") or "").strip().lower()
+        if stored_protocol:
+            protocol = stored_protocol
+    api_key = _resolve_list_remote_api_key(
+        request_key=_usable_api_key(body.get("api_key")),
+        profile=profile,
+        base_url=base_url,
+    )
 
     if not base_url:
-        return JSONResponse(content={"models": [], "error": "Base URL \u4e3a\u7a7a"})
+        return JSONResponse(content={"models": [], "error": "Base URL 为空"})
     if not api_key:
-        return JSONResponse(content={"models": [], "error": "API Key \u4e3a\u7a7a"})
+        return JSONResponse(content={
+            "models": [],
+            "error": "API Key 为空",
+            "hint": "请填写该端点的 API Key。编辑已保存档案时，可留空 Key 以使用已存凭证。",
+        })
 
     import httpx
 
@@ -1495,15 +1504,20 @@ async def list_remote_models(request: Request) -> JSONResponse:
             resp.raise_for_status()
             data = resp.json()
     except httpx.TimeoutException:
-        return JSONResponse(content={"models": [], "error": "\u8bf7\u6c42\u8d85\u65f6\uff0c\u8bf7\u68c0\u67e5 Base URL \u662f\u5426\u53ef\u8bbf\u95ee"})
+        return JSONResponse(content={"models": [], "error": "请求超时，请检查 Base URL 是否可访问"})
     except httpx.HTTPStatusError as exc:
         if exc.response.status_code == 404:
             fallback = _get_provider_fallback(base_url)
             if fallback is not None:
                 models, hint = fallback
                 return JSONResponse(content={"models": models, "hint": hint})
-        hint = _diagnose_connection_error(str(exc)[:200], base_url, "")
-        return JSONResponse(content={"models": [], "error": f"HTTP {exc.response.status_code}: {str(exc)[:150]}", "hint": hint})
+        body_text = ""
+        try:
+            body_text = exc.response.text or ""
+        except Exception:
+            body_text = ""
+        error, hint = _list_remote_http_error(exc.response.status_code, base_url, body_text)
+        return JSONResponse(content={"models": [], "error": error, "hint": hint})
     except Exception as exc:
         return JSONResponse(content={"models": [], "error": f"请求失败: {str(exc)[:200]}"})
 
@@ -1608,7 +1622,46 @@ def _mask_api_key(key: str | None) -> str:
     return key[:3] + "*" * (len(key) - 7) + key[-4:]
 
 
-_RUNTIME_ENV_KEYS: dict[str, str] = {
+def _secret_status(key: str | None) -> dict[str, object]:
+    """GET 脱敏：只回是否已配置与末四位，不回明文。"""
+    text = (key or "").strip()
+    return {"configured": bool(text), "last4": text[-4:] if text else ""}
+
+
+def _jev_provider_payload() -> dict[str, object]:
+    from excelmanus.system_one.providers import (
+        JEV_ACTIVE_PROVIDER_SETTING,
+        load_jev_providers,
+        pick_active_jev_provider,
+        public_jev_provider,
+    )
+    from excelmanus.settings_runtime import get_setting
+
+    records = load_jev_providers()
+    active = pick_active_jev_provider(records, get_setting(JEV_ACTIVE_PROVIDER_SETTING))
+    return {
+        "jev_providers": [public_jev_provider(item) for item in records],
+        "jev_active_provider": active.id if active else "",
+        "typesafe": _secret_status(get_config().typesafe_api_key),
+        "vercel_gateway": _secret_status(get_config().ai_gateway_api_key),
+    }
+
+
+def _jev_enforce_ready() -> bool:
+    """Expose the calibration gate so the settings UI cannot claim inert
+    ``enforce`` configuration is already changing execution.
+    """
+    from excelmanus.system_one.calibration import SIGNED_ENFORCE_FAMILIES, SIGNED_ENFORCE_PACKS
+
+    cfg = get_config()
+    return bool(
+        cfg
+        and getattr(cfg, "jev_calibrated", False)
+        and (SIGNED_ENFORCE_PACKS or SIGNED_ENFORCE_FAMILIES)
+    )
+
+
+_RUNTIME_SETTING_KEYS: dict[str, str] = {
     # ── 会话 ──
     "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
     "max_sessions": "EXCELMANUS_MAX_SESSIONS",
@@ -1620,7 +1673,6 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     # ── 上下文与记忆 ──
     "max_context_tokens": "EXCELMANUS_MAX_CONTEXT_TOKENS",
     "memory_enabled": "EXCELMANUS_MEMORY_ENABLED",
-    "memory_auto_extract_interval": "EXCELMANUS_MEMORY_AUTO_EXTRACT_INTERVAL",
     "memory_auto_load_lines": "EXCELMANUS_MEMORY_AUTO_LOAD_LINES",
     "memory_expire_days": "EXCELMANUS_MEMORY_EXPIRE_DAYS",
     "chat_history_enabled": "EXCELMANUS_CHAT_HISTORY_ENABLED",
@@ -1630,10 +1682,7 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "memory_maintenance_new_threshold": "EXCELMANUS_MEMORY_MAINTENANCE_NEW_THRESHOLD",
     "memory_maintenance_interval_hours": "EXCELMANUS_MEMORY_MAINTENANCE_INTERVAL_HOURS",
     "memory_maintenance_model": "EXCELMANUS_MEMORY_MAINTENANCE_MODEL",
-    # ── 摘要与压缩 ──
-    "summarization_enabled": "EXCELMANUS_SUMMARIZATION_ENABLED",
-    "summarization_threshold_ratio": "EXCELMANUS_SUMMARIZATION_THRESHOLD_RATIO",
-    "summarization_keep_recent_turns": "EXCELMANUS_SUMMARIZATION_KEEP_RECENT_TURNS",
+    # ── 压缩 ──
     "compaction_enabled": "EXCELMANUS_COMPACTION_ENABLED",
     "compaction_threshold_ratio": "EXCELMANUS_COMPACTION_THRESHOLD_RATIO",
     "compaction_keep_recent_turns": "EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS",
@@ -1653,13 +1702,11 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "llm_retry_max_delay_seconds": "EXCELMANUS_LLM_RETRY_MAX_DELAY_SECONDS",
     # ── 视觉 ──
     "main_model_vision": "EXCELMANUS_MAIN_MODEL_VISION",
-    "image_keep_rounds": "EXCELMANUS_IMAGE_KEEP_ROUNDS",
-    "image_max_active": "EXCELMANUS_IMAGE_MAX_ACTIVE",
-    "image_token_budget": "EXCELMANUS_IMAGE_TOKEN_BUDGET",
-    # ── 系统消息与工具 ──
-    "system_message_mode": "EXCELMANUS_SYSTEM_MESSAGE_MODE",
+    "image_pixel_budget": "EXCELMANUS_IMAGE_PIXEL_BUDGET",
+    "image_max_bytes": "EXCELMANUS_IMAGE_MAX_BYTES",
+    "image_files_api": "EXCELMANUS_IMAGE_FILES_API",
+    # ── 工具与 Hook ──
     "tool_result_hard_cap_chars": "EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS",
-    "large_excel_threshold_bytes": "EXCELMANUS_LARGE_EXCEL_THRESHOLD_BYTES",
     "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
     "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
     "hooks_command_timeout_seconds": "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
@@ -1678,25 +1725,24 @@ _RUNTIME_ENV_KEYS: dict[str, str] = {
     "skills_discovery_scan_workspace_ancestors": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_WORKSPACE_ANCESTORS",
     "skills_discovery_include_agents": "EXCELMANUS_SKILLS_DISCOVERY_INCLUDE_AGENTS",
     "skills_discovery_scan_external_tool_dirs": "EXCELMANUS_SKILLS_DISCOVERY_SCAN_EXTERNAL_TOOL_DIRS",
-    # ── Embedding / 语义检索 ──
-    "embedding_enabled": "EXCELMANUS_EMBEDDING_ENABLED",
-    "embedding_model": "EXCELMANUS_EMBEDDING_MODEL",
-    "embedding_dimensions": "EXCELMANUS_EMBEDDING_DIMENSIONS",
-    "embedding_timeout_seconds": "EXCELMANUS_EMBEDDING_TIMEOUT_SECONDS",
-    "memory_semantic_top_k": "EXCELMANUS_MEMORY_SEMANTIC_TOP_K",
-    "memory_semantic_threshold": "EXCELMANUS_MEMORY_SEMANTIC_THRESHOLD",
-    "memory_semantic_fallback_recent": "EXCELMANUS_MEMORY_SEMANTIC_FALLBACK_RECENT",
-    # ── Playbook ──
-    "playbook_enabled": "EXCELMANUS_PLAYBOOK_ENABLED",
-    "playbook_max_bullets": "EXCELMANUS_PLAYBOOK_MAX_BULLETS",
-    "registry_semantic_top_k": "EXCELMANUS_REGISTRY_SEMANTIC_TOP_K",
-    "registry_semantic_threshold": "EXCELMANUS_REGISTRY_SEMANTIC_THRESHOLD",
     # ── 内置搜索引擎 ──
     "exa_search_enabled": "EXCELMANUS_EXA_SEARCH",
     "search_default_provider": "EXCELMANUS_SEARCH_DEFAULT",
     "exa_api_key": "EXCELMANUS_EXA_API_KEY",
     "tavily_api_key": "EXCELMANUS_TAVILY_API_KEY",
     "brave_api_key": "EXCELMANUS_BRAVE_API_KEY",
+    # ── System One / Jev ──
+    "jev_enabled": "EXCELMANUS_JEV_ENABLED",
+    "jev_exposure": "EXCELMANUS_JEV_EXPOSURE",
+    "jev_mode_hint": "EXCELMANUS_JEV_MODE_HINT",
+    "jev_present_as_auto": "EXCELMANUS_JEV_PRESENT_AS_AUTO",
+    "jev_observation": "EXCELMANUS_JEV_OBSERVATION",
+    "jev_ui_hint": "EXCELMANUS_JEV_UI_HINT",
+    "jev_model": "EXCELMANUS_JEV_MODEL",
+    "ai_gateway_api_key": "EXCELMANUS_AI_GATEWAY_API_KEY",
+    "typesafe_api_key": "EXCELMANUS_TYPESAFE_API_KEY",
+    "jev_active_provider": "EXCELMANUS_JEV_ACTIVE_PROVIDER",
+    "jev_timeout_seconds": "EXCELMANUS_JEV_TIMEOUT_SECONDS",
 }
 
 
@@ -1716,7 +1762,6 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         # ── 上下文与记忆 ──
         "max_context_tokens": get_config().max_context_tokens,
         "memory_enabled": get_config().memory_enabled,
-        "memory_auto_extract_interval": get_config().memory_auto_extract_interval,
         "memory_auto_load_lines": get_config().memory_auto_load_lines,
         "memory_expire_days": get_config().memory_expire_days,
         "chat_history_enabled": get_config().chat_history_enabled,
@@ -1726,10 +1771,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "memory_maintenance_new_threshold": get_config().memory_maintenance_new_threshold,
         "memory_maintenance_interval_hours": get_config().memory_maintenance_interval_hours,
         "memory_maintenance_model": get_config().memory_maintenance_model or "",
-        # ── 摘要与压缩 ──
-        "summarization_enabled": get_config().summarization_enabled,
-        "summarization_threshold_ratio": get_config().summarization_threshold_ratio,
-        "summarization_keep_recent_turns": get_config().summarization_keep_recent_turns,
+        # ── 压缩 ──
         "compaction_enabled": get_config().compaction_enabled,
         "compaction_threshold_ratio": get_config().compaction_threshold_ratio,
         "compaction_keep_recent_turns": get_config().compaction_keep_recent_turns,
@@ -1749,13 +1791,11 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "llm_retry_max_delay_seconds": get_config().llm_retry_max_delay_seconds,
         # ── 视觉 ──
         "main_model_vision": get_config().main_model_vision,
-        "image_keep_rounds": get_config().image_keep_rounds,
-        "image_max_active": get_config().image_max_active,
-        "image_token_budget": get_config().image_token_budget,
-        # ── 系统消息与工具 ──
-        "system_message_mode": get_config().system_message_mode,
+        "image_pixel_budget": get_config().image_pixel_budget,
+        "image_max_bytes": get_config().image_max_bytes,
+        "image_files_api": get_config().image_files_api,
+        # ── 工具与 Hook ──
         "tool_result_hard_cap_chars": get_config().tool_result_hard_cap_chars,
-        "large_excel_threshold_bytes": get_config().large_excel_threshold_bytes,
         "parallel_readonly_tools": get_config().parallel_readonly_tools,
         "hooks_command_enabled": get_config().hooks_command_enabled,
         "hooks_command_timeout_seconds": get_config().hooks_command_timeout_seconds,
@@ -1774,25 +1814,24 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "skills_discovery_scan_workspace_ancestors": get_config().skills_discovery_scan_workspace_ancestors,
         "skills_discovery_include_agents": get_config().skills_discovery_include_agents,
         "skills_discovery_scan_external_tool_dirs": get_config().skills_discovery_scan_external_tool_dirs,
-        # ── Embedding / 语义检索 ──
-        "embedding_enabled": get_config().embedding_enabled,
-        "embedding_model": get_config().embedding_model,
-        "embedding_dimensions": get_config().embedding_dimensions,
-        "embedding_timeout_seconds": get_config().embedding_timeout_seconds,
-        "memory_semantic_top_k": get_config().memory_semantic_top_k,
-        "memory_semantic_threshold": get_config().memory_semantic_threshold,
-        "memory_semantic_fallback_recent": get_config().memory_semantic_fallback_recent,
-        # ── Playbook ──
-        "playbook_enabled": get_config().playbook_enabled,
-        "playbook_max_bullets": get_config().playbook_max_bullets,
-        "registry_semantic_top_k": get_config().registry_semantic_top_k,
-        "registry_semantic_threshold": get_config().registry_semantic_threshold,
         # ── 内置搜索引擎 ──
         "exa_search_enabled": get_config().exa_search_enabled,
         "search_default_provider": get_config().search_default_provider,
         "exa_api_key": _mask_api_key(get_config().exa_api_key),
         "tavily_api_key": _mask_api_key(get_config().tavily_api_key),
         "brave_api_key": _mask_api_key(get_config().brave_api_key),
+        # ── System One / Jev ──
+        "jev_enabled": get_config().jev_enabled,
+        "jev_exposure": get_config().jev_exposure,
+        "jev_mode_hint": get_config().jev_mode_hint,
+        "jev_present_as_auto": get_config().jev_present_as_auto,
+        "jev_observation": get_config().jev_observation,
+        "jev_ui_hint": get_config().jev_ui_hint,
+        "jev_model": get_config().jev_model,
+        "ai_gateway": _secret_status(get_config().ai_gateway_api_key),
+        **_jev_provider_payload(),
+        "jev_timeout_seconds": get_config().jev_timeout_seconds,
+        "jev_enforce_ready": _jev_enforce_ready(),
     })
 
 
@@ -1809,7 +1848,6 @@ class RuntimeConfigUpdate(BaseModel):
     # ── 上下文与记忆 ──
     max_context_tokens: int | None = Field(default=None, gt=0)
     memory_enabled: bool | None = None
-    memory_auto_extract_interval: int | None = Field(default=None, ge=0)
     memory_auto_load_lines: int | None = Field(default=None, gt=0)
     memory_expire_days: int | None = Field(default=None, ge=0)
     chat_history_enabled: bool | None = None
@@ -1819,10 +1857,7 @@ class RuntimeConfigUpdate(BaseModel):
     memory_maintenance_new_threshold: int | None = Field(default=None, ge=1)
     memory_maintenance_interval_hours: float | None = Field(default=None, ge=0.5)
     memory_maintenance_model: str | None = None
-    # ── 摘要与压缩 ──
-    summarization_enabled: bool | None = None
-    summarization_threshold_ratio: float | None = Field(default=None, gt=0, lt=1)
-    summarization_keep_recent_turns: int | None = Field(default=None, gt=0)
+    # ── 压缩 ──
     compaction_enabled: bool | None = None
     compaction_threshold_ratio: float | None = Field(default=None, gt=0, lt=1)
     compaction_keep_recent_turns: int | None = Field(default=None, gt=0)
@@ -1842,13 +1877,11 @@ class RuntimeConfigUpdate(BaseModel):
     llm_retry_max_delay_seconds: float | None = Field(default=None, gt=0)
     # ── 视觉 ──
     main_model_vision: Literal["auto", "true", "false"] | None = None
-    image_keep_rounds: int | None = Field(default=None, gt=0)
-    image_max_active: int | None = Field(default=None, gt=0)
-    image_token_budget: int | None = Field(default=None, gt=0)
-    # ── 系统消息与工具 ──
-    system_message_mode: Literal["auto", "merge", "replace"] | None = None
+    image_pixel_budget: int | str | None = None
+    image_max_bytes: int | None = Field(default=None, gt=0)
+    image_files_api: Literal["auto", "true", "false"] | None = None
+    # ── 工具与 Hook ──
     tool_result_hard_cap_chars: int | None = Field(default=None, ge=0)
-    large_excel_threshold_bytes: int | None = Field(default=None, gt=0)
     parallel_readonly_tools: bool | None = None
     hooks_command_enabled: bool | None = None
     hooks_command_timeout_seconds: int | None = Field(default=None, gt=0)
@@ -1867,60 +1900,120 @@ class RuntimeConfigUpdate(BaseModel):
     skills_discovery_scan_workspace_ancestors: bool | None = None
     skills_discovery_include_agents: bool | None = None
     skills_discovery_scan_external_tool_dirs: bool | None = None
-    # ── Embedding / 语义检索 ──
-    embedding_enabled: bool | None = None
-    embedding_model: str | None = None
-    embedding_dimensions: int | None = Field(default=None, gt=0)
-    embedding_timeout_seconds: float | None = Field(default=None, gt=0)
-    memory_semantic_top_k: int | None = Field(default=None, gt=0)
-    memory_semantic_threshold: float | None = Field(default=None, ge=0, le=1)
-    memory_semantic_fallback_recent: int | None = Field(default=None, gt=0)
-    # ── Playbook ──
-    playbook_enabled: bool | None = None
-    playbook_max_bullets: int | None = Field(default=None, gt=0)
-    registry_semantic_top_k: int | None = Field(default=None, gt=0)
-    registry_semantic_threshold: float | None = Field(default=None, ge=0, le=1)
     # ── 内置搜索引擎 ──
     exa_search_enabled: bool | None = None
     search_default_provider: Literal["exa", "tavily", "brave"] | None = None
     exa_api_key: str | None = None
     tavily_api_key: str | None = None
     brave_api_key: str | None = None
+    # ── System One / Jev ──
+    jev_enabled: Literal["off", "shadow", "enforce"] | None = None
+    jev_exposure: Literal["off", "shadow", "enforce"] | None = None
+    jev_mode_hint: bool | None = None
+    jev_present_as_auto: bool | None = None
+    jev_observation: Literal["off", "shadow", "enforce"] | None = None
+    jev_ui_hint: bool | None = None
+    jev_model: str | None = None
+    ai_gateway_api_key: str | None = None
+    typesafe_api_key: str | None = None
+    jev_active_provider: str | None = None
+    jev_providers: list[dict[str, Any]] | None = None
+    # Provider updates are patches by default. The settings UI sends true for
+    # its full-list save/delete operation so omitted providers are removed
+    # deliberately rather than by accident.
+    jev_providers_replace: bool = False
+    jev_timeout_seconds: float | None = Field(default=None, gt=0)
 
 
 @router.put("/api/v1/config/runtime")
 async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Request) -> JSONResponse:
-    """更新运行时行为配置并持久化到正式仓。"""
+    """更新运行时行为配置并持久化到主库。"""
     assert get_config() is not None, "服务未初始化"
     updates: dict[str, str] = {}
 
     payload = request.model_dump(exclude_none=True)
+    updated_fields: list[str] = []
     # 过滤掉前端回传的掩码 API Key（含 * 号），避免覆盖真实密钥
-    _API_KEY_FIELDS = {"exa_api_key", "tavily_api_key", "brave_api_key"}
+    _API_KEY_FIELDS = {"exa_api_key", "tavily_api_key", "brave_api_key", "ai_gateway_api_key", "typesafe_api_key"}
     for ak_field in _API_KEY_FIELDS:
         val = payload.get(ak_field)
         if isinstance(val, str) and ("*" in val or val == ""):
             payload.pop(ak_field, None)
-    if not payload:
+    incoming_providers = payload.pop("jev_providers", None)
+    providers_replace = bool(payload.pop("jev_providers_replace", False))
+    if incoming_providers is not None:
+        from excelmanus.system_one.providers import (
+            JEV_PROVIDERS_SETTING,
+            legacy_keys_from_providers,
+            load_jev_providers,
+            merge_jev_provider_updates,
+            serialize_jev_providers,
+        )
+
+        if not isinstance(incoming_providers, list):
+            return _error_json_response(400, "jev_providers 格式无效")
+        from urllib.parse import urlparse
+        from excelmanus.system_one.providers import record_from_mapping
+
+        for raw_provider in incoming_providers:
+            if not isinstance(raw_provider, dict):
+                return _error_json_response(400, "jev_providers 包含无效提供商")
+            parsed_provider = record_from_mapping(raw_provider)
+            if parsed_provider is None:
+                return _error_json_response(400, "jev_providers 缺少 id")
+            if parsed_provider.api_key and not parsed_provider.base_url:
+                return _error_json_response(400, f"提供商 {parsed_provider.id} 缺少 base_url")
+            if parsed_provider.base_url:
+                parsed_url = urlparse(parsed_provider.base_url)
+                if parsed_url.scheme not in {"http", "https"} or not parsed_url.netloc:
+                    return _error_json_response(400, f"提供商 {parsed_provider.id} 的 base_url 无效")
+        merged = merge_jev_provider_updates(
+            load_jev_providers(),
+            incoming_providers,
+            preserve_missing=not providers_replace,
+        )
+        updates[JEV_PROVIDERS_SETTING] = serialize_jev_providers(merged)
+        typesafe_key, vercel_key = legacy_keys_from_providers(merged)
+        updates["EXCELMANUS_TYPESAFE_API_KEY"] = typesafe_key
+        updates["EXCELMANUS_AI_GATEWAY_API_KEY"] = vercel_key
+        object.__setattr__(get_config(), "jev_providers", tuple(merged))
+        object.__setattr__(get_config(), "typesafe_api_key", typesafe_key or None)
+        object.__setattr__(get_config(), "ai_gateway_api_key", vercel_key or None)
+        updated_fields.append("jev_providers")
+    if not payload and not updates:
         return _error_json_response(400, "无有效更新字段")
 
     for field, value in payload.items():
-        env_key = _RUNTIME_ENV_KEYS.get(field)
-        if env_key is None:
+        setting_key = _RUNTIME_SETTING_KEYS.get(field)
+        if setting_key is None:
             continue
         if isinstance(value, bool):
             str_val = "true" if value else "false"
         else:
             str_val = str(value)
-        updates[env_key] = str_val
+        updates[setting_key] = str_val
+        updated_fields.append(field)
 
     if updates:
-        _persist_env_updates(updates)
+        _persist_settings(updates)
 
     # 同步更新内存中的 config 实例
     for field, value in payload.items():
         if hasattr(get_config(), field):
+            if field == "image_pixel_budget":
+                raw = str(value).strip().lower()
+                if raw == "low":
+                    value = "low"
+                else:
+                    try:
+                        parsed = int(raw)
+                    except (TypeError, ValueError):
+                        parsed = 640_000
+                    value = parsed if parsed > 0 else 640_000
             object.__setattr__(get_config(), field, value)
+
+    if "log_level" in payload:
+        setup_logging(str(payload["log_level"]))
 
     # 上下文窗口 / 压缩配置必须广播到已打开的对话。
     # 引擎持有 replace() 后的 config 副本，只改全局 get_config() 不会反映到对话页。
@@ -1938,15 +2031,19 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
 
     # 需要重启才能生效的配置项集合
     _RESTART_REQUIRED_KEYS = {
-        "embedding_enabled",
         "deploy_mode",
         "mcp_shared_manager",
+        "chat_history_enabled",
+        "max_sessions",
+        "session_ttl_seconds",
     }
     # 人类可读的重启原因映射
     _RESTART_REASON_MAP: dict[str, str] = {
-        "embedding_enabled": "语义检索配置已更新",
         "deploy_mode": "部署模式已更改",
         "mcp_shared_manager": "MCP 管理器配置已更改",
+        "chat_history_enabled": "聊天记录持久化已更新",
+        "max_sessions": "内存会话上限已更新",
+        "session_ttl_seconds": "空闲会话回收时间已更新",
     }
     # 仅需 MCP 热重载的配置项（搜索引擎相关）
     _MCP_RELOAD_KEYS = {
@@ -1992,7 +2089,7 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
 
     resp = JSONResponse(content={
         "status": "ok",
-        "updated": list(payload.keys()),
+        "updated": updated_fields,
         "restarting": need_restart,
         "restart_reason": restart_reason,
         "mcp_reloaded": mcp_reloaded,
@@ -2004,6 +2101,3 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
         from excelmanus.restart import schedule_restart
         resp.background = BackgroundTask(schedule_restart)
     return resp
-
-
-

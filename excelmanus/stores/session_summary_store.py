@@ -1,6 +1,6 @@
 """SessionSummaryStore — 会话摘要持久化存储。
 
-提供 CRUD、按 user_id 查询、语义检索（embedding）、文件名匹配等能力。
+提供 CRUD、按 user_id 查询、按时间列出、文件名匹配等能力。
 Schema 由 Database 迁移系统统一管理。
 """
 
@@ -10,14 +10,9 @@ import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import TYPE_CHECKING, Any
-
-import numpy as np
+from typing import Any
 
 from excelmanus.db_adapter import ConnectionAdapter
-
-if TYPE_CHECKING:
-    pass
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +32,6 @@ class SessionSummary:
         "files_involved",
         "outcome",
         "unfinished",
-        "embedding",
         "token_count",
         "created_at",
         "updated_at",
@@ -53,7 +47,6 @@ class SessionSummary:
         files_involved: list[str] | None = None,
         outcome: str = "",
         unfinished: str = "",
-        embedding: np.ndarray | None = None,
         token_count: int = 0,
         created_at: str = "",
         updated_at: str = "",
@@ -65,7 +58,6 @@ class SessionSummary:
         self.files_involved = files_involved or []
         self.outcome = outcome
         self.unfinished = unfinished
-        self.embedding = embedding
         self.token_count = token_count
         self.created_at = created_at or _utc_now_iso()
         self.updated_at = updated_at or self.created_at
@@ -108,19 +100,17 @@ class SessionSummaryStore:
             return
         now = _utc_now_iso()
         files_json = json.dumps(summary.files_involved, ensure_ascii=False)
-        embedding_blob = self._encode_embedding(summary.embedding)
         self._conn.execute(
             """INSERT INTO session_summaries
                (session_id, user_id, summary_text, task_goal, files_involved,
-                outcome, unfinished, embedding, token_count, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                outcome, unfinished, token_count, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                ON CONFLICT(session_id) DO UPDATE SET
                  summary_text = EXCLUDED.summary_text,
                  task_goal = EXCLUDED.task_goal,
                  files_involved = EXCLUDED.files_involved,
                  outcome = EXCLUDED.outcome,
                  unfinished = EXCLUDED.unfinished,
-                 embedding = EXCLUDED.embedding,
                  token_count = EXCLUDED.token_count,
                  updated_at = EXCLUDED.updated_at""",
             (
@@ -131,7 +121,6 @@ class SessionSummaryStore:
                 files_json,
                 summary.outcome,
                 summary.unfinished,
-                embedding_blob,
                 summary.token_count,
                 summary.created_at or now,
                 now,
@@ -173,10 +162,17 @@ class SessionSummaryStore:
         """按时间倒序列出最近的会话摘要。"""
         if not self._has_table():
             return []
-        rows = self._conn.execute(
-            "SELECT * FROM session_summaries ORDER BY updated_at DESC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        if user_id is None:
+            rows = self._conn.execute(
+                "SELECT * FROM session_summaries ORDER BY updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT * FROM session_summaries WHERE user_id = ? "
+                "ORDER BY updated_at DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
         return [self._row_to_summary(r) for r in rows]
 
     def search_by_files(
@@ -192,7 +188,7 @@ class SessionSummaryStore:
         basenames = {os.path.basename(p).lower() for p in file_paths if p}
         if not basenames:
             return []
-        candidates = self.list_recent(limit=50)
+        candidates = self.list_recent(user_id=user_id, limit=50)
         matched: list[SessionSummary] = []
         for s in candidates:
             for f in s.files_involved:
@@ -203,66 +199,20 @@ class SessionSummaryStore:
                 break
         return matched
 
-    def search_by_embedding(
-        self,
-        query_embedding: np.ndarray,
-        *,
-        user_id: str | None = None,
-        top_k: int = 3,
-        min_score: float = 0.25,
-    ) -> list[tuple[SessionSummary, float]]:
-        """语义检索历史摘要，返回 (summary, score) 列表。"""
-        if not self._has_table():
-            return []
-        from excelmanus.embedding.search import cosine_top_k
-
-        rows = self._conn.execute(
-            "SELECT * FROM session_summaries "
-            "WHERE embedding IS NOT NULL "
-            "ORDER BY updated_at DESC LIMIT 50",
-        ).fetchall()
-
-        if not rows:
-            return []
-
-        summaries: list[SessionSummary] = []
-        embeddings: list[np.ndarray] = []
-        for row in rows:
-            s = self._row_to_summary(row)
-            if s.embedding is not None and s.embedding.shape[0] > 0:
-                summaries.append(s)
-                embeddings.append(s.embedding)
-
-        if not embeddings:
-            return []
-
-        corpus = np.stack(embeddings)
-        results = cosine_top_k(query_embedding, corpus, k=top_k, threshold=min_score)
-        return [(summaries[r.index], r.score) for r in results]
-
     def count(self, *, user_id: str | None = None) -> int:
         """返回摘要总数。"""
         if not self._has_table():
             return 0
-        row = self._conn.execute(
-            "SELECT COUNT(*) FROM session_summaries",
-        ).fetchone()
+        if user_id is None:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM session_summaries",
+            ).fetchone()
+        else:
+            row = self._conn.execute(
+                "SELECT COUNT(*) FROM session_summaries WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
         return row[0] if row else 0
-
-    # ── 辅助 ─────────────────────────────────────────────
-
-    @staticmethod
-    def _encode_embedding(embedding: np.ndarray | None) -> bytes | None:
-        if embedding is None:
-            return None
-        return embedding.astype(np.float32).tobytes()
-
-    @staticmethod
-    def _decode_embedding(blob: bytes | None) -> np.ndarray | None:
-        if blob is None or len(blob) == 0:
-            return None
-        arr = np.frombuffer(blob, dtype=np.float32)
-        return arr.copy()
 
     def _row_to_summary(self, row: Any) -> SessionSummary:
         files_raw = row["files_involved"] if hasattr(row, "__getitem__") else ""
@@ -271,7 +221,6 @@ class SessionSummaryStore:
         except (json.JSONDecodeError, TypeError):
             files = []
 
-        embedding_blob = row["embedding"] if hasattr(row, "__getitem__") else None
         return SessionSummary(
             session_id=row["session_id"],
             user_id=row["user_id"] if hasattr(row, "__getitem__") else None,
@@ -280,7 +229,6 @@ class SessionSummaryStore:
             files_involved=files,
             outcome=row["outcome"] or "",
             unfinished=row["unfinished"] or "",
-            embedding=self._decode_embedding(embedding_blob),
             token_count=row["token_count"] if hasattr(row, "__getitem__") else 0,
             created_at=row["created_at"] or "",
             updated_at=row["updated_at"] or "",

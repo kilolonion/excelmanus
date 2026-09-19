@@ -29,13 +29,17 @@ def test_image_content_part_to_claude():
 
 
 def test_text_only_message_unchanged():
-    """纯文本 user 消息保持不变。"""
+    """首条 user 消息转为带 cache_control 断点的单 text block（KV 缓存钉点）。"""
     from excelmanus.providers.claude import _openai_messages_to_claude
 
     messages = [{"role": "user", "content": "hello"}]
     _, claude_msgs = _openai_messages_to_claude(messages)
     assert len(claude_msgs) == 1
-    assert claude_msgs[0]["content"] == "hello"
+    blocks = claude_msgs[0]["content"]
+    assert isinstance(blocks, list) and len(blocks) == 1
+    assert blocks[0]["type"] == "text"
+    assert blocks[0]["text"] == "hello"
+    assert blocks[0]["cache_control"] == {"type": "ephemeral"}
 
 
 # ── 内联 <thinking> 标签提取 ──────────────────────────────

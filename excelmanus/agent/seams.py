@@ -13,6 +13,9 @@ async def _compact_attachment(engine: Any) -> str:
 
 
 async def _skill_catalog_attachment(engine: Any) -> str:
+    from excelmanus.system_one.host import maybe_pin_skills
+
+    await maybe_pin_skills(engine)
     attach_skill_catalog(engine)
     return "enter"
 
@@ -26,8 +29,6 @@ def attach_wave_d(engine: Any) -> None:
         return
     driver.add_pre_step_attachment(_compact_attachment)
     driver.add_pre_step_attachment(_skill_catalog_attachment)
-    if not hasattr(engine, "_plan_active"):
-        engine._plan_active = False
     if not hasattr(engine, "_pending_plan_exit"):
         engine._pending_plan_exit = None
     if not hasattr(engine, "_last_compact_failed"):

@@ -79,6 +79,7 @@ MUTATING_AUDIT_ONLY_TOOLS: frozenset[str] = frozenset(
         "write_word",
         "edit_spreadsheet",
         "format_spreadsheet",
+        "split_spreadsheet",
         "manage_spreadsheet_objects",
         "manage_spreadsheet_versions",
     }
@@ -94,6 +95,76 @@ if READ_ONLY_SAFE_TOOLS & MUTATING_ALL_TOOLS:
     raise AssertionError("READ_ONLY_SAFE_TOOLS 不允许包含写入工具")
 
 
+# 同一工具内按 action 覆盖 write_effect。未列出的 action 沿用 ToolDef 声明。
+READONLY_TOOL_ACTIONS: dict[str, frozenset[str]] = {
+    "manage_spreadsheet_versions": frozenset({"list"}),
+}
+
+
+# 目录可见性：无 args 时，这些声明视为写效应（与执行器 RESTRICTED_WRITE_EFFECTS 对齐）。
+MUTATING_WRITE_EFFECTS: frozenset[str] = frozenset(
+    {
+        "workspace_write",
+        "external_write",
+        "dynamic",
+        "unknown",
+    }
+)
+
+
+def normalize_write_effect(declared: str | None) -> str:
+    """空值 / 未识别声明回退 unknown（fail-closed）。"""
+    effect = str(declared or "unknown").strip().lower()
+    if effect in {"none", "workspace_write", "external_write", "dynamic", "unknown"}:
+        return effect
+    return "unknown"
+
+
+def is_mutating_write_effect(declared: str | None) -> bool:
+    """Catalog 级写判定：只看 ToolDef.write_effect，不看 per-call action。"""
+    return normalize_write_effect(declared) in MUTATING_WRITE_EFFECTS
+
+def has_readonly_action(tool_name: str) -> bool:
+    """该工具是否至少声明了一个只读 action（供目录可见性判断）。"""
+    return bool(READONLY_TOOL_ACTIONS.get(tool_name))
+
+
+def is_catalog_visible(tool_name: str, declared: str | None) -> bool:
+    """目录可见性（read/plan）：无写效应，或该工具含只读 action。
+
+    执行期写拦截仍由 write_effect_for_call 按 action 判定，两者互不冲突。
+    """
+    if not is_mutating_write_effect(declared):
+        return True
+    return has_readonly_action(tool_name)
+
+
+def write_effect_for_call(
+    tool_name: str,
+    args: dict[str, object] | None = None,
+    *,
+    declared: str = "unknown",
+    actions: dict[str, object] | None = None,
+) -> str:
+    """Per-tool 声明 + per-action 覆盖（ToolDef.actions 优先）。"""
+    action = ""
+    if isinstance(args, dict):
+        raw = args.get("action")
+        if raw is not None:
+            action = str(raw).strip().lower()
+    specs = actions if isinstance(actions, dict) else None
+    if specs and action:
+        spec = specs.get(action)
+        if spec is not None:
+            effect = spec.get("write_effect") if isinstance(spec, dict) else getattr(spec, "write_effect", None)
+            if effect is not None:
+                return normalize_write_effect(str(effect))
+    allowed = READONLY_TOOL_ACTIONS.get(tool_name)
+    if allowed is not None and action in allowed:
+        return "none"
+    return normalize_write_effect(declared)
+
+
 # ── 审计目标路径映射（SSOT） ───────────────────────────────
 
 # mode=all：提取所有非空字段作为目标文件
@@ -106,6 +177,7 @@ AUDIT_TARGET_ARG_RULES_ALL: dict[str, tuple[str, ...]] = {
     "delete_file": ("file_path",),
     "edit_spreadsheet": ("file_path",),
     "format_spreadsheet": ("file_path",),
+    "split_spreadsheet": ("file_path", "output_dir"),
     "manage_spreadsheet_objects": ("file_path",),
     "manage_spreadsheet_versions": ("file_path",),
 }
@@ -184,6 +256,7 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "compare": ("compare_spreadsheets",),
     "edit": ("edit_spreadsheet",),
     "format": ("format_spreadsheet",),
+    "split": ("split_spreadsheet",),
     "objects": ("manage_spreadsheet_objects",),
     "formula_trace": ("trace_spreadsheet_formulas",),
     "versions": ("manage_spreadsheet_versions",),
@@ -195,22 +268,45 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     "vision": ("read_image",),
 }
 
+# 产品术语 → 工具路由。EffectiveToolCatalog、prompt 工具索引和
+# introspect_capability 共用这张表，避免每个入口维护一套“模型应该用谁”。
+TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
+    "diff/差异/对比/比较": ("compare_spreadsheets",),
+    "结构/工作表/区域/选区": ("inspect_spreadsheet",),
+    "分析/统计/筛选/透视": ("analyze_spreadsheet",),
+    "编辑/写入/改值/公式/去重/清洗": ("edit_spreadsheet",),
+    "拆分文件/分文件/按列拆成多个文件": ("split_spreadsheet",),
+    "格式/样式/合并": ("format_spreadsheet",),
+    "冻结/冻结窗格/首行/freeze": ("format_spreadsheet",),
+    "下拉框/数据验证/下拉/validation": ("format_spreadsheet",),
+    "图表": ("manage_spreadsheet_objects",),
+    "公式依赖/影响面": ("trace_spreadsheet_formulas",),
+    "版本/检查点/恢复": ("manage_spreadsheet_versions",),
+    "目录/查找文件": ("list_directory",),
+    "文本文件/日志": ("read_text_file",),
+    "Word文档/文档表格": ("read_word", "inspect_word", "write_word"),
+    "图片/看图": ("read_image",),
+    "批量计算/代码": ("run_code",),
+    "能力/参数/工具详情": ("introspect_capability",),
+}
+
 
 # ── 工具简短描述（用于未激活工具索引，帮助 LLM 判断是否需要激活） ──
 
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "inspect_spreadsheet": "只读探查 Excel 数据：overview 看结构，range 读取区域，search 搜值，capabilities 查能力",
-    "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，relationships 跨文件关联，files 扫目录",
-    "compare_spreadsheets": "只读对比两个工作簿或同簿两表，position 按坐标，key 按关键列",
-    "edit_spreadsheet": "原子编辑：写值/公式、插行列、改表结构，或编译 WorkbookSpec",
-    "format_spreadsheet": "原子改外观：字体/填充/边框/对齐、合并、行列尺寸",
+    "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，aggregate 汇总，pivot 透视，relationships 跨文件关联，files 扫目录",
+    "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿，或同一工作簿中的两个不同工作表；position 按坐标，key 按关键列",
+    "edit_spreadsheet": "原子编辑：写值/公式、插删行列、改表结构、透视写入、清洗变换，或编译 WorkbookSpec",
+    "format_spreadsheet": "改外观：字体/填充/边框/对齐/数字格式、合并、列宽(auto_fit)、冻结窗格、条件格式、数据验证(下拉框)",
+    "split_spreadsheet": "按某列取值把一个表拆成每组一个新 xlsx（by_column 必填，如按省拆分）；只新建不覆盖",
     "manage_spreadsheet_objects": "富对象：插入原生 Excel 图表",
     "trace_spreadsheet_formulas": "只读公式分析：map 全景、trace 单元格、impact 影响面",
-    "manage_spreadsheet_versions": "列出当前版本与检查点、打快照、按 revision 恢复",
+    "manage_spreadsheet_versions": "只读列出当前版本与检查点；打快照与按 revision 恢复会写入",
     "read_word": "读取 Word (.docx) 文档的段落内容和表格，支持分页和行内格式",
     "inspect_word": "检查 Word 文档的结构概览（标题树、段落数、表格数、节数、页面设置）",
     "search_word": "在 Word 文档中全文搜索，支持包含/精确/正则/前缀匹配",
-    "write_word": "对 Word 文档执行段落写入操作（替换/插入/追加/删除）",
+    "write_word": "对 Word 文档执行写入：段落四则 + replace_table（工作簿 range 整表替换）/ fill_template（占位符与书签）/ extract_table（抽表到 xlsx）",
     "read_text_file": "读取文本文件内容（md/txt/py/json/csv/yaml 等），查看脚本源码、配置、文档、日志",
     "list_directory": "列出指定目录下的文件和子目录，返回名称、类型和大小",
     "copy_file": "复制文件到工作区内的新位置",
@@ -219,7 +315,7 @@ TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "write_text_file": "写入文本文件（常用于生成 Python 脚本），支持覆盖或新建",
     "edit_text_file": "精准编辑文本文件：查找替换指定片段，无需重写整个文件",
     "run_code": "组合已注册 SDK 或处理领域工具盖不住的批量变换；不要用它默认写 Excel",
-    "run_shell": "执行受限 shell 命令（仅白名单只读命令如 ls/grep/find）",
+    "run_shell": "执行受限 shell 命令（仅当前主机实际可用的白名单只读命令）。文件浏览优先使用 list_directory；不要假设 PowerShell 别名或 Unix 命令存在",
     "read_image": "把工作区图片加载到当前视觉上下文。不要做 OCR，不要另开视觉模型。",
 }
 
@@ -282,4 +378,3 @@ def sanitize_approval_args_summary(
                 s = s[: default_max - 3] + "..."
         summary[key] = s
     return summary
-

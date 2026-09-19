@@ -36,6 +36,7 @@ EXPECTED_MUTATING_AUDIT_ONLY_TOOLS = {
     "write_word",
     "edit_spreadsheet",
     "format_spreadsheet",
+    "split_spreadsheet",
     "manage_spreadsheet_objects",
     "manage_spreadsheet_versions",
 }
@@ -94,6 +95,7 @@ def test_mutating_policy_covers_registered_mutating_like_tools(tmp_path: Path) -
             "run_shell",
             "manage_spreadsheet_objects",
             "manage_spreadsheet_versions",
+            "split_spreadsheet",
         }
         or name.startswith(prefixes)
     }
@@ -150,8 +152,11 @@ def test_tool_categories_cover_all_registered_tools(tmp_path: Path) -> None:
     registry = ToolRegistry()
     registry.register_builtin_tools(str(tmp_path))
     registered = set(registry.get_tool_names())
-    meta_tools = {"memory_save", "memory_read_topic", "task_create", "task_update",
-                  "inspect_excel_files", "offer_download", "sleep"}
+    meta_tools = {
+        "memory_save", "memory_read_topic", "task_create", "task_update",
+        "inspect_excel_files", "offer_download", "sleep",
+        "skill", "manage_skills", "delegate", "list_subagents", "ask_user",
+    }
     uncategorized = registered - categorized - meta_tools
     assert not uncategorized, f"未分类工具: {sorted(uncategorized)}"
 

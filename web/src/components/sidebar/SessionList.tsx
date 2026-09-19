@@ -36,15 +36,11 @@ import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
 import { AddWorkspaceDialog } from "@/components/sidebar/AddWorkspaceDialog";
-
-const sidebarMenuPanelClass =
-  "min-w-[13.5rem] overflow-hidden rounded-2xl border-[var(--em-hairline)] bg-[color-mix(in_srgb,var(--background)_90%,var(--em-fill))] p-1.5 text-foreground shadow-[0_12px_36px_rgba(32,40,35,0.12)] backdrop-blur-xl dark:bg-popover/95 dark:shadow-[0_16px_40px_rgba(0,0,0,0.45)]";
-
-const sidebarMenuItemClass =
-  "cursor-pointer rounded-xl px-2.5 py-2 text-[13px] font-medium gap-2.5 text-foreground/90 focus:bg-[var(--em-primary-alpha-08)] focus:text-foreground [&_svg]:text-[var(--em-primary-light)]";
-
-const sidebarMenuDangerItemClass =
-  "cursor-pointer rounded-xl px-2.5 py-2 text-[13px] font-medium gap-2.5 focus:bg-red-500/[0.08] focus:text-destructive";
+import {
+  glassMenuDangerItemClass,
+  glassMenuItemClass,
+  glassMenuPanelClass,
+} from "@/components/ui/menu-panel";
 
 /** Simple fuzzy match: checks if all characters in query appear in target in order */
 function fuzzyMatch(target: string, query: string): boolean {
@@ -397,9 +393,9 @@ export function SessionList() {
                                   <Ellipsis className="h-3.5 w-3.5 text-current" />
                                 </Button>
                               </DropdownMenuTrigger>
-                              <DropdownMenuContent side="bottom" align="end" sideOffset={6} className={sidebarMenuPanelClass}>
+                              <DropdownMenuContent side="bottom" align="end" sideOffset={6} className={glassMenuPanelClass}>
                                 <DropdownMenuItem
-                                  className={sidebarMenuItemClass}
+                                  className={glassMenuItemClass}
                                   onClick={() => {
                                     const current = workspaces.find((ws) => ws.id === group.workspaceId);
                                     setWorkspaceMenuKey(null);
@@ -418,7 +414,7 @@ export function SessionList() {
                                 <DropdownMenuSeparator className="mx-1 my-1.5 bg-[var(--em-hairline)]" />
                                 <DropdownMenuItem
                                   variant="destructive"
-                                  className={sidebarMenuDangerItemClass}
+                                  className={glassMenuDangerItemClass}
                                   disabled={group.isDefault || !group.workspaceId}
                                   title={group.isDefault ? "不能删除默认工作区" : undefined}
                                   onClick={() => {
@@ -619,10 +615,10 @@ export function SessionList() {
                               align="end"
                               sideOffset={6}
                               collisionPadding={8}
-                              className={sidebarMenuPanelClass}
+                              className={glassMenuPanelClass}
                             >
                               <DropdownMenuItem
-                                className={sidebarMenuItemClass}
+                                className={glassMenuItemClass}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   handleStartEdit(session.id, session.title);
@@ -637,7 +633,7 @@ export function SessionList() {
                                 <span className="text-[11px] font-medium tracking-wide text-muted-foreground">导出</span>
                               </div>
                               <DropdownMenuItem
-                                className={sidebarMenuItemClass}
+                                className={glassMenuItemClass}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleExport(session.id, "md");
@@ -648,7 +644,7 @@ export function SessionList() {
                                 <span className="ml-auto text-[11px] font-normal text-muted-foreground/70">.md</span>
                               </DropdownMenuItem>
                               <DropdownMenuItem
-                                className={sidebarMenuItemClass}
+                                className={glassMenuItemClass}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleExport(session.id, "json");
@@ -661,7 +657,7 @@ export function SessionList() {
                               <DropdownMenuSeparator className="mx-1 my-1.5 bg-[var(--em-hairline)]" />
                               <DropdownMenuItem
                                 variant="destructive"
-                                className={sidebarMenuDangerItemClass}
+                                className={glassMenuDangerItemClass}
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   void handleDelete(session.id);

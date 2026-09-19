@@ -20,6 +20,26 @@ logger = logging.getLogger(__name__)
 # 模块级单例，避免每次操作都重新派生密钥
 _api_key_cipher = TokenCipher()
 
+# 与 model_profiles.api_key 同一套 Fernet。不是聊天模型档案。
+ENCRYPTED_CONFIG_KV_KEYS = frozenset({
+    "EXCELMANUS_AI_GATEWAY_API_KEY",
+    "EXCELMANUS_TYPESAFE_API_KEY",
+    "EXCELMANUS_JEV_PROVIDERS",
+})
+
+
+def encode_config_kv(key: str, value: str) -> str:
+    if key in ENCRYPTED_CONFIG_KV_KEYS and value:
+        encoded = _api_key_cipher.encrypt(value)
+        return encoded if encoded else value
+    return value
+
+
+def decode_config_kv(key: str, value: str) -> str:
+    if key in ENCRYPTED_CONFIG_KV_KEYS and value:
+        return _api_key_cipher.decrypt_or_passthrough(value) or ""
+    return value
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -173,13 +193,15 @@ class GlobalConfigStore:
         row = self._conn.execute(
             "SELECT value FROM config_kv WHERE key = ?", (key,)
         ).fetchone()
-        return row["value"] if row else default
+        if not row:
+            return default
+        return decode_config_kv(key, str(row["value"]))
 
     def set(self, key: str, value: str) -> None:
         self._conn.execute(
             "INSERT INTO config_kv (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (key, value, _now_iso()),
+            (key, encode_config_kv(key, value), _now_iso()),
         )
         self._conn.commit()
 
@@ -188,47 +210,9 @@ class GlobalConfigStore:
         self._conn.commit()
         return cur.rowcount > 0
 
-    def import_profiles_from_env(
-        self,
-        profiles_json: str,
-        default_api_key: str = "",
-        default_base_url: str = "",
-    ) -> int:
-        """从 EXCELMANUS_MODELS JSON 字符串导入 profiles（幂等）。"""
-        import json
-
-        if not profiles_json or not profiles_json.strip():
-            return 0
-        try:
-            items = json.loads(profiles_json)
-        except (json.JSONDecodeError, TypeError):
-            return 0
-        if not isinstance(items, list):
-            return 0
-
-        added = 0
-        for item in items:
-            if not isinstance(item, dict):
-                continue
-            name = (item.get("name") or "").strip()
-            model = (item.get("model") or "").strip()
-            if not name or not model:
-                continue
-            api_key = (item.get("api_key") or "").strip() or default_api_key
-            base_url = (item.get("base_url") or "").strip() or default_base_url
-            description = (item.get("description") or "").strip()
-            protocol = (item.get("protocol") or "auto").strip().lower()
-            thinking_mode = (item.get("thinking_mode") or "auto").strip().lower()
-            model_family = (item.get("model_family") or "").strip().lower()
-            custom_extra_body = (item.get("custom_extra_body") or "").strip()
-            custom_extra_headers = (item.get("custom_extra_headers") or "").strip()
-            if self.add_profile(
-                name, model, api_key, base_url, description, protocol,
-                thinking_mode=thinking_mode, model_family=model_family,
-                custom_extra_body=custom_extra_body, custom_extra_headers=custom_extra_headers,
-            ):
-                added += 1
-        return added
+    def list_kv(self) -> dict[str, str]:
+        rows = self._conn.execute("SELECT key, value FROM config_kv").fetchall()
+        return {str(row["key"]): decode_config_kv(str(row["key"]), str(row["value"])) for row in rows}
 
 
 # ── UserConfigStore（用户级配置）──────────────────────────────
@@ -248,14 +232,16 @@ class UserConfigStore:
         row = self._conn.execute(
             "SELECT value FROM config_kv WHERE key = ?", (key,)
         ).fetchone()
-        return row["value"] if row else default
+        if not row:
+            return default
+        return decode_config_kv(key, str(row["value"]))
 
     def set(self, key: str, value: str) -> None:
         now = _now_iso()
         self._conn.execute(
             "INSERT INTO config_kv (key, value, updated_at) VALUES (?, ?, ?) "
             "ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
-            (key, value, now),
+            (key, encode_config_kv(key, value), now),
         )
         self._conn.commit()
 

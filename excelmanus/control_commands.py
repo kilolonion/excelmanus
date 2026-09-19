@@ -1,8 +1,8 @@
 """会话控制命令注册表。
 
-作为 engine 与 CLI 的共享单一数据源（single source of truth）：
+作为 engine 与前端命令路由的共享单一数据源（single source of truth）：
 - engine: 判定哪些 slash 命令属于 control command
-- CLI: 命令路由、帮助文案、补全参数
+- 前端/API: 命令路由、帮助文案、补全参数
 """
 
 from __future__ import annotations
@@ -104,12 +104,6 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         description="持久记忆管理",
         help_label="/memory [<category>|delete|clear]",
         arguments=("file_pattern", "user_pref", "error_solution", "general", "delete", "clear"),
-    ),
-    ControlCommandSpec(
-        command="/playbook",
-        description="Playbook 历史经验管理",
-        help_label="/playbook [list|search|stats|delete|reset]",
-        arguments=("list", "search", "stats", "delete", "reset"),
     ),
     ControlCommandSpec(
         command="/tools",

@@ -46,6 +46,8 @@ describe("toolActionTitle", () => {
     expect(toolActionTitle("copy_file")).toBe("复制文件");
     expect(toolActionTitle("offer_download")).toBe("提供下载");
     expect(toolActionTitle("rename_file")).toBe("重命名文件");
+    expect(toolActionTitle("delegate")).toBe("委派子任务");
+    expect(toolActionTitle("delegate_to_subagent")).toBe("委派子任务");
   });
 });
 

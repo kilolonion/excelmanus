@@ -22,7 +22,7 @@ export function ModelCapabilitiesPanel() {
             <div>
               <div className="flex items-center justify-between gap-2 mb-3">
                 <div className="min-w-0">
-                  <p className="text-xs text-muted-foreground truncate">
+                  <p className="text-xs text-muted-foreground break-all">
                     当前模型: {activeProfile?.model || "未配置"}
                   </p>
                 </div>

@@ -72,6 +72,8 @@ class _PersistenceSnapshot:
     snapshot_index: int
     turn: int
     new_snapshot_index: int = 0  # 持久化后应设置的新 snapshot index
+    event_rows: list[dict] = field(default_factory=list)  # 待落盘的会话事件
+    event_tip: int = 0  # 捕获时的事件 tip seq（保存成功后回写水位）
 
 
 @dataclass
@@ -139,6 +141,8 @@ class SessionManager:
         self._workspace_store: WorkspaceStore | None = (
             WorkspaceStore(database) if database is not None else None
         )
+        self._migrated_workspace_paths: set[str] = set()
+        self._session_workspace: dict[str, tuple[str, str | None]] = {}
 
     @property
     def database(self) -> "Database | None":
@@ -149,6 +153,46 @@ class SessionManager:
     def chat_history(self) -> "ChatHistoryStore | None":
         """底层 ChatHistoryStore 实例（只读）。"""
         return self._chat_history
+
+    def _ensure_workspace_migrated(self, path: str) -> None:
+        """Best-effort one-shot import of legacy ``outputs/backups`` history.
+
+        The marker inside the workspace makes this cheap after the first run.
+        Failures do not block session startup; the missing marker retries later.
+        """
+        if not path:
+            return
+        try:
+            from excelmanus.workspace.paths import canonicalize_workspace_path
+
+            canon = canonicalize_workspace_path(path)
+        except Exception:
+            logger.debug("工作区路径规范化失败，跳过迁移: %s", path, exc_info=True)
+            return
+        if canon in self._migrated_workspace_paths:
+            return
+        self._migrated_workspace_paths.add(canon)
+        try:
+            from excelmanus.workspace.migrate import ensure_overlay_migrated
+
+            summary = ensure_overlay_migrated(canon)
+            if summary.get("migrated") or summary.get("errors"):
+                logger.info(
+                    "工作区旧备份迁移: %s migrated=%d skipped=%d errors=%d",
+                    canon,
+                    len(summary.get("migrated") or []),
+                    len(summary.get("skipped") or []),
+                    len(summary.get("errors") or []),
+                )
+            from excelmanus.workspace.file_service import WorkspaceFileService
+            from excelmanus.workspace.runtime import discard_orphan_pending_dirs
+
+            WorkspaceFileService(canon).recover()
+            discarded = discard_orphan_pending_dirs(canon)
+            if discarded:
+                logger.info("丢弃残留 pending 目录: %s count=%d", canon, discarded)
+        except Exception:
+            logger.warning("工作区旧备份迁移失败: %s", canon, exc_info=True)
 
     def default_workspace_binding(self) -> tuple[str, str | None]:
         """Process default folder path and optional registry id."""
@@ -161,6 +205,10 @@ class SessionManager:
 
     def ensure_default_workspace(self) -> dict[str, Any]:
         path, workspace_id = self.default_workspace_binding()
+        self._ensure_workspace_migrated(path)
+        if self._workspace_store is not None:
+            for item in self._workspace_store.list():
+                self._ensure_workspace_migrated(str(item.get("path") or ""))
         if self._chat_history is not None:
             self._chat_history.backfill_workspace_paths(path, workspace_id)
         return {
@@ -195,6 +243,8 @@ class SessionManager:
             }])
         items = self._workspace_store.list()
         if items:
+            for item in items:
+                self._ensure_workspace_migrated(str(item.get("path") or ""))
             return self._mark_default_workspaces(items)
         rec = self.ensure_default_workspace()
         found = self._workspace_store.get(rec["id"]) if rec.get("id") else None
@@ -212,6 +262,7 @@ class SessionManager:
             rec = self._workspace_store.get(workspace_id)
             if rec is None:
                 raise WorkspacePathError("工作区不存在")
+            self._ensure_workspace_migrated(rec["path"])
             return rec["path"], rec["id"]
         if workspace_path:
             from excelmanus.workspace.paths import canonicalize_workspace_path
@@ -220,6 +271,7 @@ class SessionManager:
             if self._workspace_store is not None:
                 rec = self._workspace_store.get_by_path(canon)
                 if rec is not None:
+                    self._ensure_workspace_migrated(rec["path"])
                     return rec["path"], rec["id"]
             default_path, default_id = self.default_workspace_binding()
             if paths_equal(canon, default_path):
@@ -227,10 +279,48 @@ class SessionManager:
             raise WorkspacePathError("工作区未登记")
         return self.default_workspace_binding()
 
+    def preferred_workspace_binding(self) -> tuple[str, str | None]:
+        """Last used chat workspace, else the first registered folder, else process default."""
+        candidates: list[tuple[str | None, str | None]] = []
+        seen: set[str] = set()
+        if self._chat_history is not None:
+            try:
+                for sess in self._chat_history.list_sessions():
+                    candidates.append(
+                        (
+                            str(sess.get("workspace_id") or "").strip() or None,
+                            str(sess.get("workspace_path") or "").strip() or None,
+                        )
+                    )
+            except Exception:
+                logger.debug("读取最近会话工作区失败", exc_info=True)
+        try:
+            for item in self.list_workspaces():
+                candidates.append(
+                    (
+                        str(item.get("id") or "").strip() or None,
+                        str(item.get("path") or "").strip() or None,
+                    )
+                )
+        except Exception:
+            logger.debug("读取工作区列表失败", exc_info=True)
+        for ws_id, ws_path in candidates:
+            key = f"{ws_id or ''}|{ws_path or ''}"
+            if key in seen or key == "|":
+                continue
+            seen.add(key)
+            try:
+                return self.resolve_workspace_binding(ws_id, ws_path)
+            except (WorkspacePathError, FileNotFoundError, OSError):
+                continue
+        return self.default_workspace_binding()
+
     def register_workspace(self, path: str, *, title: str = "") -> tuple[dict[str, Any], bool]:
         if self._workspace_store is None:
             raise WorkspacePathError("工作区登记未启用")
-        return self._workspace_store.create(path, title=title)
+        rec, created = self._workspace_store.create(path, title=title)
+        self._ensure_workspace_migrated(rec["path"])
+        return rec, created
 
     def rename_workspace(self, workspace_id: str, title: str) -> dict[str, Any] | None:
         return self.update_workspace(workspace_id, title=title)
@@ -274,6 +364,51 @@ class SessionManager:
             raise WorkspacePathError("不能删除默认工作区")
         return self._workspace_store.delete(workspace_id)
 
+    def remember_session_workspace(
+        self,
+        session_id: str,
+        workspace_path: str,
+        workspace_id: str | None = None,
+    ) -> None:
+        if not session_id or not workspace_path:
+            return
+        self._session_workspace[session_id] = (workspace_path, workspace_id)
+
+    def session_has_file_scope(self, session_id: str) -> bool:
+        sid = (session_id or "").strip()
+        if not sid:
+            return False
+        if sid in self._session_workspace:
+            return True
+        if sid in self._sessions:
+            return True
+        if self._chat_history is not None:
+            try:
+                meta = self._chat_history.get_session_meta(sid)
+            except Exception:
+                meta = None
+            if isinstance(meta, dict) and meta.get("id"):
+                return True
+        return False
+
+    def workspace_id_for_session(self, session_id: str) -> str | None:
+        sid = (session_id or "").strip()
+        if not sid:
+            return None
+        bound = self._session_workspace.get(sid)
+        if bound and bound[1]:
+            return bound[1]
+        if self._chat_history is not None:
+            try:
+                meta = self._chat_history.get_session_meta(sid)
+            except Exception:
+                meta = None
+            if isinstance(meta, dict):
+                wid = meta.get("workspace_id")
+                if isinstance(wid, str) and wid.strip():
+                    return wid.strip()
+        return None
+
     def workspace_path_for_session(self, session_id: str) -> str:
         if self._chat_history is not None:
             try:
@@ -284,6 +419,9 @@ class SessionManager:
                 path = meta.get("workspace_path")
                 if isinstance(path, str) and path.strip():
                     return path
+        bound = self._session_workspace.get(session_id)
+        if bound:
+            return bound[0]
         entry = self._sessions.get(session_id)
         if entry is not None:
             try:
@@ -335,12 +473,18 @@ class SessionManager:
         title: str = "新对话",
     ) -> dict[str, Any]:
         """Create a blank session or reuse the unused one for this folder. No engine."""
-        path, ws_id = self.resolve_workspace_binding(workspace_id, workspace_path)
+        if workspace_id or workspace_path:
+            path, ws_id = self.resolve_workspace_binding(workspace_id, workspace_path)
+        else:
+            path, ws_id = self.preferred_workspace_binding()
         display = (title or "").strip() or "新对话"
         async with self._lock:
             if self._chat_history is not None:
                 existing = self._chat_history.find_blank_session(path)
                 if existing is not None:
+                    existing_id = str(existing.get("id") or "")
+                    if existing_id:
+                        self.remember_session_workspace(existing_id, path, ws_id)
                     return self._session_public_dict(existing)
                 new_id = str(uuid.uuid4())
                 self._chat_history.create_session(
@@ -357,9 +501,11 @@ class SessionManager:
                     "workspace_id": ws_id,
                     "blank": 1,
                 }
+                self.remember_session_workspace(new_id, path, ws_id)
                 return self._session_public_dict(meta)
             new_id = str(uuid.uuid4())
             now = datetime.now(timezone.utc).isoformat()
+            self.remember_session_workspace(new_id, path, ws_id)
             return self._session_public_dict(
                 {
                     "id": new_id,
@@ -471,40 +617,50 @@ class SessionManager:
                 entry.engine.sync_model_profiles(profiles)
                 self.sync_user_subscription_profiles(entry.engine)
 
-    def notify_file_deleted(self, file_path: str) -> None:
-        """W4: 通知活跃 session 文件已被删除。
+    def notify_mutation(self, receipt: dict) -> None:
+        """Consume the durable event, never pretend a new version was read."""
+        self.drain_workspace_events()
 
-        ISO-4: 仅通知工作区包含目标文件的会话，避免跨用户干扰。
-        """
-        entries = list(self._sessions.values())
-        for entry in entries:
+    def drain_workspace_events(self) -> None:
+        from excelmanus.workspace.file_service import WorkspaceFileService
+        roots = set(self._migrated_workspace_paths)
+        roots.update(str(entry.engine._workspace.root_dir) for entry in self._sessions.values())
+        for root in roots:
             try:
-                ws_root = str(entry.engine.workspace.root_dir)
-                if not _path_in_workspace(file_path, ws_root):
-                    continue
+                WorkspaceFileService(root).deliver_outbox(self._consume_file_event, consumer_id="session-manager")
             except Exception:
-                logger.debug("notify_file_deleted 处理异常", exc_info=True)
+                logger.warning("文件事件消费失败，将重试: %s", root, exc_info=True)
 
-    def notify_file_renamed(self, old_path: str, new_path: str) -> None:
-        """W5: 通知活跃 session 文件已被重命名，更新 staging 条目。
+    def _consume_file_event(self, event: dict) -> None:
+        from excelmanus.workspace.paths import paths_equal
+        from excelmanus.api_app_state import get_runtime
+        from excelmanus.api_sse import SessionStreamState
+        from excelmanus.events import EventType, ToolCallEvent, changed_mutations
 
-        ISO-4: 仅通知工作区包含目标文件的会话。
-        注意：list() 快照 + try-except 保护确保即使并发删除/清理会话也不会崩溃。
-        """
-        try:
-            entries = list(self._sessions.values())
-        except RuntimeError:
-            return
-        for entry in entries:
-            try:
-                engine = entry.engine
-                if engine is None:
-                    continue
-                ws_root = str(engine.workspace.root_dir)
-                if not _path_in_workspace(old_path, ws_root):
-                    continue
-            except Exception:
-                logger.debug("notify_file_renamed 处理异常", exc_info=True)
+        root = event["workspace_root"]
+        path = event["path"]
+        source = event.get("from_path")
+        if self._database is not None:
+            from excelmanus.file_registry import get_shared_file_registry
+            registry = get_shared_file_registry(self._database, root)
+            if source and not (Path(root) / source).exists() and (Path(root) / path).exists():
+                registry.rename_entry(source, path)
+            if not event.get("exists_after") and not (Path(root) / path).exists():
+                registry.mark_deleted(path)
+        changed = [f"./{p}" for p in (source, path) if p]
+        for sid, entry in list(self._sessions.items()):
+            engine = entry.engine
+            if not paths_equal(engine._workspace.root_dir, root):
+                continue
+            # The session must read again. Advancing its seen-version here would
+            # permit a subsequent write based on stale cell coordinates.
+            for item in (source, path):
+                if item:
+                    engine._state.file_content_versions.pop(item, None)
+            engine._registry_refresh_needed = True
+            stream = get_runtime().session_stream_states.setdefault(sid, SessionStreamState())
+            stream.deliver(ToolCallEvent(event_type=EventType.MUTATION, changed_files=changed,
+                mutations=changed_mutations(changed), tool_call_id=event["event_id"]))
 
     def _resolve_user_config_store(self, user_id: str | None = None) -> Any:
         """返回进程级 UserConfigStore（用于 active_model 等偏好）。"""
@@ -517,19 +673,36 @@ class SessionManager:
             return self._config_store
 
     def _refresh_engine_model_profiles(self, engine: AgentEngine, *, force_db: bool = False) -> None:
-        """把运行时 / 数据库档案同步到引擎，避免新会话只用环境快照。"""
-        live_models = getattr(self._config, "models", ()) or ()
-        try:
-            from excelmanus.api_app_state import _sync_config_profiles_from_db, get_config
+        """把运行时 / 数据库档案同步到引擎，避免新会话只用环境快照。
 
-            live = get_config()
-            if force_db or not getattr(live, "models", ()):
-                _sync_config_profiles_from_db()
+        bench / 独立进程没有 api_app_state runtime，因此优先读本管理器
+        绑定的 config_store；仅在其不可用时退回 api_app_state 全局同步。
+        """
+        live_models = getattr(self._config, "models", ()) or ()
+        store_profiles: tuple[Any, ...] = ()
+        store = self._config_store
+        if store is not None and hasattr(store, "list_profiles"):
+            try:
+                from excelmanus.api_app_state import build_model_profiles_from_rows
+                store_profiles = tuple(
+                    build_model_profiles_from_rows(store.list_profiles())
+                )
+            except Exception:
+                logger.debug("读取数据库模型档案失败", exc_info=True)
+        if store_profiles:
+            live_models = store_profiles
+        else:
+            try:
+                from excelmanus.api_app_state import _sync_config_profiles_from_db, get_config
+
                 live = get_config()
-            if live is not None and getattr(live, "models", ()):
-                live_models = live.models
-        except Exception:
-            logger.debug("同步运行时模型档案失败", exc_info=True)
+                if force_db or not getattr(live, "models", ()):
+                    _sync_config_profiles_from_db()
+                    live = get_config()
+                if live is not None and getattr(live, "models", ()):
+                    live_models = live.models
+            except Exception:
+                logger.debug("同步运行时模型档案失败", exc_info=True)
         if live_models:
             engine.sync_model_profiles(live_models)
 
@@ -574,6 +747,10 @@ class SessionManager:
         while True:
             await asyncio.sleep(interval_seconds)
             try:
+                self.drain_workspace_events()
+                from excelmanus.workbook.snapshot import prune_snapshot_cache
+                for root in self._migrated_workspace_paths:
+                    prune_snapshot_cache(root)
                 cleaned = await self.cleanup_expired()
                 if cleaned:
                     logger.info("定期清理：已清理 %d 个过期会话", cleaned)
@@ -704,6 +881,19 @@ class SessionManager:
                 logger.debug("订阅凭证解析失败", exc_info=True)
         engine_config = replace(self._config, **overrides)
         persistent_memory = self._create_memory_components()
+        from excelmanus.workspace.refs import WorkspaceRef
+
+        ws_id = None
+        if self._chat_history is not None:
+            try:
+                meta = self._chat_history.get_session_meta(session_id)
+            except Exception:
+                meta = None
+            if isinstance(meta, dict):
+                raw_id = meta.get("workspace_id")
+                if isinstance(raw_id, str) and raw_id.strip():
+                    ws_id = raw_id.strip()
+        workspace_ref = WorkspaceRef.from_root(isolated_ws.root_dir, workspace_id=ws_id)
         engine = AgentEngine(
             config=engine_config,
             registry=self._registry,
@@ -713,11 +903,58 @@ class SessionManager:
             own_mcp_manager=self._shared_mcp_manager is None,
             database=self._database,
             workspace=isolated_ws,
+            workspace_ref=workspace_ref,
         )
         self.sync_user_subscription_profiles(engine)
         if self._credential_resolver is not None:
             engine._credential_resolver = self._credential_resolver
-        if history_messages:
+
+        # ── 会话事件日志（append-only 事实源）─────────────────
+        # session_events 有记录：fold 重建 surface，跳过 messages 表注入；
+        # 无记录：挂空日志，inject_messages 落 legacy/import 事件惰性迁入。
+        _events_loaded = False
+        if self._chat_history is not None and getattr(
+            engine_config, "session_log_enabled", True
+        ):
+            try:
+                from excelmanus.session_log import SessionEventLog
+
+                if self._chat_history.has_events(session_id):
+                    _log = SessionEventLog(
+                        session_id,
+                        events=self._chat_history.iter_events(session_id),
+                    )
+                    engine.memory.load_from_log(_log)
+                    # 防御：事件流 fold 出空 surface 但 messages 表有内容时，
+                    # 回退 messages 注入（避免空事件流吞掉历史）。
+                    _events_loaded = bool(engine.raw_messages) or not history_messages
+                    if _events_loaded:
+                        orphans = _log.orphan_compaction_starts()
+                        if orphans:
+                            logger.warning(
+                                "会话 %s 存在 %d 个未闭合的 compaction/start"
+                                "（疑似上次压缩中断），surface 以已落盘事件为准",
+                                session_id, len(orphans),
+                            )
+                else:
+                    engine.memory.attach_event_log(SessionEventLog(session_id))
+            except Exception:
+                logger.warning(
+                    "会话 %s 事件日志初始化失败，退回 messages 表路径",
+                    session_id, exc_info=True,
+                )
+        if _events_loaded:
+            engine._session_id = session_id
+            engine.restore_session_snapshot()
+            # messages 表是 surface 快照缓存；行数与 fold 结果不一致说明
+            # 上次写入中断——重置 snapshot index 让下次 sync 重写快照。
+            try:
+                persisted = self._chat_history.get_message_count(session_id)
+                if persisted != len(engine.raw_messages):
+                    engine._surface_resync_needed = True
+            except Exception:
+                logger.debug("surface 快照一致性检查失败", exc_info=True)
+        elif history_messages:
             engine.inject_history(history_messages)
             engine._session_id = session_id
             engine.restore_session_snapshot()
@@ -822,9 +1059,11 @@ class SessionManager:
             )
             engine._session_id = new_id
             engine._approval.set_session_id(new_id)
-            engine.set_message_snapshot_index(
-                len(history_messages) if history_messages else 0
-            )
+            if getattr(engine, "_surface_resync_needed", False):
+                # 事件日志恢复的 surface 与 messages 快照不一致 → 全量重写
+                engine.set_message_snapshot_index(0)
+            else:
+                engine.set_message_snapshot_index(len(engine.raw_messages))
         except Exception:
             # 创建失败：释放预留 slot
             async with self._lock:
@@ -903,11 +1142,22 @@ class SessionManager:
                 return
             # 在锁内捕获快照（浅拷贝 messages 列表）
             if self._conv_persistence is not None:
+                _log = getattr(entry.engine.memory, "event_log", None)
+                _flushed = getattr(entry.engine, "_events_flushed_seq", 0)
+                _event_rows = (
+                    [ev.to_row() for ev in _log.events_after(_flushed)]
+                    if _log is not None
+                    else []
+                )
                 snapshot = _PersistenceSnapshot(
                     messages=list(entry.engine.raw_messages),
                     snapshot_index=entry.engine.message_snapshot_index,
                     turn=entry.engine.session_turn,
                     new_snapshot_index=len(entry.engine.raw_messages),
+                    event_rows=_event_rows,
+                    event_tip=max(
+                        (int(r.get("seq") or 0) for r in _event_rows), default=0
+                    ),
                 )
                 # B1-fix: 在锁内立即更新 snapshot_index，防止并发
                 # flush_messages_sync 读到旧值导致消息重复持久化。
@@ -923,6 +1173,11 @@ class SessionManager:
                 self._conv_persistence.sync_from_snapshot(
                     session_id, snapshot
                 )
+                if snapshot.event_tip:
+                    entry.engine._events_flushed_seq = max(
+                        getattr(entry.engine, "_events_flushed_seq", 0),
+                        snapshot.event_tip,
+                    )
             except Exception:
                 logger.warning("会话 %s 消息持久化失败", session_id, exc_info=True)
 
@@ -1240,16 +1495,6 @@ class SessionManager:
             token_count=token_count,
         )
 
-        # embedding 向量化（如果 embedding 客户端可用）
-        if self._config.embedding_enabled and summary_text:
-            try:
-                _emb_client = getattr(engine, "_embedding_client", None)
-                if _emb_client is not None:
-                    vec = await _emb_client.embed_single(summary_text)
-                    summary.embedding = vec
-            except Exception:
-                logger.debug("会话摘要向量化失败，跳过", exc_info=True)
-
         try:
             self._session_summary_store.upsert(summary)
             logger.info(
@@ -1395,7 +1640,7 @@ class SessionManager:
                 pending_approval = False
                 pending_question = False
                 try:
-                    pending_approval = bool(engine.has_pending_approval())
+                    pending_approval = engine.web_actionable_pending_approval() is not None
                     pending_question = bool(engine.has_pending_question())
                 except Exception:
                     logger.debug("读取会话待处理状态失败", exc_info=True)
@@ -1475,21 +1720,22 @@ class SessionManager:
                         item["message_id"] = f"volatile:{session_id}:{idx}"
                     messages.append(item)
 
-            # 序列化待处理的审批/问题状态，供前端刷新后恢复
+            # 序列化待处理的审批/问题状态，供前端刷新后恢复。
+            # 只暴露 Web 仍可提交的审批，避免刷新后弹出已处理单据。
+            engine.discard_stale_web_approval(in_flight=in_flight)
             pending_approval_data = None
-            if engine.has_pending_approval():
-                pa = engine.current_pending_approval()
-                if pa is not None:
-                    from excelmanus.tools.policy import (
-                        get_tool_risk_level,
-                        sanitize_approval_args_summary,
-                    )
-                    pending_approval_data = {
-                        "approval_id": pa.approval_id,
-                        "tool_name": pa.tool_name,
-                        "risk_level": get_tool_risk_level(pa.tool_name),
-                        "args_summary": sanitize_approval_args_summary(pa.arguments),
-                    }
+            pa = engine.web_actionable_pending_approval()
+            if pa is not None:
+                from excelmanus.tools.policy import (
+                    get_tool_risk_level,
+                    sanitize_approval_args_summary,
+                )
+                pending_approval_data = {
+                    "approval_id": pa.approval_id,
+                    "tool_name": pa.tool_name,
+                    "risk_level": get_tool_risk_level(pa.tool_name),
+                    "args_summary": sanitize_approval_args_summary(pa.arguments),
+                }
 
             pending_question_data = None
             if engine.has_pending_question():

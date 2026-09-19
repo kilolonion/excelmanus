@@ -12,12 +12,14 @@ from __future__ import annotations
 import logging
 import os
 import re
-
-import openai
+from typing import TYPE_CHECKING, Any
 
 from excelmanus.providers.claude import ClaudeClient
 from excelmanus.providers.gemini import GeminiClient
 from excelmanus.providers.openai_responses import OpenAIResponsesClient
+
+if TYPE_CHECKING:
+    import openai
 
 # ── URL 模式匹配 ─────────────────────────────────────────────
 
@@ -57,11 +59,10 @@ def is_claude_provider(base_url: str) -> bool:
 
 
 def is_responses_api_enabled() -> bool:
-    """判断是否启用 OpenAI Responses API 模式。
+    """判断是否启用 OpenAI Responses API 模式。"""
+    from excelmanus.settings_runtime import get_setting
 
-    通过环境变量 EXCELMANUS_USE_RESPONSES_API=1 启用。
-    """
-    return os.environ.get("EXCELMANUS_USE_RESPONSES_API", "").strip() in ("1", "true", "yes")
+    return (get_setting("EXCELMANUS_USE_RESPONSES_API") or "").strip() in ("1", "true", "yes")
 
 
 def normalize_openai_base_url(base_url: str) -> str:
@@ -115,7 +116,7 @@ def create_client(
     base_url: str,
     protocol: str = "auto",
     model: str = "",
-) -> openai.AsyncOpenAI | GeminiClient | ClaudeClient | OpenAIResponsesClient:
+) -> Any:
     """根据 protocol（或 base_url 自动检测）创建合适的 LLM 客户端。
 
     protocol 参数：
@@ -145,6 +146,8 @@ def create_client(
             base_url = normalize_openai_base_url(base_url)
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
     if normalized == "openai":
+        import openai
+
         base_url = normalize_openai_base_url(base_url)
         return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
@@ -171,6 +174,8 @@ def create_client(
     base_url = normalize_openai_base_url(base_url)
     if is_responses_api_enabled():
         return OpenAIResponsesClient(api_key=api_key, base_url=base_url)
+    import openai
+
     return openai.AsyncOpenAI(api_key=api_key, base_url=base_url)
 
 

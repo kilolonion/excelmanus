@@ -1,13 +1,16 @@
 # 数据写入与 Sheet 管理模板
 
 工作区 xlsx 的改写必须走 SDK。下面片段只演示计算与提交形；不要 `wb.save` 或 `ExcelWriter` 覆盖工作区文件。
+pandas 可读获准的工作区文件做计算，但 `expected_version` 必须来自 inspect/edit 回声，不能把 pandas 读取当成观察版本。
 
 ## 计算列后写回
 
 ```python
 import pandas as pd
-from em import edit_spreadsheet
+from em import inspect_spreadsheet, edit_spreadsheet
 
+seen = inspect_spreadsheet(mode="overview", file_path="file.xlsx")
+version = seen["content_version"]
 df = pd.read_excel("file.xlsx", sheet_name="Sheet1")
 df["新列"] = df["金额"] * 0.3
 values = [list(df.columns)] + df.astype(object).where(pd.notnull(df), None).values.tolist()
@@ -42,9 +45,21 @@ edit_spreadsheet(
 )
 ```
 
+## 删除行
+
+```python
+from em import edit_spreadsheet
+
+edit_spreadsheet(
+    file_path="file.xlsx",
+    expected_version=version,
+    operations=[{"kind": "delete_rows", "sheet": "Sheet1", "at": 5, "count": 3}],
+)
+```
+
 ## 条件过滤后写回（覆盖写不等于删除）
 
-`write` 只改传入矩形。更短的 `values` 不会清掉旧表尾部。没有删行操作。
+`write` 只改传入矩形。更短的 `values` 不会清掉旧表尾部。真正删行用 `delete_rows`。
 
 先读出旧矩形尺寸，把需要丢掉的行写成 `null`，或写到新表。
 

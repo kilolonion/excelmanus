@@ -9,6 +9,8 @@ from __future__ import annotations
 import re
 from unittest.mock import MagicMock
 
+import pytest
+
 from excelmanus.config import ExcelManusConfig
 from excelmanus.memory import ConversationMemory
 
@@ -23,10 +25,19 @@ _UUID_HEX_RE = re.compile(r"^[0-9a-f]{32}$")
 def _make_memory() -> ConversationMemory:
     config = MagicMock(spec=ExcelManusConfig)
     config.max_context_tokens = 100_000
-    config.image_keep_rounds = 3
-    config.image_max_active = 2
-    config.image_token_budget = 6000
+    config.image_pixel_budget = 640000
+    config.image_max_bytes = 1048576
+    config.image_files_api = "auto"
     return ConversationMemory(config)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_attachment_store(tmp_path, monkeypatch):
+    monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+    from excelmanus.attachments.store import reset_attachment_store
+    reset_attachment_store()
+    yield
+    reset_attachment_store()
 
 
 def _last_msg(mem: ConversationMemory) -> dict:
@@ -36,6 +47,19 @@ def _last_msg(mem: ConversationMemory) -> dict:
 # ---------------------------------------------------------------------------
 # Tests: every add_* injects a message_id
 # ---------------------------------------------------------------------------
+
+
+def _add_fake_image(mem) -> None:
+    from excelmanus.attachments.types import ImageAttachmentRef
+
+    ref = ImageAttachmentRef(
+        attachment_id="sha256:" + "ab" * 32,
+        media_type="image/png",
+        bytes=1,
+        width=1,
+        height=1,
+    )
+    mem.add_user_message([{"type": "image", "attachment": ref.to_dict()}])
 
 
 class TestAddUserMessage:
@@ -67,7 +91,7 @@ class TestAddUserMessage:
 class TestAddImageMessage:
     def test_has_message_id(self):
         mem = _make_memory()
-        mem.add_image_message("iVBOR", "image/png", "auto")
+        _add_fake_image(mem)
         mid = _last_msg(mem).get("message_id")
         assert mid is not None
         assert _UUID_HEX_RE.match(mid)
@@ -141,7 +165,7 @@ class TestMessageIdUniqueness:
             "content": None,
             "tool_calls": [{"id": "tc-2", "function": {"name": "f", "arguments": "{}"}}],
         })
-        mem.add_image_message("iVBOR", "image/png")
+        _add_fake_image(mem)
 
         ids = [m["message_id"] for m in mem.messages]
         assert len(ids) == 7
@@ -177,12 +201,14 @@ class TestPersistenceRoundTrip:
             "CREATE TABLE IF NOT EXISTS sessions "
             "(id TEXT PRIMARY KEY, title TEXT, created_at TEXT, updated_at TEXT, "
             "user_id TEXT, title_source TEXT DEFAULT 'fallback', "
-            "status TEXT DEFAULT 'active', message_count INTEGER DEFAULT 0)"
+            "status TEXT DEFAULT 'active', message_count INTEGER DEFAULT 0, "
+            "workspace_path TEXT DEFAULT '', workspace_id TEXT, blank INTEGER DEFAULT 1)"
         )
         raw_conn.execute(
             "CREATE TABLE IF NOT EXISTS messages "
             "(id INTEGER PRIMARY KEY AUTOINCREMENT, session_id TEXT, role TEXT, "
-            "content TEXT, turn_number INTEGER DEFAULT 0, created_at TEXT)"
+            "content TEXT, turn_number INTEGER DEFAULT 0, created_at TEXT, "
+            "message_id TEXT)"
         )
         raw_conn.commit()
 

@@ -1325,7 +1325,7 @@ function Invoke-Preflight {
         exit 1
     }
 
-    # SSH 密钥检查（非本地/Docker 模式）
+    # SSH 密钥检查（非本地模式）
     if ($Script:CFG.Topology -ne "local") {
         foreach ($keyPath in @($Script:CFG.BackendSshKeyPath, $Script:CFG.FrontendSshKeyPath)) {
             if ($keyPath -and -not (Test-Path $keyPath)) {
@@ -1632,18 +1632,9 @@ function Test-CrossConnectivity {
         }
     }
 
-    # 3) CORS check（加超时防挂起）
+    # 3) CORS is a Web settings / database value
     if ($cfg.BackendHost -and $Script:SITE_URL) {
-        Write-Info "Checking backend CORS config..."
-        Invoke-RemoteBackend "timeout 5 grep -i 'CORS_ALLOW_ORIGINS' '$($cfg.BackendDir)/.env' 2>/dev/null || echo '__NO_CORS__'" | Out-Null
-        $corsCheck = $Script:LAST_OUTPUT
-        if ($corsCheck -match '__NO_CORS__') {
-            Write-Warn "Backend .env missing EXCELMANUS_CORS_ALLOW_ORIGINS"
-        } elseif ($corsCheck -match [regex]::Escape($Script:SITE_URL)) {
-            Write-Log "CORS config includes $($Script:SITE_URL)"
-        } else {
-            Write-Warn "CORS may not include frontend domain $($Script:SITE_URL)"
-        }
+        Write-Info "Public-site CORS belongs in the Web settings page (main database)"
     }
 
     # 4) Frontend BACKEND_ORIGIN check（加超时防挂起）
@@ -1674,34 +1665,10 @@ function Test-CrossConnectivity {
 # ═══════════════════════════════════════════════════════════════
 
 function Invoke-CmdInitEnv {
-    Write-Step "Initialize remote .env configs"
+    Write-Step "Initialize frontend Next.js runtime origin (web/.env.local)"
     $cfg = $Script:CFG
+    Write-Info "Backend model/settings live in the Web settings page (main database)."
 
-    $envTemplate = Join-Path $Script:PROJECT_ROOT ".env.example"
-    if (-not (Test-Path $envTemplate)) {
-        Write-Err ".env.example template not found: $envTemplate"
-        return
-    }
-
-    # Backend .env
-    if ($cfg.Mode -ne "frontend" -and $cfg.BackendHost) {
-        $beEnvPath = "$($cfg.BackendDir)/.env"
-        Invoke-RemoteBackend "[[ -f '$beEnvPath' ]] && echo 'exists' || echo 'missing'" | Out-Null
-        $beExists = $Script:LAST_OUTPUT
-        if ($beExists -match 'exists') {
-            if (-not $Force) {
-                Write-Warn "Backend $beEnvPath exists, skipping (use -Force to overwrite)"
-            } else {
-                Write-Warn "Backend $beEnvPath exists, overwriting with backup..."
-                Invoke-RemoteBackend "cp '$beEnvPath' '${beEnvPath}.bak.$(Get-Date -Format yyyyMMddTHHmmss)'" | Out-Null
-                Push-EnvToBackend -Template $envTemplate
-            }
-        } else {
-            Push-EnvToBackend -Template $envTemplate
-        }
-    }
-
-    # Frontend .env.local
     if ($cfg.Mode -ne "backend" -and $cfg.FrontendHost) {
         $feEnvPath = "$($cfg.FrontendDir)/web/.env.local"
         Invoke-RemoteFrontend "[[ -f '$feEnvPath' ]] && echo 'exists' || echo 'missing'" | Out-Null
@@ -1721,28 +1688,7 @@ function Invoke-CmdInitEnv {
 
     Write-Host ""
     Write-Log "init-env complete"
-    Write-Info "Edit .env files on remote servers to fill in real API keys"
-    if ($cfg.BackendHost)  { Write-Info "  Backend:  ssh $($cfg.SshUser)@$($cfg.BackendHost) 'vi $($cfg.BackendDir)/.env'" }
-    if ($cfg.FrontendHost) { Write-Info "  Frontend: ssh $($cfg.SshUser)@$($cfg.FrontendHost) 'vi $($cfg.FrontendDir)/web/.env.local'" }
-}
-
-function Push-EnvToBackend {
-    param([string]$Template)
-    $cfg = $Script:CFG
-    Write-Info "Pushing .env template to backend $($cfg.BackendHost):$($cfg.BackendDir)/.env ..."
-
-    $tmpEnv = [System.IO.Path]::GetTempFileName()
-    Copy-Item $Template $tmpEnv -Force
-
-    # Auto-fill CORS if SITE_URL known
-    if ($Script:SITE_URL) {
-        (Get-Content $tmpEnv) -replace '^# EXCELMANUS_CORS_ALLOW_ORIGINS=.*', "EXCELMANUS_CORS_ALLOW_ORIGINS=$($Script:SITE_URL),http://localhost:3000" | Set-Content $tmpEnv
-    }
-
-    $sshOpts = (Get-SshOpts -KeyOverride $cfg.BackendSshKeyPath) -join " "
-    Invoke-Run "rsync -az -e `"ssh $sshOpts`" `"$tmpEnv`" `"$($cfg.SshUser)@$($cfg.BackendHost):$($cfg.BackendDir)/.env`""
-    Remove-Item $tmpEnv -Force -ErrorAction SilentlyContinue
-    Write-Log "Backend .env pushed"
+    Write-Info "Add model profiles in the Web settings page. Frontend origin is web/.env.local (Next.js)."
 }
 
 function Push-EnvToFrontend {

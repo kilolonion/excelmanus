@@ -50,14 +50,20 @@ class ConversationPersistence:
         messages = engine.raw_messages
         snapshot_idx = engine.message_snapshot_index
         new_msgs = messages[snapshot_idx:]
-        if not new_msgs:
-            return
 
         turn = engine.session_turn
 
         exists = self._chat_history.session_exists(session_id)
         if not exists:
             self._chat_history.create_session(session_id, title_from_messages(messages))
+
+        # 事件日志先于 messages 快照落盘，且在 new_msgs 短路之前：
+        # replace/void 类事件不新增消息，但必须照样落盘（events 是事实源，
+        # 崩溃后 surface 由 events 重建；反过来会产生不可追回的分叉）。
+        self._flush_events(session_id, engine)
+
+        if not new_msgs:
+            return
 
         # 压缩/摘要会替换 _messages 并将 snapshot_index 重置为 0，
         # 此时需要先清空旧消息再全量重写，否则 SQLite 中仍是压缩前的历史。
@@ -73,6 +79,30 @@ class ConversationPersistence:
 
         # F9: 同步更新 SQLite 中的会话标题（从第一条用户消息派生）
         self._sync_title(session_id, messages)
+
+    def _flush_events(self, session_id: str, engine: "AgentEngine") -> None:
+        """把内存事件日志中未落盘的部分写入 session_events（对账式自愈）。
+
+        以 DB 内 max(seq) 为水位过滤：上次保存中断/失败的事件下次自动重发。
+        """
+        memory = getattr(engine, "memory", None)
+        log = getattr(memory, "event_log", None) if memory is not None else None
+        if log is None:
+            return
+        try:
+            flushed = getattr(engine, "_events_flushed_seq", 0)
+            rows = [ev.to_row() for ev in log.events_after(flushed)]
+            if not rows:
+                return
+            persisted_upto = self._chat_history.max_event_seq(session_id)
+            if not isinstance(persisted_upto, int):
+                persisted_upto = 0
+            pending = [r for r in rows if int(r.get("seq") or 0) > persisted_upto]
+            if pending:
+                self._chat_history.save_events(session_id, pending)
+            engine._events_flushed_seq = max(int(r["seq"]) for r in rows)
+        except Exception:
+            logger.warning("会话 %s 事件日志持久化失败", session_id, exc_info=True)
 
     def _sync_title(self, session_id: str, messages: list) -> None:
         """从消息列表中派生标题并更新 SQLite（仅当标题尚未被 LLM 或用户设置时）。"""
@@ -96,6 +126,21 @@ class ConversationPersistence:
         snapshot 应包含 messages, snapshot_index, turn 属性。
         此方法不读取 engine 可变状态，适用于锁外调用。
         """
+        # 事件日志先于 messages 快照落盘（理由同 sync_new_messages）。
+        event_rows = list(getattr(snapshot, "event_rows", None) or [])
+        if event_rows:
+            try:
+                persisted_upto = self._chat_history.max_event_seq(session_id)
+                if not isinstance(persisted_upto, int):
+                    persisted_upto = 0
+                pending = [
+                    r for r in event_rows if int(r.get("seq") or 0) > persisted_upto
+                ]
+                if pending:
+                    self._chat_history.save_events(session_id, pending)
+            except Exception:
+                logger.warning("会话 %s 事件日志持久化失败", session_id, exc_info=True)
+
         new_msgs = snapshot.messages[snapshot.snapshot_index:]
         if not new_msgs:
             return
@@ -128,7 +173,11 @@ class ConversationPersistence:
                 self._chat_history.clear_messages(session_id)
             engine.set_message_snapshot_index(0)
             # 立即将剩余消息重新持久化，消除 SQLite 空窗期
-            remaining = engine.raw_messages
+            # 剥掉 _seq/_event_kind 等内部键——与 _durable_payload 语义一致。
+            remaining = [
+                {k: v for k, v in m.items() if not str(k).startswith("_")}
+                for m in engine.raw_messages
+            ]
             if remaining:
                 turn = engine.session_turn
                 self._chat_history.save_turn_messages(
@@ -147,7 +196,8 @@ class ConversationPersistence:
     ) -> None:
         """清除会话持久化消息，并重置引擎快照索引。"""
         try:
-            self._chat_history.clear_messages(session_id)
+            # 用户显式清除会话：连同事件日志一起删除。
+            self._chat_history.clear_messages(session_id, clear_events=True)
         except Exception:
             logger.warning("会话 %s 持久化消息清除失败", session_id, exc_info=True)
         if engine is not None:

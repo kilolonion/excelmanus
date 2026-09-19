@@ -495,6 +495,21 @@ class TestFileRegistry:
         assert found is not None
         assert found.id == e1.id
 
+    def test_register_upload_after_soft_delete_gets_new_id(self, registry: FileRegistry):
+        e1 = registry.register_upload(
+            canonical_path="uploads/data.xlsx",
+            original_name="data.xlsx",
+            size_bytes=100,
+        )
+        registry.mark_deleted("uploads/data.xlsx")
+        e2 = registry.register_upload(
+            canonical_path="uploads/data.xlsx",
+            original_name="data.xlsx",
+            size_bytes=80,
+        )
+        assert e2.id != e1.id
+        assert e2.deleted_at is None
+
     def test_register_agent_output_existing_path_preserves_id(self, registry: FileRegistry, workspace: Path):
         """agent_output 重复注册同路径应复用原 ID。"""
         (workspace / "out.xlsx").write_bytes(b"x" * 10)
@@ -763,11 +778,13 @@ class TestFullFileTypeScan:
         """扫描跳过以 . 或 ~$ 开头的文件。"""
         (workspace / ".hidden").write_text("secret", encoding="utf-8")
         (workspace / "~$temp.xlsx").write_bytes(b"\x00" * 10)
+        (workspace / "visible.txt.em-lock").write_bytes(b"")
         (workspace / "visible.txt").write_text("ok", encoding="utf-8")
 
         result = registry.scan_workspace()
         assert result.total_files == 1
         assert registry.get_by_path("visible.txt") is not None
+        assert registry.get_by_path("visible.txt.em-lock") is None
 
     def test_skip_noise_dirs(self, registry: FileRegistry, workspace: Path):
         """扫描跳过 .git / __pycache__ 等噪音目录。"""
@@ -908,7 +925,6 @@ def test_file_registry_not_injected_into_system(tmp_path):
     engine._transient_hook_contexts = []
     engine.full_access_enabled = False
     engine.max_context_tokens = 100000
-    engine._effective_system_mode.return_value = "multi"
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine.file_registry = reg

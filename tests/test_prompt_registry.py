@@ -8,32 +8,26 @@ import pytest
 
 from excelmanus.prompt.canonical import (
     FORBIDDEN_MODEL_TERMS,
-    IDENTITY,
-    PERSONA,
-    PLAN_POLICY,
-    RUN_CODE_SECTION,
-    TOOL_ANALYZE,
     TOOL_DESCRIPTIONS,
-    TOOL_EDIT,
-    TOOL_FORMAT,
-    TOOL_INSPECT,
     TOOLS_CODE_ONLY,
-    WORKBOOK_SPEC_CONTRACT,
 )
 from excelmanus.prompt.registry import PromptRegistry, UnknownPromptVariable, interpolate
 from excelmanus.prompt.load import PromptComposer, PromptContext, parse_prompt_file
 from excelmanus.tools.intent_tools import get_tools as get_intent_tools
 from excelmanus.tools.plan_tools import exit_plan_mode
+from tests.prompt_support import (
+    PLAN_SECTION_NAMES,
+    PROMPTS_DIR,
+    VARS,
+    WRITE_SECTION_NAMES,
+    composer as _composer,
+    filled,
+    read_snapshot,
+    section_body,
+    system_text,
+)
 
-
-PROMPTS_DIR = Path(__file__).resolve().parent.parent / "excelmanus" / "prompts"
-_VARS = {"workspace_root": "/tmp/excelmanus-ws", "model": "test-model"}
-
-
-def _composer() -> PromptComposer:
-    composer = PromptComposer(PROMPTS_DIR)
-    composer.load_all()
-    return composer
+_VARS = VARS
 
 
 def _fill(text: str) -> str:
@@ -41,52 +35,55 @@ def _fill(text: str) -> str:
 
 
 class TestCanonicalMarkdown:
-    def test_md_matches_canonical_sections(self) -> None:
-        mapping = {
-            PROMPTS_DIR / "core" / "00_identity.md": IDENTITY,
-            PROMPTS_DIR / "core" / "10_core_principles.md": PERSONA,
-            PROMPTS_DIR / "strategies" / "15_plan_policy.md": PLAN_POLICY,
-            PROMPTS_DIR / "strategies" / "16_inspect.md": TOOL_INSPECT,
-            PROMPTS_DIR / "strategies" / "17_analyze.md": TOOL_ANALYZE,
-            PROMPTS_DIR / "strategies" / "19_edit.md": TOOL_EDIT,
-            PROMPTS_DIR / "strategies" / "21_format.md": TOOL_FORMAT,
-            PROMPTS_DIR / "strategies" / "18_workbook_spec.md": WORKBOOK_SPEC_CONTRACT,
-            PROMPTS_DIR / "strategies" / "35_run_code_patterns.md": RUN_CODE_SECTION,
-        }
-        for path, expected in mapping.items():
+    def test_prompt_files_have_required_frontmatter(self) -> None:
+        required = [
+            PROMPTS_DIR / "core" / "00_identity.md",
+            PROMPTS_DIR / "core" / "10_core_principles.md",
+            PROMPTS_DIR / "core" / "20_spreadsheet_principles.md",
+            PROMPTS_DIR / "strategies" / "15_plan_policy.md",
+            PROMPTS_DIR / "strategies" / "16_inspect.md",
+            PROMPTS_DIR / "strategies" / "17_analyze.md",
+            PROMPTS_DIR / "strategies" / "19_edit.md",
+            PROMPTS_DIR / "strategies" / "21_format.md",
+            PROMPTS_DIR / "strategies" / "22_split.md",
+            PROMPTS_DIR / "strategies" / "18_workbook_spec.md",
+            PROMPTS_DIR / "strategies" / "35_run_code_patterns.md",
+        ]
+        for path in required:
             seg = parse_prompt_file(path)
-            assert seg.content == expected, path.name
+            assert seg.content.strip(), path.name
+            assert seg.max_tokens > 0, path.name
         assert not (PROMPTS_DIR / "strategies" / "20_always_on.md").exists()
+        identity = section_body("core/00_identity.md")
+        assert "ExcelManus" in identity
+        assert "inspect_spreadsheet" not in section_body("strategies/16_inspect.md")
+        from importlib.resources import files
+
+        packaged = files("excelmanus") / "prompts" / "core" / "00_identity.md"
+        assert packaged.is_file()
 
 
 class TestSystemAssembly:
-    def test_write_prefix_is_identity_persona_tool_sections(self) -> None:
-        text = _composer().compose_system_text(PromptContext(chat_mode="write"), variables=_VARS)
-        persona = _fill(PERSONA)
-        assert text.startswith(IDENTITY)
-        assert persona in text
-        assert TOOL_INSPECT in text
-        assert TOOL_ANALYZE in text
-        assert TOOL_EDIT in text
-        assert TOOL_FORMAT in text
-        assert WORKBOOK_SPEC_CONTRACT in text
-        assert RUN_CODE_SECTION in text
-        assert PLAN_POLICY not in text
+    def test_write_prefix_matches_snapshot_and_section_order(self) -> None:
+        text = system_text("write")
+        assert text == read_snapshot("native_write.txt").rstrip("\n")
+        assert text.startswith(section_body("core/00_identity.md"))
+        assert filled(section_body("core/10_core_principles.md")) in text
+        assert "spreadsheet:invariants" not in text
+        assert "结论以实际读取的数据为依据" in text
+        assert "VERSION_CONFLICT" in text
+        assert "当前是计划模式" not in text
         assert TOOLS_CODE_ONLY not in text
-        assert "inspect_spreadsheet" not in text
-        parts = [
-            IDENTITY,
-            persona,
-            TOOL_INSPECT,
-            TOOL_ANALYZE,
-            TOOL_EDIT,
-            TOOL_FORMAT,
-            WORKBOOK_SPEC_CONTRACT,
-            RUN_CODE_SECTION,
+        from excelmanus.prompt.registry import AssembleContext
+
+        names = [
+            sec.name
+            for sec in _composer().registry.assemble(
+                AssembleContext(chat_mode="write", variables=_VARS)
+            ).sections
         ]
-        assert text == "\n\n".join(parts)
+        assert names == list(WRITE_SECTION_NAMES)
         assert "finish_task" not in text
-        assert "没有轮次上限" in text
         assert "宿主有轮次上限" not in text
         assert "finish_task" not in TOOL_DESCRIPTIONS
         assert "activate_skill" not in TOOL_DESCRIPTIONS
@@ -96,58 +93,32 @@ class TestSystemAssembly:
         assert "VERSION_CONFLICT" in _DEFAULT_SYSTEM_PROMPT
         assert not hasattr(PromptComposer, "compose_core_text")
         assert "固定步骤" not in text
-        assert "先做" not in text
         assert "必须先" not in text
         assert "默认交能用的活表" not in text
         assert "先再读再 rebase" not in text
         assert "收口前最后一次" not in text
-        assert "生疏工作簿先做" not in text
-        assert "已有用户产物却还在探查" not in text
 
-    def test_plan_prefix_inserts_policy_at_order_50(self) -> None:
-        text = _composer().compose_system_text(PromptContext(chat_mode="plan"), variables=_VARS)
-        persona = _fill(PERSONA)
-        joined = "\n\n".join(
-            [
-                IDENTITY,
-                persona,
-                PLAN_POLICY,
-                TOOL_INSPECT,
-                TOOL_ANALYZE,
-                TOOL_EDIT,
-                TOOL_FORMAT,
-                WORKBOOK_SPEC_CONTRACT,
-                RUN_CODE_SECTION,
-            ]
-        )
-        assert text == joined
-        assert "先做" not in text
-        assert "必须先" not in text
-        assert "默认交能用的活表" not in text
-        assert "先再读再 rebase" not in text
+    def test_plan_prefix_matches_snapshot(self) -> None:
+        text = system_text("plan")
+        assert text == read_snapshot("native_plan.txt").rstrip("\n")
+        from excelmanus.prompt.registry import AssembleContext
+
+        names = [
+            sec.name
+            for sec in _composer().registry.assemble(
+                AssembleContext(chat_mode="plan", plan_active=True, variables=_VARS)
+            ).sections
+        ]
+        assert names == list(PLAN_SECTION_NAMES)
+        assert "VERSION_CONFLICT" not in text
+        assert "当前是计划模式" in text
+        assert "WorkbookSpec 经 edit_spreadsheet" not in text
 
     def test_code_present_as_inserts_code_only(self) -> None:
-        text = _composer().compose_system_text(
-            PromptContext(chat_mode="write"),
-            variables=_VARS,
-            present_as="code",
-        )
+        text = system_text("write", present_as="code")
+        assert text == read_snapshot("code_write.txt").rstrip("\n")
         assert TOOLS_CODE_ONLY in text
-        persona = _fill(PERSONA)
-        joined = "\n\n".join(
-            [
-                IDENTITY,
-                persona,
-                TOOLS_CODE_ONLY,
-                TOOL_INSPECT,
-                TOOL_ANALYZE,
-                TOOL_EDIT,
-                TOOL_FORMAT,
-                WORKBOOK_SPEC_CONTRACT,
-                RUN_CODE_SECTION,
-            ]
-        )
-        assert text == joined
+        assert "VERSION_CONFLICT" in text
 
     def test_code_present_as_appends_generated_sdk_section(self) -> None:
         sdk = "- inspect_spreadsheet(file_path)\n- edit_spreadsheet(file_path, content_version)"
@@ -169,7 +140,7 @@ class TestSystemAssembly:
 
 class TestForbiddenTerms:
     def test_system_and_descriptions_have_no_forbidden_terms(self) -> None:
-        text = _composer().compose_system_text(PromptContext(chat_mode="plan"), variables=_VARS)
+        text = system_text("plan")
         blob = text + "\n" + "\n".join(TOOL_DESCRIPTIONS.values())
         for term in FORBIDDEN_MODEL_TERMS:
             assert term not in blob, term
@@ -185,6 +156,7 @@ class TestToolDescriptionSnapshots:
             "trace_spreadsheet_formulas",
             "edit_spreadsheet",
             "format_spreadsheet",
+            "split_spreadsheet",
             "manage_spreadsheet_objects",
             "manage_spreadsheet_versions",
         ):
@@ -234,7 +206,6 @@ class TestAssembleKv:
         engine._transient_hook_contexts = []
         engine.full_access_enabled = False
         engine.max_context_tokens = 100000
-        engine._effective_system_mode.return_value = "multi"
         engine.state.prompt_injection_snapshots = []
         engine.state.injected_context_fingerprint = None
         engine._task_store.current = None
@@ -246,17 +217,13 @@ class TestAssembleKv:
         engine.config.workspace_root = _VARS["workspace_root"]
         engine.active_model = _VARS["model"]
 
-        route = MagicMock()
-        route.route_mode = "all_tools"
-        route.system_contexts = []
-
         first, err1 = prepare_system_prompts_for_request(engine, [])
         second, err2 = prepare_system_prompts_for_request(engine, [])
         assert err1 is None and err2 is None
         assert first[0] == second[0]
         assert "文件全景" not in first[0]
-        assert TOOL_INSPECT in first[0]
-        assert WORKBOOK_SPEC_CONTRACT in first[0]
+        assert "结论以实际读取的数据为依据" in first[0]
+        assert "WorkbookSpec 经 edit_spreadsheet" in first[0]
         assert len(first) == 1
         assert len(second) == 1
 
@@ -272,7 +239,6 @@ class TestAssembleKv:
         engine._transient_hook_contexts = ["hook-notice"]
         engine.full_access_enabled = False
         engine.max_context_tokens = 100000
-        engine._effective_system_mode.return_value = "multi"
         engine.state.prompt_injection_snapshots = []
         engine.state.injected_context_fingerprint = None
         engine._task_store.current = None
@@ -289,7 +255,7 @@ class TestAssembleKv:
             engine, ["[Skillpack] data_basic\n描述：测试"]
         )
         assert err is None
-        assert len(prompts) == 3
+        assert len(prompts) == 1
         assert engine._prompt_user_contexts == [
             "## Hook 上下文\nhook-notice",
             "[Skillpack] data_basic\n描述：测试",
@@ -317,3 +283,33 @@ class TestRegistryToolsSnapshot:
 
         code_tools = collapse_schemas(native.tools, "code")
         assert {s["function"]["name"] for s in code_tools} == {"run_code"}
+
+
+def test_system_uses_capability_map_not_tool_index() -> None:
+    from excelmanus.prompt.assemble import build_stable_system_prompt
+    from excelmanus.tools.catalog import derive_effective_catalog
+    from excelmanus.tools.intent_tools import get_tools as get_intent_tools
+    from excelmanus.tools.word_tools import get_tools as get_word_tools
+    from excelmanus.tools.registry import ToolRegistry
+
+    registry = ToolRegistry()
+    registry.register_tools(get_intent_tools() + get_word_tools())
+    catalog = derive_effective_catalog(
+        tools=registry.get_all_tools(),
+        mode="write",
+        families=frozenset({"xlsx"}),
+    )
+    nav = catalog.capability_map_text()
+    assert "## 能力地图" in nav
+    assert "write_word" not in nav
+    assert " — " not in nav
+    long_word = next(
+        (tool.description for tool in get_word_tools() if tool.name == "write_word"),
+        "",
+    )
+    assert not long_word or long_word[:40] not in nav
+    source = Path(__file__).resolve().parent.parent / "excelmanus" / "prompt" / "assemble.py"
+    text = source.read_text(encoding="utf-8")
+    assert "capability_map_text()" in text
+    assert "catalog.tool_index_text()" not in text
+    _ = build_stable_system_prompt

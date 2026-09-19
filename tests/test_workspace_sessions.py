@@ -15,6 +15,7 @@ from excelmanus.database import Database
 from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 from excelmanus.session import SessionManager
 from excelmanus.stores.workspace_store import WorkspacePathError, WorkspaceStore
+from excelmanus.workspace.paths import unique_workspace_title
 from excelmanus.tools import ToolRegistry
 from excelmanus.workspace.isolated import IsolatedWorkspace
 
@@ -62,12 +63,12 @@ def _workspace_api(tmp_path: Path):
     )
     manager.ensure_default_workspace()
     old = (get_config(), get_session_manager(), get_database())
-    old_api = (api_module._config, api_module._session_manager)
+    old_api = (api_module.app.state.runtime.config, api_module.app.state.runtime.session_manager)
     set_config(config)
     set_session_manager(manager)
     set_database(db)
-    api_module._config = config
-    api_module._session_manager = manager
+    api_module.app.state.runtime.config = config
+    api_module.app.state.runtime.session_manager = manager
     try:
         yield {
             "config": config,
@@ -79,7 +80,7 @@ def _workspace_api(tmp_path: Path):
         set_config(old[0])
         set_session_manager(old[1])
         set_database(old[2])
-        api_module._config, api_module._session_manager = old_api
+        api_module.app.state.runtime.config, api_module.app.state.runtime.session_manager = old_api
         db.close()
 
 
@@ -95,6 +96,15 @@ def test_isolated_workspace_create_missing_makes_dir(tmp_path: Path) -> None:
     assert target.is_dir()
 
 
+def test_unique_workspace_title_appends_ascii_counter() -> None:
+    assert unique_workspace_title("报表", set()) == "报表"
+    assert unique_workspace_title("报表", {"报表"}) == "报表 (1)"
+    assert unique_workspace_title("报表", {"报表", "报表 (1)"}) == "报表 (2)"
+    assert unique_workspace_title("报表 (1)", {"报表 (1)"}) == "报表 (2)"
+    assert unique_workspace_title("报表（1）", {"报表（1）"}) == "报表 (1)"
+    assert unique_workspace_title("  ", {"工作区"}) == "工作区 (1)"
+
+
 def test_workspace_store_adopts_existing_only(tmp_path: Path) -> None:
     db = Database(str(tmp_path / "data.db"))
     store = WorkspaceStore(db)
@@ -108,6 +118,47 @@ def test_workspace_store_adopts_existing_only(tmp_path: Path) -> None:
     rec2, created2 = store.create(str(real))
     assert created2 is False
     assert rec2["id"] == rec["id"]
+    db.close()
+
+
+def test_workspace_store_dedupes_titles(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "data.db"))
+    store = WorkspaceStore(db)
+    first = tmp_path / "alpha" / "same"
+    second = tmp_path / "beta" / "same"
+    third = tmp_path / "gamma" / "other"
+    first.mkdir(parents=True)
+    second.mkdir(parents=True)
+    third.mkdir(parents=True)
+
+    a, _ = store.create(str(first))
+    b, _ = store.create(str(second))
+    c, _ = store.create(str(third), title="same")
+    assert a["title"] == "same"
+    assert b["title"] == "same (1)"
+    assert c["title"] == "same (2)"
+
+    renamed = store.update(c["id"], title="same")
+    assert renamed is not None
+    assert renamed["title"] == "same (2)"
+    kept = store.update(a["id"], title="same")
+    assert kept is not None
+    assert kept["title"] == "same"
+
+    leftover = tmp_path / "delta" / "same"
+    leftover.mkdir(parents=True)
+    now = "2026-09-13T00:00:00+00:00"
+    db.conn.execute(
+        "INSERT INTO workspaces (id, path, title, created_at, updated_at, sort_index) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        ("dup-1", str(leftover.resolve()), "same", now, now, 9),
+    )
+    db.conn.commit()
+    titles = [item["title"] for item in store.list()]
+    assert titles.count("same") == 1
+    assert "same (1)" in titles
+    assert "same (2)" in titles
+    assert "same (3)" in titles
     db.close()
 
 
@@ -138,6 +189,68 @@ async def test_create_or_reuse_blank_session(tmp_path: Path) -> None:
     )
     third = await manager.create_or_reuse_session()
     assert third["id"] != first["id"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_create_or_reuse_binds_last_used_workspace(tmp_path: Path) -> None:
+    default_ws = tmp_path / "ws-a"
+    other = tmp_path / "ws-b"
+    default_ws.mkdir()
+    other.mkdir()
+    db = Database(str(tmp_path / "data.db"))
+    chat = ChatHistoryStore(db)
+    manager = SessionManager(
+        max_sessions=10,
+        ttl_seconds=60,
+        config=_config(default_ws),
+        registry=ToolRegistry(),
+        chat_history=chat,
+        database=db,
+    )
+    manager.ensure_default_workspace()
+    rec, _ = manager.register_workspace(str(other))
+    default_sess = await manager.create_or_reuse_session()
+    chat.save_turn_messages(
+        default_sess["id"],
+        [{"role": "user", "content": "a", "message_id": "u-a"}],
+        turn_number=1,
+    )
+    other_sess = await manager.create_or_reuse_session(workspace_id=rec["id"])
+    chat.save_turn_messages(
+        other_sess["id"],
+        [{"role": "user", "content": "b", "message_id": "u-b"}],
+        turn_number=1,
+    )
+    landing = await manager.create_or_reuse_session()
+    assert landing["workspace_id"] == rec["id"]
+    assert landing["blank"] is True
+    assert landing["id"] != other_sess["id"]
+    db.close()
+
+
+@pytest.mark.asyncio
+async def test_create_or_reuse_falls_back_to_first_workspace(tmp_path: Path) -> None:
+    first = tmp_path / "alpha"
+    second = tmp_path / "beta"
+    first.mkdir()
+    second.mkdir()
+    db = Database(str(tmp_path / "data.db"))
+    chat = ChatHistoryStore(db)
+    manager = SessionManager(
+        max_sessions=10,
+        ttl_seconds=60,
+        config=_config(first),
+        registry=ToolRegistry(),
+        chat_history=chat,
+        database=db,
+    )
+    manager.ensure_default_workspace()
+    manager.register_workspace(str(second))
+    landing = await manager.create_or_reuse_session()
+    assert Path(landing["workspace_path"]) == first.resolve()
+    workspaces = manager.list_workspaces()
+    assert workspaces[0]["path"] == str(first.resolve())
     db.close()
 
 
@@ -258,3 +371,24 @@ async def test_sessions_and_workspaces_http(tmp_path: Path) -> None:
             ids = {s["id"] for s in still.json()["sessions"]}
             assert sess_b["id"] in ids
             assert sess_a["id"] in ids
+
+
+def test_register_workspace_runs_overlay_migration(tmp_path: Path) -> None:
+    from excelmanus.workspace.revisions import RevisionStore
+
+    with _workspace_api(tmp_path) as env:
+        ws = tmp_path / "adopted"
+        ws.mkdir()
+        (ws / "sales.xlsx").write_bytes(b"live")
+        backups = ws / "outputs" / "backups"
+        backups.mkdir(parents=True)
+        (backups / "sales_20260911T091344_f525.xlsx").write_bytes(b"overlay-copy")
+
+        rec, created = env["manager"].register_workspace(str(ws), title="历史工作区")
+        assert created is True
+        assert rec["path"] == str(ws.resolve())
+
+        recs = RevisionStore(ws).list("sales.xlsx")
+        assert recs
+        assert any(r.label == "migrated-overlay" for r in recs)
+        assert (ws / ".excelmanus" / "migrations" / "overlay-backups.json").is_file()

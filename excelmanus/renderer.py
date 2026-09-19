@@ -20,8 +20,8 @@ from rich.console import Console
 from rich.markup import escape as rich_escape
 from rich.table import Table
 
-from excelmanus.cli.theme import THEME
-from excelmanus.cli.utils import (
+from excelmanus.theme import THEME
+from excelmanus.render_utils import (
     RESULT_MAX_LEN,
     SUBAGENT_REASON_PREVIEW,
     SUBAGENT_SUMMARY_PREVIEW,
@@ -102,11 +102,30 @@ class StreamRenderer:
             EventType.EXCEL_PREVIEW: self._render_excel_preview,
             EventType.EXCEL_DIFF: self._render_excel_diff,
             EventType.TEXT_DIFF: self._render_text_diff,
-            EventType.FILES_CHANGED: self._render_files_changed,
+            EventType.FILES_CHANGED: self._render_files_changed,  # 历史 replay only
+            EventType.MUTATION: self._render_files_changed,
             EventType.PIPELINE_PROGRESS: self._render_pipeline_progress,
             EventType.MEMORY_EXTRACTED: self._render_memory_extracted,
             EventType.FILE_DOWNLOAD: self._render_file_download,
+            EventType.FAILURE_GUIDANCE: self._render_failure_guidance,
+            EventType.LLM_RETRY: self._render_llm_retry,
+            EventType.CREDENTIAL_EXPIRED: self._render_credential_notice,
+            EventType.CREDENTIAL_REFRESHED: self._render_credential_notice,
+            EventType.TOOL_CALL_NOTICE: self._render_tool_call_notice,
+            EventType.REASONING_NOTICE: self._render_reasoning_notice,
+            EventType.BATCH_PROGRESS: self._render_batch_progress,
+            EventType.PLAN_CREATED: self._render_plan_created,
+            EventType.TEXT_PREVIEW: self._render_text_preview,
+            # 协议级 / 高频事件：终端渲染不逐条展示
             EventType.RETRACT_THINKING: lambda _evt: None,
+            EventType.TOOL_CALL_ARGS_DELTA: lambda _evt: None,
+            EventType.TURN_START: lambda _evt: None,
+            EventType.TURN_END: lambda _evt: None,
+            EventType.STEP_START: lambda _evt: None,
+            EventType.STEP_END: lambda _evt: None,
+            EventType.INBOX_CLAIMED: lambda _evt: None,
+            EventType.UI_HINT: lambda _evt: None,
+            EventType.JEV_TRACE: lambda _evt: None,
         }
         handler = handlers.get(event.event_type)
         if handler:
@@ -162,6 +181,7 @@ class StreamRenderer:
         """渲染模式变更提示。"""
         label_map = {
             "full_access": ("FULL ACCESS", THEME.GOLD),
+            "chat_mode": (f"CHAT MODE:{event.mode_value or '?'}", THEME.CYAN),
             "plan_mode": ("PLAN MODE", THEME.CYAN),
             "present_as": ("CODE MODE", THEME.GOLD),
         }
@@ -409,7 +429,7 @@ class StreamRenderer:
         if event.question_multi_select:
             self._console.print(f"  [{THEME.DIM}]↑↓ 移动 · Space 选中 · Enter 提交 · Esc 取消[/{THEME.DIM}]")
         else:
-            self._console.print(f"  [{THEME.DIM}]Esc to cancel · Tab to amend[/{THEME.DIM}]")
+            self._console.print(f"  [{THEME.DIM}]↑↓ 移动 · Enter 确认 · Esc 取消[/{THEME.DIM}]")
 
     def _render_approval(self, event: ToolCallEvent) -> None:
         tool_name = event.approval_tool_name or "未知工具"
@@ -446,21 +466,21 @@ class StreamRenderer:
                 f"  [{THEME.DIM}]{rich_escape(args_text)}[/{THEME.DIM}]"
             )
         self._console.print(
-            f"  Do you want to execute this tool?"
+            f"  是否执行此工具？"
         )
         self._console.print(
-            f"  {THEME.CURSOR} [{THEME.CYAN}]1. Yes[/{THEME.CYAN}]"
+            f"  {THEME.CURSOR} [{THEME.CYAN}]1. 执行[/{THEME.CYAN}]"
         )
         self._console.print(
-            f"    [{THEME.CYAN}]2. Yes, allow all during this session[/{THEME.CYAN}]"
+            f"    [{THEME.CYAN}]2. 本会话全部授权[/{THEME.CYAN}]"
             f" [{THEME.DIM}](shift+tab)[/{THEME.DIM}]"
         )
         self._console.print(
-            f"    [{THEME.CYAN}]3. No[/{THEME.CYAN}]"
+            f"    [{THEME.CYAN}]3. 拒绝[/{THEME.CYAN}]"
         )
         self._console.print()
         self._console.print(
-            f"  [{THEME.DIM}]Esc to cancel · Tab to amend[/{THEME.DIM}]"
+            f"  [{THEME.DIM}]↑↓ 移动 · Enter 确认 · Esc 取消[/{THEME.DIM}]"
         )
 
     def _render_approval_resolved(self, event: ToolCallEvent) -> None:
@@ -868,6 +888,158 @@ class StreamRenderer:
             self._console.print(
                 f"  {THEME.TREE_END} [{THEME.DIM}]{rich_escape(filepath)}[/{THEME.DIM}]"
             )
+
+    # ------------------------------------------------------------------
+    # 失败引导 / 重试 / 凭证 / 其他控制面事件
+    # ------------------------------------------------------------------
+
+    def _render_failure_guidance(self, event: ToolCallEvent) -> None:
+        """渲染结构化失败引导（与 Web FailureGuidanceCard 同源事件）。"""
+        title = (event.fg_title or "").strip() or "操作失败"
+        message = (event.fg_message or "").strip()
+        actions = event.fg_actions or []
+        diagnostic_id = (event.fg_diagnostic_id or "").strip()
+
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.RED}]{THEME.FAILURE} {rich_escape(title)}[/{THEME.RED}]"
+        )
+        if message:
+            self._console.print(
+                f"  [{THEME.DIM}]{rich_escape(truncate(message, 300))}[/{THEME.DIM}]"
+            )
+        for action in actions[:3]:
+            label = ""
+            if isinstance(action, dict):
+                label = str(action.get("label", "") or "").strip()
+            else:
+                label = str(action).strip()
+            if label:
+                self._console.print(f"  {THEME.TREE_MID} {rich_escape(label)}")
+        if diagnostic_id:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]诊断 ID: {rich_escape(diagnostic_id)}[/{THEME.DIM}]"
+            )
+
+    def _render_llm_retry(self, event: ToolCallEvent) -> None:
+        """渲染 LLM 调用重试通知。"""
+        status = event.retry_status or "retrying"
+        attempt = event.retry_attempt
+        max_attempts = event.retry_max_attempts
+        if status == "succeeded":
+            self._console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+                f" [{THEME.PRIMARY_LIGHT}]{THEME.SUCCESS} 模型调用在第 {attempt} 次尝试后成功[/{THEME.PRIMARY_LIGHT}]"
+            )
+            return
+        if status == "exhausted":
+            err = rich_escape(truncate(event.retry_error_message or "", 200))
+            self._console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+                f" [{THEME.RED}]{THEME.FAILURE} 模型调用重试 {attempt} 次后仍失败[/{THEME.RED}]"
+                + (f" [{THEME.DIM}]{err}[/{THEME.DIM}]" if err else "")
+            )
+            return
+        # retrying
+        delay = event.retry_delay_seconds
+        err = rich_escape(truncate(event.retry_error_message or "", 120))
+        line = (
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.GOLD}]⟳ 模型调用失败，{delay:.1f}s 后重试"
+            f"（第 {attempt}/{max_attempts} 次）[/{THEME.GOLD}]"
+        )
+        if err:
+            line += f" [{THEME.DIM}]{err}[/{THEME.DIM}]"
+        self._console.print(line)
+
+    def _render_credential_notice(self, event: ToolCallEvent) -> None:
+        """渲染 OAuth 凭证刷新成功 / 过期通知。"""
+        msg = (event.pipeline_message or "").strip()
+        if event.event_type == EventType.CREDENTIAL_EXPIRED:
+            self._console.print(
+                f"  [{THEME.RED}]{THEME.FAILURE} {rich_escape(msg or 'OAuth token 已过期，请重新连接')}[/{THEME.RED}]"
+            )
+        else:
+            self._console.print(
+                f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+                f" [{THEME.DIM}]{rich_escape(msg or 'OAuth token 已刷新')}[/{THEME.DIM}]"
+            )
+
+    def _render_tool_call_notice(self, event: ToolCallEvent) -> None:
+        """渲染 /tools 开启时的简要工具调用通知。"""
+        tool_name = (event.tool_name or "").strip()
+        if not tool_name:
+            return
+        args_text = rich_escape(truncate(format_arguments(event.arguments), 80))
+        self._console.print(
+            f"  [{THEME.DIM}]{THEME.AGENT_PREFIX} {rich_escape(tool_name)}({args_text})[/{THEME.DIM}]"
+        )
+
+    def _render_reasoning_notice(self, event: ToolCallEvent) -> None:
+        """渲染 /reasoning 开启时的推理内容通知。"""
+        thinking = (event.thinking or "").strip()
+        if not thinking:
+            return
+        summary = (
+            truncate(thinking, THINKING_SUMMARY_LEN)
+            if len(thinking) > THINKING_THRESHOLD
+            else thinking
+        )
+        self._console.print(
+            f"  [{THEME.DIM} italic]{rich_escape(summary)}[/{THEME.DIM} italic]"
+        )
+
+    def _render_batch_progress(self, event: ToolCallEvent) -> None:
+        """渲染批量任务进度。"""
+        name = (event.batch_item_name or "").strip()
+        status = event.batch_status or "running"
+        total = event.batch_total or 1
+        index = event.batch_index
+        status_label = {"running": "处理中", "completed": "完成", "failed": "失败"}.get(status, status)
+        color = THEME.RED if status == "failed" else THEME.DIM
+        item = f" {rich_escape(name)}" if name else ""
+        self._console.print(
+            f"  [{color}]{THEME.TREE_MID} 批量任务 {index + 1}/{total}{item} · {status_label}[/{color}]"
+        )
+
+    def _render_plan_created(self, event: ToolCallEvent) -> None:
+        """渲染计划文件创建通知。"""
+        title = (event.plan_title or "").strip() or "计划"
+        count = event.plan_task_count or 0
+        path = (event.plan_file_path or "").strip()
+        count_str = f"（{count} 项任务）" if count else ""
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]已创建计划[/{THEME.BOLD}]"
+            f" [{THEME.CYAN}]{rich_escape(title)}[/{THEME.CYAN}]{count_str}"
+        )
+        if path:
+            self._console.print(
+                f"  {THEME.TREE_END} [{THEME.DIM}]{rich_escape(path)}[/{THEME.DIM}]"
+            )
+
+    def _render_text_preview(self, event: ToolCallEvent) -> None:
+        """渲染文本预览（文件内容片段）。"""
+        content = event.text_preview_content or ""
+        path = (event.text_preview_file_path or "").strip()
+        if not content:
+            return
+        filename = path.split("/")[-1] or path
+        lines = content.splitlines()
+        self._console.print()
+        self._console.print(
+            f"  [{THEME.PRIMARY_LIGHT}]{THEME.AGENT_PREFIX}[/{THEME.PRIMARY_LIGHT}]"
+            f" [{THEME.BOLD}]{rich_escape(filename)}[/{THEME.BOLD}]"
+            f" [{THEME.DIM}]{event.text_preview_line_count or len(lines)} 行"
+            + ("（预览截断）" if event.text_preview_truncated else "")
+            + f"[/{THEME.DIM}]"
+        )
+        lang = detect_language(content) or "text"
+        render_syntax_block(
+            self._console,
+            truncate(content, 2000),
+            lang,
+        )
 
     # ------------------------------------------------------------------
     # 辅助方法

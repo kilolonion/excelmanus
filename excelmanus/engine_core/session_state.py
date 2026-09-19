@@ -12,6 +12,82 @@ from __future__ import annotations
 
 from typing import Any
 
+_WIRE_EPOCH_FIELDS = (
+    "key",
+    "session_id",
+    "model",
+    "protocol",
+    "call_config_digest",
+    "tools_digest",
+    "system_digest",
+    "catalog_digest",
+    "wire_digest",
+)
+
+
+def normalize_wire_epoch_dict(raw: Any) -> dict[str, str] | None:
+    """把快照里的 wire_epoch 收成可往返的 dict；缺字段给空串，坏数据当缺失。"""
+    if not isinstance(raw, dict):
+        return None
+    normalized = {
+        name: str(raw.get(name, "") or "")
+        for name in _WIRE_EPOCH_FIELDS
+    }
+    if not any(normalized.values()):
+        return None
+    return normalized
+
+
+def snapshot_wire_epoch(epoch: Any) -> dict[str, str] | None:
+    """把内存中的 EpochIdentity（或等价 dict）写成快照字段。恢复时原样读回，不重算。"""
+    if epoch is None:
+        return None
+    if isinstance(epoch, dict):
+        return normalize_wire_epoch_dict(epoch)
+    data = {
+        "session_id": str(getattr(epoch, "session_id", "") or ""),
+        "model": str(getattr(epoch, "model", "") or ""),
+        "protocol": str(getattr(epoch, "protocol", "") or ""),
+        "call_config_digest": str(getattr(epoch, "call_config_digest", "") or ""),
+        "tools_digest": str(getattr(epoch, "tools_digest", "") or ""),
+        "system_digest": str(getattr(epoch, "system_digest", "") or ""),
+        "catalog_digest": str(getattr(epoch, "catalog_digest", "") or ""),
+        "wire_digest": str(getattr(epoch, "wire_digest", "") or ""),
+    }
+    key_fn = getattr(epoch, "key", None)
+    if callable(key_fn):
+        try:
+            data["key"] = str(key_fn() or "")
+        except Exception:
+            data["key"] = str(getattr(epoch, "key", "") or "")
+    else:
+        data["key"] = str(getattr(epoch, "key", "") or "")
+    return normalize_wire_epoch_dict(data)
+
+
+def epoch_identity_from_dict(raw: Any) -> Any:
+    """从快照 dict 恢复 EpochIdentity。接口未就绪时返回 None，不重算 digest。"""
+    normalized = normalize_wire_epoch_dict(raw)
+    if normalized is None:
+        return None
+    try:
+        from excelmanus.prompt.envelope import EpochIdentity
+    except ImportError:
+        return None
+    try:
+        return EpochIdentity(
+            session_id=normalized["session_id"],
+            model=normalized["model"],
+            protocol=normalized["protocol"],
+            call_config_digest=normalized["call_config_digest"],
+            tools_digest=normalized["tools_digest"],
+            system_digest=normalized["system_digest"],
+            catalog_digest=normalized["catalog_digest"],
+            wire_digest=normalized["wire_digest"],
+        )
+    except Exception:
+        return None
+
 
 class SessionState:
     """会话级状态容器，集中管理原 AgentEngine 中分散的运行时状态。"""
@@ -38,7 +114,7 @@ class SessionState:
         # 本会话最近读到/写到的内容版本（path → sha256:...）
         self.file_content_versions: dict[str, str] = {}
 
-        # 写入操作日志（当前仅供 Playbook 反思注入）
+        # 写入操作日志
         # 每条: {tool_name, file_path, sheet, range, summary}
         self.write_operations_log: list[dict[str, str]] = []
 
@@ -52,6 +128,14 @@ class SessionState:
 
         # 上次真正发给模型的动态快照指纹；相同则本步不再重注
         self.injected_context_fingerprint: str | None = None
+        # 图片出网 pin 序列；与 engine._image_wire_pin_seq 同一语义，随快照恢复
+        self.image_wire_pin_seq: tuple[str, ...] = ()
+        # 压缩代数；与 engine._compaction_generation 同一语义，随快照恢复
+        self.compaction_generation: int = 0
+        # 上次出网 epoch（key + 各 digest）。恢复后直接使用，不重算。
+        self.wire_epoch: dict[str, str] | None = None
+        # RequestSeries 快照。无 header 时恢复为 restore/migrate，不作空前缀通行证。
+        self.request_series: dict[str, Any] | None = None
 
     def increment_turn(self) -> None:
         """递增会话轮次。"""
@@ -80,6 +164,9 @@ class SessionState:
         self.session_diagnostics = []
         self.prompt_injection_snapshots = []
         self.injected_context_fingerprint = None
+        self.image_wire_pin_seq = ()
+        self.wire_epoch = None
+        self.request_series = None
         self.affected_files = []
         self.file_content_versions = {}
         self.write_operations_log = []
@@ -114,7 +201,7 @@ class SessionState:
         cell_range: str = "",
         summary: str = "",
     ) -> None:
-        """记录一次写入操作的结构化摘要，供 Playbook 反思注入。"""
+        """记录一次写入操作的结构化摘要。"""
         entry: dict[str, str] = {"tool_name": tool_name}
         if file_path:
             entry["file_path"] = file_path
@@ -127,7 +214,7 @@ class SessionState:
         self.write_operations_log.append(entry)
 
     def render_write_operations_log(self) -> str:
-        """将写入操作日志渲染为可读文本（调试/测试用；生产消费者为 Playbook）。"""
+        """将写入操作日志渲染为可读文本。"""
         if not self.write_operations_log:
             return ""
         lines: list[str] = ["## 本轮写入操作记录"]
@@ -177,6 +264,15 @@ class SessionState:
             "affected_files": list(self.affected_files),
             "session_diagnostics": list(self.session_diagnostics),
             "present_as": self.present_as if self.present_as in {"native", "code"} else "native",
+            "image_wire_pin_seq": list(self.image_wire_pin_seq or ()),
+            "injected_context_fingerprint": self.injected_context_fingerprint,
+            "compaction_generation": int(self.compaction_generation or 0),
+            "wire_epoch": (
+                dict(self.wire_epoch) if isinstance(self.wire_epoch, dict) else None
+            ),
+            "request_series": (
+                dict(self.request_series) if isinstance(self.request_series, dict) else None
+            ),
         }
 
     @classmethod
@@ -194,4 +290,18 @@ class SessionState:
         state.session_diagnostics = data.get("session_diagnostics", [])
         raw_present = data.get("present_as", "native")
         state.present_as = "code" if raw_present in {"code", "both"} else "native"
+        raw_fp = data.get("injected_context_fingerprint", None)
+        state.injected_context_fingerprint = raw_fp if isinstance(raw_fp, str) else None
+        raw_pins = data.get("image_wire_pin_seq", ())
+        if isinstance(raw_pins, (list, tuple)):
+            state.image_wire_pin_seq = tuple(str(item) for item in raw_pins)
+        else:
+            state.image_wire_pin_seq = ()
+        try:
+            state.compaction_generation = int(data.get("compaction_generation", 0) or 0)
+        except (TypeError, ValueError):
+            state.compaction_generation = 0
+        state.wire_epoch = normalize_wire_epoch_dict(data.get("wire_epoch"))
+        raw_series = data.get("request_series")
+        state.request_series = dict(raw_series) if isinstance(raw_series, dict) else None
         return state

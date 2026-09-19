@@ -1,0 +1,18 @@
+{
+  "suite_name": "write_approval",
+  "description": "审批链路覆盖：auto_approve=accept 时 run_shell 属于 Tier A 确认工具，会触发 PENDING_APPROVAL，伪造前端逐次批准，对齐网页默认权限下的审批体验。",
+  "cases": [
+    {
+      "id": "A01",
+      "name": "run_shell 走审批",
+      "message": "请用 run_shell 工具执行这条命令并把输出原样告诉我：echo bench-approval-ok",
+      "chat_mode": "write",
+      "auto_approve": "accept",
+      "assertions": {
+        "status": "ok",
+        "required_tools": ["run_shell"],
+        "max_iterations": 12
+      }
+    }
+  ]
+}

@@ -739,9 +739,14 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
         if not enabled:
             # 关闭时驱逐受限 skill，与 command_handler 保持一致
             blocked = set(engine._restricted_code_skillpacks)
+            before = len(engine._active_skills)
             engine._active_skills = [
                 s for s in engine._active_skills if s.name not in blocked
             ]
+            if len(engine._active_skills) != before:
+                from excelmanus.request.series import series_of
+
+                series_of(engine).note("catalog/change")
     else:
         # 会话尚未创建（local-first），仅持久化到 UserConfigStore
         database = get_database()

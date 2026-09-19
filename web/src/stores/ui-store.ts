@@ -8,6 +8,7 @@ interface UIState {
   fullAccessEnabled: boolean;
   visionCapable: boolean | null;
   chatMode: "write" | "read" | "plan";
+  chatModeOwned: boolean;
   presentAs: "native" | "code";
   thinkingEffort: string;
   settingsOpen: boolean;
@@ -24,6 +25,8 @@ interface UIState {
   setFullAccessEnabled: (enabled: boolean) => void;
   setVisionCapable: (capable: boolean | null) => void;
   setChatMode: (mode: "write" | "read" | "plan") => void;
+  hydrateChatMode: (mode: "write" | "read" | "plan") => void;
+  releaseChatModeOwnership: () => void;
   setPresentAs: (mode: "native" | "code") => void;
   setThinkingEffort: (effort: string) => void;
   setSidebarTab: (tab: "chats" | "files") => void;
@@ -54,6 +57,7 @@ export const useUIStore = create<UIState>()(
   fullAccessEnabled: false,
   visionCapable: null,
   chatMode: "write" as const,
+  chatModeOwned: false,
   presentAs: "native" as const,
   thinkingEffort: "medium",
   settingsOpen: false,
@@ -69,7 +73,10 @@ export const useUIStore = create<UIState>()(
   setCurrentModel: (model) => set({ currentModel: model }),
   setFullAccessEnabled: (enabled) => set({ fullAccessEnabled: enabled }),
   setVisionCapable: (capable) => set({ visionCapable: capable }),
-  setChatMode: (mode) => set({ chatMode: mode }),
+  setChatMode: (mode) => set({ chatMode: mode, chatModeOwned: true }),
+  hydrateChatMode: (mode) =>
+    set((s) => (s.chatModeOwned ? s : { chatMode: mode })),
+  releaseChatModeOwnership: () => set({ chatModeOwned: false }),
   setPresentAs: (mode) => set({ presentAs: mode }),
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),

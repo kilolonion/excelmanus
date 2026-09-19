@@ -124,7 +124,8 @@ _show_help() {
   echo "  ./deploy/start.sh --backend-port 9000      # 自定义后端端口"
   echo "  ./deploy/start.sh --backend-only            # 仅启动后端"
   echo "  ./deploy/start.sh --log-dir ./logs          # 输出日志到文件"
-  echo "  ./deploy/start.sh --workers 4 --prod        # 生产模式 4 workers"
+  echo "  ./deploy/start.sh --prod                    # 生产模式（默认 1 worker）"
+  echo "  ./deploy/start.sh --workers 4 --prod        # 不推荐：多 worker 会跨进程丢失信封缓存"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -181,68 +182,13 @@ if [[ ! -f "${PROJECT_ROOT}/pyproject.toml" ]]; then
   log "项目已克隆完成"
 fi
 
-# ── 交互式 .env 配置（首次启动）──
-if [[ ! -f "${PROJECT_ROOT}/.env" ]]; then
-  echo ""
-  echo -e "${CYAN}  ========================================${NC}"
-  echo -e "${CYAN}    首次启动 - 配置 ExcelManus${NC}"
-  echo -e "${CYAN}  ========================================${NC}"
-  echo ""
-  echo "  需要配置 LLM API 信息才能使用。"
-  echo -e "  ${YELLOW}（直接按回车可跳过，稍后手动编辑 .env 文件）${NC}"
-  echo ""
-  read -rp "  API Key: " input_api_key
-  read -rp "  Base URL (例: https://api.openai.com/v1): " input_base_url
-  read -rp "  Model (例: gpt-5.2): " input_model
-  echo ""
-  if [[ -z "$input_api_key" ]]; then
-    warn "未填写 API Key，创建空模板 .env 文件"
-    warn "请稍后编辑 ${PROJECT_ROOT}/.env 填入配置"
-    cat > "${PROJECT_ROOT}/.env" <<EOF
-# ExcelManus Configuration
-# Please fill in your LLM API settings
-EXCELMANUS_API_KEY=your-api-key
-EXCELMANUS_BASE_URL=https://your-llm-endpoint/v1
-EXCELMANUS_MODEL=your-model-id
-EOF
-  else
-    cat > "${PROJECT_ROOT}/.env" <<EOF
-# ExcelManus Configuration
-EXCELMANUS_API_KEY=${input_api_key}
-EXCELMANUS_BASE_URL=${input_base_url}
-EXCELMANUS_MODEL=${input_model}
-EOF
-    log ".env 配置文件已创建"
-  fi
-  echo ""
-fi
-
 # ── 互斥检查 ──
 if [[ "$BACKEND_ONLY" == true && "$FRONTEND_ONLY" == true ]]; then
   error "--backend-only 与 --frontend-only 不能同时使用"
   exit 1
 fi
 
-# ── 加载 .env（如存在）──
-_load_env() {
-  local env_file="$1"
-  if [[ -f "$env_file" ]]; then
-    debug "加载环境变量: $env_file"
-    set -a
-    # shellcheck source=/dev/null
-    source "$env_file" || {
-      set +a
-      echo "❌ 加载环境文件失败: $env_file（请检查语法，例如含 < > 的值需用引号包裹）" >&2
-      exit 1
-    }
-    set +a
-  fi
-}
-# 优先级: .env.local > .env
-_load_env "${PROJECT_ROOT}/.env"
-_load_env "${PROJECT_ROOT}/.env.local"
-
-# 环境变量覆盖（优先级低于命令行参数，但高于 .env）
+# ── 端口（命令行优先，其次已有进程环境）──
 BACKEND_PORT="${EXCELMANUS_BACKEND_PORT:-$BACKEND_PORT}"
 FRONTEND_PORT="${EXCELMANUS_FRONTEND_PORT:-$FRONTEND_PORT}"
 
@@ -674,6 +620,10 @@ trap cleanup EXIT INT TERM
 # ── 启动后端 ──
 _start_backend() {
   info "启动 FastAPI 后端 (${BACKEND_HOST}:${BACKEND_PORT})..."
+  export EXCELMANUS_WEB_WORKERS="${WORKERS}"
+  if [[ "${WORKERS}" -gt 1 ]]; then
+    warn "检测到 ${WORKERS} 个 uvicorn worker。会话引擎是进程内存态，同一 session_id 落到不同 worker 会从 SQLite 重建信封；MCP 未连上或技能快照丢失时 tools/system 前缀不等值，将静默打满 prompt cache miss。单机请保持 workers=1；多实例扩容请在反代层按 session_id 粘性路由。"
+  fi
 
   local log_redirect=""
   if [[ -n "$LOG_DIR" ]]; then
@@ -686,21 +636,25 @@ _start_backend() {
     eval ".venv/bin/python -c \"import uvicorn; uvicorn.run('excelmanus.api:app', host='${BACKEND_HOST}', port=${BACKEND_PORT}, log_level='info')\"${log_redirect}" &
   fi
   BACKEND_PID=$!
+  debug "后端进程已启动 (PID $BACKEND_PID)"
+}
 
-  # 等待后端就绪
+_wait_backend() {
   local ready=false
-  for _ in $(seq 1 "$HEALTH_TIMEOUT"); do
-    if curl -s "http://localhost:${BACKEND_PORT}/api/v1/health" >/dev/null 2>&1; then
+  local tries=$((HEALTH_TIMEOUT * 5))
+  local i
+  for i in $(seq 1 "$tries"); do
+    if curl -sf --max-time 1 "http://localhost:${BACKEND_PORT}/api/v1/health" >/dev/null 2>&1; then
       log "后端已就绪 (PID $BACKEND_PID)"
       ready=true
       break
     fi
     if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-      error "后端启动失败，请检查配置（.env 文件）"
+      error "后端启动失败，请检查日志或到 Web 设置页完成模型配置"
       [[ -n "$LOG_DIR" ]] && error "查看日志: ${LOG_DIR}/backend.log"
       exit 1
     fi
-    sleep 1
+    sleep 0.2
   done
 
   if [[ "$ready" == false ]]; then
@@ -747,8 +701,24 @@ if [[ "$BACKEND_ONLY" != true ]]; then
   _start_frontend
 fi
 
+if [[ "$FRONTEND_ONLY" != true ]]; then
+  _wait_backend
+fi
+
 # 等待前端启动
-sleep 3
+if [[ "$BACKEND_ONLY" != true ]]; then
+  fe_ready=false
+  for i in $(seq 1 60); do
+    if curl -sf --max-time 1 "http://localhost:${FRONTEND_PORT}" >/dev/null 2>&1; then
+      fe_ready=true
+      break
+    fi
+    sleep 0.5
+  done
+  if [[ "$fe_ready" != true ]]; then
+    echo -e "${YELLOW}前端在 30 秒内未就绪，请检查日志${NC}"
+  fi
+fi
 
 # ── 自动打开浏览器 ──
 if [[ "$AUTO_OPEN" == true && "$BACKEND_ONLY" != true ]]; then

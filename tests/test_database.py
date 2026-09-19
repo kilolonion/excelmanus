@@ -62,10 +62,10 @@ class TestDatabase:
             "sessions",
             "messages",
             "memory_entries",
-            "vector_records",
             "approvals",
         ):
             assert expected in tables, f"缺少表: {expected}"
+        assert "vector_records" not in tables
         db.close()
 
     def test_sessions_schema_has_no_archive_status(self, tmp_path: Path) -> None:
@@ -134,3 +134,41 @@ class TestDatabase:
         ).fetchone()["cnt"]
         db2.close()
         assert v1 == v2
+
+
+class TestLegacyEmbeddingRemoval:
+    def test_session_summaries_has_no_embedding_column(self, tmp_path: Path) -> None:
+        db = Database(str(tmp_path / "test.db"))
+        columns = {
+            row["name"]
+            for row in db.conn.execute("PRAGMA table_info(session_summaries)").fetchall()
+        }
+        assert "embedding" not in columns
+        db.close()
+
+    def test_legacy_embedding_column_is_dropped_on_upgrade(self, tmp_path: Path) -> None:
+        """v3 旧库的 embedding 列在升级时应被移除，且摘要数据保留。"""
+        db_path = str(tmp_path / "test.db")
+        db = Database(db_path)
+        db.conn.execute("ALTER TABLE session_summaries ADD COLUMN embedding BLOB")
+        db.conn.execute(
+            "INSERT INTO session_summaries "
+            "(session_id, summary_text, created_at, updated_at) VALUES (?, ?, ?, ?)",
+            ("sess-1", "keep-me", "2026-01-01T00:00:00+00:00", "2026-01-01T00:00:00+00:00"),
+        )
+        db.conn.execute("DELETE FROM schema_version WHERE version >= 4")
+        db.conn.commit()
+        db.close()
+
+        upgraded = Database(db_path)
+        columns = {
+            row["name"]
+            for row in upgraded.conn.execute("PRAGMA table_info(session_summaries)").fetchall()
+        }
+        assert "embedding" not in columns
+        row = upgraded.conn.execute(
+            "SELECT summary_text FROM session_summaries WHERE session_id = ?",
+            ("sess-1",),
+        ).fetchone()
+        assert row is not None and row["summary_text"] == "keep-me"
+        upgraded.close()

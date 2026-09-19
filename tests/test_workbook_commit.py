@@ -52,7 +52,7 @@ def test_commit_bytes_stale_version(tmp_path: Path) -> None:
     assert (tmp_path / "a.bin").read_bytes() == b"v2"
 
 
-def test_commit_revision_failure_does_not_fail_user_commit(
+def test_commit_revision_failure_marks_history_pending(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from excelmanus.workspace import revisions as rev_mod
@@ -60,11 +60,26 @@ def test_commit_revision_failure_does_not_fail_user_commit(
     def boom(self, *args, **kwargs):
         raise RuntimeError("revision store down")
 
-    monkeypatch.setattr(rev_mod.RevisionStore, "capture_edit_pair", boom)
+    monkeypatch.setattr(rev_mod.RevisionStore, "add_record", boom)
     guard = _guard(tmp_path)
     result = commit_bytes(guard=guard, file_path="book.xlsx", data=b"ok", expected_version=None)
     assert result.status == "committed"
     assert (tmp_path / "book.xlsx").read_bytes() == b"ok"
+    assert "pending_recover" in result.warnings
+    receipt = result.extra.get("receipt") or {}
+    assert receipt.get("history_state") == "pending_recover"
+
+
+def test_commit_bytes_rejects_product_secrets(tmp_path: Path) -> None:
+    guard = _guard(tmp_path)
+    with pytest.raises(CommitError) as ei:
+        commit_bytes(
+            guard=guard,
+            file_path=".secret_key",
+            data=b"nope",
+            expected_version=None,
+        )
+    assert ei.value.code == "PATH_INVALID"
 
 
 def test_commit_bytes_records_revision_pair_not_backups(tmp_path: Path) -> None:
@@ -294,8 +309,8 @@ async def test_write_excel_cells_stale_version_returns_409(
     seed.close()
 
     cfg = SimpleNamespace(workspace_root=str(tmp_path))
-    monkeypatch.setattr(api_app_state, "_config", cfg)
-    monkeypatch.setattr(api_app_state, "_session_manager", None)
+    api_app_state.set_config(cfg)
+    api_app_state.set_session_manager(None)
     monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
 
     req = api_module.ExcelWriteRequest(
@@ -320,8 +335,8 @@ def _write_harness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import excelmanus.api_routes_files as files_mod
 
     cfg = SimpleNamespace(workspace_root=str(tmp_path))
-    monkeypatch.setattr(api_app_state, "_config", cfg)
-    monkeypatch.setattr(api_app_state, "_session_manager", None)
+    api_app_state.set_config(cfg)
+    api_app_state.set_session_manager(None)
     monkeypatch.setattr(files_mod, "_resolve_workspace_root", lambda _req, session_id=None: str(tmp_path))
     raw = MagicMock()
     raw.app.state.auth_enabled = False

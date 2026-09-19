@@ -1,9 +1,9 @@
 """工具错误格式统一 — 回归测试。
 
 覆盖：
-- Fix A: is_error_result 兼容 {"error": ...} 简写格式
-- Fix C: data_tools CSV + range 错误格式统一
-- Fix D: tool_dispatcher 错误消息提取兼容
+- is_error_result 识别 canonical {status,error_code,message}，并兼容入站 {"error":...} 简写
+- CSV + range 必须 INVALID_ARGS（不再静默忽略）
+- 入站简写仍可提取 message
 """
 from __future__ import annotations
 import json
@@ -68,10 +68,9 @@ class TestIsErrorResult:
         assert ToolRegistry.is_error_result(result) is False
 
 class TestCsvRangeErrorFormat:
-    """read_excel 对 CSV 使用 range 参数时应静默降级（非报错）。"""
+    """read_excel 对 CSV 使用 range 必须 INVALID_ARGS，不再静默忽略。"""
 
-    def test_csv_range_graceful_fallback(self, tmp_path):
-        """CSV + range → 静默忽略 range，正常返回数据。"""
+    def test_csv_range_is_invalid_args(self, tmp_path):
         csv_file = tmp_path / 'test.csv'
         csv_file.write_text('a,b,c\n1,2,3\n', encoding='utf-8')
         from excelmanus.workbook.data import read_excel
@@ -83,16 +82,18 @@ class TestCsvRangeErrorFormat:
             result = read_excel(file_path=str(csv_file), range='A1:C5')
             from excelmanus.engine_core.tool_result import ToolResult
             assert isinstance(result, ToolResult)
+            assert result.success is False
+            assert result.error is not None
+            assert result.error.code == "INVALID_ARGS"
             parsed = result.value
-            assert isinstance(parsed, dict)
-            assert 'error' not in parsed
-            assert parsed['shape']['rows'] == 1
-            assert parsed['shape']['columns'] == 3
+            assert parsed["status"] == "error"
+            assert parsed["error_code"] == "INVALID_ARGS"
+            assert parsed["failure_class"] == "invalid_args"
+            assert "error" not in parsed
         finally:
             set_guard(None)
 
-    def test_csv_range_not_error(self, tmp_path):
-        """CSV + range → is_error_result 应为 False（非错误）。"""
+    def test_csv_range_is_error_result(self, tmp_path):
         csv_file = tmp_path / 'test.csv'
         csv_file.write_text('a,b,c\n1,2,3\n', encoding='utf-8')
         from excelmanus.workbook.data import read_excel
@@ -102,7 +103,7 @@ class TestCsvRangeErrorFormat:
         set_guard(guard)
         try:
             result = read_excel(file_path=str(csv_file), range='A1:C5')
-            assert ToolRegistry.is_error_result(result) is False
+            assert ToolRegistry.is_error_result(result) is True
         finally:
             set_guard(None)
 

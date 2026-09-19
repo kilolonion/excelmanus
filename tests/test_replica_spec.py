@@ -131,3 +131,17 @@ def test_cell_spec_value_types():
     for vt in ("string", "number", "date", "boolean", "formula", "empty"):
         cell = CellSpec(address="A1", value_type=vt)
         assert cell.value_type == vt
+
+
+def test_uncertainty_candidate_values_accept_numbers() -> None:
+    from excelmanus.replica_spec import WorkbookSpec
+
+    spec = WorkbookSpec.model_validate({
+        "sheets": [{"name": "汇报摘要", "dimensions": {"rows": 1, "cols": 1}}],
+        "uncertainties": [{
+            "location": "明细!G14",
+            "reason": "金额≠数量×单价",
+            "candidate_values": [4800, 5800],
+        }],
+    })
+    assert spec.uncertainties[0].candidate_values == ["4800", "5800"]

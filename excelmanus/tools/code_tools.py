@@ -15,6 +15,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from excelmanus.engine_core.error_payload import (
+    RUN_CODE_FAILED,
+    RUN_CODE_PUBLISH_FAILED,
+    RUN_CODE_TIMEOUT,
+    VERSION_CONFLICT,
+)
 from excelmanus.engine_core.tool_result import (
     ToolError,
     ToolResult,
@@ -24,31 +30,16 @@ from excelmanus.engine_core.tool_result import (
 )
 from excelmanus.security import FileAccessGuard
 from excelmanus.prompt.canonical import TOOL_DESCRIPTIONS
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools.registry import ToolDef
-
-# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
-
-# ── 模块级 FileAccessGuard（延迟初始化） ─────────────────
-
-_guard: FileAccessGuard | None = None
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(os.environ.get("EXCELMANUS_WORKSPACE_ROOT", "."))
-    return _guard
+    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。"""
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 import contextvars as _contextvars
@@ -56,6 +47,23 @@ import contextvars as _contextvars
 _current_sandbox_env: _contextvars.ContextVar[Any] = _contextvars.ContextVar(
     "_current_sandbox_env", default=None,
 )
+
+_current_readonly_exec: _contextvars.ContextVar[bool] = _contextvars.ContextVar(
+    "_current_readonly_exec", default=False,
+)
+
+
+def set_readonly_exec(flag: bool) -> _contextvars.Token:
+    """标记当前异步上下文为只读执行（沙盒 read-only 档）。
+
+    只读执行仍允许 run_code 计算，但发布步骤会丢弃全部 pending 写入。
+    """
+    return _current_readonly_exec.set(bool(flag))
+
+
+def _is_readonly_exec() -> bool:
+    """返回当前执行是否处于只读档。"""
+    return bool(_current_readonly_exec.get(False))
 
 
 def set_sandbox_env(env: Any) -> _contextvars.Token:
@@ -76,7 +84,11 @@ def _apply_code_mode_env(
     *,
     workspace_root: Path,
 ) -> None:
-    """把 Code Mode 文件桥路径注入子进程环境。"""
+    """把 Code Mode 文件桥路径注入子进程环境。
+
+    session 存在时 ``prepare()`` 失败必须显式抛出：静默返回会让脚本在
+    没有 SDK 环境的情况下继续执行，最后以谜之 NO_BRIDGE 收场。
+    """
     try:
         from excelmanus.code_mode import get_code_mode_session
     except Exception:
@@ -84,16 +96,15 @@ def _apply_code_mode_env(
     session = get_code_mode_session()
     if session is None:
         return
-    try:
-        session.prepare()
-    except Exception:
-        return
+    session.prepare()
     bridge = Path(session.bridge_dir)
     sdk = Path(session.sdk_path)
     env["EXCELMANUS_CODE_MODE_BRIDGE"] = str(bridge)
     env["EXCELMANUS_CODE_MODE_SDK"] = str(sdk)
     env["EXCELMANUS_CODE_MODE_ROOT_CALL_ID"] = session.root_call_id
     env["EXCELMANUS_CODE_MODE_TIMEOUT"] = str(int(session.call_timeout))
+    if session.deadline_wall is not None:
+        env["EXCELMANUS_CODE_MODE_DEADLINE"] = str(session.deadline_wall)
 
 
 # ── 解释器探测 ───────────────────────────────────────────
@@ -116,7 +127,9 @@ def _tail(text: str, lines: int) -> str:
 def _shorten(text: str, limit: int = 240) -> str:
     if len(text) <= limit:
         return text
-    return text[:limit] + "...(truncated)"
+    # 缩短标记不得含 truncat/截断 等 ToolErrorKind 分类关键词，否则被缩短的
+    # 错误一律被误判为 CONTEXT_OVERFLOW（如解释器探测失败）。
+    return text[:limit] + "…"
 
 
 # ── 截断代码检测 ─────────────────────────────────────────
@@ -244,7 +257,7 @@ def _probe_environment(
             text=True,
             encoding="utf-8",
             errors="replace",
-            timeout=8,
+            timeout=20,
             check=False,
         )
     except Exception as exc:  # noqa: BLE001
@@ -271,7 +284,48 @@ def _probe_environment(
     )
 
 
+# 解释器探测进程级缓存：run_code 每次调用都重探既慢又留出抖动窗口
+# （Windows 冷启动 import pandas 可超 8s 超时）。成功条目常驻，
+# 失败条目 60s 内复用，防止每次调用都全候选扫描一遍。
+_RESOLVE_CACHE: dict[tuple[str, bool, str, str], tuple[list[str] | None, str, float]] = {}
+_RESOLVE_FAIL_TTL_SECONDS = 60.0
+
+
 def _resolve_python_command(
+    python_command: str, *,
+    require_excel_deps: bool,
+    sandbox_tier: str = "RED",
+) -> tuple[list[str], list[_InterpreterProbe], str]:
+    import time as _time
+
+    cache_key = (
+        str(python_command or "auto"),
+        bool(require_excel_deps),
+        str(sandbox_tier or "RED"),
+        str(os.environ.get("EXCELMANUS_RUN_PYTHON") or ""),
+    )
+    cached = _RESOLVE_CACHE.get(cache_key)
+    if cached is not None:
+        command, mode_or_err, expiry = cached
+        if command is not None:
+            return list(command), [], mode_or_err
+        if _time.monotonic() < expiry:
+            raise RuntimeError(f"{mode_or_err}（60s 内已探测失败，未重试）")
+        _RESOLVE_CACHE.pop(cache_key, None)
+    try:
+        resolved = _resolve_python_command_uncached(
+            python_command,
+            require_excel_deps=require_excel_deps,
+            sandbox_tier=sandbox_tier,
+        )
+    except RuntimeError as exc:
+        _RESOLVE_CACHE[cache_key] = (None, str(exc), _time.monotonic() + _RESOLVE_FAIL_TTL_SECONDS)
+        raise
+    _RESOLVE_CACHE[cache_key] = (resolved[0], resolved[2], 0.0)
+    return resolved
+
+
+def _resolve_python_command_uncached(
     python_command: str, *,
     require_excel_deps: bool,
     sandbox_tier: str = "RED",
@@ -360,15 +414,29 @@ def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
 
     sandbox_env["PYTHONNOUSERSITE"] = "1"
     sandbox_env["PYTHONDONTWRITEBYTECODE"] = "1"
+    sandbox_env["PYTHONIOENCODING"] = "utf-8"
+    sandbox_env["PYTHONUTF8"] = "1"
     # TMPDIR/TMP/TEMP 由 _execute_script 注入工作区本地目录
     return sandbox_env, warnings
 
 
 def _ensure_isolated_python(command: list[str]) -> tuple[list[str], bool]:
-    """确保 Python 调用启用 -I 隔离模式。"""
-    if any(item == "-I" for item in command[1:]):
-        return command, True
-    return [*command, "-I"], True
+    """确保 Python 调用启用 -I 隔离，并打开 UTF-8 模式（-I 会忽略 PYTHONUTF8）。"""
+    out = list(command)
+    if "-I" not in out[1:]:
+        out.append("-I")
+    has_utf8 = False
+    for index, item in enumerate(out):
+        if item == "-X" and index + 1 < len(out) and str(out[index + 1]).startswith("utf8"):
+            has_utf8 = True
+            break
+        text = str(item)
+        if text in {"utf8", "-Xutf8"} or text.startswith("-Xutf8"):
+            has_utf8 = True
+            break
+    if not has_utf8:
+        out.extend(["-X", "utf8"])
+    return out, True
 
 
 def _build_unix_limits_preexec(
@@ -464,11 +532,23 @@ def _generate_text_diff(
     }
 
 
+def _publish_failures(published: Any) -> list[dict[str, Any]]:
+    """返回 published 中未 committed 的字典项（原集合不改）。"""
+    if not isinstance(published, list):
+        return []
+    return [
+        item
+        for item in published
+        if isinstance(item, dict) and item.get("status") != "committed"
+    ]
+
+
 def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
     payload.pop("cow_mapping", None)
     payload.pop("cow_hint", None)
     ui = ToolUiMeta()
     published = payload.get("published")
+    publish_failures = _publish_failures(published)
     if isinstance(published, list):
         for item in published:
             if not isinstance(item, dict):
@@ -483,15 +563,35 @@ def _pack_run_code_result(payload: dict[str, Any]) -> ToolResult:
                 ui.content_version = version
     model_text = json.dumps(payload, ensure_ascii=False, indent=2)
     status = str(payload.get("status") or "")
-    if status.lower() in {"failed", "error", "fail"}:
-        message = str(payload.get("recovery_hint") or payload.get("stderr_tail") or status)
+    status_l = status.lower()
+
+    def _fail(code: str, message: str) -> ToolResult:
         return ToolResult(
             success=False,
             model_text=model_text,
             value=payload,
             ui_meta=ui,
-            error=ToolError(code="RUN_CODE_FAILED", message=message, fields=payload),
+            error=ToolError(code=code, message=message, fields=payload),
         )
+
+    if status_l in {"timed_out", "timeout"}:
+        message = str(
+            payload.get("recovery_hint") or payload.get("stderr_tail") or status or "timed_out"
+        )
+        return _fail(RUN_CODE_TIMEOUT, message)
+    if status_l in {"failed", "error", "fail"}:
+        message = str(payload.get("recovery_hint") or payload.get("stderr_tail") or status)
+        return _fail(RUN_CODE_FAILED, message)
+    if publish_failures:
+        conflict = any(
+            str(item.get("error") or item.get("status") or "") == VERSION_CONFLICT
+            for item in publish_failures
+        )
+        first = publish_failures[0]
+        message = str(
+            first.get("message") or first.get("error") or first.get("status") or "publish failed"
+        )
+        return _fail(VERSION_CONFLICT if conflict else RUN_CODE_PUBLISH_FAILED, message)
     return ok_result(payload, ui_meta=ui, model_text=model_text)
 
 
@@ -518,7 +618,7 @@ def write_text_file(
         return error_result(
             "表格文件禁止当纯文本覆盖，请使用 workbook 提交路径",
             code="PATH_INVALID",
-            fields={"file": file_path},
+            fields={"file_path": file_path},
         )
 
     existed_before = safe_path.is_file()
@@ -530,7 +630,7 @@ def write_text_file(
 
     rel_path = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
     try:
-        seen = resolve_expected_version(rel_path, expected_version, exists=existed_before)
+        seen = resolve_expected_version(rel_path, expected_version, exists=existed_before, abs_path=safe_path)
     except CommitError as exc:
         return commit_error_result(exc)
 
@@ -554,7 +654,7 @@ def write_text_file(
 
     result: dict[str, Any] = {
         "status": "success",
-        "file": cr.path,
+        "file_path": cr.path,
         "bytes": cr.bytes_written,
         "encoding": encoding,
         "overwritten": existed_before,
@@ -598,12 +698,12 @@ def edit_text_file(
         return error_result(
             "表格文件禁止当纯文本覆盖，请使用 workbook 提交路径",
             code="PATH_INVALID",
-            fields={"file": file_path},
+            fields={"file_path": file_path},
         )
 
     rel_path = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
     try:
-        seen = resolve_expected_version(rel_path, expected_version, exists=True)
+        seen = resolve_expected_version(rel_path, expected_version, exists=True, abs_path=safe_path)
     except CommitError as exc:
         return commit_error_result(exc)
 
@@ -648,7 +748,7 @@ def edit_text_file(
 
     result: dict[str, Any] = {
         "status": "success",
-        "file": cr.path,
+        "file_path": cr.path,
         "replacements": match_count,
         "bytes": cr.bytes_written,
         "content_version": cr.content_version,
@@ -666,7 +766,7 @@ def run_code(
     script_path: str | None = None,
     args: list[str] | None = None,
     workdir: str = ".",
-    timeout_seconds: int = 120,
+    timeout_seconds: int = 900,
     python_command: str = "auto",
     tail_lines: int = 80,
     require_excel_deps: bool = True,
@@ -701,6 +801,8 @@ def run_code(
         raise ValueError("必须指定 code 或 script_path 其中之一")
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds 必须大于 0")
+    if timeout_seconds > 1800:
+        raise ValueError("timeout_seconds 最大 1800 秒")
     if tail_lines < 0:
         raise ValueError("tail_lines 不能小于 0")
 
@@ -758,12 +860,17 @@ def run_code(
     if truncation_warnings:
         payload["truncation_warning"] = " ".join(truncation_warnings)
     try:
-        from excelmanus.code_mode import LOCAL_SANDBOX_DISCLAIMER, get_code_mode_session
+        from excelmanus.code_mode import (
+            get_code_mode_session,
+            sdk_unavailable_reason,
+        )
 
         _cm_session = get_code_mode_session()
-        if _cm_session is not None:
-            payload["sdk_calls"] = _cm_session.summary()
-            payload["sandbox_note"] = LOCAL_SANDBOX_DISCLAIMER
+        if _cm_session is None:
+            _unavailable = sdk_unavailable_reason()
+            if _unavailable:
+                payload["sdk_unavailable"] = True
+                payload["sdk_unavailable_reason"] = _unavailable
     except Exception:
         pass
     if payload != result.value:
@@ -890,34 +997,17 @@ def _execute_script(
     from excelmanus.tools._helpers import commit_error_result
     from excelmanus.workbook_commit import (
         CommitError,
-        commit_bytes,
         remember_content_version,
         resolve_expected_version,
     )
+    from excelmanus.workspace.file_service import TargetSpec, WorkspaceFileService
+    from excelmanus.workspace.runtime import discard_pending_run_dir, publish_pending_writes
 
-    def _commit_capture(user_path: str, text: str) -> str:
-        safe = guard.resolve_and_validate(user_path)
-        rel = str(safe.relative_to(guard.workspace_root)).replace("\\", "/")
-        seen = resolve_expected_version(rel, None, exists=safe.is_file())
-        cr = commit_bytes(
-            guard=guard,
-            file_path=rel,
-            data=text.encode("utf-8"),
-            expected_version=seen,
-        )
-        remember_content_version(rel, cr.content_version)
-        return cr.path
-
-    if stdout_file:
-        try:
-            stdout_saved = _commit_capture(stdout_file, stdout)
-        except CommitError as exc:
-            return commit_error_result(exc)
-    if stderr_file:
-        try:
-            stderr_saved = _commit_capture(stderr_file, stderr)
-        except CommitError as exc:
-            return commit_error_result(exc)
+    readonly_exec = _is_readonly_exec()
+    discarded_targets: list[str] = []
+    pending_discarded = False
+    published: list[dict[str, Any]] = []
+    discarded_writes = 0
 
     if timed_out:
         status = "timed_out"
@@ -926,15 +1016,61 @@ def _execute_script(
     else:
         status = "failed"
 
-    from excelmanus.workbook_commit import remember_content_version
-    from excelmanus.workspace.runtime import publish_pending_writes
+    if readonly_exec or timed_out:
+        discarded_writes = discard_pending_run_dir(guard.workspace_root, pending_run_id)
+        pending_discarded = True
+        if stdout_file:
+            discarded_targets.append(str(stdout_file))
+        if stderr_file:
+            discarded_targets.append(str(stderr_file))
+    else:
+        specs: list[TargetSpec] = []
+        capture_rels: dict[str, str] = {}
 
-    published = publish_pending_writes(
-        guard.workspace_root,
-        stderr,
-        run_id=pending_run_id,
-        expected_versions=export_seen_versions(),
-    )
+        def _capture_spec(user_path: str, text: str) -> None:
+            safe = guard.resolve_and_validate(user_path)
+            rel = str(safe.relative_to(guard.workspace_root)).replace("\\", "/")
+            seen = resolve_expected_version(rel, None, exists=safe.is_file(), abs_path=safe)
+            data = text.encode("utf-8")
+            if safe.is_file():
+                specs.append(TargetSpec(op="update", path=rel, data=data, expected_version=seen))
+            else:
+                specs.append(TargetSpec(op="create", path=rel, data=data))
+            capture_rels[rel] = "stdout" if user_path == stdout_file else "stderr"
+
+        if stdout_file:
+            try:
+                _capture_spec(stdout_file, stdout)
+            except CommitError as exc:
+                discard_pending_run_dir(guard.workspace_root, pending_run_id)
+                return commit_error_result(exc)
+        if stderr_file:
+            try:
+                _capture_spec(stderr_file, stderr)
+            except CommitError as exc:
+                discard_pending_run_dir(guard.workspace_root, pending_run_id)
+                return commit_error_result(exc)
+        if specs:
+            try:
+                receipt = WorkspaceFileService(guard.workspace_root).apply_batch(specs, actor="run_code")
+                WorkspaceFileService(guard.workspace_root).raise_if_failed(receipt)
+            except CommitError as exc:
+                discard_pending_run_dir(guard.workspace_root, pending_run_id)
+                return commit_error_result(exc)
+            for target in receipt.targets:
+                if target.after_version:
+                    remember_content_version(target.path, target.after_version)
+                role = capture_rels.get(target.path)
+                if role == "stdout":
+                    stdout_saved = target.path
+                elif role == "stderr":
+                    stderr_saved = target.path
+        published = publish_pending_writes(
+            guard.workspace_root,
+            stderr,
+            run_id=pending_run_id,
+            expected_versions=export_seen_versions(),
+        )
     save_versions: dict[str, str] = {}
     for item in published:
         path = str(item.get("path") or "").strip()
@@ -955,10 +1091,20 @@ def _execute_script(
         "timed_out": timed_out,
         "stdout_file": stdout_saved,
         "stderr_file": stderr_saved,
-        "sandbox_tier": sandbox_tier,
         "save_versions": save_versions,
         "published": published,
+        "pending_discarded": pending_discarded,
+        "sandbox_tier": sandbox_tier,
     }
+
+    if readonly_exec:
+        notes = list(discarded_targets)
+        if discarded_writes:
+            notes.append(f"{discarded_writes} 个沙盒内文件写入")
+        if notes:
+            result["readonly_note"] = (
+                "只读模式：以下写入已丢弃，未落盘 —— " + "；".join(notes)
+            )
 
     # 检测沙盒权限错误，追加恢复提示
     if status == "failed":
@@ -968,13 +1114,13 @@ def _execute_script(
             if "路径不在工作区内" in stderr_text:
                 hints.append(
                     "库内部临时文件写入被拦截。"
-                    "尝试使用 mcp_excel 工具写入，或通过 delegate_to_subagent 完成。"
+                    "尝试使用 mcp_excel 工具写入，或通过 delegate 完成。"
                 )
             if "敏感目录" in stderr_text or "禁止访问工作区外的 .env" in stderr_text:
                 hints.append(
                     "安全沙盒拦截：禁止访问系统敏感目录或配置文件。请仅操作工作区内的文件。"
                 )
-        
+
         if "ModuleNotFoundError" in stderr_text or "ImportError" in stderr_text or "安全策略禁止" in stderr_text:
             if any(m in stderr_text for m in ["requests", "urllib", "http", "socket", "os", "sys", "subprocess", "No module named"]):
                 hints.append(
@@ -1115,10 +1261,10 @@ def get_tools() -> list[ToolDef]:
                     },
                     "timeout_seconds": {
                         "type": "integer",
-                        "description": "超时秒数（1~300）",
-                        "default": 120,
+                        "description": "脚本墙钟预算秒数（1~1800），默认 900 以容纳交互窗口",
+                        "default": 900,
                         "minimum": 1,
-                        "maximum": 300,
+                        "maximum": 1800,
                     },
                     "python_command": {
                         "type": "string",

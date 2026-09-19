@@ -48,6 +48,8 @@ class AssembleContext:
     chat_mode: str = "write"
     full_access: bool = False
     sdk_section: str = ""
+    visible_tools: frozenset[str] | None = None
+    new_workbook: bool = True
 
 
 @dataclass(frozen=True)

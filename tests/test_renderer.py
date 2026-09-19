@@ -12,7 +12,7 @@ from hypothesis import strategies as st
 from rich.console import Console
 
 from excelmanus.events import EventType, ToolCallEvent
-from excelmanus.cli.utils import (
+from excelmanus.render_utils import (
     RESULT_MAX_LEN as _RESULT_MAX_LEN,
     THINKING_SUMMARY_LEN as _THINKING_SUMMARY_LEN,
     THINKING_THRESHOLD as _THINKING_THRESHOLD,
@@ -743,7 +743,7 @@ class TestStreamRendererUnit:
 
 
 # ---------------------------------------------------------------------------
-# 新增事件渲染器测试（借鉴前端补齐 CLI 缺失事件）
+# 新增事件渲染器测试（借鉴前端补齐终端渲染缺失事件）
 # ---------------------------------------------------------------------------
 
 

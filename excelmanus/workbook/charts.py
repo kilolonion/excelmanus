@@ -11,7 +11,7 @@ from typing import Any
 from excelmanus.engine_core.tool_result import ToolResult, error_result, ok_result
 from excelmanus.logger import get_logger
 from excelmanus.security import FileAccessGuard
-from excelmanus.tools._guard_ctx import get_guard as _get_ctx_guard
+from excelmanus.tools.context import bind_workspace, require_guard
 from excelmanus.tools._helpers import (
     MutationAborted,
     commit_error_result,
@@ -22,10 +22,9 @@ from excelmanus.tools._helpers import (
     unwrap_mutation_abort,
 )
 from excelmanus.workbook_commit import CommitError
+from excelmanus.workbook.refs import InvalidRefError
 
 logger = get_logger("tools.chart")
-
-_guard: FileAccessGuard | None = None
 
 EXCEL_CHART_TYPES = ("bar", "line", "pie", "scatter", "area")
 _CHART_TYPE_ALIASES = {
@@ -43,20 +42,11 @@ _CHART_TYPE_ALIASES = {
 
 
 def _get_guard() -> FileAccessGuard:
-    """获取或创建 FileAccessGuard（优先 per-session contextvar）。"""
-    ctx_guard = _get_ctx_guard()
-    if ctx_guard is not None:
-        return ctx_guard
-    global _guard
-    if _guard is None:
-        _guard = FileAccessGuard(".")
-    return _guard
+    return require_guard()
 
 
 def init_guard(workspace_root: str) -> None:
-    """初始化文件访问守卫（供外部配置调用）。"""
-    global _guard
-    _guard = FileAccessGuard(workspace_root)
+    bind_workspace(workspace_root)
 
 
 @dataclass(frozen=True)
@@ -126,23 +116,25 @@ def normalize_chart_args(
         if None in bounds:
             return error_result(
                 f"data_range 不支持整列/整行地址 {data_range!r}，请写 A1:B12。",
-                code="INVALID_ARGS",
+                code="RANGE_INVALID",
             )
         if categories_range:
             cat_bounds = _rb(categories_range)
             if None in cat_bounds:
                 return error_result(
                     f"categories_range 不支持整列/整行地址 {categories_range!r}。",
-                    code="INVALID_ARGS",
+                    code="RANGE_INVALID",
                 )
         target_cell = top_left_cell(target_cell) or "A1"
+    except InvalidRefError as exc:
+        return error_result(str(exc), code="RANGE_INVALID")
     except ValueError as exc:
         return error_result(str(exc), code="INVALID_ARGS")
     except Exception as exc:
         return error_result(
             f"data_range/categories_range 不是合法坐标：{exc}。"
             "请用 A1:B12，表名放在 sheet，或写成 数据!A1:B12。",
-            code="INVALID_ARGS",
+            code="RANGE_INVALID",
         )
     return ChartSpec(
         chart_type=normalized_type,

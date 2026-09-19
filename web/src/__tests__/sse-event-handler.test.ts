@@ -29,6 +29,7 @@ const chatActions: Record<string, ReturnType<typeof vi.fn>> = {
   updateSubagentBlock: vi.fn(),
   updateAssistantMessage: vi.fn(),
   setPendingApproval: vi.fn(),
+  dismissApproval: vi.fn(),
   setPendingQuestion: vi.fn(),
   setToolProgress: vi.fn(),
   clearToolProgress: vi.fn(),
@@ -53,6 +54,7 @@ function resetChatState() {
     loadedSessionId: null,
     pendingApproval: null,
     pendingQuestion: null,
+    _lastDismissedApprovalId: null,
     ...chatActions,
   };
   // 重置所有 mock 调用记录
@@ -76,6 +78,9 @@ vi.mock("@/stores/chat-store", () => ({
 const sessionMock = vi.hoisted(() => {
   const state = {
     activeSessionId: "test-session" as string | null,
+    sessions: [
+      { id: "test-session", workspaceId: "ws-test" },
+    ] as { id: string; workspaceId?: string | null }[],
     setActiveSession: vi.fn((id: string | null) => {
       state.activeSessionId = id;
     }),
@@ -91,13 +96,16 @@ vi.mock("@/stores/session-store", () => ({
   },
 }));
 
+const uiMock = vi.hoisted(() => ({
+  setFullAccessEnabled: vi.fn(),
+  setChatMode: vi.fn(),
+  setPresentAs: vi.fn(),
+  setSidebarTab: vi.fn(),
+}));
+
 vi.mock("@/stores/ui-store", () => ({
   useUIStore: {
-    getState: () => ({
-      setFullAccessEnabled: vi.fn(),
-      setChatMode: vi.fn(),
-      setPresentAs: vi.fn(),
-    }),
+    getState: () => uiMock,
   },
 }));
 
@@ -107,6 +115,10 @@ const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
   addTextDiff: vi.fn(),
   addTextPreview: vi.fn(),
   addRecentFileIfNotDismissed: vi.fn(),
+  addRecentFile: vi.fn(),
+  closePanel: vi.fn(),
+  closeFullView: vi.fn(),
+  closeCompare: vi.fn(),
   appendStreamingArgs: vi.fn(),
   clearStreamingArgs: vi.fn(),
   setMergeResult: vi.fn(),
@@ -116,15 +128,69 @@ const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
   openPanel: vi.fn(),
 };
 
+const excelView = {
+  compareMode: false,
+  panelOpen: false,
+  dismissedPaths: new Set<string>(),
+};
+
 vi.mock("@/stores/excel-store", () => ({
   useExcelStore: {
     getState: () => ({
       ...excelActions,
-      compareMode: false,
-      panelOpen: false,
+      ...excelView,
     }),
   },
 }));
+
+const wordActions: Record<string, ReturnType<typeof vi.fn>> = {
+  handleFilesChanged: vi.fn(),
+};
+
+const wordView = {
+  panelOpen: false,
+  closePanel: vi.fn(),
+  closeFullView: vi.fn(),
+  openPanel: vi.fn(),
+  openFullView: vi.fn(),
+};
+
+vi.mock("@/stores/word-store", () => ({
+  useWordStore: {
+    getState: () => ({
+      ...wordActions,
+      ...wordView,
+    }),
+  },
+}));
+
+const previewView = {
+  textOpen: false,
+  imageOpen: false,
+  closeText: vi.fn(),
+  closeImage: vi.fn(),
+  openText: vi.fn(),
+  openImage: vi.fn(),
+};
+
+vi.mock("@/stores/file-preview-store", () => ({
+  useFilePreviewStore: {
+    getState: () => previewView,
+  },
+}));
+
+vi.mock("@/lib/open-workspace-file", () => ({
+  openWorkspaceFile: vi.fn(),
+}));
+
+const mobileMock = vi.hoisted(() => ({
+  getIsMobile: vi.fn(() => false),
+  getIsTablet: vi.fn(() => false),
+  getIsDesktop: vi.fn(() => true),
+  getIsMediumScreen: vi.fn(() => false),
+}));
+
+vi.mock("@/hooks/use-mobile", () => mobileMock);
 
 import { useChatStore } from "@/stores/chat-store";
 import {
@@ -136,6 +202,7 @@ import {
   type SSEHandlerContext,
   type DeltaBatcher,
 } from "@/lib/sse-event-handler";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -174,11 +241,25 @@ function makeEvent(event: string, data: Record<string, unknown> = {}): SSEEvent 
 describe("sse-event-handler", () => {
   beforeEach(() => {
     resetChatState();
+    for (const fn of Object.values(excelActions)) fn.mockClear();
+    for (const fn of Object.values(wordActions)) fn.mockClear();
     sessionMock.activeSessionId = "test-session";
     sessionMock.setActiveSession.mockClear();
     sessionMock.updateSessionTitle.mockClear();
     sessionMock.patchSession.mockClear();
+    excelView.compareMode = false;
+    excelView.panelOpen = false;
+    excelView.dismissedPaths = new Set();
+    wordView.panelOpen = false;
+    previewView.textOpen = false;
+    previewView.imageOpen = false;
+    mobileMock.getIsMobile.mockReturnValue(false);
+    vi.mocked(openWorkspaceFile).mockClear();
     vi.mocked(useChatStore.setState).mockClear();
+    uiMock.setFullAccessEnabled.mockClear();
+    uiMock.setChatMode.mockClear();
+    uiMock.setPresentAs.mockClear();
+    uiMock.setSidebarTab.mockClear();
   });
 
   // ── stream_init ─────────────────────────────────────────────
@@ -771,6 +852,80 @@ describe("sse-event-handler", () => {
         pendingQuestion: false,
       });
     });
+
+    it("忽略已关闭的同一审批单据重放", () => {
+      mockChatState._lastDismissedApprovalId = "ap1";
+      dispatchSSEEvent(
+        makeEvent("pending_approval", {
+          tool_call_id: "tc1",
+          approval_id: "ap1",
+          approval_tool_name: "edit_spreadsheet",
+        }),
+        makeCtx(),
+      );
+      expect(chatActions.setPendingApproval).not.toHaveBeenCalled();
+    });
+  });
+
+  describe("approval_resolved", () => {
+    it("关闭弹窗并更新 pending/running 工具卡片", () => {
+      dispatchSSEEvent(
+        makeEvent("approval_resolved", {
+          tool_call_id: "tc1",
+          approval_id: "ap1",
+          approval_tool_name: "edit_spreadsheet",
+          success: true,
+          result: "已执行",
+        }),
+        makeCtx(),
+      );
+      expect(chatActions.dismissApproval).toHaveBeenCalledWith("ap1");
+      expect(sessionMock.patchSession).toHaveBeenCalledWith("test-session", {
+        pendingApproval: false,
+      });
+      const updater = chatActions.updateToolCallBlock.mock.calls[0]?.[2] as (
+        b: { type: string; status: string; result?: string },
+      ) => { type: string; status: string; result?: string };
+      expect(updater({ type: "tool_call", status: "running" })).toEqual(
+        expect.objectContaining({ status: "success", result: "已执行" }),
+      );
+      expect(updater({ type: "tool_call", status: "pending" })).toEqual(
+        expect.objectContaining({ status: "success", result: "已执行" }),
+      );
+    });
+  });
+
+  describe("mutation", () => {
+    it("刷新最近文件、受影响文件和工作区树", () => {
+      dispatchSSEEvent(
+        makeEvent("mutation", {
+          files: ["a.xlsx"],
+          mutations: [{ identity: "a.xlsx", content_version: "sha256:abc" }],
+        }),
+        makeCtx(),
+      );
+
+      expect(excelActions.addRecentFileIfNotDismissed).toHaveBeenCalledWith(
+        {
+          path: "a.xlsx",
+          filename: "a.xlsx",
+        },
+        "id:ws-test",
+      );
+      expect(excelActions.bumpWorkspaceFilesVersion).toHaveBeenCalled();
+      expect(wordActions.handleFilesChanged).toHaveBeenCalledWith(["a.xlsx"]);
+      expect(chatActions.addAffectedFiles).toHaveBeenCalledWith("a1", ["a.xlsx"]);
+    });
+
+    it("legacy files_changed 仍可 replay", () => {
+      dispatchSSEEvent(
+        makeEvent("files_changed", { files: ["legacy.xlsx"] }),
+        makeCtx(),
+      );
+
+      expect(wordActions.handleFilesChanged).toHaveBeenCalledWith(["legacy.xlsx"]);
+      expect(chatActions.addAffectedFiles).toHaveBeenCalledWith("a1", ["legacy.xlsx"]);
+    });
   });
 
   describe("tool_call_start", () => {
@@ -794,6 +949,206 @@ describe("sse-event-handler", () => {
           status: "running",
         }),
       );
+    });
+
+    it("把 parent_call_id 写进工具卡片以便嵌套展示", () => {
+      dispatchSSEEvent(
+        makeEvent("tool_call_start", {
+          tool_call_id: "child-1",
+          tool_name: "inspect_spreadsheet",
+          arguments: { file_path: "book.xlsx" },
+          parent_call_id: "run-1",
+        }),
+        makeCtx(),
+      );
+
+      expect(chatActions.appendBlock).toHaveBeenCalledWith(
+        "a1",
+        expect.objectContaining({
+          type: "tool_call",
+          toolCallId: "child-1",
+          name: "inspect_spreadsheet",
+          parentCallId: "run-1",
+        }),
+      );
+    });
+  });
+
+  describe("done auto-open", () => {
+    function seedAffected(files: string[]) {
+      mockChatState.messages = [{
+        id: "a1",
+        role: "assistant",
+        blocks: [],
+        affectedFiles: files,
+      }];
+    }
+
+    it("opens the last spreadsheet even when a later word file exists", () => {
+      seedAffected(["notes.py", "book.xlsx", "report.docx", "sales.csv"]);
+      dispatchSSEEvent(makeEvent("done"), makeCtx());
+      expect(openWorkspaceFile).toHaveBeenCalledWith("sales.csv");
+    });
+
+    it("opens the last word document when no spreadsheet changed", () => {
+      seedAffected(["notes.py", "a.docx", "b.docx"]);
+      dispatchSSEEvent(makeEvent("done"), makeCtx());
+      expect(openWorkspaceFile).toHaveBeenCalledWith("b.docx");
+    });
+
+    it("does not steal focus when a workbench panel is already open", () => {
+      seedAffected(["book.xlsx"]);
+      excelView.panelOpen = true;
+      dispatchSSEEvent(makeEvent("done"), makeCtx());
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it("skips auto-open when a high-confidence stay ui_hint suppressed it", () => {
+      seedAffected(["book.xlsx"]);
+      const ctx = makeCtx();
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "stay", suppress_auto_open: true }),
+        ctx,
+      );
+      dispatchSSEEvent(makeEvent("done"), ctx);
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it("keeps auto-open when stay does not suppress", () => {
+      seedAffected(["book.xlsx"]);
+      const ctx = makeCtx();
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "stay", suppress_auto_open: false }),
+        ctx,
+      );
+      dispatchSSEEvent(makeEvent("done"), ctx);
+      expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx");
+    });
+  });
+
+  describe("ui_hint", () => {
+    it("does not append a message block", () => {
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(chatActions.appendBlock).not.toHaveBeenCalled();
+    });
+
+    it("maps side_panel to preview openWorkspaceFile", () => {
+      dispatchSSEEvent(
+        makeEvent("ui_hint", {
+          surface: "side_panel",
+          file_path: "book.xlsx",
+          sheet: "明细",
+        }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx", {
+        intent: "preview",
+        sheet: "明细",
+      });
+    });
+
+    it("maps sheet_full to full openWorkspaceFile", () => {
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "sheet_full", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx", {
+        intent: "full",
+        sheet: undefined,
+      });
+    });
+
+    it("maps compare to openCompare", () => {
+      dispatchSSEEvent(
+        makeEvent("ui_hint", {
+          surface: "compare",
+          file_path: "a.xlsx",
+          file_path_b: "b.xlsx",
+        }),
+        makeCtx(),
+      );
+      expect(excelActions.openCompare).toHaveBeenCalledWith("a.xlsx", "b.xlsx");
+    });
+
+    it("maps files_tab to setSidebarTab", () => {
+      dispatchSSEEvent(makeEvent("ui_hint", { surface: "files_tab" }), makeCtx());
+      expect(uiMock.setSidebarTab).toHaveBeenCalledWith("files");
+    });
+
+    it("does not steal an already open panel", () => {
+      excelView.panelOpen = true;
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it("does not reopen a dismissed path", () => {
+      excelView.dismissedPaths.add("book.xlsx");
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it("does not push on mobile", () => {
+      mobileMock.getIsMobile.mockReturnValue(true);
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx(),
+      );
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+      expect(uiMock.setSidebarTab).not.toHaveBeenCalled();
+    });
+
+    it("ignores replayed hints", () => {
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "side_panel", file_path: "book.xlsx" }),
+        makeCtx({ fromReplay: true }),
+      );
+      expect(openWorkspaceFile).not.toHaveBeenCalled();
+    });
+
+    it("closes a this-turn auto compare when stay suppresses auto-open", () => {
+      const ctx = makeCtx();
+      dispatchSSEEvent(
+        makeEvent("excel_diff", {
+          file_path: "a.xlsx",
+          file_path_b: "b.xlsx",
+          diff_mode: "cross_file",
+          diff_summary: { total_cells_compared: 2, cells_different: 1 },
+        }),
+        ctx,
+      );
+      expect(excelActions.openCompare).toHaveBeenCalledWith("a.xlsx", "b.xlsx");
+      dispatchSSEEvent(
+        makeEvent("ui_hint", { surface: "stay", suppress_auto_open: true }),
+        ctx,
+      );
+      expect(excelActions.closeCompare).toHaveBeenCalled();
+    });
+  });
+
+  describe("mode_changed", () => {
+    it("reads mode_name=chat_mode and data.value", () => {
+      dispatchSSEEvent(
+        makeEvent("mode_changed", { mode_name: "chat_mode", value: "plan", enabled: true }),
+        makeCtx(),
+      );
+      expect(uiMock.setChatMode).toHaveBeenCalledWith("plan");
+    });
+
+    it("ignores legacy mode_name=plan without chat_mode", () => {
+      dispatchSSEEvent(
+        makeEvent("mode_changed", { mode_name: "plan", enabled: true }),
+        makeCtx(),
+      );
+      expect(uiMock.setChatMode).not.toHaveBeenCalled();
     });
   });
 });

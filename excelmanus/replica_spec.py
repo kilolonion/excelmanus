@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, time, timezone
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -216,22 +217,23 @@ class SemanticHints(BaseModel):
 
 
 class ConditionalFormatRule(BaseModel):
-    """条件格式规则（颜色刻度/数据条/图标集/单元格值）。"""
+    """条件格式规则（颜色刻度/数据条/图标集/单元格值）。字段名是 type，不是 kind。"""
 
-    type: Literal["color_scale", "data_bar", "icon_set", "cell_value"]
-    range: str  # Excel 范围，如 "C2:C9"
-    # color_scale
+    type: Literal["color_scale", "data_bar", "icon_set", "cell_value"] = Field(
+        description="WorkbookSpec 条件格式类型；与 format_spreadsheet 的 rule.type 不同名空间",
+    )
+    range: str = Field(description="Excel 范围，如 C2:C9")
     min_color: str | None = None
     mid_color: str | None = None
     max_color: str | None = None
-    # data_bar
     bar_color: str | None = None
-    # icon_set
-    icon_style: str | None = None  # "3_arrows" | "3_traffic_lights" 等
-    # cell_value
-    operator: str | None = None  # "greater_than" | "less_than" | "between" | "equal" | "not_equal"
+    icon_style: str | None = Field(default=None, description="如 3_arrows / 3_traffic_lights")
+    operator: str | None = Field(
+        default=None,
+        description="cell_value：greater_than/less_than/between/equal/not_equal",
+    )
     value: Any = None
-    value2: Any = None  # 仅 between 时使用
+    value2: Any = None
     font_color: str | None = None
     fill_color: str | None = None
     bold: bool | None = None
@@ -252,8 +254,8 @@ class ObjectsSpec(BaseModel):
 class ValueBlock(BaseModel):
     """矩形值块：从 start 锚点展开的二维网格。"""
 
-    start: str
-    values: list[list[Any]] = Field(default_factory=list)
+    start: str = Field(description="左上角 A1，如 A1")
+    values: list[list[Any]] = Field(default_factory=list, description="非空矩形二维数组，行等长")
 
     @field_validator("start", mode="before")
     @classmethod
@@ -264,8 +266,8 @@ class ValueBlock(BaseModel):
 class FormulaBlock(BaseModel):
     """矩形公式块：从 start 锚点展开的二维公式网格。"""
 
-    start: str
-    formulas: list[list[str]] = Field(default_factory=list)
+    start: str = Field(description="左上角 A1")
+    formulas: list[list[str]] = Field(default_factory=list, description="非空矩形二维公式数组，单元格以 = 开头")
 
     @field_validator("start", mode="before")
     @classmethod
@@ -276,8 +278,8 @@ class FormulaBlock(BaseModel):
 class StyleRegion(BaseModel):
     """将具名样式应用到矩形区域。"""
 
-    range: str
-    style_id: str
+    range: str = Field(description="A1 区域，须落在 dimensions 内")
+    style_id: str = Field(description="必须是 styles 中已有的键")
 
     @field_validator("range", mode="before")
     @classmethod
@@ -286,18 +288,34 @@ class StyleRegion(BaseModel):
 
 
 class SheetSpec(BaseModel):
-    name: str
-    dimensions: dict[str, int]  # {"rows": N, "cols": M}
+    name: str = Field(description="工作表名")
+    dimensions: dict[str, int] | None = Field(
+        default=None,
+        description="规范为 {rows, cols}；带 source_csv 时可省略",
+    )
+    source_csv: dict[str, Any] | None = Field(
+        default=None,
+        description="{file_path, encoding?, skip_rows?, start?} 导入工作区 CSV/TSV",
+    )
     freeze_panes: str | None = None
     print_layout: Any | None = None
-    cells: list[CellSpec] = Field(default_factory=list)
+    cells: list[CellSpec] = Field(default_factory=list, description="单格；公式用 value='=A1' 且 value_type=formula")
     value_blocks: list[ValueBlock] = Field(default_factory=list)
     formula_blocks: list[FormulaBlock] = Field(default_factory=list)
     style_regions: list[StyleRegion] = Field(default_factory=list)
     merged_ranges: list[MergedRange] = Field(default_factory=list)
-    styles: dict[str, StyleClass] = Field(default_factory=dict)
-    column_widths: list[float] = Field(default_factory=list)
-    row_heights: dict[str, float] = Field(default_factory=dict)  # 行号字符串 → 行高
+    styles: dict[str, StyleClass] = Field(
+        default_factory=dict,
+        description="style_id → 样式；查询 additionalProperties 得 font/fill/border",
+    )
+    column_widths: list[float] = Field(
+        default_factory=list,
+        description="规范为从 A 起的数字数组；也接受 {\"A\":18}",
+    )
+    row_heights: dict[str, float] = Field(
+        default_factory=dict,
+        description="行号字符串 → 行高；也接受数组",
+    )
     conditional_formats: list[ConditionalFormatRule] = Field(default_factory=list)
     objects: ObjectsSpec = Field(default_factory=ObjectsSpec)
     semantic_hints: SemanticHints = Field(default_factory=SemanticHints)
@@ -363,10 +381,25 @@ class WorkbookMeta(BaseModel):
 
 
 class Uncertainty(BaseModel):
-    location: str
-    reason: str
-    candidate_values: list[str] = Field(default_factory=list)
+    location: str = Field(description="不确定项位置，如 Sheet1!B2")
+    reason: str = Field(description="看不清或无法确定的原因")
+    candidate_values: list[str] = Field(
+        default_factory=list,
+        description="候选字符串列表，数字写成 \"4800\"",
+    )
     confidence: float = 0.5
+
+    @field_validator("candidate_values", mode="before")
+    @classmethod
+    def _stringify_candidate_values(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        items: list[str] = []
+        for item in value:
+            if item is None:
+                continue
+            items.append(str(item))
+        return items
 
 
 class WorkbookSpec(BaseModel):
@@ -378,10 +411,13 @@ class WorkbookSpec(BaseModel):
     version: str = "1.0"
     name: str = "replica"
     locale: str | None = None
-    default_font: FontSpec | None = None
+    default_font: FontSpec | None = Field(
+        default=None,
+        description="规范为 {name, size?}；也接受字符串字体名",
+    )
     theme_hint: str | None = None
-    sheets: list[SheetSpec]
-    uncertainties: list[Uncertainty]
+    sheets: list[SheetSpec] = Field(description="工作表列表")
+    uncertainties: list[Uncertainty] = Field(description="必须出现；没有不确定项时为 []")
 
     @model_validator(mode="before")
     @classmethod
@@ -414,12 +450,14 @@ class SpecValidationError(ValueError):
         super().__init__(summary)
 
     def to_payload(self) -> dict[str, Any]:
-        return {
-            "status": "error",
-            "error_code": "SPEC_VALIDATION_FAILED",
-            "message": "WorkbookSpec 校验失败，请按字段路径修正后重试。",
-            "errors": self.errors,
-        }
+        from excelmanus.engine_core.error_payload import SPEC_VALIDATION_FAILED, make_error_payload
+
+        return make_error_payload(
+            "WorkbookSpec 校验失败，请按字段路径修正后重试。",
+            error_code=SPEC_VALIDATION_FAILED,
+            errors=self.errors,
+            shape="WorkbookSpec",
+        )
 
 
 def format_error_path(loc: tuple[Any, ...]) -> str:
@@ -461,21 +499,34 @@ def _pydantic_errors(exc: ValidationError) -> list[dict[str, str]]:
 
 def _parse_a1(address: str) -> tuple[int, int]:
     """返回 1-indexed (row, col)。"""
-    from openpyxl.utils.cell import column_index_from_string, coordinate_from_string
+    from excelmanus.workbook.refs import CellRef, RectRef, parse_ref
 
-    from excelmanus.workbook.address import strip_sheet_qualifier
-
-    col_letter, row = coordinate_from_string(strip_sheet_qualifier(address))
-    return int(row), int(column_index_from_string(col_letter))
+    area = parse_ref(address)
+    part = area.areas[0]
+    if isinstance(part, CellRef):
+        return part.row, part.col
+    if isinstance(part, RectRef):
+        if part.whole_column or part.whole_row:
+            raise ValueError("WorkbookSpec 不支持整轴地址，请写有限单元格如 A1")
+        return part.min_row, part.min_col
+    raise ValueError(f"WorkbookSpec 地址必须是单元格或矩形：{address!r}")
 
 
 def _range_bounds(range_str: str) -> tuple[int, int, int, int]:
     """返回 (min_col, min_row, max_col, max_row)，均为 1-indexed。"""
-    from openpyxl.utils import range_boundaries
+    from excelmanus.workbook.refs import CellRef, RectRef, parse_ref
 
-    from excelmanus.workbook.address import strip_sheet_qualifier
-
-    return range_boundaries(strip_sheet_qualifier(range_str))
+    area = parse_ref(range_str)
+    if len(area.areas) != 1:
+        raise ValueError("WorkbookSpec 不支持并集 range")
+    part = area.areas[0]
+    if isinstance(part, CellRef):
+        return part.col, part.row, part.col, part.row
+    if isinstance(part, RectRef):
+        if part.whole_column or part.whole_row:
+            raise ValueError("WorkbookSpec 不支持整轴 range，请写有限矩形")
+        return part.min_col, part.min_row, part.max_col, part.max_row
+    raise ValueError(f"WorkbookSpec range 必须是单元格或矩形：{range_str!r}")
 
 
 def _sheet_dimensions(sheet: SheetSpec, sheet_index: int) -> tuple[int, int] | dict[str, str]:
@@ -531,6 +582,9 @@ def collect_layout_errors(spec: WorkbookSpec) -> list[dict[str, str]]:
     """矩形越界、坏样式引用等语义错误（带字段路径）。"""
     errors: list[dict[str, str]] = []
     for i, sheet in enumerate(spec.sheets):
+        # source_csv 的 dimensions 由工具层展开后推导，展开前无法做矩形边界检查
+        if sheet.source_csv and sheet.dimensions is None:
+            continue
         dims = _sheet_dimensions(sheet, i)
         if isinstance(dims, dict):
             errors.append(dims)
@@ -633,9 +687,16 @@ def validate_workbook_spec(data: Any) -> WorkbookSpec:
         try:
             data = json.loads(data)
         except json.JSONDecodeError as exc:
+            if exc.pos >= len(data.rstrip()) - 2:
+                message = (
+                    f"JSON 在末尾被截断（{exc}）：workbook_spec 数据量大时不要整表一次传入，"
+                    "改用 sheets[].source_csv 导入数据文件，或先建骨架再用 operations 分块写入。"
+                )
+            else:
+                message = f"不是合法 JSON: {exc}"
             raise SpecValidationError([{
                 "path": "spec",
-                "message": f"不是合法 JSON: {exc}",
+                "message": message,
             }]) from exc
     if not isinstance(data, dict):
         raise SpecValidationError([{
@@ -677,6 +738,25 @@ def iter_range_addresses(range_str: str) -> list[str]:
     return addrs
 
 
+_ISO_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+_ISO_DATETIME_RE = re.compile(
+    r"^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}(:\d{2}(\.\d+)?)?(Z|[+-]\d{2}:?\d{2})?$"
+)
+
+
+def _coerce_iso_temporal(value: str) -> datetime | date | None:
+    """严格 ISO-8601 字符串 → date/datetime（与 Excel 输入行为一致）。"""
+    text = value.strip()
+    try:
+        if _ISO_DATE_RE.match(text):
+            return date.fromisoformat(text)
+        if _ISO_DATETIME_RE.match(text):
+            return datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return None
+
+
 def materialize_sheet_cells(sheet: SheetSpec) -> list[CellSpec]:
     """把矩形值/公式块与样式区域展开为单元格列表，供 rebuild 编译。"""
     by_addr: dict[str, CellSpec] = {}
@@ -694,8 +774,13 @@ def materialize_sheet_cells(sheet: SheetSpec) -> list[CellSpec]:
                 value_type = "boolean"
             elif isinstance(value, (int, float)) and not isinstance(value, bool):
                 value_type = "number"
+            elif isinstance(value, (datetime, date, time)):
+                value_type = "date"
             elif isinstance(value, str) and value.startswith("="):
                 value_type = "formula"
+            elif isinstance(value, str) and (_temporal := _coerce_iso_temporal(value)) is not None:
+                value = _temporal
+                value_type = "date"
             else:
                 value_type = "string"
             if existing is None:
@@ -901,7 +986,39 @@ def compile_replica_to_bytes(replica: ReplicaSpec) -> tuple[bytes, dict[str, Any
             except (TypeError, ValueError):
                 continue
         if sheet.freeze_panes:
-            ws.freeze_panes = sheet.freeze_panes
+            from excelmanus.workbook.styles import apply_freeze_panes
+
+            apply_freeze_panes(ws, sheet.freeze_panes)
+        for cf_index, cf_rule in enumerate(sheet.conditional_formats or []):
+            try:
+                from excelmanus.workbook.styles import build_conditional_format_rule
+
+                rule = build_conditional_format_rule(
+                    {
+                        "type": cf_rule.type,
+                        "operator": cf_rule.operator,
+                        "value": cf_rule.value,
+                        "value2": cf_rule.value2,
+                        "min_color": cf_rule.min_color,
+                        "mid_color": cf_rule.mid_color,
+                        "max_color": cf_rule.max_color,
+                        "bar_color": cf_rule.bar_color,
+                        "icon_style": cf_rule.icon_style,
+                        "fill": {"color": cf_rule.fill_color} if cf_rule.fill_color else None,
+                        "font": (
+                            {"color": cf_rule.font_color, "bold": cf_rule.bold}
+                            if (cf_rule.font_color or cf_rule.bold)
+                            else None
+                        ),
+                    },
+                    anchor=str(cf_rule.range).split()[0].split(":")[0],
+                )
+                ws.conditional_formatting.add(cf_rule.range, rule)
+            except Exception as exc:
+                raise ValueError(
+                    f"sheet {sheet.name!r} conditional_formats[{cf_index}] "
+                    f"应用失败 range={cf_rule.range!r}: {exc}"
+                ) from exc
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue(), {
@@ -921,4 +1038,11 @@ def compile_spec_text_to_bytes(text: str) -> tuple[bytes, dict[str, Any]]:
     return compile_replica_to_bytes(load_spec_document(text))
 
 
-from excelmanus.prompt.canonical import WORKBOOK_SPEC_CONTRACT as WORKBOOK_SPEC_EXTRACT_PROMPT
+def workbook_spec_json_schema() -> dict[str, Any]:
+    """从 Pydantic 模型生成供工具 schema / 字段查询使用的结构。"""
+    schema = WorkbookSpec.model_json_schema(mode="validation")
+    schema["description"] = (
+        "创建用 WorkbookSpec，与 operations 互斥。必填 sheets 与 uncertainties。"
+        "规范输入见 properties；字符串字体、列宽字典、CSV 省略 dimensions 等兼容形由校验器接受。"
+    )
+    return schema

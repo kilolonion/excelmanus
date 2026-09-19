@@ -9,9 +9,6 @@ import shutil
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from typing import Any
-
-import numpy as np
 
 from excelmanus.db_adapter import (
     Backend,
@@ -60,15 +57,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "CREATE INDEX IF NOT EXISTS idx_memory_category ON memory_entries(category)",
         "CREATE INDEX IF NOT EXISTS idx_memory_created ON memory_entries(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_memory_user_id ON memory_entries(user_id)",
-        """CREATE TABLE IF NOT EXISTS vector_records (
-            id           INTEGER PRIMARY KEY AUTOINCREMENT,
-            content_hash TEXT UNIQUE NOT NULL,
-            text         TEXT NOT NULL,
-            metadata     TEXT,
-            vector       BLOB,
-            dimensions   INTEGER NOT NULL DEFAULT 1536,
-            created_at   TEXT NOT NULL
-        )""",
         """CREATE TABLE IF NOT EXISTS approvals (
             id               TEXT PRIMARY KEY,
             tool_name        TEXT NOT NULL,
@@ -122,10 +110,14 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             result_chars   INTEGER DEFAULT 0,
             error_type     TEXT,
             error_preview  TEXT,
+            parent_call_id TEXT,
+            call_id        TEXT,
             created_at     TEXT NOT NULL,
             user_id        TEXT
         )""",
         "CREATE INDEX IF NOT EXISTS idx_tcl_session ON tool_call_log(session_id, turn)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_parent ON tool_call_log(parent_call_id)",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_call_id ON tool_call_log(call_id)",
         "CREATE INDEX IF NOT EXISTS idx_tcl_tool ON tool_call_log(tool_name, created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tcl_created ON tool_call_log(created_at)",
         "CREATE INDEX IF NOT EXISTS idx_tcl_user_id ON tool_call_log(user_id)",
@@ -329,7 +321,6 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
             files_involved  TEXT DEFAULT '[]',
             outcome         TEXT DEFAULT '',
             unfinished      TEXT DEFAULT '',
-            embedding       BLOB,
             token_count     INTEGER DEFAULT 0,
             created_at      TEXT NOT NULL,
             updated_at      TEXT NOT NULL
@@ -476,6 +467,71 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         )""",
         "CREATE INDEX IF NOT EXISTS idx_workspaces_sort ON workspaces(sort_index, created_at)",
     ],
+    3: [
+        "DROP TABLE IF EXISTS vector_records",
+    ],
+    4: [
+        "ALTER TABLE session_summaries DROP COLUMN embedding",
+    ],
+    5: [
+        """CREATE TABLE IF NOT EXISTS session_state_snapshots (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL DEFAULT 'turn',
+            state_json      TEXT NOT NULL DEFAULT '{}',
+            task_list_json  TEXT NOT NULL DEFAULT '{}',
+            turn_number     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        # 旧库 stamp / 部分迁移重试时旧表可能已经不存在；先补空表，
+        # 复制与删除都变成幂等操作。
+        """CREATE TABLE IF NOT EXISTS session_checkpoints (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id      TEXT NOT NULL,
+            checkpoint_type TEXT NOT NULL DEFAULT 'turn',
+            state_json      TEXT NOT NULL DEFAULT '{}',
+            task_list_json  TEXT NOT NULL DEFAULT '{}',
+            turn_number     INTEGER DEFAULT 0,
+            created_at      TEXT NOT NULL
+        )""",
+        """INSERT OR IGNORE INTO session_state_snapshots
+            (id, session_id, checkpoint_type, state_json, task_list_json, turn_number, created_at)
+            SELECT id, session_id, checkpoint_type, state_json, task_list_json, turn_number, created_at
+            FROM session_checkpoints""",
+        "DROP TABLE IF EXISTS session_checkpoints",
+        "CREATE INDEX IF NOT EXISTS idx_sss_session ON session_state_snapshots(session_id)",
+        "CREATE INDEX IF NOT EXISTS idx_sss_session_turn ON session_state_snapshots(session_id, turn_number)",
+    ],
+    6: [
+        # append-only 会话事件日志：唯一事实源；messages 表降级为 surface 快照。
+        """CREATE TABLE IF NOT EXISTS session_events (
+            id            INTEGER PRIMARY KEY AUTOINCREMENT,
+            session_id    TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+            seq           INTEGER NOT NULL,
+            kind          TEXT NOT NULL,
+            turn          INTEGER DEFAULT 0,
+            step          INTEGER DEFAULT 0,
+            payload       TEXT,
+            surface_op    TEXT,
+            shadow_start  INTEGER,
+            shadow_end    INTEGER,
+            source_seqs   TEXT,
+            created_at    TEXT NOT NULL
+        )""",
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_session_events_session_seq "
+        "ON session_events(session_id, seq)",
+        "CREATE INDEX IF NOT EXISTS idx_session_events_session "
+        "ON session_events(session_id, id)",
+    ],
+    7: [
+        # Code Mode 子调用父子关联：tool_call_log 记录父 run_code 的 tool_call_id。
+        "ALTER TABLE tool_call_log ADD COLUMN parent_call_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_parent ON tool_call_log(parent_call_id)",
+    ],
+    8: [
+        "ALTER TABLE tool_call_log ADD COLUMN call_id TEXT",
+        "CREATE INDEX IF NOT EXISTS idx_tcl_call_id ON tool_call_log(call_id)",
+    ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())
@@ -487,7 +543,6 @@ _CURRENT_FORM_TABLES = (
     "sessions",
     "messages",
     "memory_entries",
-    "vector_records",
     "approvals",
     "workspace_files",
     "tool_call_log",
@@ -502,7 +557,8 @@ _CURRENT_FORM_TABLES = (
     "file_registry",
     "file_registry_aliases",
     "file_registry_events",
-    "session_checkpoints",
+    # session_checkpoints is accepted during legacy stamp only;
+    # migration v5 renames it to session_state_snapshots.
     "auth_profiles",
     "file_groups",
     "file_group_members",
@@ -575,6 +631,10 @@ class Database:
         r"ALTER\s+TABLE\s+(\S+)\s+DROP\s+COLUMN(?:\s+IF\s+EXISTS)?\s+(\S+)",
         re.IGNORECASE,
     )
+    _CREATE_INDEX_ON_RE = re.compile(
+        r"CREATE\s+(?:UNIQUE\s+)?INDEX\s+(?:IF\s+NOT\s+EXISTS\s+)?\S+\s+ON\s+(\S+)\s*\(",
+        re.IGNORECASE,
+    )
 
     def _sqlite_column_exists(self, table: str, column: str) -> bool:
         """检查 SQLite 表中是否已存在指定列。"""
@@ -590,11 +650,17 @@ class Database:
         """安全执行单条迁移 SQL，处理 SQLite ALTER TABLE 幂等问题。
 
         SQLite 不支持 ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS``，
-        因此在执行前检查列是否已存在，已存在则跳过。
+        因此在执行前检查列是否已存在，已存在则跳过；DROP COLUMN 反向处理，
+        列不存在时跳过，旧 SQLite 不支持 DROP COLUMN 时保留旧列并告警。
         """
         m = self._ALTER_ADD_COL_RE.search(sql)
         if m:
             table, column = m.group(1), m.group(2).strip("\"'`[]")
+            if not self._adapter.table_exists(table):
+                logger.warning(
+                    "跳过迁移：表 %s 不存在（%s）", table, sql,
+                )
+                return
             if self._sqlite_column_exists(table, column):
                 logger.debug(
                     "跳过已存在的列: %s.%s", table, column,
@@ -608,6 +674,25 @@ class Database:
                     "跳过不存在的列: %s.%s", table, column,
                 )
                 return
+            try:
+                self._adapter.execute(sql)
+            except Exception as exc:
+                # SQLite < 3.35 不支持 DROP COLUMN；保留旧列不影响新代码。
+                if "syntax error" in str(exc).lower() or "near \"drop\"" in str(exc).lower():
+                    logger.warning(
+                        "当前 SQLite 不支持 DROP COLUMN，跳过旧列: %s", sql,
+                    )
+                    return
+                raise
+            return
+        idx = self._CREATE_INDEX_ON_RE.search(sql)
+        if idx:
+            table = idx.group(1).strip("\"'`[]")
+            if not self._adapter.table_exists(table):
+                logger.warning(
+                    "跳过迁移：索引目标表 %s 不存在（%s）", table, sql,
+                )
+                return
         self._adapter.execute(sql)
 
     def _schema_is_current_form(self) -> bool:
@@ -615,6 +700,11 @@ class Database:
         for name in _CURRENT_FORM_TABLES:
             if not self._adapter.table_exists(name):
                 return False
+        if not (
+            self._adapter.table_exists("session_checkpoints")
+            or self._adapter.table_exists("session_state_snapshots")
+        ):
+            return False
         if self._sqlite_column_exists("sessions", "status"):
             return False
         if not self._sqlite_column_exists("messages", "message_id"):
@@ -755,7 +845,6 @@ def migrate_legacy_data(
     db: Database,
     *,
     memory_dir: str | None = None,
-    vectors_dir: str | None = None,
     audit_dir: str | None = None,
     old_chat_db_path: str | None = None,
 ) -> None:
@@ -770,9 +859,6 @@ def migrate_legacy_data(
 
     if memory_dir:
         _migrate_memory_files(conn, memory_dir)
-
-    if vectors_dir:
-        _migrate_vector_files(conn, vectors_dir)
 
     if audit_dir:
         _migrate_approval_manifests(conn, audit_dir)
@@ -916,83 +1002,6 @@ def _parse_markdown_entries(content: str) -> list[dict[str, str]]:
         })
 
     return entries
-
-
-def _migrate_vector_files(conn: ConnectionAdapter, vectors_dir: str) -> None:
-    """从 JSONL + npy 向量文件迁移到 vector_records 表。"""
-    vec_path = Path(vectors_dir)
-    jsonl_path = vec_path / "vectors.jsonl"
-    npy_path = vec_path / "vectors.npy"
-
-    if not jsonl_path.exists():
-        return
-
-    try:
-        text = jsonl_path.read_text(encoding="utf-8")
-    except OSError:
-        return
-
-    records: list[dict[str, Any]] = []
-    for line in text.strip().split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            records.append(json.loads(line))
-        except json.JSONDecodeError:
-            continue
-
-    if not records:
-        return
-
-    vectors: np.ndarray | None = None
-    if npy_path.exists():
-        try:
-            vectors = np.load(str(npy_path))
-            if vectors.shape[0] != len(records):
-                vectors = None
-        except Exception:
-            vectors = None
-
-    from datetime import timezone as _tz
-    now_iso = datetime.now(tz=_tz.utc).isoformat()
-    migrated = 0
-    for i, rec in enumerate(records):
-        content_hash = rec.get("content_hash", "")
-        entry_text = rec.get("text", "")
-        metadata = rec.get("metadata", {})
-
-        if not content_hash or not entry_text:
-            continue
-
-        vec_blob: bytes | None = None
-        dimensions = 0
-        if vectors is not None and i < vectors.shape[0]:
-            vec = vectors[i].astype(np.float32)
-            vec_blob = vec.tobytes()
-            dimensions = vec.shape[0]
-
-        try:
-            conn.execute(
-                "INSERT OR IGNORE INTO vector_records "
-                "(content_hash, text, metadata, vector, dimensions, created_at) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    content_hash,
-                    entry_text,
-                    json.dumps(metadata, ensure_ascii=False),
-                    vec_blob,
-                    dimensions,
-                    now_iso,
-                ),
-            )
-            migrated += 1
-        except Exception:
-            pass
-
-    conn.commit()
-    if migrated:
-        logger.info("已从 JSONL 文件迁移 %d 条向量记录", migrated)
 
 
 def _migrate_approval_manifests(conn: ConnectionAdapter, audit_dir: str) -> None:

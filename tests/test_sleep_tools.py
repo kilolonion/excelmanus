@@ -114,7 +114,7 @@ class TestSleepCancellation:
         assert "已等待" in result.model_text
 
     def test_no_contextvar_fallback(self) -> None:
-        """未设置 contextvar 时，sleep 回退到本地 event，正常完成（CLI 模式）。"""
+        """未设置 contextvar 时，sleep 回退到本地 event，正常完成（同步模式）。"""
         # 临时清除 contextvar
         _cancel_event_var.reset(self._token)
         self._token = _cancel_event_var.set(None)

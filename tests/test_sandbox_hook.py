@@ -58,6 +58,14 @@ def _run_in_sandbox(
     wrapper_path = workspace / "_wrapper.py"
     wrapper_path.write_text(wrapper, encoding="utf-8")
     env = os.environ.copy()
+    # 与 _execute_script 同口径：临时目录注入工作区 .tmp，保证 openpyxl 等
+    # 库创建的临时文件（tmpdir 写后再读回）不触碰工作区外路径。
+    sandbox_tmp = workspace / ".tmp"
+    sandbox_tmp.mkdir(exist_ok=True)
+    env.setdefault("TMPDIR", str(sandbox_tmp))
+    env["TMPDIR"] = str(sandbox_tmp)
+    env["TMP"] = str(sandbox_tmp)
+    env["TEMP"] = str(sandbox_tmp)
     if env_override:
         env.update(env_override)
     return subprocess.run(
@@ -169,15 +177,131 @@ class TestGreenSandbox:
         assert result.returncode != 0
         assert not target.exists()
 
-    def test_file_read_outside_workspace_allowed(self, workspace: Path) -> None:
+    def test_file_read_outside_workspace_denied(self, workspace: Path) -> None:
+        """数据路径与 Native FileAccessGuard 同口径：区外文件不可读。"""
         import tempfile
         outside = Path(tempfile.mkdtemp())
         outside_file = outside / "readable.txt"
         outside_file.write_text("safe_data", encoding="utf-8")
         code = f"with open(r'{outside_file}', 'r') as f:\n    print(f.read())"
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0
-        assert "safe_data" in result.stdout
+        assert result.returncode != 0
+        assert "PATH_OUTSIDE_WORKSPACE" in result.stderr
+
+    def test_pandas_read_outside_workspace_denied(self, workspace: Path) -> None:
+        """pandas 直读区外文件同样被拒绝。"""
+        import tempfile
+        from openpyxl import Workbook
+
+        outside = Path(tempfile.mkdtemp())
+        target = outside / "secret.xlsx"
+        wb = Workbook()
+        wb.active["A1"] = "leak"
+        wb.save(str(target))
+        wb.close()
+        code = f"import pandas as pd\npd.read_excel(r'{target}')"
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "PATH_OUTSIDE_WORKSPACE" in result.stderr
+
+    def test_pathlib_read_outside_workspace_denied(self, workspace: Path) -> None:
+        """pathlib.Path.read_text 也走同一守卫（回归：Path.open 读侧曾漏检）。"""
+        import tempfile
+        outside = Path(tempfile.mkdtemp())
+        outside_file = outside / "readable.txt"
+        outside_file.write_text("safe_data", encoding="utf-8")
+        code = (
+            "from pathlib import Path\n"
+            f"print(Path(r'{outside_file}').read_text())"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "PATH_OUTSIDE_WORKSPACE" in result.stderr
+
+    def test_symlink_escaping_workspace_denied(self, workspace: Path) -> None:
+        """工作区内指向外部的符号链接按真实解析路径拒绝。"""
+        import tempfile
+        outside = Path(tempfile.mkdtemp())
+        outside_file = outside / "secret.txt"
+        outside_file.write_text("leak", encoding="utf-8")
+        link = workspace / "link.txt"
+        link.symlink_to(outside_file)
+        code = f"print(open(r'{link}').read())"
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "PATH_OUTSIDE_WORKSPACE" in result.stderr
+
+    def test_excelmanus_internal_read_denied(self, workspace: Path) -> None:
+        """.excelmanus 内部文件（非本 run pending）不可读、不可枚举。"""
+        internal = workspace / ".excelmanus" / "excelmanus.db"
+        internal.parent.mkdir(parents=True, exist_ok=True)
+        internal.write_text("internal", encoding="utf-8")
+        code = (
+            "import os\n"
+            f"print('exists', os.path.exists(r'{internal}'))\n"
+            f"print('listdir_root', os.listdir(r'{workspace}'))\n"
+            f"print(open(r'{internal}').read())\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "exists False" in result.stdout
+        assert ".excelmanus" not in result.stdout.split("listdir_root", 1)[1].split("\n", 1)[0]
+        assert "RESERVED_NAMESPACE" in result.stderr or "SENSITIVE_FILE" in result.stderr
+
+    def test_symlink_into_excelmanus_denied(self, workspace: Path) -> None:
+        """符号链接解析进 .excelmanus 同样拒绝。"""
+        internal = workspace / ".excelmanus" / "sessions"
+        internal.mkdir(parents=True, exist_ok=True)
+        target_file = internal / "state.json"
+        target_file.write_text("{}", encoding="utf-8")
+        link = workspace / "peek.json"
+        link.symlink_to(target_file)
+        code = f"print(open(r'{link}').read())"
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "RESERVED_NAMESPACE" in result.stderr or "SENSITIVE_FILE" in result.stderr
+
+    def test_workspace_env_and_reserved_denied(self, workspace: Path) -> None:
+        """工作区内 .env 与保留前缀（outputs/backups、.versions）拒绝读取。"""
+        env_file = workspace / ".env"
+        env_file.write_text("SECRET=1", encoding="utf-8")
+        backups = workspace / "outputs" / "backups"
+        backups.mkdir(parents=True, exist_ok=True)
+        backup_file = backups / "old.xlsx"
+        backup_file.write_bytes(b"PK")
+        versions = workspace / ".versions"
+        versions.mkdir(exist_ok=True)
+        version_file = versions / "v1.json"
+        version_file.write_text("{}", encoding="utf-8")
+        code = (
+            "import os\n"
+            "errors = []\n"
+            f"for p in (r'{env_file}', r'{backup_file}', r'{version_file}'):\n"
+            "    try:\n"
+            "        open(p).read()\n"
+            "        errors.append('READ:' + p)\n"
+            "    except PermissionError as e:\n"
+            "        errors.append('DENIED:' + str(e).split(':')[0])\n"
+            "print(errors)\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0, result.stderr
+        assert "READ:" not in result.stdout
+        assert result.stdout.count("DENIED:") == 3
+
+    def test_interpreter_files_still_readable(self, workspace: Path) -> None:
+        """解释器/库文件仍可读（import 机制与库内部数据文件依赖）。"""
+        code = (
+            "import sysconfig, os\n"
+            "stdlib = sysconfig.get_path('stdlib')\n"
+            "target = os.path.join(stdlib, 'json', '__init__.py')\n"
+            "with open(target) as f:\n"
+            "    head = f.read(16)\n"
+            "print('stdlib_read_ok', bool(head))\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0, result.stderr
+        assert "stdlib_read_ok True" in result.stdout
 
 
 class TestYellowSandbox:
@@ -272,7 +396,7 @@ class TestBenchWriteRefused:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "安全策略禁止" in result.stderr
+        assert "安全策略禁止" in result.stderr or "工作区表格禁止直接保存" in result.stderr
         wb_orig = openpyxl.load_workbook(target)
         assert wb_orig.active["A1"].value == "original"
         assert not (workspace / "outputs" / "backups").exists()
@@ -308,6 +432,7 @@ class TestSaveContentVersion:
             src = generate_wrapper_script(tier, "/tmp/ws")
             assert "_SAVE_VERSIONS" in src
             assert "EXCELMANUS_SAVE_VERSION" in src
+            assert "reconfigure(encoding=\"utf-8\")" in src
             code_lines = [
                 ln.strip() for ln in src.splitlines()
                 if ln.strip() and not ln.strip().startswith("#")
@@ -357,10 +482,8 @@ class TestSaveContentVersion:
                 ),
             },
         )
-        # CAS is host-only. Wrapper writes pending; live path stays outsider bytes.
-        assert result.returncode == 0
-        assert "EXCELMANUS_PENDING_WRITE" in result.stderr
-        assert "VERSION_CONFLICT" not in result.stderr
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
         from openpyxl import load_workbook
         wb2 = load_workbook(str(target))
         assert wb2.active["A1"].value == "external"
@@ -378,17 +501,10 @@ class TestSaveContentVersion:
             "print('saved')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, result.stderr
-        assert "saved" in result.stdout
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
         assert not xlsx.exists()
-        pending = _parse_pending_writes(result.stderr)
-        assert len(pending) == 1
-        rel, pending_path = pending[0]
-        assert rel.replace("\\", "/") == "outputs/new.xlsx"
-        assert Path(pending_path).is_file()
-        versions = _parse_save_versions(result.stderr)
-        resolved = os.path.realpath(str(xlsx))
-        assert versions[resolved] == _sha256_version(Path(pending_path))
+        assert _parse_pending_writes(result.stderr) == []
 
     def test_existing_file_save_emits_sha256_on_stderr(self, workspace: Path) -> None:
         from openpyxl import Workbook
@@ -409,19 +525,13 @@ class TestSaveContentVersion:
             "print('saved')\n"
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
         from openpyxl import load_workbook
         orig = load_workbook(str(target))
         assert orig.active["A1"].value == "initial"
         orig.close()
-        pending = _parse_pending_writes(result.stderr)
-        assert len(pending) == 1
-        pending_path = Path(pending[0][1])
-        assert pending_path.is_file()
-        versions = _parse_save_versions(result.stderr)
-        resolved = os.path.realpath(str(target))
-        assert versions[resolved] == _sha256_version(pending_path)
-        assert versions[resolved].startswith("sha256:")
+        assert _parse_pending_writes(result.stderr) == []
 
     def test_bench_save_refused_no_copy(self, workspace: Path) -> None:
         from openpyxl import Workbook, load_workbook
@@ -443,7 +553,7 @@ class TestSaveContentVersion:
         )
         result = _run_in_sandbox(workspace, code, "GREEN")
         assert result.returncode != 0
-        assert "安全策略禁止" in result.stderr
+        assert "安全策略禁止" in result.stderr or "工作区表格禁止直接保存" in result.stderr
         assert not (workspace / "outputs" / "backups").exists()
         assert _parse_pending_writes(result.stderr) == []
         assert _parse_save_versions(result.stderr) == {}
@@ -467,14 +577,9 @@ class TestSaveContentVersion:
             workspace, code, "GREEN",
             env_override={"EXCELMANUS_SAVE_VERSIONS_LOG": str(log)},
         )
-        assert result.returncode == 0, result.stderr
-        assert log.exists()
-        pending = _parse_pending_writes(result.stderr)
-        assert len(pending) == 1
-        pending_path = Path(pending[0][1])
-        line = log.read_text(encoding="utf-8").strip()
-        resolved = os.path.realpath(str(xlsx))
-        assert line == f"{resolved}\t{_sha256_version(pending_path)}"
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert not log.exists()
         assert not xlsx.exists()
 
     def test_failed_outside_save_emits_no_version(self, workspace: Path) -> None:
@@ -491,6 +596,33 @@ class TestSaveContentVersion:
         assert _parse_pending_writes(result.stderr) == []
         assert not target.exists()
 
+    def test_bytesio_workbook_save_allowed(self, workspace: Path) -> None:
+        code = (
+            "from io import BytesIO\n"
+            "from openpyxl import Workbook\n"
+            "wb = Workbook()\n"
+            "wb.active['A1'] = 'ok'\n"
+            "buf = BytesIO()\n"
+            "wb.save(buf)\n"
+            "print(len(buf.getvalue()))\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0, result.stderr
+        assert int(result.stdout.strip()) > 0
+
+    def test_to_excel_workspace_xlsx_denied(self, workspace: Path) -> None:
+        out = workspace / "outputs"
+        out.mkdir()
+        target = out / "frame.xlsx"
+        code = (
+            "import pandas as pd\n"
+            f"pd.DataFrame({{'a': [1]}}).to_excel(r'{target}', index=False)\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
+        assert not target.exists()
+
 
 class TestYellowIoWrappers:
     """os/shutil/pathlib 写入也必须走 pending / 工作区守卫。"""
@@ -505,7 +637,8 @@ class TestYellowIoWrappers:
             "os.close(fd)\n"
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0
+        assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
         assert target.read_bytes() == b"original-xlsx"
 
     def test_os_replace_xlsx_does_not_replace_original(self, workspace: Path) -> None:
@@ -518,7 +651,7 @@ class TestYellowIoWrappers:
             f"os.replace(r'{src}', r'{dest}')\n"
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0
         assert dest.read_bytes() == b"dest-bytes"
         assert src.read_bytes() == b"src-bytes"
 
@@ -530,7 +663,7 @@ class TestYellowIoWrappers:
             f"Path(r'{target}').write_bytes(b'pwned')\n"
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0
         assert target.read_bytes() == b"keep-me"
 
     def test_shutil_copy_xlsx_does_not_overwrite_original(self, workspace: Path) -> None:
@@ -543,7 +676,7 @@ class TestYellowIoWrappers:
             f"shutil.copy(r'{src}', r'{dest}')\n"
         )
         result = _run_in_sandbox(workspace, code, "YELLOW")
-        assert result.returncode == 0, result.stderr
+        assert result.returncode != 0
         assert dest.read_bytes() == b"keep-xlsx"
 
 
@@ -678,3 +811,39 @@ class TestPendingIsolation:
             if evil.exists():
                 evil.rmdir()
 
+
+
+class TestRealpathLstatNoRecursion:
+    """回归：os.lstat 被守卫后，os.path.realpath/os.lstat 互调不得无限递归。
+
+    _guarded_os_lstat 内部需要 realpath 解析路径，而 realpath 又会回调
+    os.lstat；若守卫内直接调 realpath 将自递归（RecursionError）。
+    """
+
+    @pytest.mark.parametrize("tier", ["GREEN", "YELLOW", "RED"])
+    def test_realpath_and_lstat_safe_under_guard(
+        self, workspace: Path, tier: str
+    ) -> None:
+        code = (
+            "import os\n"
+            "p = os.path.realpath('.')\n"
+            "st = os.lstat('.')\n"
+            "os.stat('.')\n"
+            "print('OK', p)\n"
+        )
+        result = _run_in_sandbox(workspace, code, tier)
+        assert result.returncode == 0, result.stderr
+        assert "OK" in result.stdout
+        assert "RecursionError" not in result.stderr
+
+    def test_realpath_on_nested_and_missing_paths(self, workspace: Path) -> None:
+        (workspace / "sub").mkdir()
+        code = (
+            "import os\n"
+            "print(os.path.realpath('sub/../sub'))\n"
+            "print(os.path.realpath('missing/child.txt'))\n"
+            "print('DONE')\n"
+        )
+        result = _run_in_sandbox(workspace, code, "GREEN")
+        assert result.returncode == 0, result.stderr
+        assert "DONE" in result.stdout

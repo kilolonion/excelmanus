@@ -197,7 +197,7 @@ class TestParallelSearchImpl:
         mgr._clients = {}
         result = await _parallel_search_impl(mgr, "test query")
         parsed = result.value
-        assert "error" in parsed
+        assert parsed["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_no_search_tool_returns_error(self):
@@ -208,7 +208,7 @@ class TestParallelSearchImpl:
         mgr._clients["exa"]._tools = []
         result = await _parallel_search_impl(mgr, "test query")
         parsed = result.value
-        assert "error" in parsed
+        assert parsed["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_successful_parallel_search(self):
@@ -373,7 +373,6 @@ def test_mcp_search_guide_not_injected():
     engine._transient_hook_contexts = []
     engine.full_access_enabled = False
     engine.max_context_tokens = 100000
-    engine._effective_system_mode.return_value = "multi"
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine._current_chat_mode = "write"
@@ -480,7 +479,7 @@ class TestNumQueriesClamp:
         # 即使被 clamp，仍然会因为没有 client 返回错误
         result = await _parallel_search_impl(mgr, "test", num_queries=100)
         parsed = result.value
-        assert "error" in parsed
+        assert parsed["status"] == "error"
 
     @pytest.mark.asyncio
     async def test_clamps_to_min_one(self):
@@ -489,4 +488,4 @@ class TestNumQueriesClamp:
         mgr._clients = {}
         result = await _parallel_search_impl(mgr, "test", num_queries=0)
         parsed = result.value
-        assert "error" in parsed
+        assert parsed["status"] == "error"

@@ -5,10 +5,11 @@ export interface MentionToken {
   kind: string;
   value: string;
   rangeSpec?: string;
+  version?: string;
 }
 
 const MENTION_RE =
-  /@(?:(file|folder|skill|mcp|tool):([^\s,;!?\[\]]+)(?:\[([^\]]+)\])?)(?=\s|$|[,;!?])/gi;
+  /@(?:(file|folder|skill|mcp|tool):([^\s,;!?\[\]@]+)(?:\[([^\]]+)\])?(?:@(sha256:[0-9a-fA-F]+))?)(?=\s|$|[,;!?])/gi;
 
 /** Bare `@filename.ext`, including CJK names such as `@广告与销售数据.csv`. */
 const BARE_FILE_RE = /@([^\s@,;!?\[\]]+\.[A-Za-z0-9]+)(?=\s|$|[,;!?])/g;
@@ -33,6 +34,7 @@ export function extractMentions(text: string): MentionToken[] {
       kind: m[1].toLowerCase(),
       value: m[2],
       rangeSpec: m[3] || undefined,
+      version: m[4] || undefined,
     });
   }
 
@@ -72,10 +74,27 @@ export function extractMentions(text: string): MentionToken[] {
   return tokens;
 }
 
+/** `A1:A1` → `A1`; mixed ranges stay as-is. */
+function abbreviateIdenticalRange(range: string): string {
+  const colon = range.indexOf(":");
+  if (colon < 0) return range;
+  const start = range.slice(0, colon);
+  const end = range.slice(colon + 1);
+  return start && start === end ? start : range;
+}
+
+function formatRangeLabel(rangeSpec: string): string {
+  const bang = rangeSpec.indexOf("!");
+  if (bang < 0) return abbreviateIdenticalRange(rangeSpec);
+  const sheet = rangeSpec.slice(0, bang);
+  const range = abbreviateIdenticalRange(rangeSpec.slice(bang + 1));
+  return `${sheet}!${range}`;
+}
+
 export function mentionCapsuleLabel(token: MentionToken): string {
   if (token.kind === "file" || token.kind === "bare-file" || token.kind === "path") {
-    const base = token.value.split("/").pop() || token.value;
-    return token.rangeSpec ? `${base} ${token.rangeSpec}` : base;
+    const base = token.value.split(/[/\\]/).pop() || token.value;
+    return token.rangeSpec ? `${base} · ${formatRangeLabel(token.rangeSpec)}` : base;
   }
   return token.raw;
 }

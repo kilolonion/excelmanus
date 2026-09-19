@@ -24,6 +24,7 @@ from excelmanus.tools.intent_tools import (
     inspect_spreadsheet,
     manage_spreadsheet_objects,
     manage_spreadsheet_versions,
+    split_spreadsheet,
     trace_spreadsheet_formulas,
 )
 
@@ -41,6 +42,7 @@ _MODEL_SPREADSHEET_TOOLS = {
     "compare_spreadsheets",
     "edit_spreadsheet",
     "format_spreadsheet",
+    "split_spreadsheet",
     "manage_spreadsheet_objects",
     "trace_spreadsheet_formulas",
     "manage_spreadsheet_versions",
@@ -93,10 +95,74 @@ def test_inspect_overview_and_range(tmp_path: Path) -> None:
     assert isinstance(overview, ToolResult)
     assert overview.value
     assert overview.ui_meta.content_version
+    sheets = overview.value.get("sheets") or overview.value.get("data") or []
+    if isinstance(sheets, list) and sheets and isinstance(sheets[0], dict):
+        assert "freeze_panes" in sheets[0]
     ranged = inspect_spreadsheet(mode="range", file_path=str(path), sheet_name="Sheet1", max_rows=5)
     assert isinstance(ranged, ToolResult)
     assert ranged.success
     assert ranged.ui_meta.content_version
+
+
+def test_inspect_overview_without_file_path_does_not_scan(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    _book(tmp_path / "other.xlsx")
+    result = inspect_spreadsheet(mode="overview")
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code == "PATH_REQUIRED"
+    assert "list_directory" in (result.value or {}).get("message", "")
+
+
+def test_cross_sheet_union_range_reads_each_sheet(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    path = tmp_path / "multi.xlsx"
+    wb = Workbook()
+    wb.active.title = "随便写写"
+    wb.active["A1"] = "备忘"
+    hidden = wb.create_sheet("隐藏底稿")
+    hidden["A1"] = "86万"
+    wb.create_sheet("明细")
+    wb.save(path)
+    wb.close()
+    result = inspect_spreadsheet(
+        mode="range",
+        file_path=str(path),
+        range="随便写写!A1:A1,隐藏底稿!A1:A1",
+    )
+    assert result.success, result.model_text
+    payload = result.value or {}
+    areas = payload.get("areas") or []
+    if len(areas) == 2:
+        left = areas[0].get("values") or areas[0].get("data")
+        right = areas[1].get("values") or areas[1].get("data")
+        assert left == [["备忘"]]
+        assert right == [["86万"]]
+    else:
+        dumped = json.dumps(payload, ensure_ascii=False)
+        assert "备忘" in dumped and "86万" in dumped
+    text = result.model_text or ""
+    assert "随便写写" in text and "隐藏底稿" in text
+    assert "2 个区域" in text
+    assert "备忘" in text and "86万" in text
+
+
+def test_edit_rejects_uploads_as_readonly(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    uploads = tmp_path / "uploads"
+    uploads.mkdir()
+    path = _book(uploads / "book.xlsx")
+    from excelmanus.workbook_commit import content_version_of_file
+
+    result = edit_spreadsheet(
+        file_path="uploads/book.xlsx",
+        operations=[{"kind": "write", "sheet": "Sheet1", "start_cell": "A1", "values": [["x"]]}],
+        expected_version=content_version_of_file(path),
+    )
+    assert result.success is False
+    assert result.error is not None
+    assert result.error.code == "PATH_INVALID"
+    assert "只读" in str((result.value or {}).get("message") or result.error.message)
 
 
 def _assert_model_text_not_full_dump(result: ToolResult) -> None:
@@ -144,6 +210,97 @@ def test_analyze_filter_and_compare(tmp_path: Path) -> None:
     assert "销售" in filtered.model_text or "销售" in json.dumps(filtered.value, ensure_ascii=False)
     compared = compare_spreadsheets(file_a=str(a), file_b=str(b), alignment="position")
     assert isinstance(compared, ToolResult)
+
+
+def test_inspect_range_include_accepts_scalar(tmp_path: Path) -> None:
+    """SDK/裸 JSON 常把 include 传成单字符串，应归一为列表而非逐字符误判。"""
+    _bind_workspace(tmp_path)
+    path = _book(tmp_path / "book.xlsx")
+    ranged = inspect_spreadsheet(
+        mode="range",
+        file_path=str(path),
+        sheet_name="Sheet1",
+        range="A1:B3",
+        include="formulas",  # type: ignore[arg-type]
+    )
+    assert isinstance(ranged, ToolResult)
+    assert ranged.success, ranged.model_text
+
+
+def test_analyze_conditions_op_alias_and_missing_key_errors(tmp_path: Path) -> None:
+    """conditions 项接受 op/col 别名；缺 column/operator 时报精确字段名。"""
+    _bind_workspace(tmp_path)
+    a = _book(tmp_path / "a.xlsx")
+    filtered = analyze_spreadsheet(
+        mode="filter",
+        file_path=str(a),
+        conditions=[{"column": "部门", "op": "ne", "value": "销售"}],
+    )
+    assert filtered.success, filtered.model_text
+    assert "研发" in json.dumps(filtered.value, ensure_ascii=False) or "研发" in filtered.model_text
+
+    missing_op = analyze_spreadsheet(
+        mode="filter",
+        file_path=str(a),
+        conditions=[{"column": "部门", "value": "销售"}],
+    )
+    assert missing_op.success is False
+    msg = str((missing_op.value or {}).get("message") or missing_op.model_text)
+    assert "operator" in msg
+    assert "None" not in msg
+
+
+def test_analyze_distinct_max_rows_alias(tmp_path: Path) -> None:
+    """distinct 接受 max_rows 作 limit 别名；未知字段拒绝消息应列出可用字段。"""
+    _bind_workspace(tmp_path)
+    a = _book(tmp_path / "a.xlsx")
+    distinct = analyze_spreadsheet(
+        mode="distinct",
+        file_path=str(a),
+        column="部门",
+        max_rows=5,
+    )
+    assert distinct.success, distinct.model_text
+
+    rejected = analyze_spreadsheet(
+        mode="distinct",
+        file_path=str(a),
+        column="部门",
+        aggregations={"x": "sum"},
+    )
+    assert rejected.success is False
+    msg = str((rejected.value or {}).get("message") or rejected.model_text)
+    assert "aggregations" in msg
+    assert "limit" in msg
+
+
+def test_create_workbook_write_auto_creates_named_sheet(tmp_path: Path) -> None:
+    """create_workbook 下 write 到不存在的表名自动建表；存量簿仍按原名硬失败。"""
+    _bind_workspace(tmp_path)
+    created = edit_spreadsheet(
+        file_path="newbook.xlsx",
+        create_workbook=True,
+        operations=[{"kind": "write", "sheet": "订单", "start_cell": "A1", "values": [["h1"], ["v1"]]}],
+    )
+    assert created.success, created.model_text
+    from openpyxl import load_workbook
+
+    wb = load_workbook(tmp_path / "newbook.xlsx")
+    try:
+        assert "订单" in wb.sheetnames
+        assert wb["订单"]["A1"].value == "h1"
+    finally:
+        wb.close()
+
+    existing = _book(tmp_path / "exist.xlsx")
+    from excelmanus.workbook_commit import content_version_of_file
+
+    failed = edit_spreadsheet(
+        file_path=str(existing),
+        operations=[{"kind": "write", "sheet": "不存在的表", "start_cell": "A1", "values": [[1]]}],
+        expected_version=content_version_of_file(existing),
+    )
+    assert failed.success is False
 
 
 def test_edit_format_objects_versions(tmp_path: Path) -> None:
@@ -318,9 +475,144 @@ def test_prompt_sections_follow_segment_order() -> None:
     assert names["plan:policy"] == 50
     assert names["tool:inspect"] == 100
     assert names["spreadsheet:workbook_spec"] == 110
-    assert "spreadsheet:invariants" not in names
+    assert names["spreadsheet:invariants"] == 50
     assert names["tool:run_code"] == 150
     text = composer.compose_system_text(PromptContext())
     assert "VERSION_CONFLICT" in text
     assert "read_excel" not in text
     assert "当前是计划模式" not in text
+
+
+def test_workbook_spec_source_csv_import(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    csv = tmp_path / "月度.csv"
+    csv.write_text("月份,金额\n1月,100\n2月,250.5\n", encoding="gb18030")
+    result = edit_spreadsheet(
+        file_path="汇总.xlsx",
+        workbook_spec={
+            "sheets": [{"name": "数据", "source_csv": {"file_path": "月度.csv"}}],
+            "uncertainties": [],
+        },
+    )
+    assert result.success, result.model_text
+    wb = __import__("openpyxl").load_workbook(tmp_path / "汇总.xlsx")
+    try:
+        ws = wb["数据"]
+        assert ws["A1"].value == "月份"
+        assert ws["B2"].value == 100
+        assert ws["B3"].value == 250.5
+    finally:
+        wb.close()
+
+
+def test_workbook_spec_source_csv_requires_existing_file(tmp_path: Path) -> None:
+    _bind_workspace(tmp_path)
+    result = edit_spreadsheet(
+        file_path="out.xlsx",
+        workbook_spec={
+            "sheets": [{"name": "数据", "source_csv": {"file_path": "missing.csv"}}],
+            "uncertainties": [],
+        },
+    )
+    assert not result.success
+    assert result.error is not None
+    assert result.error.code == "NOT_FOUND"
+
+
+class TestSplitSpreadsheet:
+    def _book(self, tmp_path: Path) -> Path:
+        return _book(
+            tmp_path / "orders.xlsx",
+            rows=[
+                ["省份", "金额"],
+                ["浙江", 10],
+                ["江苏", 20],
+                ["浙江", 30],
+                [None, 40],
+            ],
+        )
+
+    def test_split_by_column_writes_one_file_per_key(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(file_path="orders.xlsx", by_column="省份")
+        assert result.success, result.model_text
+        payload = _payload(result)
+        assert payload["groups"] == 3
+        assert payload["total_rows"] == 4
+        assert payload["blank_key_rows"] == 1
+        files = {f["file_path"]: f for f in payload["files"]}
+        assert set(files) == {"outputs/浙江.xlsx", "outputs/江苏.xlsx", "outputs/空白.xlsx"}
+        assert files["outputs/浙江.xlsx"]["rows"] == 2
+        assert all(f["content_version"] for f in files.values())
+
+        from openpyxl import load_workbook
+
+        wb = load_workbook(tmp_path / "outputs" / "浙江.xlsx")
+        try:
+            ws = wb.active
+            assert ws.title == "Sheet1"
+            rows = [[c.value for c in r] for r in ws.iter_rows()]
+            assert rows == [["省份", "金额"], ["浙江", 10], ["浙江", 30]]
+        finally:
+            wb.close()
+
+    def test_split_requires_by_column(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(file_path="orders.xlsx")
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
+        assert "by_column" in result.model_text
+
+    def test_split_unknown_column_lists_columns(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(file_path="orders.xlsx", by_column="城市")
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
+        assert "省份" in result.model_text
+
+    def test_split_existing_target_aborts_without_partial_writes(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        (tmp_path / "outputs").mkdir()
+        (tmp_path / "outputs" / "江苏.xlsx").write_bytes(b"occupied")
+        result = split_spreadsheet(file_path="orders.xlsx", by_column="省份")
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "VERSION_CONFLICT"
+        assert not (tmp_path / "outputs" / "浙江.xlsx").exists()
+
+    def test_split_max_files_guard(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(file_path="orders.xlsx", by_column="省份", max_files=2)
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "INVALID_ARGS"
+        assert "3" in result.model_text
+
+    def test_split_filename_template_with_stem(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(
+            file_path="orders.xlsx",
+            by_column="省份",
+            filename_template="{stem}_{key}",
+        )
+        assert result.success, result.model_text
+        names = {f["file_path"] for f in _payload(result)["files"]}
+        assert "outputs/orders_浙江.xlsx" in names
+
+    def test_split_output_dir_rejects_uploads(self, tmp_path: Path) -> None:
+        _bind_workspace(tmp_path)
+        self._book(tmp_path)
+        result = split_spreadsheet(
+            file_path="orders.xlsx", by_column="省份", output_dir="uploads",
+        )
+        assert not result.success
+        assert result.error is not None
+        assert result.error.code == "PATH_INVALID"

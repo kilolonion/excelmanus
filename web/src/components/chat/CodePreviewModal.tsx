@@ -8,9 +8,11 @@ import {
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
-import { buildApiUrl } from "@/lib/api";
+import { apiGet, normalizeExcelPath } from "@/lib/api";
+import { isCodeFile } from "@/lib/file-kind";
 import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
+import { useFilePreviewStore } from "@/stores/file-preview-store";
 import { ensureHljs, highlightCode } from "@/lib/hljs-utils";
 
 interface CodePreviewModalProps {
@@ -20,16 +22,6 @@ interface CodePreviewModalProps {
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
 }
-
-const CODE_EXTENSIONS = new Set([
-  ".js", ".jsx", ".ts", ".tsx", ".json", ".py", ".rb", ".go", ".rs",
-  ".java", ".c", ".cpp", ".h", ".hpp", ".cs", ".php", ".swift", ".kt",
-  ".scala", ".sh", ".bash", ".zsh", ".sql", ".html", ".css", ".scss",
-  ".less", ".xml", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".conf",
-  ".md", ".markdown", ".txt", ".log", ".env", ".gitignore", ".dockerignore",
-  ".graphql", ".gql", ".vue", ".svelte", ".jsx", ".tsx", ".ex", ".exs",
-  ".erl", ".hs", ".ml", ".fs", ".clj", ".lua", ".r", ".dart", ".groovy",
-]);
 
 const CODE_LANGUAGE_MAP: Record<string, string> = {
   ".js": "javascript", ".jsx": "javascript", ".ts": "typescript", ".tsx": "typescript",
@@ -61,11 +53,6 @@ const LANG_COLORS: Record<string, string> = {
   ocaml: "#3be133", fsharp: "#b845fc", clojure: "#db5855",
   lua: "#000080", r: "#198CE7", dart: "#00B4AB", groovy: "#4298b8",
 };
-
-function isCodeFile(filename: string): boolean {
-  const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
-  return CODE_EXTENSIONS.has(ext);
-}
 
 function getLanguage(filename: string): string {
   const ext = filename.slice(filename.lastIndexOf(".")).toLowerCase();
@@ -133,16 +120,19 @@ export function CodePreviewModal({
   const [searchIdx, setSearchIdx] = useState(0);
   const searchInputRef = useRef<HTMLInputElement>(null);
 
-  const previewTabs = useExcelStore((s) => s.previewTabs);
-  const addPreviewTab = useExcelStore((s) => s.addPreviewTab);
-  const removePreviewTab = useExcelStore((s) => s.removePreviewTab);
+  const previewTabs = useFilePreviewStore((s) => s.previewTabs);
+  const addPreviewTab = useFilePreviewStore((s) => s.addPreviewTab);
+  const removePreviewTab = useFilePreviewStore((s) => s.removePreviewTab);
+  const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
 
   // ── Virtualizer ──
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // ── Fetch file content (with cache) ──
   const fetchFile = useCallback(async (path: string) => {
-    const cached = contentCache.current.get(path);
+    const version = useExcelStore.getState().getContentVersion(normalizeExcelPath(path)) || "";
+    const cacheKey = `${path}#${version}#${useExcelStore.getState().workspaceFilesVersion}`;
+    const cached = contentCache.current.get(cacheKey);
     if (cached !== undefined) {
       setContent(cached);
       setLoading(false);
@@ -152,14 +142,11 @@ export function CodePreviewModal({
     setLoading(true);
     setError("");
     try {
-      const sessionParam = activeSessionId ? `&session_id=${activeSessionId}` : "";
-      const response = await fetch(
-        buildApiUrl(`/files/read?path=${encodeURIComponent(path)}${sessionParam}`),
-      );
-      if (!response.ok) throw new Error("无法读取文件");
-      const data = await response.json();
+      const qs = new URLSearchParams({ path });
+      if (activeSessionId) qs.set("session_id", activeSessionId);
+      const data = await apiGet<{ content?: string }>(`/files/read?${qs.toString()}`);
       const text = data.content || "";
-      contentCache.current.set(path, text);
+      contentCache.current.set(cacheKey, text);
       setContent(text);
     } catch (err) {
       setError(err instanceof Error ? err.message : "读取文件失败");
@@ -205,7 +192,7 @@ export function CodePreviewModal({
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMatches([]);
-  }, [open, filePath, filename, addPreviewTab, fetchFile]);
+  }, [open, filePath, filename, addPreviewTab, fetchFile, workspaceFilesVersion]);
 
   // ── Body scroll lock ──
   useEffect(() => {
@@ -274,7 +261,7 @@ export function CodePreviewModal({
     e.stopPropagation();
     removePreviewTab(tab.filePath);
     if (tab.filePath === activeFile.filePath) {
-      const remaining = useExcelStore.getState().previewTabs.filter((t) => t.filePath !== tab.filePath);
+      const remaining = useFilePreviewStore.getState().previewTabs.filter((t) => t.filePath !== tab.filePath);
       if (remaining.length > 0) {
         const next = remaining[remaining.length - 1];
         setActiveFile(next);

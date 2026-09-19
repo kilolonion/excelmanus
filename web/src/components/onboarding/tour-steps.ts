@@ -185,10 +185,10 @@ const ADVANCED_DESKTOP: TourStep[] = [
   {
     target: "coach-chat-input",
     title: "切换对话模式",
-    description: "ExcelManus 支持三种模式：/write 可读写 Excel；/read 只读分析；/plan 先规划再执行，适合复杂任务",
+    description: "用输入框左侧的编辑 / 观察 / 计划切换权限。编辑可写表；观察只读；计划先写方案，改表须批准退出。斜杠只用 /plan。",
     icon: "BookOpen",
     placement: "top",
-    interaction: { type: "input", hint: "✍️ 输入 /read 切换到只读模式", inputTrigger: "/read", autoAdvanceMs: 1500 },
+    interaction: { type: "input", hint: "✍️ 输入 /plan 看看计划模式命令", inputTrigger: "/plan", autoAdvanceMs: 1500 },
     expandTarget: "coach-command-popover",
   },
   {
@@ -204,7 +204,7 @@ const ADVANCED_DESKTOP: TourStep[] = [
   {
     target: "coach-excel-panel",
     title: "Excel 预览面板",
-    description: "在这里查看完整表格、切换 Sheet、刷新数据、选区引用、下载文件，点击「操作历史」可查看和撤销 AI 的修改",
+    description: "在这里查看完整表格、切换 Sheet。功能区「开始」改格式，「公式」插入函数或让 AI 解释/生成，「数据」做质量检查与筛选分析，「历史」看版本；右侧可做选区引用、刷新、下载或展开到聊天",
     icon: "Table2",
     placement: "left",
     onEnter: "ensureExcelPanelOpen",
@@ -236,10 +236,10 @@ const ADVANCED_MOBILE: TourStep[] = [
   {
     target: "coach-chat-input",
     title: "切换对话模式",
-    description: "/write 可读写；/read 只读分析；/plan 先规划再执行",
+    description: "左侧切换编辑 / 观察 / 计划。斜杠只用 /plan，没有 /write 或 /read。",
     icon: "BookOpen",
     placement: "top",
-    interaction: { type: "input", hint: "✍️ 输入 /read 试试切换模式", inputTrigger: "/read", autoAdvanceMs: 1500 },
+    interaction: { type: "input", hint: "✍️ 输入 /plan 看看计划模式命令", inputTrigger: "/plan", autoAdvanceMs: 1500 },
     expandTarget: "coach-command-popover",
   },
 ];
@@ -258,18 +258,25 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "这里是 AI 的核心配置。可以创建多个模型档案，激活其中一个即可用于对话、子代理和压缩",
+    description: "「供应商」里添加模型服务，「模型配置」里为聊天、记忆和决策任务选择模型",
     icon: "Server",
     placement: "left",
     onEnter: "openSettings_model",
   },
   {
     target: "coach-settings-profiles",
-    title: "模型配置档案",
-    description: "点击展开模型配置列表，查看已添加的模型档案。每个档案可独立配置 API Key 和参数",
+    title: "模型提供商",
+    description: "先添加提供商并填写 API Key。点击已有提供商可将其设为默认。TypeSafe 与 Vercel 的 Jev 在下方单独配置",
     icon: "Server",
     placement: "left",
-    interaction: { type: "click", hint: "👆 点击展开模型配置列表", autoAdvanceMs: 1000 },
+  },
+  {
+    target: "coach-settings-model-roles",
+    title: "任务模型",
+    description: "从已添加的提供商中选择聊天模型和记忆模型。下拉项会同时显示提供商和模型名称",
+    icon: "Server",
+    placement: "left",
+    onEnter: "openSettings_model_roles",
   },
   {
     target: "coach-settings-tab-rules",
@@ -299,7 +306,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-tab-skills",
     title: "技能包管理",
-    description: "技能包让 AI 学会特定领域的工作流程。支持从文件、Gitee/GitHub、ClawHub 导入，也可以手动创建",
+    description: "技能包让 AI 学会特定领域的工作流程。支持从文件、Gitee/GitHub 导入，也可以手动创建",
     icon: "Package",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到技能页面", autoAdvanceMs: 1000 },
@@ -348,7 +355,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-tab-runtime",
     title: "系统运行时",
-    description: "高级系统配置，包括会话管理、执行安全、上下文控制、子代理等深度参数",
+    description: "基础区是代码模式、默认上下文、压缩、记忆、图片识别和子代理。会话配额、代码风险分级和技能发现在高级设置",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到系统页面", autoAdvanceMs: 1000 },
@@ -356,7 +363,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-content-runtime",
     title: "运行时参数",
-    description: "系统页分为基础和高级两部分。修改后点击保存即可生效",
+    description: "系统页分为基础和高级。默认上下文窗口和压缩保存后会立刻同步到已打开的对话；多数其他项要新开对话或重启后生效",
     icon: "SlidersHorizontal",
     placement: "left",
     onEnter: "openSettings_runtime",
@@ -364,7 +371,7 @@ const SETTINGS_DESKTOP: TourStep[] = [
   {
     target: "coach-settings-advanced-toggle",
     title: "高级设置",
-    description: "点击展开高级设置区域，包含推理配置、子代理、压缩策略等深度参数。建议保持默认值",
+    description: "展开后可调会话配额、压缩细节、图片请求投影、代码风险分级、技能发现等。建议保持默认值",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击展开高级设置", autoAdvanceMs: 1000 },
@@ -401,7 +408,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-content-model",
     title: "模型配置",
-    description: "配置模型档案的 API Key 和参数，并激活当前使用的模型",
+    description: "「供应商」里添加模型服务，「模型配置」里为聊天、记忆和决策任务选择模型",
     icon: "Server",
     placement: "top",
     onEnter: "openSettings_model",
@@ -427,7 +434,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-tab-skills",
     title: "技能包",
-    description: "从文件、Gitee/GitHub 或 ClawHub 导入技能包",
+    description: "从文件或 Gitee/GitHub 导入技能包",
     icon: "Package",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到技能", autoAdvanceMs: 1000 },
@@ -443,7 +450,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-tab-memory",
     title: "记忆",
-    description: "AI 自动提取关键信息为记忆，跨会话自动加载",
+    description: "查看和删除跨会话记忆。记忆由模型或你主动写入",
     icon: "Brain",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到记忆", autoAdvanceMs: 1000 },
@@ -451,7 +458,7 @@ const SETTINGS_MOBILE: TourStep[] = [
   {
     target: "coach-settings-tab-runtime",
     title: "系统设置",
-    description: "高级运行时参数：安全、子代理、上下文等",
+    description: "代码模式、上下文、记忆、图片识别和子代理。深度参数在高级设置",
     icon: "SlidersHorizontal",
     placement: "bottom",
     interaction: { type: "click", hint: "👆 点击切换到系统", autoAdvanceMs: 1000 },

@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import sys
 import uuid
 from pathlib import Path
 from typing import Any
@@ -16,160 +15,193 @@ from urllib.parse import quote, urlparse
 from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 
-_config: Any = None
-_session_manager: Any = None
-_database: Any = None
-_config_store: Any = None
-_config_incomplete: bool = False
-_restart_reason: str = ""
-_cap_probe_job_manager: Any = None
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 
 
-def set_config(config: Any) -> None:
-    global _config
-    _config = config
+@dataclass
+class AppRuntime:
+    """One application owns all mutable runtime state."""
+    config: Any = None
+    session_manager: Any = None
+    database: Any = None
+    config_store: Any = None
+    skillpack_manager: Any = None
+    skillpack_loader: Any = None
+    tool_registry: Any = None
+    skill_router: Any = None
+    rules_manager: Any = None
+    persistent_memory: Any = None
+    config_incomplete: bool = False
+    draining: bool = False
+    restart_reason: str = ""
+    cap_probe_job_manager: Any = None
+    active_chat_tasks: dict[str, Any] = field(default_factory=dict)
+    session_stream_states: dict[str, Any] = field(default_factory=dict)
+
+
+_runtime: ContextVar[AppRuntime | None] = ContextVar("excelmanus_app_runtime", default=None)
+
+
+def get_runtime() -> AppRuntime:
+    runtime = _runtime.get()
+    if runtime is None:
+        # Direct bench/testing callers have their own context, never module slots.
+        runtime = AppRuntime()
+        _runtime.set(runtime)
+    return runtime
+
+
+def bind_runtime(runtime: AppRuntime):
+    return _runtime.set(runtime)
+
+
+def reset_runtime(token) -> None:
+    _runtime.reset(token)
+
+
+class RuntimeMiddleware:
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        runtime = scope["app"].state.runtime
+        token = bind_runtime(runtime)
+        try:
+            await self.app(scope, receive, send)
+        finally:
+            try:
+                manager = runtime.session_manager
+                if manager is not None and hasattr(manager, "drain_workspace_events"):
+                    manager.drain_workspace_events()
+            finally:
+                reset_runtime(token)
+
+
+def set_config(value: Any) -> None:
+    get_runtime().config = value
 
 
 def get_config() -> Any:
-    return _config
+    return get_runtime().config
 
 
-def set_session_manager(session_manager: Any) -> None:
-    global _session_manager
-    _session_manager = session_manager
+def set_session_manager(value: Any) -> None:
+    get_runtime().session_manager = value
 
 
 def get_session_manager() -> Any:
-    return _session_manager
+    return get_runtime().session_manager
 
 
-def set_database(database: Any) -> None:
-    global _database
-    _database = database
+def set_database(value: Any) -> None:
+    get_runtime().database = value
 
 
 def get_database() -> Any:
-    return _database
+    return get_runtime().database
 
 
-def set_config_store(config_store: Any) -> None:
-    global _config_store
-    _config_store = config_store
+def set_config_store(value: Any) -> None:
+    get_runtime().config_store = value
+    from excelmanus.settings_runtime import bind_store, unbind_store
+
+    if value is None:
+        unbind_store()
+    else:
+        bind_store(value)
 
 
 def get_config_store() -> Any:
-    return _config_store
+    return get_runtime().config_store
 
 
-_skillpack_manager: Any = None
-_skillpack_loader: Any = None
-
-
-def set_skillpack_manager(manager: Any) -> None:
-    global _skillpack_manager
-    _skillpack_manager = manager
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        api_mod._skillpack_manager = manager
+def set_skillpack_manager(value: Any) -> None:
+    get_runtime().skillpack_manager = value
 
 
 def get_skillpack_manager() -> Any:
-    # 测试常直接赋值 excelmanus.api._skillpack_manager；优先读别名以免 app_state 过期。
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        return getattr(api_mod, "_skillpack_manager", _skillpack_manager)
-    return _skillpack_manager
+    return get_runtime().skillpack_manager
 
 
-def set_skillpack_loader(loader: Any) -> None:
-    global _skillpack_loader
-    _skillpack_loader = loader
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        api_mod._skillpack_loader = loader
+def set_skillpack_loader(value: Any) -> None:
+    get_runtime().skillpack_loader = value
 
 
 def get_skillpack_loader() -> Any:
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        return getattr(api_mod, "_skillpack_loader", _skillpack_loader)
-    return _skillpack_loader
+    return get_runtime().skillpack_loader
 
 
-_tool_registry: Any = None
-_draining: bool = False
-
-# chat stream / subscribe / abort 共用；测试会整体替换本模块上的名字。
-_active_chat_tasks: dict[str, asyncio.Task[Any]] = {}
-_session_stream_states: dict[str, Any] = {}
-
-
-def set_tool_registry(registry: Any) -> None:
-    global _tool_registry
-    _tool_registry = registry
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        api_mod._tool_registry = registry
+def set_tool_registry(value: Any) -> None:
+    get_runtime().tool_registry = value
 
 
 def get_tool_registry() -> Any:
-    # 测试常直接赋值 excelmanus.api._tool_registry；优先读别名以免 app_state 过期。
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        return getattr(api_mod, "_tool_registry", _tool_registry)
-    return _tool_registry
+    return get_runtime().tool_registry
 
 
-def set_draining(draining: bool) -> None:
-    global _draining
-    _draining = draining
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        api_mod._draining = draining
+def set_skill_router(value: Any) -> None:
+    get_runtime().skill_router = value
 
 
-def get_draining() -> bool:
-    api_mod = sys.modules.get("excelmanus.api")
-    if api_mod is not None:
-        return bool(getattr(api_mod, "_draining", _draining))
-    return _draining
+def get_skill_router() -> Any:
+    return get_runtime().skill_router
 
 
-def set_config_incomplete(incomplete: bool) -> None:
-    global _config_incomplete
-    _config_incomplete = incomplete
+def set_rules_manager(value: Any) -> None:
+    get_runtime().rules_manager = value
 
 
-def get_config_incomplete() -> bool:
-    return _config_incomplete
+def get_rules_manager() -> Any:
+    return get_runtime().rules_manager
 
 
-def set_restart_reason(reason: str) -> None:
-    global _restart_reason
-    _restart_reason = reason
+def set_persistent_memory(value: Any) -> None:
+    get_runtime().persistent_memory = value
 
 
-def get_restart_reason() -> str:
-    return _restart_reason
+def get_persistent_memory() -> Any:
+    return get_runtime().persistent_memory
 
 
-def set_cap_probe_job_manager(mgr: Any) -> None:
-    global _cap_probe_job_manager
-    _cap_probe_job_manager = mgr
+def set_config_incomplete(value: Any) -> None:
+    get_runtime().config_incomplete = value
+
+
+def get_config_incomplete() -> Any:
+    return get_runtime().config_incomplete
+
+
+def set_draining(value: Any) -> None:
+    get_runtime().draining = value
+
+
+def get_draining() -> Any:
+    return get_runtime().draining
+
+
+def set_restart_reason(value: Any) -> None:
+    get_runtime().restart_reason = value
+
+
+def get_restart_reason() -> Any:
+    return get_runtime().restart_reason
+
+
+def set_cap_probe_job_manager(value: Any) -> None:
+    get_runtime().cap_probe_job_manager = value
 
 
 def get_cap_probe_job_manager() -> Any:
-    return _cap_probe_job_manager
+    return get_runtime().cap_probe_job_manager
 
 
 def _get_probe_job_mgr() -> Any:
-    """获取或懒创建异步能力探测任务管理器。"""
-    global _cap_probe_job_manager
-    if _cap_probe_job_manager is None:
+    runtime = get_runtime()
+    if runtime.cap_probe_job_manager is None:
         from excelmanus.capability_probe_jobs import CapabilityProbeJobManager
-
-        _cap_probe_job_manager = CapabilityProbeJobManager()
-    return _cap_probe_job_manager
+        runtime.cap_probe_job_manager = CapabilityProbeJobManager()
+    return runtime.cap_probe_job_manager
 
 
 def _list_available_model_names() -> list[str]:
@@ -249,7 +281,7 @@ def apply_profile_to_config(name: str) -> bool:
 
 
 def ensure_active_model() -> None:
-    """启动时套用已激活档案；没有档案但有环境凭证时迁成档案。"""
+    """启动时套用已激活档案；没有档案但当前配置已有凭证时迁成档案。"""
     config = get_config()
     store = get_config_store()
     if config is None or store is None:
@@ -306,15 +338,13 @@ def ensure_active_model() -> None:
     apply_profile_to_config(first)
 
 
-def _sync_config_profiles_from_db() -> None:
-    """从数据库读取 model_profiles 并同步到 config.models。"""
-    config = get_config()
-    config_store = get_config_store()
-    if config is None or config_store is None:
-        return
+def build_model_profiles_from_rows(rows: list[dict[str, Any]]) -> list[Any]:
+    """把 config_store 的 profile 行转换为 ModelProfile 列表（过滤占位档案）。
+
+    纯函数，不依赖绑定的 runtime；API lifespan 与 bench 进程共用。
+    """
     from excelmanus.config import ModelProfile
 
-    rows = config_store.list_profiles()
     profiles: list[Any] = []
     for row in rows:
         if is_placeholder_model_profile(
@@ -333,6 +363,16 @@ def _sync_config_profiles_from_db() -> None:
             custom_extra_body=row.get("custom_extra_body", ""),
             custom_extra_headers=row.get("custom_extra_headers", ""),
         ))
+    return profiles
+
+
+def _sync_config_profiles_from_db() -> None:
+    """从数据库读取 model_profiles 并同步到 config.models。"""
+    config = get_config()
+    config_store = get_config_store()
+    if config is None or config_store is None:
+        return
+    profiles = build_model_profiles_from_rows(config_store.list_profiles())
     object.__setattr__(config, "models", tuple(profiles))
 
 
@@ -344,19 +384,14 @@ def bind_app_state(
     database: Any | None = None,
     config_store: Any | None = None,
 ) -> None:
-    """把当前运行时对象挂到 ``app.state``，与模块 getter 同步。"""
-    if config is not None:
-        set_config(config)
-        app.state.config = config
-    if session_manager is not None:
-        set_session_manager(session_manager)
-        app.state.session_manager = session_manager
-    if database is not None:
-        set_database(database)
-        app.state.database = database
-    if config_store is not None:
-        set_config_store(config_store)
-        app.state.config_store = config_store
+    """Bind explicit application state for lifespan and direct test calls."""
+    if not hasattr(app.state, "runtime"):
+        app.state.runtime = AppRuntime()
+    runtime = app.state.runtime
+    bind_runtime(runtime)
+    for key, value in {"config": config, "session_manager": session_manager, "database": database, "config_store": config_store}.items():
+        if value is not None:
+            setattr(runtime, key, value)
 
 
 def get_file_registry(workspace_root: str) -> Any:
@@ -433,161 +468,23 @@ def _uploads_ancestors_nonsymlink(uploads_dir: Path, target: Path) -> bool:
         return False
 
 
-def uploads_mkdir(uploads_dir: Path, relative: str) -> Path | None:
-    """Create uploads subdirectory without following any symlink component."""
-    import os
-    import stat
-
-    target = safe_uploads_path(uploads_dir, relative)
-    if target is None:
-        return None
-    cleaned = relative.replace("\\", "/").strip("/")
-    cursor = Path(uploads_dir)
-    for part in cleaned.split("/"):
-        nxt = cursor / part
-        try:
-            st = os.lstat(nxt)
-        except FileNotFoundError:
-            os.mkdir(nxt)
-            try:
-                st = os.lstat(nxt)
-            except OSError:
-                return None
-        if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
-            return None
-        cursor = nxt
-    return cursor
-
-
-def uploads_create_file(uploads_dir: Path, relative: str) -> Path | None:
-    """Create an empty file with O_EXCL and O_NOFOLLOW when available."""
-    import os
-    import stat
-
-    target = safe_uploads_path(uploads_dir, relative)
-    if target is None:
-        return None
-    parent = uploads_mkdir(uploads_dir, str(target.parent.relative_to(uploads_dir))) if target.parent != uploads_dir else uploads_dir
-    if parent is None:
-        return None
-    try:
-        pst = os.lstat(parent)
-    except OSError:
-        return None
-    if stat.S_ISLNK(pst.st_mode):
-        return None
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    try:
-        fd = os.open(str(target), flags, 0o644)
-    except OSError:
-        return None
-    os.close(fd)
-    return target
-
-
-def uploads_delete(uploads_dir: Path, relative: str) -> tuple[Path | None, str | None]:
-    """Delete a file or directory after confirming the node is still not a symlink."""
-    import os
-    import shutil
-    import stat
-
-    target = safe_uploads_path(uploads_dir, relative)
-    if target is None:
-        return None, "非法目标路径"
-    try:
-        st = os.lstat(target)
-    except FileNotFoundError:
-        return None, "路径不存在"
-    except OSError:
-        return None, "非法目标路径"
-    if stat.S_ISLNK(st.st_mode):
-        return None, "非法目标路径"
-    try:
-        if target.resolve() == Path(uploads_dir).resolve():
-            return None, "无法删除根目录"
-    except OSError:
-        return None, "非法目标路径"
-    try:
-        st2 = os.lstat(target)
-        if stat.S_ISLNK(st2.st_mode) or (st2.st_ino, st2.st_dev) != (st.st_ino, st.st_dev):
-            return None, "非法目标路径"
-        if stat.S_ISDIR(st2.st_mode):
-            shutil.rmtree(target)
-        else:
-            os.unlink(target)
-    except OSError:
-        return None, "删除失败"
-    return target, None
-
-
-def uploads_rename(
-    uploads_dir: Path, old_path: str, new_path: str,
-) -> tuple[Path | None, Path | None, str | None]:
-    import os
-    import stat
-
-    src = safe_uploads_path(uploads_dir, old_path)
-    dst = safe_uploads_path(uploads_dir, new_path)
-    if src is None or dst is None:
-        return None, None, "非法路径"
-    try:
-        src_st = os.lstat(src)
-    except FileNotFoundError:
-        return None, None, "源路径不存在"
-    except OSError:
-        return None, None, "非法路径"
-    if stat.S_ISLNK(src_st.st_mode):
-        return None, None, "非法路径"
-    try:
-        os.lstat(dst)
-        return None, None, "目标路径已存在"
-    except FileNotFoundError:
-        pass
-    except OSError:
-        return None, None, "非法路径"
-    parent = dst.parent
-    if parent != Path(uploads_dir):
-        made = uploads_mkdir(uploads_dir, str(parent.relative_to(uploads_dir)))
-        if made is None:
-            return None, None, "非法路径"
-    try:
-        st2 = os.lstat(src)
-        if stat.S_ISLNK(st2.st_mode) or (st2.st_ino, st2.st_dev) != (src_st.st_ino, src_st.st_dev):
-            return None, None, "非法路径"
-        os.rename(str(src), str(dst))
-    except OSError:
-        return None, None, "重命名失败"
-    return src, dst, None
-
-
-def write_new_file_nofollow(dest: Path, content: bytes) -> None:
-    """Create a new file without following a trailing symlink."""
-    import os
-
-    flags = os.O_CREAT | os.O_EXCL | os.O_WRONLY
-    if hasattr(os, "O_NOFOLLOW"):
-        flags |= os.O_NOFOLLOW
-    fd = os.open(str(dest), flags, 0o644)
-    try:
-        os.write(fd, content)
-    finally:
-        os.close(fd)
-
-
 def sanitize_upload_filename(filename: str, *, max_len: int = 120) -> str:
-    """Basename + whitelist; never keep path separators."""
+    """Basename + whitelist; never keep path separators. 保留安全扩展名。"""
     import re
 
     base = Path(str(filename or "").replace("\\", "/")).name
-    cleaned = re.sub(r"[^A-Za-z0-9._-]+", "_", base).strip("._")
-    if not cleaned:
-        cleaned = "unnamed"
+    suffix = Path(base).suffix
+    stem = Path(base).stem
+    # 保留 Unicode 字母/汉字（主力用户的中文文件名是常态输入），
+    # 只剥路径分隔符、控制字符、零宽/双向覆盖等非 \w 字符。
+    cleaned_stem = re.sub(r"[^\w.\-]+", "_", stem).strip("._") or "unnamed"
+    cleaned_suffix = re.sub(r"[^A-Za-z0-9.]+", "", suffix)
+    if cleaned_suffix and not cleaned_suffix.startswith("."):
+        cleaned_suffix = f".{cleaned_suffix}"
+    cleaned = f"{cleaned_stem}{cleaned_suffix}"
     if len(cleaned) > max_len:
-        stem = Path(cleaned).stem[: max(1, max_len - 8)]
-        suffix = Path(cleaned).suffix[:8]
-        cleaned = (stem + suffix)[:max_len]
+        keep = max(1, max_len - len(cleaned_suffix))
+        cleaned = f"{cleaned_stem[:keep]}{cleaned_suffix}"[:max_len]
     return cleaned
 
 
@@ -605,17 +502,41 @@ async def has_session_access(session_id: str, request: Request) -> bool:
     return True
 
 
-def resolve_workspace(request: Request, session_id: str | None = None) -> Any:
-    """Resolve the folder for this request: session cwd, else process default."""
+def _workspace_id_from_request(
+    request: Request,
+    workspace_id: str | None = None,
+) -> str | None:
+    if workspace_id and str(workspace_id).strip():
+        return str(workspace_id).strip()
+    return (request.query_params.get("workspace_id") or "").strip() or None
+
+
+def resolve_workspace(
+    request: Request,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+    *,
+    require_scope: bool = False,
+) -> Any:
+    """Resolve the folder for this request.
+
+    File routes must pass ``require_scope=True``: missing both a resolvable
+    ``session_id`` and ``workspace_id`` is 400 ``FILE_SCOPE_REQUIRED``.
+    Non-file callers may still fall back to the process default workspace.
+    """
+    from fastapi import HTTPException
+
     config = get_config()
     assert config is not None
+    from excelmanus.stores.workspace_store import WorkspacePathError
     from excelmanus.workspace import IsolatedWorkspace, SandboxConfig
     from excelmanus.workspace.paths import default_workspace_path, paths_equal
 
     sid = (session_id or request.query_params.get("session_id") or "").strip() or None
+    wid = _workspace_id_from_request(request, workspace_id)
     manager = get_session_manager()
-    if sid and manager is not None:
-        path = manager.workspace_path_for_session(sid)
+
+    def _open(path: str) -> Any:
         default_path = default_workspace_path(config)
         create_missing = paths_equal(path, default_path)
         try:
@@ -625,19 +546,58 @@ def resolve_workspace(request: Request, session_id: str | None = None) -> Any:
                 create_missing=create_missing,
             )
         except FileNotFoundError as exc:
-            from fastapi import HTTPException
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if sid and manager is not None:
+        if require_scope and not manager.session_has_file_scope(sid):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "无法确定工作区，请从会话重新打开文件",
+                    "code": "FILE_SCOPE_REQUIRED",
+                },
+            )
+        return _open(manager.workspace_path_for_session(sid))
+    if wid and manager is not None:
+        try:
+            path, _bound_id = manager.resolve_workspace_binding(wid, None)
+        except WorkspacePathError as exc:
+            raise HTTPException(
+                status_code=400,
+                detail={"error": str(exc), "code": "FILE_SCOPE_REQUIRED"},
+            ) from exc
+        return _open(path)
+    if require_scope:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "无法确定工作区，请从会话重新打开文件",
+                "code": "FILE_SCOPE_REQUIRED",
+            },
+        )
     return IsolatedWorkspace.resolve(
         config.workspace_root,
         sandbox_config=SandboxConfig(),
-        transaction_enabled=False,
         data_root=config.data_root,
     )
 
 
-def resolve_workspace_root(request: Request, session_id: str | None = None) -> str:
+def resolve_workspace_root(
+    request: Request,
+    session_id: str | None = None,
+    workspace_id: str | None = None,
+    *,
+    require_scope: bool = False,
+) -> str:
     """返回当前请求对应的工作区根目录路径字符串。"""
-    return str(resolve_workspace(request, session_id=session_id).root_dir)
+    return str(
+        resolve_workspace(
+            request,
+            session_id=session_id,
+            workspace_id=workspace_id,
+            require_scope=require_scope,
+        ).root_dir
+    )
 
 
 def resolve_excel_path(
@@ -646,7 +606,11 @@ def resolve_excel_path(
     *,
     workspace_root: str | None = None,
 ) -> str | None:
-    """将相对/绝对路径解析为安全的绝对路径。"""
+    """将调用方给出的相对/绝对路径解析为安全的绝对路径。
+
+    无 workspace_root 且无 session 时不猜默认根；也不把裸名补成
+    ``uploads/`` / ``outputs/`` / ``scripts/`` 下的同名文件。
+    """
     from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 
     config = get_config()
@@ -656,26 +620,17 @@ def resolve_excel_path(
     ws_root = workspace_root
     if not ws_root and session_id:
         manager = get_session_manager()
-        if manager is not None:
+        if manager is not None and manager.session_has_file_scope(session_id):
             ws_root = manager.workspace_path_for_session(session_id)
     if not ws_root:
-        from excelmanus.workspace.paths import default_workspace_path
-        ws_root = default_workspace_path(config)
+        return None
     guard = FileAccessGuard(str(ws_root))
-
-    candidates: list[str] = [path]
-    raw = str(path or "").replace("\\", "/").lstrip("./")
-    if raw and not Path(path).is_absolute():
-        for subdir in ("outputs", "scripts", "uploads"):
-            candidates.append(f"{subdir}/{raw}")
-
-    for candidate in candidates:
-        try:
-            resolved = guard.resolve_and_validate(candidate)
-        except (SecurityViolationError, OSError):
-            continue
-        if resolved.is_file():
-            return str(resolved)
+    try:
+        resolved = guard.resolve_and_validate(path)
+    except (SecurityViolationError, OSError):
+        return None
+    if resolved.is_file():
+        return str(resolved)
     return None
 
 

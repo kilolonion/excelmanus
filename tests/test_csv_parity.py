@@ -245,8 +245,8 @@ class TestInspectExcelFilesCsv:
         )
         assert csv_file is not None
         sheet = csv_file["sheets"][0]
-        # header_row_hint 应 > 0（跳过标题行）
-        assert sheet["header_row_hint"] >= 1
+        # header_row 为公共 1-based，标题行文件应跳过第 1 行
+        assert sheet["header_row"] >= 2
 
 
 # ══════════════════════════════════════════════════════════

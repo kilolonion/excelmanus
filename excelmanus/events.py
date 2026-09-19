@@ -58,6 +58,8 @@ class EventType(Enum):
     STEP_START = "step_start"
     STEP_END = "step_end"
     INBOX_CLAIMED = "inbox_claimed"
+    UI_HINT = "ui_hint"  # 瞬态建议：不进消息块、不回放
+    JEV_TRACE = "jev_trace"  # System One 决策：shadow/enforce 都发；不进消息块、默认不回放
 
 
 @dataclass
@@ -128,8 +130,9 @@ class ToolCallEvent:
     thinking_delta: str = ""
     args_delta: str = ""
     # 模式变更事件字段
-    mode_name: str = ""        # "full_access" | "plan_mode"
+    mode_name: str = ""        # "full_access" | "chat_mode" | "present_as" | "show_tool_calls" | "show_reasoning"
     mode_enabled: bool = False
+    mode_value: str = ""       # chat_mode 取值 write|read|plan；其它模式可空
     # Excel 预览/Diff 事件字段
     excel_file_path: str = ""
     excel_sheet: str = ""
@@ -211,6 +214,14 @@ class ToolCallEvent:
     turn_id: str = ""
     step_id: str = ""
     inbox_claimed: List[Dict[str, Any]] = field(default_factory=list)
+    # ui_hint：回合末 UI 面建议（瞬态，不进消息块）
+    ui_hint_surface: str = ""
+    ui_hint_file_path: str = ""
+    ui_hint_sheet: str = ""
+    ui_hint_reason: str = ""
+    ui_hint_suppress_auto_open: bool = False
+    # jev_trace：有界决策卡（不含密钥 / 完整 state）
+    jev_trace: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         """序列化为字典，将枚举和日期转为可 JSON 化的值。"""
@@ -226,6 +237,9 @@ class ToolCallEvent:
         data["event_type"] = EventType(data["event_type"])
         data["timestamp"] = datetime.fromisoformat(data["timestamp"])
         return cls(**data)
+
+
+TRANSIENT_SSE_TYPES = frozenset({EventType.UI_HINT, EventType.JEV_TRACE})
 
 
 @dataclass
@@ -256,13 +270,49 @@ def mutations_from_identities(
     identities: List[str],
     *,
     content_version: str | None = None,
+    content_versions: Dict[str, str] | None = None,
     source: str = "runtime",
 ) -> List[Dict[str, Any]]:
+    versions = content_versions or {}
     return [
-        MutationEvent(identity=ident, content_version=content_version, source=source).to_dict()
+        MutationEvent(
+            identity=ident,
+            content_version=versions.get(ident, content_version),
+            source=source,
+        ).to_dict()
         for ident in identities
         if ident
     ]
+
+
+def changed_mutations(
+    identities: List[str],
+    *,
+    workspace_root: str | None = None,
+    content_versions: Dict[str, str] | None = None,
+    source: str = "runtime",
+) -> List[Dict[str, Any]]:
+    """Build MutationEvent dicts for a successful write batch.
+
+    Prefer host-tracked after-versions (``remember_content_version`` / receipt).
+    Do not re-hash disk: that invents a version the write never reported.
+    """
+    merged: Dict[str, str] = dict(content_versions or {})
+    try:
+        from excelmanus.workbook_commit import export_seen_versions
+
+        for ident, version in export_seen_versions().items():
+            if version:
+                merged.setdefault(ident, version)
+    except Exception:
+        pass
+
+    del workspace_root
+    return mutations_from_identities(
+        identities,
+        content_versions=merged,
+        source=source,
+    )
 
 
 # 回调函数类型别名：接收 ToolCallEvent，无返回值

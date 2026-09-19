@@ -91,10 +91,13 @@ interface ToolCallCardProps {
   result?: string;
   error?: string;
   isLast?: boolean;
+  parentCallId?: string;
+  nested?: boolean;
 }
 
 export const ToolCallCard = React.memo(function ToolCallCard({
   toolCallId, name, args, status, result, error, isLast = true,
+  parentCallId, nested = false,
 }: ToolCallCardProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
@@ -168,7 +171,12 @@ export const ToolCallCard = React.memo(function ToolCallCard({
   const showApprovalCta = isPending && isWriteTool(name);
 
   return (
-    <div className="flex gap-2.5">
+    <div
+      className={`flex gap-2.5 ${nested ? "ml-3 pl-2 border-l border-[var(--em-hairline)]" : ""}`}
+      data-tool-call-id={toolCallId || undefined}
+      data-parent-call-id={parentCallId || undefined}
+      data-nested-tool={nested ? "true" : undefined}
+    >
       <div className="flex w-4 flex-col items-center flex-shrink-0">
         <div className="mt-0.5">{node}</div>
         {!isLast && <div className="mt-1 w-px flex-1 bg-[#C9D1CB] dark:bg-muted-foreground/30 min-h-[12px]" />}
@@ -183,6 +191,9 @@ export const ToolCallCard = React.memo(function ToolCallCard({
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
               <span className="text-[13px] font-medium text-foreground leading-5">{title}</span>
+              {nested && (
+                <span className="text-[10px] font-medium text-muted-foreground">子调用</span>
+              )}
               {isPending && (
                 <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">等待授权</span>
               )}

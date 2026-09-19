@@ -30,6 +30,8 @@ const KNOWN_TOOLS = [
   "inspect_word",
   "search_word",
   "write_word",
+  "delegate",
+  "delegate_to_subagent",
 ] as const;
 
 describe("toolIcon", () => {
@@ -37,7 +39,7 @@ describe("toolIcon", () => {
     for (const name of KNOWN_TOOLS) {
       const Icon = toolIcon(name);
       expect(Icon.displayName).toBeTruthy();
-      expect(typeof Icon.render === "function" || typeof Icon === "function").toBe(true);
+      expect(typeof (Icon as unknown as { render?: unknown }).render === "function" || typeof Icon === "function").toBe(true);
     }
   });
 

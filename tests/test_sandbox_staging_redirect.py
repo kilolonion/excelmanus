@@ -85,17 +85,11 @@ def test_staging_map_does_not_redirect_openpyxl_save(tmp_path: Path) -> None:
         code,
         staging_map={str(original): str(staged)},
     )
-    assert result.returncode == 0, result.stderr
+    assert result.returncode != 0
+    assert "em.format_spreadsheet" in result.stderr or "em.edit_spreadsheet" in result.stderr
     wb_orig = load_workbook(original)
     assert wb_orig.active["A1"].value == "original_data"
     wb_orig.close()
     wb_staged = load_workbook(staged)
     assert wb_staged.active["A1"].value == "original_data"
     wb_staged.close()
-
-    pending_dir = tmp_path / ".excelmanus" / "pending"
-    pending_files = list(pending_dir.rglob("*.xlsx")) if pending_dir.is_dir() else []
-    assert pending_files, "xlsx save should land in .excelmanus/pending/{run_id}"
-    wb_pending = load_workbook(pending_files[0])
-    assert wb_pending.active["A1"].value == "modified_data"
-    wb_pending.close()

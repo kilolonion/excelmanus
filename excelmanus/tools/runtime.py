@@ -12,10 +12,12 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import Any, Literal
 
+from excelmanus.engine_core.error_payload import PRE_EXECUTE_DENIED, SDK_CONTRACT_VIOLATION
 from excelmanus.engine_core.tool_result import (
-    ToolError,
     ToolResult,
+    annotate_shadow_schema_violations,
     coerce_legacy_result,
+    error_result,
     finalize_content,
 )
 from excelmanus.engine_types import ToolCallResult, _ToolCallBatch
@@ -58,6 +60,11 @@ def normalize_present_as(value: str | None, *, chat_mode: str = "write") -> str:
 
 def present_as_of(engine: Any) -> str:
     chat = str(getattr(engine, "_current_chat_mode", "write") or "write")
+    if chat in {"read", "plan"}:
+        return "native"
+    override = getattr(engine, "_turn_present_as", None)
+    if override in {"native", "code"}:
+        return override
     return normalize_present_as(getattr(engine, "_present_as", None), chat_mode=chat)
 
 
@@ -200,17 +207,12 @@ class ToolRuntime:
         return self.split_batches(tool_calls)
 
     def render_sdk_section(self) -> str:
-        engine = self.engine
-        registry = getattr(engine, "registry", None) or getattr(engine, "_registry", None)
-        getter = getattr(registry, "get_all_tools", None)
-        if not callable(getter):
-            return ""
-        try:
-            tool_defs = list(getter() or [])
-        except Exception:
-            return ""
+        from excelmanus.tools.context import execution_catalog_tools
         from excelmanus.code_mode import render_sdk_section
 
+        # 目录推导失败必须显式上抛：code 提示词无法生成其声明的 SDK 时，
+        # 组装应当明确失败，而不是静默产出一段空 SDK。
+        tool_defs = execution_catalog_tools(self.engine)
         return render_sdk_section(tool_defs)
 
     async def execute(
@@ -258,7 +260,7 @@ class ToolRuntime:
 
         # 4. ask → 本次一次性审批；通道缺失 = 拒绝该调用
         if decision == "ask":
-            if not await self._one_shot_ask(token):
+            if not await self._one_shot_ask(token, on_event=on_event):
                 decision = "deny"
             else:
                 decision = "allow"
@@ -279,7 +281,7 @@ class ToolRuntime:
             if engine is not None and getattr(engine, "_last_guard_deny", None):
                 engine._last_guard_deny = None
             return self._apply_finalize(
-                self._denied_result(tc, token, "PRE_EXECUTE_DENIED", str(message)),
+                self._denied_result(tc, token, PRE_EXECUTE_DENIED, str(message)),
                 token,
             )
 
@@ -309,7 +311,18 @@ class ToolRuntime:
             if updated is not None:
                 tcr = updated
 
-        # 8–9. finalize_content + 冻结给模型的文本
+        # 8–9. observation 选档（默认 noop）+ finalize_content
+        structured = tcr.structured
+        if structured is None:
+            structured = coerce_legacy_result(tcr.result)
+        from excelmanus.system_one.host import maybe_shape_observation
+
+        tcr.structured = await maybe_shape_observation(
+            self.engine,
+            structured,
+            tool_name=name,
+            arguments=dict(token.arguments),
+        )
         return self._apply_finalize(tcr, token)
 
     def _apply_finalize(self, tcr: ToolCallResult, token: ExecutionToken) -> ToolCallResult:
@@ -321,10 +334,43 @@ class ToolRuntime:
         config = getattr(engine, "config", None) or getattr(engine, "_config", None)
         if config is not None:
             cap = int(getattr(config, "tool_result_hard_cap_chars", 0) or 0)
+        registry = getattr(engine, "_registry", None) or getattr(engine, "registry", None)
+        if registry is not None:
+            structured = annotate_shadow_schema_violations(
+                structured,
+                registry=registry,
+                tool_name=token.name,
+                arguments=dict(token.arguments),
+            )
         structured = finalize_content(structured, max_chars=cap)
+        if structured.success:
+            from excelmanus.tools.output_contracts import validate_output
+
+            canonical = structured.value if structured.value is not None else structured.model_text
+            _cov = structured.coverage if isinstance(structured.coverage, dict) else {}
+            violations = (
+                [] if _cov.get("spill_retrieve")
+                else validate_output(
+                    token.name, canonical, arguments=dict(token.arguments)
+                )
+            )
+            if violations:
+                ui = structured.ui_meta
+                failed = error_result(
+                    f"{token.name} 返回值不符合声明合同",
+                    code=SDK_CONTRACT_VIOLATION,
+                    fields={
+                        "tool": token.name,
+                        "violations": violations,
+                    },
+                )
+                structured = replace(failed, ui_meta=ui)
+                tcr = replace(tcr, success=False)
         error = tcr.error
         if not tcr.success and structured.error is not None and not error:
             error = structured.error.code
+        if structured.error is not None and structured.error.code == SDK_CONTRACT_VIOLATION:
+            error = SDK_CONTRACT_VIOLATION
         return replace(
             tcr,
             result=structured.model_text,
@@ -335,16 +381,11 @@ class ToolRuntime:
 
     def _unknown_result(self, tc: Any, token: ExecutionToken) -> ToolCallResult:
         message = unknown_tool_message(token.name)
-        structured = ToolResult(
-            success=False,
-            model_text=message,
-            value={"status": "error", "code": UNKNOWN_TOOL, "message": message},
-            error=ToolError(code=UNKNOWN_TOOL, message=message),
-        )
+        structured = error_result(message, code=UNKNOWN_TOOL)
         return ToolCallResult(
             tool_name=token.name,
             arguments=dict(token.arguments),
-            result=message,
+            result=structured.model_text,
             success=False,
             error=UNKNOWN_TOOL,
             structured=structured,
@@ -357,22 +398,25 @@ class ToolRuntime:
         code: str,
         message: str,
     ) -> ToolCallResult:
-        structured = ToolResult(
-            success=False,
-            model_text=message,
-            value={"status": "error", "code": code, "message": message},
-            error=ToolError(code=code, message=message),
-        )
+        structured = error_result(message, code=code)
         return ToolCallResult(
             tool_name=token.name,
             arguments=dict(token.arguments),
-            result=message,
+            result=structured.model_text,
             success=False,
             error=code,
             structured=structured,
         )
 
-    async def _one_shot_ask(self, token: ExecutionToken) -> bool:
+    async def _one_shot_ask(self, token: ExecutionToken, on_event: Any = None) -> bool:
+        """Hook ASK：发审批卡，等同一决策通道（resolver 或 InteractionRegistry）。
+
+        与回合级审批同语义：accept 放行本次调用，reject/超时/父取消收敛为
+        deny。``_approval_resolver`` 由 driver 在 run_tool_loop 期间挂到
+        engine；Web 路径走 ``submit_approval`` → registry resolve。
+        """
+        from excelmanus.interaction import DEFAULT_INTERACTION_TIMEOUT
+
         engine = self.engine
         approval = getattr(engine, "approval", None) or getattr(engine, "_approval", None)
         if approval is None:
@@ -387,20 +431,119 @@ class ToolRuntime:
             )
         except Exception:
             return False
-        resolver = getattr(engine, "_approval_resolver", None)
-        if not callable(resolver):
+
+        approval_id = getattr(pending, "approval_id", "") or ""
+        emit_card = getattr(engine, "emit_pending_approval_event", None)
+        if callable(emit_card):
+            try:
+                emit_card(
+                    pending=pending,
+                    on_event=on_event,
+                    iteration=0,
+                    tool_call_id=token.call_id,
+                )
+            except Exception:
+                logger.debug("Hook ASK 审批事件发射失败", exc_info=True)
+
+        inflight = getattr(engine, "_inflight_approval_ids", None)
+        if inflight is None and engine is not None:
+            try:
+                inflight = engine._inflight_approval_ids = set()
+            except Exception:
+                inflight = None
+        if inflight is not None:
+            inflight.add(approval_id)
+
+        async def _reject_pending(*, timeout: bool = False) -> None:
             reject = getattr(approval, "reject_pending", None)
-            if callable(reject) and getattr(pending, "approval_id", None):
+            if callable(reject) and approval_id:
                 try:
-                    reject(pending.approval_id)
+                    reject(approval_id, timeout=timeout)
                 except Exception:
                     pass
-            return False
+
         try:
-            decision = await resolver(pending)
-        except Exception:
-            return False
-        return str(decision or "").lower() in {"accept", "approved", "allow", "yes"}
+            resolver = getattr(engine, "_approval_resolver", None)
+            session = getattr(engine, "_active_code_mode_session", None)
+            cancel_event = getattr(session, "_subcall_cancel", None)
+            registry = getattr(engine, "_interaction_registry", None)
+
+            if callable(resolver):
+                async def _wait() -> Any:
+                    try:
+                        return await resolver(pending)
+                    except Exception:  # noqa: BLE001
+                        return "reject"
+            elif registry is not None:
+                fut = registry.create(approval_id)
+
+                async def _wait() -> Any:
+                    return await fut
+            else:
+                await _reject_pending()
+                return False
+
+            waiter = getattr(self.dispatcher, "_wait_approval_decision", None)
+            if callable(waiter):
+                wait_timeout = DEFAULT_INTERACTION_TIMEOUT
+                timeout_for = getattr(session, "timeout_for", None) if session is not None else None
+                if callable(timeout_for):
+                    wait_timeout = timeout_for(token.name)
+                decision = await waiter(
+                    _wait(), cancel_event, wait_timeout,
+                )
+                from excelmanus.engine_core import tool_dispatcher as _td
+
+                if decision is _td._WAIT_PARENT_CANCELLED:
+                    await _reject_pending()
+                    return False
+                if decision is _td._WAIT_TIMEOUT:
+                    await _reject_pending(timeout=True)
+                    return False
+            else:
+                decision = await _wait()
+        finally:
+            if inflight is not None:
+                inflight.discard(approval_id)
+
+        if isinstance(decision, dict):
+            decision = decision.get("decision")
+        normalized = str(decision or "").lower()
+        if normalized == "fullaccess":
+            try:
+                engine._full_access_enabled = True
+            except Exception:
+                pass
+        emit_resolved = getattr(engine, "_emit", None) or getattr(engine, "emit", None)
+        if normalized in {"accept", "approved", "allow", "yes", "fullaccess"}:
+            # 一次性门禁：决策已落地，清理 pending 让正常分发继续
+            # （不清理会占住单槽位，下一个 create_pending 必抛）。
+            clear = getattr(approval, "clear_pending", None)
+            if callable(clear):
+                try:
+                    clear()
+                except Exception:
+                    pass
+            if callable(emit_resolved):
+                try:
+                    from excelmanus.events import EventType, ToolCallEvent
+
+                    emit_resolved(
+                        on_event,
+                        ToolCallEvent(
+                            event_type=EventType.APPROVAL_RESOLVED,
+                            tool_call_id=token.call_id,
+                            approval_id=approval_id,
+                            approval_tool_name=token.name,
+                            result="已批准",
+                            success=True,
+                        ),
+                    )
+                except Exception:
+                    logger.debug("Hook ASK 审批解决事件发射失败", exc_info=True)
+            return True
+        await _reject_pending()
+        return False
 
     @staticmethod
     def _name_and_args(

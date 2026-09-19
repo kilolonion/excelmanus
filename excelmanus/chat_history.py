@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import logging
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Any, overload
 
 from excelmanus.db_adapter import ConnectionAdapter
@@ -48,9 +48,35 @@ class ChatHistoryStore:
     def _now_iso() -> str:
         return datetime.now(timezone.utc).isoformat()
 
+    def _next_updated_at(self) -> str:
+        """严格递增的 updated_at：Windows 下 datetime.now 粒度约 15.6ms，
+        同刻写会导致 ORDER BY 平局时 created_at/rowid 反超真实时序。"""
+        now = self._now_iso()
+        row = self._conn.execute("SELECT MAX(updated_at) FROM sessions").fetchone()
+        prev = row[0] if row else None
+        if isinstance(prev, str) and prev >= now:
+            now = (
+                datetime.fromisoformat(prev) + timedelta(microseconds=1)
+            ).isoformat()
+        return now
+
+    @staticmethod
+    def _durable_payload(msg: dict) -> dict:
+        """Persist refs only: drop request-only keys and migrate leftover data URIs."""
+        payload = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+        content = payload.get("content")
+        if isinstance(content, list):
+            from excelmanus.attachments.migrate import migrate_content
+            from excelmanus.attachments.project import strip_projection_meta
+
+            migrated = migrate_content(content)
+            wrapped = strip_projection_meta([{"content": migrated}])
+            payload["content"] = wrapped[0].get("content", migrated)
+        return payload
+
     @staticmethod
     def _serialize_content(msg: dict) -> str:
-        return json.dumps(msg, ensure_ascii=False)
+        return json.dumps(ChatHistoryStore._durable_payload(msg), ensure_ascii=False)
 
     @staticmethod
     def _deserialize_message(row: object) -> dict:
@@ -73,13 +99,14 @@ class ChatHistoryStore:
         blank: bool = True,
     ) -> None:
         now = self._now_iso()
+        updated_now = self._next_updated_at()
         path = workspace_path or ""
         self._conn.execute(
             "INSERT OR IGNORE INTO sessions "
             "(id, title, created_at, updated_at, user_id, title_source, "
             " workspace_path, workspace_id, blank) "
             "VALUES (?, ?, ?, ?, ?, 'fallback', ?, ?, ?)",
-            (session_id, title, now, now, None, path, workspace_id, 1 if blank else 0),
+            (session_id, title, now, updated_now, None, path, workspace_id, 1 if blank else 0),
         )
         if path:
             self._conn.execute(
@@ -120,13 +147,13 @@ class ChatHistoryStore:
             "workspace_path, workspace_id, blank "
             "FROM sessions WHERE workspace_path = ? AND blank = 1 "
             "AND COALESCE(message_count, 0) = 0 "
-            "ORDER BY updated_at DESC LIMIT 1",
+            "ORDER BY updated_at DESC, created_at DESC, rowid DESC LIMIT 1",
             (workspace_path,),
         ).fetchone()
         return dict(row) if row is not None else None
 
     def set_session_blank(self, session_id: str, blank: bool) -> None:
-        now = self._now_iso()
+        now = self._next_updated_at()
         self._conn.execute(
             "UPDATE sessions SET blank = ?, updated_at = ? WHERE id = ?",
             (1 if blank else 0, now, session_id),
@@ -171,7 +198,7 @@ class ChatHistoryStore:
         if not sets:
             return
         sets.append("updated_at = ?")
-        vals.append(self._now_iso())
+        vals.append(self._next_updated_at())
         vals.append(session_id)
         self._conn.execute(
             f"UPDATE sessions SET {', '.join(sets)} WHERE id = ?", vals
@@ -182,6 +209,10 @@ class ChatHistoryStore:
         cur = self._conn.execute(
             "DELETE FROM sessions WHERE id = ?", (session_id,)
         )
+        if self._conn.table_exists("session_events"):
+            self._conn.execute(
+                "DELETE FROM session_events WHERE session_id = ?", (session_id,)
+            )
         self._conn.commit()
         return cur.rowcount > 0
 
@@ -194,22 +225,104 @@ class ChatHistoryStore:
         sess_count = sess_row[0] if sess_row else 0  # type: ignore[index]
         self._conn.execute("DELETE FROM messages")
         self._conn.execute("DELETE FROM sessions")
+        if self._conn.table_exists("session_events"):
+            self._conn.execute("DELETE FROM session_events")
         self._conn.commit()
         return sess_count, msg_count
 
-    def clear_messages(self, session_id: str) -> bool:
+    def clear_messages(self, session_id: str, *, clear_events: bool = False) -> bool:
+        """清空 surface 快照（messages 表）。
+
+        ``clear_events=False``（默认）：仅重写快照，事件日志保留——压缩/回退
+        等快照重写路径走这里，原文仍在 ``session_events`` 中可审计。
+        ``clear_events=True``：用户显式清除会话，事件日志一并删除。
+        """
         if not self.session_exists(session_id):
             return False
-        now = self._now_iso()
+        now = self._next_updated_at()
         self._conn.execute(
             "DELETE FROM messages WHERE session_id = ?", (session_id,)
         )
+        if clear_events and self._conn.table_exists("session_events"):
+            self._conn.execute(
+                "DELETE FROM session_events WHERE session_id = ?", (session_id,)
+            )
         self._conn.execute(
             "UPDATE sessions SET message_count = 0, blank = 1, updated_at = ? WHERE id = ?",
             (now, session_id),
         )
         self._conn.commit()
         return True
+
+    # ── Session Events（append-only 事实源）────────────
+
+    def _has_events_table(self) -> bool:
+        return self._conn.table_exists("session_events")
+
+    def save_events(self, session_id: str, events: list[dict]) -> int:
+        """批量追加事件行。(seq) 唯一索引保证不重写；违反即报错。"""
+        if not events or not self._has_events_table():
+            return 0
+        import time as _time
+
+        now = _time.time()
+        rows = []
+        for ev in events:
+            rows.append(
+                (
+                    session_id,
+                    int(ev["seq"]),
+                    str(ev["kind"]),
+                    int(ev.get("turn") or 0),
+                    int(ev.get("step") or 0),
+                    ev.get("payload"),
+                    ev.get("surface_op"),
+                    ev.get("shadow_start"),
+                    ev.get("shadow_end"),
+                    ev.get("source_seqs"),
+                    ev.get("created_at") or now,
+                )
+            )
+        self._conn.executemany(
+            "INSERT OR IGNORE INTO session_events "
+            "(session_id, seq, kind, turn, step, payload, surface_op, "
+            " shadow_start, shadow_end, source_seqs, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        self._conn.commit()
+        return len(rows)
+
+    def iter_events(self, session_id: str) -> list[dict]:
+        """按 seq 顺序返回会话全部事件行。"""
+        if not self._has_events_table():
+            return []
+        rows = self._conn.execute(
+            "SELECT seq, kind, turn, step, payload, surface_op, "
+            "shadow_start, shadow_end, source_seqs, created_at "
+            "FROM session_events WHERE session_id = ? ORDER BY seq ASC",
+            (session_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+    def has_events(self, session_id: str) -> bool:
+        if not self._has_events_table():
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM session_events WHERE session_id = ? LIMIT 1",
+            (session_id,),
+        ).fetchone()
+        return row is not None
+
+    def max_event_seq(self, session_id: str) -> int:
+        """已落盘的最大事件 seq（持久化对账水位）。"""
+        if not self._has_events_table():
+            return 0
+        row = self._conn.execute(
+            "SELECT MAX(seq) FROM session_events WHERE session_id = ?",
+            (session_id,),
+        ).fetchone()
+        return int(row[0]) if row and row[0] is not None else 0
 
     def list_sessions(
         self,
@@ -219,7 +332,7 @@ class ChatHistoryStore:
         user_id: str | None = None,
     ) -> list[dict]:
         rows = self._conn.execute(
-            "SELECT * FROM sessions ORDER BY updated_at DESC LIMIT ? OFFSET ?",
+            "SELECT * FROM sessions ORDER BY updated_at DESC, created_at DESC, rowid DESC LIMIT ? OFFSET ?",
             (limit, offset),
         ).fetchall()
         return [dict(r) for r in rows]
@@ -231,7 +344,7 @@ class ChatHistoryStore:
     ) -> None:
         if not messages:
             return
-        now = self._now_iso()
+        now = self._next_updated_at()
         rows: list[tuple[str, str, str, int, str, str]] = []
         batch_ids: set[str] = set()
         for msg in messages:

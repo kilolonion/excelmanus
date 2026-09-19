@@ -14,7 +14,7 @@
 </p>
 
 <p align="center">
-  <a href="README.md">中文</a> · English · <a href="docs/configuration_en.md">Configuration</a> · <a href="docs/ops-manual_en.md">Ops Manual</a> · <a href="https://clawhub.ai">ClawHub Market</a>
+  <a href="README.md">中文</a> · English · <a href="docs/configuration_en.md">Configuration</a> · <a href="docs/ops-manual_en.md">Ops Manual</a>
 </p>
 
 <p align="center">
@@ -25,11 +25,11 @@
 
 **ExcelManus** is a fully open-source, LLM-powered Excel Agent framework. Describe what you need in plain language and it will read data, write formulas, run analysis scripts, and create charts — like an AI assistant that truly understands Excel.
 
-- **Three interfaces** — Web UI / CLI Terminal / REST API
+- **Two interfaces** — Web UI / REST API
 - **Any LLM** — OpenAI · Claude · Gemini · DeepSeek · Qwen · Kimi · xAI · Doubao · local Ollama / vLLM, plug and play
 - **Production-ready** — Local Git stop-then-upgrade · server deploy.sh · single-user workspace · approval flows · version rollback
 
-> 💡 Only 3 env vars to get started: `API_KEY` + `BASE_URL` + `MODEL`
+> 💡 First launch: open Web Settings and add a model profile (stored in `model_profiles`). Web / API share the same profiles.
 
 ---
 
@@ -39,9 +39,10 @@
 <tr>
 <td width="50%">
 
-### 📊 Full-Format Excel Read & Write
-Cell read/write · Formulas · VLOOKUP · Batch fill · Multi-sheet operations
-Auto-converts `.xlsx` / `.xls` / `.xlsb` / `.csv`
+### 📊 Excel and Word
+Cell read/write · Formulas · VLOOKUP · Batch fill · Multi-sheet
+`.xls` / `.xlsb` convert transparently to `.xlsx`; `.xlsx` / `.xlsm` / `.csv` / `.tsv` are native
+Word `.docx` read, edit, and generate (first-class, same as Excel)
 
 ### 📈 Data Analysis & Visualization
 Filter, sort, aggregate, pivot tables; complex logic auto-generates Python scripts
@@ -52,7 +53,7 @@ Table screenshots are attached for the main model, which produces structured Exc
 No separate vision pipeline and no satellite VLM description step
 
 ### 🔄 Version Management & Diff
-Staging / Audit / CoW version chain, `/undo` precise rollback
+Writes land on the user path; history lives in `.excelmanus/revisions/`; `/undo` rolls back
 Excel write diff visualization, text file unified diff display
 
 ### ✅ Task Evidence & Agent Review
@@ -63,19 +64,16 @@ No hidden acceptance agent; permissions, file safety, backups, and rollback rema
 <td width="50%">
 
 ### 🧠 Persistent Memory & Session History Awareness
-Cross-session memory for user preferences and operation patterns; Playbook auto-distills task experience
-**Episodic Memory**: auto-generates structured session summaries, semantically retrieves past sessions to inject context
+Cross-session memory for user preferences and operation patterns; the model reads it via memory tools by default — it is not auto-injected at session start.
+**Session summary (optional)**: When enabled, a structured summary can be written at session end (`session_summary_enabled` is off by default). Filename/recency retrieval and injection into new sessions are not wired.
 
-### 🧩 Skillpack & ClawHub Market
-One Markdown = one skill, auto-discovery, on-demand activation
-Built-in [ClawHub](https://clawhub.ai) market for one-click search / install / update
+### 🧩 Skillpack
+One directory + `SKILL.md` is one skill, auto-discovery; the model loads it with the `skill` tool
+Import skill packs from a local file or GitHub
 
 ### 🔌 MCP & Subagent
 Connect external MCP Servers to extend toolset
-Large files and complex tasks auto-delegated to sub-agents
-
-### 🔍 Semantic Retrieval
-Embedding-powered parallel semantic retrieval for memory / files / skills, zero extra latency
+Delegation is the model calling `delegate`; `/subagent` toggles the feature. Large files or complex tasks are not auto-delegated.
 
 ### 🔄 Local stop-then-upgrade
 Settings one-click update: stop processes → backup `$EXCELMANUS_HOME` → git fast-forward → start again
@@ -106,10 +104,33 @@ chmod +x ./deploy/start.sh
 On first launch, the script interactively prompts for LLM config (API Key, Base URL, Model). Browser auto-opens `http://localhost:3000`.
 
 ```bash
-./deploy/start.sh --prod              # Production mode
+./deploy/start.sh --prod              # Production mode (default 1 worker)
 ./deploy/start.sh --backend-port 9000 # Custom port
-./deploy/start.sh --workers 4         # Multi-worker
+./deploy/start.sh --workers 1         # Recommended: session state is in-process; >1 workers silently bust prompt cache
 ./deploy/start.sh --help              # All options
+```
+
+</details>
+
+<details>
+<summary><b>🪟 Windows — start.ps1 / start.bat</b></summary>
+
+```powershell
+git clone https://github.com/kilolonion/excelmanus.git
+cd excelmanus
+.\deploy\start.ps1
+```
+
+```bat
+deploy\start.bat
+```
+
+On first launch, the script interactively prompts for LLM config. Browser opens `http://localhost:3000`.
+
+```powershell
+.\deploy\start.ps1 -Production
+.\deploy\start.ps1 -BackendPort 9000
+deploy\start.bat --prod
 ```
 
 </details>
@@ -126,20 +147,19 @@ curl -LsSf https://astral.sh/uv/install.sh | sh
 # 2. Clone and install
 git clone https://github.com/kilolonion/excelmanus.git
 cd excelmanus
-uv sync --all-extras     # Full install: cli/web/analysis (also supports pip install ".[all]")
+uv sync --all-extras     # Full install: web/analysis (also supports pip install ".[all]")
 
 # 3. Configure
-cp .env.example .env     # Edit .env with your API Key / Base URL / Model
+# After launch, open Web Settings and add a model profile (stored in the main database).
 
 # 4. Launch
-uv run excelmanus        # CLI terminal mode
 uv run excelmanus-api    # Web API (http://localhost:8000)
 cd web && npm i && npm run dev   # Web frontend (http://localhost:3000)
 ```
 
 ### Start Chatting
 
-Type natural language in the Web UI or CLI:
+Type natural language in the Web UI:
 
 ```
 > Read the first 10 rows of sales.xlsx
@@ -148,7 +168,7 @@ Type natural language in the Web UI or CLI:
 > Recreate this table screenshot as an Excel file
 ```
 
-## 💻 Three Interfaces
+## 💻 Two Interfaces
 
 ### Web UI
 
@@ -164,45 +184,14 @@ Built on **Next.js + Univer.js**, providing a full visual experience.
 | **Approval Flow** | Confirmation dialog for high-risk operations, changes auto-snapshot |
 | **Optimistic UI** | Messages appear immediately, writes optimistic update + rollback on failure |
 | **Error Guidance** | Actionable suggestion cards (retry / check settings / copy diagnostic ID) |
-| **ClawHub Market** | Inline skill market panel in sidebar |
 | **API Pool** | Optional credential pool and subscription rotation (off by default) |
-| **Plan Mode** | Complex tasks auto-planned, interactive confirmation before execution |
+| **Plan Mode** | `/plan` toggle; execute after confirming the plan — complex tasks are not auto-decomposed |
 | **Upgrade notification** | Detects new versions; local stop-then-upgrade then probe |
 
 <p align="center">
   <img src="docs/images/webui-mobile.png" width="300" alt="Mobile" />
 </p>
 <p align="center"><sub>Responsive layout — works on mobile</sub></p>
-
-### CLI
-
-Terminal chat with Dashboard layout, `/` auto-completion, and typo correction.
-
-<details>
-<summary>📋 Command Reference</summary>
-
-| Command | Description |
-| --- | --- |
-| `/help` | Help |
-| `/skills` | Skill management (list / install / activate / disable) |
-| `/clawhub search <keyword>` | ClawHub market search |
-| `/clawhub install <slug>` | Install market skill |
-| `/clawhub update` | Update all installed skills |
-| `/model` / `/model list` / `/model <name>` | View, list, or switch models |
-| `/plan` | Toggle Plan mode |
-| `/undo <id>` | Rollback operation |
-| `/registry` | View file registry |
-| `/rules` | Custom rules |
-| `/memory` | Memory management |
-| `/playbook` | Playbook task experience management |
-| `/compact` | Context compaction |
-| `/config export` | Encrypted config export |
-| `/config import` | Import config |
-| `/save` | Save conversation log |
-| `/clear` | Clear conversation |
-| `/rollback` | Rollback session to a specific turn |
-
-</details>
 
 ### REST API
 
@@ -223,11 +212,17 @@ Available once `excelmanus-api` starts. SSE pushes 30+ event types.
 | `GET /api/v1/files/excel` | Excel file stream |
 | `GET /api/v1/files/excel/snapshot` | Excel JSON snapshot |
 | `POST /api/v1/files/excel/write` | Side panel write-back |
+| `GET /api/v1/files/word` | Word file stream |
+| `GET /api/v1/files/word/snapshot` | Word JSON snapshot |
+| `POST /api/v1/files/word/write` | Word write-back |
+| `GET /api/v1/workspaces` | Registered workspaces |
+| `POST /api/v1/workspaces` | Register a local folder |
+| `GET /api/v1/revisions` | File revision history |
+| `POST /api/v1/revisions/restore` | Restore a historical revision |
 | `GET /api/v1/skills` | Skill list |
-| `GET /api/v1/clawhub/*` | ClawHub market (search / install / update) |
 | `GET /api/v1/version/check` | Version check |
 | `POST /api/v1/version/upgrade` | Local stop-then-upgrade (standalone + loopback only) |
-| `GET /api/v1/auth/codex/status` | Codex connection status |
+| `GET /api/v1/auth/providers/openai-codex/status` | Codex connection status |
 | `POST /api/v1/config/export` | Export config |
 | `GET /api/v1/health` | Health check |
 
@@ -254,21 +249,6 @@ Add multiple model profiles in Settings and activate one for chat, subagents, an
 
 On first use of a new model, ExcelManus auto-probes its capability boundaries (vision, function calling, context window, etc.) and dynamically adjusts tool strategies — no manual configuration needed.
 
-## 🔍 Semantic Engine
-
-ExcelManus includes an **embedding-powered semantic retrieval system** to keep the agent precisely contextualized during long conversations:
-
-| Module | Description |
-| --- | --- |
-| **Semantic Memory Retrieval** | User preferences and history vectorized, auto-recalled for new tasks |
-| **Semantic File Registry** | Workspace files indexed by embedding, injected into context by relevance |
-| **Skill catalog** | Optional skills listed in-session; the model loads a body with `skill`, or the user injects one with `/name` |
-| **Session History Retrieval** | Auto-generates structured session summaries, semantic / filename / recency three-path hybrid retrieval, injects history context on first turn |
-| **Error Solution Store** | Error → solution vector index, auto-recalls past fixes for similar errors |
-| **Smart Context Compaction** | Relevance-scored differential truncation, high-relevance messages retain more detail |
-
-All semantic retrieval runs in parallel via `asyncio.gather`, zero extra latency. Set `EXCELMANUS_EMBEDDING_ENABLED=false` to disable entirely (graceful no-op fallback).
-
 ## 🔒 Security
 
 | Mechanism | Description |
@@ -277,23 +257,13 @@ All semantic retrieval runs in parallel via `asyncio.gather`, zero extra latency
 | **Code Review** | `run_code` static analysis, Green / Yellow / Red tier auto-approval |
 | **Local process fence** | `run_code` runs in a local subprocess (path jail, restricted builtins, timeout); no Docker |
 | **Operation Approval** | High-risk writes require confirmation, changes auto-record diffs and snapshots |
-| **Version Chain** | Staging → Audit → CoW, `/undo` rollback to any version |
+| **Version Chain** | Writes land on the user path; history lives in `.excelmanus/revisions/`; `/undo` rolls back |
 | **MCP Whitelist** | External tools require per-item confirmation by default |
-| **Workspace Boundary** | One workspace, one credential store, and one memory store per process; multiple chats are not multi-tenancy |
+| **Workspace Boundary** | Credentials and memory are process-wide; multiple local folders can be registered as workspaces. Multiple chats are not multi-tenancy |
 
-## 🧩 Skillpack & ClawHub
+## 🧩 Skillpack
 
-One directory + one `SKILL.md` (with `name` and `description`) to create a skill. Auto-discovery, on-demand activation, supports Hooks, command dispatch, and MCP dependency declarations.
-
-### ClawHub Skill Market
-
-Built-in [ClawHub](https://clawhub.ai) integration — search, install, and update community skill packs from the UI sidebar or CLI:
-
-```bash
-/clawhub search financial reports   # Search market
-/clawhub install <slug>             # Install
-/clawhub update                     # Update all installed
-```
+One directory + one `SKILL.md` (with `name` and `description`) to create a skill. Auto-discovery; activation uses the `skill` tool (or slash `/<name>` / `@skill`). Supports Hooks, command dispatch, and MCP dependency declarations. Import from a local path or GitHub URL.
 
 <details>
 <summary>📦 Built-in Skills</summary>
@@ -314,16 +284,16 @@ Built-in [ClawHub](https://clawhub.ai) integration — search, install, and upda
 
 Protocol details in [`docs/skillpack_protocol_en.md`](docs/skillpack_protocol_en.md).
 
-## 🧠 Playbook — tactical handbook
-
-Optional SQLite store (off by default). When enabled, `/playbook list` shows entries and `/playbook clear` resets them. The default path does not auto-learn after a task or inject bullets each turn.
-
 ## Single-user architecture
 
-One workspace, one credential store, and one memory store per process. Multiple conversations remain.
+Credentials and memory are process-wide; multiple local folders can be registered as workspaces, and each conversation binds one folder. Multiple conversations remain.
 Configure Codex subscription OAuth under Settings → Models → Subscription & OAuth; it is not tied to a login account.
 
 Legacy `users/{id}/` trees are not auto-merged. Copy the one directory you want into `data_root` / `workspace_root`; per-user `data.db` files are not imported. See [Configuration](docs/configuration_en.md).
+
+**OpenAI Codex subscription**: bind a ChatGPT/Codex subscription via browser PKCE or device code; private models are auto-discovered, no manual API Key.
+
+> **Split frontend/backend deploys**: the OAuth callback is a frontend page that exchanges the token with the backend from the browser. Set the redirect URI to `https://your-domain/auth/codex/callback`.
 
 ## 🏗️ Deployment
 
@@ -385,27 +355,23 @@ For manual deployment, see [Ops Manual](docs/ops-manual_en.md).
 | Optimization | Impact |
 | --- | --- |
 | **Claude Layered Cache** | System prompt split into stable prefix + dynamic block, 2nd request TTFT drops to 3-5s |
-| **SACR Sparse Compression** | Strips null keys from tool results, up to **74% token savings** on sparse data |
+| **SACR Sparse Compression** | Strips null keys from tool results; tests show over 50% token savings on sparse data |
 | **Image Lifecycle Management** | Auto-manages image retention/downgrade across turns |
 | **Single Active Model** | Chat, subagents, and compaction share the active profile |
-| **Context Budget Management** | Dynamic budget allocation with relevance-scored differential truncation |
-| **Parallel Semantic Retrieval** | `asyncio.gather` runs memory/file/skill/session-history retrieval in parallel, zero extra latency |
+| **Context Budget Management** | Dynamic budget allocation with uniform truncation of older messages |
 | **SSE Event Deduplication** | Unified frontend `dispatchSSEEvent` handler |
 | **Database WAL Mode** | SQLite WAL for concurrent reads/writes |
 
 ## 📖 Configuration Reference
 
-Only 3 env vars to get started. Common configuration categories:
+Model and runtime options are saved from **Web Settings** into the main database. Common categories:
 
 | Category | Key Config |
 | --- | --- |
-| **Basic** | `EXCELMANUS_API_KEY` / `BASE_URL` / `MODEL` |
-| **Vision** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_KEEP_ROUNDS` |
-| **Security** | `GUARD_MODE` |
-| **Performance** | `IMAGE_KEEP_ROUNDS` |
-| **Playbook** | `EXCELMANUS_PLAYBOOK_ENABLED` |
-| **ClawHub** | `EXCELMANUS_CLAWHUB_ENABLED` / `CLAWHUB_REGISTRY_URL` |
-| **Embedding** | `EXCELMANUS_EMBEDDING_ENABLED` / `EXCELMANUS_EMBEDDING_MODEL` |
+| **Basic** | `EXCELMANUS_API_KEY` / `EXCELMANUS_BASE_URL` / `EXCELMANUS_MODEL` |
+| **Vision** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_PIXEL_BUDGET` |
+| **Security** | `EXCELMANUS_CODE_POLICY_*` / `EXCELMANUS_MANAGE_TOKEN` |
+| **Performance** | `EXCELMANUS_IMAGE_PIXEL_BUDGET` |
 | **Session Summary** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `EXCELMANUS_SESSION_SUMMARY_MIN_TURNS` |
 
 Full reference in [Configuration](docs/configuration_en.md).
@@ -425,15 +391,17 @@ Start scripts auto-detect OS and package manager, providing precise install comm
 Built-in Bench evaluation with multi-turn cases, auto-assertion, JSON logs, and suite-level concurrency:
 
 ```bash
-uv run python -m excelmanus.bench --all                         # All
+uv run python -m excelmanus.bench --all                         # Default short suites
 uv run python -m excelmanus.bench --suite bench/cases/xxx.json  # Specific suite
 uv run python -m excelmanus.bench --message "Read first 10 rows"  # Single test
 ```
 
+The long experiential suite (no golden answers) lives in `bench/` and is not included in `--all`. See `bench/README.md`.
+
 ## 🛠️ Development & Contributing
 
 ```bash
-uv sync --all-extras --dev    # Full install (cli/web/analysis) + test dependencies
+uv sync --all-extras --dev    # Full install (web/analysis) + test dependencies
 uv run pytest tests/test_engine.py tests/test_api.py  # Targeted tests
 ```
 

@@ -32,7 +32,11 @@ VALID_REASONS = frozenset({
     "afterEdit",
     "checkpoint",
     "beforeRestore",
+    "deleted",
+    "moved",
 })
+
+_PROTECTED_REASONS = frozenset({"checkpoint", "deleted", "moved"})
 
 DEFAULT_PRUNE_KEEP = 40
 
@@ -56,6 +60,10 @@ class RevisionRecord:
     parent_revision_id: str | None = None
     label: str | None = None
     created_at: str | None = None
+    lineage_id: str | None = None
+    exists_after: bool | None = None
+    op: str | None = None
+    committed: bool = True
 
     def to_json_dict(self) -> dict[str, Any]:
         return {
@@ -68,6 +76,10 @@ class RevisionRecord:
             "parentRevisionId": self.parent_revision_id,
             "label": self.label,
             "createdAt": self.created_at,
+            "lineageId": self.lineage_id,
+            "existsAfter": self.exists_after,
+            "op": self.op,
+            "committed": self.committed,
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -81,10 +93,19 @@ class RevisionRecord:
             "label": self.label or "",
             "parent_revision_id": self.parent_revision_id,
             "created_at": self.created_at or "",
+            "lineage_id": self.lineage_id or "",
+            "exists_after": self.exists_after,
+            "op": self.op or "",
         }
 
     @classmethod
     def from_json_dict(cls, data: dict[str, Any]) -> "RevisionRecord":
+        committed = data.get("committed")
+        if committed is None:
+            committed = True
+        exists_after = data.get("existsAfter")
+        if exists_after is None:
+            exists_after = data.get("exists_after")
         return cls(
             id=str(data.get("id") or ""),
             path=str(data.get("path") or ""),
@@ -95,6 +116,10 @@ class RevisionRecord:
             parent_revision_id=data.get("parentRevisionId") or data.get("parent_revision_id"),
             label=data.get("label"),
             created_at=data.get("createdAt") or data.get("created_at") or None,
+            lineage_id=data.get("lineageId") or data.get("lineage_id"),
+            exists_after=exists_after,
+            op=data.get("op"),
+            committed=bool(committed),
         )
 
 
@@ -104,6 +129,16 @@ def _canonical_rel(path: str) -> str:
 
 def content_sha256(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def _is_protected(rec: RevisionRecord) -> bool:
+    if rec.label:
+        return True
+    if rec.reason in _PROTECTED_REASONS:
+        return True
+    if rec.exists_after is False:
+        return True
+    return False
 
 
 class RevisionStore:
@@ -160,12 +195,18 @@ class RevisionStore:
         parent_revision_id: str | None = None,
         label: str | None = None,
         revision_id: str | None = None,
+        lineage_id: str | None = None,
+        exists_after: bool | None = None,
+        op: str | None = None,
+        committed: bool = True,
     ) -> RevisionRecord:
         if reason not in VALID_REASONS:
             raise ValueError(f"invalid revision reason: {reason}")
         rel = _canonical_rel(path)
         sha = self.put_blob(rel, data)
         existing = self._list_all(rel)
+        if exists_after is None:
+            exists_after = reason != "deleted"
         record = RevisionRecord(
             id=revision_id or secrets.token_hex(8),
             path=rel,
@@ -176,15 +217,24 @@ class RevisionStore:
             parent_revision_id=parent_revision_id,
             label=label,
             created_at=_utc_now(),
+            lineage_id=lineage_id,
+            exists_after=exists_after,
+            op=op,
+            committed=committed,
         )
         rec_dir = self._dir_for(rel) / "records"
         rec_dir.mkdir(parents=True, exist_ok=True)
         dest = rec_dir / f"{record.id}.json"
-        dest.write_text(
-            json.dumps(record.to_json_dict(), ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
+        from excelmanus.workspace.txlog import write_json_atomic
+
+        write_json_atomic(dest, record.to_json_dict())
         return record
+
+    def write_record(self, record: RevisionRecord) -> None:
+        dest = self._dir_for(record.path) / "records" / f"{record.id}.json"
+        from excelmanus.workspace.txlog import write_json_atomic
+
+        write_json_atomic(dest, record.to_json_dict())
 
     def get(self, path: str, revision_id: str) -> RevisionRecord | None:
         rel = _canonical_rel(path)
@@ -195,8 +245,8 @@ class RevisionStore:
         return RevisionRecord.from_json_dict(data)
 
     def list(self, path: str) -> list[RevisionRecord]:
-        """Committed history only. Discarded transactions are already gone from disk."""
-        return self._list_all(path)
+        """Committed history only. Uncommitted prepare records stay hidden."""
+        return [rec for rec in self._list_all(path) if rec.committed]
 
     def _list_all(self, path: str) -> list[RevisionRecord]:
         rel = _canonical_rel(path)
@@ -251,12 +301,16 @@ class RevisionStore:
         return removed
 
     def prune(self, path: str, keep: int = DEFAULT_PRUNE_KEEP) -> int:
-        """Keep the newest ``keep`` records; GC unreferenced blobs."""
+        """Keep the newest ``keep`` volatile records. Labels / tombstones stay."""
         records = self._list_all(path)
-        if keep < 0 or len(records) <= keep:
+        if keep < 0:
             return 0
-        drop = records[: len(records) - keep]
-        keep_recs = records[len(records) - keep:]
+        protected = [rec for rec in records if _is_protected(rec)]
+        volatile = [rec for rec in records if not _is_protected(rec)]
+        if len(volatile) <= keep:
+            return 0
+        drop = volatile[: len(volatile) - keep]
+        keep_recs = protected + volatile[len(volatile) - keep :]
         rel = _canonical_rel(path)
         rec_dir = self._dir_for(rel) / "records"
         removed = 0
@@ -337,6 +391,8 @@ class RevisionStore:
             reason="checkpoint",
             transaction_id=tx,
             label=label,
+            exists_after=True,
+            op="checkpoint",
         )
         self.prune(path)
         return rec
@@ -369,6 +425,9 @@ class RevisionStore:
                     data=current_bytes,
                     reason="beforeRestore",
                     transaction_id=tx,
+                    exists_after=True,
+                    op="restore",
+                    committed=False,
                 )
             return tx, before_rec, blob
         except Exception:
@@ -384,12 +443,34 @@ class RevisionStore:
         parent_revision_id: str | None,
     ) -> RevisionRecord:
         try:
+            if parent_revision_id:
+                before = self.get(path, parent_revision_id)
+                if before is not None and not before.committed:
+                    self.write_record(
+                        RevisionRecord(
+                            id=before.id,
+                            path=before.path,
+                            sequence=before.sequence,
+                            reason=before.reason,
+                            sha256=before.sha256,
+                            transaction_id=before.transaction_id,
+                            parent_revision_id=before.parent_revision_id,
+                            label=before.label,
+                            created_at=before.created_at,
+                            lineage_id=before.lineage_id,
+                            exists_after=before.exists_after,
+                            op=before.op,
+                            committed=True,
+                        )
+                    )
             rec = self.add_record(
                 path=path,
                 data=after_bytes,
                 reason="afterEdit",
                 transaction_id=transaction_id,
                 parent_revision_id=parent_revision_id,
+                exists_after=True,
+                op="restore",
             )
             self.prune(path)
             return rec

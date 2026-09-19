@@ -8,21 +8,31 @@ from unittest.mock import patch
 
 def test_api_module_imports_without_orjson() -> None:
     """API 模块在缺少 orjson 时仍应可导入并回退到标准 JSON。"""
+    original_api = sys.modules.get("excelmanus.api")
+    original_orjson = sys.modules.get("orjson")
     sys.modules.pop("excelmanus.api", None)
     sys.modules.pop("orjson", None)
+    try:
+        real_import = builtins.__import__
 
-    real_import = builtins.__import__
+        def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
+            if name == "orjson":
+                raise ModuleNotFoundError("No module named 'orjson'")
+            return real_import(name, globals, locals, fromlist, level)
 
-    def _fake_import(name, globals=None, locals=None, fromlist=(), level=0):
-        if name == "orjson":
-            raise ModuleNotFoundError("No module named 'orjson'")
-        return real_import(name, globals, locals, fromlist, level)
+        with patch("builtins.__import__", side_effect=_fake_import):
+            module = importlib.import_module("excelmanus.api")
 
-    with patch("builtins.__import__", side_effect=_fake_import):
-        module = importlib.import_module("excelmanus.api")
+        response = module.CustomJSONResponse(content={"message": "中文", "count": 1})
+        payload = response.body.decode("utf-8")
 
-    response = module.CustomJSONResponse(content={"message": "中文", "count": 1})
-    payload = response.body.decode("utf-8")
-
-    assert '"message":"中文"' in payload
-    assert "\\u4e2d\\u6587" not in payload
+        assert '"message":"中文"' in payload
+        assert "\\u4e2d\\u6587" not in payload
+    finally:
+        # 新导入的模块对象会替换 sys.modules 条目；恢复原模块，避免后续测试
+        # 持有的 collection 期引用与 sys.modules 分叉（app.state.runtime 双轨）。
+        sys.modules.pop("excelmanus.api", None)
+        if original_api is not None:
+            sys.modules["excelmanus.api"] = original_api
+        if original_orjson is not None:
+            sys.modules["orjson"] = original_orjson

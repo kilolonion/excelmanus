@@ -157,6 +157,21 @@ def test_restore_prepare_and_finish(tmp_path: Path) -> None:
     assert reasons[-1] == "afterEdit"
 
 
+def test_prune_keeps_labeled_checkpoint(tmp_path: Path) -> None:
+    store = RevisionStore(tmp_path)
+    store.checkpoint("book.xlsx", b"snap", label="keep-me")
+    for i in range(45):
+        store.add_record(
+            path="book.xlsx",
+            data=f"v{i}".encode(),
+            reason="afterEdit",
+            transaction_id=f"tx{i}",
+        )
+    store.prune("book.xlsx", keep=40)
+    labels = [r.label for r in store.list("book.xlsx")]
+    assert "keep-me" in labels
+
+
 def test_checkpoint_does_not_change_path(tmp_path: Path) -> None:
     store = RevisionStore(tmp_path)
     rec = store.checkpoint("book.xlsx", b"snap", label="before")

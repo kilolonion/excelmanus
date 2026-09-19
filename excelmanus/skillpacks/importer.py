@@ -292,7 +292,8 @@ def _collect_directory_files(directory: Path) -> list[str]:
         parts = item.relative_to(directory).parts
         if any(p.startswith(".") or p in _IGNORED_NAMES for p in parts):
             continue
-        results.append(str(item.relative_to(directory)))
+        # 相对路径统一 POSIX 风格，跨平台稳定
+        results.append(item.relative_to(directory).as_posix())
     return results
 
 

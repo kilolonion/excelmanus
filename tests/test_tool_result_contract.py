@@ -110,7 +110,7 @@ class TestToolResultAdapter:
         dispatcher._apply_ui_meta_effects(tr)
         assert len(dispatcher._deferred_image_injections) == 1
         dispatcher.flush_deferred_images()
-        engine.memory.add_image_message.assert_called_once()
+        engine.memory.add_user_message.assert_called_once()
 
 
 class TestReadExcelToolResult:
@@ -156,12 +156,16 @@ class TestResultConstructors:
         assert tr.ui_meta.content_version == "sha256:abc"
         assert tr.model_text == "ok"
 
-    def test_error_result_keeps_error_field(self) -> None:
+    def test_error_result_canonical_payload(self) -> None:
         from excelmanus.engine_core.tool_result import error_result
 
         tr = error_result("bad page", code="INVALID_ARGS", fields={"error": "bad page"})
         assert tr.success is False
-        assert tr.value["error"] == "bad page"
+        assert tr.value["status"] == "error"
+        assert tr.value["error_code"] == "INVALID_ARGS"
+        assert tr.value["message"] == "bad page"
+        assert "error" not in tr.value
+        assert "code" not in tr.value
         assert tr.error is not None
         assert tr.error.code == "INVALID_ARGS"
 

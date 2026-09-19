@@ -1,23 +1,26 @@
 import { create } from "zustand";
-import { persist } from "zustand/middleware";
+import { apiPut } from "@/lib/api";
+import {
+  type CoachPhase,
+  type OnboardingSnapshot,
+  clearLegacyLocalOnboarding,
+  mergeOnboardingSnapshots,
+  readLegacyLocalOnboarding,
+  snapshotFromServer,
+  snapshotToPayload,
+  snapshotsEqual,
+} from "@/stores/onboarding-state";
 
-type CoachPhase = "basic" | "transition" | "advanced" | "settingsTransition" | "settings" | "done";
+export type { CoachPhase };
 
-interface OnboardingState {
-  wizardCompleted: boolean;
-  coachMarksCompleted: boolean;
-  advancedGuideCompleted: boolean;
-  settingsGuideCompleted: boolean;
-  skippedAt: string | null;
-  coachPhase: CoachPhase;
-  coachStepIndex: number;
+interface OnboardingState extends OnboardingSnapshot {
   /** Runtime-only: whether the backend has valid model config (from /health `configured` field). */
   backendConfigured: boolean | null;
   /** Runtime-only: true while the settings tour is active — prevents closing the settings dialog. */
   isGuideLocked: boolean;
   /** Runtime-only: incremented by resetToPhase so CoachMarks can detect external resets. */
   _resetGeneration: number;
-  /** Runtime-only: true once the store has re-hydrated with the correct per-user key. */
+  /** Runtime-only: true after /health has applied server onboarding state. */
   _userSynced: boolean;
 
   completeWizard: () => void;
@@ -32,118 +35,160 @@ interface OnboardingState {
   setCoachProgress: (phase: CoachPhase, stepIndex: number) => void;
   setBackendConfigured: (value: boolean) => void;
   setGuideLocked: (locked: boolean) => void;
+  applyServerState: (raw: unknown, configured: boolean) => void;
 }
 
-export const useOnboardingStore = create<OnboardingState>()(
-  persist(
-    (set) => ({
+function snapshotFromStore(state: OnboardingSnapshot): OnboardingSnapshot {
+  return {
+    wizardCompleted: state.wizardCompleted,
+    coachMarksCompleted: state.coachMarksCompleted,
+    advancedGuideCompleted: state.advancedGuideCompleted,
+    settingsGuideCompleted: state.settingsGuideCompleted,
+    skippedAt: state.skippedAt,
+    coachPhase: state.coachPhase,
+    coachStepIndex: state.coachStepIndex,
+  };
+}
+
+let persistOnboarding = (_options?: { clearLegacyOnSuccess?: boolean }): void => {};
+
+export const useOnboardingStore = create<OnboardingState>()((set) => ({
+  wizardCompleted: false,
+  coachMarksCompleted: false,
+  advancedGuideCompleted: false,
+  settingsGuideCompleted: false,
+  skippedAt: null,
+  coachPhase: "basic",
+  coachStepIndex: 0,
+  backendConfigured: null,
+  isGuideLocked: false,
+  _resetGeneration: 0,
+  _userSynced: false,
+
+  completeWizard: () => {
+    set({ wizardCompleted: true });
+    persistOnboarding();
+  },
+  completeCoachMarks: () => {
+    set({ coachMarksCompleted: true, coachPhase: "transition", coachStepIndex: 0 });
+    persistOnboarding();
+  },
+  completeAdvancedGuide: () => {
+    set({ advancedGuideCompleted: true, coachPhase: "settingsTransition", coachStepIndex: 0 });
+    persistOnboarding();
+  },
+  declineAdvancedGuide: () => {
+    set({ advancedGuideCompleted: true, coachPhase: "settingsTransition", coachStepIndex: 0 });
+    persistOnboarding();
+  },
+  completeSettingsGuide: () => {
+    set({ settingsGuideCompleted: true, coachPhase: "done", coachStepIndex: 0 });
+    persistOnboarding();
+  },
+  declineSettingsGuide: () => {
+    set({ settingsGuideCompleted: true, coachPhase: "done", coachStepIndex: 0 });
+    persistOnboarding();
+  },
+  skipWizard: () => {
+    set({ wizardCompleted: true, skippedAt: new Date().toISOString() });
+    persistOnboarding();
+  },
+  resetOnboarding: () => {
+    set({
       wizardCompleted: false,
       coachMarksCompleted: false,
       advancedGuideCompleted: false,
       settingsGuideCompleted: false,
       skippedAt: null,
-      coachPhase: "basic" as CoachPhase,
+      coachPhase: "basic",
       coachStepIndex: 0,
-      backendConfigured: null,
-      isGuideLocked: false,
-      _resetGeneration: 0,
-      _userSynced: true,
-
-      completeWizard: () => set({ wizardCompleted: true }),
-      completeCoachMarks: () =>
-        set({ coachMarksCompleted: true, coachPhase: "transition" as CoachPhase, coachStepIndex: 0 }),
-      completeAdvancedGuide: () =>
-        set({ advancedGuideCompleted: true, coachPhase: "settingsTransition" as CoachPhase, coachStepIndex: 0 }),
-      declineAdvancedGuide: () =>
-        set({ advancedGuideCompleted: true, coachPhase: "settingsTransition" as CoachPhase, coachStepIndex: 0 }),
-      completeSettingsGuide: () =>
-        set({ settingsGuideCompleted: true, coachPhase: "done" as CoachPhase, coachStepIndex: 0 }),
-      declineSettingsGuide: () =>
-        set({ settingsGuideCompleted: true, coachPhase: "done" as CoachPhase, coachStepIndex: 0 }),
-      skipWizard: () =>
-        set({ wizardCompleted: true, skippedAt: new Date().toISOString() }),
-      resetOnboarding: () =>
+    });
+    persistOnboarding();
+  },
+  resetToPhase: (target) => {
+    const gen = useOnboardingStore.getState()._resetGeneration + 1;
+    switch (target) {
+      case "wizard":
         set({
           wizardCompleted: false,
           coachMarksCompleted: false,
           advancedGuideCompleted: false,
           settingsGuideCompleted: false,
           skippedAt: null,
-          coachPhase: "basic" as CoachPhase,
+          coachPhase: "basic",
           coachStepIndex: 0,
-        }),
-      resetToPhase: (target) => {
-        const gen = useOnboardingStore.getState()._resetGeneration + 1;
-        switch (target) {
-          case "wizard":
-            set({
-              wizardCompleted: false,
-              coachMarksCompleted: false,
-              advancedGuideCompleted: false,
-              settingsGuideCompleted: false,
-              skippedAt: null,
-              coachPhase: "basic" as CoachPhase,
-              coachStepIndex: 0,
-              isGuideLocked: false,
-              _resetGeneration: gen,
-            });
-            break;
-          case "basic":
-            set({
-              wizardCompleted: true,
-              coachMarksCompleted: false,
-              advancedGuideCompleted: false,
-              settingsGuideCompleted: false,
-              skippedAt: null,
-              coachPhase: "basic" as CoachPhase,
-              coachStepIndex: 0,
-              isGuideLocked: false,
-              _resetGeneration: gen,
-            });
-            break;
-          case "advanced":
-            set({
-              wizardCompleted: true,
-              coachMarksCompleted: true,
-              advancedGuideCompleted: false,
-              settingsGuideCompleted: false,
-              skippedAt: null,
-              coachPhase: "advanced" as CoachPhase,
-              coachStepIndex: 0,
-              isGuideLocked: false,
-              _resetGeneration: gen,
-            });
-            break;
-          case "settings":
-            set({
-              wizardCompleted: true,
-              coachMarksCompleted: true,
-              advancedGuideCompleted: true,
-              settingsGuideCompleted: false,
-              skippedAt: null,
-              coachPhase: "settings" as CoachPhase,
-              coachStepIndex: 0,
-              isGuideLocked: false,
-              _resetGeneration: gen,
-            });
-            break;
-        }
-      },
-      setCoachProgress: (phase, stepIndex) =>
-        set({ coachPhase: phase, coachStepIndex: stepIndex }),
-      setBackendConfigured: (value) => set({ backendConfigured: value }),
-      setGuideLocked: (locked) => set({ isGuideLocked: locked }),
-    }),
-    {
-      name: "excelmanus-onboarding",
-      partialize: (state) => {
-        const { backendConfigured: _, isGuideLocked: _2, _resetGeneration: _3, _userSynced: _4, ...persisted } = state;
-        return persisted;
-      },
+          isGuideLocked: false,
+          _resetGeneration: gen,
+        });
+        break;
+      case "basic":
+        set({
+          wizardCompleted: true,
+          coachMarksCompleted: false,
+          advancedGuideCompleted: false,
+          settingsGuideCompleted: false,
+          skippedAt: null,
+          coachPhase: "basic",
+          coachStepIndex: 0,
+          isGuideLocked: false,
+          _resetGeneration: gen,
+        });
+        break;
+      case "advanced":
+        set({
+          wizardCompleted: true,
+          coachMarksCompleted: true,
+          advancedGuideCompleted: false,
+          settingsGuideCompleted: false,
+          skippedAt: null,
+          coachPhase: "advanced",
+          coachStepIndex: 0,
+          isGuideLocked: false,
+          _resetGeneration: gen,
+        });
+        break;
+      case "settings":
+        set({
+          wizardCompleted: true,
+          coachMarksCompleted: true,
+          advancedGuideCompleted: true,
+          settingsGuideCompleted: false,
+          skippedAt: null,
+          coachPhase: "settings",
+          coachStepIndex: 0,
+          isGuideLocked: false,
+          _resetGeneration: gen,
+        });
+        break;
     }
-  )
-);
+    persistOnboarding();
+  },
+  setCoachProgress: (phase, stepIndex) => {
+    set({ coachPhase: phase, coachStepIndex: stepIndex });
+    persistOnboarding();
+  },
+  setBackendConfigured: (value) => set({ backendConfigured: value }),
+  setGuideLocked: (locked) => set({ isGuideLocked: locked }),
+  applyServerState: (raw, configured) => {
+    const server = snapshotFromServer(raw, configured);
+    const local = readLegacyLocalOnboarding();
+    const merged = mergeOnboardingSnapshots(server, local);
+    set({ ...merged, _userSynced: true });
+    if (local && !snapshotsEqual(merged, server)) {
+      persistOnboarding({ clearLegacyOnSuccess: true });
+    } else {
+      clearLegacyLocalOnboarding();
+    }
+  },
+}));
 
-if (typeof window !== "undefined") {
-  useOnboardingStore.setState({ _userSynced: true });
-}
+persistOnboarding = (options) => {
+  const payload = snapshotToPayload(snapshotFromStore(useOnboardingStore.getState()));
+  void apiPut("/onboarding", payload)
+    .then(() => {
+      if (options?.clearLegacyOnSuccess !== false) clearLegacyLocalOnboarding();
+    })
+    .catch(() => {
+      /* 下次用户操作会再写；不打断当前引导 */
+    });
+};

@@ -66,10 +66,10 @@ class TestConversationMemory:
 
     def test_default_system_prompt_contains_persona(self) -> None:
         assert "你是 ExcelManus" in _DEFAULT_SYSTEM_PROMPT
-        assert "工具成功不等于业务正确" in _DEFAULT_SYSTEM_PROMPT
         assert "VERSION_CONFLICT" in _DEFAULT_SYSTEM_PROMPT
-        assert "没有结束工具" in _DEFAULT_SYSTEM_PROMPT
-        assert "没有轮次上限" in _DEFAULT_SYSTEM_PROMPT
+        assert "uploads/" in _DEFAULT_SYSTEM_PROMPT
+        assert "问一个具体问题" in _DEFAULT_SYSTEM_PROMPT
+        assert "不擅自替换目标" in _DEFAULT_SYSTEM_PROMPT
         assert "宿主有轮次上限" not in _DEFAULT_SYSTEM_PROMPT
 
     def test_initial_get_messages_has_system_only(self, memory: ConversationMemory) -> None:
@@ -180,11 +180,11 @@ class TestTruncation:
         """截断后 system prompt 始终保留。"""
         mem = ConversationMemory(config)
         # 降低阈值以便触发截断
-        mem._truncation_threshold = 100
+        threshold = 100
 
-        # 添加大量消息直到触发截断
         for i in range(50):
             mem.add_user_message(f"这是第 {i} 条很长的消息，" * 10)
+        mem._truncate_history_to_threshold(threshold, None)
 
         msgs = mem.get_messages()
         assert msgs[0]["role"] == "system"
@@ -197,14 +197,14 @@ class TestTruncation:
         system_tokens = TokenCounter.count_message(
             {"role": "system", "content": mem.system_prompt}
         )
-        mem._truncation_threshold = system_tokens + 500
+        threshold = system_tokens + 500
 
         mem.add_user_message("第一条消息")
         mem.add_assistant_message("第一条回复")
         mem.add_user_message("第二条消息")
         mem.add_assistant_message("第二条回复")
-        # 添加一条很长的消息触发截断
         mem.add_user_message("这是一条非常长的消息，" * 100)
+        mem._truncate_history_to_threshold(threshold, None)
 
         msgs = mem.get_messages()
         # 最后一条（最长的）应保留，且要么保留原文/截断后缀，要么因 system 过大被缩为空
@@ -217,13 +217,13 @@ class TestTruncation:
     ) -> None:
         """截断 tool_call 消息时，对应的 tool_result 也一并移除。"""
         mem = ConversationMemory(config)
-        mem._truncation_threshold = 200
+        threshold = 200
 
         # 添加一组 tool_call + tool_result
         mem.add_tool_call("old_call", "read_excel", '{"path": "old.xlsx"}')
         mem.add_tool_result("old_call", "旧数据内容")
-        # 添加新消息触发截断
         mem.add_user_message("新的请求，" * 100)
+        mem._truncate_history_to_threshold(threshold, None)
 
         msgs = mem.get_messages()
         # 不应有孤立的 tool result
@@ -254,55 +254,51 @@ class TestTruncation:
         system_tokens = TokenCounter.count_message(
             {"role": "system", "content": mem.system_prompt}
         )
-        mem._truncation_threshold = system_tokens + 200
+        threshold = system_tokens + 200
         mem.add_user_message("x" * 8000)
-        assert mem._total_tokens() <= mem._truncation_threshold
+        mem._truncate_history_to_threshold(threshold, None)
+        assert mem._total_tokens_with_system_messages(None) <= threshold
 
-    def test_trim_for_request_enforces_final_message_budget(self, config: ExcelManusConfig) -> None:
-        """trim_for_request 应按最终请求消息预算裁剪历史。"""
+    def test_project_for_request_does_not_drop_durable_history(self, config: ExcelManusConfig) -> None:
+        """发送投影不得从头部删 durable；预算压力交给 compaction。"""
         mem = ConversationMemory(config)
         for i in range(30):
             mem.add_user_message(f"用户消息 {i} " * 20)
             mem.add_assistant_message(f"助手回复 {i} " * 20)
-
-        system_prompts = ["系统提示 A", "系统提示 B"]
-        result = mem.trim_for_request(
-            system_prompts=system_prompts,
-            max_context_tokens=2000,
-            reserve_ratio=0.1,
+        before = len(mem.messages)
+        result = mem.project_for_request(
+            system_prompts=["系统提示 A"],
         )
-        total_tokens = sum(TokenCounter.count_message(m) for m in result)
-        assert total_tokens <= int(2000 * 0.9)
+        assert len(mem.messages) == before
+        assert result[0]["role"] == "system"
+        assert any(m.get("content") == mem.messages[0]["content"] for m in result if m.get("role") == "user")
 
-    def test_trim_for_request_puts_context_prompts_as_user_role(
+    def test_project_for_request_puts_context_prompts_at_tail(
         self, config: ExcelManusConfig
     ) -> None:
         mem = ConversationMemory(config)
         mem.add_user_message("你好")
-        msgs = mem.trim_for_request(
+        mem.add_user_message("## Hook 上下文\nnotice", hidden=True, prompt_kind="hook")
+        msgs = mem.project_for_request(
             system_prompts=["系统提示"],
-            max_context_tokens=8000,
-            context_prompts=["## Hook 上下文\nnotice"],
         )
         assert msgs[0]["role"] == "system"
         assert msgs[1]["role"] == "user"
-        assert msgs[1]["content"] == "## Hook 上下文\nnotice"
+        assert msgs[1]["content"] == "你好"
         assert msgs[2]["role"] == "user"
-        assert msgs[2]["content"] == "你好"
+        assert msgs[2]["content"] == "## Hook 上下文\nnotice"
 
-    def test_trim_for_request_keeps_tool_call_and_result_consistency(
+    def test_project_for_request_keeps_tool_call_and_result_consistency(
         self, config: ExcelManusConfig
     ) -> None:
-        """trim_for_request 截断后不应出现孤立 tool result。"""
+        """project_for_request 截断后不应出现孤立 tool result。"""
         mem = ConversationMemory(config)
         mem.add_tool_call("call_1", "read_excel", '{"file_path":"a.xlsx"}')
         mem.add_tool_result("call_1", "读取结果")
         mem.add_user_message("后续问题 " * 50)
 
-        msgs = mem.trim_for_request(
+        msgs = mem.project_for_request(
             system_prompts=["系统提示"],
-            max_context_tokens=1200,
-            reserve_ratio=0.1,
         )
         call_ids: set[str] = set()
         for msg in msgs:
@@ -330,36 +326,63 @@ class TestMultimodalMemory:
         assert msgs[-1]["content"] == "hello"
         assert "_image_id" not in msgs[-1]
 
-    def test_add_user_message_list_content(self, config: ExcelManusConfig) -> None:
-        """多模态 content parts。"""
+    def test_add_user_message_list_content(self, config: ExcelManusConfig, tmp_path, monkeypatch) -> None:
+        """多模态 content parts 写入 durable image ref。"""
+        monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+        from excelmanus.attachments.store import reset_attachment_store
+        reset_attachment_store()
         mem = ConversationMemory(config)
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
         parts = [
             {"type": "text", "text": "看这张图"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc", "detail": "auto"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}", "detail": "auto"}},
         ]
         mem.add_user_message(parts)
         msgs = mem.get_messages()
         assert msgs[-1]["role"] == "user"
-        assert msgs[-1]["content"] == parts
+        content = msgs[-1]["content"]
+        assert isinstance(content, list)
+        assert content[0]["type"] == "text"
+        assert content[1]["type"] == "image"
+        assert content[1]["attachment"]["attachmentId"].startswith("sha256:")
         assert "_image_id" not in msgs[-1]
 
-    def test_add_image_message(self, config: ExcelManusConfig) -> None:
-        """便捷图片注入方法。"""
+    def test_add_user_image_message(self, config: ExcelManusConfig, tmp_path, monkeypatch) -> None:
+        """便捷图片注入写入 ref，不把 base64 留在历史上。"""
+        monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+        from excelmanus.attachments.store import reset_attachment_store
+        reset_attachment_store()
         mem = ConversationMemory(config)
-        mem.add_image_message(base64_data="iVBOR...", mime_type="image/png")
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+
+        ref = admit_image_bytes(decode_image_payload(png), media_type="image/png")
+        mem.add_user_message([{"type": "image", "attachment": ref.to_dict()}])
         msgs = mem.get_messages()
         last = msgs[-1]
         assert last["role"] == "user"
         assert isinstance(last["content"], list)
-        assert last["content"][0]["type"] == "image_url"
+        assert last["content"][0]["type"] == "image"
 
-    def test_count_message_with_image(self, config: ExcelManusConfig) -> None:
+    def test_count_message_with_image(self, config: ExcelManusConfig, tmp_path, monkeypatch) -> None:
         """图片消息 token 估算。"""
+        monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+        from excelmanus.attachments.store import reset_attachment_store
+        reset_attachment_store()
         mem = ConversationMemory(config)
-        mem.add_image_message(base64_data="x" * 100, mime_type="image/png")
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
+        from excelmanus.attachments.admit import admit_image_bytes, decode_image_payload
+
+        ref = admit_image_bytes(decode_image_payload(png), media_type="image/png")
+        mem.add_user_message([{"type": "image", "attachment": ref.to_dict()}])
         msgs = mem.get_messages()
         count = TokenCounter.count_message(msgs[-1])
-        # 应包含 IMAGE_TOKEN_ESTIMATE 的估算值
         assert count >= IMAGE_TOKEN_ESTIMATE
 
 
@@ -408,14 +431,13 @@ def test_property_truncation_preserves_system_and_recent(
     config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
     mem = ConversationMemory(config)
     mem.system_prompt = _PROPERTY_TEST_SYSTEM_PROMPT
-    mem._truncation_threshold = threshold
-
     for role, content in messages:
         if role == "user":
             mem.add_user_message(content)
         else:
             mem.add_assistant_message(content)
 
+    mem._truncate_history_to_threshold(threshold, None)
     result = mem.get_messages()
 
     # 不变量 1：system 消息始终在首位
@@ -466,7 +488,7 @@ def test_property_truncation_no_orphan_tool_results(
     """
     config = ExcelManusConfig(api_key="test-key", base_url="https://test.example.com/v1", model="test-model")
     mem = ConversationMemory(config)
-    mem._truncation_threshold = 150  # 较低阈值以触发截断
+    threshold = 150  # 较低阈值以触发截断
 
     # 模拟多轮 tool calling 对话
     for i in range(n_rounds):
@@ -476,6 +498,7 @@ def test_property_truncation_no_orphan_tool_results(
         mem.add_tool_result(call_id, "y" * content_size)
         mem.add_assistant_message("z" * content_size)
 
+    mem._truncate_history_to_threshold(threshold, None)
     result = mem.get_messages()
 
     # 收集所有 tool_call id
@@ -600,23 +623,22 @@ class TestRepairDanglingToolCalls:
 
 
 # ---------------------------------------------------------------------------
-# trim_for_request 消息清洗回归测试
+# project_for_request 消息清洗回归测试
 # ---------------------------------------------------------------------------
 
 
 class TestSanitizeMessagesForApi:
-    """验证 trim_for_request 在发送到 API 前剥离非标准字段。
+    """验证 project_for_request 在发送到 API 前剥离非标准字段。
 
     回归场景：LLM 返回的 assistant 消息包含 provider 特有字段
     （thinking / reasoning / reasoning_content），这些字段被存入 memory 后
-    在后续轮次随 trim_for_request 一并发送给 API，导致部分 provider
+    在后续轮次随 project_for_request 一并发送给 API，导致部分 provider
     返回 400 Bad Request。
     """
 
     def test_strips_thinking_fields_from_assistant(self, memory: ConversationMemory) -> None:
-        """assistant 消息中的 thinking/reasoning/reasoning_content 应被剥离。"""
+        """assistant 回放字段必须保留，不得再剥掉后补空串。"""
         memory.add_user_message("hello")
-        # 模拟 add_assistant_tool_message 存入带 provider 扩展字段的消息
         memory.add_assistant_tool_message({
             "role": "assistant",
             "content": "Let me check",
@@ -626,20 +648,18 @@ class TestSanitizeMessagesForApi:
             "thinking": "I should read the file first",
             "reasoning": "I should read the file first",
             "reasoning_content": "I should read the file first",
+            "replay_state": {"thinking_blocks": [{"type": "thinking", "thinking": "I should read the file first", "signature": "sig"}]},
         })
         memory.add_tool_result("tc_1", "ok")
 
-        msgs = memory.trim_for_request(
+        msgs = memory.project_for_request(
             system_prompts=["You are a helpful assistant."],
-            max_context_tokens=128000,
         )
         assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1
         a = assistant_msgs[0]
-        assert "thinking" not in a
-        assert "reasoning" not in a
-        assert "reasoning_content" not in a
-        # 标准字段保留
+        assert a["reasoning_content"] == "I should read the file first"
+        assert a["replay_state"]["thinking_blocks"][0]["signature"] == "sig"
         assert a["role"] == "assistant"
         assert a["content"] == "Let me check"
         assert len(a["tool_calls"]) == 1
@@ -654,15 +674,14 @@ class TestSanitizeMessagesForApi:
             "reasoning_content": None,
         })
 
-        msgs = memory.trim_for_request(
+        msgs = memory.project_for_request(
             system_prompts=["system"],
-            max_context_tokens=128000,
         )
         assistant_msgs = [m for m in msgs if m.get("role") == "assistant"]
         assert len(assistant_msgs) == 1
         a = assistant_msgs[0]
         assert "tool_calls" not in a
-        assert "reasoning_content" not in a
+        assert "reasoning_content" not in a or a.get("reasoning_content") in (None, "")
 
     def test_preserves_standard_tool_message_fields(self, memory: ConversationMemory) -> None:
         """tool 消息应仅保留 role/content/tool_call_id/name。"""
@@ -676,18 +695,16 @@ class TestSanitizeMessagesForApi:
         })
         memory.add_tool_result("tc_x", "done")
 
-        msgs = memory.trim_for_request(
+        msgs = memory.project_for_request(
             system_prompts=["sys"],
-            max_context_tokens=128000,
         )
         tool_msgs = [m for m in msgs if m.get("role") == "tool"]
         assert len(tool_msgs) == 1
         t = tool_msgs[0]
         assert set(t.keys()) <= {"role", "content", "tool_call_id", "name"}
 
-    def test_ensures_first_message_is_user_after_truncation(self, memory: ConversationMemory) -> None:
-        """截断后首条消息若为 assistant，应被移除直到首条为 user。"""
-        # 构造：user → assistant(tc) → tool → assistant(text) → user → assistant
+    def test_project_for_request_does_not_rewrite_durable_prefix(self, memory: ConversationMemory) -> None:
+        """发送投影不得为了 user-first 删掉 durable 前缀。"""
         memory.add_user_message("first")
         memory.add_assistant_tool_message({
             "role": "assistant",
@@ -700,36 +717,79 @@ class TestSanitizeMessagesForApi:
         memory.add_assistant_message("middle text")
         memory.add_user_message("second")
         memory.add_assistant_message("final")
-
-        # 手动移除第一条 user 消息模拟截断效果
         memory._messages.pop(0)
-        # 现在首条为 assistant(tc)
+        roles_before = [m.get("role") for m in memory.messages]
 
-        msgs = memory.trim_for_request(
+        msgs = memory.project_for_request(
             system_prompts=["sys"],
-            max_context_tokens=128000,
         )
+        assert [m.get("role") for m in memory.messages] == roles_before
         non_system = [m for m in msgs if m.get("role") != "system"]
-        assert non_system, "应至少保留一条非 system 消息"
-        assert non_system[0]["role"] == "user", (
-            f"首条非 system 消息应为 user，实际为 {non_system[0]['role']}"
-        )
+        assert non_system[0]["role"] == "assistant"
 
-    def test_user_multimodal_content_preserved(self, memory: ConversationMemory) -> None:
-        """user 消息的多模态 content（list）结构应原样保留。"""
+    def test_in_history_system_downgraded_to_user_on_wire(
+        self, memory: ConversationMemory,
+    ) -> None:
+        """R06 复现：in-history system_update 在严格 OpenAI 网关触发
+        'System message must be at the beginning' 400；wire 上须降级为 user。"""
+        memory.add_user_message("first")
+        memory.add_system_message("新系统提示内容", prompt_kind="system_update")
+        memory.add_user_message("second")
+
+        msgs = memory.project_for_request(system_prompts=["sys"])
+        # 首位 system 保留；历史中不得再出现 system 角色
+        assert msgs[0]["role"] == "system"
+        mid = [m for m in msgs[1:] if m.get("role") == "system"]
+        assert mid == []
+        demoted = [
+            m for m in msgs
+            if m.get("role") == "user" and "新系统提示内容" in str(m.get("content"))
+        ]
+        assert len(demoted) == 1
+        assert "系统提示" in demoted[0]["content"]
+        # durable 原样保留 system 角色（回放语义不变）
+        assert any(m.get("role") == "system" for m in memory.messages)
+
+    def test_user_multimodal_content_preserved(
+        self, memory: ConversationMemory, tmp_path, monkeypatch,
+    ) -> None:
+        """durable 历史存 ref；请求投影再派生 image_url。"""
+        monkeypatch.setenv("EXCELMANUS_HOME", str(tmp_path))
+        from excelmanus.attachments.store import reset_attachment_store
+        reset_attachment_store()
+        png = (
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg=="
+        )
         parts = [
             {"type": "text", "text": "describe this"},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc", "detail": "auto"}},
+            {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{png}", "detail": "auto"}},
         ]
         memory.add_user_message(parts)
+        durable = memory.messages[-1]
+        assert durable["content"][1]["type"] == "image"
+        assert "_image_id" not in durable
 
-        msgs = memory.trim_for_request(
+        msgs = memory.project_for_request(
             system_prompts=["sys"],
-            max_context_tokens=128000,
         )
         user_msgs = [m for m in msgs if m.get("role") == "user"]
         assert len(user_msgs) == 1
-        # content 结构保留（_image_id 等内部字段应已被剥离）
         u = user_msgs[0]
         assert isinstance(u["content"], list)
+        assert any(p.get("type") == "image_url" for p in u["content"])
         assert "_image_id" not in u
+        assert durable["content"][1]["type"] == "image"
+
+
+def test_legacy_image_lifecycle_and_truncation_entry_removed(config: ExcelManusConfig) -> None:
+    """旧图片生命周期空实现与旧原地截断入口必须清零。"""
+    mem = ConversationMemory(config)
+    for legacy in (
+        "mark_images_sent",
+        "manage_image_lifecycle",
+        "reset_image_tracking",
+        "_truncate_if_needed",
+        "_ensure_starts_with_user",
+    ):
+        assert not hasattr(mem, legacy), f"旧入口仍存在: {legacy}"
+    assert not hasattr(mem, "_truncation_threshold")

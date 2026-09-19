@@ -54,4 +54,10 @@ describe("workspaceFileMention", () => {
       workspaceFileMention({ path: "./uploads/folder/sales.xlsx", filename: "sales.xlsx" }),
     ).toBe("@file:uploads/folder/sales.xlsx");
   });
+
+  it("keeps workspace-list relative paths without inventing a leading slash", () => {
+    expect(
+      workspaceFileMention({ path: "web/public/samples/订单与产品.xlsx", filename: "订单与产品.xlsx" }),
+    ).toBe("@file:web/public/samples/订单与产品.xlsx");
+  });
 });

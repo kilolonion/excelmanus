@@ -20,6 +20,22 @@ logger = logging.getLogger(__name__)
 # ── 断言结果 ──────────────────────────────────────────────
 
 
+# 效率预算类规则：只告警、不判 fail。
+#
+# 历史教训（reports/03-wave-r1-findings、04-wave-r2）：max_llm_calls 等上限按
+# 理想链路 ×1.2 设置，口径探索/复核重算的余量不足，导致大量"假失败"——交付
+# 正确但超 1-2 轮即被记 fail。正确性由 output_checks 判定；效率只记 warning，
+# 供 analyze_run/summarize_runs 做 P90 预算复盘，不再影响退出码。
+EFFICIENCY_RULES = frozenset({
+    "max_iterations",
+    "max_llm_calls",
+    "max_tool_calls",
+    "max_tool_failures",
+    "max_tokens",
+    "max_duration_seconds",
+})
+
+
 @dataclass
 class AssertionResult:
     """单条断言的校验结果。"""
@@ -49,11 +65,17 @@ class AssertionResult:
 
 @dataclass
 class ValidationSummary:
-    """一个 case 的断言校验汇总。"""
+    """一个 case 的断言校验汇总。
+
+    ``failed`` 含全部未通过（含 warning）；``errors`` 只含 severity=error 的
+    未通过（决定退出码），``warnings`` 为 warn-only 未通过（只告警）。
+    """
 
     total: int = 0
     passed: int = 0
     failed: int = 0
+    errors: int = 0
+    warnings: int = 0
     results: list[AssertionResult] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -61,6 +83,8 @@ class ValidationSummary:
             "total": self.total,
             "passed": self.passed,
             "failed": self.failed,
+            "errors": self.errors,
+            "warnings": self.warnings,
             "results": [r.to_dict() for r in self.results],
         }
 
@@ -72,16 +96,22 @@ class SuiteValidationSummary:
     total_assertions: int = 0
     passed: int = 0
     failed: int = 0
+    errors: int = 0
+    warnings: int = 0
     pass_rate: float = 0.0
     failed_cases: list[str] = field(default_factory=list)
+    error_failed_cases: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "total_assertions": self.total_assertions,
             "passed": self.passed,
             "failed": self.failed,
+            "errors": self.errors,
+            "warnings": self.warnings,
             "pass_rate": self.pass_rate,
             "failed_cases": self.failed_cases,
+            "error_failed_cases": self.error_failed_cases,
         }
 
 
@@ -120,19 +150,35 @@ def _check_max_int(
     rule_name: str,
     path: tuple[str, ...],
     limit: int,
+    *,
+    fallback_path: tuple[str, ...] | None = None,
 ) -> AssertionResult:
-    """通用的 max_xxx 校验：按 path 从 result_dict 取值，判断 <= limit。"""
-    obj = result_dict
-    for key in path:
-        obj = obj.get(key, {}) if isinstance(obj, dict) else {}
-    actual = obj if isinstance(obj, (int, float)) else 0
+    """通用的 max_xxx 校验：按 path 从 result_dict 取值，判断 <= limit。
+
+    效率预算类规则（EFFICIENCY_RULES）只记 warning，不判 fail。
+    path 缺失时若给了 fallback_path 则回退取值（旧工件兼容）。
+    """
+    actual: Any = None
+    for p in (path, fallback_path):
+        if p is None:
+            continue
+        obj: Any = result_dict
+        for key in p:
+            obj = obj.get(key, {}) if isinstance(obj, dict) else {}
+        if isinstance(obj, (int, float)):
+            actual = obj
+            break
+    if actual is None:
+        actual = 0
     passed = actual <= limit
+    severity = "warning" if rule_name in EFFICIENCY_RULES else "error"
     return AssertionResult(
         rule=rule_name,
         passed=passed,
         expected=f"<= {limit}",
         actual=actual,
-        message="" if passed else f"{rule_name}: {actual} 超过上限 {limit}",
+        message="" if passed else f"{rule_name}: {actual} 超过上限 {limit}（效率告警，不判 fail）" if severity == "warning" else f"{rule_name}: {actual} 超过上限 {limit}",
+        severity=severity,
     )
 
 
@@ -177,12 +223,63 @@ def _check_forbidden_tools(
     tool_calls = result_dict.get("artifacts", {}).get("tool_calls", [])
     called_names = {tc.get("tool_name", "") for tc in tool_calls}
     violations = [t for t in forbidden if t in called_names]
+    # 只读题曾被用 run_code 内调 em.edit 绕过（顶层 tool_name 只有 run_code）。
+    # 对可携带代码的工具做子串扫描：禁用的 Excel 工具名本身 + em.<动词> 简写。
+    bypass: list[str] = []
+    if forbidden:
+        for tc in tool_calls:
+            carrier = str(tc.get("tool_name") or "")
+            if carrier not in ("run_code", "write_text_file", "run_shell"):
+                continue
+            blob = json.dumps(tc.get("arguments", {}), ensure_ascii=False, default=str).lower()
+            for name in forbidden:
+                nl = name.lower()
+                candidates = {nl, "em." + nl.split("_")[0], "em." + nl}
+                if any(c in blob for c in candidates):
+                    bypass.append(f"{carrier} 内疑似调用 {name}")
+                    break
+    problems = violations + bypass
     return AssertionResult(
         rule="forbidden_tools",
-        passed=len(violations) == 0,
+        passed=len(problems) == 0,
         expected=f"不应调用 {forbidden}",
         actual=sorted(called_names),
-        message="" if not violations else f"调用了禁止的工具: {violations}",
+        message="" if not problems else f"调用了禁止的工具: {problems}",
+    )
+
+
+# 可携带代码/路径的工具（作弊围栏与绕过扫描共用）
+_CODE_CARRYING_TOOLS = ("run_code", "write_text_file", "run_shell", "read_text_file", "list_directory")
+
+# 作弊围栏：bench 标准答案与套件原文永远不该出现在 agent 的工具参数里。
+# 固定 SEED + answers.json 落盘后，agent 若越出工作区读到它们即可直接背答案。
+_CHEAT_PATH_MARKERS = (
+    "answers.json",
+    "suite_realistic",
+    "suite_experiential",
+    "suite_smoke",
+    "suite_write_approval",
+    "suite_prompt_contract",
+    "bench/fixtures",
+    "bench\\fixtures",
+)
+
+
+def _check_no_cheat_read(result_dict: dict[str, Any]) -> AssertionResult:
+    """检查工具调用是否触碰 bench 答案/套件文件（读到即判作弊 fail）。"""
+    tool_calls = result_dict.get("artifacts", {}).get("tool_calls", [])
+    hits: list[str] = []
+    for tc in tool_calls:
+        blob = json.dumps(tc.get("arguments", {}), ensure_ascii=False, default=str).lower()
+        found = sorted({m for m in _CHEAT_PATH_MARKERS if m in blob})
+        if found:
+            hits.append(f"{tc.get('tool_name', '?')}: {found}")
+    return AssertionResult(
+        rule="no_cheat_read",
+        passed=not hits,
+        expected="不读取 bench 答案/套件文件",
+        actual=hits or "未触碰",
+        message="" if not hits else f"触碰 bench 答案/套件文件（疑似背答案）: {hits[:3]}",
     )
 
 
@@ -197,6 +294,13 @@ def _check_no_empty_promise(result_dict: dict[str, Any]) -> AssertionResult:
             severity="warning",
         )
     first_resp = llm_calls[0].get("response", {})
+    if first_resp.get("_stream") and "content" not in first_resp:
+        return AssertionResult(
+            rule="no_empty_promise",
+            passed=True,
+            message="流式响应未记录 content/tool_calls，跳过检查",
+            severity="warning",
+        )
     content = first_resp.get("content") or ""
     tool_calls = first_resp.get("tool_calls") or []
     # 空承诺 = 有文字回复但没有工具调用
@@ -220,6 +324,13 @@ def _check_no_silent_first_turn(result_dict: dict[str, Any]) -> AssertionResult:
             severity="warning",
         )
     first_resp = llm_calls[0].get("response", {})
+    if first_resp.get("_stream") and "content" not in first_resp:
+        return AssertionResult(
+            rule="no_silent_first_turn",
+            passed=True,
+            message="流式响应未记录 content/tool_calls，跳过检查",
+            severity="warning",
+        )
     content = first_resp.get("content") or ""
     tool_calls = first_resp.get("tool_calls") or []
     is_silent = not content.strip() and not tool_calls
@@ -321,22 +432,17 @@ def _check_golden_cells(
     # sheet_name 延迟解析：若无前缀，打开文件后回退到首个/唯一 sheet
     _sheet_name_deferred = sheet_name is None
 
-    # ── 定位输出文件 ──
+    # ── 定位输出文件：agent 只能写 outputs/，uploads/ 是只读原件 ──
     output_file: Path | None = None
     if workfile_dir and workfile_dir.is_dir():
-        xlsx_files = [f for ext in ("*.xlsx", "*.xls", "*.xlsb") for f in workfile_dir.glob(ext)]
-        if len(xlsx_files) == 1:
-            output_file = xlsx_files[0]
-        elif len(xlsx_files) > 1:
-            # 尝试匹配 golden 文件名
-            golden_name = Path(golden_file).name
-            # 查找与源文件同名的（init 文件被复制到 workdir）
-            for f in xlsx_files:
-                if "init" in f.name or f.stem in golden_name:
-                    output_file = f
-                    break
-            if output_file is None:
-                output_file = xlsx_files[0]
+        from excelmanus.bench_checks import find_outputs
+
+        candidates = find_outputs(workfile_dir, None, suffixes=(".xlsx", ".xlsm", ".xls", ".xlsb"))
+        golden_name = Path(golden_file).stem
+        # 多个产出时优先与 golden 同名的
+        output_file = next((f for f in candidates if f.stem in golden_name or golden_name in f.stem), None)
+        if output_file is None and candidates:
+            output_file = candidates[0]
 
     if output_file is None or not output_file.exists():
         return AssertionResult(
@@ -630,6 +736,41 @@ def validate_case(
 
     results: list[AssertionResult] = []
 
+    # answers_file 只是给 output_checks 取标准值用，本身不是断言
+    from excelmanus.bench_checks import (
+        check_uploads_unchanged,
+        load_answers,
+        run_output_checks,
+    )
+
+    answers = load_answers(assertions.get("answers_file"))
+
+    def _adopt(check: Any) -> AssertionResult:
+        return AssertionResult(
+            rule=check.name,
+            passed=check.passed,
+            expected=check.expected,
+            actual=check.actual,
+            message=check.message,
+            severity=getattr(check, "severity", "error"),
+        )
+
+    # uploads_unchanged
+    if assertions.get("uploads_unchanged"):
+        results.append(_adopt(check_uploads_unchanged(workfile_dir, result_dict)))
+
+    # no_cheat_read：suite/case 显式声明才启用（realistic suite 级默认开）。
+    # 工具参数触碰 answers.json / suite_*.json / bench/fixtures 即判作弊 fail。
+    if assertions.get("no_cheat_read"):
+        results.append(_check_no_cheat_read(result_dict))
+
+    # output_checks：产出文件 / 回复内容的结果断言
+    output_checks = assertions.get("output_checks")
+    if isinstance(output_checks, list) and output_checks:
+        results.extend(
+            _adopt(c) for c in run_output_checks(workfile_dir, result_dict, output_checks, answers)
+        )
+
     # status
     if "status" in assertions:
         results.append(_check_status(result_dict, assertions["status"]))
@@ -655,11 +796,13 @@ def validate_case(
             ("stats", "tool_call_count"), assertions["max_tool_calls"],
         ))
 
-    # max_tool_failures
+    # max_tool_failures（模型可见口径：run_code 内层 SDK 失败已并入外层 run_code 失败，不重复计；
+    # 旧工件无 model_tool_failures 时回退 tool_failures——旧口径含内层重复计，warn-only 宁多勿漏）
     if "max_tool_failures" in assertions:
         results.append(_check_max_int(
             result_dict, "max_tool_failures",
-            ("stats", "tool_failures"), assertions["max_tool_failures"],
+            ("stats", "model_tool_failures"), assertions["max_tool_failures"],
+            fallback_path=("stats", "tool_failures"),
         ))
 
     # max_tokens
@@ -728,11 +871,15 @@ def validate_case(
 
     passed = sum(1 for r in results if r.passed)
     failed = len(results) - passed
+    errors = sum(1 for r in results if not r.passed and r.severity == "error")
+    warnings = sum(1 for r in results if not r.passed and r.severity != "error")
 
     return ValidationSummary(
         total=len(results),
         passed=passed,
         failed=failed,
+        errors=errors,
+        warnings=warnings,
         results=results,
     )
 
@@ -744,17 +891,36 @@ def aggregate_suite_validation(
 
     Args:
         case_validations: [(case_id, ValidationSummary), ...]
+
+    ``failed`` 含 warning；决定退出码只看 ``errors`` / ``error_failed_cases``。
     """
+
+    def _errors_of(v: ValidationSummary) -> int:
+        if v.results:
+            return sum(1 for r in v.results if not r.passed and r.severity == "error")
+        return v.failed  # 兼容手写构造（无 results 明细时按 error 计）
+
+    def _warnings_of(v: ValidationSummary) -> int:
+        if v.results:
+            return sum(1 for r in v.results if not r.passed and r.severity != "error")
+        return 0
+
     total = sum(v.total for _, v in case_validations)
     passed = sum(v.passed for _, v in case_validations)
     failed = total - passed
+    errors = sum(_errors_of(v) for _, v in case_validations)
+    warnings = sum(_warnings_of(v) for _, v in case_validations)
     failed_cases = [cid for cid, v in case_validations if v.failed > 0]
+    error_failed_cases = [cid for cid, v in case_validations if _errors_of(v) > 0]
     pass_rate = round(passed / total * 100, 1) if total > 0 else 100.0
 
     return SuiteValidationSummary(
         total_assertions=total,
         passed=passed,
         failed=failed,
+        errors=errors,
+        warnings=warnings,
         pass_rate=pass_rate,
         failed_cases=failed_cases,
+        error_failed_cases=error_failed_cases,
     )

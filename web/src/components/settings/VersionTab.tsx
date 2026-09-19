@@ -530,7 +530,7 @@ export function VersionTab() {
               >
                 <MapPin className="h-4 w-4 text-muted-foreground shrink-0" />
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium truncate font-mono">{inst.path}</div>
+                  <div className="text-sm font-medium font-mono break-all">{inst.path}</div>
                   <div className="text-[11px] text-muted-foreground flex items-center gap-2">
                     <Badge variant="outline" className="text-[10px] h-4 px-1">
                       v{inst.version}
@@ -771,7 +771,7 @@ export function VersionTab() {
       {/* ── 说明 ── */}
       <div className="rounded-lg bg-muted/30 px-3 py-2.5 text-[11px] text-muted-foreground">
         <p>
-          <strong>更新备份</strong>：每次更新前自动备份用户数据（.env、uploads、outputs 等），
+          <strong>更新备份</strong>：每次更新前自动备份用户数据（主数据库、uploads、outputs 等），
           系统默认保留最近 2 个备份，超出自动清理。可点击恢复按钮从备份还原。
         </p>
         <p className="mt-1">

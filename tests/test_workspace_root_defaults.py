@@ -31,11 +31,3 @@ def test_config_helpers_default_workspace_root_to_test_dir(
     config = factory()
     expected = Path(module.__file__).resolve().parent
     assert Path(config.workspace_root).resolve() == expected
-
-
-def test_vba_engine_helper_defaults_workspace_root_to_test_dir() -> None:
-    """VBA 测试中的 _make_engine 默认 workspace_root 也应使用测试目录。"""
-    module = importlib.import_module("tests.test_vba_support")
-    engine = module.TestVbaExemptEngineIntegration._make_engine()
-    expected = Path(module.__file__).resolve().parent
-    assert Path(engine._config.workspace_root).resolve() == expected

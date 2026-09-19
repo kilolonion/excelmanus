@@ -13,6 +13,13 @@ import {
   type FileGroup,
 } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
+import {
+  activeSession,
+  isScopedWorkspaceKey,
+  sanitizeRecentFiles,
+  versionStoreKey,
+  workspaceKeyFromSession,
+} from "@/lib/workspace-file-ref";
 
 function activeSessionId(): string | null {
   return useSessionStore.getState().activeSessionId;
@@ -116,6 +123,7 @@ export interface ExcelFileRef {
   path: string;
   filename: string;
   lastUsedAt: number;
+  workspaceKey?: string;
 }
 
 export interface SharedColumn {
@@ -145,6 +153,9 @@ export interface MergeResultInfo {
 const MAX_RECENT_FILES = 50;
 const MAX_PERSISTED_DIFFS = 500;
 
+export type ExcelPanelTab = "sheet" | "history";
+export type HistorySubview = "revisions" | "operations";
+
 interface ExcelState {
   // 侧边面板
   panelOpen: boolean;
@@ -166,8 +177,10 @@ interface ExcelState {
   // 面板刷新计数器（每次 diff 后递增，触发 Univer 重新加载）
   refreshCounter: number;
 
-  // 当前打开文件的内容版本（sha256:...），按 normalize 后的 path 索引
+  // 当前打开文件的内容版本（sha256:...），按 workspaceKey|path 索引
   contentVersions: Record<string, string>;
+  activeWorkspaceKey: string | null;
+  viewGeneration: number;
 
   // 快捷栏：最近使用的 Excel 文件（LRU，最多 5 个）
   recentFiles: ExcelFileRef[];
@@ -199,7 +212,7 @@ interface ExcelState {
   // 工作区系统文件可见性（默认隐藏，用户可在侧栏开关切换）
   showSystemFiles: boolean;
 
-  // 工作区文件树刷新信号（在 files_changed 事件时递增）
+  // 工作区文件树刷新信号（在 mutation 事件时递增）
   workspaceFilesVersion: number;
 
   // 工作区文件列表缓存（避免每次挂载组件都重新加载）
@@ -212,13 +225,14 @@ interface ExcelState {
   // 流式工具调用参数累积（用于实时预览文本写入内容）
   streamingToolContent: Record<string, string>;
 
-  // 文本文件预览弹窗 tab 栏（最近打开的文件）
-  previewTabs: { filePath: string; filename: string }[];
-
   // 操作历史时间线
   operations: OperationRecord[];
   operationsLoading: boolean;
   operationsLoaded: boolean;
+
+  // 侧栏：表格 / 历史
+  panelTab: ExcelPanelTab;
+  historySubview: HistorySubview;
 
   // 文件组
   fileGroups: FileGroup[];
@@ -238,11 +252,15 @@ interface ExcelState {
   lastMergeResult: MergeResultInfo | null;
 
   // 操作
-  openPanel: (filePath: string, sheet?: string) => void;
+  openPanel: (filePath?: string, sheet?: string) => void;
+  openHistory: (filePath?: string, view?: HistorySubview) => void;
+  setPanelTab: (tab: ExcelPanelTab) => void;
+  setHistorySubview: (view: HistorySubview) => void;
   closePanel: () => void;
   setActiveSheet: (sheet: string) => void;
-  setContentVersion: (path: string, version: string | null | undefined) => void;
-  getContentVersion: (path: string) => string | null;
+  setContentVersion: (path: string, version: string | null | undefined, workspaceKey?: string | null) => void;
+  getContentVersion: (path: string, workspaceKey?: string | null) => string | null;
+  rebindSession: (prevWorkspaceKey: string | null, nextWorkspaceKey: string | null) => void;
   addDiff: (diff: ExcelDiffEntry) => void;
   addTextDiff: (diff: TextDiffEntry) => void;
   addTextPreview: (preview: TextPreviewEntry) => void;
@@ -250,13 +268,15 @@ interface ExcelState {
   clearStreamingArgs: (toolCallId: string) => void;
   addPreview: (preview: ExcelPreviewData) => void;
   /** Add a file explicitly opened/uploaded by the user (clears dismissal). */
-  addRecentFile: (file: { path: string; filename: string }) => void;
+  addRecentFile: (file: { path: string; filename: string }, workspaceKey?: string) => void;
   /** System-initiated add that respects dismissedPaths. */
-  addRecentFileIfNotDismissed: (file: { path: string; filename: string }) => void;
+  addRecentFileIfNotDismissed: (file: { path: string; filename: string }, workspaceKey?: string) => void;
   removeRecentFile: (path: string) => void;
   removeRecentFiles: (paths: string[]) => void;
   clearAllRecentFiles: () => void;
-  mergeRecentFiles: (files: { path: string; filename: string; modifiedAt?: number }[]) => void;
+  mergeRecentFiles: (files: { path: string; filename: string; modifiedAt?: number }[], workspaceKey?: string) => void;
+  /** Evict a cached entry the backend reported missing. 不写 dismissedPaths，文件重建后仍可重新出现。 */
+  evictRecentFile: (path: string, workspaceKey?: string | null) => void;
   openFullView: (path: string, sheet?: string) => void;
   closeFullView: () => void;
   enterSelectionMode: () => void;
@@ -273,8 +293,6 @@ interface ExcelState {
   /** Set a template message to inject into chat input (e.g. merge/compare prompt). */
   setPendingTemplateMessage: (msg: string) => void;
   clearPendingTemplateMessage: () => void;
-  addPreviewTab: (tab: { filePath: string; filename: string }) => void;
-  removePreviewTab: (filePath: string) => void;
   toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
   refreshWorkspaceFiles: (sessionId?: string | null) => Promise<void>;
@@ -311,6 +329,8 @@ export const useExcelStore = create<ExcelState>()(
   textPreviews: {},
   refreshCounter: 0,
   contentVersions: {},
+  activeWorkspaceKey: null,
+  viewGeneration: 0,
   recentFiles: [],
   fullViewPath: null,
   fullViewSheet: null,
@@ -328,10 +348,11 @@ export const useExcelStore = create<ExcelState>()(
   wsFilesLoaded: false,
   demoFile: null,
   streamingToolContent: {},
-  previewTabs: [],
   operations: [],
   operationsLoading: false,
   operationsLoaded: false,
+  panelTab: "sheet",
+  historySubview: "revisions",
 
   fileGroups: [],
   fileGroupsLoaded: false,
@@ -348,20 +369,41 @@ export const useExcelStore = create<ExcelState>()(
   lastMergeResult: null,
 
   openPanel: (filePath, sheet) =>
-    set({
-      panelOpen: true,
-      activeFilePath: filePath,
-      activeSheet: sheet ?? null,
+    set(() => {
+      const workspaceKey = workspaceKeyFromSession(activeSession());
+      if (!filePath) {
+        return { panelOpen: true, panelTab: "sheet", activeWorkspaceKey: workspaceKey };
+      }
+      return {
+        panelOpen: true,
+        panelTab: "sheet",
+        activeFilePath: filePath,
+        activeSheet: sheet ?? null,
+        activeWorkspaceKey: workspaceKey,
+      };
     }),
+
+  openHistory: (filePath, view = "revisions") =>
+    set((s) => ({
+      panelOpen: true,
+      panelTab: "history",
+      historySubview: view ?? s.historySubview,
+      ...(filePath ? { activeFilePath: filePath } : {}),
+    })),
+
+  setPanelTab: (tab) => set({ panelTab: tab }),
+
+  setHistorySubview: (view) => set({ historySubview: view }),
 
   closePanel: () => set({ panelOpen: false }),
 
   setActiveSheet: (sheet) => set({ activeSheet: sheet }),
 
-  setContentVersion: (path, version) =>
+  setContentVersion: (path, version, workspaceKey) =>
     set((state) => {
-      const key = normalizeExcelPath(path);
-      if (!key) return state;
+      const ws = workspaceKey ?? state.activeWorkspaceKey ?? "_";
+      const key = versionStoreKey(path, ws);
+      if (!key.endsWith("|") && !normalizeExcelPath(path)) return state;
       const next = { ...state.contentVersions };
       if (!version) {
         delete next[key];
@@ -371,10 +413,46 @@ export const useExcelStore = create<ExcelState>()(
       return { contentVersions: next };
     }),
 
-  getContentVersion: (path) => {
-    const key = normalizeExcelPath(path);
-    return get().contentVersions[key] ?? null;
+  getContentVersion: (path, workspaceKey) => {
+    const ws = workspaceKey ?? get().activeWorkspaceKey ?? "_";
+    return get().contentVersions[versionStoreKey(path, ws)] ?? null;
   },
+
+  rebindSession: (prevWorkspaceKey, nextWorkspaceKey) =>
+    set((state) => {
+      const nextKey = nextWorkspaceKey || "_";
+      const prevKey = prevWorkspaceKey || state.activeWorkspaceKey;
+      if (prevKey === nextKey) {
+        return { activeWorkspaceKey: nextKey };
+      }
+      const contentVersions: Record<string, string> = {};
+      for (const [key, value] of Object.entries(state.contentVersions)) {
+        if (key.startsWith(`${nextKey}|`)) contentVersions[key] = value;
+      }
+      return {
+        activeWorkspaceKey: nextKey,
+        viewGeneration: state.viewGeneration + 1,
+        contentVersions,
+        fullViewPath: null,
+        fullViewSheet: null,
+        activeFilePath: null,
+        activeSheet: null,
+        selectionMode: false,
+        pendingSelection: null,
+        draftRange: null,
+        compareMode: false,
+        compareFileA: null,
+        compareFileB: null,
+        compareSheetA: null,
+        compareSheetB: null,
+        compareRelationship: null,
+        diffs: [],
+        textDiffs: [],
+        previews: {},
+        streamingToolContent: {},
+        refreshCounter: state.refreshCounter + 1,
+      };
+    }),
 
   addDiff: (diff) =>
     set((state) => {
@@ -386,7 +464,7 @@ export const useExcelStore = create<ExcelState>()(
       if (isDup) return state;
       const newDiffs = [...state.diffs, diff].slice(-MAX_PERSISTED_DIFFS);
       const contentVersions = { ...state.contentVersions };
-      delete contentVersions[normalizeExcelPath(diff.filePath)];
+      delete contentVersions[versionStoreKey(diff.filePath, state.activeWorkspaceKey ?? "_")];
       return {
         diffs: newDiffs,
         contentVersions,
@@ -434,34 +512,47 @@ export const useExcelStore = create<ExcelState>()(
       previews: { ...state.previews, [preview.toolCallId]: preview },
     })),
 
-  addRecentFile: (file) =>
+  addRecentFile: (file, explicitWorkspaceKey) =>
     set((state) => {
+      const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
+      if (!isScopedWorkspaceKey(workspaceKey)) return {};
       const normPath = normalizeExcelPath(file.path);
-      const filtered = state.recentFiles.filter(
-        (f) => normalizeExcelPath(f.path) !== normPath,
+      const filtered = sanitizeRecentFiles(state.recentFiles).filter(
+        (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
       );
       const entry: ExcelFileRef = {
         path: file.path,
         filename: file.filename,
         lastUsedAt: Date.now(),
+        workspaceKey,
       };
-      const updated = [entry, ...filtered].slice(0, MAX_RECENT_FILES);
+      const sameWs = filtered.filter((f) => f.workspaceKey === workspaceKey);
+      const otherWs = filtered.filter((f) => f.workspaceKey !== workspaceKey);
+      const updated = [entry, ...sameWs, ...otherWs].slice(0, MAX_RECENT_FILES);
       const newDismissed = new Set(state.dismissedPaths);
       newDismissed.delete(file.path);
       newDismissed.delete(normPath);
       return { recentFiles: updated, dismissedPaths: newDismissed };
     }),
 
-  addRecentFileIfNotDismissed: (file) =>
+  addRecentFileIfNotDismissed: (file, explicitWorkspaceKey) =>
     set((state) => {
       if (state.dismissedPaths.has(file.path)) return {};
-      const filtered = state.recentFiles.filter((f) => f.path !== file.path);
+      const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
+      if (!isScopedWorkspaceKey(workspaceKey)) return {};
+      const normPath = normalizeExcelPath(file.path);
+      const filtered = sanitizeRecentFiles(state.recentFiles).filter(
+        (f) => !(normalizeExcelPath(f.path) === normPath && f.workspaceKey === workspaceKey),
+      );
       const entry: ExcelFileRef = {
         path: file.path,
         filename: file.filename,
         lastUsedAt: Date.now(),
+        workspaceKey,
       };
-      const updated = [entry, ...filtered].slice(0, MAX_RECENT_FILES);
+      const sameWs = filtered.filter((f) => f.workspaceKey === workspaceKey);
+      const otherWs = filtered.filter((f) => f.workspaceKey !== workspaceKey);
+      const updated = [entry, ...sameWs, ...otherWs].slice(0, MAX_RECENT_FILES);
       return { recentFiles: updated, workspaceFilesVersion: state.workspaceFilesVersion + 1 };
     }),
 
@@ -493,19 +584,38 @@ export const useExcelStore = create<ExcelState>()(
       return { recentFiles: [], dismissedPaths: newDismissed };
     }),
 
-  mergeRecentFiles: (files) =>
+  evictRecentFile: (path, workspaceKey) =>
     set((state) => {
+      const normPath = normalizeExcelPath(path);
+      const filtered = state.recentFiles.filter(
+        (f) =>
+          !(
+            normalizeExcelPath(f.path) === normPath
+            && (workspaceKey == null || f.workspaceKey === workspaceKey)
+          ),
+      );
+      if (filtered.length === state.recentFiles.length) return {};
+      return { recentFiles: filtered };
+    }),
+
+  mergeRecentFiles: (files, explicitWorkspaceKey) =>
+    set((state) => {
+      const workspaceKey = explicitWorkspaceKey ?? workspaceKeyFromSession(activeSession());
       const map = new Map<string, ExcelFileRef>();
-      for (const f of state.recentFiles) {
-        map.set(f.path, f);
+      for (const f of sanitizeRecentFiles(state.recentFiles)) {
+        map.set(`${f.workspaceKey}|${normalizeExcelPath(f.path)}`, f);
       }
-      for (const f of files) {
-        if (!map.has(f.path) && !state.dismissedPaths.has(f.path)) {
-          map.set(f.path, {
-            path: f.path,
-            filename: f.filename,
-            lastUsedAt: f.modifiedAt ?? 0,
-          });
+      if (isScopedWorkspaceKey(workspaceKey)) {
+        for (const f of files) {
+          const key = `${workspaceKey}|${normalizeExcelPath(f.path)}`;
+          if (!map.has(key) && !state.dismissedPaths.has(f.path)) {
+            map.set(key, {
+              path: f.path,
+              filename: f.filename,
+              lastUsedAt: f.modifiedAt ?? 0,
+              workspaceKey,
+            });
+          }
         }
       }
       const merged = Array.from(map.values())
@@ -519,6 +629,7 @@ export const useExcelStore = create<ExcelState>()(
       panelOpen: false,
       fullViewPath: path,
       fullViewSheet: sheet ?? null,
+      activeWorkspaceKey: workspaceKeyFromSession(activeSession()),
     }),
 
   closeFullView: () =>
@@ -564,18 +675,6 @@ export const useExcelStore = create<ExcelState>()(
   setPendingTemplateMessage: (msg) => set({ pendingTemplateMessage: msg }),
 
   clearPendingTemplateMessage: () => set({ pendingTemplateMessage: null }),
-
-  addPreviewTab: (tab) =>
-    set((state) => {
-      const exists = state.previewTabs.some((t) => t.filePath === tab.filePath);
-      if (exists) return {};
-      return { previewTabs: [...state.previewTabs, tab].slice(-10) };
-    }),
-
-  removePreviewTab: (filePath) =>
-    set((state) => ({
-      previewTabs: state.previewTabs.filter((t) => t.filePath !== filePath),
-    })),
 
   toggleShowSystemFiles: () =>
     set((state) => ({ showSystemFiles: !state.showSystemFiles })),
@@ -742,7 +841,6 @@ export const useExcelStore = create<ExcelState>()(
       textDiffs: [],
       previews: {},
       streamingToolContent: {},
-      previewTabs: [],
       refreshCounter: 0,
       contentVersions: {},
       fullViewPath: null,
@@ -755,6 +853,8 @@ export const useExcelStore = create<ExcelState>()(
       operations: [],
       operationsLoading: false,
       operationsLoaded: false,
+      panelTab: "sheet",
+      historySubview: "revisions",
       fileGroups: [],
       fileGroupsLoaded: false,
       activeGroupId: null,
@@ -770,7 +870,7 @@ export const useExcelStore = create<ExcelState>()(
     {
       name: "excelmanus-excel-files",
       partialize: (state) => ({
-        recentFiles: state.recentFiles,
+        recentFiles: sanitizeRecentFiles(state.recentFiles),
         dismissedPaths: Array.from(state.dismissedPaths),
         showSystemFiles: state.showSystemFiles,
         groupViewMode: state.groupViewMode,
@@ -782,9 +882,11 @@ export const useExcelStore = create<ExcelState>()(
           : new Set<string>();
         // diffs / textDiffs 是会话级瞬态数据，不从 localStorage 恢复
         const { diffs: _d, textDiffs: _td, pendingBackups: _pb, appliedPaths: _ap, undoableApplies: _ua, backupEnabled: _be, backupLoading: _bl, backupInFlight: _bi, ...safeP } = (p ?? {}) as Record<string, unknown>;
+        const rawRecent = Array.isArray(safeP.recentFiles) ? safeP.recentFiles as ExcelFileRef[] : [];
         return {
           ...current,
           ...safeP,
+          recentFiles: sanitizeRecentFiles(rawRecent),
           dismissedPaths: dismissed,
         };
       },
