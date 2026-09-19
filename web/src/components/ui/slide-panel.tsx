@@ -47,7 +47,7 @@ export function SlidePanel({ open, onClose, title, icon, headerExtra, children, 
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 0.2 }}
-            className="fixed inset-0 z-[60] bg-black/40 backdrop-blur-[2px]"
+            className="em-slide-panel-backdrop fixed inset-0 z-[60] bg-black/40 backdrop-blur-[2px]"
             onClick={onClose}
           />
           {/* Panel */}
@@ -57,7 +57,7 @@ export function SlidePanel({ open, onClose, title, icon, headerExtra, children, 
             animate={isMobile ? { y: 0 } : { x: 0 }}
             exit={isMobile ? { y: "100%" } : { x: "100%" }}
             transition={{ type: "spring", damping: 30, stiffness: 350 }}
-            className={`fixed z-[61] bg-background border-l border-border shadow-2xl flex flex-col ${
+            className={`em-slide-panel fixed z-[61] bg-background border-l border-border shadow-2xl flex flex-col ${
               isMobile
                 ? "inset-x-0 bottom-0 top-0 rounded-none"
                 : "top-0 right-0 bottom-0 rounded-none"
@@ -65,7 +65,7 @@ export function SlidePanel({ open, onClose, title, icon, headerExtra, children, 
             style={isMobile ? undefined : { width: `min(${width}px, 90vw)` }}
           >
             {/* Header */}
-            <div className="flex items-center gap-2.5 px-5 py-3 border-b border-border/60 flex-shrink-0 relative">
+            <div className="em-slide-panel-header flex items-center gap-2.5 px-5 py-3 border-b border-border/60 flex-shrink-0 relative">
               <div className="absolute bottom-0 left-0 right-0 h-px bg-gradient-to-r from-transparent via-[var(--em-primary-alpha-25)] to-transparent" />
               {icon && (
                 <div

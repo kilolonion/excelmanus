@@ -2316,6 +2316,22 @@ body {
   background: var(--em-primary-alpha-12) !important;
 }
 
+.em-slide-panel {
+  border-color: var(--em-line) !important;
+  background: var(--em-panel) !important;
+  box-shadow: -18px 0 44px rgba(24, 58, 40, 0.1) !important;
+}
+
+.em-slide-panel-header {
+  min-height: 54px;
+  border-color: var(--em-line) !important;
+  background: var(--em-panel-soft);
+}
+
+.em-slide-panel-header h2 {
+  color: var(--em-ink);
+}
+
 /* ── Sidebar Session Card Enhanced ── */
 .session-card-enhanced {
   transition: all 180ms ease;
