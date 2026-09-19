@@ -42,7 +42,7 @@ export function TransitionCard({ variant, onContinue, onDecline }: TransitionCar
         animate={{ opacity: 1, scale: 1, y: 0 }}
         exit={{ opacity: 0, scale: 0.95, y: 10 }}
         transition={{ duration: 0.3 }}
-        className="relative z-10 w-[90vw] max-w-sm rounded-2xl bg-background border border-border shadow-2xl p-6 text-center"
+        className="em-onboarding-card relative z-10 w-[90vw] max-w-sm rounded-2xl bg-background border border-border shadow-2xl p-6 text-center"
       >
         <div
           className="mx-auto w-14 h-14 rounded-full flex items-center justify-center mb-4"

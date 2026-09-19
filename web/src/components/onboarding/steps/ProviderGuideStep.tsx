@@ -149,7 +149,7 @@ export function ProviderGuideStep({
   const canProceed = apiKey.trim().length > 0;
 
   return (
-    <div className="flex flex-col items-center min-h-full px-4 sm:px-6 py-6 sm:py-8">
+    <div className="em-onboarding-step flex flex-col items-center min-h-full px-4 py-6 sm:px-6 sm:py-8">
       <div className="max-w-2xl w-full">
         {/* Header */}
         <Button
@@ -177,7 +177,7 @@ export function ProviderGuideStep({
         </div>
 
         {/* Guide section — collapsible */}
-        <div className="rounded-xl border border-border/60 bg-muted/30 mb-4 sm:mb-6 overflow-hidden">
+        <div className="em-onboarding-card rounded-xl border border-border/60 bg-muted/30 mb-4 sm:mb-6 overflow-hidden">
           <button
             type="button"
             onClick={() => setExpandedGuide(!expandedGuide)}
@@ -257,7 +257,7 @@ export function ProviderGuideStep({
         </div>
 
         {/* API Key input section */}
-        <div className="rounded-xl border border-border/60 bg-background/80 p-4 sm:p-5 space-y-3 sm:space-y-4">
+        <div className="em-onboarding-card rounded-xl border border-border/60 bg-background/80 p-4 sm:p-5 space-y-3 sm:space-y-4">
           <h3 className="text-sm font-semibold">填入你的 API 配置</h3>
 
           {/* Model */}

@@ -33,8 +33,8 @@ export function VersionUpdateToast({
 
   if (apiIncompatible) {
     return (
-      <div className="fixed bottom-4 right-4 z-9999 max-w-sm animate-in slide-in-from-bottom-4 fade-in duration-300">
-        <div className="flex items-start gap-3 rounded-lg border border-destructive/30 bg-red-50/80 dark:bg-red-950/70 p-4 shadow-lg backdrop-blur-xl">
+      <div className="em-update-toast fixed z-9999 animate-in slide-in-from-bottom-4 fade-in duration-300">
+        <div className="em-update-card flex items-start gap-3 border border-destructive/30 bg-red-50/80 p-4 backdrop-blur-xl dark:bg-red-950/70">
           <AlertTriangle className="h-5 w-5 text-destructive shrink-0 mt-0.5" />
           <div className="flex-1 min-w-0">
             <p className="text-sm font-medium text-destructive">
@@ -62,8 +62,8 @@ export function VersionUpdateToast({
   }
 
   return (
-    <div className="fixed bottom-4 right-4 z-9999 max-w-sm animate-in slide-in-from-bottom-4 fade-in duration-300">
-      <div className="flex items-start gap-3 rounded-lg border border-border bg-background p-4 shadow-lg">
+    <div className="em-update-toast fixed z-9999 animate-in slide-in-from-bottom-4 fade-in duration-300">
+      <div className="em-update-card flex items-start gap-3 border p-4">
         <RefreshCw
           className="h-5 w-5 shrink-0 mt-0.5"
           style={{ color: "var(--em-primary)" }}

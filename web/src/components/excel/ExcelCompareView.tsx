@@ -47,7 +47,7 @@ function matchBadge(type: string): string {
 function SharedColumnBar({ columns }: { columns: SharedColumn[] }) {
   if (columns.length === 0) return null;
   return (
-    <div className="border-t border-border bg-muted/30 px-3 py-2 flex flex-wrap items-center gap-2 text-[11px]">
+    <div className="em-surface-note border-t border-border bg-muted/30 px-3 py-2 flex flex-wrap items-center gap-2 text-[11px]">
       <Link2 className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
       <span className="text-muted-foreground font-medium">关联列:</span>
       {columns.slice(0, 6).map((col, i) => (
@@ -164,7 +164,7 @@ export function ExcelCompareView() {
     return (
       <div className="flex flex-col h-full">
         {/* 顶栏 */}
-        <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/20 flex-shrink-0">
+        <div className="em-surface-header flex items-center gap-2 border-b border-border bg-muted/20 flex-shrink-0">
           <Button variant="ghost" size="sm" onClick={handleClose} className="h-8 gap-1.5 text-xs">
             <ArrowLeft className="h-3.5 w-3.5" />
             返回
@@ -175,7 +175,7 @@ export function ExcelCompareView() {
         </div>
 
         {/* 文件 Tab */}
-        <div className="flex border-b border-border bg-muted/20">
+        <div className="em-surface-tabs flex border-b border-border bg-muted/20">
           <button
             onClick={() => setMobilePane("A")}
             className={`flex-1 px-3 py-2 text-xs font-medium border-b-2 transition-colors truncate ${
@@ -223,7 +223,7 @@ export function ExcelCompareView() {
   return (
     <div className="flex flex-col h-full">
       {/* 顶栏 */}
-      <div className="flex items-center gap-2 px-3 py-2 border-b border-border bg-muted/20 flex-shrink-0">
+      <div className="em-surface-header flex items-center gap-2 border-b border-border bg-muted/20 flex-shrink-0">
         <Button variant="ghost" size="sm" onClick={handleClose} className="h-7 gap-1.5 text-xs">
           <ArrowLeft className="h-3.5 w-3.5" />
           返回聊天
@@ -262,7 +262,7 @@ export function ExcelCompareView() {
           <div className="flex-1 min-w-0 flex flex-col border-r border-border">
             {/* Sheet tabs */}
             {sheetsA.length > 1 && (
-              <div className="flex items-center bg-muted/20 border-b border-border overflow-x-auto scrollbar-none flex-shrink-0">
+              <div className="em-surface-tabs flex items-center border-b border-border overflow-x-auto scrollbar-none flex-shrink-0">
                 {sheetsA.map((sn) => (
                   <button
                     key={sn}
@@ -279,7 +279,7 @@ export function ExcelCompareView() {
               </div>
             )}
             {/* 文件标题 */}
-            <div className="px-3 py-1 bg-blue-50/40 dark:bg-blue-950/20 border-b border-blue-100/50 dark:border-blue-900/30 text-[10px] font-medium text-blue-600 dark:text-blue-400 flex items-center gap-1.5 flex-shrink-0">
+            <div className="em-compare-pane-label px-3 py-1 border-b text-[10px] font-medium flex items-center gap-1.5 flex-shrink-0">
               <span className="uppercase tracking-wider">A</span>
               <span className="truncate font-normal text-foreground/70">{fileNameA}</span>
             </div>
@@ -291,7 +291,7 @@ export function ExcelCompareView() {
           {/* 右侧 — 文件 B */}
           <div className="flex-1 min-w-0 flex flex-col">
             {sheetsB.length > 1 && (
-              <div className="flex items-center bg-muted/20 border-b border-border overflow-x-auto scrollbar-none flex-shrink-0">
+              <div className="em-surface-tabs flex items-center border-b border-border overflow-x-auto scrollbar-none flex-shrink-0">
                 {sheetsB.map((sn) => (
                   <button
                     key={sn}
@@ -307,7 +307,7 @@ export function ExcelCompareView() {
                 ))}
               </div>
             )}
-            <div className="px-3 py-1 bg-green-50/40 dark:bg-green-950/20 border-b border-green-100/50 dark:border-green-900/30 text-[10px] font-medium text-green-600 dark:text-green-400 flex items-center gap-1.5 flex-shrink-0">
+            <div className="em-compare-pane-label px-3 py-1 border-b text-[10px] font-medium flex items-center gap-1.5 flex-shrink-0">
               <span className="uppercase tracking-wider">B</span>
               <span className="truncate font-normal text-foreground/70">{fileNameB}</span>
             </div>

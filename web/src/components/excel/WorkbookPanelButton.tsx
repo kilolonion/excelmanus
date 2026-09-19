@@ -70,7 +70,7 @@ export function WorkbookPanelButton() {
     <Button
       variant="ghost"
       size="icon"
-      className={`h-7 w-7 p-0 ${panelOpen && panelTab === "sheet" ? "bg-accent text-accent-foreground" : ""}`}
+      className={`h-8 w-8 rounded-full p-0 ${panelOpen && panelTab === "sheet" ? "bg-[var(--em-primary-alpha-12)] text-[var(--em-primary)]" : "text-muted-foreground"}`}
       title="工作表"
       aria-label="工作表"
       aria-pressed={panelOpen && panelTab === "sheet"}

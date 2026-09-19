@@ -51,7 +51,7 @@ interface WelcomeStepProps {
 export function WelcomeStep({ onNext, onSkip }: WelcomeStepProps) {
   return (
     <motion.div
-      className="flex flex-col items-center justify-center min-h-full px-6 py-12"
+      className="em-onboarding-step flex flex-col items-center justify-center min-h-full px-5 py-10 sm:px-6 sm:py-12"
       variants={containerVariants}
       initial="hidden"
       animate="show"
@@ -83,7 +83,7 @@ export function WelcomeStep({ onNext, onSkip }: WelcomeStepProps) {
           className="bg-clip-text text-transparent"
           style={{
             backgroundImage:
-              "linear-gradient(135deg, var(--em-primary), #8b5cf6)",
+              "linear-gradient(135deg, var(--em-primary), var(--em-primary-light))",
           }}
         >
           ExcelManus
@@ -105,7 +105,7 @@ export function WelcomeStep({ onNext, onSkip }: WelcomeStepProps) {
         {FEATURES.map((f) => (
           <div
             key={f.title}
-            className="flex items-start gap-3 p-3.5 rounded-xl border border-border/60 bg-background/60 backdrop-blur-sm"
+            className="em-onboarding-card flex items-start gap-3 p-3.5 rounded-xl border border-border/60 bg-background/60 backdrop-blur-sm"
           >
             <div
               className="flex-shrink-0 w-9 h-9 rounded-lg flex items-center justify-center"

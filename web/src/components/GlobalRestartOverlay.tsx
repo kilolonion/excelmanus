@@ -40,7 +40,7 @@ export function GlobalRestartOverlay() {
       {visible && (
         <motion.div
           key="global-restart-overlay"
-          className="fixed inset-0 z-[200] flex h-dvh min-h-[100dvh] flex-col overflow-hidden bg-background select-none"
+          className="em-recovery-overlay fixed inset-0 z-[200] flex h-dvh min-h-[100dvh] flex-col overflow-hidden bg-background select-none"
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           exit={{ opacity: 0 }}

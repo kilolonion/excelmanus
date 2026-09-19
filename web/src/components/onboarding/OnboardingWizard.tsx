@@ -1,8 +1,7 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { fetchCodexStatus } from "@/lib/auth-api";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
 import { WelcomeStep } from "./steps/WelcomeStep";
@@ -27,8 +26,6 @@ export function OnboardingWizard() {
   const [step, setStep] = useState(0);
   const [direction, setDirection] = useState(1);
   const [selectedProvider, setSelectedProvider] = useState<ProviderGuide | null>(null);
-  const [showOAuthConnectGuide, setShowOAuthConnectGuide] = useState(false);
-  const [checkingOAuthConnectStatus, setCheckingOAuthConnectStatus] = useState(false);
 
   const completeWizard = useOnboardingStore((s) => s.completeWizard);
   const skipWizard = useOnboardingStore((s) => s.skipWizard);
@@ -36,37 +33,8 @@ export function OnboardingWizard() {
   const openSettings = useUIStore((s) => s.openSettings);
 
   const configRequired = backendConfigured === false;
-  const shouldCheckOAuthConnectStatus = false;
-
-  useEffect(() => {
-    let cancelled = false;
-    if (!shouldCheckOAuthConnectStatus) {
-      setShowOAuthConnectGuide(false);
-      setCheckingOAuthConnectStatus(false);
-      return;
-    }
-
-    setCheckingOAuthConnectStatus(true);
-    fetchCodexStatus()
-      .then((status) => {
-        if (cancelled) return;
-        setShowOAuthConnectGuide(status.status !== "connected");
-      })
-      .catch(() => {
-        if (cancelled) return;
-        // 查询失败时保守展示引导，用户可选择继续手动配置
-        setShowOAuthConnectGuide(true);
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setCheckingOAuthConnectStatus(false);
-        }
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [shouldCheckOAuthConnectStatus]);
+  const showOAuthConnectGuide = false;
+  const checkingOAuthConnectStatus = false;
 
   const goNext = useCallback(() => {
     setDirection(1);
@@ -128,9 +96,9 @@ export function OnboardingWizard() {
   const totalSteps = steps.length;
 
   return (
-    <div className="fixed inset-0 z-[200] bg-background flex flex-col overflow-hidden">
+    <div className="em-onboarding fixed inset-0 z-[200] flex flex-col overflow-hidden">
       {/* Progress bar */}
-      <div className="flex-shrink-0 px-6 pt-4">
+      <div className="em-onboarding-progress flex-shrink-0 px-4 pt-4 sm:px-6">
         <div className="max-w-2xl mx-auto">
           <div className="flex items-center gap-1.5">
             {Array.from({ length: totalSteps }).map((_, i) => (

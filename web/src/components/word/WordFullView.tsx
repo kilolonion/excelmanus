@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { ArrowLeft, Download, History, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -27,7 +27,7 @@ export function WordFullView() {
   const triggerRefresh = useWordStore((state) => state.triggerRefresh);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
   const [refreshKey, setRefreshKey] = useState(0);
-  const [actionError, setActionError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<{ scope: string; message: string } | null>(null);
 
   const fileUrl = useMemo(() => {
     if (!fullViewPath) return "";
@@ -39,9 +39,8 @@ export function WordFullView() {
     return fullViewPath.split("/").pop() || fullViewPath;
   }, [fullViewPath]);
 
-  useEffect(() => {
-    setActionError(null);
-  }, [activeSessionId, fullViewPath]);
+  const viewScope = `${activeSessionId ?? ""}:${fullViewPath ?? ""}`;
+  const visibleActionError = actionError?.scope === viewScope ? actionError.message : null;
 
   const handleRefresh = useCallback(() => {
     setActionError(null);
@@ -56,10 +55,13 @@ export function WordFullView() {
     void downloadFile(fullViewPath, fileName || undefined, activeSessionId ?? undefined).catch(
       (err: unknown) => {
         console.error("Error downloading Word file:", err);
-        setActionError(err instanceof Error ? err.message : "下载失败，请重试");
+        setActionError({
+          scope: viewScope,
+          message: err instanceof Error ? err.message : "下载失败，请重试",
+        });
       }
     );
-  }, [activeSessionId, fileName, fullViewPath]);
+  }, [activeSessionId, fileName, fullViewPath, viewScope]);
 
   const handleOpenHistory = useCallback(() => {
     if (!fullViewPath) return;
@@ -71,7 +73,7 @@ export function WordFullView() {
 
   return (
     <div className="fixed inset-0 z-50 flex flex-col bg-background">
-      <div className="flex items-center gap-3 border-b border-border px-4 py-2.5 shrink-0">
+      <div className="em-surface-header flex items-center gap-3 border-b border-border shrink-0">
         <Button variant="ghost" size="sm" onClick={closeFullView}>
           <ArrowLeft className="mr-1 h-4 w-4" />
           返回
@@ -88,11 +90,11 @@ export function WordFullView() {
         </Button>
       </div>
 
-      <div className="border-b border-border bg-muted/30 px-4 py-2">
+      <div className="em-surface-note border-b border-border px-4 py-2">
         <p className="text-xs text-muted-foreground">
           只读快照预览（正文 + 表格）：不会写回文档；内容由 Agent 写入，精调版式请下载后用 Word 打开。
         </p>
-        {actionError && <p className="mt-1 text-xs text-destructive">{actionError}</p>}
+        {visibleActionError && <p className="mt-1 text-xs text-destructive">{visibleActionError}</p>}
       </div>
 
       <div className="flex-1 overflow-hidden">

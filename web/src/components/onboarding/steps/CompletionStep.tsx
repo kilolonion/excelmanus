@@ -6,6 +6,7 @@ import { CheckCircle2, Sparkles, ArrowRight } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 const smoothEase: [number, number, number, number] = [0.4, 0, 0.2, 1];
+const CONFETTI_DISTANCES = [72, 83, 66, 78, 88, 70, 80, 64, 86, 74, 82, 68];
 
 interface CompletionStepProps {
   onFinish: () => void;
@@ -20,7 +21,7 @@ export function CompletionStep({ onFinish }: CompletionStepProps) {
   }, []);
 
   return (
-    <div className="flex flex-col items-center justify-center min-h-full px-6 py-12">
+    <div className="em-onboarding-step flex flex-col items-center justify-center min-h-full px-6 py-12">
       {/* Decorative orbs */}
       <div className="absolute inset-0 overflow-hidden pointer-events-none">
         <div className="onboarding-orb onboarding-orb-1" />
@@ -49,14 +50,14 @@ export function CompletionStep({ onFinish }: CompletionStepProps) {
           Array.from({ length: 12 }).map((_, i) => {
             const angle = (i / 12) * 360;
             const rad = (angle * Math.PI) / 180;
-            const distance = 60 + Math.random() * 30;
+            const distance = CONFETTI_DISTANCES[i];
             const colors = [
               "var(--em-primary)",
-              "#8b5cf6",
-              "#3b82f6",
-              "#f59e0b",
-              "#10b981",
-              "#ef4444",
+              "var(--em-primary-light)",
+              "#c98b2f",
+              "#6aa889",
+              "#b6cbbd",
+              "#e0a94f",
             ];
             return (
               <motion.div

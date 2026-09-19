@@ -15,12 +15,8 @@ import type { ModelInfo } from "@/lib/types";
  * traps fixed descendants and makes the sheet expand inside the header.
  */
 function BottomSheetPortal({ children }: { children: React.ReactNode }) {
-  const [target, setTarget] = useState<HTMLElement | null>(null);
-  useEffect(() => {
-    setTarget(document.body);
-  }, []);
-  if (!target) return null;
-  return createPortal(children, target);
+  if (typeof document === "undefined") return null;
+  return createPortal(children, document.body);
 }
 
 /* ------------------------------------------------------------------ */
@@ -136,7 +132,7 @@ function CompactRetrySheet({
             dragConstraints={{ top: 0 }}
             dragElastic={0.12}
             onDragEnd={handleDragEnd}
-            className="fixed inset-x-0 bottom-0 z-[81] flex h-[50dvh] max-h-[50dvh] flex-col bg-background rounded-t-2xl shadow-2xl overflow-hidden"
+            className="fixed inset-x-0 bottom-0 z-[81] flex min-h-[280px] h-[min(70dvh,520px)] max-h-[78dvh] flex-col rounded-t-2xl border border-b-0 border-[var(--em-line)] bg-[var(--em-panel)] shadow-2xl overflow-hidden"
             style={{ touchAction: "none" }}
           >
             {/* Drag handle */}
@@ -181,7 +177,7 @@ function CompactRetrySheet({
                       "transition-all duration-150 ease-out cursor-pointer",
                       "active:bg-accent/70",
                       isCurrent
-                        ? "bg-(--em-primary-alpha-06)"
+                        ? "bg-[var(--em-primary-alpha-06)]"
                         : "hover:bg-accent/50",
                     ].join(" ")}
                   >
@@ -230,7 +226,7 @@ function CompactRetrySheet({
 /*  Switch Sheet                                                       */
 /* ------------------------------------------------------------------ */
 
-const SHEET_HEIGHT = "50dvh";
+const SHEET_HEIGHT = "min(70dvh, 520px)";
 
 function SwitchSheet({
   open,
@@ -472,7 +468,7 @@ function SwitchSheet({
                             "transition-all duration-150 ease-out cursor-pointer",
                             "active:bg-accent/70",
                             isSelected
-                              ? "bg-(--em-primary-alpha-06)"
+                              ? "bg-[var(--em-primary-alpha-06)]"
                               : "hover:bg-accent/50",
                             switching ? "opacity-50 pointer-events-none" : "",
                           ].join(" ")}

@@ -43,7 +43,7 @@ export function ExcelRibbonCommands({
 
   return (
     <>
-      <span className="text-[10px] uppercase tracking-wide text-muted-foreground/80 pr-1 shrink-0">
+      <span className="em-ribbon-ask-label text-[10px] uppercase tracking-wide text-muted-foreground/80 pr-1 shrink-0">
         问 AI
       </span>
       {actions.map((action) => (
@@ -53,7 +53,7 @@ export function ExcelRibbonCommands({
           data-em-ribbon={`ask-${action.kind}`}
           title={action.title}
           onClick={() => ask(action.kind)}
-          className="inline-flex items-center h-7 px-2 rounded-sm text-sm whitespace-nowrap text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
+          className="em-ribbon-ask-button inline-flex items-center h-7 px-2 rounded-sm text-sm whitespace-nowrap text-gray-700 hover:bg-gray-100 dark:text-gray-200 dark:hover:bg-gray-700"
         >
           {action.label}
         </button>

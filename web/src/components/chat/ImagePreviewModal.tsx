@@ -210,12 +210,12 @@ export function ImagePreviewModal({
 
           {/* Panel */}
           <motion.div
-            className="relative flex flex-col w-[95vw] h-[85vh] max-w-[1200px] overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 shadow-[0_20px_60px_-12px_rgba(0,0,0,0.25)]"
+            className="em-preview-modal relative flex flex-col w-[95vw] h-[85vh] max-w-[1200px] overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 shadow-[0_20px_60px_-12px_rgba(0,0,0,0.25)]"
             variants={panelVariants}
             onClick={(e) => e.stopPropagation()}
           >
             {/* ── Tab bar ── */}
-            <div className="flex items-center bg-[#f3f3f3] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700 min-h-[36px] select-none">
+            <div className="em-preview-tabs flex items-center bg-[#f3f3f3] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700 min-h-[36px] select-none">
               <div className="flex items-center flex-1 min-w-0">
                 <div className="group relative flex items-center gap-1.5 px-3 h-[36px] text-[12px] cursor-default shrink-0 border-r border-gray-200/60 dark:border-gray-700/60 bg-white dark:bg-[#1e1e1e] text-gray-800 dark:text-gray-200">
                   <div className="absolute top-0 left-0 right-0 h-[2px] bg-[var(--em-primary)]" />
@@ -235,7 +235,7 @@ export function ImagePreviewModal({
             </div>
 
             {/* ── Breadcrumb + Toolbar bar ── */}
-            <div className="flex items-center gap-1.5 px-3 h-[32px] bg-[#fafafa] dark:bg-[#1e1e1e] border-b border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500 select-none overflow-hidden">
+            <div className="em-preview-toolbar flex items-center gap-1.5 px-3 h-[32px] bg-[#fafafa] dark:bg-[#1e1e1e] border-b border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500 select-none overflow-hidden">
               {breadcrumb.map((seg, i) => (
                 <React.Fragment key={i}>
                   {i > 0 && <ChevronRight className="w-3 h-3 shrink-0 opacity-50" />}
@@ -284,7 +284,7 @@ export function ImagePreviewModal({
 
             {/* ── Image area ── */}
             <div
-              className="relative flex-1 overflow-hidden bg-gray-50 dark:bg-[#1e1e1e] flex items-center justify-center"
+              className="em-preview-content relative flex-1 overflow-hidden bg-gray-50 dark:bg-[#1e1e1e] flex items-center justify-center"
               onDoubleClick={handleReset}
               onWheel={handleWheel}
               onPointerDown={handlePointerDown}
@@ -335,7 +335,7 @@ export function ImagePreviewModal({
             </div>
 
             {/* ── Status bar (VS Code–style) ── */}
-            <div className="flex items-center justify-between px-3 h-[24px] bg-[var(--em-primary)] text-white text-[11px] select-none shrink-0">
+            <div className="em-preview-status flex items-center justify-between px-3 h-[24px] bg-[var(--em-primary)] text-white text-[11px] select-none shrink-0">
               <div className="flex items-center gap-3">
                 <span className="w-2 h-2 rounded-full ring-1 ring-white/20 bg-[#e44d26]" />
                 <span className="opacity-90 truncate max-w-[200px]" title={filename}>

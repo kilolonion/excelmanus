@@ -315,12 +315,12 @@ export function CodePreviewModal({
 
           {/* Panel */}
           <motion.div
-            className="relative flex flex-col w-[95vw] h-[85vh] max-w-[1200px] overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 shadow-[0_20px_60px_-12px_rgba(0,0,0,0.25)]"
+            className="em-preview-modal relative flex flex-col w-[95vw] h-[85vh] max-w-[1200px] overflow-hidden rounded-xl bg-white dark:bg-[#1e1e1e] border border-gray-200 dark:border-gray-700 shadow-[0_20px_60px_-12px_rgba(0,0,0,0.25)]"
             variants={panelVariants}
             onClick={(e) => e.stopPropagation()}
           >
             {/* ── Tab bar ── */}
-            <div className="flex items-center bg-[#f3f3f3] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700 min-h-[36px] select-none overflow-x-auto scrollbar-none">
+            <div className="em-preview-tabs flex items-center bg-[#f3f3f3] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700 min-h-[36px] select-none overflow-x-auto scrollbar-none">
               <div className="flex items-center flex-1 min-w-0">
                 {previewTabs.map((tab) => {
                   const isActive = tab.filePath === activeFile.filePath;
@@ -367,7 +367,7 @@ export function CodePreviewModal({
             </div>
 
             {/* ── Breadcrumb + Toolbar bar ── */}
-            <div className="flex items-center gap-1.5 px-3 h-[32px] bg-[#fafafa] dark:bg-[#1e1e1e] border-b border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500 select-none overflow-hidden">
+            <div className="em-preview-toolbar flex items-center gap-1.5 px-3 h-[32px] bg-[#fafafa] dark:bg-[#1e1e1e] border-b border-gray-100 dark:border-gray-800 text-[11px] text-gray-400 dark:text-gray-500 select-none overflow-hidden">
               {breadcrumb.map((seg, i) => (
                 <React.Fragment key={i}>
                   {i > 0 && <ChevronRight className="w-3 h-3 shrink-0 opacity-50" />}
@@ -418,7 +418,7 @@ export function CodePreviewModal({
                   transition={{ duration: 0.15 }}
                   className="overflow-hidden shrink-0"
                 >
-                  <div className="flex items-center gap-2 px-3 h-[36px] bg-[#f5f5f5] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700">
+                  <div className="em-preview-search flex items-center gap-2 px-3 h-[36px] bg-[#f5f5f5] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700">
                     <Search className="w-3.5 h-3.5 text-gray-400 shrink-0" />
                     <input
                       ref={searchInputRef}
@@ -453,7 +453,7 @@ export function CodePreviewModal({
             </AnimatePresence>
 
             {/* ── Content area ── */}
-            <div className="flex-1 overflow-hidden bg-white dark:bg-[#1e1e1e]">
+            <div className="em-preview-content flex-1 overflow-hidden bg-white dark:bg-[#1e1e1e]">
               {loading ? (
                 <div className="flex flex-col items-center justify-center h-full gap-3">
                   <Loader2 className="w-7 h-7 animate-spin text-[var(--em-primary)] opacity-40" />
@@ -532,7 +532,7 @@ export function CodePreviewModal({
             </div>
 
             {/* ── Status bar (VS Code–style) ── */}
-            <div className="flex items-center justify-between px-3 h-[24px] bg-[var(--em-primary)] text-white text-[11px] select-none shrink-0">
+            <div className="em-preview-status flex items-center justify-between px-3 h-[24px] bg-[var(--em-primary)] text-white text-[11px] select-none shrink-0">
               <div className="flex items-center gap-3">
                 <span
                   className="w-2 h-2 rounded-full ring-1 ring-white/20"

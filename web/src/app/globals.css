@@ -2156,6 +2156,166 @@ body {
   background: var(--em-panel);
 }
 
+/* ── Secondary surfaces that share the workspace chrome ── */
+.em-auth-gate {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 155, 116, 0.13), transparent 42%),
+    var(--em-page);
+}
+
+.em-auth-card {
+  border-color: var(--em-line);
+  background: rgba(255, 255, 255, 0.88);
+  color: var(--em-ink);
+}
+
+.em-auth-icon {
+  display: grid;
+  place-items: center;
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(11, 107, 79, 0.15);
+  border-radius: 12px;
+  color: var(--em-primary);
+  background: var(--em-primary-alpha-08);
+}
+
+.em-update-toast {
+  right: max(16px, var(--sar, 0px));
+  bottom: max(16px, var(--sab, 0px));
+  width: min(380px, calc(100vw - 32px));
+}
+
+.em-update-card {
+  border-color: var(--em-line-strong);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.94);
+  box-shadow: var(--em-shadow-lift);
+}
+
+.em-recovery-overlay {
+  background: var(--em-page) !important;
+}
+
+.em-surface-header {
+  min-height: 48px;
+  padding-inline: clamp(12px, 2vw, 20px);
+  border-color: var(--em-line) !important;
+  background: var(--em-panel-soft) !important;
+}
+
+.em-surface-tabs {
+  border-color: var(--em-line) !important;
+  background: var(--em-panel) !important;
+}
+
+.em-surface-note {
+  border-color: var(--em-line) !important;
+  background: var(--em-panel-soft) !important;
+}
+
+.em-compare-pane-label {
+  border-color: var(--em-line) !important;
+  background: var(--em-primary-alpha-06) !important;
+  color: var(--em-primary) !important;
+}
+
+.em-preview-modal {
+  border-color: var(--em-line-strong) !important;
+  border-radius: 18px !important;
+  background: var(--em-panel) !important;
+  box-shadow: var(--em-shadow-lift) !important;
+}
+
+.em-preview-tabs,
+.em-preview-toolbar,
+.em-preview-search {
+  border-color: var(--em-line) !important;
+  background: var(--em-panel-soft) !important;
+}
+
+.em-preview-content {
+  background: var(--em-panel) !important;
+}
+
+.em-preview-status {
+  background: var(--em-primary) !important;
+}
+
+@media (max-width: 767px) {
+  .em-auth-card {
+    border-radius: 18px;
+    padding: 22px;
+  }
+
+  .em-update-toast {
+    right: 10px;
+    bottom: max(10px, var(--sab, 0px));
+    width: calc(100vw - 20px);
+  }
+
+  .em-preview-modal {
+    width: 100vw !important;
+    height: 100dvh !important;
+    max-width: none !important;
+    border-radius: 0 !important;
+    border-inline: 0 !important;
+  }
+}
+
+.dark .em-auth-card,
+.dark .em-update-card {
+  background: rgba(23, 33, 28, 0.96);
+}
+
+.em-onboarding {
+  background:
+    radial-gradient(circle at 50% 0%, rgba(59, 155, 116, 0.11), transparent 42%),
+    var(--em-page);
+  color: var(--em-ink);
+}
+
+.em-onboarding-progress {
+  background: rgba(255, 255, 255, 0.34);
+}
+
+.em-onboarding-step {
+  width: min(100%, 960px);
+  margin-inline: auto;
+}
+
+.em-onboarding-card {
+  border-color: var(--em-line) !important;
+  background: rgba(255, 255, 255, 0.72) !important;
+  box-shadow: 0 5px 16px rgba(24, 58, 40, 0.04);
+}
+
+.em-onboarding-card:hover {
+  border-color: rgba(11, 107, 79, 0.32) !important;
+}
+
+.dark .em-onboarding-progress,
+.dark .em-onboarding-card {
+  background: rgba(23, 33, 28, 0.82) !important;
+}
+
+.em-ribbon-ask-label {
+  color: var(--em-primary) !important;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.em-ribbon-ask-button {
+  border-radius: 8px !important;
+  color: var(--em-primary) !important;
+  background: var(--em-primary-alpha-06) !important;
+}
+
+.em-ribbon-ask-button:hover {
+  background: var(--em-primary-alpha-12) !important;
+}
+
 /* ── Sidebar Session Card Enhanced ── */
 .session-card-enhanced {
   transition: all 180ms ease;
@@ -2378,7 +2538,7 @@ body {
 .onboarding-orb-2 {
   width: 350px;
   height: 350px;
-  background: radial-gradient(circle, rgba(139, 92, 246, 0.12) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(59, 155, 116, 0.1) 0%, transparent 70%);
   bottom: -5%;
   left: -5%;
   animation: onboarding-orb-drift 15s ease-in-out infinite reverse;
@@ -2387,7 +2547,7 @@ body {
 .onboarding-orb-3 {
   width: 280px;
   height: 280px;
-  background: radial-gradient(circle, rgba(59, 130, 246, 0.1) 0%, transparent 70%);
+  background: radial-gradient(circle, rgba(11, 143, 103, 0.08) 0%, transparent 70%);
   top: 40%;
   left: 50%;
   animation: onboarding-orb-drift 10s ease-in-out infinite 2s;

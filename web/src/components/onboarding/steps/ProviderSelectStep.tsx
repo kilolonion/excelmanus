@@ -62,7 +62,7 @@ export function ProviderSelectStep({
   onGoConnectOAuth,
 }: ProviderSelectStepProps) {
   return (
-    <div className="flex flex-col items-center min-h-full px-4 sm:px-6 py-6 sm:py-8">
+    <div className="em-onboarding-step flex flex-col items-center min-h-full px-4 py-6 sm:px-6 sm:py-8">
       {/* Header */}
       <div className="max-w-2xl w-full mb-6 sm:mb-8">
         <Button
@@ -130,7 +130,7 @@ export function ProviderSelectStep({
             whileHover={{ y: -2, transition: { duration: 0.15 } }}
             whileTap={{ scale: 0.98 }}
             onClick={() => onSelect(provider)}
-            className="group relative flex items-start gap-3.5 rounded-xl border border-border/60 bg-background/80 backdrop-blur-sm p-4 text-left transition-all duration-200 hover:border-[var(--em-primary)]/40 hover:shadow-md hover:bg-[var(--em-primary-alpha-06)] cursor-pointer"
+            className="em-onboarding-card group relative flex items-start gap-3.5 rounded-xl border border-border/60 bg-background/80 backdrop-blur-sm p-4 text-left transition-all duration-200 hover:border-[var(--em-primary)]/40 hover:shadow-md hover:bg-[var(--em-primary-alpha-06)] cursor-pointer"
           >
             {/* Recommended badge */}
             {provider.recommended && (
