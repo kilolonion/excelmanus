@@ -23,8 +23,6 @@ jobs:
           - os: windows-2022
             target: win
     runs-on: ${{ matrix.os }}
-    env:
-      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/Python 中文
     defaults:
       run:
         working-directory: source-中文
@@ -38,6 +36,10 @@ jobs:
         uses: astral-sh/setup-uv@v10.1.0
         with:
           version: latest
+
+      - name: Configure uv managed Python dir (Unicode path)
+        shell: bash
+        run: echo "UV_PYTHON_INSTALL_DIR=$RUNNER_TEMP/Python 中文" >> "$GITHUB_ENV"
 
       - name: Set up Python
         run: uv python install 3.12
