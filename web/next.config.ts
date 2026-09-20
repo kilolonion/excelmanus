@@ -18,7 +18,14 @@ function getLocalNetworkOrigins(port = 3000): string[] {
     `http://127.0.0.1:${port}`,
     `http://[::1]:${port}`,
   ];
-  for (const addrs of Object.values(os.networkInterfaces())) {
+  // PRoot 沙箱下 os.networkInterfaces() 可能抛 EACCES，降级为仅回环地址
+  let interfaces: ReturnType<typeof os.networkInterfaces> = {};
+  try {
+    interfaces = os.networkInterfaces();
+  } catch {
+    interfaces = {};
+  }
+  for (const addrs of Object.values(interfaces)) {
     if (!addrs) continue;
     for (const addr of addrs) {
       if (!addr.internal && addr.family === "IPv4") {
