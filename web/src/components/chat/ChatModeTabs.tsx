@@ -66,7 +66,7 @@ export function ChatModeTabs() {
             />
           )}
           <Icon className="h-3 w-3 relative z-10" />
-          <span className="relative z-10">{label}</span>
+          <span className="relative z-10 hidden sm:inline">{label}</span>
         </button>
       ))}
     </div>
