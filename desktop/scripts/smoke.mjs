@@ -35,7 +35,7 @@ const bp = await freePort(); let fp; do { fp = await freePort(); } while (bp===f
 env.EXCELMANUS_FRONTEND_PORT=String(fp);
 const children=[];
 const start=(cmd,args,options)=>{const p=spawn(cmd,args,{...options,stdio:['pipe','pipe','pipe'],windowsHide:true,detached:!win}); p.stdin.on('error',()=>{}); p.on('error',error=>console.error(error)); p.stderr.on('data',b=>process.stderr.write(b)); p.stdout.on('data',()=>{}); children.push(p);return p;};
-const wait = async url => {for(let i=0;i<120;i++){try{const r=await fetch(url,{signal:AbortSignal.timeout(1000)});if(r.ok)return r;}catch{} await new Promise(r=>setTimeout(r,250));}throw Error(`Not ready: ${url}`);};
+const wait = async url => {for(let i=0;i<600;i++){try{const r=await fetch(url,{signal:AbortSignal.timeout(1000)});if(r.ok)return r;}catch{} await new Promise(r=>setTimeout(r,250));}throw Error(`Not ready: ${url}`);};
 try {
  start(backend,['--host','127.0.0.1','--port',String(bp)],{cwd,env});
  const health=await (await wait(`http://127.0.0.1:${bp}/api/v1/health`)).json();

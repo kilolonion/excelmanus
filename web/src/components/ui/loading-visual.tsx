@@ -3,9 +3,9 @@
 import { useEffect, useRef } from "react";
 import { cn } from "@/lib/utils";
 
-const PROGRESS_FROM = 8;
-const PROGRESS_TO = 66;
-const PROGRESS_MS = 4200;
+export const PROGRESS_FROM = 8;
+export const PROGRESS_TO = 66;
+export const PROGRESS_MS = 4200;
 let progressStartedAt: number | null = null;
 
 const SHEET_FILL = "#ffffff";

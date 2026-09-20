@@ -6,9 +6,15 @@ import { execFileSync } from 'node:child_process';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const project = resolve(root, '..');
-const run = (cmd, args, options = {}) => execFileSync(cmd, args, { cwd: project, stdio: 'inherit', ...options });
+const homeDir = process.env.USERPROFILE || process.env.HOME || '';
+const extraPaths = [
+  join(homeDir, '.local', 'bin'),
+  join(homeDir, '.cargo', 'bin'),
+].filter(p => existsSync(p));
+const envPath = [...extraPaths, process.env.PATH].filter(Boolean).join(process.platform === 'win32' ? ';' : ':');
+const run = (cmd, args, options = {}) => execFileSync(cmd, args, { cwd: project, stdio: 'inherit', env: { ...process.env, PATH: envPath }, ...options });
 // uv's managed CPython is python-build-standalone, unlike a system/Homebrew Python.
-const sourcePython = run('uv', ['python', 'find', '--managed-python', '--system', '3.12'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
+const sourcePython = run('uv', ['python', 'find', '--python-preference', 'only-managed', '--system', '3.12'], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'] }).trim();
 if (process.platform === 'win32' && process.arch !== 'x64') throw new Error('Windows packaging currently supports x64 only; do not mix ARM64 and x64 runtimes');
 const pythonArch = run(sourcePython, ['-I', '-B', '-X', 'utf8', '-c', 'import platform; print(platform.machine().lower())'], {encoding:'utf8',stdio:['ignore','pipe','inherit']}).trim();
 const normalizeArch = value => ({amd64:'x64',x86_64:'x64',aarch64:'arm64'}[value] || value);

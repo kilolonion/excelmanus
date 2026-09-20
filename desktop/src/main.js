@@ -18,7 +18,6 @@ let backendPort = null;
 let frontendPort = null;
 let backendRestarts = 0;
 let stopPromise = null;
-let startupWindow = null;
 const RESTART_EXIT_CODE = 75;
 // A second process must not open the same profile/database concurrently.
 if (process.env.EXCELMANUS_HOME) app.setPath("userData", path.resolve(userDataRoot(), "browser"));
@@ -145,6 +144,12 @@ function nodeExecutable() {
   return bundled;
 }
 
+function splashFile() {
+  const file = path.join(resourceRoot(), "splash.html");
+  if (!existsSync(file)) throw new Error(`缺少启动页: ${file}`);
+  return file;
+}
+
 function frontendRoot() {
   const root = path.join(resourceRoot(), "frontend");
   if (!existsSync(path.join(root, "server.js"))) {
@@ -239,12 +244,15 @@ ipcMain.handle("excelmanus:select-folder", async (event) => {
   return result.canceled ? null : (result.filePaths[0] || null);
 });
 
-function createMainWindow(url) {
+function createMainWindow() {
   mainWindow = new BrowserWindow({
     width: 1440,
     height: 900,
     minWidth: 1024,
     minHeight: 700,
+    backgroundColor: "#ffffff",
+    show: false,
+    autoHideMenuBar: true,
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -252,9 +260,22 @@ function createMainWindow(url) {
       preload: path.join(__dirname, "preload.js"),
     },
   });
+  mainWindow.once("ready-to-show", () => mainWindow?.show());
   configureWindowSecurity(mainWindow);
+  mainWindow.on("closed", () => {
+    mainWindow = null;
+    // 启动阶段关窗即取消启动（继承原 startupWindow 语义）。
+    if (!frontendUrl && !shuttingDown) app.quit();
+  });
+}
+
+function loadFrontend(url) {
+  if (!mainWindow) return;
   void mainWindow.loadURL(url).then(() => log("主窗口加载完成")).catch(error => log(`页面加载失败: ${error.message}`));
-  mainWindow.on("closed", () => { mainWindow = null; });
+}
+
+function setSplashStatus(text) {
+  mainWindow?.webContents.executeJavaScript(`window.__emSplashSetStatus?.(${JSON.stringify(text)})`).catch(() => {});
 }
 
 function stopProcess(child, label) { return stopChild(child, label, log); }
@@ -275,10 +296,8 @@ function stopAll() {
 
 async function boot() {
   openLogStream();
-  startupWindow = new BrowserWindow({ width: 460, height: 220, resizable: false,
-    webPreferences: { contextIsolation: true, nodeIntegration: false, sandbox: true } });
-  await startupWindow.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent('<meta charset="utf-8"><title>ExcelManus</title><body style="font:16px system-ui;padding:28px"><h2>正在启动 ExcelManus</h2><p>首次启动可能需要一些时间，请稍候。</p><p>关闭此窗口可取消启动。</p></body>'));
-  startupWindow.on('closed', () => { startupWindow = null; if (!frontendUrl && !shuttingDown) app.quit(); });
+  createMainWindow();
+  await mainWindow.loadFile(splashFile());
   backendPort = await freePort();
   const portFile = path.join(userDataRoot(), "frontend-port");
   let preferred = 0;
@@ -289,15 +308,17 @@ async function boot() {
   // Keep localStorage/IndexedDB origin stable across normal restarts.
   writeFileSync(portFile, String(frontendPort));
   if (shuttingDown) return;
+  setSplashStatus("正在启动后端服务...");
   backendProcess = startBackend(backendPort, frontendPort);
   await waitForHttp(`http://${LOOPBACK}:${backendPort}/api/v1/health`, undefined, backendProcess);
   if (shuttingDown) return;
+  setSplashStatus("正在启动界面服务...");
   frontendProcess = startFrontend(frontendPort, backendPort);
   await waitForHttp(`http://${LOOPBACK}:${frontendPort}/`, undefined, frontendProcess);
   frontendUrl = `http://${LOOPBACK}:${frontendPort}/`;
-  if (shuttingDown) return;
-  createMainWindow(frontendUrl);
-  startupWindow?.close();
+  setSplashStatus("即将进入工作空间...");
+  if (shuttingDown || !mainWindow) return;
+  loadFrontend(frontendUrl);
 }
 
 app.whenReady().then(() => ownsInstance ? boot() : undefined).catch(async (error) => {
@@ -314,7 +335,8 @@ app.on("window-all-closed", () => {
 
 app.on("activate", () => {
   if (process.platform === "darwin" && !mainWindow && frontendUrl) {
-    createMainWindow(frontendUrl);
+    createMainWindow();
+    loadFrontend(frontendUrl);
   }
 });
 
@@ -323,7 +345,7 @@ app.on("before-quit", (event) => {
   if (stopPromise) return;
   void stopAll().then(() => app.exit(0)).catch(error => {
     log(`退出失败: ${error.message}`);
-    if (!mainWindow && frontendUrl) createMainWindow(frontendUrl);
+    if (!mainWindow && frontendUrl) { createMainWindow(); loadFrontend(frontendUrl); }
     dialog.showErrorBox("ExcelManus 未能完全退出", `${error.message}\n请重试退出；日志保留在用户数据目录。`);
   });
 });

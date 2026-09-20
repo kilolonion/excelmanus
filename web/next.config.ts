@@ -49,6 +49,9 @@ function getProjectVersion(): string {
 
 const nextConfig: NextConfig = {
   output: "standalone",
+  // 固定 tracing 根目录为 web/，防止上级目录中的残留 lockfile
+  // 被误判为 workspace root，导致 standalone 产物嵌套错位。
+  outputFileTracingRoot: __dirname,
   typescript: { ignoreBuildErrors: false },
   allowedDevOrigins: getLocalNetworkOrigins(getDevFrontendPort()),
   env: {

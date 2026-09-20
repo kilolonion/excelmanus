@@ -594,6 +594,26 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         None, _background_install_scan,
     )
 
+    if os.environ.get("EXCELMANUS_DESKTOP_CONTROL_STDIN") == "1":
+        import threading
+        from excelmanus import restart
+
+        def read_parent_control() -> None:
+          try:
+            import sys
+
+            for line in sys.stdin:
+              if line.strip() == "shutdown":
+                break
+          except Exception:
+            pass
+          if restart._desktop_server is not None:
+            restart._desktop_server.should_exit = True
+
+        threading.Thread(
+            target=read_parent_control, name="desktop-control", daemon=True
+        ).start()
+
     yield
 
     # ── Graceful Shutdown ──────────────────────────────────────
@@ -1139,16 +1159,6 @@ def main() -> None:
             timeout_graceful_shutdown=10,
         ))
         restart._desktop_server = server
-        if os.environ.get("EXCELMANUS_DESKTOP_CONTROL_STDIN") == "1":
-            import threading
-            import sys
-            def read_parent_control() -> None:
-                # EOF means the owning desktop process disappeared.
-                for line in sys.stdin:
-                    if line.strip() == "shutdown":
-                        break
-                server.should_exit = True
-            threading.Thread(target=read_parent_control, name="desktop-control", daemon=True).start()
         try:
             server.run()
         finally:

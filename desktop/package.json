@@ -13,7 +13,7 @@
     "dist": "npm run prepare:assets && npm run prepare:backend && electron-builder",
     "dist:win": "npm run prepare:assets && npm run prepare:backend && electron-builder --win nsis",
     "dist:mac": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg",
-    "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs && node --check ../web/scripts/gen-splash.mjs",
     "build:web": "npm --prefix ../web run build",
     "prepare:python": "node scripts/prepare-python.mjs",
     "smoke": "node scripts/smoke.mjs",
@@ -63,6 +63,10 @@
       {
         "from": ".build/frontend-runner.cjs",
         "to": "frontend-runner.cjs"
+      },
+      {
+        "from": ".build/splash.html",
+        "to": "splash.html"
       }
     ],
     "mac": {

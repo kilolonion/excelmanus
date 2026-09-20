@@ -17,16 +17,18 @@ class CipherUnavailableError(RuntimeError):
 
 def _restrict_windows_file_permissions(filepath: Path) -> None:
     """Set and verify a protected DACL using the current token's SID."""
+    import ntsecuritycon
     import win32api
     import win32con
     import win32security
+    file_all_access = getattr(ntsecuritycon, "FILE_ALL_ACCESS", getattr(win32con, "FILE_ALL_ACCESS", 0x1F01FF))
     token = win32security.OpenProcessToken(win32api.GetCurrentProcess(), win32con.TOKEN_QUERY)
     try:
         sid = win32security.GetTokenInformation(token, win32security.TokenUser)[0]
     finally:
         token.Close()
     acl = win32security.ACL()
-    acl.AddAccessAllowedAce(win32security.ACL_REVISION, win32con.FILE_ALL_ACCESS, sid)
+    acl.AddAccessAllowedAce(win32security.ACL_REVISION, file_all_access, sid)
     win32security.SetNamedSecurityInfo(
         str(filepath), win32security.SE_FILE_OBJECT,
         win32security.DACL_SECURITY_INFORMATION | win32security.PROTECTED_DACL_SECURITY_INFORMATION,
@@ -42,7 +44,7 @@ def _restrict_windows_file_permissions(filepath: Path) -> None:
     header, mask, allowed_sid = actual.GetAce(0)
     if (header[0] != win32security.ACCESS_ALLOWED_ACE_TYPE
             or win32security.ConvertSidToStringSid(allowed_sid) != win32security.ConvertSidToStringSid(sid)
-            or mask & win32con.FILE_ALL_ACCESS != win32con.FILE_ALL_ACCESS):
+            or mask & file_all_access != file_all_access):
         raise CipherUnavailableError("密钥文件 ACL 校验失败：用户 SID 或权限不匹配")
 
 

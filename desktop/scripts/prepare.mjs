@@ -46,6 +46,7 @@ function stageFrontend() {
     writeFileSync(file, JSON.stringify(pkg, null, 2) + "\n");
   }
   copyFileSync(join(desktopRoot, "src", "frontend-runner.cjs"), join(buildRoot, "frontend-runner.cjs"));
+  execFileSync(process.execPath, [join(projectRoot, "web", "scripts", "gen-splash.mjs"), join(buildRoot, "splash.html")], { stdio: "inherit" });
   console.log(`staged frontend: ${destination}`);
 }
 

@@ -14,6 +14,10 @@ datas = []
 binaries = []
 hiddenimports = []
 
+# Frozen builds have no source checkout; ship pyproject.toml next to the
+# package so excelmanus.__version__ keeps reading the single version source.
+datas.append((str(PROJECT_ROOT / "pyproject.toml"), "."))
+
 # ExcelManus loads prompts and skillpacks from package data at runtime.
 for package in ("excelmanus", "fastapi", "uvicorn", "tiktoken"):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
