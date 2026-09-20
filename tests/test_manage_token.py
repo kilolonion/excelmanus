@@ -20,6 +20,26 @@ def test_loopback_hosts() -> None:
     assert is_loopback_bind_host("::1")
     assert not is_loopback_bind_host("0.0.0.0")
     assert not is_loopback_bind_host("192.168.1.8")
+    assert not is_loopback_bind_host("127.example.com")
+    assert not is_loopback_bind_host("127.999.0.1")
+    assert is_loopback_bind_host("127.1.2.3")
+
+
+def test_api_entrypoint_checks_binding_before_starting(monkeypatch):
+    from unittest.mock import Mock
+    import excelmanus.api as api
+
+    run = Mock()
+    monkeypatch.setattr(api.uvicorn, "run", run)
+    monkeypatch.setattr("sys.argv", ["excelmanus-api", "--host", "0.0.0.0", "--workers", "2"])
+    with pytest.raises(SystemExit):
+        api.main()
+    run.assert_not_called()
+
+    monkeypatch.setenv("EXCELMANUS_MANAGE_TOKEN", "test-token-for-remote-bind")
+    api.main()
+    assert run.call_args.kwargs["host"] == "0.0.0.0"
+    assert run.call_args.kwargs["workers"] == 2
 
 
 def test_require_token_for_non_loopback(monkeypatch: pytest.MonkeyPatch) -> None:

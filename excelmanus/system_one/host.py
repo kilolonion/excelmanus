@@ -1,4 +1,4 @@
-"""Host 接线：回合入口评估、审批 shadow/E、L4 wire 收窄、回合末 UI 面、F/G/M/P。
+"""Host 接线：回合入口评估、审批 shadow/E、初始工具预加载、回合末 UI 面、F/G/M/P。
 
 缺省不改 envelope.tools / 不发 ui_hint / 不改目录 / 不改循环 / 不冷修剪 / 不改审批结果。
 仅当对应闸为 enforce 且标定已签字时才 applied。
@@ -6,15 +6,16 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping
 from typing import Any
 
 from excelmanus.events import EventType, ToolCallEvent
 from excelmanus.logger import get_logger
 from excelmanus.system_one.adapter import exposure_state_from_engine
+from excelmanus.system_one.budget import reset_turn_budget
 from excelmanus.system_one.context import is_child_session
 from excelmanus.system_one.log import record_shadow
-from excelmanus.system_one.packs import PROFILE_NAMES, resolve_profile_tools
+from excelmanus.system_one.packs import PROFILE_NAMES
 from excelmanus.system_one.policy import (
     T_BIG,
     T_CHAT,
@@ -34,7 +35,6 @@ from excelmanus.system_one.policy import (
 )
 from excelmanus.system_one.types import Decision
 from excelmanus.system_one.trace import emit_jev_trace
-from excelmanus.tools.runtime import RUN_CODE_NAME, schema_tool_name
 
 logger = get_logger("system_one.host")
 _MAX_OBSERVATION_EVALUATIONS_PER_TURN = 3
@@ -51,11 +51,11 @@ async def _eval_traced(
     on_event: Any | None = None,
 ) -> Decision:
     """evaluate 之后必发 jev_trace。失败 / unavailable 也发。"""
-    from excelmanus.system_one import evaluate
+    from excelmanus.system_one.runtime import evaluate_for_host
 
     config = live_jev_config(getattr(engine, "config", None))
     try:
-        decision = await evaluate(pack_id, state, config=config)
+        decision = await evaluate_for_host(engine, pack_id, state, config=config)
     except Exception as exc:
         logger.debug("%s evaluate failed", pack_id, exc_info=True)
         if pack_id == "approval.tool_call":
@@ -84,14 +84,17 @@ def _jev_connected(engine: Any) -> bool:
 
 def clear_turn_exposure(engine: Any) -> None:
     engine._turn_exposure = None  # type: ignore[attr-defined]
+    # Tool discovery lasts for this turn (including compaction), never leaks to
+    # another turn or a child session. This reset runs even when Jev is off.
+    engine._loaded_tool_names = set()  # type: ignore[attr-defined]
+    engine._tools_cache = None  # type: ignore[attr-defined]
     engine._skill_pin = None  # type: ignore[attr-defined]
     engine._skill_pin_evaluated = False  # type: ignore[attr-defined]
     engine._loop_wrap = None  # type: ignore[attr-defined]
     engine._jev_observation_evaluations = 0  # type: ignore[attr-defined]
-
-
-def clear_turn_present_as(engine: Any) -> None:
-    engine._turn_present_as = None  # type: ignore[attr-defined]
+    engine._jev_turn_budget = None  # type: ignore[attr-defined]
+    engine._mutation_verification = None  # type: ignore[attr-defined]
+    engine._recovery_hint = None  # type: ignore[attr-defined]
 
 
 def remember_turn_tools(engine: Any, chat_result: Any) -> None:
@@ -111,7 +114,7 @@ def turn_exposure_profile(engine: Any) -> str:
 
 
 def turn_wire_profile(engine: Any) -> str:
-    """L4 用来 ∩ 的 sticky profile。闸未 applied / child / 缺失 → full。"""
+    """初始披露的类别偏置；full 表示无偏置，仍使用常驻核心集合。"""
     if is_child_session(engine):
         return "full"
     settings = live_jev_settings(getattr(engine, "config", None))
@@ -128,27 +131,6 @@ def turn_wire_profile(engine: Any) -> str:
     return sticky
 
 
-def narrow_exposure_schemas(
-    engine: Any,
-    schemas: Sequence[Mapping[str, Any]] | Sequence[dict[str, Any]],
-) -> list[dict[str, Any]]:
-    """catalog.tools ∩ PROFILE[sticky]。full / 未 applied 原样返回。
-
-    先 ``collapse_schemas(present_as)`` 再求交。code 坍成 ``{run_code}`` 时
-    交集保持 ``run_code``，避免 inspect 把逃生舱掏空。
-    """
-    rows = [dict(item) for item in schemas]
-    names = [schema_tool_name(item) for item in rows]
-    remaining = {name for name in names if name}
-    if remaining <= {RUN_CODE_NAME}:
-        return rows
-    profile = turn_wire_profile(engine)
-    if profile == "full":
-        return rows
-    allowed = resolve_profile_tools(profile, names)
-    return [item for item in rows if schema_tool_name(item) in allowed]
-
-
 async def maybe_record_turn_exposure(
     engine: Any,
     user_text: str,
@@ -157,10 +139,10 @@ async def maybe_record_turn_exposure(
 ) -> None:
     """片 I：控制命令之后、USER_PROMPT_SUBMIT 落定后。L4 是否收窄看 applied。
 
-    片 K/L 复用本评估的 mode_hint / present_hint；未签字不发卡、不写回合覆盖。
+    片 K 复用本评估的 mode_hint；工具调用方式由主模型逐步选择。
     """
     clear_turn_exposure(engine)
-    clear_turn_present_as(engine)
+    reset_turn_budget(engine)
     if is_child_session(engine):
         return
     if not _jev_connected(engine):
@@ -188,7 +170,6 @@ async def maybe_record_turn_exposure(
         "domain": extras.get("domain") or "mixed",
         "mode_hint": extras.get("mode_hint") or "keep",
         "mode_hint_confidence": float(extras.get("mode_hint_confidence") or 0.0),
-        "present_hint": extras.get("present_hint"),
         "conf": float(extras.get("domain_confidence") or 0.0),
         "latency_ms": float(getattr(evaluation, "latency_ms", 0.0) or 0.0) if evaluation else 0.0,
         "wire_narrow": wire_narrow,
@@ -204,7 +185,6 @@ async def maybe_record_turn_exposure(
         engine._turn_exposure["sticky_profile"] = "minimal"  # type: ignore[index]
         engine._turn_exposure["wire_narrow"] = True  # type: ignore[index]
     engine._tools_cache = None  # type: ignore[attr-defined]
-    maybe_apply_turn_present_as(engine)
     maybe_enqueue_mode_switch(engine, on_event=on_event)
 
 
@@ -226,26 +206,6 @@ _MODE_SWITCH_CARDS: dict[str, dict[str, str]] = {
         "keep_desc": "留在编辑模式",
     },
 }
-
-
-def maybe_apply_turn_present_as(engine: Any) -> None:
-    """片 L：仅 write + 签字 enforce 才写回合覆盖。不改持久偏好。"""
-    if is_child_session(engine):
-        return
-    chat = str(getattr(engine, "_current_chat_mode", "write") or "write")
-    if chat != "write":
-        return
-    settings = live_jev_settings(getattr(engine, "config", None))
-    if not jev_is_active(settings) or not flag_is_applied(settings.present_as_auto, settings, pack_id="exposure.turn"):
-        return
-    record = getattr(engine, "_turn_exposure", None)
-    if not isinstance(record, Mapping):
-        return
-    hint = record.get("present_hint")
-    if hint not in {"native", "code"}:
-        return
-    engine._turn_present_as = hint  # type: ignore[attr-defined]
-    engine._tools_cache = None  # type: ignore[attr-defined]
 
 
 def maybe_enqueue_mode_switch(engine: Any, *, on_event: Any | None = None) -> None:
@@ -538,6 +498,69 @@ async def maybe_emit_ui_hint(
             on_event(event)
     except Exception:
         logger.debug("ui_hint emit failed; continuing turn", exc_info=True)
+
+
+async def maybe_verify_mutation(
+    engine: Any,
+    chat_result: Any,
+    *,
+    on_event: Any | None = None,
+) -> None:
+    """Shadow-only post-write intent verification.
+
+    The first version records a structured suggestion. It deliberately does
+    not enqueue a check or alter the reply; those actuators require a separate
+    calibration and rollout decision.
+    """
+    if engine is None or is_child_session(engine) or chat_result is None:
+        return
+    state_obj = getattr(engine, "_state", None)
+    affected = list(getattr(state_obj, "affected_files", None) or []) if state_obj else []
+    if not affected:
+        return
+    if _turn_outcome(engine, chat_result) == "fail":
+        return
+    settings = live_jev_settings(getattr(engine, "config", None))
+    if not jev_is_active(settings) or gate_for_pack("mutation.verify", settings) == "off":
+        return
+    from excelmanus.system_one.adapter import mutation_verify_state_from_engine
+
+    state = mutation_verify_state_from_engine(engine, chat_result)
+    decision = await _eval_traced(engine, "mutation.verify", state, on_event=on_event)
+    engine._mutation_verification = {  # type: ignore[attr-defined]
+        "next": str((decision.extras or {}).get("next") or "none"),
+        "satisfied": float((decision.extras or {}).get("satisfied") or 0.0),
+        "scope_ok": float((decision.extras or {}).get("scope_ok") or 0.0),
+        "applied": decision_can_apply("mutation.verify", decision, settings),
+        "reason": decision.reason,
+    }
+
+
+async def maybe_suggest_recovery(
+    engine: Any,
+    tool_results: list[Any],
+    *,
+    on_event: Any | None = None,
+) -> None:
+    """Evaluate recovery only after a deterministic failure breaker fires."""
+    if engine is None or is_child_session(engine) or getattr(engine, "_recovery_hint", None) is not None:
+        return
+    if not any(not bool(getattr(item, "success", False)) for item in tool_results):
+        return
+    settings = live_jev_settings(getattr(engine, "config", None))
+    if not jev_is_active(settings) or gate_for_pack("recovery.next_step", settings) == "off":
+        return
+    from excelmanus.system_one.adapter import recovery_state_from_engine
+
+    state = recovery_state_from_engine(engine, tool_results)
+    decision = await _eval_traced(engine, "recovery.next_step", state, on_event=on_event)
+    engine._recovery_hint = {  # type: ignore[attr-defined]
+        "next": str((decision.extras or {}).get("next") or "stop"),
+        "retryable": float((decision.extras or {}).get("retryable") or 0.0),
+        "needs_user": float((decision.extras or {}).get("needs_user") or 0.0),
+        "applied": decision_can_apply("recovery.next_step", decision, settings),
+        "reason": decision.reason,
+    }
 
 
 def _has_at_mention(text: str) -> bool:

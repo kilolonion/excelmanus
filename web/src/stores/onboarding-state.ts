@@ -187,15 +187,15 @@ export function clearLegacyLocalOnboarding(): void {
 export function shouldShowOnboardingWizard(
   userSynced: boolean,
   wizardCompleted: boolean,
-  backendConfigured: boolean | null,
 ): boolean {
-  return userSynced && (!wizardCompleted || backendConfigured === false);
+  // Configuration is optional during onboarding. A deliberate skip must survive
+  // health polling, reloads and opening the same installation in another client.
+  return userSynced && !wizardCompleted;
 }
 
 export function shouldShowCoachMarks(
   userSynced: boolean,
   wizardCompleted: boolean,
-  backendConfigured: boolean | null,
   coachMarksCompleted: boolean,
   advancedGuideCompleted: boolean,
   settingsGuideCompleted: boolean,
@@ -203,7 +203,6 @@ export function shouldShowCoachMarks(
   return (
     userSynced &&
     wizardCompleted &&
-    backendConfigured !== false &&
     (!coachMarksCompleted || !advancedGuideCompleted || !settingsGuideCompleted)
   );
 }

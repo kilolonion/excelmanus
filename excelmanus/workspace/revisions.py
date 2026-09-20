@@ -21,7 +21,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
 import secrets
+import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -39,6 +42,7 @@ VALID_REASONS = frozenset({
 _PROTECTED_REASONS = frozenset({"checkpoint", "deleted", "moved"})
 
 DEFAULT_PRUNE_KEEP = 40
+_REVISION_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,128}$")
 
 
 def _utc_now() -> str:
@@ -156,10 +160,18 @@ class RevisionStore:
         return hashlib.sha256(_canonical_rel(canonical_path).encode("utf-8")).hexdigest()
 
     def _dir_for(self, canonical_path: str) -> Path:
-        return self._root / self.path_key(canonical_path)
+        directory = self._root / self.path_key(canonical_path)
+        for node in (self._root.parent, self._root, directory, directory / "blobs", directory / "records"):
+            if node.is_symlink():
+                raise RevisionIntegrityError("history directory must not be a symlink")
+        return directory
 
     def _blob_paths(self, canonical_path: str, digest: str) -> tuple[Path, Path]:
+        if not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise RevisionIntegrityError("invalid blob digest")
         blob_dir = self._dir_for(canonical_path) / "blobs"
+        if (blob_dir / digest).is_symlink() or (blob_dir / f"{digest}.xlsx").is_symlink():
+            raise RevisionIntegrityError("history blob must not be a symlink")
         return blob_dir / digest, blob_dir / f"{digest}.xlsx"
 
     def put_blob(self, canonical_path: str, data: bytes) -> str:
@@ -168,8 +180,21 @@ class RevisionStore:
         blob_dir.mkdir(parents=True, exist_ok=True)
         dest, legacy = self._blob_paths(canonical_path, digest)
         if dest.exists() or legacy.exists():
-            return digest
-        dest.write_bytes(data)
+            if self.read_blob(canonical_path, digest) is not None:
+                return digest
+        fd, tmp_name = tempfile.mkstemp(prefix=".blob-", dir=str(blob_dir))
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            from excelmanus.workspace.txlog import replace_with_retry
+            replace_with_retry(tmp_name, str(dest))
+        finally:
+            try:
+                os.unlink(tmp_name)
+            except FileNotFoundError:
+                pass
         return digest
 
     def read_blob(self, canonical_path: str, content_sha256_hex: str) -> bytes | None:
@@ -238,15 +263,30 @@ class RevisionStore:
 
     def get(self, path: str, revision_id: str) -> RevisionRecord | None:
         rel = _canonical_rel(path)
+        if not _REVISION_ID_RE.fullmatch(str(revision_id or "")):
+            return None
         dest = self._dir_for(rel) / "records" / f"{revision_id}.json"
+        if dest.is_symlink():
+            raise RevisionIntegrityError("history record must not be a symlink")
         if not dest.is_file():
             return None
-        data = json.loads(dest.read_text(encoding="utf-8"))
-        return RevisionRecord.from_json_dict(data)
+        try:
+            rec = RevisionRecord.from_json_dict(json.loads(dest.read_text(encoding="utf-8")))
+        except (ValueError, TypeError, AttributeError) as exc:
+            raise RevisionIntegrityError("invalid history record") from exc
+        if rec.path != rel or rec.id != revision_id:
+            raise RevisionIntegrityError("history record identity mismatch")
+        return rec
 
     def list(self, path: str) -> list[RevisionRecord]:
         """Committed history only. Uncommitted prepare records stay hidden."""
         return [rec for rec in self._list_all(path) if rec.committed]
+
+    def delete_record(self, record: RevisionRecord) -> None:
+        if not _REVISION_ID_RE.fullmatch(record.id):
+            raise ValueError("invalid revision id")
+        (self._dir_for(record.path) / "records" / f"{record.id}.json").unlink(missing_ok=True)
+        self._gc_blobs(record.path)
 
     def _list_all(self, path: str) -> list[RevisionRecord]:
         rel = _canonical_rel(path)
@@ -383,6 +423,7 @@ class RevisionStore:
         *,
         label: str | None = None,
         transaction_id: str | None = None,
+        lineage_id: str | None = None,
     ) -> RevisionRecord:
         tx = transaction_id or secrets.token_hex(8)
         rec = self.add_record(
@@ -391,6 +432,7 @@ class RevisionStore:
             reason="checkpoint",
             transaction_id=tx,
             label=label,
+            lineage_id=lineage_id,
             exists_after=True,
             op="checkpoint",
         )
@@ -399,7 +441,7 @@ class RevisionStore:
 
     def read_revision(self, path: str, revision_id: str) -> tuple[RevisionRecord, bytes]:
         rec = self.get(path, revision_id)
-        if rec is None:
+        if rec is None or not rec.committed or rec.path != _canonical_rel(path):
             raise KeyError(f"revision not found: {revision_id}")
         data = self.read_blob(path, rec.sha256)
         if data is None:

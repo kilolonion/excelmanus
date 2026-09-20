@@ -1,6 +1,7 @@
 "use client";
 
-import React from "react";
+import React, { useEffect, useRef } from "react";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   Terminal,
   AtSign,
@@ -43,7 +44,21 @@ export function CommandPopover({
   onBackToSlash,
   onBackToAt,
 }: CommandPopoverProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const virtual = popoverItems.length > 100;
+  const virtualizer = useVirtualizer({
+    count: popoverItems.length,
+    getScrollElement: () => scrollRef.current,
+    getItemKey: (index) => popoverItems[index].command || index,
+    estimateSize: () => 40,
+    overscan: 4,
+    enabled: virtual && !!popover,
+  });
+  useEffect(() => {
+    if (virtual && popover && popoverItems.length) virtualizer.scrollToIndex(selectedIndex, { align: "auto" });
+  }, [selectedIndex, popover, popoverItems.length, virtual, virtualizer]);
   if (!popover || popoverItems.length === 0) return null;
+  const rows = virtual ? virtualizer.getVirtualItems() : popoverItems.map((_, index) => ({ index, start: 0 }));
 
   return (
     <div
@@ -100,8 +115,11 @@ export function CommandPopover({
         )}
         <span className="ml-auto text-[10px] opacity-60 hidden sm:inline">↑↓ 导航 · Tab 选择 · Esc 关闭</span>
       </div>
-      <div className="max-h-[min(192px,40dvh)] sm:max-h-60 overflow-y-auto py-1 overscroll-contain">
-        {popoverItems.map((item, i) => {
+      <div ref={scrollRef} className="max-h-[min(192px,40dvh)] sm:max-h-60 overflow-y-auto py-1 overscroll-contain">
+        <div style={virtual ? { height: virtualizer.getTotalSize(), position: "relative" } : undefined}>
+        {rows.map((row) => {
+          const i = row.index;
+          const item = popoverItems[i];
           const isActive = item.isActive;
           const hasChildren = item.hasChildren;
           // 主斜杠菜单中为 /skills 和 /model 显示下钻箭头
@@ -109,6 +127,9 @@ export function CommandPopover({
           return (
             <button
               key={item.command || `empty-${i}`}
+              data-index={i}
+              ref={virtual ? virtualizer.measureElement : undefined}
+              style={virtual ? { position: "absolute", top: 0, left: 0, transform: `translateY(${row.start}px)` } : undefined}
               className={`w-full flex items-center gap-2.5 px-3.5 py-2 text-sm text-left transition-colors ${
                 item.command ? (i === selectedIndex ? "bg-[var(--em-primary-alpha-10)]" : "hover:bg-accent/40") : "opacity-50 cursor-default"
               }`}
@@ -135,6 +156,7 @@ export function CommandPopover({
             </button>
           );
         })}
+        </div>
       </div>
     </div>
   );

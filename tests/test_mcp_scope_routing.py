@@ -178,12 +178,10 @@ def test_mcp_guide_not_injected_into_system():
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
     prompts, error = prepare_system_prompts_for_request(engine, [])
     assert error is None
     blob = "\n".join(prompts)
     assert "搜索工具选择指南" not in blob
     assert "通用网页搜索" not in blob
-
 

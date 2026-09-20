@@ -1,97 +1,94 @@
-# Bench
+# 模型评测（Bench）
 
-评测只放这里。套件 JSON、夹具生成器、跑手都在本目录；跑次产物在 `outputs/`，不要另开 `evals/` 之类平行树。
+Bench 用于通过实际对话、工具调用和产出文件评估 ExcelManus。适用版本：1.8.0 源码；更新日期：2026-09-19。
 
-```
-bench/
-  README.md
-  run.ps1                      # 把 test.env 凭据导入隔离主库，生成夹具，再跑 bench
-  cases/                       # 全部 suite JSON；--all 只跑 include_in_all 未关闭的
-    suite_smoke.json           # 短冒烟，有断言
-    suite_write_approval.json  # 审批链路，有断言
-    suite_experiential.json    # 体验向长套件，无标准答案，不进 --all
-    suite_realistic.json       # 真实办公任务套件，有结果断言，不进 --all
-  fixtures/
-    build_experiential.py      # 生成脏办公文件
-    build_realistic.py         # 生成真实办公夹具（多表/CSV/docx/大表）+ answers.json
-    jev_calibration/           # 片 D 离线合成夹具（固定 JSON，不打网；未签字）
-    experiential/  realistic/  # 生成物，不入库
-  reports/                     # 框架审计、runbook、各轮分析
-  analyze_run.py               # run_*.json 展开成复盘 Markdown（含 system prompt/token）
-  summarize_runs.py            # 一批 run_*.json 的效率指标汇总表
-```
+[文档导航](../docs/README.md) · [套件字段](cases/README.md) · [夹具生成](fixtures/README.md)
 
-## 两类套件
+这里的对话评测会调用所配置的模型服务，可能产生费用。它与无需真实模型的单元测试、Jev 离线合成检查是不同的验证方式。
 
-| 套件 | 目的 | 判断方式 | `--all` |
+## 套件选择
+
+| 套件 | 当前用例数 | 目的与判断方式 | 包含在 `--all` |
 | --- | --- | --- | --- |
-| `suite_smoke` / `suite_write_approval` | 链路是否通 | `assertions` | 是 |
-| `suite_experiential` | 真实/含糊/怪异请求下的体验 | 事后读对话，不设标准答案 | 否（`include_in_all: false`） |
-| `suite_realistic` | 真实办公任务的交付正确性 + 效率 | `output_checks` 结果断言 + review_focus 人工复盘 | 否 |
+| `suite_smoke.json` | 2 | 基础链路与声明式断言 | 是 |
+| `suite_write_approval.json` | 1 | 审批交互 | 是 |
+| `suite_experiential.json` | 24 | 含糊、异常、多轮和跨文件任务；人工阅读对话，不设标准答案 | 否 |
+| `suite_realistic.json` | 32 | 办公任务；结果断言与人工复盘 | 否 |
+| `suite_prompt_contract.json` | 5 | 提示词与工具契约场景；运行时计算检查项 | 否 |
 
-`realistic` 套件 32 条分五波（wave-r1…r4 只读/清洗/格式/多轮边界，wave-r5 为补洞扩展：
-条件格式、多条件过滤、省份口径、代码模式对照、长程撤销、双条件均薪）：只读问答、公式/汇总/透视、脏数据清洗、
-格式化、跨文件对比、大表、缺文件/隐私边界、多轮指代、docx 交付。断言值用
-`@answers:key` 引用 `fixtures/realistic/answers.json`；`auto_approve=accept`
-模拟网页默认逐次审批。效率预算（max_*）为 warn-only 告警，不判 fail，详见
-`cases/README.md`。nightly 可用 `-Seed <int>` 生成同构异值夹具防过拟合
-（换 seed 后必须用新 `answers.json` 评分）。
+`--all` 仅运行 `include_in_all` 未关闭的套件，目前共 3 个用例。增加套件后，范围以 JSON 文件为准。长套件需要显式选择，不应把短套件通过视为全面功能验收。
 
-体验套件分四轮，共 24 条，覆盖探查、脏数据、多轮指代、Word/Excel/CSV/图、只读/计划/代码模式、对比、撤销、缺文件、隐私、越权拒绝、自相矛盾指令。`expected.review_focus` 只是阅读提纲，不会触发 golden 比对。
+## 准备隔离配置
 
-夹具构造意图写在 `fixtures/build_experiential.py`：金额、日期、区域、公式可以互相打架。
+Bench 从当前 data home 的主数据库读取激活模型。`--import-env` 是显式的一次性凭据导入，执行后退出；它不会把 `.env` 变回产品配置源，也不会自行保证与日常数据隔离。
 
-## 字段
+建议使用独立目录。以下命令在仓库根目录运行，`test.env` 是本机凭据清单，不应提交到仓库：
 
-见 `cases/README.md`。体验套件额外约定：
+```bash
+export EXCELMANUS_HOME="$PWD/outputs/bench-local/runtime-home"
+uv run python -m excelmanus.bench --import-env test.env --model YOUR_MODEL_ID
+uv run python -m excelmanus.bench --all --output-dir outputs/bench-local
+```
 
-- `include_in_all: false`：`--all` 跳过
-- `scoring: none`：不写断言、不写 `golden_file`
-- `expected.lens` / `expected.review_focus`：事后分析用
-- `tags` 含 `wave-1` … `wave-4`
+清单可使用 `url`、`key`、`model`，或对应的 `EXCELMANUS_BASE_URL`、`EXCELMANUS_API_KEY`、`EXCELMANUS_MODEL`。如果清单已包含模型，导入时可省略 `--model`。隔离目录应同时用于导入和后续运行；更换终端时重新设置。完成评测后，在该终端执行 `unset EXCELMANUS_HOME` 可恢复默认目录选择。
 
-## 运行
+## 生成夹具并运行
+
+体验和办公套件使用本地生成的输入文件，先按 [夹具说明](fixtures/README.md) 准备：
+
+```bash
+uv run python bench/fixtures/build_experiential.py
+uv run python bench/fixtures/build_realistic.py
+```
+
+在已配置隔离 data home 的终端运行：
+
+```bash
+uv run python -m excelmanus.bench --suite bench/cases/suite_experiential.json --case E15
+uv run python -m excelmanus.bench --suite bench/cases/suite_realistic.json --case R01
+uv run python -m excelmanus.bench --suite bench/cases/suite_realistic.json --wave r1
+uv run python -m excelmanus.bench --suite bench/cases/suite_prompt_contract.json
+uv run python -m excelmanus.bench --help
+```
+
+可重复传入 `--case`，也可通过 `--concurrency`、`--suite-concurrency` 控制并发。默认均为 1；提高并发会增加模型请求和资源占用。
+
+单轮超时优先级为 case → suite → `--turn-timeout`，`0` 表示不限制。用例工作目录在每次运行前重新准备，不能用它保存独立的用户文件。
+
+### Windows PowerShell 入口
+
+`bench/run.ps1` 会读取凭据、创建隔离主库、选择夹具生成器并调用同一个 Bench 运行器：
 
 ```powershell
-# 短套件
-uv run python -m excelmanus.bench --all
-uv run python -m excelmanus.bench --suite bench/cases/suite_smoke.json
-
-# 体验向：先生成夹具；凭据来自仓库根 test.env（导入隔离主库，不是产品 .env）
-.\bench\run.ps1 -CaseId E15              # 单条（推荐：跑完读对话再下一条）
-.\bench\run.ps1 -Wave 1                  # 整波
-
-# 真实办公套件（模型运行需先批准，流程见 reports/02-realistic-runbook.md）
-.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -CaseId R01
-.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -Wave r1
-.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -BigRows 20000   # 调试缩小大表
-.\bench\run.ps1 -TurnTimeout 600         # 覆盖单轮硬超时（套件默认 900s）
-.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -Strict   # 严格模式：效率超限也判 fail
+.\bench\run.ps1 -CaseId E15 -Model YOUR_MODEL_ID
+.\bench\run.ps1 -Wave 1 -Model YOUR_MODEL_ID
+.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -CaseId R01 -Model YOUR_MODEL_ID
+.\bench\run.ps1 -Suite bench/cases/suite_realistic.json -Wave r1 -Strict -Model YOUR_MODEL_ID
 ```
 
-## 运行分级
+脚本读取仓库根目录的 `test.env`，可用 `-TestEnv` 替换。显式传入 `-Model` 或在清单中填写模型，避免依赖脚本内的回退模型。`-BigRows` 可缩小办公套件的大表，`-Seed` 可生成不同数据；更换种子后，必须使用同一次生成的 `answers.json`。
 
-| 层级 | 命令 | 用途 | 口径 |
-|---|---|---|---|
-| L1 CI 门禁 | `--all`（3 条冒烟） | 链路是否通，每次提交 | error 判 fail |
-| L2 nightly 回归 | `--suite suite_realistic.json` | 32 条交付正确性 | 默认 warn-only；收紧用 `-Strict` |
-| L3/L4 波次 | `-Wave r1…r5` | 定点复盘某一类任务 | 同 L2 |
-| L5 开放体验 | `--suite suite_experiential.json` | 含糊/对抗/安全，只人工读 digest | 不评分 |
+修改该脚本时保留 UTF-8 BOM，确保 Windows PowerShell 5.1 正确读取中文。
 
-`--all` 故意只含冒烟：长套件费模型与时间，必须显式指定。
+## 如何解释结果
 
-`run.ps1` 把仓库根 `test.env` 里的 `url`/`key`/`model` 当作**评测凭据清单**：规范化网关 URL 后写入本次运行的隔离主库（`outputs/.../runtime-home`）。未写 `model` 时默认 `mimo-v2.5-pro`。夹具生成器按套件名自动选（realistic/experiential，可用 `-Fixtures` 覆盖）。未显式给 `-OutputDir` 时按套件名落到 `outputs/<suite>/`，再按用例 `wave-*` 标签落到子目录。
+- **正确性**：由 error 级过程断言和 `output_checks` 判定。断言范围外的文件保真、界面体验等仍需单独检查。
+- **效率**：`max_*` 预算默认产生 warning，不改变正确性结论；`--strict-efficiency` 或 PowerShell `-Strict` 会将超限纳入失败。
+- **体验套件**：`scoring: none`，按 `review_focus` 人工阅读回复、操作和交付内容；不能将运行结束等同于业务通过。
+- **历史报告**：`reports/` 中的结果只适用于所记录的代码、模型、配置和夹具，不能直接用作新版本通过证明。
 
-产物（每个用例）：
+办公套件通过 `@answers:key` 引用 `fixtures/realistic/answers.json`。标准答案由评测器读取；Agent 不应读取答案或套件定义来完成任务。完整字段与反绕过规则见 [套件文档](cases/README.md)。
 
-- `conversations/{case_id}.json`：伪造前端 transcript + 会话库 + 引擎记忆
-- `conversations/{case_id}.digest.md`：**分析摘要**——一轮一节，回复全文、工具调用
-  （参数/返回截断）、LLM 调用指标（耗时/token/上下文规模）、思考摘要、交互事件、
-  系统提示注入概况。事后评审先读这份，要细节再钻下面两份全量。
-- `run_*.json`：全量执行记录（llm_calls 带每次请求 messages 与 usage）
-- `workfiles/{suite}/{case_id}/`：用例独立工作区（每次跑前清空）
+## 产物与目录
 
-事后阅读优先看 digest 与伪造前端 `transcript`，对照该 case 的 `review_focus`。不要用单元格是否等于标准答案当通过条件。
+| 位置 | 内容 |
+| --- | --- |
+| `conversations/{case_id}.digest.md` | 每轮回复、工具摘要、交互事件和请求指标，适合先阅读 |
+| `conversations/{case_id}.json` | 模拟前端 transcript、会话记录和引擎记忆 |
+| `run_*.json` | 完整执行记录，包括模型请求与 usage |
+| `workfiles/{suite}/{case_id}/` | 用例独立工作区 |
+| `bench/reports/` | 已保存的阶段分析与历史报告 |
 
-注意 `run.ps1` 含中文注释，必须保持 UTF-8 with BOM 保存，否则 Windows PowerShell 5.1
-按 ANSI 解析直接报语法错误（pwsh 7 不受影响）。
+默认 CLI 产物目录为 `outputs/bench`。PowerShell 入口默认按套件和 wave 组织到 `outputs/`。`analyze_run.py` 与 `summarize_runs.py` 用于复盘和指标汇总。
+
+执行记录可能包含完整对话、文件内容、请求参数及模型输出。分享前检查并脱敏，不要将含真实业务数据或凭证的运行产物提交到仓库。

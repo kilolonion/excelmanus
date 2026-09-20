@@ -97,7 +97,6 @@ class ChatRequest(BaseModel):
         str, StringConstraints(strip_whitespace=True, min_length=1, max_length=128)
     ] | None = None
     chat_mode: Literal["write", "read", "plan"] = "write"
-    present_as: Literal["native", "code"] | None = None
     images: list[ImageAttachment] = Field(default_factory=list)
 
 
@@ -467,7 +466,6 @@ async def chat(request: ChatRequest, raw_request: Request) -> ChatResponse:
             on_event=_on_event_sync,
             images=_serialize_images(request.images),
             chat_mode=request.chat_mode,
-            present_as=request.present_as,
             display_text=display_text,
             mention_contexts=mention_contexts,
         )
@@ -706,7 +704,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             _flush_scheduled = False
 
             def _schedule_flush() -> None:
-                """将同步 flush 调度为异步任务，避免在事件回调中阻塞事件循环。
+                """合并同一工具批的消息持久化，调度到事件回调之后。
 
                 同一轮 tool batch 中多个 TOOL_CALL_END 事件只触发一次 flush：
                 首个 TOOL_CALL_END 设置标记并调度，后续的跳过。
@@ -721,9 +719,8 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                     nonlocal _flush_scheduled
                     try:
                         if get_session_manager() is not None:
-                            await asyncio.to_thread(
-                                get_session_manager().flush_messages_sync, session_id,
-                            )
+                            # 读取可变 memory 的增量持久化与 Driver 检查点留在同一事件循环。
+                            get_session_manager().flush_messages_sync(session_id)
                     except Exception:
                         logger.debug("异步消息持久化失败", exc_info=True)
                     finally:
@@ -734,7 +731,7 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
             def _on_event(event: ToolCallEvent) -> None:
                 """引擎事件回调：通过 stream_state 投递，同时持久化 Excel 事件。
 
-                消息持久化通过 asyncio.to_thread 异步执行，不阻塞事件循环。
+                消息持久化合并调度，在同一事件循环读取 memory。
                 """
                 nonlocal _sse_event_count
                 _sse_event_count += 1
@@ -763,7 +760,6 @@ async def chat_stream(request: ChatRequest, raw_request: Request) -> StreamingRe
                         on_event=_on_event,
                         images=_serialize_images(request.images),
                         chat_mode=request.chat_mode,
-                        present_as=request.present_as,
                         display_text=display_text,
                         mention_contexts=mention_contexts,
                     )
@@ -1377,7 +1373,7 @@ async def chat_abort(request: AbortRequest, raw_request: Request) -> JSONRespons
     if get_session_manager() is not None:
         engine = get_session_manager().get_engine(request.session_id)
         if engine is not None and engine._tool_dispatcher is not None:
-            engine._tool_dispatcher.request_cancel()
+            engine._driver.request_cancel()
 
     task.cancel()
     logger.info("通过 abort 端点取消会话 %s 的聊天任务", request.session_id)
@@ -1431,7 +1427,7 @@ async def chat_answer(
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
-    engine = get_session_manager().get_engine(session_id)
+    engine = await get_session_manager().get_or_restore_engine(session_id)
     if engine is None:
         return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
 
@@ -1442,7 +1438,9 @@ async def chat_answer(
             content={"error": f"问题 {request.question_id} 不存在或已回答"},
         )
     logger.info("问题已回答: session=%s question=%s", session_id, request.question_id)
-    return JSONResponse(status_code=200, content={"status": "answered"})
+    return JSONResponse(status_code=200, content={
+        "status": "answered", "resume_required": engine._interaction_handler.needs_resume(),
+    })
 
 
 @router.post("/api/v1/chat/{session_id}/approve", responses=_error_responses)
@@ -1457,7 +1455,7 @@ async def chat_approve(
     if not await _has_session_access(session_id, raw_request):
         return JSONResponse(status_code=403, content={"error": "无权访问此会话"})
 
-    engine = get_session_manager().get_engine(session_id)
+    engine = await get_session_manager().get_or_restore_engine(session_id)
     if engine is None:
         return JSONResponse(status_code=404, content={"error": "会话不存在或未激活"})
 
@@ -1467,7 +1465,9 @@ async def chat_approve(
             "审批已决策: session=%s approval=%s decision=%s",
             session_id, request.approval_id, request.decision,
         )
-        return JSONResponse(status_code=200, content={"status": "resolved"})
+        return JSONResponse(status_code=200, content={
+            "status": "resolved", "resume_required": engine._interaction_handler.needs_resume(),
+        })
 
     # Future 已不在：可能刚提交成功、工具仍在执行，或刷新后重复提交。
     # 对前端必须幂等，不能 404 把弹窗锁在错误态。

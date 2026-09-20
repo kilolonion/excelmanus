@@ -191,17 +191,33 @@ def commit_bytes(
     file_path: str,
     data: bytes,
     expected_version: str | None = None,
+    operation_id: str | None = None,
     record_history: bool = True,
 ) -> CommitResult:
     """把 ``data`` 原子写入工作区内路径。实现委托 ``WorkspaceFileService``。"""
     del record_history
-    from excelmanus.workspace.file_service import receipt_to_commit_result, service_for_guard
+    from excelmanus.workspace.file_service import TargetSpec, receipt_to_commit_result, service_for_guard
 
     svc = service_for_guard(guard)
     rel = None
     try:
         dest = guard.resolve_and_validate(file_path)
         rel = str(dest.relative_to(guard.workspace_root)).replace("\\", "/")
+        if operation_id:
+            existing = svc.get_receipt(operation_id, recover=True)
+            if existing is not None:
+                raw = svc.txlog.read_receipt(operation_id) or {}
+                target = (raw.get("targets") or [{}])[-1]
+                original_spec = TargetSpec(
+                    op=target.get("op") or ("update" if dest.is_file() else "create"),
+                    path=rel,
+                    data=data,
+                    expected_version=target.get("before_version"),
+                )
+                expected_digest = svc._intent_digest([original_spec], [])
+                if raw.get("intent_digest") != expected_digest:
+                    raise CommitError("OPERATION_ID_REUSED", f"operation_id {operation_id} 已用于不同意图")
+                return receipt_to_commit_result(existing, bytes_written=len(data))
         if dest.is_file():
             if expected_version is None:
                 current = content_version_of(dest.read_bytes())
@@ -210,7 +226,7 @@ def commit_bytes(
                     f"{rel} 已存在（{current}），创建写入必须带 expected_version",
                     fields={"path": rel, "content_version": current},
                 )
-            receipt = svc.update(rel, data, expected_version=expected_version)
+            receipt = svc.update(rel, data, expected_version=expected_version, operation_id=operation_id)
         else:
             if expected_version is not None:
                 raise CommitError(
@@ -218,7 +234,7 @@ def commit_bytes(
                     f"{rel} 不存在，无法按版本 {expected_version} 更新",
                     fields={"path": rel, "expected_version": expected_version},
                 )
-            receipt = svc.create(rel, data)
+            receipt = svc.create(rel, data, operation_id=operation_id)
         return receipt_to_commit_result(receipt, bytes_written=len(data))
     except SecurityViolationError as exc:
         raise CommitError("PATH_INVALID", str(exc)) from exc
@@ -273,6 +289,7 @@ def commit_unlink(
     guard: FileAccessGuard,
     file_path: str,
     expected_version: str | None = None,
+    operation_id: str | None = None,
     record_history: bool = True,
 ) -> CommitResult:
     """Atomically delete a live workspace file after CAS."""
@@ -287,7 +304,7 @@ def commit_unlink(
     if not dest.is_file():
         raise CommitError("PATH_INVALID", f"文件不存在：{rel}", fields={"path": rel})
     seen = resolve_expected_version(rel, expected_version, exists=True, abs_path=dest)
-    receipt = service_for_guard(guard).delete(rel, expected_version=seen)
+    receipt = service_for_guard(guard).delete(rel, expected_version=seen, operation_id=operation_id)
     return receipt_to_commit_result(receipt)
 
 
@@ -297,6 +314,7 @@ def commit_move(
     source: str,
     destination: str,
     expected_version: str | None = None,
+    operation_id: str | None = None,
     record_history: bool = True,
 ) -> CommitResult:
     """CAS the source file, then atomically rename within the workspace."""
@@ -315,7 +333,7 @@ def commit_move(
     if dst.exists():
         raise CommitError("PATH_INVALID", f"目标路径已存在：{dst_rel}", fields={"path": dst_rel})
     seen = resolve_expected_version(src_rel, expected_version, exists=True, abs_path=src)
-    receipt = service_for_guard(guard).move(src_rel, dst_rel, expected_version=seen)
+    receipt = service_for_guard(guard).move(src_rel, dst_rel, expected_version=seen, operation_id=operation_id)
     result = receipt_to_commit_result(receipt)
     extra = dict(result.extra)
     extra.setdefault("source", src_rel)
@@ -337,6 +355,7 @@ def commit_workbook(
     mutate_fn: Callable[[Any], None],
     expected_version: str | None = None,
     create: bool = False,
+    operation_id: str | None = None,
     record_history: bool = True,
 ) -> CommitResult:
     """加载（或新建）openpyxl Workbook，执行 ``mutate_fn``，再原子提交。"""
@@ -380,6 +399,8 @@ def commit_workbook(
             builder,
             expected_version=expected_version,
             create=create,
+            operation_id=operation_id,
+            intent={"kind": "workbook_builder", "path": rel},
         )
         live = dest if dest.is_file() else (Path(guard.workspace_root) / receipt.primary_path())
         data_len = live.stat().st_size if live.is_file() else 0

@@ -9,6 +9,15 @@
 
 from __future__ import annotations
 
+# 常驻 schema 是面向表格任务的明确产品默认，不是调用频率统计或授权名单。
+# 其余内置/MCP 能力通过 introspect_capability 按需披露；执行目录不裁剪。
+DEFAULT_DISCLOSURE_CORE_TOOLS: frozenset[str] = frozenset({
+    "inspect_spreadsheet", "analyze_spreadsheet", "edit_spreadsheet", "format_spreadsheet",
+    "list_directory", "run_code", "introspect_capability",
+    "ask_user", "offer_download", "task_create", "task_update", "sleep", "skill",
+    "write_plan", "exit_plan_mode",
+})
+
 # ── 只读安全白名单（低风险） ───────────────────────────────
 
 # 仅显式白名单中的工具在只读模式下可直接执行。
@@ -36,7 +45,7 @@ READ_ONLY_SAFE_TOOLS: frozenset[str] = frozenset(
 # ── 可并行执行的只读工具 ──────────────────────────────────────
 # READ_ONLY_SAFE_TOOLS 的子集，排除有特殊调度路径的元工具
 # （task_create 有 plan 拦截、task_update 有 task list 事件、introspect_capability 极少出现）。
-# 同一轮次中相邻的可并行工具将通过 asyncio.gather 并发执行。
+# 同一轮次中依赖已满足的只读调用按执行波次和配置的并发上限执行。
 PARALLELIZABLE_READONLY_TOOLS: frozenset[str] = frozenset(
     {
         "inspect_spreadsheet",
@@ -266,6 +275,15 @@ TOOL_CATEGORIES: dict[str, tuple[str, ...]] = {
     ),
     "code": ("write_text_file", "edit_text_file", "run_code", "run_shell"),
     "vision": ("read_image",),
+    "interaction": ("ask_user", "offer_download"),
+    "skills": ("skill", "manage_skills"),
+    "tasks": ("task_create", "task_update", "sleep", "write_plan", "exit_plan_mode"),
+    "agents": ("delegate", "list_subagents"),
+    "memory": ("memory_read_topic",),
+    "web": ("parallel_search",),
+    # 扩展工具的名称来自调用级有效目录，不在这里固化服务器名单。
+    "mcp": (),
+    "other": (),
 }
 
 # 产品术语 → 工具路由。EffectiveToolCatalog、prompt 工具索引和
@@ -296,8 +314,8 @@ TOOL_INTENT_ROUTES: dict[str, tuple[str, ...]] = {
 TOOL_SHORT_DESCRIPTIONS: dict[str, str] = {
     "inspect_spreadsheet": "只读探查 Excel 数据：overview 看结构，range 读取区域，search 搜值，capabilities 查能力",
     "analyze_spreadsheet": "只读分析：profile/quality 全貌，filter 筛选，aggregate 汇总，pivot 透视，relationships 跨文件关联，files 扫目录",
-    "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿，或同一工作簿中的两个不同工作表；position 按坐标，key 按关键列",
-    "edit_spreadsheet": "原子编辑：写值/公式、插删行列、改表结构、透视写入、清洗变换，或编译 WorkbookSpec",
+    "compare_spreadsheets": "只读表格数据对比（diff）；两个工作簿或两个工作表；未指定 sheet 时只比较第一张表；position 按坐标，key 按关键列",
+    "edit_spreadsheet": "原子编辑：写值/公式、selection 写回、插删行列、改表结构、透视写入、清洗变换，或编译 WorkbookSpec",
     "format_spreadsheet": "改外观：字体/填充/边框/对齐/数字格式、合并、列宽(auto_fit)、冻结窗格、条件格式、数据验证(下拉框)",
     "split_spreadsheet": "按某列取值把一个表拆成每组一个新 xlsx（by_column 必填，如按省拆分）；只新建不覆盖",
     "manage_spreadsheet_objects": "富对象：插入原生 Excel 图表",

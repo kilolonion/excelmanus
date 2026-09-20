@@ -34,6 +34,33 @@ def test_commit_bytes_create_and_conflict(tmp_path: Path) -> None:
     assert ei.value.code == "VERSION_CONFLICT"
 
 
+def test_operation_id_is_idempotent_and_rejects_intent_reuse(tmp_path: Path) -> None:
+    guard = FileAccessGuard(tmp_path)
+    first = commit_bytes(
+        guard=guard,
+        file_path="a.bin",
+        data=b"same",
+        expected_version=None,
+        operation_id="op-fixed",
+    )
+    replay = commit_bytes(
+        guard=guard,
+        file_path="a.bin",
+        data=b"same",
+        expected_version=first.content_version,
+        operation_id="op-fixed",
+    )
+
+    assert replay.content_version == first.content_version
+    with pytest.raises(CommitError) as exc:
+        commit_bytes(
+            guard=guard,
+            file_path="a.bin",
+            data=b"different",
+            expected_version=first.content_version,
+            operation_id="op-fixed",
+        )
+    assert exc.value.code == "OPERATION_ID_REUSED"
 def test_commit_bytes_stale_version(tmp_path: Path) -> None:
     guard = _guard(tmp_path)
     first = commit_bytes(guard=guard, file_path="a.bin", data=b"v1", expected_version=None)

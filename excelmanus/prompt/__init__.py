@@ -3,7 +3,6 @@
 from excelmanus.prompt.canonical import (
     FORBIDDEN_MODEL_TERMS,
     TOOL_DESCRIPTIONS,
-    TOOLS_CODE_ONLY,
 )
 from excelmanus.prompt.envelope import (
     EnvelopeIdentity,
@@ -44,7 +43,6 @@ __all__ = [
     "PromptAssembly",
     "PromptRegistry",
     "PromptRegistryError",
-    "TOOLS_CODE_ONLY",
     "TOOL_DESCRIPTIONS",
     "UnknownPromptVariable",
     "interpolate",

@@ -81,9 +81,9 @@ class TestRenderSdkSource:
         from excelmanus.code_mode import render_sdk_section
 
         section = render_sdk_section([_read_excel_def()])
-        assert "read_excel(file_path: str, sheet_name: str = None" in section
-        assert "max_rows: int = None" in section
-        assert "-> dict" in section
+        assert "read_excel(file_path: str, sheet_name: str = ..." in section
+        assert "max_rows: int = ..." in section
+        assert "-> Any" in section  # 未登记返回合同，不编造 dict。
         assert "- run_code" not in section
         assert "_call_host" not in section
         assert "from em import" not in section
@@ -646,6 +646,32 @@ class TestDockerOffWording:
         assert "强隔离" not in LOCAL_SANDBOX_DISCLAIMER
         assert payload.get("sandbox_note") == LOCAL_SANDBOX_DISCLAIMER
 
+    def test_full_access_note_reports_network_and_process_access(self, tmp_path: Path) -> None:
+        from excelmanus.code_mode import (
+            FULL_ACCESS_SANDBOX_DISCLAIMER,
+            CodeModeSession,
+            apply_sdk_calls_summary,
+            render_sdk_source,
+        )
+
+        session = CodeModeSession(
+            dispatcher=AsyncMock(),
+            root_call_id="call_full_access_note",
+            bridge_dir=tmp_path / "bridge-full-access",
+            sandbox_note=FULL_ACCESS_SANDBOX_DISCLAIMER,
+        )
+        payload = json.loads(apply_sdk_calls_summary(
+            json.dumps({"status": "success"}),
+            session,
+        ))
+        source = render_sdk_source(
+            [_read_excel_def()],
+            disclaimer=FULL_ACCESS_SANDBOX_DISCLAIMER,
+        )
+        assert payload["sandbox_note"] == FULL_ACCESS_SANDBOX_DISCLAIMER
+        assert "允许网络" in source
+        assert "子进程" in source
+
 
 class TestWrapperSdkInject:
     def test_wrapper_exposes_em_module(self, tmp_path: Path) -> None:
@@ -824,10 +850,12 @@ def _make_approval_engine(tmp_path: Path) -> object:
     from excelmanus.interaction import InteractionRegistry
 
     approval = ApprovalManager(str(tmp_path))
+    interactions = InteractionRegistry()
     return SimpleNamespace(
         approval=approval,
         _approval=approval,
-        _interaction_registry=InteractionRegistry(),
+        _interaction_registry=interactions,
+        interaction_registry=interactions,
         _approval_resolver=None,
         _active_code_mode_session=None,
         _inflight_approval_ids=set(),
@@ -1270,7 +1298,7 @@ class TestOutputContracts:
         assert "applied?" in edit
 
     def test_sdk_nested_array_field_hint(self) -> None:
-        """对象数组参数提示嵌套字段名；operations/workbook_spec 仍冻结。"""
+        """对象数组使用合法 Python 类型；嵌套字段通过详情查询。"""
         from excelmanus.code_mode import _py_type_of
 
         questions = {
@@ -1279,9 +1307,7 @@ class TestOutputContracts:
                 "text": {"type": "string"}, "options": {"type": "array"},
             }},
         }
-        assert _py_type_of(questions, prop_name="questions") == (
-            "list[dict{text, options}]"
-        )
+        assert _py_type_of(questions, prop_name="questions") == "list[dict]"
         ops = {
             "type": "array",
             "items": {"type": "object", "properties": {
@@ -1408,26 +1434,30 @@ class TestCodeModeWrapUp:
             "return_code": "0",
         })
         assert any("return_code" in item and "int" in item for item in violations)
-        # 元工具（ask_user/skill 等）按 any 登记不校验——其返回形状由
-        # 交互层决定（ask_user 实为回答 payload dict）。
-        assert validate_output("skill", {"not": "a string"}) == []
+        # 元工具也有实际返回合同：技能文本与问题回答不再统称 any。
+        assert validate_output("skill", {"not": "a string"})
+        assert validate_output("skill", "OK 技能已加载") == []
         assert validate_output("ask_user", {"question_id": "q", "raw_input": "1"}) == []
 
-    def test_empty_sdk_fails_loud(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_prompt_does_not_render_full_sdk(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from types import SimpleNamespace
+        from unittest.mock import Mock
 
         from excelmanus.prompt.assemble import build_stable_system_prompt
 
-        monkeypatch.setattr("excelmanus.tools.runtime.present_as_of", lambda engine: "code")
         monkeypatch.setattr("excelmanus.tools.catalog.catalog_from_engine", lambda engine: None)
+        sdk_renderer = Mock(side_effect=AssertionError("不应渲染全量 SDK"))
+        composer = Mock()
+        composer.registry.assemble.return_value = SimpleNamespace(tools=[])
+        composer.registry.render_system.return_value = "直接调用与 run_code 共存；tool_detail 按需查询。"
         engine = SimpleNamespace(
             _child_system_prompt=None,
-            _prompt_composer=object(),
-            _tool_runtime=SimpleNamespace(render_sdk_section=lambda: "   "),
+            _prompt_composer=composer,
+            _tool_runtime=SimpleNamespace(render_sdk_section=sdk_renderer),
             _current_chat_mode="write",
         )
-        with pytest.raises(RuntimeError, match="SDK 段为空"):
-            build_stable_system_prompt(engine)
+        build_stable_system_prompt(engine)
+        sdk_renderer.assert_not_called()
 
     def test_tool_call_log_persists_call_id(self, tmp_path: Path) -> None:
         from excelmanus.database import Database
@@ -1760,4 +1790,3 @@ class TestSseSubcallEvents:
             for m in wire if m.get("role") == "assistant"
             for tc in (m.get("tool_calls") or [])
         ]
-

@@ -24,6 +24,10 @@ from excelmanus.tools.registry import ToolDef
 logger = get_logger("code_mode")
 
 LOCAL_SANDBOX_DISCLAIMER = "本机受限子进程：禁网络、禁起进程、禁出工作区。"
+FULL_ACCESS_SANDBOX_DISCLAIMER = (
+    "已开启跳过审批：允许网络、子进程和本机命令执行；"
+    "仅在信任当前任务时使用。"
+)
 
 _IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _SKIP_SDK_TOOLS = frozenset({"run_code"})
@@ -129,6 +133,7 @@ class CodeModeSession:
     deadline_mono: float | None = None
     deadline_wall: float | None = None
     delegate_timeout: float = _DEFAULT_DELEGATE_TIMEOUT_S
+    sandbox_note: str = LOCAL_SANDBOX_DISCLAIMER
     on_event: Any = None
     # None = 未配置绑定快照（兼容旧构造）；frozenset（可为空）= 已绑定集合。
     bound_names: frozenset[str] | None = None
@@ -157,6 +162,7 @@ class CodeModeSession:
             render_sdk_source(
                 self.tool_defs,
                 delegate_timeout=self.delegate_timeout,
+                disclaimer=self.sandbox_note,
             ),
             encoding="utf-8",
         )
@@ -457,7 +463,8 @@ class CodeModeSession:
         version = _content_version_from_result(result)
         success = bool(getattr(result, "success", False))
         payload = _payload_from_tool_result(
-            result, tool_name=tool, arguments=arguments
+            result, tool_name=tool, arguments=arguments,
+            tool_def=next((definition for definition in self.tool_defs if definition.name == tool), None),
         )
         if not payload.get("ok"):
             # 返回合同违约：工具虽 success 但对 SDK 是集成失败，如实记账。
@@ -647,6 +654,15 @@ def build_session_for_run_code(
         if timeout_seconds is None
         else min(max(float(timeout_seconds), 0.0), _MAX_RUN_TIMEOUT_S)
     )
+    parent_remaining_fn = getattr(getattr(dispatcher, "_engine", None), "_driver", None)
+    parent_remaining = (
+        parent_remaining_fn.remaining_turn_seconds()
+        if parent_remaining_fn is not None
+        and callable(getattr(parent_remaining_fn, "remaining_turn_seconds", None))
+        else None
+    )
+    if parent_remaining is not None:
+        timeout = min(timeout, parent_remaining)
     delegate_timeout = float(
         getattr(config, "subagent_timeout_seconds", _DEFAULT_DELEGATE_TIMEOUT_S)
         or _DEFAULT_DELEGATE_TIMEOUT_S
@@ -663,6 +679,11 @@ def build_session_for_run_code(
         deadline_mono=now_mono + timeout,
         deadline_wall=now_wall + timeout,
         delegate_timeout=delegate_timeout,
+        sandbox_note=(
+            FULL_ACCESS_SANDBOX_DISCLAIMER
+            if bool(getattr(engine, "_full_access_enabled", False))
+            else LOCAL_SANDBOX_DISCLAIMER
+        ),
         on_event=on_event,
         bound_names=bound,
     )
@@ -708,7 +729,7 @@ def apply_sdk_calls_summary(result_json: str, session: CodeModeSession) -> str:
     if not isinstance(data, dict):
         return result_json
     data["sdk_calls"] = session.summary()
-    data["sandbox_note"] = LOCAL_SANDBOX_DISCLAIMER
+    data["sandbox_note"] = getattr(session, "sandbox_note", LOCAL_SANDBOX_DISCLAIMER)
     return json.dumps(data, ensure_ascii=False, indent=2)
 
 
@@ -731,7 +752,7 @@ def attach_sdk_calls(result: Any, session: CodeModeSession) -> Any:
         if isinstance(parsed, dict):
             payload = parsed
     payload["sdk_calls"] = session.summary()
-    payload["sandbox_note"] = LOCAL_SANDBOX_DISCLAIMER
+    payload["sandbox_note"] = getattr(session, "sandbox_note", LOCAL_SANDBOX_DISCLAIMER)
     return replace(
         result,
         value=payload,
@@ -753,9 +774,9 @@ def render_sdk_section(tool_defs: list[ToolDef]) -> str:
     if len(lines) == 1:
         return ""
     if any(tool.name == "introspect_capability" for tool in tool_defs):
-        lines.append('参数不清楚时在程序内调用 introspect_capability(query_type="tool_detail", query="工具名.字段")；不要读取 em.py 猜参数。')
+        lines.append('参数不清楚时，先直接调用 introspect_capability(query_type="tool_detail", query="工具名.字段")，读取详情后再生成程序；不要读取 em.py 猜参数。')
     lines.append("大结果中间数据可写 scripts/temp/*.json 供后续 run_code 复用；不要为同一数据反复全量拉取。")
-    lines.append("读取 `spill:` 句柄返回原始 payload：JSON 对象→dict，其余→原始 str；按返回类型分支处理，不要假设必是 dict。")
+    lines.append("读取 `spill:` 句柄返回原始 payload：JSON 对象→dict，数组→list，其余→原始 str；按返回类型分支处理，不要假设必是 dict。")
     return "\n".join(lines)
 
 
@@ -766,6 +787,7 @@ _JSON_TYPE_TO_PY: dict[str, str] = {
     "boolean": "bool",
     "object": "dict",
     "array": "list",
+    "null": "None",
 }
 
 
@@ -773,38 +795,89 @@ _JSON_TYPE_TO_PY: dict[str, str] = {
 _SPEC_CONTAINER_PROPS = frozenset({"operations", "workbook_spec"})
 
 
-def _py_type_of(spec: dict[str, Any], *, prop_name: str = "") -> str:
-    """schema → SDK 签名容器类型；枚举值另行标注，嵌套结构不展开。"""
+def _py_type_of(
+    spec: dict[str, Any], *, prop_name: str = "", root: dict[str, Any] | None = None,
+    _seen_refs: frozenset[str] = frozenset(),
+) -> str:
+    """canonical schema → Python 提示；保留所有 union/null/enum 分支。"""
     if not isinstance(spec, dict):
         return "Any"
+    ref = spec.get("$ref")
+    if isinstance(ref, str) and root is not None and ref not in _seen_refs:
+        from excelmanus.tools.schema_walk import resolve_local_ref
+
+        resolved = resolve_local_ref(root, ref)
+        if resolved:
+            return _py_type_of(
+                {**resolved, **{k: v for k, v in spec.items() if k != "$ref"}},
+                prop_name=prop_name, root=root, _seen_refs=_seen_refs | {ref},
+            )
+    values = spec.get("enum")
+    if "const" in spec:
+        values = [spec["const"]]
+    if isinstance(values, list) and values and all(
+        value is None or isinstance(value, (str, int, float, bool)) for value in values
+    ):
+        return "Literal[" + ", ".join(repr(value) for value in values) + "]"
+    for union_key in ("anyOf", "oneOf"):
+        options = spec.get(union_key)
+        if isinstance(options, list) and options:
+            parts = [
+                _py_type_of(option, prop_name=prop_name, root=root, _seen_refs=_seen_refs)
+                for option in options
+            ]
+            return " | ".join(dict.fromkeys(parts))
     raw = spec.get("type")
     types = raw if isinstance(raw, list) else [raw]
-    parts = [str(t) for t in types if t and t != "null"]
-    # array+string 双形态（operations 等）：声明列表合同，字符串是序列化逃生口。
-    if "array" in parts:
+    parts: list[str] = []
+    for item_type in types:
+        base = _JSON_TYPE_TO_PY.get(str(item_type), "Any")
         items = spec.get("items")
-        item_props = items.get("properties") if isinstance(items, dict) else None
-        if (
-            isinstance(item_props, dict)
-            and item_props
-            and prop_name not in _SPEC_CONTAINER_PROPS
-        ):
-            # 对象数组只提示字段名清单（不展开内层类型），引导模型一次写对
-            # 嵌套字段形状；operations/workbook_spec 细节仍走 tool_detail。
-            keys = list(item_props)[:6]
-            suffix = "…" if len(item_props) > 6 else ""
-            base = "list[dict{" + ", ".join(keys) + suffix + "}]"
-        else:
-            base = "list"
-    elif "object" in parts:
-        base = "dict"
-    elif parts:
-        base = _JSON_TYPE_TO_PY.get(parts[0], "Any")
-    else:
-        base = "Any"
-    if "null" in types and base != "Any":
-        return f"{base} | None"
-    return base
+        if item_type == "array" and isinstance(items, dict) and prop_name not in _SPEC_CONTAINER_PROPS:
+            item_hint = _py_type_of(items, root=root, _seen_refs=_seen_refs)
+            base = f"list[{item_hint}]"
+        parts.append(base)
+    return " | ".join(dict.fromkeys(parts)) or "Any"
+
+
+def _schema_allows_null(
+    spec: dict[str, Any], root: dict[str, Any], *, _seen_refs: frozenset[str] = frozenset(),
+) -> bool:
+    """仅本地判定是否需要保留 null；未知合同也保留，由宿主校验。
+
+    这不是第二个参数校验器：oneOf 排他性和 not 等约束仍由注册表检查。
+    不解析远程引用，也不让某个 MCP 的未知引用阻断全部 SDK 生成。
+    """
+    ref = spec.get("$ref")
+    if isinstance(ref, str):
+        if not ref.startswith("#/") or ref in _seen_refs:
+            return True
+        from excelmanus.tools.schema_walk import resolve_local_ref
+
+        resolved = resolve_local_ref(root, ref)
+        if not resolved:
+            return True
+        return _schema_allows_null(resolved, root, _seen_refs=_seen_refs | {ref})
+    raw_type = spec.get("type")
+    if raw_type is not None:
+        types = raw_type if isinstance(raw_type, list) else [raw_type]
+        if "null" not in types:
+            return False
+    if "enum" in spec and None not in spec["enum"]:
+        return False
+    if "const" in spec and spec["const"] is not None:
+        return False
+    for key in ("anyOf", "oneOf", "allOf"):
+        options = spec.get(key)
+        if isinstance(options, list):
+            possibilities = [
+                _schema_allows_null(item, root, _seen_refs=_seen_refs)
+                if isinstance(item, dict) else item is not False
+                for item in options
+            ]
+            if not (all(possibilities) if key == "allOf" else any(possibilities)):
+                return False
+    return True
 
 
 def _sdk_signature_line(tool: ToolDef) -> str:
@@ -820,20 +893,20 @@ def _sdk_signature_line(tool: ToolDef) -> str:
     for name in [*req_names, *opt_names]:
         py_name = _py_name(str(name))
         spec = properties.get(name) if isinstance(properties.get(name), dict) else {}
-        py_type = _py_type_of(spec, prop_name=str(name))
+        py_type = _py_type_of(spec, prop_name=str(name), root=schema)
         if name in required:
             params.append(f"{py_name}: {py_type}" if py_type != "Any" else py_name)
         else:
-            default = spec.get("default") if "default" in spec else None
+            default_text = repr(spec["default"]) if "default" in spec else "..."
             if py_type != "Any":
-                params.append(f"{py_name}: {py_type} = {default!r}")
+                params.append(f"{py_name}: {py_type} = {default_text}")
             else:
-                params.append(f"{py_name}={default!r}")
+                params.append(f"{py_name}={default_text}")
     from excelmanus.tools.output_contracts import return_hint_for
 
     line = (
         f"- {_py_name(str(tool.name))}({', '.join(params)})"
-        f" -> {return_hint_for(str(tool.name))}"
+        f" -> {return_hint_for(str(tool.name), tool_def=tool)}"
     )
     enum_lines = _schema_enum_lines(schema)
     if enum_lines:
@@ -846,8 +919,9 @@ def render_sdk_source(
     **kwargs: Any,
 ) -> str:
     """从 ToolDef 生成可执行 Python 模块文本（不在沙盒内直接调 func）。"""
+    disclaimer = str(kwargs.get("disclaimer") or LOCAL_SANDBOX_DISCLAIMER)
     parts: list[str] = [
-        _SDK_PREAMBLE.replace("{disclaimer}", LOCAL_SANDBOX_DISCLAIMER),
+        _SDK_PREAMBLE.replace("{disclaimer}", disclaimer),
     ]
     interactive = interaction_wait_window()
     delegate_timeout = float(
@@ -948,7 +1022,13 @@ def _payload_from_tool_result(
     result: ToolResult,
     tool_name: str = "",
     arguments: dict[str, Any] | None = None,
+    *,
+    tool_def: ToolDef | None = None,
 ) -> dict[str, Any]:
+    from excelmanus.tools.output_contracts import enforce_output_contract
+    from excelmanus.engine_core.tool_result import result_value
+
+    result = enforce_output_contract(result, tool_name, arguments or {}, tool_def=tool_def)
     if not getattr(result, "success", False):
         code = "TOOL_ERROR"
         message = getattr(result, "model_text", None) or "tool failed"
@@ -971,47 +1051,14 @@ def _payload_from_tool_result(
         if details:
             error_obj["details"] = details
         return {"ok": False, "error": error_obj}
-    value = getattr(result, "value", None)
-    if value is None:
-        text = getattr(result, "model_text", None) or ""
-        try:
-            value = json.loads(text)
-        except (json.JSONDecodeError, TypeError, ValueError):
-            value = text
-    # 返回合同运行时校验：已登记工具的成功结果必须满足顶层键声明，
-    # 违约不静默放过——脚本拿到结构化错误而不是形状错误的返回值。
-    # spill 句柄读取是宿主投影（value 可为原始字符串），不走工具自身合同。
-    coverage = getattr(result, "coverage", None)
-    if not (isinstance(coverage, dict) and coverage.get("spill_retrieve")):
-        from excelmanus.tools.output_contracts import validate_output
-
-        violations = validate_output(tool_name, value, arguments=arguments)
-    else:
-        violations = []
-    if violations:
-        return {
-            "ok": False,
-            "error": {
-                "code": "SDK_CONTRACT_VIOLATION",
-                "message": f"{tool_name} 返回值不符合声明合同",
-                "details": {"tool": tool_name, "violations": violations},
-            },
-        }
-    return {"ok": True, "value": value}
+    return {"ok": True, "value": result_value(result)}
 
 
 # schema 为同一参数声明的双别名：签名只保留规范名，
 # 但宿主 _op_get 同时接受别名，故 SDK 需把别名 kwargs 归一为规范名再分发。
-_SDK_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (
-    ("path", "file_path"),
-    ("sheet", "sheet_name"),
-    ("column", "by_column"),
-    ("content_version", "expected_version"),
-    ("cell_range", "range"),
-    ("other_path", "file_b"),
-    ("max_rows", "max_lines"),
-    ("limit", "max_rows"),
-)
+from excelmanus.tools.registry import _ALIAS_FOLDS
+
+_SDK_ALIAS_PAIRS: tuple[tuple[str, str], ...] = (*_ALIAS_FOLDS, ("max_rows", "max_lines"))
 
 
 def _sdk_aliases(properties: dict[str, Any]) -> dict[str, str]:
@@ -1064,15 +1111,27 @@ def _render_tool_function(tool: ToolDef) -> str:
     opt_names = [name for name in names if name not in required]
     params: list[str] = []
     arg_items: list[str] = []
+    nullable_names: list[str] = []
+    aliases = _sdk_aliases(properties)
+    # Host validation still enforces required fields after alias resolution.
+    # Python must allow path=... to supply a required file_path.
+    aliased_required = bool(required & set(aliases.values()))
     for name in [*req_names, *opt_names]:
         py_name = _py_name(str(name))
         spec = properties.get(name) if isinstance(properties.get(name), dict) else {}
-        if name in required:
+        nullable = _schema_allows_null(spec, schema)
+        if nullable:
+            nullable_names.append(str(name))
+        if name in required and not aliased_required:
             params.append(py_name)
+        elif nullable and "default" not in spec:
+            params.append(f"{py_name}=_EM_UNSET")
         else:
             default = spec.get("default") if "default" in spec else None
             params.append(f"{py_name}={default!r}")
-        arg_items.append(f"{str(name)!r}: {py_name}")
+        # 保留旧的非 nullable None=省略约定；nullable 参数则必须传递 null。
+        value = py_name if nullable else f"({py_name} if {py_name} is not None else _EM_UNSET)"
+        arg_items.append(f"{str(name)!r}: {value}")
     aliases = _sdk_aliases(properties)
     if aliases:
         params.append("**_kw")
@@ -1081,13 +1140,23 @@ def _render_tool_function(tool: ToolDef) -> str:
     args_literal = ", ".join(arg_items)
     call_args = f"{{{args_literal}}}"
     if aliases:
-        call_args = f"_with_alias({call_args}, _kw, {aliases!r})"
+        call_args = f"_with_alias({call_args}, _kw, {aliases!r}, {tuple(nullable_names)!r})"
     fn_name = _py_name(str(tool.name))
     enum_comment = "".join(
         f"    # {line.strip()}\n" for line in _schema_enum_lines(schema)
     )
+    from excelmanus.tools.output_contracts import output_schema_for, return_hint_for
+
+    output_schema = output_schema_for(str(tool.name), tool_def=tool)
+    return_type = (
+        "dict" if output_schema is not None and output_schema.get("type") == "object"
+        else _py_type_of(output_schema, root=output_schema) if output_schema is not None else "Any"
+    )
+    if output_schema is not None and output_schema.get("x-spill-result-types"):
+        return_type = _py_type_of({"type": output_schema["x-spill-result-types"]})
+    description += "\n返回: " + return_hint_for(str(tool.name), tool_def=tool)
     return (
-        f"def {fn_name}({signature}) -> dict:\n"
+        f"def {fn_name}({signature}) -> {return_type}:\n"
         f"{enum_comment}"
         f"    return _call_host({tool.name!r}, {call_args})\n"
         f"{fn_name}.__doc__ = {description!r}\n"
@@ -1111,6 +1180,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from typing import Any, Literal
 
 
 class HostToolError(Exception):
@@ -1130,11 +1200,12 @@ class HostToolError(Exception):
 
 
 _SEQ = 0
+_EM_UNSET = object()
 
 # _EM_INTERACTIVE_WINDOW / _EM_TOOL_TIMEOUTS 由宿主在生成时注入。
 # 子调用等待 = min(父剩余, 自身窗口)；问答/审批窗口覆盖任意工具上的 Hook ASK。
 
-def _with_alias(args, extra, aliases):
+def _with_alias(args, extra, aliases, nullable_names=()):
     """归一 schema 别名参数（如 sheet→sheet_name）后并入 args；未知参数报错。"""
     for key, val in extra.items():
         canon = aliases.get(key)
@@ -1143,9 +1214,9 @@ def _with_alias(args, extra, aliases):
                 "未知参数 %r；可用参数以工具 schema 为准（introspect_capability 可查）" % key
             )
         current = args.get(canon)
-        if current is not None and current != val:
+        if current is not _EM_UNSET and current != val:
             raise TypeError("参数 %r 与其别名 %r 同时给出且值不同" % (canon, key))
-        args[canon] = val
+        args[canon] = _EM_UNSET if val is None and canon not in nullable_names else val
     return args
 
 
@@ -1185,7 +1256,7 @@ def _call_host(tool, arguments):
     payload = {
         "id": seq,
         "tool": tool,
-        "arguments": {k: v for k, v in arguments.items() if v is not None},
+        "arguments": {k: v for k, v in arguments.items() if v is not _EM_UNSET},
         "root_call_id": os.environ.get("EXCELMANUS_CODE_MODE_ROOT_CALL_ID") or "",
     }
     tmp_path = req_path + ".tmp"

@@ -3,11 +3,12 @@
 import { useEffect, useRef, useState } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { CheckCircle2, ChevronDown, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, CircleHelp, Clock3, Loader2, PauseCircle, XCircle } from "lucide-react";
 
 import { thinkingPreview } from "@/lib/thinking";
 import { cn } from "@/lib/utils";
-import type { SubagentToolCall } from "@/lib/types";
+import type { SubagentRunStatus, SubagentToolCall } from "@/lib/types";
+import { isSubagentActive, SUBAGENT_STATUS_LABELS } from "@/lib/subagent-runs";
 import { ToolCallCard } from "./ToolCallCard";
 
 const TOOL_TIMELINE_COLLAPSE_THRESHOLD = 5;
@@ -53,6 +54,8 @@ interface SubagentBlockProps {
   tools?: SubagentToolCall[];
   stopReason?: string;
   diagnostic?: string;
+  background?: boolean;
+  runStatus?: SubagentRunStatus;
 }
 
 function isRedundantReason(reason: string, summary?: string): boolean {
@@ -73,31 +76,26 @@ export function SubagentBlock({
   tools = [],
   stopReason,
   diagnostic,
+  background,
+  runStatus,
 }: SubagentBlockProps) {
-  const [expanded, setExpanded] = useState(true);
+  const [disclosure, setDisclosure] = useState<{ phase: string; expanded: boolean } | null>(null);
   const [showAllTools, setShowAllTools] = useState(false);
   const timelineEndRef = useRef<HTMLDivElement>(null);
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
 
-  const isDone = status === "done";
-  const isFailed = isDone && success === false;
-  const isRunning = status === "running";
+  const isDone = runStatus ? !isSubagentActive(runStatus) : status === "done";
+  const isStopped = runStatus && ["paused", "interrupted", "aborted"].includes(runStatus);
+  const isFailed = runStatus ? ["error", "max-tokens", "refusal"].includes(runStatus) : isDone && success === false;
+  const isRunning = runStatus ? runStatus === "running" : status === "running";
+  const phase = runStatus || `${status}:${isFailed}`;
+  const expanded = disclosure?.phase === phase ? disclosure.expanded : !isDone || isFailed;
 
   useEffect(() => {
-    if (isDone && !isFailed) {
-      setExpanded(false);
-    }
-  }, [isDone, isFailed]);
-
-  useEffect(() => {
-    if (!isRunning) {
-      startRef.current = null;
-      return;
-    }
+    if (!isRunning) return;
     if (startRef.current === null) startRef.current = Date.now();
     const start = startRef.current;
-    setElapsed(0);
     const timer = setInterval(() => {
       setElapsed(Math.round((Date.now() - start) / 1000));
     }, 1000);
@@ -110,21 +108,27 @@ export function SubagentBlock({
     }
   }, [tools.length, isDone]);
 
+  // 聊天流结束后可能收不到工具结束事件；任务已结束时不继续显示旧的执行动画。
+  const incompleteDetails = isDone && tools.some((tool) => tool.status === "running");
+  const timelineTools = isDone ? tools.filter((tool) => tool.status !== "running") : tools;
   const visibleTools =
-    !showAllTools && tools.length > TOOL_TIMELINE_COLLAPSE_THRESHOLD
-      ? tools.slice(-TOOL_TIMELINE_COLLAPSE_THRESHOLD)
-      : tools;
-  const hiddenCount = tools.length - visibleTools.length;
+    !showAllTools && timelineTools.length > TOOL_TIMELINE_COLLAPSE_THRESHOLD
+      ? timelineTools.slice(-TOOL_TIMELINE_COLLAPSE_THRESHOLD)
+      : timelineTools;
+  const hiddenCount = timelineTools.length - visibleTools.length;
 
-  const title = `委派给${getDisplayName(name)}`;
+  const title = `${background ? "后台 · " : ""}委派给${getDisplayName(name)}`;
   const preview = !expanded ? formatSubagentPreview(summary || reason) : "";
   const showReason = Boolean(reason) && !isRedundantReason(reason, summary);
   const statsLabel = `${iterations} 轮 · ${toolCalls} 调用`;
   const elapsedLabel = isRunning && elapsed > 0 ? `${elapsed}s` : null;
   const failLabel = STOP_REASON_LABEL[stopReason || ""] || stopReason || "子代理执行失败";
 
-  const StatusIcon = isRunning ? Loader2 : isFailed ? XCircle : CheckCircle2;
-  const badge = isRunning
+  const StatusIcon = isRunning ? Loader2 : runStatus === "waiting_input" ? CircleHelp
+    : runStatus === "queued" ? Clock3 : isStopped ? PauseCircle : isFailed ? XCircle : CheckCircle2;
+  const badge = runStatus
+    ? { text: SUBAGENT_STATUS_LABELS[runStatus], cls: isFailed ? "bg-red-500/10 text-red-600" : "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" }
+    : isRunning
     ? { text: "进行中", cls: "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" }
     : isFailed
       ? { text: "失败", cls: "bg-red-500/10 text-red-600" }
@@ -134,7 +138,7 @@ export function SubagentBlock({
     <div className="my-2 rounded-2xl border border-[var(--em-hairline)] bg-background overflow-hidden">
       <button
         type="button"
-        onClick={() => setExpanded((v) => !v)}
+        onClick={() => setDisclosure({ phase, expanded: !expanded })}
         aria-expanded={expanded}
         aria-label={expanded ? "收起子代理" : "展开子代理"}
         className="flex w-full items-center gap-2 px-3 sm:px-3.5 py-2.5 text-left hover:bg-[var(--em-fill)] transition-colors"
@@ -192,7 +196,10 @@ export function SubagentBlock({
             </p>
           )}
 
-          {tools.length > 0 && (
+          {incompleteDetails && (
+            <p className="text-[12px] text-muted-foreground">部分工具调用的结束详情未收到，请查看任务结果。</p>
+          )}
+          {timelineTools.length > 0 && (
             <div>
               {hiddenCount > 0 && (
                 <button
@@ -200,7 +207,7 @@ export function SubagentBlock({
                   onClick={() => setShowAllTools(true)}
                   className="mb-1 text-[12px] text-muted-foreground hover:text-foreground transition-colors"
                 >
-                  显示全部 {tools.length} 条（已隐藏 {hiddenCount} 条）
+                  显示全部 {timelineTools.length} 条（已隐藏 {hiddenCount} 条）
                 </button>
               )}
               {visibleTools.map((tool, i) => (

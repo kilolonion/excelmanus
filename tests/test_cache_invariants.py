@@ -55,7 +55,6 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
         },
     ]
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._compaction_generation = 0
     engine._projection_generation = 0
     engine._image_wire_pin_seq = ()
@@ -169,6 +168,7 @@ def _starts_series(prev, curr) -> bool:
 def _prepare_loop_engine(engine):
     """轻量补齐 run_tool_loop 所需字段，不构造 AgentEngine。"""
     engine._driver = None
+    engine._turn_budget = None
     engine._tool_dispatcher = None
     engine._llm_call_store = None
     engine._show_reasoning = False

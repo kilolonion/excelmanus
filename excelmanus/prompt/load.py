@@ -2,7 +2,7 @@
 
 稳定 system 前缀：identity / persona / spreadsheet:invariants / 工具自有段 /
 workbook_spec / run_code；strategy 段按 front-matter ``conditions`` 门控
-（``plan:policy`` 仅 plan 激活时非空；写相关段仅 write/code 目录非空）。
+（``plan:policy`` 仅 plan 激活时非空；写相关段仅 write 目录非空）。
 动态世界模型不再经 fingerprint 注入第二条 system。
 """
 
@@ -16,7 +16,6 @@ from typing import Any
 
 import yaml
 
-from excelmanus.prompt.canonical import TOOLS_CODE_ONLY
 from excelmanus.prompt.registry import AssembleContext, PromptRegistry, interpolate
 
 logger = logging.getLogger(__name__)
@@ -38,6 +37,7 @@ class PromptSegment:
     max_tokens: int = 0  # 0 表示不限
     min_tokens: int = 0
     conditions: dict[str, Any] = field(default_factory=dict)
+    complete: bool = False
 
 
 @dataclass
@@ -49,9 +49,8 @@ class PromptContext:
 
 # ── strategy 段门控 ──────────────────────────────────────
 # front-matter ``conditions`` 语法（键之间 AND，同一键的列表为 OR）：
-#   catalog_mode: write | read | plan | code   # 标量或列表，对照目录模式
+#   catalog_mode: write | read | plan          # 标量或列表
 #   chat_mode:     write | read | plan          # 标量或列表；plan_active 额外匹配 plan
-#   present_as:    native | code               # 标量或列表
 #   tool:          工具名（可见目录含该名才注入；未传 visible_tools 时不过滤）
 #   new_workbook:  bool                        # 工作区尚无表格文件
 #   full_access:   bool
@@ -72,8 +71,7 @@ def _catalog_mode_of(ctx: AssembleContext) -> str:
     from excelmanus.tools.catalog import resolve_catalog_mode
 
     return resolve_catalog_mode(
-        chat_mode=str(ctx.chat_mode or "write"),
-        present_as=str(ctx.present_as or "native"),
+        chat_mode=ctx.chat_mode,
     )
 
 
@@ -105,11 +103,6 @@ def strategy_conditions_match(
         if current.isdisjoint(allowed):
             return False
 
-    if "present_as" in cond:
-        allowed = _condition_values(cond["present_as"])
-        if str(ctx.present_as or "native") not in allowed:
-            return False
-
     if "full_access" in cond:
         if bool(cond["full_access"]) != bool(ctx.full_access):
             return False
@@ -133,6 +126,16 @@ def strategy_conditions_match(
 
 _FRONTMATTER_RE = re.compile(r"^---\s*\n(.*?)\n---\s*\n", re.DOTALL)
 _REQUIRED_FIELDS = ("name", "priority", "layer")
+_ALLOWED_LAYERS = frozenset({"core", "strategy", "subagent"})
+_ALLOWED_CONDITION_KEYS = frozenset({
+    "catalog_mode",
+    "chat_mode",
+    "tool",
+    "new_workbook",
+    "full_access",
+    "base_sections",
+})
+_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,127}$")
 
 
 def parse_prompt_file(path: Path) -> PromptSegment:
@@ -145,23 +148,58 @@ def parse_prompt_file(path: Path) -> PromptSegment:
     m = _FRONTMATTER_RE.match(raw)
     if not m:
         raise ValueError(f"文件缺少 YAML frontmatter: {path}")
-    meta = yaml.safe_load(m.group(1)) or {}
+    try:
+        meta = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError as exc:
+        raise ValueError(f"frontmatter YAML 不合法: {path}") from exc
+    if not isinstance(meta, dict):
+        raise ValueError(f"frontmatter 必须是对象: {path}")
     for f in _REQUIRED_FIELDS:
         if f not in meta:
             raise ValueError(f"缺少必填字段 {f!r}: {path}")
-    content = raw[m.end():].strip()
+    name = str(meta["name"]).strip()
+    if not name or not _NAME_RE.fullmatch(name):
+        raise ValueError(f"提示词 name 不合法: {name!r}: {path}")
+    layer = str(meta["layer"]).strip()
+    if layer not in _ALLOWED_LAYERS:
+        raise ValueError(f"不支持的提示词 layer: {layer!r}: {path}")
     priority = int(meta["priority"])
     order = int(meta["order"]) if "order" in meta else priority
+    if not -10000 <= priority <= 10000 or not -10000 <= order <= 10000:
+        raise ValueError(f"提示词 priority/order 超出范围: {path}")
+    max_tokens = int(meta.get("max_tokens", 0) or 0)
+    min_tokens = int(meta.get("min_tokens", 0) or 0)
+    if max_tokens < 0 or min_tokens < 0 or (max_tokens and min_tokens > max_tokens):
+        raise ValueError(f"提示词 token 预算不合法: {path}")
+    raw_conditions = meta.get("conditions") or {}
+    if not isinstance(raw_conditions, dict):
+        raise ValueError(f"提示词 conditions 必须是对象: {path}")
+    conditions = dict(raw_conditions)
+    unknown_conditions = sorted(set(conditions) - _ALLOWED_CONDITION_KEYS)
+    if unknown_conditions:
+        raise ValueError(
+            f"提示词 conditions 含未知键 {', '.join(unknown_conditions)}: {path}"
+        )
+    for mode_key in ("catalog_mode", "chat_mode"):
+        if mode_key in conditions:
+            modes = _condition_values(conditions[mode_key])
+            if not modes or not modes <= {"read", "plan", "write"}:
+                raise ValueError(f"提示词 {mode_key} 必须是 read/plan/write: {path}")
+    complete = bool(meta.get("complete", False))
+    content = raw[m.end():].strip()
+    if not content:
+        raise ValueError(f"提示词正文不能为空: {path}")
     return PromptSegment(
-        name=str(meta["name"]),
+        name=name,
         version=str(meta.get("version", "0.0.0")),
         priority=priority,
-        layer=str(meta["layer"]),
+        layer=layer,
         content=content,
         order=order,
-        max_tokens=int(meta.get("max_tokens", 0)),
-        min_tokens=int(meta.get("min_tokens", 0)),
-        conditions=dict(meta.get("conditions", {}) or {}),
+        max_tokens=max_tokens,
+        min_tokens=min_tokens,
+        conditions=conditions,
+        complete=complete,
     )
 
 
@@ -188,7 +226,7 @@ class PromptComposer:
     def _source_stamp(self) -> tuple[Any, ...]:
         return tuple(
             (str(path), path.stat().st_mtime_ns, path.stat().st_size)
-            for folder in ("core", "strategies")
+            for folder in ("core", "strategies", "subagent")
             for path in sorted((self._prompts_dir / folder).glob("*.md"))
         )
 
@@ -198,10 +236,22 @@ class PromptComposer:
         self.load_all(auto_repair=False)
         return True
 
+    def fork(self) -> PromptComposer:
+        """复用正文素材，重建注册表，避免复制父会话的工具/context 回调。"""
+        child = PromptComposer(self._prompts_dir)
+        child.core_segments = list(self.core_segments)
+        child.strategy_segments = list(self.strategy_segments)
+        child.load_errors = list(self.load_errors)
+        child._file_stamp = self._file_stamp
+        child._rebuild_registry()
+        child.reload_if_changed()
+        child.validate_runtime()
+        return child
+
     def validate_runtime(self) -> None:
         """生产会话不能静默忽略损坏或缺失的核心提示。测试素材可单独加载。"""
         names = {s.name for s in self.core_segments if s.content.strip()}
-        missing = {"harness:identity", "deployment:persona"} - names
+        missing = {"harness:identity", "deployment:persona", "spreadsheet:invariants"} - names
         if self.load_errors or missing:
             raise ValueError(
                 "提示词加载不完整：" + "; ".join(self.load_errors + sorted(missing))
@@ -253,31 +303,21 @@ class PromptComposer:
         """把已加载的 md 段登记进 PromptRegistry；条件不匹配时 text 为空。"""
         registry = PromptRegistry()
         for seg in self.core_segments:
-            registry.section(seg.name, seg.order, seg.content)
+            registry.section(seg.name, seg.order, seg.content, complete=seg.complete)
         for seg in self.strategy_segments:
             body = seg.content
             cond = dict(seg.conditions)
             registry.section(
                 seg.name,
                 seg.order,
-                lambda ctx, text=body, conditions=cond: (
-                    text if strategy_conditions_match(conditions, ctx) else ""
+                lambda ctx, text=body, conditions=cond, name=seg.name: (
+                    text if (
+                        (ctx.strategy_names is None or name in ctx.strategy_names or name == "plan:policy")
+                        and strategy_conditions_match(conditions, ctx)
+                    ) else ""
                 ),
+                complete=seg.complete,
             )
-        registry.section(
-            "tools:code-only",
-            99,
-            lambda ctx: TOOLS_CODE_ONLY if ctx.present_as == "code" else "",
-        )
-        registry.section(
-            "tools:sdk",
-            150,
-            lambda ctx: (
-                ctx.sdk_section
-                if ctx.present_as == "code" and ctx.sdk_section
-                else ""
-            ),
-        )
         self.registry = registry
 
     @staticmethod
@@ -293,17 +333,19 @@ class PromptComposer:
         ctx: PromptContext,
         variables: dict[str, str] | None = None,
         *,
-        present_as: str = "native",
-        sdk_section: str = "",
+        visible_tools: frozenset[str] | None = None,
+        new_workbook: bool = True,
+        full_access: bool = False,
     ) -> str:
         """稳定 system 前缀：identity + persona + 按目录模式门控的策略段。"""
         assembly = self.registry.assemble(
             AssembleContext(
                 plan_active=ctx.chat_mode == "plan",
-                present_as=present_as,
                 variables=variables,
                 chat_mode=ctx.chat_mode,
-                sdk_section=sdk_section,
+                visible_tools=visible_tools,
+                new_workbook=new_workbook,
+                full_access=full_access,
             )
         )
         return self.registry.render_system(assembly)
@@ -313,64 +355,46 @@ class PromptComposer:
         subagent_name: str,
         inherit_strategies: list[str] | None = None,
         variables: dict[str, str] | None = None,
+        *,
+        role_text: str | None = None,
+        context: AssembleContext | None = None,
     ) -> str | None:
-        """角色正文（_base + {name}.md）加上具名注册表段。"""
+        """角色补充段。生产入口的 core/策略由共享 registry 按 child 条件组装。"""
+        if (not subagent_name or subagent_name in {".", ".."}
+                or "/" in subagent_name or "\\" in subagent_name):
+            raise ValueError(f"子代理提示词名称不合法: {subagent_name!r}")
         subagent_dir = self._prompts_dir / "subagent"
-        if not subagent_dir.is_dir():
-            return None
-
         specific_file = subagent_dir / f"{subagent_name}.md"
-        if not specific_file.exists():
+        if role_text is None and not specific_file.exists():
             return None
-
-        # 加载专用文件（先解析以获取 base_sections）
-        try:
-            specific_seg = parse_prompt_file(specific_file)
-        except Exception as exc:
-            logger.warning("子代理 %s.md 解析失败: %s", subagent_name, exc)
-            return None
-
-        # 从 frontmatter conditions 中提取 base_sections（可选）
-        base_sections: list[str] | None = specific_seg.conditions.get(
-            "base_sections"
-        )
-
-        parts: list[str] = []
-
-        # 加载共享基础 _base.md（可选）
+        specific_seg = parse_prompt_file(specific_file) if role_text is None else None
+        if specific_seg is not None and specific_seg.layer != "subagent":
+            raise ValueError(f"子代理角色层必须为 subagent: {specific_file}")
+        body = specific_seg.content if specific_seg is not None else str(role_text or "").strip()
+        if not body:
+            raise ValueError(f"子代理角色正文为空: {subagent_name}")
+        # 缺失/损坏须由请求入口报告，不得绕过共享角色约束。
         base_file = subagent_dir / "_base.md"
-        if base_file.exists():
-            try:
-                base_seg = parse_prompt_file(base_file)
-                base_content = base_seg.content.strip()
-                if base_content:
-                    if base_sections:
-                        base_content = self._filter_base_sections(
-                            base_content, base_sections
-                        )
-                    if base_content:
-                        parts.append(base_content)
-            except Exception as exc:
-                logger.warning("子代理 _base.md 解析失败: %s", exc)
-
-        if specific_seg.content.strip():
-            parts.append(specific_seg.content)
+        base_seg = parse_prompt_file(base_file)
+        if base_seg.layer != "subagent":
+            raise ValueError(f"子代理共享层必须为 subagent: {base_file}")
+        parts = [base_seg.content, body]
 
         # ── 继承主代理策略段 ──
         if inherit_strategies:
-            strategy_text = self._resolve_inherited_strategies(inherit_strategies)
+            strategy_text = self._resolve_inherited_strategies(inherit_strategies, context=context)
             if strategy_text:
                 parts.append(strategy_text)
 
         result = "\n\n".join(parts) if parts else None
         if not result:
             return None
-        if variables:
-            return interpolate(result, variables, strict=False)
+        if variables is not None:
+            return interpolate(result, variables, strict=True)
         return result
 
     def _resolve_inherited_strategies(
-        self, inherit_strategies: list[str]
+        self, inherit_strategies: list[str], *, context: AssembleContext | None = None,
     ) -> str:
         """按具名段从同一策略表取不变量，不认魔法标签。"""
         if not self.strategy_segments:
@@ -378,7 +402,8 @@ class PromptComposer:
         explicit_names = {
             name for name in inherit_strategies if name not in {"__universal__", "__all__"}
         }
-        selected = [seg for seg in self.strategy_segments if seg.name in explicit_names]
+        selected = [seg for seg in self.strategy_segments if seg.name in explicit_names
+                    and (context is None or strategy_conditions_match(seg.conditions, context))]
         if not selected:
             return ""
         selected.sort(key=lambda s: (s.order, s.priority, s.name))

@@ -1,4 +1,4 @@
-"""片 J：L4 wire = catalog ∩ PROFILE。生产默认不收窄；测试内临时签字才真收窄。"""
+"""片 J：L4 wire = catalog ∩ (core + profile + loaded)。测试内临时签字启用 profile。"""
 
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from excelmanus.system_one.host import (
 from excelmanus.system_one.types import Decision
 from excelmanus.tools.catalog import catalog_from_engine
 from excelmanus.tools.registry import ToolDef, ToolRegistry
-from excelmanus.tools.runtime import is_direct_call_allowed
 
 
 def _config(**overrides: object) -> ExcelManusConfig:
@@ -59,6 +58,9 @@ def _registry() -> ToolRegistry:
             _tool("write_plan"),
         ]
     )
+    from excelmanus.tools.introspection_tools import register_introspection_tools
+
+    register_introspection_tools(registry)
     return registry
 
 
@@ -79,7 +81,6 @@ def _inspect_record(*, applied: bool, sticky: str = "inspect") -> dict[str, obje
         "sticky_profile": sticky,
         "domain": "inspect_only",
         "mode_hint": "keep",
-        "present_hint": None,
         "conf": 0.9,
         "latency_ms": 0.0,
         "wire_narrow": applied and sticky != "full",
@@ -93,7 +94,6 @@ def _engine(
     *,
     config: ExcelManusConfig,
     exposure: dict[str, object] | None = None,
-    present_as: str = "native",
     child: bool = False,
 ) -> SimpleNamespace:
     registry = _registry()
@@ -101,7 +101,6 @@ def _engine(
         _registry=registry,
         registry=registry,
         _current_chat_mode="write",
-        _present_as=present_as,
         _turn_exposure=exposure,
         _exposure_sticky=None,
         _active_skills=[],
@@ -132,7 +131,6 @@ def _applied_decision(profile: str) -> Decision:
             "domain": "inspect_only" if profile == "inspect" else "spreadsheet_write",
             "domain_confidence": 0.9,
             "mode_hint": "keep",
-            "present_hint": None,
             "wire_narrow": False,
         },
         applied=True,
@@ -152,7 +150,7 @@ def _epoch(catalog_digest: str, tools: list[dict]) -> object:
     )
 
 
-def test_default_config_keeps_full_wire_even_if_profile_inspect(tmp_path: Path) -> None:
+def test_default_config_keeps_core_wire_even_if_profile_inspect(tmp_path: Path) -> None:
     engine = _engine(
         tmp_path,
         config=_config(),
@@ -169,12 +167,15 @@ def test_default_config_keeps_full_wire_even_if_profile_inspect(tmp_path: Path) 
     assert catalog_from_engine(engine).digest() == digest
 
 
-def test_signed_enforce_narrows_schema_not_digest_or_epoch(
+def test_signed_profiles_change_schema_not_digest_or_epoch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _sign_exposure(monkeypatch)
     config = _config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True)
-    full_engine = _engine(tmp_path, config=config, exposure=None)
+    full_engine = _engine(
+        tmp_path, config=config,
+        exposure={**_inspect_record(applied=True, sticky="file_code"), "profile": "file_code"},
+    )
     catalog = catalog_from_engine(full_engine)
     assert catalog is not None
     digest = catalog.digest()
@@ -195,8 +196,9 @@ def test_signed_enforce_narrows_schema_not_digest_or_epoch(
     assert "inspect_spreadsheet" in inspect_names
     assert "analyze_spreadsheet" in inspect_names
     assert "ask_user" in inspect_names
-    assert "edit_spreadsheet" not in inspect_names
-    assert "run_code" not in inspect_names
+    assert "edit_spreadsheet" in inspect_names
+    assert "run_shell" not in inspect_names
+    assert "run_code" in inspect_names
     assert "write_plan" not in inspect_names
     assert "write_plan" not in full
     assert len(inspect_names) < len(full)
@@ -221,7 +223,7 @@ def test_signed_enforce_narrows_schema_not_digest_or_epoch(
     assert prev.tools_digest != curr.tools_digest
 
 
-def test_out_of_narrow_native_call_still_allowed(
+def test_undisclosed_authorized_tool_still_executable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _sign_exposure(monkeypatch)
@@ -231,14 +233,14 @@ def test_out_of_narrow_native_call_still_allowed(
         exposure=_inspect_record(applied=True, sticky="inspect"),
     )
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert "edit_spreadsheet" not in names
+    assert "run_shell" not in names
     catalog = catalog_from_engine(engine)
     assert catalog is not None
-    assert "edit_spreadsheet" in catalog.name_set()
-    assert is_direct_call_allowed("edit_spreadsheet", present_as="native", parent=None)
+    assert "run_shell" in catalog.name_set()
+    assert engine.registry.call_tool("run_shell", {}).success
 
 
-def test_code_present_as_stays_run_code(
+def test_profile_keeps_core_direct_and_programmatic_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _sign_exposure(monkeypatch)
@@ -246,12 +248,45 @@ def test_code_present_as_stays_run_code(
         tmp_path,
         config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
         exposure=_inspect_record(applied=True, sticky="inspect"),
-        present_as="code",
     )
-    assert _schema_names(MetaToolBuilder(engine).build_v5_tools_impl()) == {"run_code"}
+    names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
+    assert {"run_code", "inspect_spreadsheet", "ask_user"} <= names
+    assert "edit_spreadsheet" in names  # 常驻核心不受 profile 收窄。
     catalog = catalog_from_engine(engine)
     assert catalog is not None
     assert "inspect_spreadsheet" in catalog.name_set()
+
+
+def test_loaded_tools_survive_profile_narrowing_without_expanding_permissions(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _sign_exposure(monkeypatch)
+    engine = _engine(
+        tmp_path,
+        config=_config(jev_enabled="enforce", jev_exposure="enforce", jev_calibrated=True),
+        exposure=_inspect_record(applied=True, sticky="inspect"),
+    )
+    engine._loaded_tool_names = {"edit_spreadsheet", "not_registered"}
+    names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
+    assert "edit_spreadsheet" in names
+    assert "not_registered" not in names
+
+    engine._current_chat_mode = "read"
+    names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
+    assert "edit_spreadsheet" not in names
+    assert "run_code" not in names
+
+
+@pytest.mark.asyncio
+async def test_new_turn_resets_loaded_tools_even_when_jev_is_off(tmp_path: Path) -> None:
+    engine = _engine(tmp_path, config=_config())
+    old_loaded = {"edit_spreadsheet"}
+    engine._loaded_tool_names = old_loaded
+    engine._tools_cache = [{"function": {"name": "old"}}]
+    await maybe_record_turn_exposure(engine, "next request")
+    assert engine._loaded_tool_names == set()
+    assert engine._loaded_tool_names is not old_loaded
+    assert engine._tools_cache is None
 
 
 def test_master_shadow_child_enforce_does_not_narrow(
@@ -319,7 +354,8 @@ async def test_sticky_two_turns_then_narrow(
     assert turn_wire_profile(engine) == "inspect"
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
     assert "inspect_spreadsheet" in names
-    assert "edit_spreadsheet" not in names
+    assert "edit_spreadsheet" in names
+    assert "run_shell" not in names
 
     edit = _applied_decision("edit")
     with patch("excelmanus.system_one.evaluate", AsyncMock(return_value=edit)):

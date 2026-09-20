@@ -167,6 +167,37 @@ class ApprovalManager:
     def pending(self) -> PendingApproval | None:
         return self._pending
 
+    def snapshot_pending(self) -> dict[str, Any] | None:
+        """Return the pending approval in a session-snapshot-friendly shape."""
+        if self._pending is None:
+            return None
+        return {
+            "approval_id": self._pending.approval_id,
+            "tool_name": self._pending.tool_name,
+            "arguments": dict(self._pending.arguments),
+            "tool_scope": list(self._pending.tool_scope),
+            "created_at_utc": self._pending.created_at_utc,
+            "parent_call_id": self._pending.parent_call_id,
+        }
+
+    def restore_pending(self, raw: dict[str, Any] | None) -> None:
+        """Restore a pending approval after a session snapshot reload."""
+        if not isinstance(raw, dict) or not raw.get("approval_id"):
+            self._pending = None
+            return
+        self._pending = PendingApproval(
+            approval_id=str(raw.get("approval_id")),
+            tool_name=str(raw.get("tool_name") or ""),
+            arguments=dict(raw.get("arguments") or {}),
+            tool_scope=[str(item) for item in raw.get("tool_scope") or []],
+            created_at_utc=str(raw.get("created_at_utc") or ""),
+            parent_call_id=(
+                str(raw.get("parent_call_id"))
+                if raw.get("parent_call_id") is not None
+                else None
+            ),
+        )
+
     def has_pending(self) -> bool:
         return self._pending is not None
 

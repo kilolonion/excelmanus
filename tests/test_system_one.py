@@ -50,7 +50,6 @@ def test_jev_is_active_requires_gate_and_key() -> None:
         jev_enabled="off",
         jev_exposure="enforce",
         jev_mode_hint=True,
-        jev_present_as_auto=True,
         jev_observation="enforce",
         jev_ui_hint=True,
         jev_model="jev-1.13.0",
@@ -61,7 +60,6 @@ def test_jev_is_active_requires_gate_and_key() -> None:
         jev_enabled="shadow",
         jev_exposure="shadow",
         jev_mode_hint=False,
-        jev_present_as_auto=False,
         jev_observation="off",
         jev_ui_hint=False,
         jev_model="jev-1.13.0",
@@ -73,7 +71,6 @@ def test_jev_is_active_requires_gate_and_key() -> None:
         jev_enabled="shadow",
         jev_exposure="shadow",
         jev_mode_hint=False,
-        jev_present_as_auto=False,
         jev_observation="off",
         jev_ui_hint=False,
         jev_model="jev-1.13.0",
@@ -90,7 +87,6 @@ def _jev_cfg(**overrides: object) -> SimpleNamespace:
         "jev_enabled": "shadow",
         "jev_exposure": "off",
         "jev_mode_hint": False,
-        "jev_present_as_auto": False,
         "jev_observation": "off",
         "jev_ui_hint": False,
         "jev_model": "",
@@ -247,7 +243,6 @@ def test_gate_matrix_master_shadow_downgrades_enforce() -> None:
         jev_enabled="shadow",
         jev_exposure="enforce",
         jev_mode_hint=True,
-        jev_present_as_auto=True,
         jev_observation="enforce",
         jev_ui_hint=True,
         jev_model="jev-1.13.0",
@@ -323,13 +318,16 @@ def test_jev_config_defaults() -> None:
     assert cfg.jev_enabled == "off"
     assert cfg.jev_exposure == "off"
     assert cfg.jev_mode_hint is False
-    assert cfg.jev_present_as_auto is False
     assert cfg.jev_observation == "off"
     assert cfg.jev_ui_hint is False
     assert cfg.jev_model == "jev-1.13.0"
     assert cfg.typesafe_api_key is None
     assert cfg.jev_timeout_seconds == pytest.approx(1.5)
     assert _parse_jev_gate(None, "EXCELMANUS_JEV_ENABLED", "off") == "off"
+
+
+def test_exposure_does_not_classify_call_syntax() -> None:
+    assert "fits_code_mode" not in {q.qid for q in get_pack("exposure.turn").questions}
 
 
 def test_jev_settings_come_from_store_not_process_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -549,6 +547,60 @@ def test_approval_fail_closed_and_thresholds() -> None:
     assert ask.kind == "ask"
 
 
+def test_mutation_verify_is_shadow_decision_only() -> None:
+    decision = synthesize(
+        "mutation.verify",
+        _eval(
+            "mutation.verify",
+            {
+                "satisfied": NoulAnswer(0.92),
+                "scope_ok": NoulAnswer(0.9),
+                "next": ChoiceAnswer("inspect_more", confidence=0.88),
+            },
+        ),
+        {"verification_facts": {"success": True}},
+    )
+    assert decision.kind == "noop"
+    assert decision.extras["next"] == "inspect_more"
+    assert decision.applied is False
+
+
+def test_recovery_pack_is_only_a_failure_suggestion() -> None:
+    decision = synthesize(
+        "recovery.next_step",
+        _eval(
+            "recovery.next_step",
+            {
+                "next": ChoiceAnswer("retry", confidence=0.9),
+                "retryable": NoulAnswer(0.9),
+                "needs_user": NoulAnswer(0.1),
+            },
+        ),
+        {"safe_to_retry": True},
+    )
+    assert decision.kind == "noop"
+    assert decision.extras["next"] == "retry"
+    assert decision.applied is False
+
+
+def test_recovery_state_uses_only_trailing_failure_streak() -> None:
+    from excelmanus.engine_types import ToolCallResult
+    from excelmanus.system_one.adapter import recovery_state_from_engine
+
+    engine = SimpleNamespace(
+        memory=SimpleNamespace(get_messages=lambda: [{"role": "user", "content": "继续"}]),
+        _last_iteration_count=2,
+    )
+    results = [
+        ToolCallResult("x", {}, "old", False, error="old"),
+        ToolCallResult("y", {}, "ok", True),
+        ToolCallResult("z", {}, "new1", False, error="new1"),
+        ToolCallResult("w", {}, "new2", False, error="new2"),
+    ]
+    state = recovery_state_from_engine(engine, results)
+    assert state["consecutive_failures"] == 2
+
+
 def test_adapter_strips_secrets_history_and_bytes() -> None:
     bounded = bound_state(
         "approval.tool_call",
@@ -602,6 +654,8 @@ def test_profile_names_avoid_code_clash() -> None:
         "exposure.turn",
         "observation.shape",
         "observation.prune",
+        "mutation.verify",
+        "recovery.next_step",
         "ui.surface",
         "approval.tool_call",
         "skill.pin",
@@ -623,7 +677,10 @@ def test_profile_selectors_have_no_ghost_names() -> None:
         assert not unknown, unknown
 
 
-def test_profile_intersects_registry_and_keeps_write_plan_out_of_inspect() -> None:
+def test_profile_intersects_authorized_catalog_and_preserves_core() -> None:
+    from excelmanus.tools.catalog import derive_effective_catalog
+    from excelmanus.tools.registry import ToolDef
+
     registered = {
         "inspect_spreadsheet",
         "edit_spreadsheet",
@@ -635,16 +692,25 @@ def test_profile_intersects_registry_and_keeps_write_plan_out_of_inspect() -> No
         "parallel_search",
     }
     inspect_tools = resolve_profile_tools("inspect", registered)
-    assert "write_plan" not in inspect_tools
-    assert "exit_plan_mode" not in inspect_tools
+    assert "write_plan" in inspect_tools
+    assert "exit_plan_mode" in inspect_tools
     assert "inspect_spreadsheet" in inspect_tools
     assert "ask_user" in inspect_tools
-    assert "edit_spreadsheet" not in inspect_tools
+    assert "edit_spreadsheet" in inspect_tools
     web_tools = resolve_profile_tools("web", registered)
     assert "mcp_demo_search" in web_tools
     full = resolve_profile_tools("full", registered)
     assert full == registered
     assert resolve_profile_tools("inspect", registered) <= registered
+    tools = [ToolDef(
+        name=name, description=name, input_schema={"type": "object", "properties": {}},
+        func=lambda: None, write_effect="none",
+    ) for name in registered]
+    for mode in ("read", "write", "plan"):
+        catalog = derive_effective_catalog(tools=tools, mode=mode)
+        visible = resolve_profile_tools("inspect", catalog.names())
+        assert ("write_plan" in visible) is (mode == "plan")
+        assert ("exit_plan_mode" in visible) is (mode == "plan")
 
 
 def test_profile_reconciles_with_builtin_registry(tmp_path) -> None:
@@ -656,8 +722,8 @@ def test_profile_reconciles_with_builtin_registry(tmp_path) -> None:
         resolved = resolve_profile_tools(profile, names)
         assert resolved <= names
         if profile == "inspect":
-            assert "write_plan" not in resolved
-            assert "edit_spreadsheet" not in resolved
+            assert "write_plan" in resolved
+            assert "edit_spreadsheet" in resolved
 
 
 @pytest.mark.asyncio
@@ -666,7 +732,6 @@ async def test_evaluate_without_key_matches_current_behavior() -> None:
         jev_enabled="off",
         jev_exposure="enforce",
         jev_mode_hint=True,
-        jev_present_as_auto=True,
         jev_observation="enforce",
         jev_ui_hint=True,
         jev_model="jev-1.13.0",
@@ -679,7 +744,6 @@ async def test_evaluate_without_key_matches_current_behavior() -> None:
         jev_enabled="shadow",
         jev_exposure="enforce",
         jev_mode_hint=False,
-        jev_present_as_auto=False,
         jev_observation="off",
         jev_ui_hint=False,
         jev_model="jev-1.13.0",
@@ -692,7 +756,6 @@ async def test_evaluate_without_key_matches_current_behavior() -> None:
         jev_enabled="enforce",
         jev_exposure="off",
         jev_mode_hint=False,
-        jev_present_as_auto=False,
         jev_observation="off",
         jev_ui_hint=False,
         jev_model="jev-1.13.0",

@@ -7,6 +7,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import json
 from dataclasses import replace
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -133,6 +135,40 @@ class TestCreateClientRouting:
         )
         assert isinstance(client, OpenAIResponsesClient)
         assert client._base_url == "https://api.openai.com/v1"
+
+    def test_codex_client_sends_chatgpt_account_header_from_oauth_jwt(self):
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc-workspace"},
+        }).encode()).rstrip(b"=").decode()
+        token = f"header.{payload}.signature"
+
+        client = create_client(
+            api_key=token,
+            base_url="https://chatgpt.com/backend-api/codex",
+            protocol="openai_responses",
+        )
+
+        assert client._request_headers()["ChatGPT-Account-Id"] == "acc-workspace"
+
+    def test_standard_openai_client_does_not_send_chatgpt_account_header(self):
+        client = create_client(
+            api_key="test_key",
+            base_url="https://api.openai.com",
+            protocol="openai_responses",
+        )
+
+        assert "ChatGPT-Account-Id" not in client._request_headers()
+
+    def test_account_header_is_not_sent_to_lookalike_host(self):
+        payload = base64.urlsafe_b64encode(json.dumps({
+            "https://api.openai.com/auth": {"chatgpt_account_id": "acc-secret"},
+        }).encode()).rstrip(b"=").decode()
+        client = OpenAIResponsesClient(
+            api_key=f"header.{payload}.signature",
+            base_url="https://evil.example/chatgpt.com/backend-api/codex",
+        )
+
+        assert "ChatGPT-Account-Id" not in client._request_headers()
 
     def test_openai_protocol_creates_async_openai(self):
         import openai

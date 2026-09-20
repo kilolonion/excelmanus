@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRe
 import { fetchFileBlob, uploadFile, uploadFileFromUrl } from "@/lib/api";
 import { identityKey, toPublicFileIdentity } from "@/lib/file-identity";
 import type { AttachedFile } from "@/lib/types";
-import { getActiveSessionId } from "@/stores/session-store";
+import { useSessionStore } from "@/stores/session-store";
 import { isVisionImageFile } from "@/lib/file-kind";
 import { detectFileUrl, friendlyUploadError } from "./chat-input-constants";
 import {
@@ -39,6 +39,16 @@ function attachmentIdentity(path: string | undefined, filename: string): string 
 /** 本地选择/粘贴时上传尚未返回工作区路径，至少写入可解析的 `@file:` + basename。 */
 function mentionForPendingUpload(filename: string): string {
   return formatFileMention({ path: filename });
+}
+
+function activeUploadScope(): { sessionId?: string; workspaceId?: string } {
+  const state = useSessionStore.getState();
+  const sessionId = state.activeSessionId ?? undefined;
+  const workspaceId = state.sessions.find((item) => item.id === sessionId)?.workspaceId ?? undefined;
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+  };
 }
 
 /**
@@ -118,7 +128,8 @@ export function useChatUpload({
 
   const triggerUpload = useCallback(async (id: string, file: File) => {
     try {
-      const result = await uploadFile(file);
+      const scope = activeUploadScope();
+      const result = await uploadFile(file, scope.sessionId, scope.workspaceId);
       setFiles((prev) =>
         prev.map((f) =>
           f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f
@@ -139,7 +150,8 @@ export function useChatUpload({
 
   const hydrateWorkspaceImage = useCallback(async (id: string, path: string, filename: string) => {
     try {
-      const blob = await fetchFileBlob(path, getActiveSessionId() ?? undefined);
+      const scope = activeUploadScope();
+      const blob = await fetchFileBlob(path, scope.sessionId, scope.workspaceId);
       const file = new File([blob], filename, { type: blob.type || "application/octet-stream" });
       setFiles((prev) =>
         prev.map((f) =>
@@ -273,7 +285,8 @@ export function useChatUpload({
     setFiles((prev) => [...prev, placeholder]);
 
     try {
-      const result = await uploadFileFromUrl(url);
+      const scope = activeUploadScope();
+      const result = await uploadFileFromUrl(url, scope.sessionId, scope.workspaceId);
       setFiles((prev) =>
         prev.map((f) =>
           f.id === id ? { ...f, status: "success" as const, uploadResult: result } : f

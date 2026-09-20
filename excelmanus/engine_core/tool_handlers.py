@@ -300,6 +300,9 @@ class DelegationHandler(BaseToolHandler):
         if tool_name == "list_subagents":
             return self._handle_list(arguments)
 
+        if arguments.get("action", "start") != "start" or arguments.get("background"):
+            return await self._handle_background(arguments, on_event=on_event)
+
         # delegate / delegate_to_subagent / parallel_delegate 统一处理
         # 判断是并行还是单任务模式
         tasks_value = arguments.get("tasks")
@@ -307,6 +310,51 @@ class DelegationHandler(BaseToolHandler):
             return await self._handle_parallel(arguments, on_event=on_event)
         else:
             return await self._handle_delegate(tool_call_id, arguments, on_event=on_event, iteration=iteration)
+
+    async def _handle_background(self, arguments, *, on_event):
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+        from excelmanus.engine_core.tool_result import from_payload, ok_result
+        from excelmanus.engine_core.error_payload import payload_from_subagent_error
+        from excelmanus.subagent.errors import SubagentError
+        from excelmanus.subagent.models import SubagentStartRequest
+
+        runtime = self._engine._subagent_runtime
+        action = arguments.get("action", "start")
+        run_id = arguments.get("run_id", "")
+        try:
+            if action == "start":
+                if arguments.get("tasks"):
+                    raise SubagentError("INVALID_ARGS", "后台启动每次传一个 task；tasks 是同步并行入口。")
+                task = arguments.get("task", "")
+                brief = arguments.get("task_brief")
+                if isinstance(brief, dict) and brief.get("title"):
+                    task = self._engine.render_task_brief(brief)
+                run_id = await runtime.start_background(SubagentStartRequest(
+                    task=task, agent_name=arguments.get("agent_name"),
+                    file_paths=arguments.get("file_paths") or [], on_event=on_event,
+                ))
+            elif action == "list":
+                payload = {"status": "success", "runs": runtime.list_runs()}
+            elif action == "wait":
+                row = await runtime.wait(run_id, timeout=float(arguments.get("wait_seconds", 30)))
+                payload = {"status": "success", "run": row}
+            elif action == "send":
+                await runtime.send_message(run_id, arguments.get("message", ""))
+            elif action in {"cancel", "pause"}:
+                await runtime.interrupt(run_id, pause=action == "pause")
+            elif action == "resume":
+                run_id = await runtime.resume(run_id, arguments.get("message", ""), on_event=on_event)
+            elif action != "status":
+                raise SubagentError("INVALID_ARGS", f"不支持的子任务操作: {action}")
+            if action not in {"list", "wait"}:
+                payload = {"status": "success", "run": runtime.get_run(run_id)}
+            structured = ok_result(payload)
+        except SubagentError as exc:
+            structured = from_payload(payload_from_subagent_error(exc))
+        return _ToolExecOutcome(
+            result_str=structured.model_text, success=structured.success,
+            error=structured.error.code if structured.error else None, structured=structured,
+        )
 
     async def _handle_delegate(self, tool_call_id, arguments, *, on_event, iteration):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
@@ -350,7 +398,14 @@ class DelegationHandler(BaseToolHandler):
         log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
         return _ToolExecOutcome(
             result_str=result_str, success=success, error=error,
+            structured=self._text_result(result_str, success),
         )
+
+    @staticmethod
+    def _text_result(text: str, success: bool):
+        from excelmanus.engine_core.tool_result import ToolResult
+
+        return ToolResult.from_text(text, success=success)
 
     def _handle_list(self, arguments):
         from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
@@ -384,7 +439,10 @@ class DelegationHandler(BaseToolHandler):
             error = str(exc)
 
         log_tool_call(logger, "delegate", arguments, result=result_str if success else None, error=error if not success else None)
-        return _ToolExecOutcome(result_str=result_str, success=success, error=error)
+        return _ToolExecOutcome(
+            result_str=result_str, success=success, error=error,
+            structured=self._text_result(result_str, success),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -407,9 +465,16 @@ class AskUserHandler(BaseToolHandler):
         result_str = await self._engine.handle_ask_user_blocking(
             arguments=arguments, tool_call_id=tool_call_id, on_event=on_event, iteration=iteration,
         )
+        from excelmanus.engine_core.tool_result import coerce_legacy_result, error_result
+
+        structured = coerce_legacy_result(result_str)
+        # Completed questions have JSON answers. Timeout text is not an answer.
+        if not isinstance(structured.value, (dict, list)):
+            structured = error_result(result_str, code="CANCELLED")
         log_tool_call(logger, tool_name, arguments, result=result_str)
         return _ToolExecOutcome(
-            result_str=result_str, success=True,
+            result_str=structured.model_text, success=structured.success, structured=structured,
+            error=structured.error.code if structured.error else None,
             pending_question=False, question_id=None, defer_tool_result=False,
         )
 
@@ -482,6 +547,9 @@ class HighRiskApprovalHandler(BaseToolHandler):
                 )
             if action != "auto":
                 pending = e.approval.create_pending(tool_name=tool_name, arguments=arguments, tool_scope=tool_scope)
+                persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
+                if callable(persist_runtime):
+                    persist_runtime()
                 e.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=iteration, tool_call_id=tool_call_id)
                 result_str = e.format_pending_prompt(pending)
                 log_tool_call(logger, tool_name, arguments, result=result_str)
@@ -651,6 +719,9 @@ class CodePolicyHandler(BaseToolHandler):
             arguments={**arguments, "sandbox_tier": _analysis.tier.value},
             tool_scope=tool_scope,
         )
+        persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
+        if callable(persist_runtime):
+            persist_runtime()
         result_str = (
             f"⚠️ 代码包含高风险操作，需要人工确认：\n"
             f"- 风险等级: {_analysis.tier.value}\n"
@@ -691,7 +762,11 @@ class CodePolicyHandler(BaseToolHandler):
         e = self._engine
         dispatcher = self._dispatcher
 
-        _sandbox_tier = analysis.tier.value
+        _sandbox_tier = (
+            "RED"
+            if bool(getattr(e, "_full_access_enabled", False))
+            else analysis.tier.value
+        )
         _augmented_args = {**arguments, "sandbox_tier": _sandbox_tier}
 
         # uploads 目录快照，用于检测新建/变更文件

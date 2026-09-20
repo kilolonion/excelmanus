@@ -9,13 +9,11 @@
       "pack_id": "exposure.turn",
       "state": {
         "user_text": "帮我看看",
-        "chat_mode": "write",
-        "present_as": "native"
+        "chat_mode": "write"
       },
       "answers": {
         "domain": { "choice": "inspect_only", "confidence": 0.42 },
         "needs_write": { "noul": 0.2 },
-        "fits_code_mode": { "noul": 0.1 },
         "mode_mismatch": { "choice": "keep", "confidence": 0.3 },
         "is_chitchat": { "noul": 0.2 }
       },
@@ -27,13 +25,11 @@
       "pack_id": "exposure.turn",
       "state": {
         "user_text": "🤔📊❓",
-        "chat_mode": "write",
-        "present_as": "native"
+        "chat_mode": "write"
       },
       "answers": {
         "domain": { "choice": "chitchat", "confidence": 0.4 },
         "needs_write": { "noul": 0.05 },
-        "fits_code_mode": { "noul": 0.02 },
         "mode_mismatch": { "choice": "keep", "confidence": 0.2 },
         "is_chitchat": { "noul": 0.5 }
       },
@@ -45,13 +41,11 @@
       "pack_id": "exposure.turn",
       "state": {
         "user_text": "华东区 8 月的销售额是多少？",
-        "chat_mode": "write",
-        "present_as": "native"
+        "chat_mode": "write"
       },
       "answers": {
         "domain": { "choice": "inspect_only", "confidence": 0.91 },
         "needs_write": { "noul": 0.08 },
-        "fits_code_mode": { "noul": 0.1 },
         "mode_mismatch": { "choice": "keep", "confidence": 0.7 },
         "is_chitchat": { "noul": 0.02 }
       },
@@ -63,13 +57,11 @@
       "pack_id": "exposure.turn",
       "state": {
         "user_text": "订单表最后加一列\"毛利\"，用公式算：金额减去数量乘成本，成本要从产品目录那张表按产品编码查。公式要能下拉的那种，别直接填死数。",
-        "chat_mode": "write",
-        "present_as": "native"
+        "chat_mode": "write"
       },
       "answers": {
         "domain": { "choice": "spreadsheet_write", "confidence": 0.92 },
         "needs_write": { "noul": 0.95 },
-        "fits_code_mode": { "noul": 0.35 },
         "mode_mismatch": { "choice": "keep", "confidence": 0.8 },
         "is_chitchat": { "noul": 0.01 }
       },
@@ -81,13 +73,11 @@
       "pack_id": "exposure.turn",
       "state": {
         "user_text": "把重复客户删掉，但一个客户都不能少。另外退货也算进业绩。做完直接覆盖。",
-        "chat_mode": "write",
-        "present_as": "native"
+        "chat_mode": "write"
       },
       "answers": {
         "domain": { "choice": "mixed", "confidence": 0.5 },
         "needs_write": { "noul": 0.8 },
-        "fits_code_mode": { "noul": 0.4 },
         "mode_mismatch": { "choice": "keep", "confidence": 0.4 },
         "is_chitchat": { "noul": 0.05 }
       },

@@ -394,7 +394,7 @@ def _read_version_from_dir(directory: Path) -> str | None:
         try:
             for line in init_py.read_text(encoding="utf-8").splitlines():
                 if line.strip().startswith("__version__"):
-                    # __version__ = "1.7.3"
+                    # __version__ = "1.8.0"
                     parts = line.split("=", 1)
                     if len(parts) == 2:
                         return parts[1].strip().strip("\"'")

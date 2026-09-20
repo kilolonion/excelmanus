@@ -1,4 +1,5 @@
 import { create } from "zustand";
+import { invalidateWorkbookCaches } from "@/lib/api";
 import { persist } from "zustand/middleware";
 import {
   fetchWorkspaceFiles,
@@ -19,7 +20,11 @@ import {
   sanitizeRecentFiles,
   versionStoreKey,
   workspaceKeyFromSession,
+  workspaceKeyForSessionId,
 } from "@/lib/workspace-file-ref";
+import { isSpreadsheetFile } from "@/lib/file-kind";
+
+let workspaceFilesRequest: { sessionId: string | null; version: number; promise: Promise<void> } | null = null;
 
 function activeSessionId(): string | null {
   return useSessionStore.getState().activeSessionId;
@@ -156,6 +161,12 @@ const MAX_PERSISTED_DIFFS = 500;
 export type ExcelPanelTab = "sheet" | "history";
 export type HistorySubview = "revisions" | "operations";
 
+export interface WorkbookChange {
+  sequence: number;
+  version?: string;
+  source: "local" | "remote" | "refresh";
+}
+
 interface ExcelState {
   // 侧边面板
   panelOpen: boolean;
@@ -174,13 +185,14 @@ interface ExcelState {
   // 文本文件预览数据（按 toolCallId 索引）
   textPreviews: Record<string, TextPreviewEntry>;
 
-  // 面板刷新计数器（每次 diff 后递增，触发 Univer 重新加载）
+  // 历史列表的兼容刷新信号；工作簿视图只订阅 workbookChanges 中自己的文件。
   refreshCounter: number;
 
   // 当前打开文件的内容版本（sha256:...），按 workspaceKey|path 索引
   contentVersions: Record<string, string>;
   activeWorkspaceKey: string | null;
   viewGeneration: number;
+  workbookChanges: Record<string, WorkbookChange>;
 
   // 快捷栏：最近使用的 Excel 文件（LRU，最多 5 个）
   recentFiles: ExcelFileRef[];
@@ -218,6 +230,10 @@ interface ExcelState {
   // 工作区文件列表缓存（避免每次挂载组件都重新加载）
   workspaceFiles: { path: string; filename: string; is_dir?: boolean }[];
   wsFilesLoaded: boolean;
+  workspaceFilesSessionId: string | null | undefined;
+  workspaceFilesLoadedVersion: number;
+  workspaceFilesLoadedAt: number;
+  workspaceFilesError: string | null;
 
   // 引导演示文件（不真实存储，引导结束后自动消失）
   demoFile: { path: string; filename: string } | null;
@@ -260,6 +276,7 @@ interface ExcelState {
   setActiveSheet: (sheet: string) => void;
   setContentVersion: (path: string, version: string | null | undefined, workspaceKey?: string | null) => void;
   getContentVersion: (path: string, workspaceKey?: string | null) => string | null;
+  notifyWorkbookChanged: (path: string, workspaceKey: string, version?: string, source?: WorkbookChange["source"]) => void;
   rebindSession: (prevWorkspaceKey: string | null, nextWorkspaceKey: string | null) => void;
   addDiff: (diff: ExcelDiffEntry) => void;
   addTextDiff: (diff: TextDiffEntry) => void;
@@ -295,7 +312,7 @@ interface ExcelState {
   clearPendingTemplateMessage: () => void;
   toggleShowSystemFiles: () => void;
   bumpWorkspaceFilesVersion: () => void;
-  refreshWorkspaceFiles: (sessionId?: string | null) => Promise<void>;
+  refreshWorkspaceFiles: (sessionId?: string | null, options?: { cached?: boolean }) => Promise<void>;
   fetchOperationHistory: (sessionId: string) => Promise<void>;
   undoOperationById: (sessionId: string, approvalId: string) => Promise<boolean>;
   appendOperation: (op: OperationRecord) => void;
@@ -331,6 +348,7 @@ export const useExcelStore = create<ExcelState>()(
   contentVersions: {},
   activeWorkspaceKey: null,
   viewGeneration: 0,
+  workbookChanges: {},
   recentFiles: [],
   fullViewPath: null,
   fullViewSheet: null,
@@ -346,6 +364,10 @@ export const useExcelStore = create<ExcelState>()(
   workspaceFilesVersion: 0,
   workspaceFiles: [],
   wsFilesLoaded: false,
+  workspaceFilesSessionId: undefined,
+  workspaceFilesLoadedVersion: -1,
+  workspaceFilesLoadedAt: 0,
+  workspaceFilesError: null,
   demoFile: null,
   streamingToolContent: {},
   operations: [],
@@ -418,6 +440,21 @@ export const useExcelStore = create<ExcelState>()(
     return get().contentVersions[versionStoreKey(path, ws)] ?? null;
   },
 
+  notifyWorkbookChanged: (path, workspaceKey, version, source = "remote") => {
+    const key = versionStoreKey(path, workspaceKey);
+    const previous = get().workbookChanges[key];
+    if (source !== "refresh" && version && previous?.version === version) return;
+    invalidateWorkbookCaches({ workspaceKey, relative: path });
+    set((state) => {
+      const contentVersions = { ...state.contentVersions };
+      if (version) contentVersions[key] = version;
+      else delete contentVersions[key];
+      return { contentVersions, workbookChanges: { ...state.workbookChanges,
+        [key]: { sequence: (previous?.sequence ?? 0) + 1, version, source },
+      } };
+    });
+  },
+
   rebindSession: (prevWorkspaceKey, nextWorkspaceKey) =>
     set((state) => {
       const nextKey = nextWorkspaceKey || "_";
@@ -432,6 +469,15 @@ export const useExcelStore = create<ExcelState>()(
       return {
         activeWorkspaceKey: nextKey,
         viewGeneration: state.viewGeneration + 1,
+        workspaceFiles: [],
+        wsFilesLoaded: false,
+        workspaceFilesSessionId: undefined,
+        workspaceFilesLoadedVersion: -1,
+        workspaceFilesLoadedAt: 0,
+        workspaceFilesError: null,
+        fileGroups: [],
+        fileGroupsLoaded: false,
+        workbookChanges: {},
         contentVersions,
         fullViewPath: null,
         fullViewSheet: null,
@@ -463,16 +509,8 @@ export const useExcelStore = create<ExcelState>()(
       );
       if (isDup) return state;
       const newDiffs = [...state.diffs, diff].slice(-MAX_PERSISTED_DIFFS);
-      const contentVersions = { ...state.contentVersions };
-      delete contentVersions[versionStoreKey(diff.filePath, state.activeWorkspaceKey ?? "_")];
       return {
         diffs: newDiffs,
-        contentVersions,
-        // 如果面板打开且是同一文件 → 触发刷新
-        refreshCounter:
-          state.panelOpen && state.activeFilePath === diff.filePath
-            ? state.refreshCounter + 1
-            : state.refreshCounter,
       };
     }),
 
@@ -682,17 +720,48 @@ export const useExcelStore = create<ExcelState>()(
   bumpWorkspaceFilesVersion: () =>
     set((state) => ({ workspaceFilesVersion: state.workspaceFilesVersion + 1 })),
 
-  refreshWorkspaceFiles: async (sessionId) => {
-    try {
-      const sid = sessionId ?? activeSessionId();
-      const files = await fetchWorkspaceFiles(sid);
-      set({
-        workspaceFiles: files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir })),
-        wsFilesLoaded: true,
-      });
-    } catch {
-      // silent
+  refreshWorkspaceFiles: (sessionId, options) => {
+    const sid = sessionId === undefined ? activeSessionId() : sessionId;
+    const state = get();
+    const version = state.workspaceFilesVersion;
+    if (options?.cached && state.wsFilesLoaded && !state.workspaceFilesError && state.workspaceFilesSessionId === sid
+      && state.workspaceFilesLoadedVersion === version && Date.now() - state.workspaceFilesLoadedAt < 30_000) {
+      return Promise.resolve();
     }
+    if (workspaceFilesRequest?.sessionId === sid && workspaceFilesRequest.version === version) {
+      return workspaceFilesRequest.promise;
+    }
+    if (state.workspaceFilesError) set({ workspaceFilesError: null });
+    if (state.workspaceFilesSessionId !== sid) {
+      set({ workspaceFiles: [], wsFilesLoaded: false, workspaceFilesSessionId: sid, fileGroups: [], fileGroupsLoaded: false });
+    }
+    const request = { sessionId: sid, version, promise: Promise.resolve() };
+    workspaceFilesRequest = request;
+    request.promise = (async () => {
+      try {
+        const { files } = await fetchWorkspaceFiles(sid);
+        // An older scan must not replace a newer scan or another session's files.
+        if (workspaceFilesRequest !== request || activeSessionId() !== sid) return;
+        const next = files.map((f) => ({ path: f.path, filename: f.filename, is_dir: f.is_dir }));
+        const previous = get().workspaceFiles;
+        const unchanged = previous.length === next.length && previous.every((file, index) =>
+          file.path === next[index].path && file.filename === next[index].filename && file.is_dir === next[index].is_dir);
+        set({ workspaceFiles: unchanged ? previous : next, wsFilesLoaded: true, workspaceFilesSessionId: sid,
+          workspaceFilesLoadedVersion: version, workspaceFilesLoadedAt: Date.now() });
+        // Reuse the same scan for recent workbooks instead of walking the workspace twice.
+        get().mergeRecentFiles(files.filter((file) => !file.is_dir && isSpreadsheetFile(file.filename)).map((file) => ({
+          path: file.path, filename: file.filename, modifiedAt: (file.modified_at || 0) * 1000,
+        })), workspaceKeyForSessionId(sid));
+      } catch (error) {
+        // Keep the previous snapshot; a failed scan is not an empty workspace.
+        if (workspaceFilesRequest === request && activeSessionId() === sid) {
+          set({ workspaceFilesError: error instanceof Error ? error.message : "文件列表加载失败" });
+        }
+      } finally {
+        if (workspaceFilesRequest === request) workspaceFilesRequest = null;
+      }
+    })();
+    return request.promise;
   },
 
   fetchOperationHistory: async (sessionId) => {
@@ -724,12 +793,17 @@ export const useExcelStore = create<ExcelState>()(
           ? { ...op, undoable: false }
           : op
       ),
-      refreshCounter: state.refreshCounter + 1,
     }));
 
     try {
       const result = await apiUndoOperation(sessionId, approvalId);
       if (result.status === "ok") {
+        const source = useSessionStore.getState().sessions.find((s) => s.id === sessionId);
+        const workspaceKey = workspaceKeyFromSession(source);
+        for (const change of snapshot.operations.find((op) => op.approval_id === approvalId)?.changes || []) {
+          get().notifyWorkbookChanged(change.path, workspaceKey, undefined, "refresh");
+        }
+        get().bumpWorkspaceFilesVersion();
         return true;
       }
       set({
@@ -837,11 +911,18 @@ export const useExcelStore = create<ExcelState>()(
 
   clearSession: () =>
     set({
+      workspaceFiles: [],
+      wsFilesLoaded: false,
+      workspaceFilesSessionId: undefined,
+      workspaceFilesLoadedVersion: -1,
+      workspaceFilesLoadedAt: 0,
+      workspaceFilesError: null,
       diffs: [],
       textDiffs: [],
       previews: {},
       streamingToolContent: {},
       refreshCounter: 0,
+      workbookChanges: {},
       contentVersions: {},
       fullViewPath: null,
       fullViewSheet: null,

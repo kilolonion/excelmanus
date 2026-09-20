@@ -74,13 +74,11 @@ async def followup(
     approval_resolver: ApprovalResolver | None = None,
     question_resolver: QuestionResolver | None = None,
     chat_mode: str = "write",
-    present_as: str | None = None,
 ) -> ChatResult:
     """用户后续：控制面处理完毕后入 inbox next-turn 并 wakeup。
 
     斜杠与待答问题不进模型历史。不在这里探查工作簿或分析任务意图。
     """
-    engine._question_resolver = question_resolver
     normalized_images: list[dict[str, str]] = []
     for item in images or []:
         if not isinstance(item, dict):
@@ -120,12 +118,28 @@ async def followup(
         )
         return ChatResult(reply=reject_msg)
 
-    # 修复上一次中断（abort / CancelledError）可能遗留的悬空 tool_call
-    _repaired = engine._memory.repair_dangling_tool_calls()
-    if _repaired:
-        logger.info("修复了 %d 个中断遗留的悬空 tool_call", _repaired)
+    command_parts = user_message.strip().split(maxsplit=1)
+    if command_parts and command_parts[0].lower() == "/resume":
+        return await engine._driver.resume(
+            command_parts[1] if len(command_parts) > 1 else "", on_event=on_event,
+            approval_resolver=approval_resolver, question_resolver=question_resolver,
+        )
+    if (command_parts and command_parts[0].lower() in {"/accept", "/reject"}
+            and len(command_parts) == 2 and not engine._driver.running
+            and engine._interaction_handler.approval_is_actionable(command_parts[1].strip())):
+        from excelmanus.chat_turn import submit_approval
+        submit_approval(engine, command_parts[1].strip(), "accept" if command_parts[0].lower() == "/accept" else "reject")
+        return await engine._driver.resume(on_event=on_event, question_resolver=question_resolver)
 
-    if engine._question_flow.has_pending():
+    pending_question = engine._question_flow.current()
+    if pending_question is not None and not engine._driver.running and engine._interaction_handler.can_recover():
+        if not user_message.strip().startswith("/"):
+            from excelmanus.chat_turn import submit_question_answer
+            submit_question_answer(engine, pending_question.question_id, user_message)
+            return await engine._driver.resume(on_event=on_event, question_resolver=question_resolver)
+
+    if engine._question_flow.has_pending() and not engine._driver.running:
+        engine._question_resolver = question_resolver
         engine._mention_contexts = mention_contexts or []
         engine._ingest_mention_versions(mention_contexts)
         pending_chat_start = time.monotonic()
@@ -155,6 +169,7 @@ async def followup(
     control_reply = await engine._command_handler.handle(user_message, on_event=on_event)
     if control_reply is not None:
         logger.info("控制命令执行: %s", _summarize_text(user_message))
+        engine._driver._persist_runtime_state()
         return ChatResult(reply=control_reply)
 
     # 待审批只卡住同一 tool_call_id 的回执路径，不阻塞无关的新用户回合。
@@ -169,16 +184,15 @@ async def followup(
             "approval_resolver": approval_resolver,
             "question_resolver": question_resolver,
             "chat_mode": chat_mode,
-            "present_as": present_as,
         },
     )
-    engine._driver._on_event = on_event
-    await engine._driver.kick()
-    return item.result if item.result is not None else ChatResult(reply="")
+    result = await engine._driver.wait_for_item(item)
+    return result if isinstance(result, ChatResult) else ChatResult(reply="")
 
 async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     """认领后才路由并写入 memory。返回 ChatResult 表示短路径结束本 turn。"""
     extra = item.extra if isinstance(getattr(item, "extra", None), dict) else {}
+    engine._question_resolver = extra.get("question_resolver")
     user_message = str(item.content or "")
     on_event: EventCallback | None = extra.get("on_event")
     slash_command = extra.get("slash_command")
@@ -186,7 +200,6 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     mention_contexts = extra.get("mention_contexts")
     normalized_images: list[dict[str, str]] = list(extra.get("images") or [])
     chat_mode = extra.get("chat_mode") or "write"
-    present_as = extra.get("present_as")
     chat_start = time.monotonic()
 
     # 认领后先替换引用快照；技能短路分支也不能留下上一轮的待注入引用。
@@ -194,10 +207,6 @@ async def apply_claimed_followup(engine, item: Any) -> ChatResult | None:
     engine._ingest_mention_versions(mention_contexts)
 
     from excelmanus.plan_mode import apply_chat_mode
-    from excelmanus.tools.runtime import set_present_as_preference
-
-    if present_as is not None:
-        set_present_as_preference(engine, present_as)
     # 请求体 chat_mode 是权威：点「编辑」必须能离开 plan，禁止被旧 _plan_active 粘住。
     # tab / 请求切到 read 也是用户显式退出（清 pending），与 /plan off 等价。
     apply_chat_mode(
@@ -440,13 +449,11 @@ def finalize_driver_turn(
     )
     from excelmanus.system_one.host import (
         clear_turn_exposure,
-        clear_turn_present_as,
         remember_turn_tools,
     )
 
     remember_turn_tools(engine, chat_result)
     clear_turn_exposure(engine)
-    clear_turn_present_as(engine)
 
 
 # ── Skill 解析与 Hook 管理（委托到 SkillResolver）──────────
@@ -502,4 +509,3 @@ async def route_skills(
         raw_args=raw_args,
         blocked_skillpacks=blocked_skillpacks,
     )
-

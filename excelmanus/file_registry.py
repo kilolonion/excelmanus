@@ -561,13 +561,17 @@ class FileRegistry:
 
     def list_all(self, include_deleted: bool = False) -> list[FileEntry]:
         """列出所有文件。"""
+        from excelmanus.security.source_isolation import is_product_source_path
+
         if not include_deleted:
             return [
                 e for e in self._path_cache.values()
                 if e.deleted_at is None
+                and not is_product_source_path(e.canonical_path, self._workspace_root)
             ]
         rows = self._store.list_all(self._workspace_key, include_deleted=True)
-        return [FileEntry.from_dict(r) for r in rows]
+        return [FileEntry.from_dict(r) for r in rows
+                if not is_product_source_path(r["canonical_path"], self._workspace_root)]
 
     def get_children(self, file_id: str) -> list[FileEntry]:
         """获取文件的子文件（备份/副本）。"""
@@ -946,6 +950,7 @@ class FileRegistry:
 
     def _collect_file_paths(self, max_files: int, *, excel_only: bool = False) -> list[Path]:
         """递归收集工作区中的文件路径。"""
+        from excelmanus.security.source_isolation import is_product_source_path
         root = self._workspace_root
         paths: list[Path] = []
 
@@ -959,11 +964,14 @@ class FileRegistry:
             ):
                 dirs[:] = []
                 continue
-            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS]
+            dirs[:] = [d for d in dirs if d not in _SKIP_DIRS
+                       and not is_product_source_path(Path(walk_root) / d, root)]
             if rel_dir == "outputs":
                 dirs[:] = [d for d in dirs if d not in {"backups", "audits", ".versions"}]
             for name in files:
                 if is_hidden_name(name):
+                    continue
+                if is_product_source_path(Path(walk_root) / name, root):
                     continue
                 _, ext = os.path.splitext(name)
                 ext_lower = ext.lower()

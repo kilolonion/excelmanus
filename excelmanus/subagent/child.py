@@ -14,11 +14,6 @@ logger = get_logger("subagent.child")
 
 DEFAULT_MAX_DEPTH = 1
 
-SUBAGENT_DELEGATION_CONTEXT = (
-    "你是被委派的子代理：权限范围在启动时已固定，本会话内不能扩大。"
-    "需要审批的操作会被自动拒绝。超出范围时不要重试被拒操作，把限制写回主代理。"
-)
-
 _REINIT_TOOL_NAMES = (
     "task_create",
     "task_update",
@@ -64,31 +59,25 @@ def resolve_child_runtime(parent: Any, config: SubagentConfig) -> tuple[str, str
     return parent._active_model, parent._active_api_key, parent._active_base_url
 
 
-def compose_child_prompt(parent: Any, config: SubagentConfig) -> str:
-    """角色正文 + 固定 delegation 声明。"""
-    composer = getattr(parent, "_prompt_composer", None)
-    variables = dict(getattr(parent, "_runtime_vars", None) or {})
-    body = ""
-    if composer is not None:
-        try:
-            text = composer.compose_for_subagent(
-                config.name,
-                inherit_strategies=config.inherit_strategies or None,
-                variables=variables or None,
-            )
-            if text and text.strip():
-                body = text.strip()
-        except Exception:
-            logger.debug("子代理提示词组装失败，使用 config.system_prompt", exc_info=True)
-    if not body and config.system_prompt.strip():
-        body = config.system_prompt.strip()
+def compose_child_prompt(child: Any, config: SubagentConfig) -> str:
+    """只返回角色补充；通用 core、条件策略和工具目录使用共享组装入口。"""
+    from excelmanus.prompt.assemble import prompt_variables
+    from excelmanus.subagent.builtin import BUILTIN_SUBAGENTS
+
+    composer = getattr(child, "_prompt_composer", None)
+    if composer is None:
+        raise ValueError("子代理提示词组装器未初始化")
+    builtin = config.source == "builtin" and config.name in BUILTIN_SUBAGENTS
+    if not builtin and not config.system_prompt.strip():
+        raise ValueError(f"自定义子代理 {config.name} 缺少角色正文")
+    body = composer.compose_for_subagent(
+        config.name,
+        variables=prompt_variables(child),
+        role_text=None if builtin else config.system_prompt,
+    )
     if not body:
-        body = (
-            f"你是子代理 `{config.name}`。\n"
-            f"职责：{config.description}\n"
-            "忠于工具结果，只在授权范围内操作，路径相对工作区。"
-        )
-    return f"{body}\n\n{SUBAGENT_DELEGATION_CONTEXT}"
+        raise ValueError(f"子代理 {config.name} 缺少专用提示词文件")
+    return body
 
 
 def child_extra_disallowed(config: SubagentConfig) -> list[str]:
@@ -116,8 +105,10 @@ def assert_child_capability_subset(parent: Any, child: Any) -> None:
 
     parent_cap = getattr(parent, "_fixed_capability", None) or capability_from_engine(parent)
     child_cap = getattr(child, "_fixed_capability", None) or capability_from_engine(child)
-    rank = {"read": 0, "plan": 1, "code": 2, "write": 2}
-    if rank.get(child_cap.catalog_mode, 0) > rank.get(parent_cap.catalog_mode, 0):
+    rank = {"read": 0, "plan": 1, "write": 2}
+    if child_cap.catalog_mode not in rank or parent_cap.catalog_mode not in rank:
+        raise SubagentError("PERMISSION_DENIED", "父子代理必须使用有效的 read/plan/write 权限模式。")
+    if rank[child_cap.catalog_mode] > rank[parent_cap.catalog_mode]:
         raise SubagentError(
             "PERMISSION_DENIED",
             "子代理能力不能超过父会话（mode 被放大）。",
@@ -153,6 +144,41 @@ def compose_child(
 
     child_depth = resolve_child_depth(parent, max_depth=max_depth)
     model, api_key, base_url = resolve_child_runtime(parent, config)
+    child_cap = child_capability(parent, config)
+    # 在创建客户端/发布 run 之前校验，不以 config.system_prompt 掩盖损坏的内置角色。
+    from types import SimpleNamespace
+    from excelmanus.prompt.load import PromptComposer
+    from excelmanus.prompt.registry import AssembleContext
+    from excelmanus.tools.catalog import inspect_workspace_catalog
+
+    try:
+        parent_composer = getattr(parent, "_prompt_composer", None)
+        if not isinstance(parent_composer, PromptComposer):
+            raise ValueError("父会话缺少 PromptComposer")
+        composer = parent_composer.fork()
+        compose_child_prompt(SimpleNamespace(
+            _prompt_composer=composer, config=parent._config, active_model=model,
+            _runtime_vars={"workspace_root": str(parent._workspace.root_dir)},
+        ), config)
+        unknown = set(config.inherit_strategies) - {seg.name for seg in composer.strategy_segments}
+        if unknown:
+            raise ValueError(f"子代理继承了未注册策略: {', '.join(sorted(unknown))}")
+        # 同时检查将实际注入的 core/策略变量，避免创建 client 后才发现残缺模板。
+        visible = {
+            tool.name for tool in parent.registry.get_all_tools()
+            if tool.name not in child_cap.disallowed_tools
+            and (child_cap.allowed_tools is None or tool.name in child_cap.allowed_tools)
+        }
+        composer.registry.assemble(AssembleContext(
+            variables={"workspace_root": str(parent._workspace.root_dir), "model": model},
+            chat_mode=child_cap.catalog_mode, plan_active=child_cap.catalog_mode == "plan",
+            visible_tools=frozenset(visible),
+            full_access=bool(getattr(parent, "_full_access_enabled", False)),
+            new_workbook=bool(inspect_workspace_catalog(str(parent._workspace.root_dir))["new_workbook"]),
+            strategy_names=frozenset(config.inherit_strategies) if config.inherit_strategies else None,
+        ))
+    except (ValueError, OSError) as exc:
+        raise SubagentError("PROMPT_INVALID", str(exc)) from exc
     child_cfg: ExcelManusConfig = replace(
         parent._config,
         model=model,
@@ -163,7 +189,6 @@ def compose_child(
     )
     registry = parent.registry.fork()
     registry.remove_tools(_REINIT_TOOL_NAMES)
-    child_cap = child_capability(parent, config)
 
     child = AgentEngine(
         child_cfg,
@@ -187,14 +212,17 @@ def compose_child(
     child._state._file_registry = parent._file_registry
     child._file_access_guard = parent._file_access_guard
     child._sandbox_env = parent._sandbox_env
-    child._prompt_composer = getattr(parent, "_prompt_composer", None)
+    child._prompt_composer = composer
+    child._bind_prompt_registry_runtime()
     child._full_access_enabled = bool(getattr(parent, "_full_access_enabled", False))
     child._subagent_config = config
     child._last_guard_deny = None
-    child._present_as = "native"
     child._delegation_depth = child_depth
     child._subagent_enabled = False
     child._fixed_capability = child_cap
+    # Synchronous delegation shares the active parent turn budget.  Background
+    # runs are composed while idle and therefore start their own budget later.
+    child._inherited_turn_budget = getattr(parent, "_turn_budget", None)
     child._current_chat_mode = child_cap.catalog_mode
     # 每个 child 一个独立 prompt_cache_key：并行子代理前缀互异，
     # 共享 "em_session" 会让 KV 缓存互相踩踏（命中率归零）。
@@ -203,15 +231,9 @@ def compose_child(
     parent_sid = getattr(parent, "_session_id", None) or "anon"
     child._session_id = f"{parent_sid}-child-{_uuid.uuid4().hex[:12]}"
 
-    from excelmanus.tools.catalog import bind_engine_catalog
+    from excelmanus.prompt.assemble import build_stable_system_prompt
 
-    child._child_system_prompt = compose_child_prompt(parent, config)
-    catalog = bind_engine_catalog(child)
-    if catalog is not None:
-        index = catalog.tool_index_text()
-        if index:
-            child._child_system_prompt = f"{child._child_system_prompt}\n\n{index}"
-    child._memory.system_prompt = child._child_system_prompt
+    child._memory.system_prompt = build_stable_system_prompt(child)
 
     def _readonly_pre(token: Any) -> str:
         parent_call = getattr(token, "parent", None)

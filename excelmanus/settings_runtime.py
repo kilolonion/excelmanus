@@ -27,6 +27,8 @@ _warned_ignored_env = False
 # 进程定位符：找到数据卷 / 绑定端口 / 部署模式 / 子进程 IPC。不是设置仓。
 LOCATOR_KEYS = frozenset({
     "EXCELMANUS_HOME",
+    "EXCELMANUS_DESKTOP",
+    "EXCELMANUS_DESKTOP_CONTROL_STDIN",
     "EXCELMANUS_DB_PATH",
     "EXCELMANUS_CHAT_HISTORY_DB_PATH",
     "EXCELMANUS_DATA_ROOT",

@@ -9,9 +9,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { MiniCheckbox } from "@/components/ui/MiniCheckbox";
 import { apiPost } from "@/lib/api";
-import type { ModelConfig } from "./types";
-
-export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) {
+export function ConfigTransferPanel({ onImported }: { onImported?: () => void }) {
   const [mode, setMode] = useState<"idle" | "export" | "import">("idle");
   const [exportMode, setExportMode] = useState<"password" | "simple">("password");
   const [exportSections, setExportSections] = useState<Record<string, boolean>>({
@@ -90,8 +88,13 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
         password: needsPassword ? importPassword : null,
       }, { direct: true });
       setImportResult(data);
+      if (Array.isArray(data.imported.profiles) && data.imported.profiles.length > 0) {
+        onImported?.();
+      }
     } catch (e) {
       setError(e instanceof Error ? e.message : "导入失败");
+      // 导入可能部分成功或响应中断，重新核对已提交的服务端档案。
+      onImported?.();
     } finally {
       setImporting(false);
     }
@@ -320,7 +323,7 @@ export function ConfigTransferPanel({ config }: { config: ModelConfig | null }) 
             ))}
           </div>
           <p className="text-[11px] text-amber-600 dark:text-amber-400">
-            配置已生效。建议刷新页面以查看最新配置。
+            配置已导入，模型列表已刷新。
           </p>
         </div>
       )}

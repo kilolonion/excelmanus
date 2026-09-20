@@ -41,6 +41,7 @@ import { FileAttachmentChips } from "./FileAttachmentChips";
 import { CommandPopover } from "./CommandPopover";
 import { InlineQuestionBanner } from "@/components/modals/QuestionPanel";
 import { answerQuestion } from "@/lib/api";
+import { resumeAfterInteraction } from "@/lib/chat-actions";
 import { applyDisplayReplacements, useInsertMentionTokens } from "./chat-input-insert";
 import {
   ChatMentionList,
@@ -95,10 +96,12 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
   const isComposingRef = useRef(false);
   const pendingQuestion = useChatStore((s) => s.pendingQuestion);
   const hasMessages = useChatStore((s) => s.messageOrder.length > 0);
-  const messages = useChatStore((s) => s.messages);
+  // Streaming deltas do not affect the retry control. Avoid rerendering the
+  // entire composer (and its file/mention pickers) for each received token.
+  const messages = useChatStore((s) => s.isStreaming ? null : s.messages);
   const setPendingQuestion = useChatStore((s) => s.setPendingQuestion);
   const lastFailure = useMemo(
-    () => (isStreaming ? null : findLastRetryableFailure(messages)),
+    () => (isStreaming || !messages ? null : findLastRetryableFailure(messages)),
     [isStreaming, messages],
   );
 
@@ -523,6 +526,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      useUIStore.getState().bumpModelProfiles();
       applyVisionFromModel(modelList.find((m) => m.name === name));
       closePopover();
       setText("");
@@ -683,9 +687,9 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       const selectedLabels = Array.from(questionSelected);
       let answer: string;
       if (selectedLabels.length > 0 && trimmed) {
-        answer = `${selectedLabels.join(", ")}\n${trimmed}`;
+        answer = `${selectedLabels.join("\n")}\n${trimmed}`;
       } else if (selectedLabels.length > 0) {
-        answer = selectedLabels.join(", ");
+        answer = selectedLabels.join("\n");
       } else {
         answer = trimmed;
       }
@@ -704,13 +708,14 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
       setIsAnswerSubmitting(true);
       const hasMoreQuestions = (pendingQuestion.queueSize ?? 0) > 1;
       try {
-        await answerQuestion(sessionId, questionId, answer);
-        if (!hasMoreQuestions) {
+        const response = await answerQuestion(sessionId, questionId, answer);
+        if ((!hasMoreQuestions || response.resume_required) && useChatStore.getState().pendingQuestion?.id === questionId) {
           setPendingQuestion(null);
         }
         setQuestionSelected(new Set());
         setText("");
         requestAnimationFrame(autoResize);
+        resumeAfterInteraction(sessionId, response);
       } catch (err) {
         console.error("[ChatInput] answerQuestion failed:", err);
         const errorMessage = "回答提交失败，请稍后重试";
@@ -725,10 +730,11 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
     try {
       if (extractTypedFileMentions(finalText).length > 0) {
         const sessionId = useSessionStore.getState().activeSessionId;
-        const workspaceFiles = await fetchWorkspaceFiles(sessionId);
+        const { files: workspaceFiles, truncated } = await fetchWorkspaceFiles(sessionId);
         const knownPaths = workspaceFiles.map((f) => f.path);
         const missing = findMissingFileMentions(finalText, knownPaths);
-        if (shouldBlockMissingFileMentions(knownPaths, missing)) {
+        // truncated 时清单不完整，存在性校验不可靠，放行由后端兜底
+        if (!truncated && shouldBlockMissingFileMentions(knownPaths, missing)) {
           nudgeInput(`找不到引用的文件：${missing[0]}，请检查后重试`);
           return;
         }
@@ -809,7 +815,7 @@ export function ChatInput({ onSend, onCommandResult, disabled, isStreaming, onSt
 
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      if (isStreaming) {
+      if (isStreaming && !pendingQuestion) {
         nudgeInput("助手正在回复，请稍候");
         return;
       }

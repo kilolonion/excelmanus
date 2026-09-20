@@ -15,10 +15,15 @@ def canonicalize_workspace_path(path: str | Path) -> str:
 
 
 def default_workspace_path(config: Any) -> str:
-    """Process default folder: DATA_ROOT if set, otherwise WORKSPACE_ROOT."""
+    """Keep the process workspace outside the application checkout by default."""
+    from excelmanus.data_home import get_data_home, get_package_root
+
     data_root = str(getattr(config, "data_root", "") or "").strip()
-    workspace_root = str(getattr(config, "workspace_root", "") or ".").strip() or "."
-    return canonicalize_workspace_path(data_root or workspace_root)
+    workspace_root = str(getattr(config, "workspace_root", "") or "").strip()
+    candidate = data_root or workspace_root
+    if not candidate or canonicalize_workspace_path(candidate) == canonicalize_workspace_path(get_package_root()):
+        return canonicalize_workspace_path(get_data_home())
+    return canonicalize_workspace_path(candidate)
 
 
 def workspace_title_from_path(path: str | Path) -> str:

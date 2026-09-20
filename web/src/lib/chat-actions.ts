@@ -21,15 +21,16 @@ import {
 } from "./sse-event-handler";
 import { resolveFailureActions } from "./failure-recovery";
 
-function currentPresentAs(): "native" | "code" {
-  return useUIStore.getState().presentAs === "code" ? "code" : "native";
-}
-
 type ChatImagePayload = {
   media_type: string;
   attachment_id: string;
   name?: string;
 };
+
+function workspaceIdForSession(sessionId?: string | null): string | undefined {
+  if (!sessionId) return undefined;
+  return useSessionStore.getState().sessions.find((item) => item.id === sessionId)?.workspaceId ?? undefined;
+}
 
 async function _admitChatImage(
   data: string,
@@ -311,10 +312,21 @@ let _deferredTokenStats: {
   iterations: number;
 } | null = null;
 
+export function resumeAfterInteraction(sessionId: string, response: { resume_required?: boolean }) {
+  if (!response.resume_required || getActiveSessionId() !== sessionId || useChatStore.getState().isStreaming) return;
+  // 决策已持久化，使用既有聊天流接回执行；不让提交按钮等待下一道问题。
+  void sendMessage("/resume", undefined, sessionId, "继续执行").catch(() => {
+    if (getActiveSessionId() === sessionId) {
+      useChatStore.getState().setPipelineStatus({ stage: "resume_failed", message: "回答或决策已保存，任务暂未继续，可使用 /resume 重试。", startedAt: Date.now() });
+    }
+  });
+}
+
 export async function sendMessage(
   text: string,
   files?: AttachedFile[],
   sessionId?: string | null,
+  displayText?: string,
 ) {
   const store = useChatStore.getState();
   const sessionStore = useSessionStore.getState();
@@ -329,7 +341,7 @@ export async function sendMessage(
 
   if (uiState.configReady === false || uiState.configReady === null) {
     const userMsgId = uuid();
-    store.addUserMessage(userMsgId, text);
+    store.addUserMessage(userMsgId, displayText ?? text);
     const assistantMsgId = uuid();
     store.addAssistantMessage(assistantMsgId);
     const items = uiState.configPlaceholderItems;
@@ -395,7 +407,7 @@ export async function sendMessage(
   const userMsgId = uuid();
   store.addUserMessage(
     userMsgId,
-    text,
+    displayText ?? text,
     fileUploadResults.length > 0 ? fileUploadResults : undefined
   );
 
@@ -532,7 +544,6 @@ export async function sendMessage(
         message: messageContent,
         session_id: effectiveSessionId,
         chat_mode: useUIStore.getState().chatMode,
-        present_as: currentPresentAs(),
         ...(imageAttachments.length > 0 ? { images: imageAttachments } : {}),
       },
       (event) => {
@@ -685,7 +696,7 @@ export async function sendContinuation(
   try {
     await consumeSSE(
       buildApiUrl("/chat/stream", { direct: true }),
-      { message: text, session_id: effectiveSessionId, chat_mode: useUIStore.getState().chatMode, present_as: currentPresentAs() },
+      { message: text, session_id: effectiveSessionId, chat_mode: useUIStore.getState().chatMode },
       (event) => {
         _resetContStall();
         const sseEvent = event as SSEEvent;
@@ -826,6 +837,7 @@ export async function rollbackAndResend(
 
   const effectiveSessionId = sessionId || getActiveSessionId() || store.loadedSessionId;
   if (!effectiveSessionId) return;
+  const workspaceId = workspaceIdForSession(effectiveSessionId);
 
   // 璋冪敤鍚庣 rollback API锛坮esend_mode 浼氱Щ闄ょ洰鏍囩敤鎴锋秷鎭級
   try {
@@ -876,7 +888,7 @@ export async function rollbackAndResend(
       files.map(async (f, i): Promise<AttachedFile> => {
         const id = `resend-${Date.now()}-${i}`;
         try {
-          const uploadResult = await uploadFile(f);
+          const uploadResult = await uploadFile(f, effectiveSessionId, workspaceId);
           return { id, file: f, status: "success" as const, uploadResult };
         } catch (err) {
           console.error("Edit-resend upload failed:", f.name, err);
@@ -930,6 +942,7 @@ export async function retryAssistantMessage(
 
   const effectiveSessionId = sessionId || getActiveSessionId() || store.loadedSessionId;
   if (!effectiveSessionId) return;
+  const workspaceId = workspaceIdForSession(effectiveSessionId);
 
   // 濡傛灉闇€瑕佸垏鎹㈡ā鍨嬶紝鍏堝垏鎹?
   if (switchToModel) {
@@ -937,6 +950,7 @@ export async function retryAssistantMessage(
       const { apiPut } = await import("./api");
       await apiPut("/models/active", { name: switchToModel });
       useUIStore.getState().setCurrentModel(switchToModel);
+      useUIStore.getState().bumpModelProfiles();
     } catch (err) {
       console.error("Model switch failed:", err);
       return;
@@ -979,7 +993,7 @@ export async function retryAssistantMessage(
         if (isImage) {
           // 鍥剧墖闇€瑕侀噸鏂拌幏鍙栧唴瀹癸紝鍚﹀垯 sendMessage 鍥?file.size===0 璺宠繃 base64 缂栫爜
           try {
-            const blob = await fetchFileBlob(f.path, effectiveSessionId ?? undefined);
+            const blob = await fetchFileBlob(f.path, effectiveSessionId, workspaceId);
             const file = new File([blob], f.filename, { type: blob.type || "image/png" });
             return { id, file, status: "success" as const, uploadResult: { filename: f.filename, path: f.path, size: f.size } };
           } catch (err) {
@@ -1022,7 +1036,7 @@ export function stopGeneration() {
         blocksChanged = true;
         return { ...block, status: "error", error: "已被用户停止" };
       }
-      if (block.type === "subagent" && block.status === "running") {
+      if (block.type === "subagent" && block.status === "running" && !block.background) {
         blocksChanged = true;
         return { ...block, status: "done", summary: "已被用户停止" };
       }

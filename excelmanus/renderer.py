@@ -183,7 +183,6 @@ class StreamRenderer:
             "full_access": ("FULL ACCESS", THEME.GOLD),
             "chat_mode": (f"CHAT MODE:{event.mode_value or '?'}", THEME.CYAN),
             "plan_mode": ("PLAN MODE", THEME.CYAN),
-            "present_as": ("CODE MODE", THEME.GOLD),
         }
         label, color = label_map.get(event.mode_name, (event.mode_name, THEME.DIM))
         action = "已开启" if event.mode_enabled else "已关闭"

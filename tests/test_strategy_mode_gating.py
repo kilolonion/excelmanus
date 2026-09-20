@@ -1,11 +1,10 @@
-"""strategy 段按目录模式（write / read / plan / code）门控。"""
+"""strategy 段按权限目录（write / read / plan）门控。"""
 
 from __future__ import annotations
 
 from pathlib import Path
 from unittest.mock import MagicMock
 
-from excelmanus.prompt.canonical import TOOLS_CODE_ONLY
 from excelmanus.prompt.load import (
     PromptComposer,
     PromptContext,
@@ -31,33 +30,29 @@ _RUN_CODE_MARKER = "写入串行。stdout 不证明业务正确"
 _INVARIANT_MARKER = "结论以实际读取的数据为依据"
 
 
-def _system(mode: str, *, present_as: str = "native") -> str:
-    return system_text(mode, present_as=present_as)
+def _system(mode: str) -> str:
+    return system_text(mode)
 
 
-def _section_names(mode: str, *, present_as: str = "native") -> list[str]:
+def _section_names(mode: str) -> list[str]:
     assembly = _composer().registry.assemble(
         AssembleContext(
             chat_mode=mode,
             plan_active=mode == "plan",
-            present_as=present_as,
             variables=_VARS,
         )
     )
     return [sec.name for sec in assembly.sections]
 
 
-def test_edit_frontmatter_gates_write_and_code_catalog_modes() -> None:
+def test_edit_frontmatter_gates_write_catalog_mode() -> None:
     seg = parse_prompt_file(PROMPTS_DIR / "strategies" / "19_edit.md")
     assert seg.name == "tool:edit"
-    modes = set(seg.conditions["catalog_mode"])
-    assert modes == {"write", "code"}
-    assert "read" not in modes
-    assert "plan" not in modes
+    assert seg.conditions["catalog_mode"] == "write"
     assert _EDIT_MARKER in seg.content
 
 
-def test_write_related_frontmatter_gates_write_and_code_catalog_modes() -> None:
+def test_write_related_frontmatter_gates_write_catalog_mode() -> None:
     for rel, name, marker in (
         ("18_workbook_spec.md", "spreadsheet:workbook_spec", _SPEC_MARKER),
         ("21_format.md", "tool:format", _FORMAT_MARKER),
@@ -65,10 +60,7 @@ def test_write_related_frontmatter_gates_write_and_code_catalog_modes() -> None:
     ):
         seg = parse_prompt_file(PROMPTS_DIR / "strategies" / rel)
         assert seg.name == name
-        modes = set(seg.conditions["catalog_mode"])
-        assert modes == {"write", "code"}
-        assert "read" not in modes
-        assert "plan" not in modes
+        assert seg.conditions["catalog_mode"] == "write"
         assert marker in seg.content
 
 
@@ -119,39 +111,30 @@ def test_write_system_keeps_edit_strategy() -> None:
     text = _system("write")
     assert _EDIT_MARKER in text
     assert "当前是计划模式" not in text
-    assert TOOLS_CODE_ONLY not in text
+    assert "唯一可以直接调用" not in text
 
 
-def test_code_catalog_mode_keeps_edit_strategy() -> None:
-    text = _system("write", present_as="code")
-    assert _EDIT_MARKER in text
-    assert TOOLS_CODE_ONLY in text
-
-
-def test_code_presented_prompt_restores_strategies_via_execution_catalog(
+def test_prompt_uses_execution_catalog_for_strategies(
     tmp_path: Path,
 ) -> None:
     """生产路径：catalog_from_engine → build_stable_system_prompt。
 
-    code wire 坍缩为 run_code-only，但策略段 / 能力地图 / SDK 声明必须
-    按执行目录可达集门控——不设 visible_tools 的组装路径覆盖不到这条。
+    直接工具与程序工具共存；策略段与能力地图按执行目录门控，
+    SDK 签名按需获取，常驻提示不调用全量 SDK renderer。
     """
     from types import SimpleNamespace
 
-    from excelmanus.code_mode import render_sdk_section
     from excelmanus.prompt.assemble import build_stable_system_prompt
     from excelmanus.prompt.budget import _make_engine, _prepare_workspace
     from excelmanus.tools.catalog import (
         catalog_from_engine,
         execution_catalog_from_engine,
     )
-    from excelmanus.tools.runtime import collapse_schemas
 
     workspace = tmp_path / "ws"
     _prepare_workspace(workspace, profile="xlsx", has_workbook=True)
     engine = _make_engine(
         chat_mode="write",
-        present_as="code",
         workspace=workspace,
         composer=_composer(),
     )
@@ -159,12 +142,12 @@ def test_code_presented_prompt_restores_strategies_via_execution_catalog(
     assert catalog is not None
     assert catalog.mode == "write"
     assert "inspect_spreadsheet" in catalog.name_set()
-    wire = collapse_schemas(catalog.tool_schemas(), "code")
-    wire_names = sorted(
+    schemas = catalog.tool_schemas()
+    schema_names = sorted(
         (s.get("function") or {}).get("name") or s.get("name") or ""
-        for s in wire
+        for s in schemas
     )
-    assert wire_names == ["run_code"]
+    assert set(schema_names) == catalog.name_set()
 
     exec_catalog = execution_catalog_from_engine(engine)
     assert exec_catalog is not None
@@ -173,18 +156,20 @@ def test_code_presented_prompt_restores_strategies_via_execution_catalog(
     assert "run_code" in reachable
 
     engine._tool_runtime = SimpleNamespace(
-        render_sdk_section=lambda: render_sdk_section(list(exec_catalog.tools)),
+        render_sdk_section=MagicMock(side_effect=AssertionError("must be on demand")),
     )
     text = build_stable_system_prompt(engine)
     assert _EDIT_MARKER in text
     assert _FORMAT_MARKER in text
     assert _SPEC_MARKER in text
-    assert "edit_spreadsheet(" in text  # SDK 声明按执行目录绑定
+    assert "import em" in text
+    assert "tool_detail" in text
+    engine._tool_runtime.render_sdk_section.assert_not_called()
     nav = exec_catalog.capability_map_text()
     assert "edit_spreadsheet" in nav
 
 
-def test_code_presented_prompt_missing_strategy_when_visible_tools_wire_only(
+def test_tool_strategy_requires_tool_in_execution_catalog(
     tmp_path: Path,
 ) -> None:
     """反向证据：若 visible_tools 退回 wire 目录，tool: 段会再次丢失。"""
@@ -192,7 +177,6 @@ def test_code_presented_prompt_missing_strategy_when_visible_tools_wire_only(
 
     ctx = AssembleContext(
         chat_mode="write",
-        present_as="code",
         visible_tools=frozenset({"run_code"}),
     )
     assert not strategy_conditions_match({"tool": ["edit_spreadsheet"]}, ctx)
@@ -200,7 +184,6 @@ def test_code_presented_prompt_missing_strategy_when_visible_tools_wire_only(
         {"tool": ["edit_spreadsheet"]},
         AssembleContext(
             chat_mode="write",
-            present_as="code",
             visible_tools=frozenset({"edit_spreadsheet", "run_code"}),
         ),
     )
@@ -234,15 +217,13 @@ def test_gating_is_not_hardcoded_filenames() -> None:
 
 
 def test_catalog_mode_matcher_and_list_or() -> None:
-    ctx_write = AssembleContext(chat_mode="write", present_as="native")
-    ctx_code = AssembleContext(chat_mode="write", present_as="code")
+    ctx_write = AssembleContext(chat_mode="write")
     ctx_read = AssembleContext(chat_mode="read")
     ctx_plan = AssembleContext(chat_mode="plan", plan_active=True)
-    write_code = {"catalog_mode": ["write", "code"]}
-    assert strategy_conditions_match(write_code, ctx_write)
-    assert strategy_conditions_match(write_code, ctx_code)
-    assert not strategy_conditions_match(write_code, ctx_read)
-    assert not strategy_conditions_match(write_code, ctx_plan)
+    write_only = {"catalog_mode": ["write"]}
+    assert strategy_conditions_match(write_only, ctx_write)
+    assert not strategy_conditions_match(write_only, ctx_read)
+    assert not strategy_conditions_match(write_only, ctx_plan)
     assert strategy_conditions_match({"chat_mode": "plan"}, ctx_plan)
     assert not strategy_conditions_match({"chat_mode": "plan"}, ctx_write)
     assert strategy_conditions_match(
@@ -268,7 +249,6 @@ def _mock_engine(composer: PromptComposer, chat_mode: str) -> MagicMock:
     engine._current_chat_mode = chat_mode
     engine._runtime_vars = dict(_VARS)
     engine._last_route_result = None
-    engine._present_as = "native"
     engine._tool_runtime = None
     engine.config.workspace_root = _VARS["workspace_root"]
     engine.active_model = _VARS["model"]

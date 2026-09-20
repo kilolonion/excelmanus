@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -20,6 +21,9 @@ from excelmanus.system_one.types import Evaluation
 # live 中文对照未签字。往这里加 pack_id 等于宣称「可以 enforce」——本刀禁止加。
 SIGNED_ENFORCE_PACKS: frozenset[str] = frozenset()
 SIGNED_ENFORCE_FAMILIES: frozenset[str] = frozenset()
+# Optional signed provenance. Empty preserves the existing explicit pack/family
+# signoff behavior used by local tests; production signoff should populate it.
+SIGNED_ENFORCE_PROVENANCE: dict[str, str] = {}
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _DEFAULT_FIXTURE = _REPO_ROOT / "bench" / "fixtures" / "jev_calibration" / "samples.json"
@@ -41,9 +45,33 @@ def calibration_allows_enforce(pack_id: str, settings: JevSettings | None = None
     if not cfg.calibrated:
         return False
     if pack_id in SIGNED_ENFORCE_PACKS:
+        signed = SIGNED_ENFORCE_PROVENANCE.get(pack_id)
+        if signed and signed != calibration_fingerprint(pack_id):
+            return False
         return True
     spec = get_pack(pack_id)
     return spec.family in SIGNED_ENFORCE_FAMILIES
+
+
+def calibration_fingerprint(pack_id: str) -> str:
+    """Stable digest of the pack questions/criteria used for signoff drift."""
+    spec = get_pack(pack_id)
+    payload = {
+        "pack_id": spec.pack_id,
+        "family": spec.family,
+        "gate": spec.gate,
+        "questions": [
+            {
+                "qid": item.qid,
+                "kind": item.kind,
+                "instructions": item.instructions,
+                "criteria": item.criteria,
+            }
+            for item in spec.questions
+        ],
+    }
+    raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
 def fixture_path(root: Path | None = None) -> Path:
@@ -120,7 +148,6 @@ def _state_from_case(case: Mapping[str, Any], *, source: str) -> dict[str, Any] 
         return None
     case_id = str(case.get("id") or "")
     chat_mode = str(case.get("chat_mode") or "write")
-    present_as = str(case.get("present_as") or "native")
     assertions_raw = case.get("assertions")
     assertions: Mapping[str, Any] = assertions_raw if isinstance(assertions_raw, Mapping) else {}
     required = [str(item) for item in (assertions.get("required_tools") or ()) if str(item)]
@@ -128,7 +155,6 @@ def _state_from_case(case: Mapping[str, Any], *, source: str) -> dict[str, Any] 
     state: dict[str, Any] = {
         "user_text": user_text,
         "chat_mode": chat_mode,
-        "present_as": present_as,
     }
     if pack_id == "approval.tool_call":
         tool_name = next((name for name in required if name in _APPROVAL_TOOLS), "run_shell")

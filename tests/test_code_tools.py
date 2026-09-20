@@ -12,6 +12,26 @@ from excelmanus.security import SecurityViolationError
 from excelmanus.tools import code_tools
 
 
+def _bind_full_access(workspace: Path):
+    from excelmanus.tools.context import (
+        CallerCapability,
+        SessionBinding,
+        ToolCallContext,
+        bind_call,
+    )
+    from excelmanus.workspace.refs import WorkspaceRef
+
+    return bind_call(ToolCallContext(
+        binding=SessionBinding(
+            session_id="full-access-test",
+            workspace=WorkspaceRef.from_root(workspace),
+            capability=CallerCapability(approval="never", full_access=True),
+        ),
+        call_id="run-code-full-access",
+        tool_name="run_code",
+    ))
+
+
 def _payload(result):
     from excelmanus.engine_core.tool_result import ToolResult
 
@@ -150,6 +170,31 @@ class TestRunCodeInline:
         assert result["mode"] == "inline"
         assert "hello" in result["stdout_tail"]
         assert result["sandbox_tier"] == "RED"
+
+    def test_full_access_promotes_yellow_to_network_capable_red(
+        self, workspace: Path, monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from excelmanus.tools.context import reset_call
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+        token = _bind_full_access(workspace)
+        try:
+            result = _payload(code_tools.run_code(
+                code=(
+                    "import socket\n"
+                    "sock = socket.socket()\n"
+                    "print('network-socket-enabled')\n"
+                    "sock.close()\n"
+                ),
+                python_command=sys.executable,
+                require_excel_deps=False,
+                sandbox_tier="YELLOW",
+            ))
+        finally:
+            reset_call(token)
+        assert result["status"] == "success"
+        assert result["sandbox_tier"] == "RED"
+        assert "network-socket-enabled" in result["stdout_tail"]
 
     def test_inline_stdout_utf8_chinese(self, workspace: Path) -> None:
         result = _payload(

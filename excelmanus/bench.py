@@ -1,7 +1,7 @@
 """Bench 测试运行器：加载用例 JSON → 走与前端直聊相同的会话链路 → 输出 JSON 日志。
 
 每轮与网页聊天一致：SessionManager.acquire_for_chat → 提及解析 →
-``engine.followup(..., mention_contexts, chat_mode, present_as)`` →
+``engine.followup(..., mention_contexts, chat_mode)`` →
 release_for_chat。问答/审批走 InteractionRegistry（同 ``/answer`` ``/approve``）。
 
 运行方式：
@@ -96,7 +96,6 @@ class BenchCase:
     images: list[str] = field(default_factory=list)
     auto_replies: list[str] = field(default_factory=list)
     chat_mode: str = "write"
-    present_as: str | None = None
     auto_approve: str = "fullaccess"
     # 单轮硬超时（秒），0 = 不限制；防止审批/网络挂起导致无人值守卡死
     turn_timeout: float = 0.0
@@ -1206,7 +1205,6 @@ async def run_case(
         auto_replies=case.auto_replies,
         auto_approve=case.auto_approve,
         chat_mode=case.chat_mode,
-        present_as=case.present_as,
         on_event=collector.on_event,
         on_engine=_on_engine,
     )
@@ -1608,7 +1606,6 @@ def _load_suite(path: str | Path) -> tuple[str, list[BenchCase], bool]:
             images=_as_str_list(item.get("images")),
             auto_replies=_as_str_list(item.get("auto_replies")),
             chat_mode=str(item.get("chat_mode") or "write"),
-            present_as=item.get("present_as"),
             auto_approve=str(item.get("auto_approve") or suite_auto_approve),
             turn_timeout=case_turn_timeout if case_turn_timeout > 0 else suite_turn_timeout,
             turns=turns,
@@ -1799,7 +1796,6 @@ def _build_case_digest(
         f"套件 {suite_name or '∅'}",
         f"标签 {','.join(case.tags) or '∅'}",
         f"chat_mode={case.chat_mode}",
-        f"present_as={case.present_as or '∅'}",
         f"auto_approve={case.auto_approve}",
         f"model={result.active_model or '∅'}",
     ]
@@ -2366,7 +2362,6 @@ def import_env_to_database(
                 model_name,
                 api_key=api_key,
                 base_url=base_url,
-                description=f"imported from {env_path}",
             )
             action = "added"
         if activate:

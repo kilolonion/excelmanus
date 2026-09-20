@@ -24,31 +24,42 @@ export function PlaceholderAlert() {
   const setConfigReady = useUIStore((s) => s.setConfigReady);
   const setConfigPlaceholderItems = useUIStore((s) => s.setConfigPlaceholderItems);
   const wizardCompleted = useOnboardingStore((s) => s.wizardCompleted);
+  const guideCompleted = useOnboardingStore((s) => s.coachMarksCompleted && s.advancedGuideCompleted && s.settingsGuideCompleted);
+  const skippedAt = useOnboardingStore((s) => s.skippedAt);
+  const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
+  // A deliberate skip must not be replaced by another blocking config dialog.
+  // Keep configReady=false so a real task still asks the user to connect a model.
+  const canPrompt = wizardCompleted && guideCompleted && !skippedAt;
 
   useEffect(() => {
+    let cancelled = false;
     checkModelPlaceholder()
       .then((result) => {
+        if (cancelled) return;
+        setData(result);
         if (result?.has_placeholder) {
-          setData(result);
           setConfigReady(false);
           setConfigPlaceholderItems(result.items);
           if (
-            wizardCompleted &&
+            canPrompt &&
             typeof window !== "undefined" &&
             sessionStorage.getItem(DISMISS_KEY) !== "1"
           ) {
             setOpen(true);
           }
         } else {
+          setOpen(false);
           setConfigReady(true);
           setConfigPlaceholderItems([]);
         }
       })
       .catch(() => {
+        if (cancelled) return;
         setConfigReady(true);
         setConfigPlaceholderItems([]);
       });
-  }, [setConfigReady, setConfigPlaceholderItems, wizardCompleted]);
+    return () => { cancelled = true; };
+  }, [setConfigReady, setConfigPlaceholderItems, canPrompt, backendConfigured]);
 
   const handleDismiss = () => {
     setOpen(false);
@@ -66,7 +77,7 @@ export function PlaceholderAlert() {
   const items = data.items;
 
   return (
-    <OverlayCard open={open} onOpenChange={(v) => !v && handleDismiss()} size="sm" tone="warning">
+    <OverlayCard open={open && canPrompt} onOpenChange={(v) => !v && handleDismiss()} size="sm" tone="warning">
       <OverlayCardHeader
         icon={<AlertTriangle className="h-5 w-5" />}
         title="模型配置未完成"

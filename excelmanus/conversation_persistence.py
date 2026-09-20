@@ -62,6 +62,11 @@ class ConversationPersistence:
         # 崩溃后 surface 由 events 重建；反过来会产生不可追回的分叉）。
         self._flush_events(session_id, engine)
 
+        if not messages and exists:
+            # /clear 后仍要同步空 surface；否则恢复会把旧 messages 缓存重新注入。
+            self._chat_history.clear_messages(session_id)
+            engine.set_message_snapshot_index(0)
+            return
         if not new_msgs:
             return
 
@@ -173,9 +178,11 @@ class ConversationPersistence:
                 self._chat_history.clear_messages(session_id)
             engine.set_message_snapshot_index(0)
             # 立即将剩余消息重新持久化，消除 SQLite 空窗期
-            # 剥掉 _seq/_event_kind 等内部键——与 _durable_payload 语义一致。
+            # Use the same durable projection; keep compaction handoff metadata.
+            from excelmanus.chat_history import ChatHistoryStore
+
             remaining = [
-                {k: v for k, v in m.items() if not str(k).startswith("_")}
+                ChatHistoryStore._durable_payload(m)
                 for m in engine.raw_messages
             ]
             if remaining:

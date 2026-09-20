@@ -2,6 +2,16 @@ import { describe, expect, it, vi } from "vitest";
 import { activateWorkbookSheet } from "@/lib/excel-univer-lifecycle";
 
 describe("activateWorkbookSheet", () => {
+  it("activates through the installed facade instead of assuming getName exists", () => {
+    const target = { getSheetName: () => "原始数" };
+    const setActiveSheet = vi.fn();
+    expect(activateWorkbookSheet({ getActiveWorkbook: () => ({
+      getSheetByName: (name) => name === "原始数" ? target : null,
+      setActiveSheet,
+    }) }, "原始数")).toBe(true);
+    expect(setActiveSheet).toHaveBeenCalledWith(target);
+  });
+
   it("activates the named sheet", () => {
     const activate = vi.fn();
     const ok = activateWorkbookSheet(

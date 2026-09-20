@@ -13,9 +13,10 @@ import { useUIStore } from "@/stores/ui-store";
 import { apiGet, apiPut } from "@/lib/api";
 import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import type { ModelInfo } from "@/lib/types";
-import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
+import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
+import { hasProviderLogo, ProviderLogo, providerFallbackInitial } from "@/components/settings/model/ProviderLogo";
 import { applyVisionFromModel } from "@/lib/vision-capability";
 
 interface ModelCapabilitySummary {
@@ -33,7 +34,7 @@ interface ProviderGroup {
 function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
   const map = new Map<string, ModelInfo[]>();
   for (const m of models) {
-    const provider = extractProvider(m.base_url);
+    const provider = inferModelBrand(m);
     if (!map.has(provider)) map.set(provider, []);
     map.get(provider)!.push(m);
   }
@@ -41,6 +42,46 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
     provider,
     models,
   }));
+}
+
+function ModelBrandMark({
+  provider,
+  label,
+  unhealthy,
+}: {
+  provider: string;
+  label: string;
+  unhealthy: boolean;
+}) {
+  const color = getProviderColor(provider);
+  const initial = providerFallbackInitial(label);
+
+  return (
+    <span
+      className="relative inline-flex h-4 w-4 shrink-0 items-center justify-center"
+      aria-label={`${label} 品牌`}
+    >
+      {hasProviderLogo(provider) ? (
+        <ProviderLogo id={provider} color={color} className="h-4 w-4" />
+      ) : (
+        <span
+          className="inline-flex h-4 w-4 items-center justify-center rounded-full text-[9px] font-bold leading-none"
+          style={{
+            color,
+            backgroundColor: `${color}18`,
+          }}
+        >
+          {initial}
+        </span>
+      )}
+      {unhealthy && (
+        <span
+          className="absolute -bottom-0.5 -right-0.5 h-1.5 w-1.5 rounded-full border border-card bg-[var(--em-error)]"
+          aria-label="模型不可用"
+        />
+      )}
+    </span>
+  );
 }
 
 export function TopModelSelector() {
@@ -54,17 +95,20 @@ export function TopModelSelector() {
   const [search, setSearch] = useState("");
   const [open, setOpen] = useState(false);
   const searchRef = useRef<HTMLInputElement>(null);
+  const modelsRequestRef = useRef(0);
   const isMobile = useIsMobile();
 
   const fetchModels = () => {
+    const requestId = ++modelsRequestRef.current;
+    const profileVersion = useUIStore.getState().modelProfileVersion;
     apiGet<{ models: ModelInfo[] }>("/models")
       .then((data) => {
+        if (requestId !== modelsRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
         setModels(data.models);
         const active = data.models.find((m) => m.active);
-        if (active) {
-          setCurrentModel(active.name);
-          applyVisionFromModel(active);
-        }
+        setCurrentModel(active?.name ?? "");
+        applyVisionFromModel(active);
+        if (!active) useUIStore.getState().setVisionCapable(null);
       })
       .catch(() => {});
   };
@@ -106,9 +150,9 @@ export function TopModelSelector() {
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      useUIStore.getState().bumpModelProfiles();
       applyVisionFromModel(models.find((m) => m.name === name));
       setOpen(false);
-      fetchModels();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "切换失败";
       setSwitchError(msg);
@@ -135,7 +179,7 @@ export function TopModelSelector() {
   const activeModel = models.find((m) => m.name === currentModel);
   const displayName = activeModel ? displayModelLabel(activeModel) : currentModel || "模型";
   const currentModelUnhealthy = currentModel && capsMap[currentModel]?.healthy === false;
-  const activeProvider = activeModel ? extractProvider(activeModel.base_url) : "unknown";
+  const activeProvider = activeModel ? inferModelBrand(activeModel) : "unknown";
   const showSearch = models.length >= 4;
 
   // Mobile: bottom sheet handler
@@ -148,20 +192,14 @@ export function TopModelSelector() {
       <>
         <Button
           variant="ghost"
-          className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
+          className="em-model-selector-trigger gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 overflow-hidden shadow-sm"
           data-coach-id="coach-model-selector"
           onClick={() => setOpen(true)}
         >
-          <span
-            className="h-2 w-2 rounded-full shrink-0 transition-all duration-300 group-hover:scale-125"
-            style={{
-              backgroundColor: currentModelUnhealthy
-                ? "var(--em-error)"
-                : getProviderColor(activeProvider),
-              boxShadow: currentModelUnhealthy
-                ? "0 0 6px var(--em-error)"
-                : `0 0 6px ${getProviderColor(activeProvider)}40`,
-            }}
+          <ModelBrandMark
+            provider={activeProvider}
+            label={displayName}
+            unhealthy={Boolean(currentModelUnhealthy)}
           />
           <AnimatePresence mode="wait" initial={false}>
             <motion.span
@@ -170,7 +208,7 @@ export function TopModelSelector() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-              className={`truncate max-w-[80px] sm:max-w-[200px] ${
+              className={`em-model-selector-label truncate ${
                 currentModelUnhealthy ? "text-destructive" : ""
               }`}
             >
@@ -201,18 +239,11 @@ export function TopModelSelector() {
   return (
     <DropdownMenu open={open} onOpenChange={(o) => { setOpen(o); if (!o) setSearch(""); }}>
       <DropdownMenuTrigger asChild>
-        <Button variant="ghost" className="gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
-          {/* Provider color indicator dot */}
-          <span
-            className="h-2 w-2 rounded-full shrink-0 transition-all duration-300 group-hover:scale-125"
-            style={{
-              backgroundColor: currentModelUnhealthy
-                ? "var(--em-error)"
-                : getProviderColor(activeProvider),
-              boxShadow: currentModelUnhealthy
-                ? "0 0 6px var(--em-error)"
-                : `0 0 6px ${getProviderColor(activeProvider)}40`,
-            }}
+        <Button variant="ghost" className="em-model-selector-trigger gap-1.5 px-2.5 h-8 rounded-full border border-[var(--em-line)] bg-card/80 text-[12px] font-medium text-muted-foreground group shrink-0 shadow-sm" data-coach-id="coach-model-selector">
+          <ModelBrandMark
+            provider={activeProvider}
+            label={displayName}
+            unhealthy={Boolean(currentModelUnhealthy)}
           />
           <AnimatePresence mode="wait" initial={false}>
             <motion.span
@@ -221,7 +252,7 @@ export function TopModelSelector() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -4 }}
               transition={{ duration: 0.15, ease: [0.4, 0, 0.2, 1] }}
-              className={`truncate max-w-[80px] sm:max-w-[200px] ${
+              className={`em-model-selector-label truncate ${
                 currentModelUnhealthy ? "text-destructive" : ""
               }`}
             >

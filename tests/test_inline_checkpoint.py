@@ -66,7 +66,7 @@ class TestPostWriteCheckpointFormat:
             {"file_path": str(fp), "sheet": "Sheet1"},
             str(tmp_path),
         )
-        assert "回读确认" in result
+        assert "未核验" in result
         assert "Sheet1" in result
 
 

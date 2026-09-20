@@ -39,6 +39,7 @@ import {
   clearAllCachedMessages,
 } from "@/lib/idb-cache";
 import { get, set, del, keys } from "idb-keyval";
+import type { CachedMessagesV2 } from "@/lib/idb-cache";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -121,7 +122,7 @@ describe("idb-cache", () => {
 
       const result = await loadCachedMessages("s3");
       expect(result!.length).toBe(1);
-      expect((result![0] as any).content).toBe("second");
+      expect(result![0]).toMatchObject({ role: "user", content: "second" });
     });
 
     it("未知格式 → del(key) + 返回 null", async () => {
@@ -172,7 +173,7 @@ describe("idb-cache", () => {
       const msgs: Message[] = [makeUserMsg("u1"), makeAssistantMsg("a1")];
       await saveCachedMessages("s1", msgs);
 
-      const stored = store.get("chat_msgs_s1") as any;
+      const stored = store.get("chat_msgs_s1") as CachedMessagesV2;
       expect(stored).toBeDefined();
       expect(stored.version).toBe(2);
       expect(stored.messages.length).toBe(2);
@@ -188,9 +189,9 @@ describe("idb-cache", () => {
       ];
       await saveCachedMessages("s2", msgs);
 
-      const stored = store.get("chat_msgs_s2") as any;
+      const stored = store.get("chat_msgs_s2") as CachedMessagesV2;
       expect(stored.messages.length).toBe(1);
-      expect(stored.messagesById["dup"].content).toBe("second");
+      expect(stored.messagesById["dup"]).toMatchObject({ role: "user", content: "second" });
     });
 
     it("保存时过滤空 ID", async () => {
@@ -200,7 +201,7 @@ describe("idb-cache", () => {
       ];
       await saveCachedMessages("s3", msgs);
 
-      const stored = store.get("chat_msgs_s3") as any;
+      const stored = store.get("chat_msgs_s3") as CachedMessagesV2;
       expect(stored.messages.length).toBe(1);
       expect(stored.messageOrder).toEqual(["valid"]);
     });

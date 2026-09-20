@@ -9,16 +9,21 @@ on:
     branches:
       - main
       - master
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
 
 jobs:
-  session-regression:
+  backend-regression:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
 
@@ -26,14 +31,14 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --frozen --all-extras --dev
 
-      - name: Run session regression tests
+      - name: Run backend regression tests
         run: |
-          uv run pytest -q \
-            tests/test_session.py \
-            tests/test_session_mcp_lifecycle.py \
-            tests/test_api.py
+          uv run pytest -q
+
+      - name: Build Python distributions
+        run: uv build
 
   prompt-layering:
     runs-on: ubuntu-latest
@@ -42,7 +47,7 @@ jobs:
         uses: actions/checkout@v5
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
 
@@ -50,21 +55,12 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
+        run: uv sync --frozen --all-extras --dev
 
       - name: Prompt, schema and budget checks
         run: |
-          uv run pytest -q \
-            tests/test_prompt_composer.py \
-            tests/test_prompt_registry.py \
-            tests/test_strategy_mode_gating.py \
-            tests/test_prompt_budgets.py \
-            tests/test_schema_walk.py \
-            tests/test_intent_tools.py \
-            tests/test_introspection_tools.py \
-            tests/test_capability_discovery.py \
-            tests/test_pandas_workspace_read.py
           uv run python scripts/check_prompt_budgets.py --check
+          uv run python scripts/check_prompt_contracts.py
 
   type-check:
     runs-on: ubuntu-latest
@@ -76,7 +72,7 @@ jobs:
           fetch-depth: 0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v10
+        uses: astral-sh/setup-uv@v10.1.0
         with:
           version: "latest"
 
@@ -84,10 +80,7 @@ jobs:
         run: uv python install 3.12
 
       - name: Install dependencies
-        run: uv sync --all-extras --dev
-
-      - name: Install pyright
-        run: uv run pip install pyright
+        run: uv sync --frozen --all-extras --dev
 
       - name: Determine files to check
         id: files
@@ -135,6 +128,14 @@ jobs:
       - name: Typecheck
         working-directory: web
         run: npx tsc --noEmit -p .
+
+      - name: Lint
+        working-directory: web
+        run: npm run lint
+
+      - name: Audit production dependencies
+        working-directory: web
+        run: npm audit --omit=dev
 
       - name: Unit tests
         working-directory: web

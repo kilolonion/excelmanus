@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import contextvars
+import hashlib
 from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from excelmanus.security.guard import FileAccessGuard
 from excelmanus.workspace.identity import resolve_canonical
 from excelmanus.workspace.refs import FileRef, WorkspaceRef
 
-CatalogMode = Literal["read", "plan", "write", "code"]
+CatalogMode = Literal["read", "plan", "write"]
 ToolAccess = Literal["may_write", "read_only"]
 ApprovalPolicy = Literal["ask", "never"]
 Actor = Literal["host", "child", "http"]
@@ -33,6 +34,7 @@ class CallerCapability:
     catalog_mode: CatalogMode = "write"
     tool_access: ToolAccess = "may_write"
     approval: ApprovalPolicy = "ask"
+    full_access: bool = False
     allowed_tools: frozenset[str] | None = None
     disallowed_tools: frozenset[str] = frozenset()
 
@@ -55,6 +57,8 @@ class ToolCallContext:
     parent_call_id: str | None = None
     observed_versions: Mapping[str, str] = field(default_factory=dict)
     durable_attachment_ids: frozenset[str] = field(default_factory=frozenset)
+    # 宿主提供的本轮披露集合；不代表授权，编译时仍与有效目录求交。
+    loaded_tool_names: set[str] | None = field(default=None, compare=False, repr=False)
 
 
 _current_call: contextvars.ContextVar[ToolCallContext | None] = contextvars.ContextVar(
@@ -65,6 +69,32 @@ _current_call: contextvars.ContextVar[ToolCallContext | None] = contextvars.Cont
 
 def current_call() -> ToolCallContext | None:
     return _current_call.get()
+
+
+def call_has_full_access() -> bool:
+    """返回当前调用是否由宿主签发了「跳过审批」能力。"""
+    ctx = current_call()
+    return bool(ctx is not None and ctx.binding.capability.full_access)
+
+
+def operation_id_for(path: str | None = None) -> str | None:
+    """Stable workspace mutation key for the current dispatched tool call."""
+    ctx = current_call()
+    if ctx is None or not ctx.call_id:
+        return None
+    if not ctx.binding.session_id:
+        return None
+    if ctx.call_id == "bind_workspace" and not ctx.arguments:
+        return None
+    material = "|".join(
+        str(item or "") for item in (
+            ctx.binding.session_id,
+            ctx.call_id,
+            ctx.tool_name,
+            str(path or "").replace("\\", "/").strip().lower(),
+        )
+    )
+    return "emop_" + hashlib.sha256(material.encode("utf-8")).hexdigest()[:32]
 
 
 def bind_call(ctx: ToolCallContext) -> contextvars.Token[ToolCallContext | None]:
@@ -138,7 +168,7 @@ _ALL_FAMILIES: frozenset[str] = frozenset({"xlsx", "csv", "docx", "mcp"})
 
 
 def capability_from_engine(engine: Any) -> CallerCapability:
-    """权限目录用 chat_mode，不用 present_as=code 的展示坍缩。
+    """权限目录由 chat_mode 决定，不受 schema 按需披露影响。
 
     ``allowed_tools`` 承载 mode 级权限投影（read/plan 不含写入工具），供
     child ``restrict()`` / 交集检查收窄；文件族与 MCP 是否可用按实时工作区
@@ -170,7 +200,14 @@ def capability_from_engine(engine: Any) -> CallerCapability:
                     allow_run_code=_allow_run_code_of(engine, mode),
                 )
                 names = frozenset(catalog.names())
-    return CallerCapability(catalog_mode=mode, allowed_tools=names)
+    from excelmanus.security.policy import resolve_approval_policy
+
+    return CallerCapability(
+        catalog_mode=mode,
+        approval=resolve_approval_policy(engine),
+        full_access=bool(getattr(engine, "_full_access_enabled", False)),
+        allowed_tools=names,
+    )
 
 
 def binding_from_engine(engine: Any) -> SessionBinding:
@@ -235,13 +272,14 @@ def intersect_capability(
         catalog_mode=child_mode,
         tool_access=access,
         approval="never",
+        full_access=parent.full_access,
         allowed_tools=allowed,
         disallowed_tools=frozenset(blocked),
     )
 
 
 def execution_catalog_tools(engine: Any) -> list[Any]:
-    """SDK / 子调用可见的执行目录：按 chat_mode 投影，不是 present_as=code。
+    """SDK / 子调用可见的完整执行目录：按 chat_mode 和调用方授权投影。
 
     统一走 ``execution_catalog_from_engine``——与 wire 目录、introspect、
     能力地图、策略段共享同一组输入（capability、文件族、CSV profile、MCP

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from excelmanus.engine_types import ThinkingConfig, _EFFORT_RATIOS
@@ -145,6 +147,9 @@ class TestConfigThinkingFields:
         )
         assert cfg.thinking_effort == "medium"
         assert cfg.thinking_budget == 0
+        assert cfg.thinking_effort_options == (
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        )
 
     def test_custom_thinking_effort(self):
         from excelmanus.config import ExcelManusConfig
@@ -154,9 +159,65 @@ class TestConfigThinkingFields:
             model="test-model",
             thinking_effort="high",
             thinking_budget=8192,
+            thinking_effort_options=("low", "high"),
         )
         assert cfg.thinking_effort == "high"
         assert cfg.thinking_budget == 8192
+        assert cfg.thinking_effort_options == ("low", "high")
+
+
+@pytest.mark.asyncio
+async def test_allowed_efforts_are_persisted_in_canonical_order_and_fallback_current(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from excelmanus import api_routes_config
+    from excelmanus.config import ExcelManusConfig
+
+    config = ExcelManusConfig(
+        api_key="test",
+        base_url="https://api.example.com/v1",
+        model="test-model",
+        thinking_effort="medium",
+    )
+
+    class FakeEngine:
+        thinking_config = ThinkingConfig(effort="medium")
+
+        def set_thinking_config(self, *, effort: str | None, budget: int | None) -> None:
+            self.thinking_config = ThinkingConfig(
+                effort=effort or self.thinking_config.effort,
+                budget_tokens=self.thinking_config.budget_tokens if budget is None else budget,
+            )
+
+    engine = FakeEngine()
+
+    class FakeSessionManager:
+        async def list_sessions(self) -> list[dict[str, str]]:
+            return [{"id": "session-1"}]
+
+        def get_engine(self, session_id: str) -> FakeEngine:
+            assert session_id == "session-1"
+            return engine
+
+    persisted: dict[str, str] = {}
+    monkeypatch.setattr(api_routes_config, "get_config", lambda: config)
+    monkeypatch.setattr(api_routes_config, "get_session_manager", FakeSessionManager)
+    monkeypatch.setattr(api_routes_config, "_persist_settings", persisted.update)
+
+    response = await api_routes_config.set_thinking_config(
+        api_routes_config.ThinkingConfigRequest(
+            allowed_efforts=["high", "low", "high"],
+        ),
+        None,  # type: ignore[arg-type]
+    )
+    payload = json.loads(response.body)
+
+    assert payload["allowed_efforts"] == ["low", "high"]
+    assert payload["effort"] == "low"
+    assert engine.thinking_config.effort == "low"
+    assert config.thinking_effort_options == ("low", "high")
+    assert persisted["EXCELMANUS_THINKING_EFFORT_OPTIONS"] == "low,high"
+    assert persisted["EXCELMANUS_THINKING_EFFORT"] == "low"
 
 
 # ── engine thinking 注入测试 ──────────────────────────

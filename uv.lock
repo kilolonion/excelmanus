@@ -632,11 +632,12 @@ wheels = [
 
 [[package]]
 name = "excelmanus"
-version = "1.7.3"
+version = "1.8.0"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
     { name = "httpx" },
+    { name = "jsonschema" },
     { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "mcp" },
@@ -652,6 +653,7 @@ dependencies = [
     { name = "python-docx" },
     { name = "pyxlsb" },
     { name = "pyyaml" },
+    { name = "referencing" },
     { name = "rich" },
     { name = "tiktoken" },
     { name = "xlrd" },
@@ -719,6 +721,7 @@ requires-dist = [
     { name = "httpx", specifier = ">=0.24.0" },
     { name = "httpx", marker = "extra == 'dev'", specifier = ">=0.24.0" },
     { name = "hypothesis", marker = "extra == 'dev'", specifier = ">=6.0.0" },
+    { name = "jsonschema", specifier = ">=4.26.0" },
     { name = "matplotlib", specifier = ">=3.7.0" },
     { name = "mcp", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.24.0" },
@@ -737,6 +740,7 @@ requires-dist = [
     { name = "python-multipart", marker = "extra == 'web'", specifier = ">=0.0.6" },
     { name = "pyxlsb", specifier = ">=1.0.10" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "referencing", specifier = ">=0.30.0" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "scikit-learn", marker = "extra == 'analysis'", specifier = ">=1.3.0" },
     { name = "scipy", marker = "extra == 'analysis'", specifier = ">=1.11.0" },

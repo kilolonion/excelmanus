@@ -6,8 +6,9 @@ import logging
 import os
 import re
 from collections.abc import Iterable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from excelmanus.data_home import get_data_home
 class ConfigError(Exception):
     """配置缺失或校验失败时抛出的异常。"""
 
@@ -31,14 +32,15 @@ class ModelProfile:
 # 基础 URL 合法性正则：仅接受 http:// 或 https:// 开头的 URL
 _URL_PATTERN = re.compile(r"^https?://[^\s/$.?#].[^\s]*$", re.IGNORECASE)
 _ALLOWED_LOG_LEVELS = {"DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"}
-_ALLOWED_THINKING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max"}
+THINKING_EFFORT_ORDER = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
+_ALLOWED_THINKING_EFFORTS = set(THINKING_EFFORT_ORDER)
 _ALLOWED_PROTOCOLS = {"auto", "openai", "openai_responses", "anthropic", "gemini"}
 logger = logging.getLogger(__name__)
 
 # ── 模型 → 上下文窗口大小映射（token 数） ──────────────────────────
 # 键为模型标识符的前缀或完整名称，匹配时优先取最长前缀。
 # 未匹配到的模型回退到 _DEFAULT_CONTEXT_TOKENS。
-_DEFAULT_CONTEXT_TOKENS = 128_000
+_DEFAULT_CONTEXT_TOKENS = 256_000
 
 _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # OpenAI 提供商
@@ -126,6 +128,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "gemini-3.5-flash-lite": 1_048_576,
     "gemini-3.5-flash": 1_048_576,
     "gemini-3.1-pro": 1_048_576,
+    "gemini-3.1-pro-preview": 1_048_576,
     "gemini-3.1-flash-lite": 1_048_576,
     "gemini-3.1-flash": 1_048_576,
     "gemini-3-flash": 1_048_576,
@@ -172,6 +175,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "deepseek-flash": 1_000_000,
     "deepseek-v4-pro": 1_000_000,
     "deepseek-v4-flash": 1_000_000,
+    "deepseek-v4.1": 1_000_000,
     "deepseek-chat": 128_000,
     "deepseek-reasoner": 128_000,
     "deepseek-v3": 128_000,
@@ -248,6 +252,8 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     # Moonshot（Kimi）提供商
     "kimi-k3": 1_000_000,
     "kimi-k2.7-code": 256_000,
+    "kimi-k2.7-code-highspeed": 256_000,
+    "kimi-k2.7": 256_000,
     "kimi-k2.6": 256_000,
     "kimi-k2": 262_144,
     "kimi-k2-thinking": 262_144,
@@ -272,6 +278,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "command-r-08-2024": 128_000,
     # 智谱 GLM 提供商
     "glm-5.3": 1_000_000,
+    "glm-5.3-flash": 1_000_000,
     "glm-5.2": 1_000_000,
     "glm-5.1": 1_000_000,
     "glm-5-turbo": 1_000_000,
@@ -295,6 +302,7 @@ _MODEL_CONTEXT_WINDOW: dict[str, int] = {
     "doubao-seed-1-6": 256_000,
     # xAI Grok 提供商
     "grok-4.6": 500_000,
+    "grok-4-6": 500_000,
     "grok-4.5": 500_000,
     "grok-4.3": 1_000_000,
     "grok-4-fast-reasoning": 2_000_000,
@@ -353,6 +361,14 @@ _DEPRECATED_MODEL_REPLACEMENTS: dict[str, str] = {
     "gemini-2.0-flash-thinking-exp": "gemini-3.8-flash",
     "gemini-2.0-flash-lite": "gemini-3.5-flash-lite",
     "gemini-2.0-flash-lite-001": "gemini-3.5-flash-lite",
+    # 2026 年 9 月前的模型别名，统一迁移到当前旗舰默认值
+    "qwen3.7-plus": "qwen3.8-max",
+    "qwen3.7-flash": "qwen3.8-flash",
+    "qwen3.7-max": "qwen3.8-max",
+    "qwen3.6-plus": "qwen3.8-max",
+    "qwen3.6-flash": "qwen3.8-flash",
+    "grok-4.5": "grok-4.6",
+    "grok-4.3": "grok-4.6",
     # DeepSeek 旧别名（2026-07-24 下线）
     "deepseek-chat": "deepseek-flash",
     "deepseek-reasoner": "deepseek-flash",
@@ -481,11 +497,18 @@ class ExcelManusConfig:
     base_url: str
     model: str
     protocol: str = "auto"  # 激活模型协议类型：auto|openai|openai_responses|anthropic|gemini
-    max_iterations: int = 50  # 本轮 LLM 回合与工具调用上限（并行工具各计 1 次）
+    responses_continuation_enabled: bool = False  # Responses 原生 previous_response_id 续接
+    responses_background_enabled: bool = False  # Responses 后台响应并轮询终态
+    max_iterations: int = 120  # 本轮 LLM 回合与工具调用上限（并行工具各计 1 次）
+    turn_timeout_seconds: int = 0  # 单个 turn 的 wall-clock 上限；0 表示不限制
+    turn_token_budget: int = 0  # 单个 turn 的输入+输出 token 上限；0 表示不限制
+    turn_cost_budget_usd: float = 0.0  # 单个 turn 的美元成本上限；0 表示不限制
+    input_cost_per_1k_usd: float = 0.0  # provider 未返回 cost 时的估算单价
+    output_cost_per_1k_usd: float = 0.0
     max_consecutive_failures: int = 6
     session_ttl_seconds: int = 1800
     max_sessions: int = 1000
-    workspace_root: str = "."
+    workspace_root: str = field(default_factory=lambda: str(get_data_home()))
     data_root: str = ""  # 集中数据目录（默认 ~/.excelmanus/data）
     deploy_mode: str = "standalone"  # standalone|server — 部署模式
     log_level: str = "INFO"
@@ -533,6 +556,7 @@ class ExcelManusConfig:
     parallel_subagent_max: int = 3  # 并行子代理最大并发数
     # 同一轮次中相邻只读工具并发执行（asyncio.gather）
     parallel_readonly_tools: bool = True
+    parallel_tool_max: int = 4  # 同一只读工具批最多同时执行的调用数（1–32）
     subagent_user_dir: str = "~/.excelmanus/agents"
     subagent_project_dir: str = ".excelmanus/agents"
     # 跨会话持久记忆配置
@@ -551,7 +575,7 @@ class ExcelManusConfig:
     llm_retry_base_delay_seconds: float = 2.0  # 指数退避基准延迟（秒）
     llm_retry_max_delay_seconds: float = 30.0  # 单次重试最大延迟上限（秒）
     # 对话记忆上下文窗口大小（token 数），用于截断策略
-    max_context_tokens: int = 128_000
+    max_context_tokens: int = _DEFAULT_CONTEXT_TOKENS
     # 提示词缓存优化：向 OpenAI API 发送 prompt_cache_key 提升缓存命中率
     prompt_cache_key_enabled: bool = True
     # 上下文自动压缩（Compaction）：增强版对话摘要，后台静默执行
@@ -599,6 +623,7 @@ class ExcelManusConfig:
     # Thinking（推理深度）配置
     thinking_effort: str = "medium"  # none|minimal|low|medium|high|xhigh|max
     thinking_budget: int = 0  # 精确 token 预算（>0 时覆盖 effort 换算值）
+    thinking_effort_options: tuple[str, ...] = THINKING_EFFORT_ORDER
     # 友好错误消息：将内部错误映射为更友好的用户可见消息
     friendly_error_messages: bool = True
     # 多模型配置档案（可选，通过 /model 命令切换）
@@ -607,8 +632,9 @@ class ExcelManusConfig:
     jev_enabled: str = "off"  # off | shadow | enforce
     jev_exposure: str = "off"
     jev_mode_hint: bool = False
-    jev_present_as_auto: bool = False
     jev_observation: str = "off"
+    jev_verification: str = "off"
+    jev_recovery: str = "off"
     jev_ui_hint: bool = False
     jev_model: str = "jev-1.13.0"
     typesafe_api_key: str | None = None
@@ -703,6 +729,19 @@ def _parse_positive_float(value: str | None, name: str, default: float) -> float
         raise ConfigError(f"配置项 {name} 必须为浮点数，当前值: {value!r}")
     if result <= 0:
         raise ConfigError(f"配置项 {name} 必须为正数，当前值: {result}")
+    return result
+
+
+def _parse_nonnegative_float(value: str | None, name: str, default: float) -> float:
+    """Parse an optional non-negative float; zero disables the budget."""
+    if value is None or not str(value).strip():
+        return default
+    try:
+        result = float(str(value).strip())
+    except ValueError as exc:
+        raise ConfigError(f"{name} 必须是非负数字") from exc
+    if result < 0:
+        raise ConfigError(f"{name} 必须大于等于 0")
     return result
 
 
@@ -1000,7 +1039,7 @@ def _parse_csv_tuple(value: str | None) -> tuple[str, ...]:
 def _load_context_optimization_config(model: str = "") -> _ContextOptimizationConfig:
     """加载上下文优化相关配置，避免字段声明/解析/回填三处漂移。
 
-    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 模型自动推断 > 默认 128k。
+    优先级：EXCELMANUS_MAX_CONTEXT_TOKENS 设置 > 模型自动推断 > 默认 256k。
     """
     env_max_ctx = _s("EXCELMANUS_MAX_CONTEXT_TOKENS")
     if env_max_ctx:
@@ -1039,17 +1078,18 @@ def _load_context_optimization_config(model: str = "") -> _ContextOptimizationCo
     )
 
 
-def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
+def load_config(values: Mapping[str, str] | None = None, *, allow_incomplete: bool = False) -> ExcelManusConfig:
     """加载配置。用户设置以主库 / 覆盖层为准；缺省用默认值。
 
     模型凭证以数据库档案为准；缺失时抛出 ConfigError。
+    allow_incomplete 仅用于 API 首次配置时恢复非模型设置，不补造模型凭证。
     ``values`` 仅供单元测试传入一份临时映射。
     """
     from excelmanus.settings_runtime import credentials_from_store, models_from_store, using_values
 
     if values is not None:
         with using_values(values):
-            return load_config(None)
+            return load_config(None, allow_incomplete=allow_incomplete)
 
     load_runtime_env()
 
@@ -1066,26 +1106,26 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         if not _s("EXCELMANUS_PROTOCOL") and creds.get("protocol"):
             protocol = _parse_protocol(creds.get("protocol"), "EXCELMANUS_PROTOCOL")
 
-    if not api_key:
+    if not api_key and not allow_incomplete:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_API_KEY。"
             "请在设置页面添加模型档案。"
         )
-    if not base_url:
+    if not base_url and not allow_incomplete:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_BASE_URL。"
             "请在设置页面添加模型档案。"
         )
-    _validate_base_url(base_url)
-
-    base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL", model=model, api_key=api_key)
+    if base_url:
+        _validate_base_url(base_url)
+        base_url = _normalize_base_url(base_url, protocol=protocol, env_name="EXCELMANUS_BASE_URL", model=model, api_key=api_key)
 
     if not model:
         from excelmanus.providers.gemini import _extract_model_from_url
         extracted = _extract_model_from_url(base_url)
         if extracted:
             model = extracted
-    if not model:
+    if not model and not allow_incomplete:
         raise ConfigError(
             "缺少必填配置项 EXCELMANUS_MODEL。"
             "请在设置页面添加模型档案。"
@@ -1094,7 +1134,42 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
     _log_deprecated_model_warning("EXCELMANUS_MODEL", model)
 
     max_iterations = _parse_int(
-        _s("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 50
+        _s("EXCELMANUS_MAX_ITERATIONS"), "EXCELMANUS_MAX_ITERATIONS", 120
+    )
+    turn_timeout_seconds = _parse_int_allow_zero(
+        _s("EXCELMANUS_TURN_TIMEOUT_SECONDS"),
+        "EXCELMANUS_TURN_TIMEOUT_SECONDS",
+        0,
+    )
+    responses_continuation_enabled = _parse_bool(
+        _s("EXCELMANUS_RESPONSES_CONTINUATION_ENABLED"),
+        "EXCELMANUS_RESPONSES_CONTINUATION_ENABLED",
+        False,
+    )
+    responses_background_enabled = _parse_bool(
+        _s("EXCELMANUS_RESPONSES_BACKGROUND_ENABLED"),
+        "EXCELMANUS_RESPONSES_BACKGROUND_ENABLED",
+        False,
+    )
+    turn_token_budget = _parse_int_allow_zero(
+        _s("EXCELMANUS_TURN_TOKEN_BUDGET"),
+        "EXCELMANUS_TURN_TOKEN_BUDGET",
+        0,
+    )
+    turn_cost_budget_usd = _parse_nonnegative_float(
+        _s("EXCELMANUS_TURN_COST_BUDGET_USD"),
+        "EXCELMANUS_TURN_COST_BUDGET_USD",
+        0.0,
+    )
+    input_cost_per_1k_usd = _parse_nonnegative_float(
+        _s("EXCELMANUS_INPUT_COST_PER_1K_USD"),
+        "EXCELMANUS_INPUT_COST_PER_1K_USD",
+        0.0,
+    )
+    output_cost_per_1k_usd = _parse_nonnegative_float(
+        _s("EXCELMANUS_OUTPUT_COST_PER_1K_USD"),
+        "EXCELMANUS_OUTPUT_COST_PER_1K_USD",
+        0.0,
     )
     max_consecutive_failures = _parse_int(
         _s("EXCELMANUS_MAX_CONSECUTIVE_FAILURES"),
@@ -1110,7 +1185,7 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         _s("EXCELMANUS_MAX_SESSIONS"), "EXCELMANUS_MAX_SESSIONS", 1000
     )
 
-    workspace_root = _s("EXCELMANUS_WORKSPACE_ROOT") or "."
+    workspace_root = _s("EXCELMANUS_WORKSPACE_ROOT") or str(get_data_home())
     data_root = os.environ.get("EXCELMANUS_DATA_ROOT", "").strip()
 
     # 部署模式推断
@@ -1240,6 +1315,9 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         "EXCELMANUS_PARALLEL_READONLY_TOOLS",
         True,
     )
+    parallel_tool_max = _parse_int(_s("EXCELMANUS_PARALLEL_TOOL_MAX"), "EXCELMANUS_PARALLEL_TOOL_MAX", 4)
+    if parallel_tool_max > 32:
+        raise ConfigError("EXCELMANUS_PARALLEL_TOOL_MAX 不能超过 32")
     subagent_max_iterations = _parse_int(
         _s("EXCELMANUS_SUBAGENT_MAX_ITERATIONS"),
         "EXCELMANUS_SUBAGENT_MAX_ITERATIONS",
@@ -1453,6 +1531,13 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         "EXCELMANUS_THINKING_BUDGET",
         0,
     )
+    configured_effort_options = set(
+        _parse_csv_tuple(_s("EXCELMANUS_THINKING_EFFORT_OPTIONS"))
+    )
+    thinking_effort_options = tuple(
+        effort for effort in THINKING_EFFORT_ORDER
+        if effort in configured_effort_options
+    ) or THINKING_EFFORT_ORDER
 
     models = models_from_store()
 
@@ -1465,13 +1550,14 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
     jev_mode_hint = _parse_bool(
         _s("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", False
     )
-    jev_present_as_auto = _parse_bool(
-        _s("EXCELMANUS_JEV_PRESENT_AS_AUTO"),
-        "EXCELMANUS_JEV_PRESENT_AS_AUTO",
-        False,
-    )
     jev_observation = _parse_jev_gate(
         _s("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "off"
+    )
+    jev_verification = _parse_jev_gate(
+        _s("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "off"
+    )
+    jev_recovery = _parse_jev_gate(
+        _s("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "off"
     )
     jev_ui_hint = _parse_bool(
         _s("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", False
@@ -1504,7 +1590,14 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         base_url=base_url,
         model=model,
         protocol=protocol,
+        responses_continuation_enabled=responses_continuation_enabled,
+        responses_background_enabled=responses_background_enabled,
         max_iterations=max_iterations,
+        turn_timeout_seconds=turn_timeout_seconds,
+        turn_token_budget=turn_token_budget,
+        turn_cost_budget_usd=turn_cost_budget_usd,
+        input_cost_per_1k_usd=input_cost_per_1k_usd,
+        output_cost_per_1k_usd=output_cost_per_1k_usd,
         max_consecutive_failures=max_consecutive_failures,
         session_ttl_seconds=session_ttl_seconds,
         max_sessions=max_sessions,
@@ -1546,6 +1639,7 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         cap_probe_thinking_strategy_timeout=cap_probe_thinking_strategy_timeout,
         subagent_enabled=subagent_enabled,
         parallel_readonly_tools=parallel_readonly_tools,
+        parallel_tool_max=parallel_tool_max,
         subagent_max_iterations=subagent_max_iterations,
         subagent_max_consecutive_failures=subagent_max_consecutive_failures,
         subagent_timeout_seconds=subagent_timeout_seconds,
@@ -1594,12 +1688,14 @@ def load_config(values: Mapping[str, str] | None = None) -> ExcelManusConfig:
         chat_history_db_path=chat_history_db_path,
         thinking_effort=thinking_effort_raw,
         thinking_budget=thinking_budget,
+        thinking_effort_options=thinking_effort_options,
         models=models,
         jev_enabled=jev_enabled,
         jev_exposure=jev_exposure,
         jev_mode_hint=jev_mode_hint,
-        jev_present_as_auto=jev_present_as_auto,
         jev_observation=jev_observation,
+        jev_verification=jev_verification,
+        jev_recovery=jev_recovery,
         jev_ui_hint=jev_ui_hint,
         jev_model=jev_model,
         typesafe_api_key=typesafe_api_key,

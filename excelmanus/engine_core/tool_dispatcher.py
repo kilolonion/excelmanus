@@ -25,6 +25,7 @@ from excelmanus.engine_core.tool_errors import (
 from excelmanus.engine_core.tool_result import (
     ToolError,
     ToolResult,
+    ToolUiMeta,
     coerce_legacy_result,
     error_result,
 )
@@ -37,6 +38,7 @@ from excelmanus.logger import get_logger, log_tool_call
 from excelmanus.security.policy import (
     RESTRICTED_WRITE_EFFECTS,
     is_plan_active,
+    resolve_approval_policy,
     writes_denied,
 )
 from excelmanus.tools.registry import ToolNotAllowedError
@@ -423,11 +425,18 @@ class ToolDispatcher:
     def cancel_active_sleep(self) -> None:
         """中断当前会话正在执行的 sleep 工具调用。"""
         self._sleep_cancel_event.set()
+        runtime = getattr(self, "_runtime", None)
+        for row in getattr(runtime, "_calls", {}).values():
+            if row.name == "sleep" and row.status in {"running", "cancelling"}:
+                row.cancel_event.set()
 
     def request_cancel(self) -> None:
         """取消当前任务：打断 sleep，并拒绝后续 execute / 子调用。"""
         self._cancel_event.set()
         self._sleep_cancel_event.set()
+        session = getattr(self._engine, "_active_code_mode_session", None)
+        if session is not None:
+            session.stop()
 
     def reset_cancel(self) -> None:
         self._cancel_event.clear()
@@ -474,6 +483,11 @@ class ToolDispatcher:
         arguments: dict[str, Any],
     ) -> tuple[str, str, str] | None:
         """同一 run 内只读工具：工具名 + 规范参数 + 文件 content_version。"""
+        owner = getattr(self._engine, "_background_parent", None) or self._engine
+        runtime = getattr(owner, "_subagent_runtime", None)
+        if runtime is not None and runtime.has_active_runs:
+            # 后台子代理可能已改变文件，旧的会话观察版本不能作为缓存命中依据。
+            return None
         from excelmanus.tools.policy import is_mutating_write_effect
         from excelmanus.tools.registry import normalize_tool_aliases
 
@@ -538,18 +552,6 @@ class ToolDispatcher:
 
     _PLAN_MODE_ALLOWED = frozenset({"write_plan", "exit_plan_mode"})
     _READ_MODE_DENIED_BY_NAME = frozenset({"write_plan", "exit_plan_mode"})
-
-    def _direct_call_allowed(self, tc: Any, tool_name: str) -> bool:
-        from excelmanus.tools.runtime import is_direct_call_allowed, present_as_of
-
-        parent = getattr(tc, "parent_call_id", None) or None
-        if isinstance(parent, str) and not parent.strip():
-            parent = None
-        return is_direct_call_allowed(
-            tool_name,
-            present_as=present_as_of(self._engine),
-            parent=parent,
-        )
 
     def _write_effect_of(self, tool_name: str, args: dict[str, Any] | None = None) -> str:
         getter = getattr(self._engine, "get_tool_write_effect", None)
@@ -650,6 +652,11 @@ class ToolDispatcher:
         from excelmanus.engine_core.spill import extract_spill_locator, retrieve_spill_result
         from excelmanus.tools import memory_tools
         from excelmanus.tools.sleep_tools import set_cancel_event, reset_cancel_event
+        from excelmanus.tools.runtime import current_execution
+
+        active_execution = current_execution()
+        if active_execution is not None and active_execution.cancel_requested:
+            return self._blocked_tool_result("CANCELLED", "本次工具调用已取消，未开始新的操作。")
 
         replay_key = self._readonly_replay_key(tool_name, arguments)
         cached = self._readonly_replay_cache.get(replay_key) if replay_key else None
@@ -666,6 +673,44 @@ class ToolDispatcher:
 
         # 检测是否有异步快速路径（MCP 工具）
         tool_def = registry.get_tool(tool_name)
+        external_op_id = None
+        external_txlog = None
+        external_intent_hash = None
+        if tool_def is not None and getattr(tool_def, "write_effect", "unknown") == "external_write":
+            import hashlib
+            import json as _json
+            from excelmanus.tools.context import operation_id_for
+            from excelmanus.workspace.txlog import TxLog
+
+            external_op_id = operation_id_for(tool_name)
+            if external_op_id:
+                external_txlog = TxLog(self._workspace_root())
+                external_intent_hash = hashlib.sha256(
+                    _json.dumps(arguments, ensure_ascii=False, sort_keys=True, default=str).encode()
+                ).hexdigest()
+                existing = external_txlog.read_external_receipt(external_op_id)
+                if existing is not None:
+                    if existing.get("intent_hash") != external_intent_hash:
+                        return error_result(
+                            "external operation id 已用于不同意图",
+                            code="OPERATION_ID_REUSED",
+                        )
+                    if existing.get("status") == "committed":
+                        return self._coerce_tool_result(str(existing.get("result") or ""))
+                    return error_result(
+                        "外部写入状态不确定，禁止自动重放；请查询或由 provider 确认后继续。",
+                        code="EXTERNAL_COMMIT_UNKNOWN",
+                        fields={"operation_id": external_op_id, "status": existing.get("status")},
+                    )
+                external_txlog.write_external_receipt(
+                    external_op_id,
+                    {
+                        "operation_id": external_op_id,
+                        "tool_name": tool_name,
+                        "intent_hash": external_intent_hash,
+                        "status": "pending",
+                    },
+                )
         _has_async = (
             tool_def is not None
             and getattr(tool_def, "async_func", None) is not None
@@ -683,7 +728,10 @@ class ToolDispatcher:
         else:
             # 普通工具：走线程池路径
             persistent_memory = self._persistent_memory
-            sleep_cancel_event = self._sleep_cancel_event
+            from excelmanus.tools.runtime import current_execution
+
+            active_execution = current_execution()
+            sleep_cancel_event = active_execution.cancel_event if active_execution is not None else self._sleep_cancel_event
 
             # 将每会话的 sleep 取消事件注入 contextvar，
             # asyncio.to_thread 会自动拷贝到工作线程。
@@ -698,13 +746,55 @@ class ToolDispatcher:
                     )
 
             try:
-                result_value = await asyncio.to_thread(_call)
+                work = asyncio.create_task(asyncio.to_thread(_call))
+                try:
+                    result_value = await asyncio.shield(work)
+                except asyncio.CancelledError:
+                    # Python 线程不能被 Task.cancel 终止。等当前调用落定后再
+                    # 结束 actor，避免暂停/恢复后同一文件仍有旧调用在提交。
+                    if active_execution is None or not active_execution.cancel_requested:
+                        self.request_cancel()
+                    sleep_cancel_event.set()
+                    settled = await asyncio.gather(work, return_exceptions=True)
+                    if not isinstance(settled[0], BaseException):
+                        completed = self._coerce_tool_result(settled[0])
+                        if active_execution is not None:
+                            active_execution.outcome = completed
+                        self._remember_tool_versions(completed)
+                        self._apply_ui_meta_effects(completed)
+                        if self._write_effect_of(tool_name, arguments) != "none" and completed.ui_meta.files:
+                            self._record_public_identities(self._engine, completed.ui_meta.files)
+                    raise
             finally:
                 reset_cancel_event(_sleep_token)
 
         tool_result = self._coerce_tool_result(result_value)
+        from excelmanus.tools.runtime import current_execution
+
+        active_execution = current_execution()
+        if active_execution is not None:
+            active_execution.outcome = tool_result
+        if external_txlog is not None and external_op_id is not None:
+            external_txlog.write_external_receipt(
+                external_op_id,
+                {
+                    "operation_id": external_op_id,
+                    "tool_name": tool_name,
+                    "intent_hash": external_intent_hash,
+                    "status": (
+                        "committed"
+                        if tool_result.success and getattr(tool_def, "consistency", "external_unverified") == "local_commit"
+                        else "external_unverified" if tool_result.success else "failed"
+                    ),
+                    "result": tool_result.model_text,
+                    "consistency": getattr(tool_def, "consistency", "external_unverified"),
+                },
+            )
         self._remember_tool_versions(tool_result)
         self._apply_ui_meta_effects(tool_result)
+        from excelmanus.tools.output_contracts import enforce_output_contract
+
+        tool_result = enforce_output_contract(tool_result, tool_name, arguments, tool_def=tool_def)
         self._last_call_structured = tool_result
         self._last_call_raw_result = tool_result.model_text
 
@@ -753,29 +843,36 @@ class ToolDispatcher:
         if on_event is None:
             on_event = getattr(self, "_current_on_event", None)
         runtime = getattr(self, "_runtime", None)
-        execute = runtime.execute if runtime is not None else self.execute
-        tcr = await execute(tc, tool_scope, on_event, 0)
-        if isinstance(tcr, ToolResult):
-            return tcr
-        if isinstance(tcr, ToolCallResult):
-            if tcr.pending_approval:
-                return await self._await_subcall_approval(tcr, tc, on_event)
-            if tcr.structured is not None:
-                if tcr.success or not tcr.structured.success:
-                    return tcr.structured
-                return ToolResult(
-                    success=False,
-                    model_text=tcr.result,
-                    value=tcr.structured.value,
-                    error=tcr.structured.error
-                    or ToolError(
-                        code=str(tcr.error or "TOOL_ERROR"),
-                        message=tcr.error or tcr.result,
-                    ),
-                    ui_meta=tcr.structured.ui_meta,
-                )
-            return ToolResult.from_text(tcr.result, success=bool(tcr.success))
-        return self._coerce_tool_result(tcr)
+
+        async def execute_and_resolve() -> ToolResult:
+            execute = runtime.execute if runtime is not None else self.execute
+            tcr = await execute(tc, tool_scope, on_event, 0)
+            if isinstance(tcr, ToolResult):
+                return tcr
+            if isinstance(tcr, ToolCallResult):
+                if tcr.pending_approval:
+                    return await self._await_subcall_approval(tcr, tc, on_event)
+                if tcr.structured is not None:
+                    if tcr.success or not tcr.structured.success:
+                        return tcr.structured
+                    return ToolResult(
+                        success=False,
+                        model_text=tcr.result,
+                        value=tcr.structured.value,
+                        error=tcr.structured.error
+                        or ToolError(
+                            code=str(tcr.error or "TOOL_ERROR"),
+                            message=tcr.error or tcr.result,
+                        ),
+                        ui_meta=tcr.structured.ui_meta,
+                    )
+                return ToolResult.from_text(tcr.result, success=bool(tcr.success))
+            return self._coerce_tool_result(tcr)
+
+        if runtime is None:
+            return await execute_and_resolve()
+        result = await runtime.run_managed(tc, execute_and_resolve, on_event, 0)
+        return result.structured or ToolResult.from_text(result.result, success=result.success)
 
     async def _await_subcall_approval(
         self,
@@ -822,8 +919,11 @@ class ToolDispatcher:
             if callable(resolver):
                 wait_coro = self._resolve_decision_via_resolver(resolver, pending)
             elif registry is not None:
-                fut = registry.create(approval_id)
-                wait_coro = self._resolve_decision_via_registry(fut)
+                interaction = getattr(e, "_interaction_handler", None)
+                if interaction is not None:
+                    wait_coro = interaction.wait_approval_decision(approval_id)
+                else:
+                    wait_coro = self._resolve_decision_via_registry(registry.create(approval_id))
             else:
                 e._approval.reject_pending(approval_id)
                 return error_result(
@@ -971,8 +1071,18 @@ class ToolDispatcher:
 
         e = self._engine  # 引擎快捷引用
 
-        if self.is_cancelled():
+        from excelmanus.tools.runtime import current_execution
+
+        active_execution = current_execution()
+        if self.is_cancelled() or (active_execution is not None and active_execution.cancel_requested):
             return self._blocked_call_result(tc, code="CANCELLED", message="任务已取消")
+        turn_budget = getattr(self._engine, "_turn_budget", None)
+        if turn_budget is not None:
+            try:
+                turn_budget.reserve_tool()
+            except Exception as exc:
+                code = "TURN_TIMEOUT" if getattr(exc, "kind", "") == "wall_clock" else "BUDGET_EXCEEDED"
+                return self._blocked_call_result(tc, code=code, message=str(exc))
         if not self.consume_call_budget():
             return self._blocked_call_result(
                 tc,
@@ -981,6 +1091,10 @@ class ToolDispatcher:
             )
 
         function = getattr(tc, "function", None)
+        loaded_tool_names = getattr(e, "_loaded_tool_names", None)
+        if not isinstance(loaded_tool_names, set):
+            loaded_tool_names = set()
+            e._loaded_tool_names = loaded_tool_names
         _sandbox_token = _set_sandbox_env(e.sandbox_env)
         _readonly_token = _set_readonly_exec(_writes_denied(e))
         _call_token = bind_call(
@@ -990,6 +1104,7 @@ class ToolDispatcher:
                 tool_name=str(getattr(function, "name", "") or ""),
                 parent_call_id=getattr(tc, "parent_call_id", None) or None,
                 durable_attachment_ids=attachment_ids_from_engine(e),
+                loaded_tool_names=loaded_tool_names,
             )
         )
         prev_event = getattr(self, "_current_on_event", None)
@@ -1129,15 +1244,6 @@ class ToolDispatcher:
                 else INVALID_ARGS
             )
             log_tool_call(logger, tool_name, arguments, error=error)
-        elif not self._direct_call_allowed(tc, tool_name):
-            from excelmanus.tools.runtime import UNKNOWN_TOOL, unknown_tool_message
-
-            result_str = unknown_tool_message(tool_name)
-            success = False
-            error = UNKNOWN_TOOL
-            structured = self._blocked_tool_result(UNKNOWN_TOOL, result_str)
-            result_str = structured.model_text
-            log_tool_call(logger, tool_name, arguments, error=error)
         elif writes_denied(e) and self._denied_in_read_mode(tool_name, arguments):
             result_str = "当前是只读模式，写入被拒绝。"
             success = False
@@ -1181,7 +1287,14 @@ class ToolDispatcher:
                 )
 
             preflight_error = None
-            if tool_name == "run_shell":
+            if getattr(tc, "_parallel_admitted", False) and not self._runtime.is_concurrency_safe(tool_name, arguments):
+                from excelmanus.engine_core.tool_result import error_result
+
+                preflight_error = error_result(
+                    "工具在排队或 Hook 更新后不再满足只读并发条件；本调用未执行，请重新安排串行调用。",
+                    code="TOOL_NOT_ALLOWED", fields={"executed": False},
+                )
+            if tool_name == "run_shell" and preflight_error is None:
                 from excelmanus.tools.shell_tools import preflight_shell
 
                 preflight_error = preflight_shell(arguments, e.file_access_guard)
@@ -1205,13 +1318,20 @@ class ToolDispatcher:
                 success = False
                 error = PRE_EXECUTE_DENIED
                 log_tool_call(logger, tool_name, arguments, error=error)
-            elif pre_hook is not None and pre_hook.decision == HookDecision.ASK:
+            elif (
+                pre_hook is not None
+                and pre_hook.decision == HookDecision.ASK
+                and resolve_approval_policy(e) != "never"
+            ):
                 try:
                     pending = e.approval.create_pending(
                         tool_name=tool_name,
                         arguments=arguments,
                         tool_scope=tool_scope,
                     )
+                    persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
+                    if callable(persist_runtime):
+                        persist_runtime()
                     pending_approval = True
                     approval_id = pending.approval_id
                     result_str = e.format_pending_prompt(pending)
@@ -1336,6 +1456,7 @@ class ToolDispatcher:
             error_kind=error_kind,
             structured=structured,
             parent_call_id=getattr(tc, "parent_call_id", "") or "",
+            output_pending=pending_approval or pending_question or defer_tool_result,
         )
 
         self._note_repeat_outcome(success, structured, error, result_str)
@@ -1513,6 +1634,17 @@ class ToolDispatcher:
         """通过策略处理器表分发工具执行（含可重试循环）。"""
         policy = DEFAULT_RETRY_POLICY
         last_outcome: _ToolExecOutcome | None = None
+        # 任何可能改变工作区、外部服务或通过 Code Mode 间接改变状态的
+        # 调用都不能由 dispatcher 盲目重放。只有工具自己声明幂等并由
+        # 上层显式包住 request token 时，才允许未来增加重试。
+        write_effect = "none"
+        try:
+            write_effect = str(self._engine._get_tool_write_effect(tool_name) or "none")
+        except Exception:
+            write_effect = "unknown"
+        retry_mutation = write_effect in {
+            "workspace_write", "external_write", "dynamic", "unknown",
+        }
 
         for attempt in range(policy.max_retries + 1):
             outcome = await self._dispatch_single_attempt(
@@ -1555,6 +1687,13 @@ class ToolDispatcher:
                     audit_record=outcome.audit_record,
                     structured=structured,
                 )
+
+            if retry_mutation:
+                logger.warning(
+                    "工具 %s 可能产生副作用，禁止自动重放；请由模型依据结构化错误决定下一步",
+                    tool_name,
+                )
+                return outcome
 
             last_outcome = outcome
             # 最后一次重试也失败了
@@ -1710,6 +1849,7 @@ class ToolDispatcher:
         error_kind: str | None = None,
         structured: ToolResult | None = None,
         parent_call_id: str = "",
+        output_pending: bool = False,
     ) -> tuple[str, bool, str | None, ToolResult | None]:
         """后处理流水线：CoW/备份/VLM/硬截断/事件/审计/任务清单。
 
@@ -1737,6 +1877,18 @@ class ToolDispatcher:
             )
         if structured is not None:
             self._remember_tool_versions(structured)
+        if structured is not None and success and not output_pending:
+            from excelmanus.tools.output_contracts import enforce_output_contract
+
+            structured = enforce_output_contract(
+                structured, tool_name, arguments, tool_def=e.registry.get_tool(tool_name),
+            )
+            if not structured.success:
+                success = False
+                error = structured.error.code if structured.error else "SDK_CONTRACT_VIOLATION"
+                result_str = structured.model_text
+        if structured is not None and structured.error is not None and structured.error.code == "SDK_CONTRACT_VIOLATION":
+            error = structured.error.code
 
         # ── CoW 路径拦截提醒：追加到 model_text ──
         if cow_reminders:
@@ -1774,6 +1926,14 @@ class ToolDispatcher:
             structured, result_str = attach_write_verification(
                 structured, write_verification, result_str,
             )
+
+        if structured is not None and tool_name in self._EXCEL_READ_TOOLS | self._EXCEL_WRITE_TOOLS | {"split_spreadsheet"}:
+            from excelmanus.engine_core.spill import expose_spreadsheet_value
+
+            store = self._spill_store()
+            if store is not None:
+                structured = expose_spreadsheet_value(structured.with_model_text(result_str), store=store)
+                result_str = structured.model_text
 
         result_str, structured = spill_result_text(
             result_str,
@@ -1860,7 +2020,7 @@ class ToolDispatcher:
                     error_type=error_kind if error_kind else (error[:50] if error else None),
                     error_preview=str(error)[:200] if error else None,
                     call_id=str(tool_call_id or "") or None,
-                    parent_call_id=getattr(tc, "parent_call_id", None) or None,
+                    parent_call_id=parent_call_id or None,
                 )
             except Exception:
                 pass
@@ -2164,7 +2324,12 @@ class ToolDispatcher:
         try:
             payload = verify_write(tool_name, arguments, workspace_root=workspace_root)
             if payload.get("skipped"):
-                return ""
+                if payload.get("verification_kind") == "style":
+                    payload.setdefault(
+                        "sheet",
+                        arguments.get("sheet") or arguments.get("sheet_name") or "",
+                    )
+                return format_write_verification_line(payload)
             return format_write_verification_line(payload)
         except Exception:
             return ""
@@ -2461,4 +2626,3 @@ class ToolDispatcher:
         if extra_changed_paths:
             raw_paths.extend(p for p in extra_changed_paths if p)
         self._record_public_identities(e, raw_paths)
-

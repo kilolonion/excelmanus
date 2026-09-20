@@ -41,9 +41,8 @@
     },
     {
       "id": "S07",
-      "name": "契约：Code Mode 下 SDK 数据 + pandas 滚动聚合",
-      "tags": ["prompt-contract", "code-mode", "aggregate", "qa"],
-      "present_as": "code",
+      "name": "契约：SDK 数据 + pandas 滚动聚合",
+      "tags": ["prompt-contract", "programmatic", "aggregate", "qa"],
       "attachments": ["bench/fixtures/realistic/订单明细_2024.xlsx"],
       "message": "算一下：只取「已完成」订单，按月汇总金额之后，最后一个月份往前 3 个月的移动平均销售额是多少？",
       "assertions": {

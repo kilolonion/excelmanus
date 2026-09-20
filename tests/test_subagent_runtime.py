@@ -218,14 +218,11 @@ async def test_parallel_explorers_same_file_allowed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_background_and_send_message_are_fail_loud() -> None:
+async def test_unknown_background_run_reports_not_found() -> None:
     runtime = SubagentRuntime(_make_parent())
     with pytest.raises(SubagentError) as exc:
-        await runtime.start_background(SubagentStartRequest(task="x"))
-    assert exc.value.code == "UNSUPPORTED_CAPABILITY"
-    with pytest.raises(SubagentError) as exc:
         await runtime.send_message("run-1", "hi")
-    assert exc.value.code == "UNSUPPORTED_CAPABILITY"
+    assert exc.value.code == "NOT_FOUND"
 
 
 def test_list_catalog() -> None:

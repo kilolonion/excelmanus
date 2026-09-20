@@ -6,6 +6,8 @@ export const JEV_PACKS = [
   { id: "loop.wrap", title: "是否继续", hint: "这一步之后建议继续还是停下" },
   { id: "ui.surface", title: "界面建议", hint: "是否打开侧栏或表格页" },
   { id: "observation.prune", title: "历史收起", hint: "收起已经用过的历史结果" },
+  { id: "mutation.verify", title: "写入验证", hint: "观察写入是否覆盖用户要求" },
+  { id: "recovery.next_step", title: "失败恢复", hint: "失败熔断后建议检查、询问或停止" },
 ] as const;
 
 export type JevPackId = (typeof JEV_PACKS)[number]["id"];
@@ -125,4 +127,8 @@ export const ANSWER_LABELS: Record<string, string> = {
   next: "下一步",
   pin: "置顶技能",
   action: "动作",
+  satisfied: "是否完成",
+  scope_ok: "范围符合",
+  retryable: "可重试",
+  needs_user: "需要用户",
 };

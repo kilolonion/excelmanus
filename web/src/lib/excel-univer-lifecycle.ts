@@ -1,27 +1,33 @@
 type UniverSheetLike = {
   getName?: () => string;
+  getSheetName?: () => string;
   activate?: () => void;
 };
 
-type UniverWorkbookLike = {
-  getSheets?: () => UniverSheetLike[];
+type UniverWorkbookLike<Sheet extends UniverSheetLike> = {
+  getSheets?: () => Sheet[];
+  getSheetByName?: (name: string) => Sheet | null;
+  setActiveSheet?: (sheet: Sheet) => unknown;
 };
 
-type UniverApiLike = {
-  getActiveWorkbook?: () => UniverWorkbookLike | null | undefined;
+type UniverApiLike<Sheet extends UniverSheetLike> = {
+  getActiveWorkbook?: () => UniverWorkbookLike<Sheet> | null | undefined;
 };
 
-export function activateWorkbookSheet(
-  api: UniverApiLike | null | undefined,
+export function activateWorkbookSheet<Sheet extends UniverSheetLike>(
+  api: UniverApiLike<Sheet> | null | undefined,
   sheetName?: string,
 ): boolean {
   if (!api || !sheetName) return false;
   try {
     const workbook = api.getActiveWorkbook?.();
     if (!workbook) return false;
-    const target = workbook.getSheets?.()?.find((sheet) => sheet.getName?.() === sheetName);
+    const target = workbook.getSheetByName?.(sheetName)
+      ?? workbook.getSheets?.()?.find((sheet) => (sheet.getSheetName?.() || sheet.getName?.()) === sheetName);
     if (!target) return false;
-    target.activate?.();
+    if (workbook.setActiveSheet) workbook.setActiveSheet(target);
+    else if (target.activate) target.activate();
+    else return false;
     return true;
   } catch {
     return false;

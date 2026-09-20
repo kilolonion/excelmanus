@@ -17,6 +17,10 @@ import {
   Combine,
   ArrowLeftRight,
   Layers,
+  Search,
+  X,
+  RefreshCw,
+  MoreHorizontal,
 } from "lucide-react";
 import {
   Tooltip,
@@ -29,7 +33,6 @@ import { useSessionStore } from "@/stores/session-store";
 import {
   uploadFile,
   uploadFileToFolder,
-  fetchExcelFiles,
   normalizeExcelPath,
   workspaceMkdir,
   workspaceDeleteItem,
@@ -38,7 +41,6 @@ import { mapWithConcurrency } from "@/lib/concurrency";
 import { openWorkspaceFile } from "@/lib/open-workspace-file";
 import {
   recentFilesForWorkspace,
-  workspaceKeyForSessionId,
 } from "@/lib/workspace-file-ref";
 import { WORKSPACE_FILE_INPUT_ACCEPT } from "@/lib/file-kind";
 import { formatFileMention } from "@/components/chat/chat-input-insert";
@@ -52,36 +54,18 @@ import { InlineCreateInput } from "./InlineInputs";
 import { TreeNodeItem } from "./TreeNodeItem";
 import { FlatFileListView } from "./FlatFileListView";
 import { FileGroupListView } from "./FileGroupListView";
-import { ExcelFilesDialog, RemoveConfirmDialog } from "./ExcelFilesDialogs";
+import { RemoveConfirmDialog } from "./ExcelFilesDialogs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 
 function isNotFoundError(err: unknown): boolean {
   const msg = err instanceof Error ? err.message : String(err ?? "");
   return /404|not found|不存在/i.test(msg);
-}
-
-/** Hook: long-press detection for touch devices (opens context menu) */
-function useLongPress(onLongPress: () => void, delay = 500) {
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const triggeredRef = useRef(false);
-
-  const start = useCallback((e: React.TouchEvent) => {
-    triggeredRef.current = false;
-    timerRef.current = setTimeout(() => {
-      triggeredRef.current = true;
-      onLongPress();
-    }, delay);
-  }, [onLongPress, delay]);
-
-  const cancel = useCallback(() => {
-    if (timerRef.current) {
-      clearTimeout(timerRef.current);
-      timerRef.current = null;
-    }
-  }, []);
-
-  const wasTriggered = useCallback(() => triggeredRef.current, []);
-
-  return { onTouchStart: start, onTouchEnd: cancel, onTouchMove: cancel, wasTriggered };
 }
 
 interface ExcelFilesBarProps {
@@ -90,15 +74,16 @@ interface ExcelFilesBarProps {
 }
 
 export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
+  const scrollRef = useRef<HTMLDivElement>(null);
   const recentFiles = useExcelStore((s) => s.recentFiles);
   const activeWorkspaceKey = useExcelStore((s) => s.activeWorkspaceKey);
   const addRecentFile = useExcelStore((s) => s.addRecentFile);
   const removeRecentFile = useExcelStore((s) => s.removeRecentFile);
   const removeRecentFiles = useExcelStore((s) => s.removeRecentFiles);
-  const mergeRecentFiles = useExcelStore((s) => s.mergeRecentFiles);
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
   const workspaceFiles = useExcelStore((s) => s.workspaceFiles);
   const wsFilesLoaded = useExcelStore((s) => s.wsFilesLoaded);
+  const workspaceFilesError = useExcelStore((s) => s.workspaceFilesError);
   const refreshWorkspaceFiles = useExcelStore((s) => s.refreshWorkspaceFiles);
   const showSystemFiles = useExcelStore((s) => s.showSystemFiles);
   const toggleShowSystemFiles = useExcelStore((s) => s.toggleShowSystemFiles);
@@ -107,18 +92,15 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   const toggleGroupViewMode = useExcelStore((s) => s.toggleGroupViewMode);
   const createGroupFromSelected = useExcelStore((s) => s.createGroupFromSelected);
 
-  // 过滤后的文件列表（根据 showSystemFiles 开关决定是否展示系统文件）
-  const visibleFiles = useMemo(
+  // 先按系统文件开关过滤，再按搜索词过滤展示列表。
+  const workspaceVisibleFiles = useMemo(
     () => filterWorkspaceFiles(workspaceFiles, showSystemFiles),
     [workspaceFiles, showSystemFiles],
   );
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
-  const currentUserId = "process";
   const fileInputRef = useRef<HTMLInputElement>(null);
   const fileInputId = useId();
-  const scannedUserIdRef = useRef<string | null>(null);
   const [draggingPath, setDraggingPath] = useState<string | null>(null);
-  const [dialogOpen, setDialogOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
   const scopedRecentFiles = useMemo(
@@ -135,6 +117,16 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
   // 视图模式：扁平列表 vs 文件夹树（默认列表视图）
   const [treeView, setTreeView] = useState(false);
+  const [fileQuery, setFileQuery] = useState("");
+  useEffect(() => { scrollRef.current?.scrollTo({ top: 0 }); }, [fileQuery]);
+
+  const visibleFiles = useMemo(() => {
+    const query = fileQuery.trim().toLocaleLowerCase();
+    if (!query) return workspaceVisibleFiles;
+    return workspaceVisibleFiles.filter((file) =>
+      `${file.filename} ${file.path}`.toLocaleLowerCase().includes(query),
+    );
+  }, [fileQuery, workspaceVisibleFiles]);
 
   // 多选模式
   const [selectMode, setSelectMode] = useState(false);
@@ -161,8 +153,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   }, []);
 
   const wsFilePaths = visibleFiles.filter((f) => !f.is_dir).map((f) => f.path);
+  const allVisibleFilePaths = workspaceVisibleFiles.filter((f) => !f.is_dir).map((f) => f.path);
   const totalFileCount = workspaceFiles.filter((f) => !f.is_dir).length;
-  const hiddenCount = totalFileCount - wsFilePaths.length;
+  const hiddenCount = totalFileCount - allVisibleFilePaths.length;
+  const hasQuery = fileQuery.trim().length > 0;
 
   const toggleSelectAll = useCallback(() => {
     setSelectedPaths((prev) => {
@@ -171,24 +165,14 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     });
   }, [wsFilePaths]);
 
-  useEffect(() => {
-    if (scannedUserIdRef.current === currentUserId) return;
-    scannedUserIdRef.current = currentUserId;
-    fetchExcelFiles(activeSessionId)
-      .then((files) => {
-        if (files.length > 0) {
-          mergeRecentFiles(
-            files.map((f) => ({
-              path: f.path,
-              filename: f.filename,
-              modifiedAt: f.modified_at ? f.modified_at * 1000 : 0,
-            })),
-            workspaceKeyForSessionId(activeSessionId),
-          );
-        }
-      })
-      .catch(() => {});
-  }, [mergeRecentFiles, currentUserId, activeSessionId]);
+  const setViewMode = useCallback((mode: "list" | "tree" | "groups") => {
+    if (mode === "groups") {
+      if (!groupViewMode) toggleGroupViewMode();
+      return;
+    }
+    if (groupViewMode) toggleGroupViewMode();
+    setTreeView(mode === "tree");
+  }, [groupViewMode, toggleGroupViewMode]);
 
   const handleCreateRootFolder = useCallback(async (name: string) => {
     const folderName = name.trim();
@@ -219,17 +203,8 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     }
   }, [refreshWorkspaceFiles, activeSessionId]);
 
-  const prevSessionRef = useRef(activeSessionId);
   useEffect(() => {
-    if (prevSessionRef.current !== activeSessionId) {
-      prevSessionRef.current = activeSessionId;
-      useExcelStore.setState({
-        workspaceFiles: [],
-        wsFilesLoaded: false,
-        fileGroupsLoaded: false,
-      });
-    }
-    void refreshWorkspaceFiles(activeSessionId);
+    void refreshWorkspaceFiles(activeSessionId, { cached: true });
   }, [activeSessionId, refreshWorkspaceFiles]);
 
   const openFilePicker = useCallback(() => {
@@ -357,9 +332,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   }, [pendingRemovePaths, removeRecentFile, removeRecentFiles, exitSelectMode, refreshWorkspaceFiles, activeSessionId]);
 
   const requestClearAll = useCallback(() => {
-    setPendingRemovePaths(wsFilePaths);
+    if (allVisibleFilePaths.length === 0) return;
+    setPendingRemovePaths(allVisibleFilePaths);
     setConfirmRemoveOpen(true);
-  }, [wsFilePaths]);
+  }, [allVisibleFilePaths]);
 
   const handleDragStart = useCallback(
     (e: React.DragEvent, file: { path: string; filename: string }) => {
@@ -399,7 +375,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
     useExcelStore.getState().draggingFileCount = 0;
   }, []);
 
-  const isDeleteAll = pendingRemovePaths.length === wsFilePaths.length && wsFilePaths.length > 0;
+  const isDeleteAll = pendingRemovePaths.length === allVisibleFilePaths.length && allVisibleFilePaths.length > 0;
 
   // 空状态：仅非嵌入时显示（父组件控制可见性）
   if (totalFileCount === 0 && !embedded) {
@@ -460,7 +436,7 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
   if (totalFileCount === 0 && !wsFilesLoaded && !embedded) return null;
 
   return (
-    <div className={embedded ? "px-2 py-1" : "px-3 pb-2"}>
+    <div className={embedded ? "flex h-full min-h-0 flex-col px-2 py-1" : "px-3 pb-2"}>
       {/* Section header — only in standalone mode */}
       {!embedded && (
         <div className="flex items-center justify-between mb-1.5">
@@ -515,114 +491,143 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         </div>
       )}
 
-      {/* Upload button row in embedded mode */}
+      {/* File controls */}
       {embedded && (
         <TooltipProvider delayDuration={300}>
-          <div className="flex items-center justify-between mb-2 border-b border-border/40 pb-1.5">
-            {/* Left group: view toggle */}
-            <div className="flex items-center gap-1 rounded-lg bg-muted/50 p-0.5">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => { if (groupViewMode) toggleGroupViewMode(); else setTreeView((v) => !v); }}
-                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
-                      !groupViewMode && treeView
-                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
-                        : !groupViewMode
-                          ? "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
-                          : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
-                    }`}
-                  >
-                    {treeView && !groupViewMode ? <List className="h-3.5 w-3.5" /> : <FolderTree className="h-3.5 w-3.5" />}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{groupViewMode ? "切换文件视图" : treeView ? "切换列表视图" : "切换文件夹视图"}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={toggleGroupViewMode}
-                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
-                      groupViewMode
-                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
-                        : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
-                    }`}
-                  >
-                    <Layers className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{groupViewMode ? "退出文件组视图" : "文件组视图"}</TooltipContent>
-              </Tooltip>
+          <div className="mb-2 shrink-0 space-y-2 border-b border-border/40 pb-2">
+            <div className="flex items-center justify-between gap-2">
+              <div className="min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="text-[13px] font-semibold text-foreground">工作区文件</span>
+                  <span className="rounded-full bg-muted px-1.5 py-0.5 text-[10px] text-muted-foreground">
+                    {totalFileCount}
+                  </span>
+                </div>
+                <span className="text-[10px] text-muted-foreground/70">
+                  {hasQuery
+                    ? `找到 ${wsFilePaths.length} 个匹配项`
+                    : hiddenCount > 0
+                      ? `${hiddenCount} 个系统文件已隐藏`
+                      : "拖拽文件到聊天框即可引用"}
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={openFilePicker}
+                className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-md px-2.5 text-[11px] font-medium text-white shadow-sm transition-opacity hover:opacity-90"
+                style={{ backgroundColor: "var(--em-primary)" }}
+              >
+                <Plus className="h-3.5 w-3.5" />
+                上传文件
+              </button>
             </div>
-            {/* Right group: actions */}
-            <div className="flex items-center gap-1 rounded-lg bg-muted/50 p-0.5">
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={toggleShowSystemFiles}
-                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
-                      showSystemFiles
-                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
-                        : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
-                    }`}
-                  >
-                    {showSystemFiles ? <Eye className="h-3.5 w-3.5" /> : <EyeOff className="h-3.5 w-3.5" />}
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{showSystemFiles ? "隐藏系统文件" : `显示系统文件${hiddenCount > 0 ? ` (已隐藏 ${hiddenCount})` : ""}`}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
-                    className={`h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md transition-all duration-150 ${
-                      selectMode
-                        ? "text-[var(--em-primary)] bg-[var(--em-primary-alpha-10)] shadow-sm"
-                        : "text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)]"
-                    }`}
-                  >
-                    <CheckSquare className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">{selectMode ? "退出多选" : "批量选择"}</TooltipContent>
-              </Tooltip>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    onClick={requestClearAll}
-                    className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-all duration-150"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">清空所有文件</TooltipContent>
-              </Tooltip>
-              {treeView && (
+
+            <div className="relative">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground/70" />
+              <input
+                type="search"
+                value={fileQuery}
+                onChange={(event) => setFileQuery(event.target.value)}
+                placeholder="搜索文件名或路径"
+                aria-label="搜索工作区文件"
+                className="h-8 w-full rounded-md border border-border/70 bg-background/70 pl-8 pr-8 text-[11px] outline-none transition-colors placeholder:text-muted-foreground/60 focus:border-[var(--em-primary)] focus:ring-1 focus:ring-[var(--em-primary-alpha-10)]"
+              />
+              {fileQuery && (
+                <button
+                  type="button"
+                  onClick={() => setFileQuery("")}
+                  aria-label="清除文件搜索"
+                  className="absolute right-1.5 top-1/2 flex h-5 w-5 -translate-y-1/2 items-center justify-center rounded text-muted-foreground hover:bg-muted hover:text-foreground"
+                >
+                  <X className="h-3 w-3" />
+                </button>
+              )}
+            </div>
+
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex min-w-0 items-center gap-0.5 rounded-md bg-muted/60 p-0.5">
+                {([
+                  ["list", List, "列表"],
+                  ["tree", FolderTree, "文件夹"],
+                  ["groups", Layers, "文件组"],
+                ] as const).map(([mode, Icon, label]) => {
+                  const active = mode === "groups"
+                    ? groupViewMode
+                    : !groupViewMode && (mode === "tree" ? treeView : !treeView);
+                  return (
+                    <button
+                      key={mode}
+                      type="button"
+                      onClick={() => setViewMode(mode)}
+                      aria-label={`${label}视图`}
+                      aria-pressed={active}
+                      className={`inline-flex h-7 items-center gap-1 rounded px-2 text-[10px] transition-colors ${
+                        active
+                          ? "bg-background text-[var(--em-primary)] shadow-sm"
+                          : "text-muted-foreground hover:text-foreground"
+                      }`}
+                    >
+                      <Icon className="h-3.5 w-3.5" />
+                      <span className="hidden min-[360px]:inline">{label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              <div className="flex shrink-0 items-center gap-0.5">
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <button
-                      onClick={() => setCreatingRootFolder(true)}
-                      className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-muted-foreground hover:text-[var(--em-primary)] hover:bg-[var(--em-primary-alpha-10)] transition-all duration-150"
+                      type="button"
+                      onClick={() => (selectMode ? exitSelectMode() : setSelectMode(true))}
+                      className={`flex h-7 w-7 items-center justify-center rounded-md transition-all duration-150 ${
+                        selectMode
+                          ? "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]"
+                          : "text-muted-foreground hover:bg-muted hover:text-foreground"
+                      }`}
+                      aria-label={selectMode ? "退出多选" : "批量选择"}
                     >
-                      <FolderPlus className="h-3.5 w-3.5" />
+                      <CheckSquare className="h-3.5 w-3.5" />
                     </button>
                   </TooltipTrigger>
-                  <TooltipContent side="bottom">新建文件夹</TooltipContent>
+                  <TooltipContent side="bottom">{selectMode ? "退出多选" : "批量选择"}</TooltipContent>
                 </Tooltip>
-              )}
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <button
-                    type="button"
-                    onClick={openFilePicker}
-                    className="h-9 w-9 sm:h-7 sm:w-7 flex items-center justify-center rounded-md text-white shadow-sm transition-all duration-150 hover:opacity-90"
-                    style={{ backgroundColor: "var(--em-primary)" }}
-                  >
-                    <Plus className="h-3.5 w-3.5" />
-                  </button>
-                </TooltipTrigger>
-                <TooltipContent side="bottom">上传文件</TooltipContent>
-              </Tooltip>
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <button
+                      type="button"
+                      className="flex h-7 w-7 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+                      aria-label="更多文件操作"
+                    >
+                      <MoreHorizontal className="h-3.5 w-3.5" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent side="bottom" align="end" className="w-48">
+                    <DropdownMenuItem onClick={openFilePicker}>
+                      <Plus className="h-4 w-4" />
+                      上传文件
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={() => setCreatingRootFolder(true)}>
+                      <FolderPlus className="h-4 w-4" />
+                      新建文件夹
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem onClick={() => { void refreshWorkspaceFiles(); }}>
+                      <RefreshCw className="h-4 w-4" />
+                      刷新文件列表
+                    </DropdownMenuItem>
+                    <DropdownMenuItem onClick={toggleShowSystemFiles}>
+                      {showSystemFiles ? <Eye className="h-4 w-4" /> : <EyeOff className="h-4 w-4" />}
+                      {showSystemFiles ? "隐藏系统文件" : `显示系统文件${hiddenCount > 0 ? `（${hiddenCount} 个）` : ""}`}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem variant="destructive" onClick={requestClearAll}>
+                      <Trash2 className="h-4 w-4" />
+                      清空所有文件
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
             </div>
           </div>
         </TooltipProvider>
@@ -663,12 +668,12 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
 
       {/* Multi-select action bar */}
       {selectMode && (
-        <div className="flex items-center gap-1 mb-1 px-1">
+        <div className="order-last flex shrink-0 flex-wrap items-center gap-x-2 gap-y-1 border-t border-border/40 bg-background/80 px-1 pt-2">
           <button
             onClick={toggleSelectAll}
             className="text-[10px] text-muted-foreground hover:text-foreground transition-colors"
           >
-            {selectedPaths.size === wsFilePaths.length ? "取消全选" : "全选"}
+            {selectedPaths.size === wsFilePaths.length && wsFilePaths.length > 0 ? "取消全选" : "全选"}
           </button>
           {selectedPaths.size > 0 && (
             <>
@@ -795,27 +800,54 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
         </div>
       )}
 
-      {groupViewMode ? (
-        <FileGroupListView onClickFile={handleClick} />
-      ) : !wsFilesLoaded ? (
-        <div className="flex flex-col items-center justify-center py-6 gap-2 text-muted-foreground/60">
-          <div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
-          <span className="text-[11px]">加载文件列表…</span>
+      {workspaceFilesError && (
+        <div role="alert" className="px-2 py-2 text-xs text-destructive">
+          文件列表加载失败。
+          <button type="button" className="ml-1 underline" onClick={() => void refreshWorkspaceFiles(activeSessionId)}>重试</button>
         </div>
-      ) : treeView ? (
-        <>
-          {creatingRootFolder && (
-            <div className="flex items-center gap-1.5 py-1.5 px-2 mb-0.5">
-              <Folder className="h-4.5 w-4.5 flex-shrink-0 text-[var(--em-primary-light)]" />
-              <InlineCreateInput
-                placeholder="文件夹名称"
-                onConfirm={handleCreateRootFolder}
-                onCancel={() => setCreatingRootFolder(false)}
-              />
-            </div>
-          )}
-          <FileTreeView
+      )}
+      <div ref={scrollRef} data-file-scroll-viewport className={embedded ? "min-h-0 flex-1 overflow-y-auto pr-1" : undefined}>
+        {groupViewMode ? (
+          <FileGroupListView key={fileQuery} onClickFile={handleClick} query={fileQuery} />
+        ) : !wsFilesLoaded ? (workspaceFilesError ? null : (
+          <div className="flex flex-col items-center justify-center py-6 gap-2 text-muted-foreground/60">
+            <div className="h-4 w-4 border-2 border-current border-t-transparent rounded-full animate-spin" />
+            <span className="text-[11px]">加载文件列表…</span>
+          </div>
+        )) : treeView ? (
+          <>
+            {creatingRootFolder && (
+              <div className="flex items-center gap-1.5 py-1.5 px-2 mb-0.5">
+                <Folder className="h-4.5 w-4.5 flex-shrink-0 text-[var(--em-primary-light)]" />
+                <InlineCreateInput
+                  placeholder="文件夹名称"
+                  onConfirm={handleCreateRootFolder}
+                  onCancel={() => setCreatingRootFolder(false)}
+                />
+              </div>
+            )}
+            <FileTreeView
+              key={fileQuery}
+              files={visibleFiles}
+              sessionId={activeSessionId ?? undefined}
+              draggingPath={draggingPath}
+              selectMode={selectMode}
+              selectedPaths={selectedPaths}
+              onDragStart={handleDragStart}
+              onDragEnd={handleDragEnd}
+              onClick={handleClick}
+              onDoubleClick={handleDoubleClick}
+              onRemove={(path) => requestRemove([path])}
+              onRefresh={refreshWorkspaceFiles}
+              onAddRecentFile={addRecentFile}
+              emptyMessage={hasQuery ? "未找到匹配文件" : hiddenCount > 0 ? `${hiddenCount} 个系统文件已隐藏` : "暂无文件，点击上方上传"}
+            />
+          </>
+        ) : (
+          <FlatFileListView
+            scrollRef={embedded ? scrollRef : undefined}
             files={visibleFiles}
+            recentTimestamps={recentTimestamps}
             sessionId={activeSessionId ?? undefined}
             draggingPath={draggingPath}
             selectMode={selectMode}
@@ -825,47 +857,10 @@ export function ExcelFilesBar({ embedded }: ExcelFilesBarProps) {
             onClick={handleClick}
             onDoubleClick={handleDoubleClick}
             onRemove={(path) => requestRemove([path])}
-            onRefresh={refreshWorkspaceFiles}
-            onAddRecentFile={addRecentFile}
+            emptyMessage={hasQuery ? "未找到匹配文件" : hiddenCount > 0 ? `${hiddenCount} 个系统文件已隐藏` : "暂无文件，点击上方上传"}
           />
-        </>
-      ) : (
-        <FlatFileListView
-          files={visibleFiles}
-          recentTimestamps={recentTimestamps}
-          sessionId={activeSessionId ?? undefined}
-          draggingPath={draggingPath}
-          selectMode={selectMode}
-          selectedPaths={selectedPaths}
-          onDragStart={handleDragStart}
-          onDragEnd={handleDragEnd}
-          onClick={handleClick}
-          onDoubleClick={handleDoubleClick}
-          onRemove={(path) => requestRemove([path])}
-        />
-      )}
-
-      {false && wsFilesLoaded && wsFilePaths.length === 0 && embedded && (
-        <div className="flex flex-col items-center gap-2 py-4 text-center">
-          <FileSpreadsheet className="h-6 w-6 text-muted-foreground/40" />
-          <span className="text-[11px] text-muted-foreground/60">
-            {hiddenCount > 0
-              ? `${hiddenCount} 个系统文件已隐藏，点击眼睛图标显示`
-              : "暂无文件，点击上方 + 上传"}
-          </span>
-        </div>
-      )}
-
-      {dialogOpen && (
-        <ExcelFilesDialog
-          files={scopedRecentFiles}
-          sessionId={activeSessionId ?? undefined}
-          onClose={() => setDialogOpen(false)}
-          onClickFile={handleClick}
-          onDoubleClickFile={handleDoubleClick}
-          onRemoveFile={(path) => requestRemove([path])}
-        />
-      )}
+        )}
+      </div>
 
       <input
         id={fileInputId}
@@ -909,10 +904,12 @@ interface TreeViewProps {
   onRemove: (path: string) => void;
   onRefresh: () => void;
   onAddRecentFile: (file: { path: string; filename: string }) => void;
+  emptyMessage?: string;
 }
 
 function FileTreeView(props: TreeViewProps) {
-  const tree = buildTree(props.files);
+  const tree = useMemo(() => buildTree(props.files), [props.files]);
+  const [visibleCount, setVisibleCount] = useState(100);
   const folderUploadRef = useRef<HTMLInputElement>(null);
   const [uploadTargetFolder, setUploadTargetFolder] = useState("");
 
@@ -946,10 +943,10 @@ function FileTreeView(props: TreeViewProps) {
     <div className="space-y-0.5">
       {tree.children.length === 0 && (
         <div className="px-2 py-3 text-[11px] text-muted-foreground/60 text-center">
-          暂无文件，点击上方 + 上传
+          {props.emptyMessage ?? "暂无文件，点击上方上传"}
         </div>
       )}
-      {tree.children.map((node) => (
+      {tree.children.slice(0, visibleCount).map((node) => (
         <TreeNodeItem
           key={node.fullPath}
           node={node}
@@ -970,6 +967,12 @@ function FileTreeView(props: TreeViewProps) {
           }}
         />
       ))}
+      {tree.children.length > visibleCount && (
+        <button type="button" className="w-full p-2 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setVisibleCount((count) => count + 100)}>
+          显示更多（剩余 {tree.children.length - visibleCount} 项）
+        </button>
+      )}
       <input
         ref={folderUploadRef}
         type="file"

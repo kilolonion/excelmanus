@@ -1,7 +1,8 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { buildApiUrl, getAuthHeaders } from "@/lib/api";
+import { buildApiUrl, directFetch, getAuthHeaders } from "@/lib/api";
+import { formatApiErrorMessage } from "@/lib/api-error";
 
 /**
  * 通过 fetch + Authorization header 加载图片为 blob URL。
@@ -17,44 +18,55 @@ import { buildApiUrl, getAuthHeaders } from "@/lib/api";
 export function useAuthImage(apiPath: string | undefined, enabled = true) {
   const [blobUrl, setBlobUrl] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState(false);
-  const prevUrlRef = useRef<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const activeUrlRef = useRef<string | null>(null);
 
   useEffect(() => {
     if (!apiPath || !enabled) {
       setBlobUrl(null);
       setLoading(false);
-      setError(false);
+      setError(null);
       return;
     }
 
-    const url = buildApiUrl(apiPath);
-
-    // 避免重复请求同一 URL
-    if (url === prevUrlRef.current && blobUrl) return;
+    // 桌面版后端端口由 Electron 启动时动态分配。图片必须显式走运行时
+    // 后端地址，不能落到 Next.js 构建时固化的同源 rewrite。
+    const url = buildApiUrl(apiPath, { direct: true });
 
     let cancelled = false;
     let objectUrl: string | null = null;
+    const controller = new AbortController();
 
     const load = async () => {
       setLoading(true);
-      setError(false);
+      setError(null);
+      setBlobUrl(null);
 
       try {
-        const res = await fetch(url, { headers: { ...getAuthHeaders() } });
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const res = await directFetch(url, {
+          headers: { ...getAuthHeaders() },
+          signal: controller.signal,
+        });
+        if (!res.ok) {
+          const data = await res.json().catch(() => ({}));
+          throw new Error(formatApiErrorMessage(data, res.status));
+        }
+        const contentType = (res.headers.get("content-type") || "").toLowerCase();
+        if (!contentType.startsWith("image/")) {
+          throw new Error(`服务器返回了非图片内容（${contentType || "未知类型"}）`);
+        }
 
         const blob = await res.blob();
         if (cancelled) return;
 
         objectUrl = URL.createObjectURL(blob);
-        prevUrlRef.current = url;
+        activeUrlRef.current = objectUrl;
         setBlobUrl(objectUrl);
         setLoading(false);
-      } catch {
+      } catch (err) {
         if (!cancelled) {
           setLoading(false);
-          setError(true);
+          setError(err instanceof Error ? err.message : "图片请求失败");
         }
       }
     };
@@ -63,19 +75,19 @@ export function useAuthImage(apiPath: string | undefined, enabled = true) {
 
     return () => {
       cancelled = true;
+      controller.abort();
       if (objectUrl) {
         URL.revokeObjectURL(objectUrl);
+        if (activeUrlRef.current === objectUrl) activeUrlRef.current = null;
       }
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [apiPath, enabled]);
 
-  // 组件卸载时清理 blob URL
+  // 兜底清理：正常路径由上面的 effect cleanup 回收。
   useEffect(() => {
     return () => {
-      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      if (activeUrlRef.current) URL.revokeObjectURL(activeUrlRef.current);
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return { blobUrl, loading, error };

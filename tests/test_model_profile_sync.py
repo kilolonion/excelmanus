@@ -1,0 +1,186 @@
+"""DB → 模型 API → 已有/新建会话的回归验证；不调用外部模型。"""
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
+from urllib.parse import quote
+
+import pytest
+import pytest_asyncio
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
+from starlette.requests import Request
+
+from excelmanus.api_app_state import get_runtime, set_config_store
+from excelmanus.api_routes_config import router
+from excelmanus.config import ExcelManusConfig
+from excelmanus.config_transfer import export_config
+from excelmanus.database import Database
+from excelmanus.session import SessionManager
+from excelmanus.stores.config_store import GlobalConfigStore, UserConfigStore
+from excelmanus.tools import ToolRegistry
+
+
+def profile(name="first", model="model-a"):
+    return dict(name=name, model=model, api_key="fake-local-key", base_url="https://unit.invalid/v1")
+
+
+@pytest_asyncio.fixture
+async def setup(tmp_path, monkeypatch):
+    db = Database(str(tmp_path / "models.db"))
+    store = GlobalConfigStore(db)
+    config = ExcelManusConfig(
+        api_key="fake-bootstrap-key", base_url="https://unit.invalid/v1", model="bootstrap",
+        workspace_root=str(tmp_path), db_path=str(tmp_path / "models.db"),
+        memory_enabled=False,
+    )
+    # 客户端构建也使用替身，确保不会意外发出模型请求；会话/路由/数据库使用真实实现。
+    monkeypatch.setattr("excelmanus.engine_core.llm_client_manager.create_client", lambda **kw: SimpleNamespace(**kw))
+    monkeypatch.setattr("excelmanus.engine.AgentEngine.initialize_mcp", AsyncMock())
+    monkeypatch.setattr("excelmanus.engine.AgentEngine.shutdown_mcp", AsyncMock())
+    monkeypatch.setattr("excelmanus.engine.AgentEngine.start_registry_scan", lambda *a, **kw: False)
+    manager = SessionManager(5, 60, config=config, registry=ToolRegistry(), database=db, config_store=store)
+    runtime = get_runtime()
+    runtime.config = config
+    runtime.session_manager = manager
+    runtime.database = db
+    set_config_store(store)
+    app = FastAPI()
+    app.include_router(router)
+    app.state.runtime = runtime
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://unit") as client:
+        yield SimpleNamespace(client=client, manager=manager, store=store, config=config,
+                              user=UserConfigStore(db.conn), app=app)
+    await manager.shutdown()
+    db.close()
+
+
+async def engine_for(s):
+    sid, engine = await s.manager.acquire_for_chat(None)
+    await s.manager.release_for_chat(sid)
+    return sid, engine
+
+
+@pytest.mark.asyncio
+async def test_create_rename_switch_delete_updates_actual_sessions(setup):
+    s = setup
+    assert (await s.client.post("/api/v1/config/models/profiles", json=profile())).status_code == 201
+    sid, engine = await engine_for(s)
+    name = "供应商/model #2?"
+    path = "/api/v1/config/models/profiles/" + quote(name, safe="")
+    assert (await s.client.post("/api/v1/config/models/profiles", json=profile(name, "model-b"))).status_code == 201
+    assert name in engine.model_names()
+    assert name in [m["name"] for m in (await s.client.get("/api/v1/models")).json()["models"]]
+    assert (await s.client.put("/api/v1/models/active", json={"name": name})).status_code == 200
+    assert engine.current_model == "model-b"
+    assert s.user.get_active_model() == name
+    assert (await s.client.put(path, json=profile("renamed", "model-c"))).status_code == 200
+    assert engine.current_model_name == "renamed"
+    assert engine.current_model == "model-c"
+    _, fresh = await engine_for(s)
+    assert fresh.current_model_name == "renamed"
+    assert (await s.client.delete("/api/v1/config/models/profiles/renamed")).status_code == 200
+    assert engine.current_model_name == fresh.current_model_name == "first"
+    assert (await s.client.delete("/api/v1/config/models/profiles/first")).status_code == 200
+    assert (await s.client.get("/api/v1/models")).json()["models"] == []
+    assert s.user.get_active_model() is None
+    assert s.config.model == s.config.api_key == s.config.base_url == ""
+    assert get_runtime().config_incomplete
+    assert (await s.manager.get_session_detail(sid))["current_model_name"] is None
+    s.manager._refresh_engine_model_profiles(engine)
+    assert engine.model_names() == []
+
+
+@pytest.mark.asyncio
+async def test_import_activates_first_profile_and_reloads_active_client(setup):
+    s = setup
+    token = export_config({"profiles": [profile()]}, mode="simple")
+    assert (await s.client.post("/api/v1/config/import", json={"token": token})).status_code == 200
+    assert s.user.get_active_model() == "first"
+    _, engine = await engine_for(s)
+    token = export_config({"profiles": [profile(model="model-updated"), profile("second")]}, mode="simple")
+    assert (await s.client.post("/api/v1/config/import", json={"token": token})).status_code == 200
+    assert engine.current_model == s.config.model == "model-updated"
+    assert "second" in engine.model_names()
+    assert engine._client.model == "model-updated"
+
+
+@pytest.mark.asyncio
+async def test_description_can_be_explicitly_cleared(setup):
+    s = setup
+    payload = {**profile(), "description": "自定义描述"}
+    assert (await s.client.post("/api/v1/config/models/profiles", json=payload)).status_code == 201
+    # 省略 description 保留原值；显式空字符串清除原值。
+    assert (await s.client.put("/api/v1/config/models/profiles/first", json=profile())).status_code == 200
+    assert s.store.get_profile("first")["description"] == "自定义描述"
+    assert (await s.client.put("/api/v1/config/models/profiles/first", json={**profile(), "description": ""})).status_code == 200
+    assert (await s.client.get("/api/v1/models")).json()["models"][0]["description"] == ""
+
+
+@pytest.mark.asyncio
+async def test_invalid_import_does_not_leave_unannounced_partial_profiles(setup):
+    s = setup
+    token = export_config({"profiles": [profile(), profile("placeholder", "test-model")]}, mode="simple")
+    assert (await s.client.post("/api/v1/config/import", json={"token": token})).status_code == 400
+    assert s.store.list_profiles() == []
+    assert s.config.models == ()
+
+
+@pytest.mark.asyncio
+async def test_partial_import_reports_saved_names_and_synchronizes_them(setup, monkeypatch):
+    s = setup
+    await s.client.post("/api/v1/config/models/profiles", json=profile())
+    _, engine = await engine_for(s)
+    add = s.store.add_profile
+    monkeypatch.setattr(s.store, "add_profile", lambda **kw: False if kw["name"] == "broken" else add(**kw))
+    token = export_config({"profiles": [profile("saved"), profile("broken")]}, mode="simple")
+    response = await s.client.post("/api/v1/config/import", json={"token": token})
+    assert response.status_code == 500
+    assert response.json()["imported"] == {"profiles": ["saved"]}
+    assert "saved" in engine.model_names()
+    assert "broken" not in engine.model_names()
+
+
+@pytest.mark.asyncio
+async def test_failures_do_not_report_success(setup, monkeypatch):
+    s = setup
+    await s.client.post("/api/v1/config/models/profiles", json=profile())
+    await s.client.post("/api/v1/config/models/profiles", json=profile("second"))
+    _, engine = await engine_for(s)
+    monkeypatch.setattr(engine, "switch_model", lambda name: "未找到模型")
+    response = await s.client.put("/api/v1/models/active", json={"name": "second"})
+    assert response.status_code == 409
+    assert s.user.get_active_model() == engine.current_model_name == "first"
+    assert (await s.client.put("/api/v1/models/active", json={"name": "openai-codex/not-saved"})).status_code == 404
+    assert (await s.client.put("/api/v1/config/models/profiles/first", json=profile("second"))).status_code == 409
+    monkeypatch.setattr(s.store, "update_profile", lambda *a, **kw: False)
+    assert (await s.client.put("/api/v1/config/models/profiles/first", json=profile())).status_code == 500
+
+
+@pytest.mark.asyncio
+async def test_oauth_autocreate_restore_and_disconnect_sync_existing_engine(setup, monkeypatch):
+    from excelmanus.auth.router import _auto_add_codex_default_model, _sync_subscription_sessions
+    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
+
+    s = setup
+    await s.client.post("/api/v1/config/models/profiles", json=profile())
+    _, engine = await engine_for(s)
+    credentials = MagicMock()
+    credentials.get_active_profile.return_value = SimpleNamespace(access_token="fake-oauth-token")
+    s.manager.set_credential_store(credentials)
+    monkeypatch.setattr("excelmanus.auth.providers.registry.list_all", lambda: {"codex": OpenAICodexProvider})
+    request = Request({"type": "http", "app": s.app})
+    assert _auto_add_codex_default_model(request)
+    await _sync_subscription_sessions(request)
+    codex = "openai-codex/gpt-6-astra"
+    assert codex in engine.model_names()
+    assert (await s.client.put("/api/v1/models/active", json={"name": codex})).status_code == 200
+    assert engine._active_api_key == "fake-oauth-token"
+    # OAuth 身份由 model 也能识别，用户重命名档案不应丢失凭证。
+    renamed = profile("my-subscription", codex)
+    renamed["api_key"] = ""
+    assert (await s.client.put("/api/v1/config/models/profiles/" + codex, json=renamed)).status_code == 200
+    # 新会话从 DB 恢复激活档案，不得用空的 api_key 覆盖注入凭证。
+    _, fresh = await engine_for(s)
+    assert fresh._active_api_key == "fake-oauth-token"
+    credentials.get_active_profile.return_value = None
+    await _sync_subscription_sessions(request)
+    assert engine._active_api_key == fresh._active_api_key == ""

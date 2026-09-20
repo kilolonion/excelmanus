@@ -1,26 +1,22 @@
 "use client";
 
 import { motion } from "framer-motion";
-import { ArrowLeft, Crown, Loader2, Sparkles } from "lucide-react";
+import { ArrowLeft, ArrowRight, Crown, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PROVIDER_GUIDES, PROVIDER_LOGO_SLUG } from "../provider-guides";
+import { PROVIDER_GUIDES } from "../provider-guides";
+import { PROVIDER_LOGO_SLUG } from "../../settings/model/constants";
 import type { ProviderGuide } from "../provider-guides";
 
 const smoothEase: [number, number, number, number] = [0.4, 0, 0.2, 1];
 
 const containerVariants = {
   hidden: {},
-  show: { transition: { staggerChildren: 0.05, delayChildren: 0.1 } },
+  show: { transition: { staggerChildren: 0.045, delayChildren: 0.08 } },
 };
 
 const cardVariants = {
-  hidden: { opacity: 0, y: 16, scale: 0.96 },
-  show: {
-    opacity: 1,
-    y: 0,
-    scale: 1,
-    transition: { duration: 0.35, ease: smoothEase },
-  },
+  hidden: { opacity: 0, y: 12 },
+  show: { opacity: 1, y: 0, transition: { duration: 0.3, ease: smoothEase } },
 };
 
 function ProviderLogo({ id }: { id: string }) {
@@ -28,9 +24,9 @@ function ProviderLogo({ id }: { id: string }) {
   if (!slug) return null;
   return (
     <span
-      className="inline-block h-6 w-6 shrink-0"
+      className="inline-block h-7 w-7 shrink-0"
       role="img"
-      aria-label={id}
+      aria-label={`${id} logo`}
       style={{
         backgroundColor: "currentColor",
         maskImage: `url(/providers/${slug}.svg)`,
@@ -62,101 +58,63 @@ export function ProviderSelectStep({
   onGoConnectOAuth,
 }: ProviderSelectStepProps) {
   return (
-    <div className="em-onboarding-step flex flex-col items-center min-h-full px-4 py-6 sm:px-6 sm:py-8">
-      {/* Header */}
-      <div className="max-w-2xl w-full mb-6 sm:mb-8">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={onBack}
-          className="gap-1.5 text-muted-foreground -ml-2 mb-4"
-        >
-          <ArrowLeft className="h-4 w-4" />
+    <div className="em-onboarding-step em-onboarding-provider-select">
+      <div className="em-onboarding-step-heading">
+        <Button variant="ghost" size="sm" onClick={onBack} className="em-onboarding-back-button">
+          <ArrowLeft aria-hidden="true" />
           返回
         </Button>
-
-        <h2 className="text-2xl font-bold tracking-tight mb-2">
-          选择你的 AI 模型供应商
-        </h2>
-        <p className="text-sm text-muted-foreground">
-          选择一个供应商获取 API Key，之后随时可以在设置中修改或添加更多模型
-        </p>
-
-        {checkingOAuthConnectStatus && (
-          <div className="mt-4 rounded-xl border border-border/60 bg-muted/30 p-3.5 flex items-center gap-2 text-sm text-muted-foreground">
-            <Loader2 className="h-4 w-4 animate-spin" />
-            正在检查 OAuth 连接状态...
-          </div>
-        )}
-
-        {!checkingOAuthConnectStatus && showOAuthConnectGuide && onGoConnectOAuth && (
-          <div className="mt-4 rounded-xl border border-[var(--em-primary)]/35 bg-[var(--em-primary-alpha-06)] p-4 sm:p-4.5 space-y-3">
-            <div className="flex items-start gap-2.5">
-              <div
-                className="mt-0.5 flex h-7 w-7 items-center justify-center rounded-lg"
-                style={{ backgroundColor: "var(--em-primary-alpha-15)" }}
-              >
-                <Sparkles className="h-4 w-4" style={{ color: "var(--em-primary)" }} />
-              </div>
-              <div className="min-w-0">
-                <p className="text-sm font-semibold">检测到你正在使用 OAuth 登录</p>
-                <p className="text-xs text-muted-foreground mt-1 leading-relaxed">
-                  先连接 OpenAI Codex 订阅，可自动添加可用模型，无需手动填 API Key。
-                </p>
-              </div>
-            </div>
-            <Button
-              onClick={onGoConnectOAuth}
-              className="h-9 text-sm text-white"
-              style={{ backgroundColor: "var(--em-primary)" }}
-            >
-              去连接并自动添加模型
-            </Button>
-          </div>
-        )}
+        <div className="em-onboarding-eyebrow">第 2 步 · 选择连接方式</div>
+        <h2 tabIndex={-1}>连接一个 AI 模型</h2>
+        <p>选择你常用的供应商，使用 API Key 或订阅授权连接。之后可在设置中随时切换或添加模型。</p>
       </div>
 
-      {/* Provider cards grid */}
+      {checkingOAuthConnectStatus && (
+        <div className="em-onboarding-inline-notice" role="status">
+          <Loader2 className="animate-spin" aria-hidden="true" />
+          正在检查 OAuth 连接状态…
+        </div>
+      )}
+
+      {!checkingOAuthConnectStatus && showOAuthConnectGuide && onGoConnectOAuth && (
+        <div className="em-onboarding-oauth-banner">
+          <span className="em-onboarding-feature-icon"><Sparkles aria-hidden="true" /></span>
+          <div>
+            <strong>可以直接使用 ChatGPT 订阅</strong>
+            <p>连接 OpenAI Codex，无需手动填写 API Key。</p>
+          </div>
+          <Button onClick={onGoConnectOAuth} size="sm">去连接 <ArrowRight aria-hidden="true" /></Button>
+        </div>
+      )}
+
       <motion.div
-        className="grid grid-cols-1 sm:grid-cols-2 gap-3 max-w-2xl w-full"
+        className="em-onboarding-provider-grid"
         variants={containerVariants}
         initial="hidden"
         animate="show"
+        aria-label="AI 模型供应商"
       >
         {PROVIDER_GUIDES.map((provider) => (
           <motion.button
             key={provider.id}
             variants={cardVariants}
             whileHover={{ y: -2, transition: { duration: 0.15 } }}
-            whileTap={{ scale: 0.98 }}
+            whileTap={{ scale: 0.985 }}
             onClick={() => onSelect(provider)}
-            className="em-onboarding-card group relative flex items-start gap-3.5 rounded-xl border border-border/60 bg-background/80 backdrop-blur-sm p-4 text-left transition-all duration-200 hover:border-[var(--em-primary)]/40 hover:shadow-md hover:bg-[var(--em-primary-alpha-06)] cursor-pointer"
+            className={`em-onboarding-provider-card${provider.recommended ? " is-recommended" : ""}`}
+            type="button"
+            aria-label={`使用 ${provider.label}`}
           >
-            {/* Recommended badge */}
-            {provider.recommended && (
-              <div
-                className="absolute -top-2 right-3 flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-semibold text-white"
-                style={{ backgroundColor: "var(--em-primary)" }}
-              >
-                <Crown className="h-2.5 w-2.5" />
-                推荐
-              </div>
-            )}
-
-            {/* Logo */}
-            <div className="flex-shrink-0 w-10 h-10 rounded-lg bg-muted/50 flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-10)] transition-colors">
-              <ProviderLogo id={provider.id} />
-            </div>
-
-            {/* Info */}
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold group-hover:text-foreground transition-colors">
+            <span className="em-onboarding-provider-logo"><ProviderLogo id={provider.id} /></span>
+            <span className="em-onboarding-provider-copy">
+              <span className="em-onboarding-provider-title">
                 {provider.label}
-              </p>
-              <p className="text-xs text-muted-foreground mt-0.5 leading-relaxed line-clamp-2">
-                {provider.description}
-              </p>
-            </div>
+                {provider.recommended && <span className="em-onboarding-recommended"><Crown aria-hidden="true" /> 推荐</span>}
+              </span>
+              <span className="em-onboarding-provider-description">{provider.description}</span>
+              <span className="em-onboarding-provider-pricing">{provider.pricing}</span>
+            </span>
+            <ArrowRight className="em-onboarding-provider-arrow" aria-hidden="true" />
           </motion.button>
         ))}
       </motion.div>

@@ -686,6 +686,10 @@ def read_text_file(
     if max_rows is not None:
         max_lines = int(max_rows)
     guard = _get_guard()
+    from excelmanus.engine_core.spill import is_spill_reference, retrieve_spill_result
+
+    if is_spill_reference(file_path):
+        return retrieve_spill_result(file_path, workspace_root=guard.workspace_root)
     safe_path = guard.resolve_and_validate(file_path)
 
     if not safe_path.is_file():
@@ -792,11 +796,13 @@ def copy_file(source: str, destination: str) -> ToolResult:
 
     dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
     try:
+        from excelmanus.tools.context import operation_id_for
         cr = commit_bytes(
             guard=guard,
             file_path=dst_rel,
             data=src_path.read_bytes(),
             expected_version=None,
+            operation_id=operation_id_for(dst_rel),
         )
     except CommitError as exc:
         return commit_error_result(exc)
@@ -844,11 +850,13 @@ def rename_file(
     src_rel = str(src_path.relative_to(guard.workspace_root)).replace("\\", "/")
     dst_rel = str(dst_path.relative_to(guard.workspace_root)).replace("\\", "/")
     try:
+        from excelmanus.tools.context import operation_id_for
         cr = commit_move(
             guard=guard,
             source=src_rel,
             destination=dst_rel,
             expected_version=expected_version,
+            operation_id=operation_id_for(dst_rel),
         )
     except CommitError as exc:
         return commit_error_result(exc)
@@ -914,10 +922,12 @@ def delete_file(
     rel = str(safe_path.relative_to(guard.workspace_root)).replace("\\", "/")
     size = _format_size(safe_path.stat().st_size)
     try:
+        from excelmanus.tools.context import operation_id_for
         cr = commit_unlink(
             guard=guard,
             file_path=rel,
             expected_version=expected_version,
+            operation_id=operation_id_for(rel),
         )
     except CommitError as exc:
         return commit_error_result(exc)
@@ -1047,6 +1057,7 @@ def get_tools() -> list[ToolDef]:
             name="read_text_file",
             description=(
                 "读取文本文件内容（md、txt、py、json、csv、yaml、toml 等）。"
+                "也可取回工具大结果：file_path 原样传 spill/result_spill/selection_spill 字段的值（spill:…）；返回完整原始结果，不按文本行数截断。"
                 "适用场景：查看脚本源码、配置文件、文档、日志等非 Excel 文本文件。"
                 "不适用：Excel/二进制文件请用 inspect_spreadsheet。"
                 "返回文件内容与行数信息；超长文件自动截断。"
@@ -1056,7 +1067,7 @@ def get_tools() -> list[ToolDef]:
                 "properties": {
                     "file_path": {
                         "type": "string",
-                        "description": "文件路径（相对于工作目录）",
+                        "description": "工作区相对文件路径，或结果字段返回的完整 spill:… 句柄。句柄不是磁盘路径，原样传入，不要拼接字段名或目录。",
                     },
                     "encoding": {
                         "type": "string",

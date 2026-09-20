@@ -3,7 +3,7 @@
 assemble 产出请求投影（messages）；seal 产出出网载荷（wire_messages）。
 连续两步 identity 相同且 compaction / projection generation 不变时，tools /
 system / 历史前缀必须字节相同。动态事实只追加到 durable 尾部。
-plan/code 切换只追加 system，不改 messages[0]。这是唯一路径。
+计划模式切换只追加 system，不改 messages[0]。这是唯一路径。
 """
 
 from __future__ import annotations
@@ -16,7 +16,11 @@ from typing import Any
 
 from excelmanus.attachments.project import content_has_image, strip_projection_meta
 from excelmanus.engine_utils import build_mention_context_block
-from excelmanus.prompt.assemble import prepare_system_prompts_for_request
+from excelmanus.prompt.assemble import (
+    commit_prompt_dynamic,
+    prepare_system_prompts_for_request,
+    rollback_prompt_dynamic,
+)
 from excelmanus.tools.runtime import schema_tool_name
 
 logger = logging.getLogger(__name__)
@@ -351,37 +355,53 @@ def _memory_of(engine: Any) -> Any:
     return getattr(engine, "_memory", None) or getattr(engine, "memory", None)
 
 
-def flush_dynamic_contexts(engine: Any) -> list[str]:
+def flush_dynamic_contexts(
+    engine: Any,
+    *,
+    defer_commit: bool = False,
+) -> list[str]:
     """把 mention / hook / 技能快照追加到 durable 尾部，禁止插在 system 与历史之间。"""
     appended: list[str] = []
+    appended_messages: list[Any] = []
     memory = _memory_of(engine)
     if memory is None:
         return appended
 
     mentions = getattr(engine, "_mention_contexts", None) or []
+    engine._mention_contexts_pending_restore = list(mentions)
     mention_block = build_mention_context_block(mentions)
     mention_digest = digest_text(mention_block)
     if mention_block:
         memory.add_user_message(mention_block, hidden=True, prompt_kind="mention")
         appended.append(mention_block)
-    # 引用是本次用户消息的事实。消费一次后清空，不能仅按正文去重：
-    # 相邻两轮可选择同一格，仍应各自携带定位与版本。
-    engine._mention_contexts = []
-    engine._mention_flush_digest = mention_digest
+        messages = getattr(memory, "messages", None)
+        if isinstance(messages, list) and messages:
+            appended_messages.append(messages[-1])
+    # 请求编译可延迟消费；兼容直接调用此 helper 的路径则保持一次性语义。
+    if defer_commit:
+        engine._mention_pending_digest = mention_digest
+    else:
+        engine._mention_contexts = []
+        engine._mention_flush_digest = mention_digest
 
     pending = list(getattr(engine, "_prompt_user_contexts", None) or [])
-    engine._prompt_user_contexts = []
+    engine._prompt_contexts_pending_restore = list(pending)
     for text in pending:
         if isinstance(text, str) and text.strip():
             kind = "hook" if text.startswith("## Hook 上下文") else "prompt_context"
             memory.add_user_message(text, hidden=True, prompt_kind=kind)
             appended.append(text)
+            messages = getattr(memory, "messages", None)
+            if isinstance(messages, list) and messages:
+                appended_messages.append(messages[-1])
+    engine._prompt_dynamic_appended_messages = appended_messages
+    if not defer_commit:
+        engine._prompt_user_contexts = []
     return appended
 
 
 @dataclass(frozen=True)
 class EnvelopeIdentity:
-    present_as: str
     plan_active: bool
     tool_access: str
     tools_digest: str
@@ -439,7 +459,7 @@ def assert_prefix_stable(prev: RequestEnvelope, curr: RequestEnvelope) -> None:
 
 
 def assert_in_history_keeps_head(prev: RequestEnvelope, curr: RequestEnvelope) -> None:
-    """in-history 且 tools 未变时，plan/code 切换不得改 messages[0]。"""
+    """in-history 且 tools 未变时，计划模式切换不得改 messages[0]。"""
     if not curr.in_history or not prev.in_history:
         return
     if prev.compaction_generation != curr.compaction_generation:
@@ -455,7 +475,7 @@ def assert_in_history_keeps_head(prev: RequestEnvelope, curr: RequestEnvelope) -
 
 
 def resolve_envelope_tools(engine: Any, *, tool_access: str) -> list[dict[str, Any]]:
-    """唯一来源是 MetaToolBuilder（L4：present_as 坍缩后再 ∩ sticky profile）。"""
+    """唯一来源是 MetaToolBuilder（授权目录、初始披露与本轮已加载工具）。"""
     builder = getattr(engine, "_meta_tool_builder", None)
     getter = getattr(builder, "build_v5_tools", None)
     if callable(getter):
@@ -494,6 +514,7 @@ def assemble_envelope(
     tool_access: str = "may_write",
     vision_capable: bool | None = None,
     persist: bool = True,
+    commit_dynamic: bool = True,
 ) -> tuple[RequestEnvelope | None, str | None]:
     """组装本步唯一请求信封。失败时返回 (None, error)。
 
@@ -505,7 +526,7 @@ def assemble_envelope(
     if error is not None:
         return None, error
     if persist:
-        flush_dynamic_contexts(engine)
+        flush_dynamic_contexts(engine, defer_commit=not commit_dynamic)
 
     system = prepared[0] if prepared else ""
     tools = resolve_envelope_tools(engine, tool_access=tool_access)
@@ -579,6 +600,11 @@ def assemble_envelope(
             )
         except Exception as exc:
             logger.error("envelope projection failed: %s", exc, exc_info=True)
+            rollback_prompt_dynamic(
+                engine,
+                getattr(engine, "_prompt_dynamic_appended_messages", None),
+            )
+            engine._prompt_dynamic_appended_messages = []
             return None, f"请求投影失败: {exc}"
 
     proj_gen = getattr(engine, "_projection_generation", 0)
@@ -590,10 +616,7 @@ def assemble_envelope(
         if image_report.get("rewrote_pinned_inline"):
             proj_gen += 1
 
-    from excelmanus.tools.runtime import present_as_of
-
     identity = EnvelopeIdentity(
-        present_as=present_as_of(engine),
         plan_active=(getattr(engine, "_current_chat_mode", "write") or "write") == "plan",
         tool_access=tool_access,
         tools_digest=digest_tools(tools),
@@ -629,6 +652,11 @@ def assemble_envelope(
         except AssertionError as exc:
             logger.error("request envelope prefix invariant broken: %s", exc)
             # fail closed：绝不带着已改写/缩短的前缀继续出网。
+            rollback_prompt_dynamic(
+                engine,
+                getattr(engine, "_prompt_dynamic_appended_messages", None),
+            )
+            engine._prompt_dynamic_appended_messages = []
             return None, f"请求信封前缀不变量破坏: {exc}"
     if persist:
         if memory is not None:
@@ -654,6 +682,11 @@ def assemble_envelope(
         from excelmanus.prompt.cache_restore import remember_prefix_snapshot
 
         remember_prefix_snapshot(engine, envelope)
+        if commit_dynamic:
+            commit_prompt_dynamic(engine)
+        engine._prompt_dynamic_appended_messages = [] if commit_dynamic else getattr(
+            engine, "_prompt_dynamic_appended_messages", []
+        )
     return envelope, None
 
 

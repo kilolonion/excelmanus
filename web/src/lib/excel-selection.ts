@@ -10,10 +10,12 @@ export function readActiveRange(api: {
           getColumn?: () => number;
           getNumRows?: () => number;
           getNumColumns?: () => number;
-        };
-      };
-    };
-  };
+          getHeight?: () => number;
+          getWidth?: () => number;
+        } | null;
+      } | null;
+    } | null;
+  } | null;
 } | null): { sheet?: string; range?: string } {
   try {
     const sheet = api?.getActiveWorkbook?.()?.getActiveSheet?.();
@@ -23,8 +25,8 @@ export function readActiveRange(api: {
     const row = selected?.getRow?.();
     const col = selected?.getColumn?.();
     if (row == null || col == null) return { sheet: sheetName };
-    const rows = selected?.getNumRows?.() ?? 1;
-    const cols = selected?.getNumColumns?.() ?? 1;
+    const rows = selected?.getHeight?.() ?? selected?.getNumRows?.() ?? 1;
+    const cols = selected?.getWidth?.() ?? selected?.getNumColumns?.() ?? 1;
     if (![row, col, rows, cols].every(Number.isInteger) || row < 0 || col < 0 || rows < 1 || cols < 1) {
       return { sheet: sheetName };
     }

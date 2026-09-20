@@ -20,7 +20,6 @@ def _ask_engine(*, jev_enabled: str = "shadow"):
             jev_enabled=jev_enabled,
             jev_exposure="off",
             jev_mode_hint=False,
-            jev_present_as_auto=False,
             jev_observation="off",
             jev_ui_hint=False,
             jev_model="jev-1.13.0",

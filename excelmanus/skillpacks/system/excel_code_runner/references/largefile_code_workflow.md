@@ -1,38 +1,37 @@
-# 大文件 Excel 代码执行参考
+# 大表的读取、计算和版本
 
-## 快速模板
+标准汇总直接用 analyze_spreadsheet(mode="aggregate")，分文件直接用 split_spreadsheet。
+以下仅用于 native 工具未覆盖的逐行 Python 计算。每页的 data 才是当前窗口，preview 只是样本。
 
 ```python
-from pathlib import Path
-import pandas as pd
+from em import inspect_spreadsheet
 
-input_file = Path("input.xlsx")
-output_file = Path("outputs/result.csv")
-output_file.parent.mkdir(parents=True, exist_ok=True)
-
-df = pd.read_excel(
-    input_file,
-    sheet_name=0,
-    usecols=None,
-    nrows=200000,
-)
-
-result = (
-    df.groupby("月份", dropna=False)["销售额"]
-    .sum()
-    .reset_index()
-    .sort_values("销售额", ascending=False)
-)
-result.to_csv(output_file, index=False)
-print(f"rows={len(df)} output={output_file}")
+try:
+    offset = 0
+    version = None
+    total = 0.0
+    processed = 0
+    while True:
+        page = inspect_spreadsheet(
+            file_path="outputs/book.xlsx", sheet_name="Sheet1", mode="range",
+            header_row=1, offset=offset, max_rows=1000, expected_version=version,
+        )
+        version = page["content_version"]
+        records = page["data"]
+        for row in records:
+            if row.get("金额") is None:
+                raise ValueError("金额含空白或无缓存公式，不能当作 0")
+            total += float(row["金额"])
+        processed += len(records)
+        if len(records) < 1000:
+            break
+        offset += len(records)
+    print({"processed_rows": processed, "total": total, "content_version": version})
+except Exception as exc:
+    print(f"读取或计算失败，不能使用未完成的汇总: {exc}")
 ```
 
-## 建议参数
-- `usecols`：限制列范围，优先读取业务相关列。
-- `nrows`：先读小样本验证逻辑，再逐步放大。
-- `sheet_name`：显式指定目标 sheet，避免读错表。
-
-## 执行建议
-- 首次执行先用 1k~10k 行验证。
-- 稳定后再执行全量或分批。
-- 输出尽量写文件，返回摘要而非全量明细。
+需要写回时：在同一次计算后把 version 作为 expected_version；修改目标列使用矩阵或 selection，
+不把所有旧列重新写一遍。新建工作簿用 workbook_spec，已有工作簿用 operations。
+分批写入的下一批使用上一批写回返回的版本；中断后检查已提交内容，不重放整个循环。
+每个独立产物都检查 status、warnings 和实际路径后再 offer_download。

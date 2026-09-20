@@ -189,6 +189,19 @@ def format_tool_result(mcp_result: Any) -> str:
     return "\n".join(fallback_parts)
 
 
+def structured_tool_result(mcp_result: Any) -> Any:
+    """Keep MCP structuredContent separate from its human-readable summary."""
+    from excelmanus.engine_core.tool_result import ToolResult, coerce_legacy_result, error_result
+
+    text = format_tool_result(mcp_result)
+    if getattr(mcp_result, "isError", False) is True:
+        return error_result(text or "MCP 工具执行失败", code="TOOL_ERROR")
+    value = getattr(mcp_result, "structuredContent", None)
+    if value is not None:
+        return ToolResult(success=True, model_text=text, value=value)
+    return coerce_legacy_result(text)
+
+
 _EXCEL_SERVER_NAME = "excel"
 _EXCEL_ABSOLUTE_PATH_ARG = "fileAbsolutePath"
 
@@ -261,10 +274,10 @@ def _make_async_tool_func(
     避免 asyncio.run() 创建新 event loop 的开销。
 
     Returns:
-        异步可调用对象，签名为 ``async (**kwargs) -> str``。
+        异步可调用对象，返回 ToolResult。
     """
 
-    async def async_tool_func(**kwargs: Any) -> str:
+    async def async_tool_func(**kwargs: Any) -> Any:
         from excelmanus.engine_core.tool_result import error_result
         from excelmanus.tools.context import ToolContextMissing
 
@@ -279,7 +292,7 @@ def _make_async_tool_func(
         )
         # client.call_tool 内部已有 asyncio.wait_for(timeout) 保护
         result = await client.call_tool(original_name, safe_kwargs)
-        return format_tool_result(result)
+        return structured_tool_result(result)
 
     return async_tool_func
 
@@ -290,7 +303,7 @@ def _make_tool_func(
     original_name: str,
     timeout: int,
     workspace_root: str,
-) -> Callable[..., str]:
+) -> Callable[..., Any]:
     """创建同步包装函数，内部通过 event loop 执行异步 MCP 工具调用。
 
     仅作为 async_func 不可用时的兜底路径。
@@ -304,11 +317,11 @@ def _make_tool_func(
         workspace_root: 当前工作区根目录，用于路径规范化。
 
     Returns:
-        同步可调用对象，签名为 ``(**kwargs) -> str``。
+        同步可调用对象，返回 ToolResult。
     """
 
-    def tool_func(**kwargs: Any) -> str:
-        async def _call() -> str:
+    def tool_func(**kwargs: Any) -> Any:
+        async def _call() -> Any:
             from excelmanus.engine_core.tool_result import error_result
             from excelmanus.tools.context import ToolContextMissing
 
@@ -325,7 +338,7 @@ def _make_tool_func(
                 client.call_tool(original_name, safe_kwargs),
                 timeout=timeout,
             )
-            return format_tool_result(result)
+            return structured_tool_result(result)
 
         # 判断当前是否已有运行中的 event loop
         try:
@@ -470,6 +483,9 @@ def make_tool_def(
     input_schema: dict[str, Any] = (
         _canonicalize_schema(raw_schema) if isinstance(raw_schema, dict) else {}
     )
+    raw_output_schema = getattr(mcp_tool, "output_schema", None)
+    if raw_output_schema is None:
+        raw_output_schema = getattr(mcp_tool, "outputSchema", None)
 
     timeout: int = getattr(getattr(client, "_config", None), "timeout", 30)
 
@@ -504,6 +520,7 @@ def make_tool_def(
         description=tagged_description,
         input_schema=input_schema,
         func=func,
+        output_schema=_canonicalize_schema(raw_output_schema) if isinstance(raw_output_schema, dict) else None,
         async_func=async_func,
         max_result_chars=5000,
         write_effect=write_effect,  # type: ignore[arg-type]

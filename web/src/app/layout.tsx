@@ -15,6 +15,12 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
+// The desktop shell chooses an available backend port at launch time. Keep
+// the runtime configuration script request-scoped so that the packaged
+// standalone server injects that port into every HTML response instead of
+// baking an empty value into the build output.
+export const dynamic = "force-dynamic";
+
 export const metadata: Metadata = {
   title: "ExcelManus",
   description: "基于大语言模型的 Excel 智能代理",

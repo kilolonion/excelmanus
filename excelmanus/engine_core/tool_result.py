@@ -162,13 +162,11 @@ def coerce_legacy_result(raw: Any, *, default_code: str = "TOOL_ERROR") -> "Tool
         return _lift_result_value(raw)
     if isinstance(raw, dict):
         return from_payload(raw)
-    if raw is None:
-        return ToolResult.from_text("", success=True)
-    if isinstance(raw, (int, float, bool)):
-        return ToolResult.from_text(str(raw), success=True)
+    if raw is None or isinstance(raw, (list, int, float, bool)):
+        return ToolResult(success=True, model_text=json.dumps(raw, ensure_ascii=False), value=raw, value_is_set=True)
     text = str(raw)
     stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
+    if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
         try:
             parsed = json.loads(stripped)
         except (json.JSONDecodeError, TypeError, ValueError):
@@ -178,7 +176,20 @@ def coerce_legacy_result(raw: Any, *, default_code: str = "TOOL_ERROR") -> "Tool
             if result.error is not None and result.error.code == "TOOL_ERROR" and default_code != "TOOL_ERROR":
                 result.error.code = default_code
             return result
+        if isinstance(parsed, list):
+            return ToolResult(success=True, model_text=text, value=parsed)
     return ToolResult.from_text(text, success=True)
+
+
+def result_value(result: "ToolResult") -> Any:
+    """Shared Native/SDK value projection; explicit text stays text even if it is JSON."""
+    if result.value is not None or result.value_is_set:
+        return result.value
+    # Compatibility for old ToolResult constructors without a structured value.
+    try:
+        return json.loads(result.model_text)
+    except (ValueError, TypeError):
+        return result.model_text
 
 
 def annotate_shadow_schema_violations(
@@ -188,7 +199,7 @@ def annotate_shadow_schema_violations(
     tool_name: str,
     arguments: dict[str, Any],
 ) -> "ToolResult":
-    """shadow 模式：不阻断，把 schema 违规写入结果载荷供模型自纠。"""
+    """shadow 模式：模型文本附带输入违规提示，SDK value 保持输出合同。"""
     mode = str(getattr(registry, "_schema_validation_mode", "off") or "off").strip().lower()
     if mode != "shadow" or not tool_name:
         return result
@@ -219,7 +230,6 @@ def annotate_shadow_schema_violations(
         updated["remediation"] = hint
         return replace(
             result,
-            value=updated,
             model_text=json.dumps(updated, ensure_ascii=False, default=str),
         )
     wrapped: dict[str, Any] = {
@@ -231,7 +241,6 @@ def annotate_shadow_schema_violations(
     }
     return replace(
         result,
-        value=wrapped,
         model_text=json.dumps(wrapped, ensure_ascii=False, default=str),
     )
 
@@ -402,11 +411,15 @@ class ToolResult:
     error: ToolError | None = None
     truncated: bool = False
     coverage: dict[str, Any] | None = None
+    # Distinguish an explicit JSON null from legacy text-only constructors.
+    # replace()/model-text projections preserve this without reparsing summaries.
+    value_is_set: bool = False
 
     @classmethod
     def from_text(cls, text: str, success: bool = True) -> ToolResult:
-        """未迁移工具的适配器：字符串进 model_text，不解析魔法字段。"""
-        return cls(success=success, model_text=str(text or ""))
+        """Explicit text contract: retain the original string for both consumers."""
+        value = str(text or "")
+        return cls(success=success, model_text=value, value=value)
 
     def with_model_text(self, model_text: str) -> ToolResult:
         return replace(self, model_text=model_text)

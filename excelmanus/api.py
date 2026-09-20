@@ -149,6 +149,8 @@ def _build_bootstrap_config() -> tuple[ExcelManusConfig, ConfigError | None]:
             base_url="https://example.invalid/v1",
             model="",
             cors_allow_origins=tuple(load_cors_allow_origins()),
+            # Fresh profiles lack model credentials but still need packaged skills.
+            skills_system_dir=str(Path(__file__).resolve().parent / "skillpacks" / "system"),
         )
         return fallback, exc
 
@@ -494,7 +496,8 @@ async def _lifespan_bound(app: FastAPI) -> AsyncIterator[None]:
         except Exception:
             logger.debug("启动时后台版本检查失败（非致命）", exc_info=True)
 
-    _fire_and_forget(_background_update_check(), name="update_check")
+    if os.environ.get("EXCELMANUS_DESKTOP") != "1":
+        _fire_and_forget(_background_update_check(), name="update_check")
 
     # ── 附件派生缓存清理（非阻塞，只动可再生数据） ─────────
     async def _background_attachment_sweep() -> None:
@@ -868,7 +871,7 @@ def create_app(
             "Cache-Control",
             "X-ExcelManus-Token",
         ],
-        expose_headers=["X-Request-Id"],
+        expose_headers=["X-Request-Id", "Content-Disposition"],
     )
 
     _register_exception_handlers(application)
@@ -1020,7 +1023,6 @@ from excelmanus.api_routes_sessions import (  # noqa: F401
     list_sessions,
     scan_session_registry,
     toggle_full_access,
-    toggle_present_as,
     undo_approval,
     undo_operation,
     update_session_title_api,
@@ -1117,7 +1119,10 @@ def main() -> None:
     )
     parser.add_argument("--host", type=str, default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--workers", type=int, default=1)
     args, _ = parser.parse_known_args()
+    if args.workers < 1:
+        parser.error("--workers 必须至少为 1")
 
     os.environ["EXCELMANUS_API_PORT"] = str(args.port)
     os.environ["EXCELMANUS_API_HOST"] = args.host
@@ -1126,10 +1131,36 @@ def main() -> None:
 
     require_manage_token_for_bind(args.host)
 
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        from excelmanus import restart
+        server = uvicorn.Server(uvicorn.Config(
+            "excelmanus.api:app", host=args.host, port=args.port, log_level="info",
+            # Cancel long-lived SSE requests before lifespan drains agent state.
+            timeout_graceful_shutdown=10,
+        ))
+        restart._desktop_server = server
+        if os.environ.get("EXCELMANUS_DESKTOP_CONTROL_STDIN") == "1":
+            import threading
+            import sys
+            def read_parent_control() -> None:
+                # EOF means the owning desktop process disappeared.
+                for line in sys.stdin:
+                    if line.strip() == "shutdown":
+                        break
+                server.should_exit = True
+            threading.Thread(target=read_parent_control, name="desktop-control", daemon=True).start()
+        try:
+            server.run()
+        finally:
+            restart._desktop_server = None
+        if restart._desktop_restart_requested:
+            raise SystemExit(75)
+        return
+
     uvicorn.run(
         "excelmanus.api:app",
         host=args.host,
         port=args.port,
         log_level="info",
+        workers=args.workers,
     )
-

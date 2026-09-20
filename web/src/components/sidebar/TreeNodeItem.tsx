@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState } from "react";
+import React, { useMemo, useState } from "react";
 import {
   FilePlus,
   FolderPlus,
@@ -73,11 +73,13 @@ export interface TreeNodeProps {
 
 export function TreeNodeItem(props: TreeNodeProps) {
   const { node, sessionId, depth, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRefresh, onUploadToFolder } = props;
-  const [expanded, setExpanded] = useState(depth < 2);
+  const [expanded, setExpanded] = useState(depth < 2 && node.children.length <= 50);
   const [renaming, setRenaming] = useState(false);
   const [creating, setCreating] = useState<"file" | "folder" | null>(null);
   const [dragOver, setDragOver] = useState(false);
   const [fileInfoPath, setFileInfoPath] = useState<string | null>(null);
+  const [visibleChildren, setVisibleChildren] = useState(100);
+  const fileCount = useMemo(() => countFiles(node), [node]);
   const isFolder = !node.file;
   const indent = depth * 12;
   const isFileActive = useWorkspaceFileActive(node.file?.path ?? "", node.file?.filename);
@@ -225,7 +227,6 @@ export function TreeNodeItem(props: TreeNodeProps) {
             )}
             {(() => {
               const sysLabel = isSysFolderName(node.name);
-              const fileCount = countFiles(node);
               return (
                 <span className="flex items-center gap-1 flex-shrink-0">
                   {sysLabel && (
@@ -281,9 +282,15 @@ export function TreeNodeItem(props: TreeNodeProps) {
                 <InlineCreateInput placeholder={creating === "folder" ? "文件夹名称" : "文件名称"} onConfirm={handleCreate} onCancel={() => setCreating(null)} />
               </div>
             )}
-            {node.children.map((child) => (
+            {node.children.slice(0, visibleChildren).map((child) => (
               <TreeNodeItem key={child.fullPath} {...props} node={child} depth={depth + 1} />
             ))}
+            {node.children.length > visibleChildren && (
+              <button type="button" className="w-full p-2 text-xs text-muted-foreground hover:text-foreground"
+                onClick={() => setVisibleChildren((count) => count + 100)}>
+                显示更多（剩余 {node.children.length - visibleChildren} 项）
+              </button>
+            )}
           </div>
         )}
       </div>

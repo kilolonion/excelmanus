@@ -62,7 +62,7 @@ describe("ensureLandingSession", () => {
       workspaceId: "ws-b",
       workspacePath: "/data/b",
     });
-    expect(created.id).toBe("blank-1");
+    expect(created?.id).toBe("blank-1");
     expect(useSessionStore.getState().activeSessionId).toBe("blank-1");
     expect(useSessionStore.getState().lastWorkspaceId).toBe("ws-b");
   });

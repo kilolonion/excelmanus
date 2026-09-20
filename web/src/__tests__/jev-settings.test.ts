@@ -21,6 +21,12 @@ import {
 } from "@/lib/jev-settings";
 
 describe("jev-settings", () => {
+  it("only sends known settings from drafts with extra fields", () => {
+    const draft = { ...EMPTY_JEV_DRAFT, unknown_option: true, jev_mode_hint: true };
+    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT)).toEqual({ jev_mode_hint: true });
+    expect(buildJevPayload(draft, EMPTY_JEV_DRAFT, JEV_ROLE_KEYS)).toEqual({ jev_mode_hint: true });
+  });
+
   it("labels gates", () => {
     expect(jevGateLabel("off")).toBe("关闭");
     expect(jevGateLabel("shadow")).toBe("仅观察");

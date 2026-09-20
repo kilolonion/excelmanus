@@ -1,0 +1,97 @@
+{
+  "name": "excelmanus-desktop",
+  "version": "1.8.0",
+  "private": true,
+  "description": "Desktop shell for ExcelManus",
+  "author": "ExcelManus contributors",
+  "main": "src/main.js",
+  "scripts": {
+    "prepare:frontend": "node scripts/prepare.mjs frontend",
+    "prepare:runtime": "node scripts/prepare.mjs runtime",
+    "prepare:backend": "node scripts/build-backend.mjs",
+    "prepare:assets": "npm run build:web && node scripts/prepare.mjs frontend && node scripts/prepare.mjs runtime && npm run prepare:python",
+    "dist": "npm run prepare:assets && npm run prepare:backend && electron-builder",
+    "dist:win": "npm run prepare:assets && npm run prepare:backend && electron-builder --win nsis",
+    "dist:mac": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg",
+    "check": "node --check src/main.js && node --check src/preload.js && node --check src/process-lifecycle.js && node --check src/frontend-runner.cjs && node --check scripts/prepare.mjs && node --check scripts/build-backend.mjs && node --check scripts/prepare-python.mjs && node --check scripts/smoke.mjs && node --check scripts/smoke-app.mjs",
+    "build:web": "npm --prefix ../web run build",
+    "prepare:python": "node scripts/prepare-python.mjs",
+    "smoke": "node scripts/smoke.mjs",
+    "dist:mac:local": "npm run prepare:assets && npm run prepare:backend && electron-builder --mac dmg --config.mac.identity=-",
+    "smoke:app": "node scripts/smoke-app.mjs",
+    "test": "node --test tests/*.test.cjs"
+  },
+  "devDependencies": {
+    "electron": "44.4.3",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "com.kilolonion.excelmanus",
+    "productName": "ExcelManus",
+    "asar": true,
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "backend_runner.py",
+      "package.json"
+    ],
+    "extraResources": [
+      {
+        "from": ".build/frontend",
+        "to": "frontend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".build/backend",
+        "to": "backend",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".build/runtime",
+        "to": "runtime",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": ".build/frontend-runner.cjs",
+        "to": "frontend-runner.cjs"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.icns",
+      "target": [
+        "dmg"
+      ],
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist",
+      "identity": "-"
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "deleteAppDataOnUninstall": false
+    }
+  }
+}

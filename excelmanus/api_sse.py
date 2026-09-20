@@ -208,6 +208,7 @@ def sse_event_to_sse(
         EventType.THINKING: "thinking",
         EventType.TOOL_CALL_START: "tool_call_start",
         EventType.TOOL_CALL_END: "tool_call_end",
+        EventType.TOOL_CALL_STATE: "tool_call_state",
         EventType.ITERATION_START: "iteration_start",
         EventType.SUBAGENT_START: "subagent_start",
         EventType.SUBAGENT_ITERATION: "subagent_iteration",
@@ -245,6 +246,7 @@ def sse_event_to_sse(
         EventType.REASONING_NOTICE: "reasoning_notice",
         EventType.TURN_START: "turn_start",
         EventType.TURN_END: "turn_end",
+        EventType.TURN_FAILED: "turn_failed",
         EventType.STEP_START: "step_start",
         EventType.STEP_END: "step_end",
         EventType.INBOX_CLAIMED: "inbox_claimed",
@@ -260,7 +262,7 @@ def sse_event_to_sse(
             "content": sanitize_external_text(event.thinking, max_len=2000),
             "iteration": event.iteration,
         }
-    elif event.event_type == EventType.TOOL_CALL_START:
+    elif event.event_type in {EventType.TOOL_CALL_START, EventType.TOOL_CALL_STATE}:
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
             "tool_name": event.tool_name,
@@ -269,6 +271,8 @@ def sse_event_to_sse(
                 max_len=1000,
             ),
             "iteration": event.iteration,
+            "execution_id": event.execution_id,
+            "execution_state": event.execution_state,
         }
         if event.parent_call_id:
             data["parent_call_id"] = sanitize_external_text(event.parent_call_id, max_len=160)
@@ -276,6 +280,8 @@ def sse_event_to_sse(
         data = {
             "tool_call_id": sanitize_external_text(event.tool_call_id, max_len=160),
             "tool_name": event.tool_name,
+            "execution_id": event.execution_id,
+            "execution_state": event.execution_state,
             "success": event.success,
             "result": sanitize_external_text(
                 event.result[:500] if event.result else "",
@@ -314,6 +320,13 @@ def sse_event_to_sse(
         data = {"turn_id": event.turn_id, "iteration": event.iteration}
     elif event.event_type == EventType.TURN_END:
         data = {"turn_id": event.turn_id, "iteration": event.iteration}
+    elif event.event_type == EventType.TURN_FAILED:
+        data = {
+            "turn_id": event.turn_id,
+            "iteration": event.iteration,
+            "stop_reason": sanitize_external_text(event.stop_reason, max_len=40),
+            "error": sanitize_external_text(event.turn_error, max_len=500),
+        }
     elif event.event_type == EventType.INBOX_CLAIMED:
         data = {
             "turn_id": event.turn_id,
@@ -322,6 +335,7 @@ def sse_event_to_sse(
         }
     elif event.event_type == EventType.SUBAGENT_START:
         data = {
+            "background": event.subagent_background,
             "name": sanitize_external_text(event.subagent_name, max_len=100),
             "reason": sanitize_external_text(event.subagent_reason, max_len=500),
             "tools": event.subagent_tools,
@@ -691,4 +705,8 @@ def sse_event_to_sse(
     else:
         data = event.to_dict()
 
+    for field in ("trace_id", "span_id", "parent_span_id", "request_id"):
+        value = getattr(event, field, "")
+        if value:
+            data[field] = value
     return sse_format(sse_type, data)

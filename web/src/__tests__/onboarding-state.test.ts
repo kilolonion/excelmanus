@@ -50,20 +50,22 @@ describe("legacy localStorage merge", () => {
 
 describe("visibility", () => {
   it("hides wizard on a new browser when server already completed it", () => {
-    expect(shouldShowOnboardingWizard(true, true, true)).toBe(false);
+    expect(shouldShowOnboardingWizard(true, true)).toBe(false);
   });
 
-  it("still shows wizard when model config is missing", () => {
-    expect(shouldShowOnboardingWizard(true, true, false)).toBe(true);
+  it("respects a completed or skipped wizard even without model config", () => {
+    expect(shouldShowOnboardingWizard(true, true)).toBe(false);
+    expect(shouldShowCoachMarks(true, true, false, false, false)).toBe(true);
+    expect(shouldShowCoachMarks(true, true, true, true, true)).toBe(false);
   });
 
   it("waits until health hydrate before overlay", () => {
-    expect(shouldShowOnboardingWizard(false, false, false)).toBe(false);
-    expect(shouldShowCoachMarks(false, true, true, false, false, false)).toBe(false);
+    expect(shouldShowOnboardingWizard(false, false)).toBe(false);
+    expect(shouldShowCoachMarks(false, true, false, false, false)).toBe(false);
   });
 
   it("keeps replay working when wizardCompleted is reset", () => {
-    expect(shouldShowOnboardingWizard(true, false, true)).toBe(true);
+    expect(shouldShowOnboardingWizard(true, false)).toBe(true);
   });
 });
 

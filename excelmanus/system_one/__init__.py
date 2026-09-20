@@ -33,6 +33,18 @@ def _with_transport(decision: Decision, transport: str) -> Decision:
     )
 
 
+def _with_provenance(decision: Decision, settings: Any) -> Decision:
+    extras = dict(decision.extras or {})
+    extras.update({"provider_id": str(getattr(settings, "provider_id", "") or ""), "protocol": str(getattr(settings, "protocol", "") or "")})
+    return Decision(
+        kind=decision.kind,
+        reason=decision.reason,
+        evaluation=decision.evaluation,
+        extras=extras,
+        applied=decision.applied,
+    )
+
+
 def _unavailable_decision(pack_id: str, reason: str, *, transport: str = "unavailable") -> Decision:
     spec = get_pack(pack_id)
     extras: dict[str, Any] = {"transport": transport}
@@ -50,6 +62,10 @@ def _unavailable_decision(pack_id: str, reason: str, *, transport: str = "unavai
         extras["next"] = "continue"
     elif pack_id == "observation.prune":
         extras["prune"] = False
+    elif pack_id == "mutation.verify":
+        extras.update({"satisfied": 0.5, "next": "none"})
+    elif pack_id == "recovery.next_step":
+        extras["next"] = "none"
     return Decision.noop(reason, **extras)
 
 
@@ -66,6 +82,9 @@ async def evaluate(
     """
     settings = settings_from(config)
     gate = gate_for_pack(pack_id, settings)
+    from excelmanus.system_one.breaker import allow, provider_key, record_failure, record_success
+
+    connection_key = provider_key(settings.provider_id, settings.protocol, settings.model, settings.base_url)
     transport = public_transport(settings.api_key, settings.protocol)
     if gate == "off":
         return _unavailable_decision(pack_id, "disabled", transport="unavailable")
@@ -73,6 +92,10 @@ async def evaluate(
     api_key = settings.api_key
     if not client_ready(api_key, settings.protocol):
         decision = _unavailable_decision(pack_id, "unavailable")
+        record_shadow(pack_id=pack_id, gate=gate, decision=decision)
+        return decision
+    if not allow(connection_key):
+        decision = _with_provenance(_unavailable_decision(pack_id, "provider_cooldown"), settings)
         record_shadow(pack_id=pack_id, gate=gate, decision=decision)
         return decision
     assert api_key
@@ -88,23 +111,46 @@ async def evaluate(
             base_url=settings.base_url,
         )
     except SystemOneUnavailable as exc:
+        record_failure(connection_key, str(exc))
         decision = _unavailable_decision(pack_id, f"error:{exc}")
         if spec.family == "security":
             # 高风险 fail-closed：维持 ASK，不放行。
             decision = Decision.ask(f"error:{exc}")
             decision = _with_transport(decision, "unavailable")
+        decision = _with_provenance(decision, settings)
         record_shadow(pack_id=pack_id, gate=gate, decision=decision)
         return decision
     except Exception as exc:
+        record_failure(connection_key, type(exc).__name__)
         decision = _unavailable_decision(pack_id, f"error:{type(exc).__name__}")
         if spec.family == "security":
             decision = Decision.ask(f"error:{type(exc).__name__}")
             decision = _with_transport(decision, "unavailable")
+        decision = _with_provenance(decision, settings)
         record_shadow(pack_id=pack_id, gate=gate, decision=decision)
         return decision
 
     decision = synthesize(pack_id, evaluation, bounded)
+    record_success(connection_key)
+    evaluation = type(evaluation)(
+        pack_id=evaluation.pack_id,
+        answers=evaluation.answers,
+        model=evaluation.model,
+        latency_ms=evaluation.latency_ms,
+        usage=evaluation.usage,
+        skipped=evaluation.skipped,
+        skip_reason=evaluation.skip_reason,
+        provider_id=settings.provider_id,
+        protocol=settings.protocol,
+    )
+    decision = Decision(
+        kind=decision.kind,
+        reason=decision.reason,
+        evaluation=evaluation,
+        extras=decision.extras,
+        applied=decision.applied,
+    )
     decision = stamp_application(pack_id, decision, settings)
-    decision = _with_transport(decision, transport)
+    decision = _with_provenance(_with_transport(decision, transport), settings)
     record_shadow(pack_id=pack_id, gate=gate, decision=decision, evaluation=evaluation)
     return decision

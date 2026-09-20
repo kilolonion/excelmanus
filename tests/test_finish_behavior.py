@@ -437,7 +437,7 @@ class TestRunCodeWritePropagation:
         audit_record = self._make_audit_record(has_changes=True)
         with patch.object(
             engine, "_execute_tool_with_audit", new_callable=AsyncMock,
-            return_value=('{"status":"success","stdout_tail":"ok","cow_mapping":{}}', audit_record),
+            return_value=('{"status":"success","return_code":0,"stderr_tail":"","stdout_tail":"ok","cow_mapping":{}}', audit_record),
         ):
             result = await engine._execute_tool_call(
                 self._run_code_tc(), tool_scope=None, on_event=None, iteration=1,
@@ -451,7 +451,7 @@ class TestRunCodeWritePropagation:
         engine._has_write_tool_call = False
         audit_record = self._make_audit_record(has_changes=False)
         result_json = (
-            '{"status":"success","stdout_tail":"ok",'
+            '{"status":"success","return_code":0,"stderr_tail":"","stdout_tail":"ok",'
             '"published":[{"path":"book.xlsx","status":"committed","content_version":"sha256:abc"}]}'
         )
         with patch.object(
@@ -471,7 +471,7 @@ class TestRunCodeWritePropagation:
         audit_record = self._make_audit_record(has_changes=False)
         with patch.object(
             engine, "_execute_tool_with_audit", new_callable=AsyncMock,
-            return_value=('{"status":"success","stdout_tail":"ok","cow_mapping":{}}', audit_record),
+            return_value=('{"status":"success","return_code":0,"stderr_tail":"","stdout_tail":"ok","cow_mapping":{}}', audit_record),
         ):
             result = await engine._execute_tool_call(
                 self._run_code_tc(), tool_scope=None, on_event=None, iteration=1,
@@ -493,7 +493,7 @@ class TestRunCodeWritePropagation:
         audit_record = self._make_audit_record(has_changes=False)
         with patch.object(
             engine, "_execute_tool_with_audit", new_callable=AsyncMock,
-            return_value=('{"status":"success","stdout_tail":"ok","cow_mapping":{}}', audit_record),
+            return_value=('{"status":"success","return_code":0,"stderr_tail":"","stdout_tail":"ok","cow_mapping":{}}', audit_record),
         ):
             result = await engine._execute_tool_call(
                 self._run_code_tc(code=code_with_save),
@@ -556,7 +556,7 @@ class TestRegistryRefreshOnRecordedWrite:
 
 
 class TestChatModeToolFiltering:
-    """read 目录不含写工具与委派；plan 仍可见委派。"""
+    """read 目录不含写工具与委派；write/plan 的委派按需披露。"""
 
     def _tool_names(self, engine: AgentEngine, chat_mode: str) -> set[str]:
         from excelmanus.engine import _tool_access_from_chat_mode
@@ -584,10 +584,13 @@ class TestChatModeToolFiltering:
         assert not missing, f"只读模式缺少必要工具: {missing}"
         assert "finish_task" not in names
 
-    def test_delegate_present_in_write(self) -> None:
+    def test_delegate_is_discoverable_then_loaded_in_write(self) -> None:
         engine = _make_engine()
         names = self._tool_names(engine, "write")
-        assert "delegate" in names
+        assert "delegate" not in names
+        assert "delegate" in engine.registry.effective_catalog().name_set()
+        engine._loaded_tool_names = {"delegate"}
+        assert "delegate" in self._tool_names(engine, "write")
 
     def test_plan_mode_allows_write_plan(self) -> None:
         engine = _make_engine()
@@ -595,16 +598,18 @@ class TestChatModeToolFiltering:
         assert "write_plan" in names
         assert "exit_plan_mode" in names
 
-    def test_plan_catalog_matches_write(self) -> None:
+    def test_plan_has_controls_and_discoverable_delegate(self) -> None:
         engine = _make_engine()
         write_names = self._tool_names(engine, "write")
         plan_names = self._tool_names(engine, "plan")
         assert "write_plan" in plan_names
         assert "write_plan" not in write_names
-        assert "delegate" in plan_names
+        assert "delegate" not in plan_names
+        assert "delegate" in engine.registry.effective_catalog().name_set()
 
     def test_read_catalog_hides_delegate_vs_write(self) -> None:
         engine = _make_engine()
+        engine._loaded_tool_names = {"delegate"}
         write_names = self._tool_names(engine, "write")
         read_names = self._tool_names(engine, "read")
         assert "delegate" in write_names

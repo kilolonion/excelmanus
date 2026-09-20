@@ -119,6 +119,18 @@ describe("extractCellEditsFromSheetValueChanged", () => {
 });
 
 describe("isExcelWriteConflict / persistExcelCellEdits", () => {
+  it("drains a captured write to its original workspace after the visible workspace changes", async () => {
+    const { deps } = mockDeps(async () => ({ status: "success", cells_written: 1, content_version: "v2" }));
+    const result = await persistExcelCellEdits({
+      path: "book.xlsx", changes: [{ cell: "A1", value: 7 }],
+      workspaceKey: "path:/original", workspaceId: null, sessionId: "original-session",
+      expectedVersion: "v1", viewGeneration: -1,
+    }, deps);
+    expect(result.kind).toBe("ok");
+    expect(deps.writeExcelCells).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: "original-session", workspaceId: null, expectedVersion: "v1",
+    }));
+  });
   afterEach(() => {
     resetExcelCellEditStateForTests();
   });

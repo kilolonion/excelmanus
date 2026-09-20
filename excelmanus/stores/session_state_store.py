@@ -99,7 +99,7 @@ class SessionStateStore:
                 "SELECT state_json, task_list_json, turn_number, created_at "
                 "FROM session_state_snapshots "
                 "WHERE session_id = ? "
-                "ORDER BY turn_number DESC, id DESC "
+                "ORDER BY id DESC "
                 "LIMIT 1",
                 (session_id,),
             ).fetchone()
@@ -138,7 +138,7 @@ class SessionStateStore:
                 "WHERE session_id = ? AND id NOT IN ("
                 "  SELECT id FROM session_state_snapshots "
                 "  WHERE session_id = ? "
-                "  ORDER BY turn_number DESC, id DESC "
+                "  ORDER BY id DESC "
                 f"  LIMIT {_MAX_CHECKPOINTS_PER_SESSION}"
                 ")",
                 (session_id, session_id),

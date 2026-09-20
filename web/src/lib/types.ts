@@ -51,7 +51,6 @@ export interface SessionDetail {
   latestSeq: number;
   fullAccessEnabled: boolean;
   chatMode: "write" | "read" | "plan";
-  presentAs?: "native" | "code";
   currentModel: string | null;
   currentModelName: string | null;
   visionCapable: boolean | null;
@@ -71,12 +70,52 @@ export interface SubagentToolCall {
   args?: Record<string, unknown>;
 }
 
+export type SubagentRunStatus =
+  | "queued" | "running" | "waiting_input" | "completed" | "paused"
+  | "interrupted" | "aborted" | "error" | "max-tokens" | "refusal";
+
+/** 会话任务 API 的记录；时间戳沿用后端的 Unix 秒。 */
+export interface SubagentRun {
+  run_id: string;
+  agent_name: string;
+  task: string;
+  file_paths: string[];
+  background: boolean;
+  status: SubagentRunStatus;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  iteration: number;
+  tool_calls: number;
+  last_tool: string;
+  resumed_from: string | null;
+  changed_files?: string[];
+  pending_question?: {
+    question_id: string;
+    header: string;
+    text: string;
+    multi_select: boolean;
+    options: { label: string; description: string; value: string; is_other: boolean }[];
+  };
+  result: {
+    stop_reason: string;
+    output: string;
+    diagnostic: string | null;
+    iterations: number;
+    tool_calls_count: number;
+    structured_changes: { path: string; tool_name: string; change_type: string; sheets_affected: string[] }[];
+    observed_files: string[];
+  } | null;
+}
+
 export type AssistantBlock =
   | { type: "thinking"; content: string; duration?: number; startedAt?: number }
   | { type: "text"; content: string }
   | {
       type: "tool_call";
       toolCallId?: string;
+      executionId?: string;
+      executionState?: string;
       name: string;
       args: Record<string, unknown>;
       status: "running" | "success" | "error" | "pending" | "streaming";
@@ -97,6 +136,8 @@ export type AssistantBlock =
       success?: boolean;
       stopReason?: string;
       diagnostic?: string;
+      background?: boolean;
+      runStatus?: SubagentRunStatus;
       tools: SubagentToolCall[];
     }
   | { type: "task_list"; items: TaskItem[] }

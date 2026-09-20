@@ -1,8 +1,8 @@
 """EffectiveToolCatalog：模型可见工具目录的唯一推导。
 
 L2 执行目录 = SDK 绑定 = 桥许可 = introspect 源 = 策略可达集 = ``catalog_digest``。
-``present_as=code`` 与 ``_turn_exposure`` **不进**本目录：code 坍缩与
-exposure ``catalog ∩ PROFILE`` 只发生在 L4 ``envelope.tools``。
+``_turn_exposure`` **不进**本目录；披露收窄
+只发生在 L4 ``envelope.tools``，不会改变执行权。
 Registry 只持有注册快照；本模块做 mode / scope 投影，不改工具名与 schema 字段。
 """
 
@@ -24,11 +24,11 @@ from excelmanus.tools.policy import (
     normalize_write_effect,
 )
 
-CatalogMode = Literal["read", "plan", "write", "code"]
+CatalogMode = Literal["read", "plan", "write"]
 OpenAISchemaMode = Literal["responses", "chat_completions"]
 
 RUN_CODE_NAME = "run_code"
-_VALID_MODES: frozenset[str] = frozenset({"read", "plan", "write", "code"})
+_VALID_MODES: frozenset[str] = frozenset({"read", "plan", "write"})
 _READ_PLAN_MODES: frozenset[str] = frozenset({"read", "plan"})
 _DELEGATE_META_NAMES: frozenset[str] = frozenset(
     {"delegate", "delegate_to_subagent", "parallel_delegate"}
@@ -52,19 +52,13 @@ _CSV_ONLY_DISALLOWED: frozenset[str] = frozenset(
 def resolve_catalog_mode(
     *,
     chat_mode: str = "write",
-    present_as: str = "native",
     tool_access: str = "may_write",
 ) -> CatalogMode:
-    """chat_mode + present_as + 显式 read_only restrict → CatalogMode。
-
-    code 仅在写入会话生效（plan/read 已由 present_as_of 强制 native）。
-    tool_access=read_only 只把 write 会话压成 read；plan 仍是 plan。
-    """
-    chat = str(chat_mode or "write").strip().lower() or "write"
-    present = str(present_as or "native").strip().lower() or "native"
+    """只按 chat_mode 与 read_only 权限推导目录；未知模式明确拒绝。"""
+    chat = str(chat_mode).strip().lower()
+    if chat not in _VALID_MODES:
+        raise ValueError(f"unknown catalog mode: {chat_mode!r}")
     access = str(tool_access or "may_write").strip().lower() or "may_write"
-    if present == "code" and chat not in _READ_PLAN_MODES:
-        return "code"
     if chat == "read":
         return "read"
     if chat == "plan":
@@ -116,8 +110,6 @@ def _is_visible(
         return mode == "plan"
     if mode == "read" and visibility == "hide_in_read":
         return False
-    if mode == "code":
-        return name == RUN_CODE_NAME
     if mode in _READ_PLAN_MODES:
         if is_catalog_visible(name, _declared_effect(tool)):
             return True
@@ -309,16 +301,40 @@ class EffectiveToolCatalog:
         return "\n".join(lines)
 
     def capability_map_text(self) -> str:
-        """短能力地图：只有意图 → 工具名，不含 description。"""
+        """完整授权能力的短导航：意图/分类/名称，不注入参数或 SDK 声明。"""
         visible = self.name_set()
+        if not visible:
+            return ""
         routes = [
             f"{intent} → {', '.join(name for name in names if name in visible)}"
             for intent, names in TOOL_INTENT_ROUTES.items()
             if any(name in visible for name in names)
         ]
-        if not routes:
-            return ""
-        return "\n".join(["## 能力地图（当前目录）", *routes])
+        covered = {
+            name for names in TOOL_INTENT_ROUTES.values() for name in names if name in visible
+        }
+        for category, members in TOOL_CATEGORIES.items():
+            remaining = [name for name in members if name in visible and name not in covered]
+            if remaining:
+                routes.append(f"{category} → {', '.join(remaining)}")
+                covered.update(remaining)
+        for tool in self.tools:
+            name = _tool_name(tool)
+            if not name or name in covered:
+                continue
+            # 未分类插件以名称 + 短描述提供发现线索；完整说明只按需查询。
+            hint = _description_for(tool)
+            if len(hint) > 80:
+                hint = hint[:80] + "…"
+            routes.append(f"{name}：{hint}" if hint else name)
+        guidance = (
+            "上列是当前授权能力；普通内置工具与 MCP 都可能尚未加载参数。"
+            "用 introspect_capability 的 can_i_do/category_tools 查找能力，"
+            "tool_detail 获取具体工具或字段详情后，下一步可直接调用；"
+            "system_status 可列出完整目录。未展示 schema 不表示能力不可用。"
+            if "introspect_capability" in visible else ""
+        )
+        return "\n".join(filter(None, ["## 能力地图（当前目录）", guidance, *routes]))
 
     def introspection_source(self) -> dict[str, Any]:
         """introspect / can_i_do 只扫当前目录。"""
@@ -331,6 +347,8 @@ class EffectiveToolCatalog:
 
     def digest(self) -> str:
         """稳定内容摘要：排序 + 规范化 JSON。不含注册计数器。"""
+        from excelmanus.tools.output_contracts import output_schema_for
+
         payload = {
             "mode": self.mode,
             "model_index": self.tool_index_text(),
@@ -340,6 +358,7 @@ class EffectiveToolCatalog:
                     "description": str(getattr(tool, "description", "") or ""),
                     "name": _tool_name(tool),
                     "schema": getattr(tool, "input_schema", None) or {},
+                    "output_schema": output_schema_for(_tool_name(tool), tool_def=tool),
                     "write_effect": _declared_effect(tool),
                 }
                 for tool in self.tools
@@ -366,8 +385,10 @@ def derive_effective_catalog(
     allow_run_code: bool = False,
     families: frozenset[str] | None = None,
 ) -> EffectiveToolCatalog:
-    """从 registry 快照 + mode + scope + MCP/技能附加项推导有效目录。"""
-    resolved: CatalogMode = mode if mode in _VALID_MODES else "write"  # type: ignore[assignment]
+    """从 registry 快照 + mode + scope 推导目录，未知模式不得放宽到 write。"""
+    if mode not in _VALID_MODES:
+        raise ValueError(f"unknown catalog mode: {mode!r}")
+    resolved: CatalogMode = mode  # type: ignore[assignment]
     merged: dict[str, Any] = {}
     for tool in tools:
         name = _tool_name(tool)
@@ -529,8 +550,7 @@ def execution_catalog_from_engine(
 ) -> EffectiveToolCatalog | None:
     """执行目录：SDK 绑定 / 桥分发 / introspect / 能力地图 / 策略段的共同数据源。
 
-    mode 与 ``catalog_from_engine`` 一样剥离 ``present_as=code``。差别只在
-    capability 收窄（child allowed/disallowed）。无真实 registry 返回 None。
+    与 ``catalog_from_engine`` 使用同一权限投影。无真实 registry 返回 None。
     """
     from excelmanus.tools.registry import ToolRegistry
 
@@ -545,7 +565,6 @@ def execution_catalog_from_engine(
     access = "read_only" if cap.tool_access == "read_only" else tool_access
     mode = resolve_catalog_mode(
         chat_mode=cap.catalog_mode,
-        present_as="native",
         tool_access=access,
     )
     flags = _workspace_flags(engine)
@@ -566,23 +585,6 @@ def execution_catalog_from_engine(
     )
 
 
-def execution_mode_from_engine(
-    engine: Any,
-    *,
-    tool_access: str = "may_write",
-) -> CatalogMode:
-    """执行目录的 mode：剥离 present_as=code 的 wire 坍缩，保留权限投影。"""
-    from excelmanus.tools.context import capability_from_engine
-
-    cap = getattr(engine, "_fixed_capability", None) or capability_from_engine(engine)
-    access = "read_only" if cap.tool_access == "read_only" else tool_access
-    return resolve_catalog_mode(
-        chat_mode=cap.catalog_mode,
-        present_as="native",
-        tool_access=access,
-    )
-
-
 def catalog_from_engine(
     engine: Any,
     *,
@@ -590,8 +592,8 @@ def catalog_from_engine(
 ) -> EffectiveToolCatalog | None:
     """从引擎推导 L2 目录并绑到 registry / introspect。失败返回 None。
 
-    ``present_as`` / ``_turn_exposure`` 不进入 mode：digest 只跟 chat_mode /
-    工作区族 / 注册表走。code 坍缩与 exposure ∩ 留给 L4 ``build_v5_tools_impl``。
+    ``_turn_exposure`` 不进入 mode：digest 只跟 chat_mode /
+    工作区族 / 注册表走。披露收窄留给 L4 ``build_v5_tools_impl``。
     """
     from excelmanus.tools.registry import ToolRegistry
 
@@ -599,28 +601,31 @@ def catalog_from_engine(
     if not isinstance(registry, ToolRegistry):
         return None
 
-    chat_mode = str(getattr(engine, "_current_chat_mode", "write") or "write")
-    mode = resolve_catalog_mode(
-        chat_mode=chat_mode,
-        present_as="native",
-        tool_access=tool_access,
-    )
+    from excelmanus.tools.context import capability_from_engine
     from excelmanus.tools.meta_tool_defs import refresh_meta_tool_schemas
 
     refresh_meta_tool_schemas(engine)
+    cap = getattr(engine, "_fixed_capability", None) or capability_from_engine(engine)
+    access = "read_only" if cap.tool_access == "read_only" else tool_access
+    mode = resolve_catalog_mode(
+        chat_mode=cap.catalog_mode,
+        tool_access=access,
+    )
     skill_names = _skill_names_of(engine)
     allow_run_code = _allow_run_code_of(engine, mode)
     flags = _workspace_flags(engine)
     profile = str(flags.get("profile") or "xlsx")
     engine._catalog_new_workbook = bool(flags["new_workbook"])
     engine._catalog_profile = profile
-    disallowed = tuple(_CSV_ONLY_DISALLOWED) if profile == "csv" else ()
+    disallowed = tuple(cap.disallowed_tools) + (tuple(_CSV_ONLY_DISALLOWED) if profile == "csv" else ())
+    allowed = None if cap.allowed_tools is None else list(cap.allowed_tools)
     registered = registry.get_all_tools()
     families = _families_with_mcp(flags, registered)
     engine._catalog_families = families
     catalog = derive_effective_catalog(
         tools=registered,
         mode=mode,
+        allowed=allowed,
         disallowed=disallowed,
         skill_names=skill_names,
         allow_run_code=allow_run_code,
@@ -628,11 +633,11 @@ def catalog_from_engine(
     )
     registry.bind_catalog(
         mode=mode,
+        allowed=allowed,
         disallowed=disallowed,
         skill_names=skill_names,
         allow_run_code=allow_run_code,
         families=families,
-        execution_mode=execution_mode_from_engine(engine, tool_access=tool_access),
     )
     return catalog
 

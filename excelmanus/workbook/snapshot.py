@@ -521,6 +521,33 @@ def open_snapshot_at(
     )
 
 
+def open_snapshot_bytes(
+    data: bytes,
+    *,
+    relative: str,
+    workspace: WorkspaceRef,
+    suffix: str | None = None,
+    expected_version: str | None = None,
+) -> WorkbookSnapshot:
+    """Open immutable bytes that do not have a live user path (for history preview)."""
+    file_suffix = suffix or Path(relative).suffix.lower() or ".bin"
+    version = content_version_of(data)
+    if expected_version and expected_version != version:
+        raise SnapshotStale(
+            f"{relative} 修订版本不匹配：期望 {expected_version}，实际 {version}",
+            fields={"expected_version": expected_version, "content_version": version, "path": relative},
+        )
+    file_ref = FileRef(workspace=workspace, relative=relative.replace("\\", "/"), observed_version=version)
+    backing = _materialize_backing(workspace, data, file_suffix, version)
+    return WorkbookSnapshot(
+        id=SnapshotId(workspace_key=workspace.identity_key(), relative=file_ref.relative, content_version=version),
+        file=file_ref,
+        content_version=version,
+        backing=backing,
+        suffix=file_suffix,
+    )
+
+
 def open_snapshot(raw: str, *, expected_version: str | None = None) -> WorkbookSnapshot:
     """正式工具开簿：解析 FileRef，读字节一次，钉 backing。"""
     from excelmanus.tools.context import require_guard, resolve_file_ref
@@ -584,6 +611,32 @@ def selection_from_rows(
 def parse_bound_selection(raw: Any) -> BoundSelection | None:
     if isinstance(raw, str):
         text = raw.strip()
+        # Large filter/range results expose a spill locator instead of putting
+        # thousands of row numbers in the model-facing message.  Accept the
+        # locator anywhere a normal selection object is accepted so the native
+        # read -> write path remains composable.
+        try:
+            from excelmanus.engine_core.spill import (
+                SpillNotFound,
+                SpillStore,
+                is_spill_reference,
+            )
+
+            if is_spill_reference(text):
+                from excelmanus.tools.context import current_call
+
+                call = current_call()
+                if call is None:
+                    return None
+                payload = json.loads(SpillStore(call.binding.workspace.root).get(text))
+                if isinstance(payload, dict) and isinstance(payload.get("selection"), dict):
+                    raw = payload["selection"]
+                else:
+                    raw = payload
+        except (SpillNotFound, ValueError, TypeError, json.JSONDecodeError):
+            return None
+        if not isinstance(raw, str):
+            text = ""
         if text[:1] == "{":
             try:
                 raw = json.loads(text)
@@ -867,6 +920,8 @@ def project_csv_view(
     projected: list[dict[str, Any]] = []
     loaded: list[dict[str, int]] = []
     for rect in windows:
+        if rect.sheet and rect.sheet != sheet_name:
+            raise SnapshotError(f"工作表 '{rect.sheet}' 不存在", code="SHEET_NOT_FOUND")
         r0 = max(1, rect.min_row)
         c0 = max(1, rect.min_col)
         r1 = min(rect.max_row, max(used_rows, 1))
@@ -877,7 +932,6 @@ def project_csv_view(
             for col in range(c0, c1 + 1):
                 raw = src[col - 1] if col - 1 < len(src) else ""
                 if raw == "":
-                    cells[f"{row},{col}"] = {"t": "z", "v": None, "cached": "yes"}
                     continue
                 try:
                     value: Any = int(raw)
@@ -890,10 +944,11 @@ def project_csv_view(
                         value = raw
                         kind = "s"
                 cells[f"{row},{col}"] = {"t": kind, "v": value, "cached": "yes"}
-        loaded.append({"r0": r0, "c0": c0, "r1": r1, "c1": c1, "sheet": sheet_name})
+        window_rect = {"r0": rect.min_row, "c0": rect.min_col, "r1": rect.max_row, "c1": rect.max_col}
+        loaded.append({**window_rect, "sheet": sheet_name})
         projected.append({
             "sheet": sheet_name,
-            "rect": {"r0": r0, "c0": c0, "r1": r1, "c1": c1},
+            "rect": window_rect,
             "cells": cells,
             "merges": [],
             "col_widths": {},
@@ -907,6 +962,8 @@ def project_csv_view(
         },
         "content_version": snapshot.content_version,
         "snapshot_id": snapshot.id.key(),
+        "active_sheet": sheet_name,
+        "with_styles": True,
         "sheets": sheets,
         "windows": projected,
         "coverage": {
@@ -923,6 +980,7 @@ def project_view(
     *,
     data_only: bool = False,
     with_styles: bool = True,
+    active_sheet_default: bool = False,
 ) -> dict[str, Any]:
     """第 5 批 WorkbookViewSnapshot 的服务端投影。"""
     if snapshot.is_csv():
@@ -932,6 +990,9 @@ def project_view(
     wb_f = snapshot.open_workbook(data_only=False, read_only=not with_styles)
     wb_v = snapshot.open_workbook(data_only=True, read_only=True)
     try:
+        if active_sheet_default:
+            active = wb_f.active or wb_f.worksheets[0]
+            windows = [replace_rect(rect, rect.sheet or active.title) for rect in windows]
         sheets = []
         used_by_sheet: dict[str, tuple[int, int]] = {}
         for name in wb_f.sheetnames:
@@ -950,10 +1011,23 @@ def project_view(
             ws_f = wb_f[title]
             ws_v = wb_v[title]
             cells: dict[str, Any] = {}
-            for row in range(rect.min_row, rect.max_row + 1):
-                for col in range(rect.min_col, rect.max_col + 1):
+            # ReadOnlyWorksheet.cell() starts an XML scan on every call. Walk
+            # both snapshots once, and omit default blanks from the wire data.
+            from itertools import zip_longest
+
+            used_rows, used_cols = used_by_sheet[title]
+            bounds = dict(min_row=rect.min_row, max_row=min(rect.max_row, used_rows),
+                          min_col=rect.min_col, max_col=min(rect.max_col, used_cols))
+            rows_f = ws_f.iter_rows(**bounds) if bounds["max_row"] >= rect.min_row and bounds["max_col"] >= rect.min_col else ()
+            rows_v = ws_v.iter_rows(**bounds) if bounds["max_row"] >= rect.min_row and bounds["max_col"] >= rect.min_col else ()
+            for row, pair in enumerate(zip_longest(rows_f, rows_v, fillvalue=()), rect.min_row):
+                for col, (cell, cached) in enumerate(zip_longest(*pair), rect.min_col):
+                    cached_value = getattr(cached, "value", None)
+                    has_style = with_styles and getattr(cell, "has_style", False)
+                    if getattr(cell, "value", None) is None and cached_value is None and not has_style:
+                        continue
                     fact = cell_fact_from_openpyxl(
-                        title, row, col, ws_f.cell(row, col), ws_v.cell(row, col).value,
+                        title, row, col, cell, cached_value,
                     )
                     payload: dict[str, Any] = {
                         "t": fact.t,
@@ -964,8 +1038,8 @@ def project_view(
                         payload["f"] = fact.f
                     if fact.e:
                         payload["e"] = fact.e
-                    if with_styles:
-                        style = extract_cell_style(ws_f.cell(row, col))
+                    if has_style:
+                        style = extract_cell_style(cell)
                         if style:
                             payload["s"] = style
                     cells[f"{row},{col}"] = payload
@@ -999,6 +1073,8 @@ def project_view(
             },
             "content_version": snapshot.content_version,
             "snapshot_id": snapshot.id.key(),
+            "active_sheet": (wb_f.active or wb_f.worksheets[0]).title,
+            "with_styles": with_styles,
             "sheets": sheets,
             "windows": projected,
             "coverage": {

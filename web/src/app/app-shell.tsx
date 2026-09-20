@@ -18,7 +18,7 @@ const RETRY_INTERVAL_MS = 400;
 
 export function AppShell({ children }: { children: ReactNode }) {
   const pathname = usePathname();
-  const { checkBackendHealth } = useAuthConfigStore();
+  const checkBackendHealth = useAuthConfigStore((s) => s.checkBackendHealth);
   const authRequired = useAuthConfigStore((s) => s.authRequired);
   const [ready, setReady] = useState(false);
   const [Layout, setLayout] = useState<ClientLayoutComponent | null>(null);

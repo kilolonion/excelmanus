@@ -121,12 +121,15 @@ class TestToolDispatcherExecute:
         dispatcher._dispatch_tool_execution.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_code_present_as_rejects_direct_edit_before_dispatch(self) -> None:
+    async def test_direct_tool_dispatch_preserves_business_error(self) -> None:
+        from excelmanus.engine_core.tool_dispatcher import _ToolExecOutcome
+
         engine = _make_engine()
-        engine._present_as = "code"
         dispatcher = engine._tool_dispatcher
         dispatcher._dispatch_via_handlers = AsyncMock(
-            side_effect=AssertionError("code collapse must run before dispatch")
+            return_value=_ToolExecOutcome(
+                result_str="version conflict", success=False, error="VERSION_CONFLICT",
+            )
         )
         tc = SimpleNamespace(
             id="call_edit",
@@ -143,8 +146,9 @@ class TestToolDispatcherExecute:
             route_result=None,
         )
         assert result.success is False
-        assert result.error == "UNKNOWN_TOOL"
-        dispatcher._dispatch_via_handlers.assert_not_awaited()
+        assert result.error == "VERSION_CONFLICT"
+        assert result.result == "version conflict"
+        dispatcher._dispatch_via_handlers.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_execute_post_tool_hook_deny_turns_success_to_failure(self) -> None:

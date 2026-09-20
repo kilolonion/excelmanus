@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { ArrowRightLeft, Loader2, RefreshCw } from "lucide-react";
 import {
   DropdownMenu,
@@ -33,16 +33,17 @@ export function RetryModelPicker({
   const currentModel = useUIStore((s) => s.currentModel);
   const isMobile = useIsMobile();
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const modelsRequestRef = useRef(0);
 
-  const fetchModelsOnce = useCallback(() => {
-    if (modelsLoaded) return;
-    setModelsLoaded(true);
+  const fetchModels = useCallback(() => {
+    const requestId = ++modelsRequestRef.current;
     apiGet<{ models: ModelInfo[] }>("/models")
-      .then((data) => setModels(data.models))
+      .then((data) => {
+        if (requestId === modelsRequestRef.current) setModels(data.models);
+      })
       .catch(() => {});
-  }, [modelsLoaded]);
+  }, []);
 
   if (isMobile) {
     return (
@@ -51,7 +52,7 @@ export function RetryModelPicker({
           type="button"
           aria-label={triggerLabel}
           onClick={() => {
-            fetchModelsOnce();
+            fetchModels();
             setMobileSheetOpen(true);
           }}
           className={triggerClassName}
@@ -72,7 +73,7 @@ export function RetryModelPicker({
   }
 
   return (
-    <DropdownMenu onOpenChange={(open) => { if (open) fetchModelsOnce(); }}>
+    <DropdownMenu onOpenChange={(open) => { if (open) fetchModels(); }}>
       <DropdownMenuTrigger asChild>
         <button type="button" aria-label={triggerLabel} className={triggerClassName}>
           <ArrowRightLeft className="h-3.5 w-3.5 shrink-0" />

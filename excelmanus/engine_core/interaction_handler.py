@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from copy import deepcopy
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from excelmanus.engine_utils import (
@@ -39,6 +41,201 @@ class InteractionHandler:
 
     def __init__(self, engine: "AgentEngine") -> None:
         self._engine = engine
+        self._recovery: dict[str, Any] | None = None
+
+    def _persist(self) -> None:
+        driver = getattr(self._engine, "_driver", None)
+        if driver is not None:
+            driver._persist_runtime_state()
+
+    def snapshot(self) -> dict[str, Any] | None:
+        return deepcopy(self._recovery)
+
+    def clear_recovery(self) -> None:
+        self._recovery = None
+
+    def restore(self, record: dict[str, Any] | None) -> None:
+        self._recovery = deepcopy(record) if isinstance(record, dict) else None
+        if not self._recovery or self._recovery.get("consumed"):
+            return
+        if self._recovery.get("kind") == "question":
+            if self._recovery.get("phase") != "paused":
+                self._restore_questions()
+        elif self._recovery.get("kind") == "approval":
+            if self._recovery.get("phase") == "waiting" and not self._recovery.get("consumed"):
+                self._engine._approval.restore_pending(self._recovery["approval"])
+            else:
+                self._engine._approval.clear_pending()
+
+    def can_recover(self) -> bool:
+        record = self._recovery or {}
+        return bool(record.get("tool_call_id") and not record.get("consumed"))
+
+    def pause_recovery(self) -> None:
+        if self._recovery and self._recovery.get("phase") == "waiting":
+            self._recovery["phase"] = "paused"
+
+    def needs_resume(self) -> bool:
+        return self.can_recover() and not self._engine._driver.running
+
+    def approval_is_actionable(self, approval_id: str) -> bool:
+        record = self._recovery or {}
+        return (record.get("kind") == "approval" and record.get("phase") == "waiting"
+                and record.get("approval", {}).get("approval_id") == approval_id
+                and not record.get("consumed"))
+
+    def _parent_call_id(self) -> str | None:
+        from excelmanus.tools.context import current_call
+
+        call = current_call()
+        parent = call.parent_call_id if call is not None else None
+        session = getattr(self._engine, "_active_code_mode_session", None)
+        return parent or getattr(session, "root_call_id", None)
+
+    def remember_approval(self, pending: "PendingApproval", tool_call_id: str) -> None:
+        record = self._recovery or {}
+        if record.get("approval", {}).get("approval_id") == pending.approval_id:
+            return
+        parent = pending.parent_call_id or self._parent_call_id()
+        if parent == tool_call_id:
+            parent = None
+        self._recovery = {
+            "kind": "approval", "phase": "waiting", "consumed": False,
+            "tool_call_id": tool_call_id, "parent_call_id": parent,
+            "approval": asdict(pending), "decision": None,
+        }
+        self._persist()
+
+    def record_approval_decision(self, approval_id: str, decision: str) -> bool:
+        record = self._recovery or {}
+        if record.get("kind") != "approval" or record.get("approval", {}).get("approval_id") != approval_id:
+            return False
+        if record.get("decision") is not None:
+            return True  # 已提交的决策不被重复请求改写。
+        normalized = str(decision).strip().lower()
+        decision = "accept" if normalized in {"accept", "approved", "allow", "yes"} else "fullaccess" if normalized == "fullaccess" else "reject"
+        record.update(decision=decision, phase="decided")
+        self._persist()
+        return True
+
+    def approval_execution_started(self, approval_id: str) -> None:
+        record = self._recovery or {}
+        if record.get("approval", {}).get("approval_id") == approval_id:
+            record["phase"] = "executing"
+            self._persist()
+
+    def finish_approval(self, approval_id: str, result: str, success: bool) -> None:
+        record = self._recovery or {}
+        if record.get("approval", {}).get("approval_id") == approval_id:
+            record.update(phase="completed", result=result, success=success)
+            self._persist()
+
+    def observe_tool_result(self, tool_call_id: str, result: str, success: bool) -> None:
+        record = self._recovery or {}
+        if record.get("tool_call_id") == tool_call_id and not record.get("consumed"):
+            record.update(phase="completed", result=result, success=success)
+            self._persist()
+
+    def consume_tool_result(self, tool_call_id: str) -> None:
+        record = self._recovery or {}
+        target = record.get("parent_call_id") or record.get("tool_call_id")
+        if target == tool_call_id and not record.get("consumed"):
+            record["consumed"] = True
+            self._persist()
+
+    def record_question_answer(self, question_id: str, payload: dict[str, Any]) -> bool:
+        record = self._recovery or {}
+        if record.get("kind") != "question" or not any(
+            row["question_id"] == question_id for row in record.get("questions", [])
+        ):
+            return False
+        answers = record["answers"]
+        if question_id not in answers:
+            answers[question_id] = deepcopy(payload)
+            if not self._engine._driver.running:
+                self._restore_questions()
+            self._persist()
+        return True
+
+    def _restore_questions(self) -> None:
+        record = self._recovery or {}
+        remaining = [] if record.get("phase") == "completed" else [
+            row for row in record.get("questions", [])
+            if row["question_id"] not in record.get("answers", {})
+        ]
+        self._engine._question_flow.restore(remaining)
+
+    async def wait_approval_decision(self, approval_id: str) -> Any:
+        record = self._recovery or {}
+        if record.get("approval", {}).get("approval_id") == approval_id and record.get("decision") is not None:
+            return {"decision": record["decision"], "approval_id": approval_id}
+        fut = self._engine._interaction_registry.create(approval_id)
+        return await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
+
+    async def resume_pending(self, on_event: "EventCallback | None", *,
+                             approval_resolver: Any = None, question_resolver: Any = None) -> Any:
+        """重建待决交互的消费者，并把最终结果写回原工具调用。"""
+        e = self._engine
+        record = self._recovery
+        if record is None or not self.can_recover():
+            return
+        e._question_resolver = question_resolver
+        if record["kind"] == "question" and record.get("phase") != "completed":
+            record["phase"] = "waiting"
+            self._restore_questions()
+            await self._collect_question_answers(on_event=on_event, iteration=0)
+        elif record["kind"] == "approval" and record.get("phase") != "completed":
+            saved = record["approval"]
+            approval_id = saved["approval_id"]
+            if record.get("phase") == "executing":
+                # 已开始执行时只能依据已有回执恢复，不能把已批准工具再执行一遍。
+                applied = e._approval.get_applied(approval_id)
+                text = applied.result_preview if applied is not None else "执行曾开始，但结果未完整记录；请先核对实际结果再继续。"
+                self.finish_approval(approval_id, text, bool(applied and applied.execution_status == "success"))
+            else:
+                e._approval.restore_pending(saved)
+                pending = e._approval.pending
+                assert pending is not None
+                if record.get("decision") is None:
+                    record["phase"] = "waiting"
+                    self._persist()
+                    self.emit_pending_approval_event(pending=pending, on_event=on_event, iteration=0,
+                                                     tool_call_id=record["tool_call_id"])
+                    payload = (await approval_resolver(pending) if approval_resolver is not None
+                               else await self.wait_approval_decision(approval_id))
+                    self.record_approval_decision(approval_id, payload["decision"] if isinstance(payload, dict) else str(payload))
+                updates, _ = await e._apply_approval_decision(
+                    record["decision"], pending, approval_id, record["tool_call_id"], on_event, 0, "恢复审批",
+                )
+                self.finish_approval(approval_id, updates["result"], bool(updates["success"]))
+        target = record.get("parent_call_id") or record["tool_call_id"]
+        result = str(record.get("result") or "")
+        if record.get("parent_call_id"):
+            result = json.dumps({"status": "interrupted", "message": "原脚本已中断，未重新执行脚本。待决子调用已处理，后续请从实际结果继续。",
+                                 "call_id": record["tool_call_id"], "interaction_result": result}, ensure_ascii=False)
+        replaced = e.memory.replace_tool_result(target, result)
+        if not replaced:
+            e.memory.add_tool_result(target, result)
+        else:
+            from excelmanus.prompt.envelope import invalidate_envelope
+            invalidate_envelope(e)
+        record["consumed"] = True
+        e._interaction_registry.cleanup_done()
+        self._persist()
+        from excelmanus.engine_types import ToolCallResult
+
+        name = record.get("approval", {}).get("tool_name", "ask_user")
+        arguments = record.get("approval", {}).get("arguments", record.get("arguments", {}))
+        if record.get("parent_call_id"):
+            name = "run_code"
+        from excelmanus.events import EventType, ToolCallEvent
+        e._emit(on_event, ToolCallEvent(
+            event_type=EventType.TOOL_CALL_END, tool_call_id=target,
+            tool_name=name, arguments=deepcopy(arguments), result=result,
+            success=bool(record.get("success")) and not bool(record.get("parent_call_id")),
+        ))
+        return ToolCallResult(tool_name=name, arguments=deepcopy(arguments), result=result,
+                              success=bool(record.get("success")) and not bool(record.get("parent_call_id")))
 
     # ── 事件发射辅助 ──────────────────────────────────────
 
@@ -88,6 +285,7 @@ class InteractionHandler:
         from excelmanus.events import EventType, ToolCallEvent
         from excelmanus.tools.policy import get_tool_risk_level, sanitize_approval_args_summary
 
+        self.remember_approval(pending, tool_call_id)
         self._engine._emit(
             on_event,
             ToolCallEvent(
@@ -128,6 +326,9 @@ class InteractionHandler:
             questions_payload=questions_value,
             tool_call_id=tool_call_id,
         )
+        persist_runtime = getattr(getattr(e, "_driver", None), "_persist_runtime_state", None)
+        if callable(persist_runtime):
+            persist_runtime()
         # 只 emit 第一个问题，后续问题在回答后逐个 emit
         first = pending_list[0]
         self.emit_user_question_event(
@@ -159,8 +360,6 @@ class InteractionHandler:
         - Web 模式：使用 InteractionRegistry Future（等待 /answer API）。
         超时 DEFAULT_INTERACTION_TIMEOUT 秒后返回超时消息。
         """
-        from excelmanus.events import EventType, ToolCallEvent
-
         e = self._engine
         # ── 统一 questions 数组模式 ──
         questions_value = arguments.get("questions")
@@ -175,74 +374,78 @@ class InteractionHandler:
             questions_payload=questions_value,
             tool_call_id=tool_call_id,
         )
+        self._recovery = {
+            "kind": "question", "phase": "waiting", "consumed": False,
+            "tool_call_id": tool_call_id, "parent_call_id": self._parent_call_id(),
+            "questions": [asdict(question) for question in pending_list], "answers": {},
+            "arguments": deepcopy(arguments),
+        }
+        self._persist()
+        return await self._collect_question_answers(on_event=on_event, iteration=iteration)
 
+    async def _collect_question_answers(self, *, on_event: "EventCallback | None", iteration: int) -> str:
+        from excelmanus.events import EventType, ToolCallEvent
+
+        e = self._engine
+        record = self._recovery
+        assert record is not None
         resolver = getattr(e, "_question_resolver", None)
-        collected_answers: list[dict[str, Any]] = []
-
-        for i, pending_q in enumerate(pending_list):
-            # 发射当前问题事件
+        self._restore_questions()
+        while (pending_q := e._question_flow.current()) is not None:
+            fut = None if resolver is not None else e._interaction_registry.create(pending_q.question_id)
             self.emit_user_question_event(
-                question=pending_q,
-                on_event=on_event,
-                iteration=iteration,
+                question=pending_q, on_event=on_event, iteration=iteration,
             )
-
-            if resolver is not None:
-                # ── bench/同步前端模式：通过回调获取回答 ──
-                try:
-                    raw_answer = await resolver(pending_q)
-                except Exception as _qr_exc:
-                    logger.warning("question_resolver 异常: %s", _qr_exc)
-                    raw_answer = ""
-                e._question_flow.pop_current()
-                try:
-                    parsed = e._question_flow.parse_answer(raw_answer, question=pending_q)
-                    payload = parsed.to_tool_result()
-                except Exception:
-                    payload = {"raw_input": raw_answer}
-            else:
-                # ── Web 模式：创建 Future 并等待 /answer API ──
-                fut = e._interaction_registry.create(pending_q.question_id)
-                try:
+            try:
+                if resolver is not None:
+                    try:
+                        raw_answer = await resolver(pending_q)
+                    except Exception as exc:
+                        logger.warning("question_resolver 异常: %s", exc)
+                        raw_answer = ""
+                    try:
+                        payload = e._question_flow.parse_answer(raw_answer, question=pending_q).to_tool_result()
+                    except Exception:
+                        payload = {"raw_input": raw_answer}
+                else:
+                    assert fut is not None
                     payload = await asyncio.wait_for(fut, timeout=DEFAULT_INTERACTION_TIMEOUT)
-                except asyncio.TimeoutError:
-                    for remaining in pending_list[i:]:
-                        e._question_flow.pop_current()
-                        e._interaction_registry.cancel(remaining.question_id)
-                    e._interaction_registry.cleanup_done()
-                    return f"等待用户回答超时（{int(DEFAULT_INTERACTION_TIMEOUT)}s），已取消问题。"
-                except asyncio.CancelledError:
-                    for remaining in pending_list[i:]:
-                        e._question_flow.pop_current()
-                    e._interaction_registry.cleanup_done()
-                    return "用户取消了问题。"
+            except asyncio.CancelledError:
+                e._question_flow.clear()
+                e._interaction_registry.cancel(pending_q.question_id)
+                self._persist()
+                raise
+            except asyncio.TimeoutError:
+                e._question_flow.clear()
+                e._interaction_registry.cleanup_done()
+                result = f"等待用户回答超时（{int(DEFAULT_INTERACTION_TIMEOUT)}s），已取消问题。"
+                record.update(phase="completed", result=result, success=False)
+                self._persist()
+                return result
+            answer = payload if isinstance(payload, dict) else {"raw_input": str(payload)}
+            self.record_question_answer(pending_q.question_id, answer)
+            current = e._question_flow.current()
+            if current is not None and current.question_id == pending_q.question_id:
                 e._question_flow.pop_current()
-
-            if isinstance(payload, dict):
-                collected_answers.append(payload)
-            else:
-                collected_answers.append({"raw_input": str(payload)})
-
-            # 发射已回答事件
+            self._persist()
             e._emit(
                 on_event,
                 ToolCallEvent(
                     event_type=EventType.APPROVAL_RESOLVED,
                     approval_id=pending_q.question_id,
                     approval_tool_name="ask_user",
-                    result=str(payload.get("raw_input", payload) if isinstance(payload, dict) else payload),
+                    result=str(answer.get("raw_input", answer)),
                     success=True,
                     iteration=iteration,
                 ),
             )
 
         e._interaction_registry.cleanup_done()
-
-        # 格式化合并结果
-        if len(collected_answers) == 1:
-            answer = collected_answers[0]
-            return json.dumps(answer, ensure_ascii=False)
-        return json.dumps(collected_answers, ensure_ascii=False)
+        collected = [record["answers"][question["question_id"]] for question in record["questions"]]
+        result = json.dumps(collected[0] if len(collected) == 1 else collected, ensure_ascii=False)
+        record.update(phase="completed", result=result, success=True)
+        self._persist()
+        return result
 
     async def await_question_answer(
         self,

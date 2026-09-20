@@ -7,7 +7,7 @@
 - related_tools: 查询相关工具推荐（同分类）
 - system_status: 查询当前运行时状态（工具数/MCP/子代理等）
 
-注册为 READ_ONLY_SAFE_TOOLS，纯查询无副作用。
+注册为 READ_ONLY_SAFE_TOOLS，不修改业务数据。成功详情仅更新本轮披露集合，不授予权限。
 """
 
 from __future__ import annotations
@@ -212,6 +212,7 @@ _FORMAT_KIND_CHEATSHEETS: dict[str, str] = {
     ),
     "conditional_format": (
         "kind=conditional_format 形状：range + rule（type/operator/value/font/fill）；remove=true 删除相交规则。"
+        "type=formula 用 rule.formula 或同义 formula1，例如 =$D2=\"未匹配\"；相对行号以 range 左上角为基准，$ 锁定行/列。"
         "sheet 或 表!A1。"
         "示例：{\"kind\":\"conditional_format\",\"sheet\":\"Sheet1\",\"range\":\"A2:A20\",\"rule\":{\"type\":\"cell_value\",\"operator\":\"greaterThan\",\"value\":0}}"
     ),
@@ -273,9 +274,14 @@ def _source_tools() -> dict[str, ToolDef]:
 
 
 def _tool_unavailable(tool_name: str) -> str:
+    from difflib import get_close_matches
+
+    names = sorted(_source_tools())
+    candidates = get_close_matches(tool_name, names, n=5, cutoff=0.4) or names[:5]
     return (
         f"工具不可用: {tool_name}\n"
-        "工具不存在于当前目录。建议使用 category_tools 或 can_i_do 查询可见能力。"
+        "工具不存在于当前目录。建议使用 category_tools 或 can_i_do 查询可见能力。\n"
+        f"当前可查询候选: {', '.join(candidates) or '无'}"
     )
 
 
@@ -305,6 +311,8 @@ def _find_category(tool_name: str) -> str | None:
     for cat, tools in TOOL_CATEGORIES.items():
         if tool_name in tools:
             return cat
+    if tool_name.startswith("mcp_"):
+        return "mcp"
     return None
 
 
@@ -383,20 +391,40 @@ def _handle_tool_detail(tool_name: str) -> str:
         f"描述: {desc}",
     ]
     if field_path == "output" or field_path.startswith("output."):
-        from excelmanus.tools.output_contracts import contract_summary
+        from excelmanus.tools.output_contracts import contract_summary, output_schema_for
 
-        summary = contract_summary(tool_name)
+        summary = contract_summary(tool_name, tool_def=tool_def)
         if summary is None:
             return f"未知输出合同: {tool_name}.output（未声明，不编造）"
         if field_path != "output":
-            return (
-                f"未知输出字段: {tool_name}.{field_path}；"
-                "只声明顶层键，请查 工具名.output"
-            )
+            from excelmanus.tools.schema_walk import compact_node, walk_schema_path
+
+            schema = output_schema_for(tool_name, tool_def=tool_def)
+            assert schema is not None
+            node, available, _ = walk_schema_path(schema, field_path.removeprefix("output."))
+            if node is None:
+                return f"未知输出字段: {tool_name}.{field_path}；可查字段: {', '.join(available)}"
+            # The raw property preserves nullable / array types at the leaf.
+            parent_path, _, leaf = field_path.removeprefix("output.").rpartition(".")
+            parent, _, _ = walk_schema_path(schema, parent_path)
+            raw = (parent or {}).get("properties", {}).get(leaf)
+            lines.append("\n输出字段 schema:\n" + json.dumps(compact_node(raw if isinstance(raw, dict) else node), ensure_ascii=False))
+            _record_loaded_tool(tool_def)
+            return "\n".join(lines)
         lines.append("\n输出合同:\n" + summary)
+        _record_loaded_tool(tool_def)
         return "\n".join(lines)
     if not field_path:
+        from excelmanus.code_mode import _sdk_signature_line
+        from excelmanus.tools.output_contracts import contract_summary
+
         lines.append("\n" + _summarize_tool_schema(tool_def))
+        if tool_name != "run_code":
+            lines.append("\nPython SDK（import em）:\n- em." + _sdk_signature_line(tool_def).removeprefix("- "))
+            lines.append("签名中的 ... 表示省略参数；None 仅在合同含 null 时表示显式空值。")
+            lines.append("类型签名为速查；oneOf/allOf、嵌套必填及其他约束请查具体参数 schema。")
+        summary = contract_summary(tool_name, tool_def=tool_def)
+        lines.append("\n输出合同:\n" + (summary or "未声明，不推断返回类型；按实际返回值处理。"))
         lines.append("可用 tool_detail 查询 工具名.字段 缩小范围；不要把 A1 语法整段当参数。")
     else:
         schema = tool_def.input_schema if isinstance(tool_def.input_schema, dict) else {}
@@ -416,6 +444,7 @@ def _handle_tool_detail(tool_name: str) -> str:
                 example = _TOOL_USAGE_EXAMPLES.get(tool_name)
                 if example:
                     lines.append(f"\n调用示例: {example}")
+                _record_loaded_tool(tool_def)
                 return "\n".join(lines)
 
         node, available, _err = walk_schema_path(schema, field_path)
@@ -424,7 +453,25 @@ def _handle_tool_detail(tool_name: str) -> str:
             return (
                 f"字段不存在: {tool_name}.{field_path}；当前可查字段: {available_text}"
             )
-        compact = compact_node(node)
+        # walker 为继续向下走会解包 nullable/array。详情保留终点的原始
+        # schema，避免把 array|string、anyOf|null 误披露为单一分支。
+        parent_path, _, final_key = field_path.rpartition(".")
+        parent = schema
+        if parent_path:
+            parent, _, _ = walk_schema_path(schema, parent_path)
+        props = parent.get("properties", {}) if isinstance(parent, dict) else {}
+        raw_node = props.get(final_key) if isinstance(props, dict) else None
+        if isinstance(raw_node, dict) and "$ref" in raw_node:
+            from excelmanus.tools.schema_walk import resolve_local_ref
+
+            resolved = resolve_local_ref(schema, raw_node["$ref"])
+            if resolved:
+                raw_node = {**resolved, **{key: value for key, value in raw_node.items() if key != "$ref"}}
+        compact = compact_node(raw_node if isinstance(raw_node, dict) else node)
+        if isinstance(raw_node, dict):
+            for key in ("anyOf", "oneOf", "allOf", "not", "const"):
+                if key in raw_node:
+                    compact[key] = raw_node[key]
         schema_str = json.dumps(compact, ensure_ascii=False, separators=(",", ":"), default=str)
         lines.append(f"\n参数 {field_path}:\n{schema_str}")
         if available:
@@ -451,7 +498,17 @@ def _handle_tool_detail(tool_name: str) -> str:
     if example:
         lines.append(f"\n调用示例: {example}")
 
+    _record_loaded_tool(tool_def)
     return "\n".join(lines)
+
+
+def _record_loaded_tool(tool: ToolDef) -> None:
+    """仅在成功详情路径记录授权目录的可信标识，不解析模型可见文本。"""
+    from excelmanus.tools.context import current_call
+
+    ctx = current_call()
+    if ctx is not None and ctx.loaded_tool_names is not None:
+        ctx.loaded_tool_names.add(tool.name)
 
 
 def _handle_category_tools(category: str) -> str:
@@ -465,6 +522,10 @@ def _handle_category_tools(category: str) -> str:
         )
 
     source = _source_tools()
+    if category == "mcp":
+        tools = tuple(name for name in source if name.startswith("mcp_"))
+    elif category == "other":
+        tools = tuple(name for name in source if _find_category(name) is None)
     lines = [f"分类: {category}"]
     listed = 0
     for tool_name in tools:
@@ -543,6 +604,10 @@ def _handle_can_i_do(description: str) -> str:
     lines: list[str] = []
     normalized = str(description or "").strip().lower()
 
+    exact = next((name for name in source if name.lower() == normalized), None)
+    if exact is not None:
+        return f"能力判断: 可见工具可做\n  - {exact} — {_short_desc(exact, source[exact])}"
+
     unavailable = [
         desc for name, desc in _EXTENDED_CAPABILITIES.items()
         if "当前不可用" in desc and (
@@ -583,7 +648,7 @@ def _handle_can_i_do(description: str) -> str:
     scores: list[tuple[str, float]] = []
     for tool_name, tool in source.items():
         desc = _short_desc(tool_name, tool)
-        score = _compute_match_score(keywords, desc)
+        score = _compute_match_score(keywords, f"{tool_name} {desc}")
         if score > 0:
             scores.append((tool_name, score))
     scores.sort(key=lambda x: x[1], reverse=True)
@@ -591,7 +656,7 @@ def _handle_can_i_do(description: str) -> str:
         (name, s) for name, s in scores[:_MAX_RESULTS] if s >= _MATCH_THRESHOLD
     ]
     if top_builtin:
-        lines.append("内置工具匹配:")
+        lines.append("当前授权工具匹配:")
         for name, _s in top_builtin:
             tool = source.get(name)
             lines.append(f"  - {name} — {_short_desc(name, tool)}")
@@ -674,11 +739,9 @@ def _handle_system_status(_query: str = "") -> str:
 
     if mcp_tools:
         lines.append("  MCP 工具列表:")
-        for t in mcp_tools[:15]:
+        for t in mcp_tools:
             desc_short = (t.description or "")[:60]
             lines.append(f"    - {t.name} — {desc_short}")
-        if len(mcp_tools) > 15:
-            lines.append(f"    (+{len(mcp_tools) - 15} more)")
 
     return "\n".join(lines)
 
@@ -722,6 +785,9 @@ def introspect_capability(query_type: str = "", query: str = "", queries: list |
     if queries is not None and isinstance(queries, list):
         results = []
         for i, q in enumerate(queries[:10], 1):  # 最多 10 条
+            if not isinstance(q, dict) or not isinstance(q.get("query_type", ""), str) or not isinstance(q.get("query", ""), str):
+                results.append(f"[{i}] 无效查询：每项需要字符串 query_type 与 query")
+                continue
             qt = q.get("query_type", "")
             qv = q.get("query", "")
             handler = handlers.get(qt)
@@ -756,6 +822,8 @@ def register_introspection_tools(registry: ToolRegistry) -> None:
             name="introspect_capability",
             description=(
                 "查询自身工具能力详情，用于决策时确认能力边界。"
+                "普通内置工具与 MCP 扩展工具均可能按需隐藏；先 can_i_do 按能力搜索、category_tools 按分类查找，或 system_status 查看完整授权目录。"
+                "tool_detail 返回 Python SDK 签名与输出合同；成功查询后下一步可直接调用该工具。"
                 "tool_detail 写工具名或顶层参数；嵌套无 JSON properties 时读返回说明并停，"
                 "不要连查 WorkbookSpec 样式字段。"
             ),

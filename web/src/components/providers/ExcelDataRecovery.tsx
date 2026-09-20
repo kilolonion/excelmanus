@@ -5,6 +5,7 @@ import { useExcelStore } from "@/stores/excel-store";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useWordStore } from "@/stores/word-store";
+import { useFilePreviewStore } from "@/stores/file-preview-store";
 import {
   workspaceKeyForSessionId,
   workspaceKeyFromSession,
@@ -28,11 +29,14 @@ export function ExcelDataRecovery() {
       const sessions = useSessionStore.getState().sessions;
       const prev = sessions.find((item) => item.id === prevSessionRef.current);
       const next = sessions.find((item) => item.id === loadedSessionId);
+      const prevWorkspaceKey = workspaceKeyFromSession(prev);
+      const nextWorkspaceKey = workspaceKeyFromSession(next);
       useExcelStore.getState().rebindSession(
-        workspaceKeyFromSession(prev),
-        workspaceKeyFromSession(next),
+        prevWorkspaceKey,
+        nextWorkspaceKey,
       );
-      useWordStore.getState().rebindWorkspace(workspaceKeyFromSession(next));
+      useWordStore.getState().rebindWorkspace(nextWorkspaceKey);
+      useFilePreviewStore.getState().clearForSessionChange();
     }
     prevSessionRef.current = loadedSessionId;
 

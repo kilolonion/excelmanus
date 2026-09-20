@@ -20,4 +20,14 @@ describe("selection identity", () => {
   it("keeps zero-based UI coordinates aligned with Excel", () => {
     expect(readActiveRange(api({ getName: () => "销售" }, 2, 26))).toEqual({ sheet: "销售", range: "B3:AA4" });
   });
+  it("reads multi-cell dimensions from the installed Univer facade", () => {
+    const currentApi = { getActiveWorkbook: () => ({ getActiveSheet: () => ({
+      getSheetName: () => "销售",
+      getSelection: () => ({ getActiveRange: () => ({
+        getRow: () => 2, getColumn: () => 1, getHeight: () => 2, getWidth: () => 26,
+      }) }),
+    }) }) };
+    expect(readActiveRange(currentApi)).toEqual({ sheet: "销售", range: "B3:AA4" });
+    expect(readActiveRange({ getActiveWorkbook: () => null })).toEqual({});
+  });
 });

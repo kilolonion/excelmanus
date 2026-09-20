@@ -2,426 +2,256 @@
   <img src="web/public/logo.svg" width="380" alt="ExcelManus" />
 </p>
 
-<h3 align="center">用自然语言驾驭 Excel 的开源 AI Agent 框架</h3>
+<h3 align="center">用自然语言处理 Excel 与 Word 的开源 AI 助手</h3>
 
 <p align="center">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache%202.0-blue.svg" alt="License" /></a>
   <a href="https://github.com/kilolonion/excelmanus"><img src="https://img.shields.io/github/stars/kilolonion/excelmanus?style=social" alt="GitHub Stars" /></a>
   <img src="https://img.shields.io/badge/python-≥3.10-3776AB.svg?logo=python&logoColor=white" alt="Python" />
-  <img src="https://img.shields.io/badge/version-1.7.3-green.svg" alt="Version" />
+  <img src="https://img.shields.io/badge/version-1.8.0-green.svg" alt="Version" />
   <img src="https://img.shields.io/badge/Next.js-16-black?logo=next.js" alt="Next.js" />
-  <img src="https://img.shields.io/badge/pytest-included-brightgreen.svg" alt="Tests" />
 </p>
 
 <p align="center">
-  <a href="README_EN.md">English</a> · 中文 · <a href="docs/configuration.md">配置文档</a> · <a href="docs/ops-manual.md">运维手册</a>
+  中文 · <a href="README_EN.md">English</a> · <a href="docs/README.md">文档导航</a> · <a href="docs/configuration.md">配置参考</a> · <a href="docs/ops-manual.md">运维手册</a>
 </p>
 
 <p align="center">
-  <img src="docs/images/webui-desktop.png" width="720" alt="Web UI" />
+  <img src="docs/images/webui-desktop.png" width="960" alt="ExcelManus 桌面工作台" />
 </p>
+<p align="center"><sub>统一工作台：在同一界面管理对话、文件、任务与表格</sub></p>
 
----
+**ExcelManus** 将对话、文件和表格编辑放在同一个工作台中。描述你的任务，助手可以读取工作簿、整理数据、编写公式、调整格式、生成图表，并将结果保存为可继续编辑的文件。
 
-**ExcelManus** 是一个完全开源的 LLM 驱动 Excel Agent 框架。用一句话描述你想做的事，它就能自动读取数据、编写公式、运行分析脚本、绘制图表 —— 像一个真正理解 Excel 的 AI 助手。
+项目提供 Web UI、REST API，以及 Windows / macOS 桌面打包入口。模型、凭证和会话数据由你的部署管理；可连接 OpenAI 兼容接口、Anthropic、Gemini，或配置本地模型服务。实际可用功能取决于模型及接口支持。
 
-- **两种交互入口** — Web UI / REST API
-- **任意大模型** — OpenAI · Claude · Gemini · DeepSeek · Qwen · Kimi · xAI · 豆包 · 本地 Ollama / vLLM，即插即用
-- **生产可用** — 本机 Git 停机升级 · 服务器 deploy.sh · 单用户工作区 · 操作审批 · 版本回滚
+> 本文对应当前 **1.8.0 源码**。桌面安装包的提供情况、签名状态和支持架构，以具体发布资产为准。完整构建说明见 [Desktop README](desktop/README.md)。
 
-> 💡 首次启动打开 Web 设置页添加模型档案（写入主数据库 `model_profiles`）。Web / API 共用同一份档案。
+## 核心能力
 
----
+| 能力 | 可以做什么 |
+| --- | --- |
+| Excel 处理 | 读取与编辑单元格、公式、工作表、样式、条件格式和数据验证；筛选、分组、聚合、比较与拆分数据 |
+| 数据分析与图表 | 使用内置工具完成常见操作；需要循环、跨文件组合或自定义计算时，通过 Python 调用同一组工具 |
+| Word 处理 | 读取、检索、编辑和生成 `.docx` 文档；复杂任务可使用 Python 脚本 |
+| 图片转表格 | 将截图交给支持视觉的当前模型识别，再根据结构化规格生成工作簿 |
+| 文件预览与历史 | 在工作台预览和编辑表格，查看修改记录、比较版本、恢复历史文件 |
+| 多工作区与多会话 | 登记已有本机文件夹，每个会话绑定一个工作区；同一工作区中的会话共享文件 |
+| 后台任务与恢复 | 子代理可在后台执行；在「任务」面板查看进度、补充指令、暂停或继续；中断的主任务可用 `/resume` 恢复 |
+| 技能与外部工具 | 用 Skillpack 复用任务方法，通过 MCP 连接搜索及其他外部服务 |
 
-## ✨ 核心能力
+`.xls` / `.xlsb` 上传时会转换为 `.xlsx`；项目也支持处理 `.xlsx`、`.xlsm`、`.csv` 和 `.tsv`。不同格式可承载的样式、公式和对象不同。公式计算、复杂对象保真和界面呈现不应视为与 Microsoft Excel 完全等价；重要文件请保留原件，并检查生成结果。
+
+## 桌面 App
+
+ExcelManus Desktop 把 Web 工作台、API 后端，以及 `run_code` 所需的 Python 和 Node.js 运行时打包在一个应用中。安装后直接打开即可使用，不需要分别启动前端和后端；模型服务仍由你在设置中连接和选择。
+
+- **统一工作区**：对话、文件、后台任务和表格视图在同一个窗口中切换。
+- **内置表格工作台**：直接查看和编辑工作簿，通过公式栏、工作表标签和对话输入继续处理数据。
+- **集中管理模型**：在设置中管理模型提供商、模型配置、订阅与 OAuth，以及可选的决策服务。
+- **本地数据目录**：主数据库、凭证和默认工作区保存在 App 的独立 profile 中；登记到其他位置的工作区仍保留在原路径。
 
 <table>
 <tr>
-<td width="50%">
-
-### 📊 Excel 与 Word
-单元格读写 · 公式 · VLOOKUP · 批量填充 · 多 Sheet
-`.xls` / `.xlsb` 透明转 `.xlsx`；`.xlsx` / `.xlsm` / `.csv` / `.tsv` 原生读写
-Word `.docx` 读取、编辑与生成（与 Excel 同为一等能力）
-
-### 📈 数据分析 & 可视化
-筛选、排序、聚合、透视表；复杂逻辑自动生成 Python 脚本
-柱状图 · 折线图 · 饼图等嵌入 Excel 或导出高清图片
-
-### 🖼️ 视觉识别与提取
-表格截图作为附件交给当前模型，产出结构化 Excel 数据
-没有独立视觉流水线，也没有附属 VLM 描述步骤
-
-### 🔄 版本管理 & Diff
-写入落用户路径；历史在 `.excelmanus/revisions/`，`/undo` 回滚
-Excel 修改前后 Diff 可视化，文本文件 unified diff 展示
-
-### ✅ 任务证据与自主检查
-为子任务记录可选检查目标，主 Agent 按需回读、比较与检查公式
-不运行隐藏验收 Agent；权限、文件安全、备份和回滚机制保持独立
-
-</td>
-<td width="50%">
-
-### 🧠 持久记忆 & 会话历史感知
-跨会话记忆用户偏好与操作模式；默认由模型通过记忆工具读取，不会在会话开始自动注入。
-**会话摘要（可选）**：开启后可在会话结束时生成结构化摘要并落库（`session_summary_enabled` 默认关）。不自动按文件名 / 时间序检索历史会话，也不注入新会话。
-
-### 🧩 Skillpack
-一个目录 + `SKILL.md` 即一个技能，自动发现；模型用 `skill` 工具按需加载
-支持从本地文件或 GitHub 导入技能包
-
-### 🔌 MCP & Subagent
-接入外部 MCP Server 扩展工具集
-委派由模型调用 `delegate`；`/subagent` 控制开关，不会因大文件或复杂任务自动委派
-
-### 🔄 本机停机升级
-设置页一键更新：停进程 → 备份 `$EXCELMANUS_HOME` → git fast-forward → 再拉起
-服务器部署请在运维机运行 `deploy.sh`，不要从生产 API 升级
-
-</td>
+<td width="50%"><img src="docs/images/webui-mobile.png" alt="ExcelManus 表格工作台" /></td>
+<td width="50%"><img src="docs/images/app-settings.png" alt="ExcelManus 模型与提供商设置" /></td>
+</tr>
+<tr>
+<td align="center"><b>表格工作台</b><br />查看、编辑工作簿，并从当前内容继续对话</td>
+<td align="center"><b>模型与连接</b><br />管理提供商、模型、订阅与 OAuth</td>
 </tr>
 </table>
 
-## 🚀 快速开始
+桌面安装包是否可用、支持哪些系统架构以及是否已签名，以对应发布资产为准。构建、签名、运行时和数据迁移说明见 [桌面版文档](desktop/README.md)。
 
-> **前置要求**：Python ≥ 3.10 · Node.js ≥ 20.9（Web UI 需要，Next.js 16）
+## 快速开始
 
-### 方式一：一键启动（推荐）
+### 下载安装桌面版
 
-自动安装依赖、启动后端和前端，适合大多数用户。
+如果当前发布提供适合你的系统和架构的安装包，可从 [GitHub Releases](https://github.com/kilolonion/excelmanus/releases) 获取。桌面包包含前端、后端以及执行代码所需的 Python 和 Node.js 运行时；额外配置的 MCP 命令可能仍需要单独安装。
 
-<details open>
-<summary><b>🍎 macOS / 🐧 Linux — 启动脚本</b></summary>
+桌面版使用独立的数据目录。首次启动后，在设置页添加并激活模型；升级时安装新的应用包。源码构建、签名和数据迁移说明见 [桌面版文档](desktop/README.md)。
+
+### 从源码一键启动
+
+需要 **Python ≥ 3.10、Node.js ≥ 20.9 和 Git**。建议使用 [uv](https://docs.astral.sh/uv/) 管理 Python 依赖。启动脚本会检查环境、安装项目依赖并启动前后端。
+
+macOS / Linux：
 
 ```bash
 git clone https://github.com/kilolonion/excelmanus.git
-# 国内推荐：git clone https://gitee.com/kilolonion/excelmanus.git
 cd excelmanus
-chmod +x ./deploy/start.sh
 ./deploy/start.sh
 ```
 
-首次启动会交互式提示填写大模型配置（API Key、Base URL、模型名称）。启动成功后浏览器自动打开 `http://localhost:3000`。
-
-```bash
-./deploy/start.sh --prod              # 生产模式（默认 1 worker）
-./deploy/start.sh --backend-port 9000 # 自定义端口
-./deploy/start.sh --workers 1         # 推荐：会话在进程内存，>1 会跨 worker 打满 prompt cache miss
-./deploy/start.sh --help              # 全部选项
-```
-
-</details>
-
-<details>
-<summary><b>🪟 Windows — start.ps1 / start.bat</b></summary>
+Windows PowerShell：
 
 ```powershell
 git clone https://github.com/kilolonion/excelmanus.git
-# 国内推荐：git clone https://gitee.com/kilolonion/excelmanus.git
 cd excelmanus
 .\deploy\start.ps1
 ```
 
-```bat
-deploy\start.bat
-```
+Windows CMD 也可运行 `deploy\start.bat`。国内用户可将克隆地址替换为 [Gitee 仓库](https://gitee.com/kilolonion/excelmanus)。
 
-首次启动会交互式提示填写大模型配置。启动成功后浏览器打开 `http://localhost:3000`。
-
-```powershell
-.\deploy\start.ps1 -Production
-.\deploy\start.ps1 -BackendPort 9000
-deploy\start.bat --prod
-```
-
-</details>
-
-### 方式二：手动安装（uv）
-
-适合想精确控制依赖的用户。[uv](https://docs.astral.sh/uv/) 比 pip 快 10–100 倍。
+启动后访问 [http://localhost:3000](http://localhost:3000)，在引导页或「设置 → 模型」中添加模型档案并激活。无需在终端填写模型密钥；未配置模型时仍可打开设置页。
 
 ```bash
-# 1. 安装 uv
-curl -LsSf https://astral.sh/uv/install.sh | sh
-# Windows: powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-
-# 2. 克隆并安装
-git clone https://github.com/kilolonion/excelmanus.git
-# 国内推荐：git clone https://gitee.com/kilolonion/excelmanus.git
-cd excelmanus
-uv sync --all-extras     # 完整安装：web/analysis（也支持 pip install ".[all]"）
-
-# 3. 配置
-# 启动后打开 Web 设置页添加模型档案（保存在主数据库）。
-
-# 4. 启动
-uv run excelmanus-api    # Web API（http://localhost:8000）
-cd web && npm i && npm run dev   # Web 前端（http://localhost:3000）
+./deploy/start.sh --prod                  # 构建并运行生产前端
+./deploy/start.sh --backend-port 9000     # 修改后端端口
+./deploy/start.sh --frontend-port 8080    # 修改前端端口
+./deploy/start.sh --backend-only         # 仅启动后端
+./deploy/start.sh --help                 # 查看完整选项
 ```
 
-### 开始对话
+Windows 生产模式使用 `.\deploy\start.ps1 -Production` 或 `deploy\start.bat --prod`。单机保持 **1 个后端 worker**，避免内存中的会话与运行状态分散到多个进程。
 
-在 Web UI 中直接输入自然语言：
+### 手动启动
 
+在仓库根目录安装依赖并启动后端：
+
+```bash
+uv sync --frozen --extra web --extra analysis
+uv run excelmanus-api --host 127.0.0.1 --port 8000
 ```
-> 读取 sales.xlsx 前 10 行
-> 把 A 列金额求和写到 B1
-> 按地区分组统计销售额，生成柱状图
-> 把这张表格截图还原成 Excel
+
+另开一个终端启动前端：
+
+```bash
+cd web
+npm ci
+npm run dev
 ```
 
-## 💻 两种交互方式
+仅使用 REST API 时可只安装 `web` extra。需要 VBA 检查工具或实验性 Jev 功能时，再分别添加 `--extra vba`、`--extra system-one`。前端地址配置见 [Web README](web/README.md)。
 
-### Web UI
+### 开始第一个任务
 
-基于 **Next.js + Univer.js**，提供完整的可视化操作体验。
+先上传文件，或登记文件所在的本机文件夹，再在对话中描述需求：
 
-| 能力 | 说明 |
+```text
+读取 sales.xlsx 的前 10 行，告诉我各列含义。
+按地区汇总销售额，保存为新工作簿，并生成柱状图。
+比较两份报价单，列出价格变化和缺失项目。
+把这张表格截图整理成可编辑的 Excel 文件。
+```
+
+可以通过 `@` 引用文件、技能或表格选区。需要先讨论方案时使用计划模式；只想查看和分析时使用只读模式。
+
+## 工作台与任务执行
+
+Web 工作台基于 Next.js、React 和 Univer，支持流式对话、文件预览、表格选区引用、单元格编辑、文件历史及后台任务面板，也提供移动端布局。
+
+- **直接工具与代码执行**：同一任务可以交替使用业务工具和 `run_code`，无需切换代码模式。常用工具直接提供，其他能力按需查询和加载。
+- **写入与审批**：普通工作区编辑按当前权限执行并记录变更；删除文件、执行 Shell 等操作可能需要确认。并非每次写入都会弹出审批。
+- **版本冲突**：工作簿写入使用观察到的内容版本。发生冲突时应重新读取文件后决定如何修改，避免覆盖其他会话或手工编辑。
+- **后台子代理**：由模型显式调用 `delegate` 启动。主聊天结束后，后台任务可以继续；暂停或取消会保留已经提交的改动。
+- **中断恢复**：服务重启后，未完成任务显示为中断。`/resume` 根据已保存的对话与工具结果继续，不会恢复旧进程，也不会自动重放结果不明的写入。
+- **记忆与摘要**：记忆按需读取；会话结束摘要默认关闭。启用相关功能可能产生额外模型调用。
+
+## 模型与配置
+
+在设置页管理多个模型档案，选择一个作为当前激活模型。对话、子代理与上下文压缩使用该档案；也可用 `/model <名称>` 切换。
+
+| 接口 | 配置方式 |
 | --- | --- |
-| **SSE 流式响应** | 实时显示思考过程、工具调用、子代理执行；断连自动重连 |
-| **Excel 侧边面板** | 内嵌 Univer 查看器，实时预览编辑，支持选区引用和全屏模式 |
-| **Excel & Text Diff** | 每次写入前后对比，行/列/值变化一目了然 |
-| **多会话管理** | SQLite + IndexedDB 三级缓存，刷新/重启不丢失 |
-| **文件交互** | 拖拽上传、`@` 引用文件和技能；`.xls` / `.xlsb` 自动转 `.xlsx` |
-| **操作审批** | 高风险操作弹窗确认，变更自动记录快照 |
-| **乐观 UI** | 消息即时显示，写操作乐观更新 + 失败自动回滚 |
-| **错误引导** | 失败时展示可操作建议卡片（重试 / 检查设置 / 复制诊断 ID） |
-| **号池管理** | 可选的 API 号池与订阅轮换（默认关闭） |
-| **Plan 模式** | `/plan` 开关；确认计划后再执行，不会自动拆解复杂任务 |
-| **升级通知** | 检测到新版本时提示升级；本机停机更新后探活刷新 |
+| OpenAI 兼容 | 填写 Base URL、API Key 和模型 ID；适用于支持该协议的云端或本地服务 |
+| OpenAI Responses | 将模型档案协议设为 `openai_responses` |
+| Anthropic / Gemini | 使用对应提供商预设，或显式选择 `anthropic` / `gemini` 协议 |
+| Codex 订阅连接 | 在「设置 → 模型 → 订阅与 OAuth」中使用浏览器授权或设备码；可用模型以连接后的发现结果为准 |
 
-<p align="center">
-  <img src="docs/images/webui-mobile.png" width="300" alt="移动端" />
-</p>
-<p align="center"><sub>响应式布局 — 移动端同样可用</sub></p>
+远程部署使用 Codex 连接时，按设置页提示使用设备码，或粘贴浏览器授权后的完整回调地址。当前集成使用固定的本机回调 `http://localhost:1455/auth/callback`；不要替换为部署站点的回调地址。
 
-### REST API
+**产品设置保存在主数据库**，模型档案保存在 `model_profiles`，其他设置保存在 `config_kv`。项目 `.env` 和用户 `config.env` 不再作为产品配置源。`EXCELMANUS_HOME`、监听端口、管理令牌等进程参数用于定位数据或启动服务，详见 [配置参考](docs/configuration.md)。
 
-`excelmanus-api` 启动后即可调用，SSE 推送 30+ 种事件类型。
+## 数据与访问边界
 
-<details>
-<summary>📋 主要接口</summary>
+ExcelManus 是单用户软件。多个工作区和会话共用进程级模型凭证、记忆和外部服务配置，不提供多租户账号隔离。
 
-| 接口 | 说明 |
+默认源码数据目录为 `~/.excelmanus`，工作区文件默认放在其 `data/` 下；登记的其他文件夹保留在原位置。文件修订存放在各工作区的 `.excelmanus/revisions/`。备份时应同时保存主数据库、`.secret_key` 和工作区文件。
+
+文件工具检查工作区边界、敏感文件及符号链接。Python 代码在本机子进程中执行，并受路径检查、代码策略和超时约束；这不等同于虚拟机或容器隔离。模型请求可能包含对话、工具读到的文件内容和图片，搜索及 MCP 调用也会发送对应参数，详见 [隐私政策](docs/privacy-policy.md)。
+
+后端默认监听 `127.0.0.1`。远程访问需配置管理令牌和受控入口；通过反向代理暴露本机后端时也需要访问保护。部署步骤见 [运维手册](docs/ops-manual.md)。
+
+## REST API
+
+后端默认地址为 [http://localhost:8000](http://localhost:8000)。启动后可在 [交互式 API 文档](http://localhost:8000/docs) 查看实际请求参数和响应结构。
+
+| 接口 | 用途 |
 | --- | --- |
-| `POST /api/v1/chat/stream` | SSE 流式对话 |
+| `POST /api/v1/chat/stream` | 流式对话 |
 | `POST /api/v1/chat` | JSON 对话 |
-| `POST /api/v1/chat/abort` | 终止任务 |
-| `POST /api/v1/chat/subscribe` | 重连并恢复会话流 |
-| `POST /api/v1/chat/rollback` | 回滚会话到指定轮次 |
-| `GET /api/v1/sessions` | 会话列表（支持归档过滤） |
-| `GET /api/v1/sessions/{id}/messages` | 分页获取历史消息 |
-| `GET /api/v1/files/excel` | Excel 文件流 |
-| `GET /api/v1/files/excel/snapshot` | Excel JSON 快照 |
-| `POST /api/v1/files/excel/write` | 侧边面板回写 |
-| `GET /api/v1/files/word` | Word 文件流 |
-| `GET /api/v1/files/word/snapshot` | Word JSON 快照 |
-| `POST /api/v1/files/word/write` | Word 回写 |
-| `GET /api/v1/workspaces` | 已登记工作区 |
-| `POST /api/v1/workspaces` | 登记本机文件夹 |
-| `GET /api/v1/revisions` | 文件修订历史 |
-| `POST /api/v1/revisions/restore` | 恢复历史版本 |
-| `GET /api/v1/skills` | 技能列表 |
-| `GET /api/v1/version/check` | 版本检查 |
-| `POST /api/v1/version/upgrade` | 本机停机更新（仅 standalone + loopback） |
-| `GET /api/v1/auth/providers/openai-codex/status` | Codex 连接状态 |
-| `POST /api/v1/config/export` | 导出配置 |
-| `GET /api/v1/health` | 健康检查 |
+| `POST /api/v1/chat/abort` | 停止主任务 |
+| `POST /api/v1/chat/subscribe` | 订阅或重新连接会话事件流 |
+| `GET /api/v1/sessions/{session_id}/turn` | 查看主任务状态及恢复条件 |
+| `GET /api/v1/sessions/{session_id}/subagents` | 查看后台子代理 |
+| `POST /api/v1/sessions/{session_id}/subagents/{run_id}` | 补充指令、暂停、取消或继续后台任务 |
+| `GET /api/v1/files/excel/view` | 获取工作簿视图 |
+| `POST /api/v1/files/excel/write` | 保存表格编辑 |
+| `GET /api/v1/files/word/snapshot` | 获取 Word 文档快照 |
+| `POST /api/v1/files/word/write` | 保存 Word 编辑 |
+| `GET /api/v1/revisions` | 查询文件修订 |
+| `POST /api/v1/revisions/restore` | 恢复文件历史版本 |
+| `GET /api/v1/health` | 检查服务状态 |
 
-</details>
+配置了有效管理令牌后，除健康检查和 CORS 预检外，API 请求需携带 `Authorization: Bearer <token>`。健康检查成功只表示服务可响应，不代表模型配置、文件处理或外部工具均已通过验证。
 
-## 🤖 模型支持
+## Skillpack
 
-ExcelManus 通过 URL 自动检测模型提供商，零配置切换：
-
-| Provider | 说明 |
-| --- | --- |
-| **OpenAI 兼容** | 默认协议。任何 OpenAI 兼容 API 均可——Ollama / vLLM / LM Studio / DeepSeek 等 |
-| **Claude (Anthropic)** | URL 含 `anthropic` 自动切换；Claude 5 使用 adaptive thinking |
-| **Gemini (Google)** | URL 含 `googleapis` / `generativelanguage` 自动切换 |
-| **OpenAI Responses API** | 新一代推理 API，`EXCELMANUS_USE_RESPONSES_API=1` 启用 |
-| **OpenAI Codex** | ChatGPT 订阅 OAuth（浏览器 PKCE 或设备码）绑定 Codex，私有模型自动发现，无需手填 Key |
-| **MiniMax / 智谱 / 百炼 / Kimi / 豆包 / xAI** | 自动检测 base_url，`/models` 不可用时回退内置推荐列表 |
-
-### 模型档案
-
-在设置里添加多个模型档案，激活其中一个即可用于对话、子代理和上下文压缩。`/model <名称>` 切换当前激活档案。
-
-### 模型能力探测
-
-首次使用新模型时，ExcelManus 自动探测其能力边界（视觉、函数调用、上下文窗口等），据此动态调整工具策略，无需手动配置。
-
-## 🔒 安全机制
-
-| 机制 | 说明 |
-| --- | --- |
-| **路径沙盒** | 读写限制在工作目录，路径穿越和符号链接越界被拒绝 |
-| **代码审查** | `run_code` 静态分析，按 Green / Yellow / Red 三级自动审批 |
-| **本机代码围栏** | `run_code` 在本机子进程中执行（路径守卫、受限 builtins、超时）；不依赖 Docker |
-| **操作审批** | 高风险写入需用户确认，变更自动记录 diff 和快照 |
-| **版本链** | 写入落用户路径；历史在 `.excelmanus/revisions/`，`/undo` 回滚 |
-| **MCP 白名单** | 外部工具默认需逐项确认 |
-| **工作区边界** | 凭证与记忆是进程级一份；可登记多个本机文件夹作工作区。多对话不是多租户 |
-
-## 🧩 Skillpack
-
-一个目录 + 一个 `SKILL.md`（含 `name` 和 `description`）即可创建技能。自动发现；激活走模型工具 `skill`（或斜杠 `/<name>` / `@skill`）。支持 Hook、命令分派、MCP 依赖声明。可从本地路径或 GitHub URL 导入。
+一个目录和一份带 `name`、`description` 的 `SKILL.md` 即可定义技能。模型通过 `skill` 按需加载，用户也可以用 `/<技能名>` 或 `@` 显式引用。技能可声明参考资源、Hook 和 MCP 依赖；加载技能不会扩大当前会话权限。
 
 <details>
 <summary>📦 内置技能</summary>
 
 | 技能 | 用途 |
 | --- | --- |
-| `data_basic` | 读取、分析、筛选、转换 |
-| `chart_basic` | 图表（内嵌 + 图片导出） |
-| `format_basic` | 样式、条件格式、高级排版 |
+| `data_basic` | 数据读取、分析、筛选与转换 |
+| `chart_basic` | 工作簿图表与图片导出 |
+| `format_basic` | 样式、条件格式与排版 |
 | `file_ops` | 文件管理 |
 | `sheet_ops` | 工作表与跨表操作 |
-| `excel_code_runner` | Python 脚本处理大文件 |
-| `run_code_templates` | 常用代码模板 |
-| `word_basic` | Word 读取、编辑与内容生成 |
-| `word_code_runner` | 复杂 Word 操作用 python-docx 脚本 |
+| `excel_code_runner` | 自定义 Python 计算与跨工具组合 |
+| `run_code_templates` | 批量读写、分析与格式化模板 |
+| `word_basic` | Word 读取、编辑与生成 |
+| `word_code_runner` | 复杂 Word 文档处理 |
 
 </details>
 
-协议详见 [`docs/skillpack_protocol.md`](docs/skillpack_protocol.md)。
+加载顺序、目录发现、覆盖规则和 Hook 协议见 [Skillpack 文档](docs/skillpack_protocol.md)。
 
-## 单用户架构
+## 升级与部署
 
-凭证与记忆是进程级一份；可把多个本机文件夹登记为工作区，每个对话绑定其中一个文件夹。多对话（多会话）仍然支持。
-Codex 订阅 OAuth 在「设置 → 模型 → 订阅与 OAuth」中配置，不依赖登录账号。
-
-旧版 `users/{id}/` 不会自动合并；请手工把要用的目录拷到 `data_root` / `workspace_root`，各用户 `data.db` 不自动导入。详见 [配置说明](docs/configuration.md)。
-
-**OpenAI Codex 订阅**：用户可通过浏览器 PKCE 或设备码绑定 ChatGPT/Codex 订阅，私有模型自动发现，无需手填 API Key。
-
-> **前后端分离部署**：OAuth 回调已优化为前端页面接收 + 浏览器直连后端交换 token，需将重定向 URI 设为 `https://your-domain/auth/codex/callback`。
-
-详细配置见 [配置文档](docs/configuration.md)。
-
-## 🏗️ 部署
-
-### 本机启动（推荐）
-
-```bash
-./deploy/start.sh              # macOS / Linux 开发模式
-./deploy/start.sh --prod       # 生产模式
-.\deploy\start.ps1 -Production # Windows PowerShell
-deploy\start.bat --prod        # Windows CMD
-```
-
-访问 `http://localhost:3000`。支持 `--backend-port` · `--frontend-port` · `--workers` · `--backend-only` 等选项。
-
-本机升级：设置页「执行更新」，或先停服务再 `./deploy/update.sh`。升级会停掉进程组、备份 `$EXCELMANUS_HOME`、fast-forward 拉代码后再拉起。
-
-**原 Compose / 镜像用户**：把卷里的数据库和上传文件拷到 `$EXCELMANUS_HOME`（默认 `~/.excelmanus`）后，改用 `./deploy/start.sh` 或服务器上的 PM2 / systemd。产品不再提供 Docker 安装轨。
-
-### 远程部署
-
-部署脚本在**运维机**上通过 SSH 同步远程服务器，支持单机 / 前后端分离 / 本地拓扑。生产进程（`EXCELMANUS_DEPLOY_MODE=server`）不能自己升级或远程部署。
-
-```bash
-./deploy/deploy.sh                    # 完整部署
-./deploy/deploy.sh --backend-only     # 仅后端
-./deploy/deploy.sh --frontend-only    # 仅前端
-./deploy/deploy.sh rollback           # 回滚上一版本
-./deploy/deploy.sh rollback-to --commit <hash>
-./deploy/deploy.sh check              # 环境 + 互联检测
-```
-
-<details>
-<summary>🔐 部署安全机制</summary>
-
-三层防护，避免部署导致线上 502：
-
-| 层 | 机制 | 说明 |
-| --- | --- | --- |
-| **构建退出码** | 不使用管道吞掉退出码 | 构建失败立即中止 |
-| **产物校验** | BUILD_ID + routes-manifest.json | 不完整产物拒绝重启 |
-| **启动降级** | standalone vs next start 自动检测 | 兼容不同 Next.js 输出 |
-
-构建失败时保留当前运行版本，不会触发 PM2 重启。自动排除 `.env`、`data/`、`workspace/`。
-
-</details>
-
-### 升级
-
-本机（standalone）停机升级：设置页一键更新，或先停服务再 `./deploy/update.sh`。Helper 杀掉 start 进程组，备份 `$EXCELMANUS_HOME`，fast-forward 拉代码后再拉起。冲突不会 `reset --hard`。
-
-服务器（`EXCELMANUS_DEPLOY_MODE=server`）请在运维机运行 `./deploy/deploy.sh`；生产 API 拒绝自己升级。回滚：`./deploy/deploy.sh rollback-to --commit <hash>`。
-
-详见 [升级与部署](docs/hot-update-design.md)。
-
-手动部署详见 [运维手册](docs/ops-manual.md)。
-
-## ⚡ 性能优化
-
-| 优化项 | 效果 |
+| 安装形态 | 更新方式 |
 | --- | --- |
-| **Claude 分层 Cache** | System Prompt 拆分为稳定前缀 + 动态块，第 2 次请求 TTFT 降至 3-5s |
-| **SACR 稀疏压缩** | 工具结果去除 null 键；测试中稀疏数据节省超过 50% token |
-| **图片生命周期管理** | 自动管理多轮对话中的图片保留/降级，避免重复传输 |
-| **单一激活模型** | 对话、子代理与压缩共用当前激活档案，切换一次全部生效 |
-| **上下文预算管理** | 动态分配预算，均匀截断旧消息 |
-| **SSE 事件去重** | 前端统一 `dispatchSSEEvent` 处理器 |
-| **数据库 WAL 模式** | SQLite 启用 WAL，并发读写不阻塞 |
+| 桌面版 | 安装新的应用包，保留并备份用户数据目录 |
+| 本机 Git 源码 | 通过设置页停机更新，或停止服务后运行 `./deploy/update.sh` |
+| 远程服务器 | 在运维机运行 `bash ./deploy/deploy.sh`；服务器 API 不执行自身升级 |
 
-## 📖 配置参考
+本机 Git 更新采用 fast-forward，遇到分支冲突时停止更新。服务器部署脚本会同步部署目录，更新前应保留数据备份，避免在部署目录存放未提交的开发工作。当前不提供 Docker 安装流程，也不承诺无中断升级。
 
-模型与运行时选项在 **Web 设置页** 写入主数据库。常用配置分类：
+详见 [升级与部署说明](docs/hot-update-design.md) 和 [运维手册](docs/ops-manual.md)。
 
-| 类别 | 关键配置 |
-| --- | --- |
-| **基础** | `EXCELMANUS_API_KEY` / `EXCELMANUS_BASE_URL` / `EXCELMANUS_MODEL` |
-| **视觉** | `EXCELMANUS_MAIN_MODEL_VISION` / `EXCELMANUS_IMAGE_PIXEL_BUDGET` |
-| **安全** | `EXCELMANUS_CODE_POLICY_*` / `EXCELMANUS_MANAGE_TOKEN` |
-| **性能** | `EXCELMANUS_IMAGE_PIXEL_BUDGET` |
-| **会话摘要** | `EXCELMANUS_SESSION_SUMMARY_ENABLED` / `EXCELMANUS_SESSION_SUMMARY_MIN_TURNS` |
-
-完整配置列表见 [配置文档](docs/configuration.md)。
-
-## 🖥️ 平台支持
-
-| 平台 | 状态 | 说明 |
-| --- | --- | --- |
-| **macOS** | ✅ 完整支持 | 开发主平台 |
-| **Linux** | ✅ 完整支持 | Ubuntu / Debian / CentOS / Fedora / Arch 等 |
-| **Windows** | ✅ 完整支持 | PowerShell 5.1+ 或 CMD |
-
-启动脚本自动检测 OS 和包管理器，缺少依赖时给出精确的安装命令。
-
-## 🧪 评测框架
-
-内置 Bench 评测，支持多轮用例、自动断言、JSON 日志和 Suite 并发：
+## 开发与评测
 
 ```bash
-uv run python -m excelmanus.bench --all                         # 默认短套件
-uv run python -m excelmanus.bench --suite bench/cases/xxx.json  # 指定 suite
-uv run python -m excelmanus.bench --message "读取前10行"          # 单条
+uv sync --frozen --extra web --extra analysis --dev
+uv run pytest tests/test_engine.py tests/test_api.py
 ```
 
-体验向长套件（无标准答案）见 `bench/README.md`，不进入 `--all`。
+前端检查和桌面构建分别见 [Web README](web/README.md)、[Desktop README](desktop/README.md)。修改工具、技能或提示词时，请同步对应说明并运行相关契约测试。
 
-## 🛠️ 开发 & 贡献
+真实模型评测会调用已配置的服务并可能产生费用：
 
 ```bash
-uv sync --all-extras --dev    # 完整安装（web/analysis）+ 测试依赖
-uv run pytest tests/test_engine.py tests/test_api.py  # 针对性测试
+uv run python -m excelmanus.bench --all
+uv run python -m excelmanus.bench --suite bench/cases/suite_realistic.json --case R01
 ```
 
-欢迎提交 PR 和 Issue！请确保新代码附带测试，并跑通与改动相关的测试。
+运行前按 [Bench 文档](bench/README.md) 准备隔离配置和夹具。`--all` 只包含默认短套件，长套件需显式指定；历史评测报告不能替代当前版本的验证结果。
 
-## ⭐ Star History
+欢迎通过 [Issues](https://github.com/kilolonion/excelmanus/issues) 和 Pull Request 反馈问题、改进文档或贡献代码。
 
-如果 ExcelManus 对你有帮助，请给我们一个 Star 🌟
+## 许可证
 
-<p align="center">
-  <a href="https://github.com/kilolonion/excelmanus/stargazers">
-    <img src="https://starchart.cc/kilolonion/excelmanus.svg?variant=adaptive" width="600" alt="Star History" />
-  </a>
-</p>
-
-## 📄 许可证
-
-[Apache License 2.0](LICENSE) © kilolonion
+[Apache License 2.0](LICENSE) © kilolonion。另见 [用户服务协议](docs/terms-of-service.md)。

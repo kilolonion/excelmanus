@@ -35,5 +35,5 @@ export function rememberFullViewTarget(
 export function workspaceKeepAliveLayerClass(active: boolean): string {
   return active
     ? "relative flex flex-col h-full min-h-0"
-    : "invisible pointer-events-none absolute inset-0 flex flex-col min-h-0";
+    : "invisible opacity-0 pointer-events-none absolute inset-0 flex flex-col min-h-0";
 }

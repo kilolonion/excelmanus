@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import ipaddress
 import os
 from starlette.requests import Request
 from starlette.responses import JSONResponse
@@ -28,9 +29,10 @@ def is_loopback_bind_host(host: str) -> bool:
     h = (host or "").strip().lower()
     if h in LOOPBACK_HOSTS:
         return True
-    if h.startswith("127."):
-        return True
-    return False
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
 
 
 def require_manage_token_for_bind(host: str) -> None:

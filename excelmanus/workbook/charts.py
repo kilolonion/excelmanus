@@ -93,6 +93,10 @@ def normalize_chart_args(
         (chart_type or "").strip().lower(),
         (chart_type or "").strip().lower(),
     )
+    import math
+
+    if any(isinstance(n, bool) or not isinstance(n, (int, float)) or not math.isfinite(n) or n <= 0 for n in (width, height)):
+        return error_result("图表 width/height 必须为正数，单位厘米", code="INVALID_ARGS")
     if normalized_type not in EXCEL_CHART_TYPES:
         return error_result(
             f"不支持的图表类型 '{chart_type}'，支持: {list(EXCEL_CHART_TYPES)}；column 视为 bar",

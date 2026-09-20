@@ -30,7 +30,7 @@ from excelmanus.engine_core.error_payload import (
     TOOL_ERROR,
     make_error_payload,
 )
-from excelmanus.engine_core.tool_result import ToolResult
+from excelmanus.engine_core.tool_result import ToolResult, error_result
 from excelmanus.logger import get_logger
 
 logger = get_logger("spill")
@@ -53,7 +53,8 @@ MAX_WRITE_VERIFY_SAMPLE = 64
 
 SPILL_DIR_REL = ".excelmanus/spill"
 LOCATOR_PREFIX = "spill:"
-_LOCATOR_RE = re.compile(r"^spill:[0-9a-f]{64}$")
+_LOCATOR_RE = re.compile(r"^(?:spill|result_spill|selection_spill):(?P<digest>[0-9a-f]{64})$")
+_REFERENCE_PREFIXES = ("spill:", "result_spill:", "selection_spill:")
 _HOST_PATH_RE = re.compile(r"(?:^[A-Za-z]:\\)|(?:/Users/)|(?:/home/)")
 _CELL_RE = re.compile(r"^\$?([A-Za-z]{1,3})\$?([1-9][0-9]{0,6})$")
 
@@ -83,11 +84,19 @@ def is_spill_locator(text: str | None) -> bool:
     return _HOST_PATH_RE.search(raw) is None
 
 
+def is_spill_reference(text: str | None) -> bool:
+    """Recognize reserved handles, including malformed ones, before path resolution."""
+    return str(text or "").strip().startswith(_REFERENCE_PREFIXES)
+
+
 def parse_locator(text: str) -> SpillLocator:
     raw = str(text or "").strip()
-    if not is_spill_locator(raw):
+    match = _LOCATOR_RE.fullmatch(raw)
+    if match is None:
         raise ValueError(f"非法 spill 句柄: {text!r}")
-    return SpillLocator(raw)
+    # Output keys are often copied as prefixes. Accept those exact aliases but
+    # keep one storage/return format; never interpret the digest as a file path.
+    return SpillLocator(LOCATOR_PREFIX + match.group("digest"))
 
 
 def estimate_tokens(text: str) -> int:
@@ -120,13 +129,13 @@ def extract_spill_locator(arguments: dict[str, Any] | None) -> str | None:
     """从工具参数里取出 spill 句柄（优先 file_path / path）。"""
     if not isinstance(arguments, dict):
         return None
-    for key in ("file_path", "path", "locator", "spill"):
+    for key in ("file_path", "path", "locator", "spill", "result_spill", "selection_spill"):
         value = arguments.get(key)
-        if isinstance(value, str) and is_spill_locator(value):
+        if isinstance(value, str) and is_spill_reference(value):
             return value.strip()
-    for value in arguments.values():
-        if isinstance(value, str) and is_spill_locator(value):
-            return value.strip()
+        if key in {"file_path", "path"} and value:
+            return None
+    # A search query/cell value that looks like a handle is still user data.
     return None
 
 
@@ -151,9 +160,10 @@ class SpillProjection:
             "tokens": self.estimated_tokens,
             "preview": self.preview,
             "retrieve": (
-                "把 spill 句柄当作 file_path 传给 read_text_file 或 "
-                "inspect_spreadsheet 取回原文；句柄不含宿主路径。"
+                "按 next_call 取回原文；将 spill 字段的完整值原样传入 file_path，"
+                "不要把字段名拼到哈希前。句柄不是磁盘路径。"
             ),
+            "next_call": {"tool": "read_text_file", "arguments": {"file_path": str(self.locator)}},
         }
         return payload
 
@@ -226,27 +236,31 @@ def retrieve_spill_result(locator: str, *, workspace_root: str | Path) -> ToolRe
     """给 dispatcher 复用读工具时的 ToolResult 投影。"""
     try:
         text = retrieve_spill(locator, workspace_root=workspace_root)
-    except (SpillNotFound, ValueError):
-        payload = make_error_payload(
+    except ValueError:
+        return replace(error_result(
+            f"结果句柄格式无效：{locator}", code="INVALID_ARGS",
+            fields={
+                "locator": str(locator),
+                "remediation": "原样复制返回的 spill/result_spill/selection_spill 字段值（spill: 加 64 位小写十六进制摘要），用 read_text_file(file_path=该值)；不要拼接字段名或目录。",
+            },
+        ), coverage={"spill_retrieve": True, "kind": "invalid"})
+    except SpillNotFound:
+        return replace(error_result(
             f"spill 句柄不存在或已失效：{locator}",
-            error_code=NOT_FOUND,
-            failure_class=FAILURE_NOT_FOUND,
-            locator=str(locator),
-        )
-        return ToolResult(
-            success=False,
-            model_text=json.dumps(payload, ensure_ascii=False),
-            value=payload,
-            coverage={"spill_retrieve": True, "kind": "missing"},
-        )
+            code=NOT_FOUND,
+            fields={
+                "locator": str(parse_locator(locator)),
+                "remediation": "该结果句柄在当前工作区不存在或内容已损坏。重新执行产生它的只读查询以取得新句柄；不要列目录寻找句柄，也不要重放写入操作。",
+            },
+        ), coverage={"spill_retrieve": True, "kind": "missing"})
     parsed: Any = text
     stripped = text.strip()
-    if stripped.startswith("{") and stripped.endswith("}"):
+    if (stripped.startswith("{") and stripped.endswith("}")) or (stripped.startswith("[") and stripped.endswith("]")):
         try:
             loaded = json.loads(stripped)
         except (json.JSONDecodeError, TypeError, ValueError):
             loaded = None
-        if isinstance(loaded, dict):
+        if isinstance(loaded, (dict, list)):
             parsed = loaded
     return ToolResult(
         success=True,
@@ -515,6 +529,9 @@ def _op_get(op: dict[str, Any], *keys: str) -> Any:
 
 
 def _intended_from_write_op(op: dict[str, Any], default_sheet: str) -> tuple[list[dict[str, Any]], int]:
+    from excelmanus.workbook.snapshot import parse_bound_selection
+
+    selection = parse_bound_selection(op.get("selection"))
     start_raw = str(_op_get(op, "start_cell", "startCell", "cell", "start") or "")
     sheet = str(_op_get(op, "sheet", "sheet_name") or default_sheet or "")
     if "!" in start_raw:
@@ -522,9 +539,11 @@ def _intended_from_write_op(op: dict[str, Any], default_sheet: str) -> tuple[lis
         sheet = sheet or maybe_sheet.strip("'")
     parsed = _parse_cell(start_raw)
     values = _op_get(op, "values")
-    if parsed is None or not isinstance(values, list) or not values:
+    if not isinstance(values, list) or not values or (parsed is None and selection is None):
         return [], 0
-    row0, col0 = parsed
+    row0, col0 = parsed or (1, 1)
+    if selection is not None:
+        sheet = selection.sheet
     n_rows = len(values)
     first = values[0] if values else []
     n_cols = len(first) if isinstance(first, list) else 1
@@ -542,8 +561,8 @@ def _intended_from_write_op(op: dict[str, Any], default_sheet: str) -> tuple[lis
         raw = cells[c_off]
         intended.append({
             "sheet": sheet,
-            "row": row0 + r_off,
-            "col": col0 + c_off,
+            "row": selection.rows[r_off] if selection is not None else row0 + r_off,
+            "col": selection.cols[c_off] if selection is not None and selection.cols else col0 + c_off,
             "expected": raw,
             "kind": "formula" if _is_formula(raw) else "value",
         })
@@ -655,6 +674,14 @@ def verify_write(
         return _verify_write_word(arguments, workspace_root)
     if tool_name not in excel_tools:
         return {"skipped": True, "status": "success"}
+
+    if tool_name == "format_spreadsheet":
+        return {
+            "skipped": True,
+            "status": "success",
+            "verification_kind": "style",
+            "reason": "样式/合并/验证规则未纳入值回读抽样；请以 appearance 与工具 warnings 为准",
+        }
 
     file_path = str(arguments.get("file_path") or arguments.get("path") or "").strip()
     if not file_path:
@@ -824,6 +851,9 @@ def verify_write(
             error_code=RESULT_UNCERTAIN,
             **extra,
         )
+    if not intended:
+        base["verification_kind"] = "readability"
+        base["reason"] = "未提取到可逐格核验的值意图；仅确认提交版本可打开"
     base["status"] = "success"
     return base
 
@@ -865,7 +895,13 @@ def _verify_write_word(arguments: dict[str, Any], workspace_root: str) -> dict[s
 
 
 def format_write_verification_line(payload: dict[str, Any]) -> str:
-    if not payload or payload.get("skipped"):
+    if not payload:
+        return ""
+    if payload.get("skipped"):
+        if payload.get("verification_kind") == "style":
+            sheet = str(payload.get("sheet") or "")
+            prefix = f"{sheet} " if sheet else ""
+            return f"\n未核验: {prefix}样式属性未做写后回读，不能据此声称样式已验证。"
         return ""
     if payload.get("status") == "error" or payload.get("error_code"):
         code = payload.get("error_code") or "TOOL_ERROR"
@@ -878,6 +914,8 @@ def format_write_verification_line(payload: dict[str, Any]) -> str:
             f"当前段落数={payload.get('paragraphs', 0)}，"
             f"表格数={payload.get('tables', 0)}"
         )
+    if payload.get("verification_kind") == "readability":
+        return f"\n回读确认: {payload.get('sheet', '')} 文件可打开；未核验本次对象、结构或样式效果。"
     n_val = len(payload.get("value_changes") or [])
     n_fml = len(payload.get("formula_changes") or [])
     total = payload.get("total_changes") or (n_val + n_fml)
@@ -911,7 +949,7 @@ def attach_write_verification(
     result_str: str,
 ) -> tuple[ToolResult | None, str]:
     """把校验写入 value.meta.write_verification，并追加一行给模型。"""
-    if not verification or verification.get("skipped"):
+    if not verification:
         return result, result_str
     line = format_write_verification_line(verification)
     entries = [*(verification.get("value_changes") or []), *(verification.get("formula_changes") or [])]
@@ -961,3 +999,39 @@ def spill_result_text(
     if structured is None:
         return spilled.model_text, None
     return spilled.model_text, spilled
+
+
+def expose_spreadsheet_value(result: ToolResult, *, store: SpillStore) -> ToolResult:
+    """Keep native tool results as usable as their SDK value, with bounded text.
+
+    Small results carry the actual payload; large results carry an opaque
+    handle to that same payload. Never spill only a preview while calling it
+    the complete result. The existing read_text_file path retrieves handles.
+    """
+    if not isinstance(result.value, dict) or (result.coverage or {}).get("spill_retrieve"):
+        return result
+    payload = result.value
+    raw = json.dumps(payload, ensure_ascii=False, default=str)
+    if not should_spill(raw):
+        return result.with_model_text(raw)
+    locator = store.put(raw)
+    envelope = {
+        "result_spill": str(locator),
+        "read_result": "按 next_call 取回完整 JSON；file_path 原样使用 result_spill 字段的值（spill:…），不要把 result_spill 当作前缀或目录。",
+        "next_call": {"tool": "read_text_file", "arguments": {"file_path": str(locator)}},
+    }
+    for key in (
+        "status", "file_path", "file_a", "file_b", "content_version",
+        "content_version_a", "content_version_b", "resolved_sheet", "scope",
+        "coverage", "selection_spill", "warnings", "error_code", "message", "remediation",
+        "committed", "partial", "tx_id", "operation_id", "recovery_required",
+        "operation_index", "operation_kind",
+    ):
+        if key in payload:
+            envelope[key] = payload[key]
+    # A short summary is navigation only; the complete structured payload is
+    # always recoverable, including artifact lists, selections and warnings.
+    envelope["preview"] = result.model_text[:DEFAULT_PREVIEW_CHARS]
+    envelope["result_projection"] = "partial; full payload in result_spill"
+    value = {**payload, "result_spill": str(locator)}
+    return replace(result, value=value, model_text=json.dumps(envelope, ensure_ascii=False, default=str))

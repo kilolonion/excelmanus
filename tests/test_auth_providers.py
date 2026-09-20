@@ -49,7 +49,7 @@ class TestOpenAICodexProvider:
         assert not self.provider.matches_model("gpt-4.1-mini")
 
     def test_validate_codex_cli_format(self):
-        """Codex CLI auth.json 格式。"""
+        """旧版 Codex CLI auth.json 顶层 token 格式。"""
         exp = int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp())
         token = _make_jwt({
             "https://api.openai.com/auth": {
@@ -64,6 +64,38 @@ class TestOpenAICodexProvider:
         assert cred.account_id == "acc-123"
         assert cred.plan_type == "plus"
         assert cred.credential_type == "oauth"
+
+    def test_validate_current_codex_cli_nested_tokens_format(self):
+        """当前 Codex CLI auth.json 的 tokens 嵌套格式。"""
+        exp = int((datetime.now(tz=timezone.utc) + timedelta(hours=1)).timestamp())
+        access_token = _make_jwt({"exp": exp})
+        id_token = _make_jwt({
+            "https://api.openai.com/auth": {
+                "chatgpt_account_id": "acc-current",
+                "chatgpt_plan_type": "pro",
+            },
+            "https://api.openai.com/profile": {"email": "current@example.com"},
+        })
+        raw = {
+            "auth_mode": "chatgpt",
+            "last_refresh": "2026-09-19T07:12:33Z",
+            "tokens": {
+                "id_token": id_token,
+                "access_token": access_token,
+                "refresh_token": "rt_current",
+                "account_id": "acc-current",
+            },
+        }
+
+        cred = self.provider.validate_token_data(raw)
+
+        assert cred.access_token == access_token
+        assert cred.refresh_token == "rt_current"
+        assert cred.account_id == "acc-current"
+        assert cred.plan_type == "pro"
+        assert cred.expires_at == datetime.fromtimestamp(exp, tz=timezone.utc).isoformat()
+        assert cred.extra_data is not None
+        assert cred.extra_data["email"] == "current@example.com"
 
     def test_validate_openclaw_format(self):
         """OpenClaw 风格格式。"""
@@ -84,7 +116,7 @@ class TestOpenAICodexProvider:
         assert cred.refresh_token == "rt_simple"
 
     def test_validate_missing_token_raises(self):
-        with pytest.raises(ValueError, match="缺少 access token"):
+        with pytest.raises(ValueError, match="tokens.access_token"):
             self.provider.validate_token_data({})
 
     def test_get_api_credential(self):
@@ -148,14 +180,21 @@ class TestOpenAICodexProvider:
 
     def test_build_authorize_url_is_openai_origin(self):
         url = self.provider.build_authorize_url(
-            redirect_uri="http://localhost:3000/auth/codex/callback",
+            redirect_uri=self.provider.BROWSER_REDIRECT_URI,
             state="abc",
             code_challenge="challenge",
         )
         assert url.startswith("https://auth.openai.com/oauth/authorize?")
         assert "code_challenge=challenge" in url
-        assert "scope=openid+profile+email+offline_access" in url or "offline_access" in url
+        assert "offline_access" in url
+        assert "api.connectors.read" in url
+        assert "api.connectors.invoke" in url
+        assert "originator=excelmanus" in url
         assert self.provider.assert_auth_url(url) == url
+
+    def test_callback_path_matches_official_codex_cli(self):
+        assert self.provider.CALLBACK_PATH == "/auth/callback"
+        assert self.provider.BROWSER_REDIRECT_URI == "http://localhost:1455/auth/callback"
 
     def test_assert_auth_url_rejects_other_hosts(self):
         from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
@@ -474,6 +513,16 @@ class TestOAuthStateToken:
         result = _unseal_oauth_state(sealed)
         assert result["device_auth_id"] == "daid-xyz"
         assert result["user_code"] == "WXYZ-9876"
+
+    def test_loopback_callback_page_forwards_state_bound_code(self):
+        from excelmanus.auth.router import _codex_callback_page
+
+        page = _codex_callback_page(code="code-123", state="state-456", error="")
+
+        assert '"type": "codex-oauth-callback"' in page
+        assert '"code": "code-123"' in page
+        assert '"state": "state-456"' in page
+        assert "window.opener.postMessage" in page
 
 
 # ── DB 迁移测试 ───────────────────────────────────────────────

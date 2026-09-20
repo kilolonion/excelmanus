@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -247,6 +249,130 @@ async def test_inject_does_not_wakeup_and_joins_next_followup() -> None:
         m.get("content") for m in engine.memory.messages if m.get("role") == "user"
     ]
     assert user_contents[:2] == ["系统提示：用中文", "开始"]
+
+
+@pytest.mark.asyncio
+async def test_wait_for_item_recovers_followup_enqueued_at_idle_race() -> None:
+    """A followup arriving after the actor's final queue check is retried.
+
+    The actor may have already decided that no next turn exists while another
+    request is enqueueing.  ``wait_for_item`` must wake a fresh actor instead
+    of returning an empty ChatResult for the second caller.
+    """
+    from excelmanus.engine_types import ChatResult
+    from excelmanus.agent.driver import Driver
+
+    engine = SimpleNamespace(_tools_cache=None, _state=SimpleNamespace(increment_turn=lambda: None))
+    driver = Driver(engine)
+    engine._driver = driver
+    first = driver.enqueue_followup("first")
+    turn_checked = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_turn() -> bool:
+        current = first if first.result is None else second
+        current.result = ChatResult(reply=current.content)
+        turn_checked.set()
+        await release.wait()
+        return False
+
+    driver.turn = fake_turn  # type: ignore[method-assign]
+    first_kick = asyncio.create_task(driver.kick())
+    await turn_checked.wait()
+    second = driver.enqueue_followup("second")
+    second_wait = asyncio.create_task(driver.wait_for_item(second))
+    release.set()
+    await first_kick
+    result = await second_wait
+    assert result.reply == "second"
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_kick_does_not_cancel_shared_actor() -> None:
+    """A caller cancellation must leave the session actor available to others."""
+    from excelmanus.engine_types import ChatResult
+    from excelmanus.agent.driver import Driver
+
+    engine = SimpleNamespace(_tools_cache=None, _state=SimpleNamespace(increment_turn=lambda: None))
+    driver = Driver(engine)
+    first = driver.enqueue_followup("first")
+    second = driver.enqueue_followup("second")
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def fake_turn() -> bool:
+        current = first if first.result is None else second
+        current.result = ChatResult(reply=current.content)
+        started.set()
+        await release.wait()
+        return current is first
+
+    driver.turn = fake_turn  # type: ignore[method-assign]
+    owner = asyncio.create_task(driver.kick())
+    await started.wait()
+    owner.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await owner
+    release.set()
+    result = await driver.wait_for_item(second)
+    assert result.reply == "second"
+
+
+@pytest.mark.asyncio
+async def test_turn_timeout_cancels_llm_and_returns_functional_result() -> None:
+    engine = AgentEngine(_make_config(turn_timeout_seconds=0.01), ToolRegistry())
+
+    async def slow_completion(**_kwargs):
+        await asyncio.sleep(1)
+
+    engine._client.chat.completions.create = slow_completion
+    result = await engine.followup("超时测试")
+    assert "超时" in result.reply
+    assert engine._driver.status == "idle"
+
+
+def test_driver_runtime_snapshot_restores_inbox_and_interactions() -> None:
+    from excelmanus.agent.driver import Driver
+    from excelmanus.engine_core.session_state import SessionState
+    from excelmanus.question_flow import QuestionFlowManager
+
+    class _Approval:
+        def __init__(self) -> None:
+            self.pending = {"approval_id": "a1", "tool_name": "write_text_file"}
+
+        def snapshot_pending(self):
+            return self.pending
+
+        def restore_pending(self, value):
+            self.pending = value
+
+    source_state = SessionState()
+    source_engine = SimpleNamespace(
+        _state=source_state,
+        _approval=_Approval(),
+        _question_flow=QuestionFlowManager(),
+        save_session_snapshot=lambda: None,
+    )
+    source_driver = Driver(source_engine)
+    source_driver.turn_index = 4
+    source_driver.step_index = 2
+    source_driver.enqueue_followup("resume me")
+    source_state.runtime_state = source_driver.runtime_state()
+    persisted = source_state.to_dict()
+
+    restored_state = SessionState.from_dict(persisted)
+    restored_engine = SimpleNamespace(
+        _state=restored_state,
+        _approval=_Approval(),
+        _question_flow=QuestionFlowManager(),
+        save_session_snapshot=lambda: None,
+    )
+    restored_driver = Driver(restored_engine)
+    restored_driver.restore_runtime_state(restored_state.runtime_state)
+    assert restored_driver.turn_index == 4
+    assert restored_driver.step_index == 2
+    assert [item.content for item in restored_driver.inbox.next_turn] == ["resume me"]
+    assert restored_engine._approval.pending["approval_id"] == "a1"
 
 
 def test_sse_live_turn_events_include_ids_and_keep_preparing_copy() -> None:

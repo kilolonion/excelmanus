@@ -10,6 +10,7 @@ function resetVersionState() {
     selectionMode: false,
     activeWorkspaceKey: null,
     viewGeneration: 0,
+    workbookChanges: {},
     fullViewPath: null,
     activeFilePath: null,
   });
@@ -91,7 +92,7 @@ describe("excel-store contentVersion", () => {
     expect(useExcelStore.getState().getContentVersion("./book.xlsx")).toBeNull();
   });
 
-  it("drops a file version when an agent diff lands for that path", () => {
+  it("keeps the view when a display-only diff arrives", () => {
     useExcelStore.getState().setContentVersion("./book.xlsx", "sha256:v1");
     useExcelStore.getState().addDiff({
       toolCallId: "tc-1",
@@ -101,7 +102,21 @@ describe("excel-store contentVersion", () => {
       changes: [],
       timestamp: Date.now(),
     });
-    expect(useExcelStore.getState().getContentVersion("./book.xlsx")).toBeNull();
+    expect(useExcelStore.getState().getContentVersion("./book.xlsx")).toBe("sha256:v1");
+    expect(useExcelStore.getState().refreshCounter).toBe(0);
+  });
+
+  it("refreshes only the committed file in its source workspace and deduplicates receipts", () => {
+    const store = useExcelStore.getState();
+    store.notifyWorkbookChanged("a.xlsx", "id:a", "v2");
+    store.notifyWorkbookChanged("./a.xlsx", "id:a", "v2");
+    expect(useExcelStore.getState().workbookChanges).toEqual({ "id:a|./a.xlsx": { sequence: 1, version: "v2", source: "remote" } });
+    expect(store.getContentVersion("a.xlsx", "id:a")).toBe("v2");
+    expect(store.getContentVersion("a.xlsx", "id:b")).toBeNull();
+    expect(useExcelStore.getState().refreshCounter).toBe(0);
+    store.notifyWorkbookChanged("a.xlsx", "id:a", undefined, "refresh");
+    expect(store.getContentVersion("a.xlsx", "id:a")).toBeNull();
+    expect(useExcelStore.getState().workbookChanges["id:a|./a.xlsx"].sequence).toBe(2);
   });
 
   it("opens the workbook panel without replacing the last file", () => {

@@ -123,7 +123,6 @@ def test_legacy_snapshot_missing_fields_uses_defaults() -> None:
     assert restored.compaction_generation == 0
     assert restored.wire_epoch is None
     assert restored.request_series is None
-    assert restored.present_as == "native"
 
 
 def test_snapshot_wire_epoch_reads_key_method() -> None:

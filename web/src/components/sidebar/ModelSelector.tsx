@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -25,16 +25,19 @@ export function ModelSelector() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [switching, setSwitching] = useState(false);
   const [switchError, setSwitchError] = useState<string | null>(null);
+  const modelsRequestRef = useRef(0);
 
   const fetchModels = () => {
+    const requestId = ++modelsRequestRef.current;
+    const profileVersion = useUIStore.getState().modelProfileVersion;
     apiGet<{ models: ModelInfo[] }>("/models")
       .then((data) => {
+        if (requestId !== modelsRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
         setModels(data.models);
         const active = data.models.find((m) => m.active);
-        if (active) {
-          setCurrentModel(active.name);
-          applyVisionFromModel(active);
-        }
+        setCurrentModel(active?.name ?? "");
+        applyVisionFromModel(active);
+        if (!active) useUIStore.getState().setVisionCapable(null);
       })
       .catch(() => {});
   };
@@ -57,8 +60,8 @@ export function ModelSelector() {
     try {
       await apiPut("/models/active", { name });
       setCurrentModel(name);
+      useUIStore.getState().bumpModelProfiles();
       applyVisionFromModel(models.find((m) => m.name === name));
-      fetchModels();
     } catch (e) {
       const msg = e instanceof Error ? e.message : "切换失败";
       setSwitchError(msg);

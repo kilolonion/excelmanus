@@ -10,7 +10,7 @@ import { UndoableCard } from "../UndoableCard";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { useUIStore } from "@/stores/ui-store";
-import { buildApiUrl, downloadFile } from "@/lib/api";
+import { apiPost, downloadFile } from "@/lib/api";
 import { useAuthConfigStore } from "@/stores/auth-config-store";
 import type { AssistantBlock } from "@/lib/types";
 import { useCallback, useState } from "react";
@@ -22,15 +22,23 @@ export function SaveResultCard({ path }: { path: string }) {
   const dir = path.substring(0, path.length - filename.length);
   const deployMode = useAuthConfigStore((s) => s.deployMode);
   const canReveal = deployMode === "standalone";
+  const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const activeWorkspaceId = useSessionStore(
+    (s) => s.sessions.find((item) => item.id === s.activeSessionId)?.workspaceId ?? null,
+  );
+  const [revealError, setRevealError] = useState("");
 
   const handleReveal = useCallback(() => {
     if (!canReveal) return;
-    fetch(buildApiUrl("/files/reveal"), {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
-    }).catch(() => {});
-  }, [path, canReveal]);
+    setRevealError("");
+    void apiPost("/files/reveal", {
+      path,
+      session_id: activeSessionId || undefined,
+      workspace_id: activeWorkspaceId || undefined,
+    }).catch((err: unknown) => {
+      setRevealError(err instanceof Error ? err.message : "无法在文件管理器中显示文件");
+    });
+  }, [activeSessionId, activeWorkspaceId, path, canReveal]);
 
   const handleCopyPath = useCallback(() => {
     navigator.clipboard.writeText(path).catch(() => {});
@@ -62,6 +70,7 @@ export function SaveResultCard({ path }: { path: string }) {
           {canReveal ? "打开文件夹" : "复制路径"}
         </span>
       </button>
+      {revealError ? <p className="mt-1 text-xs text-destructive">{revealError}</p> : null}
     </div>
   );
 }
@@ -182,14 +191,17 @@ export function MemoryExtractedBlock({
 
 export function FileDownloadCard({ block }: { block: Extract<AssistantBlock, { type: "file_download" }> }) {
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const activeWorkspaceId = useSessionStore(
+    (s) => s.sessions.find((item) => item.id === s.activeSessionId)?.workspaceId ?? null,
+  );
 
   const handleOpen = useCallback(() => {
     openWorkspaceFile(block.filePath);
   }, [block.filePath]);
 
   const handleDownload = useCallback(() => {
-    downloadFile(block.filePath, block.filename, activeSessionId ?? undefined).catch(() => {});
-  }, [block.filePath, block.filename, activeSessionId]);
+    downloadFile(block.filePath, block.filename, activeSessionId, activeWorkspaceId).catch(() => {});
+  }, [block.filePath, block.filename, activeSessionId, activeWorkspaceId]);
 
   return (
     <div className="my-1.5">

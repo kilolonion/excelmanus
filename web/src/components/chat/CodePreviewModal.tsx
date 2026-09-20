@@ -10,9 +10,8 @@ import { motion, AnimatePresence } from "framer-motion";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { apiGet, normalizeExcelPath } from "@/lib/api";
 import { isCodeFile } from "@/lib/file-kind";
-import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
-import { useFilePreviewStore } from "@/stores/file-preview-store";
+import { previewTabKey, useFilePreviewStore, type PreviewTab } from "@/stores/file-preview-store";
 import { ensureHljs, highlightCode } from "@/lib/hljs-utils";
 
 interface CodePreviewModalProps {
@@ -21,6 +20,8 @@ interface CodePreviewModalProps {
   trigger?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  sessionId?: string;
+  workspaceId?: string;
 }
 
 const CODE_LANGUAGE_MAP: Record<string, string> = {
@@ -81,10 +82,7 @@ const panelVariants = {
   exit: { opacity: 0, scale: 0.98, y: 4, transition: { duration: 0.12, ease: "easeIn" as const } },
 };
 
-interface TabItem {
-  filePath: string;
-  filename: string;
-}
+type TabItem = PreviewTab;
 
 const LINE_HEIGHT = 20;
 
@@ -94,6 +92,8 @@ export function CodePreviewModal({
   trigger,
   open: controlledOpen,
   onOpenChange,
+  sessionId,
+  workspaceId,
 }: CodePreviewModalProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -103,7 +103,12 @@ export function CodePreviewModal({
     }
     onOpenChange?.(next);
   }, [controlledOpen, onOpenChange]);
-  const [activeFile, setActiveFile] = useState<TabItem>({ filePath, filename });
+  const [activeFile, setActiveFile] = useState<TabItem>({
+    filePath,
+    filename,
+    ...(sessionId ? { sessionId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+  });
   const [content, setContent] = useState<string>("");
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string>("");
@@ -111,8 +116,6 @@ export function CodePreviewModal({
   const [activeLine, setActiveLine] = useState<number>(-1);
   const [mdPreview, setMdPreview] = useState(false);
   const contentCache = useRef(new Map<string, string>());
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
-
   // Search state
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState("");
@@ -129,9 +132,9 @@ export function CodePreviewModal({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // ── Fetch file content (with cache) ──
-  const fetchFile = useCallback(async (path: string) => {
+  const fetchFile = useCallback(async (path: string, scope?: Pick<PreviewTab, "sessionId" | "workspaceId">) => {
     const version = useExcelStore.getState().getContentVersion(normalizeExcelPath(path)) || "";
-    const cacheKey = `${path}#${version}#${useExcelStore.getState().workspaceFilesVersion}`;
+    const cacheKey = `${scope?.workspaceId || scope?.sessionId || "_"}#${path}#${version}#${useExcelStore.getState().workspaceFilesVersion}`;
     const cached = contentCache.current.get(cacheKey);
     if (cached !== undefined) {
       setContent(cached);
@@ -143,8 +146,9 @@ export function CodePreviewModal({
     setError("");
     try {
       const qs = new URLSearchParams({ path });
-      if (activeSessionId) qs.set("session_id", activeSessionId);
-      const data = await apiGet<{ content?: string }>(`/files/read?${qs.toString()}`);
+      if (scope?.sessionId) qs.set("session_id", scope.sessionId);
+      if (scope?.workspaceId) qs.set("workspace_id", scope.workspaceId);
+      const data = await apiGet<{ content?: string }>(`/files/read?${qs.toString()}`, { direct: true });
       const text = data.content || "";
       contentCache.current.set(cacheKey, text);
       setContent(text);
@@ -153,7 +157,7 @@ export function CodePreviewModal({
     } finally {
       setLoading(false);
     }
-  }, [activeSessionId]);
+  }, []);
 
   // ── Highlight with shared module (lazy) ──
   const [highlightedLines, setHighlightedLines] = useState<string[]>([]);
@@ -184,15 +188,21 @@ export function CodePreviewModal({
   // ── Open → register tab + fetch + reset state ──
   useEffect(() => {
     if (!open) return;
-    addPreviewTab({ filePath, filename });
-    setActiveFile({ filePath, filename });
-    fetchFile(filePath);
+    const tab: TabItem = {
+      filePath,
+      filename,
+      ...(sessionId ? { sessionId } : {}),
+      ...(workspaceId ? { workspaceId } : {}),
+    };
+    addPreviewTab(tab);
+    setActiveFile(tab);
+    fetchFile(filePath, tab);
     setActiveLine(-1);
     setMdPreview(false);
     setSearchOpen(false);
     setSearchQuery("");
     setSearchMatches([]);
-  }, [open, filePath, filename, addPreviewTab, fetchFile, workspaceFilesVersion]);
+  }, [open, filePath, filename, sessionId, workspaceId, addPreviewTab, fetchFile, workspaceFilesVersion]);
 
   // ── Body scroll lock ──
   useEffect(() => {
@@ -250,7 +260,7 @@ export function CodePreviewModal({
   // ── Tab actions ──
   const handleTabClick = useCallback((tab: TabItem) => {
     setActiveFile(tab);
-    fetchFile(tab.filePath);
+    fetchFile(tab.filePath, tab);
     setActiveLine(-1);
     setMdPreview(false);
     setSearchOpen(false);
@@ -259,18 +269,20 @@ export function CodePreviewModal({
 
   const handleTabClose = useCallback((e: React.MouseEvent, tab: TabItem) => {
     e.stopPropagation();
-    removePreviewTab(tab.filePath);
-    if (tab.filePath === activeFile.filePath) {
-      const remaining = useFilePreviewStore.getState().previewTabs.filter((t) => t.filePath !== tab.filePath);
+    removePreviewTab(tab);
+    if (previewTabKey(tab) === previewTabKey(activeFile)) {
+      const remaining = useFilePreviewStore.getState().previewTabs.filter(
+        (item) => previewTabKey(item) !== previewTabKey(tab),
+      );
       if (remaining.length > 0) {
         const next = remaining[remaining.length - 1];
         setActiveFile(next);
-        fetchFile(next.filePath);
+        fetchFile(next.filePath, next);
       } else {
         setOpen(false);
       }
     }
-  }, [activeFile.filePath, removePreviewTab, fetchFile, setOpen]);
+  }, [activeFile, removePreviewTab, fetchFile, setOpen]);
 
   // ── Toolbar actions ──
   const handleCopy = useCallback(async () => {
@@ -283,8 +295,8 @@ export function CodePreviewModal({
 
   const handleDownload = useCallback(async () => {
     const { downloadFile } = await import("@/lib/api");
-    downloadFile(activeFile.filePath, activeFile.filename, activeSessionId ?? undefined).catch(() => {});
-  }, [activeFile, activeSessionId]);
+    downloadFile(activeFile.filePath, activeFile.filename, activeFile.sessionId, activeFile.workspaceId).catch(() => {});
+  }, [activeFile]);
 
   // ── Derived state ──
   const language = getLanguage(activeFile.filename);
@@ -323,12 +335,12 @@ export function CodePreviewModal({
             <div className="em-preview-tabs flex items-center bg-[#f3f3f3] dark:bg-[#252526] border-b border-gray-200 dark:border-gray-700 min-h-[36px] select-none overflow-x-auto scrollbar-none">
               <div className="flex items-center flex-1 min-w-0">
                 {previewTabs.map((tab) => {
-                  const isActive = tab.filePath === activeFile.filePath;
+                  const isActive = previewTabKey(tab) === previewTabKey(activeFile);
                   const tabLang = getLanguage(tab.filename);
                   const tabColor = getLangColor(tabLang);
                   return (
                     <div
-                      key={tab.filePath}
+                      key={previewTabKey(tab)}
                       onClick={() => handleTabClick(tab)}
                       className={`group relative flex items-center gap-1.5 px-3 h-[36px] text-[12px] cursor-pointer shrink-0 border-r border-gray-200/60 dark:border-gray-700/60 transition-colors ${
                         isActive

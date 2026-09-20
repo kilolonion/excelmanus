@@ -71,11 +71,9 @@ def _domain_registry() -> ToolRegistry:
 
 
 class TestModeMapping:
-    def test_read_and_plan_and_code(self) -> None:
+    def test_read_plan_and_write(self) -> None:
         assert resolve_catalog_mode(chat_mode="read") == "read"
         assert resolve_catalog_mode(chat_mode="plan") == "plan"
-        assert resolve_catalog_mode(chat_mode="write", present_as="code") == "code"
-        assert resolve_catalog_mode(chat_mode="read", present_as="code") == "read"
         assert resolve_catalog_mode(chat_mode="write", tool_access="read_only") == "read"
         assert resolve_catalog_mode(chat_mode="plan", tool_access="read_only") == "plan"
         assert resolve_catalog_mode(chat_mode="write") == "write"
@@ -167,12 +165,18 @@ class TestVisibleEqualsExecutable:
         assert "trace_spreadsheet_formulas" not in names
         assert "manage_spreadsheet_objects" not in names
 
-    def test_code_collapses_to_run_code(self) -> None:
-        catalog = derive_effective_catalog(
-            tools=_domain_registry().get_all_tools(),
-            mode="code",
-        )
-        assert catalog.names() == ["run_code"]
+    @pytest.mark.parametrize("mode", ["code", "both", "unknown", "", None])
+    def test_invalid_catalog_mode_does_not_expand_permissions(self, mode) -> None:
+        registry = _domain_registry()
+        registry.bind_catalog(mode="read")
+        for operation in (
+            lambda: derive_effective_catalog(tools=registry.get_all_tools(), mode=mode),
+            lambda: resolve_catalog_mode(chat_mode=mode),
+            lambda: registry.bind_catalog(mode=mode),
+        ):
+            with pytest.raises(ValueError, match="unknown catalog mode"):
+                operation()
+        assert "edit_spreadsheet" not in registry.effective_catalog().name_set()
 
     def test_readonly_subagent_keeps_run_code(self) -> None:
         catalog = derive_effective_catalog(
@@ -186,7 +190,7 @@ class TestVisibleEqualsExecutable:
 
 
 class TestIndexSubsetOfSchemas:
-    @pytest.mark.parametrize("mode", ["read", "plan", "write", "code"])
+    @pytest.mark.parametrize("mode", ["read", "plan", "write"])
     def test_index_names_subset_of_schema_names(self, mode: str) -> None:
         catalog = derive_effective_catalog(
             tools=_domain_registry().get_all_tools(),
@@ -362,7 +366,7 @@ class TestMetaToolBuilderProjection:
         engine._tools_cache = None
         engine._tools_cache_key = None
         engine._current_chat_mode = "read"
-        engine._present_as = "native"
+        engine._fixed_capability = None
         engine._skill_router = None
         engine._skill_resolver = None
         engine._subagent_config = None
@@ -488,18 +492,16 @@ def test_error_next_step_only_on_capability_gaps(tmp_path) -> None:
     assert "next_step" not in (bad_obj.error.fields or {})
 
 
-def test_present_as_code_does_not_change_catalog_digest(tmp_path) -> None:
-    """L3/L4：present_as=code 不改 catalog_digest；wire 仍坍缩为 {run_code}。"""
+def test_exposure_does_not_change_catalog_digest(tmp_path) -> None:
+    """披露状态不改变执行目录或其 digest。"""
     from excelmanus.prompt.envelope import digest_tools, epoch_changed, compute_epoch_identity
     from excelmanus.tools.catalog import catalog_from_engine, execution_catalog_from_engine
-    from excelmanus.tools.runtime import collapse_schemas, set_present_as_preference
 
     registry = _domain_registry()
     engine = SimpleNamespace(
         _registry=registry,
         registry=registry,
         _current_chat_mode="write",
-        _present_as="native",
         _turn_exposure=None,
         _active_skills=[],
         _tools_cache=None,
@@ -509,49 +511,48 @@ def test_present_as_code_does_not_change_catalog_digest(tmp_path) -> None:
         _fixed_capability=None,
         config=SimpleNamespace(workspace_root=str(tmp_path)),
     )
-    native = catalog_from_engine(engine)
-    assert native is not None
-    native_digest = native.digest()
-    native_wire = collapse_schemas(native.tool_schemas(), "native")
-    set_present_as_preference(engine, "code")
+    before = catalog_from_engine(engine)
+    assert before is not None
+    before_digest = before.digest()
+    before_schemas = before.tool_schemas()
     engine._turn_exposure = {"profile": "inspect", "applied": False, "wire_narrow": False}
-    coded = catalog_from_engine(engine)
-    assert coded is not None
-    assert coded.mode == "write"
-    assert coded.digest() == native_digest
-    assert registry.catalog_digest() == native_digest
-    assert "inspect_spreadsheet" in coded.name_set()
-    assert "run_code" in coded.name_set()
-    code_wire = collapse_schemas(coded.tool_schemas(), "code")
-    code_names = {
+    after = catalog_from_engine(engine)
+    assert after is not None
+    assert after.mode == "write"
+    assert after.digest() == before_digest
+    assert registry.catalog_digest() == before_digest
+    assert "inspect_spreadsheet" in after.name_set()
+    assert "run_code" in after.name_set()
+    after_schemas = after.tool_schemas()
+    after_names = {
         (s.get("function") or {}).get("name") or s.get("name")
-        for s in code_wire
+        for s in after_schemas
     }
-    assert code_names == {"run_code"}
+    assert after_names == after.name_set()
     execution = execution_catalog_from_engine(engine)
     assert execution is not None
     assert execution.mode == "write"
-    assert execution.digest() == native_digest
-    native_id = compute_epoch_identity(
+    assert execution.digest() == before_digest
+    before_id = compute_epoch_identity(
         session_id="s1",
         model="m",
         protocol="openai|https://x",
         call_config={"temperature": 0.2},
-        tools=native_wire,
+        tools=before_schemas,
         system="SYS",
-        catalog_digest=native_digest,
+        catalog_digest=before_digest,
         wire_payload=[{"role": "user", "content": "a"}],
     )
-    code_id = compute_epoch_identity(
+    after_id = compute_epoch_identity(
         session_id="s1",
         model="m",
         protocol="openai|https://x",
         call_config={"temperature": 0.2},
-        tools=code_wire,
+        tools=after_schemas,
         system="SYS",
-        catalog_digest=coded.digest(),
+        catalog_digest=after.digest(),
         wire_payload=[{"role": "user", "content": "a"}],
     )
-    assert epoch_changed(native_id, code_id) is False
-    assert native_id.tools_digest != code_id.tools_digest
-    assert digest_tools(native_wire) != digest_tools(code_wire)
+    assert epoch_changed(before_id, after_id) is False
+    assert before_id.tools_digest == after_id.tools_digest
+    assert digest_tools(before_schemas) == digest_tools(after_schemas)

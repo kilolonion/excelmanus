@@ -575,11 +575,7 @@ def resolve_workspace(
                 "code": "FILE_SCOPE_REQUIRED",
             },
         )
-    return IsolatedWorkspace.resolve(
-        config.workspace_root,
-        sandbox_config=SandboxConfig(),
-        data_root=config.data_root,
-    )
+    return _open(default_workspace_path(config))
 
 
 def resolve_workspace_root(

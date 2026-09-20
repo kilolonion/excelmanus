@@ -13,10 +13,11 @@ import { settingsCache } from "@/lib/settings-cache";
 import { formatModelIdForDisplay } from "@/lib/model-display";
 import { SettingsFoldSection } from "../SettingsFoldSection";
 import { useAdminModel } from "./admin-model-context";
-import { ProviderLogo } from "./ProviderLogo";
+import { ProviderAvatar } from "./ProviderLogo";
 import {
   findProfileByModelId,
   formatProviderModelLabel,
+  getProviderBrandColor,
   inferProfileProvider,
 } from "./helpers";
 import type { ProfileEntry } from "./types";
@@ -26,7 +27,7 @@ type RuntimeSnippet = {
 };
 
 const PICKER_TRIGGER_CLASS =
-  "inline-flex items-center gap-2 h-9 w-[13.75rem] shrink-0 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed";
+  "inline-flex items-center gap-2 h-9 w-[clamp(9rem,42vw,13.75rem)] shrink-0 rounded-lg border border-input bg-background px-2.5 text-left text-xs hover:bg-muted/40 disabled:opacity-50 disabled:cursor-not-allowed";
 
 function ModelPicker({
   valueLabel,
@@ -47,11 +48,20 @@ function ModelPicker({
   selectedName?: string | null;
   extraOption?: { label: string; selected: boolean; onSelect: () => void };
 }) {
+  const iconLabel = disabled ? emptyText : valueLabel;
+  const iconColor = getProviderBrandColor(providerId);
+
   return (
     <DropdownMenu modal={false}>
       <DropdownMenuTrigger asChild disabled={disabled}>
         <button type="button" className={PICKER_TRIGGER_CLASS}>
-          {providerId ? <ProviderLogo id={providerId} /> : <span className="w-4 shrink-0" />}
+          <ProviderAvatar
+            id={providerId || "unknown"}
+            label={iconLabel}
+            color={iconColor}
+            className="h-5 w-5 rounded-md"
+            iconClassName="h-3.5 w-3.5"
+          />
           <span className="flex-1 truncate">{disabled ? emptyText : valueLabel}</span>
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground shrink-0" />
         </button>
@@ -66,6 +76,7 @@ function ModelPicker({
         )}
         {profiles.map((profile) => {
           const id = inferProfileProvider(profile);
+          const profileLabel = formatModelIdForDisplay(profile.model) || profile.name;
           const selected = profile.name === selectedName;
           return (
             <DropdownMenuItem
@@ -73,7 +84,13 @@ function ModelPicker({
               className="gap-2 text-xs"
               onClick={() => onSelect(profile)}
             >
-              {id ? <ProviderLogo id={id} /> : <span className="w-4" />}
+              <ProviderAvatar
+                id={id || "unknown"}
+                label={profileLabel}
+                color={getProviderBrandColor(id)}
+                className="h-5 w-5 rounded-md"
+                iconClassName="h-3.5 w-3.5"
+              />
               <span className="flex-1 min-w-0">
                 <span className="block truncate">{formatProviderModelLabel(profile)}</span>
                 <span className="block text-[10px] text-muted-foreground truncate">{profile.name}</span>
@@ -89,7 +106,7 @@ function ModelPicker({
 
 export function RoleModelSection() {
   const { config, handleActivateProfile, activatingProfile } = useAdminModel();
-  const profiles = config?.profiles || [];
+  const profiles = useMemo(() => config?.profiles || [], [config?.profiles]);
   const active = profiles.find((p) => p.name === config?.active) || profiles[0] || null;
 
   const [memoryModel, setMemoryModel] = useState("");
@@ -146,7 +163,7 @@ export function RoleModelSection() {
     >
       <div className="px-3 pb-3">
         <div className="rounded-lg border border-border/70 divide-y divide-border/70 overflow-hidden">
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2 px-3 py-3">
+          <div className="flex items-center gap-2 px-3 py-3">
             <div className="flex items-start gap-2 flex-1 min-w-0">
               <MessageSquare className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">
@@ -168,7 +185,7 @@ export function RoleModelSection() {
             </div>
           </div>
 
-          <div className="flex flex-col sm:flex-row sm:items-center gap-2 px-3 py-3">
+          <div className="flex items-center gap-2 px-3 py-3">
             <div className="flex items-start gap-2 flex-1 min-w-0">
               <Brain className="h-4 w-4 mt-0.5 shrink-0 text-muted-foreground" />
               <div className="min-w-0">

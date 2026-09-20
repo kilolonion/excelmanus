@@ -1,582 +1,253 @@
 # ExcelManus 运维手册
 
-## 1. 架构总览
+适用版本：1.8.0 源码 · 更新日期：2026-09-19
 
-```
-                           ┌─────────────────────────────────────┐
-                           │         用户浏览器                    │
-                           └──────────────┬──────────────────────┘
-                                          │ https://<YOUR_DOMAIN>
-                                          ▼
-                    ┌─────────────────────────────────────────────┐
-                    │    前端服务器 <FRONTEND_IP>（国内 · 阿里云）     │
-                    │                                             │
-                    │  Nginx (SSL 终止)                            │
-                    │    ├─ /api/*  ──▶  <BACKEND_IP>:8000      │
-                    │    └─ /*      ──▶  127.0.0.1:3000           │
-                    │                                             │
-                    │  PM2 进程                                    │
-                    │    └─ excelmanus-web  (Next.js, port 3000)  │
-                    └──────────────┬──────────────────────────────┘
-                                   │ proxy /api/*
-                                   ▼
-                    ┌─────────────────────────────────────────────┐
-                    │    后端服务器 <BACKEND_IP>（海外 · 阿里云）   │
-                    │                                             │
-                    │  Nginx (备用 SSL, Let's Encrypt)             │
-                    │    ├─ /api/*  ──▶  127.0.0.1:8000           │
-                    │    └─ /*      ──▶  <FRONTEND_IP>:3000        │
-                    │                                             │
-                    │  PM2 进程                                    │
-                    │    └─ excelmanus-api (Python/uvicorn, 8000) │
-                    └─────────────────────────────────────────────┘
-```
+[文档导航](README.md) · [English](ops-manual_en.md) · [配置参考](configuration.md)
 
-**为什么这样拆分？**
+本手册介绍源码启动、服务器部署、数据备份和故障排查。路径、域名与服务账号均为示例，请按实际环境替换。桌面安装包的构建和数据目录见 [Desktop README](../desktop/README.md)。
 
-- 前端服务器在国内，用户访问速度快，承担 DNS 入口 + SSL 终止 + 静态资源
-- 后端服务器在海外，可直接调用 OpenAI/Claude 等 API，无需代理
-- 后端服务器也配了 Nginx + SSL（Let's Encrypt），如果 DNS 切过去可独立运行
+## 1. 选择运行方式
 
----
+| 方式 | 适用场景 | 启动与更新 |
+| --- | --- | --- |
+| 桌面应用 | 本机使用 | 由应用启动随包服务，安装新包更新 |
+| 本机 Git 源码 | 开发或本机长期使用 | `deploy/start.*` 启动，停止服务后更新 |
+| 服务器 | 经受控入口远程访问 | PM2 / systemd 管理进程，由运维机执行部署 |
 
-## 2. 服务器清单
+ExcelManus 是单用户软件。工作区和多会话共享模型凭证、记忆与外部服务配置；管理令牌不提供多用户隔离。源码运行需要 Python ≥ 3.10、Node.js ≥ 20.9、Git；推荐使用 uv。服务器还需要相应的进程管理器与反向代理。
 
-| 角色 | IP | 系统 | 关键路径 |
-|------|----|------|----------|
-| 前端 | `<FRONTEND_IP>` | Alibaba Cloud Linux | `/opt/excelmanus/web` |
-| 后端 | `<BACKEND_IP>` | Alibaba Cloud Linux | `/opt/excelmanus` |
+单机后端保持 **1 个 worker**。正在运行的会话、审批和任务状态包含进程内数据，不能仅靠增加 worker 扩容。
 
-**SSH 登录**（两台共用同一密钥）：
+## 2. 本机源码启动
+
+在仓库根目录运行：
 
 ```bash
-ssh -i <SSH_KEY_FILE> root@<FRONTEND_IP>   # 前端
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>  # 后端
+./deploy/start.sh
+./deploy/start.sh --prod
+./deploy/start.sh --backend-port 9000 --frontend-port 8080
+./deploy/start.sh --backend-only
+./deploy/start.sh --no-open --log-dir ./logs
+./deploy/start.sh --help
 ```
 
----
-
-## 3. 运行环境
-
-### 3.1 前端服务器 (<FRONTEND_IP>)
-
-| 组件 | 版本 | 路径 |
-|------|------|------|
-| Node.js | v22.22.0 | `/www/server/nodejs/v22.22.0/bin` |
-| PM2 | 6.x | 同上 |
-| Nginx | 系统自带 | 配置: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL 证书 | 自行管理（certbot / ACME / 手动上传） | `/etc/ssl/certs/<YOUR_DOMAIN>/` |
-
-**注意**: 该服务器的 PM2 需要手动加 PATH：
-
-```bash
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
-```
-
-### 3.2 后端服务器 (<BACKEND_IP>)
-
-| 组件 | 版本 | 路径 |
-|------|------|------|
-| Python | 3.11.9 | `/usr/local/bin/python3.11`（从源码编译） |
-| Node.js | v22.22.0 | `/usr/bin/node`（nodesource RPM） |
-| PM2 | 6.0.14 | `/usr/bin/pm2` |
-| Nginx | 1.20.1 | 配置: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL 证书 | Let's Encrypt (certbot) | `/etc/letsencrypt/live/<YOUR_DOMAIN>/` |
-| venv | Python 3.11 | `/opt/excelmanus/venv` |
-
----
-
-## 4. 防火墙端口
-
-### 前端服务器
-
-```
-20/tcp 21/tcp 22/tcp 80/tcp 443/tcp 3000/tcp 8888/tcp 39000-40000/tcp
-```
-
-- `3000/tcp` 必须开放，供后端服务器的 Nginx 回源前端
-
-### 后端服务器
-
-```
-20/tcp 21/tcp 22/tcp 80/tcp 443/tcp 8000/tcp 8888/tcp 15996/tcp 39000-40000/tcp
-```
-
-- `8000/tcp` 必须开放，供前端服务器的 Nginx 转发 API 请求
-
-**管理命令**：
-
-```bash
-firewall-cmd --list-ports                         # 查看
-firewall-cmd --permanent --add-port=PORT/tcp      # 添加
-firewall-cmd --permanent --remove-port=PORT/tcp   # 删除
-firewall-cmd --reload                             # 生效
-```
-
----
-
-## 5. 日常运维
-
-### 5.1 本地一键启动
-
-`deploy/start.sh` 支持同时启动后端 + 前端，适用于本地开发和单机部署：
-
-```bash
-# macOS / Linux
-./deploy/start.sh                          # 开发模式
-./deploy/start.sh --prod                   # 生产模式（npm run start）
-./deploy/start.sh --backend-port 9000      # 自定义后端端口
-./deploy/start.sh --frontend-port 8080     # 自定义前端端口
-./deploy/start.sh --prod                   # 生产模式（默认 1 worker；>1 会跨进程重建会话信封，prompt cache 静默失效）
-./deploy/start.sh --backend-only           # 仅启动后端
-./deploy/start.sh --frontend-only          # 仅启动前端
-./deploy/start.sh --log-dir ./logs         # 日志输出到文件
-./deploy/start.sh --no-open                # 不自动打开浏览器
-./deploy/start.sh --skip-deps              # 跳过依赖检查
-./deploy/start.sh --help                   # 查看完整参数列表
-```
-
-**Windows 用户：**
+Windows 使用 PowerShell：
 
 ```powershell
-# PowerShell
 .\deploy\start.ps1
 .\deploy\start.ps1 -Production
-.\deploy\start.ps1 -BackendPort 9000 -Production
-
-# CMD
-deploy\start.bat
-deploy\start.bat --prod
-deploy\start.bat --backend-port 9000
+.\deploy\start.ps1 -BackendPort 9000 -FrontendPort 8080
 ```
 
-> 脚本自动检测操作系统（macOS / Linux / Windows），在 Linux 上识别 apt / dnf / yum / pacman / zypper / apk 等包管理器，缺少依赖时自动给出对应安装命令。支持优雅关闭（先 SIGTERM，5s 后 SIGKILL）、自动打开浏览器。模型配置在 Web 设置页，写入主数据库。
+CMD 可使用 `deploy\start.bat` 或 `deploy\start.bat --prod`。浏览器默认访问 [http://localhost:3000](http://localhost:3000)，后端默认监听 `127.0.0.1:8000`。启动后在设置页添加并激活模型档案。
 
-### 5.2 远程部署（运维机 `deploy.sh`）
-
-`deploy/deploy.sh`（和 Windows 版 `deploy/deploy.ps1`）在**本地机器**运行，通过 SSH 操作远程服务器。支持单机 / 前后端分离 / 本地三种拓扑。
-
-**首次部署建议流程：**
+手动启动时，在两个终端分别运行：
 
 ```bash
-# 1. 检查环境依赖（本地 + 远程工具、前后端互联、磁盘/内存）
-./deploy/deploy.sh check
-
-# 2. 写入前端 Next.js 的 web/.env.local（BACKEND_ORIGIN；不是产品设置仓）
-./deploy/deploy.sh init-env
-# 打开 Web 设置页添加模型档案；CORS 等运行时项也在设置页
-
-# 3. 执行部署
-./deploy/deploy.sh
-# 部署后自动执行：健康检查 + 前后端互联检测
+# 终端一：仓库根目录
+uv sync --frozen --extra web --extra analysis
+uv run excelmanus-api --host 127.0.0.1 --port 8000
 ```
-
-**日常部署：**
 
 ```bash
-# 完整部署（后端 + 前端）
-./deploy/deploy.sh
-
-# 只更新后端
-./deploy/deploy.sh --backend-only
-
-# 只更新前端
-./deploy/deploy.sh --frontend-only
-
-# 本地构建并打包前端制品（推荐）
-cd /path/to/excelmanus/web
-npm run build
-mkdir -p ../web-dist
-tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
-
-# 使用本地/CI 构建好的前端制品（推荐低内存服务器）
-./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
-
-# 从本地 rsync 同步（不走 GitHub）
-./deploy/deploy.sh --from-local
+# 终端二：仓库根目录
+cd web
+npm ci
+npm run dev
 ```
 
-**运维命令：**
+自定义端口时，同时配置前端连接地址，见 [Web README](../web/README.md)。
 
-```bash
-./deploy/deploy.sh status                  # 查看远程服务状态（进程 + 健康检查 + Git 版本）
-./deploy/deploy.sh rollback                # 回滚上一版本（前端备份恢复 + 后端 git reset）
-./deploy/deploy.sh history                 # 查看部署历史（时间/状态/拓扑/分支/耗时）
-./deploy/deploy.sh logs                    # 查看最近一次部署的详细日志
+## 3. 配置与数据目录
+
+| 内容 | 位置与管理方式 |
+| --- | --- |
+| 模型档案和产品设置 | 主库 `model_profiles` / `config_kv`；通过设置页或配置导入管理 |
+| 主数据库 | 默认 `$EXCELMANUS_HOME/excelmanus.db` |
+| 凭证加密密钥 | 默认 `$EXCELMANUS_HOME/.secret_key`，须与数据库一起保留 |
+| 默认工作区 | `EXCELMANUS_DATA_ROOT`，未指定时通常为 `$EXCELMANUS_HOME/data` |
+| 其他工作区 | 用户登记的本机目录，保留在原路径 |
+| 文件修订 | 每个工作区的 `.excelmanus/revisions/` |
+| 部署清单 | 运维机的 `deploy/.env.deploy`，由模板复制并填写 |
+| 前端连接参数 | Next.js 进程环境或 `web/.env.local` |
+
+源码版 `EXCELMANUS_HOME` 默认是 `~/.excelmanus`；桌面版使用 Electron 用户数据目录下的 `profile/`。二者不会自动合并。不要让桌面版与源码服务同时使用同一数据目录。
+
+项目 `.env`、用户 `config.env` 不再提供产品设置。`EXCELMANUS_HOME`、`EXCELMANUS_DB_PATH`、监听参数、`EXCELMANUS_DEPLOY_MODE`、`EXCELMANUS_MANAGE_TOKEN` 等由启动进程提供。完整分类见 [配置参考](configuration.md)。
+
+## 4. 服务器访问保护
+
+推荐的单机拓扑：
+
+```text
+浏览器 ── HTTPS ── Nginx
+                  ├─ /api/ ── 127.0.0.1:8000（FastAPI）
+                  └─ /     ── 127.0.0.1:3000（Next.js）
 ```
 
-**高级选项：**
+1. 为运行进程设置 `EXCELMANUS_DEPLOY_MODE=server`，关闭应用内的自身升级入口。
+2. 配置至少 16 字符的 `EXCELMANUS_MANAGE_TOKEN`。即使后端监听 loopback，只要反向代理对外暴露，也应配置访问保护。
+3. 浏览器在令牌提示页输入相同令牌；API 客户端使用 `Authorization: Bearer <token>`。不要在公开前端变量中保存令牌，也不要由未经认证的代理为所有访客自动注入令牌。
+4. 同机部署只需让代理访问应用端口；分机部署通过私网、VPN 或明确受控的后端入口连接，不必把 3000/8000 端口向所有公网来源开放。
 
-```bash
---dry-run                  # 仅打印将执行的操作，不实际执行
---service-manager systemd  # 使用 systemd 而非 PM2 管理服务
---pre-deploy ./hook.sh     # 部署前执行自定义脚本
---post-deploy ./hook.sh    # 部署后执行自定义脚本
---no-lock                  # 跳过部署锁（允许并行部署，危险）
---force                    # 跳过确认提示
---cold-build               # 远端清理缓存后重新构建（仅排障）
+令牌设置后，健康检查和 CORS 预检仍可无令牌访问。公开前端页面、静态资源和 API 文档不由管理令牌统一保护；需要限制整个站点时，在网络入口配置访问控制。
+
+下面是 systemd 的配置示例。先创建专用服务账号，准备 `/srv/excelmanus` 源码及其 `.venv`，并赋予该账号读写 `/var/lib/excelmanus` 的权限：
+
+```ini
+# /etc/systemd/system/excelmanus-api.service
+[Unit]
+Description=ExcelManus API
+After=network-online.target
+
+[Service]
+Type=simple
+User=excelmanus
+WorkingDirectory=/srv/excelmanus
+EnvironmentFile=/etc/excelmanus/runtime.env
+ExecStart=/srv/excelmanus/.venv/bin/excelmanus-api --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
-**Windows PowerShell：**
+`/etc/excelmanus/runtime.env` 仅供服务管理器读取，内容示例：
 
-```powershell
-.\deploy\deploy.ps1                        # 完整部署
-.\deploy\deploy.ps1 init-env               # 写入前端 Next.js web/.env.local
-.\deploy\deploy.ps1 check                  # 环境检查
-.\deploy\deploy.ps1 rollback -Force        # 回滚（跳过确认）
-.\deploy\deploy.ps1 -ServiceManager nssm   # 使用 NSSM 管理 Windows 服务
+```dotenv
+EXCELMANUS_HOME=/var/lib/excelmanus
+EXCELMANUS_DEPLOY_MODE=server
+EXCELMANUS_MANAGE_TOKEN=replace-with-your-own-random-token
 ```
 
-> **安全机制**：部署锁防止并行部署冲突；每次部署生成日志文件（保留 20 个）；历史记录保留 100 条；异常退出时自动释放锁并报告耗时。
+将令牌占位符替换为自己的随机值，并限制该文件的访问权限。模型密钥在 Web 设置页保存，不放入此文件。使用 PM2 时，把相同启动参数配置到后端进程环境，并确认重启后仍然存在。
 
-### 5.3 手动操作
+## 5. 反向代理与前端地址
 
-**后端 (<BACKEND_IP>)**：
+生产环境可为 Next.js 设置：
 
-```bash
-# 查看状态
-pm2 list
-
-# 重启后端
-pm2 restart excelmanus-api
-
-# 查看日志
-pm2 logs excelmanus-api --lines 50 --nostream
-
-# 实时日志
-pm2 logs excelmanus-api
-
-# 手动更新代码（Gitee 优先，GitHub 备用）
-cd /opt/excelmanus
-git fetch https://gitee.com/kilolonion/excelmanus main
-# 或 git fetch https://github.com/kilolonion/excelmanus main
-git reset --hard FETCH_HEAD
-# 优先使用 uv（如已安装）
-uv sync --all-extras -q 2>/dev/null || { source venv/bin/activate && pip install -e '.[all]' -q; }
-pm2 restart excelmanus-api
+```dotenv
+EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin
+BACKEND_INTERNAL_URL=http://127.0.0.1:8000
 ```
 
-**前端 (<FRONTEND_IP>)**：
+前者在 Next.js 运行时读取，让浏览器经同源代理访问 API；后者用于 Next.js rewrite，在构建时也应保持正确。跨域直连时还需在产品设置中配置 `EXCELMANUS_CORS_ALLOW_ORIGINS`。
 
-```bash
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
-
-# 查看状态
-pm2 list
-
-# 重启前端（不重新构建）
-pm2 restart excelmanus-web
-
-# 重新构建并重启
-cd /opt/excelmanus/web
-npm install --production=false
-NEXT_PUBLIC_BACKEND_ORIGIN= BACKEND_INTERNAL_URL=http://<BACKEND_IP>:8000 npm run build
-pm2 restart excelmanus-web
-
-# 若默认构建失败，可尝试 webpack 兜底
-npm run build:webpack
-pm2 restart excelmanus-web
-
-# 查看日志
-pm2 logs excelmanus-web --lines 50 --nostream
-```
-
-> 低内存机器（1~2G）应优先使用 `--frontend-artifact` 制品化发布，避免现场冷编译触发 OOM。
-> 跨区传输推荐使用支持断点续传的 rsync（脚本已内置 `--partial --append-verify`）。
-
-### 5.4 健康检查
-
-```bash
-# 通过域名（走完整链路）
-curl https://<YOUR_DOMAIN>/api/v1/health
-
-# 直连后端
-curl http://<BACKEND_IP>:8000/api/v1/health
-
-# 检查前端可达性
-curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/
-```
-
----
-
-## 6. Nginx 配置
-
-### 6.1 前端服务器 `/etc/nginx/conf.d/excelmanus.conf`
+以下片段放入已配置域名与 TLS 证书的 Nginx `server` 块：
 
 ```nginx
-# HTTP -> HTTPS redirect
-server {
-    listen 80;
-    server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
-    return 301 https://$host$request_uri;
+client_max_body_size 100m;
+
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 600s;
 }
 
-# HTTPS
-server {
-    listen 443 ssl http2;
-    server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
-
-    ssl_certificate     /etc/ssl/certs/<YOUR_DOMAIN>/fullchain.pem;
-    ssl_certificate_key /etc/ssl/certs/<YOUR_DOMAIN>/privkey.pem;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-
-    client_max_body_size 100m;
-
-    # SSE 流式接口（不使用 Connection: upgrade，否则 SSE 会失败）
-    location /api/v1/chat/stream {
-        proxy_pass http://<BACKEND_IP>:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Connection '';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 600s;
-        chunked_transfer_encoding on;
-    }
-
-    # 其他 API 请求转发到后端服务器
-    location /api/ {
-        proxy_pass http://<BACKEND_IP>:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 300s;
-    }
-
-    # 前端本地 Next.js
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
-### 6.2 后端服务器 `/etc/nginx/conf.d/excelmanus.conf`
+对整个 `/api/` 关闭缓冲可覆盖首次对话和重连事件流。上传限制应与应用配置相匹配；这里的 `100m` 只是代理示例。修改后先运行 `nginx -t`，再重载 Nginx。证书续期方式和有效期以部署环境为准。
 
-此配置由 certbot 自动管理。当 DNS 指向此服务器时，可独立处理所有流量：
+## 6. 使用部署脚本
 
-- `/api/*` → 本地后端 (`127.0.0.1:8000`)
-- `/*` → 回源到前端服务器 (`<FRONTEND_IP>:3000`)
-
-**Nginx 管理命令**：
+部署脚本在**运维机**运行。先复制清单并填写服务器、SSH 密钥、远程路径和分支：
 
 ```bash
-nginx -t             # 检查配置语法
-nginx -s reload      # 平滑重载
-systemctl restart nginx  # 完全重启
+cp deploy/.env.deploy.example deploy/.env.deploy
+bash ./deploy/deploy.sh --help
+bash ./deploy/deploy.sh check --single-server --host server.example.com --venv .venv
+bash ./deploy/deploy.sh --single-server --host server.example.com --venv .venv --dry-run
+bash ./deploy/deploy.sh --single-server --host server.example.com --venv .venv
 ```
 
----
+`uv sync` 使用 `.venv`，因此示例明确传入 `--venv .venv`。脚本支持 `--single-server`、`--split-server`、`--local`，以及 PM2 / systemd。Windows 运维入口为 `deploy/deploy.ps1`，具体参数以脚本帮助为准。
 
-## 7. 配置
+首次上线前检查服务环境中的管理令牌、持久化目录和代理配置。脚本不会替你生成管理令牌或建立多用户账号系统。默认后端绑定 loopback；分机拓扑还需自行准备受控的跨机连接，不能直接把另一台服务器的 loopback 当作可达地址。
 
-用户设置与模型档案只在主库 `config_kv` / `model_profiles`（`$EXCELMANUS_HOME/excelmanus.db`），通过 Web 设置页或 `/config` 管理。
-
-服务器部署由 `deploy.sh` 把 `EXCELMANUS_DEPLOY_MODE=server` 写入 systemd / PM2 进程（定位符）。前端 `web/.env.local` 只给 Next.js 用（`NEXT_PUBLIC_BACKEND_ORIGIN`）。
-
-关键配置（设置页 / 主库键）：
-
-| 配置键 | 用途 | 备注 |
-|------|------|------|
-| 模型档案（设置页） | API Key / Base URL / 模型名 | 必填；存在 `model_profiles` |
-| `EXCELMANUS_PROTOCOL` | 模型协议类型 | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | 部署模式（`auto`/`standalone`/`server`） | `deploy.sh` 在 systemd/PM2 写入 `server` |
-| `EXCELMANUS_MAIN_MODEL_VISION` | 激活模型是否接受图片附件（`auto`/`true`/`false`） | `auto` |
-| `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子 | 通常留空，自动生成 `.secret_key` |
-| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS 白名单 | 公网部署须包含前端域名 |
-
-服务器模式由 `deploy.sh` 写入 `EXCELMANUS_DEPLOY_MODE=server`。此时 API 拒绝 `/version/upgrade` 与 `/deploy/execute`；升级与回滚只在运维机跑 `./deploy/deploy.sh`（`rollback-to --commit` 为 checkout + 重启）。本机 Git 安装用设置页停机更新，详见 [升级与部署](hot-update-design.md)。
-
-本机 standalone 升级禁止静默 `git reset --hard`（冲突需手工解决）。服务器上 `./deploy/deploy.sh rollback` 会执行 `git reset --hard`。
-
----
-
-## 8. SSL 证书续期
-
-### 前端服务器
-
-SSL 证书需自行管理续期，推荐使用 certbot 或 ACME 客户端自动续期。
-
-### 后端服务器
-
-SSL 证书由 Let's Encrypt (certbot) 管理，已配置自动续期：
+常用操作：
 
 ```bash
-# 查看证书信息
-certbot certificates
-
-# 手动续期测试
-certbot renew --dry-run
-
-# 强制续期
-certbot renew
+bash ./deploy/deploy.sh --backend-only --venv .venv
+bash ./deploy/deploy.sh --frontend-only
+bash ./deploy/deploy.sh status
+bash ./deploy/deploy.sh history
+bash ./deploy/deploy.sh logs
+bash ./deploy/deploy.sh rollback
+bash ./deploy/deploy.sh rollback-to --commit COMMIT_SHA
 ```
 
-证书到期日请以 `certbot certificates` 的现场输出为准，不要沿用手册里的历史日期。
+以上命令沿用部署清单；请先确认清单中的拓扑与目标。脚本的 Git 同步及部分回滚路径会执行 `git reset --hard`，部署目录应作为发布副本使用，不应保存未提交的开发改动。`--from-local` 会同步本地文件，运行前检查同步范围。
 
----
-
-## 9. DNS 切换指南
-
-当前 DNS 指向前端服务器 (`<FRONTEND_IP>`)。如需切换到后端服务器独立运行：
-
-1. 将 `<YOUR_DOMAIN>` 和 `www.<YOUR_DOMAIN>` 的 A 记录改为 `<BACKEND_IP>`
-2. 后端服务器的 Nginx 已配好 SSL + 双向代理，无需额外操作
-3. 切换后验证：`curl https://<YOUR_DOMAIN>/api/v1/health`
-
-切回时将 A 记录改回 `<FRONTEND_IP>` 即可。
-
----
-
-## 10. 故障排查
-
-### 前端 502
+低内存服务器可接收预先构建的前端产物。从仓库根目录执行：
 
 ```bash
-# 1. 检查前端进程
-ssh -i <SSH_KEY_FILE> root@<FRONTEND_IP>
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
-pm2 list    # excelmanus-web 应为 online
-
-# 2. 检查后端可达性（从前端服务器）
-curl http://<BACKEND_IP>:8000/api/v1/health
-
-# 3. 如果后端不可达，检查后端
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
-pm2 list    # excelmanus-api 应为 online
-pm2 logs excelmanus-api --lines 30 --nostream
+npm --prefix web ci
+npm --prefix web run build
+mkdir -p web-dist
+tar -czf web-dist/frontend-standalone.tar.gz -C web .next/standalone .next/static public
+bash ./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
 ```
 
-### 后端 500
+产物应与目标环境的操作系统、架构和 Node.js 运行时兼容，不能默认把 macOS 构建直接用于 Linux。部署锁、构建检查和健康检查能发现部分故障，但不等于业务验收或无中断升级。
+
+## 7. 升级、备份与恢复
+
+本机源码版可从设置页停机升级，或停止服务后运行 `./deploy/update.sh`。更新会备份应用数据并尝试 fast-forward；有冲突时不会强制重置本机开发分支。服务器版由运维机部署，桌面版安装新包，详见 [升级与部署](hot-update-design.md)。
+
+内置升级备份当前不是完整 profile 备份，未包含 `.secret_key`；迁移和灾难恢复不能仅依赖自动生成的备份目录。
+
+备份前先停止相关进程，使 SQLite、运行状态和文件保持一致。至少保存：
+
+- 整个 `EXCELMANUS_HOME`，包括主数据库与 `.secret_key`；若指定了外部 `EXCELMANUS_DB_PATH`，单独备份该数据库。
+- 登记在数据目录外的所有工作区，连同其中的 `.excelmanus/revisions/`。
+- 自定义技能、MCP 配置及进程管理器配置；它们可能不在 `EXCELMANUS_HOME` 下。
+
+例如，停止服务后将 profile 备份到其目录之外：
 
 ```bash
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
-pm2 logs excelmanus-api --lines 50 --nostream
-# 模型与运行时设置在 Web 设置页 / 主数据库
+tar -czf /secure-backups/excelmanus-profile.tar.gz -C /path/to/profile .
 ```
 
-### Nginx 配置错误
+恢复时先备份当前数据，再恢复相匹配的数据库、密钥和文件，确认属主及权限后启动。代码回滚不会自动回滚数据库结构或所有工作区文件。会话删除也不等于清理文件修订、独立日志或历史备份。
+
+旧 `users/{id}/` 目录和旧容器卷需要手工选择并搬迁，不能直接合并多个用户数据库。旧 `outputs/backups` 的修订迁移说明见 [配置参考](configuration.md)。
+
+## 8. 检查与故障排查
+
+部署后先检查服务，再执行一个小规模的实际文件任务：
 
 ```bash
-nginx -t    # 语法检查
-# 查看错误日志
-tail -50 /var/log/nginx/error.log
+curl --fail http://127.0.0.1:8000/api/v1/health
+curl --fail https://your-domain.example/api/v1/health
 ```
 
-### 内存不足
+还应确认管理令牌能阻止未授权 API 请求、模型能够响应、上传和下载可用、SSE 持续到达，以及一次编辑与版本恢复符合预期。不要仅凭 HTTP 200 判断发布成功。
 
-```bash
-free -h
-pm2 list    # 检查进程内存
-# 后端 API 通常占用 ~200MB
-```
+| 现象 | 优先检查 |
+| --- | --- |
+| 前端 502 | Next.js / API 进程、代理目标端口、构建产物与服务日志 |
+| API 401 | 浏览器输入的管理令牌、进程环境、代理是否转发 Authorization |
+| 模型无法调用 | 当前激活档案、协议、Base URL、模型权限、服务商限流 |
+| SSE 长时间无内容 | Nginx 缓冲、读超时、运行时后端地址、跨域设置 |
+| 端口变更后连错后端 | `EXCELMANUS_RUNTIME_BACKEND_ORIGIN` 和构建时旧地址 |
+| 凭证无法解密 | 数据库是否与原 `.secret_key` 配套，是否切换了 data home |
+| 重启后任务中断 | 用 `/resume` 查看恢复结果；在任务面板继续子代理，不重复启动同一写入 |
+| 表格版本冲突 | 重新读取最新工作簿后再编辑，不覆盖其他会话的新版本 |
+| 内存不足 | 前端使用兼容的预构建产物；检查文件规模、进程数量与日志 |
 
----
-
-## 11. 从零搭建后端服务器
-
-如果需要在新服务器上重建后端环境，按以下步骤操作。
-
-> **注意**: 下方以 Python 3.11 为例，实际可使用任何 `>=3.10` 的版本（部署脚本不绑定 Python 小版本）。
-
-```bash
-# 1. 安装编译依赖
-yum groupinstall -y "Development Tools"
-yum install -y openssl-devel bzip2-devel libffi-devel zlib-devel readline-devel sqlite-devel
-
-# 2. 编译安装 Python 3.11
-cd /tmp
-curl -O https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-tar xzf Python-3.11.9.tgz && cd Python-3.11.9
-./configure --enable-optimizations
-make -j$(nproc)       # 大约 10-20 分钟
-make altinstall
-ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3
-ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip3
-
-# 3. 安装 Node.js 22
-curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-yum install -y nodejs
-npm install -g pm2
-
-# 4. 克隆代码
-mkdir -p /opt
-# 国内推荐 Gitee（更快）
-git clone https://gitee.com/kilolonion/excelmanus.git /opt/excelmanus
-# 或 git clone https://github.com/kilolonion/excelmanus.git /opt/excelmanus
-cd /opt/excelmanus
-
-# 5. 安装依赖（推荐 uv，也可用 pip）
-# 方式 A：uv（推荐，自动创建 venv）
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync --all-extras
-uv pip install 'httpx[socks]'
-# 方式 B：传统 pip
-# python3.11 -m venv venv
-# source venv/bin/activate
-# pip install -e '.[all]'
-# pip install 'httpx[socks]'
-
-# 6. 打开 Web 设置页添加模型档案（写入主数据库）
-# 7. 配置 mcp.json
-
-# 8. 启动后端
-pm2 start "venv/bin/python -c \"import uvicorn; uvicorn.run('excelmanus.api:app', host='0.0.0.0', port=8000, log_level='info')\"" --name excelmanus-api --cwd /opt/excelmanus
-pm2 save
-pm2 startup
-
-# 9. 安装 Nginx + SSL
-yum install -y nginx certbot python3-certbot-nginx
-# 写入 Nginx 配置（见第 6 节）
-systemctl start nginx && systemctl enable nginx
-certbot --nginx -d <YOUR_DOMAIN> -d www.<YOUR_DOMAIN> --non-interactive --agree-tos --email YOUR_EMAIL
-
-# 10. 开放防火墙
-firewall-cmd --permanent --add-port=8000/tcp
-firewall-cmd --permanent --add-port=80/tcp
-firewall-cmd --permanent --add-port=443/tcp
-firewall-cmd --reload
-```
-
----
-
-## 12. 文件清单
-
-```
-项目根目录/
-├── deploy/
-│   ├── start.sh           # 一键启动脚本（macOS / Linux）
-│   ├── start.ps1          # 一键启动脚本（Windows PowerShell）
-│   ├── start.bat          # 一键启动脚本（Windows CMD）
-│   ├── deploy.sh          # 远程部署脚本 v2.0（macOS / Linux）
-│   ├── deploy.ps1         # 远程部署脚本 v2.0（Windows PowerShell）
-│   ├── .env.deploy        # 部署配置（服务器地址/端口/路径，不入 Git）
-│   ├── .env.deploy.example # 部署配置模板
-│   ├── nginx.conf         # Nginx 反向代理配置（127.0.0.1 示例；生产见本手册）
-│   └── certs/             # TLS 证书
-├── excelmanus/
-│   ├── config.py           # 运行时配置（主库设置 + 默认值）
-│   ├── context_budget.py   # 上下文预算管理器
-│   ├── model_probe.py      # 模型元数据探测（上下文窗口自动校正）
-│   └── security/
-│       └── cipher.py       # Fernet 对称加密（API Key / Token 加密存储）
-├── mcp.json               # MCP 服务器配置
-└── docs/
-    └── ops-manual.md      # 本手册
-```
+PM2 可使用 `pm2 list`、`pm2 logs excelmanus-api --lines 50 --nostream`；systemd 可使用 `systemctl status excelmanus-api`、`journalctl -u excelmanus-api -n 50`。分享日志前移除凭证、文件内容及其他敏感信息。

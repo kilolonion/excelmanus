@@ -14,9 +14,10 @@ import { fetchSessionDetail, fetchSessions, apiGet } from "@/lib/api";
 import { parseChatMode, shouldHydrateChatMode } from "@/lib/chat-mode-hydrate";
 import { buildDefaultSessionTitle } from "@/lib/session-title";
 import { isPlaceholderModelId } from "@/lib/model-display";
+import { normalizeThinkingEffortOptions } from "@/lib/thinking";
 import { ensureLandingSession } from "@/lib/session-actions";
 import type { Session } from "@/lib/types";
-import { DEMO_SESSION_PREFIX } from "@/components/onboarding/CoachMarks";
+import { DEMO_SESSION_PREFIX } from "@/components/onboarding/demo-session";
 
 /**
  * 将最后一个 assistant 消息中最后一个 running/success 状态的 tool_call 标记为 pending，
@@ -55,6 +56,7 @@ export function SessionSync() {
   const setVisionCapable = useUIStore((s) => s.setVisionCapable);
   const setCurrentModel = useUIStore((s) => s.setCurrentModel);
   const setThinkingEffort = useUIStore((s) => s.setThinkingEffort);
+  const setThinkingEffortOptions = useUIStore((s) => s.setThinkingEffortOptions);
 
   const setActiveSession = useSessionStore((s) => s.setActiveSession);
   const hydratedChatModeSessionRef = useRef<string | null>(null);
@@ -63,12 +65,13 @@ export function SessionSync() {
 
   // 启动时拉取 thinking config 同步到 store
   useEffect(() => {
-    apiGet<{ effort: string }>("/thinking")
+    apiGet<{ effort: string; allowed_efforts?: string[] }>("/thinking")
       .then((data) => {
         if (data.effort) setThinkingEffort(data.effort);
+        setThinkingEffortOptions(normalizeThinkingEffortOptions(data.allowed_efforts));
       })
       .catch(() => {});
-  }, [setThinkingEffort]);
+  }, [setThinkingEffort, setThinkingEffortOptions]);
 
   useEffect(() => {
     apiGet<{
@@ -88,8 +91,11 @@ export function SessionSync() {
 
   useEffect(() => {
     let cancelled = false;
+    let syncing = false;
 
     const syncSessions = async () => {
+      if (cancelled || syncing || document.hidden) return;
+      syncing = true;
       try {
         await waitForSessionHydration();
         if (cancelled) return;
@@ -152,10 +158,14 @@ export function SessionSync() {
         }
       } catch {
         // 蹇界暐
+      } finally {
+        syncing = false;
       }
     };
 
     void syncSessions();
+    const onVisible = () => { if (!document.hidden) void syncSessions(); };
+    document.addEventListener("visibilitychange", onVisible);
     const timer = window.setInterval(() => {
       void syncSessions();
     }, 15_000);
@@ -163,6 +173,7 @@ export function SessionSync() {
     return () => {
       cancelled = true;
       window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [mergeSessions, setActiveSession]);
 
@@ -204,6 +215,7 @@ export function SessionSync() {
     let cancelled = false;
     const prevInFlightRef = { current: false };
     let snapshotValidated = false;
+    let polling = false;
     let notFoundCount = 0;
     const NOT_FOUND_THRESHOLD = 2;
     if (hydratedChatModeSessionRef.current !== activeSessionId) {
@@ -226,7 +238,10 @@ export function SessionSync() {
       hydratedChatModeSessionRef.current = activeSessionId;
     };
     const pollDetail = async () => {
+      if (cancelled || polling || document.hidden) return;
+      polling = true;
       try {
+        const modelProfileVersion = useUIStore.getState().modelProfileVersion;
         const detail = await fetchSessionDetail(activeSessionId);
         if (cancelled) {
           return;
@@ -260,13 +275,14 @@ export function SessionSync() {
 
         setFullAccessEnabled(detail.fullAccessEnabled);
         // 占位会话（engine 尚未创建）会返回 vision_capable=null；不要把未知当成不支持。
-        if (detail.currentModel != null && typeof detail.visionCapable === "boolean") {
+        const modelSnapshotIsCurrent = modelProfileVersion === useUIStore.getState().modelProfileVersion;
+        if (modelSnapshotIsCurrent && detail.currentModel != null && typeof detail.visionCapable === "boolean") {
           setVisionCapable(detail.visionCapable);
         }
         // 每个 session 只 hydrate 一次 chat_mode。轮询不得覆盖用户点选；/plan 走 SSE。
         hydrateChatModeOnce(detail.chatMode);
         const modelName = detail.currentModelName || detail.currentModel;
-        if (modelName && !isPlaceholderModelId(modelName)) setCurrentModel(modelName);
+        if (modelSnapshotIsCurrent && modelName && !isPlaceholderModelId(modelName)) setCurrentModel(modelName);
 
         // 閲嶈锛歱ollDetail 涓哄紓姝ワ紝鍙兘涓庝箰瑙傛湰鍦?sendMessage() 绔炴€併€?
         // 鍦ㄤ换浣曚細瑕嗙洊娑堟伅鐨勫埛鏂板墠锛屽姟蹇呴噸鏂拌鍙栨渶鏂?chat 鐘舵€侊紝閬垮厤鎿﹂櫎鍒氳拷鍔犵殑鏈湴 user/assistant 姘旀场銆?
@@ -292,12 +308,15 @@ export function SessionSync() {
           } else if (!snapshotValidated) {
             snapshotValidated = true;
             const latestChat = useChatStore.getState();
-            if (latestChat.abortController === null && !latestChat.isStreaming) {
+            if (latestChat.abortController === null && !latestChat.isStreaming
+              && !latestChat.isLoadingMessages && latestChat.loadedSessionId === activeSessionId) {
               const remoteCount = Math.max(0, detail.messageCount ?? 0);
               const localCount = latestChat.messageOrder.length;
               if (remoteCount !== localCount) {
                 await refreshSessionMessagesFromBackend(activeSessionId);
               }
+            } else {
+              snapshotValidated = false;
             }
           }
 
@@ -352,6 +371,8 @@ export function SessionSync() {
         // 缃戠粶閿欒锛堝鏂綉/瓒呮椂锛夛細涓嶉噸缃?UI 寮€鍏筹紝閬垮厤鐬椂缃戠粶娉㈠姩瀵艰嚧鐢ㄦ埛涓㈠け Full Access 鐘舵€併€?
         // fullAccessEnabled 绛?UI 鐘舵€佷細鍦ㄤ笅涓€娆℃垚鍔熻疆璇㈡椂鑷劧鎭㈠銆?
         consecutiveErrors++;
+      } finally {
+        polling = false;
       }
     };
 
@@ -365,10 +386,11 @@ export function SessionSync() {
     let currentInterval = POLL_FAST;
     let consecutiveErrors = 0;
     // chat_mode 首次 hydrate 不等轮询延迟，避免 F5 后 tab 先闪回 write。
-    void fetchSessionDetail(activeSessionId).then((detail) => {
-      if (cancelled || !detail) return;
-      hydrateChatModeOnce(detail.chatMode);
-    }).catch(() => {});
+    // One initial request also hydrates chat mode; avoid a second detail fetch
+    // just for that field. Message validation waits for the session loader.
+    void pollDetail();
+    const onVisible = () => { if (!document.hidden) void pollDetail(); };
+    document.addEventListener("visibilitychange", onVisible);
     let timer = window.setTimeout(function schedule() {
       void pollDetail().then(() => {
         if (cancelled) return;
@@ -386,6 +408,7 @@ export function SessionSync() {
     return () => {
       cancelled = true;
       window.clearTimeout(timer);
+      document.removeEventListener("visibilitychange", onVisible);
     };
   }, [
     activeSessionId,

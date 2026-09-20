@@ -1,50 +1,92 @@
-# Skillpack Protocol Specification (SSOT)
+# Skillpack protocol
 
-> Last updated: 2026-09-15  
-> Scope: `excelmanus/skillpacks`, README, tests, and task documentation
+Applies to: 1.8.0 source tree · Updated: 2026-09-19
 
-## 1. Goals
-- Unify the loading protocol, routing semantics, and documentation for Skillpacks.
-- Prevent cognitive drift caused by "implementation changed but documentation not synced."
+[Documentation](README.md) · [中文](skillpack_protocol.md) · [Configuration](configuration_en.md)
 
-## 2. Three-Layer Loading and Override
-- Override priority: `system < user < project`.
-- A Skillpack with the same name from a higher-priority source overrides the one from a lower-priority source.
-- system serves only as the built-in default set; project can override system/user.
+Skillpacks provide reusable task methods and reference material. This guide covers authoring, discovery, overrides, and invocation. The runtime remains responsible for permissions.
 
-## 3. Directory Discovery Rules
-Discovery order (lowest to highest priority):
-1. system: `excelmanus/skillpacks/system`
-2. user: `~/.excelmanus/skillpacks`, `~/.claude/skills`, `~/.openclaw/skills`
-3. project:
-   - Ancestor chain: `cwd -> workspace_root`, scanning `.agents/skills` at each level
-   - Explicit directories: `.excelmanus/skillpacks`, `.agents/skills`, `.claude/skills`, `.openclaw/skills`
+## 1. Write a skill
 
-Strict protocol notes:
-- External tool directories (`.openclaw/skills`) are only supported at the project level.
-- `workspace/skills` is no longer used as an external tool project-level directory.
+Each skill has its own directory with a `SKILL.md` entry point. For example, create `sales_summary/SKILL.md` in the user skill directory:
 
-## 4. Routing Semantics
-- Slash commands: `/<skill_name> args...` directly invoke the skill (`slash_direct`).
-- Non-slash messages: enter the step loop. Visible tools come from `EffectiveToolCatalog` by session mode: `read` / `plan` do not see pure-write tools; `write` sees the full catalog; `code` sees only `run_code`. Slash and `@skill` are explicit control plane, not lexical task routing.
+```markdown
+---
+name: sales_summary
+description: Summarize sales by region and save the summary to a new workbook.
+file-patterns:
+  - "*.xlsx"
+user-invocable: true
+---
+Confirm the meaning of the sales and region columns before summarizing.
+Explain how duplicate records and missing regions are handled.
+Report the output file, calculation scope, and any unresolved questions.
+```
 
-## 5. Built-in system Skillpacks (Authoritative List)
-- `data_basic`
-- `chart_basic`
-- `format_basic`
-- `file_ops`
-- `sheet_ops`
-- `excel_code_runner`
-- `run_code_templates`
-- `word_basic`
-- `word_code_runner`
+`name` and `description` support discovery; the Markdown body provides the method. `resources` can list reference files inside the skill directory. Common optional fields:
 
-## 6. Change Governance Requirements
-- Any protocol change must simultaneously update: implementation, README, tests, and this document.
-- When adding or removing a built-in system Skillpack, the following must be synced:
-  - `excelmanus/skillpacks/system/*`
-  - Built-in list in README
-  - Contract test `tests/test_skillpack_docs_contract.py`
+| Field | Purpose |
+| --- | --- |
+| `file-patterns` | File-pattern metadata; does not grant file access or trigger execution by itself |
+| `resources` | Reference files to load |
+| `version` | Skill version identifier |
+| `user-invocable` | Whether users can invoke the skill explicitly |
+| `disable-model-invocation` | Whether model-initiated invocation is disabled |
+| `argument-hint` | Argument hint |
+| `required-mcp-servers` / `required-mcp-tools` | MCP dependencies |
+| `hooks` | Hook handlers, described in section 7 |
+
+Hyphenated fields above also accept underscore aliases. Describe applicability, key steps, and delivery requirements in the body. Query current tool details for parameters instead of duplicating a complete schema that can drift.
+
+## 2. Loading and overrides
+
+Overall priority is `system < user < project`. A same-name skill from a later, higher-priority source replaces the earlier skill; their bodies are not merged. Built-in skills provide defaults that user or project skills can override.
+
+Settings supports skill management and import. Inspect the running instance's skill list and loading warnings to determine what is available. Loading a skill does not expand file access, tool permissions, or approval authority.
+
+## 3. Directory discovery
+
+Default scan order is listed below. Settings can disable general discovery, external tool directories, or ancestor scanning.
+
+1. Built-in directory: `excelmanus/skillpacks/system`.
+2. User directories: the configured user root, defaulting to `~/.excelmanus/skillpacks`, plus `~/.claude/skills` and `~/.openclaw/skills` when external discovery is enabled.
+3. Ancestor directories: only when cwd is inside the configured workspace, scan `.agents/skills` from the workspace root toward cwd. Later, nearer directories can override earlier ones.
+4. Explicit project directories: the configured project root, normally `<workspace_root>/.excelmanus/skillpacks`, plus enabled `.agents/skills`, `.claude/skills`, and `.openclaw/skills` directories.
+5. Additional roots from `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS`, loaded as project sources.
+
+`.openclaw/skills` is supported at both user and project levels. A plain `workspace/skills` directory is not a default root; add it explicitly if needed. Disabling general discovery leaves only the configured system, user, and project roots.
+
+## 4. Invocation and tool visibility
+
+- `/<skill_name> args...` invokes a skill explicitly (`slash_direct` internally). An `@` reference can also include a skill in task context.
+- Ordinary messages enter the model loop. The model can load instructions and resources through `skill`; loading does not execute a fixed business script.
+- `read` and `plan` exclude pure-write tools. Tools with read-only actions may remain discoverable, but write actions are restricted at execution.
+- In `write`, direct tools and `run_code` coexist. Common tools load upfront; other capabilities are disclosed on demand after `introspect_capability`. The `em.*` SDK binds the complete authorized catalog.
+- Invoking a skill does not switch execution modes or bypass path checks, content versions, approvals, or write restrictions.
+
+## 5. Built-in system Skillpacks
+
+| Skill | Main purpose |
+| --- | --- |
+| `data_basic` | Reading, analysis, filtering, and transformation |
+| `chart_basic` | Workbook charts and image export |
+| `format_basic` | Styles, conditional formatting, and layout |
+| `file_ops` | File management |
+| `sheet_ops` | Worksheet and cross-sheet operations |
+| `excel_code_runner` | Custom calculations and tool composition |
+| `run_code_templates` | Batch writing, analysis, and formatting templates |
+| `word_basic` | Word reading, editing, and generation |
+| `word_code_runner` | Complex Word processing |
+
+## 6. Maintenance and validation
+
+Update the implementation, both language guides, and related tests when the protocol changes. Adding or removing a built-in skill requires updating `excelmanus/skillpacks/system/`, both project README lists, and `tests/test_skillpack_docs_contract.py`.
+
+```bash
+uv run pytest tests/test_skillpack_docs_contract.py
+```
+
+Runtime skill files and templates affect program behavior. When changing a sample tool call, verify the current parameters, output structure, and write permissions. Clear prose alone does not establish a correct contract.
 
 ## 7. Hook Protocol
 - Hook event keys support three naming conventions: `PascalCase`, `lowerCamelCase`, `snake_case`.

@@ -16,7 +16,6 @@ from excelmanus.engine_core.tool_result import ToolResult, ToolUiMeta
 from excelmanus.plan_mode import apply_chat_mode
 from excelmanus.question_flow import QuestionFlowManager
 from excelmanus.system_one.host import (
-    clear_turn_present_as,
     maybe_enqueue_mode_switch,
     maybe_record_turn_exposure,
     maybe_shape_observation,
@@ -24,7 +23,6 @@ from excelmanus.system_one.host import (
 from excelmanus.system_one.policy import T_BIG, T_TIGHT_CHARS
 from excelmanus.system_one.types import Decision
 from excelmanus.tools.registry import ToolDef, ToolRegistry
-from excelmanus.tools.runtime import present_as_of, set_present_as_preference
 
 
 def _config(**overrides: object) -> ExcelManusConfig:
@@ -47,7 +45,7 @@ def _sign(monkeypatch: pytest.MonkeyPatch, *packs: str) -> None:
     )
 
 
-def _decision(*, mode_hint: str = "keep", mode_conf: float = 0.9, present_hint: str | None = None) -> Decision:
+def _decision(*, mode_hint: str = "keep", mode_conf: float = 0.9) -> Decision:
     return Decision(
         kind="noop",
         reason="domain:inspect_only",
@@ -57,7 +55,6 @@ def _decision(*, mode_hint: str = "keep", mode_conf: float = 0.9, present_hint: 
             "domain_confidence": 0.9,
             "mode_hint": mode_hint,
             "mode_hint_confidence": mode_conf,
-            "present_hint": present_hint,
             "wire_narrow": False,
         },
         applied=False,
@@ -70,8 +67,6 @@ def _stub(**overrides: object) -> SimpleNamespace:
         "_subagent_config": None,
         "_is_host_session": True,
         "_current_chat_mode": "read",
-        "_present_as": "native",
-        "_turn_present_as": None,
         "_pending_plan_exit": None,
         "_turn_image_count": 0,
         "_exposure_last_tools": [],
@@ -198,19 +193,8 @@ async def test_mode_switch_child_does_not_enqueue(monkeypatch: pytest.MonkeyPatc
     assert engine._question_flow.has_pending() is False
 
 
-def test_present_as_default_does_not_write_turn_override() -> None:
-    engine = _stub(_current_chat_mode="write", _present_as="native")
-    engine._turn_exposure = {"present_hint": "code"}
-    from excelmanus.system_one.host import maybe_apply_turn_present_as
-
-    maybe_apply_turn_present_as(engine)
-    assert engine._turn_present_as is None
-    assert engine._present_as == "native"
-    assert present_as_of(engine) == "native"
-
-
 @pytest.mark.asyncio
-async def test_present_as_signed_overrides_wire_not_preference(
+async def test_exposure_retains_direct_and_programmatic_core_tools(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _sign(monkeypatch, "exposure.turn")
@@ -245,41 +229,24 @@ async def test_present_as_signed_overrides_wire_not_preference(
             _config(
                 jev_enabled="enforce",
                 jev_exposure="shadow",
-                jev_present_as_auto=True,
                 jev_calibrated=True,
             ),
             workspace_root=str(tmp_path),
         ),
         _current_chat_mode="write",
-        _present_as="native",
         _registry=registry,
         registry=registry,
         _skill_router=None,
         _skill_resolver=None,
         _fixed_capability=None,
     )
-    set_present_as_preference(engine, "native")
     with patch(
         "excelmanus.system_one.evaluate",
-        AsyncMock(return_value=_decision(present_hint="code")),
+        AsyncMock(return_value=_decision()),
     ):
         await maybe_record_turn_exposure(engine, "对每张表循环汇总")
-    assert engine._present_as == "native"
-    assert engine._turn_present_as == "code"
-    assert present_as_of(engine) == "code"
     names = _schema_names(MetaToolBuilder(engine).build_v5_tools_impl())
-    assert names == {"run_code"}
-    clear_turn_present_as(engine)
-    assert engine._turn_present_as is None
-    assert engine._present_as == "native"
-    assert present_as_of(engine) == "native"
-
-
-def test_present_as_read_plan_ignore_override() -> None:
-    engine = _stub(_current_chat_mode="read", _present_as="code", _turn_present_as="code")
-    assert present_as_of(engine) == "native"
-    engine._current_chat_mode = "plan"
-    assert present_as_of(engine) == "native"
+    assert names == {"run_code", "inspect_spreadsheet", "edit_spreadsheet"}
 
 
 def _big_result(*, success: bool = True, extra_ui: ToolUiMeta | None = None) -> ToolResult:

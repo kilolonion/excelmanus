@@ -113,7 +113,7 @@ async def test_a1_mcp_async_wrapper_uses_bound_workspace_not_closure(tmp_path: P
     finally:
         reset_call(token)
 
-    assert result == "ok"
+    assert result.success and result.value == "ok"
     called = captured["arguments"]
     assert isinstance(called, dict)
     assert Path(str(called["fileAbsolutePath"])).resolve() == (b / "report.xlsx").resolve()
@@ -137,7 +137,7 @@ def test_a1_mcp_sync_wrapper_uses_bound_workspace_not_closure(tmp_path: Path) ->
     finally:
         reset_call(token)
 
-    assert result == "ok"
+    assert result.success and result.value == "ok"
     called = captured["arguments"]
     assert isinstance(called, dict)
     assert Path(str(called["fileAbsolutePath"])).resolve() == (b / "report.xlsx").resolve()

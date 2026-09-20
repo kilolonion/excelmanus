@@ -14,16 +14,29 @@ export type OpenWorkspaceFileIntent = "preview" | "full";
 export interface OpenWorkspaceFileOptions {
   intent?: OpenWorkspaceFileIntent;
   sheet?: string;
+  sessionId?: string | null;
+  workspaceId?: string | null;
 }
 
-function currentSessionId(): string | undefined {
-  return useSessionStore.getState().activeSessionId ?? undefined;
+function currentFileScope(opts?: OpenWorkspaceFileOptions): {
+  sessionId?: string;
+  workspaceId?: string;
+} {
+  const state = useSessionStore.getState();
+  const sessionId = opts?.sessionId ?? state.activeSessionId ?? undefined;
+  const session = state.sessions?.find((item) => item.id === sessionId);
+  const workspaceId = opts?.workspaceId ?? session?.workspaceId ?? undefined;
+  return {
+    ...(sessionId ? { sessionId } : {}),
+    ...(workspaceId ? { workspaceId } : {}),
+  };
 }
 
 export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions): WorkspaceFileKind {
   const filename = fileNameOf(path);
   const kind = classifyWorkspaceFile(filename);
   const intent = opts?.intent ?? "preview";
+  const scope = currentFileScope(opts);
   const excel = useExcelStore.getState();
   const word = useWordStore.getState();
   const preview = useFilePreviewStore.getState();
@@ -60,17 +73,17 @@ export function openWorkspaceFile(path: string, opts?: OpenWorkspaceFileOptions)
 
   if (kind === "image") {
     preview.closeText();
-    preview.openImage(path, filename);
+    preview.openImage(path, filename, scope);
     return kind;
   }
 
   if (kind === "text") {
     preview.closeImage();
-    preview.openText(path, filename);
+    preview.openText(path, filename, scope);
     return kind;
   }
 
-  downloadFile(path, filename, currentSessionId()).catch(() => {});
+  downloadFile(path, filename, scope.sessionId, scope.workspaceId).catch(() => {});
   return kind;
 }
 

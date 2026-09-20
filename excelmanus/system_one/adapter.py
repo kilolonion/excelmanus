@@ -27,7 +27,6 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
     "exposure.turn": (
         "user_text",
         "chat_mode",
-        "present_as",
         "families",
         "has_pending_plan",
         "image_count",
@@ -80,6 +79,23 @@ _PACK_FIELDS: dict[str, tuple[str, ...]] = {
         "result_head",
         "success",
         "re_fetchable",
+    ),
+    "mutation.verify": (
+        "user_text",
+        "chat_mode",
+        "turn_outcome",
+        "tools_used",
+        "files_written",
+        "verification_facts",
+        "write_operations",
+    ),
+    "recovery.next_step": (
+        "user_text",
+        "iteration",
+        "consecutive_failures",
+        "last_error",
+        "last_tools",
+        "error_facts",
     ),
 }
 
@@ -224,7 +240,7 @@ def bound_state(pack_id: str, state: Mapping[str, Any] | None) -> dict[str, Any]
             else:
                 out[key] = _clip_text(raw, _MAX_HEAD) if isinstance(raw, str) else raw
         else:
-            if key in {"chat_mode", "present_as", "turn_outcome", "policy", "code_tier"}:
+            if key in {"chat_mode", "turn_outcome", "policy", "code_tier"}:
                 out[key] = str(src.get(key) or "")
     out.pop("messages", None)
     out.pop("history", None)
@@ -252,7 +268,6 @@ def exposure_state_from_engine(engine: Any, user_text: str) -> dict[str, Any]:
         {
             "user_text": user_text,
             "chat_mode": getattr(engine, "_current_chat_mode", "write"),
-            "present_as": getattr(engine, "_present_as", "native"),
             "families": list(families),
             "has_pending_plan": bool(getattr(engine, "_pending_plan_exit", None)),
             "image_count": int(getattr(engine, "_turn_image_count", 0) or 0),
@@ -346,6 +361,103 @@ def ui_surface_state_from_engine(
             "files_written": files_written,
             "turn_outcome": turn_outcome or "ok",
             "candidate_files": files_written[:3],
+        },
+    )
+
+
+def mutation_verify_state_from_engine(engine: Any, chat_result: Any | None = None) -> dict[str, Any]:
+    """Project deterministic post-write facts for ``mutation.verify``."""
+    state = getattr(engine, "_state", None)
+    affected = [
+        str(item)
+        for item in (getattr(state, "affected_files", None) or [])
+        if item
+    ][:10]
+    operations = list(getattr(state, "write_operations_log", None) or [])[:10] if state else []
+    tools: list[str] = []
+    for item in getattr(chat_result, "tool_calls", None) or ():
+        name = str(getattr(item, "tool_name", "") or getattr(item, "name", "") or "")
+        if name:
+            tools.append(name)
+    verification_facts = {
+        "success": bool(getattr(chat_result, "success", True)) if chat_result is not None else True,
+        "truncated": bool(getattr(chat_result, "truncated", False)) if chat_result is not None else False,
+        "affected_file_count": len(affected),
+        "write_operation_count": len(operations),
+        "has_version_conflict": any("conflict" in str(item).lower() for item in operations),
+    }
+    return bound_state(
+        "mutation.verify",
+        {
+            "user_text": last_user_text(engine),
+            "chat_mode": getattr(engine, "_current_chat_mode", "write"),
+            "turn_outcome": "ok" if verification_facts["success"] else "fail",
+            "tools_used": tools[:10],
+            "files_written": affected,
+            "verification_facts": verification_facts,
+            "write_operations": operations,
+        },
+    )
+
+
+def recovery_state_from_engine(
+    engine: Any,
+    tool_results: list[Any],
+    *,
+    reason: str = "breaker",
+) -> dict[str, Any]:
+    # Only the trailing failure streak caused this breaker. Earlier failures
+    # separated by a successful tool must not bias the recovery suggestion.
+    failures: list[Any] = []
+    for item in reversed(tool_results):
+        if bool(getattr(item, "success", False)):
+            break
+        failures.append(item)
+    failures.reverse()
+    errors: list[dict[str, Any]] = []
+    for item in failures[-5:]:
+        structured = getattr(item, "structured", None)
+        tool_error = getattr(structured, "error", None)
+        fields = getattr(tool_error, "fields", {}) if tool_error is not None else {}
+        if not isinstance(fields, Mapping):
+            fields = {}
+        code = str(
+            getattr(tool_error, "code", "")
+            or fields.get("error_code")
+            or getattr(item, "error", "")
+            or "TOOL_ERROR"
+        )
+        kind = str(
+            getattr(item, "error_kind", "")
+            or fields.get("failure_class")
+            or ""
+        )
+        retryable = kind in {"retryable", "transient"}
+        errors.append({
+            "tool": str(getattr(item, "tool_name", "") or ""),
+            "error_code": code[:80],
+            "failure_class": kind[:60],
+            "error": str(fields.get("message") or getattr(item, "error", "") or "")[:160],
+            "remediation": str(fields.get("remediation") or "")[:160],
+            "rejected": kind in {"permission_denied", "approval_denied", "approval_timeout", "blocked"},
+            "committed": bool(fields.get("committed") or fields.get("write_committed")),
+            "retryable": retryable,
+        })
+    safe_to_retry = bool(errors) and all(
+        item.get("retryable") and not item.get("rejected") and not item.get("committed")
+        for item in errors
+    )
+    return bound_state(
+        "recovery.next_step",
+        {
+            "user_text": last_user_text(engine),
+            "iteration": int(getattr(engine, "_last_iteration_count", 0) or 0),
+            "consecutive_failures": len(failures),
+            "breaker_triggered": True,
+            "safe_to_retry": safe_to_retry,
+            "last_error": str(reason or "breaker"),
+            "last_tools": [str(getattr(item, "tool_name", "") or "") for item in tool_results[-10:]],
+            "error_facts": errors,
         },
     )
 

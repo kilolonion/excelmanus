@@ -1,4 +1,4 @@
-import { buildApiUrl } from "./api";
+import { apiDelete, apiGet, apiPost } from "./api";
 
 export interface ProviderInfo {
   provider: string;
@@ -24,19 +24,8 @@ export interface CodexStatus {
   email?: string;
 }
 
-async function _json<T>(res: Response, fallback: string): Promise<T> {
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error((data as { detail?: string; error?: string }).detail
-      || (data as { error?: string }).error
-      || `${fallback}: ${res.status}`);
-  }
-  return res.json();
-}
-
 export async function fetchProviders(): Promise<{ providers: ProviderInfo[] }> {
-  const res = await fetch(buildApiUrl("/auth/providers"));
-  return _json(res, "获取提供商列表失败");
+  return apiGet("/auth/providers");
 }
 
 export async function codexOAuthStart(redirectUri?: string): Promise<{
@@ -45,12 +34,10 @@ export async function codexOAuthStart(redirectUri?: string): Promise<{
   redirect_uri: string;
   mode: "popup" | "paste";
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/oauth/start"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(redirectUri ? { redirect_uri: redirectUri } : {}),
-  });
-  return _json(res, "发起 OAuth 失败");
+  return apiPost(
+    "/auth/providers/openai-codex/oauth/start",
+    redirectUri ? { redirect_uri: redirectUri } : {},
+  );
 }
 
 export async function codexOAuthExchange(code: string, state: string): Promise<{
@@ -60,12 +47,7 @@ export async function codexOAuthExchange(code: string, state: string): Promise<{
   plan_type: string;
   expires_at: string;
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/oauth/exchange"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ code, state }),
-  });
-  return _json(res, "OAuth 交换失败");
+  return apiPost("/auth/providers/openai-codex/oauth/exchange", { code, state });
 }
 
 export async function codexDeviceCodeStart(): Promise<{
@@ -75,10 +57,7 @@ export async function codexDeviceCodeStart(): Promise<{
   state: string;
   expires_in?: number;
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/device-code/start"), {
-    method: "POST",
-  });
-  return _json(res, "发起设备码登录失败");
+  return apiPost("/auth/providers/openai-codex/device-code/start", {});
 }
 
 export async function codexDeviceCodePoll(state: string): Promise<{
@@ -88,12 +67,7 @@ export async function codexDeviceCodePoll(state: string): Promise<{
   plan_type?: string;
   expires_at?: string;
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/device-code/poll"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ state }),
-  });
-  return _json(res, "轮询授权状态失败");
+  return apiPost("/auth/providers/openai-codex/device-code/poll", { state });
 }
 
 export async function connectCodex(tokenData: Record<string, unknown>): Promise<{
@@ -103,32 +77,20 @@ export async function connectCodex(tokenData: Record<string, unknown>): Promise<
   plan_type: string;
   expires_at: string;
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex"), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ token_data: tokenData }),
-  });
-  return _json(res, "连接 Codex 失败");
+  return apiPost("/auth/providers/openai-codex", { token_data: tokenData });
 }
 
 export async function disconnectCodex(): Promise<{ status: string }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex"), {
-    method: "DELETE",
-  });
-  return _json(res, "断开连接失败");
+  return apiDelete<{ status: string }>("/auth/providers/openai-codex");
 }
 
 export async function fetchCodexStatus(): Promise<CodexStatus> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/status"));
-  return _json(res, "获取状态失败");
+  return apiGet("/auth/providers/openai-codex/status");
 }
 
 export async function refreshCodexToken(): Promise<{
   status: string;
   expires_at: string;
 }> {
-  const res = await fetch(buildApiUrl("/auth/providers/openai-codex/refresh"), {
-    method: "POST",
-  });
-  return _json(res, "刷新 Token 失败");
+  return apiPost("/auth/providers/openai-codex/refresh", {});
 }

@@ -75,6 +75,9 @@ describe("workspaceKeepAliveLayerClass", () => {
   it("keeps inactive layers in-layout so Univer retains its size", () => {
     expect(workspaceKeepAliveLayerClass(true)).toContain("relative");
     expect(workspaceKeepAliveLayerClass(false)).toContain("invisible");
+    // Univer descendants may explicitly restore visibility. Parent opacity is
+    // composited as a group, so descendants cannot punch through this layer.
+    expect(workspaceKeepAliveLayerClass(false)).toContain("opacity-0");
     expect(workspaceKeepAliveLayerClass(false)).toContain("absolute inset-0");
     expect(workspaceKeepAliveLayerClass(false)).not.toContain("hidden");
   });

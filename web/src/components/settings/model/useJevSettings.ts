@@ -22,8 +22,9 @@ export type JevRuntime = {
   jev_enabled: string;
   jev_exposure: string;
   jev_mode_hint: boolean;
-  jev_present_as_auto: boolean;
   jev_observation: string;
+  jev_verification: string;
+  jev_recovery: string;
   jev_ui_hint: boolean;
   jev_model: string;
   jev_timeout_seconds: number;
@@ -39,8 +40,9 @@ function snapshotFromRuntime(data: JevRuntime): JevDraft {
     jev_enabled: parseJevGate(data.jev_enabled),
     jev_exposure: parseJevGate(data.jev_exposure),
     jev_observation: parseJevGate(data.jev_observation),
+    jev_verification: parseJevGate(data.jev_verification),
+    jev_recovery: parseJevGate(data.jev_recovery),
     jev_mode_hint: Boolean(data.jev_mode_hint),
-    jev_present_as_auto: Boolean(data.jev_present_as_auto),
     jev_ui_hint: Boolean(data.jev_ui_hint),
     jev_model: data.jev_model || JEV_DEFAULT_MODEL,
     jev_timeout_seconds: data.jev_timeout_seconds ?? 1.5,

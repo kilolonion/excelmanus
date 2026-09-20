@@ -324,6 +324,7 @@ class TestSessionDetail:
 
         assert detail["full_access_enabled"] is False
         assert detail["chat_mode"] == "write"
+        assert not any(key.startswith("present_as") for key in detail)
         assert detail["current_model"] == manager._sessions[sid].engine.current_model
         assert (
             detail["current_model_name"]
@@ -351,6 +352,7 @@ class TestSessionDetail:
 
         assert detail["full_access_enabled"] is False
         assert detail["chat_mode"] == "write"
+        assert not any(key.startswith("present_as") for key in detail)
         assert detail["current_model"] is None
         assert detail["current_model_name"] is None
 
@@ -543,6 +545,19 @@ class TestCleanupExpired:
         removed = await manager.cleanup_expired(now=61.0)
         assert removed == 0
         assert await manager.get_active_count() == 1
+
+    @pytest.mark.asyncio
+    async def test_background_jobs_keep_session_alive_and_close_with_shared_mcp(
+        self, manager: SessionManager,
+    ) -> None:
+        sid, engine = await _create_session(manager)
+        engine._subagent_runtime._live["job"] = (None, None, None)
+        manager._sessions[sid].last_access = 0
+        assert await manager.cleanup_expired(now=61) == 0
+        engine._subagent_runtime.close = AsyncMock()
+        manager._shared_mcp_manager = MagicMock()
+        assert await manager.delete(sid)
+        engine._subagent_runtime.close.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_cleanup_does_not_extract_memory_for_expired_sessions(
@@ -767,7 +782,7 @@ def test_apply_persisted_active_model_switches_from_env_snapshot() -> None:
         memory_enabled=False,
         workspace_root="/tmp/excelmanus-test-session",
     )
-    user = MagicMock()
+    user = MagicMock(spec=["get_active_model"])
     user.get_active_model.return_value = "DeepSeek"
     mgr = SessionManager(
         max_sessions=5,
@@ -803,7 +818,7 @@ def test_apply_persisted_active_model_refreshes_empty_profiles() -> None:
         ),
     )
     live = SimpleNamespace(models=live_models)
-    user = MagicMock()
+    user = MagicMock(spec=["get_active_model"])
     user.get_active_model.return_value = "DeepSeek"
     mgr = SessionManager(
         max_sessions=5,

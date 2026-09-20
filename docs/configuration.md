@@ -1,10 +1,14 @@
 # 配置参考
 
-用户设置只存在**主数据库**（`~/.excelmanus/excelmanus.db` 的 `config_kv` 与 `model_profiles`）。设置页、导入配置、`/config` 都写这里。`load_config()` 只读这份设置源。
+适用版本：1.8.0 源码 · 更新日期：2026-09-19
 
-启动后打开 Web 设置页添加模型即可；无模型时服务以降级模式启动，保存档案后立即生效。
+[文档导航](README.md) · [English](configuration_en.md) · [运维手册](ops-manual.md)
 
-进程可以用少量**定位符**找到数据卷并监听，由启动脚本 / systemd 写入进程，**不是**设置覆盖层：
+**持久化设置以主数据库为准**：模型档案存放在 `model_profiles`，其他设置存放在 `config_kv`。默认数据库为 `~/.excelmanus/excelmanus.db`。设置页、配置导入和 `/config` 共用这份数据；运行期间可存在内存覆盖值，`load_config()` 不直接读取产品环境变量。
+
+启动后打开 Web 设置页添加模型即可；未配置模型时仍可进入设置页；保存并激活有效档案后即可开始对话。
+
+以下**启动参数（定位符）**由启动脚本或服务管理器提供，用于确定数据目录、部署模式和监听地址：
 
 | 定位符 | 说明 | 默认值 |
 |---|---|---|
@@ -13,15 +17,21 @@
 | `EXCELMANUS_DATA_ROOT` | 集中数据目录（上传/输出；密钥不在此目录） | `{EXCELMANUS_HOME}/data` |
 | `EXCELMANUS_DEPLOY_MODE` | `auto`/`standalone`/`server`；`auto` 与未知值均为 standalone；`server` 必须显式指定 | `auto` |
 | `EXCELMANUS_API_HOST` / `EXCELMANUS_API_PORT` / `EXCELMANUS_BACKEND_PORT` / `EXCELMANUS_FRONTEND_PORT` | 监听地址与端口 | 见启动脚本 |
-| `EXCELMANUS_WEB_WORKERS` | uvicorn worker 数；`>1` 时 API 启动打缓存失效 WARNING。单机保持 `1` | 由 `deploy/start.*` 设置，默认 `1` |
-| `EXCELMANUS_MANAGE_TOKEN` | 绑定非 loopback 时必填（至少 16 字符）；配置后除健康检查外全部 `/api/v1` 需 `Authorization: Bearer` | 空（仅 loopback 可空） |
+| `EXCELMANUS_WEB_WORKERS` | uvicorn worker 数；`>1` 时 API 会提示会话与缓存可能分散到多个进程。单机保持 `1` | 由 `deploy/start.*` 设置，默认 `1` |
+| `EXCELMANUS_MANAGE_TOKEN` | 绑定非 loopback 时必填（至少 16 字符）；配置有效令牌后，除健康检查和 CORS 预检外，API 请求需 `Authorization: Bearer` | 空（仅 loopback 可空） |
 | `EXCELMANUS_SECRET_KEY` | Fernet 密钥种子（测试或自定义数据卷） | 空则生成 `{EXCELMANUS_HOME}/.secret_key` |
+| `EXCELMANUS_DESKTOP` | 桌面运行标记，由桌面启动器设置 | 源码启动不设置 |
+| `EXCELMANUS_RUN_PYTHON` | `run_code` 使用的 Python 路径；桌面版自动指定随包运行时 | 随运行环境确定 |
 
-不要把模型密钥或运行时选项放进进程环境；残留的产品设置键会被忽略并打告警。
+模型密钥和运行时选项应在设置页保存；进程环境中残留的产品设置键会被忽略，并记录警告。
 
-下面表格中的名称是主库 `config_kv` 的键，与设置页字段对应。
+项目 `.env` 和用户目录 `config.env` 均不再作为产品配置源，也不会自动导入。
+评测工具仍保留显式的 `python -m excelmanus.bench --import-env PATH` 一次性导入命令；
+它只把指定文件写成数据库中的模型档案，不参与启动配置加载，也不生成文件来源描述。
 
-模型档案的 API Key 加密后存在主数据库，Fernet 密钥在 `$EXCELMANUS_HOME/.secret_key`（不跟随 DATA_ROOT，避免落入 Agent 工作区）。这两处必须在同一持久卷上，否则重启后 Key 无法解密。
+除标为“定位符”的项目外，下面的名称都是主库设置键。优先使用设置页；部分高级键不一定有独立的界面字段。以 `EXCELMANUS_` 开头不代表可以通过环境变量覆盖。配置保存后按界面提示应用或重启；监听端口、数据目录等启动参数必须由启动进程设置。
+
+模型档案的 API Key 加密后存在主数据库，Fernet 密钥在 `$EXCELMANUS_HOME/.secret_key`（不跟随 DATA_ROOT，避免落入 Agent 工作区）。迁移或恢复时必须保留与数据库配套的密钥；仅复制数据库可能导致凭证无法解密。
 
 ## 基础配置
 
@@ -31,14 +41,21 @@
 | `EXCELMANUS_BASE_URL` | 无激活档案时的 `config_kv` 回退 | — |
 | `EXCELMANUS_MODEL` | 无激活档案时的 `config_kv` 回退；Gemini 可从 BASE_URL 自动提取 | — |
 | `EXCELMANUS_PROTOCOL` | 模型协议类型（`auto`/`openai`/`openai_responses`/`anthropic`/`gemini`） | `auto` |
-| `EXCELMANUS_MAX_ITERATIONS` | 本轮 LLM 回合与工具调用上限（并行工具各计 1 次） | `50` |
+| `EXCELMANUS_MAX_ITERATIONS` | 本轮 LLM 回合与工具调用上限（并行工具各计 1 次） | `120` |
+| `EXCELMANUS_TURN_TIMEOUT_SECONDS` | 单个 turn 的 wall-clock 上限（`0` 表示不限制） | `0` |
+| `EXCELMANUS_RESPONSES_CONTINUATION_ENABLED` | 启用 Responses API 的 `previous_response_id` 原生续接 | `false` |
+| `EXCELMANUS_RESPONSES_BACKGROUND_ENABLED` | 使用 Responses API 后台响应并轮询到终态 | `false` |
+| `EXCELMANUS_TURN_TOKEN_BUDGET` | 单个 turn 输入与输出 token 总上限（`0` 表示不限制） | `0` |
+| `EXCELMANUS_TURN_COST_BUDGET_USD` | 单个 turn 成本上限（美元，`0` 表示不限制） | `0` |
+| `EXCELMANUS_INPUT_COST_PER_1K_USD` | provider 未返回成本时的输入 token 估算单价 | `0` |
+| `EXCELMANUS_OUTPUT_COST_PER_1K_USD` | provider 未返回成本时的输出 token 估算单价 | `0` |
 | `EXCELMANUS_MAX_CONSECUTIVE_FAILURES` | 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SESSION_TTL_SECONDS` | API 会话空闲超时（秒） | `1800` |
 | `EXCELMANUS_MAX_SESSIONS` | API 最大并发会话数 | `1000` |
-| `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `.` |
+| `EXCELMANUS_WORKSPACE_ROOT` | 文件访问白名单根目录 | `~/.excelmanus/data` |
 | `EXCELMANUS_LOG_LEVEL` | 日志级别 | `INFO` |
 | `EXCELMANUS_CORS_ALLOW_ORIGINS` | API CORS 允许来源（逗号分隔）。启动时还会自动补上 `localhost` / `127.0.0.1` / `[::1]` 与前端端口 | `http://localhost:3000,http://127.0.0.1:3000` |
-| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 对话上下文 token 上限 | `128000` |
+| `EXCELMANUS_MAX_CONTEXT_TOKENS` | 显式设置时覆盖模型推断的上下文上限 | 按模型推断；未知模型回退 `256000` |
 | `EXCELMANUS_PROMPT_CACHE_KEY_ENABLED` | 向 API 发送 prompt_cache_key 提升缓存命中率 | `true` |
 
 ## Skillpack 与路由配置
@@ -64,21 +81,40 @@
 | `EXCELMANUS_SUBAGENT_MAX_ITERATIONS` | 子代理循环的 LLM 回合与工具调用上限 | `120` |
 | `EXCELMANUS_SUBAGENT_MAX_CONSECUTIVE_FAILURES` | subagent 连续失败熔断阈值 | `6` |
 | `EXCELMANUS_SUBAGENT_TIMEOUT_SECONDS` | 单个子代理执行超时（秒） | `600` |
-| `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | 并行子代理最大并发数 | `3` |
-| `EXCELMANUS_PARALLEL_READONLY_TOOLS` | 同一轮次相邻只读工具并发执行 | `true` |
+| `EXCELMANUS_PARALLEL_SUBAGENT_MAX` | 同步并行批上限与单会话后台子代理并发数；后台超出并发数时排队 | `3` |
+| `EXCELMANUS_PARALLEL_READONLY_TOOLS` | 同批无依赖只读工具并发执行；关闭后仍检查依赖 | `true` |
+| `EXCELMANUS_PARALLEL_TOOL_MAX` | 单批只读工具最大执行并发数，1–32；新会话生效 | `4` |
 | `EXCELMANUS_SUBAGENT_USER_DIR` | 用户级 subagent 目录 | `~/.excelmanus/agents` |
 | `EXCELMANUS_SUBAGENT_PROJECT_DIR` | 项目级 subagent 目录 | `<workspace_root>/.excelmanus/agents` |
 
+`delegate` 默认仍等待结果。单任务传 `background=true` 会立即返回 `run.run_id`；
+使用 `action=status/list/wait` 查询，`send` 追加指令或回答子代理的问题，
+`pause/cancel` 停止当前执行，`resume` 带上已保存的对话新建执行并返回新 ID。
+`wait_seconds` 为 0–60，等待超时只返回状态，不取消任务。
+
+任务和结果复用 session snapshot；重启时未完成任务显示 `interrupted`，显式 `resume`
+才继续。恢复从保存的对话继续，不会复活旧进程、线程或外部请求。
+暂停/取消会等当前本地同步调用完成，已经提交的文件改动保留。
+后台任务超时从实际开始执行计时；主聊天结束不终止它，删除会话或关闭服务会收尾。
+
+会话 API 提供 `GET /api/v1/sessions/{session_id}/subagents`，以及
+`POST /api/v1/sessions/{session_id}/subagents/{run_id}`（body 包含 `action`、可选 `message` / `wait_seconds`）。
+网页会话顶栏的「任务」入口可查看后台任务、执行结果和已修改文件，支持补充指令、
+回答问题、暂停、取消与继续。主对话结束或停止后，当前会话的活动后台任务仍每两秒
+更新状态；切换回来或刷新页面会重新查询。继续会创建新执行记录，旧记录保留。
+后台任务结束时会刷新其修改过的文件视图。面板仅展示当前会话，任务仍由对话中的
+`delegate` 启动，不在页面加载时自动恢复执行。
+
 ## 上下文自动压缩（Compaction）
 
-对话超阈值时用当前激活模型压缩早期对话，后台静默执行，不阻塞主链路。
+上下文接近阈值时，使用当前激活模型概括较早的对话，并保留近期内容。压缩会产生额外模型调用；遇到上下文溢出等情况，当前请求可能需要等待压缩或按恢复流程重试。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
 | `EXCELMANUS_COMPACTION_ENABLED` | 是否启用自动压缩 | `true` |
 | `EXCELMANUS_COMPACTION_THRESHOLD_RATIO` | 触发压缩的上下文占比阈值 | `0.85` |
 | `EXCELMANUS_COMPACTION_KEEP_RECENT_TURNS` | 压缩时保留的最近轮数 | `5` |
-| `EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS` | 压缩摘要最大 token 数 | `1500` |
+| `EXCELMANUS_COMPACTION_MAX_SUMMARY_TOKENS` | 压缩摘要生成预算 | `4096` |
 
 ## Hook 配置
 
@@ -89,11 +125,15 @@
 | `EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS` | `command` hook 超时（秒） | `10` |
 | `EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS` | hook 输出截断长度 | `32000` |
 
-## 路由行为
+## 工具与权限
 
-- 每轮请求前由 `EffectiveToolCatalog` 推导可见工具集（`names()` / `tool_schemas()` / `tool_index_text()` / `introspection_source()` / `digest()` 同源）。目录可见性用 `policy.is_catalog_visible(tool_name, declared)`：无写效应，或该工具含只读 action（`policy.has_readonly_action`）。`READ_ONLY_SAFE_TOOLS` 白名单不再驱动目录可见集（仍用于审批、并行等其它判定）。
-- `read` / `plan` 可见集不含纯写工具。`manage_spreadsheet_versions` 因含只读 `list` action 在 read/plan 仍可见；`checkpoint` / `restore` 执行期由 `write_effect_for_call` 判为 `workspace_write` 拦截。`write` 看见完整目录；`code` 目录仅 `run_code`。看见工具不等于可以改表。
-- 技能靠 user-role 目录快照。模型调用 `skill` 加载正文；用户 `/name` 手势也会注入 `<skill-invocation>`。二者都不改工具可见性。
+- `write` 模式允许当前工作区权限内的写入；直接工具与 `run_code` 可以交替使用。
+- `read` / `plan` 不向模型提供纯写工具。含只读 action 的工具仍可被发现，但写入 action 在执行时会被拦截。例如版本工具可以列出历史，创建检查点、恢复和删除操作仍受写入权限限制。
+- 常用表格工具与必要控制入口直接提供；对象、版本、公式追踪、Word、文件操作、委派和 MCP 等能力通过 `introspect_capability` 按需加载。`em.*` SDK 绑定完整的授权执行目录。
+- 技能通过 `skill`、`/<技能名>` 或 `@` 按需加载，不改变会话的工具权限。默认审批与只读权限是两套不同的约束：普通写入不一定弹窗，只读限制仍会生效。
+- 选择「跳过」审批后，宿主会自动批准模型的工具与 Shell 请求；`run_code` 和 Shell 可访问网络、启动子进程并执行非白名单命令。该模式具有本机命令执行风险，仅在信任当前任务时开启；「询问」模式仍保持原有白名单、网络和审批限制。
+
+实现与维护说明见 [提示词分层](prompt-layering.md) 和 [Skillpack 协议](skillpack_protocol.md)。
 
 ## 多模型
 
@@ -101,6 +141,28 @@
 
 - 只保留一个激活模型。`/model <name>` 切换当前激活档案。
 - 对话、子代理、上下文压缩、记忆提取都使用该激活模型。
+- Web 设置页的提供商预设、默认模型、协议、思考模式、模型族和 Logo 统一维护在
+  `web/src/components/settings/model/constants.tsx`；引导页只维护说明文字并从该预设派生，避免模型 ID 与 Logo 漂移。
+- 提供商预设用于填写连接参数，不代表账号一定有权调用其中的模型。请以服务商返回的模型列表、连接测试及实际能力探测结果为准。
+- Responses 接口优先通过模型档案的 `openai_responses` 协议选择。视觉、工具调用与推理深度仍取决于具体模型和网关。
+
+### Codex 订阅连接
+
+在「设置 → 模型 → 订阅与 OAuth」中连接。当前集成的浏览器回调固定为 `http://localhost:1455/auth/callback`；远程部署使用设备码，或按页面提示粘贴完整回调地址。不要把回调替换成站点域名。OAuth 凭证加密保存到主数据库，属于进程级配置，不构成 ExcelManus 用户账号。
+
+## 模型能力探测
+
+可在模型设置中发起连接或能力探测。探测使用配置的模型接口，可能产生请求费用；结果受服务商、网关和当时可用性影响。以下高级项也是主库设置键，不是环境变量：
+
+| 配置键 | 说明 | 默认值 |
+| --- | --- | --- |
+| `CAP_PROBE_JOB_CONCURRENCY` | 全局并发探测数 | `2` |
+| `CAP_PROBE_PROVIDER_CONCURRENCY` | 同一提供商的并发探测数 | `1` |
+| `CAP_PROBE_HEALTH_TIMEOUT` | 连接探测超时（秒） | `8` |
+| `CAP_PROBE_TOOL_TIMEOUT` | 工具调用探测超时（秒） | `20` |
+| `CAP_PROBE_VISION_TIMEOUT` | 视觉探测超时（秒） | `20` |
+| `CAP_PROBE_THINKING_TOTAL_TIMEOUT` | 推理探测总预算（秒） | `30` |
+| `CAP_PROBE_THINKING_STRATEGY_TIMEOUT` | 单项推理策略探测超时（秒） | `8` |
 
 ## 视觉配置
 
@@ -117,14 +179,14 @@
 | `EXCELMANUS_LLM_RETRY_BASE_DELAY_SECONDS` | 重试指数退避起始延迟（秒） | `2.0` |
 | `EXCELMANUS_LLM_RETRY_MAX_DELAY_SECONDS` | 单次重试等待上限（秒） | `30.0` |
 
-## 备份沙盒
+## 文件修订与旧备份迁移
 
-备份 overlay 已移除。写入落在用户路径；历史在 `.excelmanus/revisions/`。
+旧版备份覆盖层已移除。修改直接保存到用户文件，历史修订存放在工作区的 `.excelmanus/revisions/`。
 
 升级后首次打开工作区会自动把旧 `outputs/backups` 一次性导入 RevisionStore；marker 在 `.excelmanus/migrations/overlay-backups.json`。需要重跑时执行：
 
 ```bash
-python -m excelmanus.workspace.migrate <workspace> --force
+uv run python -m excelmanus.workspace.migrate /path/to/workspace --force
 ```
 
 ## 代码策略引擎配置
@@ -135,7 +197,7 @@ python -m excelmanus.workspace.migrate <workspace> --force
 |---|---|---|
 | `EXCELMANUS_CODE_POLICY_ENABLED` | 是否启用代码策略引擎 | `true` |
 | `EXCELMANUS_CODE_POLICY_GREEN_AUTO` | Green 级（安全）代码自动批准 | `true` |
-| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | Yellow 级代码自动批准（默认关；打开后仍不会自动批准文件系统写入） | `false` |
+| `EXCELMANUS_CODE_POLICY_YELLOW_AUTO` | 含 NETWORK 能力的 Yellow 级代码是否自动批准；普通文件写入仍按工作区与版本规则处理，不由此开关逐次确认 | `false` |
 | `EXCELMANUS_CODE_POLICY_EXTRA_SAFE` | 额外安全模块白名单（逗号分隔） | 空 |
 | `EXCELMANUS_CODE_POLICY_EXTRA_BLOCKED` | 额外阻断模块黑名单（逗号分隔） | 空 |
 
@@ -188,15 +250,18 @@ Tavily 和 Brave 通过 `npx` 启动（stdio 传输），需要系统安装 Node
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
+| `EXCELMANUS_MCP_CONFIG` | 自定义 MCP 配置文件路径，优先于默认搜索位置 | 空 |
+| `EXCELMANUS_MCP_STATE_DIR` | MCP 进程状态目录 | `<workspace>/.excelmanus/mcp` |
+| `EXCELMANUS_MCP_EXPAND_ENV_REFS` | 展开 MCP 配置中的 `$VAR` / `${VAR}` | `true` |
 | `EXCELMANUS_MCP_SHARED_MANAGER` | API 会话是否复用共享 MCP 管理器 | `false` |
-| `EXCELMANUS_MCP_ENABLE_STREAMABLE_HTTP` | 是否启用 streamable_http transport | `false` |
+| `EXCELMANUS_MCP_ENABLE_STREAMABLE_HTTP` | 是否启用 streamable_http transport | `true` |
 | `EXCELMANUS_MCP_UNDEFINED_ENV` | 未定义环境变量策略（`keep`/`empty`/`error`） | `keep` |
 | `EXCELMANUS_MCP_STRICT_SECRETS` | 明文敏感字段是否阻断加载 | `false` |
 
 `mcp.json` 能力：
 - `transport` 支持 `stdio`、`sse`、`streamable_http`。
 - 支持在 `args/env/url/headers` 中使用 `$VAR` / `${VAR}`。这是 MCP 子进程自己的密钥展开，读的是启动该子进程时的进程环境，不是产品设置仓。
-- MCP 仅负责注册 `mcp_*` 工具；Skillpack 负责策略与授权。若 Skillpack 需要 MCP，在 `SKILL.md` 中声明 `required-mcp-servers` / `required-mcp-tools`。
+- MCP 注册 `mcp_*` 工具；可见性和执行权限由运行时策略控制。Skillpack 可以提供使用方法并声明 `required-mcp-servers` / `required-mcp-tools`，但不会单独授予权限。
 
 MCP 安全扫描：
 - 本地：`scripts/security/scan_secrets.sh`
@@ -217,7 +282,7 @@ MCP 安全扫描：
 
 ## 会话摘要
 
-默认关。开启后只在会话结束时把摘要落入主库，不检索、不注入新会话。
+默认关闭。开启后在会话结束时将摘要保存到主数据库，不自动检索或注入新会话。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
@@ -251,11 +316,28 @@ MCP 安全扫描：
 
 ## 会话快照
 
-每轮结束后保存 SessionState / 任务列表到 `session_state_snapshots` 表，用于会话恢复。这不是文件检查点；文件历史在 `.excelmanus/revisions/`。
+任务认领、模型步骤边界和回合结束时，保存 SessionState / 任务列表到
+`session_state_snapshots`。快照包括当前主任务、输入参数、步骤位置、未消费的插话与排队消息。
+SessionManager 先同步已有会话消息和工具结果，再保存引用它们的执行状态。
+这不是文件检查点；文件历史在 `.excelmanus/revisions/`。
 
-## 代码沙盒
+服务重启后，执行中的主任务显示为 `interrupted`，读取状态不会自动开始执行。
+在聊天中输入 `/resume`，或 `/resume 先补齐区域统计`，可从保存的对话和工具结果发起
+后续回合。继续会保留原来的聊天模式，并记录 `resumed_from`；已完成的工具不会由程序自动重放。
+不完整的工具结果会标记为「结果未完整记录」，交给后续步骤核对实际结果。
+如果只有尚未认领的消息，则 `/resume` 唤醒已有队列。
 
-`run_code` 只走本机子进程围栏：禁网络、禁起进程、禁出工作区。产品安装也不再提供 Compose / 镜像轨。
+`GET /api/v1/sessions/{session_id}/turn` 返回最近主回合的状态、任务、步骤、排队数和
+`can_resume`。执行中的任务不允许用 `/resume` 再启动一份。当前只恢复普通模型/工具步骤的
+对话边界；审批和问答会保存对应工具调用、答案和决策，提交后通过现有聊天流自动接回。接口会在 `resume_blocked_by` 中说明仍无法恢复的状态。
+继续任务不会恢复原 Python 栈、外部请求或 Code Mode 进程中的局部变量。已经开始但结果不确定的写入不会自动重放，会以未知结果交给后续模型核对。
+
+清空会话时同时清除恢复状态与消息缓存；最新快照与快照保留按保存顺序选择，避免轮次归零后
+重新选中旧任务。每条 followup 在自身回合完成后返回，不等待其他排队回合执行完毕。
+
+## 代码执行边界
+
+`run_code` 在本机子进程中执行，始终有超时与工作区提交管线。「询问」模式还会限制网络、子进程和敏感路径；「跳过」模式允许网络与子进程，不应视为安全隔离。修改工作区工作簿仍应通过授权的 `em.*` SDK，使提交和内容版本沿用直接工具的流程。脚本失败不会自动撤销先前已经提交的调用。
 
 ## Thinking（推理深度）
 
@@ -263,6 +345,7 @@ MCP 安全扫描：
 |---|---|---|
 | `EXCELMANUS_THINKING_EFFORT` | 推理深度级别（`none`/`minimal`/`low`/`medium`/`high`/`xhigh`/`max`） | `medium` |
 | `EXCELMANUS_THINKING_BUDGET` | 精确 token 预算（> 0 时覆盖 effort 换算值） | `0` |
+| `EXCELMANUS_THINKING_EFFORT_OPTIONS` | 可用推理级别列表（逗号分隔）；仅保留已支持的级别，空结果回退完整列表 | `none,minimal,low,medium,high,xhigh,max` |
 
 ## OpenAI Responses API
 
@@ -272,15 +355,16 @@ MCP 安全扫描：
 
 ## System One / Jev
 
-Jev 不是聊天模型，不进 `model_profiles`。TypeSafe、Vercel 与自定义决策提供商在设置页「模型 → 供应商」；Jev 系列选型与总闸/子闸在「模型 → 模型配置」。都写主库 `config_kv`。
+Jev 是可选的决策模型，其配置保存在 `config_kv`。在「设置 → 模型 → 供应商」配置 TypeSafe、Vercel 或自定义决策提供商，在「模型 → 模型配置」选择模型及各类策略开关。
 
 | 配置键 | 说明 | 默认值 |
 |---|---|---|
-| `EXCELMANUS_JEV_ENABLED` | 总闸：`off` / `shadow` / `enforce` | `off` |
-| `EXCELMANUS_JEV_EXPOSURE` | 暴露面子闸 | `off` |
-| `EXCELMANUS_JEV_OBSERVATION` | 观察面子闸 | `off` |
+| `EXCELMANUS_JEV_ENABLED` | 全局模式：`off` / `shadow` / `enforce` | `off` |
+| `EXCELMANUS_JEV_EXPOSURE` | 工具披露策略：`off` / `shadow` / `enforce` | `off` |
+| `EXCELMANUS_JEV_OBSERVATION` | 观察结果策略：`off` / `shadow` / `enforce` | `off` |
+| `EXCELMANUS_JEV_VERIFICATION` | 修改后检查建议：`off` / `shadow` / `enforce` | `off` |
+| `EXCELMANUS_JEV_RECOVERY` | 错误恢复建议：`off` / `shadow` / `enforce` | `off` |
 | `EXCELMANUS_JEV_MODE_HINT` | 模式建议卡 | `false` |
-| `EXCELMANUS_JEV_PRESENT_AS_AUTO` | 瞬态 present_as | `false` |
 | `EXCELMANUS_JEV_UI_HINT` | 回合末 UI 面建议 | `false` |
 | `EXCELMANUS_JEV_MODEL` | 当前决策模型 | `jev-1.13.0` |
 | `EXCELMANUS_JEV_ACTIVE_PROVIDER` | 当前决策提供商 id（`typesafe` / `vercel` / `custom-*`） | — |
@@ -290,7 +374,7 @@ Jev 不是聊天模型，不进 `model_profiles`。TypeSafe、Vercel 与自定�
 | `EXCELMANUS_TYPESAFE_API_KEY` | TypeSafe 直连密钥（与提供商列表同步） | — |
 | `EXCELMANUS_AI_GATEWAY_API_KEY` | Vercel Gateway 密钥（与提供商列表同步） | — |
 
-未签字时即使总闸为 `enforce` 也不会 `applied`。标定器 `bench/jev_live_calibrate.py` 从同一份主库读密钥。
+这是可选的实验性功能，需要 `system-one` extra。`off` 不启用；`shadow` 记录建议而不应用；`enforce` 还要求有效标定与对应题包或策略族的签字。目前仓库签字集合为空，仅打开开关或把 `EXCELMANUS_JEV_CALIBRATED` 设为 `true` 不足以启用执行侧影响。标定器 `bench/jev_live_calibrate.py` 从主库读取密钥，真实标定会访问外部服务，且不会自动签字。
 
 ## 加密配置
 
@@ -300,11 +384,14 @@ Jev 不是聊天模型，不进 `model_profiles`。TypeSafe、Vercel 与自定�
 |---|---|---|
 | `EXCELMANUS_SECRET_KEY` | Fernet 加密密钥种子（定位符，见上文） | 自动生成 |
 
-密钥派生优先级：
-1. 进程启动时若已设置 `EXCELMANUS_SECRET_KEY`（SHA-256 派生；用于测试或自定义数据卷）
-2. `{EXCELMANUS_HOME}/.secret_key` 自动生成（首次启动时创建，文件权限 600）
-3. 历史 `DATA_ROOT/.secret_key` / `~/.excelmanus/data/.secret_key`（读取后迁移到正式路径）
-4. 均不可用时，加密组件不启用（仅限开发环境）
+密钥按以下顺序确定：
+
+1. 使用进程启动时指定的 `EXCELMANUS_SECRET_KEY`，通过 SHA-256 派生。
+2. 读取现有的 `{EXCELMANUS_HOME}/.secret_key`。
+3. 读取历史 `DATA_ROOT/.secret_key` 或 `~/.excelmanus/data/.secret_key`，并尝试迁移到正式路径。
+4. 没有可用密钥时，在正式路径生成新密钥，并限制文件权限。
+
+敏感凭证的加密写入在加密组件不可用时会报错。不要通过删除或重新生成密钥来处理已有数据库的解密失败；应恢复原来配套的密钥。
 
 `FileAccessGuard` 会拒绝读写 `.secret_key`、`excelmanus.db`、`installations.json` 以及磁盘上残留的 `.env` / `config.env`，即使这些文件位于已登记的工作区内。
 
@@ -312,11 +399,13 @@ Jev 不是聊天模型，不进 `model_profiles`。TypeSafe、Vercel 与自定�
 
 一份进程只有一份 data home（SQLite 聊天库、记忆、MCP 配置、模型凭证），**不是**多租户。用户可以把多个本机文件夹登记为工作区：每个对话绑定其中一个文件夹，同一文件夹下的多条对话共享该目录里的文件。Agent 的 cwd、文件守卫、版本与 registry 扫描根跟随当前会话的文件夹；记忆和 MCP 仍是进程级共享，不会按文件夹隔离。
 
-默认工作区是 `EXCELMANUS_DATA_ROOT`（若设置）或 `EXCELMANUS_WORKSPACE_ROOT`。对话 tab 可以收编已经存在的本机目录，不会在目标路径上 mkdir，也不会把聊天记录写到 xlsx 旁边。
+默认工作区是 `EXCELMANUS_DATA_ROOT`（若设置）或 `EXCELMANUS_WORKSPACE_ROOT`，未设置时使用 `EXCELMANUS_HOME/data`（默认 `~/.excelmanus/data`），与应用安装/源码目录分开。旧版自动登记的应用根目录不再作为新会话的候选，历史会话及其上传/输出文件保留在原位置，不自动搬移。
+
+文件树、文件发现、@ 提及和工具访问默认忽略产品源码及构建目录。需要处理代码项目时，在对话 tab 的“添加工作区”中显式登记该目录；登记会持久化代码访问许可，重启后仍然生效。自动创建默认工作区不会授予此许可。工作区边界、敏感文件和内部状态目录的保护保持生效。添加工作区仅收编已有本机目录，不会在目标路径上 mkdir，也不会把聊天记录写到 xlsx 旁边。
 
 `EXCELMANUS_AUTH_ENABLED` / `NEXT_PUBLIC_AUTH_ENABLED` / `EXCELMANUS_SESSION_ISOLATION` 已移除。Codex 订阅 OAuth 仍可用（进程级，不绑定登录用户）。
 
-后端默认监听 `127.0.0.1`。若绑定非 loopback 地址（LAN 或公网），必须设置 `EXCELMANUS_MANAGE_TOKEN`（至少 16 字符）；令牌一旦配置，除健康检查外全部 `/api/v1` 要求 `Authorization: Bearer`。服务器模式请让 Nginx 反代到 `127.0.0.1:8000`，不要把应用端口直接暴露到 `0.0.0.0`。
+后端默认监听 `127.0.0.1`。若绑定非 loopback 地址（LAN 或公网），必须设置 `EXCELMANUS_MANAGE_TOKEN`（至少 16 字符）；配置有效令牌后，除健康检查和 CORS 预检外，API 请求要求 `Authorization: Bearer`。服务器模式请让 Nginx 反代到 `127.0.0.1:8000`，不要把应用端口直接暴露到 `0.0.0.0`。
 
 ### 旧版 `users/` 手动搬迁
 
@@ -328,6 +417,8 @@ Jev 不是聊天模型，不进 `model_profiles`。TypeSafe、Vercel 与自定�
 4. FileRegistry 扫描会跳过名为 `users` 的目录，避免把归档残骸扫进工作区。
 
 ## 变更记录
+
+- 2026-09-19：同步桌面定位符、4096 token 压缩预算、工具按需加载、能力探测、Jev 检查与恢复设置，以及 OAuth 和密钥迁移说明。
 
 - 2026-09-19：Jev 设置从「运行时」改到「模型 → 供应商 / 模型配置」。TypeSafe 与 Vercel 拆成两个预填卡，并支持自定义决策提供商。
 - 2026-09-18：产品设置只走主库 `config_kv` / `model_profiles` 与进程覆盖层。Jev 总闸与密钥也走这条链（Web 设置页运行时项），不再从进程环境或仓库根 `.env` 继承。定位符（`HOME` / `DB_PATH` / `DATA_ROOT` / `DEPLOY_MODE` / 端口 / `MANAGE_TOKEN`）仍由启动脚本写入进程。`deploy/.env.deploy` 与 `web/.env.local` 是运维机清单和 Next.js 运行时 origin。MCP `mcp.json` 的 `$VAR` 只展开给 MCP 子进程。

@@ -6,6 +6,8 @@ import { toolIcon, toolStatusIconClass } from "@/lib/tool-icons";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useChatStore } from "@/stores/chat-store";
+import { cancelToolCall } from "@/lib/api";
+import type { AssistantBlock } from "@/lib/types";
 import { ExcelPreviewTable } from "@/components/excel/ExcelPreviewTable";
 import { ExcelDiffTable } from "@/components/excel/ExcelDiffTable";
 import { TextDiffView } from "./TextDiffView";
@@ -85,6 +87,8 @@ const TEXT_PREVIEW_TOOLS = new Set(["read_text_file"]);
 
 interface ToolCallCardProps {
   toolCallId?: string;
+  executionId?: string;
+  executionState?: string;
   name: string;
   args: Record<string, unknown>;
   status: "running" | "success" | "error" | "pending" | "streaming";
@@ -95,9 +99,54 @@ interface ToolCallCardProps {
   nested?: boolean;
 }
 
+export function ToolCallCancelButton({ executionId, executionState }: { executionId?: string; executionState?: string }) {
+  const sessionId = useChatStore((s) => s.loadedSessionId);
+  const [requested, setRequested] = useState(false);
+  const [error, setError] = useState("");
+  const currentId = useRef(executionId);
+  useEffect(() => {
+    currentId.current = executionId;
+    return () => { currentId.current = undefined; };
+  }, [executionId]);
+  const active = executionState === "queued" || executionState === "running" || executionState === "cancelling";
+  if (!executionId || !sessionId || !active) return null;
+  const cancelling = requested || executionState === "cancelling";
+  async function cancel() {
+    if (!executionId || !sessionId) return;
+    const id = executionId;
+    setRequested(true);
+    setError("");
+    try {
+      const result = await cancelToolCall(sessionId, id);
+      const store = useChatStore.getState();
+      if (currentId.current !== id || store.loadedSessionId !== sessionId) return;
+      for (const message of store.messages) {
+        if (message.role !== "assistant" || !message.blocks.some((b) => b.type === "tool_call" && b.executionId === id)) continue;
+        store.updateAssistantMessage(message.id, (m) => ({ ...m, blocks: m.blocks.map((b) => {
+          if (b.type !== "tool_call" || b.executionId !== id || b.status === "success" || b.status === "error") return b;
+          return { ...b, executionState: result.status,
+            status: result.status === "completed" ? "success" : ["cancelled", "failed"].includes(result.status) ? "error" : b.status } as AssistantBlock;
+        }) }));
+      }
+    } catch (err) {
+      if (currentId.current === id) {
+        setRequested(false);
+        setError(err instanceof Error ? err.message : "取消失败，请重试");
+      }
+    }
+  }
+  return <div className="mt-1.5 text-xs text-muted-foreground">
+    <button type="button" disabled={cancelling} onClick={cancel}
+      className="rounded px-2 py-1 hover:bg-muted disabled:opacity-60">
+      {cancelling ? "等待当前操作收尾…" : "取消此操作"}
+    </button>
+    {error && <span className="ml-2 text-red-600" role="alert">{error}</span>}
+  </div>;
+}
+
 export const ToolCallCard = React.memo(function ToolCallCard({
   toolCallId, name, args, status, result, error, isLast = true,
-  parentCallId, nested = false,
+  parentCallId, nested = false, executionId, executionState,
 }: ToolCallCardProps) {
   const isMobile = useIsMobile();
   const [open, setOpen] = useState(false);
@@ -105,6 +154,12 @@ export const ToolCallCard = React.memo(function ToolCallCard({
   const startRef = useRef<number | null>(null);
   const [elapsed, setElapsed] = useState(0);
   const isStreaming = (status as string) === "streaming";
+  const isRunning = status === "running" || isStreaming;
+  const [wasRunning, setWasRunning] = useState(isRunning);
+  if (wasRunning !== isRunning) {
+    setWasRunning(isRunning);
+    setElapsed(0);
+  }
   const streamingRawArgs = useExcelStore((s) =>
     toolCallId && (isStreaming || status === "running") && TEXT_DIFF_TOOLS.has(name)
       ? s.streamingToolContent[toolCallId] ?? null
@@ -123,7 +178,6 @@ export const ToolCallCard = React.memo(function ToolCallCard({
     }
     if (startRef.current === null) startRef.current = Date.now();
     const start = startRef.current;
-    setElapsed(0);
     const timer = setInterval(() => {
       setElapsed(Math.round((Date.now() - start) / 1000));
     }, 1000);
@@ -155,17 +209,16 @@ export const ToolCallCard = React.memo(function ToolCallCard({
     toolCallId && canHaveTextPreview ? s.textPreviews[toolCallId] : undefined
   );
 
-  const isError = status === "error";
-  const isPending = status === "pending";
-  const isRunning = status === "running" || isStreaming;
+  const isCancelled = executionState === "cancelled";
+  const isError = status === "error" && !isCancelled;
+  const isPending = status === "pending" && executionState !== "queued";
   const title = toolActionTitle(name, args);
   const ctx = extractToolContext(args);
   const contextLine = formatToolContextLine(ctx);
 
-  const Icon = toolIcon(name);
-  const node = (
-    <Icon className={`h-4 w-4 ${toolStatusIconClass(isStreaming ? "running" : status)}`} />
-  );
+  const node = React.createElement(toolIcon(name), {
+    className: `h-4 w-4 ${isCancelled ? "text-muted-foreground" : toolStatusIconClass(isStreaming ? "running" : status)}`,
+  });
 
   const elapsedLabel = isRunning && elapsed > 0 ? `${elapsed}s` : null;
   const showApprovalCta = isPending && isWriteTool(name);
@@ -194,6 +247,8 @@ export const ToolCallCard = React.memo(function ToolCallCard({
               {nested && (
                 <span className="text-[10px] font-medium text-muted-foreground">子调用</span>
               )}
+              {executionState === "queued" && <span className="text-[10px] text-muted-foreground">等待执行</span>}
+              {isCancelled && <span className="text-[10px] text-muted-foreground">已取消</span>}
               {isPending && (
                 <span className="text-[10px] font-medium text-amber-700 dark:text-amber-400">等待授权</span>
               )}
@@ -217,6 +272,8 @@ export const ToolCallCard = React.memo(function ToolCallCard({
             <ChevronDown className={`h-3.5 w-3.5 text-muted-foreground/40 transition-transform ${open ? "rotate-180" : ""}`} />
           </span>
         </button>
+
+        <ToolCallCancelButton key={executionId} executionId={executionId} executionState={executionState} />
 
         {showApprovalCta && (
           <div className="mt-2 rounded-xl border border-amber-200/80 dark:border-amber-500/25 bg-amber-50/80 dark:bg-amber-500/10 px-3 py-2.5">

@@ -107,6 +107,7 @@ class TestEventTypeEnum:
         expected = {
             "TOOL_CALL_START",
             "TOOL_CALL_END",
+            "TOOL_CALL_STATE",
             "THINKING",
             "THINKING_DELTA",
             "TEXT_DELTA",
@@ -149,6 +150,7 @@ class TestEventTypeEnum:
             "REASONING_NOTICE",
             "TURN_START",
             "TURN_END",
+            "TURN_FAILED",
             "STEP_START",
             "STEP_END",
             "INBOX_CLAIMED",
@@ -173,6 +175,7 @@ class TestEventTypeEnum:
         assert [(member.name, member.value) for member in EventType] == [
             ("TOOL_CALL_START", "tool_call_start"),
             ("TOOL_CALL_END", "tool_call_end"),
+            ("TOOL_CALL_STATE", "tool_call_state"),
             ("THINKING", "thinking"),
             ("ITERATION_START", "iteration_start"),
             ("ROUTE_START", "route_start"),
@@ -215,6 +218,7 @@ class TestEventTypeEnum:
             ("REASONING_NOTICE", "reasoning_notice"),
             ("TURN_START", "turn_start"),
             ("TURN_END", "turn_end"),
+            ("TURN_FAILED", "turn_failed"),
             ("STEP_START", "step_start"),
             ("STEP_END", "step_end"),
             ("INBOX_CLAIMED", "inbox_claimed"),
@@ -321,6 +325,7 @@ class TestToolCallEventFields:
             "subagent_name",
             "subagent_permission_mode",
             "subagent_conversation_id",
+            "subagent_background",
             "subagent_iterations",
             "subagent_tool_calls",
             "subagent_tool_index",
@@ -409,8 +414,14 @@ class TestToolCallEventFields:
             "fg_model",
             "ui",
             "parent_call_id",
+            "execution_id",
+            "execution_state",
             "turn_id",
             "step_id",
+            "trace_id",
+            "span_id",
+            "parent_span_id",
+            "request_id",
             "inbox_claimed",
             "ui_hint_surface",
             "ui_hint_file_path",
@@ -418,6 +429,8 @@ class TestToolCallEventFields:
             "ui_hint_reason",
             "ui_hint_suppress_auto_open",
             "jev_trace",
+            "stop_reason",
+            "turn_error",
         }
         assert set(annotations.keys()) == expected_fields
 

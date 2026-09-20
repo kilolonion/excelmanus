@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown, Download } from "lucide-react";
+import { Loader2, CheckCircle2, AlertTriangle, X, Database, Settings2, Crown, SlidersHorizontal } from "lucide-react";
 import { AdminModelContext } from "./model/admin-model-context";
 import { useAdminModelSettings } from "./model/useAdminModelSettings";
 import { ProviderSection } from "./model/ProviderSection";
@@ -20,7 +20,7 @@ const SUB_TABS: { key: ModelSubTab; label: string; icon: ReactNode; coachId: str
   { key: "providers", label: "供应商", icon: <Database className="h-3 w-3" />, coachId: "coach-settings-subtab-providers" },
   { key: "roles", label: "模型配置", icon: <Settings2 className="h-3 w-3" />, coachId: "coach-settings-subtab-roles" },
   { key: "subscription", label: "订阅与 OAuth", icon: <Crown className="h-3 w-3" />, coachId: "coach-settings-subtab-subscription" },
-  { key: "diagnostics", label: "高级诊断", icon: <Download className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
+  { key: "diagnostics", label: "高级设置", icon: <SlidersHorizontal className="h-3 w-3" />, coachId: "coach-settings-subtab-diagnostics" },
 ];
 
 export function ModelTab() {

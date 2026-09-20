@@ -16,23 +16,15 @@ import {
 } from "@/components/ui/tooltip";
 import { useUIStore } from "@/stores/ui-store";
 import { apiPut } from "@/lib/api";
-
-const EFFORT_LEVELS = [
-  { key: "none", label: "关闭", desc: "不使用推理" },
-  { key: "minimal", label: "极简", desc: "最少推理" },
-  { key: "low", label: "低", desc: "轻度推理" },
-  { key: "medium", label: "中", desc: "平衡模式" },
-  { key: "high", label: "高", desc: "深度推理" },
-  { key: "xhigh", label: "极高", desc: "更强推理" },
-  { key: "max", label: "最深", desc: "最深推理" },
-] as const;
+import { THINKING_EFFORT_LEVELS } from "@/lib/thinking";
 
 const EFFORT_LABEL_MAP: Record<string, string> = Object.fromEntries(
-  EFFORT_LEVELS.map(({ key, label }) => [key, label])
+  THINKING_EFFORT_LEVELS.map(({ key, label }) => [key, label])
 );
 
 export function ThinkingLevelSelector() {
   const thinkingEffort = useUIStore((s) => s.thinkingEffort);
+  const thinkingEffortOptions = useUIStore((s) => s.thinkingEffortOptions);
   const setThinkingEffort = useUIStore((s) => s.setThinkingEffort);
   const [saving, setSaving] = useState(false);
 
@@ -53,6 +45,9 @@ export function ThinkingLevelSelector() {
   );
 
   const currentLabel = EFFORT_LABEL_MAP[thinkingEffort] ?? "中";
+  const visibleLevels = THINKING_EFFORT_LEVELS.filter(({ key }) =>
+    thinkingEffortOptions.includes(key)
+  );
 
   return (
     <DropdownMenu>
@@ -79,7 +74,7 @@ export function ThinkingLevelSelector() {
       </TooltipProvider>
 
       <DropdownMenuContent align="end" sideOffset={6} className="min-w-[140px]">
-        {EFFORT_LEVELS.map(({ key, label, desc }) => (
+        {visibleLevels.map(({ key, label, desc }) => (
           <DropdownMenuItem
             key={key}
             onClick={() => handleSelect(key)}

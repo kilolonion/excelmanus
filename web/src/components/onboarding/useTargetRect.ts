@@ -1,136 +1,118 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 
-/**
- * Find the nearest scrollable ancestor of an element.
- * Returns null if no scrollable ancestor is found (or it's the viewport).
- */
-function findScrollableAncestor(el: Element): Element | null {
-  let parent = el.parentElement;
-  while (parent) {
-    const style = getComputedStyle(parent);
-    const overflowY = style.overflowY;
-    const overflowX = style.overflowX;
-    if (
-      (overflowY === "auto" || overflowY === "scroll" || overflowY === "hidden") &&
-      parent.scrollHeight > parent.clientHeight
-    ) {
-      return parent;
-    }
-    if (
-      (overflowX === "auto" || overflowX === "scroll" || overflowX === "hidden") &&
-      parent.scrollWidth > parent.clientWidth
-    ) {
-      return parent;
-    }
-    parent = parent.parentElement;
-  }
-  return null;
+export interface GuideViewport {
+  left: number;
+  top: number;
+  width: number;
+  height: number;
 }
 
-/**
- * Clip a DOMRect to the visible bounds of a container element.
- * Returns null if the clipped rect is too small (fully hidden).
- */
-function clipRectToContainer(r: DOMRect, container: Element): DOMRect | null {
-  const cr = container.getBoundingClientRect();
-  const x = Math.max(r.x, cr.x);
-  const y = Math.max(r.y, cr.y);
-  const right = Math.min(r.right, cr.right);
-  const bottom = Math.min(r.bottom, cr.bottom);
-  const w = right - x;
-  const h = bottom - y;
-  if (w < 2 || h < 2) return null;
-  return DOMRect.fromRect({ x, y, width: w, height: h });
+function readViewport(): GuideViewport {
+  if (typeof window === "undefined") return { left: 0, top: 0, width: 1024, height: 768 };
+  const viewport = window.visualViewport;
+  const style = getComputedStyle(document.documentElement);
+  const inset = (name: string) => Number.parseFloat(style.getPropertyValue(name)) || 0;
+  const left = inset("--sal");
+  const right = inset("--sar");
+  const top = inset("--sat");
+  const bottom = inset("--sab");
+  return {
+    left: (viewport?.offsetLeft ?? 0) + left,
+    top: (viewport?.offsetTop ?? 0) + top,
+    width: Math.max(1, (viewport?.width ?? window.innerWidth) - left - right),
+    height: Math.max(1, (viewport?.height ?? window.innerHeight) - top - bottom),
+  };
 }
 
-/**
- * Tracks a DOM element's bounding rect via requestAnimationFrame.
- * Returns null if the element is not found or too small (< 2px).
- * Automatically clips the rect to the nearest scrollable ancestor's visible bounds.
- */
-export function useTargetRect(target: string, expandTarget?: string): DOMRect | null {
-  const [rect, setRect] = useState<DOMRect | null>(null);
-  const prevKey = useRef("");
-
+/** Shared geometry for the wizard and coach cards, including the soft keyboard. */
+export function useGuideViewport(): GuideViewport {
+  const [viewport, setViewport] = useState(readViewport);
   useEffect(() => {
-    if (!target) {
-      if (prevKey.current !== "null") {
-        prevKey.current = "null";
-        setRect(null);
-      }
-      return;
-    }
-
-    let rafId: number | null = null;
-
-    const selector = target.startsWith("[")
-      ? target
-      : `[data-coach-id="${target}"]`;
-
-    const track = () => {
-      const el = document.querySelector(selector);
-      if (el) {
-        let r = el.getBoundingClientRect();
-        if (r.width < 2 || r.height < 2) {
-          if (prevKey.current !== "null") {
-            prevKey.current = "null";
-            setRect(null);
-          }
-        } else {
-          // Clip to nearest scrollable ancestor so overlay cutout
-          // doesn't extend beyond the visible scroll container
-          const scrollParent = findScrollableAncestor(el);
-          if (scrollParent) {
-            const clipped = clipRectToContainer(r, scrollParent);
-            if (!clipped) {
-              if (prevKey.current !== "null") {
-                prevKey.current = "null";
-                setRect(null);
-              }
-              rafId = requestAnimationFrame(track);
-              return;
-            }
-            r = clipped;
-          }
-
-          // Expand to include secondary target (e.g. a popover) if present
-          if (expandTarget) {
-            const expandSel = expandTarget.startsWith("[")
-              ? expandTarget
-              : `[data-coach-id="${expandTarget}"]`;
-            const expandEl = document.querySelector(expandSel);
-            if (expandEl) {
-              const er = expandEl.getBoundingClientRect();
-              if (er.width >= 2 && er.height >= 2) {
-                const minX = Math.min(r.x, er.x);
-                const minY = Math.min(r.y, er.y);
-                const maxR = Math.max(r.right, er.right);
-                const maxB = Math.max(r.bottom, er.bottom);
-                r = DOMRect.fromRect({ x: minX, y: minY, width: maxR - minX, height: maxB - minY });
-              }
-            }
-          }
-
-          const key = `${r.x},${r.y},${r.width},${r.height}`;
-          if (key !== prevKey.current) {
-            prevKey.current = key;
-            setRect(DOMRect.fromRect(r));
-          }
-        }
-      } else {
-        if (prevKey.current !== "null") {
-          prevKey.current = "null";
-          setRect(null);
-        }
-      }
-      rafId = requestAnimationFrame(track);
+    let frame = 0;
+    const update = () => {
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => setViewport(readViewport()));
     };
-
-    rafId = requestAnimationFrame(track);
+    update();
+    window.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("resize", update);
+    window.visualViewport?.addEventListener("scroll", update);
     return () => {
-      if (rafId !== null) cancelAnimationFrame(rafId);
+      cancelAnimationFrame(frame);
+      window.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("resize", update);
+      window.visualViewport?.removeEventListener("scroll", update);
     };
-  }, [target, expandTarget]);
+  }, []);
+  return viewport;
+}
 
-  return rect;
+export function findTourTarget(target: string): HTMLElement | null {
+  if (!target) return null;
+  const selector = target.startsWith("[") ? target : `[data-coach-id="${target}"]`;
+  // Settings has both mobile and desktop tab buttons in the DOM. Never select
+  // the hidden first match, and allow inputs to be targets themselves.
+  return Array.from(document.querySelectorAll<HTMLElement>(selector)).find((el) => {
+    const rect = el.getBoundingClientRect();
+    const style = getComputedStyle(el);
+    return rect.width >= 2 && rect.height >= 2 && style.visibility !== "hidden";
+  }) ?? null;
+}
+
+function visibleRect(el: HTMLElement): DOMRect | null {
+  const r = el.getBoundingClientRect();
+  const v = readViewport();
+  let left = Math.max(r.left, v.left);
+  let top = Math.max(r.top, v.top);
+  let right = Math.min(r.right, v.left + v.width);
+  let bottom = Math.min(r.bottom, v.top + v.height);
+  for (let parent = el.parentElement; parent; parent = parent.parentElement) {
+    const style = getComputedStyle(parent);
+    const bounds = parent.getBoundingClientRect();
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowX)) {
+      left = Math.max(left, bounds.left);
+      right = Math.min(right, bounds.right);
+    }
+    if (/(auto|scroll|hidden|clip)/.test(style.overflowY)) {
+      top = Math.max(top, bounds.top);
+      bottom = Math.min(bottom, bounds.bottom);
+    }
+  }
+  if (right - left < 2 || bottom - top < 2) return null;
+  return DOMRect.fromRect({ x: left, y: top, width: right - left, height: bottom - top });
+}
+
+/** Track actual visible bounds during panel transitions, scrolling and rotation. */
+export function useTargetRect(target: string, expandTarget?: string): DOMRect | null {
+  const [state, setState] = useState<{ target: string; rect: DOMRect | null }>({ target: "", rect: null });
+  useEffect(() => {
+    if (!target) return;
+    let frame = 0;
+    let previous = "";
+    let scrolled = false;
+    const track = () => {
+      const el = findTourTarget(target);
+      if (el && !scrolled) {
+        el.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "instant" });
+        scrolled = true;
+      }
+      let rect = el ? visibleRect(el) : null;
+      const expanded = expandTarget ? findTourTarget(expandTarget) : null;
+      const extra = expanded ? visibleRect(expanded) : null;
+      if (rect && extra) {
+        const x = Math.min(rect.x, extra.x);
+        const y = Math.min(rect.y, extra.y);
+        rect = DOMRect.fromRect({ x, y, width: Math.max(rect.right, extra.right) - x, height: Math.max(rect.bottom, extra.bottom) - y });
+      }
+      const key = rect ? [rect.x, rect.y, rect.width, rect.height].map(Math.round).join(",") : "null";
+      if (key !== previous) {
+        previous = key;
+        setState({ target, rect });
+      }
+      frame = requestAnimationFrame(track);
+    };
+    frame = requestAnimationFrame(track);
+    return () => cancelAnimationFrame(frame);
+  }, [target, expandTarget]);
+  return state.target === target ? state.rect : null;
 }

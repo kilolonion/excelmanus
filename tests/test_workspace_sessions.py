@@ -373,6 +373,75 @@ async def test_sessions_and_workspaces_http(tmp_path: Path) -> None:
             assert sess_a["id"] in ids
 
 
+@pytest.mark.asyncio
+async def test_file_routes_honor_explicit_workspace_scope(tmp_path: Path) -> None:
+    extra = tmp_path / "external-workspace"
+    extra.mkdir()
+    (extra / "note.txt").write_text("external", encoding="utf-8")
+    (extra / "shot.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+
+    with _workspace_api(tmp_path):
+        transport = ASGITransport(app=app, raise_app_exceptions=False)
+        async with AsyncClient(transport=transport, base_url="http://test") as client:
+            adopted = await client.post("/api/v1/workspaces", json={"path": str(extra)})
+            workspace_id = adopted.json()["workspace"]["id"]
+            scope = {"workspace_id": workspace_id}
+
+            text = await client.get(
+                "/api/v1/files/read",
+                params={"path": "note.txt", **scope},
+            )
+            assert text.status_code == 200
+            assert text.json()["content"] == "external"
+
+            image = await client.get(
+                "/api/v1/files/image",
+                params={"path": "shot.png", **scope},
+            )
+            assert image.status_code == 200
+            assert image.headers["content-type"] == "image/png"
+
+            download = await client.get(
+                "/api/v1/files/download",
+                params={"path": "note.txt", **scope},
+            )
+            assert download.status_code == 200
+            assert download.content == b"external"
+            assert download.headers["cache-control"] == "private, no-store"
+
+            uploaded = await client.post(
+                "/api/v1/upload",
+                data={"workspace_id": workspace_id},
+                files={"file": ("added.txt", b"added", "text/plain")},
+            )
+            assert uploaded.status_code == 200
+            uploaded_path = uploaded.json()["path"].removeprefix("./")
+            assert (extra / uploaded_path).read_bytes() == b"added"
+
+            with patch(
+                "excelmanus.security.url_fetch.fetch_public_http",
+                new=AsyncMock(return_value=b"remote"),
+            ):
+                remote = await client.post(
+                    "/api/v1/upload-from-url",
+                    json={
+                        "url": "https://example.com/remote.txt",
+                        "workspace_id": workspace_id,
+                    },
+                )
+            assert remote.status_code == 200
+            remote_path = remote.json()["path"].removeprefix("./")
+            assert (extra / remote_path).read_bytes() == b"remote"
+
+            with patch("subprocess.Popen") as popen:
+                revealed = await client.post(
+                    "/api/v1/files/reveal",
+                    json={"path": "note.txt", "workspace_id": workspace_id},
+                )
+            assert revealed.status_code == 200
+            assert popen.called
+
+
 def test_register_workspace_runs_overlay_migration(tmp_path: Path) -> None:
     from excelmanus.workspace.revisions import RevisionStore
 

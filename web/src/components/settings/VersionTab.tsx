@@ -87,9 +87,9 @@ function formatTimestamp(ts: string): string {
 
 export function VersionTab() {
   const deployMode = useAuthConfigStore((s) => s.deployMode);
-  const isStandalone = deployMode === "standalone";
 
   const [version, setVersion] = useState<VersionInfo | null>(null);
+  const isStandalone = deployMode === "standalone" && version?.check_method !== "desktop_installer";
   const [backups, setBackups] = useState<BackupEntry[]>([]);
   const [installations, setInstallations] = useState<InstallationEntry[]>([]);
   const [loading, setLoading] = useState(true);
@@ -148,7 +148,9 @@ export function VersionTab() {
     try {
       const v = await apiGet<VersionInfo>("/version/check?force=1");
       setVersion(v);
-      if (v.check_failed) {
+      if (v.check_method === "desktop_installer") {
+        showMsg("ok", "桌面版请下载并安装新版 App，用户数据会保留");
+      } else if (v.check_failed) {
         showMsg("err", v.error ? `检查更新失败: ${v.error}` : "检查更新失败");
       } else if (v.has_update) {
         const label =
@@ -346,7 +348,9 @@ export function VersionTab() {
                 </Badge>
               </div>
               <div className="text-[11px] text-muted-foreground mt-0.5">
-                {version?.has_update ? (
+                {version?.check_method === "desktop_installer" ? (
+                  "桌面版通过新版安装包更新，用户数据会保留"
+                ) : version?.has_update ? (
                   <span className="text-amber-600 dark:text-amber-400 flex items-center gap-1">
                     <ArrowUpCircle className="h-3 w-3" />
                     {version.latest && version.latest !== version.current
@@ -793,7 +797,7 @@ export function VersionTab() {
             </p>
           </>
         )}
-        {!isStandalone && (
+        {deployMode === "server" && (
           <p className="mt-1">
             <strong>服务器部署</strong>：请在运维机运行 <code>./deploy/deploy.sh</code> 同步代码并重启，
             不要从生产 API 升级。

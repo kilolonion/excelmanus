@@ -6,6 +6,7 @@ UserConfigStore（进程级偏好，如 active_model）。
 from __future__ import annotations
 
 import logging
+import re
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING, Any
 
@@ -45,6 +46,13 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _profile_description(value: str) -> str:
+    """丢弃旧评测导入器自动生成的 env 来源文案，保留用户描述。"""
+    if re.fullmatch(r"import(?:ed)?\s+from\s+[^\r\n]*\.env(?:\.[\w.-]+)?", value.strip(), re.IGNORECASE):
+        return ""
+    return value
+
+
 # ── GlobalConfigStore（全局配置）──────────────────────────────
 
 
@@ -56,6 +64,21 @@ class GlobalConfigStore:
 
     def __init__(self, database: "Database") -> None:
         self._conn = database.conn
+        # 清理旧数据库中的自动来源描述；不读取或改写凭证、模型及激活状态。
+        rows = self._conn.execute(
+            "SELECT name, description FROM model_profiles "
+            "WHERE lower(trim(description)) LIKE 'import%from%env%'"
+        ).fetchall()
+        changed = False
+        for row in rows:
+            if _profile_description(row["description"]) != row["description"]:
+                cursor = self._conn.execute(
+                    "UPDATE model_profiles SET description = '' WHERE name = ? AND description = ?",
+                    (row["name"], row["description"]),
+                )
+                changed = changed or cursor.rowcount > 0
+        if changed:
+            self._conn.commit()
 
     # ── model_profiles CRUD ──────────────────────────────
 
@@ -107,7 +130,7 @@ class GlobalConfigStore:
                 "thinking_mode, model_family, custom_extra_body, custom_extra_headers, "
                 "created_at, updated_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                (name, model, enc_api_key, base_url, description, protocol,
+                (name, model, enc_api_key, base_url, _profile_description(description), protocol,
                  thinking_mode, model_family, custom_extra_body, custom_extra_headers,
                  now, now),
             )
@@ -152,7 +175,7 @@ class GlobalConfigStore:
             params.append(base_url)
         if description is not None:
             sets.append("description = ?")
-            params.append(description)
+            params.append(_profile_description(description))
         if protocol is not None:
             sets.append("protocol = ?")
             params.append(protocol)
@@ -267,11 +290,3 @@ class UserConfigStore:
     def set_full_access(self, enabled: bool) -> None:
         """持久化 full_access 开关（跨会话）。"""
         self.set("full_access_enabled", "true" if enabled else "false")
-
-    def get_present_as(self) -> str:
-        """读取持久化的代码模式偏好（跨会话）。"""
-        return "code" if self.get("present_as") == "code" else "native"
-
-    def set_present_as(self, mode: str) -> None:
-        """持久化代码模式偏好（跨会话）。"""
-        self.set("present_as", "code" if mode == "code" else "native")

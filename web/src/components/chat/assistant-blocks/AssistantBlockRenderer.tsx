@@ -3,7 +3,7 @@
 import { CheckCircle2, ChevronsUpDown, CircleStop, Info, Repeat, Wrench, XCircle, Zap } from "lucide-react";
 import { isHiddenAssistantChrome } from "@/lib/assistant-chrome";
 import { ThinkingBlock } from "../ThinkingBlock";
-import { ToolCallCard } from "../ToolCallCard";
+import { ToolCallCard, ToolCallCancelButton } from "../ToolCallCard";
 import { AskUserCard } from "../AskUserCard";
 import { SubagentBlock } from "../SubagentBlock";
 import { TaskList } from "../TaskList";
@@ -71,16 +71,18 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
     case "tool_call": {
       if (block.name === "ask_user" || block.name === "suggest_mode_switch") {
         return (
-          <AskUserCard
+          <><AskUserCard
             args={block.args}
             status={block.status}
             result={block.result}
-          />
+          /><ToolCallCancelButton key={block.executionId} executionId={block.executionId} executionState={block.executionState} /></>
         );
       }
       return (
         <ToolCallCard
           toolCallId={block.toolCallId}
+          executionId={block.executionId}
+          executionState={block.executionState}
           name={block.name}
           args={block.args}
           status={block.status}
@@ -103,6 +105,8 @@ export const AssistantBlockRenderer = React.memo(function AssistantBlockRenderer
           tools={block.tools}
           stopReason={block.stopReason}
           diagnostic={block.diagnostic}
+          background={block.background}
+          runStatus={block.runStatus}
         />
       );
     case "task_list":

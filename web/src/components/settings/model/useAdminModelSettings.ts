@@ -1,11 +1,16 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef, useMemo } from "react";
-import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels, getManageToken } from "@/lib/api";
+import { apiGet, apiPut, apiPost, apiDelete, testModelConnection, listRemoteModels, getManageToken, buildApiUrl } from "@/lib/api";
 import type { RemoteModelItem } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import type { TestConnectionResult } from "@/lib/api";
 import { useUIStore } from "@/stores/ui-store";
+import {
+  DEFAULT_THINKING_EFFORT_OPTIONS,
+  normalizeThinkingEffortOptions,
+  type ThinkingEffort,
+} from "@/lib/thinking";
 import { SECTION_META } from "./constants";
 import {
   isMaskedApiKey,
@@ -16,7 +21,16 @@ import {
 import type { ModelConfig, ModelSection, ModelCapabilities, ProfileEntry, ProbeJobSnapshot } from "./types";
 import type { ProviderPreset } from "./types";
 
+type ThinkingSettings = {
+  effort: string;
+  budget: number;
+  effective_budget: number;
+  allowed_efforts?: string[];
+};
+
 export function useAdminModelSettings() {
+  const modelProfileVersion = useUIStore((s) => s.modelProfileVersion);
+  const configRequestRef = useRef(0);
   const [config, setConfig] = useState<ModelConfig | null>(null);
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<string | null>(null);
@@ -70,6 +84,9 @@ export function useAdminModelSettings() {
 
   // Thinking 配置
   const [thinkingEffort, setThinkingEffort] = useState<string>("medium");
+  const [thinkingEffortOptions, setThinkingEffortOptions] = useState<ThinkingEffort[]>(
+    [...DEFAULT_THINKING_EFFORT_OPTIONS],
+  );
   const [thinkingBudget, setThinkingBudget] = useState<string>("");
   const [thinkingEffectiveBudget, setThinkingEffectiveBudget] = useState<number>(0);
   const [thinkingSaving, setThinkingSaving] = useState(false);
@@ -121,45 +138,51 @@ export function useAdminModelSettings() {
 
   const fetchThinkingConfig = useCallback(async (force = false) => {
     if (!force) {
-      const cached = settingsCache.get<{ effort: string; budget: number; effective_budget: number }>("/thinking");
+      const cached = settingsCache.get<ThinkingSettings>("/thinking");
       if (cached) {
         setThinkingEffort(cached.effort);
         setThinkingBudget(cached.budget > 0 ? String(cached.budget) : "");
         setThinkingEffectiveBudget(cached.effective_budget);
+        setThinkingEffortOptions(normalizeThinkingEffortOptions(cached.allowed_efforts));
         return;
       }
     }
     try {
-      const data = await apiGet<{ effort: string; budget: number; effective_budget: number }>("/thinking", { direct: true });
+      const data = await apiGet<ThinkingSettings>("/thinking", { direct: true });
       settingsCache.set("/thinking", data);
       setThinkingEffort(data.effort);
       setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
       setThinkingEffectiveBudget(data.effective_budget);
+      setThinkingEffortOptions(normalizeThinkingEffortOptions(data.allowed_efforts));
     } catch {
       // 后端未就绪
     }
   }, []);
 
-  const handleSaveThinking = useCallback(async (effort: string, budgetStr: string) => {
+  const handleSaveThinking = useCallback(async (allowedEfforts: ThinkingEffort[], budgetStr: string) => {
     setThinkingSaving(true);
     try {
-      const body: Record<string, unknown> = { effort };
+      const body: Record<string, unknown> = { allowed_efforts: allowedEfforts };
       const budgetNum = parseInt(budgetStr, 10);
       if (!isNaN(budgetNum) && budgetNum >= 0) {
         body.budget = budgetNum;
       } else {
         body.budget = 0;
       }
-      const data = await apiPut<{ effort: string; budget: number; effective_budget: number }>("/thinking", body, { direct: true });
+      const data = await apiPut<ThinkingSettings>("/thinking", body, { direct: true });
+      const nextOptions = normalizeThinkingEffortOptions(data.allowed_efforts);
       settingsCache.set("/thinking", data);
       setThinkingEffort(data.effort);
       setThinkingBudget(data.budget > 0 ? String(data.budget) : "");
       setThinkingEffectiveBudget(data.effective_budget);
+      setThinkingEffortOptions(nextOptions);
+      useUIStore.getState().setThinkingEffort(data.effort);
+      useUIStore.getState().setThinkingEffortOptions(nextOptions);
       setThinkingSaved(true);
       setTimeout(() => setThinkingSaved(false), 2000);
-      setSaveToast({ msg: "推理深度已更新", type: "success" });
+      setSaveToast({ msg: "可调思考等级已更新", type: "success" });
     } catch (e) {
-      setSaveToast({ msg: e instanceof Error ? e.message : "推理深度保存失败", type: "error" });
+      setSaveToast({ msg: e instanceof Error ? e.message : "思考等级保存失败", type: "error" });
     } finally {
       setThinkingSaving(false);
     }
@@ -194,13 +217,9 @@ export function useAdminModelSettings() {
 
   const subscribeToProbeJob = useCallback((jobId: string) => {
     probeEsRef.current?.close();
-    const origin = typeof window !== "undefined" ? window.location.origin : "";
     const token = getManageToken();
     const esUrl =
-      origin +
-      "/api/v1/config/models/capabilities/jobs/" +
-      jobId +
-      "/events" +
+      buildApiUrl(`/config/models/capabilities/jobs/${encodeURIComponent(jobId)}/events`, { direct: true }) +
       (token ? `?manage_token=${encodeURIComponent(token)}` : "");
     const es = new EventSource(esUrl);
     probeEsRef.current = es;
@@ -378,6 +397,8 @@ export function useAdminModelSettings() {
   }, []);
 
   const fetchConfig = useCallback(async (force = false) => {
+    const requestId = ++configRequestRef.current;
+    const profileVersion = useUIStore.getState().modelProfileVersion;
     if (!force) {
       const cached = settingsCache.get<ModelConfig>("/config/models");
       if (cached) { applyConfigData(cached); return; }
@@ -386,21 +407,25 @@ export function useAdminModelSettings() {
     if (!force) setLoading(true);
     try {
       const data = await apiGet<ModelConfig>("/config/models", { direct: true });
+      if (requestId !== configRequestRef.current || profileVersion !== useUIStore.getState().modelProfileVersion) return;
       settingsCache.set("/config/models", data);
       applyConfigData(data);
     } catch {
       // 后端未就绪
     } finally {
-      setLoading(false);
+      if (requestId === configRequestRef.current) setLoading(false);
     }
   }, [applyConfigData]);
 
   useEffect(() => {
-    fetchConfig();
+    fetchConfig(modelProfileVersion > 0);
+  }, [fetchConfig, modelProfileVersion]);
+
+  useEffect(() => {
     // 强制刷新能力探测结果，避免 Tab 切换/重进设置页时沿用旧的失败提示
     fetchAllCapabilities(true);
     fetchThinkingConfig();
-  }, [fetchConfig, fetchAllCapabilities, fetchThinkingConfig]);
+  }, [fetchAllCapabilities, fetchThinkingConfig]);
 
   // 自动消失 saveToast
   useEffect(() => {
@@ -414,7 +439,6 @@ export function useAdminModelSettings() {
     try {
       await apiPut("/models/active", { name: profile.name }, { direct: true });
       setSaveToast({ msg: `已激活「${profile.name}」`, type: "success" });
-      fetchConfig(true);
       fetchAllCapabilities(true);
       useUIStore.getState().bumpModelProfiles();
     } catch (e) {
@@ -422,7 +446,7 @@ export function useAdminModelSettings() {
     } finally {
       setActivatingProfile(null);
     }
-  }, [fetchConfig, fetchAllCapabilities]);
+  }, [fetchAllCapabilities]);
 
   const handleSaveSection = async (sectionKey: string) => {
     setSaving(sectionKey);
@@ -506,8 +530,6 @@ export function useAdminModelSettings() {
     setRemoteModelHint(null);
     setRemoteModels([]);
     setModelDropdownTarget(null);
-    useUIStore.getState().bumpModelProfiles();
-    setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
     setHighlightProfile(newName);
     setTimeout(() => setHighlightProfile(null), 2000);
     requestAnimationFrame(() => {
@@ -516,8 +538,9 @@ export function useAdminModelSettings() {
 
     try {
       await apiPost("/config/models/profiles", draftSnapshot, { direct: true });
-      // 成功后从服务端同步最新数据
-      fetchConfig(true);
+      setSaveToast({ msg: `模型档案「${newName}」已添加`, type: "success" });
+      // 只有服务端写入成功后才通知会话模型选择器，避免它抢先读到旧列表。
+      useUIStore.getState().bumpModelProfiles();
     } catch (e) {
       // 添加失败回滚：恢复到之前的 profiles 列表。
       setConfig((prev) => {
@@ -569,8 +592,6 @@ export function useAdminModelSettings() {
     setRemoteModelHint(null);
     setRemoteModels([]);
     setModelDropdownTarget(null);
-    useUIStore.getState().bumpModelProfiles();
-    setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
     setHighlightProfile(updatedName);
     setTimeout(() => setHighlightProfile(null), 2000);
     requestAnimationFrame(() => {
@@ -578,9 +599,10 @@ export function useAdminModelSettings() {
     });
 
     try {
-      await apiPut(`/config/models/profiles/${originalName}`, draftSnapshot, { direct: true });
-      // 成功后从服务端同步最新数据
-      fetchConfig(true);
+      await apiPut(`/config/models/profiles/${encodeURIComponent(originalName)}`, draftSnapshot, { direct: true });
+      setSaveToast({ msg: `模型档案「${updatedName}」已更新`, type: "success" });
+      // 只有服务端写入成功后才通知会话模型选择器，避免它抢先读到旧列表。
+      useUIStore.getState().bumpModelProfiles();
     } catch (e) {
       // 更新失败回滚：恢复到之前的 profiles 列表。
       setConfig((prev) => {
@@ -609,11 +631,12 @@ export function useAdminModelSettings() {
         settingsCache.set("/config/models", next);
         return next;
       });
-      useUIStore.getState().bumpModelProfiles();
     }
 
     try {
-      await apiDelete(`/config/models/profiles/${name}`, { direct: true });
+      await apiDelete(`/config/models/profiles/${encodeURIComponent(name)}`, { direct: true });
+      // 只有服务端删除成功后才通知会话模型选择器，避免它抢先读到旧列表。
+      useUIStore.getState().bumpModelProfiles();
       setSaveToast({ msg: `模型档案「${name}」已删除`, type: "success" });
       // 如果正在编辑被删除的 profile，关闭表单
       if (editingProfile === name) {
@@ -701,6 +724,8 @@ export function useAdminModelSettings() {
     setTestResult,
     thinkingEffort,
     setThinkingEffort,
+    thinkingEffortOptions,
+    setThinkingEffortOptions,
     thinkingBudget,
     setThinkingBudget,
     thinkingEffectiveBudget,

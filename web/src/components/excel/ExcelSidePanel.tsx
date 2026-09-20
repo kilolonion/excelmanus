@@ -14,14 +14,14 @@ import { useIsMobile, useIsTablet, useIsDesktop, useIsMediumScreen } from "@/hoo
 import { useResizablePanel } from "@/hooks/use-resizable-panel";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl, downloadFile, invalidateWorkbookCaches } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
 import { fileRefFromSession, recentFilesForWorkspace, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
 
 const UniverSheet = dynamic(
   () => import("./UniverSheet").then((m) => ({ default: m.UniverSheet })),
-  { ssr: false, loading: () => <div className="flex items-center justify-center h-full text-sm text-muted-foreground">加载 Excel 引擎...</div> }
+  { ssr: false, loading: () => <div role="status" className="flex items-center justify-center h-full text-sm text-muted-foreground">正在准备表格…</div> }
 );
 
 function formatSelectionConfirmLabel(
@@ -97,11 +97,9 @@ export function ExcelSidePanel() {
     isDragging: isResizing,
   } = useResizablePanel(isDesktop);
 
-  // 根据屏幕尺寸决定显示模式
-  // 桌面端（>=1280px）：固定右侧栏（拖宽超过 50vw 时切换为浮动）
-  // 中等屏幕（1024-1279px）：浮层模式，类似移动端但更大
-  // 移动端（<1024px）：全屏浮层
-  const useFloatingMode = !isDesktop || isFloatingByResize;
+  // 非手机尺寸下始终作为布局列，让顶栏、对话区和输入框同步缩窄。
+  // 仅手机或桌面端手动拖宽超过 50vw 时使用浮层。
+  const useFloatingMode = isMobile || isFloatingByResize;
   const panelWidth = isMobile ? undefined : isDesktop ? resizableWidth : isTablet ? 420 : 600;
 
   // ── Tab 栏鼠标拖拽横向滚动（适配无触摸板的电脑端 + 移动端触摸） ──
@@ -198,8 +196,8 @@ export function ExcelSidePanel() {
   }, [selectionMode, enterSelectionMode, handleCancelRange]);
 
   const fileUrl = useMemo(
-    () => (activeFilePath ? buildExcelFileUrl(activeFilePath, activeSessionId ?? undefined) : ""),
-    [activeFilePath, activeSessionId]
+    () => (activeFilePath ? buildExcelFileUrl(activeFilePath, activeSessionId, session?.workspaceId) : ""),
+    [activeFilePath, activeSessionId, session?.workspaceId]
   );
 
   const fileName = fileBaseName(activeFilePath) || "工作表";
@@ -214,9 +212,8 @@ export function ExcelSidePanel() {
 
   const handleRefresh = () => {
     if (activeFilePath) {
-      invalidateWorkbookCaches({ workspaceKey, relative: activeFilePath });
+      useExcelStore.getState().notifyWorkbookChanged(activeFilePath, workspaceKey, undefined, "refresh");
     }
-    useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
   };
 
   const isOpen = panelOpen;
@@ -369,6 +366,7 @@ export function ExcelSidePanel() {
           {!!activeFilePath && (
             <div className="relative flex-1 min-h-0 overflow-hidden">
               <UniverSheet
+                active={isOpen && panelTab === "sheet"}
                 fileUrl={fileUrl}
                 fileRef={activeFilePath ? fileRefFromSession(activeFilePath, session) : null}
                 sessionId={activeSessionId}
@@ -391,7 +389,7 @@ export function ExcelSidePanel() {
                     onCancelSelection={handleCancelRange}
                     onToggleStyles={() => setWithStyles((v) => !v)}
                     onRefresh={handleRefresh}
-                    onDownload={() => downloadFile(activeFilePath, fileName, activeSessionId ?? undefined).catch(() => { })}
+                    onDownload={() => downloadFile(activeFilePath, fileName, activeSessionId, session?.workspaceId).catch(() => { })}
                     onExpand={() => openFullView(activeFilePath, activeSheet ?? undefined)}
                     onClose={closePanel}
                   />
@@ -401,6 +399,7 @@ export function ExcelSidePanel() {
                 <HistoryPaneOverlay>
                   <FileHistoryWorkspace
                     filePath={activeFilePath}
+                    workspaceId={session?.workspaceId}
                     active={isOpen && panelTab === "history"}
                     view={historySubview}
                     onViewChange={setHistorySubview}

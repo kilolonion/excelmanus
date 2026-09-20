@@ -81,6 +81,57 @@ class QuestionFlowManager:
         """清空队列。"""
         self._queue.clear()
 
+    def snapshot(self) -> list[dict[str, Any]]:
+        """Serialize the pending question queue for session recovery."""
+        return [
+            {
+                "question_id": item.question_id,
+                "tool_call_id": item.tool_call_id,
+                "header": item.header,
+                "text": item.text,
+                "options": [
+                    {
+                        "label": option.label,
+                        "description": option.description,
+                        "value": option.value,
+                        "is_other": option.is_other,
+                    }
+                    for option in item.options
+                ],
+                "multi_select": item.multi_select,
+                "created_at_utc": item.created_at_utc,
+            }
+            for item in self._queue
+        ]
+
+    def restore(self, raw: list[dict[str, Any]] | None) -> None:
+        """Restore a previously snapshotted question queue."""
+        self._queue.clear()
+        for item in raw or []:
+            if not isinstance(item, dict):
+                continue
+            options = [
+                QuestionOption(
+                    label=str(option.get("label") or ""),
+                    description=str(option.get("description") or ""),
+                    value=str(option.get("value") or ""),
+                    is_other=bool(option.get("is_other", False)),
+                )
+                for option in item.get("options") or []
+                if isinstance(option, dict)
+            ]
+            self._queue.append(
+                PendingQuestion(
+                    question_id=str(item.get("question_id") or ""),
+                    tool_call_id=str(item.get("tool_call_id") or ""),
+                    header=str(item.get("header") or ""),
+                    text=str(item.get("text") or ""),
+                    options=options,
+                    multi_select=bool(item.get("multi_select", False)),
+                    created_at_utc=str(item.get("created_at_utc") or ""),
+                )
+            )
+
     def has_pending(self) -> bool:
         """是否存在待回答问题。"""
         return bool(self._queue)

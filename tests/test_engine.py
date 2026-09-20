@@ -152,57 +152,6 @@ class TestControlCommandFullAccess:
         assert kwargs_unlocked['blocked_skillpacks'] is None
 
 
-class TestControlCommandCode:
-    """会话级 /code 控制命令测试。"""
-
-    @pytest.mark.asyncio
-    async def test_status_defaults_to_native(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        result = await engine.followup('/code status')
-        assert isinstance(result, ChatResult)
-        assert '关闭' in result.reply
-        assert engine._present_as == 'native'
-        assert engine.last_route_result.route_mode == 'control_command'
-
-    @pytest.mark.asyncio
-    async def test_on_then_off(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        on_result = await engine.followup('/code')
-        assert '已开启代码模式' in on_result.reply
-        assert engine._present_as == 'code'
-        assert engine.last_route_result.route_mode == 'control_command'
-        off_result = await engine.followup('/code off')
-        assert '已关闭代码模式' in off_result.reply
-        assert engine._present_as == 'native'
-
-    @pytest.mark.asyncio
-    async def test_code_preference_survives_plan_mode(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        await engine.followup('/code on')
-        from excelmanus.plan_mode import set_plan_active
-        set_plan_active(engine, True)
-        status = await engine.followup('/code status')
-        assert engine._present_as == 'code'
-        assert '观察/计划' in status.reply
-
-    @pytest.mark.asyncio
-    async def test_command_does_not_invoke_llm(self) -> None:
-        config = _make_config()
-        registry = _make_registry_with_tools()
-        engine = AgentEngine(config, registry)
-        mocked_create = AsyncMock(return_value=_make_text_response('不应被调用'))
-        engine._client.chat.completions.create = mocked_create
-        result = await engine.followup('/code_mode status')
-        assert '关闭' in result.reply
-        mocked_create.assert_not_called()
-
-
 class TestControlCommandSubagent:
     """会话级 /subagent 控制命令测试。"""
 
@@ -1023,9 +972,10 @@ class TestMetaToolDefinitions:
         assert delegate_params['properties']['file_paths']['type'] == 'array'
         assert 'agent_name' in delegate_params['properties']
         assert delegate_params['properties']['agent_name']['enum'] == ['folder_summarizer']
-        assert delegate_tool['description'] == (
-            "把一项自包含任务交给具名子代理。它看不到本段对话，只回终态结果不回中间步骤。"
-            "省略 agent_name 用通用 subagent。下一动作依赖结果时用单任务；独立探查可走 tasks。"
+        assert 'background=true' in delegate_tool['description']
+        assert 'run.status/run.result' in delegate_tool['description']
+        assert {'status', 'wait', 'send', 'pause', 'cancel', 'resume'} <= set(
+            delegate_params['properties']['action']['enum']
         )
         assert 'folder_summarizer' not in delegate_tool['description']
         ask_user_tool = by_name['ask_user']['function']
@@ -1127,6 +1077,73 @@ class TestCommandDispatchAndHooks:
         assert result.success is True
         assert result.pending_approval is True
         assert isinstance(result.approval_id, str) and result.approval_id
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_auto_allows_pre_tool_hook_ask(self) -> None:
+        config = _make_config()
+        registry = _make_registry_with_tools()
+        engine = AgentEngine(config, registry)
+        engine._full_access_enabled = True
+        engine._active_skills = [Skillpack(name='hook/ask', description='ask hook', instructions='', source='project', root_dir='/tmp/hook', hooks={'PreToolUse': [{'matcher': 'add_numbers', 'hooks': [{'type': 'prompt', 'decision': 'ask'}]}]})]
+        tc = SimpleNamespace(id='call_hook_ask_fullaccess', function=SimpleNamespace(name='add_numbers', arguments=json.dumps({'a': 1, 'b': 2})))
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=['add_numbers'],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.pending_approval is False
+        assert result.result == '3'
+        assert engine._approval.pending is None
+
+    @pytest.mark.asyncio
+    async def test_fullaccess_executes_network_shell_without_pending(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import subprocess
+
+        from excelmanus.tools import shell_tools
+
+        observed: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            observed["command"] = command
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(command, 0, "network ok\n", "")
+
+        monkeypatch.setattr(shell_tools.subprocess, "run", fake_run)
+        registry = ToolRegistry()
+        registry.register_tools(shell_tools.get_tools())
+        engine = AgentEngine(
+            _make_config(workspace_root=str(tmp_path)),
+            registry,
+        )
+        engine._full_access_enabled = True
+        tc = SimpleNamespace(
+            id='call_shell_fullaccess',
+            function=SimpleNamespace(
+                name='run_shell',
+                arguments=json.dumps({'command': 'curl https://example.com'}),
+            ),
+        )
+
+        result = await engine._execute_tool_call(
+            tc=tc,
+            tool_scope=['run_shell'],
+            on_event=None,
+            iteration=1,
+        )
+
+        assert result.success is True
+        assert result.pending_approval is False
+        assert engine._approval.pending is None
+        assert observed["command"] == "curl https://example.com"
+        assert observed["shell"] is True
 
     @pytest.mark.asyncio
     async def test_pre_tool_hook_updated_input_is_applied(self) -> None:

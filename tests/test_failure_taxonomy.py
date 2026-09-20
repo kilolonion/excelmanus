@@ -159,7 +159,6 @@ class TestFourDenialClasses:
                 raise AssertionError("deny 路径不得落到 dispatcher.execute")
 
         engine = SimpleNamespace(
-            _present_as="native",
             _current_chat_mode="write",
             config=SimpleNamespace(tool_result_hard_cap_chars=0),
             _config=SimpleNamespace(tool_result_hard_cap_chars=0),
@@ -350,7 +349,8 @@ class TestSchemaValidationModes:
             arguments=arguments,
         )
         assert annotated.success is True
-        payload = annotated.value
+        assert annotated.value == result.value
+        payload = json.loads(annotated.model_text)
         assert isinstance(payload, dict)
         assert payload["schema_validation"] == "shadow"
         assert payload["schema_violations"]
@@ -385,7 +385,6 @@ class TestSchemaValidationModes:
                 )
 
         engine = SimpleNamespace(
-            _present_as="native",
             _current_chat_mode="write",
             config=SimpleNamespace(tool_result_hard_cap_chars=0),
             _config=SimpleNamespace(tool_result_hard_cap_chars=0),

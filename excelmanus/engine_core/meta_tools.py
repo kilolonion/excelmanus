@@ -91,10 +91,7 @@ class MetaToolBuilder:
         tool_access: str = "unknown",
     ) -> list[dict[str, Any]]:
         """构建工具 schema + 元工具（带脏标记缓存）。"""
-        from excelmanus.tools.runtime import present_as_of
-
         e = self._engine
-        present_as = present_as_of(e)
         from excelmanus.prompt.envelope import catalog_fingerprint, sort_tool_schemas
         from excelmanus.system_one.host import turn_wire_profile
         from excelmanus.tools.catalog import catalog_from_engine
@@ -111,9 +108,9 @@ class MetaToolBuilder:
             frozenset(s.name for s in e._active_skills),
             frozenset(_session_skill_names(e)),
             frozenset(_session_subagent_names(e)),
-            present_as,
             catalog.digest() if catalog is not None else catalog_fingerprint(e),
             turn_wire_profile(e),
+            frozenset(getattr(e, "_loaded_tool_names", ()) or ()),
         )
         if e._tools_cache is not None and e._tools_cache_key == cache_key:
             return e._tools_cache
@@ -135,13 +132,15 @@ class MetaToolBuilder:
 
         可见集来自 EffectiveToolCatalog：read/plan 不把写效应工具交给模型。
         ``tool_access == "read_only"`` 把 write 会话压成 read 投影。
-        ``present_as=code`` 的坍缩只在这里经 ``collapse_schemas`` 发生（L4 wire）。
-        exposure 收窄同样只发生在这之后：``catalog ∩ PROFILE``，默认不生效。
+        默认核心 + 初始 profile + 本轮成功查询的工具，与有效目录求交。
+        SDK 和实际执行仍使用完整有效目录，不使用这里的展示投影。
         """
-        from excelmanus.system_one.host import narrow_exposure_schemas
+        from excelmanus.system_one.host import turn_wire_profile
+        from excelmanus.system_one.packs import resolve_profile_tools
         from excelmanus.tools.catalog import catalog_from_engine
         from excelmanus.tools.meta_tool_defs import refresh_meta_tool_schemas
-        from excelmanus.tools.runtime import collapse_schemas, present_as_of
+        from excelmanus.tools.runtime import schema_tool_name
+        from excelmanus.tools.policy import DEFAULT_DISCLOSURE_CORE_TOOLS
 
         e = self._engine
         refresh_meta_tool_schemas(e)
@@ -151,5 +150,15 @@ class MetaToolBuilder:
             schemas = catalog.tool_schemas(schema_mode="chat_completions")
         else:
             schemas = e._registry.get_tiered_schemas(mode="chat_completions")
-        present = present_as_of(e)
-        return narrow_exposure_schemas(e, collapse_schemas(schemas, present))
+        names = {schema_tool_name(item) for item in schemas}
+        # 无发现入口时保留全部授权 schema，否则隐藏能力无法再次获得。
+        if "introspect_capability" not in names:
+            return schemas
+        loaded = frozenset(getattr(e, "_loaded_tool_names", ()) or ())
+        profile = turn_wire_profile(e)
+        initial = (
+            resolve_profile_tools(profile, names)
+            if profile != "full" else frozenset()
+        )
+        visible = DEFAULT_DISCLOSURE_CORE_TOOLS | initial | loaded
+        return [item for item in schemas if schema_tool_name(item) in visible]

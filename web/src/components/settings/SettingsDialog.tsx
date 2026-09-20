@@ -2,7 +2,7 @@
 
 import { useCallback, lazy, Suspense } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Settings, Server, Package, Plug, SlidersHorizontal, ScrollText, Brain, X, ArrowUpCircle } from "lucide-react";
+import { Settings, Server, Package, SlidersHorizontal, X, ArrowUpCircle } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -13,10 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Tabs, TabsContent } from "@/components/ui/tabs";
 const ModelTab = lazy(() => import("./ModelTab").then(m => ({ default: m.ModelTab })));
-const RulesTab = lazy(() => import("./RulesTab").then(m => ({ default: m.RulesTab })));
-const SkillsTab = lazy(() => import("./SkillsTab").then(m => ({ default: m.SkillsTab })));
-const MCPTab = lazy(() => import("./MCPTab").then(m => ({ default: m.MCPTab })));
-const MemoryTab = lazy(() => import("./MemoryTab").then(m => ({ default: m.MemoryTab })));
+const PluginsTab = lazy(() => import("./PluginsTab").then(m => ({ default: m.PluginsTab })));
 const RuntimeTab = lazy(() => import("./RuntimeTab").then(m => ({ default: m.RuntimeTab })));
 const VersionTab = lazy(() => import("./VersionTab").then(m => ({ default: m.VersionTab })));
 
@@ -33,17 +30,20 @@ import { useShallow } from "zustand/react/shallow";
 import { useUIStore } from "@/stores/ui-store";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { checkModelPlaceholder } from "@/lib/api";
-import { SettingsTourHints } from "@/components/onboarding/SettingsTourHints";
 
 const TAB_META = [
   { value: "model", label: "模型", icon: <Server className="size-4" /> },
-  { value: "rules", label: "规则", icon: <ScrollText className="size-4" /> },
-  { value: "skills", label: "技能", icon: <Package className="size-4" /> },
-  { value: "mcp", label: "MCP", icon: <Plug className="size-4" /> },
-  { value: "memory", label: "记忆", icon: <Brain className="size-4" /> },
+  { value: "plugins", label: "插件", icon: <Package className="size-4" /> },
   { value: "runtime", label: "系统", icon: <SlidersHorizontal className="size-4" /> },
   { value: "version", label: "版本", icon: <ArrowUpCircle className="size-4" /> },
 ];
+
+const PLUGIN_TAB_VALUES = ["rules", "skills", "mcp", "memory"] as const;
+type PluginTabValue = (typeof PLUGIN_TAB_VALUES)[number];
+
+function isPluginTab(value: string): value is PluginTabValue {
+  return PLUGIN_TAB_VALUES.includes(value as PluginTabValue);
+}
 
 export function SettingsDialog() {
   const { settingsOpen, settingsTab, openSettings, closeSettings } = useUIStore(
@@ -56,13 +56,18 @@ export function SettingsDialog() {
   );
 
   const isGuideLocked = useOnboardingStore((s) => s.isGuideLocked);
+  const primaryTab = isPluginTab(settingsTab) || settingsTab === "plugins" ? "plugins" : settingsTab;
+  const pluginTab: PluginTabValue = isPluginTab(settingsTab) ? settingsTab : "skills";
 
   const handleOpenChange = useCallback((v: boolean) => {
     if (v) {
       openSettings(settingsTab);
     } else {
-      // Prevent closing while settings tour is active
-      if (isGuideLocked) return;
+      if (isGuideLocked) {
+        useOnboardingStore.getState().skipAll();
+        closeSettings();
+        return;
+      }
       closeSettings();
       checkModelPlaceholder()
         .then((result) => {
@@ -81,80 +86,38 @@ export function SettingsDialog() {
   }, [openSettings, closeSettings, settingsTab, isGuideLocked]);
 
   return (
-    <Dialog open={settingsOpen} onOpenChange={handleOpenChange}>
-      <DialogContent showCloseButton={false} className="em-settings-dialog !grid-none !flex !flex-col max-w-none sm:max-w-3xl h-[100dvh] sm:h-[76vh] sm:max-h-[88vh] p-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
-        <DialogHeader className="border-b border-[var(--em-line)] bg-[var(--em-panel-soft)] px-4 pt-4 pb-4 sm:px-6 sm:pt-5 flex-shrink-0 flex-row items-center">
-          <DialogTitle className="flex items-center gap-2 flex-1">
-            <Settings className="h-5 w-5" />
-            设置
-          </DialogTitle>
-          <DialogClose asChild>
-            <Button variant="ghost" size="icon" className="h-7 w-7 shrink-0 opacity-70 hover:opacity-100">
-              <X className="h-4 w-4" />
-              <span className="sr-only">Close</span>
-            </Button>
-          </DialogClose>
-        </DialogHeader>
-
+    <Dialog open={settingsOpen} onOpenChange={handleOpenChange} modal={!isGuideLocked}>
+      <DialogContent
+        showCloseButton={false}
+        onInteractOutside={(event) => { if (isGuideLocked) event.preventDefault(); }}
+        onOpenAutoFocus={(event) => { if (isGuideLocked) event.preventDefault(); }}
+        onCloseAutoFocus={(event) => { if (isGuideLocked) event.preventDefault(); }}
+        className="em-settings-dialog !grid-none !flex !flex-col max-w-none max-h-none sm:max-w-3xl h-[100dvh] sm:h-[76vh] sm:max-h-[88vh] p-0 gap-0 overflow-hidden rounded-none sm:rounded-lg top-0 left-0 right-0 bottom-0 sm:top-[50%] sm:left-[50%] sm:right-auto sm:bottom-auto translate-x-0 translate-y-0 sm:translate-x-[-50%] sm:translate-y-[-50%] w-full">
         <Tabs
-          value={settingsTab}
+          value={primaryTab}
           onValueChange={(v) => openSettings(v)}
-          className="pb-4 sm:pb-6 flex flex-col overflow-hidden min-h-0 flex-1"
+          className="flex flex-col overflow-hidden min-h-0 flex-1"
         >
-          {/* ── Tab navigation (mobile: 2×4 grid, desktop: horizontal strip) ── */}
+          <div className="em-settings-chrome flex-shrink-0">
+            <DialogHeader className="px-4 pt-2 pb-0 sm:px-6 sm:pt-3 flex-shrink-0 flex-row items-center">
+              <DialogTitle className="flex items-center gap-2 flex-1">
+                <Settings className="h-5 w-5" />
+                设置
+              </DialogTitle>
+              <DialogClose asChild>
+                <Button variant="ghost" size="icon" className="h-9 w-9 shrink-0 rounded-full opacity-70 hover:opacity-100">
+                  <X className="h-4 w-4" />
+                  <span className="sr-only">Close</span>
+                </Button>
+              </DialogClose>
+            </DialogHeader>
+
+            {/* ── Tab navigation (mobile: scrollable capsules, desktop: horizontal strip) ── */}
             <nav className="em-settings-tabs relative flex-shrink-0" role="tablist" data-coach-id="coach-settings-tabs">
-            {/* Desktop: horizontal strip */}
-            <div className="hidden sm:flex px-4">
-              {TAB_META.map((tab) => {
-                const isActive = settingsTab === tab.value;
-                return (
-                  <button
-                    key={tab.value}
-                    type="button"
-                    role="tab"
-                    aria-selected={isActive}
-                    data-coach-id={`coach-settings-tab-${tab.value}`}
-                    onClick={() => openSettings(tab.value)}
-                    className={`
-                      relative flex-1 min-w-[44px] flex items-center justify-center
-                      gap-2 py-3
-                      outline-none select-none whitespace-nowrap
-                      transition-colors duration-200
-                      ${isActive
-                        ? "text-foreground"
-                        : "text-muted-foreground hover:text-foreground/70"}
-                    `}
-                  >
-                    <span
-                      className="transition-colors duration-200"
-                      style={{ color: isActive ? "var(--em-primary)" : undefined }}
-                    >
-                      {tab.icon}
-                    </span>
-                    <span className="text-[13px] font-medium leading-tight">
-                      {tab.label}
-                    </span>
-                    {isActive && (
-                      <motion.div
-                        layoutId="settings-tab-underline"
-                        className="absolute bottom-0 inset-x-2 h-[2px] rounded-full"
-                        style={{ backgroundColor: "var(--em-primary)" }}
-                        transition={{ type: "spring", stiffness: 400, damping: 30 }}
-                      />
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-            {/* Mobile: scrollable frosted-glass capsules with fade masks */}
-            <div className="relative sm:hidden">
-              {/* Left fade mask */}
-              <div className="pointer-events-none absolute left-0 top-0 bottom-0 w-6 z-10 bg-linear-to-r from-background to-transparent" />
-              {/* Right fade mask */}
-              <div className="pointer-events-none absolute right-0 top-0 bottom-0 w-6 z-10 bg-linear-to-l from-background to-transparent" />
-              <div className="flex gap-2 px-5 py-2 overflow-x-auto scrollbar-none">
+              {/* Desktop: horizontal strip */}
+              <div className="hidden sm:flex px-4">
                 {TAB_META.map((tab) => {
-                  const isActive = settingsTab === tab.value;
+                  const isActive = primaryTab === tab.value;
                   return (
                     <button
                       key={tab.value}
@@ -162,17 +125,15 @@ export function SettingsDialog() {
                       role="tab"
                       aria-selected={isActive}
                       data-coach-id={`coach-settings-tab-${tab.value}`}
-                      onClick={() => openSettings(tab.value)}
+                      onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
                       className={`
-                        flex items-center gap-1.5 px-3 py-1.5
-                        rounded-full shrink-0
+                        relative flex-1 min-w-[44px] flex items-center justify-center
+                        gap-2 py-3
                         outline-none select-none whitespace-nowrap
-                        text-[12px] font-medium
-                        transition-all duration-200
-                        backdrop-blur-md
+                        transition-colors duration-200
                         ${isActive
-                          ? "bg-primary/15 text-foreground shadow-sm ring-1 ring-primary/20"
-                          : "bg-muted/40 text-muted-foreground hover:bg-muted/70 hover:text-foreground/80"}
+                          ? "text-foreground"
+                          : "text-muted-foreground hover:text-foreground/70"}
                       `}
                     >
                       <span
@@ -181,40 +142,85 @@ export function SettingsDialog() {
                       >
                         {tab.icon}
                       </span>
-                      {tab.label}
+                      <span className="text-[13px] font-medium leading-tight">
+                        {tab.label}
+                      </span>
+                      {isActive && (
+                        <motion.div
+                          layoutId="settings-tab-underline"
+                          className="absolute bottom-0 inset-x-2 h-[2px] rounded-full"
+                          style={{ backgroundColor: "var(--em-primary)" }}
+                          transition={{ type: "spring", stiffness: 400, damping: 30 }}
+                        />
+                      )}
                     </button>
                   );
                 })}
               </div>
-            </div>
-            <div className="border-b border-border" />
-          </nav>
+
+              {/* Mobile: scrollable frosted-glass capsules with fade masks */}
+              <div className="relative sm:hidden">
+                <div className="em-settings-tab-fade pointer-events-none absolute left-0 top-0 bottom-0 w-5 z-10" />
+                <div className="em-settings-tab-fade pointer-events-none absolute right-0 top-0 bottom-0 w-5 z-10 rotate-180" />
+                <div className="flex gap-2 px-4 py-1.5 overflow-x-auto scrollbar-none">
+                  {TAB_META.map((tab) => {
+                    const isActive = primaryTab === tab.value;
+                    return (
+                      <button
+                        key={tab.value}
+                        type="button"
+                        role="tab"
+                        aria-selected={isActive}
+                        data-coach-id={`coach-settings-tab-${tab.value}`}
+                        onClick={() => openSettings(tab.value === "plugins" ? "skills" : tab.value)}
+                        className={`
+                          flex items-center justify-center gap-1.5 px-3 py-1.5
+                          rounded-full shrink-0
+                          outline-none select-none whitespace-nowrap
+                          text-[12px] font-medium
+                          transition-all duration-200
+                          backdrop-blur-md
+                          ${isActive
+                            ? "bg-primary/15 text-foreground shadow-sm ring-1 ring-primary/20"
+                            : "bg-background/45 text-muted-foreground hover:bg-background/70 hover:text-foreground/80"}
+                        `}
+                      >
+                        <span
+                          className="transition-colors duration-200"
+                          style={{ color: isActive ? "var(--em-primary)" : undefined }}
+                        >
+                          {tab.icon}
+                        </span>
+                        {tab.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            </nav>
+          </div>
           <div className="h-2 sm:h-3 flex-shrink-0" />
 
           <AnimatePresence mode="wait">
             <motion.div
-              key={settingsTab}
+              key={primaryTab}
               initial={{ opacity: 0, x: 8 }}
               animate={{ opacity: 1, x: 0 }}
               exit={{ opacity: 0, x: -8 }}
               transition={{ duration: 0.15 }}
-              className="em-settings-scroll overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[env(safe-area-inset-bottom)]"
+              className="em-settings-scroll overflow-y-auto min-h-0 flex-1 px-4 sm:px-6 flex flex-col pb-[max(1rem,env(safe-area-inset-bottom))] sm:pb-6"
             >
               <Suspense fallback={<TabSpinner />}>
                 <TabsContent value="model" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "model" ? true : undefined} data-coach-id="coach-settings-content-model">
                   {settingsTab === "model" && <ModelTab />}
                 </TabsContent>
-                <TabsContent value="rules" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "rules" ? true : undefined} data-coach-id="coach-settings-content-rules">
-                  {settingsTab === "rules" && <RulesTab />}
-                </TabsContent>
-                <TabsContent value="skills" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "skills" ? true : undefined} data-coach-id="coach-settings-content-skills">
-                  {settingsTab === "skills" && <SkillsTab />}
-                </TabsContent>
-                <TabsContent value="mcp" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "mcp" ? true : undefined} data-coach-id="coach-settings-content-mcp">
-                  {settingsTab === "mcp" && <MCPTab />}
-                </TabsContent>
-                <TabsContent value="memory" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "memory" ? true : undefined} data-coach-id="coach-settings-content-memory">
-                  {settingsTab === "memory" && <MemoryTab />}
+                <TabsContent value="plugins" className="mt-0 grow shrink-0 flex flex-col" forceMount={primaryTab === "plugins" ? true : undefined} data-coach-id={`coach-settings-content-${pluginTab}`}>
+                  {primaryTab === "plugins" && (
+                    <PluginsTab
+                      activeTab={pluginTab}
+                      onTabChange={(tab) => openSettings(tab)}
+                    />
+                  )}
                 </TabsContent>
                 <TabsContent value="runtime" className="mt-0 grow shrink-0 flex flex-col" forceMount={settingsTab === "runtime" ? true : undefined} data-coach-id="coach-settings-content-runtime">
                   {settingsTab === "runtime" && <RuntimeTab />}
@@ -226,7 +232,6 @@ export function SettingsDialog() {
             </motion.div>
           </AnimatePresence>
         </Tabs>
-        <SettingsTourHints activeTab={settingsTab} />
       </DialogContent>
     </Dialog>
   );

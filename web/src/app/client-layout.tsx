@@ -5,26 +5,31 @@ import { Sidebar, SidebarToggle } from "@/components/sidebar/Sidebar";
 import { TopModelSelector } from "@/components/chat/TopModelSelector";
 import { ChatSessionHeader } from "@/components/chat/ChatSessionHeader";
 import { ChatWorkspaceTabs } from "@/components/chat/ChatWorkspaceTabs";
+import { BackgroundTasks } from "@/components/chat/BackgroundTasks";
 import { WorkbookPanelButton } from "@/components/excel/WorkbookPanelButton";
 import { JevTimelineButton, JevTimelineDrawer } from "@/components/chat/JevTimeline";
 import { SessionSync } from "@/components/providers/SessionSync";
 import { ExcelDataRecovery } from "@/components/providers/ExcelDataRecovery";
 import { PlaceholderAlert } from "@/components/modals/PlaceholderAlert";
-import { SettingsDialog } from "@/components/settings/SettingsDialog";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { shouldShowCoachMarks, shouldShowOnboardingWizard } from "@/stores/onboarding-state";
-import { ExcelSidePanel } from "@/components/excel/ExcelSidePanel";
-import { prefetchUniverModules } from "@/lib/univer-modules";
-import { WordSidePanel } from "@/components/word/WordSidePanel";
 import { FilePreviewHost } from "@/components/files/FilePreviewHost";
+import { useUIStore } from "@/stores/ui-store";
+import { useExcelStore } from "@/stores/excel-store";
+import { useWordStore } from "@/stores/word-store";
+import { useChatStore } from "@/stores/chat-store";
+
+const SettingsDialog = dynamic(() => import("@/components/settings/SettingsDialog").then((m) => m.SettingsDialog), { ssr: false });
+const ExcelSidePanel = dynamic(() => import("@/components/excel/ExcelSidePanel").then((m) => m.ExcelSidePanel), { ssr: false });
+const WordSidePanel = dynamic(() => import("@/components/word/WordSidePanel").then((m) => m.WordSidePanel), { ssr: false });
 
 const AdminPanel = dynamic(
   () => import("@/components/admin/AdminPanel").then((m) => ({ default: m.AdminPanel })),
   { ssr: false }
 );
 
-// 首屏空闲后再预加载 Univer，避免和会话/模型请求抢带宽
-prefetchUniverModules();
+// Univer is warmed by workbook hover/focus and opening, not by loading chat.
+// requestIdleCallback cannot keep a large module's parse/evaluation work idle.
 
 const ApprovalModal = dynamic(
   () => import("@/components/modals/ApprovalModal").then((m) => ({ default: m.ApprovalModal })),
@@ -46,13 +51,12 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
   const coachMarksCompleted = useOnboardingStore((s) => s.coachMarksCompleted);
   const advancedGuideCompleted = useOnboardingStore((s) => s.advancedGuideCompleted);
   const settingsGuideCompleted = useOnboardingStore((s) => s.settingsGuideCompleted);
-  const backendConfigured = useOnboardingStore((s) => s.backendConfigured);
   const userSynced = useOnboardingStore((s) => s._userSynced);
-  const showWizard = shouldShowOnboardingWizard(userSynced, wizardCompleted, backendConfigured);
+  const guideGeneration = useOnboardingStore((s) => s._resetGeneration);
+  const showWizard = shouldShowOnboardingWizard(userSynced, wizardCompleted);
   const showCoachMarks = shouldShowCoachMarks(
     userSynced,
     wizardCompleted,
-    backendConfigured,
     coachMarksCompleted,
     advancedGuideCompleted,
     settingsGuideCompleted,
@@ -60,29 +64,33 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
 
   return (
     <>
-      {/* Onboarding Wizard — full-screen overlay for first-time setup or missing backend config */}
-      {showWizard && <OnboardingWizard />}
+      {/* First-run setup can be skipped even before a model is configured. */}
+      {showWizard && <OnboardingWizard key={guideGeneration} />}
 
-      {/* Coach Marks — two-phase guide (basic + advanced explore) */}
-      {showCoachMarks && <CoachMarks />}
+      {/* Interactive chapters share progress across responsive layouts. */}
+      {showCoachMarks && <CoachMarks key={guideGeneration} />}
 
       <div className="em-app-shell flex h-viewport overflow-hidden">
         <Sidebar />
         <main className="em-main flex-1 flex flex-col overflow-hidden min-w-0">
-          {/* 顶栏只占对话列；表格/文档侧栏与左侧栏一样通顶挤压 */}
+          {/* 顶栏与对话区共用同一列，右侧面板打开时一起缩窄 */}
           <div className="em-topbar flex flex-col shrink-0 topbar-glass">
-            <div className="em-topbar-toolbar flex items-center overflow-hidden">
-              <SidebarToggle />
-              <ChatSessionHeader />
+            <div className="em-topbar-toolbar relative flex items-center overflow-hidden">
+              <div className="em-topbar-leading flex min-w-0 flex-1 items-center">
+                <SidebarToggle />
+                <ChatSessionHeader />
+              </div>
 
-              <div className="ml-auto flex items-center gap-1 sm:gap-1.5 md:gap-2 flex-shrink-0 min-w-0">
+              <div className="em-workspace-tabs">
+                <ChatWorkspaceTabs />
+              </div>
+
+              <div className="em-topbar-actions ml-auto flex items-center gap-1 sm:gap-1.5 md:gap-2 flex-shrink-0 min-w-0">
                 <TopModelSelector />
+                <BackgroundTasks />
                 <JevTimelineButton />
                 <WorkbookPanelButton />
               </div>
-            </div>
-            <div className="em-workspace-tabs">
-              <ChatWorkspaceTabs />
             </div>
           </div>
           <div className="flex-1 min-h-0 overflow-hidden">
@@ -90,16 +98,29 @@ export function ClientLayout({ children }: { children: React.ReactNode }) {
           </div>
         </main>
         <JevTimelineDrawer />
-        <ExcelSidePanel />
-        <WordSidePanel />
+        <WorkspaceOverlays />
         <FilePreviewHost />
-        <ApprovalModal />
         <SessionSync />
         <ExcelDataRecovery />
         <PlaceholderAlert />
-        <SettingsDialog />
-        <AdminPanel />
       </div>
     </>
   );
+}
+
+function WorkspaceOverlays() {
+  const settingsOpen = useUIStore((s) => s.settingsOpen);
+  const adminOpen = useUIStore((s) => s.adminOpen);
+  const hasApproval = useChatStore((s) => !!s.pendingApproval);
+  // Retain the initialized workbook when closed, preserving the existing
+  // editor lifecycle, but do not import its UI before the first open.
+  const hasExcelPanel = useExcelStore((s) => s.panelOpen || !!s.activeFilePath);
+  const wordPanelOpen = useWordStore((s) => s.panelOpen);
+  return <>
+    {hasExcelPanel && <ExcelSidePanel />}
+    {wordPanelOpen && <WordSidePanel />}
+    {hasApproval && <ApprovalModal />}
+    {settingsOpen && <SettingsDialog />}
+    {adminOpen && <AdminPanel />}
+  </>;
 }

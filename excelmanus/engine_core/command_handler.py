@@ -1,7 +1,7 @@
 """CommandHandler — 从 AgentEngine 解耦的控制命令处理组件。
 
 负责管理：
-- /fullaccess, /code, /subagent, /accept, /reject, /undo, /plan, /model, /compact, /registry 命令
+- /fullaccess, /subagent, /accept, /reject, /undo, /plan, /model, /compact, /registry 命令
 """
 
 from __future__ import annotations
@@ -70,6 +70,9 @@ class CommandHandler:
         command = NORMALIZED_ALIAS_TO_CANONICAL_CONTROL_COMMAND.get(normalized_command)
         if command is None:
             return None
+        if command == "/resume":
+            result = await e._driver.resume(text.partition(" ")[2], on_event=on_event)
+            return result.reply
 
         from excelmanus.skillpacks.router import SkillMatchResult
         e._last_route_result = SkillMatchResult(
@@ -86,7 +89,10 @@ class CommandHandler:
                 e._full_access_enabled = True
                 e._persist_full_access(True)
                 self._emit_mode_changed(on_event, "full_access", True)
-                msg = "已开启 fullaccess。当前代码技能权限：full_access。"
+                msg = (
+                    "已开启跳过审批（full_access）。模型请求的工具、联网代码与本机 Shell "
+                    "命令将自动执行。"
+                )
                 # 若当前有 pending approval，自动执行并续上对话
                 pending = e.approval.pending
                 if pending is not None:
@@ -109,41 +115,12 @@ class CommandHandler:
 
                     series_of(e).note("catalog/change")
                 self._emit_mode_changed(on_event, "full_access", False)
-                return "已关闭 fullaccess。当前代码技能权限：restricted。"
+                return "已关闭跳过审批（restricted）。联网代码与非白名单 Shell 命令已恢复限制。"
             if action == "status" and not too_many_args:
-                status = "full_access" if e._full_access_enabled else "restricted"
-                return f"当前代码技能权限：{status}。"
+                status = "跳过（含联网与本机命令）" if e._full_access_enabled else "询问（受限）"
+                code_access = "full_access" if e._full_access_enabled else "restricted"
+                return f"当前审批策略：{status}；代码技能权限：{code_access}。"
             return "无效参数。用法：/fullaccess [on|off|status]。"
-
-        if command == "/code":
-            from excelmanus.tools.runtime import present_as_of, set_present_as_preference
-
-            if (action in {"on", ""}) and not too_many_args:
-                set_present_as_preference(e, "code")
-                persist = getattr(e, "_persist_present_as", None)
-                if callable(persist):
-                    persist("code")
-                self._emit_mode_changed(on_event, "present_as", True)
-                return (
-                    "已开启代码模式。模型只能直调 run_code，其余能力在程序内通过 SDK 调用。"
-                    "观察/计划模式下仍使用原生工具。"
-                )
-            if action == "off" and not too_many_args:
-                set_present_as_preference(e, "native")
-                persist = getattr(e, "_persist_present_as", None)
-                if callable(persist):
-                    persist("native")
-                self._emit_mode_changed(on_event, "present_as", False)
-                return "已关闭代码模式，回到原生工具目录。"
-            if action == "status" and not too_many_args:
-                preferred = "code" if str(getattr(e, "_present_as", "native") or "") == "code" else "native"
-                effective = present_as_of(e)
-                if preferred == "code" and effective != "code":
-                    return "代码模式: **开启**（当前观察/计划，仍使用原生工具）。"
-                if preferred == "code":
-                    return "代码模式: **开启**。"
-                return "代码模式: **关闭**。"
-            return "无效参数。用法：/code [on|off|status]。"
 
         if command == "/subagent":
             # /subagent 默认行为为查询状态，避免误触启停
@@ -245,6 +222,7 @@ class CommandHandler:
             return await self._handle_probe_command(parts)
 
         if command == "/clear":
+            await self._engine.shutdown_agents()
             return self._handle_clear_command()
 
         return self._handle_undo_command(parts)
@@ -312,6 +290,8 @@ class CommandHandler:
         sys_msgs, compact_tools = compaction_wire_context(e)
         sys_msgs = sys_msgs or e.memory.build_system_messages()
 
+        from excelmanus.compaction import capture_progress, sync_compaction_boundary
+
         result = await compaction_mgr.manual_compact(
             memory=e.memory,
             system_msgs=sys_msgs,
@@ -320,21 +300,17 @@ class CommandHandler:
             custom_instruction=custom_instruction,
             tools=compact_tools,
             vision_capable=bool(getattr(e, "_is_vision_capable", True)),
+            progress_provider=lambda: capture_progress(e),
         )
 
         if not result.success:
             return f"压缩未执行: {result.error}"
 
-        # 压缩替换了消息列表（成功即必然改写），重置快照索引以触发持久化全量重写
-        e.set_message_snapshot_index(0)
-        # 信封以 engine 侧 generation 为准（envelope 取值 engine or memory），
-        # 必须与 memory 侧同步，否则旧信封会因 generation 相等而拒绝新历史。
-        e._compaction_generation = int(
-            getattr(e.memory, "_compaction_generation", 0) or 0
-        )
-        from excelmanus.prompt.envelope import invalidate_envelope
+        recorder = getattr(e, "record_compaction_handoff", None)
+        if callable(recorder):
+            recorder(getattr(result, "handoff", None))
 
-        invalidate_envelope(e)
+        sync_compaction_boundary(e)
 
         pct_before = (
             result.tokens_before / e.max_context_tokens * 100
@@ -427,10 +403,9 @@ class CommandHandler:
 
         # 子调用内联等待中的审批：决策注入等待通道，禁止走重放路径
         # （重放会在原调用之外产生第二次执行）。
-        if approval_id in getattr(e, "_inflight_approval_ids", ()):
-            resolved = e._interaction_registry.resolve(
-                approval_id, {"decision": "accept", "approval_id": approval_id},
-            )
+        if approval_id in getattr(e, "_inflight_approval_ids", ()) or e._interaction_registry.has_pending(approval_id):
+            from excelmanus.chat_turn import submit_approval
+            resolved = submit_approval(e, approval_id, "accept")
             if resolved:
                 return f"已批准 `{approval_id}`，等待工具调用继续执行。"
             return "该审批正在由工具内联通道等待决策，无法通过 /accept 重放。"
@@ -522,10 +497,9 @@ class CommandHandler:
             return "无效参数。用法：/reject <id>。"
         approval_id = parts[1].strip()
         pending = e.approval.pending
-        if approval_id in getattr(e, "_inflight_approval_ids", ()):
-            resolved = e._interaction_registry.resolve(
-                approval_id, {"decision": "reject", "approval_id": approval_id},
-            )
+        if approval_id in getattr(e, "_inflight_approval_ids", ()) or e._interaction_registry.has_pending(approval_id):
+            from excelmanus.chat_turn import submit_approval
+            resolved = submit_approval(e, approval_id, "reject")
             if resolved:
                 return f"已拒绝 `{approval_id}`。"
             return "该审批正在由工具内联通道等待决策，无法通过 /reject 处理。"

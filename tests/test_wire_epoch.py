@@ -134,7 +134,7 @@ def test_epoch_key_changes_with_model_or_catalog() -> None:
 
 
 def test_tools_array_change_is_not_epoch_change() -> None:
-    """present_as=code 只改 L4 wire：tools_digest 变，catalog_digest 不变 → 非 epoch_changed。
+    """工具披露只改 L4 wire：tools_digest 变，catalog_digest 不变 → 非 epoch_changed。
 
     assemble_envelope 仍会因 prev.tools != tools 而 starts_series。
     """

@@ -16,7 +16,7 @@ export type { CoachPhase };
 interface OnboardingState extends OnboardingSnapshot {
   /** Runtime-only: whether the backend has valid model config (from /health `configured` field). */
   backendConfigured: boolean | null;
-  /** Runtime-only: true while the settings tour is active — prevents closing the settings dialog. */
+  /** Runtime-only: lets the settings tour card receive focus outside the settings dialog. */
   isGuideLocked: boolean;
   /** Runtime-only: incremented by resetToPhase so CoachMarks can detect external resets. */
   _resetGeneration: number;
@@ -30,6 +30,7 @@ interface OnboardingState extends OnboardingSnapshot {
   completeSettingsGuide: () => void;
   declineSettingsGuide: () => void;
   skipWizard: () => void;
+  skipAll: () => void;
   resetOnboarding: () => void;
   resetToPhase: (target: "wizard" | "basic" | "advanced" | "settings") => void;
   setCoachProgress: (phase: CoachPhase, stepIndex: number) => void;
@@ -49,8 +50,6 @@ function snapshotFromStore(state: OnboardingSnapshot): OnboardingSnapshot {
     coachStepIndex: state.coachStepIndex,
   };
 }
-
-let persistOnboarding = (_options?: { clearLegacyOnSuccess?: boolean }): void => {};
 
 export const useOnboardingStore = create<OnboardingState>()((set) => ({
   wizardCompleted: false,
@@ -82,7 +81,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
     persistOnboarding();
   },
   completeSettingsGuide: () => {
-    set({ settingsGuideCompleted: true, coachPhase: "done", coachStepIndex: 0 });
+    set({ coachMarksCompleted: true, advancedGuideCompleted: true, settingsGuideCompleted: true, coachPhase: "done", coachStepIndex: 0, isGuideLocked: false });
     persistOnboarding();
   },
   declineSettingsGuide: () => {
@@ -91,6 +90,19 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
   },
   skipWizard: () => {
     set({ wizardCompleted: true, skippedAt: new Date().toISOString() });
+    persistOnboarding();
+  },
+  skipAll: () => {
+    set({
+      wizardCompleted: true,
+      coachMarksCompleted: true,
+      advancedGuideCompleted: true,
+      settingsGuideCompleted: true,
+      coachPhase: "done",
+      coachStepIndex: 0,
+      isGuideLocked: false,
+      skippedAt: new Date().toISOString(),
+    });
     persistOnboarding();
   },
   resetOnboarding: () => {
@@ -173,7 +185,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
     const server = snapshotFromServer(raw, configured);
     const local = readLegacyLocalOnboarding();
     const merged = mergeOnboardingSnapshots(server, local);
-    set({ ...merged, _userSynced: true });
+    set({ ...merged, backendConfigured: configured, _userSynced: true });
     if (local && !snapshotsEqual(merged, server)) {
       persistOnboarding({ clearLegacyOnSuccess: true });
     } else {
@@ -182,13 +194,31 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
   },
 }));
 
-persistOnboarding = (options) => {
-  const payload = snapshotToPayload(snapshotFromStore(useOnboardingStore.getState()));
-  void apiPut("/onboarding", payload)
-    .then(() => {
-      if (options?.clearLegacyOnSuccess !== false) clearLegacyLocalOnboarding();
-    })
-    .catch(() => {
-      /* 下次用户操作会再写；不打断当前引导 */
-    });
+// Serialize and coalesce progress writes: a slow previous step must never
+// overwrite a later skip/completion on the server.
+let pendingWrite: { payload: ReturnType<typeof snapshotToPayload>; clearLegacy: boolean } | null = null;
+let writing = false;
+const persistOnboarding = (options?: { clearLegacyOnSuccess?: boolean }): void => {
+  pendingWrite = {
+    payload: snapshotToPayload(snapshotFromStore(useOnboardingStore.getState())),
+    clearLegacy: options?.clearLegacyOnSuccess !== false,
+  };
+  if (writing) return;
+  writing = true;
+  void (async () => {
+    try {
+      while (pendingWrite) {
+        const next = pendingWrite;
+        pendingWrite = null;
+        try {
+          await apiPut("/onboarding", next.payload);
+          if (next.clearLegacy) clearLegacyLocalOnboarding();
+        } catch {
+          /* Continue with the latest progress; retry on the next user action. */
+        }
+      }
+    } finally {
+      writing = false;
+    }
+  })();
 };

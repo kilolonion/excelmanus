@@ -4,6 +4,7 @@ import { MessageCircleQuestion, X, Check, SkipForward } from "lucide-react";
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { abortChat, answerQuestion } from "@/lib/api";
+import { resumeAfterInteraction } from "@/lib/chat-actions";
 import { motion } from "framer-motion";
 import type { Question } from "@/lib/types";
 
@@ -59,7 +60,8 @@ export function InlineQuestionBanner({ question, selected, onToggle }: InlineQue
                 const qid = question.id;
                 setPendingQuestion(null);
                 if (sid && qid) {
-                  answerQuestion(sid, qid, "[用户选择跳过此问题，请自行判断并继续执行]").catch(() => {});
+                  answerQuestion(sid, qid, "[用户选择跳过此问题，请自行判断并继续执行]")
+                    .then((response) => resumeAfterInteraction(sid, response)).catch(() => {});
                 }
               }}
               className="text-muted-foreground/50 hover:text-foreground transition-colors px-1.5 py-1 rounded-lg hover:bg-muted/60 text-[11px] font-medium"

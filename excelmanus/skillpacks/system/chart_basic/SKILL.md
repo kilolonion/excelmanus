@@ -1,6 +1,6 @@
 ---
 name: chart_basic
-description: 已有数据上的图表与表格对象。
+description: 已有数据上的原生 Excel 图表（Table 对象当前不可用）。
 file_patterns:
   - "*.xlsx"
 resources:
@@ -9,7 +9,7 @@ version: "2.1.0"
 ---
 原生 Excel 图表走 `manage_spreadsheet_objects` 的 `operations`（`kind=chart`）。`data_range` 需包含表头行。
 
-独立 PNG 可用 `run_code` + matplotlib。Table 名称在工作簿内唯一，`ref` 含表头。
+独立 PNG 可用 `run_code` + matplotlib。当前只支持创建原生图表；没有 Table 对象或已有图表更新/删除入口。
 
 ```
 manage_spreadsheet_objects(

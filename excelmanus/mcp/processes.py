@@ -82,6 +82,10 @@ def list_workspace_mcp_processes(
     state_dir: str | None = None,
 ) -> list[ProcessInfo]:
     """列出当前工作区 MCP 缓存目录下的所有进程。"""
+    if os.name == "nt":
+        # SDK owns connection jobs; the desktop backend owns a parent job with
+        # KILL_ON_JOB_CLOSE for final cleanup. Never fall back to Unix PID probes.
+        return []
     marker = _workspace_mcp_marker(workspace_root, state_dir=state_dir)
     try:
         output = subprocess.check_output(
@@ -147,6 +151,19 @@ def _expand_descendants(
 
 def _is_alive(pid: int) -> bool:
     """检查进程是否仍存在。"""
+    if os.name == "nt":
+        import win32api
+        import win32event
+        try:
+            handle = win32api.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+        except Exception as exc:
+            if getattr(exc, "winerror", None) == 5:
+                return True
+            return False
+        try:
+            return win32event.WaitForSingleObject(handle, 0) == win32event.WAIT_TIMEOUT
+        finally:
+            handle.Close()
     try:
         os.kill(pid, 0)
     except ProcessLookupError:

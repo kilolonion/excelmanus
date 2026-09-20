@@ -9,7 +9,6 @@ import pytest
 from excelmanus.prompt.canonical import (
     FORBIDDEN_MODEL_TERMS,
     TOOL_DESCRIPTIONS,
-    TOOLS_CODE_ONLY,
 )
 from excelmanus.prompt.registry import PromptRegistry, UnknownPromptVariable, interpolate
 from excelmanus.prompt.load import PromptComposer, PromptContext, parse_prompt_file
@@ -35,6 +34,17 @@ def _fill(text: str) -> str:
 
 
 class TestCanonicalMarkdown:
+    @pytest.mark.parametrize("condition", ["catalog_mode: code", "chat_mode: unknown", "present_as: code"])
+    def test_removed_or_invalid_mode_conditions_fail_loud(self, tmp_path: Path, condition: str) -> None:
+        path = tmp_path / "invalid.md"
+        path.write_text(
+            "---\nname: invalid-mode\npriority: 1\nlayer: strategy\n"
+            f"conditions:\n  {condition}\n---\n正文。\n",
+            encoding="utf-8",
+        )
+        with pytest.raises(ValueError, match="conditions 含未知键|必须是 read/plan/write"):
+            parse_prompt_file(path)
+
     def test_prompt_files_have_required_frontmatter(self) -> None:
         required = [
             PROMPTS_DIR / "core" / "00_identity.md",
@@ -66,14 +76,15 @@ class TestCanonicalMarkdown:
 class TestSystemAssembly:
     def test_write_prefix_matches_snapshot_and_section_order(self) -> None:
         text = system_text("write")
-        assert text == read_snapshot("native_write.txt").rstrip("\n")
+        assert text == read_snapshot("write.txt").rstrip("\n")
         assert text.startswith(section_body("core/00_identity.md"))
         assert filled(section_body("core/10_core_principles.md")) in text
         assert "spreadsheet:invariants" not in text
         assert "结论以实际读取的数据为依据" in text
         assert "VERSION_CONFLICT" in text
         assert "当前是计划模式" not in text
-        assert TOOLS_CODE_ONLY not in text
+        assert "唯一可以直接调用" not in text
+        assert "import em" in text
         from excelmanus.prompt.registry import AssembleContext
 
         names = [
@@ -100,7 +111,7 @@ class TestSystemAssembly:
 
     def test_plan_prefix_matches_snapshot(self) -> None:
         text = system_text("plan")
-        assert text == read_snapshot("native_plan.txt").rstrip("\n")
+        assert text == read_snapshot("plan.txt").rstrip("\n")
         from excelmanus.prompt.registry import AssembleContext
 
         names = [
@@ -114,23 +125,20 @@ class TestSystemAssembly:
         assert "当前是计划模式" in text
         assert "WorkbookSpec 经 edit_spreadsheet" not in text
 
-    def test_code_present_as_inserts_code_only(self) -> None:
-        text = system_text("write", present_as="code")
-        assert text == read_snapshot("code_write.txt").rstrip("\n")
-        assert TOOLS_CODE_ONLY in text
-        assert "VERSION_CONFLICT" in text
+    def test_read_prefix_matches_snapshot(self) -> None:
+        text = system_text("read")
+        assert text == read_snapshot("read.txt").rstrip("\n")
+        assert "VERSION_CONFLICT" not in text
 
-    def test_code_present_as_appends_generated_sdk_section(self) -> None:
-        sdk = "- inspect_spreadsheet(file_path)\n- edit_spreadsheet(file_path, content_version)"
+    def test_sdk_signatures_are_not_injected_into_system_prompt(self) -> None:
         text = _composer().compose_system_text(
             PromptContext(chat_mode="write"),
             variables=_VARS,
-            present_as="code",
-            sdk_section=sdk,
         )
-        assert TOOLS_CODE_ONLY in text
-        assert sdk in text
-        assert text.endswith(sdk)
+        assert "def inspect_spreadsheet(" not in text
+        assert "def edit_spreadsheet(" not in text
+        assert "import em" in text
+        assert "tool_detail" in text
 
     def test_missing_workspace_root_fails_loud(self) -> None:
         with pytest.raises(UnknownPromptVariable) as exc:
@@ -213,7 +221,6 @@ class TestAssembleKv:
         engine._current_chat_mode = "write"
         engine._runtime_vars = dict(_VARS)
         engine._last_route_result = None
-        engine._present_as = "native"
         engine.config.workspace_root = _VARS["workspace_root"]
         engine.active_model = _VARS["model"]
 
@@ -246,7 +253,6 @@ class TestAssembleKv:
         engine._current_chat_mode = "write"
         engine._runtime_vars = dict(_VARS)
         engine._last_route_result = None
-        engine._present_as = "native"
         engine._tool_runtime = None
         engine.config.workspace_root = _VARS["workspace_root"]
         engine.active_model = _VARS["model"]
@@ -264,7 +270,7 @@ class TestAssembleKv:
 
 
 class TestRegistryToolsSnapshot:
-    def test_code_present_as_collapses_bound_tools(self) -> None:
+    def test_direct_and_programmatic_tools_remain_bound(self) -> None:
         from excelmanus.prompt.registry import AssembleContext
 
         composer = _composer()
@@ -274,16 +280,11 @@ class TestRegistryToolsSnapshot:
                 {"function": {"name": "run_code"}},
             ]
         )
-        native = composer.registry.assemble(AssembleContext(present_as="native"))
-        assert {s["function"]["name"] for s in native.tools} == {
+        assembly = composer.registry.assemble(AssembleContext())
+        assert {s["function"]["name"] for s in assembly.tools} == {
             "edit_spreadsheet",
             "run_code",
         }
-        from excelmanus.tools.runtime import collapse_schemas
-
-        code_tools = collapse_schemas(native.tools, "code")
-        assert {s["function"]["name"] for s in code_tools} == {"run_code"}
-
 
 def test_system_uses_capability_map_not_tool_index() -> None:
     from excelmanus.prompt.assemble import build_stable_system_prompt

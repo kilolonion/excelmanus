@@ -62,6 +62,12 @@ describe("SubagentBlock", () => {
             error: "写入被拒绝",
             args: { file_path: "sales.xlsx" },
           },
+          {
+            index: 1,
+            name: "inspect_spreadsheet",
+            argsSummary: "overview",
+            status: "running",
+          },
         ],
       }),
     );
@@ -69,6 +75,8 @@ describe("SubagentBlock", () => {
     expect(html).toContain("委派给通用子代理");
     expect(html).toContain("失败");
     expect(html).toContain("错误：工具连续失败");
+    expect(html).toContain("部分工具调用的结束详情未收到");
+    expect(html).not.toContain("animate-spin");
     expect(html).not.toContain("violet");
   });
 

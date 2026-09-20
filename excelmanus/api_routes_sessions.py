@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, Field
 
 from excelmanus.api_app_state import (
     error_json_response as _error_json_response,
@@ -28,6 +29,158 @@ from excelmanus.session import SessionNotFoundError
 logger = get_logger("api.sessions")
 
 router = APIRouter()
+
+
+class SubagentControlRequest(BaseModel):
+    action: Literal["status", "wait", "send", "cancel", "pause", "resume"]
+    message: str = ""
+    wait_seconds: float = Field(default=30, ge=0, le=60)
+
+
+class ResponsesControlRequest(BaseModel):
+    action: Literal["status", "cancel", "steer"]
+    message: str = ""
+
+
+async def _engine_for_session(session_id: str, request: Request):
+    if not await _has_session_access(session_id, request):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    manager = get_session_manager()
+    if manager is None:
+        raise HTTPException(status_code=503, detail="服务未初始化")
+    engine = await manager.get_or_restore_engine(session_id)
+    if engine is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return engine
+
+
+@router.get("/api/v1/sessions/{session_id}/turn")
+async def get_main_turn(session_id: str, request: Request) -> dict:
+    engine = await _engine_for_session(session_id, request)
+    return {"turn": engine._driver.current_turn()}
+
+
+@router.get("/api/v1/sessions/{session_id}/trace")
+async def get_session_trace(session_id: str, request: Request) -> dict[str, Any]:
+    """Read the bounded trace, including spans restored from session snapshots."""
+    engine = await _engine_for_session(session_id, request)
+    trace = getattr(engine, "_trace", None)
+    return {"trace": trace.snapshot() if trace is not None else {"trace_id": "", "spans": []}}
+
+
+@router.get("/api/v1/sessions/{session_id}/tool-calls")
+async def list_tool_calls(session_id: str, request: Request) -> dict:
+    engine = await _engine_for_session(session_id, request)
+    return {"calls": engine._tool_runtime.call_states()}
+
+
+@router.post("/api/v1/sessions/{session_id}/tool-calls/{execution_id}/cancel")
+async def cancel_tool_call(session_id: str, execution_id: str, request: Request) -> dict:
+    engine = await _engine_for_session(session_id, request)
+    try:
+        return {"call": engine._tool_runtime.cancel_call(execution_id)}
+    except KeyError:
+        raise HTTPException(status_code=404, detail="工具执行不存在或已过期") from None
+
+
+@router.get("/api/v1/sessions/{session_id}/handoff")
+async def get_compaction_handoff(session_id: str, request: Request) -> dict[str, Any]:
+    """Read saved progress and continuity state without running a model or tool."""
+    engine = await _engine_for_session(session_id, request)
+    from excelmanus.compaction import handoff_from_memory
+
+    artifact, error = handoff_from_memory(engine.memory)
+    return {"handoff": artifact, "continuity_error": error}
+
+
+@router.get("/api/v1/sessions/{session_id}/subagents")
+async def list_subagent_runs(session_id: str, request: Request) -> dict:
+    runtime = (await _engine_for_session(session_id, request))._subagent_runtime
+    return {"runs": runtime.list_runs()}
+
+
+@router.post("/api/v1/sessions/{session_id}/subagents/{run_id}")
+async def control_subagent_run(
+    session_id: str, run_id: str, body: SubagentControlRequest, request: Request,
+) -> dict:
+    from excelmanus.subagent.errors import SubagentError
+
+    runtime = (await _engine_for_session(session_id, request))._subagent_runtime
+    try:
+        if body.action == "wait":
+            return {"run": await runtime.wait(run_id, body.wait_seconds)}
+        if body.action == "send":
+            await runtime.send_message(run_id, body.message)
+        elif body.action in {"pause", "cancel"}:
+            await runtime.interrupt(run_id, pause=body.action == "pause")
+        elif body.action == "resume":
+            run_id = await runtime.resume(run_id, body.message)
+        return {"run": runtime.get_run(run_id)}
+    except SubagentError as exc:
+        raise HTTPException(status_code=404 if exc.code == "NOT_FOUND" else 409,
+                            detail=exc.message) from exc
+
+
+@router.post("/api/v1/sessions/{session_id}/responses/{response_id}")
+async def control_responses_background(
+    session_id: str,
+    response_id: str,
+    body: ResponsesControlRequest,
+    request: Request,
+) -> dict[str, Any]:
+    """Query, cancel, or steer a stored Responses background response."""
+    engine = await _engine_for_session(session_id, request)
+    try:
+        if body.action == "status":
+            payload = await engine.get_responses_background(response_id)
+        elif body.action == "cancel":
+            payload = await engine.cancel_responses_background(response_id)
+        else:
+            if not body.message.strip():
+                raise HTTPException(status_code=422, detail="steer message 不能为空")
+            result = await engine.steer_responses(response_id, body.message.strip())
+            payload = {
+                "id": getattr(result, "response_id", "") or "",
+                "status": "completed",
+                "output": getattr(result.choices[0].message, "content", "")
+                if getattr(result, "choices", None) else "",
+            }
+        return {"response": sanitize_external_data(payload)}
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@router.get("/api/v1/sessions/{session_id}/mutations/{operation_id}")
+async def get_workspace_operation(
+    session_id: str, operation_id: str, request: Request,
+) -> dict[str, Any]:
+    """Return the durable idempotent mutation receipt for a session operation."""
+    engine = await _engine_for_session(session_id, request)
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    service = WorkspaceFileService(engine._workspace.root_dir)
+    receipt = service.get_receipt(operation_id, recover=False)
+    if receipt is None:
+        raise HTTPException(status_code=404, detail="找不到写入操作")
+    return {"operation": sanitize_external_data(receipt.to_dict())}
+
+
+@router.post("/api/v1/sessions/{session_id}/mutations/{operation_id}/abort")
+async def abort_workspace_operation(
+    session_id: str, operation_id: str, request: Request,
+) -> dict[str, Any]:
+    """Explicitly abandon an unfinished partial mutation while keeping published files."""
+    engine = await _engine_for_session(session_id, request)
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    service = WorkspaceFileService(engine._workspace.root_dir)
+    try:
+        receipt = service.abort_recovery(operation_id)
+    except Exception as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return {"operation": sanitize_external_data(receipt.to_dict())}
 
 # OpenAPI 错误响应（与 api.py _error_responses 对应项保持一致）
 _error_responses: dict = {
@@ -644,11 +797,12 @@ async def compact_session_context(session_id: str, request: Request) -> JSONResp
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
 
-    engine = await session_manager.get_or_restore_engine(
-        session_id
-    )
-    if engine is None:
-        return _error_json_response(404, f"会话不存在: {session_id}")
+    try:
+        engine = await _engine_for_session(session_id, request)
+    except HTTPException as exc:
+        return _error_json_response(exc.status_code, str(exc.detail))
+    if engine._driver.running:
+        return _error_json_response(409, "当前会话正在执行，请在步骤结束后压缩。")
 
     try:
         result = await engine._command_handler.handle("/compact")
@@ -764,48 +918,14 @@ async def toggle_full_access(session_id: str, request: Request) -> JSONResponse:
     })
 
 
-@router.post("/api/v1/sessions/{session_id}/present-as")
-async def toggle_present_as(session_id: str, request: Request) -> JSONResponse:
-    """切换指定会话的代码模式偏好（供设置页与快捷入口使用）。"""
-    session_manager = get_session_manager()
-    if session_manager is None:
-        raise HTTPException(status_code=503, detail="服务未初始化")
-
-    body = await request.json()
-    from excelmanus.tools.runtime import preferred_present_as, set_present_as_preference
-
-    present_as = preferred_present_as(body.get("present_as"))
-
-    engine = await session_manager.get_or_restore_engine(
-        session_id
-    )
-    if engine is not None:
-        set_present_as_preference(engine, present_as)
-        persist = getattr(engine, "_persist_present_as", None)
-        if callable(persist):
-            persist(present_as)
-    else:
-        database = get_database()
-        if database is not None:
-            try:
-                from excelmanus.stores.config_store import UserConfigStore
-                uc = UserConfigStore(database.conn)
-                uc.set_present_as(present_as)
-            except Exception:
-                logger.debug("持久化 present_as 失败（无会话）", expl_info=True)
-
-    return JSONResponse(content={
-        "session_id": session_id,
-        "present_as": present_as,
-    })
-
-
 @router.get("/api/v1/sessions/{session_id}")
 async def get_session(session_id: str, request: Request) -> JSONResponse:
     """获取会话详情含消息历史。"""
     session_manager = get_session_manager()
     if session_manager is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
+    # 当前会话冷恢复后才能展示可继续提交的交互；读取不启动 Driver。
+    await session_manager.get_or_restore_engine(session_id)
     try:
         detail = await session_manager.get_session_detail(session_id)
     except SessionNotFoundError:
@@ -817,7 +937,6 @@ async def get_session(session_id: str, request: Request) -> JSONResponse:
             "messages": [],
             "full_access_enabled": False,
             "chat_mode": "write",
-            "present_as": "native",
             "current_model": None,
             "current_model_name": None,
             "vision_capable": None,

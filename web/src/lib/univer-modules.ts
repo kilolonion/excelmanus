@@ -1,8 +1,9 @@
 type UniverModules = {
-  createUniver: any;
-  LocaleType: any;
-  UniverSheetsCorePreset: any;
-  sheetsCoreZhCN: any;
+  createUniver: typeof import("@univerjs/presets").createUniver;
+  LocaleType: typeof import("@univerjs/presets").LocaleType;
+  UniverSheetsCorePreset: typeof import("@univerjs/preset-sheets-core").UniverSheetsCorePreset;
+  sheetsCoreZhCN: typeof import("@univerjs/preset-sheets-core/locales/zh-CN").default;
+  mergeWorksheetSnapshotWithDefault: typeof import("@univerjs/core").mergeWorksheetSnapshotWithDefault;
 };
 
 let _univerModuleCache: Promise<UniverModules> | null = null;
@@ -14,12 +15,14 @@ export function getUniverModules() {
       import("@univerjs/preset-sheets-core"),
       import("@univerjs/preset-sheets-core/locales/zh-CN"),
       import("@univerjs/preset-sheets-core/lib/index.css"),
-    ]).then(([presetsMod, sheetCoreMod, zhCNMod]) => ({
+      import("@univerjs/core"),
+    ]).then(([presetsMod, sheetCoreMod, zhCNMod, , coreMod]) => ({
       createUniver: presetsMod.createUniver,
       LocaleType: presetsMod.LocaleType,
       UniverSheetsCorePreset: sheetCoreMod.UniverSheetsCorePreset,
       sheetsCoreZhCN: zhCNMod.default,
-    }));
+      mergeWorksheetSnapshotWithDefault: coreMod.mergeWorksheetSnapshotWithDefault,
+    })).catch((error) => { _univerModuleCache = null; throw error; });
   }
   return _univerModuleCache;
 }
@@ -35,9 +38,9 @@ export function warmUniverModules() {
 export function prefetchUniverModules() {
   if (typeof window === "undefined") return;
   const schedule =
-    (window as any).requestIdleCallback ??
+    window.requestIdleCallback ??
     ((cb: () => void) => setTimeout(cb, 8000));
   schedule(() => {
-    getUniverModules();
+    void getUniverModules().catch(() => {});
   }, { timeout: 8000 });
 }

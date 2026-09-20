@@ -11,7 +11,7 @@ import { apiGet } from "@/lib/api";
 import { displayModelLabel, formatModelIdForDisplay } from "@/lib/model-display";
 import { useUIStore } from "@/stores/ui-store";
 import type { AssistantBlock, ModelInfo } from "@/lib/types";
-import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
+import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { ModelListBottomSheet } from "@/components/chat/ModelListBottomSheet";
 
@@ -43,7 +43,7 @@ interface ProviderGroup {
 function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
   const map = new Map<string, ModelInfo[]>();
   for (const m of models) {
-    const provider = extractProvider(m.base_url);
+    const provider = inferModelBrand(m);
     if (!map.has(provider)) map.set(provider, []);
     map.get(provider)!.push(m);
   }
@@ -71,9 +71,9 @@ export const MessageActions = React.memo(function MessageActions({
   const [copied, setCopied] = useState(false);
   const [feedback, setFeedback] = useState<"up" | "down" | null>(null);
   const [models, setModels] = useState<ModelInfo[]>([]);
-  const [modelsLoaded, setModelsLoaded] = useState(false);
   const [dropdownOpen, setDropdownOpen] = useState(false);
   const [mobileSheetOpen, setMobileSheetOpen] = useState(false);
+  const modelsRequestRef = React.useRef(0);
   const currentModel = useUIStore((s) => s.currentModel);
   const isMobile = useIsMobile();
 
@@ -91,13 +91,14 @@ export const MessageActions = React.memo(function MessageActions({
     // TODO：后端 API 就绪后发送反馈
   }, []);
 
-  const fetchModelsOnce = useCallback(() => {
-    if (modelsLoaded) return;
-    setModelsLoaded(true);
+  const fetchModels = useCallback(() => {
+    const requestId = ++modelsRequestRef.current;
     apiGet<{ models: ModelInfo[] }>("/models")
-      .then((data) => setModels(data.models))
+      .then((data) => {
+        if (requestId === modelsRequestRef.current) setModels(data.models);
+      })
       .catch(() => {});
-  }, [modelsLoaded]);
+  }, []);
 
   const hasText = blocks.some((b) => b.type === "text");
   const hasFailure = blocks.some((b) => b.type === "failure_guidance");
@@ -137,7 +138,7 @@ export const MessageActions = React.memo(function MessageActions({
       {canRetry && onRetryWithModel && isMobile && (
         <>
           <ActionButton
-            onClick={() => { fetchModelsOnce(); setMobileSheetOpen(true); }}
+            onClick={() => { fetchModels(); setMobileSheetOpen(true); }}
             active={false}
             activeColor=""
             label="切换模型重试"
@@ -156,7 +157,7 @@ export const MessageActions = React.memo(function MessageActions({
       )}
 
       {canRetry && onRetryWithModel && !isMobile && (
-        <DropdownMenu onOpenChange={(open) => { setDropdownOpen(open); if (open) fetchModelsOnce(); }}>
+        <DropdownMenu onOpenChange={(open) => { setDropdownOpen(open); if (open) fetchModels(); }}>
           <DropdownMenuTrigger asChild>
             <button
               type="button"

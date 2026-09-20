@@ -929,7 +929,6 @@ def test_file_registry_not_injected_into_system(tmp_path):
     engine.state.injected_context_fingerprint = None
     engine.file_registry = reg
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
     prompts, error = prepare_system_prompts_for_request(engine, [])
     assert error is None

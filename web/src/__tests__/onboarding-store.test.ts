@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const apiPut = vi.fn().mockResolvedValue({});
 
@@ -8,6 +8,11 @@ vi.mock("@/lib/api", () => ({
 
 const { useOnboardingStore } = await import("@/stores/onboarding-store");
 const { LEGACY_ONBOARDING_STORAGE_KEY } = await import("@/stores/onboarding-state");
+
+afterEach(async () => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  vi.unstubAllGlobals();
+});
 
 describe("onboarding store server hydrate", () => {
   beforeEach(() => {
@@ -47,6 +52,30 @@ describe("onboarding store server hydrate", () => {
       "/onboarding",
       expect.objectContaining({ wizard_completed: true }),
     );
+  });
+
+  it("can end all guidance without a model and replay a chapter later", () => {
+    useOnboardingStore.setState({ backendConfigured: false, isGuideLocked: true });
+    useOnboardingStore.getState().skipAll();
+    expect(useOnboardingStore.getState()).toMatchObject({
+      backendConfigured: false, wizardCompleted: true, coachMarksCompleted: true,
+      advancedGuideCompleted: true, settingsGuideCompleted: true, coachPhase: "done", isGuideLocked: false,
+    });
+    useOnboardingStore.getState().resetToPhase("settings");
+    expect(useOnboardingStore.getState()).toMatchObject({ coachPhase: "settings", coachStepIndex: 0, settingsGuideCompleted: false, skippedAt: null });
+  });
+
+  it("keeps the final skip newer than slow in-flight progress writes", async () => {
+    let release!: () => void;
+    apiPut.mockImplementationOnce(() => new Promise<void>((resolve) => { release = resolve; }));
+    useOnboardingStore.getState().setCoachProgress("basic", 1);
+    useOnboardingStore.getState().setCoachProgress("basic", 2);
+    useOnboardingStore.getState().skipAll();
+    expect(apiPut).toHaveBeenCalledTimes(1);
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(apiPut).toHaveBeenCalledTimes(2);
+    expect(apiPut.mock.calls[1][1]).toMatchObject({ coach_phase: "done", wizard_completed: true, settings_guide_completed: true });
   });
 });
 

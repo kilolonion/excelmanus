@@ -175,7 +175,6 @@ def test_settings_from_reads_typesafe_key(monkeypatch: pytest.MonkeyPatch) -> No
         jev_enabled="off",
         jev_exposure="off",
         jev_mode_hint=False,
-        jev_present_as_auto=False,
         jev_observation="off",
         jev_ui_hint=False,
         jev_model="jev-1.13.0",

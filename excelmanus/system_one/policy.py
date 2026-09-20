@@ -37,6 +37,8 @@ T_STICKY_TURNS = 2
 T_PRUNE_KEEP = 4
 T_PRUNE_IRRELEVANT = 0.35
 T_PRUNE_BATCH = 3
+T_RECOVERY_NEEDS_USER = 0.7
+T_RECOVERY_RETRY = 0.8
 _RM_RF = re.compile(
     r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*f\b|\brm\s+-[a-zA-Z]*f[a-zA-Z]*r\b",
     re.IGNORECASE,
@@ -58,7 +60,6 @@ class JevSettings:
     enabled: GateLevel
     exposure: GateLevel
     mode_hint: bool
-    present_as_auto: bool
     observation: GateLevel
     ui_hint: bool
     model: str
@@ -67,6 +68,9 @@ class JevSettings:
     calibrated: bool = False
     protocol: str = ""
     base_url: str = ""
+    verification: GateLevel = "off"
+    recovery: GateLevel = "off"
+    provider_id: str = ""
 
 
 def noul_of(answer: Answer | None, default: float = 0.5) -> float:
@@ -83,7 +87,7 @@ def score_of(answer: Answer | None) -> ScoreAnswer | None:
     return answer if isinstance(answer, ScoreAnswer) else None
 
 
-def _legacy_key_and_protocol(config: Any) -> tuple[str | None, str, str, str]:
+def _legacy_key_and_protocol(config: Any) -> tuple[str | None, str, str, str, str]:
     from excelmanus.system_one.providers import (
         JevProviderRecord,
         record_from_mapping,
@@ -109,21 +113,23 @@ def _legacy_key_and_protocol(config: Any) -> tuple[str | None, str, str, str]:
         gateway_key=gateway,
         model_override=str(getattr(config, "jev_model", "") or ""),
     )
-    return connection.api_key, connection.protocol, connection.model, connection.base_url
+    return connection.api_key, connection.protocol, connection.model, connection.base_url, connection.provider_id
 
 
 def settings_from(config: Any | None = None) -> JevSettings:
     if config is not None:
-        key, protocol, model, base_url = _legacy_key_and_protocol(config)
+        key, protocol, model, base_url, provider_id = _legacy_key_and_protocol(config)
         enabled = str(getattr(config, "jev_enabled", "off") or "off")
         exposure = str(getattr(config, "jev_exposure", "off") or "off")
         observation = str(getattr(config, "jev_observation", "off") or "off")
+        verification = str(getattr(config, "jev_verification", "off") or "off")
         return JevSettings(
             enabled=_as_gate(enabled),
             exposure=_as_gate(exposure),
             mode_hint=bool(getattr(config, "jev_mode_hint", False)),
-            present_as_auto=bool(getattr(config, "jev_present_as_auto", False)),
             observation=_as_gate(observation),
+            verification=_as_gate(verification),
+            recovery=_as_gate(str(getattr(config, "jev_recovery", "off") or "off")),
             ui_hint=bool(getattr(config, "jev_ui_hint", False)),
             model=model,
             api_key=key,
@@ -131,6 +137,7 @@ def settings_from(config: Any | None = None) -> JevSettings:
             calibrated=bool(getattr(config, "jev_calibrated", False)),
             protocol=protocol,
             base_url=base_url,
+            provider_id=provider_id,
         )
     from excelmanus.config import _parse_bool, _parse_jev_gate, _parse_positive_float
     from excelmanus.settings_runtime import get_setting
@@ -154,13 +161,14 @@ def settings_from(config: Any | None = None) -> JevSettings:
         enabled=_parse_jev_gate(get_setting("EXCELMANUS_JEV_ENABLED"), "EXCELMANUS_JEV_ENABLED", "off"),  # type: ignore[arg-type]
         exposure=_parse_jev_gate(get_setting("EXCELMANUS_JEV_EXPOSURE"), "EXCELMANUS_JEV_EXPOSURE", "off"),  # type: ignore[arg-type]
         mode_hint=_parse_bool(get_setting("EXCELMANUS_JEV_MODE_HINT"), "EXCELMANUS_JEV_MODE_HINT", False),
-        present_as_auto=_parse_bool(
-            get_setting("EXCELMANUS_JEV_PRESENT_AS_AUTO"),
-            "EXCELMANUS_JEV_PRESENT_AS_AUTO",
-            False,
-        ),
         observation=_parse_jev_gate(
             get_setting("EXCELMANUS_JEV_OBSERVATION"), "EXCELMANUS_JEV_OBSERVATION", "off"
+        ),  # type: ignore[arg-type]
+        verification=_parse_jev_gate(
+            get_setting("EXCELMANUS_JEV_VERIFICATION"), "EXCELMANUS_JEV_VERIFICATION", "off"
+        ),  # type: ignore[arg-type]
+        recovery=_parse_jev_gate(
+            get_setting("EXCELMANUS_JEV_RECOVERY"), "EXCELMANUS_JEV_RECOVERY", "off"
         ),  # type: ignore[arg-type]
         ui_hint=_parse_bool(get_setting("EXCELMANUS_JEV_UI_HINT"), "EXCELMANUS_JEV_UI_HINT", False),
         model=connection.model,
@@ -180,6 +188,7 @@ def settings_from(config: Any | None = None) -> JevSettings:
         ),
         protocol=connection.protocol,
         base_url=connection.base_url,
+        provider_id=connection.provider_id,
     )
 
 
@@ -235,12 +244,17 @@ def effective_flag(master: GateLevel, enabled: bool) -> GateLevel:
 
 def gate_for_pack(pack_id: str, settings: JevSettings) -> GateLevel:
     spec = get_pack(pack_id)
+    if spec.shadow_only:
+        child = _as_gate(str(getattr(settings, spec.gate, "off") or "off"))
+        return "shadow" if effective_gate(settings.enabled, child) != "off" else "off"
     if spec.gate == "master":
         return settings.enabled
     if spec.gate == "exposure":
         return effective_gate(settings.enabled, settings.exposure)
     if spec.gate == "observation":
         return effective_gate(settings.enabled, settings.observation)
+    if spec.gate == "verification":
+        return effective_gate(settings.enabled, settings.verification)
     if spec.gate == "ui_hint":
         return effective_flag(settings.enabled, settings.ui_hint)
     return "off"
@@ -261,7 +275,7 @@ def decision_can_apply(pack_id: str, decision: Decision, settings: JevSettings) 
 
 
 def flag_is_applied(enabled: bool, settings: JevSettings, *, pack_id: str) -> bool:
-    """bool 子闸（MODE_HINT / PRESENT_AS_AUTO）：总闸 shadow 降级，未签字不得 applied。"""
+    """bool 子闸（MODE_HINT）：总闸 shadow 降级，未签字不得 applied。"""
     if effective_flag(settings.enabled, enabled) != "enforce":
         return False
     from excelmanus.system_one.calibration import calibration_allows_enforce
@@ -307,6 +321,10 @@ def synthesize(pack_id: str, evaluation: Evaluation, state: Mapping[str, Any] | 
         return _synthesize_loop_wrap(evaluation)
     if spec.pack_id == "observation.prune":
         return _synthesize_prune(evaluation, state)
+    if spec.pack_id == "mutation.verify":
+        return _synthesize_mutation_verify(evaluation, state)
+    if spec.pack_id == "recovery.next_step":
+        return _synthesize_recovery(evaluation, state)
     return Decision.noop("unknown_pack")
 
 
@@ -339,13 +357,6 @@ def _synthesize_exposure(evaluation: Evaluation, state: Mapping[str, Any]) -> De
         reason = "mode_mismatch_write_fallback"
     if profile not in PROFILE_NAMES:
         profile = "full"
-    fits = noul_of(answers.get("fits_code_mode"))
-    present_hint = None
-    if chat_mode == "write":
-        if fits >= T_CODE:
-            present_hint = "code"
-        elif fits <= (1.0 - T_CODE):
-            present_hint = "native"
     mode_hint = mode.choice if mode is not None else "keep"
     mode_conf = float(mode.confidence) if mode is not None else 0.0
     return Decision(
@@ -354,10 +365,8 @@ def _synthesize_exposure(evaluation: Evaluation, state: Mapping[str, Any]) -> De
         evaluation=evaluation,
         extras={
             "profile": profile,
-            "present_hint": present_hint,
             "mode_hint": mode_hint,
             "mode_hint_confidence": mode_conf,
-            "fits_code_noul": fits,
             "wire_narrow": False,
             "domain": domain.choice if domain is not None else "mixed",
             "domain_confidence": domain.confidence if domain is not None else 0.0,
@@ -522,13 +531,79 @@ def _synthesize_prune(evaluation: Evaluation, state: Mapping[str, Any]) -> Decis
     )
 
 
+def _synthesize_mutation_verify(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision:
+    satisfied = noul_of(evaluation.answers.get("satisfied"))
+    scope_ok = noul_of(evaluation.answers.get("scope_ok"), default=0.5)
+    next_answer = choice_of(evaluation.answers.get("next"))
+    next_action = next_answer.choice if next_answer is not None else "none"
+    if next_action not in {"none", "inspect_more", "ask_user"}:
+        next_action = "none"
+    if satisfied < T_SUGGEST or scope_ok < T_SUGGEST:
+        return Decision(
+            kind="noop",
+            reason="low_confidence_or_incomplete_evidence",
+            evaluation=evaluation,
+            extras={
+                "satisfied": satisfied,
+                "scope_ok": scope_ok,
+                "next": "inspect_more" if scope_ok < T_SUGGEST else "ask_user",
+            },
+        )
+    if next_answer is None or next_answer.confidence < T_SUGGEST:
+        next_action = "none" if satisfied >= T_CODE and scope_ok >= T_CODE else "inspect_more"
+    return Decision(
+        kind="noop",
+        reason=f"next:{next_action}",
+        evaluation=evaluation,
+        extras={
+            "satisfied": satisfied,
+            "scope_ok": scope_ok,
+            "next": next_action,
+            "next_confidence": float(next_answer.confidence) if next_answer is not None else 0.0,
+        },
+    )
+
+
+def _synthesize_recovery(evaluation: Evaluation, state: Mapping[str, Any]) -> Decision:
+    next_answer = choice_of(evaluation.answers.get("next"))
+    retryable = noul_of(evaluation.answers.get("retryable"))
+    needs_user = noul_of(evaluation.answers.get("needs_user"))
+    valid = next_answer is not None and next_answer.choice in {"retry", "inspect_more", "ask_user", "stop"}
+    action = next_answer.choice if valid and next_answer is not None else "none"
+    reason = f"next:{action}"
+    if not valid or next_answer is None or not (T_SUGGEST <= next_answer.confidence <= 1.0):
+        action, reason = "none", "low_confidence"
+    elif state.get("breaker_triggered"):
+        action, reason = "stop", "breaker_stopped"
+    elif any(
+        item.get("failure_class") in {"permission_denied", "approval_denied", "approval_timeout", "blocked"}
+        for item in state.get("error_facts", []) if isinstance(item, Mapping)
+    ):
+        action, reason = "stop", "permission_boundary"
+    elif needs_user >= T_RECOVERY_NEEDS_USER:
+        action, reason = "ask_user", "needs_user"
+    elif action == "retry" and (not state.get("safe_to_retry") or retryable < T_RECOVERY_RETRY):
+        action, reason = "inspect_more", "retry_not_evidenced"
+    return Decision(
+        kind="noop",
+        reason=reason,
+        evaluation=evaluation,
+        extras={
+            "next": action,
+            "retryable": retryable,
+            "needs_user": needs_user,
+            "next_confidence": float(next_answer.confidence) if next_answer is not None else 0.0,
+        },
+    )
+
+
 def next_sticky_profile(
     prev: Mapping[str, Any] | None,
     proposed: str,
 ) -> tuple[str, dict[str, Any]]:
-    """连续 2 回合同一 profile 才从 full 收窄；收窄后不同则立即回 full。
+    """连续 2 回合同一类别才预加载该 profile，类别改变则回无偏置的 full。
 
-    L4 仅在 ``decision_is_applied`` 时用返回的 sticky profile 做 schema ∩。
+    L4 仅在 ``decision_is_applied`` 时应用该初始集合，授权目录始终不变。
     """
     profile = proposed if proposed in PROFILE_NAMES else "full"
     last = str((prev or {}).get("last_profile") or "full")

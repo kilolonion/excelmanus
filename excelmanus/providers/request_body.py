@@ -59,8 +59,35 @@ def responses_body(model: str, messages: list, tools: Any = None, *, tool_choice
                    extra_kwargs: dict | None = None) -> dict:
     from excelmanus.providers.openai_responses import (_chat_messages_to_responses_input,
         _chat_tools_to_responses_tools, _map_chat_tool_choice_to_responses, _apply_chat_kwargs_to_responses_body)
-    instructions, contents = _chat_messages_to_responses_input(messages)
-    body = {"model": model, "input": contents, "stream": True, "store": False}
+    extras = extra_kwargs or {}
+    previous_response_id = (
+        extras.get("_responses_previous_response_id")
+        or extras.get("previous_response_id")
+    )
+    source_messages = messages
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        # A stored Responses response already contains its preceding output.
+        # Send only system instructions plus messages after that response.
+        cut_at: int | None = None
+        for index, message in enumerate(messages):
+            if not isinstance(message, dict):
+                continue
+            state = message.get("replay_state")
+            if isinstance(state, dict) and state.get("response_id") == previous_response_id:
+                cut_at = index + 1
+        if cut_at is not None:
+            system_messages = [
+                item for item in messages
+                if isinstance(item, dict) and item.get("role") == "system"
+            ]
+            source_messages = [*system_messages, *messages[cut_at:]]
+    instructions, contents = _chat_messages_to_responses_input(source_messages)
+    body: dict[str, Any] = {
+        "model": model,
+        "input": contents,
+        "stream": True,
+        "store": bool(extras.get("_responses_store", False)),
+    }
     if instructions:
         body["instructions"] = instructions
     schemas = _chat_tools_to_responses_tools(tools if isinstance(tools, list) else None)
@@ -69,7 +96,7 @@ def responses_body(model: str, messages: list, tools: Any = None, *, tool_choice
     choice = _map_chat_tool_choice_to_responses(tool_choice)
     if choice is not None:
         body["tool_choice"] = choice
-    _apply_chat_kwargs_to_responses_body(body, extra_kwargs or {})
+    _apply_chat_kwargs_to_responses_body(body, extras)
     return body
 
 

@@ -46,6 +46,7 @@ function SegmentButton({
 
 export function FileHistoryWorkspace({
   filePath,
+  workspaceId,
   active,
   view,
   onViewChange,
@@ -54,6 +55,7 @@ export function FileHistoryWorkspace({
   cellDiffs,
 }: {
   filePath: string | null;
+  workspaceId?: string | null;
   active: boolean;
   view: HistorySubview;
   onViewChange: (view: HistorySubview) => void;
@@ -110,7 +112,7 @@ export function FileHistoryWorkspace({
       )}
       <div className="flex-1 min-h-0 overflow-hidden">
         <div className={`h-full ${view === "revisions" ? "" : "hidden"}`}>
-          <RevisionTimelinePanel filePath={filePath} active={active && view === "revisions"} />
+          <RevisionTimelinePanel filePath={filePath} workspaceId={workspaceId} active={active && view === "revisions"} />
         </div>
         <div className={`h-full ${view === "operations" ? "" : "hidden"}`}>
           <OperationTimeline filePath={filePath} />

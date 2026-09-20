@@ -64,6 +64,12 @@ class ChatHistoryStore:
     def _durable_payload(msg: dict) -> dict:
         """Persist refs only: drop request-only keys and migrate leftover data URIs."""
         payload = {k: v for k, v in msg.items() if not str(k).startswith("_")}
+        # Compaction metadata describes durable history, not a request projection.
+        # Preserve it in messages-table restores when session_events is disabled.
+        if msg.get("_prompt_kind") == "compaction":
+            for key in ("_prompt_kind", "_ui_hidden", "_compaction_handoff", "_source_message_ids"):
+                if key in msg:
+                    payload[key] = msg[key]
         content = payload.get("content")
         if isinstance(content, list):
             from excelmanus.attachments.migrate import migrate_content

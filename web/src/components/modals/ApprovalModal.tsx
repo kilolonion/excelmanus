@@ -13,6 +13,7 @@ import {
 import { useChatStore } from "@/stores/chat-store";
 import { useSessionStore } from "@/stores/session-store";
 import { submitApproval } from "@/lib/api";
+import { resumeAfterInteraction } from "@/lib/chat-actions";
 import { useCallback, useMemo, useRef, useState } from "react";
 import {
   OverlayCard,
@@ -128,11 +129,12 @@ function ApprovalModalInner() {
     setErrorMsg(null);
 
     try {
-      await submitApproval(sessionId, approvalId, action);
+      const response = await submitApproval(sessionId, approvalId, action);
       setPhase("success");
       finishApprovalLocally(approvalId, sessionId, {
         executing: action === "accept" || action === "fullaccess",
       });
+      resumeAfterInteraction(sessionId, response);
     } catch (err) {
       console.error("[ApprovalModal] submitApproval failed:", err);
       if (isApprovalGoneError(err)) {
@@ -157,7 +159,10 @@ function ApprovalModalInner() {
     }
     if (sid && approvalId) {
       try {
-        await submitApproval(sid, approvalId, "reject");
+        const response = await submitApproval(sid, approvalId, "reject");
+        closeLocally(approvalId);
+        resumeAfterInteraction(sid, response);
+        return;
       } catch (err) {
         if (!isApprovalGoneError(err)) {
           console.error("[ApprovalModal] reject on dismiss failed:", err);

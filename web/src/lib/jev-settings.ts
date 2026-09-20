@@ -266,8 +266,9 @@ export type JevDraft = {
   jev_enabled: JevGate;
   jev_exposure: JevGate;
   jev_observation: JevGate;
+  jev_verification: JevGate;
+  jev_recovery: JevGate;
   jev_mode_hint: boolean;
-  jev_present_as_auto: boolean;
   jev_ui_hint: boolean;
   jev_model: string;
   jev_timeout_seconds: number;
@@ -279,8 +280,9 @@ export const EMPTY_JEV_DRAFT: JevDraft = {
   jev_enabled: "off",
   jev_exposure: "off",
   jev_observation: "off",
+  jev_verification: "off",
+  jev_recovery: "off",
   jev_mode_hint: false,
-  jev_present_as_auto: false,
   jev_ui_hint: false,
   jev_model: JEV_DEFAULT_MODEL,
   jev_timeout_seconds: 1.5,
@@ -299,8 +301,9 @@ export const JEV_ROLE_KEYS: (keyof JevDraft)[] = [
   "jev_enabled",
   "jev_exposure",
   "jev_observation",
+  "jev_verification",
+  "jev_recovery",
   "jev_mode_hint",
-  "jev_present_as_auto",
   "jev_ui_hint",
 ];
 

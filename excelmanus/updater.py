@@ -140,7 +140,13 @@ def _read_version_from_disk(project_root: Path) -> str:
                 if line.strip().startswith("__version__"):
                     parts = line.split("=", 1)
                     if len(parts) == 2:
-                        return parts[1].strip().strip('"').strip("'")
+                        import ast
+                        try:
+                            value = ast.literal_eval(parts[1].strip())
+                        except (ValueError, SyntaxError):
+                            continue
+                        if isinstance(value, str):
+                            return value
         except Exception:
             pass
     return "unknown"

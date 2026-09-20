@@ -74,9 +74,8 @@ const SOURCE_LABELS: Record<string, string> = {
 };
 
 function DemoSkillsBanner() {
-  const [active, setActive] = useState(false);
+  const [active, setActive] = useState(isSettingsDemoActive);
   useEffect(() => {
-    setActive(isSettingsDemoActive());
     return onSettingsDemoChange(() => setActive(isSettingsDemoActive()));
   }, []);
   if (!active) return null;
@@ -264,18 +263,31 @@ export function SkillsTab() {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center gap-1.5 sm:gap-2">
-        <Button
-          size="sm"
-          variant="outline"
-          className="h-8 sm:h-7 text-xs gap-1 flex-shrink-0"
-          onClick={() => { resetImportState(); setShowImport(true); setImportMethod("file"); }}
-        >
-          <Plus className="h-3 w-3" />
-          <span className="hidden sm:inline">导入</span>
-        </Button>
-        <div className="h-4 w-px bg-border/60 flex-shrink-0 hidden sm:block" />
-        <div className="flex-1 min-w-0 overflow-x-auto scrollbar-none">
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]">
+              <Package className="h-3.5 w-3.5" />
+            </div>
+            <div className="min-w-0">
+              <h4 className="text-sm font-medium">技能仓库</h4>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
+                已加载 {skills.length} 个技能包，可按来源筛选
+              </p>
+            </div>
+          </div>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-8 text-xs gap-1.5 shrink-0"
+            onClick={() => { resetImportState(); setShowImport(true); setImportMethod("file"); }}
+          >
+            <Plus className="h-3 w-3" />
+            导入技能
+          </Button>
+        </div>
+
+        <div className="min-w-0 overflow-x-auto scrollbar-none">
           <div className="flex items-center gap-1 sm:gap-1.5">
             {(["all", "system", "user", "project"] as const).map((src) => {
               const isActive = sourceFilter === src;
@@ -299,7 +311,7 @@ export function SkillsTab() {
             })}
           </div>
         </div>
-      </div>
+      </section>
 
       {showImport && !editingSkill && (
         <motion.div
@@ -458,10 +470,19 @@ export function SkillsTab() {
         </div>
       )}
 
-      <div className="space-y-1.5" data-coach-id="coach-settings-skills-list">
+      <section className="em-plugin-panel space-y-2 rounded-xl border p-3" data-coach-id="coach-settings-skills-list">
+        <div className="flex items-center justify-between gap-2 px-0.5">
+          <div>
+            <h4 className="text-sm font-medium">已安装技能</h4>
+            <p className="text-[10px] text-muted-foreground">点击卡片查看指令、资源与适用文件</p>
+          </div>
+          <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+            {filteredSkills.length} 个
+          </span>
+        </div>
         <DemoSkillsBanner />
         {filteredSkills.length === 0 && !isSettingsDemoActive() && (
-          <div className="text-center py-8">
+          <div className="rounded-xl border border-dashed text-center py-10">
             <Sparkles className="h-8 w-8 mx-auto mb-2 text-muted-foreground/30" />
             <p className="text-xs text-muted-foreground">
               {sourceFilter === "all" ? "暂无已加载的技能包" : `暂无 ${SOURCE_LABELS[sourceFilter]} 类技能`}
@@ -542,7 +563,7 @@ export function SkillsTab() {
             </SettingsEntityCard>
           );
         })}
-      </div>
+      </section>
     </div>
   );
 }

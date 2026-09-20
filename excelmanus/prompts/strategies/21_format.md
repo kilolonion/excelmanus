@@ -1,12 +1,12 @@
 ---
 name: tool:format
-version: "10.0.0"
+version: "10.1.0"
 priority: 106
 order: 106
 layer: strategy
-max_tokens: 80
+max_tokens: 125
 conditions:
-  catalog_mode: [write, code]
+  catalog_mode: write
   tool: format_spreadsheet
 ---
-随数据变化的规则用条件格式；一次性指定某格外观用直接 format。批量固定样式可按范围操作，不必改成条件格式。单表可省略 sheet；多表必须带 sheet 或 表!A1。合并区以锚点为准。
+随数据变化用条件格式：rule.type=formula，formula/formula1 同义。一次性指定某格外观用直接 format，下拉验证用 data_validation。多表带 sheet 或 表!A1，合并区写锚点。结果看 appearance/skipped_merged_non_anchors；不自动逐属性回读。

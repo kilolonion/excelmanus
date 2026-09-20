@@ -36,6 +36,24 @@ def _init_guard(tmp_path: Path) -> None:
 
 
 class TestToolResultAdapter:
+    def test_declared_output_schema_validates_custom_tool_shape(self) -> None:
+        from excelmanus.tools.output_contracts import validate_declared_output_schema
+
+        schema = {
+            "type": "object",
+            "required": ["status", "items"],
+            "additionalProperties": False,
+            "properties": {
+                "status": {"type": "string"},
+                "items": {"type": "array", "items": {"type": "integer"}},
+            },
+        }
+        assert validate_declared_output_schema({"status": "ok", "items": [1, 2]}, schema) == []
+        violations = validate_declared_output_schema({"status": 1, "extra": True}, schema)
+        assert any("status" in item for item in violations)
+        assert any("items" in item for item in violations)
+        assert any("extra" in item for item in violations)
+
     def test_from_text_does_not_parse_magic_fields(self) -> None:
         raw = json.dumps({
             "status": "ok",

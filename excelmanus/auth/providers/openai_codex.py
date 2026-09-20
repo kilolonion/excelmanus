@@ -105,12 +105,18 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
     AUTH_ENDPOINT = "https://auth.openai.com/oauth/authorize"
     TOKEN_ENDPOINT = "https://auth.openai.com/oauth/token"
     CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann"
-    SCOPE = "openid profile email offline_access"
+    SCOPE = (
+        "openid profile email offline_access "
+        "api.connectors.read api.connectors.invoke"
+    )
     BASE_URL = "https://chatgpt.com/backend-api/codex"
     PROTOCOL = "openai_responses"
     REFRESH_MARGIN_SECONDS = 300
     MODEL_NAME_PREFIX = "openai-codex/"
-    CALLBACK_PATH = "/auth/codex/callback"
+    # OpenAI's public Codex client accepts this exact loopback redirect.
+    # Keep both path and port aligned with the official Codex CLI.
+    CALLBACK_PATH = "/auth/callback"
+    BROWSER_REDIRECT_URI = "http://localhost:1455/auth/callback"
     # 连接成功后自动暴露给当前用户的 Codex 可用模型（仅用户私有，不写入全局 model_profiles）。
     # model: 真实模型 ID；display_name: 前端展示友好别名。
     _SUPPORTED_MODELS: tuple[tuple[str, str], ...] = (
@@ -158,7 +164,7 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
         async with _http_client() as client:
             resp = await client.post(
                 cls.DEVICE_USERCODE_URL,
-                json={"client_id": cls.CLIENT_ID, "scope": cls.SCOPE},
+                json={"client_id": cls.CLIENT_ID},
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
@@ -253,7 +259,7 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
             "state": state,
             "id_token_add_organizations": "true",
             "codex_cli_simplified_flow": "true",
-            "originator": "codex_cli_rs",
+            "originator": "excelmanus",
         }
         return cls.assert_auth_url(f"{cls.AUTH_ENDPOINT}?{urlencode(params)}")
 
@@ -336,25 +342,38 @@ class OpenAICodexProvider(AuthProvider, PKCECapable, DeviceCodeCapable):
         )
 
     def validate_token_data(self, raw_data: dict[str, Any]) -> ValidatedCredential:
-        """验证粘贴的 token 数据。支持 Codex CLI / OpenClaw / 简化 三种格式。"""
+        """验证粘贴的 token 数据。支持当前/旧版 Codex CLI、OpenClaw 和简化格式。"""
+        nested_tokens = raw_data.get("tokens")
+        token_data = dict(nested_tokens) if isinstance(nested_tokens, dict) else {}
+        # Preserve the legacy top-level formats while accepting the current
+        # Codex CLI auth.json shape: {"auth_mode": "chatgpt", "tokens": {...}}.
+        token_data.update({key: value for key, value in raw_data.items() if key != "tokens"})
         access_token = (
-            raw_data.get("token")
-            or raw_data.get("access")
-            or raw_data.get("access_token")
+            token_data.get("token")
+            or token_data.get("access")
+            or token_data.get("access_token")
             or ""
         )
-        refresh_token = raw_data.get("refresh_token") or raw_data.get("refresh")
+        refresh_token = token_data.get("refresh_token") or token_data.get("refresh")
 
         if not access_token:
             raise ValueError(
                 "缺少 access token。请粘贴完整的 auth.json 内容，"
-                "需包含 'token'、'access' 或 'access_token' 字段。"
+                "需包含 'tokens.access_token'、'token'、'access' 或 "
+                "'access_token' 字段。"
             )
 
-        expires_at = self._parse_expires(raw_data)
+        expires_at = self._parse_expires(token_data)
         claims = _parse_jwt_claims(access_token)
         account_id, plan_type = _extract_account_info(claims)
         email = _extract_email(claims)
+        id_claims = _parse_jwt_claims(str(token_data.get("id_token") or ""))
+        if id_claims:
+            id_account_id, id_plan_type = _extract_account_info(id_claims)
+            account_id = account_id or id_account_id
+            plan_type = plan_type or id_plan_type
+            email = email or _extract_email(id_claims)
+        account_id = account_id or str(token_data.get("account_id") or "")
 
         return ValidatedCredential(
             access_token=access_token,

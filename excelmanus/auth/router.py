@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import html
 import json as _json
 import logging
 from typing import Any
@@ -33,15 +35,15 @@ _CODEX_LEGACY_NAMES = {"Codex 5.3", "codex-5.3", "codex-oauth", "Codex Spark", "
 _CODEX_LEGACY_MODELS = {"gpt-5.3-codex", "gpt-5.3-codex-spark", "gpt-5.2-codex", "openai-codex/gpt-5.2-codex"}
 
 
-def _auto_add_codex_default_model(request: Request) -> None:
+def _auto_add_codex_default_model(request: Request) -> bool:
     """Codex 连接成功后，若模型列表中还没有任何默认 Codex 条目，则自动新增一个。
 
-    仅写入全局 model_profiles（config_store），不影响用户私有 Codex 动态模型列表。
+    写入全局 model_profiles，随后由 _sync_subscription_sessions 同步已有会话。
     """
     from excelmanus.api_app_state import get_config_store
     config_store = get_config_store()
     if config_store is None:
-        return
+        return False
     try:
         existing = config_store.list_profiles()
         # 检查是否已有同名 profile 或同 model 的 codex 条目（兼容新旧命名）
@@ -49,19 +51,21 @@ def _auto_add_codex_default_model(request: Request) -> None:
         _all_models = {_CODEX_DEFAULT_MODEL} | _CODEX_LEGACY_MODELS
         for p in existing:
             if p.get("name", "") in _all_names:
-                return
+                return False
             if p.get("model", "") in _all_models:
-                return
-        config_store.add_profile(
+                return False
+        created = config_store.add_profile(
             name=_CODEX_DEFAULT_PROFILE_NAME,
             model=_CODEX_DEFAULT_MODEL,
             api_key="",
             base_url=_CODEX_DEFAULT_BASE_URL,
             description="GPT-6 Astra - OAuth 登录（无需 API Key）",
-            protocol="openai",
+            protocol="openai_responses",
             thinking_mode="openai_reasoning",
             model_family="gpt",
         )
+        if not created:
+            return False
         # 同步到内存 config
         from excelmanus.api_app_state import _sync_config_profiles_from_db, _user_config_store
         try:
@@ -74,13 +78,17 @@ def _auto_add_codex_default_model(request: Request) -> None:
         except Exception:
             pass
         logger.info("已自动添加 Codex 默认模型: %s (%s)", _CODEX_DEFAULT_PROFILE_NAME, _CODEX_DEFAULT_MODEL)
+        return True
     except Exception:
         logger.debug("自动添加 Codex 默认模型失败", exc_info=True)
+        return False
 
 
 async def _sync_subscription_sessions(request: Request) -> None:
     """同步全部活跃会话的订阅模型档案。"""
-    session_mgr = getattr(request.app.state, "session_manager", None)
+    from excelmanus.api_app_state import get_config, get_session_manager, _sync_config_profiles_from_db
+
+    session_mgr = get_session_manager()
     if session_mgr is None:
         return
 
@@ -93,6 +101,11 @@ async def _sync_subscription_sessions(request: Request) -> None:
     )
 
     try:
+        _sync_config_profiles_from_db()
+        config = get_config()
+        if config is not None:
+            # 重新读取 DB，既带入自动新增档案，也清除断开连接前注入的旧 token。
+            await session_mgr.broadcast_model_profiles(config.models)
         sessions = await session_mgr.list_sessions()
         for item in sessions:
             sid = item.get("id")
@@ -102,9 +115,13 @@ async def _sync_subscription_sessions(request: Request) -> None:
             if engine is None:
                 continue
 
-            session_mgr.sync_user_subscription_profiles(engine)
-
             current_name = engine.current_model_name
+            current_profile = next((p for p in engine._config.models if p.name == current_name), None)
+            if current_profile is not None and (
+                any(current_profile.name.startswith(pfx) for pfx in _prefixes)
+                or any(current_profile.model.startswith(pfx) for pfx in _prefixes)
+            ):
+                engine.switch_model(current_name)
             if (
                 current_name
                 and any(current_name.startswith(pfx) for pfx in _prefixes)
@@ -446,15 +463,147 @@ async def refresh_openai_codex(
 
 # ── Codex OAuth PKCE Browser Flow ──────────────────────────────
 # 双路径设计：
-# - Path A (本地访问): popup → OpenAI auth → redirect 回前端回调页 → postMessage
-# - Path B (远程访问): popup → OpenAI auth → redirect 到 localhost (失败) → 用户粘贴 URL
-# 两种路径共享同一后端端点，区别仅在前端行为。
+# - Path A (本地访问): popup → OpenAI auth → 固定 loopback:1455 → postMessage
+# - Path B (远程访问): popup → OpenAI auth → localhost:1455 (失败) → 用户粘贴 URL
+# OpenAI 的公开 Codex client 只接受固定的 localhost:1455/auth/callback。
 #
 # 注意：state 参数必须短（≤128 字符），OpenAI auth 端点对长 state 会报 unknown_error。
 # 因此 PKCE 数据存储在 DB 中（多 worker 安全），state 仅为短随机 token（与 Codex CLI 一致）。
 
 _CODEX_OAUTH_TTL = 900  # state token 有效期 15 分钟
 _CODEX_OAUTH_FALLBACK_PORT = 1455  # 与 Codex CLI 默认回调端口保持一致
+_codex_callback_server: asyncio.AbstractServer | None = None
+_codex_callback_timeout_task: asyncio.Task[None] | None = None
+_codex_callback_state = ""
+
+
+def _codex_callback_page(*, code: str, state: str, error: str) -> str:
+    """生成一次性 loopback 回调页，把结果传回发起登录的前端窗口。"""
+    payload = {
+        "type": "codex-oauth-callback",
+        **({"error": error} if error else {"code": code, "state": state}),
+    }
+    payload_json = _json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c")
+    success = not error
+    title = "授权成功" if success else "授权失败"
+    message = "正在完成连接，此窗口将自动关闭。" if success else error
+    color = "#16a34a" if success else "#dc2626"
+    return f"""<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>{title}</title><style>body{{font-family:-apple-system,BlinkMacSystemFont,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0;background:#f8fafc;color:#111827}}main{{max-width:420px;padding:32px;text-align:center}}h1{{color:{color};font-size:24px}}p{{color:#6b7280;line-height:1.6}}</style></head>
+<body><main><h1>{title}</h1><p>{html.escape(message)}</p></main>
+<script>const payload={payload_json};if(window.opener){{window.opener.postMessage(payload,"*");}}setTimeout(()=>window.close(),1500);</script>
+</body></html>"""
+
+
+async def _close_codex_callback_listener() -> None:
+    global _codex_callback_server, _codex_callback_timeout_task, _codex_callback_state
+    server = _codex_callback_server
+    _codex_callback_server = None
+    _codex_callback_state = ""
+    if server is not None:
+        server.close()
+        await server.wait_closed()
+    timeout_task = _codex_callback_timeout_task
+    _codex_callback_timeout_task = None
+    current = asyncio.current_task()
+    if timeout_task is not None and timeout_task is not current:
+        timeout_task.cancel()
+
+
+async def _expire_codex_callback_listener(expected_state: str) -> None:
+    await asyncio.sleep(_CODEX_OAUTH_TTL)
+    if _codex_callback_state == expected_state:
+        await _close_codex_callback_listener()
+
+
+async def _handle_codex_loopback_callback(
+    reader: asyncio.StreamReader,
+    writer: asyncio.StreamWriter,
+    expected_state: str,
+) -> None:
+    from urllib.parse import parse_qs, urlsplit
+
+    status = 400
+    code = ""
+    state = ""
+    error = "回调请求无效"
+    matched_attempt = False
+    try:
+        request_head = await asyncio.wait_for(reader.readuntil(b"\r\n\r\n"), timeout=5)
+        request_lines = request_head.split(b"\r\n")
+        request_line = request_lines[0].decode("ascii", "replace")
+        host_header = next(
+            (
+                line.split(b":", 1)[1].strip().decode("ascii", "replace")
+                for line in request_lines[1:]
+                if line.lower().startswith(b"host:")
+            ),
+            "",
+        )
+        method, target, _version = request_line.split(" ", 2)
+        parsed = urlsplit(target)
+        params = parse_qs(parsed.query)
+        state = (params.get("state") or [""])[0]
+        if host_header not in ("localhost:1455", "127.0.0.1:1455"):
+            status, error = 400, "OAuth 回调 Host 无效"
+        elif method != "GET" or parsed.path != "/auth/callback":
+            status, error = 404, "未找到 OAuth 回调地址"
+        elif state != expected_state:
+            status, error = 400, "OAuth state 不匹配，请重新发起登录"
+        else:
+            matched_attempt = True
+            oauth_error = (params.get("error_description") or params.get("error") or [""])[0]
+            code = (params.get("code") or [""])[0]
+            if oauth_error:
+                status, error = 400, oauth_error
+            elif not code:
+                status, error = 400, "OpenAI 回调缺少授权码"
+            else:
+                status, error = 200, ""
+    except Exception:
+        logger.debug("Codex loopback 回调解析失败", exc_info=True)
+
+    body = _codex_callback_page(code=code, state=state, error=error).encode("utf-8")
+    reason = "OK" if status == 200 else "Bad Request" if status == 400 else "Not Found"
+    headers = (
+        f"HTTP/1.1 {status} {reason}\r\n"
+        "Content-Type: text/html; charset=utf-8\r\n"
+        "Cache-Control: no-store\r\n"
+        "X-Content-Type-Options: nosniff\r\n"
+        "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'\r\n"
+        f"Content-Length: {len(body)}\r\n"
+        "Connection: close\r\n\r\n"
+    ).encode("ascii")
+    writer.write(headers + body)
+    try:
+        await writer.drain()
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except (ConnectionError, OSError):
+            pass
+    if matched_attempt:
+        await _close_codex_callback_listener()
+
+
+async def _start_codex_callback_listener(state: str) -> None:
+    """在官方固定回调端口启动一个与 state 绑定的一次性 listener。"""
+    global _codex_callback_server, _codex_callback_timeout_task, _codex_callback_state
+    await _close_codex_callback_listener()
+    server = await asyncio.start_server(
+        lambda reader, writer: _handle_codex_loopback_callback(
+            reader, writer, state,
+        ),
+        host="127.0.0.1",
+        port=_CODEX_OAUTH_FALLBACK_PORT,
+    )
+    _codex_callback_server = server
+    _codex_callback_state = state
+    _codex_callback_timeout_task = asyncio.create_task(
+        _expire_codex_callback_listener(state)
+    )
 
 def _generate_oauth_state() -> str:
     """生成与 Codex CLI 相同格式的短随机 state（32 字节 → 43 字符 base64url）。"""
@@ -469,7 +618,7 @@ async def codex_oauth_start(
 ) -> Any:
     """发起 Codex OAuth PKCE 浏览器流程。
 
-    Body (可选): {"redirect_uri": "http://localhost:3000/auth/codex/callback"}
+    Body (可选): {"redirect_uri": "http://localhost:3000/auth/callback"}
     - 如果前端在 localhost 上运行，传入实际回调 URL（Path A）
     - 如果不传，使用 fallback localhost:1455（Path B，用户需粘贴 URL）
 
@@ -483,19 +632,31 @@ async def codex_oauth_start(
     except Exception:
         pass
 
-    # 确定 redirect_uri
+    # 前端回调 URL 仅用于判断是否为同机浏览器；向 OpenAI 注册的 redirect_uri
+    # 必须始终是官方 Codex client 的固定 loopback 地址。
     client_redirect = (body.get("redirect_uri") or "").strip()
     if client_redirect:
         # 安全校验：仅允许 localhost / 127.0.0.1
         from urllib.parse import urlparse
         parsed = urlparse(client_redirect)
-        if parsed.hostname not in ("localhost", "127.0.0.1"):
-            raise HTTPException(400, "redirect_uri 仅允许 localhost 或 127.0.0.1")
-        redirect_uri = client_redirect
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in ("localhost", "127.0.0.1")
+            or parsed.username
+            or parsed.password
+            or parsed.path != OpenAICodexProvider.CALLBACK_PATH
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise HTTPException(
+                400,
+                "redirect_uri 必须是 http://localhost[:port]/auth/callback "
+                "或 http://127.0.0.1[:port]/auth/callback",
+            )
         mode = "popup"
     else:
-        redirect_uri = f"http://localhost:{_CODEX_OAUTH_FALLBACK_PORT}{OpenAICodexProvider.CALLBACK_PATH}"
         mode = "paste"
+    redirect_uri = OpenAICodexProvider.BROWSER_REDIRECT_URI
 
     # 生成 PKCE
     code_verifier, code_challenge = OpenAICodexProvider.generate_pkce()
@@ -509,6 +670,17 @@ async def codex_oauth_start(
         "code_verifier": code_verifier,
         "redirect_uri": redirect_uri,
     }, ttl=_CODEX_OAUTH_TTL)
+
+    if mode == "popup":
+        try:
+            await _start_codex_callback_listener(state)
+        except OSError as exc:
+            cred_store.pop_oauth_state(state, ttl=_CODEX_OAUTH_TTL)
+            raise HTTPException(
+                409,
+                "本机 1455 端口被占用，无法接收 OpenAI 回调。"
+                "请关闭正在运行的 codex login，或改用设备码登录。",
+            ) from exc
 
     # 构造授权 URL
     authorize_url = OpenAICodexProvider.build_authorize_url(
@@ -588,5 +760,3 @@ async def codex_oauth_exchange(
         "plan_type": credential.plan_type,
         "expires_at": credential.expires_at,
     }
-
-

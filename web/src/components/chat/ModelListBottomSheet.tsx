@@ -5,7 +5,7 @@ import { createPortal } from "react-dom";
 import { motion, AnimatePresence, type PanInfo } from "framer-motion";
 import { Check, Loader2, Search, Sparkles, RefreshCw, AlertTriangle, X } from "lucide-react";
 import { displayModelLabel } from "@/lib/model-display";
-import { extractProvider, getProviderColor, getProviderDisplayName } from "@/lib/provider-brand";
+import { getProviderColor, getProviderDisplayName, inferModelBrand } from "@/lib/provider-brand";
 import { ProviderAvatar } from "@/components/settings/model/ProviderLogo";
 import type { ModelInfo } from "@/lib/types";
 
@@ -31,7 +31,7 @@ interface ProviderGroup {
 function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
   const map = new Map<string, ModelInfo[]>();
   for (const m of models) {
-    const provider = extractProvider(m.base_url);
+    const provider = inferModelBrand(m);
     if (!map.has(provider)) map.set(provider, []);
     map.get(provider)!.push(m);
   }
@@ -48,7 +48,7 @@ function groupByProvider(models: ModelInfo[]): ProviderGroup[] {
 const displayLabel = (m: ModelInfo) => displayModelLabel(m);
 
 function providerOf(m: ModelInfo): string {
-  return m.provider || extractProvider(m.base_url);
+  return inferModelBrand(m);
 }
 
 /* ------------------------------------------------------------------ */
@@ -183,6 +183,7 @@ function CompactRetrySheet({
                   >
                     <ProviderAvatar
                       id={provider}
+                      label={displayLabel(m)}
                       color={providerColor}
                       className="h-8 w-8"
                       iconClassName="h-4 w-4"
@@ -394,6 +395,7 @@ function SwitchSheet({
                     >
                       <ProviderAvatar
                         id={provider}
+                        label={displayLabel(activeModel)}
                         color={isUnhealthy ? undefined : providerColor}
                         className="h-11 w-11"
                         iconClassName="h-5 w-5"
@@ -442,6 +444,7 @@ function SwitchSheet({
                       <div className="flex items-center gap-2 px-4 pt-2 pb-1">
                         <ProviderAvatar
                           id={group.provider}
+                          label={getProviderDisplayName(group.provider)}
                           color={color}
                           className="h-4 w-4 rounded-md"
                           iconClassName="h-2.5 w-2.5"
@@ -475,6 +478,7 @@ function SwitchSheet({
                         >
                           <ProviderAvatar
                             id={group.provider}
+                            label={displayLabel(m)}
                             color={isUnhealthy ? undefined : color}
                             className="h-8 w-8"
                             iconClassName="h-4 w-4"

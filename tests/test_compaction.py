@@ -151,6 +151,8 @@ class TestAutoCompact:
         assert "文件状态" in result.summary_text
         assert mgr.stats.compaction_count == 1
         assert mgr.stats.last_compaction_at is not None
+        assert result.handoff["summary"] == result.summary_text
+        assert result.handoff["continuity"]["summary_inserted"] is True
 
         # 验证合成消息
         assert memory._messages[0]["role"] == "user"

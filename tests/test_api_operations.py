@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+import re
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import importlib.util
@@ -29,6 +30,17 @@ api_module = importlib.util.module_from_spec(_spec)
 sys.modules["excelmanus._api_module"] = api_module
 _spec.loader.exec_module(api_module)
 app = api_module.app
+
+
+def test_session_routes_do_not_shadow_each_other():
+    """Parameter names cannot distinguish two HTTP routes with the same shape."""
+    seen = set()
+    for route in sessions_mod.router.routes:
+        shape = re.sub(r"\{[^}]+\}", "{}", route.path)
+        for method in route.methods:
+            key = (method, shape)
+            assert key not in seen, f"Duplicate session route: {key}"
+            seen.add(key)
 
 
 # ── 辅助 ─────────────────────────────────────────────────
@@ -222,6 +234,23 @@ class TestListOperations:
 
 
 # ── GET /api/v1/sessions/{sid}/operations/{approval_id} ──
+
+
+@pytest.mark.asyncio
+async def test_mutation_receipt_query_does_not_publish_pending_writes(client, api_state, tmp_workspace):
+    engine = _make_engine_mock(config_workspace=str(tmp_workspace))
+    engine._workspace.root_dir = tmp_workspace
+    api_state["manager"].get_or_restore_engine = AsyncMock(return_value=engine)
+    receipt = MagicMock()
+    receipt.to_dict.return_value = {"operation_id": "op-1", "state": "failed_partial"}
+    with (
+        patch.object(sessions_mod, "_has_session_access", new=AsyncMock(return_value=True)),
+        patch("excelmanus.workspace.file_service.WorkspaceFileService.get_receipt", return_value=receipt) as get_receipt,
+    ):
+        response = await client.get("/api/v1/sessions/sess-1/mutations/op-1")
+    assert response.status_code == 200
+    assert response.json()["operation"]["state"] == "failed_partial"
+    get_receipt.assert_called_once_with("op-1", recover=False)
 
 
 class TestGetOperationDetail:

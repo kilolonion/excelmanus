@@ -57,7 +57,7 @@ async def test_read_session_can_list_versions_but_not_restore() -> None:
 
     def versions(action: str = "", **_kwargs: object) -> str:
         called.append(str(action))
-        return "ok"
+        return json.dumps({"status": "success", "file_path": "book.xlsx", "revisions": []})
 
     engine._registry.register_tool(
         ToolDef(

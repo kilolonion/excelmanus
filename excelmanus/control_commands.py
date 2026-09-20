@@ -51,12 +51,6 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
         arguments=("status", "on", "off"),
     ),
     ControlCommandSpec(
-        command="/code",
-        description="代码模式",
-        aliases=("/code_mode",),
-        arguments=("status", "on", "off"),
-    ),
-    ControlCommandSpec(
         command="/plan",
         description="计划模式",
         arguments=("status", "on", "off", "approve", "reject"),
@@ -130,6 +124,11 @@ CONTROL_COMMAND_SPECS: tuple[ControlCommandSpec, ...] = (
     ControlCommandSpec(
         command="/clear",
         description="清除对话历史（保留会话）",
+    ),
+    ControlCommandSpec(
+        command="/resume",
+        description="继续最近中断的任务或排队消息",
+        help_label="/resume [补充要求]",
     ),
 )
 

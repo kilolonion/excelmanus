@@ -1,8 +1,15 @@
 "use client";
 
 import { useState } from "react";
-import { ExternalLink } from "lucide-react";
+import { ChevronDown, ExternalLink, LockKeyhole } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   JEV_PROVIDER_PRESETS,
   draftFromJevPreset,
@@ -12,6 +19,11 @@ import {
 } from "@/lib/jev-settings";
 
 const FIELD = "h-9 text-xs rounded-lg";
+
+const PROTOCOL_OPTIONS: { value: JevProtocol; label: string }[] = [
+  { value: "typesafe", label: "typesafe（官方 System One）" },
+  { value: "gateway", label: "gateway（Vercel Evaluate）" },
+];
 
 export function JevProviderForm({
   draft,
@@ -24,6 +36,7 @@ export function JevProviderForm({
 }) {
   const [keyVisible, setKeyVisible] = useState(false);
   const preset = jevPresetById(draft.id);
+  const protocolLabel = PROTOCOL_OPTIONS.find((option) => option.value === draft.protocol)?.label;
 
   return (
     <div className="rounded-xl border border-border/70 bg-background p-3 space-y-2.5">
@@ -79,15 +92,47 @@ export function JevProviderForm({
       <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
         <div className="space-y-1">
           <label className="text-[11px] font-medium text-foreground/80">协议</label>
-          <select
-            className="w-full h-9 text-xs rounded-lg border border-input bg-background px-2"
-            value={draft.protocol}
-            disabled={Boolean(preset)}
-            onChange={(event) => onChange({ ...draft, protocol: event.target.value as JevProtocol })}
-          >
-            <option value="typesafe">typesafe（官方 System One）</option>
-            <option value="gateway">gateway（Vercel Evaluate）</option>
-          </select>
+          {preset ? (
+            <div
+              className="flex h-9 w-full items-center gap-2 rounded-lg border border-input bg-muted/25 px-2.5 text-xs text-foreground/75"
+              aria-label="协议（预设固定）"
+            >
+              <span className="min-w-0 flex-1 truncate">{protocolLabel}</span>
+              <LockKeyhole className="h-3.5 w-3.5 shrink-0 text-muted-foreground/70" aria-hidden />
+            </div>
+          ) : (
+            <DropdownMenu modal={false}>
+              <DropdownMenuTrigger asChild>
+                <button
+                  type="button"
+                  className="group flex h-9 w-full items-center gap-2 rounded-lg border border-input bg-background px-2.5 text-left text-xs shadow-[0_1px_2px_rgba(24,58,40,0.04)] transition-[border-color,background-color,box-shadow] hover:border-[var(--em-primary-alpha-25)] hover:bg-muted/30 focus-visible:border-[var(--em-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary-alpha-15)] data-[state=open]:border-[var(--em-primary)] data-[state=open]:bg-[var(--em-primary-alpha-06)] data-[state=open]:shadow-[0_0_0_3px_var(--em-primary-alpha-10)]"
+                >
+                  <span className="min-w-0 flex-1 truncate">{protocolLabel}</span>
+                  <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground transition-transform duration-200 group-data-[state=open]:rotate-180" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent
+                align="start"
+                sideOffset={6}
+                className="w-[var(--radix-dropdown-menu-trigger-width)] rounded-xl border-border/80 bg-popover/95 p-1.5 shadow-xl backdrop-blur-sm"
+              >
+                <DropdownMenuRadioGroup
+                  value={draft.protocol}
+                  onValueChange={(value) => onChange({ ...draft, protocol: value as JevProtocol })}
+                >
+                  {PROTOCOL_OPTIONS.map((option) => (
+                    <DropdownMenuRadioItem
+                      key={option.value}
+                      value={option.value}
+                      className="rounded-lg py-2 pr-2.5 pl-7 text-xs transition-colors focus:bg-[var(--em-primary-alpha-10)] focus:text-foreground data-[state=checked]:bg-[var(--em-primary-alpha-06)] data-[state=checked]:font-medium data-[state=checked]:[&_svg]:!text-[var(--em-primary)]"
+                    >
+                      {option.label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
         <div className="space-y-1">
           <label className="text-[11px] font-medium text-foreground/80">Model ID</label>

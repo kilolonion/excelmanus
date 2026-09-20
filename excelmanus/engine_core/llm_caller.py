@@ -389,11 +389,31 @@ class LLMCaller:
             lease_file_ids(prepared.request_id, prepared.file_leases)
             e._open_request_id = prepared.request_id
             e._sent_prepared_request = prepared
-        return await e._client.chat.completions.create(**kwargs)
+        from excelmanus.trace import traced_request
+
+        return await traced_request(e, e._client.chat.completions.create, kwargs)
 
     # ── 流式消费 ──────────────────────────────────────────
 
     async def consume_stream(
+        self, stream: Any, on_event: "EventCallback | None", iteration: int,
+        *, _llm_start_ts: float | None = None,
+    ) -> tuple[Any, Any]:
+        try:
+            return await self._consume_stream(stream, on_event, iteration, _llm_start_ts=_llm_start_ts)
+        finally:
+            import inspect
+
+            close = getattr(stream, "aclose", None) or getattr(stream, "close", None)
+            if callable(close):
+                try:
+                    closed = close()
+                    if inspect.isawaitable(closed):
+                        await closed
+                except Exception:
+                    logger.debug("stream close failed", exc_info=True)
+
+    async def _consume_stream(
         self,
         stream: Any,
         on_event: "EventCallback | None",

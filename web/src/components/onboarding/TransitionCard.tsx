@@ -1,74 +1,29 @@
 "use client";
 
-import { createPortal } from "react-dom";
-import { motion } from "framer-motion";
-import { Compass, Settings, Rocket } from "lucide-react";
-import { Button } from "@/components/ui/button";
+import { Dialog } from "radix-ui";
+import { Compass, ArrowRight } from "lucide-react";
+import { useGuideViewport } from "./useTargetRect";
 
-interface TransitionCardProps {
+export function TransitionCard({ variant, onContinue, onDecline, onSkip }: {
   variant: "basic-to-advanced" | "advanced-to-settings";
-  onContinue: () => void;
-  onDecline: () => void;
-}
-
-const CONFIG = {
-  "basic-to-advanced": {
-    icon: <Compass className="h-7 w-7" style={{ color: "var(--em-primary)" }} />,
-    title: "基础引导完成！",
-    description: "你已经了解了核心功能。\n想继续探索进阶技巧吗？",
-    declineText: "稍后探索",
-    continueText: "继续探索",
-    continueIcon: <Rocket className="h-4 w-4" />,
-  },
-  "advanced-to-settings": {
-    icon: <Settings className="h-7 w-7" style={{ color: "var(--em-primary)" }} />,
-    title: "进阶引导完成！",
-    description: "接下来带你了解设置面板的各项功能，\n掌握模型、规则、技能等高级配置。",
-    declineText: "稍后再看",
-    continueText: "探索设置",
-    continueIcon: <Settings className="h-4 w-4" />,
-  },
-};
-
-export function TransitionCard({ variant, onContinue, onDecline }: TransitionCardProps) {
-  const cfg = CONFIG[variant];
-
-  return createPortal(
-    <div className="fixed inset-0 z-[10001] flex items-center justify-center" style={{ pointerEvents: "auto" }}>
-      {/* Backdrop — clicking declines */}
-      <div className="absolute inset-0 bg-black/50" onClick={onDecline} />
-      <motion.div
-        initial={{ opacity: 0, scale: 0.92, y: 20 }}
-        animate={{ opacity: 1, scale: 1, y: 0 }}
-        exit={{ opacity: 0, scale: 0.95, y: 10 }}
-        transition={{ duration: 0.3 }}
-        className="em-onboarding-card relative z-10 w-[90vw] max-w-sm rounded-2xl bg-background border border-border shadow-2xl p-6 text-center"
-      >
-        <div
-          className="mx-auto w-14 h-14 rounded-full flex items-center justify-center mb-4"
-          style={{ backgroundColor: "var(--em-primary-alpha-10)" }}
-        >
-          {cfg.icon}
-        </div>
-        <h3 className="text-lg font-bold mb-1.5">{cfg.title}</h3>
-        <p className="text-sm text-muted-foreground mb-5 leading-relaxed whitespace-pre-line">
-          {cfg.description}
-        </p>
-        <div className="flex flex-col sm:flex-row gap-2.5">
-          <Button variant="outline" className="flex-1 h-10 gap-1.5" onClick={onDecline}>
-            {cfg.declineText}
-          </Button>
-          <Button
-            className="flex-1 h-10 gap-1.5 text-white"
-            style={{ backgroundColor: "var(--em-primary)" }}
-            onClick={onContinue}
-          >
-            {cfg.continueIcon}
-            {cfg.continueText}
-          </Button>
-        </div>
-      </motion.div>
-    </div>,
-    document.body
+  onContinue: () => void; onDecline: () => void; onSkip: () => void;
+}) {
+  const viewport = useGuideViewport();
+  const width = Math.min(440, viewport.width - 24);
+  const nextIsFiles = variant === "basic-to-advanced";
+  return (
+    <Dialog.Root open onOpenChange={(open) => { if (!open) onSkip(); }}>
+      <Dialog.Portal>
+        <Dialog.Overlay className="fixed inset-0 z-[10001] bg-black/30" />
+        <Dialog.Content className="em-tour-transition" style={{ left: viewport.left + (viewport.width - width) / 2, top: viewport.top + viewport.height / 2, transform: "translateY(-50%)", width, maxHeight: viewport.height - 24 }}>
+          <span className="em-onboarding-completion-icon"><Compass aria-hidden="true" /></span>
+          <Dialog.Title>{nextIsFiles ? "接下来，试试文件与表格" : "最后，认识模型与插件"}</Dialog.Title>
+          <Dialog.Description>已走完这一节。可以继续体验、跳到下一节，或现在进入工作区。</Dialog.Description>
+          <button type="button" className="em-tour-next" onClick={onContinue}>{nextIsFiles ? "体验文件与表格" : "体验模型与插件"}<ArrowRight aria-hidden="true" /></button>
+          <button type="button" onClick={onDecline}>{nextIsFiles ? "跳过本节，前往设置引导" : "跳过本节，进入工作区"}</button>
+          <button type="button" onClick={onSkip}>结束全部引导</button>
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
   );
 }

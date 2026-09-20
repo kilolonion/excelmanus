@@ -5,7 +5,9 @@
 ## 格式化样式
 
 ```python
-from em import format_spreadsheet
+from em import format_spreadsheet, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 format_spreadsheet(
     file_path="file.xlsx",
@@ -32,7 +34,9 @@ format_spreadsheet(
 ## 批量格式化（区域）
 
 ```python
-from em import format_spreadsheet
+from em import format_spreadsheet, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 format_spreadsheet(
     file_path="file.xlsx",
@@ -49,8 +53,12 @@ format_spreadsheet(
 
 ## 合并单元格
 
+默认保留所有值；非锚点有值时先整理内容。只有明确要舍弃非锚点值时才传 allow_data_loss=true。
+
 ```python
-from em import format_spreadsheet
+from em import format_spreadsheet, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 format_spreadsheet(
     file_path="file.xlsx",
@@ -61,12 +69,16 @@ format_spreadsheet(
 
 ## 条件格式 / 打印 / 数据验证
 
-当前不可用：已有 xlsx 没有这些对象的保存通路。不要用 openpyxl 改完再期望 SDK 提交能带上。
+条件格式和数据验证已经可用，使用 `format_spreadsheet` 的 `operations`，先查询
+`format_spreadsheet.operations.rule` 的字段合同。不要用 openpyxl 改完再期望 SDK
+提交能带上。打印设置是否可用以当前能力目录为准，不把它与条件格式混为一谈。
 
 ## 图表
 
 ```python
-from em import manage_spreadsheet_objects
+from em import manage_spreadsheet_objects, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 manage_spreadsheet_objects(
     file_path="file.xlsx",
@@ -86,7 +98,9 @@ manage_spreadsheet_objects(
 ## 专业对齐（按列数据类型）
 
 ```python
-from em import format_spreadsheet
+from em import format_spreadsheet, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 format_spreadsheet(
     file_path="file.xlsx",
@@ -102,7 +116,9 @@ format_spreadsheet(
 ## auto_fit 收尾
 
 ```python
-from em import format_spreadsheet
+from em import format_spreadsheet, inspect_spreadsheet
+
+version = inspect_spreadsheet(file_path="file.xlsx", mode="overview")["content_version"]
 
 format_spreadsheet(
     file_path="file.xlsx",

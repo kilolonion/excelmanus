@@ -289,6 +289,12 @@ class TestMergeCells:
         wb.close()
 
         result = _format(file_path, [{"kind": "merge", "range": "A1:B1"}])
+        assert not result.success
+        assert result.value["affected_cells"] == ["B1"]
+        unchanged = load_workbook(file_path)
+        assert unchanged.active["B1"].value == "数据"
+        unchanged.close()
+        result = _format(file_path, [{"kind": "merge", "range": "A1:B1", "allow_data_loss": True}])
         assert result.success
         styles = read_cell_styles(str(file_path), "A1:B1").value
         assert styles["summary"]["has_merged_cells"] is True

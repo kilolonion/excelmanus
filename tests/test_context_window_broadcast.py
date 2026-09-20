@@ -68,20 +68,20 @@ class TestIsContextWindowUserPinned:
     ) -> None:
         from excelmanus.settings_runtime import override_settings
 
-        override_settings({"EXCELMANUS_MAX_CONTEXT_TOKENS": "128000"})
-        assert is_context_window_user_pinned(128_000, "test-model") is True
+        override_settings({"EXCELMANUS_MAX_CONTEXT_TOKENS": "200000"})
+        assert is_context_window_user_pinned(200_000, "test-model") is True
 
     def test_value_mismatch_pins_without_env(self) -> None:
         assert is_context_window_user_pinned(400_000, "test-model") is True
 
     def test_inferred_default_is_not_pinned(self) -> None:
-        assert is_context_window_user_pinned(128_000, "test-model") is False
+        assert is_context_window_user_pinned(256_000, "test-model") is False
 
 
 class TestContextBudgetSetBaseTokens:
     def test_set_base_tokens_clears_adaptive_override(self) -> None:
         budget = ContextBudget(base_tokens=0, model="test-model")
-        assert budget.max_tokens == 128_000
+        assert budget.max_tokens == 256_000
         budget.set_override(80_000, adaptive=True)
         assert budget.max_tokens == 80_000
         assert budget.set_base_tokens(1_000_000) == 1_000_000

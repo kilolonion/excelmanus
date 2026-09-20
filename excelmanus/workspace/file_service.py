@@ -40,7 +40,7 @@ from excelmanus.workspace.revisions import (
     RevisionStore,
     content_sha256,
 )
-from excelmanus.workspace.txlog import TxLog, read_json, replace_with_retry, write_json_atomic
+from excelmanus.workspace.txlog import FileBusyError, TxLog, read_json, replace_with_retry, write_json_atomic
 
 logger = get_logger("workspace.file_service")
 
@@ -329,14 +329,77 @@ class WorkspaceFileService:
         if not lineage_id:
             return [r for r in self.store.list(rel) if r.committed]
         data = self.lineages.load_lineage(lineage_id)
-        records: list[RevisionRecord] = []
+        records: dict[str, RevisionRecord] = {}
+        paths = {rel}
         for item in data.get("records") or []:
-            rec = self.store.get(str(item.get("path") or rel), str(item.get("revision_id") or ""))
+            path = str(item.get("path") or rel)
+            paths.add(path)
+            rec = self.store.get(path, str(item.get("revision_id") or ""))
             if rec is not None and rec.committed:
-                records.append(rec)
+                records[rec.id] = rec
+        # Records own history; the lineage index is only a projection. Include
+        # checkpoints written by older releases (and migrated overlay backups)
+        # even when their index entry was never written.
+        for path in paths:
+            items = self.store.list(path)
+            for index, rec in enumerate(items):
+                owner = rec.lineage_id
+                if not owner and rec.reason == "checkpoint":
+                    before = next((r for r in reversed(items[:index]) if r.lineage_id), None)
+                    after = next((r for r in items[index + 1:] if r.lineage_id), None)
+                    owner = before.lineage_id if before else after.lineage_id if after else lineage_id
+                if owner == lineage_id:
+                    records[rec.id] = rec
         if records:
-            return records
+            return sorted(records.values(), key=lambda r: (r.created_at or "", r.sequence, r.id))
         return [r for r in self.store.list(rel) if r.committed]
+
+    def checkpoint(
+        self, file_path: str, *, expected_version: str, label: str | None = None,
+    ) -> RevisionRecord:
+        """Capture and index the same locked, version-checked bytes."""
+        rel = self._canonical(file_path, must_exist=True)
+        dest = self.root / rel
+        with self._workspace_lock():
+            handle = _acquire_lock(lock_path_for(dest))
+            try:
+                data = dest.read_bytes()
+                actual = content_version_of(data)
+                if actual != expected_version:
+                    raise CommitError("STALE_SNAPSHOT", "检查点源文件版本已变化", fields={"content_version": actual})
+                lineage_id = self._ensure_legacy_lineage(rel)
+                digest = content_sha256(data)
+                existing = next(
+                    (item for item in self.store.list(rel)
+                     if item.reason == "checkpoint" and item.label == label and item.sha256 == digest),
+                    None,
+                )
+                if existing is not None:
+                    self._index_record(lineage_id, existing, current_path=rel, closed=False)
+                    return existing
+                rec = self.store.checkpoint(rel, data, label=label, lineage_id=lineage_id)
+                self._index_record(lineage_id, rec, current_path=rel, closed=False)
+                return rec
+            finally:
+                _release_lock(handle)
+
+    def read_history(self, file_path: str, revision_id: str) -> tuple[RevisionRecord, bytes]:
+        rel = self._canonical(file_path)
+        rec, data = self._load_revision(rel, revision_id)
+        if not rec.committed:
+            raise CommitError("NOT_FOUND", "修订尚未提交")
+        return rec, data
+
+    def delete_checkpoint(self, file_path: str, revision_id: str) -> None:
+        """Explicitly remove one checkpoint; never remove automatic recovery history."""
+        rel = self._canonical(file_path)
+        with self._workspace_lock():
+            rec = next((r for r in self.list_history(rel) if r.id == revision_id), None)
+            if rec is None:
+                raise CommitError("NOT_FOUND", "检查点不存在")
+            if rec.reason != "checkpoint":
+                raise CommitError("INVALID_ARGS", "只能手动删除检查点，自动历史由保留策略管理")
+            self.store.delete_record(rec)
 
     def create(
         self,
@@ -671,6 +734,14 @@ class WorkspaceFileService:
     def recover(self) -> list[MutationReceipt]:
         with self._workspace_lock():
             return self._recover_locked()
+
+    def get_receipt(self, operation_id: str, *, recover: bool = True) -> MutationReceipt | None:
+        """Read an idempotent mutation receipt, optionally settling recovery first."""
+        with self._workspace_lock():
+            if recover:
+                self._recover_locked()
+            raw = self.txlog.read_receipt(operation_id)
+            return MutationReceipt.from_dict(raw) if raw else None
 
     def deliver_outbox(self, consumer: Callable[[dict[str, Any]], None], *, consumer_id: str) -> int:
         """Deliver committed effects at least once; acknowledge only after success."""
@@ -1075,6 +1146,10 @@ class WorkspaceFileService:
                 raise
             except OSError as exc:
                 item.publish_status = "failed"
+                if isinstance(exc, FileBusyError) or getattr(exc, "winerror", None) in (32, 33):
+                    raise CommitError("FILE_LOCKED", f"文件被占用：{item.rel}。请关闭 Excel 或文件预览后重试。") from exc
+                if isinstance(exc, PermissionError):
+                    raise CommitError("SAVE_FAILED", f"没有权限写入 {item.rel}；请检查目录权限或选择可写目录。") from exc
                 raise CommitError("SAVE_FAILED", f"写入 {item.rel} 失败：{exc}") from exc
             intent["targets"][index]["publish_status"] = item.publish_status
             self.txlog.write_intent(intent)

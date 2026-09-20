@@ -14,6 +14,7 @@ from typing import Any
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict
+from starlette.concurrency import run_in_threadpool
 
 import excelmanus
 from excelmanus.api_app_state import (
@@ -61,9 +62,15 @@ async def upload_file(raw_request: Request) -> JSONResponse:
     ws = _resolve_workspace(
         raw_request,
         session_id=str(form.get("session_id") or raw_request.query_params.get("session_id") or "") or None,
+        workspace_id=str(form.get("workspace_id") or raw_request.query_params.get("workspace_id") or "") or None,
     )
 
-    content = await file.read()
+    try:
+        content = await file.read(_UPLOAD_MAX_PART_SIZE + 1)
+    finally:
+        await form.close()
+    if len(content) > _UPLOAD_MAX_PART_SIZE:
+        return _error_json_response(413, "上传文件超过 100 MB 限制")
 
     # 支持可选的 folder= 表单字段或查询参数
     folder = raw_request.query_params.get("folder", "")
@@ -123,7 +130,7 @@ async def upload_file(raw_request: Request) -> JSONResponse:
             )
             # 转换后添加原始扩展名别名，方便用户用原名引用
             if converted:
-                registry.add_alias(entry.id, "original_path", f"./{(target_dir / safe_name).relative_to(ws.root_dir)}")
+                registry.add_alias(entry.id, "original_path", f"./{_original_dest.relative_to(ws.root_dir).as_posix()}")
         except Exception:
             logger.debug("FileRegistry register_upload 失败", exc_info=True)
 
@@ -153,6 +160,8 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     except Exception:
         return _error_json_response(400, "请求体必须是 JSON")
 
+    if not isinstance(body, dict) or not isinstance(body.get("url", ""), str):
+        return _error_json_response(400, "请求体必须是包含 url 字符串的 JSON 对象")
     url: str = (body.get("url") or "").strip()
     if not url:
         return _error_json_response(400, "缺少 url 字段")
@@ -186,7 +195,11 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
     if len(content) == 0:
         return _error_json_response(400, "下载到空文件")
 
-    ws = _resolve_workspace(raw_request, session_id=(body.get("session_id") or None))
+    ws = _resolve_workspace(
+        raw_request,
+        session_id=(body.get("session_id") or None),
+        workspace_id=(body.get("workspace_id") or None),
+    )
     safe_name = f"{uuid.uuid4().hex[:8]}_{raw_filename}"
     rel = f"uploads/{safe_name}"
     from excelmanus.workbook_commit import CommitError
@@ -236,7 +249,7 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
                 size_bytes=dest_path.stat().st_size,
             )
             if converted:
-                registry.add_alias(entry.id, "original_path", f"./{(upload_dir / safe_name).relative_to(ws.root_dir)}")
+                registry.add_alias(entry.id, "original_path", f"./{_original_dest_url.relative_to(ws.root_dir).as_posix()}")
         except Exception:
             logger.debug("FileRegistry register_upload 失败 (from-url)", exc_info=True)
 
@@ -253,6 +266,10 @@ async def upload_file_from_url(raw_request: Request) -> JSONResponse:
 
 @router.get("/api/v1/mentions")
 async def list_mentions(request: Request, path: str = "") -> JSONResponse:
+    return await run_in_threadpool(_list_mentions, request, path)
+
+
+def _list_mentions(request: Request, path: str = "") -> JSONResponse:
     """返回 @ 提及可选项。path 参数支持子目录扫描。"""
     tools: list[str] = []
     skills: list[dict] = []
@@ -273,11 +290,19 @@ async def list_mentions(request: Request, path: str = "") -> JSONResponse:
     safe_path = path.replace("..", "").strip("/")
     if _config is not None:
         ws = _resolve_workspace_root(request)
-        scan_dir = os.path.join(ws, safe_path) if safe_path else ws
+        from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+        from excelmanus.security.source_isolation import is_product_source_path
+        from excelmanus.workspace.identity import is_hidden_name
+        try:
+            scan_dir = str(FileAccessGuard(ws).resolve_and_validate(safe_path or "."))
+        except SecurityViolationError:
+            return _error_json_response(403, "该目录不属于当前可访问的工作区")
         if os.path.isdir(scan_dir):
             try:
                 for entry in os.scandir(scan_dir):
-                    if entry.name.startswith(".") or entry.name in {"node_modules", "__pycache__", ".venv"}:
+                    if is_hidden_name(entry.name) or entry.name in {"node_modules", "__pycache__", ".venv"}:
+                        continue
+                    if is_product_source_path(entry.path, ws):
                         continue
                     rel = f"{safe_path}/{entry.name}" if safe_path else entry.name
                     if entry.is_dir():
@@ -402,13 +427,19 @@ async def execute_command(request: Request) -> JSONResponse:
     # /fullaccess status
     if command == "/fullaccess status":
         # fullaccess 已改为跨会话持久化设置
-        hint = "全权限模式: **关闭**\n\n使用 `/fullaccess on` 开启，开启后工具调用将跳过审批确认（跨会话生效）"
+        hint = (
+            "跳过审批: **关闭**\n\n使用 `/fullaccess on` 开启；开启后工具、"
+            "联网代码和本机 Shell 命令将自动执行（跨会话生效）。"
+        )
         if _database is not None:
             try:
                 from excelmanus.stores.config_store import UserConfigStore
                 _uc = UserConfigStore(_database.conn)
                 if _uc.get_full_access():
-                    hint = "全权限模式: **开启**（跨会话生效）\n\n使用 `/fullaccess off` 关闭"
+                    hint = (
+                        "跳过审批: **开启**（含联网与本机命令，跨会话生效）"
+                        "\n\n使用 `/fullaccess off` 关闭"
+                    )
             except Exception:
                 pass
         elif _session_manager is not None:
@@ -417,7 +448,10 @@ async def execute_command(request: Request) -> JSONResponse:
                 for s in sessions:
                     detail = await _session_manager.get_session_detail(s["id"])
                     if detail.get("full_access_enabled"):
-                        hint = f"全权限模式: **开启**\n\n使用 `/fullaccess off` 关闭"
+                        hint = (
+                            "跳过审批: **开启**（含联网与本机命令）"
+                            "\n\n使用 `/fullaccess off` 关闭"
+                        )
                         break
             except Exception:
                 pass

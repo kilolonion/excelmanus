@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { extractWorkbookOpsFromMutation } from "@/lib/excel-cell-edit";
-import { firstUnloadedCell, mergeViewWindows, pageForCell, rangeIsLoaded } from "@/lib/workbook-window";
-import { demoWorkbookView } from "@/lib/workbook-view";
+import { firstUnloadedCell, mergeViewWindows, pageForCell, pagesForViewport, rangeIsLoaded } from "@/lib/workbook-window";
+import { demoWorkbookView, viewSnapshotToUniver, windowCellPatch } from "@/lib/workbook-view";
 
 describe("installed Univer command contracts", () => {
   const ranges = [{ startRow: 0, endRow: 0, startColumn: 0, endColumn: 1 }];
@@ -24,6 +24,32 @@ describe("installed Univer command contracts", () => {
 });
 
 describe("version-bound range loading", () => {
+  it("keeps unopened sheets sparse, without synthesizing unloaded cells", () => {
+    const view = demoWorkbookView("book.xlsx");
+    view.sheets.push({ name: "Huge", sheet_id: "Huge", used: { rows: 1000000, cols: 100 } });
+    view.coverage.unloaded = [{ sheet: "Huge", r0: 1, c0: 1, r1: 1000000, c1: 100 }];
+    const mapped = viewSnapshotToUniver(view, "id") as { sheets: Record<string, { cellData: unknown; rowCount: number }> };
+    expect(mapped.sheets["sheet-Huge"].cellData).toEqual({});
+    expect(mapped.sheets["sheet-Huge"].rowCount).toBe(1000000);
+  });
+
+  it("replaces loaded windows when styles arrive and explicitly clears deleted cells", () => {
+    const view = demoWorkbookView("book.xlsx");
+    const next = structuredClone(view);
+    next.windows[0].cells = { "1,1": { t: "n", v: 9, cached: "yes", s: { bl: 1 } } };
+    const merged = mergeViewWindows(view, next);
+    expect(merged.windows).toHaveLength(1);
+    expect(merged.windows[0].cells["1,1"].s).toEqual({ bl: 1 });
+    const patch = windowCellPatch(next.windows[0], { "0": { "0": { f: "=2" }, "1": { v: "deleted" } }, "500": { "0": { v: "outside" } } });
+    expect(patch[0][0]).toMatchObject({ v: 9, f: null, s: { bl: 1 }, p: null });
+    expect(patch[0][1]).toBeNull();
+    expect(patch[500]).toBeUndefined();
+  });
+
+  it("loads both sides of a viewport straddling row and column boundaries", () => {
+    expect(pagesForViewport({ startRow: 195, endRow: 220, startColumn: 48, endColumn: 55 }).map((p) => p.address))
+      .toEqual(["A1:AX200", "AY1:CV200", "A201:AX400", "AY201:CV400"]);
+  });
   it("combines adjacent windows and locates holes", () => {
     const view = demoWorkbookView("book.xlsx");
     view.coverage.loaded = [{sheet:"Sheet1",r0:1,c0:1,r1:200,c1:50},{sheet:"Sheet1",r0:201,c0:1,r1:400,c1:50}];

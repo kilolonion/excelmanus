@@ -73,6 +73,7 @@ def test_create_app_uses_config_cors_for_middleware(monkeypatch: pytest.MonkeyPa
         layer for layer in local_app.user_middleware if layer.cls is CORSMiddleware
     ]
     assert len(cors_layers) == 1
+    assert "Content-Disposition" in cors_layers[0].kwargs["expose_headers"]
     assert set(cors_layers[0].kwargs["allow_origins"]) == {
         "http://a.example",
         "http://b.example",
@@ -1151,7 +1152,6 @@ class TestPublicChatAndSseContract:
             ("/compact status", "上下文压缩状态"),
             ("/subagent status", None),
             ("/plan status", "计划模式"),
-            ("/code status", "代码模式"),
             ("/accept apv_demo", None),
         )
         session_id = "ctrl-cmd-session"
@@ -2320,17 +2320,7 @@ class TestImageAttachment:
 
         req = ChatRequest(message="hello")
         assert req.images == []
-        assert req.present_as is None
         assert req.chat_mode == "write"
-
-    def test_chat_request_accepts_present_as_code(self) -> None:
-        from excelmanus.api import ChatRequest
-        from pydantic import ValidationError
-
-        req = ChatRequest(message="hello", present_as="code")
-        assert req.present_as == "code"
-        with pytest.raises(ValidationError):
-            ChatRequest(message="hello", present_as="both")
 
     def test_image_attachment_defaults(self) -> None:
         """ImageAttachment 默认值。"""
@@ -3109,12 +3099,12 @@ class TestAdminGuardForModelConfig:
         mock_cfg_store.add_profile.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_switch_model_accepts_codex_prefixed_profile_name(
+    async def test_switch_model_requires_stored_codex_profile(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """切换模型接口应支持 openai-codex 前缀 profile 名称。"""
+        """OAuth 凭证不等于模型档案，存储未初始化不能报告切换成功。"""
 
-        # 不依赖全局 profile，走 Codex 用户私有模型解析路径。
+        # 私有动态档案已移除；Codex 与其他模型一样需要 DB 档案。
         monkeypatch.setattr(api_module.app.state.runtime, "config_store", None)
         monkeypatch.setattr(api_runtime(), "config_store", None)
         mock_cred_store = MagicMock()
@@ -3131,7 +3121,7 @@ class TestAdminGuardForModelConfig:
             headers={"Authorization": "Bearer fake-token"},
         )
 
-        assert resp.status_code == 200
+        assert resp.status_code == 503
 
     @pytest.mark.asyncio
     async def test_switch_model_rejects_default_alias(

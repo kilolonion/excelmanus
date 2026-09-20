@@ -1,8 +1,10 @@
 "use client";
 
-import { CodePreviewModal } from "@/components/chat/CodePreviewModal";
-import { ImagePreviewModal } from "@/components/chat/ImagePreviewModal";
+import dynamic from "next/dynamic";
 import { useFilePreviewStore } from "@/stores/file-preview-store";
+
+const CodePreviewModal = dynamic(() => import("@/components/chat/CodePreviewModal").then((m) => m.CodePreviewModal), { ssr: false });
+const ImagePreviewModal = dynamic(() => import("@/components/chat/ImagePreviewModal").then((m) => m.ImagePreviewModal), { ssr: false });
 
 export function FilePreviewHost() {
   const textTarget = useFilePreviewStore((s) => s.textTarget);
@@ -18,6 +20,8 @@ export function FilePreviewHost() {
         <CodePreviewModal
           filePath={textTarget.path}
           filename={textTarget.filename}
+          sessionId={textTarget.sessionId}
+          workspaceId={textTarget.workspaceId}
           open={textOpen}
           onOpenChange={(open) => {
             if (!open) closeText();
@@ -28,6 +32,8 @@ export function FilePreviewHost() {
         <ImagePreviewModal
           imagePath={imageTarget.path}
           filename={imageTarget.filename}
+          sessionId={imageTarget.sessionId}
+          workspaceId={imageTarget.workspaceId}
           open={imageOpen}
           onOpenChange={(open) => {
             if (!open) closeImage();

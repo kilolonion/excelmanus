@@ -47,11 +47,15 @@ def generate_wrapper_script(tier: str, workspace_root: str) -> str:
         tier: 代码风险等级 (GREEN/YELLOW/RED)
         workspace_root: 工作区根目录绝对路径
     """
+    from excelmanus.security.source_isolation import protected_source_paths
+
+    source_paths = repr(protected_source_paths(workspace_root))
     if tier == "RED":
         return _RED_FS_GUARD_TEMPLATE.format(
             workspace_root=repr(workspace_root),
             code_mode_inject=_CODE_MODE_INJECT,
             utf8_stdio=_UTF8_STDIO,
+            product_source_paths=source_paths,
         ).replace("<<<PENDING_WRITE_RUNTIME>>>", _PENDING_WRITE_RUNTIME)
 
     blocked = _GREEN_BLOCKED if tier == "GREEN" else _YELLOW_BLOCKED
@@ -70,6 +74,7 @@ def generate_wrapper_script(tier: str, workspace_root: str) -> str:
         raw_socket_module_blocked_calls=raw_socket_blocked_calls_repr,
         code_mode_inject=_CODE_MODE_INJECT,
         utf8_stdio=_UTF8_STDIO,
+        product_source_paths=source_paths,
     ).replace("<<<PENDING_WRITE_RUNTIME>>>", _PENDING_WRITE_RUNTIME)
 
 
@@ -1051,11 +1056,7 @@ _HOME_DIR = os.path.expanduser("~")
 _SENSITIVE_DIRS = [
     os.path.realpath(os.path.join(_HOME_DIR, ".excelmanus")),
 ]
-_PRODUCT_SOURCE_DIRS = [
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "excelmanus")),
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "tests")),
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "docs")),
-]
+_PRODUCT_SOURCE_DIRS = {product_source_paths}
 
 # ── 文件系统守卫 ──
 _BENCH_PROTECTED_DIRS_RAW = os.environ.get("EXCELMANUS_BENCH_PROTECTED_DIRS", "bench/external")
@@ -1167,11 +1168,7 @@ class _SandboxImportBlocker(importlib.abc.MetaPathFinder):
 sys.meta_path.insert(0, _SandboxImportBlocker())
 
 # ── Layer 2: Filesystem Guard ──
-_PRODUCT_SOURCE_DIRS = [
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "excelmanus")),
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "tests")),
-    os.path.realpath(os.path.join(_WORKSPACE_ROOT, "docs")),
-]
+_PRODUCT_SOURCE_DIRS = {product_source_paths}
 _BENCH_PROTECTED_DIRS_RAW = os.environ.get("EXCELMANUS_BENCH_PROTECTED_DIRS", "bench/external")
 _BENCH_PROTECTED_DIRS = [
     os.path.realpath(os.path.join(_WORKSPACE_ROOT, d.strip()))

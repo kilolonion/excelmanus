@@ -3,14 +3,18 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import TYPE_CHECKING, Literal
+
+if TYPE_CHECKING:
+    from asyncio import Future
+    from excelmanus.events import EventCallback
 
 SubagentPermissionMode = Literal["default", "acceptEdits", "readOnly", "dontAsk"]
 SubagentCapabilityMode = Literal["restricted", "full"]
 SubagentMemoryScope = Literal["user", "project"]
 SubagentSource = Literal["builtin", "user", "project"]
 SubagentStopReason = Literal["completed", "aborted", "error", "max-tokens", "refusal"]
-SubagentMode = Literal["one-shot"]
+SubagentMode = Literal["one-shot", "background"]
 
 
 @dataclass(frozen=True)
@@ -67,7 +71,7 @@ class SubagentStartRequest:
     agent_name: str | None = None
     file_paths: list[str] = field(default_factory=list)
     label: str = ""
-    on_event: object | None = None
+    on_event: EventCallback | None = None
 
 
 @dataclass
@@ -124,7 +128,7 @@ class SubagentRun:
         self._disposed = False
 
     @property
-    def result(self) -> object:
+    def result(self) -> Future[SubagentResult]:
         return self._future
 
     def set_result(self, result: SubagentResult) -> None:

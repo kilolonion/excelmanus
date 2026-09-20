@@ -26,20 +26,23 @@ export function WordFullView() {
   const openHistory = useWordStore((state) => state.openHistory);
   const triggerRefresh = useWordStore((state) => state.triggerRefresh);
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const activeWorkspaceId = useSessionStore(
+    (state) => state.sessions.find((item) => item.id === state.activeSessionId)?.workspaceId ?? null,
+  );
   const [refreshKey, setRefreshKey] = useState(0);
   const [actionError, setActionError] = useState<{ scope: string; message: string } | null>(null);
 
   const fileUrl = useMemo(() => {
     if (!fullViewPath) return "";
-    return buildWordFileUrl(fullViewPath, activeSessionId);
-  }, [activeSessionId, fullViewPath]);
+    return buildWordFileUrl(fullViewPath, activeSessionId, activeWorkspaceId);
+  }, [activeSessionId, activeWorkspaceId, fullViewPath]);
 
   const fileName = useMemo(() => {
     if (!fullViewPath) return "";
     return fullViewPath.split("/").pop() || fullViewPath;
   }, [fullViewPath]);
 
-  const viewScope = `${activeSessionId ?? ""}:${fullViewPath ?? ""}`;
+  const viewScope = `${activeWorkspaceId ?? activeSessionId ?? ""}:${fullViewPath ?? ""}`;
   const visibleActionError = actionError?.scope === viewScope ? actionError.message : null;
 
   const handleRefresh = useCallback(() => {
@@ -52,7 +55,7 @@ export function WordFullView() {
     if (!fullViewPath) return;
 
     setActionError(null);
-    void downloadFile(fullViewPath, fileName || undefined, activeSessionId ?? undefined).catch(
+    void downloadFile(fullViewPath, fileName || undefined, activeSessionId, activeWorkspaceId).catch(
       (err: unknown) => {
         console.error("Error downloading Word file:", err);
         setActionError({
@@ -61,7 +64,7 @@ export function WordFullView() {
         });
       }
     );
-  }, [activeSessionId, fileName, fullViewPath, viewScope]);
+  }, [activeSessionId, activeWorkspaceId, fileName, fullViewPath, viewScope]);
 
   const handleOpenHistory = useCallback(() => {
     if (!fullViewPath) return;

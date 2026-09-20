@@ -44,6 +44,8 @@ def _require_control_plane(request: Request) -> JSONResponse | None:
     """破坏性操作：server 模式拒绝；非 loopback 拒绝。"""
     from excelmanus.api_app_state import get_config
 
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        return _error(409, "桌面版不支持源码更新或停机恢复，请退出后安装新版 App；用户数据会保留。")
     cfg = get_config()
     if cfg is not None and cfg.is_server:
         return _error(403, "服务器部署请在运维机运行 deploy.sh，不能从生产 API 升级或远程部署。")
@@ -64,6 +66,8 @@ def reset_git_commit_cache() -> None:
 
 def _get_git_commit(root: Path) -> str | None:
     global _git_commit_cache
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        return None
     if _git_commit_cache is not _GIT_COMMIT_UNSET:
         return _git_commit_cache  # type: ignore[return-value]
     try:
@@ -176,6 +180,13 @@ async def version_check(request: Request) -> JSONResponse:
     from excelmanus.updater import check_for_updates, get_current_version
 
     root = _get_project_root()
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        import excelmanus
+        return JSONResponse(content={
+            "current": excelmanus.__version__, "latest": None, "has_update": False,
+            "commits_behind": 0, "release_notes": "请通过新版安装包更新桌面 App，用户数据会保留。",
+            "check_method": "desktop_installer", "check_failed": False, "error": None,
+        })
     current = get_current_version(root)
     force = request.query_params.get("force", "") == "1"
     try:

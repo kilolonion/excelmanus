@@ -241,7 +241,14 @@ class SessionManager:
                 "updated_at": "",
                 "sort_index": 0,
             }])
-        items = self._workspace_store.list()
+        # Old releases automatically registered the installation directory.
+        # Preserve its historical sessions/files, but do not select it for new
+        # work until the user explicitly adopts it via Add Workspace.
+        self.default_workspace_binding()
+        from excelmanus.data_home import get_package_root
+
+        items = [item for item in self._workspace_store.list()
+                 if item.get("source_access") or not paths_equal(item["path"], get_package_root())]
         if items:
             for item in items:
                 self._ensure_workspace_migrated(str(item.get("path") or ""))
@@ -262,6 +269,9 @@ class SessionManager:
             rec = self._workspace_store.get(workspace_id)
             if rec is None:
                 raise WorkspacePathError("工作区不存在")
+            from excelmanus.data_home import get_package_root
+            if not rec.get("source_access") and paths_equal(rec["path"], get_package_root()):
+                raise WorkspacePathError("应用源码目录默认不作为工作区，请先手动添加该目录")
             self._ensure_workspace_migrated(rec["path"])
             return rec["path"], rec["id"]
         if workspace_path:
@@ -271,6 +281,9 @@ class SessionManager:
             if self._workspace_store is not None:
                 rec = self._workspace_store.get_by_path(canon)
                 if rec is not None:
+                    from excelmanus.data_home import get_package_root
+                    if not rec.get("source_access") and paths_equal(canon, get_package_root()):
+                        raise WorkspacePathError("应用源码目录默认不作为工作区，请先手动添加该目录")
                     self._ensure_workspace_migrated(rec["path"])
                     return rec["path"], rec["id"]
             default_path, default_id = self.default_workspace_binding()
@@ -564,7 +577,10 @@ class SessionManager:
         augmented: list[ModelProfile] = []
         changed = False
         for p in engine._config.models:
-            if OpenAICodexProvider.is_codex_profile_name(p.name):
+            if (
+                OpenAICodexProvider.is_codex_profile_name(p.name)
+                or OpenAICodexProvider.is_codex_profile_name(p.model)
+            ):
                 augmented.append(replace(
                     p,
                     api_key=api_key,
@@ -606,6 +622,12 @@ class SessionManager:
                     compaction_enabled=compaction_enabled,
                     compaction_threshold_ratio=compaction_threshold_ratio,
                 )
+
+    async def broadcast_execution_budget(self, **values: Any) -> None:
+        """Apply future-turn budget settings to all active engines."""
+        async with self._lock:
+            for entry in self._sessions.values():
+                entry.engine.apply_execution_budget(**values)
 
     async def broadcast_model_profiles(self, profiles: tuple) -> None:
         """向所有活跃会话广播模型档案列表变更（锁保护）。
@@ -679,7 +701,7 @@ class SessionManager:
         绑定的 config_store；仅在其不可用时退回 api_app_state 全局同步。
         """
         live_models = getattr(self._config, "models", ()) or ()
-        store_profiles: tuple[Any, ...] = ()
+        store_profiles: tuple[Any, ...] | None = None
         store = self._config_store
         if store is not None and hasattr(store, "list_profiles"):
             try:
@@ -689,7 +711,7 @@ class SessionManager:
                 )
             except Exception:
                 logger.debug("读取数据库模型档案失败", exc_info=True)
-        if store_profiles:
+        if store_profiles is not None:
             live_models = store_profiles
         else:
             try:
@@ -699,12 +721,13 @@ class SessionManager:
                 if force_db or not getattr(live, "models", ()):
                     _sync_config_profiles_from_db()
                     live = get_config()
-                if live is not None and getattr(live, "models", ()):
+                if live is not None:
                     live_models = live.models
             except Exception:
                 logger.debug("同步运行时模型档案失败", exc_info=True)
-        if live_models:
-            engine.sync_model_profiles(live_models)
+        engine.sync_model_profiles(live_models)
+        # 数据库档案没有 OAuth token；刷新后必须重新注入再恢复激活模型。
+        self.sync_user_subscription_profiles(engine)
 
     def _apply_persisted_active_model(self, engine: AgentEngine, user_config: Any | None = None) -> None:
         """按已激活档案切换新会话，失败时先补档案再试一次。"""
@@ -906,6 +929,11 @@ class SessionManager:
             workspace_ref=workspace_ref,
         )
         self.sync_user_subscription_profiles(engine)
+        if self._conv_persistence is not None:
+            persistence = self._conv_persistence
+            engine._persist_session_messages = lambda: persistence.sync_new_messages(
+                session_id, engine,
+            )
         if self._credential_resolver is not None:
             engine._credential_resolver = self._credential_resolver
 
@@ -956,6 +984,10 @@ class SessionManager:
                 logger.debug("surface 快照一致性检查失败", exc_info=True)
         elif history_messages:
             engine.inject_history(history_messages)
+            engine._session_id = session_id
+            engine.restore_session_snapshot()
+        else:
+            # 后台任务/Inbox 可以早于第一条已保存的聊天消息存在。
             engine._session_id = session_id
             engine.restore_session_snapshot()
         _user_config = self._resolve_user_config_store()
@@ -1213,6 +1245,7 @@ class SessionManager:
 
         if engine is not None:
             try:
+                await engine.shutdown_agents()
                 await self._generate_session_summary(
                     session_id, engine, user_id=user_id,
                 )
@@ -1265,6 +1298,7 @@ class SessionManager:
 
         if engine is not None:
             try:
+                await engine.shutdown_agents()
                 engine.clear_memory()
                 if self._conv_persistence is not None:
                     self._conv_persistence.clear(session_id, engine)
@@ -1301,6 +1335,7 @@ class SessionManager:
 
         for sid, engine in active_engines:
             try:
+                await engine.shutdown_agents()
                 await self._generate_session_summary(sid, engine, user_id=user_id)
             except Exception:
                 logger.debug("会话 %s 摘要生成失败", sid, exc_info=True)
@@ -1354,6 +1389,8 @@ class SessionManager:
                 sid
                 for sid, entry in self._sessions.items()
                 if (not entry.in_flight)
+                and not entry.engine._subagent_runtime.has_active_runs
+                and entry.engine._driver.status != "running"
                 and (now - entry.last_access) > (
                     readonly_ttl if entry.restored_readonly else self._ttl_seconds
                 )
@@ -1394,6 +1431,7 @@ class SessionManager:
 
         for sid, engine in active_engines:
             try:
+                await engine.shutdown_agents()
                 await self._generate_session_summary(sid, engine)
             except Exception:
                 logger.debug("会话 %s 关闭时摘要生成失败", sid, exc_info=True)
@@ -1750,6 +1788,7 @@ class SessionManager:
                             for o in pq.options
                         ],
                         "multi_select": pq.multi_select,
+                        "queue_size": engine._question_flow.queue_size(),
                     }
 
             # 序列化最近路由结果，供前端刷新后重建路由状态 block
@@ -1762,6 +1801,11 @@ class SessionManager:
                     "tool_scope": list(lr.tool_scope) if lr.tool_scope else [],
                 }
 
+            # 已删除的激活档案不再作为可用模型返回，避免轮询恢复已清空的 UI 选择。
+            model_available = (
+                engine.current_model_name is None
+                or engine.current_model_name in engine.model_names()
+            )
             return {
                 "id": session_id,
                 "message_count": len(messages),
@@ -1769,13 +1813,13 @@ class SessionManager:
                 "messages": messages,
                 "full_access_enabled": engine.full_access_enabled,
                 "chat_mode": getattr(engine, '_current_chat_mode', 'write'),
-                "present_as": getattr(engine, '_present_as', 'native'),
-                "current_model": engine.current_model,
-                "current_model_name": engine.current_model_name,
+                "current_model": engine.current_model if model_available else None,
+                "current_model_name": engine.current_model_name if model_available else None,
                 "vision_capable": engine.is_vision_capable,
                 "pending_approval": pending_approval_data,
                 "pending_question": pending_question_data,
                 "last_route": last_route_data,
+                "turn": engine._driver.current_turn(),
             }
 
         if self._chat_history is not None:
@@ -1793,7 +1837,6 @@ class SessionManager:
                 "messages": messages,
                 "full_access_enabled": _fa,
                 "chat_mode": "write",
-                "present_as": "native",
                 "current_model": None,
                 "current_model_name": None,
                 "vision_capable": None,

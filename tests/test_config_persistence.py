@@ -23,6 +23,49 @@ from excelmanus.settings_persist import (
 from excelmanus.stores.config_store import GlobalConfigStore
 
 
+def test_legacy_import_descriptions_are_cleaned_without_changing_profiles(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "descriptions.db"))
+    try:
+        store = GlobalConfigStore(db)
+        samples = {
+            "old": "imported from test.env",
+            "old-path": "imported from /tmp/model.env",
+            "old-short": "import from .env.local",
+            "custom": "用户自定义说明",
+            "manual": "imported from test.env; keep this manual note",
+        }
+        for name, description in samples.items():
+            assert store.add_profile(name, "model-a", api_key="fake-test-key")
+            # 直接写入旧行，模拟升级前留下的数据。
+            db.conn.execute("UPDATE model_profiles SET description = ? WHERE name = ?", (description, name))
+        db.conn.commit()
+        before = [dict(row) for row in db.conn.execute("SELECT * FROM model_profiles ORDER BY name").fetchall()]
+        GlobalConfigStore(db)
+        after = [dict(row) for row in db.conn.execute("SELECT * FROM model_profiles ORDER BY name").fetchall()]
+        for original, cleaned in zip(before, after):
+            expected_description = "" if original["name"].startswith("old") else original["description"]
+            assert cleaned == {**original, "description": expected_description}
+        # 再次初始化不改变任何数据。
+        GlobalConfigStore(db)
+        assert [dict(row) for row in db.conn.execute("SELECT * FROM model_profiles ORDER BY name").fetchall()] == after
+    finally:
+        db.close()
+
+
+def test_profile_writes_do_not_restore_generated_env_descriptions(tmp_path: Path) -> None:
+    db = Database(str(tmp_path / "descriptions.db"))
+    try:
+        store = GlobalConfigStore(db)
+        assert store.add_profile("model", "model-a", description="imported from test.env")
+        assert store.get_profile("model")["description"] == ""
+        assert store.update_profile("model", description="import from /tmp/local.env")
+        assert store.get_profile("model")["description"] == ""
+        assert store.update_profile("model", description="我的主模型")
+        assert store.get_profile("model")["description"] == "我的主模型"
+    finally:
+        db.close()
+
+
 def test_persist_settings_writes_database_not_env_files(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

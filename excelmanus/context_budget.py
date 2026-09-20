@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 
-from excelmanus.config import _infer_context_tokens_for_model
+from excelmanus.config import _DEFAULT_CONTEXT_TOKENS, _infer_context_tokens_for_model
 
 logger = logging.getLogger(__name__)
 
@@ -15,12 +15,12 @@ logger = logging.getLogger(__name__)
 class ContextBudget:
     """可变的上下文预算管理器。
 
-    优先级：override > base(用户环境变量) > model(推断) > 128k 默认。
+    优先级：override > base(用户环境变量) > model(推断) > 256k 默认。
     """
 
     __slots__ = ("_base_tokens", "_model_tokens", "_override_tokens", "_override_is_adaptive")
 
-    _DEFAULT_TOKENS = 128_000
+    _DEFAULT_TOKENS = _DEFAULT_CONTEXT_TOKENS
 
     def __init__(self, *, base_tokens: int = 0, model: str = "") -> None:
         self._base_tokens = max(0, base_tokens)

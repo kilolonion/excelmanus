@@ -188,12 +188,8 @@ class TestLegacyCompat:
         assert state.has_write_tool_call is True
         assert not hasattr(state, "current_write_hint")
 
-    def test_present_as_roundtrip_and_legacy_both(self):
-        state = SessionState()
-        state.present_as = "code"
-        restored = SessionState.from_dict(state.to_dict())
-        assert restored.present_as == "code"
-        legacy = SessionState.from_dict({"present_as": "both"})
-        assert legacy.present_as == "code"
-        missing = SessionState.from_dict({})
-        assert missing.present_as == "native"
+    def test_unknown_snapshot_fields_are_not_restored_or_serialized(self):
+        state = SessionState.from_dict({"session_turn": 3, "unused_field": "value"})
+        assert state.session_turn == 3
+        assert not hasattr(state, "unused_field")
+        assert "unused_field" not in state.to_dict()

@@ -13,6 +13,7 @@ class EventType(Enum):
 
     TOOL_CALL_START = "tool_call_start"
     TOOL_CALL_END = "tool_call_end"
+    TOOL_CALL_STATE = "tool_call_state"
     THINKING = "thinking"
     ITERATION_START = "iteration_start"
     ROUTE_START = "route_start"  # 历史 replay only；默认路径不再发射
@@ -55,6 +56,7 @@ class EventType(Enum):
     REASONING_NOTICE = "reasoning_notice"  # /reasoning 开启时的推理内容通知
     TURN_START = "turn_start"
     TURN_END = "turn_end"
+    TURN_FAILED = "turn_failed"
     STEP_START = "step_start"
     STEP_END = "step_end"
     INBOX_CLAIMED = "inbox_claimed"
@@ -72,6 +74,8 @@ class ToolCallEvent:
 
     event_type: EventType
     tool_call_id: str = ""
+    execution_id: str = ""
+    execution_state: str = ""
     tool_name: str = ""
     arguments: Dict[str, Any] = field(default_factory=dict)
     result: str = ""
@@ -92,6 +96,7 @@ class ToolCallEvent:
     subagent_name: str = ""
     subagent_permission_mode: str = ""
     subagent_conversation_id: str = ""
+    subagent_background: bool = False
     subagent_iterations: int = 0
     subagent_tool_calls: int = 0
     subagent_tool_index: int = 0  # 子代理内部工具调用序号
@@ -130,7 +135,7 @@ class ToolCallEvent:
     thinking_delta: str = ""
     args_delta: str = ""
     # 模式变更事件字段
-    mode_name: str = ""        # "full_access" | "chat_mode" | "present_as" | "show_tool_calls" | "show_reasoning"
+    mode_name: str = ""        # "full_access" | "chat_mode" | "show_tool_calls" | "show_reasoning"
     mode_enabled: bool = False
     mode_value: str = ""       # chat_mode 取值 write|read|plan；其它模式可空
     # Excel 预览/Diff 事件字段
@@ -168,6 +173,9 @@ class ToolCallEvent:
     # pipeline_progress 事件字段
     pipeline_stage: str = ""
     pipeline_message: str = ""
+    # Turn/step 终态
+    stop_reason: str = ""
+    turn_error: str = ""
     # batch_progress 事件字段（批量任务进度）
     batch_index: int = 0           # 当前任务序号 (0-based)
     batch_total: int = 1           # 总任务数
@@ -213,6 +221,10 @@ class ToolCallEvent:
     # Driver live 事件（不必持久成第二套日志）
     turn_id: str = ""
     step_id: str = ""
+    trace_id: str = ""
+    span_id: str = ""
+    parent_span_id: str = ""
+    request_id: str = ""
     inbox_claimed: List[Dict[str, Any]] = field(default_factory=list)
     # ui_hint：回合末 UI 面建议（瞬态，不进消息块）
     ui_hint_surface: str = ""

@@ -188,6 +188,7 @@ def _normalize_tool_calls(raw_tool_calls: Any) -> list[Any]:
                     id=str(item.get("id", "") or ""),
                     type=item.get("type", "function"),
                     function=function_obj,
+                    **{key: item[key] for key in ("depends_on", "depends_on_call_ids") if key in item},
                 )
             )
         else:
@@ -208,6 +209,7 @@ def _coerce_completion_message(message: Any) -> Any:
             thinking=message.get("thinking"),
             reasoning=message.get("reasoning"),
             reasoning_content=message.get("reasoning_content"),
+            replay_state=message.get("replay_state"),
         )
     return message
 

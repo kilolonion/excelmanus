@@ -244,11 +244,11 @@ def _probe_environment(
                 "sys.meta_path.insert(0, _B())\n"
                 "import pandas,openpyxl\n"
             )
-            probe_command = [*command, "-c", probe_code]
+            probe_command = [*command, "-B", "-c", probe_code]
         else:
-            probe_command = [*command, "-c", "import pandas,openpyxl"]
+            probe_command = [*command, "-B", "-c", "import pandas,openpyxl"]
     else:
-        probe_command = [*command, "-c", "import sys; print(sys.version_info[0])"]
+        probe_command = [*command, "-B", "-c", "import sys; print(sys.version_info[0])"]
 
     try:
         completed = subprocess.run(
@@ -259,6 +259,7 @@ def _probe_environment(
             errors="replace",
             timeout=20,
             check=False,
+            **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
         )
     except Exception as exc:  # noqa: BLE001
         return _InterpreterProbe(
@@ -343,7 +344,7 @@ def _resolve_python_command_uncached(
     env_python = os.environ.get("EXCELMANUS_RUN_PYTHON")
     if env_python:
         candidates.append(_parse_python_command(env_python))
-    if sys.executable:
+    if sys.executable and not getattr(sys, "frozen", False):
         candidates.append([sys.executable])
     candidates.extend(
         [
@@ -400,7 +401,7 @@ _SANDBOX_ENV_ALLOWLIST = {
 }
 
 
-def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
+def _build_sandbox_env(*, allow_network: bool = False) -> tuple[dict[str, str], list[str]]:
     """构建最小环境变量白名单。"""
     sandbox_env: dict[str, str] = {}
     warnings: list[str] = []
@@ -408,6 +409,15 @@ def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
         value = os.environ.get(key)
         if value:
             sandbox_env[key] = value
+    if allow_network:
+        for key in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        ):
+            value = os.environ.get(key)
+            if value:
+                sandbox_env[key] = value
 
     if os.name == "nt" and "SYSTEMROOT" not in sandbox_env:
         warnings.append("缺少 SYSTEMROOT，Windows 子进程可能无法启动。")
@@ -423,6 +433,8 @@ def _build_sandbox_env() -> tuple[dict[str, str], list[str]]:
 def _ensure_isolated_python(command: list[str]) -> tuple[list[str], bool]:
     """确保 Python 调用启用 -I 隔离，并打开 UTF-8 模式（-I 会忽略 PYTHONUTF8）。"""
     out = list(command)
+    if "-B" not in out[1:]:
+        out.append("-B")
     if "-I" not in out[1:]:
         out.append("-I")
     has_utf8 = False
@@ -642,11 +654,13 @@ def write_text_file(
             pass
 
     try:
+        from excelmanus.tools.context import operation_id_for
         cr = commit_bytes(
             guard=guard,
             file_path=rel_path,
             data=content.encode(encoding, errors="strict"),
             expected_version=seen,
+            operation_id=operation_id_for(rel_path),
         )
     except CommitError as exc:
         return commit_error_result(exc)
@@ -736,11 +750,13 @@ def edit_text_file(
         match_count = 1
 
     try:
+        from excelmanus.tools.context import operation_id_for
         cr = commit_bytes(
             guard=guard,
             file_path=rel_path,
             data=new_text.encode(encoding, errors="strict"),
             expected_version=seen,
+            operation_id=operation_id_for(rel_path),
         )
     except CommitError as exc:
         return commit_error_result(exc)
@@ -781,7 +797,8 @@ def run_code(
     - **文件模式**：传入 ``script_path`` 参数，直接执行已有 ``.py`` 文件。
 
     **路径处理指南**：
-    - 代码执行在隔离的沙盒环境中，工作目录由 ``workdir`` 参数决定（默认为当前目录）。
+    - 代码在本机子进程中执行，「询问」使用受限沙盒，「跳过」允许网络和子进程。
+    - 工作目录由 ``workdir`` 参数决定（默认为当前目录）。
     - 可通过 ``os.environ.get("EXCELMANUS_WORKSPACE_ROOT")`` 获取沙盒工作区根目录。
     - 可通过 ``os.environ.get("EXCELMANUS_WORKDIR")`` 获取当前工作目录。
     - 推荐使用绝对路径或相对于工作区的相对路径（如 ``./outputs/file.txt``）。
@@ -805,6 +822,13 @@ def run_code(
         raise ValueError("timeout_seconds 最大 1800 秒")
     if tail_lines < 0:
         raise ValueError("tail_lines 不能小于 0")
+
+    from excelmanus.tools.context import call_has_full_access
+
+    full_access = call_has_full_access()
+    if full_access:
+        # 「跳过」是宿主签发的调用能力，不信任模型回显的 sandbox_tier。
+        sandbox_tier = "RED"
 
     guard = _get_guard()
     workdir_safe = guard.resolve_and_validate(workdir)
@@ -848,6 +872,7 @@ def run_code(
             stderr_file=stderr_file,
             inline_mode=inline_mode,
             sandbox_tier=sandbox_tier,
+            allow_network=full_access,
         )
     finally:
         if temp_script is not None and temp_script.exists():
@@ -896,6 +921,7 @@ def _execute_script(
     stderr_file: str | None,
     inline_mode: bool,
     sandbox_tier: str = "RED",
+    allow_network: bool = False,
 ) -> ToolResult:
     """内部执行脚本核心逻辑（供 run_code 调用）。始终走本机子进程围栏。"""
     python_cmd, probes, mode = _resolve_python_command(
@@ -904,7 +930,7 @@ def _execute_script(
         sandbox_tier=sandbox_tier,
     )
     sandbox_python_cmd, isolated_python = _ensure_isolated_python(python_cmd)
-    sandbox_env, env_warnings = _build_sandbox_env()
+    sandbox_env, env_warnings = _build_sandbox_env(allow_network=allow_network)
     preexec_fn, limits_applied, limit_warnings = _build_unix_limits_preexec(
         timeout_seconds
     )
@@ -969,6 +995,8 @@ def _execute_script(
             "close_fds": True,
             "start_new_session": True,
         }
+        if os.name == "nt":
+            run_kwargs["creationflags"] = subprocess.CREATE_NO_WINDOW
         if preexec_fn is not None:
             run_kwargs["preexec_fn"] = preexec_fn
         completed = subprocess.run(

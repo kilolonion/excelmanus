@@ -65,6 +65,42 @@ class TestUploadFromUrl:
         assert resp.status_code == 400
         assert "url" in resp.json().get("error", "").lower()
 
+    @pytest.mark.parametrize("body", [[], "not-an-object", {"url": 123}])
+    def test_invalid_body_is_rejected(self, client, body):
+        assert client.post("/api/v1/upload-from-url", json=body).status_code == 400
+
+    @pytest.mark.parametrize("from_url", [False, True])
+    def test_conversion_registers_original_path_alias(self, client, tmp_path, from_url):
+        registry = MagicMock()
+        registry.register_upload.return_value.id = "uploaded-file"
+
+        def convert(source, **_kwargs):
+            target = source.with_suffix(".xlsx")
+            target.write_bytes(b"converted workbook")
+            return target
+
+        with (
+            patch("excelmanus.api_routes_system._get_file_registry", return_value=registry),
+            patch("excelmanus.xls_converter.convert_to_xlsx", side_effect=convert),
+            patch("excelmanus.security.url_fetch.fetch_public_http", new=AsyncMock(return_value=b"legacy workbook")),
+        ):
+            if from_url:
+                response = client.post("/api/v1/upload-from-url", json={"url": "https://example.com/report.xls"})
+            else:
+                response = client.post("/api/v1/upload", files={"file": ("report.xls", b"legacy workbook")}, data={"folder": "quarter"})
+        assert response.status_code == 200, response.text
+        assert response.json()["converted_from"] == "report.xls"
+        expected_alias = response.json()["path"].removesuffix(".xlsx") + ".xls"
+        registry.add_alias.assert_called_once_with("uploaded-file", "original_path", expected_alias)
+        assert (tmp_path / response.json()["path"]).is_file()
+        assert not (tmp_path / expected_alias).exists()
+
+    def test_multipart_file_size_limit_is_enforced(self, client, tmp_path):
+        with patch("excelmanus.api_routes_system._UPLOAD_MAX_PART_SIZE", 8):
+            response = client.post("/api/v1/upload", files={"file": ("large.csv", b"123456789")})
+        assert response.status_code == 413
+        assert list((tmp_path / "uploads").iterdir()) == []
+
     def test_invalid_scheme(self, client):
         resp = client.post("/api/v1/upload-from-url", json={"url": "ftp://example.com/a.xlsx"})
         assert resp.status_code == 400

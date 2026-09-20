@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from typing import Any
 
 from excelmanus.events import EventType, ToolCallEvent
@@ -20,6 +21,8 @@ _PACK_ACTIONS: dict[str, tuple[str, ...]] = {
     "loop.wrap": ("next",),
     "ui.surface": ("surface",),
     "observation.prune": ("prune",),
+    "mutation.verify": ("next",),
+    "recovery.next_step": ("next",),
 }
 
 _ANSWER_KEYS = (
@@ -34,6 +37,10 @@ _ANSWER_KEYS = (
     "pin",
     "action",
     "still_relevant",
+    "satisfied",
+    "scope_ok",
+    "retryable",
+    "needs_user",
     "done_enough",
 )
 
@@ -105,7 +112,6 @@ def curated_answers(pack_id: str, decision: Decision) -> dict[str, str | float |
         for qid, answer in (evaluation.answers or {}).items():
             if qid not in _ANSWER_KEYS and qid not in {
                 "mode_mismatch",
-                "fits_code_mode",
                 "needs_skill",
                 "destructive",
             }:
@@ -150,6 +156,10 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
         return "总闸或子闸关闭，未评估"
     if reason == "unavailable" or reason.startswith("error:") or reason.startswith("unavailable:"):
         return "评估不可用，执行面与接线前相同"
+    if reason == "budget_exhausted":
+        return "Jev 回合预算已用尽，执行面保持接线前行为"
+    if reason == "provider_cooldown":
+        return "Jev provider 处于冷却期，执行面保持接线前行为"
     if not decision.applied or gate != "enforce":
         return "仅观察，未改 wire/审批/UI"
     extras = decision.extras or {}
@@ -175,6 +185,10 @@ def impact_sentence(pack_id: str, decision: Decision, gate: str) -> str:
         return f"已建议切换到 {extras.get('surface') or 'stay'}"
     if pack_id == "observation.prune":
         return "已将旧观察收成指针" if extras.get("prune") else "保留旧观察"
+    if pack_id == "mutation.verify":
+        return f"写入后验证建议 {extras.get('next') or 'none'}"
+    if pack_id == "recovery.next_step":
+        return f"失败后建议 {extras.get('next') or 'stop'}"
     return "已应用到执行面"
 
 
@@ -204,7 +218,24 @@ def build_jev_trace_payload(
         "reason": str(decision.reason or "")[:200],
         "answers": curated_answers(pack_id, decision),
         "impact": impact_sentence(pack_id, decision, gate),
+        "provider_id": str(extras.get("provider_id") or "")[:80],
+        "protocol": str(extras.get("protocol") or "")[:40],
+        "model": str(getattr(evaluation, "model", "") or "")[:120] if evaluation else "",
     }
+    try:
+        from excelmanus.system_one.calibration import calibration_fingerprint
+
+        payload["calibration_fingerprint"] = calibration_fingerprint(pack_id)
+    except Exception:
+        payload["calibration_fingerprint"] = ""
+    budget = extras.get("budget")
+    if isinstance(budget, Mapping):
+        payload["budget"] = {
+            "evaluations": int(budget.get("evaluations", 0) or 0),
+            "max_evaluations": int(budget.get("max_evaluations", 0) or 0),
+            "spent_latency_ms": round(float(budget.get("spent_latency_ms", 0.0) or 0.0), 1),
+            "exhausted_reason": str(budget.get("exhausted_reason") or "")[:40],
+        }
     return {key: value for key, value in payload.items() if key not in _BLOCKED_PAYLOAD_KEYS}
 
 
@@ -241,6 +272,19 @@ def emit_jev_trace(
         decision,
         gate=gate,
         transport=transport,
+    )
+    driver = getattr(engine, "_driver", None)
+    prepared = getattr(engine, "_prepared_request", None)
+    payload.update(
+        {
+            "turn_id": str(getattr(driver, "turn_id", "") or "")[:80],
+            "step_id": str(getattr(driver, "step_id", "") or "")[:80],
+            "request_id": str(
+                getattr(engine, "_open_request_id", "")
+                or getattr(prepared, "request_id", "")
+                or ""
+            )[:120],
+        }
     )
     event = ToolCallEvent(event_type=EventType.JEV_TRACE, jev_trace=payload)
     callback = _resolve_on_event(engine, on_event)

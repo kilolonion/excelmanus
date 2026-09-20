@@ -99,7 +99,6 @@ vi.mock("@/stores/session-store", () => ({
 const uiMock = vi.hoisted(() => ({
   setFullAccessEnabled: vi.fn(),
   setChatMode: vi.fn(),
-  setPresentAs: vi.fn(),
   setSidebarTab: vi.fn(),
 }));
 
@@ -124,6 +123,7 @@ const excelActions: Record<string, ReturnType<typeof vi.fn>> = {
   setMergeResult: vi.fn(),
   fetchOperationHistory: vi.fn(),
   bumpWorkspaceFilesVersion: vi.fn(),
+  notifyWorkbookChanged: vi.fn(),
   openCompare: vi.fn(),
   openPanel: vi.fn(),
 };
@@ -239,6 +239,16 @@ function makeEvent(event: string, data: Record<string, unknown> = {}): SSEEvent 
 // ---------------------------------------------------------------------------
 
 describe("sse-event-handler", () => {
+  it("retains the background identity needed when the main generation is stopped", () => {
+    resetChatState();
+    dispatchSSEEvent(makeEvent("subagent_start", {
+      name: "explorer", reason: "统计", conversation_id: "background-1", background: true,
+    }), makeCtx());
+    expect(chatActions.appendBlock).toHaveBeenCalledWith("a1", expect.objectContaining({
+      type: "subagent", conversationId: "background-1", background: true, status: "running",
+    }));
+  });
+
   beforeEach(() => {
     resetChatState();
     for (const fn of Object.values(excelActions)) fn.mockClear();
@@ -258,7 +268,6 @@ describe("sse-event-handler", () => {
     vi.mocked(useChatStore.setState).mockClear();
     uiMock.setFullAccessEnabled.mockClear();
     uiMock.setChatMode.mockClear();
-    uiMock.setPresentAs.mockClear();
     uiMock.setSidebarTab.mockClear();
   });
 
@@ -868,6 +877,24 @@ describe("sse-event-handler", () => {
   });
 
   describe("approval_resolved", () => {
+    it("applies a recovered result to its original message after the chat stream changes", () => {
+      const old = { id: "old-message", role: "assistant" as const, timestamp: 1, blocks: [{
+        type: "tool_call", toolCallId: "original-call", name: "edit_spreadsheet", args: {}, status: "error", result: "已停止",
+      }] };
+      mockChatState.messages = [old];
+      dispatchSSEEvent(makeEvent("tool_call_end", {
+        tool_call_id: "original-call", tool_name: "edit_spreadsheet", success: true, result: "恢复后已写入",
+      }), makeCtx());
+      const [messageId, update] = chatActions.updateAssistantMessage.mock.calls[0];
+      expect(messageId).toBe("old-message");
+      expect(update(old).blocks[0]).toMatchObject({ status: "success", result: "恢复后已写入" });
+    });
+
+    it("does not finish an ask_user tool when only one question in its batch was answered", () => {
+      dispatchSSEEvent(makeEvent("approval_resolved", { approval_id: "q1", approval_tool_name: "ask_user", success: true }), makeCtx());
+      expect(chatActions.updateToolCallBlock).not.toHaveBeenCalled();
+    });
+
     it("关闭弹窗并更新 pending/running 工具卡片", () => {
       dispatchSSEEvent(
         makeEvent("approval_resolved", {
@@ -913,6 +940,7 @@ describe("sse-event-handler", () => {
         "id:ws-test",
       );
       expect(excelActions.bumpWorkspaceFilesVersion).toHaveBeenCalled();
+      expect(excelActions.notifyWorkbookChanged).toHaveBeenCalledWith("a.xlsx", "id:ws-test", "sha256:abc");
       expect(wordActions.handleFilesChanged).toHaveBeenCalledWith(["a.xlsx"]);
       expect(chatActions.addAffectedFiles).toHaveBeenCalledWith("a1", ["a.xlsx"]);
     });
@@ -987,13 +1015,13 @@ describe("sse-event-handler", () => {
     it("opens the last spreadsheet even when a later word file exists", () => {
       seedAffected(["notes.py", "book.xlsx", "report.docx", "sales.csv"]);
       dispatchSSEEvent(makeEvent("done"), makeCtx());
-      expect(openWorkspaceFile).toHaveBeenCalledWith("sales.csv");
+      expect(openWorkspaceFile).toHaveBeenCalledWith("sales.csv", { sessionId: "test-session" });
     });
 
     it("opens the last word document when no spreadsheet changed", () => {
       seedAffected(["notes.py", "a.docx", "b.docx"]);
       dispatchSSEEvent(makeEvent("done"), makeCtx());
-      expect(openWorkspaceFile).toHaveBeenCalledWith("b.docx");
+      expect(openWorkspaceFile).toHaveBeenCalledWith("b.docx", { sessionId: "test-session" });
     });
 
     it("does not steal focus when a workbench panel is already open", () => {
@@ -1022,7 +1050,7 @@ describe("sse-event-handler", () => {
         ctx,
       );
       dispatchSSEEvent(makeEvent("done"), ctx);
-      expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx");
+      expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx", { sessionId: "test-session" });
     });
   });
 
@@ -1047,6 +1075,7 @@ describe("sse-event-handler", () => {
       expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx", {
         intent: "preview",
         sheet: "明细",
+        sessionId: "test-session",
       });
     });
 
@@ -1058,6 +1087,7 @@ describe("sse-event-handler", () => {
       expect(openWorkspaceFile).toHaveBeenCalledWith("book.xlsx", {
         intent: "full",
         sheet: undefined,
+        sessionId: "test-session",
       });
     });
 

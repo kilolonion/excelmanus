@@ -285,6 +285,7 @@ def commit_workbook_tool(
     expected_version: str | None = None,
     create: bool = False,
     selection_bound: bool = False,
+    operation_id: str | None = None,
 ) -> Any:
     """工具写入入口：优先使用本轮已读到的 content_version，再原子提交。"""
     from excelmanus.workbook_commit import (
@@ -316,6 +317,7 @@ def commit_workbook_tool(
         mutate_fn=mutate_fn,
         expected_version=seen,
         create=create,
+        operation_id=operation_id or _operation_id_for(file_path),
     )
     remember_content_version(file_path, result.content_version)
     remember_content_version(result.path, result.content_version)
@@ -328,6 +330,7 @@ def commit_bytes_tool(
     file_path: str,
     data: bytes,
     expected_version: str | None = None,
+    operation_id: str | None = None,
 ) -> Any:
     """字节写入入口：同样优先使用已读版本。"""
     from excelmanus.workbook_commit import (
@@ -348,10 +351,17 @@ def commit_bytes_tool(
         file_path=file_path,
         data=data,
         expected_version=seen,
+        operation_id=operation_id or _operation_id_for(file_path),
     )
     remember_content_version(file_path, result.content_version)
     remember_content_version(result.path, result.content_version)
     return result
+
+
+def _operation_id_for(path: str | None = None) -> str | None:
+    from excelmanus.tools.context import operation_id_for
+
+    return operation_id_for(path)
 
 
 def commit_error_result(exc: Any) -> ToolResult:

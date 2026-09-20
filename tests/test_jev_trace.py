@@ -88,6 +88,18 @@ def test_payload_shape_is_bounded_and_has_impact() -> None:
     assert "state" not in payload
 
 
+def test_trace_keeps_only_public_calibration_and_transport_provenance() -> None:
+    payload = build_jev_trace_payload(
+        "exposure.turn",
+        _decision(),
+        gate="shadow",
+        transport="gateway",
+    )
+    assert len(payload["calibration_fingerprint"]) == 64
+    assert payload["model"] == "jev-1.13.0"
+    assert "api_key" not in str(payload)
+
+
 def test_unavailable_payload_still_names_pack() -> None:
     payload = build_jev_trace_payload(
         "exposure.turn",
@@ -156,7 +168,6 @@ async def test_entry_shadow_emits_even_when_unavailable() -> None:
         _subagent_config=None,
         _is_host_session=True,
         _current_chat_mode="write",
-        _present_as="native",
         _pending_plan_exit=None,
         _turn_image_count=0,
         _exposure_last_tools=[],

@@ -4,8 +4,8 @@ version: "12.0.0"
 priority: 100
 order: 100
 layer: strategy
-max_tokens: 120
+max_tokens: 170
 conditions:
   tool: inspect_spreadsheet
 ---
-按任务选择 overview 看结构，或 range 读精确窗口。截断、采样不是全表事实；coverage 与 spill 取回决定是否继续读。resolved_range 只说明本次解析范围，不能代替完整性判断。大结果可能外置为 spill: 句柄；需要原文时把句柄当作 file_path 传给 read_text_file。默认读缓存值；null 且带 formula 是未计算，不是空白。range 的 include 仅 formulas。单表可省略 sheet。
+overview 看结构，range 读窗口，search 定位。截断/采样不是全表事实；分页检查 content_version，变化就重读。range/filter 的 selection 保留原表 `source_cols`，写回直接消费，不要按投影列重编号；大 selection 用 `spill:` 句柄传给 edit。默认读缓存值；null 且带 formula 是未计算。range 仅支持 include=formulas；多表省略 sheet 仅在证据唯一时允许。

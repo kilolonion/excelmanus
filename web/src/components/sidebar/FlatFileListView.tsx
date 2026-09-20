@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState, type RefObject } from "react";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import {
   Ellipsis,
   CheckSquare,
@@ -31,6 +32,7 @@ import { formatFileMention } from "@/components/chat/chat-input-insert";
 import { normalizePath } from "./file-tree-helpers";
 
 export interface FlatFileListViewProps {
+  scrollRef?: RefObject<HTMLDivElement | null>;
   files: { path: string; filename: string; is_dir?: boolean }[];
   recentTimestamps: Map<string, number>;
   sessionId?: string;
@@ -42,11 +44,13 @@ export interface FlatFileListViewProps {
   onClick: (path: string) => void;
   onDoubleClick: (path: string) => void;
   onRemove: (path: string) => void;
+  emptyMessage?: string;
 }
 
 export function FlatFileListView(props: FlatFileListViewProps) {
-  const { files, recentTimestamps, sessionId, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove } = props;
+  const { files, recentTimestamps, sessionId, draggingPath, selectMode, selectedPaths, onDragStart, onDragEnd, onClick, onDoubleClick, onRemove, emptyMessage = "暂无文件，点击上方上传" } = props;
   const openPaths = useOpenWorkspacePathSet();
+  const [menuPath, setMenuPath] = useState<string | null>(null);
 
   // 最近使用的文件排前面，其余按文件名字母序
   const flatFiles = useMemo(() => {
@@ -59,17 +63,40 @@ export function FlatFileListView(props: FlatFileListViewProps) {
     });
   }, [files, recentTimestamps]);
 
+  // Comparison menus need at most ten alternatives, not a full scan for every row.
+  const comparisonFiles = useMemo(
+    () => flatFiles.filter((file) => isSpreadsheetFile(file.filename)).slice(0, 11),
+    [flatFiles],
+  );
+  const pinnedIndex = flatFiles.findIndex((file) => file.path === (menuPath ?? draggingPath));
+  const virtualizer = useVirtualizer({
+    count: flatFiles.length,
+    getScrollElement: () => props.scrollRef?.current ?? null,
+    getItemKey: (index) => flatFiles[index].path,
+    estimateSize: () => 56,
+    overscan: 5,
+    enabled: !!props.scrollRef,
+    rangeExtractor: (range) => {
+      const indices = defaultRangeExtractor(range);
+      return pinnedIndex < 0 ? indices : [...new Set([...indices, pinnedIndex])].sort((a, b) => a - b);
+    },
+  });
+  const rows = props.scrollRef
+    ? virtualizer.getVirtualItems()
+    : flatFiles.map((file, index) => ({ key: file.path, index, start: 0 }));
+
   if (flatFiles.length === 0) {
     return (
       <div className="px-2 py-3 text-[11px] text-muted-foreground/60 text-center">
-        暂无文件，点击上方 + 上传
+        {emptyMessage}
       </div>
     );
   }
 
   return (
-    <div className="space-y-0.5">
-      {flatFiles.map((file) => {
+    <div style={props.scrollRef ? { height: virtualizer.getTotalSize(), position: "relative" } : undefined}>
+      {rows.map((row) => {
+        const file = flatFiles[row.index];
         const isFileActive = openPaths.has(file.path);
         const isDragging = draggingPath === file.path;
         const isSelected = selectedPaths.has(file.path);
@@ -77,8 +104,10 @@ export function FlatFileListView(props: FlatFileListViewProps) {
         const dirPart = normalized.includes("/") ? normalized.slice(0, normalized.lastIndexOf("/")) : "";
 
         return (
+          <div key={row.key} data-index={row.index}
+            ref={props.scrollRef ? virtualizer.measureElement : undefined}
+            style={props.scrollRef ? { position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)`, paddingBottom: 2 } : undefined}>
           <div
-            key={file.path}
             draggable={!selectMode || isSelected}
             onDragStart={(e) => onDragStart(e, file)}
             onDragEnd={onDragEnd}
@@ -123,9 +152,10 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                 >
                   <AtSign className="h-3.5 w-3.5" />
                 </button>
-                <DropdownMenu>
+                <DropdownMenu onOpenChange={(open) => setMenuPath(open ? file.path : null)}>
                   <DropdownMenuTrigger asChild>
                     <button
+                      aria-label={`${file.filename} 的文件选项`}
                       className={`flex-shrink-0 h-6 w-6 flex items-center justify-center rounded-md text-muted-foreground transition-opacity duration-150 hover:bg-accent hover:text-foreground ${
                         isFileActive ? "opacity-100" : "opacity-0 group-hover:opacity-100 touch-show"
                       }`}
@@ -134,7 +164,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       <Ellipsis className="h-3.5 w-3.5" />
                     </button>
                   </DropdownMenuTrigger>
-                  <DropdownMenuContent side="right" align="start" className="w-36">
+                  {menuPath === file.path && <DropdownMenuContent side="right" align="start" className="w-36">
                     <DropdownMenuItem onClick={(e) => { e.stopPropagation(); useExcelStore.getState().mentionFileToInput(file); }}>
                       <AtSign className="h-4 w-4" />
                       添加到输入框
@@ -154,9 +184,7 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       与其他文件合并
                     </DropdownMenuItem>
                     {(() => {
-                      const otherExcels = flatFiles.filter(
-                        (f) => f.path !== file.path && isSpreadsheetFile(f.filename),
-                      );
+                      const otherExcels = comparisonFiles.filter((f) => f.path !== file.path);
                       if (otherExcels.length > 0) {
                         return (
                           <DropdownMenuSub>
@@ -235,10 +263,11 @@ export function FlatFileListView(props: FlatFileListViewProps) {
                       <Trash2 className="h-4 w-4" />
                       删除
                     </DropdownMenuItem>
-                  </DropdownMenuContent>
+                  </DropdownMenuContent>}
                 </DropdownMenu>
               </>
             )}
+          </div>
           </div>
         );
       })}

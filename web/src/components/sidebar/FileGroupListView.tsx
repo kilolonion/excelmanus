@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useEffect } from "react";
+import { useState, useCallback, useEffect, useMemo } from "react";
 import {
   ChevronDown,
   ChevronRight,
@@ -25,9 +25,10 @@ import { InlineRenameInput } from "./InlineInputs";
 
 interface FileGroupListViewProps {
   onClickFile: (path: string) => void;
+  query?: string;
 }
 
-export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
+export function FileGroupListView({ onClickFile, query = "" }: FileGroupListViewProps) {
   const fileGroups = useExcelStore((s) => s.fileGroups);
   const fileGroupsLoaded = useExcelStore((s) => s.fileGroupsLoaded);
   const loadFileGroups = useExcelStore((s) => s.loadFileGroups);
@@ -35,6 +36,17 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
 
   const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
   const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [visibleGroups, setVisibleGroups] = useState(100);
+  const [visibleMembers, setVisibleMembers] = useState<Record<string, number>>({});
+  const filteredGroups = useMemo(() => {
+    const normalizedQuery = query.trim().toLocaleLowerCase();
+    if (!normalizedQuery) return fileGroups;
+    return fileGroups.filter((group) =>
+      `${group.name} ${group.members?.map((member) => `${member.original_name} ${member.canonical_path}`).join(" ") ?? ""}`
+        .toLocaleLowerCase()
+        .includes(normalizedQuery),
+    );
+  }, [fileGroups, query]);
 
   useEffect(() => {
     if (!fileGroupsLoaded) loadFileGroups();
@@ -86,12 +98,12 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
     );
   }
 
-  if (fileGroups.length === 0) {
+  if (filteredGroups.length === 0) {
     return (
       <div className="flex flex-col items-center gap-2 py-6 text-center">
         <Layers className="h-6 w-6 text-muted-foreground/40" />
         <span className="text-[11px] text-muted-foreground/60">
-          暂无文件组，多选文件后可创建
+          {query.trim() ? "未找到匹配文件组" : "暂无文件组，多选文件后可创建"}
         </span>
       </div>
     );
@@ -99,9 +111,10 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
 
   return (
     <div className="space-y-1">
-      {fileGroups.map((group) => {
+      {filteredGroups.slice(0, visibleGroups).map((group) => {
         const isExpanded = expandedIds.has(group.id);
         const memberCount = group.members?.length ?? 0;
+        const memberLimit = visibleMembers[group.id] ?? 100;
 
         return (
           <div key={group.id} className="rounded-lg overflow-hidden">
@@ -218,7 +231,7 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
             {/* Group members (expanded) */}
             {isExpanded && group.members && group.members.length > 0 && (
               <div className="pl-6 pb-1">
-                {group.members.map((member) => (
+                {group.members.slice(0, memberLimit).map((member) => (
                   <div
                     key={member.file_id}
                     draggable
@@ -260,6 +273,12 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
                     )}
                   </div>
                 ))}
+                {memberCount > memberLimit && (
+                  <button type="button" className="w-full p-2 text-xs text-muted-foreground hover:text-foreground"
+                    onClick={() => setVisibleMembers((counts) => ({ ...counts, [group.id]: memberLimit + 100 }))}>
+                    显示更多（剩余 {memberCount - memberLimit} 项）
+                  </button>
+                )}
               </div>
             )}
 
@@ -271,6 +290,12 @@ export function FileGroupListView({ onClickFile }: FileGroupListViewProps) {
           </div>
         );
       })}
+      {filteredGroups.length > visibleGroups && (
+        <button type="button" className="w-full p-2 text-xs text-muted-foreground hover:text-foreground"
+          onClick={() => setVisibleGroups((count) => count + 100)}>
+          显示更多文件组（剩余 {filteredGroups.length - visibleGroups} 项）
+        </button>
+      )}
     </div>
   );
 }

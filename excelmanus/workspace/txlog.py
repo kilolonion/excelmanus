@@ -18,8 +18,12 @@ TERMINAL_STATES = frozenset({"committed", "aborted", "failed_partial"})
 
 # Windows 下杀毒/索引器可能短暂持有新文件句柄，os.replace 会瞬时 PermissionError；
 # 有界重试只覆盖这种瞬态锁，真实冲突仍 fail-closed 上抛。
-_REPLACE_RETRIES = 5
-_REPLACE_RETRY_DELAY = 0.01
+_REPLACE_RETRIES = 8
+_REPLACE_RETRY_DELAY = 0.05
+
+
+class FileBusyError(PermissionError):
+    """A sharing/lock violation remained after bounded retries."""
 
 
 def replace_with_retry(
@@ -33,8 +37,14 @@ def replace_with_retry(
         try:
             os.replace(src, dst)
             return
-        except PermissionError:
+        except PermissionError as exc:
+            winerror = getattr(exc, "winerror", None)
+            # Access denied (5) is not a transient sharing violation.
+            if winerror is not None and winerror not in (32, 33):
+                raise
             if attempt == retries - 1:
+                if winerror in (32, 33):
+                    raise FileBusyError(f"文件被其他程序占用：{dst}。请关闭 Excel 或文件预览后重试。") from exc
                 raise
             time.sleep(delay * (attempt + 1))
 
@@ -151,6 +161,19 @@ class TxLog:
             # Read-only migration of the former literal filename format.
             result = read_json(self.tx_root / "receipts" / f"{operation_id}.json")
         return result
+
+    def external_receipt_path(self, operation_id: str) -> Path:
+        key = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()
+        return self.tx_root / "external" / f"{key}.json"
+
+    def write_external_receipt(self, operation_id: str, receipt: dict[str, Any]) -> None:
+        if operation_id:
+            write_json_atomic(self.external_receipt_path(operation_id), receipt)
+
+    def read_external_receipt(self, operation_id: str) -> dict[str, Any] | None:
+        if not operation_id:
+            return None
+        return read_json(self.external_receipt_path(operation_id))
 
     def discard_recovery_blobs(self, tx_id: str) -> None:
         """History now owns the bytes. Keep intent/receipt for idempotent replay."""

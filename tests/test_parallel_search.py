@@ -376,7 +376,6 @@ def test_mcp_search_guide_not_injected():
     engine.state.prompt_injection_snapshots = []
     engine.state.injected_context_fingerprint = None
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
     prompts, error = prepare_system_prompts_for_request(engine, [])
     assert error is None

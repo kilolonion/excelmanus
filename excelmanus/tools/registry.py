@@ -81,6 +81,14 @@ _ALIAS_FOLDS: tuple[tuple[str, str], ...] = (
     ("path", "file_path"),
     ("sheet", "sheet_name"),
     ("content_version", "expected_version"),
+    ("cell_range", "range"),
+    ("other_path", "file_b"),
+    ("file_path", "file_a"),
+    ("sheet", "sheet_a"),
+    ("other_sheet", "sheet_b"),
+    ("paths", "file_paths"),
+    ("column", "by_column"),
+    ("limit", "max_rows"),
 )
 
 # 工具名兼容别名：模型常见的近名误称 → 规范名。
@@ -116,7 +124,22 @@ def normalize_tool_aliases(
     """
     args = dict(arguments)
     accepted = _schema_property_names(schema)
-    for src, dest in _ALIAS_FOLDS:
+    if accepted is not None and "request" in accepted and isinstance(args.get("request"), dict):
+        nested = args.pop("request")
+        if "request" in nested:
+            return error_result("request 不能继续嵌套 request", code="TOOL_ARGUMENT_VALIDATION_ERROR")
+        normalized_nested = normalize_tool_aliases(nested, schema)
+        normalized_flat = normalize_tool_aliases(args, schema)
+        if isinstance(normalized_nested, ToolResult):
+            return normalized_nested
+        if isinstance(normalized_flat, ToolResult):
+            return normalized_flat
+        for key, value in normalized_nested.items():
+            if key in normalized_flat and normalized_flat[key] not in (None, "") and normalized_flat[key] != value:
+                return error_result(f"request.{key} 与平铺 {key} 冲突", code="TOOL_ARGUMENT_VALIDATION_ERROR")
+            normalized_flat[key] = value
+        args = normalized_flat
+    for src, dest in (_ALIAS_FOLDS if accepted is not None else _ALIAS_FOLDS[:3]):
         if src not in args:
             continue
         if accepted is not None and dest not in accepted:
@@ -176,6 +199,9 @@ class ToolDef:
     write_effect: WriteEffect = "unknown"
     visibility: ToolVisibility = "always"
     consistency: ToolConsistency = "local_commit"
+    # Success value JSON Schema (2020-12). When absent, use the built-in
+    # OUTPUT_CONTRACTS declaration; undeclared external tools remain unknown.
+    output_schema: dict[str, Any] | None = None
     actions: dict[str, Any] = field(default_factory=dict)
 
     def truncate_result(self, text: str) -> str:
@@ -405,7 +431,6 @@ class ToolRegistry:
         self._catalog_skill_names: tuple[str, ...] = ()
         self._catalog_allow_run_code: bool = False
         self._catalog_families: frozenset[str] | None = None
-        self._catalog_execution_mode: str | None = None
 
     def fork(self) -> "ToolRegistry":
         """创建一个 per-session 的 overlay registry。
@@ -427,7 +452,6 @@ class ToolRegistry:
         child._catalog_skill_names = self._catalog_skill_names
         child._catalog_allow_run_code = self._catalog_allow_run_code
         child._catalog_families = self._catalog_families
-        child._catalog_execution_mode = self._catalog_execution_mode
         return child
 
     def _bump_catalog(self) -> None:
@@ -443,21 +467,17 @@ class ToolRegistry:
         skill_names: Sequence[str] = (),
         allow_run_code: bool = False,
         families: frozenset[str] | None = None,
-        execution_mode: str | None = None,
     ) -> None:
-        """绑定有效目录投影参数。digest / schemas 都读这组参数。
+        """绑定有效目录投影参数。digest / schemas 都读这组参数。"""
+        from excelmanus.tools.catalog import resolve_catalog_mode
 
-        ``execution_mode`` 是剥离 wire 坍缩后的执行目录模式；仅当 ``mode``
-        为展示态（code）时与 ``mode`` 不同，供 introspect 换绑执行目录。
-        """
-        self._catalog_mode = str(mode or "write")
+        self._catalog_mode = resolve_catalog_mode(chat_mode=mode)
         self._catalog_allowed = tuple(allowed) if allowed is not None else None
         self._catalog_disallowed = tuple(str(name) for name in disallowed)
         self._catalog_extra_tools = tuple(extra_tools)
         self._catalog_skill_names = tuple(str(name) for name in skill_names if str(name).strip())
         self._catalog_allow_run_code = bool(allow_run_code)
         self._catalog_families = families
-        self._catalog_execution_mode = execution_mode
 
     def effective_catalog(self) -> Any:
         """当前绑定参数下的 EffectiveToolCatalog。"""
@@ -902,22 +922,7 @@ class ToolRegistry:
 
             if tool_name == "introspect_capability":
                 from excelmanus.tools.introspection_tools import _call_catalog
-                from excelmanus.tools.catalog import derive_effective_catalog
-
                 catalog = self.effective_catalog()
-                if catalog.mode == "code":
-                    # wire 坍缩为 run_code-only；发现入口换绑执行目录，
-                    # 投影参数与绑定目录完全一致（families / allow_run_code / 执行 mode）。
-                    catalog = derive_effective_catalog(
-                        tools=self.get_all_tools(),
-                        mode=self._catalog_execution_mode or "write",
-                        allowed=self._catalog_allowed,
-                        disallowed=self._catalog_disallowed,
-                        extra_tools=self._catalog_extra_tools,
-                        skill_names=self._catalog_skill_names,
-                        allow_run_code=self._catalog_allow_run_code,
-                        families=self._catalog_families,
-                    )
                 token = _call_catalog.set(catalog)
                 try:
                     return coerce_legacy_result(tool.func(**arguments))

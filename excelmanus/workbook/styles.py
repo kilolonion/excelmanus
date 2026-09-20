@@ -359,9 +359,41 @@ def apply_freeze_panes(ws: Any, freeze_panes: str | None) -> str:
     if not text or text.lower() in {"none", "null", "false", "0"}:
         ws.freeze_panes = None
         return ""
-    ws.freeze_panes = text
+    from openpyxl.utils.cell import coordinate_to_tuple
+
+    try:
+        row, col = coordinate_to_tuple(text.upper())
+        if not (1 <= row <= 1048576 and 1 <= col <= 16384):
+            raise ValueError("超出 Excel 行列上限")
+    except (ValueError, KeyError) as exc:
+        raise ValueError("freeze_panes 需要单个 A1 单元格，或空字符串取消冻结") from exc
+    ws.freeze_panes = text.upper()
     applied = getattr(ws, "freeze_panes", None)
-    return str(applied) if applied else text
+    return str(applied) if applied else ""
+
+
+def _size_entries(sizes: dict[Any, Any], *, axis: str) -> dict[str, float]:
+    """Validate every entry before applying any dimensions; never drop invalid entries."""
+    import math
+    from openpyxl.utils import column_index_from_string
+
+    out: dict[str, float] = {}
+    for key, value in sizes.items():
+        text = str(key).strip()
+        try:
+            index = column_index_from_string(text.upper()) if axis == "column" and text.isalpha() else int(text)
+        except (ValueError, TypeError) as exc:
+            raise ValueError(f"{axis} 尺寸键 {key!r} 必须是 Excel 1-based 行列号或列字母") from exc
+        if isinstance(key, bool) or index < 1 or index > (16384 if axis == "column" else 1048576):
+            raise ValueError(f"{axis} 尺寸键 {key!r} 超出 Excel 行列上限")
+        max_size = 255 if axis == "column" else 409.5
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or not 0 < value <= max_size:
+            raise ValueError(f"{axis}[{key!r}] 必须为 0 < 尺寸 <= {max_size} 的有限数值；列宽用字符宽度，行高用 points")
+        canonical = get_column_letter(index) if axis == "column" else str(index)
+        if canonical in out and out[canonical] != value:
+            raise ValueError(f"{axis} 尺寸键 {key!r} 与 {canonical} 冲突")
+        out[canonical] = float(value)
+    return out
 
 
 def apply_column_sizes(
@@ -373,7 +405,7 @@ def apply_column_sizes(
     """在已打开的工作表上调整列宽，不提交文件。"""
     adjusted: dict[str, float] = {}
     if columns:
-        for col_letter, width in columns.items():
+        for col_letter, width in _size_entries(columns, axis="column").items():
             ws.column_dimensions[str(col_letter).upper()].width = float(width)
             adjusted[str(col_letter).upper()] = float(width)
         return adjusted
@@ -419,11 +451,12 @@ def apply_row_sizes(
     ws: Any,
     rows: dict[str, float] | None = None,
     auto_fit: bool = False,
+    row_numbers: set[int] | None = None,
 ) -> dict[str, float]:
     """在已打开的工作表上调整行高，不提交文件。"""
     adjusted: dict[str, float] = {}
     if rows:
-        for row_num_str, height in rows.items():
+        for row_num_str, height in _size_entries(rows, axis="row").items():
             row_num = int(row_num_str)
             ws.row_dimensions[row_num].height = float(height)
             adjusted[str(row_num)] = float(height)
@@ -436,6 +469,8 @@ def apply_row_sizes(
         if dim.width is not None:
             current_col_widths[col_letter] = dim.width
     for row_idx in range(1, (ws.max_row or 0) + 1):
+        if row_numbers is not None and row_idx not in row_numbers:
+            continue
         row_cells = [cell for cell in ws[row_idx] if not isinstance(cell, MergedCell)]
         if not row_cells:
             continue
@@ -503,47 +538,19 @@ def _build_font(config: dict[str, Any]) -> Font:
 
 
 def _patch_font(existing: Any, config: dict[str, Any] | str) -> Font:
-    """按显式键叠加到已有 Font，未出现的属性保持原值。"""
+    """Patch only declared fields, preserving all other font attributes."""
+    from copy import copy
+
     if isinstance(config, str):
-        return Font(name=config) if existing is None else Font(
-            name=config,
-            size=getattr(existing, "size", None),
-            bold=getattr(existing, "bold", None),
-            italic=getattr(existing, "italic", None),
-            color=getattr(existing, "color", None),
-            underline=getattr(existing, "underline", None),
-            strike=getattr(existing, "strike", None),
-            vertAlign=getattr(existing, "vertAlign", None),
-        )
-    kwargs: dict[str, Any] = {}
-    if existing is not None:
-        kwargs = {
-            "name": existing.name,
-            "size": existing.size,
-            "bold": existing.bold,
-            "italic": existing.italic,
-            "color": existing.color,
-            "underline": existing.underline,
-            "strike": existing.strike,
-            "vertAlign": existing.vertAlign,
-        }
-    if "name" in config:
-        kwargs["name"] = config.get("name")
-    if "size" in config:
-        kwargs["size"] = config.get("size")
-    if "bold" in config:
-        kwargs["bold"] = config.get("bold")
-    if "italic" in config:
-        kwargs["italic"] = config.get("italic")
-    if "color" in config:
-        kwargs["color"] = _resolve_color(config.get("color"))
-    if "underline" in config:
-        kwargs["underline"] = config.get("underline")
-    if "strike" in config or "strikethrough" in config:
-        kwargs["strike"] = config.get("strikethrough", config.get("strike"))
-    if "vertAlign" in config:
-        kwargs["vertAlign"] = config.get("vertAlign")
-    return Font(**kwargs)
+        config = {"name": config}
+    allowed = {"name", "size", "bold", "italic", "color", "underline", "strike", "strikethrough", "vertAlign"}
+    if not isinstance(config, dict) or set(config) - allowed:
+        raise ValueError(f"font 支持的字段: {sorted(allowed)}")
+    font = copy(existing) if existing is not None else Font()
+    for key, value in config.items():
+        key = "strike" if key == "strikethrough" else key
+        setattr(font, key, _resolve_color(value) if key == "color" else value)
+    return font
 
 
 def _build_fill(config: dict[str, Any]) -> PatternFill:
@@ -573,17 +580,17 @@ def _build_fill(config: dict[str, Any]) -> PatternFill:
         )
     return PatternFill(
         start_color=color,
-        end_color=color,
-        fill_type=fill_type,
+        end_color=_resolve_color(config.get("end_color")) or color,
+        fill_type=None if fill_type == "none" else fill_type,
     )
 
 
 def _build_side(side_config: dict[str, Any] | str) -> Side:
     """从配置构建单个 Side 对象。"""
     if isinstance(side_config, str):
-        return Side(style=side_config, color="000000")
+        return Side(style=None if side_config == "none" else side_config, color="000000")
     return Side(
-        style=side_config.get("style", "thin"),
+        style=None if side_config.get("style") == "none" else side_config.get("style", "thin"),
         color=_resolve_color(side_config.get("color")) or "000000",
     )
 
@@ -602,7 +609,7 @@ def _build_border(config: dict[str, Any]) -> Border:
     # 统一模式：四边相同
     style = config.get("style", "thin")
     color = _resolve_color(config.get("color")) or "000000"
-    side = Side(style=style, color=color)
+    side = Side(style=None if style == "none" else style, color=color)
     return Border(left=side, right=side, top=side, bottom=side)
 
 
@@ -619,27 +626,26 @@ def _build_alignment(config: dict[str, Any]) -> Alignment:
 
 
 def _patch_alignment(existing: Any, config: dict[str, Any]) -> Alignment:
-    """按显式键叠加到已有 Alignment，未出现的属性保持原值。"""
-    kwargs: dict[str, Any] = {}
-    if existing is not None:
-        kwargs = {
-            "horizontal": existing.horizontal,
-            "vertical": existing.vertical,
-            "wrap_text": existing.wrap_text,
-            "shrink_to_fit": existing.shrinkToFit,
-            "indent": existing.indent,
-            "text_rotation": existing.textRotation,
-        }
-    if "horizontal" in config or "horizontalAlignment" in config:
-        kwargs["horizontal"] = config.get("horizontal") or config.get("horizontalAlignment")
-    if "vertical" in config or "verticalAlignment" in config:
-        kwargs["vertical"] = config.get("vertical") or config.get("verticalAlignment")
-    if "wrap_text" in config or "wrapText" in config:
-        wrap = config.get("wrap_text")
-        if wrap is None:
-            wrap = config.get("wrapText")
-        kwargs["wrap_text"] = wrap
-    return Alignment(**kwargs)
+    """Patch alignment using Excel/openpyxl field names and public aliases."""
+    from copy import copy
+
+    aliases = {"horizontalAlignment": "horizontal", "verticalAlignment": "vertical",
+               "wrap_text": "wrapText", "shrink_to_fit": "shrinkToFit", "text_rotation": "textRotation"}
+    allowed = {"horizontal", "vertical", "wrapText", "shrinkToFit", "textRotation", "indent", "readingOrder"}
+    if not isinstance(config, dict):
+        raise ValueError("alignment 必须是对象")
+    alignment = copy(existing) if existing is not None else Alignment()
+    normalized = {}
+    for key, value in config.items():
+        name = aliases.get(key, key)
+        if name not in allowed:
+            raise ValueError(f"alignment 不支持字段 {key}；可用 {sorted(allowed | set(aliases))}")
+        if name in normalized and normalized[name] != value:
+            raise ValueError(f"alignment 别名冲突: {name}")
+        normalized[name] = value
+    for name, value in normalized.items():
+        setattr(alignment, name, value)
+    return alignment
 
 
 # ── 条件格式规则构建 ─────────────────────────────────────
@@ -746,6 +752,28 @@ def _cf_dxf(rule_spec: dict[str, Any]) -> Any:
     return DifferentialStyle(**kwargs)
 
 
+def _rule_formula(rule_spec: dict[str, Any]) -> str:
+    """Shared expression input for conditional formatting and custom validation."""
+    formulas: list[str] = []
+    for key in ("formula", "formula1"):
+        raw = rule_spec.get(key)
+        if raw is None:
+            continue
+        if isinstance(raw, list) and len(raw) == 1:
+            raw = raw[0]
+        if not isinstance(raw, str) or not raw.strip():
+            raise ValueError(f"rule.{key} 需要非空公式字符串（或单元素字符串数组）")
+        formula = raw.strip().removeprefix("=").strip()
+        if not formula:
+            raise ValueError(f"rule.{key} 不能为空公式")
+        formulas.append(formula)
+    if not formulas:
+        raise ValueError("需要 rule.formula（也接受同义字段 formula1），例如 =$D2=\"未匹配\"")
+    if len(set(formulas)) != 1:
+        raise ValueError("rule.formula 与 rule.formula1 冲突；只传一个，或使用相同公式")
+    return formulas[0]
+
+
 def build_conditional_format_rule(
     rule_spec: dict[str, Any], *, anchor: str = "A1"
 ) -> Any:
@@ -776,6 +804,10 @@ def build_conditional_format_rule(
                 f"conditional_format.rule.operator={raw_op!r} 不支持；"
                 f"可用 {sorted(set(_CF_OPERATOR_MAP.values()))}"
             )
+        if rule_spec.get("value") is not None and rule_spec.get("formula1") is not None and str(rule_spec["value"]) != str(rule_spec["formula1"]):
+            raise ValueError("rule.value 与 rule.formula1 冲突；只传一个，或使用相同值")
+        if rule_spec.get("value2") is not None and rule_spec.get("formula2") is not None and str(rule_spec["value2"]) != str(rule_spec["formula2"]):
+            raise ValueError("rule.value2 与 rule.formula2 冲突；只传一个，或使用相同值")
         v1 = (
             rule_spec.get("value")
             if rule_spec.get("value") is not None
@@ -818,9 +850,7 @@ def build_conditional_format_rule(
         return CellIsRule(operator=operator, formula=formulas[:2], **style_kwargs)
 
     if rtype in {"formula", "expression"}:
-        formula = str(rule_spec.get("formula") or "").strip().lstrip("=")
-        if not formula:
-            raise ValueError("type=formula 需要 rule.formula")
+        formula = _rule_formula(rule_spec)
         return FormulaRule(formula=[formula], **style_kwargs)
 
     if rtype in {"text", "contains_text", "containstext", "text_contains"}:
@@ -833,7 +863,8 @@ def build_conditional_format_rule(
             text=text,
             dxf=_cf_dxf(rule_spec),
         )
-        rule.formula = [f'NOT(ISERROR(SEARCH("{text}",{anchor})))']
+        escaped = text.replace('"', '""')
+        rule.formula = [f'NOT(ISERROR(SEARCH("{escaped}",{anchor})))']
         return rule
 
     if rtype in {"duplicate", "duplicates", "duplicate_values", "duplicatevalues"}:
@@ -1001,6 +1032,8 @@ def build_data_validation(rule_spec: dict[str, Any]) -> Any:
     if rtype == "list":
         values = rule_spec.get("values")
         formula1 = rule_spec.get("formula1", rule_spec.get("source"))
+        if isinstance(values, list) and values and formula1 not in (None, ""):
+            raise ValueError("data_validation type=list 的 values 与 formula1 不能同时指定")
         if isinstance(values, list) and values:
             formula1 = '"' + ",".join(str(v) for v in values) + '"'
         elif isinstance(values, str) and values.strip() and not formula1:
@@ -1015,11 +1048,7 @@ def build_data_validation(rule_spec: dict[str, Any]) -> Any:
             f1 = "=" + f1
         kwargs["formula1"] = f1
     elif rtype == "custom":
-        formula1 = rule_spec.get("formula1", rule_spec.get("formula"))
-        if formula1 is None or str(formula1).strip() == "":
-            raise ValueError("type=custom 需要 formula1 校验公式")
-        f1 = str(formula1).strip()
-        kwargs["formula1"] = f1 if f1.startswith("=") else "=" + f1
+        kwargs["formula1"] = "=" + _rule_formula(rule_spec)
     else:
         raw_op = str(rule_spec.get("operator") or "between").strip()
         operator = _normalize_operator_name(raw_op) or _DV_OPERATOR_MAP.get(raw_op.lower())

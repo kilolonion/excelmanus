@@ -1,5 +1,6 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
+import { shallow } from "zustand/shallow";
 import type { Session } from "@/lib/types";
 import {
   buildDefaultSessionTitle,
@@ -26,7 +27,7 @@ export function getActiveSessionId(): string | null {
 
 export const useSessionStore = create<SessionState>()(
   persist(
-    (set) => ({
+    (set, get) => ({
       sessions: [],
       activeSessionId: null,
       lastWorkspaceId: null,
@@ -66,14 +67,16 @@ export const useSessionStore = create<SessionState>()(
             s.id === id ? { ...s, title } : s
           ),
         })),
-      patchSession: (id, patch) =>
-        set((state) => ({
-          sessions: state.sessions.map((s) =>
-            s.id === id ? { ...s, ...patch } : s
-          ),
-        })),
-      mergeSessions: (remote) =>
-        set((state) => {
+      patchSession: (id, patch) => {
+        const sessions = get().sessions;
+        const index = sessions.findIndex((s) => s.id === id);
+        if (index < 0) return;
+        const next = { ...sessions[index], ...patch };
+        if (shallow(sessions[index], next)) return;
+        set({ sessions: sessions.map((s, i) => i === index ? next : s) });
+      },
+      mergeSessions: (remote) => {
+          const state = get();
           const localMap = new Map(state.sessions.map((s) => [s.id, s]));
           for (const rs of remote) {
             const local = localMap.get(rs.id);
@@ -83,10 +86,11 @@ export const useSessionStore = create<SessionState>()(
               && isFallbackSessionTitle(rs.title, rs.id);
             const merged = { ...local, ...rs };
             const normalizedTitle = (keepLocalTitle ? local?.title : merged.title)?.trim();
-            localMap.set(rs.id, {
+            const next = {
               ...merged,
               title: normalizedTitle || buildDefaultSessionTitle(rs.id),
-            });
+            };
+            localMap.set(rs.id, local && shallow(local, next) ? local : next);
           }
 
           // 移除仅存在于本地、后端未返回的会话。
@@ -113,8 +117,11 @@ export const useSessionStore = create<SessionState>()(
           const merged = Array.from(localMap.values()).sort(
             (a, b) => (b.updatedAt ?? "").localeCompare(a.updatedAt ?? "")
           );
-          return { sessions: merged };
-        }),
+          // Preserve references and skip persistence/subscriber work when a poll
+          // returns the same sessions. Only changed rows get a new object.
+          if (merged.length === state.sessions.length && merged.every((s, i) => s === state.sessions[i])) return;
+          set({ sessions: merged });
+        },
     }),
     {
       name: "excelmanus-sessions",

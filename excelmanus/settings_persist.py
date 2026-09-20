@@ -79,7 +79,7 @@ def refresh_config_in_place(config: Any) -> Any:
     from excelmanus.config import ConfigError, ExcelManusConfig, load_config
 
     try:
-        refreshed = load_config()
+        refreshed = load_config(allow_incomplete=True)
     except ConfigError:
         return config
     for field in fields(ExcelManusConfig):

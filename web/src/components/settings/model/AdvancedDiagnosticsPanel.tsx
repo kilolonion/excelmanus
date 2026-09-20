@@ -1,17 +1,19 @@
 "use client";
 
-import { Brain, Loader2, Save, CheckCircle2, Zap } from "lucide-react";
+import { Brain, Check, Loader2, Save, CheckCircle2, Zap } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { THINKING_EFFORT_LEVELS, type ThinkingEffort } from "@/lib/thinking";
+import { useUIStore } from "@/stores/ui-store";
 import { useAdminModel } from "./admin-model-context";
 import { ConfigTransferPanel } from "./ConfigTransferPanel";
 import { ModelCapabilitiesPanel } from "./ModelCapabilitiesPanel";
 
 export function AdvancedDiagnosticsPanel() {
   const {
-    config,
     thinkingEffort,
-    setThinkingEffort,
+    thinkingEffortOptions,
+    setThinkingEffortOptions,
     thinkingBudget,
     setThinkingBudget,
     thinkingEffectiveBudget,
@@ -19,6 +21,20 @@ export function AdvancedDiagnosticsPanel() {
     thinkingSaved,
     handleSaveThinking,
   } = useAdminModel();
+  const currentEffortLabel =
+    THINKING_EFFORT_LEVELS.find(({ key }) => key === thinkingEffort)?.label ?? "中";
+
+  const toggleEffortOption = (level: ThinkingEffort) => {
+    if (thinkingEffortOptions.includes(level)) {
+      if (thinkingEffortOptions.length === 1) return;
+      setThinkingEffortOptions(thinkingEffortOptions.filter((item) => item !== level));
+      return;
+    }
+    const selected = new Set([...thinkingEffortOptions, level]);
+    setThinkingEffortOptions(
+      THINKING_EFFORT_LEVELS.map(({ key }) => key).filter((key) => selected.has(key)),
+    );
+  };
 
   return (
     <div className="space-y-6">
@@ -36,33 +52,32 @@ export function AdvancedDiagnosticsPanel() {
         </h3>
             <div className="space-y-3">
               <p className="text-xs text-muted-foreground">
-                控制模型思考链的深度，影响推理质量和 token 消耗
+                选择聊天区思考深度菜单中允许显示的等级；可多选，至少保留一个
               </p>
               <div>
-                <label className="text-xs text-muted-foreground mb-1.5 block">思考等级</label>
+                <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                  <span>可调等级（多选）</span>
+                  <span>当前：{currentEffortLabel}</span>
+                </div>
                 <div className="grid grid-cols-3 sm:grid-cols-7 gap-1.5 sm:gap-1">
-                  {(["none", "minimal", "low", "medium", "high", "xhigh", "max"] as const).map((level) => {
-                    const labels: Record<string, string> = {
-                      none: "关闭", minimal: "极简", low: "低",
-                      medium: "中", high: "高", xhigh: "极高", max: "最深",
-                    };
-                    const isActive = thinkingEffort === level;
+                  {THINKING_EFFORT_LEVELS.map(({ key, label }) => {
+                    const isActive = thinkingEffortOptions.includes(key);
                     return (
                       <button
-                        key={level}
-                        className={`px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border ${
+                        key={key}
+                        type="button"
+                        aria-pressed={isActive}
+                        className={`inline-flex items-center justify-center gap-1 px-2.5 py-2 sm:py-1 rounded-md text-xs font-medium transition-colors border disabled:cursor-not-allowed disabled:opacity-60 ${
                           isActive
                             ? "text-white border-transparent"
                             : "border-border text-muted-foreground hover:bg-muted/60"
                         }`}
                         style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
-                        onClick={() => {
-                          setThinkingEffort(level);
-                          handleSaveThinking(level, thinkingBudget);
-                        }}
-                        disabled={thinkingSaving}
+                        onClick={() => toggleEffortOption(key)}
+                        disabled={thinkingSaving || (isActive && thinkingEffortOptions.length === 1)}
                       >
-                        {labels[level]}
+                        {isActive && <Check className="h-3 w-3" aria-hidden />}
+                        {label}
                       </button>
                     );
                   })}
@@ -84,7 +99,7 @@ export function AdvancedDiagnosticsPanel() {
                     size="sm"
                     className="h-8 sm:h-7 text-xs gap-1 text-white flex-shrink-0"
                     style={{ backgroundColor: "var(--em-primary)" }}
-                    onClick={() => handleSaveThinking(thinkingEffort, thinkingBudget)}
+                    onClick={() => handleSaveThinking(thinkingEffortOptions, thinkingBudget)}
                     disabled={thinkingSaving}
                   >
                     {thinkingSaving ? (
@@ -107,7 +122,11 @@ export function AdvancedDiagnosticsPanel() {
 
       </div>
       <div>
-        <ConfigTransferPanel config={config} />
+        <ConfigTransferPanel
+          onImported={() => {
+            useUIStore.getState().bumpModelProfiles();
+          }}
+        />
       </div>
     </div>
   );

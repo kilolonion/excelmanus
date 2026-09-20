@@ -9,11 +9,11 @@ from __future__ import annotations
 
 import asyncio
 import os
-from typing import Any, AsyncIterator, Literal
+from typing import TYPE_CHECKING, Any, AsyncIterator, Literal
 
 from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from excelmanus.api_app_state import (
     _get_probe_job_mgr,
@@ -30,8 +30,11 @@ from excelmanus.api_app_state import (
     set_restart_reason,
 )
 from excelmanus.api_sse import sse_format as _sse_format
-from excelmanus.config import format_deprecated_model_message
+from excelmanus.config import THINKING_EFFORT_ORDER, format_deprecated_model_message
 from excelmanus.logger import get_logger, setup_logging
+
+if TYPE_CHECKING:
+    from excelmanus.capability_probe_jobs import ProbeTargetSpec
 
 logger = get_logger("api.config")
 
@@ -99,12 +102,8 @@ async def list_models(request: Request) -> JSONResponse:
 
 async def _activate_named_profile(name: str) -> JSONResponse | None:
     """校验并激活档案。成功返回 None，失败返回错误响应。"""
-    from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
-
     store = get_config_store()
     profile = store.get_profile(name) if store is not None else None
-    if profile is None and OpenAICodexProvider.is_codex_profile_name(name):
-        profile = {"name": name, "model": name}
     if profile is None:
         if store is None:
             return _error_json_response(503, "配置存储未初始化")
@@ -120,23 +119,35 @@ async def _activate_named_profile(name: str) -> JSONResponse | None:
     if deprecated is not None:
         return deprecated
 
+    if is_placeholder_model_profile(name, profile.get("model", ""), profile.get("base_url", "")):
+        return _error_json_response(400, "不能激活测试占位模型。")
+
+    manager = get_session_manager()
+    _sync_config_profiles_from_db()
+    if manager is not None:
+        await manager.broadcast_model_profiles(get_config().models)
+    sessions = await manager.list_sessions() if manager is not None else []
+    failed_sessions: list[str] = []
+    for session_info in sessions:
+        try:
+            engine = manager.get_engine(session_info["id"])
+            if engine is not None:
+                engine.switch_model(name)
+                if engine.current_model_name != name:
+                    failed_sessions.append(session_info["id"])
+        except Exception:
+            failed_sessions.append(session_info["id"])
+            logger.warning("模型切换失败 (session=%s)", session_info["id"], exc_info=True)
+
+    if failed_sessions:
+        return _error_json_response(409, "部分会话未能切换模型，请重试。未切换会话：" + ", ".join(failed_sessions))
+
     user_cfg = _user_config_store()
     if user_cfg is not None:
         user_cfg.set_active_model(name)
     apply_profile_to_config(name)
 
-    if get_session_manager() is None:
-        return None
-    sessions = await get_session_manager().list_sessions()
-    for session_info in sessions:
-        try:
-            engine = get_session_manager().get_engine(session_info["id"])
-            if engine is not None:
-                engine.switch_model(name)
-        except Exception:
-            pass
-
-    db = get_session_manager().database
+    db = manager.database if manager is not None else None
     if db is not None:
         try:
             from excelmanus.model_probe import load_capabilities
@@ -178,13 +189,18 @@ class ThinkingConfigRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     effort: str | None = None  # none|minimal|low|medium|high|xhigh|max
     budget: int | None = None  # 精确 token 预算（0 = 使用 effort 换算）
+    allowed_efforts: list[
+        Literal["none", "minimal", "low", "medium", "high", "xhigh", "max"]
+    ] | None = None
 
 
 @router.get("/api/v1/thinking")
 async def get_thinking_config(raw_request: Request) -> JSONResponse:
-    """获取当前 thinking 配置（等级 + 预算）。"""
+    """获取当前 thinking 配置（等级、预算与前端可选等级）。"""
     if get_session_manager() is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
+    assert get_config() is not None
+    allowed_efforts = list(get_config().thinking_effort_options)
     sessions = await get_session_manager().list_sessions()
     # 取第一个活跃 session 的 thinking_config
     for s in sessions:
@@ -195,41 +211,82 @@ async def get_thinking_config(raw_request: Request) -> JSONResponse:
                 "effort": tc.effort,
                 "budget": tc.budget_tokens,
                 "effective_budget": tc.effective_budget(),
+                "allowed_efforts": allowed_efforts,
             })
     # 回退到全局配置
-    assert get_config() is not None
     return JSONResponse(content={
         "effort": get_config().thinking_effort,
         "budget": get_config().thinking_budget,
         "effective_budget": 0,
+        "allowed_efforts": allowed_efforts,
     })
 
 
 @router.put("/api/v1/thinking")
 async def set_thinking_config(request: ThinkingConfigRequest, raw_request: Request) -> JSONResponse:
-    """设置 thinking 等级和/或预算，同步到所有活跃会话。"""
+    """设置 thinking 等级、预算与可选等级，同步到所有活跃会话。"""
     if get_session_manager() is None:
         raise HTTPException(status_code=503, detail="服务未初始化")
     from excelmanus.engine import _EFFORT_RATIOS
     if request.effort is not None and request.effort not in _EFFORT_RATIOS:
         return _error_json_response(400, f"无效的 effort 值: {request.effort!r}。可选: {', '.join(sorted(_EFFORT_RATIOS))}")
+
+    assert get_config() is not None
+    allowed_efforts: list[str] | None = None
+    if request.allowed_efforts is not None:
+        selected = set(request.allowed_efforts)
+        allowed_efforts = [effort for effort in THINKING_EFFORT_ORDER if effort in selected]
+        if not allowed_efforts:
+            return _error_json_response(400, "至少保留一个可调思考等级。")
+
+    persisted: dict[str, str] = {}
+    global_effort = request.effort
+    if global_effort is None and allowed_efforts is not None:
+        current_global_effort = get_config().thinking_effort
+        if current_global_effort not in allowed_efforts:
+            global_effort = allowed_efforts[0]
+    if global_effort is not None:
+        persisted["EXCELMANUS_THINKING_EFFORT"] = global_effort
+        object.__setattr__(get_config(), "thinking_effort", global_effort)
+    if request.budget is not None:
+        persisted["EXCELMANUS_THINKING_BUDGET"] = str(max(0, request.budget))
+        object.__setattr__(get_config(), "thinking_budget", max(0, request.budget))
+    if allowed_efforts is not None:
+        persisted["EXCELMANUS_THINKING_EFFORT_OPTIONS"] = ",".join(allowed_efforts)
+        object.__setattr__(get_config(), "thinking_effort_options", tuple(allowed_efforts))
+    if persisted:
+        _persist_settings(persisted)
+
     sessions = await get_session_manager().list_sessions()
     updated = 0
     result_tc = None
     for s in sessions:
         engine = get_session_manager().get_engine(s["id"])
         if engine is not None:
-            engine.set_thinking_config(effort=request.effort, budget=request.budget)
+            session_effort = request.effort
+            if (
+                session_effort is None
+                and allowed_efforts is not None
+                and engine.thinking_config.effort not in allowed_efforts
+            ):
+                session_effort = allowed_efforts[0]
+            engine.set_thinking_config(effort=session_effort, budget=request.budget)
             result_tc = engine.thinking_config
             updated += 1
 
     if result_tc is None:
-        return _error_json_response(404, "无活跃会话。")
+        from excelmanus.engine_types import ThinkingConfig
+
+        result_tc = ThinkingConfig(
+            effort=get_config().thinking_effort,
+            budget_tokens=get_config().thinking_budget,
+        )
 
     return JSONResponse(content={
         "effort": result_tc.effort,
         "budget": result_tc.budget_tokens,
         "effective_budget": result_tc.effective_budget(),
+        "allowed_efforts": list(get_config().thinking_effort_options),
         "sessions_updated": updated,
     })
 
@@ -267,6 +324,14 @@ class ModelProfileCreate(BaseModel):
     custom_extra_body: str = ""
     custom_extra_headers: str = ""
     clone_from: str = ""
+
+    @field_validator("name", "model")
+    @classmethod
+    def nonempty_identifier(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("模型名称与 Model ID 不能为空")
+        return value
 
 
 def _deprecated_model_error_response(model: str, *, prefix: str = "") -> JSONResponse | None:
@@ -417,8 +482,10 @@ async def add_model_profile(request: ModelProfileCreate, raw_request: Request) -
         await get_session_manager().broadcast_model_profiles(get_config().models)
 
     user_cfg = _user_config_store()
-    if user_cfg is not None and not user_cfg.get_active_model():
-        await _activate_named_profile(request.name)
+    if user_cfg is not None and not get_config_store().get_profile(user_cfg.get_active_model() or ""):
+        err = await _activate_named_profile(request.name)
+        if err is not None:
+            return err
 
     return JSONResponse(status_code=201, content={"status": "created", "name": request.name})
 
@@ -440,10 +507,14 @@ async def delete_model_profile(name: str, request: Request) -> JSONResponse:
     if was_active:
         remaining = get_config_store().list_profiles()
         if remaining:
-            await _activate_named_profile(remaining[0]["name"])
+            err = await _activate_named_profile(remaining[0]["name"])
+            if err is not None:
+                return err
         elif user_cfg is not None:
             user_cfg.set_active_model(None)
             set_config_incomplete(True)
+            for field in ("model", "api_key", "base_url"):
+                object.__setattr__(get_config(), field, "")
     return JSONResponse(content={"status": "deleted", "name": name})
 
 
@@ -459,6 +530,10 @@ async def update_model_profile(
 
     if not get_config_store().get_profile(name):
         return _error_json_response(404, f"未找到模型: {name}")
+    if request.name != name and get_config_store().get_profile(request.name):
+        return _error_json_response(409, f"模型名称已存在: {request.name}")
+    if is_placeholder_model_profile(request.name, request.model, request.base_url):
+        return _error_json_response(400, "不能保存测试占位模型。")
 
     deprecated = _deprecated_model_error_response(
         request.model,
@@ -467,19 +542,21 @@ async def update_model_profile(
     if deprecated is not None:
         return deprecated
 
-    get_config_store().update_profile(
+    updated = get_config_store().update_profile(
         name,
         new_name=request.name if request.name != name else None,
         model=request.model,
         api_key=request.api_key or None,
         base_url=request.base_url or None,
-        description=request.description or None,
+        description=request.description if "description" in request.model_fields_set else None,
         protocol=request.protocol or None,
         thinking_mode=request.thinking_mode,
         model_family=request.model_family,
         custom_extra_body=request.custom_extra_body,
         custom_extra_headers=request.custom_extra_headers,
     )
+    if not updated:
+        return _error_json_response(500, f"保存模型档案失败: {request.name}")
     _sync_config_profiles_from_db()
     if get_session_manager() is not None and get_config() is not None:
         await get_session_manager().broadcast_model_profiles(get_config().models)
@@ -487,7 +564,9 @@ async def update_model_profile(
     user_cfg = _user_config_store()
     active_name = user_cfg.get_active_model() if user_cfg is not None else None
     if active_name == name or active_name == request.name:
-        await _activate_named_profile(request.name)
+        err = await _activate_named_profile(request.name)
+        if err is not None:
+            return err
 
     return JSONResponse(content={"status": "updated", "name": request.name})
 
@@ -558,52 +637,63 @@ async def import_model_config(
     imported: dict[str, Any] = {}
 
     profiles_data = sections.get("profiles")
-    if isinstance(profiles_data, list) and get_config_store() is not None:
-        profile_names: list[str] = []
+    if isinstance(profiles_data, list):
+        if get_config_store() is None:
+            return _error_json_response(503, "配置存储未初始化")
+        # 先校验整批，防止后面的无效档案导致前面的写入不触发同步。
+        validated_profiles: list[dict] = []
         for p in profiles_data:
             if not isinstance(p, dict):
-                continue
-            name = p.get("name", "").strip()
-            model = p.get("model", "").strip()
-            if not name or not model:
-                continue
-            deprecated = _deprecated_model_error_response(
-                model,
-                prefix=f"导入的模型档案 {name!r} 不可用。",
-            )
+                return _error_json_response(422, "模型档案必须是对象。")
+            try:
+                profile = ModelProfileCreate.model_validate(p)
+            except ValueError:
+                return _error_json_response(422, "模型档案字段无效。")
+            if is_placeholder_model_profile(profile.name, profile.model, profile.base_url):
+                return _error_json_response(400, "不能导入测试占位模型。")
+            deprecated = _deprecated_model_error_response(profile.model)
             if deprecated is not None:
                 return deprecated
-            existing = get_config_store().get_profile(name)
-            if existing:
-                get_config_store().update_profile(
-                    name,
-                    model=model,
-                    api_key=p.get("api_key", ""),
-                    base_url=p.get("base_url", ""),
-                    description=p.get("description", ""),
-                    protocol=p.get("protocol", "auto"),
-                    thinking_mode=p.get("thinking_mode", "auto"),
-                    model_family=p.get("model_family", ""),
-                    custom_extra_body=p.get("custom_extra_body", ""),
-                    custom_extra_headers=p.get("custom_extra_headers", ""),
-                )
-            else:
-                get_config_store().add_profile(
-                    name=name,
-                    model=model,
-                    api_key=p.get("api_key", ""),
-                    base_url=p.get("base_url", ""),
-                    description=p.get("description", ""),
-                    protocol=p.get("protocol", "auto"),
-                    thinking_mode=p.get("thinking_mode", "auto"),
-                    model_family=p.get("model_family", ""),
-                    custom_extra_body=p.get("custom_extra_body", ""),
-                    custom_extra_headers=p.get("custom_extra_headers", ""),
-                )
+            validated_profiles.append(profile.model_dump())
+
+        profile_names: list[str] = []
+        failed_name: str | None = None
+        for p in validated_profiles:
+            name = p["name"]
+            fields = {key: value for key, value in p.items() if key not in ("name", "clone_from")}
+            try:
+                if get_config_store().get_profile(name):
+                    saved = get_config_store().update_profile(name, **fields)
+                else:
+                    saved = get_config_store().add_profile(name=name, **fields)
+            except Exception:
+                logger.warning("导入模型档案失败 (name=%s)", name, exc_info=True)
+                saved = False
+            if not saved:
+                failed_name = name
+                break
             profile_names.append(name)
         if profile_names:
             imported["profiles"] = profile_names
             _sync_config_profiles_from_db()
+            if get_session_manager() is not None and get_config() is not None:
+                await get_session_manager().broadcast_model_profiles(get_config().models)
+
+            # 导入可能覆盖当前激活档案的模型、凭证或地址；重新激活以更新运行时客户端。
+            user_cfg = _user_config_store()
+            active_name = user_cfg.get_active_model() if user_cfg is not None else None
+            if not active_name or get_config_store().get_profile(active_name) is None:
+                active_name = profile_names[0]
+            if active_name in profile_names:
+                err = await _activate_named_profile(active_name)
+                if err is not None:
+                    return err
+
+        if failed_name is not None:
+            return JSONResponse(status_code=500, content={
+                "error": f"保存模型档案失败: {failed_name}。已保存：{', '.join(profile_names) or '无'}",
+                "imported": imported,
+            })
 
     return JSONResponse(content={
         "status": "ok",
@@ -1666,6 +1756,13 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "session_ttl_seconds": "EXCELMANUS_SESSION_TTL_SECONDS",
     "max_sessions": "EXCELMANUS_MAX_SESSIONS",
     "max_consecutive_failures": "EXCELMANUS_MAX_CONSECUTIVE_FAILURES",
+    "turn_timeout_seconds": "EXCELMANUS_TURN_TIMEOUT_SECONDS",
+    "responses_continuation_enabled": "EXCELMANUS_RESPONSES_CONTINUATION_ENABLED",
+    "responses_background_enabled": "EXCELMANUS_RESPONSES_BACKGROUND_ENABLED",
+    "turn_token_budget": "EXCELMANUS_TURN_TOKEN_BUDGET",
+    "turn_cost_budget_usd": "EXCELMANUS_TURN_COST_BUDGET_USD",
+    "input_cost_per_1k_usd": "EXCELMANUS_INPUT_COST_PER_1K_USD",
+    "output_cost_per_1k_usd": "EXCELMANUS_OUTPUT_COST_PER_1K_USD",
     # ── 执行与安全 ──
     "subagent_enabled": "EXCELMANUS_SUBAGENT_ENABLED",
     "max_iterations": "EXCELMANUS_MAX_ITERATIONS",
@@ -1708,6 +1805,7 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     # ── 工具与 Hook ──
     "tool_result_hard_cap_chars": "EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS",
     "parallel_readonly_tools": "EXCELMANUS_PARALLEL_READONLY_TOOLS",
+    "parallel_tool_max": "EXCELMANUS_PARALLEL_TOOL_MAX",
     "hooks_command_enabled": "EXCELMANUS_HOOKS_COMMAND_ENABLED",
     "hooks_command_timeout_seconds": "EXCELMANUS_HOOKS_COMMAND_TIMEOUT_SECONDS",
     "hooks_output_max_chars": "EXCELMANUS_HOOKS_OUTPUT_MAX_CHARS",
@@ -1735,8 +1833,9 @@ _RUNTIME_SETTING_KEYS: dict[str, str] = {
     "jev_enabled": "EXCELMANUS_JEV_ENABLED",
     "jev_exposure": "EXCELMANUS_JEV_EXPOSURE",
     "jev_mode_hint": "EXCELMANUS_JEV_MODE_HINT",
-    "jev_present_as_auto": "EXCELMANUS_JEV_PRESENT_AS_AUTO",
     "jev_observation": "EXCELMANUS_JEV_OBSERVATION",
+    "jev_verification": "EXCELMANUS_JEV_VERIFICATION",
+    "jev_recovery": "EXCELMANUS_JEV_RECOVERY",
     "jev_ui_hint": "EXCELMANUS_JEV_UI_HINT",
     "jev_model": "EXCELMANUS_JEV_MODEL",
     "ai_gateway_api_key": "EXCELMANUS_AI_GATEWAY_API_KEY",
@@ -1755,6 +1854,13 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "session_ttl_seconds": get_config().session_ttl_seconds,
         "max_sessions": get_config().max_sessions,
         "max_consecutive_failures": get_config().max_consecutive_failures,
+        "turn_timeout_seconds": get_config().turn_timeout_seconds,
+        "responses_continuation_enabled": get_config().responses_continuation_enabled,
+        "responses_background_enabled": get_config().responses_background_enabled,
+        "turn_token_budget": get_config().turn_token_budget,
+        "turn_cost_budget_usd": get_config().turn_cost_budget_usd,
+        "input_cost_per_1k_usd": get_config().input_cost_per_1k_usd,
+        "output_cost_per_1k_usd": get_config().output_cost_per_1k_usd,
         # ── 执行与安全 ──
         "subagent_enabled": get_config().subagent_enabled,
         "max_iterations": get_config().max_iterations,
@@ -1797,6 +1903,7 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         # ── 工具与 Hook ──
         "tool_result_hard_cap_chars": get_config().tool_result_hard_cap_chars,
         "parallel_readonly_tools": get_config().parallel_readonly_tools,
+        "parallel_tool_max": get_config().parallel_tool_max,
         "hooks_command_enabled": get_config().hooks_command_enabled,
         "hooks_command_timeout_seconds": get_config().hooks_command_timeout_seconds,
         "hooks_output_max_chars": get_config().hooks_output_max_chars,
@@ -1824,8 +1931,9 @@ async def get_runtime_config(request: Request) -> JSONResponse:
         "jev_enabled": get_config().jev_enabled,
         "jev_exposure": get_config().jev_exposure,
         "jev_mode_hint": get_config().jev_mode_hint,
-        "jev_present_as_auto": get_config().jev_present_as_auto,
         "jev_observation": get_config().jev_observation,
+        "jev_verification": get_config().jev_verification,
+        "jev_recovery": get_config().jev_recovery,
         "jev_ui_hint": get_config().jev_ui_hint,
         "jev_model": get_config().jev_model,
         "ai_gateway": _secret_status(get_config().ai_gateway_api_key),
@@ -1841,6 +1949,13 @@ class RuntimeConfigUpdate(BaseModel):
     session_ttl_seconds: int | None = Field(default=None, gt=0)
     max_sessions: int | None = Field(default=None, gt=0)
     max_consecutive_failures: int | None = Field(default=None, gt=0)
+    turn_timeout_seconds: int | None = Field(default=None, ge=0)
+    responses_continuation_enabled: bool | None = None
+    responses_background_enabled: bool | None = None
+    turn_token_budget: int | None = Field(default=None, ge=0)
+    turn_cost_budget_usd: float | None = Field(default=None, ge=0)
+    input_cost_per_1k_usd: float | None = Field(default=None, ge=0)
+    output_cost_per_1k_usd: float | None = Field(default=None, ge=0)
     # ── 执行与安全 ──
     subagent_enabled: bool | None = None
     max_iterations: int | None = None
@@ -1883,6 +1998,7 @@ class RuntimeConfigUpdate(BaseModel):
     # ── 工具与 Hook ──
     tool_result_hard_cap_chars: int | None = Field(default=None, ge=0)
     parallel_readonly_tools: bool | None = None
+    parallel_tool_max: int | None = Field(default=None, ge=1, le=32)
     hooks_command_enabled: bool | None = None
     hooks_command_timeout_seconds: int | None = Field(default=None, gt=0)
     hooks_output_max_chars: int | None = Field(default=None, gt=0)
@@ -1910,8 +2026,9 @@ class RuntimeConfigUpdate(BaseModel):
     jev_enabled: Literal["off", "shadow", "enforce"] | None = None
     jev_exposure: Literal["off", "shadow", "enforce"] | None = None
     jev_mode_hint: bool | None = None
-    jev_present_as_auto: bool | None = None
     jev_observation: Literal["off", "shadow", "enforce"] | None = None
+    jev_verification: Literal["off", "shadow", "enforce"] | None = None
+    jev_recovery: Literal["off", "shadow", "enforce"] | None = None
     jev_ui_hint: bool | None = None
     jev_model: str | None = None
     ai_gateway_api_key: str | None = None
@@ -2027,6 +2144,17 @@ async def update_runtime_config(request: RuntimeConfigUpdate, raw_request: Reque
             max_context_tokens=payload.get("max_context_tokens"),
             compaction_enabled=payload.get("compaction_enabled"),
             compaction_threshold_ratio=payload.get("compaction_threshold_ratio"),
+        )
+    _BUDGET_KEYS = {
+        "turn_timeout_seconds",
+        "turn_token_budget",
+        "turn_cost_budget_usd",
+        "input_cost_per_1k_usd",
+        "output_cost_per_1k_usd",
+    }
+    if payload.keys() & _BUDGET_KEYS and get_session_manager() is not None:
+        await get_session_manager().broadcast_execution_budget(
+            **{key: payload[key] for key in _BUDGET_KEYS if key in payload}
         )
 
     # 需要重启才能生效的配置项集合

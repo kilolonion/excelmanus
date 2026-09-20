@@ -32,9 +32,15 @@ function RuleRow({
   updating: string | null;
 }) {
   return (
-    <div className="flex items-center gap-2 rounded-lg border border-border px-3 py-2.5 sm:py-2">
+    <div className="em-settings-section flex items-center gap-3 rounded-xl border border-border px-3 py-3">
+      <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--em-primary-alpha-06)] text-[var(--em-primary)]">
+        <ScrollText className="h-3.5 w-3.5" />
+      </div>
       <div className="flex-1 min-w-0">
-        <p className="text-sm break-words">{rule.content}</p>
+        <p className="text-[13px] leading-relaxed break-words">{rule.content}</p>
+        <p className="mt-0.5 text-[10px] text-muted-foreground">
+          {rule.enabled ? "已启用" : "已停用"}
+        </p>
       </div>
       <div className="flex items-center gap-1.5 flex-shrink-0">
         <Switch
@@ -61,9 +67,8 @@ function RuleRow({
 }
 
 function DemoRulesBanner() {
-  const [active, setActive] = useState(false);
+  const [active, setActive] = useState(isSettingsDemoActive);
   useEffect(() => {
-    setActive(isSettingsDemoActive());
     return onSettingsDemoChange(() => setActive(isSettingsDemoActive()));
   }, []);
   if (!active) return null;
@@ -309,81 +314,31 @@ export function RulesTab({ sessionId }: RulesTabProps) {
   }
 
   return (
-    <div className="flex flex-col flex-1">
-      {/* Rules list content */}
-      <div className="flex-1 flex flex-col gap-6">
-        {/* 全局规则 */}
-        <div className="flex-1 flex flex-col gap-3" data-coach-id="coach-settings-rules-list">
-          <div className="flex items-center gap-2">
-            <ScrollText className="h-3.5 w-3.5" style={{ color: "var(--em-primary)" }} />
-            <span className="text-sm font-medium">全局规则</span>
+    <div className="space-y-3">
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
+        <div className="flex items-start gap-2">
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]">
+            <Plus className="h-3.5 w-3.5" />
           </div>
-
-          <DemoRulesBanner />
-          <div className="flex-1 flex flex-col gap-2">
-            {globalRules.length === 0 && !isSettingsDemoActive() ? (
-              <div className="flex-1 flex items-center justify-center text-xs text-muted-foreground border border-dashed rounded-lg">
-                暂无规则
-              </div>
-            ) : (
-              <>
-                {globalRules.map((rule) => (
-                  <RuleRow
-                    key={rule.id}
-                    rule={rule}
-                    onToggle={handleToggleGlobal}
-                    onDelete={handleDeleteGlobal}
-                    updating={updating}
-                  />
-                ))}
-              </>
-            )}
+          <div className="min-w-0">
+            <h4 className="text-sm font-medium">添加规则</h4>
+            <p className="mt-0.5 text-[11px] leading-relaxed text-muted-foreground">
+              用一句明确的话描述 Agent 必须遵守的行为。
+            </p>
           </div>
         </div>
-
-        {/* 会话规则（仅当 sessionId 存在时显示） */}
-        {sessionId && (
-          <div className="space-y-3">
-            <div className="flex items-center gap-2">
-              <ToggleLeft className="h-3.5 w-3.5 text-muted-foreground" />
-              <span className="text-sm font-medium">会话规则</span>
-            </div>
-
-            <div className="space-y-2">
-              {sessionRules.length === 0 ? (
-                <p className="text-xs text-muted-foreground text-center py-6 border border-dashed rounded-lg">
-                  暂无规则
-                </p>
-              ) : (
-                sessionRules.map((rule) => (
-                  <RuleRow
-                    key={rule.id}
-                    rule={rule}
-                    onToggle={handleToggleSession}
-                    onDelete={handleDeleteSession}
-                    updating={updating}
-                  />
-                ))
-              )}
-            </div>
-          </div>
-        )}
-      </div>
-
-      {/* Input bars pinned at bottom */}
-      <div className="shrink-0 mt-auto pt-4 space-y-3 border-t border-border/60">
         <div className="flex flex-col sm:flex-row gap-2">
           <Input
             value={globalInput}
             onChange={(e) => setGlobalInput(e.target.value)}
-            className="h-8 sm:h-7 text-xs flex-1"
-            placeholder="输入新规则内容..."
+            className="h-9 text-xs flex-1"
+            placeholder="例如：修改前先保留原始数据列"
             data-coach-id="coach-settings-rule-input"
             onKeyDown={(e) => e.key === "Enter" && handleAddGlobalRule()}
           />
           <Button
             size="sm"
-            className="h-8 sm:h-7 text-xs gap-1 text-white shrink-0"
+            className="h-9 text-xs gap-1 text-white shrink-0"
             style={{ backgroundColor: "var(--em-primary)" }}
             disabled={addingGlobal || !globalInput.trim()}
             onClick={handleAddGlobalRule}
@@ -397,19 +352,70 @@ export function RulesTab({ sessionId }: RulesTabProps) {
             添加规则
           </Button>
         </div>
+      </section>
 
-        {sessionId && (
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3" data-coach-id="coach-settings-rules-list">
+        <div className="flex items-center justify-between gap-3">
+          <div className="flex items-center gap-2">
+            <ScrollText className="h-4 w-4 text-[var(--em-primary)]" />
+            <div>
+              <h4 className="text-sm font-medium">全局规则</h4>
+              <p className="text-[10px] text-muted-foreground">每个新任务都会加载</p>
+            </div>
+          </div>
+          <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+            {globalRules.length} 条
+          </span>
+        </div>
+
+        <DemoRulesBanner />
+        <div className="space-y-2">
+          {globalRules.length === 0 && !isSettingsDemoActive() ? (
+            <div className="rounded-xl border border-dashed px-4 py-10 text-center">
+              <ScrollText className="mx-auto h-7 w-7 text-muted-foreground/30" />
+              <p className="mt-2 text-xs font-medium text-muted-foreground">还没有全局规则</p>
+              <p className="mt-1 text-[10px] text-muted-foreground/70">在上方添加后，可随时单独启停</p>
+            </div>
+          ) : (
+            globalRules.map((rule) => (
+              <RuleRow
+                key={rule.id}
+                rule={rule}
+                onToggle={handleToggleGlobal}
+                onDelete={handleDeleteGlobal}
+                updating={updating}
+              />
+            ))
+          )}
+        </div>
+      </section>
+
+      {sessionId && (
+        <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="flex items-center gap-2">
+              <ToggleLeft className="h-4 w-4 text-muted-foreground" />
+              <div>
+                <h4 className="text-sm font-medium">会话规则</h4>
+                <p className="text-[10px] text-muted-foreground">仅覆盖当前任务</p>
+              </div>
+            </div>
+            <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+              {sessionRules.length} 条
+            </span>
+          </div>
+
           <div className="flex flex-col sm:flex-row gap-2">
             <Input
               value={sessionInput}
               onChange={(e) => setSessionInput(e.target.value)}
-              className="h-8 sm:h-7 text-xs flex-1"
-              placeholder="输入会话规则内容..."
+              className="h-9 text-xs flex-1"
+              placeholder="输入仅用于当前任务的规则..."
               onKeyDown={(e) => e.key === "Enter" && handleAddSessionRule()}
             />
             <Button
               size="sm"
-              className="h-8 sm:h-7 text-xs gap-1 text-white shrink-0"
+              className="h-9 text-xs gap-1 text-white shrink-0"
               style={{ backgroundColor: "var(--em-primary)" }}
               disabled={addingSession || !sessionInput.trim()}
               onClick={handleAddSessionRule}
@@ -422,8 +428,26 @@ export function RulesTab({ sessionId }: RulesTabProps) {
               添加规则
             </Button>
           </div>
-        )}
-      </div>
+
+          <div className="space-y-2">
+            {sessionRules.length === 0 ? (
+              <p className="rounded-xl border border-dashed py-6 text-center text-xs text-muted-foreground">
+                当前任务没有专属规则
+              </p>
+            ) : (
+              sessionRules.map((rule) => (
+                <RuleRow
+                  key={rule.id}
+                  rule={rule}
+                  onToggle={handleToggleSession}
+                  onDelete={handleDeleteSession}
+                  updating={updating}
+                />
+              ))
+            )}
+          </div>
+        </section>
+      )}
     </div>
   );
 }

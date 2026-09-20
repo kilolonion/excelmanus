@@ -610,15 +610,9 @@ function Start-Backend {
         Write-Warn "检测到 $Workers 个 uvicorn worker。会话引擎是进程内存态，同一 session_id 落到不同 worker 会从 SQLite 重建信封；MCP 未连上或技能快照丢失时 tools/system 前缀不等值，将静默打满 prompt cache miss。单机请保持 workers=1；多实例扩容请在反代层按 session_id 粘性路由。"
     }
 
-    $uvicornCmd = if ($Workers -gt 1) {
-        "import uvicorn; uvicorn.run('excelmanus.api:app', host='$ListenHost', port=$BackendPort, log_level='info', workers=$Workers)"
-    } else {
-        "import uvicorn; uvicorn.run('excelmanus.api:app', host='$ListenHost', port=$BackendPort, log_level='info')"
-    }
-
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $Script:PythonBin
-    $startInfo.Arguments = "-c `"$uvicornCmd`""
+    $startInfo.Arguments = "-c `"from excelmanus.api import main; main()`" --host `"$ListenHost`" --port $BackendPort --workers $Workers"
     $startInfo.WorkingDirectory = $Script:PROJECT_ROOT
     $startInfo.UseShellExecute = $false
 

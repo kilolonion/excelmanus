@@ -1,50 +1,92 @@
-# Skillpack 协议规范（SSOT）
+# Skillpack 协议
 
-> 最后更新：2026-09-15  
-> 适用范围：`excelmanus/skillpacks`、README、测试与任务文档
+适用版本：1.8.0 源码 · 更新日期：2026-09-19
 
-## 1. 目标
-- 统一 Skillpack 的加载协议、路由语义与文档口径。
-- 避免“实现已变更、文档未同步”造成的认知漂移。
+[文档导航](README.md) · [English](skillpack_protocol_en.md) · [配置参考](configuration.md)
 
-## 2. 三层加载与覆盖
-- 覆盖优先级：`system < user < project`。
-- 同名 Skillpack 以高优先级来源覆盖低优先级来源。
-- system 仅作为内置默认集；project 可覆盖 system/user。
+Skillpack 为模型提供可复用的任务方法和参考资料。本文说明当前的编写、发现、覆盖与调用规则；权限仍由运行时控制。
+
+## 1. 编写一个技能
+
+每个技能放在独立目录中，入口为 `SKILL.md`。例如，在用户技能目录创建 `sales_summary/SKILL.md`：
+
+```markdown
+---
+name: sales_summary
+description: 按地区汇总销售数据，并将汇总表保存到新工作簿。
+file-patterns:
+  - "*.xlsx"
+user-invocable: true
+---
+先确认销售额和地区列的含义，再按用户要求汇总。
+存在重复记录或缺失地区时，说明处理方式。
+交付时列出输出文件、统计口径和仍需确认的事项。
+```
+
+`name` 和 `description` 用于发现；Markdown 正文提供具体方法。`resources` 可列出技能目录内的参考文件。常用可选字段：
+
+| 字段 | 用途 |
+| --- | --- |
+| `file-patterns` | 文件模式元数据；不会单独授予文件访问或自动执行权限 |
+| `resources` | 要加载的参考资源路径 |
+| `version` | 技能版本标识 |
+| `user-invocable` | 是否允许用户显式调用 |
+| `disable-model-invocation` | 是否禁止模型主动调用 |
+| `argument-hint` | 参数提示 |
+| `required-mcp-servers` / `required-mcp-tools` | MCP 依赖声明 |
+| `hooks` | Hook 处理器配置，见第 7 节 |
+
+上述连字符字段也支持对应的下划线写法。方法正文宜描述适用条件、关键步骤和交付要求；工具字段应通过当前工具详情查询，避免复制容易过期的完整参数表。
+
+## 2. 加载与覆盖
+
+总体优先级为 `system < user < project`。同名技能由后加载的高优先级来源覆盖，不合并两份正文。内置技能提供默认方法，用户和项目技能可覆盖它们。
+
+设置页支持管理和导入技能；目录名称、加载警告和当前可见技能应以运行实例的技能列表为准。技能加载不会扩大当前会话的文件范围、工具权限或审批权限。
 
 ## 3. 目录发现规则
-发现顺序（低优先级到高优先级）：
-1. system：`excelmanus/skillpacks/system`
-2. user：`~/.excelmanus/skillpacks`、`~/.claude/skills`、`~/.openclaw/skills`
-3. project：
-   - 祖先链：`cwd -> workspace_root` 逐层 `.agents/skills`
-   - 显式目录：`.excelmanus/skillpacks`、`.agents/skills`、`.claude/skills`、`.openclaw/skills`
 
-严格协议说明：
-- 外部工具目录（`.openclaw/skills`）仅支持项目级路径。
-- `workspace/skills` 不再作为外部工具项目级目录。
+默认扫描顺序如下；可用配置项关闭通用发现、外部工具目录或祖先链扫描：
 
-## 4. 路由语义
-- 斜杠命令：`/<skill_name> args...` 直连技能（`slash_direct`）。
-- 非斜杠消息：进入步循环。可见工具由 `EffectiveToolCatalog` 按会话模式推导：`read` / `plan` 看不到纯写工具；`write` 看见完整目录；`code` 仅 `run_code`。斜杠与 `@skill` 是显式控制面，不是词法任务路由。
+1. 内置目录：`excelmanus/skillpacks/system`。
+2. 用户目录：配置的用户技能目录（默认 `~/.excelmanus/skillpacks`），以及启用外部目录发现后的 `~/.claude/skills`、`~/.openclaw/skills`。
+3. 项目祖先链：仅当当前目录位于配置的工作区内时，扫描从工作区根到当前目录的 `.agents/skills`；后加载的近层目录可覆盖前者。
+4. 项目显式目录：配置的项目技能目录（默认 `<workspace_root>/.excelmanus/skillpacks`），以及开关允许的 `.agents/skills`、`.claude/skills`、`.openclaw/skills`。
+5. `EXCELMANUS_SKILLS_DISCOVERY_EXTRA_DIRS` 指定的额外目录，作为项目来源加载。
 
-## 5. 内置 system Skillpacks（权威清单）
-- `data_basic`
-- `chart_basic`
-- `format_basic`
-- `file_ops`
-- `sheet_ops`
-- `excel_code_runner`
-- `run_code_templates`
-- `word_basic`
-- `word_code_runner`
+`.openclaw/skills` 同时支持用户级和项目级发现。普通 `workspace/skills` 不是默认扫描入口；如需使用，显式加入额外目录。关闭通用发现时，只加载配置的 system、user、project 三个目录。
 
-## 6. 变更治理要求
-- 协议变更必须同时更新：实现、README、测试、本文档。
-- 新增/删除内置 system Skillpack 时，必须同步：
-  - `excelmanus/skillpacks/system/*`
-  - README 内置清单
-  - 契约测试 `tests/test_skillpack_docs_contract.py`
+## 4. 调用与工具可见性
+
+- `/<skill_name> args...` 显式调用技能（内部路由名为 `slash_direct`）；`@` 引用也可把技能作为当前任务上下文。
+- 普通消息进入模型循环，模型可通过 `skill` 按需加载方法与参考资料。加载本身不执行一套固定业务脚本。
+- `read` / `plan` 不提供纯写工具；含只读 action 的工具仍可能被发现，写入 action 在执行时受限。
+- `write` 中直接工具与 `run_code` 共存。常用工具直接提供，其他能力经 `introspect_capability` 查询后按需加载；代码内的 `em.*` 绑定完整授权目录。
+- 技能调用不切换执行模式，不绕过路径、内容版本、审批或写入约束。
+
+## 5. 内置 system Skillpacks
+
+| 技能 | 主要用途 |
+| --- | --- |
+| `data_basic` | 读取、分析、筛选与转换 |
+| `chart_basic` | 工作簿图表与图片导出 |
+| `format_basic` | 样式、条件格式与排版 |
+| `file_ops` | 文件管理 |
+| `sheet_ops` | 工作表及跨表操作 |
+| `excel_code_runner` | 自定义计算和跨工具编排 |
+| `run_code_templates` | 批量读写、分析及格式模板 |
+| `word_basic` | Word 读取、编辑与生成 |
+| `word_code_runner` | 复杂 Word 处理 |
+
+## 6. 维护与验证
+
+协议变化应同步实现、中英文说明和相关测试。新增或删除内置技能时，同步 `excelmanus/skillpacks/system/`、两份项目 README 的技能清单及 `tests/test_skillpack_docs_contract.py`。
+
+```bash
+uv run pytest tests/test_skillpack_docs_contract.py
+```
+
+运行时使用的 `SKILL.md` 及参考模板属于程序行为的一部分。修改示例调用时，应核对当前工具参数、返回结构和写入权限，不能仅把文字通顺视为契约正确。
 
 ## 7. Hook 协议
 - Hook 事件键支持三种写法：`PascalCase`、`lowerCamelCase`、`snake_case`。

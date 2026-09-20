@@ -92,7 +92,6 @@ async def run_engine_followup(
     on_event: EventCallback | None = None,
     images: list[dict[str, Any]] | None = None,
     chat_mode: str = "write",
-    present_as: str | None = None,
     display_text: str | None = None,
     mention_contexts: list[ResolvedMention] | None = None,
 ) -> ChatTurnOutcome:
@@ -108,7 +107,6 @@ async def run_engine_followup(
         mention_contexts=mention_contexts,
         images=images or [],
         chat_mode=chat_mode,
-        present_as=present_as,
     )
     return ChatTurnOutcome(
         result=result,
@@ -133,12 +131,16 @@ def submit_question_answer(
     try:
         question_flow = getattr(engine, "_question_flow", None)
         pending = question_flow.current() if question_flow is not None else None
-        if pending is not None and pending.question_id == qid:
+        if question_flow is not None and pending is not None and pending.question_id == qid:
             parsed = question_flow.parse_answer(answer, pending)
             payload = parsed.to_tool_result()
     except Exception:
         logger.debug("解析回答失败，使用原始文本", exc_info=True)
-    return bool(registry.resolve(qid, payload))
+    handler = getattr(engine, "_interaction_handler", None)
+    recorded = handler.record_question_answer(qid, payload) if handler is not None else False
+    if recorded and not registry.has_pending(qid):
+        return True
+    return bool(registry.resolve(qid, payload) or recorded)
 
 
 def submit_approval(
@@ -156,4 +158,8 @@ def submit_approval(
     registry = getattr(engine, "interaction_registry", None)
     if registry is None:
         return False
-    return bool(registry.resolve(aid, {"decision": normalized, "approval_id": aid}))
+    handler = getattr(engine, "_interaction_handler", None)
+    recorded = handler.record_approval_decision(aid, normalized) if handler is not None else False
+    if recorded and not registry.has_pending(aid):
+        return True
+    return bool(registry.resolve(aid, {"decision": normalized, "approval_id": aid}) or recorded)

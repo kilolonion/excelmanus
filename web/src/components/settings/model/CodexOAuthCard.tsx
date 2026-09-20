@@ -24,7 +24,8 @@ import { CODEX_OAUTH_PRESET, CODEX_MODELS } from "./constants";
 import type { CodexModelEntry } from "./types";
 
 const CODEX_AUTH_ORIGIN = "https://auth.openai.com";
-const CODEX_CALLBACK_PATH = "/auth/codex/callback";
+const CODEX_CALLBACK_PATH = "/auth/callback";
+const CODEX_LOOPBACK_ORIGIN = "http://localhost:1455";
 
 function assertCodexAuthUrl(value: string): string {
   const parsed = new URL(value);
@@ -122,7 +123,7 @@ export function CodexOAuthCard({
   // postMessage listener for popup auto-callback
   useEffect(() => {
     const handler = (event: MessageEvent) => {
-      if (event.origin !== window.location.origin) return;
+      if (event.origin !== window.location.origin && event.origin !== CODEX_LOOPBACK_ORIGIN) return;
       if (event.data?.type !== "codex-oauth-callback") return;
       if (popupTimerRef.current) { clearInterval(popupTimerRef.current); popupTimerRef.current = null; }
       if (event.data.error) {
@@ -130,16 +131,19 @@ export function CodexOAuthCard({
         return;
       }
       const { code, state: cbState } = event.data;
-      if (code && cbState) {
+      if (code && cbState && cbState === oauthState) {
         codexOAuthExchange(code, cbState)
-          .then(() => fetchCodexStatus().then(setStatus))
+          .then(() => {
+            onProfileCreated();
+            return fetchCodexStatus().then(setStatus);
+          })
           .catch((e: unknown) => { setError(e instanceof Error ? e.message : "OAuth 交换失败"); })
           .finally(() => { setOauthBusy(false); setOauthMode(null); setOauthState(""); });
       }
     };
     window.addEventListener("message", handler);
     return () => window.removeEventListener("message", handler);
-  }, []);
+  }, [oauthState, onProfileCreated]);
 
   const handleOAuthLogin = useCallback(async () => {
     if (oauthBusy) return;
@@ -155,6 +159,10 @@ export function CodexOAuthCard({
       const top = window.screenY + (window.outerHeight - h) / 2;
       const popup = window.open(authorizeUrl, "codex-oauth", `width=${w},height=${h},left=${left},top=${top},toolbar=no,menubar=no`);
       popupRef.current = popup;
+      if (!popup) {
+        setOauthMode("paste");
+        return;
+      }
       if (data.mode === "popup" && popup) {
         popupTimerRef.current = setInterval(() => {
           if (popup.closed) {
@@ -178,11 +186,12 @@ export function CodexOAuthCard({
       const state = url.searchParams.get("state");
       if (!code || !state) { setError("URL 中缺少 code 或 state 参数"); return; }
       await codexOAuthExchange(code, state);
+      onProfileCreated();
       const next = await fetchCodexStatus();
       setStatus(next);
     } catch (e) { setError(e instanceof Error ? e.message : "连接失败"); }
     finally { setOauthBusy(false); setOauthMode(null); setOauthState(""); setPasteUrl(""); }
-  }, [pasteUrl, oauthState]);
+  }, [pasteUrl, oauthState, onProfileCreated]);
 
   const cancelOAuth = useCallback(() => {
     if (popupRef.current && !popupRef.current.closed) popupRef.current.close();
@@ -207,6 +216,7 @@ export function CodexOAuthCard({
           const result = await codexDeviceCodePoll(data.state);
           if (result.status === "connected") {
             stopPolling();
+            onProfileCreated();
             fetchCodexStatus().then(setStatus).catch(() => {});
           }
         } catch (e) {
@@ -220,7 +230,7 @@ export function CodexOAuthCard({
       const expiresMs = Math.max((data.expires_in ?? 15 * 60) * 1000, 30_000);
       setTimeout(() => { if (pollRef.current) { stopPolling(); setError("设备码已过期，请重试"); } }, expiresMs);
     } catch (e) { setAuthorizing(false); setError(e instanceof Error ? e.message : "无法发起设备码登录"); }
-  }, [authorizing, stopPolling]);
+  }, [authorizing, onProfileCreated, stopPolling]);
 
   const handleManualConnect = useCallback(async () => {
     if (!tokenInput.trim() || connecting) return;
@@ -228,13 +238,14 @@ export function CodexOAuthCard({
     try {
       const parsed = JSON.parse(tokenInput.trim());
       await connectCodex(parsed);
+      onProfileCreated();
       const next = await fetchCodexStatus();
       setStatus(next);
       setTokenInput(""); setShowManual(false);
     } catch (e) {
       setError(e instanceof SyntaxError ? "JSON 格式无效" : (e instanceof Error ? e.message : "连接失败"));
     } finally { setConnecting(false); }
-  }, [tokenInput, connecting]);
+  }, [tokenInput, connecting, onProfileCreated]);
 
   const handleDisconnect = useCallback(async () => {
     if (disconnecting) return;
@@ -277,7 +288,7 @@ export function CodexOAuthCard({
   const handleRemoveCodexModel = useCallback(async (profileName: string) => {
     setRemovingModel(profileName); setError("");
     try {
-      await apiDelete(`/config/models/profiles/${profileName}`, { direct: true });
+      await apiDelete(`/config/models/profiles/${encodeURIComponent(profileName)}`, { direct: true });
       onProfileCreated();
     } catch (e) { setError(e instanceof Error ? e.message : "删除档案失败"); }
     finally { setRemovingModel(null); }
@@ -454,7 +465,7 @@ export function CodexOAuthCard({
                 <div className="space-y-1.5">
                   <p className="text-[11px] text-muted-foreground">登录完成后，复制地址栏 URL 粘贴到下方：</p>
                   <p className="text-[10px] text-amber-600 dark:text-amber-400">提示：页面可能显示无法访问，直接复制地址栏 URL 即可</p>
-                  <Input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} className="h-7 text-[11px] font-mono" placeholder="http://localhost:1455/auth/codex/callback?code=...&state=..." autoFocus />
+                  <Input value={pasteUrl} onChange={(e) => setPasteUrl(e.target.value)} className="h-7 text-[11px] font-mono" placeholder="http://localhost:1455/auth/callback?code=...&state=..." autoFocus />
                   <Button size="sm" className="w-full h-7 text-[11px] text-white" style={{ backgroundColor: "var(--em-primary)" }} onClick={handlePasteUrlSubmit} disabled={!pasteUrl.trim()}>
                     确认连接
                   </Button>

@@ -496,6 +496,10 @@ def tool_call_audit_payload(event: Any) -> dict[str, Any]:
     parent = str(getattr(event, "parent_call_id", "") or "")
     if parent:
         payload["parent_call_id"] = parent
+    for field in ("trace_id", "span_id", "parent_span_id", "request_id", "turn_id", "step_id", "execution_id", "execution_state"):
+        value = getattr(event, field, "")
+        if isinstance(value, str) and value:
+            payload[field] = value
     event_type = getattr(event, "event_type", None)
     value = event_type.value if hasattr(event_type, "value") else str(event_type or "")
     if value == "tool_call_end":

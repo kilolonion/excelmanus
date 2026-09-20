@@ -5,6 +5,7 @@ import {
   CheckCircle2,
   ChevronDown,
   Clock,
+  CircleStop,
   Loader2,
   XCircle,
 } from "lucide-react";
@@ -20,10 +21,12 @@ export interface ActivityToolItem {
   origIndex: number;
 }
 
-function groupStatus(tools: ToolBlock[]): "pending" | "running" | "error" | "success" {
-  if (tools.some((t) => t.status === "pending")) return "pending";
+function groupStatus(tools: ToolBlock[]): "pending" | "queued" | "running" | "cancelled" | "error" | "success" {
+  if (tools.some((t) => t.status === "pending" && t.executionState !== "queued")) return "pending";
   if (tools.some((t) => t.status === "running" || t.status === "streaming")) return "running";
-  if (tools.some((t) => t.status === "error")) return "error";
+  if (tools.some((t) => t.executionState === "queued")) return "queued";
+  if (tools.some((t) => t.status === "error" && t.executionState !== "cancelled")) return "error";
+  if (tools.some((t) => t.executionState === "cancelled")) return "cancelled";
   return "success";
 }
 
@@ -46,11 +49,16 @@ export function ActivityGroup({
   if (collapsed) {
     const CollapsedIcon =
       status === "error" ? XCircle
-      : status === "pending" ? Clock
+      : status === "pending" || status === "queued" ? Clock
+      : status === "running" ? Loader2
+      : status === "cancelled" ? CircleStop
       : CheckCircle2;
     const collapsedLabel =
       status === "error" ? `已完成 ${stepCount} 个步骤，有失败`
       : status === "pending" ? `等待授权 · ${stepCount} 个步骤`
+      : status === "queued" ? `等待执行 · ${stepCount} 个步骤`
+      : status === "running" ? `进行中 · ${stepCount} 个步骤`
+      : status === "cancelled" ? `已结束 · 有取消的步骤`
       : `已完成 ${stepCount} 个步骤`;
     return (
       <button
@@ -77,13 +85,16 @@ export function ActivityGroup({
   }
 
   const StatusIcon =
-    status === "pending" ? Clock
+    status === "pending" || status === "queued" ? Clock
     : status === "running" ? Loader2
+    : status === "cancelled" ? CircleStop
     : status === "error" ? XCircle
     : CheckCircle2;
 
   const badge =
     status === "pending" ? { text: "等待授权", cls: "bg-amber-500/10 text-amber-700 dark:text-amber-400" }
+    : status === "queued" ? { text: "等待执行", cls: "bg-muted text-muted-foreground" }
+    : status === "cancelled" ? { text: "有取消", cls: "bg-muted text-muted-foreground" }
     : status === "running" ? { text: "进行中", cls: "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" }
     : status === "error" ? { text: "有失败", cls: "bg-red-500/10 text-red-600" }
     : { text: "已完成", cls: "bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]" };
@@ -121,6 +132,8 @@ export function ActivityGroup({
             <div key={node.item.toolCallId || `${i}-${node.item.name}`}>
               <ToolCallCard
                 toolCallId={node.item.toolCallId}
+                executionId={node.item.executionId}
+                executionState={node.item.executionState}
                 name={node.item.name}
                 args={node.item.args}
                 status={node.item.status}
@@ -133,6 +146,8 @@ export function ActivityGroup({
                 <ToolCallCard
                   key={child.toolCallId || `${i}-${j}-${child.name}`}
                   toolCallId={child.toolCallId}
+                  executionId={child.executionId}
+                  executionState={child.executionState}
                   name={child.name}
                   args={child.args}
                   status={child.status}

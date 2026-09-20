@@ -84,6 +84,9 @@ export function ExcelCompareView() {
   const openCompare = useExcelStore((s) => s.openCompare);
   const setCompareRelationship = useExcelStore((s) => s.setCompareRelationship);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
+  const activeWorkspaceId = useSessionStore(
+    (s) => s.sessions.find((item) => item.id === s.activeSessionId)?.workspaceId ?? null,
+  );
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -97,12 +100,12 @@ export function ExcelCompareView() {
   const fileNameB = compareFileB?.split("/").pop() || "文件 B";
 
   const fileUrlA = useMemo(
-    () => (compareFileA ? buildExcelFileUrl(compareFileA, activeSessionId ?? undefined) : ""),
-    [compareFileA, activeSessionId],
+    () => (compareFileA ? buildExcelFileUrl(compareFileA, activeSessionId, activeWorkspaceId) : ""),
+    [compareFileA, activeSessionId, activeWorkspaceId],
   );
   const fileUrlB = useMemo(
-    () => (compareFileB ? buildExcelFileUrl(compareFileB, activeSessionId ?? undefined) : ""),
-    [compareFileB, activeSessionId],
+    () => (compareFileB ? buildExcelFileUrl(compareFileB, activeSessionId, activeWorkspaceId) : ""),
+    [compareFileB, activeSessionId, activeWorkspaceId],
   );
 
   const sharedColumns = compareRelationship?.sharedColumns ?? [];
@@ -115,6 +118,7 @@ export function ExcelCompareView() {
     try {
       const data = await fetchExcelCompare(compareFileA, compareFileB, {
         sessionId: activeSessionId ?? undefined,
+        workspaceId: activeWorkspaceId,
       });
       setSheetsA(data.file_a.sheets || []);
       setSheetsB(data.file_b.sheets || []);
@@ -132,7 +136,7 @@ export function ExcelCompareView() {
     } finally {
       setLoading(false);
     }
-  }, [compareFileA, compareFileB, activeSessionId, setCompareRelationship]);
+  }, [compareFileA, compareFileB, activeSessionId, activeWorkspaceId, setCompareRelationship]);
 
   useEffect(() => {
     loadCompareData();

@@ -14,9 +14,12 @@ OpenAI Responses API（/responses）与 Chat Completions API（/chat/completions
 from __future__ import annotations
 
 import json
+import asyncio
+import time
 import uuid
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -69,6 +72,7 @@ class _Message:
     thinking: str | None = None
     reasoning: str | None = None
     reasoning_content: str | None = None
+    replay_state: Any = None
 
 
 @dataclass
@@ -92,6 +96,7 @@ class _ChatCompletion:
     model: str = ""
     choices: list[_Choice] = field(default_factory=list)
     usage: _Usage = field(default_factory=_Usage)
+    response_id: str = ""
 
 
     # 兼容旧引用：保留 _ChatCompletion._StreamDelta 名称。
@@ -320,6 +325,17 @@ def _apply_chat_kwargs_to_responses_body(body: dict[str, Any], kwargs: dict[str,
     if isinstance(max_tokens, int) and max_tokens > 0 and "max_output_tokens" not in body:
         body["max_output_tokens"] = max_tokens
 
+    previous_response_id = (
+        kwargs.get("_responses_previous_response_id")
+        or kwargs.get("previous_response_id")
+    )
+    if isinstance(previous_response_id, str) and previous_response_id.strip():
+        body["previous_response_id"] = previous_response_id.strip()
+    if "_responses_store" in kwargs:
+        body["store"] = bool(kwargs["_responses_store"])
+    if "_responses_background" in kwargs:
+        body["background"] = bool(kwargs["_responses_background"])
+
 
 def _collect_reasoning_texts_from_summary(summary: Any) -> list[str]:
     """从 reasoning.summary 字段提取文本。"""
@@ -471,6 +487,7 @@ def _responses_output_to_openai(
         thinking=thinking_joined,
         reasoning=thinking_joined,
         reasoning_content=thinking_joined,
+        replay_state={"response_id": resp_id} if resp_id else None,
     )
 
     # 确定 finish_reason
@@ -508,6 +525,7 @@ def _responses_output_to_openai(
             finish_reason=finish_reason,
         )],
         usage=usage,
+        response_id=resp_id,
     )
 
 
@@ -569,8 +587,32 @@ class OpenAIResponsesClient:
     def __init__(self, api_key: str, base_url: str) -> None:
         self._api_key = api_key
         self._base_url = base_url.rstrip("/")
+        self._chatgpt_account_id = ""
+        parsed_base_url = urlparse(self._base_url)
+        if (
+            parsed_base_url.scheme == "https"
+            and parsed_base_url.hostname == "chatgpt.com"
+            and parsed_base_url.path.rstrip("/") == "/backend-api/codex"
+        ):
+            from excelmanus.auth.providers.openai_codex import (
+                _extract_account_info,
+                _parse_jwt_claims,
+            )
+
+            self._chatgpt_account_id, _plan_type = _extract_account_info(
+                _parse_jwt_claims(api_key)
+            )
         self._http = httpx.AsyncClient(timeout=300.0)
         self.chat = _ResponsesChat(self)
+
+    def _request_headers(self) -> dict[str, str]:
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self._api_key}",
+        }
+        if self._chatgpt_account_id:
+            headers["ChatGPT-Account-Id"] = self._chatgpt_account_id
+        return headers
 
     async def _generate(
         self,
@@ -591,14 +633,13 @@ class OpenAIResponsesClient:
         body = dict(prepared) if prepared is not None else responses_body(
             model, messages, tools, tool_choice=tool_choice, extra_kwargs=extra_kwargs,
         )
+        if body.get("background") is True:
+            return await self._generate_background(model, body, extra_kwargs=extra_kwargs)
         input_items = body.get("input", [])
         responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = self._request_headers()
 
         logger.debug(
             "Responses API 请求 (collected stream): model=%s, input=%d项, tools=%d个",
@@ -646,6 +687,116 @@ class OpenAIResponsesClient:
         )
         return result
 
+    async def _generate_background(
+        self,
+        model: str,
+        body: dict[str, Any],
+        *,
+        extra_kwargs: dict[str, Any] | None = None,
+    ) -> _ChatCompletion:
+        """Submit a background Responses request and poll its response status.
+
+        The normal path remains streaming.  This path is explicit and returns
+        the same compatibility object after the provider reaches a terminal
+        status, so the Agent loop never mistakes ``queued`` for an empty reply.
+        """
+        payload = await self.start_background_response(body)
+        response_id = str(payload.get("id") or "")
+        status = str(payload.get("status") or "")
+        if status in {"queued", "in_progress", "pending"}:
+            payload = await self.wait_background_response(
+                response_id,
+                timeout_seconds=float(
+                    (extra_kwargs or {}).get("_responses_background_poll_seconds", 300.0)
+                    or 300.0
+                ),
+            )
+        status = str(payload.get("status") or "")
+        if status in {"failed", "cancelled", "canceled", "expired"}:
+            error = payload.get("error") or f"status={status}"
+            raise ResponsesAPIError(422, f"Responses background 执行失败: {error}")
+        return _responses_output_to_openai(payload, model)
+
+    async def start_background_response(self, body: dict[str, Any]) -> dict[str, Any]:
+        """Submit a background response and return its provider handle."""
+        payload = dict(body)
+        payload["background"] = True
+        response = await self._http.post(
+            f"{self._base_url}/responses",
+            json=payload,
+            headers=self._request_headers(),
+        )
+        if response.status_code not in {200, 201, 202}:
+            text = await response.aread()
+            raise ResponsesAPIError(
+                response.status_code,
+                f"Responses background 请求错误 (HTTP {response.status_code}): {text[:500]}",
+            )
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ResponsesAPIError(0, "Responses background 返回不是 JSON 对象")
+        return result
+
+    async def get_background_response(self, response_id: str) -> dict[str, Any]:
+        response = await self._http.get(
+            f"{self._base_url}/responses/{response_id}",
+            headers=self._request_headers(),
+        )
+        if response.status_code != 200:
+            text = await response.aread()
+            raise ResponsesAPIError(
+                response.status_code,
+                f"Responses background 查询错误 (HTTP {response.status_code}): {text[:500]}",
+            )
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ResponsesAPIError(0, "Responses background 查询返回不是 JSON 对象")
+        return result
+
+    async def wait_background_response(
+        self, response_id: str, *, timeout_seconds: float = 300.0,
+    ) -> dict[str, Any]:
+        deadline = time.monotonic() + max(0.1, timeout_seconds)
+        while True:
+            payload = await self.get_background_response(response_id)
+            status = str(payload.get("status") or "")
+            if status not in {"queued", "in_progress", "pending"}:
+                return payload
+            if time.monotonic() >= deadline:
+                raise ResponsesAPIError(408, "Responses background 响应等待超时")
+            await asyncio.sleep(0.5)
+
+    async def cancel_background_response(self, response_id: str) -> dict[str, Any]:
+        """Request cancellation of a queued/in-progress background response."""
+        response = await self._http.post(
+            f"{self._base_url}/responses/{response_id}/cancel",
+            json={},
+            headers=self._request_headers(),
+        )
+        if response.status_code not in {200, 202}:
+            text = await response.aread()
+            raise ResponsesAPIError(
+                response.status_code,
+                f"Responses background 取消错误 (HTTP {response.status_code}): {text[:500]}",
+            )
+        result = response.json()
+        if not isinstance(result, dict):
+            raise ResponsesAPIError(0, "Responses background 取消返回不是 JSON 对象")
+        return result
+
+    async def steer_response(
+        self, response_id: str, text: str, *, model: str,
+    ) -> _ChatCompletion:
+        """Continue a stored response with an explicit provider-level steer."""
+        body = {
+            "model": model,
+            "previous_response_id": response_id,
+            "input": [{"type": "message", "role": "user", "content": text}],
+            "stream": True,
+            "store": True,
+        }
+        return await self._generate(model, [], extra_kwargs={"_prepared_body": body})
+
     async def _generate_stream(
         self,
         model: str,
@@ -661,18 +812,32 @@ class OpenAIResponsesClient:
         body = dict(prepared) if prepared is not None else responses_body(
             model, messages, tools, tool_choice=tool_choice, extra_kwargs=extra_kwargs,
         )
+        if body.get("background") is True:
+            return await self._generate_background(model, body, extra_kwargs=extra_kwargs)
         input_items = body.get("input", [])
         responses_tools = body.get("tools", [])
 
         url = f"{self._base_url}/responses"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"Bearer {self._api_key}",
-        }
+        headers = self._request_headers()
 
         async def _stream_generator():
             current_tools: dict[int, dict] = {}
+            emitted_tool_indexes: set[int] = set()
             _inline_sm = InlineThinkingStateMachine()
+
+            def _merge_function_item(output_index: int, item: dict[str, Any]) -> dict[str, Any]:
+                raw_arguments = item.get("arguments", "")
+                if not isinstance(raw_arguments, str):
+                    raw_arguments = json.dumps(raw_arguments, ensure_ascii=False)
+                current = current_tools.setdefault(
+                    output_index,
+                    {"id": "", "name": "", "arguments": ""},
+                )
+                current["id"] = item.get("call_id", item.get("id", "")) or current["id"]
+                current["name"] = item.get("name", "") or current["name"]
+                if raw_arguments:
+                    current["arguments"] = raw_arguments
+                return current
 
             async with self._http.stream("POST", url, json=body, headers=headers) as resp:
                 if resp.status_code != 200:
@@ -708,11 +873,7 @@ class OpenAIResponsesClient:
                         item = event_data.get("item", {})
                         output_index = event_data.get("output_index", 0)
                         if item.get("type") == "function_call":
-                            current_tools[output_index] = {
-                                "id": item.get("call_id", item.get("id", "")),
-                                "name": item.get("name", ""),
-                                "arguments": "",
-                            }
+                            _merge_function_item(output_index, item)
                         # reasoning item 的文本通过 reasoning_summary_text.delta
                         # 事件逐增量流式发送，此处不再重复提取以避免内容重复。
 
@@ -729,8 +890,9 @@ class OpenAIResponsesClient:
 
                     elif event_type == "response.function_call_arguments.done":
                         output_index = event_data.get("output_index", 0)
-                        if output_index in current_tools:
+                        if output_index in current_tools and output_index not in emitted_tool_indexes:
                             tool = current_tools[output_index]
+                            emitted_tool_indexes.add(output_index)
                             yield StreamDelta(tool_calls_delta=[{
                                 "index": output_index,
                                 "id": tool["id"],
@@ -738,8 +900,23 @@ class OpenAIResponsesClient:
                                 "arguments": tool["arguments"],
                             }])
 
+                    elif event_type == "response.output_item.done":
+                        item = event_data.get("item", {})
+                        if isinstance(item, dict) and item.get("type") == "function_call":
+                            output_index = int(event_data.get("output_index", item.get("output_index", 0)) or 0)
+                            tool = _merge_function_item(output_index, item)
+                            if output_index not in emitted_tool_indexes:
+                                emitted_tool_indexes.add(output_index)
+                                yield StreamDelta(tool_calls_delta=[{
+                                    "index": output_index,
+                                    "id": tool["id"],
+                                    "name": tool["name"],
+                                    "arguments": tool["arguments"],
+                                }])
+
                     elif event_type == "response.completed":
                         response_obj = event_data.get("response", {})
+                        response_id = response_obj.get("id") or event_data.get("response_id")
                         usage_data = response_obj.get("usage", {})
                         u = None
                         if usage_data:
@@ -756,6 +933,23 @@ class OpenAIResponsesClient:
                                 if _cached:
                                     u.prompt_tokens_details = {"cached_tokens": _cached}  # type: ignore[attr-defined]
                         output = response_obj.get("output", [])
+                        # Some async/background providers omit both argument
+                        # delta and output_item.done; the terminal response is
+                        # still authoritative for the complete function call.
+                        for fallback_index, item in enumerate(output):
+                            if not isinstance(item, dict) or item.get("type") != "function_call":
+                                continue
+                            output_index = int(item.get("output_index", fallback_index) or 0)
+                            tool = _merge_function_item(output_index, item)
+                            if output_index in emitted_tool_indexes:
+                                continue
+                            emitted_tool_indexes.add(output_index)
+                            yield StreamDelta(tool_calls_delta=[{
+                                "index": output_index,
+                                "id": tool["id"],
+                                "name": tool["name"],
+                                "arguments": tool["arguments"],
+                            }])
                         has_tool = any(
                             item.get("type") == "function_call"
                             for item in output
@@ -764,6 +958,11 @@ class OpenAIResponsesClient:
                         yield StreamDelta(
                             finish_reason="tool_calls" if has_tool else "stop",
                             usage=u,
+                            replay_state=(
+                                {"response_id": response_id}
+                                if isinstance(response_id, str) and response_id
+                                else None
+                            ),
                         )
 
         return _stream_generator()

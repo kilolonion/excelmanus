@@ -219,6 +219,7 @@ def collect_public_identities(
 
 def catalog(workspace_root: str | Path) -> list[CanonicalPath]:
     """Walk the live workspace; skip reserved namespaces, hidden names, leftovers."""
+    from excelmanus.security.source_isolation import is_product_source_path
     root = Path(workspace_root).expanduser().resolve()
     found: list[CanonicalPath] = []
     if not root.is_dir():
@@ -231,9 +232,12 @@ def catalog(workspace_root: str | Path) -> list[CanonicalPath]:
             name
             for name in dirnames
             if not is_hidden_name(name)
+            and not is_product_source_path(Path(dirpath) / name, root)
             and not is_reserved_relative(f"{rel_dir}/{name}".lstrip("/"))
         ]
         for name in filenames:
+            if is_product_source_path(Path(dirpath) / name, root):
+                continue
             rel = f"{rel_dir}/{name}".lstrip("/") if rel_dir else name
             try:
                 found.append(resolve_canonical(root, rel))

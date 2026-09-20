@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { createElement, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Terminal,
   FileText,
@@ -104,7 +104,6 @@ interface OperationTimelineItemProps {
 
 function OperationTimelineItem({ op, onUndo, undoing }: OperationTimelineItemProps) {
   const [expanded, setExpanded] = useState(false);
-  const Icon = getToolIcon(op.tool_name);
   const isSuccess = op.execution_status === "success";
   const isUndoing = undoing === op.approval_id;
   const summary = useMemo(() => changeSummary(op.changes), [op.changes]);
@@ -126,7 +125,9 @@ function OperationTimelineItem({ op, onUndo, undoing }: OperationTimelineItemPro
         onClick={() => setExpanded(!expanded)}
       >
         <div className="flex items-center gap-2 px-3 py-2">
-          <Icon className="h-3.5 w-3.5 text-muted-foreground flex-shrink-0" />
+          {createElement(getToolIcon(op.tool_name), {
+            className: "h-3.5 w-3.5 text-muted-foreground flex-shrink-0",
+          })}
           <span className="text-xs font-medium truncate flex-1">
             {friendlyToolName(op.tool_name)}
           </span>

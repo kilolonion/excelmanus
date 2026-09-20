@@ -1,4 +1,4 @@
-import { directFetch } from "./api";
+import { directFetch, getAuthHeaders } from "./api";
 import { formatApiErrorMessage } from "./api-error";
 
 export interface SSEEvent {
@@ -33,6 +33,7 @@ export async function consumeSSE(
       "Content-Type": "application/json",
       Accept: "text/event-stream",
       "Cache-Control": "no-cache",
+      ...getAuthHeaders(),
     },
     body: JSON.stringify(body),
     signal,

@@ -1,67 +1,70 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
-import { invalidateWorkbookCaches } from "@/lib/api";
+import { useCallback, useState } from "react";
 import {
   enqueueExcelCellEdit,
-  resumeExcelCellEdits,
+  discardWorkbookEdits,
+  isWorkbookEditPaused,
 } from "@/lib/excel-cell-edit";
 import { useExcelStore } from "@/stores/excel-store";
-import { activeFileRef } from "@/lib/workspace-file-ref";
+import { fileRefFromSession, versionStoreKey, workspaceKeyFromSession } from "@/lib/workspace-file-ref";
 import { useSessionStore } from "@/stores/session-store";
 
 export function useExcelCellEdit(filePath: string | null) {
-  const [conflict, setConflict] = useState(false);
-  const [writeError, setWriteError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setConflict(false);
-    setWriteError(null);
-    if (filePath) resumeExcelCellEdits(filePath);
-  }, [filePath]);
+  const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
+  const key = filePath ? versionStoreKey(filePath, workspaceKeyFromSession(session)) : null;
+  const [writeState, setWriteState] = useState(() => ({
+    key,
+    conflict: Boolean(filePath && isWorkbookEditPaused(fileRefFromSession(filePath, session))),
+    error: null as string | null,
+  }));
+  if (writeState.key !== key) {
+    setWriteState({
+      key,
+      conflict: Boolean(filePath && isWorkbookEditPaused(fileRefFromSession(filePath, session))),
+      error: null,
+    });
+  }
 
   const handleCellEdit = useCallback(
     (cell: string, value: unknown, sheet?: string) => {
       if (!filePath || !cell) return;
-      const file = activeFileRef(filePath);
+      const file = fileRefFromSession(filePath, session);
       enqueueExcelCellEdit({
         path: filePath,
         sheet,
         cell,
         value,
         file,
-        sessionId: useSessionStore.getState().activeSessionId,
+        sessionId: session?.id ?? null,
         viewGeneration: useExcelStore.getState().viewGeneration,
         expectedVersion: useExcelStore.getState().getContentVersion(filePath, file.workspaceKey),
         onConflict: () => {
-          setWriteError(null);
-          setConflict(true);
+          setWriteState((current) => current.key === key
+            ? { key, conflict: true, error: null } : current);
         },
         onError: (message) => {
-          setConflict(false);
-          setWriteError(message || "保存失败");
+          setWriteState((current) => current.key === key
+            ? { key, conflict: false, error: message || "保存失败" } : current);
         },
       });
     },
-    [filePath],
+    [filePath, session, key],
   );
 
   const reloadAfterConflict = useCallback(() => {
     if (!filePath) return;
-    resumeExcelCellEdits(filePath);
-    const file = activeFileRef(filePath);
-    useExcelStore.getState().setContentVersion(filePath, null, file.workspaceKey);
-    invalidateWorkbookCaches({ workspaceKey: file.workspaceKey, relative: filePath });
-    useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
-    setConflict(false);
-    setWriteError(null);
-  }, [filePath]);
+    const file = fileRefFromSession(filePath, session);
+    discardWorkbookEdits(file);
+    useExcelStore.getState().notifyWorkbookChanged(filePath, file.workspaceKey, undefined, "refresh");
+    setWriteState({ key, conflict: false, error: null });
+  }, [filePath, session, key]);
 
   return {
     handleCellEdit,
-    conflict,
-    writeError,
+    conflict: writeState.conflict,
+    writeError: writeState.error,
     reloadAfterConflict,
-    dismissWriteError: () => setWriteError(null),
+    dismissWriteError: () => setWriteState((current) => ({ ...current, error: null })),
   };
 }

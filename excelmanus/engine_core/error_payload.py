@@ -71,6 +71,7 @@ PATH_REQUIRED = "PATH_REQUIRED"
 PERMISSION_DENIED = "PERMISSION_DENIED"
 VERSION_CONFLICT = "VERSION_CONFLICT"
 SAVE_FAILED = "SAVE_FAILED"
+FILE_LOCKED = "FILE_LOCKED"
 DECODE_ERROR = "DECODE_ERROR"
 LIMIT_EXCEEDED = "LIMIT_EXCEEDED"
 EXECUTION_FAILED = "EXECUTION_FAILED"
@@ -110,6 +111,12 @@ APPROVAL_DENIED = "APPROVAL_DENIED"
 APPROVAL_TIMEOUT = "APPROVAL_TIMEOUT"
 CODE_MODE_UNAVAILABLE = "CODE_MODE_UNAVAILABLE"
 SDK_CONTRACT_VIOLATION = "SDK_CONTRACT_VIOLATION"
+INVALID_DEPENDENCY = "INVALID_DEPENDENCY"
+DEPENDENCY_CYCLE = "DEPENDENCY_CYCLE"
+DEPENDENCY_FAILED = "DEPENDENCY_FAILED"
+OPERATION_ID_REUSED = "OPERATION_ID_REUSED"
+EXTERNAL_COMMIT_UNKNOWN = "EXTERNAL_COMMIT_UNKNOWN"
+TURN_TIMEOUT = "TURN_TIMEOUT"
 # C2 Excel 语义码（本单元只登记词表，不改工具名/参数）
 FORMULA_ERROR = "FORMULA_ERROR"
 WORKBOOK_PROTECTED = "WORKBOOK_PROTECTED"
@@ -127,6 +134,7 @@ ERROR_CODES: frozenset[str] = frozenset({
     PERMISSION_DENIED,
     VERSION_CONFLICT,
     SAVE_FAILED,
+    FILE_LOCKED,
     DECODE_ERROR,
     LIMIT_EXCEEDED,
     EXECUTION_FAILED,
@@ -164,6 +172,12 @@ ERROR_CODES: frozenset[str] = frozenset({
     APPROVAL_TIMEOUT,
     CODE_MODE_UNAVAILABLE,
     SDK_CONTRACT_VIOLATION,
+    INVALID_DEPENDENCY,
+    DEPENDENCY_CYCLE,
+    DEPENDENCY_FAILED,
+    OPERATION_ID_REUSED,
+    EXTERNAL_COMMIT_UNKNOWN,
+    TURN_TIMEOUT,
     FORMULA_ERROR,
     WORKBOOK_PROTECTED,
     OUT_OF_RANGE,
@@ -192,6 +206,12 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     APPROVAL_TIMEOUT: FAILURE_APPROVAL_TIMEOUT,
     CODE_MODE_UNAVAILABLE: FAILURE_BLOCKED,
     SDK_CONTRACT_VIOLATION: FAILURE_INTERNAL,
+    INVALID_DEPENDENCY: FAILURE_INVALID_ARGS,
+    DEPENDENCY_CYCLE: FAILURE_INVALID_ARGS,
+    DEPENDENCY_FAILED: FAILURE_BLOCKED,
+    OPERATION_ID_REUSED: FAILURE_CONFLICT,
+    EXTERNAL_COMMIT_UNKNOWN: FAILURE_BLOCKED,
+    TURN_TIMEOUT: FAILURE_BLOCKED,
     NOT_FOUND: FAILURE_NOT_FOUND,
     SHEET_NOT_FOUND: FAILURE_NOT_FOUND,
     UNKNOWN_TOOL: FAILURE_NOT_FOUND,
@@ -217,6 +237,7 @@ ERROR_CODE_TO_FAILURE_CLASS: dict[str, str] = {
     LIMIT_EXCEEDED: FAILURE_BLOCKED,
     WORKBOOK_PROTECTED: FAILURE_BLOCKED,
     SAVE_FAILED: FAILURE_INTERNAL,
+    FILE_LOCKED: FAILURE_BLOCKED,
     EXECUTION_FAILED: FAILURE_INTERNAL,
     TOOL_ERROR: FAILURE_INTERNAL,
     TOOL_EXECUTION_ERROR: FAILURE_INTERNAL,
@@ -252,9 +273,15 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     APPROVAL_TIMEOUT: "审批超时，不能当作已批准；先向用户确认，再决定是否重新提交。",
     CODE_MODE_UNAVAILABLE: "Code Mode 桥不可用；不要假设脚本已执行。改用 Native 意图工具，或等桥恢复后再 run_code。",
     SDK_CONTRACT_VIOLATION: "工具返回值不符合声明合同；按 introspect_capability(query_type=\"tool_detail\", query=\"工具名.output\") 核对顶层键与类型后再用，不要把违约值当成功结果继续写。",
+    INVALID_DEPENDENCY: "依赖必须引用本批唯一的 tool call ID；修正依赖后重发未执行的调用。",
+    DEPENDENCY_CYCLE: "移除自依赖或循环，遵守写入顺序；不要重放已经提交的写入。",
+    DEPENDENCY_FAILED: "先处理前置调用的失败或未完成状态，再发起尚未执行的后续步骤。",
+    OPERATION_ID_REUSED: "该操作 ID 已用于不同意图；先核对原操作状态，不要用它提交另一项写入，也不要重放已提交的操作。",
+    EXTERNAL_COMMIT_UNKNOWN: "外部写入是否提交尚不确定；先查询原操作或外部系统的实际状态，不要自动重放。",
+    TURN_TIMEOUT: "本回合已超时；先核对已完成调用和写入状态，再继续尚未执行的步骤，不要重放已提交或结果不确定的写入。",
     NOT_FOUND: "message 指出缺失的是列名/键名时，按返回的可用列列表修正后重试；是文件路径时按候选核对拼写，任务允许查找时再列目录，不要擅自换文件。",
     SHEET_NOT_FOUND: "若返回了 available_sheets，用其中准确表名重试；没有候选时先 overview 再按实际表名重试。不要编造默认表名。",
-    UNKNOWN_TOOL: "改用当前目录里存在的工具名；若处于 code 模式，请在 run_code 内调用该工具。",
+    UNKNOWN_TOOL: "先用 introspect_capability 查询当前可用能力及工具详情，再使用已确认的工具名。",
     NAMED_RANGE_NOT_FOUND: "先列出工作簿命名区域，再用存在的名称重试。",
     TABLE_NOT_FOUND: "先列出工作表 Table 名称，再用存在的表名重试。",
     VERSION_CONFLICT: "这次写入没有落盘。重读受影响范围，按新数据重新计算或确认后再写；不要只替换 expected_version 重放基于旧数据的操作。更早已经成功的写入不要当成失败。",
@@ -276,6 +303,7 @@ _REMEDIATION_BY_CODE: dict[str, str] = {
     BUDGET_EXCEEDED: "本轮工具调用预算已用尽，不要继续堆调用；汇总后结束。",
     LIMIT_EXCEEDED: "缩小范围或条数后重试，不要用同样的超限参数。",
     WORKBOOK_PROTECTED: "工作簿受保护，不要重试写入；请用户解除保护或改用只读。",
+    FILE_LOCKED: "请用户关闭 Excel 或文件预览，释放占用后再重试；不要循环重试同一写入。",
     SAVE_FAILED: "不要盲目重试同一写入；检查路径/磁盘后换参数或换工具。",
     EXECUTION_FAILED: "根据 message 修正输入后重试，不要用完全相同的参数连打。",
     TOOL_ERROR: "把 error_code 与 message 视为失败分类，修正后再试，不要同参连打。",

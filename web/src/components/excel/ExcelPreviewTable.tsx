@@ -14,6 +14,10 @@ interface ExcelPreviewTableProps {
 
 export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
   const openPanel = useExcelStore((s) => s.openPanel);
+  const { masterMap, hiddenSet } = useMemo(
+    () => buildMergeMaps(data?.mergeRanges),
+    [data?.mergeRanges],
+  );
 
   // 防御性检查：确保必要的数据字段存在
   if (!data || !data.columns || !data.rows) {
@@ -31,11 +35,6 @@ export function ExcelPreviewTable({ data }: ExcelPreviewTableProps) {
   // cellStyles[0] = header row styles, cellStyles[1..] = data row styles
   const headerStyles = data.cellStyles?.[0];
   const hasStyles = Boolean(data.cellStyles && data.cellStyles.length > 0);
-
-  const { masterMap, hiddenSet } = useMemo(
-    () => buildMergeMaps(data.mergeRanges),
-    [data.mergeRanges],
-  );
 
   return (
     <div className="my-2 rounded-xl border border-[var(--em-hairline)] overflow-hidden text-xs">

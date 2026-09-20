@@ -79,7 +79,6 @@ class FakeFrontend:
     auto_replies: list[str] = field(default_factory=list)
     auto_approve: str = "fullaccess"
     chat_mode: str = "write"
-    present_as: str | None = None
     on_event: EventCallback | None = None
     on_engine: Callable[[Any], None] | None = None
 
@@ -353,7 +352,6 @@ class FakeFrontend:
         attachments: list[str] | None = None,
         images: list[str] | None = None,
         chat_mode: str | None = None,
-        present_as: str | None = None,
     ) -> ChatResult:
         """像网页输入框一样发送一轮：可带附件/图片，并处理审批。"""
         session_id, engine = await self.manager.acquire_for_chat(self.session_id)
@@ -380,7 +378,6 @@ class FakeFrontend:
                 on_event=self._dispatch,
                 images=image_payloads,
                 chat_mode=chat_mode or self.chat_mode,
-                present_as=present_as if present_as is not None else self.present_as,
             )
             reply = (outcome.result.reply or "").strip()
             self.transcript.append({

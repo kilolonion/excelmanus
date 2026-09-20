@@ -1471,25 +1471,37 @@ def _finalize_read_excel_result(
         apply_read_contract(
             summary,
             snapshot=snapshot,
-            result_kind="areas" if summary.get("areas") else "matrix",
+            result_kind="areas" if summary.get("areas") else ("matrix" if kind == "range" else "records"),
             sheet=sheet_name,
             header_row=public_header,
             source_rows=source_rows,
+            source_cols=summary.get("source_cols"),
             coverage=cov,
             formulas_uncached=summary.get("formulas_uncached", "unknown"),
             selection=selection_from_rows(
                 snapshot,
                 sheet=str(sheet_name or ""),
                 rows=source_rows or [],
+                cols=summary.get("source_cols"),
                 origin="range" if kind == "range" else "read",
                 header_row=public_header,
-            ) if source_rows else None,
+            ) if source_rows and not summary.get("areas") else None,
             meta_kind=kind,
         )
+        if summary.get("areas"):
+            for area in summary["areas"]:
+                area["selection"] = selection_from_rows(
+                    snapshot, sheet=area["resolved_sheet"], rows=area["source_rows"],
+                    cols=area["source_cols"], origin="range", header_row=public_header,
+                ).to_json()
     elif snapshot is None:
         raise RuntimeError("read finalize 必须提供 WorkbookSnapshot")
     if sample_rows:
         summary["meta"]["sampled"] = True
+
+    selection_hint = _selection_model_hint(summary)
+    if selection_hint:
+        lines.append(selection_hint)
 
     if summary["meta"].get("formulas_uncached"):
         lines.append("缓存值未保证重算；null 可能是无公式缓存，不能据此判断为空白格。")
@@ -1521,6 +1533,7 @@ def _finalize_compare_excel_result(
     sheet_b: str,
     key_columns: list[str] | None,
     alignment: str,
+    scope: str = "explicit_sheets",
 ) -> ToolResult:
     if result.get("error"):
         extra = {k: v for k, v in result.items() if k not in {"error", "code"}}
@@ -1536,6 +1549,7 @@ def _finalize_compare_excel_result(
     diff_mode = result.get("diff_mode", "cross_file")
 
     value = {
+        **result,
         "status": "success",
         "alignment": alignment,
         "key_columns": key_columns or [],
@@ -1568,6 +1582,10 @@ def _finalize_compare_excel_result(
 
     lines = [
         f"对比 {rel_path_a} vs {rel_path_b}（{diff_mode}，对齐={alignment}）。",
+        (
+            f"工作表范围：{sheet_a} vs {sheet_b}。"
+            + ("未指定表名时仅比较两边第一张表。" if scope == "first_sheet_when_omitted" else "")
+        ),
         (
             f"差异：{cells_diff} 处单元格；"
             f"新增行 {summary.get('rows_added', 0)}、删除行 {summary.get('rows_deleted', 0)}、"
@@ -1680,6 +1698,32 @@ def _preview_from_records(
     }
 
 
+def _selection_model_hint(payload: dict[str, Any], *, max_inline_rows: int = 200) -> str:
+    """Expose a read result's write-back selection on the native model surface."""
+    selection = payload.get("selection")
+    if not isinstance(selection, dict):
+        return ""
+    rows = selection.get("rows")
+    if isinstance(rows, list) and len(rows) > max_inline_rows:
+        try:
+            from excelmanus.engine_core.spill import SpillStore
+
+            locator = SpillStore(_get_guard().workspace_root).put(
+                json.dumps({"selection": selection}, ensure_ascii=False, default=str)
+            )
+            payload["selection_spill"] = str(locator)
+            return (
+                f"可写回 selection 已外置：{locator}；"
+                "把该句柄作为 edit_spreadsheet.operations[].selection 传入，"
+                "不要把它当文件路径。"
+            )
+        except Exception:
+            logger.debug("selection spill 失败，回退内联 selection", exc_info=True)
+    return "可写回 selection：" + json.dumps(
+        selection, ensure_ascii=False, separators=(",", ":"), default=str
+    )
+
+
 def _finalize_filter_data_result(
     result: dict[str, Any],
     *,
@@ -1699,7 +1743,19 @@ def _finalize_filter_data_result(
     _attach_file_meta(result, rel_path=rel_path, content_version=content_version)
     result["records"] = data if isinstance(data, list) else []
     source_rows = result.get("source_rows") if isinstance(result.get("source_rows"), list) else []
-    source_cols = {str(c): i + 1 for i, c in enumerate(columns)}
+    # Preserve original worksheet coordinates after a projected column subset.
+    # ``columns`` is the returned view, not a new A-based worksheet.
+    original_columns = result.get("source_columns")
+    if not isinstance(original_columns, list):
+        original_columns = list(columns)
+    original_positions = {
+        str(column): index + 1 for index, column in enumerate(original_columns)
+    }
+    source_cols = {
+        str(column): original_positions[str(column)]
+        for column in columns
+        if str(column) in original_positions
+    }
     result["source_cols"] = source_cols
     if snapshot is not None:
         from excelmanus.workbook.snapshot import Coverage, apply_read_contract, selection_from_rows
@@ -1751,6 +1807,9 @@ def _finalize_filter_data_result(
         lines.append(f"⚠️ {result['note']}")
     if result.get("sheet_disambiguation_warning"):
         lines.append(f"⚠️ {result['sheet_disambiguation_warning']}")
+    selection_hint = _selection_model_hint(result)
+    if selection_hint:
+        lines.append(selection_hint)
     if isinstance(data, list) and data:
         sample_n = min(3, len(data))
         lines.append(
@@ -1763,7 +1822,12 @@ def _finalize_filter_data_result(
             from excelmanus.engine_core.spill import SpillStore
 
             full_text = json.dumps(
-                {"columns": columns, "records": data, "source_rows": source_rows},
+                {
+                    "selection": result.get("selection"),
+                    "columns": columns,
+                    "records": data,
+                    "source_rows": source_rows,
+                },
                 ensure_ascii=False, default=str,
             )
             locator = SpillStore(_get_guard().workspace_root).put(full_text)
@@ -2402,6 +2466,8 @@ def read_excel(
     if _null_info:
         summary["null_info"] = _null_info
     summary["preview"] = _df_to_compact_records(df.head(10))
+    summary["data"] = _df_to_compact_records(df)
+    summary["source_cols"] = list(_builtin_range(1, len(df.columns) + 1))
 
     # 自动 tail 预览：表格 > 20 行时附加最后 5 行
     if df.shape[0] > 20:
@@ -2526,6 +2592,7 @@ def _load_df_for_tool(
     sheet_name: str | None,
     header_row: int | None,
     column_hints: list[str] | None = None,
+    expected_version: str | None = None,
 ) -> tuple[dict[str, Any] | None, ToolResult | None]:
     """filter/aggregate/distinct 共用的前置：守卫→快照→定 sheet→读 df。
 
@@ -2547,7 +2614,7 @@ def _load_df_for_tool(
         resolve_sheet_by_visibility,
     )
 
-    snap, snap_err = _open_tool_snapshot(file_path)
+    snap, snap_err = _open_tool_snapshot(file_path, expected_version=expected_version)
     if snap_err is not None:
         return None, snap_err
     safe_path = snap.backing_path
@@ -2975,6 +3042,9 @@ def _normalize_conditions(
     # 条件项字段别名归一：模型常缩写为 op/col
     for cond in cond_list:
         if isinstance(cond, dict):
+            extras = set(cond) - {"column", "col", "operator", "op", "value"}
+            if extras:
+                return None, error_result(f"条件不支持字段 {sorted(extras)}；请使用 column/operator/value", code="INVALID_ARGS")
             if "operator" not in cond and "op" in cond:
                 cond["operator"] = cond.pop("op")
             if "column" not in cond and "col" in cond:
@@ -3069,6 +3139,7 @@ def filter_data(
     sort_by: str | None = None,
     ascending: bool = True,
     limit: int | None = None,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """根据条件过滤 Excel 数据行并可选排序，支持单条件和多条件 AND/OR 组合。
 
@@ -3094,6 +3165,7 @@ def filter_data(
     ctx, err = _load_df_for_tool(
         file_path, sheet_name, header_row,
         column_hints=_collect_column_hints(column=column, conditions=conditions, columns=columns, sort_by=sort_by),
+        expected_version=expected_version,
     )
     if err is not None:
         return err
@@ -3152,6 +3224,7 @@ def filter_data(
         "filtered_rows": total_filtered,
         "returned_rows": len(filtered),
         "columns": [str(c) for c in filtered.columns],
+        "source_columns": [str(c) for c in df.columns],
         "data": _df_to_compact_records(filtered),
         "source_rows": [_excel_source_row(effective_header, idx) for idx in filtered.index],
     }
@@ -3382,7 +3455,7 @@ def _normalize_join(
             {"error": f"join 仅支持 how='left'（VLOOKUP 语义），收到 {how!r}"},
             code="INVALID_ARGS",
         )
-    columns = join.get("columns")
+    columns = _maybe_json(join.get("columns"))
     if columns is not None and not isinstance(columns, list):
         return None, _error_payload_result(
             {"error": "join.columns 必须是列名数组（缺省=右表全部非键列）"},
@@ -3392,6 +3465,7 @@ def _normalize_join(
         "right_file": join.get("file_path") or join.get("path"),
         "right_sheet": join.get("sheet") or join.get("sheet_name"),
         "right_header": join.get("header_row"),
+        "expected_version": join.get("expected_version"),
         "left_on": str(left_on),
         "right_on": str(right_on),
         "columns": [str(c) for c in columns] if columns else None,
@@ -3402,14 +3476,23 @@ def _apply_join(
     df: "pd.DataFrame",
     spec: dict[str, Any],
     default_file: str,
+    *,
+    source_version: str | None = None,
+    right_frame: Any = None,
 ) -> tuple["pd.DataFrame | None", int, "ToolResult | None"]:
     """按归一 spec 执行左连接；返回 (merged_df, unmatched_count, err)。"""
     right_file = spec["right_file"] or default_file
-    rctx, rerr = _load_df_for_tool(right_file, spec["right_sheet"], spec["right_header"])
-    if rerr is not None:
-        return None, 0, rerr
-    assert rctx is not None
-    right = rctx["df"]
+    if right_frame is None:
+        same_file = _get_guard().resolve_and_validate(right_file) == _get_guard().resolve_and_validate(default_file)
+        rctx, rerr = _load_df_for_tool(right_file, spec["right_sheet"], spec["right_header"],
+                                     expected_version=spec.get("expected_version") or (source_version if same_file else None))
+        if rerr is not None:
+            return None, 0, rerr
+        right = rctx["df"]
+        spec["source"] = {"file_path": rctx["rel_path"], "sheet": rctx["sheet_name"], "content_version": rctx["bound_version"]}
+    else:
+        right = right_frame
+        spec["source"] = {"file_path": default_file, "sheet": spec["right_sheet"], "version_scope": "same_atomic_operations"}
     right_on = spec["right_on"]
     if right_on not in right.columns:
         return None, 0, _error_payload_result(
@@ -3457,6 +3540,7 @@ def aggregate_data(
     ascending: bool = False,
     limit: int | None = None,
     join: Any = None,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """分组聚合：对满足条件的行按 group_by 汇总，返回每组聚合值（不回明细行）。
 
@@ -3486,6 +3570,7 @@ def aggregate_data(
             group_by=group_by, aggregations=aggregations, column=column,
             conditions=conditions, sort_by=sort_by, join=join,
         ),
+        expected_version=expected_version,
     )
     if err is not None:
         return err
@@ -3502,7 +3587,7 @@ def aggregate_data(
         return join_err
     unmatched = 0
     if join_spec is not None:
-        merged, unmatched, merge_err = _apply_join(df, join_spec, file_path)
+        merged, unmatched, merge_err = _apply_join(df, join_spec, file_path, source_version=bound_version)
         if merge_err is not None:
             return merge_err
         assert merged is not None
@@ -3655,6 +3740,7 @@ def aggregate_data(
         result["join"] = {
             "left_on": join_spec["left_on"],
             "right_on": join_spec["right_on"],
+            "source": join_spec.get("source"),
             "right_sheet": join_spec["right_sheet"],
             "unmatched_rows": unmatched,
         }
@@ -3857,10 +3943,29 @@ def dataframe_from_worksheet(ws: Any, header_row: int | None = 1) -> "pd.DataFra
     return pd.DataFrame(data, columns=headers)
 
 
-def write_dataframe_to_worksheet(ws: Any, df: "pd.DataFrame") -> None:
-    max_row = ws.max_row or 1
+def write_dataframe_to_worksheet(
+    ws: Any,
+    df: "pd.DataFrame",
+    *,
+    start_row: int = 1,
+    source_rows: list[int] | None = None,
+    source_columns: list[int] | None = None,
+) -> None:
+    """Write a DataFrame while preserving an optional prefix above start_row."""
+    start_row = max(int(start_row or 1), 1)
+    max_row = ws.max_row or start_row
     max_col = max(ws.max_column or 1, len(df.columns) or 1)
-    for r in range(1, max_row + 1):
+    from copy import copy
+
+    styles = {}
+    if source_columns is not None:
+        row_map = [start_row, *(source_rows or list(range(start_row + 1, start_row + 1 + len(df))))]
+        for out_row, src_row in enumerate(row_map, start_row):
+            for out_col, src_col in enumerate(source_columns, 1):
+                cell = ws.cell(src_row, src_col)
+                styles[(out_row, out_col)] = (copy(cell._style), copy(cell.comment), copy(cell.hyperlink))
+    clear_from = start_row
+    for r in range(clear_from, max_row + 1):
         for c in range(1, max_col + 1):
             ws.cell(row=r, column=c).value = None
     headers = [str(c) for c in df.columns]
@@ -3870,13 +3975,22 @@ def write_dataframe_to_worksheet(ws: Any, df: "pd.DataFrame") -> None:
         matrix.append(list(row))
     target_rows = max(1, len(matrix))
     target_cols = max(1, len(headers))
-    if max_row > target_rows:
-        ws.delete_rows(target_rows + 1, max_row - target_rows)
-    if max_col > target_cols:
+    target_end_row = start_row + target_rows - 1
+    if max_row > target_end_row:
+        ws.delete_rows(target_end_row + 1, max_row - target_end_row)
+    # When a prefix is preserved, do not delete columns that may contain
+    # title/form metadata above the data block.
+    if start_row == 1 and max_col > target_cols:
         ws.delete_cols(target_cols + 1, max_col - target_cols)
-    for r, row in enumerate(matrix, start=1):
+    for r, row in enumerate(matrix, start=start_row):
         for c, val in enumerate(row, start=1):
             ws.cell(row=r, column=c).value = val
+            if (r, c) in styles:
+                cell = ws.cell(r, c)
+                cell._style, cell.comment, link = styles[(r, c)]
+                cell._hyperlink = None
+                if link is not None:
+                    cell.hyperlink = link
 
 
 _PHONE_DIGITS_RE = re.compile(r"\D+")
@@ -3956,7 +4070,9 @@ def apply_transform_frame(
         how = str(keep or "first").strip().lower()
         if how in {"first", "last"}:
             retained = ~comparable.duplicated(subset=keys, keep=how)
-            return df.loc[retained].reset_index(drop=True), None
+            out = df.loc[retained].reset_index(drop=True)
+            out.attrs["source_positions"] = [int(i) for i in df.index[retained]]
+            return out, None
         if how not in {"earliest", "latest"}:
             return None, "dedupe.keep 必须是 first / last / earliest / latest"
         if not order_by:
@@ -3985,14 +4101,20 @@ def apply_transform_frame(
         )
         winners = ranked.drop_duplicates(subset=keys, keep="first")[row_key]
         positions = sorted(int(pos) for pos in winners.tolist())
-        return df.iloc[positions].reset_index(drop=True), None
+        out = df.iloc[positions].reset_index(drop=True)
+        out.attrs["source_positions"] = positions
+        return out, None
     if act == "split":
         if not column or column not in df.columns:
             return None, f"split 需要存在的 column，可用列: {[str(c) for c in df.columns]}"
         names = _as_str_list(into)
-        expanded = df[column].astype(str).str.split(str(delimiter), expand=True)
+        expanded = df[column].astype("string").str.split(str(delimiter), expand=True, regex=False)
         if not names:
             names = [f"{column}_{i + 1}" for i in range(expanded.shape[1])]
+        if len(set(names)) != len(names) or any(name in df.columns and name != column for name in names):
+            return None, "split 的新列名不能重复或覆盖其他已有列"
+        if len(names) < expanded.shape[1]:
+            return None, f"split 产生 {expanded.shape[1]} 列，new_columns 仅 {len(names)} 项；请提供足够列名"
         while expanded.shape[1] < len(names):
             expanded[expanded.shape[1]] = None
         expanded = expanded.iloc[:, : len(names)]
@@ -4041,6 +4163,7 @@ def pivot_data(
     limit: int | None = None,
     margins: Any = False,
     margins_name: Any = "合计",
+    expected_version: str | None = None,
 ) -> ToolResult:
     """只读二维透视：index × columns × values；margins=True 追加合计行/列。"""
     ctx, err = _load_df_for_tool(
@@ -4049,6 +4172,7 @@ def pivot_data(
             group_by=group_by, index=index, columns=columns, values=values,
             column=column, conditions=conditions, join=join,
         ),
+        expected_version=expected_version,
     )
     if err is not None:
         return err
@@ -4064,7 +4188,7 @@ def pivot_data(
         return join_err
     unmatched = 0
     if join_spec is not None:
-        merged, unmatched, merge_err = _apply_join(df, join_spec, file_path)
+        merged, unmatched, merge_err = _apply_join(df, join_spec, file_path, source_version=bound_version)
         if merge_err is not None:
             return merge_err
         assert merged is not None
@@ -4142,6 +4266,7 @@ def pivot_data(
             "unmatched_rows": unmatched,
             "left_on": join_spec["left_on"],
             "right_on": join_spec["right_on"],
+            "source": join_spec.get("source"),
         }
     if sheet_name:
         result["resolved_sheet"] = sheet_name
@@ -4205,6 +4330,7 @@ def distinct_data(
     logic: str = "and",
     limit: int | None = None,
     dup_only: bool = False,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """单列取值分布：唯一值计数 + value_counts + 可选重复键与行号。
 
@@ -4218,6 +4344,7 @@ def distinct_data(
     ctx, err = _load_df_for_tool(
         file_path, sheet_name, header_row,
         column_hints=_collect_column_hints(column=column, conditions=conditions),
+        expected_version=expected_version,
     )
     if err is not None:
         return err
@@ -5364,8 +5491,86 @@ def _load_sheet_as_df(
     sheet_names = list(wb.sheetnames)
     wb.close()
 
-    df, _ = _read_df(safe_path, sheet_name, max_rows=None, header_row=header_row)
+    df, effective_header = _read_df(safe_path, sheet_name or sheet_names[0], max_rows=None, header_row=header_row)
+    # Restore raw typed values and formulas instead of treating absent caches
+    # as blanks. Header detection is shared with the other analysis tools.
+    wb = load_workbook(safe_path, read_only=True, data_only=False)
+    try:
+        ws = wb[sheet_name or sheet_names[0]]
+        start_row = effective_header + 2 if effective_header >= 0 else 1
+        body = [list(row) for row in ws.iter_rows(min_row=start_row, values_only=True)]
+        width = len(df.columns)
+        body = [(row + [None] * width)[:width] for row in body]
+        while body and all(value is None for value in body[-1]):
+            body.pop()
+        df = pd.DataFrame(body, columns=df.columns, dtype=object)
+        df.attrs["header_row"] = effective_header + 1
+    finally:
+        wb.close()
     return df, sheet_names
+
+
+def _compare_matrix(safe_path: Any, sheet_name: str) -> list[list[Any]]:
+    """Literal coordinates including headers, title rows and formula text."""
+    if _is_csv_file(safe_path):
+        import csv
+        from excelmanus.workbook.snapshot import csv_separator_for
+
+        with open(safe_path, encoding=_detect_csv_encoding(safe_path), newline="") as handle:
+            return list(csv.reader(handle, delimiter=csv_separator_for(safe_path)))
+    from openpyxl import load_workbook
+
+    wb = load_workbook(safe_path, read_only=True, data_only=False)
+    try:
+        rows = [list(row) for row in wb[sheet_name].iter_rows(values_only=True)]
+        while rows and all(v is None for v in rows[-1]):
+            rows.pop()
+        return rows
+    finally:
+        wb.close()
+
+
+def _compare_value(value: Any) -> Any:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    return _serialize_cell_value(value)
+
+
+def _same_compare_value(left: Any, right: Any) -> bool:
+    if type(left) is not type(right):
+        return (type(left) in (int, float) and type(right) in (int, float)
+                and left == right)
+    return left == right
+
+
+
+def _formula_facts(safe_path: Any, sheet_name: str | None) -> tuple[dict[str, str], str]:
+    """Return formula text and whether any formula lacks a cached value."""
+    if _is_csv_file(safe_path):
+        return {}, "not_applicable"
+    from openpyxl import load_workbook
+
+    formulas: dict[str, str] = {}
+    uncached = False
+    wb_formula = load_workbook(safe_path, read_only=True, data_only=False)
+    wb_values = load_workbook(safe_path, read_only=True, data_only=True)
+    try:
+        title = sheet_name or wb_formula.sheetnames[0]
+        if title not in wb_formula.sheetnames or title not in wb_values.sheetnames:
+            return {}, "unknown"
+        ws_f = wb_formula[title]
+        ws_v = wb_values[title]
+        for row_f, row_v in zip(ws_f.iter_rows(), ws_v.iter_rows()):
+            for cell_f, cell_v in zip(row_f, row_v):
+                value = cell_f.value
+                if isinstance(value, str) and value.startswith("="):
+                    formulas[cell_f.coordinate] = value
+                    if cell_v.value is None:
+                        uncached = True
+    finally:
+        wb_formula.close()
+        wb_values.close()
+    return formulas, ("uncached" if uncached else ("cached" if formulas else "none"))
 
 
 def compare_excel(
@@ -5397,6 +5602,8 @@ def compare_excel(
     Returns:
         ToolResult（value 含差异摘要，ui_meta.diff 供 SSE 投影）。
     """
+    if isinstance(max_diffs, bool) or not isinstance(max_diffs, int) or max_diffs < 1:
+        return error_result("max_diffs 必须是正整数", code="INVALID_ARGS")
     if ignore_style is False:
         return _error_payload_result(
             {"error": "当前不支持样式对比。请省略 ignore_style 或设为 true。", "code": "INVALID_ARGS"},
@@ -5440,7 +5647,7 @@ def compare_excel(
     snap_a, err_a = _open_tool_snapshot(file_a)
     if err_a is not None:
         return err_a
-    snap_b, err_b = _open_tool_snapshot(file_b)
+    snap_b, err_b = (snap_a, None) if live_a.resolve() == live_b.resolve() else _open_tool_snapshot(file_b)
     if err_b is not None:
         return err_b
     safe_a = snap_a.backing_path
@@ -5500,6 +5707,11 @@ def compare_excel(
             code="EXECUTION_FAILED",
         )
 
+    resolved_sheet_a = sheet_a or (sheets_a[0] if sheets_a else "Sheet1")
+    resolved_sheet_b = sheet_b or (sheets_b[0] if sheets_b else "Sheet1")
+    formula_a, formula_status_a = _formula_facts(safe_a, resolved_sheet_a)
+    formula_b, formula_status_b = _formula_facts(safe_b, resolved_sheet_b)
+
     # ── 3. 结构对比 ──
     # 构建 str→原始列名 映射，用于 .at[] 访问
     col_map_a: dict[str, Any] = {str(c): c for c in df_a.columns}
@@ -5514,177 +5726,84 @@ def compare_excel(
     sheets_only_a = sorted(set(sheets_a) - set(sheets_b)) if snap_a.file.relative != snap_b.file.relative else []
     sheets_only_b = sorted(set(sheets_b) - set(sheets_a)) if snap_a.file.relative != snap_b.file.relative else []
 
-    # ── 4. 数据对比 ──
+    # Count all differences; only the returned detail list is capped.
     cell_diffs: list[dict[str, Any]] = []
-    rows_added = 0
-    rows_deleted = 0
-    rows_modified = 0
-    total_cells_compared = 0
+    cells_different = rows_added = rows_deleted = rows_modified = total_cells_compared = 0
     duplicate_keys_a: list[str] = []
     duplicate_keys_b: list[str] = []
     unmatched_in_a: list[str] = []
     unmatched_in_b: list[str] = []
     alignment = align
 
+    def add_difference(item: dict[str, Any]) -> None:
+        nonlocal cells_different
+        cells_different += 1
+        if len(cell_diffs) < max_diffs:
+            cell_diffs.append(item)
+
     if alignment == "key":
         missing = [k for k in (key_columns or []) if k not in cols_a or k not in cols_b]
         if missing:
-            return _error_payload_result(
-                {
-                    "error": f"key_columns 不在两边的列中: {missing}",
-                    "code": "NOT_FOUND",
-                    "available_columns_a": sorted(cols_a),
-                    "available_columns_b": sorted(cols_b),
-                },
-                code="NOT_FOUND",
-            )
-        str_cols_a = {str(c): c for c in df_a.columns}
-        str_cols_b = {str(c): c for c in df_b.columns}
-        key_a = [str_cols_a[k] for k in key_columns]
-        key_b = [str_cols_b[k] for k in key_columns]
-
+            return error_result(f"key_columns 不在两边的列中: {missing}", code="NOT_FOUND",
+                                fields={"available_columns_a": sorted(cols_a), "available_columns_b": sorted(cols_b)})
+        key_a = [col_map_a[k] for k in key_columns]
+        key_b = [col_map_b[k] for k in key_columns]
         dup_a = df_a.duplicated(subset=key_a, keep=False)
         dup_b = df_b.duplicated(subset=key_b, keep=False)
-        if dup_a.any():
-            duplicate_keys_a = (
-                df_a.loc[dup_a, key_columns]
-                .drop_duplicates()
-                .astype(str)
-                .agg("-".join, axis=1)
-                .tolist()[:20]
-            )
-        if dup_b.any():
-            duplicate_keys_b = (
-                df_b.loc[dup_b, key_columns]
-                .drop_duplicates()
-                .astype(str)
-                .agg("-".join, axis=1)
-                .tolist()[:20]
-            )
-
-        df_a_keyed = df_a.set_index(key_a)
-        df_b_keyed = df_b.set_index(key_b)
-
-        keys_a = set(df_a_keyed.index.tolist())
-        keys_b = set(df_b_keyed.index.tolist())
+        if dup_a.any() or dup_b.any():
+            return error_result("业务主键不唯一，无法确定按键对齐；请增加 key_columns 或改用 position。",
+                                code="INVALID_ARGS", fields={
+                                    "duplicate_keys_a": df_a.loc[dup_a, key_a].drop_duplicates().head(20).to_dict("records"),
+                                    "duplicate_keys_b": df_b.loc[dup_b, key_b].drop_duplicates().head(20).to_dict("records"),
+                                })
+        if df_a[key_a].isna().any().any() or df_b[key_b].isna().any().any():
+            return error_result("业务主键含空值，请先清理或改用 position。", code="INVALID_ARGS")
+        left = df_a.set_index(key_a)
+        right = df_b.set_index(key_b)
+        keys_a, keys_b = set(left.index.tolist()), set(right.index.tolist())
+        rows_deleted, rows_added = len(keys_a - keys_b), len(keys_b - keys_a)
         unmatched_in_a = [str(k) for k in sorted(keys_a - keys_b, key=str)][:50]
         unmatched_in_b = [str(k) for k in sorted(keys_b - keys_a, key=str)][:50]
-        all_keys = keys_a | keys_b
-
-        for key_val in all_keys:
-            if len(cell_diffs) >= max_diffs:
-                break
-            key_label = str(key_val)
-            in_a = key_val in df_a_keyed.index
-            in_b = key_val in df_b_keyed.index
-
-            if in_a and not in_b:
-                rows_deleted += 1
-                continue
-            if not in_a and in_b:
-                rows_added += 1
-                continue
-
-            row_a = df_a_keyed.loc[key_val]
-            row_b = df_b_keyed.loc[key_val]
-            if isinstance(row_a, pd.DataFrame):
-                row_a = row_a.iloc[0]
-            if isinstance(row_b, pd.DataFrame):
-                row_b = row_b.iloc[0]
-
-            row_changed = False
+        for key in sorted(keys_a & keys_b, key=str):
+            changed = False
             for col in common_cols:
                 if col in key_columns:
                     continue
                 total_cells_compared += 1
-                val_a = _serialize_cell_value(row_a.get(col))
-                val_b = _serialize_cell_value(row_b.get(col))
-                if str(val_a) != str(val_b):
-                    row_changed = True
-                    if len(cell_diffs) < max_diffs:
-                        cell_diffs.append({
-                            "key": key_label,
-                            "column": col,
-                            "old": val_a,
-                            "new": val_b,
-                        })
-            if row_changed:
-                rows_modified += 1
-
+                va = _compare_value(left.loc[key, col_map_a[col]])
+                vb = _compare_value(right.loc[key, col_map_b[col]])
+                if not _same_compare_value(va, vb):
+                    changed = True
+                    add_difference({"key": str(key), "column": col, "old": va, "new": vb})
+            rows_modified += int(changed)
     else:
+        from itertools import zip_longest
         from openpyxl.utils import get_column_letter
 
-        rows_added = max(0, len(df_b) - len(df_a))
-        rows_deleted = max(0, len(df_a) - len(df_b))
-        min_rows = min(len(df_a), len(df_b))
-        n_cols = max(int(df_a.shape[1]), int(df_b.shape[1]))
-
-        use_hash_filter = min_rows > 10000
-        diff_row_indices: set[int] | None = None
-        if use_hash_filter and n_cols > 0:
-            def _row_hash(df: pd.DataFrame, n: int) -> pd.Series:
-                width = int(df.shape[1])
-                return df.iloc[:min_rows].astype(str).apply(
-                    lambda r: hash(tuple(r.tolist() + [""] * (n - width))),
-                    axis=1,
-                )
-            hash_a = _row_hash(df_a, n_cols)
-            hash_b = _row_hash(df_b, n_cols)
-            diff_row_indices = set((hash_a != hash_b).to_numpy().nonzero()[0])
-            logger.info(
-                "行级 hash 过滤：%d/%d 行有差异",
-                len(diff_row_indices), min_rows,
-            )
-
-        for row_idx in _builtin_range(min_rows):
-            if len(cell_diffs) >= max_diffs:
-                break
-            if diff_row_indices is not None and row_idx not in diff_row_indices:
-                total_cells_compared += n_cols
-                continue
-            row_changed = False
-            for col_idx in _builtin_range(n_cols):
+        matrix_a = _compare_matrix(safe_a, resolved_sheet_a)
+        matrix_b = _compare_matrix(safe_b, resolved_sheet_b)
+        rows_added = max(0, len(matrix_b) - len(matrix_a))
+        rows_deleted = max(0, len(matrix_a) - len(matrix_b))
+        for row_number, (row_a, row_b) in enumerate(zip_longest(matrix_a, matrix_b, fillvalue=[]), 1):
+            changed = False
+            for col_number, (va, vb) in enumerate(zip_longest(row_a, row_b), 1):
                 total_cells_compared += 1
-                val_a = (
-                    _serialize_cell_value(df_a.iat[row_idx, col_idx])
-                    if col_idx < df_a.shape[1]
-                    else None
-                )
-                val_b = (
-                    _serialize_cell_value(df_b.iat[row_idx, col_idx])
-                    if col_idx < df_b.shape[1]
-                    else None
-                )
-                if str(val_a) != str(val_b):
-                    row_changed = True
-                    if len(cell_diffs) < max_diffs:
-                        cell_diffs.append({
-                            "cell": f"{get_column_letter(col_idx + 1)}{row_idx + 2}",
-                            "old": val_a,
-                            "new": val_b,
-                        })
-            if row_changed:
-                rows_modified += 1
-
-        if len(df_b) > len(df_a):
-            for extra_idx in _builtin_range(len(df_a), min(len(df_b), len(df_a) + max_diffs)):
-                if len(cell_diffs) >= max_diffs:
-                    break
-                for col_idx in _builtin_range(int(df_b.shape[1])):
-                    total_cells_compared += 1
-                    val = _serialize_cell_value(df_b.iat[extra_idx, col_idx])
-                    if val is not None and str(val) != "":
-                        cell_diffs.append({
-                            "cell": f"{get_column_letter(col_idx + 1)}{extra_idx + 2}",
-                            "old": None,
-                            "new": val,
-                        })
-
-    # ── 5. 构建结果 ──
-    truncated = len(cell_diffs) >= max_diffs
-    cells_different = len(cell_diffs)
+                va, vb = _compare_value(va), _compare_value(vb)
+                if not _same_compare_value(va, vb):
+                    changed = True
+                    item = {"cell": f"{get_column_letter(col_number)}{row_number}", "old": va, "new": vb}
+                    if isinstance(va, str) and va.startswith("="):
+                        item["old_formula"] = va
+                    if isinstance(vb, str) and vb.startswith("="):
+                        item["new_formula"] = vb
+                    add_difference(item)
+            if row_number <= min(len(matrix_a), len(matrix_b)):
+                rows_modified += int(changed)
 
     sample_diffs = cell_diffs[:10]
+    truncated = cells_different > len(sample_diffs) or (
+        alignment == "key" and (rows_deleted > len(unmatched_in_a) or rows_added > len(unmatched_in_b))
+    )
 
     is_same_file = snap_a.file.relative == snap_b.file.relative and snap_a.id.workspace_key == snap_b.id.workspace_key
     diff_mode = "cross_sheet" if is_same_file and (sheet_a or sheet_b) else "cross_file"
@@ -5697,8 +5816,11 @@ def compare_excel(
         "content_version": snap_a.content_version,
         "content_version_a": snap_a.content_version,
         "content_version_b": snap_b.content_version,
-        "sheet_a": sheet_a or "(默认)",
-        "sheet_b": sheet_b or "(默认)",
+        "sheet_a": resolved_sheet_a,
+        "sheet_b": resolved_sheet_b,
+        "scope": "explicit_sheets" if sheet_a and sheet_b else "first_sheet_when_omitted",
+        "compared_sheets": {"a": [resolved_sheet_a], "b": [resolved_sheet_b]},
+        "formula_status": {"a": formula_status_a, "b": formula_status_b},
         "summary": {
             "total_cells_compared": total_cells_compared,
             "cells_different": cells_different,
@@ -5716,7 +5838,10 @@ def compare_excel(
 
     structure_changed = bool(columns_added or columns_deleted or sheets_only_a or sheets_only_b)
     if cells_different == 0 and rows_added == 0 and rows_deleted == 0 and not structure_changed:
-        result["hint"] = "两个文件（或 Sheet）的数据完全相同。"
+        if result["scope"] == "first_sheet_when_omitted":
+            result["hint"] = "两边指定/默认的第一张工作表数据完全相同；未比较其他工作表。"
+        else:
+            result["hint"] = "两个文件（或 Sheet）的数据完全相同。"
     else:
         parts = []
         if cells_different > 0:
@@ -5749,7 +5874,12 @@ def compare_excel(
     result["unmatched_in_b"] = unmatched_in_b
     result["coverage"] = {
         "kind": "truncated" if truncated else "complete",
-        "diffs_returned": len(cell_diffs),
+        "diffs_returned": len(sample_diffs),
+        "diffs_total": cells_different,
+        "counts_complete": True,
+        "unmatched_keys_returned": {"a": len(unmatched_in_a), "b": len(unmatched_in_b)},
+        "unmatched_keys_total": {"a": rows_deleted, "b": rows_added} if alignment == "key" else None,
+        "formula_comparison": "text; no recalculation",
         "max_diffs": max_diffs,
         "cells_compared": total_cells_compared,
     }
@@ -5758,10 +5888,11 @@ def compare_excel(
         result,
         rel_path_a=rel_a,
         rel_path_b=rel_b,
-        sheet_a=sheet_a or "(默认)",
-        sheet_b=sheet_b or "(默认)",
+        sheet_a=resolved_sheet_a,
+        sheet_b=resolved_sheet_b,
         key_columns=key_columns,
         alignment=alignment,
+        scope=result.get("scope") or "explicit_sheets",
     )
 
 
@@ -6123,6 +6254,8 @@ def scan_excel_snapshot(
     max_sample_rows: int = 500,
     include_relationships: bool = True,
     sheet_name: str | None = None,
+    expected_version: str | None = None,
+    header_row: int | None = None,
 ) -> ToolResult:
     """一次性扫描 Excel 文件，返回所有 Sheet 的 schema、列统计、数据质量信号。
 
@@ -6142,7 +6275,7 @@ def scan_excel_snapshot(
 
     from excelmanus.workbook.snapshot import SnapshotError, require_default_sheet
 
-    snap, snap_err = _open_tool_snapshot(file_path)
+    snap, snap_err = _open_tool_snapshot(file_path, expected_version=expected_version)
     if snap_err is not None:
         return snap_err
     safe_path = snap.backing_path
@@ -6155,6 +6288,7 @@ def scan_excel_snapshot(
         return _scan_csv_snapshot(
             safe_path, size_str, max_sample_rows,
             rel_path=rel_path, bound_version=bound_version, snapshot=snap,
+            header_row=header_row,
         )
 
     if sheet_name is not None:
@@ -6173,7 +6307,15 @@ def scan_excel_snapshot(
     # 元数据扫描（read_only=True，快速获取行列数/公式/合并）
     wb_meta = load_workbook(safe_path, read_only=True, data_only=True)
     sheet_metas: list[dict[str, Any]] = []
-    for ws in wb_meta.worksheets[:_SNAPSHOT_MAX_SHEETS]:
+    all_meta_sheets = list(wb_meta.worksheets)
+    if requested_sheet:
+        # An explicit target must not disappear behind the overview cap.
+        selected_meta_sheets = [
+            ws for ws in all_meta_sheets if ws.title == requested_sheet
+        ]
+    else:
+        selected_meta_sheets = all_meta_sheets[:_SNAPSHOT_MAX_SHEETS]
+    for ws in selected_meta_sheets:
         if requested_sheet and ws.title != requested_sheet:
             continue
         # 部分导出文件不写 <dimension>，read_only 下 max_row/max_column 为 0；
@@ -6195,7 +6337,13 @@ def scan_excel_snapshot(
     # 检测公式和合并单元格（需要非 read_only 模式，但只读前几行）
     try:
         wb_full = load_workbook(safe_path, read_only=False, data_only=False)
-        for i, ws in enumerate(wb_full.worksheets[:_SNAPSHOT_MAX_SHEETS]):
+        if requested_sheet:
+            selected_full_sheets = [
+                ws for ws in wb_full.worksheets if ws.title == requested_sheet
+            ]
+        else:
+            selected_full_sheets = list(wb_full.worksheets[:_SNAPSHOT_MAX_SHEETS])
+        for i, ws in enumerate(selected_full_sheets):
             if requested_sheet and ws.title != requested_sheet:
                 continue
             meta_i = next((idx for idx, item in enumerate(sheet_metas) if item["name"] == ws.title), None)
@@ -6220,6 +6368,7 @@ def scan_excel_snapshot(
                     if has_formulas:
                         break
                 sheet_metas[i]["has_formulas"] = has_formulas
+                sheet_metas[i]["formula_scan"] = {"rows_scanned": min(20, ws.max_row or 0), "complete": (ws.max_row or 0) <= 20}
         wb_full.close()
     except Exception:
         for meta in sheet_metas:
@@ -6238,7 +6387,7 @@ def scan_excel_snapshot(
         sampled = data_rows > max_sample_rows
 
         try:
-            read_kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_sample_rows if sampled else None)
+            read_kwargs = _build_read_kwargs(safe_path, sheet_name, max_rows=max_sample_rows if sampled else None, header_row=header_row)
             form_type = read_kwargs.pop("_form_type_document", False)
             internal_header = read_kwargs.get("header")
             public_header = (
@@ -6315,7 +6464,7 @@ def scan_excel_snapshot(
     elif len(result["resolved_sheets"]) == 1:
         result["resolved_sheet"] = result["resolved_sheets"][0]
 
-    if len(wb_meta.sheetnames if hasattr(wb_meta, 'sheetnames') else sheet_metas) > _SNAPSHOT_MAX_SHEETS:
+    if not requested_sheet and len(all_meta_sheets) > _SNAPSHOT_MAX_SHEETS:
         result["truncated"] = True
         result["truncated_note"] = f"仅扫描前 {_SNAPSHOT_MAX_SHEETS} 个 Sheet"
 
@@ -6332,10 +6481,11 @@ def _scan_csv_snapshot(
     rel_path: str = "",
     bound_version: str | None = None,
     snapshot: Any = None,
+    header_row: int | None = None,
 ) -> ToolResult:
     """CSV 文件的 scan_excel_snapshot 简化实现。"""
     try:
-        df, effective_header = _read_csv_df(safe_path, max_rows=max_sample_rows)
+        df, effective_header = _read_csv_df(safe_path, max_rows=max_sample_rows, header_row=_public_header_row_to_internal(header_row))
     except Exception as exc:
         return _error_payload_result(
             {"error": f"CSV 读取失败: {exc}"},
@@ -6408,6 +6558,7 @@ def search_excel_values(
     max_results: int = 50,
     case_sensitive: bool = False,
     file_paths: list[str] | None = None,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """跨 Sheet 搜索 Excel 单元格值，类似 ripgrep。
 
@@ -6437,6 +6588,7 @@ def search_excel_values(
                 file_path=fp, query=query, match_mode=match_mode,
                 sheets=sheets, columns=columns, max_results=per_file_max,
                 case_sensitive=case_sensitive,
+                expected_version=expected_version,
             )
             sub = sub_result.value if isinstance(sub_result.value, dict) else None
             if not isinstance(sub, dict) or "error" in sub:
@@ -6484,7 +6636,7 @@ def search_excel_values(
     not_found = check_file_exists(live_path, file_path, guard)
     if not_found is not None:
         return not_found
-    snap, snap_err = _open_tool_snapshot(file_path)
+    snap, snap_err = _open_tool_snapshot(file_path, expected_version=expected_version)
     if snap_err is not None:
         return snap_err
     safe_path = snap.backing_path

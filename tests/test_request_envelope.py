@@ -50,7 +50,6 @@ def _engine(*, session_id: str = "sess-1") -> MagicMock:
         },
     ]
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._compaction_generation = 0
     engine._projection_generation = 0
     engine._image_wire_pin_seq = ()
@@ -250,7 +249,6 @@ def test_assert_prefix_stable_allows_identity_change() -> None:
     engine.memory.system_prompt = "plan system"
     second = RequestEnvelope(
         identity=first.identity.__class__(
-            present_as=first.identity.present_as,
             plan_active=True,
             tool_access=first.identity.tool_access,
             tools_digest=first.identity.tools_digest,

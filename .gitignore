@@ -93,10 +93,11 @@ tasks/
 dev-docs/
 docs/plans/
 docs/research/
-# 改造期审计文档需入库（仅推送私有仓库；合并回公开仓库前请重新忽略）
+# 审计报告随源码保留；原始运行日志和本机数据留在已忽略目录。
 # docs/audit_*.md
 docs/agent-architecture-review.md
 RELEASE_*.md
+!RELEASE_v1.8.0.md
 !README.md
 !README_EN.md
 
@@ -133,6 +134,8 @@ scripts/
 scripts/*
 !scripts/__init__.py
 !scripts/migrate_skills_to_standard.py
+!scripts/check_prompt_contracts.py
+!scripts/check_prompt_budgets.py
 !scripts/security/
 scripts/security/*
 !scripts/security/scan_secrets.sh
@@ -157,6 +160,15 @@ windsurf-*
 # Web 前端构建产物
 # ==============================
 node_modules/
+
+# Desktop application build outputs
+desktop/.build/
+desktop/dist/
+desktop/dist-*/
+!desktop/build/
+!desktop/build/icon.icns
+!desktop/build/icon.ico
+!desktop/build/entitlements.mac.plist
 web/.next/
 web/.env.local
 
@@ -180,6 +192,7 @@ RELEASE_v1.6.4.md
 # web/public assets needed for frontend
 !web/public/icon.png
 !web/public/samples/**
+web/public/samples/*.em-lock
 backups/
 
 # Vite 缓存

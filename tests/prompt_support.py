@@ -54,11 +54,10 @@ def filled(text: str) -> str:
     return interpolate(text, VARS, strict=True)
 
 
-def system_text(mode: str = "write", *, present_as: str = "native") -> str:
+def system_text(mode: str = "write") -> str:
     return composer().compose_system_text(
         PromptContext(chat_mode=mode),
         variables=VARS,
-        present_as=present_as,
     )
 
 
@@ -75,9 +74,9 @@ def read_snapshot(name: str) -> str:
 def dump_snapshots() -> None:
     SNAPSHOT_DIR.mkdir(parents=True, exist_ok=True)
     mapping = {
-        "native_write.txt": system_text("write"),
-        "native_plan.txt": system_text("plan"),
-        "code_write.txt": system_text("write", present_as="code"),
+        "write.txt": system_text("write"),
+        "plan.txt": system_text("plan"),
+        "read.txt": system_text("read"),
     }
     for name, text in mapping.items():
         body = text if text.endswith("\n") else text + "\n"

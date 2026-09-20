@@ -1,6 +1,8 @@
 "use client";
 
-import { useEffect, useRef, useCallback } from "react";
+import Image from "next/image";
+import { useEffect, useRef, useCallback, useState } from "react";
+import dynamic from "next/dynamic";
 import { motion, AnimatePresence } from "framer-motion";
 import { useIsMobile } from "@/hooks/use-mobile";
 import {
@@ -10,13 +12,15 @@ import {
   FolderOpen,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { ScrollArea } from "@/components/ui/scroll-area";
 import { useUIStore } from "@/stores/ui-store";
 import { useSessionStore } from "@/stores/session-store";
 import { sidebarTransition, sidebarContentVariants, useMotionSafe } from "@/lib/sidebar-motion";
 import { SessionList } from "./SessionList";
-import { ExcelFilesBar } from "./ExcelFilesBar";
 import { StatusFooter } from "./StatusFooter";
+
+const ExcelFilesBar = dynamic(() => import("./ExcelFilesBar").then((m) => m.ExcelFilesBar), {
+  loading: () => <div role="status" className="p-4 text-xs text-muted-foreground">正在准备文件列表…</div>,
+});
 
 const tabs: { key: "chats" | "files"; label: string; icon: typeof MessageSquare }[] = [
   { key: "chats", label: "对话", icon: MessageSquare },
@@ -58,6 +62,7 @@ export function Sidebar() {
   const { safeTransition } = useMotionSafe();
   const activeTab = useUIStore((s) => s.sidebarTab);
   const setActiveTab = useUIStore((s) => s.setSidebarTab);
+  const [contentMounted, setContentMounted] = useState(sidebarOpen);
 
   // 首次渲染跳过动画，避免侧栏闪烁
   const isFirstRender = useRef(true);
@@ -65,6 +70,17 @@ export function Sidebar() {
 
   // 移动端左滑关闭侧栏
   const swipe = useSwipeToClose(isMobile && sidebarOpen, toggleSidebar);
+
+  // 移动端抽屉保持固定宽度，只动画 transform。动画 width 会在每一帧重排
+  // ScrollArea 里的整份会话历史，低端移动设备上尤其明显。
+  const mobileSidebarWidth = "min(88vw, 360px)";
+  const sidebarAnimate = isMobile
+    // Keep width out of the mobile animation entirely; only x changes.
+    ? { x: sidebarOpen ? 0 : "-100%" }
+    : { width: sidebarOpen ? 320 : 0, x: 0 };
+  const sidebarOpenTransition = isFirstRender.current
+    ? { duration: 0 }
+    : (safeTransition ?? (isMobile ? { duration: 0.22, ease: "easeOut" as const } : sidebarTransition));
 
   // 移动端自动收起侧栏（首次挂载及会话变化时）
   useEffect(() => {
@@ -91,14 +107,25 @@ export function Sidebar() {
       </AnimatePresence>
       <motion.aside
         data-coach-id="coach-sidebar"
-        animate={{ width: isMobile ? (sidebarOpen ? "min(88vw, 360px)" : 0) : (sidebarOpen ? 320 : 0) }}
-        transition={isFirstRender.current ? { duration: 0 } : (safeTransition ?? sidebarTransition)}
+        aria-label="侧栏"
+        aria-hidden={!sidebarOpen}
+        inert={!sidebarOpen ? true : undefined}
+        animate={sidebarAnimate}
+        transition={sidebarOpenTransition}
+        onAnimationStart={() => {
+          if (useUIStore.getState().sidebarOpen) setContentMounted(true);
+        }}
+        onAnimationComplete={() => setContentMounted(useUIStore.getState().sidebarOpen)}
         className={`em-sidebar flex flex-col ${
           isMobile ? "fixed inset-y-0 left-0 z-50" : ""
         }`}
         style={{ 
-          backgroundColor: "var(--em-sidebar-bg)",
-          overflow: sidebarOpen ? "hidden" : "hidden"
+          width: isMobile ? mobileSidebarWidth : undefined,
+          minWidth: isMobile ? mobileSidebarWidth : undefined,
+          overflow: "hidden",
+          pointerEvents: sidebarOpen ? "auto" : "none",
+          willChange: isMobile && (sidebarOpen || contentMounted) ? "transform" : undefined,
+          boxShadow: sidebarOpen ? undefined : "none",
         }}
         onTouchStart={swipe.onTouchStart}
         onTouchEnd={swipe.onTouchEnd}
@@ -107,26 +134,31 @@ export function Sidebar() {
         <motion.div
           className="em-sidebar-inner flex flex-col h-full"
           style={{
-            width: isMobile ? "min(88vw, 360px)" : "320px",
-            minWidth: isMobile ? "min(88vw, 360px)" : "320px",
+            width: isMobile ? mobileSidebarWidth : "320px",
+            minWidth: isMobile ? mobileSidebarWidth : "320px",
           }}
-          variants={sidebarContentVariants}
-          animate={sidebarOpen ? "open" : "closed"}
-          transition={isFirstRender.current ? { duration: 0 } : undefined}
+          variants={isMobile ? undefined : sidebarContentVariants}
+          animate={isMobile ? undefined : sidebarOpen ? "open" : "closed"}
+          transition={isMobile ? undefined : isFirstRender.current ? { duration: 0 } : undefined}
         >
           {/* Header */}
           <div className="em-sidebar-header flex items-center justify-between px-4 pt-4 pb-3 flex-shrink-0">
             <div className="em-brand-lockup">
-              <div className="em-brand-mark" aria-hidden="true">E</div>
-              <div className="em-brand-copy">
-                <div className="em-brand-name">ExcelManus</div>
-                <div className="em-brand-subtitle">智能工作区</div>
-              </div>
+              <Image
+                src="/logo.svg"
+                alt="ExcelManus"
+                width={176}
+                height={28}
+                priority
+                unoptimized
+                className="em-brand-logo"
+              />
             </div>
             <Button
               variant="ghost"
               size="icon"
               onClick={toggleSidebar}
+              aria-label="收起侧栏"
               className="h-7 w-7 min-h-8 min-w-8 flex-shrink-0"
             >
               <PanelLeftClose className="h-4 w-4" />
@@ -162,14 +194,18 @@ export function Sidebar() {
             style={{ background: "linear-gradient(to right, transparent, var(--border), transparent)" }}
           />
 
-          {/* Tab Content — both panels stay mounted, toggle via CSS to avoid layout thrash */}
+          {/* Unmount inactive content and release the drawer after its exit
+              animation, so hidden lists have no subscriptions or scan effects. */}
           <div className="flex-1 min-h-0 overflow-hidden relative">
-            <div className="h-full px-2" style={{ display: activeTab === "chats" ? undefined : "none" }}>
-              <SessionList />
-            </div>
-            <ScrollArea className="h-full px-2" style={{ display: activeTab === "files" ? undefined : "none" }}>
-              <ExcelFilesBar embedded />
-            </ScrollArea>
+            {(sidebarOpen || contentMounted) && (activeTab === "chats" ? (
+              <div className="h-full px-2">
+                <SessionList />
+              </div>
+            ) : (
+              <div className="h-full min-h-0">
+                <ExcelFilesBar embedded />
+              </div>
+            ))}
           </div>
 
           {/* Footer */}
@@ -193,6 +229,7 @@ export function SidebarToggle() {
       variant="ghost"
       size="icon"
       onClick={toggleSidebar}
+      aria-label="展开侧栏"
       className="h-8 w-8 mr-1"
     >
       <PanelLeft className="h-4 w-4" />

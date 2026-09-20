@@ -1,4 +1,4 @@
-import type { SessionDetail, WorkspaceFolder } from "@/lib/types";
+import type { SessionDetail, SubagentRun, WorkspaceFolder } from "@/lib/types";
 import { resolveDirectBackendOrigin } from "@/lib/backend-origin";
 import { formatApiErrorMessage } from "@/lib/api-error";
 
@@ -51,21 +51,21 @@ export function getAuthHeaders(): Record<string, string> {
 /**
  * 解析 API 基础路径。
  *
- * - 默认：走 Next.js rewrite 代理（同源，避免 CORS）
- * - direct: true：直连后端（用于 SSE 流，因为 Next.js rewrite 会缓冲整个响应）
+ * - 配置了运行时后端地址时：直连后端。桌面版后端使用启动时分配的
+ *   随机端口，构建时固化的 Next.js rewrite 无法转发到这个端口。
+ * - 未配置运行时地址时：默认走 Next.js rewrite 代理（同源，避免 CORS）
+ * - direct: true：在没有运行时地址时也尝试直连（用于 SSE 流）
  *
- * 普通 REST 请求一律走代理，只有 SSE/abort 等实时性要求高的请求才用 direct。
+ * 没有运行时后端地址时，普通 REST 请求走代理；SSE/abort 等实时性要求高的
+ * 请求传入 direct=true。
  */
 function resolveApiBase(opts?: { direct?: boolean }): string {
-  // 大多数浏览器请求通过 Next.js rewrite 代理，保持同源（避免局域网设备访问时的 CORS 问题）。
-  //
-  // 但 SSE（Server-Sent Events）流必须绕过代理，因为 Next.js rewrite 会缓冲整个
-  // 响应后才转发给客户端，这会完全破坏实时流式传输。需要实时流的调用方
-  // 传入 `direct: true` 直连后端。
+  // 没有运行时后端地址时，大多数浏览器请求通过 Next.js rewrite 代理，保持同源。
+  // SSE（Server-Sent Events）流仍需传入 direct=true，避免 Next.js rewrite 缓冲响应。
   if (typeof window !== "undefined") {
-    if (opts?.direct) {
-      return `${resolveDirectBackendOrigin()}${API_BASE_PATH}`;
-    }
+    const directOrigin = resolveDirectBackendOrigin();
+    if (directOrigin) return `${directOrigin}${API_BASE_PATH}`;
+    if (opts?.direct) return `${directOrigin}${API_BASE_PATH}`;
     return API_BASE_PATH;
   }
   if (opts?.direct) {
@@ -114,8 +114,8 @@ function _isTransientError(err: unknown, res?: Response | null): boolean {
 }
 
 /**
- * 带 auth token 刷新重试的 fetch 包装（用于直连调用）。
- * - 遇到 401 时自动刷新 token 并重试一次。
+ * 直连后端的 fetch 包装。
+ * - 跨域时携带 credentials；Authorization 由调用方通过 getAuthHeaders 注入。
  * - 遇到暂态网络错误或 502/503/504 时自动重试一次（间隔 1 秒）。
  */
 export async function directFetch(
@@ -156,11 +156,15 @@ async function handleAuthError(res: Response): Promise<never> {
   throw new Error(formatApiErrorMessage(data, res.status));
 }
 
-export async function apiGet<T = unknown>(path: string, opts?: { direct?: boolean }): Promise<T> {
-  const res = await fetch(buildApiUrl(path, opts), {
+export async function apiGet<T = unknown>(
+  path: string,
+  opts?: { direct?: boolean; signal?: AbortSignal; timeoutMs?: number },
+): Promise<T> {
+  const url = buildApiUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+    signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS, opts?.signal),
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
@@ -170,12 +174,13 @@ export async function apiPost<T = unknown>(
   body: unknown,
   opts?: { direct?: boolean; timeoutMs?: number },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path, opts), {
+  const url = buildApiUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
     signal: _withTimeout(opts?.timeoutMs ?? _DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
@@ -185,12 +190,13 @@ export async function apiPut<T = unknown>(
   body: unknown,
   opts?: { direct?: boolean },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path, opts), {
+  const url = buildApiUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     method: "PUT",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
@@ -200,28 +206,63 @@ export async function apiPatch<T = unknown>(
   body: unknown,
   opts?: { direct?: boolean },
 ): Promise<T> {
-  const res = await fetch(buildApiUrl(path, opts), {
+  const url = buildApiUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     method: "PATCH",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify(body),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
   return res.json();
 }
 
-export async function apiDelete(path: string, opts?: { direct?: boolean }): Promise<void> {
-  const res = await fetch(buildApiUrl(path, opts), {
+export async function apiDelete<T = void>(path: string, opts?: { direct?: boolean }): Promise<T> {
+  const url = buildApiUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     method: "DELETE",
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) return handleAuthError(res);
+  return await res.json().catch(() => undefined) as T;
 }
 
 export async function fetchSessions(): Promise<unknown[]> {
   const res: { sessions?: unknown[] } = await apiGet("/sessions");
   return res.sessions ?? [];
+}
+
+export async function fetchSubagentRuns(sessionId: string): Promise<SubagentRun[]> {
+  const data = await apiGet<{ runs: SubagentRun[] }>(
+    `/sessions/${encodeURIComponent(sessionId)}/subagents`,
+  );
+  return data.runs;
+}
+
+export type SubagentControlAction = "send" | "pause" | "cancel" | "resume";
+
+export async function cancelToolCall(sessionId: string, executionId: string): Promise<{ status: string }> {
+  const data = await apiPost<{ call: { status: string } }>(
+    `/sessions/${encodeURIComponent(sessionId)}/tool-calls/${encodeURIComponent(executionId)}/cancel`,
+    {},
+  );
+  return data.call;
+}
+
+export async function controlSubagentRun(
+  sessionId: string,
+  runId: string,
+  action: SubagentControlAction,
+  message = "",
+): Promise<SubagentRun> {
+  const data = await apiPost<{ run: SubagentRun }>(
+    `/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(runId)}`,
+    { action, message },
+    // 暂停/取消需要等待已开始的本地工具收尾；请求本身不自动重放。
+    { timeoutMs: _UPLOAD_TIMEOUT_MS },
+  );
+  return data.run;
 }
 
 export async function createSession(opts?: {
@@ -311,6 +352,7 @@ export async function fetchSessionDetail(
       text: (pq.text as string) || "",
       options: (pq.options as { label: string; description: string }[]) || [],
       multiSelect: Boolean(pq.multi_select),
+      queueSize: typeof pq.queue_size === "number" ? pq.queue_size : 1,
     };
   }
 
@@ -322,7 +364,6 @@ export async function fetchSessionDetail(
     latestSeq: (data.latest_seq as number) ?? 0,
     fullAccessEnabled: (data.full_access_enabled as boolean) ?? false,
     chatMode: (data.chat_mode as "write" | "read" | "plan") ?? "write",
-    presentAs: data.present_as === "code" ? "code" : "native",
     currentModel: (data.current_model as string | null) ?? null,
     currentModelName: (data.current_model_name as string | null) ?? null,
     visionCapable: typeof data.vision_capable === "boolean" ? data.vision_capable : null,
@@ -515,7 +556,7 @@ export async function answerQuestion(
   sessionId: string,
   questionId: string,
   answer: string,
-): Promise<{ status: string }> {
+): Promise<{ status: string; resume_required?: boolean }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/answer`, { direct: true });
   const res = await fetch(url, _withCredentials(url, {
     method: "POST",
@@ -525,7 +566,7 @@ export async function answerQuestion(
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Answer error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -534,30 +575,12 @@ export async function submitApproval(
   sessionId: string,
   approvalId: string,
   decision: "accept" | "reject" | "fullaccess",
-): Promise<{ status: string }> {
+): Promise<{ status: string; resume_required?: boolean }> {
   const url = buildApiUrl(`/chat/${encodeURIComponent(sessionId)}/approve`, { direct: true });
   const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({ approval_id: approvalId, decision }),
-    signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  }));
-  if (!res.ok) {
-    const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Approve error: ${res.status}`);
-  }
-  return res.json();
-}
-
-export async function togglePresentAs(
-  sessionId: string,
-  presentAs: "native" | "code",
-): Promise<{ session_id: string; present_as: "native" | "code" }> {
-  const url = buildApiUrl(`/sessions/${encodeURIComponent(sessionId)}/present-as`, { direct: true });
-  const res = await fetch(url, _withCredentials(url, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ present_as: presentAs }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   }));
   if (!res.ok) {
@@ -696,38 +719,48 @@ export function normalizeExcelPath(path: string): string {
   return p;
 }
 
+export interface WorkspaceRequestScope {
+  sessionId?: string | null;
+  workspaceId?: string | null;
+}
+
+function appendWorkspaceScope(params: URLSearchParams, scope?: WorkspaceRequestScope): void {
+  if (scope?.sessionId) params.set("session_id", scope.sessionId);
+  if (scope?.workspaceId) params.set("workspace_id", scope.workspaceId);
+}
+
 function buildExcelSnapshotUrl(
   path: string,
-  opts?: { sheet?: string; maxRows?: number; sessionId?: string },
+  opts?: { sheet?: string; maxRows?: number } & WorkspaceRequestScope,
 ): string {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (opts?.sheet) params.set("sheet", opts.sheet);
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  appendWorkspaceScope(params, opts);
   return buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
 }
 
-export function buildExcelFileUrl(path: string, sessionId?: string): string {
+export function buildExcelFileUrl(path: string, sessionId?: string | null, workspaceId?: string | null): string {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   return buildApiUrl(`/files/excel?${params.toString()}`);
 }
 
 // ── Word 预览 API ─────────────────────────────────────────
 
-export function buildWordFileUrl(path: string, sessionId?: string | null): string {
+export function buildWordFileUrl(path: string, sessionId?: string | null, workspaceId?: string | null): string {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   return buildApiUrl(`/files/word?${params.toString()}`);
 }
 
 function buildWordSnapshotUrl(
   path: string,
-  opts?: { maxParagraphs?: number; sessionId?: string },
+  opts?: { maxParagraphs?: number } & WorkspaceRequestScope,
 ): string {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
   if (opts?.maxParagraphs) params.set("max_paragraphs", String(opts.maxParagraphs));
-  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  appendWorkspaceScope(params, opts);
   return buildApiUrl(`/files/word/snapshot?${params.toString()}`);
 }
 
@@ -765,14 +798,16 @@ export interface WordSnapshotResponse {
 
 export async function fetchWordSnapshot(
   path: string,
-  opts?: { maxParagraphs?: number; sessionId?: string },
+  opts?: { maxParagraphs?: number } & WorkspaceRequestScope,
 ): Promise<WordSnapshotResponse> {
-  const res = await fetch(buildWordSnapshotUrl(path, opts), {
+  const url = buildWordSnapshotUrl(path, opts);
+  const res = await fetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
-    throw new Error(`Word snapshot 请求失败: ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -780,25 +815,28 @@ export async function fetchWordSnapshot(
 export async function writeWordContent(
   path: string,
   operations: { action: string; index?: number; text?: string; style?: string }[],
-  opts?: { sessionId?: string; expectedVersion: string },
+  opts?: WorkspaceRequestScope & { expectedVersion: string },
 ): Promise<{ status: string; applied_count: number; errors?: string[]; content_version?: string }> {
   const expectedVersion = opts?.expectedVersion;
   if (!expectedVersion) {
     throw new Error("Word write 必须提供 expected_version");
   }
-  const res = await fetch(buildApiUrl("/files/word/write"), {
+  const url = buildApiUrl("/files/word/write");
+  const res = await fetch(url, _withCredentials(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
     body: JSON.stringify({
       path: normalizeExcelPath(path),
       operations,
       session_id: opts?.sessionId,
+      workspace_id: opts?.workspaceId,
       expected_version: expectedVersion,
     }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
-  });
+  }));
   if (!res.ok) {
-    throw new Error(`Word write 请求失败: ${res.status}`);
+    const data = await res.json().catch(() => ({}));
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -810,9 +848,9 @@ export interface ExcelFileListItem {
   is_dir?: boolean;
 }
 
-export async function fetchExcelFiles(sessionId?: string | null): Promise<ExcelFileListItem[]> {
+export async function fetchExcelFiles(sessionId?: string | null, workspaceId?: string | null): Promise<ExcelFileListItem[]> {
   const params = new URLSearchParams();
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   const qs = params.toString();
   const url = buildApiUrl(`/files/excel/list${qs ? `?${qs}` : ""}`);
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
@@ -821,15 +859,21 @@ export async function fetchExcelFiles(sessionId?: string | null): Promise<ExcelF
   return data.files ?? [];
 }
 
-export async function fetchWorkspaceFiles(sessionId?: string | null): Promise<ExcelFileListItem[]> {
+export interface WorkspaceFileList {
+  files: ExcelFileListItem[];
+  /** 后端按上限截断时为 true：files 不是完整清单，不可用于存在性校验 */
+  truncated: boolean;
+}
+
+export async function fetchWorkspaceFiles(sessionId?: string | null, workspaceId?: string | null): Promise<WorkspaceFileList> {
   const params = new URLSearchParams();
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   const qs = params.toString();
   const url = buildApiUrl(`/files/workspace/list${qs ? `?${qs}` : ""}`);
   const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
-  if (!res.ok) return [];
+  if (!res.ok) throw new Error(`工作区文件列表加载失败: ${res.status}`);
   const data = await res.json();
-  return data.files ?? [];
+  return { files: data.files ?? [], truncated: !!data.truncated };
 }
 
 // ── FileRegistry API ─────────────────────────────────────
@@ -872,12 +916,13 @@ export async function fetchFileRegistry(opts?: {
   includeEvents?: boolean;
   fileId?: string;
   sessionId?: string | null;
+  workspaceId?: string | null;
 }): Promise<{ files: FileRegistryEntry[]; total: number } | { file: FileRegistryEntry }> {
   const params = new URLSearchParams();
   if (opts?.includeDeleted) params.set("include_deleted", "true");
   if (opts?.includeEvents) params.set("include_events", "true");
   if (opts?.fileId) params.set("file_id", opts.fileId);
-  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  appendWorkspaceScope(params, opts);
   const qs = params.toString();
   return apiGet(`/files/registry${qs ? `?${qs}` : ""}`);
 }
@@ -982,13 +1027,13 @@ export interface CompareResponse {
 export async function fetchExcelCompare(
   pathA: string,
   pathB: string,
-  opts?: { sessionId?: string; maxRows?: number },
+  opts?: WorkspaceRequestScope & { maxRows?: number },
 ): Promise<CompareResponse> {
   const params = new URLSearchParams({
     path_a: normalizeExcelPath(pathA),
     path_b: normalizeExcelPath(pathB),
   });
-  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  appendWorkspaceScope(params, opts);
   if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
   const url = buildApiUrl(`/files/excel/compare?${params.toString()}`);
   const res = await fetch(url, {
@@ -997,19 +1042,19 @@ export async function fetchExcelCompare(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Compare error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
 
 // ── Workspace file management APIs ───────────────────────
 
-export async function workspaceMkdir(path: string, sessionId?: string | null): Promise<void> {
+export async function workspaceMkdir(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/mkdir");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path, session_id: sessionId || undefined }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1018,12 +1063,12 @@ export async function workspaceMkdir(path: string, sessionId?: string | null): P
   }
 }
 
-export async function workspaceCreateFile(path: string, sessionId?: string | null): Promise<void> {
+export async function workspaceCreateFile(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/create");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path, session_id: sessionId || undefined }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1032,12 +1077,12 @@ export async function workspaceCreateFile(path: string, sessionId?: string | nul
   }
 }
 
-export async function workspaceDeleteItem(path: string, sessionId?: string | null): Promise<void> {
+export async function workspaceDeleteItem(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/item");
   const res = await fetch(url, {
     method: "DELETE",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ path, session_id: sessionId || undefined }),
+    body: JSON.stringify({ path, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1046,12 +1091,12 @@ export async function workspaceDeleteItem(path: string, sessionId?: string | nul
   }
 }
 
-export async function workspaceRenameItem(oldPath: string, newPath: string, sessionId?: string | null): Promise<void> {
+export async function workspaceRenameItem(oldPath: string, newPath: string, sessionId?: string | null, workspaceId?: string | null): Promise<void> {
   const url = buildApiUrl("/files/workspace/rename");
   const res = await fetch(url, {
     method: "POST",
     headers: { "Content-Type": "application/json", ...getAuthHeaders() },
-    body: JSON.stringify({ old_path: oldPath, new_path: newPath, session_id: sessionId || undefined }),
+    body: JSON.stringify({ old_path: oldPath, new_path: newPath, session_id: sessionId || undefined, workspace_id: workspaceId || undefined }),
     signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
   });
   if (!res.ok) {
@@ -1064,19 +1109,22 @@ export async function uploadFileToFolder(
   file: File,
   folder: string,
   sessionId?: string | null,
+  workspaceId?: string | null,
 ): Promise<{ filename: string; path: string; size: number }> {
   const formData = new FormData();
   formData.append("file", file);
   formData.append("folder", folder);
   if (sessionId) formData.append("session_id", sessionId);
-  const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
+  if (workspaceId) formData.append("workspace_id", workspaceId);
+  const res = await fetch(buildApiUrl("/upload"), {
     method: "POST",
+    headers: { ...getAuthHeaders() },
     body: formData,
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Upload error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -1127,7 +1175,7 @@ function dropCacheKeys(
 
 export function snapshotCacheKey(
   path: string,
-  opts?: { maxRows?: number; withStyles?: boolean; sessionId?: string; workspaceKey?: string },
+  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
 ): string {
   return [
     fileCachePrefix(opts?.workspaceKey || "_", path),
@@ -1147,20 +1195,21 @@ export function invalidateSnapshotCache(opts?: { workspaceKey?: string; relative
 /** @deprecated 编辑器请用 prefetchWorkbookView */
 export function prefetchExcelSnapshot(
   path: string,
-  opts?: { maxRows?: number; withStyles?: boolean; sessionId?: string; workspaceKey?: string },
+  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
 ) {
-  if (!path || !opts?.sessionId) return;
+  if (!path || (!opts?.sessionId && !opts?.workspaceId)) return;
   void fetchAllSheetsSnapshot(path, {
     maxRows: opts?.maxRows ?? 500,
     withStyles: opts?.withStyles !== false,
     sessionId: opts.sessionId,
+    workspaceId: opts.workspaceId,
     workspaceKey: opts.workspaceKey,
   }).catch(() => null);
 }
 
 export async function fetchAllSheetsSnapshot(
   path: string,
-  opts?: { maxRows?: number; sessionId?: string; withStyles?: boolean; workspaceKey?: string }
+  opts?: { maxRows?: number; withStyles?: boolean; workspaceKey?: string } & WorkspaceRequestScope,
 ): Promise<AllSheetsSnapshotResponse> {
   const cacheKey = snapshotCacheKey(path, opts);
   const cached = _snapshotCache.get(cacheKey);
@@ -1174,13 +1223,13 @@ export async function fetchAllSheetsSnapshot(
   const pending = (async () => {
     const params = new URLSearchParams({ path: normalizeExcelPath(path), all_sheets: "1" });
     if (opts?.maxRows) params.set("max_rows", String(opts.maxRows));
-    if (opts?.sessionId) params.set("session_id", opts.sessionId);
+    appendWorkspaceScope(params, opts);
     params.set("with_styles", opts?.withStyles !== false ? "1" : "0");
     const url = buildApiUrl(`/files/excel/snapshot?${params.toString()}`);
     const res = await fetch(url, { headers: { ...getAuthHeaders() }, signal: _withTimeout(_DEFAULT_TIMEOUT_MS) });
     if (!res.ok) {
       const data = await res.json().catch(() => ({}));
-      throw new Error(data.error || `Snapshot error: ${res.status}`);
+      throw new Error(formatApiErrorMessage(data, res.status));
     }
     const result: AllSheetsSnapshotResponse = await res.json();
     _snapshotCache.set(cacheKey, { data: result, ts: Date.now() });
@@ -1199,7 +1248,7 @@ export async function fetchAllSheetsSnapshot(
 
 export async function fetchExcelSnapshot(
   path: string,
-  opts?: { sheet?: string; maxRows?: number; sessionId?: string }
+  opts?: { sheet?: string; maxRows?: number } & WorkspaceRequestScope,
 ): Promise<ExcelSnapshot> {
   const res = await fetch(buildExcelSnapshotUrl(path, opts), {
     headers: { ...getAuthHeaders() },
@@ -1207,7 +1256,7 @@ export async function fetchExcelSnapshot(
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Snapshot error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -1215,8 +1264,37 @@ export async function fetchExcelSnapshot(
 export type WorkbookViewResponse = import("@/lib/workbook-view").WorkbookViewSnapshot;
 
 const _viewCache = new Map<string, { data: WorkbookViewResponse; ts: number }>();
-const _viewInflight = new Map<string, Promise<WorkbookViewResponse>>();
+type ViewFlight = {
+  promise: Promise<WorkbookViewResponse>;
+  controller: AbortController;
+  readers: Set<symbol>;
+};
+const _viewInflight = new Map<string, ViewFlight>();
 const _VIEW_TTL_MS = 30_000;
+const _VIEW_OPEN_TTL_MS = 5_000;
+const _VIEW_CACHE_LIMIT = 64;
+
+function cacheView(key: string, data: WorkbookViewResponse) {
+  _viewCache.delete(key);
+  _viewCache.set(key, { data, ts: Date.now() });
+  while (_viewCache.size > _VIEW_CACHE_LIMIT) _viewCache.delete(_viewCache.keys().next().value!);
+}
+
+function readViewFlight(flight: ViewFlight, signal?: AbortSignal): Promise<WorkbookViewResponse> {
+  const reader = Symbol();
+  flight.readers.add(reader);
+  return new Promise((resolve, reject) => {
+    const release = () => {
+      signal?.removeEventListener("abort", abort);
+      flight.readers.delete(reader);
+      if (!flight.readers.size) flight.controller.abort();
+    };
+    const abort = () => { release(); reject(new DOMException("视图请求已取消", "AbortError")); };
+    if (signal?.aborted) { abort(); return; }
+    signal?.addEventListener("abort", abort, { once: true });
+    flight.promise.then(resolve, reject).finally(release);
+  });
+}
 
 export function viewCacheKey(opts: {
   workspaceKey: string;
@@ -1239,10 +1317,12 @@ export function invalidateWorkbookViewCache(opts?: {
   workspaceKey?: string;
   relative?: string;
 }): void {
-  dropCacheKeys(
-    [_viewCache as Map<string, unknown>, _viewInflight as Map<string, unknown>],
-    opts,
-  );
+  dropCacheKeys([_viewCache as Map<string, unknown>], opts);
+  for (const [key, flight] of _viewInflight) {
+    if (!matchesFileCacheKey(key, opts)) continue;
+    _viewInflight.delete(key);
+    flight.controller.abort();
+  }
 }
 
 /** 写入/恢复后同时清 snapshot 与 view，键空间与读取一致。 */
@@ -1264,7 +1344,9 @@ export async function fetchWorkbookView(opts: {
   withStyles?: boolean;
   expectedVersion?: string;
   viewGeneration?: number;
+  signal?: AbortSignal;
 }): Promise<WorkbookViewResponse> {
+  opts.signal?.throwIfAborted();
   if (!opts.sessionId && !opts.workspaceId) {
     throw new Error("无法确定工作区，请从会话重新打开文件");
   }
@@ -1276,18 +1358,19 @@ export async function fetchWorkbookView(opts: {
     rect: opts.rect,
     withStyles: opts.withStyles,
   });
-  const inflightKey = `${cacheKey}|g${opts.viewGeneration ?? 0}`;
-  if (opts.expectedVersion) {
-    const cached = _viewCache.get(cacheKey);
-    if (cached && Date.now() - cached.ts < _VIEW_TTL_MS) {
-      return cached.data;
-    }
+  // A response without a requested version is a short-lived open hint. All
+  // returned windows are also stored under their actual immutable version.
+  const inflightKey = cacheKey;
+  const cached = _viewCache.get(cacheKey);
+  if (cached && Date.now() - cached.ts < (opts.expectedVersion ? _VIEW_TTL_MS : _VIEW_OPEN_TTL_MS)) {
+    return cached.data;
   }
   const inflight = _viewInflight.get(inflightKey);
-  if (inflight) return inflight;
+  if (inflight && !inflight.controller.signal.aborted) return readViewFlight(inflight, opts.signal);
 
-  let pending!: Promise<WorkbookViewResponse>;
-  pending = (async () => {
+  const controller = new AbortController();
+  const flight: ViewFlight = { controller, readers: new Set(), promise: null! };
+  flight.promise = (async () => {
     const params = new URLSearchParams({ path: normalizeExcelPath(opts.path) });
     if (opts.sessionId) params.set("session_id", opts.sessionId);
     if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
@@ -1297,9 +1380,12 @@ export async function fetchWorkbookView(opts: {
     if (opts.expectedVersion) params.set("expected_version", opts.expectedVersion);
     const res = await fetch(buildApiUrl(`/files/excel/view?${params.toString()}`), {
       headers: { ...getAuthHeaders() },
-      signal: _withTimeout(_DEFAULT_TIMEOUT_MS),
+      signal: _withTimeout(_DEFAULT_TIMEOUT_MS, controller.signal),
     });
     const data = await res.json().catch(() => ({} as Record<string, unknown>));
+    if (_viewInflight.get(inflightKey) !== flight || controller.signal.aborted) {
+      throw new DOMException("视图请求已失效", "AbortError");
+    }
     if (res.status === 409) {
       const err = new Error((data.error as string) || "STALE_VIEW");
       (err as Error & { code?: string }).code = String(data.code || "STALE_VIEW");
@@ -1311,7 +1397,7 @@ export async function fetchWorkbookView(opts: {
       ) as Error & { status?: number; code?: string };
       err.status = res.status;
       if (typeof data.code === "string") err.code = data.code;
-      if (res.status === 404) {
+      if (res.status === 404 && (!data.code || data.code === "PATH_INVALID")) {
         // 后端确认文件不存在：剔除该工作区桶里的陈旧 recentFiles 条目，
         // 否则侧栏/工作表面板会持续指向已删除路径反复 404。
         void import("@/stores/excel-store")
@@ -1323,23 +1409,27 @@ export async function fetchWorkbookView(opts: {
       throw err;
     }
     const result = data as WorkbookViewResponse;
-    if (_viewInflight.get(inflightKey) !== pending) {
-      throw new Error("STALE_VIEW: 请求已失效");
+    if (!result.content_version || result.file?.workspaceKey !== opts.workspaceKey
+      || normalizeExcelPath(result.file.relative) !== normalizeExcelPath(opts.path)
+      || (opts.expectedVersion && opts.expectedVersion !== result.content_version)) {
+      throw new Error("STALE_VIEW: 响应文件或版本不匹配");
     }
-    if (result.content_version) {
-      _viewCache.set(cacheKey, { data: result, ts: Date.now() });
-    }
+    cacheView(cacheKey, result);
+    cacheView(viewCacheKey({ workspaceKey: opts.workspaceKey, relative: opts.path,
+      version: result.content_version, sheet: opts.sheet, rect: opts.rect, withStyles: opts.withStyles }), result);
+    // An implicit active-sheet request can be reused by an explicit tab request.
+    if (!opts.sheet && result.windows.length === 1) cacheView(viewCacheKey({
+      workspaceKey: opts.workspaceKey, relative: opts.path, version: result.content_version,
+      sheet: result.windows[0].sheet, rect: opts.rect, withStyles: opts.withStyles,
+    }), result);
     return result;
-  })();
-
-  _viewInflight.set(inflightKey, pending);
-  try {
-    return await pending;
-  } finally {
-    if (_viewInflight.get(inflightKey) === pending) {
+  })().finally(() => {
+    if (_viewInflight.get(inflightKey) === flight) {
       _viewInflight.delete(inflightKey);
     }
-  }
+  });
+  _viewInflight.set(inflightKey, flight);
+  return readViewFlight(flight, opts.signal);
 }
 
 export function prefetchWorkbookView(opts: {
@@ -1347,9 +1437,11 @@ export function prefetchWorkbookView(opts: {
   workspaceKey: string;
   sessionId?: string;
   workspaceId?: string | null;
+  sheet?: string;
+  signal?: AbortSignal;
 }): void {
   if (!opts.path || (!opts.sessionId && !opts.workspaceId)) return;
-  void fetchWorkbookView(opts).catch(() => null);
+  void fetchWorkbookView({ ...opts, withStyles: false }).catch(() => null);
 }
 
 export interface ExcelWriteResponse {
@@ -1413,9 +1505,9 @@ export async function writeExcelCells(opts: {
  * 从工作区下载文件并返回 Blob（不触发浏览器下载）。
  * 用于重试时重新获取图片内容以编码 base64。
  */
-export async function fetchFileBlob(path: string, sessionId?: string): Promise<Blob> {
+export async function fetchFileBlob(path: string, sessionId?: string | null, workspaceId?: string | null): Promise<Blob> {
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
   const res = await fetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
@@ -1423,7 +1515,7 @@ export async function fetchFileBlob(path: string, sessionId?: string): Promise<B
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `fetchFileBlob error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.blob();
 }
@@ -1432,16 +1524,22 @@ export async function fetchFileBlob(path: string, sessionId?: string): Promise<B
 const DOWNLOAD_COOLDOWN_MS = 1000;
 const _downloadCooldowns = new Map<string, number>();
 
-export async function downloadFile(path: string, filename?: string, sessionId?: string): Promise<void> {
+export async function downloadFile(
+  path: string,
+  filename?: string,
+  sessionId?: string | null,
+  workspaceId?: string | null,
+): Promise<void> {
   const now = Date.now();
-  const lastTime = _downloadCooldowns.get(path) ?? 0;
+  const cooldownKey = `${workspaceId || sessionId || "_"}|${normalizeExcelPath(path)}`;
+  const lastTime = _downloadCooldowns.get(cooldownKey) ?? 0;
   if (now - lastTime < DOWNLOAD_COOLDOWN_MS) {
     // 同一文件冷却中，忽略本次请求
     return;
   }
-  _downloadCooldowns.set(path, now);
+  _downloadCooldowns.set(cooldownKey, now);
   const params = new URLSearchParams({ path: normalizeExcelPath(path) });
-  if (sessionId) params.set("session_id", sessionId);
+  appendWorkspaceScope(params, { sessionId, workspaceId });
   const url = buildApiUrl(`/files/download?${params.toString()}`, { direct: true });
   const res = await fetch(url, _withCredentials(url, {
     headers: { ...getAuthHeaders() },
@@ -1449,7 +1547,7 @@ export async function downloadFile(path: string, filename?: string, sessionId?: 
   }));
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Download error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   const blob = await res.blob();
   const name = filename || path.split("/").pop() || "download";
@@ -1463,7 +1561,7 @@ export async function downloadFile(path: string, filename?: string, sessionId?: 
   URL.revokeObjectURL(objectUrl);
 }
 
-export async function uploadFile(file: File, sessionId?: string | null): Promise<{
+export async function uploadFile(file: File, sessionId?: string | null, workspaceId?: string | null): Promise<{
   filename: string;
   path: string;
   size: number;
@@ -1471,32 +1569,42 @@ export async function uploadFile(file: File, sessionId?: string | null): Promise
   const formData = new FormData();
   formData.append("file", file);
   if (sessionId) formData.append("session_id", sessionId);
-  const res = await directFetch(buildApiUrl("/upload", { direct: true }), {
+  if (workspaceId) formData.append("workspace_id", workspaceId);
+  const res = await fetch(buildApiUrl("/upload"), {
     method: "POST",
+    headers: { ...getAuthHeaders() },
     body: formData,
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `Upload error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
 
-export async function uploadFileFromUrl(url: string): Promise<{
+export async function uploadFileFromUrl(
+  url: string,
+  sessionId?: string | null,
+  workspaceId?: string | null,
+): Promise<{
   filename: string;
   path: string;
   size: number;
 }> {
-  const res = await directFetch(buildApiUrl("/upload-from-url", { direct: true }), {
+  const res = await fetch(buildApiUrl("/upload-from-url"), {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ url }),
+    headers: { "Content-Type": "application/json", ...getAuthHeaders() },
+    body: JSON.stringify({
+      url,
+      session_id: sessionId || undefined,
+      workspace_id: workspaceId || undefined,
+    }),
     signal: _withTimeout(_UPLOAD_TIMEOUT_MS),
   });
   if (!res.ok) {
     const data = await res.json().catch(() => ({}));
-    throw new Error(data.error || `URL upload error: ${res.status}`);
+    throw new Error(formatApiErrorMessage(data, res.status));
   }
   return res.json();
 }
@@ -1672,25 +1780,61 @@ export interface RevisionListResponse {
 
 export async function fetchRevisions(
   path: string,
-  sessionId?: string,
+  opts?: { sessionId?: string; workspaceId?: string | null; limit?: number; signal?: AbortSignal },
 ): Promise<RevisionListResponse> {
   const params = new URLSearchParams({ path });
-  if (sessionId) params.set("session_id", sessionId);
-  return apiGet<RevisionListResponse>(`/revisions?${params.toString()}`);
+  if (opts?.sessionId) params.set("session_id", opts.sessionId);
+  if (opts?.workspaceId) params.set("workspace_id", opts.workspaceId);
+  if (opts?.limit) params.set("limit", String(opts.limit));
+  return apiGet<RevisionListResponse>(`/revisions?${params.toString()}`, { signal: opts?.signal });
 }
 
 export async function restoreRevision(opts: {
   path: string;
   revisionId: string;
-  expectedVersion: string;
+  expectedVersion?: string | null;
   sessionId?: string | null;
+  workspaceId?: string | null;
 }): Promise<{ status: string; path: string; content_version: string; restored_revision: string }> {
   return apiPost("/revisions/restore", {
     path: opts.path,
     revision_id: opts.revisionId,
-    expected_version: opts.expectedVersion,
+    ...(opts.expectedVersion ? { expected_version: opts.expectedVersion } : {}),
     session_id: opts.sessionId ?? null,
+    workspace_id: opts.workspaceId ?? null,
   });
+}
+
+export async function deleteRevision(opts: {
+  path: string;
+  revisionId: string;
+  sessionId?: string | null;
+  workspaceId?: string | null;
+}): Promise<{ status: string; path: string; deleted_revision: string }> {
+  return apiPost("/revisions/delete", {
+    path: opts.path,
+    revision_id: opts.revisionId,
+    session_id: opts.sessionId ?? null,
+    workspace_id: opts.workspaceId ?? null,
+  });
+}
+
+export async function fetchRevisionPreview(opts: {
+  path: string;
+  revisionId: string;
+  sessionId?: string | null;
+  workspaceId?: string | null;
+  signal?: AbortSignal;
+}): Promise<Partial<import("@/lib/workbook-view").WorkbookViewSnapshot> & {
+  revision_id: string;
+  revision_reason: string;
+  revision_label: string;
+  paragraphs?: { text?: string }[];
+}> {
+  const params = new URLSearchParams({ path: opts.path, revision_id: opts.revisionId });
+  if (opts.sessionId) params.set("session_id", opts.sessionId);
+  if (opts.workspaceId) params.set("workspace_id", opts.workspaceId);
+  return apiGet(`/revisions/preview?${params.toString()}`, { signal: opts.signal });
 }
 
 // ── Version Advanced Operations ─────────────────────────

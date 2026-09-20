@@ -33,6 +33,46 @@ def create_extra_from_engine(engine: Any) -> dict[str, Any]:
         or getattr(getattr(engine, "_config", None), "model", "")
         or ""
     )
+    config = getattr(engine, "_config", None)
+    protocol_hint = str(getattr(engine, "_active_protocol", "") or "")
+    if protocol_hint != "openai_responses":
+        try:
+            from excelmanus.request.route import resolve_route
+
+            protocol_hint = resolve_route(engine).protocol
+        except Exception:
+            pass
+    if protocol_hint == "openai_responses":
+        if bool(getattr(config, "responses_background_enabled", False)):
+            extra["_responses_background"] = True
+        if bool(getattr(config, "responses_continuation_enabled", False)):
+            generation = int(getattr(engine, "_compaction_generation", 0) or 0)
+            previous = getattr(engine, "_responses_last_response", None)
+            if not isinstance(previous, dict):
+                memory = getattr(engine, "_memory", None)
+                for message in reversed(list(getattr(memory, "messages", []) or [])):
+                    state = message.get("replay_state") if isinstance(message, dict) else None
+                    response_id = state.get("response_id") if isinstance(state, dict) else None
+                    source = message.get("replay_source") or {} if isinstance(message, dict) else {}
+                    if (isinstance(response_id, str) and response_id.strip()
+                            and source.get("compaction_generation", 0) == generation):
+                        previous = {
+                            "id": response_id.strip(),
+                            "protocol": "openai_responses",
+                            "model": api_model,
+                            "compaction_generation": generation,
+                        }
+                        break
+            protocol = str(getattr(engine, "_active_protocol", "") or "")
+            if (
+                isinstance(previous, dict)
+                and previous.get("protocol") == "openai_responses"
+                and protocol == "openai_responses"
+                and str(previous.get("model") or "") == api_model
+                and previous.get("compaction_generation", 0) == generation
+            ):
+                extra["_responses_previous_response_id"] = str(previous["id"])
+            extra["_responses_store"] = True
     from excelmanus.auth.providers.openai_codex import OpenAICodexProvider
 
     if OpenAICodexProvider.is_codex_profile_name(api_model):
@@ -254,6 +294,11 @@ async def compile_request(
     envelope: RequestEnvelope | None = None,
 ) -> tuple[PreparedRequest | None, str | None]:
     """Assemble + seal + header. Does not update last_accepted."""
+    from excelmanus.compaction import handoff_from_memory
+
+    _, handoff_error = handoff_from_memory(getattr(engine, "_memory", None))
+    if handoff_error:
+        return None, handoff_error + "；请恢复有效会话历史后继续。"
     if extra is None:
         extra = create_extra_from_engine(engine)
     engine._compile_extra = extra
@@ -278,6 +323,7 @@ async def compile_request(
             tool_access=tool_access,
             vision_capable=vision_capable,
             persist=persist_surface,
+            commit_dynamic=False,
         )
         if error is not None or envelope is None:
             return None, error or "系统上下文组装失败"
@@ -286,6 +332,15 @@ async def compile_request(
     if persist_surface and report.get("required_omitted") and "attachment_quota" not in {
         ev.get("type") for ev in series.events[-8:] if isinstance(ev, dict)
     }:
+        from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+        # 第一次投影只用于发现附件配额问题；在重编译前撤回其动态
+        # context，避免同一条 hook/mention 在 durable history 中出现两次。
+        rollback_prompt_dynamic(
+            engine,
+            getattr(engine, "_prompt_dynamic_appended_messages", None),
+        )
+        engine._prompt_dynamic_appended_messages = []
         series.start_new("attachment_quota")
         from excelmanus.prompt.envelope import invalidate_envelope
 
@@ -296,6 +351,7 @@ async def compile_request(
             tool_access=tool_access,
             vision_capable=vision_capable,
             persist=persist_surface,
+            commit_dynamic=False,
         )
         if error is not None or envelope is None:
             return None, error or "附件配额重装失败"
@@ -310,6 +366,12 @@ async def compile_request(
         route=route,
     )
     if seal_error is not None or sealed is None:
+        from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+        rollback_prompt_dynamic(
+            engine,
+            getattr(engine, "_prompt_dynamic_appended_messages", None),
+        )
         return None, seal_error or "请求封口失败"
 
     wire = list(getattr(sealed, "wire_messages", None) or [])
@@ -317,6 +379,12 @@ async def compile_request(
     header = _build_header(route, sealed, wire, transport=transport)
     prefix_error = series.check_prefix(header)
     if prefix_error:
+        from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+        rollback_prompt_dynamic(
+            engine,
+            getattr(engine, "_prompt_dynamic_appended_messages", None),
+        )
         return None, prefix_error
 
     from excelmanus.attachments.files_api import collect_wire_file_ids
@@ -324,9 +392,21 @@ async def compile_request(
     try:
         reserved = {"messages", "tools", "model", "system", "instructions", "input", "contents", "systemInstruction"}
         if reserved.intersection(((extra or {}).get("extra_body") or {})):
+            from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+            rollback_prompt_dynamic(
+                engine,
+                getattr(engine, "_prompt_dynamic_appended_messages", None),
+            )
             return None, "自定义请求体不能覆盖消息、工具、模型或系统策略"
         native_body = _provider_body(route, sealed, wire, header, extra)
     except (TypeError, ValueError) as exc:
+        from excelmanus.prompt.assemble import rollback_prompt_dynamic
+
+        rollback_prompt_dynamic(
+            engine,
+            getattr(engine, "_prompt_dynamic_appended_messages", None),
+        )
         return None, f"协议请求编译失败：{exc}"
     header = replace(header, provider_digest=digest_text(canonical_json(native_body)))
     prepared = PreparedRequest(
@@ -342,4 +422,8 @@ async def compile_request(
     )
     engine._prepared_request = prepared
     engine._last_envelope = sealed
+    from excelmanus.prompt.assemble import commit_prompt_dynamic
+
+    commit_prompt_dynamic(engine)
+    engine._prompt_dynamic_appended_messages = []
     return prepared, None

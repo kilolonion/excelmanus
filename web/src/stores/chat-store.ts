@@ -1,5 +1,6 @@
 import { create } from "zustand";
-import type { Message, Approval, Question, AssistantBlock, FileAttachment } from "@/lib/types";
+import type { Message, Approval, Question, AssistantBlock, FileAttachment, SubagentRun } from "@/lib/types";
+import { isSubagentActive, subagentChangedFiles } from "@/lib/subagent-runs";
 import { loadCachedMessages, saveCachedMessages, deleteCachedMessages, clearAllCachedMessages } from "@/lib/idb-cache";
 import { fetchSessionMessages, fetchSessionExcelEvents, clearAllSessions } from "@/lib/api";
 import { useSessionStore } from "@/stores/session-store";
@@ -929,6 +930,7 @@ interface ChatState {
     conversationId: string | null,
     updater: (block: AssistantBlock) => AssistantBlock,
   ) => void;
+  syncSubagentRuns: (sessionId: string, runs: SubagentRun[]) => void;
   updateToolCallBlock: (
     messageId: string,
     toolCallId: string | null,
@@ -1067,6 +1069,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               break;
             }
           }
+          if (targetIdx === -1) return message;
         }
         if (targetIdx === -1) {
           for (let i = message.blocks.length - 1; i >= 0; i--) {
@@ -1088,6 +1091,53 @@ export const useChatStore = create<ChatState>((set, get) => ({
         return { ...message, blocks };
       });
       return patch ?? {};
+    }),
+  syncSubagentRuns: (sessionId, runs) =>
+    set((state) => {
+      if (state.loadedSessionId !== sessionId) return {};
+      const byId = new Map(runs.filter((run) => run.background).map((run) => [run.run_id, run]));
+      let changed = false;
+      const messages = state.messages.map((message) => {
+        if (message.role !== "assistant") return message;
+        let messageChanged = false;
+        let affectedFiles = message.affectedFiles;
+        const blocks = message.blocks.map((block): AssistantBlock => {
+          if (block.type !== "subagent" || !block.conversationId) return block;
+          const run = byId.get(block.conversationId);
+          if (!run) return block;
+          // 对话事件已收到终态时，较早发出的活动状态查询不能把它变回进行中。
+          if (isSubagentActive(run.status) && block.status === "done" && block.stopReason) return block;
+          const next: typeof block = {
+            ...block,
+            background: true,
+            runStatus: run.status,
+            status: isSubagentActive(run.status) ? "running" : "done",
+            iterations: Math.max(block.iterations, run.iteration),
+            toolCalls: Math.max(block.toolCalls, run.tool_calls),
+            summary: run.result?.output || block.summary,
+            success: run.result ? run.result.stop_reason === "completed" : undefined,
+            stopReason: run.result?.stop_reason,
+            diagnostic: run.result?.diagnostic || undefined,
+          };
+          const files = subagentChangedFiles(run);
+          const merged = mergeAffectedFiles(affectedFiles ?? [], files);
+          if (merged.length !== (affectedFiles?.length ?? 0)) {
+            affectedFiles = merged;
+            messageChanged = true;
+          }
+          if (next.background === block.background && next.runStatus === block.runStatus
+            && next.status === block.status && next.iterations === block.iterations
+            && next.toolCalls === block.toolCalls && next.summary === block.summary
+            && next.success === block.success && next.stopReason === block.stopReason
+            && next.diagnostic === block.diagnostic) return block;
+          messageChanged = true;
+          return next;
+        });
+        if (!messageChanged) return message;
+        changed = true;
+        return { ...message, blocks, affectedFiles };
+      });
+      return changed ? _setMessagesSnapshot(messages) : {};
     }),
   updateToolCallBlock: (messageId, toolCallId, updater) =>
     set((state) => {

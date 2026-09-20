@@ -1,4 +1,5 @@
 import { resolveWorkbookPanelPath } from "@/components/excel/WorkbookPanelButton";
+import { isSpreadsheetFile } from "@/lib/file-kind";
 
 export type ChatWorkspaceTab = "chat" | "sheet";
 
@@ -14,6 +15,7 @@ export function resolveSheetFullViewTarget(input: {
   activeFilePath: string | null;
   activeSheet: string | null;
   recentFiles: { path: string; workspaceKey?: string }[];
+  workspaceFiles?: { path: string; filename: string; is_dir?: boolean }[];
   workspaceKey?: string | null;
   fullViewPath: string | null;
   fullViewSheet: string | null;
@@ -29,9 +31,13 @@ export function resolveSheetFullViewTarget(input: {
     input.recentFiles,
     input.workspaceKey,
   );
-  if (!path) return null;
+  const workspacePath = input.workspaceFiles?.find(
+    (file) => !file.is_dir && isSpreadsheetFile(file.filename || file.path),
+  )?.path;
+  const targetPath = path || workspacePath;
+  if (!targetPath) return null;
   return {
-    path,
-    sheet: path === input.activeFilePath ? input.activeSheet ?? undefined : undefined,
+    path: targetPath,
+    sheet: targetPath === input.activeFilePath ? input.activeSheet ?? undefined : undefined,
   };
 }

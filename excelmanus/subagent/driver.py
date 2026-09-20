@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
 from typing import Any
 
 from excelmanus.logger import get_logger
@@ -44,11 +45,12 @@ class InProcessDriver:
         self._child = child
         projected = wrap_on_event(on_event, descriptor)
         child._driver._on_event = projected
-        item = child._driver.enqueue_followup(prompt, extra={"on_event": projected})
+        item = child._driver.enqueue_followup(
+            prompt, extra={"on_event": projected, "chat_mode": getattr(child, "_current_chat_mode", "write")}
+        )
 
         async def _kick() -> Any:
-            await child._driver.kick()
-            return item.result
+            return await child._driver.wait_for_item(item)
 
         try:
             self._task = asyncio.create_task(_kick())
@@ -103,6 +105,13 @@ class InProcessDriver:
         self._disposed = True
         child = self._child
         task = self._task
+        if child is not None:
+            child_driver = getattr(child, "_driver", None)
+            stop = getattr(child_driver, "stop", None)
+            if callable(stop):
+                stopped = stop("aborted")
+                if inspect.isawaitable(stopped):
+                    await stopped
         if task is not None and not task.done():
             task.cancel()
             try:
@@ -116,5 +125,10 @@ class InProcessDriver:
             cancel = getattr(dispatcher, "request_cancel", None)
             if callable(cancel):
                 cancel()
+            close = getattr(getattr(child, "_client", None), "close", None)
+            if callable(close):
+                closed = close()
+                if inspect.isawaitable(closed):
+                    await closed
         self._child = None
         self._task = None

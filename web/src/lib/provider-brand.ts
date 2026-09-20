@@ -112,6 +112,125 @@ export function extractProvider(baseUrl: string | undefined): string {
   }
 }
 
+interface ModelBrandSource {
+  name?: string;
+  model?: string;
+  display_name?: string;
+  resolved_model?: string;
+  description?: string;
+  base_url?: string;
+  provider?: string;
+}
+
+const PROVIDER_ALIASES: Record<string, string> = {
+  openai: "openai",
+  "openai-codex": "openai-codex",
+  anthropic: "anthropic",
+  claude: "anthropic",
+  google: "gemini",
+  gemini: "gemini",
+  deepseek: "deepseek",
+  qwen: "qwen",
+  dashscope: "qwen",
+  aliyuncs: "qwen",
+  zhipu: "zhipu",
+  glm: "zhipu",
+  moonshot: "moonshot",
+  kimi: "moonshot",
+  x: "xai",
+  xai: "xai",
+  grok: "xai",
+  mistral: "mistral",
+  mistralai: "mistral",
+  meta: "meta",
+  llama: "meta",
+  openrouter: "openrouter",
+  tencent: "tencent",
+  hunyuan: "tencent",
+  qq: "tencent",
+  bytedance: "bytedance",
+  doubao: "bytedance",
+  volcengine: "bytedance",
+  baidu: "baidu",
+  perplexity: "perplexity",
+  nvidia: "nvidia",
+  huggingface: "huggingface",
+  hf: "huggingface",
+  siliconflow: "siliconflow",
+  siliconcloud: "siliconflow",
+  minimax: "minimax",
+  alibaba: "alibabacloud",
+  aliyun: "alibabacloud",
+  alibabacloud: "alibabacloud",
+  huawei: "huawei",
+};
+
+const MODEL_BRAND_PATTERNS: Array<[string, RegExp]> = [
+  ["openai-codex", /openai[-_\s/]?codex|\bcodex[-_\s/]+gpt/],
+  ["deepseek", /deep[-_\s]?seek/],
+  ["anthropic", /anthropic|claude/],
+  ["gemini", /gemini|generativelanguage\.googleapis/],
+  ["qwen", /qwen|tongyi|dashscope|aliyuncs/],
+  ["zhipu", /zhipu|\bglm[-_\s\d/]|bigmodel/],
+  ["moonshot", /moonshot|kimi/],
+  ["xai", /\bxai\b|\bgrok|api\.x\.ai/],
+  ["mistral", /mistral|codestral|pixtral/],
+  ["meta", /meta[-_\s/]?llama|\bllama/],
+  ["openrouter", /openrouter/],
+  ["tencent", /tencent|hunyuan|腾讯|混元/],
+  ["bytedance", /bytedance|doubao|volcengine|volces|字节|豆包/],
+  ["baidu", /baidu|ernie|qianfan|文心/],
+  ["perplexity", /perplexity|\bpplx/],
+  ["nvidia", /nvidia|nemotron/],
+  ["huggingface", /huggingface|hugging[-_\s]?face|\bhf\//],
+  ["siliconflow", /siliconflow|siliconcloud/],
+  ["minimax", /minimax/],
+  ["alibabacloud", /alibabacloud|aliyun|阿里云/],
+  ["huawei", /huawei|pangu|华为|盘古/],
+  ["openai", /openai|chatgpt|\bgpt(?:[-_\s/]|\d)|\bo[134](?:[-_\s/]|$)/],
+];
+
+function brandFromText(value: string | undefined): string | null {
+  const normalized = value?.trim().toLowerCase();
+  if (!normalized) return null;
+  for (const [brand, pattern] of MODEL_BRAND_PATTERNS) {
+    if (pattern.test(normalized)) return brand;
+  }
+  return null;
+}
+
+/**
+ * Infer the model's brand from its identity, not just its transport endpoint.
+ * This keeps branded models recognizable behind proxies and custom gateways.
+ */
+export function inferModelBrand(source: ModelBrandSource): string {
+  const modelIdentity = [
+    source.resolved_model,
+    source.model,
+    source.display_name,
+    source.name,
+  ].filter(Boolean).join(" ");
+  const modelBrand = brandFromText(modelIdentity);
+  if (modelBrand) return modelBrand;
+
+  const explicitProvider = source.provider?.trim().toLowerCase();
+  if (explicitProvider) {
+    const canonical = PROVIDER_ALIASES[explicitProvider];
+    if (canonical) return canonical;
+    const providerBrand = brandFromText(explicitProvider);
+    if (providerBrand) return providerBrand;
+  }
+
+  const endpointBrand = brandFromText(source.base_url);
+  if (endpointBrand) return endpointBrand;
+
+  const descriptionBrand = brandFromText(source.description);
+  if (descriptionBrand) return descriptionBrand;
+
+  const endpointProvider = extractProvider(source.base_url);
+  return PROVIDER_ALIASES[endpointProvider] || endpointProvider;
+}
+
 export function getProviderColor(provider: string): string {
   return PROVIDER_COLORS[provider] || "#6b7280";
 }

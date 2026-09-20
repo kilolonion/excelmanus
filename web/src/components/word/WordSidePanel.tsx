@@ -38,20 +38,21 @@ export function WordSidePanel() {
     }))
   );
   const activeSessionId = useSessionStore((state) => state.activeSessionId);
+  const activeWorkspaceId = useSessionStore((state) => state.sessions.find((item) => item.id === state.activeSessionId)?.workspaceId ?? null);
   const [refreshKey, setRefreshKey] = useState(0);
   const [actionError, setActionError] = useState<{ scope: string; message: string } | null>(null);
 
   const fileUrl = useMemo(() => {
     if (!activeDocPath) return "";
-    return buildWordFileUrl(activeDocPath, activeSessionId);
-  }, [activeDocPath, activeSessionId]);
+    return buildWordFileUrl(activeDocPath, activeSessionId, activeWorkspaceId);
+  }, [activeDocPath, activeSessionId, activeWorkspaceId]);
 
   const fileName = useMemo(() => {
     if (!activeDocPath) return "";
     return activeDocPath.split("/").pop() || activeDocPath;
   }, [activeDocPath]);
 
-  const viewScope = `${activeSessionId ?? ""}:${activeDocPath ?? ""}`;
+  const viewScope = `${activeWorkspaceId ?? activeSessionId ?? ""}:${activeDocPath ?? ""}`;
   const visibleActionError = actionError?.scope === viewScope ? actionError.message : null;
 
   const handleRefresh = useCallback(() => {
@@ -64,7 +65,7 @@ export function WordSidePanel() {
     if (!activeDocPath) return;
 
     setActionError(null);
-    void downloadFile(activeDocPath, fileName || undefined, activeSessionId ?? undefined).catch(
+    void downloadFile(activeDocPath, fileName || undefined, activeSessionId, activeWorkspaceId).catch(
       (err: unknown) => {
         console.error("Error downloading Word file:", err);
         setActionError({
@@ -73,7 +74,7 @@ export function WordSidePanel() {
         });
       }
     );
-  }, [activeDocPath, activeSessionId, fileName, viewScope]);
+  }, [activeDocPath, activeSessionId, activeWorkspaceId, fileName, viewScope]);
 
   if (!panelOpen || !activeDocPath) return null;
 
@@ -177,7 +178,7 @@ export function WordSidePanel() {
             </p>
           </div>
           <div className="flex-1 min-h-0">
-            <RevisionTimelinePanel filePath={activeDocPath} active={panelOpen && panelTab === "history"} />
+            <RevisionTimelinePanel filePath={activeDocPath} workspaceId={activeWorkspaceId} active={panelOpen && panelTab === "history"} />
           </div>
         </div>
       </div>

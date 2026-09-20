@@ -161,6 +161,18 @@ export function JevRoleSection() {
                     onChange={(value) => setDraft((prev) => ({ ...prev, jev_observation: value }))}
                   />
                 </JevFieldRow>
+                <JevFieldRow label="写入验证" desc="写入回合结束后，观察 Jev 是否认为用户要求已完成；当前只记录，不改变执行。">
+                  <JevGateSelect
+                    value={draft.jev_verification}
+                    onChange={(value) => setDraft((prev) => ({ ...prev, jev_verification: value }))}
+                  />
+                </JevFieldRow>
+                <JevFieldRow label="失败恢复" desc="熔断后记录恢复建议；当前不会自动重试或停止循环。">
+                  <JevGateSelect
+                    value={draft.jev_recovery}
+                    onChange={(value) => setDraft((prev) => ({ ...prev, jev_recovery: value }))}
+                  />
+                </JevFieldRow>
                 <JevFieldRow label="界面建议" desc="完成后是否打开表格或侧栏。">
                   <Switch
                     checked={draft.jev_ui_hint}
@@ -174,14 +186,6 @@ export function JevRoleSection() {
                     checked={draft.jev_mode_hint}
                     onCheckedChange={(checked) =>
                       setDraft((prev) => ({ ...prev, jev_mode_hint: checked }))
-                    }
-                  />
-                </JevFieldRow>
-                <JevFieldRow label="临时代码模式" desc="本轮可以临时改用代码模式，不会改你的默认设置。">
-                  <Switch
-                    checked={draft.jev_present_as_auto}
-                    onCheckedChange={(checked) =>
-                      setDraft((prev) => ({ ...prev, jev_present_as_auto: checked }))
                     }
                   />
                 </JevFieldRow>

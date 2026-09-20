@@ -154,6 +154,30 @@ async def test_restore_stale_version_returns_409(
 
 
 @pytest.mark.asyncio
+async def test_restore_deleted_file_does_not_require_live_version(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _harness(tmp_path, monkeypatch)
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    svc = WorkspaceFileService(tmp_path)
+    svc.create("book.xlsx", b"v0")
+    listed_before = svc.list_history("book.xlsx")
+    revision_id = listed_before[-1].id if listed_before else None
+    assert revision_id
+    svc.delete("book.xlsx", expected_version=content_version_of_file(tmp_path / "book.xlsx"))
+    assert not (tmp_path / "book.xlsx").exists()
+
+    from excelmanus.api_routes_workspace import RevisionRestoreRequest, restore_revision
+
+    response = await restore_revision(
+        RevisionRestoreRequest(path="book.xlsx", revision_id=revision_id)
+    )
+    assert response.status_code == 200
+    assert (tmp_path / "book.xlsx").read_bytes()
+
+
+@pytest.mark.asyncio
 async def test_list_revisions_rejects_reserved_path(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -164,3 +188,29 @@ async def test_list_revisions_rejects_reserved_path(
     with pytest.raises(HTTPException) as ei:
         await list_revisions(path=".excelmanus/revisions/x.xlsx")
     assert ei.value.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_preview_revision_reads_immutable_workbook_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _harness(tmp_path, monkeypatch)
+    from io import BytesIO
+    from excelmanus.workspace.file_service import WorkspaceFileService
+
+    wb = Workbook()
+    wb.active["A1"] = "historical"
+    buffer = BytesIO()
+    wb.save(buffer)
+    wb.close()
+    svc = WorkspaceFileService(tmp_path)
+    svc.create("book.xlsx", buffer.getvalue())
+    revision_id = svc.list_history("book.xlsx")[-1].id
+
+    from excelmanus.api_routes_workspace import preview_revision
+
+    response = await preview_revision(path="book.xlsx", revision_id=revision_id)
+    assert response.status_code == 200
+    body = _json(response)
+    assert body["revision_id"] == revision_id
+    assert body["windows"][0]["cells"]["1,1"]["v"] == "historical"

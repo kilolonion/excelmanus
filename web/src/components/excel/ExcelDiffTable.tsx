@@ -436,11 +436,6 @@ function GridSingleView({
 }
 
 function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }: { changes: ExcelCellDiff[]; layout: DiffLayout; profile: DiffProfile; mergeRanges?: MergeRange[]; oldMergeRanges?: MergeRange[] }) {
-  // 全增/全删：单表展示，不浪费空间显示空表
-  if (profile !== "mixed") {
-    return <GridSingleView changes={changes} profile={profile} mergeRanges={profile === "all-deleted" ? oldMergeRanges : mergeRanges} />;
-  }
-
   const { cols, rows, cellMap } = useGridLayout(changes);
 
   const { masterMap: oldMMap, hiddenSet: oldHSet } = useMemo(
@@ -451,6 +446,11 @@ function GridDiffView({ changes, layout, profile, mergeRanges, oldMergeRanges }:
     () => buildMergeMaps(mergeRanges),
     [mergeRanges],
   );
+
+  // Keep hook order stable when a streamed diff changes from additions to mixed edits.
+  if (profile !== "mixed") {
+    return <GridSingleView changes={changes} profile={profile} mergeRanges={profile === "all-deleted" ? oldMergeRanges : mergeRanges} />;
+  }
 
   const isVertical = layout === "vertical";
 

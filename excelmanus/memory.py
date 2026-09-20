@@ -27,6 +27,7 @@ _INJECTED_USER_PREFIXES = (
     "<skill-invocation",
     "<mention_context>",
     "## Hook 上下文",
+    "<sourced-context",
 )
 
 # role → 事件 kind（无 _event_kind 标记时的兜底映射）。
@@ -699,7 +700,7 @@ class ConversationMemory:
                 msg = {
                     "role": "tool",
                     "tool_call_id": tc_id,
-                    "content": "[任务已中断，该工具未执行完成]",
+                    "content": "[任务已中断，该工具的结果未完整记录；继续前需核对实际执行结果]",
                 }
                 self._messages.append(msg)
                 self._emit("tool/result", msg)

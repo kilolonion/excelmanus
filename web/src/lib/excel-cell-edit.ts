@@ -64,7 +64,8 @@ export type SheetValueChangedLike = {
   effectedRanges?: RangeLike[];
 };
 
-const FLUSH_MS = 80;
+const FLUSH_MS = 200;
+const MAX_FLUSH_MS = 1000;
 
 type PersistFn = (
   opts: {
@@ -100,12 +101,25 @@ interface PendingBatch {
   onConflict?: () => void;
   onError?: (message: string) => void;
   timer: ReturnType<typeof setTimeout> | null;
+  startedAt: number;
 }
 
 const pendingByPath = new Map<string, PendingBatch>();
 const inFlightByPath = new Map<string, Promise<void>>();
 const pausedByPath = new Set<string>();
 const acknowledgedVersions = new Map<string, { before: string; after: string }>();
+const editListeners = new Set<() => void>();
+
+export function subscribeWorkbookEdits(listener: () => void): () => void {
+  editListeners.add(listener);
+  return () => { editListeners.delete(listener); };
+}
+
+function emitEditState() { for (const listener of editListeners) listener(); }
+
+export function isWorkbookEditPaused(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): boolean {
+  return isPaused(fileRefKey(file), file.relative);
+}
 
 /** 将 0-based 列索引转换为 Excel 列字母（0→A, 25→Z, 26→AA）。 */
 export function colIndexToLetter(index: number): string {
@@ -363,14 +377,16 @@ export async function persistExcelCellEdits(
   if (isDemoExcelPath(opts.path)) return { kind: "skipped" };
 
   const currentGen = useExcelStore.getState().viewGeneration;
-  if (opts.viewGeneration != null && opts.viewGeneration !== currentGen) {
-    return { kind: "skipped" };
+  const capturedScope = Boolean(opts.workspaceKey && opts.workspaceKey !== "_"
+    && (opts.workspaceId || opts.sessionId) && opts.expectedVersion);
+  if (opts.viewGeneration != null && opts.viewGeneration !== currentGen && !capturedScope) {
+    return { kind: "error", message: "工作区已切换，无法确定未保存更改的来源" };
   }
 
   const resolved = { ...defaultDeps(), ...deps };
   const session = activeSession();
   const workspaceKey = opts.workspaceKey ?? workspaceKeyFromSession(session);
-  const sessionId = opts.sessionId ?? resolved.getSessionId() ?? undefined;
+  const sessionId = opts.sessionId !== undefined ? opts.sessionId ?? undefined : resolved.getSessionId() ?? undefined;
   const expectedVersion =
     opts.expectedVersion ?? resolved.getExpectedVersion(opts.path, workspaceKey);
   if (!expectedVersion) {
@@ -387,7 +403,7 @@ export async function persistExcelCellEdits(
       changes: [],
       operations,
       sessionId,
-      workspaceId: opts.workspaceId ?? session?.workspaceId ?? null,
+      workspaceId: opts.workspaceKey ? opts.workspaceId ?? null : opts.workspaceId ?? session?.workspaceId ?? null,
       expectedVersion,
     });
     if (isExcelWriteConflict(result)) {
@@ -397,6 +413,7 @@ export async function persistExcelCellEdits(
       resolved.setContentVersion(opts.path, result.content_version, workspaceKey);
     }
     resolved.invalidateCaches({ workspaceKey, relative: opts.path });
+    useExcelStore.getState().notifyWorkbookChanged(opts.path, workspaceKey, result.content_version, "local");
     useExcelStore.getState().bumpWorkspaceFilesVersion();
     return { kind: "ok", contentVersion: result.content_version };
   } catch (err) {
@@ -442,6 +459,17 @@ export function resumeExcelCellEdits(path: string): void {
   }
 }
 
+/** Explicit reload discards this file's uncommitted queue before rebasing. */
+export function discardWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): void {
+  const key = fileRefKey(file);
+  const pending = pendingByPath.get(key);
+  if (pending?.timer) clearTimeout(pending.timer);
+  pendingByPath.delete(key);
+  pausedByPath.delete(key);
+  acknowledgedVersions.delete(key);
+  emitEditState();
+}
+
 export function enqueueExcelCellEdit(opts: {
   path: string;
   sheet?: string;
@@ -478,6 +506,7 @@ export function enqueueExcelCellEdit(opts: {
       onConflict: opts.onConflict,
       onError: opts.onError,
       timer: null,
+      startedAt: Date.now(),
     };
     pendingByPath.set(key, batch);
   }
@@ -496,7 +525,8 @@ export function enqueueExcelCellEdit(opts: {
   if (batch.timer) clearTimeout(batch.timer);
   batch.timer = setTimeout(() => {
     void flushPath(key);
-  }, FLUSH_MS);
+  }, Math.max(0, Math.min(FLUSH_MS, MAX_FLUSH_MS - (Date.now() - batch.startedAt))));
+  emitEditState();
 }
 
 export function enqueueWorkbookCommand(opts: {
@@ -531,6 +561,7 @@ export function enqueueWorkbookCommand(opts: {
       onConflict: opts.onConflict,
       onError: opts.onError,
       timer: null,
+      startedAt: Date.now(),
     };
     pendingByPath.set(key, batch);
   }
@@ -540,7 +571,8 @@ export function enqueueWorkbookCommand(opts: {
   if (batch.timer) clearTimeout(batch.timer);
   batch.timer = setTimeout(() => {
     void flushPath(key);
-  }, FLUSH_MS);
+  }, Math.max(0, Math.min(FLUSH_MS, MAX_FLUSH_MS - (Date.now() - batch.startedAt))));
+  emitEditState();
 }
 
 async function flushPath(key: string): Promise<void> {
@@ -591,7 +623,15 @@ async function flushPath(key: string): Promise<void> {
     await next;
   } finally {
     if (inFlightByPath.get(key) === held) inFlightByPath.delete(key);
+    emitEditState();
   }
+}
+
+/** Drain only this file; switching surfaces must not discard debounced edits. */
+export async function flushWorkbookEdits(file: Pick<WorkspaceFileRef, "workspaceKey" | "relative">): Promise<void> {
+  const key = fileRefKey(file);
+  await flushPath(key);
+  await inFlightByPath.get(key);
 }
 
 /** 测试用：立刻冲刷队列并等待在途写入。 */

@@ -96,6 +96,9 @@ _LIST_SHEETS_DIMENSIONS = (
     "charts",
     "images",
     "conditional_formatting",
+    "data_validation",
+    "print_settings",
+    "tables",
     "column_widths",
     "styles",
     "merges",
@@ -183,6 +186,9 @@ def list_sheets(
     limit: int = 100,
     include: list[str] | None = None,
     max_preview_rows: int = 5,
+    sheet_name: str | None = None,
+    header_row: int | None = None,
+    expected_version: str | None = None,
 ) -> ToolResult:
     """列出 Excel 文件中所有工作表的名称和基本信息，可按需附加额外维度。
 
@@ -220,10 +226,31 @@ def list_sheets(
         return not_found
     from excelmanus.workbook.data import _open_tool_snapshot
 
-    snap, snap_err = _open_tool_snapshot(file_path)
+    snap, snap_err = _open_tool_snapshot(file_path, expected_version=expected_version)
     if snap_err is not None:
         return snap_err
     safe_path = snap.backing_path
+
+    if snap.is_csv():
+        from excelmanus.workbook.data import _read_df, _df_to_compact_records
+        if sheet_name not in (None, "", "Sheet1"):
+            return error_result("CSV/TSV 只有逻辑工作表 Sheet1", code="SHEET_NOT_FOUND")
+        df, internal_header = _read_df(safe_path, None, header_row=header_row)
+        supported = {"columns", "preview", "dtypes"}
+        unsupported = sorted(set(include or []) - supported)
+        info = {"name": "Sheet1", "rows": len(df) + max(0, internal_header + 1),
+                "columns": len(df.columns), "header_row": internal_header + 1,
+                "column_names": [str(c) for c in df.columns], "sheet_state": "visible",
+                "dtypes": {str(c): str(df[c].dtype) for c in df.columns},
+                "preview": _df_to_compact_records(df.head(max_preview_rows))}
+        payload = {"file_path": snap.file.relative, "content_version": snap.content_version,
+                   "sheet_count": 1, "sheets": [info] if offset == 0 else [], "offset": offset,
+                   "returned": int(offset == 0), "has_more": False, "values": [],
+                   "coverage": {"kind": "complete", "scope": "structure; preview sampled"},
+                   "meta": {"kind": "overview"}, "result_kind": "matrix"}
+        if unsupported:
+            payload["warnings"] = [f"CSV/TSV 不含这些工作簿对象: {unsupported}"]
+        return ok_result(payload)
 
     include_set: set[str] = set(include) if include else set()
     invalid_dims = include_set - set(_LIST_SHEETS_DIMENSIONS)
@@ -239,7 +266,14 @@ def list_sheets(
     try:
         active_name = wb.active.title if wb.active else None
         sheets: list[dict[str, Any]] = []
-        for ws in wb.worksheets:
+        selected = wb.worksheets
+        if sheet_name:
+            from excelmanus.workbook.snapshot import require_default_sheet, SnapshotError
+            try:
+                selected = [wb[require_default_sheet(wb.sheetnames, sheet_name)]]
+            except SnapshotError as exc:
+                return error_result(str(exc), code=exc.code, fields=exc.fields)
+        for ws in selected:
             state = _sheet_state_of(ws)
             info: dict[str, Any] = {
                 "name": ws.title,
@@ -250,21 +284,28 @@ def list_sheets(
                 "hidden": state != "visible",
             }
 
-            if "columns" in include_set:
-                header_row = list(ws.iter_rows(
-                    min_row=1, max_row=1, values_only=True,
+            resolved_header = 1 if header_row is None else header_row
+            if "columns" in include_set or "preview" in include_set:
+                if header_row is None:
+                    from excelmanus.workbook.data import _detect_header_row
+                    detected = _detect_header_row(safe_path, ws.title)
+                    resolved_header = (detected + 1 if detected is not None else 1)
+                resolved_header = max(0, resolved_header)
+                info["header_row"] = resolved_header if resolved_header else -1
+            if "columns" in include_set and resolved_header:
+                header_cells = list(ws.iter_rows(
+                    min_row=resolved_header, max_row=resolved_header, values_only=True,
                 ))
-                if header_row and header_row[0]:
+                if header_cells and header_cells[0]:
                     info["column_names"] = [
                         str(c) if c is not None else None
-                        for c in header_row[0]
-                        if c is not None
+                        for c in header_cells[0]
                     ]
 
             if "preview" in include_set:
                 preview_rows: list[list[Any]] = []
                 for row in ws.iter_rows(
-                    min_row=2, max_row=1 + max_preview_rows, values_only=True,
+                    min_row=resolved_header + 1, max_row=resolved_header + max_preview_rows, values_only=True,
                 ):
                     preview_rows.append([
                         str(c) if c is not None else None for c in row
@@ -278,6 +319,8 @@ def list_sheets(
                     _collect_conditional_formatting,
                     _collect_freeze_panes,
                     _collect_images,
+                    _collect_data_validation,
+                    _collect_print_settings,
                 )
 
                 if "freeze_panes" in include_set:
@@ -288,6 +331,12 @@ def list_sheets(
                     info["images"] = _collect_images(ws)
                 if "conditional_formatting" in include_set:
                     info["conditional_formatting"] = _collect_conditional_formatting(ws)
+                if "data_validation" in include_set:
+                    info["data_validation"] = _collect_data_validation(ws)
+                if "print_settings" in include_set:
+                    info["print_settings"] = _collect_print_settings(ws)
+                if "tables" in include_set:
+                    info["tables"] = [{"name": table.name, "range": table.ref} for table in ws.tables.values()]
                 if "column_widths" in include_set:
                     info["column_widths"] = _collect_column_widths(ws)
                 if "styles" in include_set:

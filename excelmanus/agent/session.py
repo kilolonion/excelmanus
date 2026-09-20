@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
@@ -117,6 +117,8 @@ class AgentEngine:
         self._session_id: str | None = None
         self._history_snapshot_index: int = 0
         self._state = SessionState()
+        from excelmanus.trace import TraceRecorder
+        self._trace = TraceRecorder()
         self._session_role = role if role in {"host", "child"} else "host"
         self._is_host_session = self._session_role == "host"
         # ── LLM 客户端（仅激活模型） ──
@@ -292,14 +294,15 @@ class AgentEngine:
         self._plan_active: bool = False
         self._pending_plan_exit: str | None = None
         self._last_compact_failed: bool = False
+        self._compaction_handoff: dict[str, Any] = {}
         self._skill_catalog_digest: str | None = None
-        self._present_as: str = (
-            self._load_persisted_present_as(database) if self._is_host_session else "native"
-        )
         self._turn_exposure: dict[str, Any] | None = None
+        # Set by Driver for the active turn.  A synchronous child may point at
+        # the parent's object so nested work consumes the same budget.
+        self._turn_budget: Any = None
+        self._inherited_turn_budget: Any = None
         self._exposure_sticky: dict[str, Any] | None = None
         self._exposure_last_tools: list[str] = []
-        self._turn_present_as: str | None = None
         self._turn_image_count: int = 0
         self._prompt_user_contexts: list[str] = []
         self._prompt_tool_snapshot: list[Any] | None = None
@@ -329,6 +332,7 @@ class AgentEngine:
         self._database = database
         self._llm_call_store: Any = None  # 类型：LLMCallStore | None
         self._checkpoint_store: Any = None  # 类型：SessionStateStore | None
+        self._persist_session_messages: Callable[[], None] | None = None
         if database is not None:
             try:
                 from excelmanus.stores.llm_call_store import LLMCallStore as _LCS
@@ -381,6 +385,7 @@ class AgentEngine:
         self._active_protocol: str = config.protocol
         self._active_model_name: str | None = None  # 当前激活的 profile name
         self._active_profile: ModelProfile | None = None  # 当前激活的完整 profile
+        self._responses_last_response: dict[str, str] | None = None
 
         # ── 上下文预算管理（切换模型时自动更新） ──
         # base_tokens（锁定值，不随模型切换变化）仅在用户显式指定时设置。
@@ -747,6 +752,7 @@ class AgentEngine:
         # 清理所有 pending 状态，避免 rollback 后 chat() 误入旧的
         # pending question/approval/plan 处理路径，导致孤立 tool_call_id 400 错误
         self._question_flow.clear()
+        self._interaction_handler.clear_recovery()
         self._system_question_actions.clear()
         self._batch_answers.clear()
         self._pending_question_route_result = None
@@ -762,6 +768,7 @@ class AgentEngine:
         # SessionState 中与已回退轮次相关的累积状态
         self._state.affected_files.clear()
         self._state.write_operations_log.clear()
+        self.restore_compaction_handoff()
         # 历史被截断，旧信封前缀已失效；不丢弃会 fail-closed 粘死会话
         from excelmanus.prompt.envelope import invalidate_envelope
 
@@ -1065,8 +1072,34 @@ class AgentEngine:
         except Exception:
             logger.debug("prompt cache 预热失败，跳过", exc_info=True)
 
+    def _responses_client(self) -> Any:
+        from excelmanus.providers.openai_responses import OpenAIResponsesClient
+
+        if not isinstance(self._client, OpenAIResponsesClient):
+            raise RuntimeError("当前会话没有使用 OpenAI Responses provider")
+        return self._client
+
+    async def get_responses_background(self, response_id: str) -> dict[str, Any]:
+        return await self._responses_client().get_background_response(response_id)
+
+    async def cancel_responses_background(self, response_id: str) -> dict[str, Any]:
+        return await self._responses_client().cancel_background_response(response_id)
+
+    async def steer_responses(self, response_id: str, message: str) -> Any:
+        return await self._responses_client().steer_response(
+            response_id,
+            message,
+            model=self._active_model,
+        )
+
+    async def shutdown_agents(self) -> None:
+        """关闭会话任务；共享 MCP 连接由 SessionManager 单独管理。"""
+        await self._subagent_runtime.close()
+        await self._driver.stop("shutdown")
+
     async def shutdown_mcp(self) -> None:
         """关闭所有 MCP Server 连接，释放资源。"""
+        await self.shutdown_agents()
         await self._cancel_registry_scan()
 
         if self._active_skills:
@@ -1191,9 +1224,10 @@ class AgentEngine:
         if self._checkpoint_store is None or self._session_id is None:
             return
         try:
-            from excelmanus.tools.runtime import preferred_present_as
-
-            self._state.present_as = preferred_present_as(getattr(self, "_present_as", "native"))
+            # 任务状态所引用的对话边界先落盘，避免恢复到了比消息更新的步骤。
+            persist_messages = getattr(self, "_persist_session_messages", None)
+            if callable(persist_messages):
+                persist_messages()
             memory_generation = getattr(self._memory, "_compaction_generation", 0) if self._memory is not None else 0
             self._state.compaction_generation = int(
                 getattr(self, "_compaction_generation", 0) or memory_generation or 0
@@ -1203,6 +1237,8 @@ class AgentEngine:
 
             self._state.wire_epoch = snapshot_wire_epoch(getattr(self, "_wire_epoch", None))
             self._state.request_series = series_of(self).to_dict()
+            self._state.runtime_state = self._driver.runtime_state()
+            self._state.runtime_state["subagents"] = self._subagent_runtime.snapshot()
             from excelmanus.prompt.cache_restore import attach_prefix_to_state_dict
 
             state_dict = attach_prefix_to_state_dict(
@@ -1227,6 +1263,7 @@ class AgentEngine:
         try:
             cp = self._checkpoint_store.load_latest_checkpoint(self._session_id)
             if cp is None:
+                self.restore_compaction_handoff()
                 return False
             from excelmanus.engine_core.session_state import SessionState, epoch_identity_from_dict
             from excelmanus.prompt.cache_restore import extract_restored_prefix
@@ -1236,9 +1273,6 @@ class AgentEngine:
             # 保留 _file_registry 引用（不序列化）
             restored_state._file_registry = self._state._file_registry
             self._state = restored_state
-            from excelmanus.tools.runtime import preferred_present_as
-
-            self._present_as = preferred_present_as(restored_state.present_as)
             self._tools_cache = None
             self._compaction_generation = int(restored_state.compaction_generation or 0)
             if self._memory is not None:
@@ -1256,6 +1290,12 @@ class AgentEngine:
             # 迁移任务清单到现有 _task_store（保持工具引用有效）
             self._task_store._task_list = restored_store._task_list
             self._task_store._plan_file_path = restored_store._plan_file_path
+            driver = getattr(self, "_driver", None)
+            restore_runtime = getattr(driver, "restore_runtime_state", None)
+            if callable(restore_runtime):
+                restore_runtime(restored_state.runtime_state)
+            self._subagent_runtime.restore(restored_state.runtime_state.get("subagents") or [])
+            self.restore_compaction_handoff()
             logger.info(
                 "session snapshot 恢复成功: session=%s turn=%s",
                 self._session_id, cp["turn_number"],
@@ -1316,7 +1356,48 @@ class AgentEngine:
         status["usage_ratio"] = (
             round(current / max_tokens, 3) if max_tokens > 0 else 0.0
         )
+        from copy import deepcopy
+        from excelmanus.compaction import handoff_from_memory
+
+        artifact, error = handoff_from_memory(self._memory)
+        status["handoff"] = deepcopy(artifact)
+        status["handoff_error"] = error
         return status
+
+    def record_compaction_handoff(self, handoff: dict[str, Any] | None) -> None:
+        """Persist the structured progress artifact for the next context window."""
+        from copy import deepcopy
+
+        if not isinstance(handoff, dict) or handoff.get("schema_version") != 1:
+            return
+        self._compaction_handoff = deepcopy(handoff)
+
+    @property
+    def _compaction_handoff(self) -> dict[str, Any]:
+        return self._state.compaction_handoff
+
+    @_compaction_handoff.setter
+    def _compaction_handoff(self, value: dict[str, Any]) -> None:
+        self._state.compaction_handoff = value
+
+    def restore_compaction_handoff(self) -> None:
+        from excelmanus.compaction import handoff_from_memory
+
+        artifact, error = handoff_from_memory(self._memory)
+        if error:
+            logger.warning("压缩交接恢复失败: %s", error)
+        # Surface wins if messages were saved before the execution snapshot, or
+        # an explicit rollback removed the old artifact. Never resurrect it.
+        self._compaction_handoff = artifact
+        if artifact:
+            if artifact["generation"] > self._compaction_generation:
+                from excelmanus.request.series import series_of
+
+                series_of(self).start_new("surface/compact")
+                self._responses_last_response = None
+            generation = max(self._compaction_generation, artifact["generation"])
+            self._compaction_generation = self._memory._compaction_generation = generation
+            self._state.compaction_generation = generation
 
     def _sync_context_window_consumers(self) -> None:
         """将 ContextBudget 的有效窗口同步到 memory / compaction。"""
@@ -1348,6 +1429,30 @@ class AgentEngine:
             object.__setattr__(
                 self._config, "compaction_threshold_ratio", compaction_threshold_ratio,
             )
+
+    def apply_execution_budget(
+        self,
+        *,
+        turn_timeout_seconds: int | None = None,
+        turn_token_budget: int | None = None,
+        turn_cost_budget_usd: float | None = None,
+        input_cost_per_1k_usd: float | None = None,
+        output_cost_per_1k_usd: float | None = None,
+    ) -> None:
+        """Apply budget settings to future turns in this live engine.
+
+        An already running turn keeps its immutable deadline and counters.
+        """
+        values = {
+            "turn_timeout_seconds": turn_timeout_seconds,
+            "turn_token_budget": turn_token_budget,
+            "turn_cost_budget_usd": turn_cost_budget_usd,
+            "input_cost_per_1k_usd": input_cost_per_1k_usd,
+            "output_cost_per_1k_usd": output_cost_per_1k_usd,
+        }
+        for name, value in values.items():
+            if value is not None:
+                object.__setattr__(self._config, name, value)
 
     @property
     def last_route_result(self) -> SkillMatchResult:
@@ -1400,31 +1505,7 @@ class AgentEngine:
             store = UserConfigStore(self._database.conn)
             store.set_full_access(enabled)
         except Exception:
-            logger.debug("持久化 full_access 失败", expl_info=True)
-
-    def _load_persisted_present_as(self, database: "Database | None") -> str:
-        """从用户级配置读取代码模式偏好（跨会话继承）。"""
-        if database is None:
-            return "native"
-        try:
-            from excelmanus.stores.config_store import UserConfigStore
-            store = UserConfigStore(database.conn)
-            return store.get_present_as()
-        except Exception:
-            logger.debug("读取持久化 present_as 失败", expl_info=True)
-            return "native"
-
-    def _persist_present_as(self, mode: str) -> None:
-        """将代码模式偏好持久化到用户级配置（跨会话生效）。"""
-        if self._database is None:
-            return
-        try:
-            from excelmanus.stores.config_store import UserConfigStore
-            from excelmanus.tools.runtime import preferred_present_as
-            store = UserConfigStore(self._database.conn)
-            store.set_present_as(preferred_present_as(mode))
-        except Exception:
-            logger.debug("持久化 present_as 失败", expl_info=True)
+            logger.debug("持久化 full_access 失败", exc_info=True)
 
     @property
     def subagent_enabled(self) -> bool:
@@ -1645,6 +1726,8 @@ class AgentEngine:
             return None
         if self._interaction_registry.has_pending(pending.approval_id):
             return pending
+        if self._interaction_handler.approval_is_actionable(pending.approval_id):
+            return pending
         return None
 
     def discard_stale_web_approval(self, *, in_flight: bool) -> bool:
@@ -1658,7 +1741,13 @@ class AgentEngine:
             return False
         if self._interaction_registry.has_pending(pending.approval_id):
             return False
+        if self._interaction_handler.approval_is_actionable(pending.approval_id):
+            return False
         if in_flight:
+            return False
+        record = self._driver._turn_record or {}
+        if record.get("status") == "interrupted":
+            # 进程恢复后的待审批数据仍属于中断任务，不能当作已决策单据丢掉。
             return False
         logger.warning("丢弃无法 resolve 的过期待审批: %s", pending.approval_id)
         self._approval.clear_pending()
@@ -1822,12 +1911,16 @@ class AgentEngine:
 
     def _emit(self, on_event: EventCallback | None, event: ToolCallEvent) -> None:
         """安全地发出事件，捕获回调异常。"""
+        runtime = getattr(self, "_tool_runtime", None)
+        if runtime is not None and not runtime.filter_event(event):
+            return
         driver = getattr(self, "_driver", None)
         if driver is not None:
             if not event.turn_id:
                 event.turn_id = driver.turn_id
             if not event.step_id:
                 event.step_id = driver.step_id
+        self._trace_event(event)
         self._record_tool_call_audit(event)
         if on_event is None:
             return
@@ -1835,6 +1928,15 @@ class AgentEngine:
             on_event(event)
         except Exception as exc:
             logger.warning("事件回调异常: %s", exc)
+
+    def _trace_event(self, event: ToolCallEvent) -> None:
+        """Trace is observational; failures must not suppress execution events."""
+        from excelmanus.trace import record_event
+
+        try:
+            record_event(self, event)
+        except Exception:
+            logger.debug("trace event failed", exc_info=True)
 
     def _record_tool_call_audit(self, event: ToolCallEvent) -> None:
         """TOOL_CALL_START/END 写入既有 session_events（非 surface），不另起全文日志。"""
@@ -1862,7 +1964,6 @@ class AgentEngine:
         approval_resolver: ApprovalResolver | None = None,
         question_resolver: QuestionResolver | None = None,
         chat_mode: str = "write",
-        present_as: str | None = None,
     ) -> ChatResult:
         from excelmanus.agent.session_api import followup as _impl
         return await _impl(
@@ -1876,7 +1977,6 @@ class AgentEngine:
             approval_resolver=approval_resolver,
             question_resolver=question_resolver,
             chat_mode=chat_mode,
-            present_as=present_as,
         )
 
 
@@ -1973,8 +2073,10 @@ class AgentEngine:
 
         series_of(self).note("catalog/change")
 
+        from excelmanus.prompt.skill_catalog import render_skill_invocation
+
         context_text = selected.render_context()
-        return f"OK\n{context_text}"
+        return f"OK\n{render_skill_invocation(selected.name, context_text)}"
 
     @staticmethod
     def _normalize_mcp_identifier(name: str) -> str:
@@ -2265,74 +2367,59 @@ class AgentEngine:
         iteration: int,
         route_result: SkillMatchResult | None,
     ) -> list[tuple[Any, ToolCallResult]]:
-        """并发执行一批只读工具调用，返回与输入同序的 (tc, result) 列表。
+        """Bound worker count and emit starts only when a queued call is admitted."""
+        from excelmanus.engine_core.tool_result import error_result
 
-        1. 按序预发射所有 TOOL_CALL_START 事件（保证前端展示顺序）
-        2. asyncio.gather 并发执行（skip_start_event=True 避免重复发射）
-        3. 异常转为失败 ToolCallResult，不影响其他工具
-        """
-        from excelmanus.events import EventType, ToolCallEvent
+        dispatcher = self._tool_dispatcher
+        assert dispatcher is not None
+        limit = max(1, min(32, int(getattr(self._config, "parallel_tool_max", 4) or 4)))
+        pending = iter(enumerate(batch))
+        ordered: list[Any] = [None] * len(batch)
 
-        # 按序预发射 TOOL_CALL_START
-        for tc in batch:
-            func = getattr(tc, "function", None)
-            args, _ = self._tool_dispatcher.parse_arguments(
-                getattr(func, "arguments", None),
-            )
-            tc_id = getattr(tc, "id", "")
-            tc_name = getattr(func, "name", "")
-            self._emit(
-                on_event,
-                ToolCallEvent(
-                    event_type=EventType.TOOL_CALL_START,
-                    tool_call_id=tc_id,
-                    tool_name=tc_name,
-                    arguments=args,
-                    iteration=iteration,
-                ),
-            )
-            # /tools 开启时额外发射简要工具调用通知
-            if self._show_tool_calls:
-                self._emit(
-                    on_event,
-                    ToolCallEvent(
-                        event_type=EventType.TOOL_CALL_NOTICE,
-                        tool_call_id=tc_id,
-                        tool_name=tc_name,
-                        arguments=args,
-                        iteration=iteration,
-                    ),
-                )
+        async def worker() -> None:
+            for index, tc in pending:
+                # There is no await between dequeue and admission; cancellation
+                # closes admission before another tool function can start.
+                if dispatcher.is_cancelled():
+                    raise asyncio.CancelledError
+                function = getattr(tc, "function", None)
+                name = getattr(function, "name", "")
+                call_id = getattr(tc, "id", "")
+                args, _ = dispatcher.parse_arguments(getattr(function, "arguments", None))
+                self._tool_runtime.prepare_call(tc, on_event, iteration)
+                try:
+                    from types import SimpleNamespace
 
-        # 并发执行
-        async def _run_one(tc: Any) -> tuple[Any, ToolCallResult]:
-            result = await self._execute_tool_call(
-                tc, tool_scope, on_event, iteration,
-                route_result=route_result,
-                skip_start_event=True,
-            )
-            return (tc, result)
+                    parallel_call = SimpleNamespace(
+                        id=call_id, function=function, type=getattr(tc, "type", "function"),
+                        parent_call_id=getattr(tc, "parent_call_id", None), _parallel_admitted=True,
+                        _execution_id=getattr(tc, "_execution_id", ""),
+                    )
+                    from excelmanus.agent.loop import _execute_and_resolve_tool
 
-        raw_results = await asyncio.gather(
-            *[_run_one(tc) for tc in batch],
-            return_exceptions=True,
-        )
+                    result = await self._tool_runtime.run_managed(
+                        parallel_call, lambda: _execute_and_resolve_tool(
+                            self, parallel_call, tool_scope, on_event, iteration, route_result,
+                            getattr(self, "_approval_resolver", None),
+                        ), on_event, iteration,
+                    )
+                    tc._pending_result_written = getattr(parallel_call, "_pending_result_written", False)
+                except Exception as exc:
+                    structured = error_result(f"并行执行异常: {exc}", code="TOOL_EXECUTION_ERROR")
+                    result = ToolCallResult(tool_name=name, arguments=args, result=structured.model_text,
+                                            success=False, error="TOOL_EXECUTION_ERROR", structured=structured)
+                ordered[index] = (tc, result)
 
-        # 异常转为失败结果，保持位置顺序
-        ordered: list[tuple[Any, ToolCallResult]] = []
-        for i, r in enumerate(raw_results):
-            if isinstance(r, BaseException):
-                tc = batch[i]
-                name = getattr(getattr(tc, "function", None), "name", "")
-                ordered.append((tc, ToolCallResult(
-                    tool_name=name,
-                    arguments={},
-                    result=f"并行执行异常: {r}",
-                    success=False,
-                    error=str(r),
-                )))
-            else:
-                ordered.append(r)
+        workers = [asyncio.create_task(worker()) for _ in range(min(limit, len(batch)))]
+        try:
+            await asyncio.gather(*workers)
+        except BaseException:
+            for task in workers:
+                if not task.done():
+                    task.cancel()
+            # Sync tool threads must settle before the parent turn resumes.
+            await asyncio.gather(*workers, return_exceptions=True)
+            raise
         return ordered
 
     def _apply_tool_result_hard_cap(self, text: str) -> str:
@@ -2415,8 +2502,7 @@ class AgentEngine:
             with memory_tools.bind_memory_context(self._persistent_memory):
                 return self._registry.call_tool(name, args, tool_scope=scope)
 
-        try:
-            return await asyncio.to_thread(
+        execution = asyncio.create_task(asyncio.to_thread(
                 self._approval.execute_and_audit,
                 approval_id=approval_id,
                 tool_name=tool_name,
@@ -2427,7 +2513,12 @@ class AgentEngine:
                 created_at_utc=created_at_utc,
                 session_turn=self._state.session_turn,
                 session_id=self._session_id,
-            )
+            ))
+        try:
+            return await asyncio.shield(execution)
+        except asyncio.CancelledError:
+            await asyncio.shield(asyncio.gather(execution, return_exceptions=True))
+            raise
         except Exception as exc:  # noqa: BLE001
             # execute_and_audit 在失败时会先写入 manifest 与 _applied，再抛异常。
             # 这里将失败记录带回调用方，避免上层丢失审计上下文。
@@ -2454,6 +2545,7 @@ class AgentEngine:
         from excelmanus.events import EventType, ToolCallEvent
 
         write_happened = False
+        self._interaction_handler.record_approval_decision(approval_id, decision or "reject")
         if decision in ("accept", "fullaccess"):
             if decision == "fullaccess":
                 self._full_access_enabled = True
@@ -2493,6 +2585,7 @@ class AgentEngine:
                 "%s完成: decision=%s ok=%s tool=%s",
                 source, decision, exec_ok, pending.tool_name,
             )
+            self._interaction_handler.finish_approval(approval_id, exec_result, exec_ok)
             return dict(
                 pending_approval=False,
                 success=exec_ok,
@@ -2516,6 +2609,7 @@ class AgentEngine:
                 ),
             )
             logger.info("%s拒绝: %s", source, approval_id)
+            self._interaction_handler.finish_approval(approval_id, reject_msg, False)
             return dict(
                 pending_approval=False,
                 success=False,
@@ -2536,6 +2630,10 @@ class AgentEngine:
         共享逻辑：同时被 _handle_accept_command 和循环内联审批使用。
         """
         from excelmanus.attachments.offload import attachment_ids_from_engine
+        self._interaction_handler.record_approval_decision(pending.approval_id, "accept")
+        self._interaction_handler.approval_execution_started(pending.approval_id)
+        if self._approval.pending is not None and self._approval.pending.approval_id == pending.approval_id:
+            self._approval.clear_pending()
         from excelmanus.tools.context import (
             ToolCallContext,
             bind_call,
@@ -2663,6 +2761,9 @@ class AgentEngine:
         from excelmanus.engine_core.tool_result import coerce_legacy_result
 
         structured = coerce_legacy_result(payload)
+        if self._get_tool_write_effect(pending.tool_name) == "workspace_write":
+            for path in [*structured.ui_meta.files, *(change.path for change in record.changes)]:
+                self._state.record_affected_file(path)
         self._tool_dispatcher._apply_ui_meta_effects(structured)
         if on_event is not None:
             self._tool_dispatcher._emit_ui_meta_events(
@@ -2746,15 +2847,23 @@ class AgentEngine:
                 payload={"reason": "clear_memory"},
             )
         self._memory.clear()
+        from excelmanus.trace import TraceRecorder
+
+        self._trace = TraceRecorder()
+        self._trace_active_request_key = None
+        self._trace_last_request_key = None
         from excelmanus.prompt.envelope import reset_system_projection
 
         reset_system_projection(self)
         self._last_envelope = None
+        self._compaction_handoff = {}
+        self._compaction_generation = self._memory._compaction_generation = 0
         self._envelope_prefix_snapshot = None
         self._restored_envelope_prefix = None
         self._wire_epoch = None
         self._wire_digest_payload = None
         self._wire_epoch_needs_restore = False
+        self._responses_last_response = None
         from excelmanus.request.series import RequestSeries
 
         self._request_series = RequestSeries()
@@ -2763,6 +2872,7 @@ class AgentEngine:
         self._active_skills.clear()
         self._tools_cache = None  # 技能清空 → 失效缓存
         self._question_flow.clear()
+        self._interaction_handler.clear_recovery()
         self._system_question_actions.clear()
         self._batch_answers.clear()
         self._pending_question_route_result = None
@@ -2776,6 +2886,16 @@ class AgentEngine:
             skills_used=[],
             route_mode="fallback",
         )
+        # clear 的异步入口先停止 actor/子任务，再清掉恢复快照中的旧任务与通知。
+        from excelmanus.agent.inbox import Inbox
+
+        self._driver.inbox = Inbox()
+        self._driver.turn_index = self._driver.step_index = 0
+        self._driver.turn_id = self._driver.step_id = ""
+        self._driver._turn_record = None
+        self._driver._active_item = None
+        self._subagent_runtime = SubagentRuntime(self)
+        self.save_session_snapshot()
 
     @property
     def turn_count(self) -> int:
@@ -2982,6 +3102,7 @@ class AgentEngine:
         self._active_api_key = next_api_key
         self._active_base_url = next_base_url
         self._active_protocol = next_protocol
+        self._responses_last_response = None
         self._client = create_client(
             api_key=self._active_api_key,
             base_url=self._active_base_url,
@@ -3061,6 +3182,7 @@ class AgentEngine:
         self._active_base_url = mgr.active_base_url
         self._active_protocol = mgr.active_protocol
         self._client = mgr.client
+        self._responses_last_response = None
 
     async def _adapt_guidance_only_slash_route(
         self,

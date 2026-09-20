@@ -57,11 +57,21 @@ def test_resolve_child_runtime_uses_parent_active() -> None:
 
 
 def test_compose_child_prompt_has_delegation_lock() -> None:
-    parent = SimpleNamespace(_prompt_composer=None, _runtime_vars={})
-    text = compose_child_prompt(parent, SubagentConfig(name="x", description="探查"))
+    parent = _make_prompt_parent()
+    text = compose_child_prompt(parent, SubagentConfig(
+        name="x", description="探查", source="project", system_prompt="你负责探查。",
+    ))
     assert "探查" in text
     assert "不能扩大" in text
     assert "最多重试" not in text
+
+
+def _make_prompt_parent():
+    from excelmanus.prompt.load import PromptComposer
+
+    composer = PromptComposer(Path(__file__).resolve().parents[1] / "excelmanus" / "prompts")
+    composer.load_all(auto_repair=False)
+    return SimpleNamespace(_prompt_composer=composer, _runtime_vars={"workspace_root": "/tmp", "model": "test"})
 
 
 def test_explorer_write_guard_rejects_mutating_and_nested_writes() -> None:
@@ -196,7 +206,7 @@ async def test_driver_timeout_maps_aborted() -> None:
     descriptor = SubagentDescriptor(run_id="run-1", agent_name="explorer")
 
     class _Hang:
-        async def kick(self) -> None:
+        async def wait_for_item(self, _item) -> None:
             await asyncio.sleep(10)
 
         def enqueue_followup(self, *_args, **_kwargs):

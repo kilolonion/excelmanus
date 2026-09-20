@@ -86,6 +86,21 @@ _DANGEROUS_PATTERNS: list[re.Pattern[str]] = [
 ]
 
 
+def _split_command(command: str) -> list[str]:
+    """Restricted grammar: on Windows backslashes are path characters.
+
+    This is intentionally not cmd/PowerShell evaluation; shell=False remains.
+    Both quote styles group arguments; shell expansions remain prohibited.
+    """
+    if os.name != "nt":
+        return shlex.split(command)
+    lexer = shlex.shlex(command, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""
+    return list(lexer)
+
+
 def _tail(text: str, lines: int) -> str:
     """取文本尾部指定行数。"""
     if lines <= 0:
@@ -139,7 +154,7 @@ def _validate_single_command(segment: str) -> tuple[bool, str]:
             return False, f"检测到危险字符模式: {pattern.pattern}"
 
     try:
-        tokens = shlex.split(stripped)
+        tokens = _split_command(stripped)
     except ValueError as exc:
         return False, f"命令解析失败: {exc}"
     if not tokens:
@@ -326,7 +341,7 @@ def preflight_command(command: str) -> tuple[bool, str]:
         return False, reason
     for chain_text, _ in _split_chain_simple(command.strip()):
         for segment in _split_pipeline(chain_text.strip()):
-            tokens = shlex.split(segment.strip())
+            tokens = _split_command(segment.strip())
             if not tokens:
                 continue
             name = Path(tokens[0]).name
@@ -334,7 +349,7 @@ def preflight_command(command: str) -> tuple[bool, str]:
                 if os.name == "nt":
                     return False, (
                         f"当前 Windows 主机没有可执行命令: {name}（PowerShell 别名不能由 shell=False 执行）。"
-                        "文件浏览请使用 list_directory；需要文本处理请使用已安装的可执行命令。"
+                        "文件浏览请使用 list_directory/read_text_file；表格处理请使用原生表格工具；计算和文本处理请使用 run_code。"
                     )
                 return False, f"当前主机找不到可执行命令: {name}"
     return True, "ok"
@@ -346,8 +361,16 @@ def preflight_shell(arguments: dict[str, Any], guard: FileAccessGuard) -> ToolRe
         inspect.signature(run_shell).bind(**arguments)
     except TypeError as exc:
         return error_result(f"run_shell 参数不匹配：{exc}", code="INVALID_ARGS", fields={"preflight": True})
+    from excelmanus.tools.context import call_has_full_access
+
     command = arguments.get("command", "")
-    valid, reason = preflight_command(command)
+    unrestricted = call_has_full_access()
+    if not isinstance(command, str) or not command.strip():
+        valid, reason = False, "命令不能为空"
+    elif unrestricted:
+        valid, reason = True, "ok"
+    else:
+        valid, reason = preflight_command(command)
     if valid:
         try:
             timeout = arguments.get("timeout_seconds", 30)
@@ -359,11 +382,12 @@ def preflight_shell(arguments: dict[str, Any], guard: FileAccessGuard) -> ToolRe
             workdir = guard.resolve_and_validate(arguments.get("workdir", "."))
             if not workdir.is_dir():
                 raise ValueError("workdir 必须是存在的目录")
-            from excelmanus.security.source_isolation import command_touches_product_source
+            if not unrestricted:
+                from excelmanus.security.source_isolation import command_touches_product_source
 
-            if command_touches_product_source(command):
-                raise ValueError("禁止用 shell 读取产品源码")
-            valid, reason = _check_sensitive_paths(command, workdir, guard.workspace_root)
+                if command_touches_product_source(command, guard.workspace_root):
+                    raise ValueError("禁止用 shell 读取产品源码")
+                valid, reason = _check_sensitive_paths(command, workdir, guard.workspace_root)
         except (ValueError, TypeError, OSError, SecurityViolationError) as exc:
             valid, reason = False, str(exc)
     if valid:
@@ -399,7 +423,7 @@ def _check_sensitive_paths(
         pipe_segments = _split_pipeline(seg_stripped)
         for pipe_seg in pipe_segments:
             try:
-                tokens = shlex.split(pipe_seg.strip())
+                tokens = _split_command(pipe_seg.strip())
             except ValueError:
                 continue
             if not tokens:
@@ -442,10 +466,10 @@ def run_shell(
     timeout_seconds: int = 30,
     tail_lines: int = 80,
 ) -> ToolResult:
-    """执行受限 shell 命令（仅允许白名单内命令）。
+    """执行 shell 命令。
 
-    适用于文件探查、搜索、环境信息查询等只读场景。
-    写操作和网络请求被严格禁止。
+    「询问」模式仅允许白名单内的只读命令。「跳过」模式由宿主签发
+    full_access 能力，直接交给系统 shell，可联网、起子进程和写入文件。
     """
     if timeout_seconds <= 0:
         raise ValueError("timeout_seconds 必须大于 0")
@@ -459,41 +483,49 @@ def run_shell(
     if not workdir_safe.exists() or not workdir_safe.is_dir():
         raise NotADirectoryError(f"工作目录不存在: {workdir_safe}")
 
+    from excelmanus.tools.context import call_has_full_access
+
+    unrestricted = call_has_full_access()
+    if not isinstance(command, str) or not command.strip():
+        return from_payload(
+            {"status": "blocked", "reason": "命令不能为空", "command": command},
+        )
+
     from excelmanus.security.source_isolation import (
         PRODUCT_SOURCE_FORBIDDEN,
         command_touches_product_source,
         is_product_source_path,
     )
 
-    # 安全校验
-    valid, reason = preflight_command(command)
-    if not valid:
-        return from_payload(
-            {"status": "blocked", "reason": reason, "command": command},
-        )
-    if command_touches_product_source(command):
-        return from_payload(
-            {
-                "status": "blocked",
-                "reason": f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止用 shell 读取产品源码",
-                "command": command,
-            },
-        )
+    if not unrestricted:
+        # 「询问」模式保留原有白名单、源码和敏感路径约束。
+        valid, reason = preflight_command(command)
+        if not valid:
+            return from_payload(
+                {"status": "blocked", "reason": reason, "command": command},
+            )
+        if command_touches_product_source(command, guard.workspace_root):
+            return from_payload(
+                {
+                    "status": "blocked",
+                    "reason": f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止用 shell 读取产品源码",
+                    "command": command,
+                },
+            )
 
-    # 敏感路径校验
-    path_ok, path_reason = _check_sensitive_paths(
-        command, workdir_safe, guard.workspace_root,
-    )
-    if not path_ok:
-        return from_payload(
-            {"status": "blocked", "reason": path_reason, "command": command},
+        path_ok, path_reason = _check_sensitive_paths(
+            command, workdir_safe, guard.workspace_root,
         )
+        if not path_ok:
+            return from_payload(
+                {"status": "blocked", "reason": path_reason, "command": command},
+            )
 
     # 构建最小环境
-    sandbox_env = _build_shell_env()
+    sandbox_env = _build_shell_env(allow_network=unrestricted)
 
-    # 按 && / || 拆分为链式段
-    chain_segments = _split_chain_simple(command.strip())
+    # 受限路径继续用 shell=False 的小语法；跳过审批时才交给系统 shell。
+    chain_segments = [] if unrestricted else _split_chain_simple(command.strip())
 
     started = time.time()
     timed_out = False
@@ -502,6 +534,26 @@ def run_shell(
     stderr = ""
 
     try:
+        if unrestricted:
+            completed = subprocess.run(
+                command,
+                cwd=workdir_safe,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout_seconds,
+                check=False,
+                env=sandbox_env,
+                stdin=subprocess.DEVNULL,
+                close_fds=True,
+                start_new_session=True,
+                shell=True,
+                **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
+            )
+            return_code = completed.returncode
+            stdout = completed.stdout or ""
+            stderr = completed.stderr or ""
         for chain_idx, (seg_text, chain_op) in enumerate(chain_segments):
             # 链式运算符语义
             if chain_idx > 0:
@@ -518,7 +570,7 @@ def run_shell(
 
             if len(segments) == 1:
                 # 单命令，直接执行
-                tokens = shlex.split(segments[0].strip())
+                tokens = _split_command(segments[0].strip())
                 completed = subprocess.run(
                     tokens,
                     cwd=workdir_safe,
@@ -533,6 +585,7 @@ def run_shell(
                     close_fds=True,
                     start_new_session=True,
                     shell=False,
+                    **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
                 )
                 return_code = completed.returncode
                 seg_stdout = completed.stdout or ""
@@ -542,7 +595,7 @@ def run_shell(
                 procs: list[subprocess.Popen[str]] = []
                 prev_stdout: Any = subprocess.DEVNULL
                 for idx, seg in enumerate(segments):
-                    tokens = shlex.split(seg.strip())
+                    tokens = _split_command(seg.strip())
                     stdin_src = prev_stdout if idx > 0 else subprocess.DEVNULL
                     p = subprocess.Popen(
                         tokens,
@@ -556,6 +609,7 @@ def run_shell(
                         env=sandbox_env,
                         close_fds=True,
                         start_new_session=True,
+                        **({"creationflags": subprocess.CREATE_NO_WINDOW} if os.name == "nt" else {}),
                     )
                     # 关闭上一个进程的 stdout（已被当前进程接管）
                     if idx > 0 and prev_stdout is not None:
@@ -603,9 +657,13 @@ def run_shell(
             ) or ""
         )
     except FileNotFoundError:
-        seg0 = _split_pipeline(chain_segments[0][0].strip())
+        if unrestricted:
+            missing = command.strip().split(maxsplit=1)[0]
+        else:
+            seg0 = _split_pipeline(chain_segments[0][0].strip())
+            missing = _split_command(seg0[0].strip())[0]
         return error_result(
-            f"命令未找到: {shlex.split(seg0[0].strip())[0]}",
+            f"命令未找到: {missing}",
             code="NOT_FOUND",
             fields={"command": command},
         )
@@ -630,7 +688,7 @@ def run_shell(
     return from_payload(result)
 
 
-def _build_shell_env() -> dict[str, str]:
+def _build_shell_env(*, allow_network: bool = False) -> dict[str, str]:
     """构建最小 shell 环境变量。"""
     import os
 
@@ -640,27 +698,37 @@ def _build_shell_env() -> dict[str, str]:
         value = os.environ.get(key)
         if value:
             env[key] = value
+    if allow_network:
+        for key in (
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY",
+            "http_proxy", "https_proxy", "all_proxy", "no_proxy",
+            "SSL_CERT_FILE", "REQUESTS_CA_BUNDLE", "CURL_CA_BUNDLE",
+        ):
+            value = os.environ.get(key)
+            if value:
+                env[key] = value
     return env
 
 
 def get_tools() -> list[ToolDef]:
-    """返回受限 Shell 工具定义。"""
+    """返回按当前审批策略执行的 Shell 工具定义。"""
     return [
         ToolDef(
             name="run_shell",
             description=(
-                "执行本机已安装的白名单只读可执行文件；不解释 PowerShell 别名或 cmd 内置命令。"
+                "执行本机 shell 命令。「询问」模式只允许已安装的白名单只读可执行文件；"
+                "「跳过」模式自动批准并允许任意系统 shell 命令，包括网络请求和子进程。"
+                "受限模式不解释 PowerShell 别名或 cmd 内置命令。"
                 f"白名单：{', '.join(sorted(ALLOWED_COMMANDS))}。"
                 "目录浏览优先用 list_directory，文本读取用 read_text_file。参数与主机可用性在审批前校验。"
-                "适用场景：文件探查、搜索、环境信息查询等只读操作。"
-                "不适用：写入操作和网络请求（严格禁止）。"
+                "「询问」模式仅适合文件探查、搜索和环境信息查询。"
             ),
             input_schema={
                 "type": "object",
                 "properties": {
                     "command": {
                         "type": "string",
-                        "description": "shell 命令（仅白名单命令，支持管道）",
+                        "description": "shell 命令（询问模式仅白名单；跳过模式允许任意系统命令）",
                     },
                     "workdir": {
                         "type": "string",

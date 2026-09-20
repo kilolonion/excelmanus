@@ -161,11 +161,35 @@ export function getLastAssistantMessage(
 
 const S = () => useChatStore.getState();
 
+function updateResultBlock(messageId: string, callId: string | null, update: (block: AssistantBlock, previousMessage: boolean) => AssistantBlock, executionId?: string) {
+  if (executionId) {
+    const owner = [...S().messages].reverse().find((message) => message.role === "assistant"
+      && message.blocks.some((block) => block.type === "tool_call" && block.executionId === executionId));
+    if (owner) {
+      S().updateAssistantMessage(owner.id, (message) => ({ ...message,
+        blocks: message.blocks.map((block) => block.type === "tool_call" && block.executionId === executionId
+          ? update(block, owner.id !== messageId) : block),
+      }));
+      return;
+    }
+  }
+  const original = callId ? [...S().messages].reverse().find((message) => message.role === "assistant"
+    && message.blocks.some((block) => block.type === "tool_call" && block.toolCallId === callId)) : null;
+  if (original && original.id !== messageId) {
+    S().updateAssistantMessage(original.id, (message) => ({ ...message,
+      blocks: message.blocks.map((block) => block.type === "tool_call" && block.toolCallId === callId ? update(block, true) : block),
+    }));
+  } else {
+    S().updateToolCallBlock(messageId, callId, (block) => update(block, false));
+  }
+}
+
 /** Apply one changed-files batch from either MUTATION or legacy FILES_CHANGED. */
 function applyChangedFiles(
   ctx: SSEHandlerContext,
   msgId: string,
   changedFiles: string[],
+  mutations: { identity?: string; content_version?: string }[] = [],
 ): void {
   if (changedFiles.length === 0) return;
   ctx.hadPersistedToolWork = true;
@@ -177,6 +201,8 @@ function applyChangedFiles(
     if (!filePath) continue;
     const filename = filePath.split("/").pop() || filePath;
     excelStore.addRecentFileIfNotDismissed({ path: filePath, filename }, sourceWorkspaceKey);
+    const version = mutations.find((item) => item.identity?.replace(/^\.\//, "") === filePath.replace(/^\.\//, ""))?.content_version;
+    excelStore.notifyWorkbookChanged(filePath, sourceWorkspaceKey, version || undefined);
   }
   wordStore.handleFilesChanged(changedFiles);
   S().addAffectedFiles(msgId, changedFiles);
@@ -413,6 +439,30 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     // --- 工具调用 ---
+    case "tool_call_state": {
+      const callId = data.tool_call_id as string;
+      const executionId = data.execution_id as string;
+      const executionState = data.execution_state as string;
+      if (!callId || !executionId) break;
+      const message = getLastAssistantMessage(S().messages, msgId);
+      const existing = message?.blocks.find((b) => b.type === "tool_call" && b.toolCallId === callId
+        && (!b.executionId || b.executionId === executionId));
+      if (existing) {
+        S().updateToolCallBlock(msgId, callId, (b) => {
+          if (b.type !== "tool_call" || b.toolCallId !== callId || (b.executionId && b.executionId !== executionId)) return b;
+          if (b.status === "success" || b.status === "error") return b;
+          return { ...b, executionId, executionState,
+            status: executionState === "queued" ? "pending" : b.status } as AssistantBlock;
+        });
+      } else if (executionState === "queued") {
+        S().appendBlock(msgId, { type: "tool_call", toolCallId: callId,
+          executionId, executionState, status: "pending", name: (data.tool_name as string) || "",
+          args: (data.arguments as Record<string, unknown>) || {},
+          parentCallId: (data.parent_call_id as string) || undefined,
+        });
+      }
+      break;
+    }
     case "tool_call_start": {
       S().setPipelineStatus(null);
       const toolCallIdRaw = data.tool_call_id;
@@ -425,15 +475,21 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         : undefined;
       const msgForStart = getLastAssistantMessage(S().messages, msgId);
       const streamingExists = toolCallId && msgForStart?.blocks.some(
-        (b) => b.type === "tool_call" && b.toolCallId === toolCallId && (b.status as string) === "streaming",
+        (b) => b.type === "tool_call" && b.toolCallId === toolCallId
+          && (b.status === "streaming" || b.executionState === "queued" || b.executionState === "cancelling"
+            || (!!data.execution_id && b.executionId === data.execution_id)),
       );
       if (streamingExists) {
         S().updateToolCallBlock(msgId, toolCallId!, (b) => {
           if (b.type === "tool_call") {
+            if (b.status === "success" || b.status === "error") return b;
+            if (b.executionId && data.execution_id && b.executionId !== data.execution_id) return b;
             return {
               ...b,
               args: (data.arguments as Record<string, unknown>) || b.args,
               status: "running",
+              executionId: (data.execution_id as string) || b.executionId,
+              executionState: (data.execution_state as string) || "running",
               iteration: (data.iteration as number) || undefined,
               parentCallId: parentCallId ?? b.parentCallId,
             } as AssistantBlock;
@@ -447,6 +503,8 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           name: (data.tool_name as string) || "",
           args: (data.arguments as Record<string, unknown>) || {},
           status: "running",
+          executionId: (data.execution_id as string) || undefined,
+          executionState: (data.execution_state as string) || undefined,
           iteration: (data.iteration as number) || undefined,
           parentCallId,
         });
@@ -468,22 +526,25 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           pendingQuestion: false,
         });
       }
-      S().updateToolCallBlock(msgId, toolCallId, (b) => {
+      updateResultBlock(msgId, toolCallId, (b, previousMessage) => {
         if (b.type === "tool_call") {
-          if (b.status === "pending") {
+          const executionId = data.execution_id as string | undefined;
+          if (executionId && (b.toolCallId !== toolCallId || (b.executionId && b.executionId !== executionId))) return b;
+          if (b.status === "pending" && !previousMessage && !data.execution_state) {
             return { ...b, result: (data.result as string) || undefined } as AssistantBlock;
           }
-          if (b.status === "running" || (b.status as string) === "streaming") {
+          if ((executionId && b.executionId === executionId) || previousMessage || b.status === "running" || b.status === "streaming" || (b.status === "pending" && data.execution_state)) {
             return {
               ...b,
               status: data.success ? "success" : "error",
               result: (data.result as string) || undefined,
               error: (data.error as string) || undefined,
+              executionState: (data.execution_state as string) || b.executionState,
             } as AssistantBlock;
           }
         }
         return b;
-      });
+      }, (data.execution_id as string) || undefined);
       if (data.success && data.ui && typeof data.ui === "object") {
         const merge = (data.ui as Record<string, unknown>).merge;
         if (merge && typeof merge === "object") {
@@ -519,6 +580,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         toolCalls: 0,
         status: "running",
         conversationId: (data.conversation_id as string) || "",
+        background: data.background === true,
         tools: [],
       });
       break;
@@ -608,6 +670,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
           return {
             ...b,
             status: "done",
+            runStatus: b.runStatus === "paused" ? "paused" : undefined,
             success: (data.success as boolean) ?? true,
             stopReason: (data.stop_reason as string) || (data.reason as string) || "",
             diagnostic: (data.diagnostic as string) || "",
@@ -680,11 +743,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         pendingApproval: false,
       });
       const arToolCallId = (data.tool_call_id as string) || null;
-      S().updateToolCallBlock(msgId, arToolCallId, (b) => {
-        if (
-          b.type === "tool_call"
-          && (b.status === "pending" || b.status === "running" || b.status === "streaming")
-        ) {
+      // 单个问题已回答不代表整组 ask_user 已完成，等待真实 tool_call_end。
+      if (toolName !== "ask_user" || arToolCallId) updateResultBlock(msgId, arToolCallId, (b) => {
+        if (b.type === "tool_call") {
           return {
             ...b,
             status: success ? ("success" as const) : ("error" as const),
@@ -840,7 +901,9 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
     }
 
     case "mutation": {
-      applyChangedFiles(ctx, msgId, (data.files as string[]) || []);
+      const mutations = (data.mutations as { identity?: string; content_version?: string }[]) || [];
+      const files = [...new Set([...(data.files as string[] || []), ...mutations.flatMap((m) => m.identity ? [m.identity] : [])])];
+      applyChangedFiles(ctx, msgId, files, mutations);
       break;
     }
 
@@ -913,13 +976,10 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
         uiMode.setFullAccessEnabled(enabled);
       } else if (modeName === "chat_mode") {
         uiMode.setChatMode(data.value as "write" | "read" | "plan");
-      } else if (modeName === "present_as") {
-        uiMode.setPresentAs(enabled ? "code" : "native");
       }
       const _modeLabelMap: Record<string, string> = {
         full_access: "跳过审批",
         chat_mode: "对话模式",
-        present_as: "代码模式",
       };
       const modeLabel = _modeLabelMap[modeName] || modeName;
       const modeAction = enabled ? "Enabled" : "Disabled";
@@ -987,9 +1047,17 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
       const sheet = sheetRaw || undefined;
       if (filePath && pathIsDismissed(filePath)) break;
       if (surface === "side_panel") {
-        if (filePath) openWorkspaceFile(filePath, { intent: "preview", sheet });
+        if (filePath) openWorkspaceFile(filePath, {
+          intent: "preview",
+          sheet,
+          sessionId: ctx.effectiveSessionId,
+        });
       } else if (surface === "sheet_full") {
-        if (filePath) openWorkspaceFile(filePath, { intent: "full", sheet });
+        if (filePath) openWorkspaceFile(filePath, {
+          intent: "full",
+          sheet,
+          sessionId: ctx.effectiveSessionId,
+        });
       } else if (surface === "compare") {
         const fileB = String(data.file_path_b || "");
         if (filePath && fileB) {
@@ -1036,7 +1104,7 @@ export function dispatchSSEEvent(event: SSEEvent, ctx: SSEHandlerContext): void 
             && !previewStore.textOpen
             && !previewStore.imageOpen
           ) {
-            openWorkspaceFile(target);
+            openWorkspaceFile(target, { sessionId: ctx.effectiveSessionId });
           }
         }
       }

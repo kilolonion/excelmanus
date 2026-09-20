@@ -1285,15 +1285,14 @@
     },
     {
       "id": "R30",
-      "name": "代码模式：区域×月份透视",
+      "name": "统一调用回归：区域×月份透视",
       "tags": [
         "wave-r5",
         "aggregate",
         "pivot",
-        "code-mode",
+        "unified-tools",
         "write"
       ],
-      "present_as": "code",
       "attachments": [
         "bench/fixtures/realistic/订单明细_2024.xlsx"
       ],
@@ -1322,10 +1321,10 @@
         ]
       },
       "expected": {
-        "lens": "同一任务走 code 路径（与 R06 对照）",
+        "lens": "原 R30 输出回归；调用方式由模型按任务选择",
         "review_focus": [
-          "run_code+SDK 路径是否一次走通",
-          "与 R06 的工具路径/轮数对比",
+          "直接工具或 run_code+SDK 是否完成同一业务结果",
+          "工具路径是否符合任务形态，不再作为模式 A/B",
           "合计是公式还是值"
         ]
       }

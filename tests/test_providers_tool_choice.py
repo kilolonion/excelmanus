@@ -44,6 +44,18 @@ class _FakeStreamContext:
         del exc_type, exc, tb
 
 
+class _FakeJsonResponse:
+    def __init__(self, payload: dict[str, Any], status_code: int = 200) -> None:
+        self.status_code = status_code
+        self._payload = payload
+
+    def json(self) -> dict[str, Any]:
+        return self._payload
+
+    async def aread(self) -> bytes:
+        return b"background error"
+
+
 def _sample_chat_tools() -> list[dict[str, Any]]:
     return [
         {
@@ -295,3 +307,184 @@ async def test_openai_responses_stream_keeps_prompt_cache_key() -> None:
 
     assert captured_bodies
     assert all(body["prompt_cache_key"] == "em_stream_session" for body in captured_bodies)
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_exposes_response_id_for_native_continuation() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    captured_body: dict[str, Any] = {}
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
+        captured_body.update(json)
+        response = _FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.completed","response":{"id":"resp_1","output":[{"type":"message","content":[{"type":"output_text","text":"ok"}]}],"usage":{"input_tokens":1,"output_tokens":1}}}',
+                "data: [DONE]",
+            ],
+        )
+        return _FakeStreamContext(response)
+
+    client._http.stream = _fake_stream
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "hi"}],
+            stream=False,
+        )
+    finally:
+        await client.close()
+
+    message = response.choices[0].message
+    assert response.response_id == "resp_1"
+    assert message.replay_state == {"response_id": "resp_1"}
+
+
+def test_responses_continuation_sends_only_new_items() -> None:
+    from excelmanus.providers.request_body import responses_body
+
+    body = responses_body(
+        "gpt-test",
+        [
+            {"role": "user", "content": "first"},
+            {
+                "role": "assistant",
+                "content": "ok",
+                "replay_state": {"response_id": "resp_1"},
+            },
+            {"role": "user", "content": "follow up"},
+        ],
+        extra_kwargs={
+            "_responses_previous_response_id": "resp_1",
+            "_responses_store": True,
+        },
+    )
+
+    assert body["previous_response_id"] == "resp_1"
+    assert body["store"] is True
+    assert [item["content"] for item in body["input"]] == ["follow up"]
+
+
+def test_request_compiler_projects_responses_continuation_state() -> None:
+    from types import SimpleNamespace
+
+    from excelmanus.request.compiler import create_extra_from_engine
+
+    engine = SimpleNamespace(
+        _config=SimpleNamespace(responses_continuation_enabled=True),
+        _active_protocol="openai_responses",
+        _active_model="gpt-test",
+        _active_profile=None,
+        _thinking_config=None,
+        _responses_last_response={
+            "id": "resp_1",
+            "protocol": "openai_responses",
+            "model": "gpt-test",
+        },
+    )
+
+    extra = create_extra_from_engine(engine)
+
+    assert extra["_responses_previous_response_id"] == "resp_1"
+    assert extra["_responses_store"] is True
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_background_response_is_polled_to_terminal_state() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    client._http.post = AsyncMock(return_value=_FakeJsonResponse({"id": "resp_bg", "status": "queued"}))
+    client._http.get = AsyncMock(return_value=_FakeJsonResponse({
+        "id": "resp_bg",
+        "status": "completed",
+        "output": [{"type": "message", "content": [{"type": "output_text", "text": "done"}]}],
+        "usage": {"input_tokens": 2, "output_tokens": 1},
+    }))
+    try:
+        response = await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "long task"}],
+            _responses_background=True,
+            _responses_store=True,
+        )
+    finally:
+        await client.close()
+
+    assert response.choices[0].message.content == "done"
+    client._http.get.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_async_tool_done_event_is_normalized_once() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, json, headers
+        return _FakeStreamContext(_FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.output_item.added","output_index":0,"item":{"type":"function_call","call_id":"fc_1","name":"lookup"}}',
+                'data: {"type":"response.output_item.done","output_index":0,"item":{"type":"function_call","call_id":"fc_1","name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}}',
+                'data: {"type":"response.completed","response":{"id":"resp_async","output":[{"type":"function_call","call_id":"fc_1","name":"lookup","arguments":"{\\"q\\":\\"x\\"}"}]}}',
+                "data: [DONE]",
+            ],
+        ))
+
+    client._http.stream = _fake_stream
+    try:
+        stream = await client.chat.completions.create(
+            model="gpt-test",
+            messages=[{"role": "user", "content": "lookup"}],
+            stream=True,
+        )
+        deltas = [delta async for delta in stream]
+    finally:
+        await client.close()
+
+    tool_deltas = [delta.tool_calls_delta for delta in deltas if delta.tool_calls_delta]
+    assert len(tool_deltas) == 1
+    assert tool_deltas[0][0]["name"] == "lookup"
+    assert tool_deltas[0][0]["arguments"] == '{"q":"x"}'
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_background_handles_are_queryable_and_cancelable() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    client._http.get = AsyncMock(return_value=_FakeJsonResponse({"id": "resp_1", "status": "in_progress"}))
+    client._http.post = AsyncMock(return_value=_FakeJsonResponse({"id": "resp_1", "status": "cancelled"}))
+    try:
+        status = await client.get_background_response("resp_1")
+        cancelled = await client.cancel_background_response("resp_1")
+    finally:
+        await client.close()
+
+    assert status["status"] == "in_progress"
+    assert cancelled["status"] == "cancelled"
+    assert client._http.post.call_args.args[0].endswith("/responses/resp_1/cancel")
+
+
+@pytest.mark.asyncio
+async def test_openai_responses_steer_response_uses_previous_response_id() -> None:
+    client = OpenAIResponsesClient(api_key="k", base_url="https://example.com/v1")
+    captured_body: dict[str, Any] = {}
+
+    def _fake_stream(method: str, url: str, *, json: dict[str, Any], headers: dict[str, str]) -> _FakeStreamContext:
+        del method, url, headers
+        captured_body.update(json)
+        return _FakeStreamContext(_FakeStreamResponse(
+            status_code=200,
+            lines=[
+                'data: {"type":"response.completed","response":{"id":"resp_2","output":[{"type":"message","content":[{"type":"output_text","text":"steered"}]}]}}',
+                "data: [DONE]",
+            ],
+        ))
+
+    client._http.stream = _fake_stream
+    try:
+        result = await client.steer_response("resp_1", "请改用第二种口径", model="gpt-test")
+    finally:
+        await client.close()
+
+    assert result.choices[0].message.content == "steered"
+    assert captured_body["previous_response_id"] == "resp_1"
+    assert captured_body["store"] is True

@@ -25,12 +25,13 @@ const HEADING_FONT_PX: Record<number, number> = {
   6: 12,
 };
 
-function parseWordFileUrl(url: string): { path: string; sessionId?: string } {
+function parseWordFileUrl(url: string): { path: string; sessionId?: string; workspaceId?: string } {
   try {
     const parsedUrl = new URL(url, "http://local.invalid");
     return {
       path: parsedUrl.searchParams.get("path") || "",
       sessionId: parsedUrl.searchParams.get("session_id") || undefined,
+      workspaceId: parsedUrl.searchParams.get("workspace_id") || undefined,
     };
   } catch {
     return { path: "" };
@@ -123,7 +124,7 @@ export function WordSnapshotView({ fileUrl }: WordSnapshotViewProps) {
   const [retryNonce, setRetryNonce] = useState(0);
   const [model, setModel] = useState<WordSnapshotViewModel | null>(null);
 
-  const { path: filePath, sessionId } = useMemo(() => parseWordFileUrl(fileUrl), [fileUrl]);
+  const { path: filePath, sessionId, workspaceId } = useMemo(() => parseWordFileUrl(fileUrl), [fileUrl]);
   const parseError = filePath ? null : "无法解析文件路径";
 
   useEffect(() => {
@@ -134,7 +135,7 @@ export function WordSnapshotView({ fileUrl }: WordSnapshotViewProps) {
 
     void (async () => {
       try {
-        const snapshot = await fetchWordSnapshot(filePath, { sessionId });
+        const snapshot = await fetchWordSnapshot(filePath, { sessionId, workspaceId });
         if (cancelled || loadVersion !== loadVersionRef.current) return;
         setModel(toWordSnapshotViewModel(snapshot));
         setError(null);
@@ -151,7 +152,7 @@ export function WordSnapshotView({ fileUrl }: WordSnapshotViewProps) {
       cancelled = true;
       loadVersionRef.current += 1;
     };
-  }, [filePath, refreshCounter, retryNonce, sessionId]);
+  }, [filePath, refreshCounter, retryNonce, sessionId, workspaceId]);
 
   const handleRetry = useCallback(() => {
     setError(null);

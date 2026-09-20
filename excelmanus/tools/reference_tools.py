@@ -28,9 +28,9 @@ def _open_ref_snapshot(file_path: str):
     return _open_tool_snapshot(file_path)
 
 
-def _ensure_index(file_path: str) -> WorkbookRefIndex:
+def _ensure_index(file_path: str, snapshot: Any = None) -> WorkbookRefIndex:
     """确保 Tier 1 索引已缓存。扫描快照 backing，键含 workspace+版本。"""
-    snap, snap_err = _open_ref_snapshot(file_path)
+    snap, snap_err = (snapshot, None) if snapshot is not None else _open_ref_snapshot(file_path)
     if snap_err is not None or snap is None:
         raise RuntimeError(snap_err.model_text if snap_err is not None else "无法打开快照")
     cache = get_session_cache()
@@ -52,13 +52,24 @@ def _parse_target(target: str) -> tuple[str | None, str]:
     from excelmanus.workbook.address import parse_sheet_address
 
     parsed = parse_sheet_address(target)
-    return parsed.sheet, parsed.address
+    from openpyxl.utils.cell import range_boundaries
+    try:
+        c1, r1, c2, r2 = range_boundaries(parsed.address)
+    except ValueError as exc:
+        raise InvalidRefError("target 需要单个 A1 单元格，例如 'Sheet 1'!$B$2") from exc
+    if None in (c1, r1, c2, r2) or (c1, r1) != (c2, r2):
+        raise InvalidRefError("target 当前仅支持单个单元格；按单元格分别追踪范围内的公式")
+    from openpyxl.utils import get_column_letter
+    return parsed.sheet, f"{get_column_letter(c1)}{r1}"
 
 
 def get_reference_map(file_path: str, detail: str = "summary") -> ToolResult:
     """获取工作簿引用全景图。"""
     try:
-        index = _ensure_index(file_path)
+        snap, snap_err = _open_ref_snapshot(file_path)
+        if snap_err is not None:
+            return snap_err
+        index = _ensure_index(file_path, snapshot=snap)
     except Exception as e:
         return _error_json(f"无法扫描文件: {e}")
 
@@ -67,6 +78,8 @@ def get_reference_map(file_path: str, detail: str = "summary") -> ToolResult:
         "sheets": {},
         "cross_sheet_edges": [],
         "named_ranges": index.named_ranges,
+        "content_version": snap.content_version,
+        "coverage": {"kind": "partial", "reason": "静态公式引用解析，未重算；动态/外部引用不保证完整"},
     }
 
     for name, summary in index.sheets.items():
@@ -153,6 +166,9 @@ def trace_references(
             "formula": node.formula,
             "precedents": precedents,
             "dependents": dependents,
+            "resolved_sheet": sheet_name,
+            "content_version": snap.content_version,
+            "coverage": {"kind": "partial", "direction": direction, "depth": min(depth, _resolver._MAX_DEPTH), "reason": "静态引用解析，未重算"},
         }
         return ok_result(
             payload,
@@ -174,6 +190,10 @@ def get_impact_analysis(
     """分析修改影响范围。"""
     from excelmanus.workbook.snapshot import SnapshotError, require_default_sheet
 
+    scope = str(scope or "all").strip().lower()
+    if scope not in {"all", "sheet"}:
+        return _error_json("scope 仅支持 all 或 sheet", code="INVALID_ARGS")
+
     try:
         snap, snap_err = _open_ref_snapshot(file_path)
         if snap_err is not None or snap is None:
@@ -192,6 +212,8 @@ def get_impact_analysis(
             affected_sheets: set[str] = set()
 
             for ws_name in wb.sheetnames:
+                if scope == "sheet" and ws_name != sheet_name:
+                    continue
                 ws = wb[ws_name]
                 for row in ws.iter_rows():
                     for cell in row:
@@ -209,6 +231,7 @@ def get_impact_analysis(
                                     "formula": val,
                                 })
                                 affected_sheets.add(ws_name)
+                                break  # multiple references in one formula are one affected cell
         finally:
             wb.close()
 
@@ -218,6 +241,10 @@ def get_impact_analysis(
             "direct_impact": direct,
             "total_affected_cells": len(direct),
             "affected_sheets": sorted(affected_sheets),
+            "resolved_sheet": sheet_name,
+            "content_version": snap.content_version,
+            "scope": scope,
+            "coverage": {"kind": "partial", "scope": "direct_dependents", "sheet_scope": scope, "reason": "仅直接依赖；静态解析，动态/外部引用不保证完整"},
         }
         return ok_result(
             payload,

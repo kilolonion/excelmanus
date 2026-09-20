@@ -49,7 +49,8 @@ class TestBuildV5ToolsReadOnly:
         engine._tools_cache = None
         engine._tools_cache_key = None
         engine._current_chat_mode = "write"
-        engine._present_as = "native"
+        engine._fixed_capability = None
+        engine._loaded_tool_names = set()
         engine._skill_router = None
         engine._skill_resolver = None
         engine._subagent_config = None
@@ -60,13 +61,16 @@ class TestBuildV5ToolsReadOnly:
         self.builder.build_meta_tools = MagicMock(return_value=[])
         self.engine = engine
 
-    def test_write_mode_exposes_all_domain_tools(self):
+    def test_write_mode_exposes_core_tools_and_defers_file_tools(self):
         self.engine._current_chat_mode = "write"
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
         assert "inspect_spreadsheet" in names
         assert "edit_spreadsheet" in names
         assert "run_code" in names
-        assert "write_text_file" in names
+        assert "write_text_file" not in names
+        self.engine._loaded_tool_names.add("write_text_file")
+        loaded_names = _extract_tool_names(self.builder.build_v5_tools_impl())
+        assert "write_text_file" in loaded_names
 
     def test_read_only_restrict_hides_write_tools(self):
         self.engine._current_chat_mode = "read"
@@ -88,14 +92,33 @@ class TestBuildV5ToolsReadOnly:
         assert "write_text_file" not in names
         assert "run_code" not in names
 
-    def test_code_present_as_catalog_only_run_code(self):
-        self.engine._present_as = "code"
+    def test_direct_and_programmatic_tools_coexist(self):
         names = _extract_tool_names(self.builder.build_v5_tools_impl())
-        assert names == {"run_code"}
+        assert {"run_code", "inspect_spreadsheet", "edit_spreadsheet"} <= names
+
+    def test_fixed_child_scope_intersects_loaded_tools(self):
+        from excelmanus.tools.context import CallerCapability
+
+        self.engine._fixed_capability = CallerCapability(
+            catalog_mode="write",
+            allowed_tools=frozenset({"inspect_spreadsheet", "edit_spreadsheet", "run_code"}),
+            disallowed_tools=frozenset({"edit_spreadsheet"}),
+        )
+        self.engine._loaded_tool_names = {"edit_spreadsheet", "write_text_file"}
+        names = _extract_tool_names(self.builder.build_v5_tools_impl())
+        assert names == {"inspect_spreadsheet", "run_code"}
+
+    def test_fixed_readonly_scope_hides_writes(self):
+        from excelmanus.tools.context import CallerCapability
+
+        self.engine._fixed_capability = CallerCapability(tool_access="read_only")
+        names = _extract_tool_names(self.builder.build_v5_tools_impl())
+        assert "inspect_spreadsheet" in names
+        assert "edit_spreadsheet" not in names
+        assert "run_code" not in names
 
     def test_plan_mode_hides_write_tools_and_does_not_reuse_write_cache(self):
         """推翻旧语义：plan 与 write 不再共用同一份写工具目录。"""
-        self.engine._present_as = "native"
         write = self.builder.build_v5_tools()
         key_write = self.engine._tools_cache_key
         write_names = _extract_tool_names(write)

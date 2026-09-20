@@ -532,6 +532,10 @@ _SQLITE_MIGRATIONS: dict[int, list[str]] = {
         "ALTER TABLE tool_call_log ADD COLUMN call_id TEXT",
         "CREATE INDEX IF NOT EXISTS idx_tcl_call_id ON tool_call_log(call_id)",
     ],
+    9: [
+        # Automatic/default registrations do not authorize exposing source code.
+        "ALTER TABLE workspaces ADD COLUMN source_access INTEGER NOT NULL DEFAULT 0",
+    ],
 }
 
 _LATEST_VERSION = max(_SQLITE_MIGRATIONS.keys())

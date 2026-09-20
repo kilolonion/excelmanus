@@ -168,6 +168,46 @@ class TestRegistration:
 class TestToolDetail:
     """验证：需求 4.1–4.3"""
 
+    def test_sdk_detail_preserves_union_null_enum_and_required(self, registry: ToolRegistry) -> None:
+        registry.register_tool(ToolDef(
+            name="mcp_union_tool", description="union tool", func=lambda **_: None,
+            input_schema={
+                "type": "object",
+                "properties": {
+                    "operations": {"type": ["array", "string", "null"], "items": {"type": "object"}},
+                    "level": {"anyOf": [{"enum": ["low", "high"]}, {"type": "integer"}, {"type": "null"}]},
+                    "strict": {"type": "boolean", "default": True},
+                },
+                "required": ["operations"],
+            },
+        ))
+        detail = introspect_capability("tool_detail", "mcp_union_tool")
+        assert "operations: list | str | None," in detail
+        assert "level: Literal['low', 'high'] | int | None = ..." in detail
+        assert "strict: bool = True" in detail
+        assert "必填: operations" in detail
+        assert "-> Any" in detail and "未声明" in detail
+        field = introspect_capability("tool_detail", "mcp_union_tool.level")
+        assert '"anyOf"' in field and '"type":"null"' in field
+        operations = introspect_capability("tool_detail", "mcp_union_tool.operations")
+        assert '"type":["array","string","null"]' in operations
+
+    def test_root_detail_includes_same_output_contract_as_output_query(self, registry: ToolRegistry) -> None:
+        from excelmanus.tools.output_contracts import contract_summary
+
+        summary = contract_summary("inspect_spreadsheet")
+        assert summary in introspect_capability("tool_detail", "inspect_spreadsheet")
+        assert summary in introspect_capability("tool_detail", "inspect_spreadsheet.output")
+
+    def test_output_detail_preserves_optional_value_types(self, registry: ToolRegistry) -> None:
+        from excelmanus.tools.output_contracts import contract_for
+
+        contract = contract_for("edit_spreadsheet")
+        assert contract.optional_types
+        detail = introspect_capability("tool_detail", "edit_spreadsheet.output")
+        for name, value_type in contract.optional_types.items():
+            assert f"{name}:{value_type}" in detail
+
     def test_existing_tool(self, registry: ToolRegistry) -> None:
         """查询已注册工具应返回 schema 和权限信息。"""
         result = introspect_capability("tool_detail", "inspect_spreadsheet")
@@ -270,11 +310,11 @@ class TestCanIDo:
     def test_max_results_per_layer(self, registry: ToolRegistry) -> None:
         """每层匹配结果不应超过 5 个。"""
         result = introspect_capability("can_i_do", "Excel 数据 文件 格式")
-        # 内置工具匹配行
+        # 当前授权工具匹配行
         builtin_lines = []
         in_builtin = False
         for line in result.splitlines():
-            if line.startswith("内置工具匹配"):
+            if line.startswith("当前授权工具匹配"):
                 in_builtin = True
                 continue
             if in_builtin and line.startswith("  - "):

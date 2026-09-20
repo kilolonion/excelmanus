@@ -128,9 +128,9 @@ class TestDefaultValues:
             load_config(values={'EXCELMANUS_API_KEY': 'test-key', 'EXCELMANUS_BASE_URL': 'https://example.com/v1'})
 
     def test_default_max_iterations(self, monkeypatch) -> None:
-        """默认最大迭代次数为 20。（需求 6.6）"""
+        """默认最大迭代次数为 120。"""
         cfg = _load()
-        assert cfg.max_iterations == 50
+        assert cfg.max_iterations == 120
 
     def test_default_yellow_auto_approve_is_false(self, monkeypatch, tmp_path) -> None:
         monkeypatch.chdir(tmp_path)
@@ -158,15 +158,42 @@ class TestDefaultValues:
         cfg = _load()
         assert cfg.skills_context_char_budget == 12000
 
+    def test_turn_budget_config(self, monkeypatch) -> None:
+        cfg = _load(
+            EXCELMANUS_TURN_TOKEN_BUDGET="1200",
+            EXCELMANUS_TURN_COST_BUDGET_USD="0.25",
+            EXCELMANUS_INPUT_COST_PER_1K_USD="0.01",
+            EXCELMANUS_OUTPUT_COST_PER_1K_USD="0.02",
+        )
+        assert cfg.turn_token_budget == 1200
+        assert cfg.turn_cost_budget_usd == 0.25
+        assert cfg.input_cost_per_1k_usd == 0.01
+        assert cfg.output_cost_per_1k_usd == 0.02
+
+    def test_responses_continuation_config(self) -> None:
+        assert _load(EXCELMANUS_RESPONSES_CONTINUATION_ENABLED="true").responses_continuation_enabled is True
+
+    def test_responses_background_config(self) -> None:
+        assert _load(EXCELMANUS_RESPONSES_BACKGROUND_ENABLED="true").responses_background_enabled is True
+
+    def test_parallel_tool_concurrency_config(self) -> None:
+        assert _load().parallel_tool_max == 4
+        assert _load(EXCELMANUS_PARALLEL_TOOL_MAX="1").parallel_tool_max == 1
+        assert _load(EXCELMANUS_PARALLEL_TOOL_MAX="32").parallel_tool_max == 32
+        for value in ("0", "-1", "33", "invalid"):
+            with pytest.raises(ConfigError):
+                _load(EXCELMANUS_PARALLEL_TOOL_MAX=value)
+
     def test_skills_context_char_budget_zero_allowed(self, monkeypatch) -> None:
         """技能正文字符预算允许设为 0（表示不限制）。"""
         cfg = _load(EXCELMANUS_SKILLS_CONTEXT_CHAR_BUDGET='0')
         assert cfg.skills_context_char_budget == 0
 
     def test_default_workspace_root(self, monkeypatch) -> None:
-        """默认工作目录白名单根路径为当前目录。（需求 6.8）"""
+        """默认工作区落在集中数据目录，不暴露启动目录的源码。"""
+        from excelmanus.data_home import get_data_home
         cfg = _load()
-        assert cfg.workspace_root == '.'
+        assert cfg.workspace_root == str(get_data_home())
 
     def test_default_tool_result_hard_cap_chars(self, monkeypatch) -> None:
         """默认工具结果全局硬截断上限为 12000。"""
@@ -177,6 +204,16 @@ class TestDefaultValues:
         """允许覆盖工具结果全局硬截断上限。"""
         cfg = _load(EXCELMANUS_TOOL_RESULT_HARD_CAP_CHARS='2048')
         assert cfg.tool_result_hard_cap_chars == 2048
+
+    def test_thinking_effort_options_are_filtered_and_ordered(self) -> None:
+        cfg = _load(EXCELMANUS_THINKING_EFFORT_OPTIONS="max,low,unknown,low")
+        assert cfg.thinking_effort_options == ("low", "max")
+
+    def test_empty_thinking_effort_options_fall_back_to_all(self) -> None:
+        cfg = _load(EXCELMANUS_THINKING_EFFORT_OPTIONS="unknown")
+        assert cfg.thinking_effort_options == (
+            "none", "minimal", "low", "medium", "high", "xhigh", "max",
+        )
 
     def test_legacy_system_message_mode_env_is_ignored(self, monkeypatch) -> None:
         """旧 EXCELMANUS_SYSTEM_MESSAGE_MODE 配置已移除，不得再进入配置对象。"""
@@ -190,7 +227,7 @@ class TestDefaultValues:
         assert cfg.subagent_max_iterations == 120
         assert cfg.subagent_max_consecutive_failures == 6
         assert cfg.subagent_user_dir == '~/.excelmanus/agents'
-        assert cfg.subagent_project_dir == os.path.join('.excelmanus', 'agents')
+        assert cfg.subagent_project_dir == os.path.join(cfg.workspace_root, '.excelmanus', 'agents')
 
     def test_subagent_config_from_env(self, monkeypatch) -> None:
         """支持覆盖 subagent 配置。"""
@@ -261,6 +298,14 @@ class TestIntegerParsing:
         """负值应抛出 ConfigError。"""
         with pytest.raises(ConfigError, match='正整数'):
             _load(EXCELMANUS_MAX_SESSIONS='-5')
+
+    def test_turn_timeout_allows_zero_and_positive_values(self) -> None:
+        assert _load(EXCELMANUS_TURN_TIMEOUT_SECONDS="0").turn_timeout_seconds == 0
+        assert _load(EXCELMANUS_TURN_TIMEOUT_SECONDS="5").turn_timeout_seconds == 5
+
+    def test_turn_timeout_rejects_negative_values(self) -> None:
+        with pytest.raises(ConfigError, match="非负整数"):
+            _load(EXCELMANUS_TURN_TIMEOUT_SECONDS="-1")
 
 class TestWorkspaceRoot:
     """工作目录白名单配置测试。"""
@@ -463,7 +508,7 @@ class TestContextWindowInference:
         monkeypatch.chdir(tmp_path)
         for model in ('gemini-2.0-flash', 'claude-3.5-sonnet', 'codex-mini-latest'):
             cfg = _load(EXCELMANUS_MODEL=model)
-            assert cfg.max_context_tokens == 128000
+            assert cfg.max_context_tokens == 256000
 
     @pytest.mark.parametrize(('model', 'expected'), [('gemini-2.0-flash', ('gemini-2.0-flash', 'gemini-3.8-flash')), ('claude-3-5-sonnet', ('claude-3-5-sonnet', 'claude-sonnet-5')), ('openai-codex/codex-mini-latest', ('codex-mini-latest', 'gpt-5.6-luna')), ('gpt-5', None)])
     def test_deprecated_model_replacement_lookup(self, model: str, expected) -> None:

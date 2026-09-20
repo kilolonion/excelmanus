@@ -9,6 +9,8 @@ PackId = Literal[
     "exposure.turn",
     "observation.shape",
     "observation.prune",
+    "mutation.verify",
+    "recovery.next_step",
     "ui.surface",
     "approval.tool_call",
     "skill.pin",
@@ -54,6 +56,8 @@ class Evaluation:
     usage: Mapping[str, Any] = field(default_factory=dict)
     skipped: bool = False
     skip_reason: str = ""
+    provider_id: str = ""
+    protocol: str = ""
 
 
 @dataclass(frozen=True)

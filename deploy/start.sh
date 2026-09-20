@@ -195,6 +195,8 @@ FRONTEND_PORT="${EXCELMANUS_FRONTEND_PORT:-$FRONTEND_PORT}"
 # ── 初始化日志文件 ──
 if [[ -n "$LOG_DIR" ]]; then
   mkdir -p "$LOG_DIR"
+  # 转为绝对路径：前端在子 shell 中 `cd web` 后再引用相对日志目录会失效（导致前端起不来）
+  LOG_DIR="$(cd "$LOG_DIR" && pwd)"
   _log_file="${LOG_DIR}/start_$(date +%Y%m%dT%H%M%S).log"
   echo "# ExcelManus Start — $(date '+%Y-%m-%d %H:%M:%S')" > "$_log_file"
   info "日志输出到: $_log_file"
@@ -625,15 +627,12 @@ _start_backend() {
     warn "检测到 ${WORKERS} 个 uvicorn worker。会话引擎是进程内存态，同一 session_id 落到不同 worker 会从 SQLite 重建信封；MCP 未连上或技能快照丢失时 tools/system 前缀不等值，将静默打满 prompt cache miss。单机请保持 workers=1；多实例扩容请在反代层按 session_id 粘性路由。"
   fi
 
-  local log_redirect=""
+  local backend_cmd=(.venv/bin/python -c 'from excelmanus.api import main; main()'
+    --host "$BACKEND_HOST" --port "$BACKEND_PORT" --workers "$WORKERS")
   if [[ -n "$LOG_DIR" ]]; then
-    log_redirect=" >> ${LOG_DIR}/backend.log 2>&1"
-  fi
-
-  if [[ "$WORKERS" -gt 1 ]]; then
-    eval ".venv/bin/python -c \"import uvicorn; uvicorn.run('excelmanus.api:app', host='${BACKEND_HOST}', port=${BACKEND_PORT}, log_level='info', workers=${WORKERS})\"${log_redirect}" &
+    "${backend_cmd[@]}" >> "${LOG_DIR}/backend.log" 2>&1 &
   else
-    eval ".venv/bin/python -c \"import uvicorn; uvicorn.run('excelmanus.api:app', host='${BACKEND_HOST}', port=${BACKEND_PORT}, log_level='info')\"${log_redirect}" &
+    "${backend_cmd[@]}" &
   fi
   BACKEND_PID=$!
   debug "后端进程已启动 (PID $BACKEND_PID)"
@@ -685,9 +684,9 @@ _start_frontend() {
   export BACKEND_INTERNAL_URL="http://127.0.0.1:${BACKEND_PORT}"
 
   if [[ -n "$LOG_DIR" ]]; then
-    (cd web && PORT=${FRONTEND_PORT} exec $run_cmd >> "${LOG_DIR}/frontend.log" 2>&1) &
+    (cd web && HOSTNAME=127.0.0.1 PORT=${FRONTEND_PORT} exec $run_cmd >> "${LOG_DIR}/frontend.log" 2>&1) &
   else
-    (cd web && PORT=${FRONTEND_PORT} exec $run_cmd) &
+    (cd web && HOSTNAME=127.0.0.1 PORT=${FRONTEND_PORT} exec $run_cmd) &
   fi
   FRONTEND_PID=$!
 }

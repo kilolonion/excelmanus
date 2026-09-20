@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState, useCallback, useMemo } from "react";
-import { Trash2, Loader2, Brain, ChevronRight, Sparkles, Star } from "lucide-react";
+import { Trash2, Loader2, Brain, ChevronRight, Star } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { apiGet, apiDelete } from "@/lib/api";
@@ -50,9 +50,8 @@ function formatTimestamp(ts: string): string {
 }
 
 function DemoMemoryBanner() {
-  const [active, setActive] = useState(false);
+  const [active, setActive] = useState(isSettingsDemoActive);
   useEffect(() => {
-    setActive(isSettingsDemoActive());
     return onSettingsDemoChange(() => setActive(isSettingsDemoActive()));
   }, []);
   if (!active) return null;
@@ -169,40 +168,62 @@ export function MemoryTab() {
 
   return (
     <div className="space-y-3">
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
+        <div className="flex items-start justify-between gap-3">
+          <div className="flex min-w-0 items-start gap-2">
+            <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]">
+              <Brain className="h-3.5 w-3.5" />
+            </div>
+            <div className="min-w-0">
+              <h4 className="text-sm font-medium">记忆库</h4>
+              <p className="mt-0.5 text-[10px] leading-relaxed text-muted-foreground">
+                Agent 已保留 {entries.length} 条跨任务信息
+              </p>
+            </div>
+          </div>
+          <span className="rounded-full bg-muted px-2 py-1 text-[10px] font-medium text-muted-foreground">
+            {filteredEntries.length} 条
+          </span>
+        </div>
 
-      {/* ── Category filter pills ── */}
-      <div className="flex items-center gap-1 overflow-x-auto scrollbar-none" data-coach-id="coach-settings-memory-filters">
-        {([null, ...CATEGORIES] as const).map((cat) => {
-          const key = cat ?? "all";
-          const isActive = categoryFilter === cat;
-          const count = cat ? (categoryCounts[cat] || 0) : categoryCounts.all;
-          if (cat && count === 0) return null;
-          return (
-            <button
-              key={key}
-              type="button"
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
-                isActive
-                  ? "text-white border-transparent"
-                  : "border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground"
-              }`}
-              style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
-              onClick={() => setCategoryFilter(cat)}
-            >
-              {CATEGORY_LABELS[key] ?? key}
-              <span className={`text-[10px] ${isActive ? "text-white/70" : "text-muted-foreground/60"}`}>
-                {count}
-              </span>
-            </button>
-          );
-        })}
-      </div>
+        {/* ── Category filter pills ── */}
+        <div className="flex items-center gap-1 overflow-x-auto scrollbar-none" data-coach-id="coach-settings-memory-filters">
+          {([null, ...CATEGORIES] as const).map((cat) => {
+            const key = cat ?? "all";
+            const isActive = categoryFilter === cat;
+            const count = cat ? (categoryCounts[cat] || 0) : categoryCounts.all;
+            if (cat && count === 0) return null;
+            return (
+              <button
+                key={key}
+                type="button"
+                className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-medium transition-colors whitespace-nowrap border ${
+                  isActive
+                    ? "text-white border-transparent"
+                    : "border-border text-muted-foreground hover:bg-muted/60 hover:text-foreground"
+                }`}
+                style={isActive ? { backgroundColor: "var(--em-primary)" } : undefined}
+                onClick={() => setCategoryFilter(cat)}
+              >
+                {CATEGORY_LABELS[key] ?? key}
+                <span className={`text-[10px] ${isActive ? "text-white/70" : "text-muted-foreground/60"}`}>
+                  {count}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </section>
 
       {/* ── Memory list grouped by category ── */}
-      <div className="space-y-3" data-coach-id="coach-settings-memory-list">
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3" data-coach-id="coach-settings-memory-list">
+        <div className="px-0.5">
+          <h4 className="text-sm font-medium">记忆条目</h4>
+          <p className="text-[10px] text-muted-foreground">点击条目查看完整内容，或清理不再准确的信息</p>
+        </div>
         <DemoMemoryBanner />
         {orderedCategories.length === 0 && !isSettingsDemoActive() && (
-          <div className="text-center py-8">
+          <div className="rounded-xl border border-dashed text-center py-10">
             <Brain className="h-8 w-8 mx-auto mb-2 text-muted-foreground/30" />
             <p className="text-xs text-muted-foreground">
               {categoryFilter ? `暂无「${CATEGORY_LABELS[categoryFilter] ?? categoryFilter}」类记忆` : "Agent 尚未记录任何记忆"}
@@ -288,7 +309,7 @@ export function MemoryTab() {
             })}
           </div>
         ))}
-      </div>
+      </section>
     </div>
   );
 }

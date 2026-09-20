@@ -266,7 +266,7 @@ class TestComposeForSubagent:
         assert "共享约束。" in result
         assert "探查专用。" in result
 
-    def test_specific_only_no_base(self, tmp_path: Path) -> None:
+    def test_missing_shared_base_fails(self, tmp_path: Path) -> None:
         sa_dir = tmp_path / "subagent"
         sa_dir.mkdir()
         (sa_dir / "writer.md").write_text(
@@ -274,9 +274,8 @@ class TestComposeForSubagent:
             encoding="utf-8",
         )
         composer = PromptComposer(tmp_path)
-        result = composer.compose_for_subagent("writer")
-        assert result is not None
-        assert "写入专用。" in result
+        with pytest.raises(FileNotFoundError):
+            composer.compose_for_subagent("writer")
 
     def test_nonexistent_subagent_returns_none(self, tmp_path: Path) -> None:
         sa_dir = tmp_path / "subagent"
@@ -299,7 +298,7 @@ class TestComposeForSubagent:
             assert result is not None, f"{name} 子代理提示词加载失败"
             assert len(result) > 50, f"{name} 子代理提示词过短"
             # 应包含 _base.md 的共享约束
-            assert "忠于工具" in result, f"{name} 缺少共享约束"
+            assert "本会话内不能扩大" in result, f"{name} 缺少共享约束"
 
 
 class TestErrorRecoveryInUnconditional:

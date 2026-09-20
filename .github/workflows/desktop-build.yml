@@ -1,0 +1,140 @@
+name: Desktop build
+
+on:
+  workflow_dispatch:
+    inputs:
+      signed_windows:
+        description: Require a signed Windows installer (needs Windows signing secrets)
+        type: boolean
+        default: false
+  push:
+    tags:
+      - "v*"
+
+jobs:
+  package:
+    name: Package (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: mac
+          - os: windows-2022
+            target: win
+    runs-on: ${{ matrix.os }}
+    env:
+      UV_PYTHON_INSTALL_DIR: ${{ runner.temp }}/Python 中文
+    defaults:
+      run:
+        working-directory: source-中文
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v5
+        with:
+          path: source-中文
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v10.1.0
+        with:
+          version: latest
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Install Python dependencies
+        run: uv sync --frozen --all-extras --dev
+
+      - name: Install PyInstaller (macOS)
+        if: runner.os == 'macOS'
+        run: uv pip install --python .venv/bin/python "PyInstaller>=6.19,<7"
+
+      - name: Install PyInstaller (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: uv pip install --python .venv/Scripts/python.exe "PyInstaller>=6.19,<7"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            source-中文/web/package-lock.json
+            source-中文/desktop/package-lock.json
+
+      - name: Build web frontend
+        working-directory: source-中文/web
+        run: |
+          npm ci
+
+      - name: Package macOS app
+        if: matrix.target == 'mac'
+        working-directory: source-中文/desktop
+        run: |
+          npm ci
+          npm run dist:mac
+
+      - name: Windows source regressions
+        if: matrix.target == 'win'
+        shell: pwsh
+        run: |
+          .venv/Scripts/python.exe -m pytest tests/test_desktop_runtime.py tests/test_windows_desktop.py -q
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          .venv/Scripts/python.exe desktop/scripts/check-graceful-shutdown.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Package Windows app
+        if: matrix.target == 'win'
+        working-directory: source-中文/desktop
+        shell: pwsh
+        env:
+          WIN_CSC_LINK: ${{ secrets.WINDOWS_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WINDOWS_CSC_KEY_PASSWORD }}
+          REQUIRE_SIGNING: ${{ startsWith(github.ref, 'refs/tags/') || inputs.signed_windows || false }}
+        run: |
+          npm ci
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm test
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:REQUIRE_SIGNING -eq 'true') {
+            if (!$env:WIN_CSC_LINK) { throw 'Signed release requires WINDOWS_CSC_LINK' }
+            npm run dist:win -- --config.forceCodeSigning=true
+          } else {
+            npm run dist:win
+          }
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($env:REQUIRE_SIGNING -eq 'true') {
+            Get-ChildItem dist -Filter '*.exe' | ForEach-Object {
+              if ((Get-AuthenticodeSignature $_.FullName).Status -ne 'Valid') { throw "Invalid signature: $($_.Name)" }
+            }
+          }
+
+      - name: Smoke test packaged macOS resources
+        if: matrix.target == 'mac'
+        working-directory: source-中文/desktop
+        run: |
+          app_path=$(find dist -maxdepth 2 -type d -name '*.app' -print -quit)
+          test -n "$app_path"
+          node scripts/smoke.mjs "$app_path/Contents/Resources"
+
+      - name: Smoke test Windows packaged resources
+        if: matrix.target == 'win'
+        working-directory: source-中文/desktop
+        run: node scripts/smoke.mjs dist/win-unpacked/resources
+
+      - name: Windows install, upgrade, graceful exit and uninstall
+        if: matrix.target == 'win'
+        working-directory: source-中文/desktop
+        shell: pwsh
+        run: ./scripts/smoke-installed-win.ps1
+
+      - name: Upload desktop artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: excelmanus-${{ matrix.target }}
+          path: |
+            source-中文/desktop/dist/*.exe
+            source-中文/desktop/dist/*.dmg
+            source-中文/desktop/dist/*.blockmap
+          if-no-files-found: error

@@ -7,7 +7,6 @@ import {
   Loader2, ImageIcon, ExternalLink, ChevronRight,
 } from "lucide-react";
 import { motion, AnimatePresence } from "framer-motion";
-import { useSessionStore } from "@/stores/session-store";
 import { useExcelStore } from "@/stores/excel-store";
 import { useAuthImage } from "@/hooks/use-auth-image";
 
@@ -18,6 +17,8 @@ interface ImagePreviewModalProps {
   trigger?: React.ReactNode;
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
+  sessionId?: string;
+  workspaceId?: string;
 }
 
 /* ─── constants ─── */
@@ -51,6 +52,8 @@ export function ImagePreviewModal({
   trigger,
   open: controlledOpen,
   onOpenChange,
+  sessionId,
+  workspaceId,
 }: ImagePreviewModalProps) {
   const [internalOpen, setInternalOpen] = useState(false);
   const open = controlledOpen ?? internalOpen;
@@ -63,17 +66,28 @@ export function ImagePreviewModal({
   const [zoom, setZoom] = useState(1);
   const [rotation, setRotation] = useState(0);
   const [imgLoaded, setImgLoaded] = useState(false);
+  const [decodeError, setDecodeError] = useState("");
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [dragging, setDragging] = useState(false);
   const dragStart = useRef({ x: 0, y: 0, panX: 0, panY: 0 });
-  const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const workspaceFilesVersion = useExcelStore((s) => s.workspaceFilesVersion);
 
   // ── authenticated image loading ──
-  const imageApiPath = `/files/image?path=${encodeURIComponent(imagePath)}&session_id=${activeSessionId || ""}&v=${workspaceFilesVersion}`;
+  const imageApiPath = useMemo(() => {
+    const params = new URLSearchParams({ path: imagePath, v: String(workspaceFilesVersion) });
+    if (sessionId) params.set("session_id", sessionId);
+    if (workspaceId) params.set("workspace_id", workspaceId);
+    return `/files/image?${params.toString()}`;
+  }, [imagePath, sessionId, workspaceFilesVersion, workspaceId]);
   const { blobUrl, loading: fetchLoading, error: fetchError } = useAuthImage(imageApiPath, open);
-  const loading = fetchLoading || (!imgLoaded && !fetchError && open);
-  const error = fetchError;
+  const error = fetchError || decodeError;
+  const loading = fetchLoading || (!imgLoaded && !error && open);
+
+  useEffect(() => {
+    if (!fetchLoading) return;
+    setImgLoaded(false);
+    setDecodeError("");
+  }, [fetchLoading, imagePath]);
 
   // ── reset on close ──
   useEffect(() => {
@@ -81,6 +95,7 @@ export function ImagePreviewModal({
       setZoom(1);
       setRotation(0);
       setImgLoaded(false);
+      setDecodeError("");
       setPan({ x: 0, y: 0 });
       setDragging(false);
     }
@@ -128,11 +143,11 @@ export function ImagePreviewModal({
   const handleDownload = useCallback(async () => {
     try {
       const { downloadFile } = await import("@/lib/api");
-      downloadFile(imagePath, filename, activeSessionId ?? undefined).catch(() => {});
+      downloadFile(imagePath, filename, sessionId, workspaceId).catch(() => {});
     } catch {
       // silent
     }
-  }, [imagePath, filename, activeSessionId]);
+  }, [imagePath, filename, sessionId, workspaceId]);
 
   // ── scroll wheel zoom ──
   const handleWheel = useCallback((e: React.WheelEvent) => {
@@ -313,10 +328,15 @@ export function ImagePreviewModal({
                     <ImageIcon className="w-8 h-8" />
                   </div>
                   <span className="text-sm font-medium">无法加载图片</span>
+                  <span className="max-w-[36rem] px-6 text-center text-xs text-gray-400 dark:text-gray-500">
+                    {error}
+                  </span>
                   <span className="text-xs text-gray-300 dark:text-gray-600">按 Esc 关闭</span>
                 </div>
               ) : (
                 blobUrl && (
+                  // Blob URL 需要原生 img 的 load/error 事件来区分传输与解码失败。
+                  // eslint-disable-next-line @next/next/no-img-element
                   <img
                     src={blobUrl}
                     alt={filename}
@@ -327,8 +347,14 @@ export function ImagePreviewModal({
                       transition: dragging ? "none" : "transform 0.2s cubic-bezier(0.16, 1, 0.3, 1)",
                       display: imgLoaded ? "block" : "none",
                     }}
-                    onLoad={() => setImgLoaded(true)}
-                    onError={() => setImgLoaded(false)}
+                    onLoad={() => {
+                      setDecodeError("");
+                      setImgLoaded(true);
+                    }}
+                    onError={() => {
+                      setImgLoaded(false);
+                      setDecodeError("图片数据已下载，但浏览器无法解码");
+                    }}
                   />
                 )
               )}

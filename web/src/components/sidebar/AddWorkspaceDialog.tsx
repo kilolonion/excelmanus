@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent } from "react";
-import { Folder, FolderPlus, X } from "lucide-react";
+import { Folder, FolderOpen, FolderPlus, Loader2, X } from "lucide-react";
 import {
   OverlayCard,
   OverlayCardAction,
@@ -12,6 +12,14 @@ import { DialogDescription, DialogTitle } from "@/components/ui/dialog";
 import { createWorkspaceFolder, updateWorkspaceFolder } from "@/lib/api";
 import type { WorkspaceFolder } from "@/lib/types";
 import { cn } from "@/lib/utils";
+
+declare global {
+  interface Window {
+    excelManusDesktop?: {
+      selectFolder: () => Promise<string | null>;
+    };
+  }
+}
 
 function folderNameFromPath(path: string): string {
   const parts = path.trim().split(/[/\\]/).filter(Boolean);
@@ -34,6 +42,7 @@ export function AddWorkspaceDialog({
   const [title, setTitle] = useState("");
   const [path, setPath] = useState("");
   const [pathOpen, setPathOpen] = useState(false);
+  const [picking, setPicking] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const isEdit = Boolean(workspace?.id);
@@ -47,6 +56,7 @@ export function AddWorkspaceDialog({
     setTitle(workspace?.title || "");
     setPath(workspace?.path || "");
     setPathOpen(Boolean(workspace?.path));
+    setPicking(false);
     setBusy(false);
     setError("");
   }, [open, workspace]);
@@ -59,15 +69,40 @@ export function AddWorkspaceDialog({
   }, [open, showPathEditor]);
 
   const close = useCallback(() => {
-    if (busy) return;
+    if (busy || picking) return;
     onOpenChange(false);
-  }, [busy, onOpenChange]);
+  }, [busy, onOpenChange, picking]);
+
+  const handleChooseFolder = useCallback(async () => {
+    if (busy || picking || pathLocked) return;
+    const picker = typeof window !== "undefined"
+      ? window.excelManusDesktop?.selectFolder
+      : undefined;
+    if (!picker) {
+      setPathOpen(true);
+      window.requestAnimationFrame(() => pathRef.current?.focus());
+      return;
+    }
+
+    setPicking(true);
+    setError("");
+    try {
+      const selectedPath = await picker();
+      if (!selectedPath) return;
+      setPath(selectedPath);
+      setPathOpen(true);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "无法打开系统文件夹选择器");
+    } finally {
+      setPicking(false);
+    }
+  }, [busy, pathLocked, picking]);
 
   const handleAdd = useCallback(async () => {
     const nextPath = path.trim();
     if (!nextPath) {
-      setPathOpen(true);
-      setError("请输入本机文件夹的绝对路径");
+      setError("请选择本机文件夹");
+      void handleChooseFolder();
       return;
     }
     const nextTitle = title.trim() || inferredTitle;
@@ -93,7 +128,7 @@ export function AddWorkspaceDialog({
     } finally {
       setBusy(false);
     }
-  }, [inferredTitle, isEdit, onCreated, onOpenChange, path, pathLocked, title, workspace?.id]);
+  }, [handleChooseFolder, inferredTitle, isEdit, onCreated, onOpenChange, path, pathLocked, title, workspace?.id]);
 
   const submitOnEnter = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Enter") {
@@ -118,7 +153,7 @@ export function AddWorkspaceDialog({
         <button
           type="button"
           onClick={close}
-          disabled={busy}
+          disabled={busy || picking}
           className="inline-flex size-11 sm:size-8 items-center justify-center rounded-xl text-muted-foreground/50 hover:bg-muted/80 hover:text-foreground transition-colors disabled:opacity-40"
           title="关闭"
         >
@@ -127,11 +162,12 @@ export function AddWorkspaceDialog({
       </div>
       <DialogDescription className="sr-only">
         {isEdit
-          ? "修改工作区名称，或更换本机已有文件夹的绝对路径。不会新建目录，也不会把聊天记录放到该文件夹里。"
-          : "输入工作区名称，并填写本机已有文件夹的绝对路径。不会新建目录，也不会把聊天记录放到该文件夹里。"}
+          ? "修改工作区名称，或从系统文件夹选择器更换本机已有目录。不会新建目录，也不会把聊天记录放到该文件夹里。"
+          : "输入工作区名称，并从系统文件夹选择器选择本机已有目录。不会新建目录，也不会把聊天记录放到该文件夹里。"}
       </DialogDescription>
 
       <OverlayCardBody className="flex flex-col gap-5 pt-5 pb-6">
+        {!isEdit && <p className="text-xs leading-relaxed text-muted-foreground">应用源码默认与工作区隔离。如需处理代码项目，请在这里添加它的文件夹。</p>}
         <label className="flex h-12 items-center overflow-hidden rounded-full border border-[var(--em-hairline)] bg-background transition-[border-color,box-shadow] focus-within:border-[var(--em-primary)] focus-within:ring-2 focus-within:ring-[var(--em-primary-alpha-15)]">
           <span className="flex h-full w-12 shrink-0 items-center justify-center border-r border-[var(--em-hairline)] text-muted-foreground">
             <Folder className="h-4 w-4" />
@@ -142,7 +178,7 @@ export function AddWorkspaceDialog({
             onChange={(event) => setTitle(event.target.value)}
             onKeyDown={submitOnEnter}
             placeholder={inferredTitle || "工作区名称"}
-            disabled={busy}
+            disabled={busy || picking}
             autoComplete="off"
             aria-label="工作区名称"
             className="h-full min-w-0 flex-1 bg-transparent px-3.5 text-[15px] outline-none placeholder:text-muted-foreground/55 disabled:opacity-60"
@@ -177,7 +213,7 @@ export function AddWorkspaceDialog({
                     }}
                     onKeyDown={submitOnEnter}
                     placeholder="/path/to/existing/folder"
-                    disabled={busy}
+                    disabled={busy || picking}
                     spellCheck={false}
                     autoComplete="off"
                     aria-invalid={Boolean(error)}
@@ -187,39 +223,55 @@ export function AddWorkspaceDialog({
                   />
                 </div>
                 {pathLocked ? null : (
-                <button
-                  type="button"
-                  onClick={() => {
-                    setPath("");
-                    setPathOpen(false);
-                    setError("");
-                  }}
-                  disabled={busy}
-                  className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background/80 hover:text-foreground"
-                  title="移除文件夹"
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleChooseFolder()}
+                    disabled={busy || picking}
+                    className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background/80 hover:text-foreground disabled:opacity-40"
+                    title="更换文件夹"
+                    aria-label="更换源文件夹"
+                  >
+                    {picking ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                  </button>
+                )}
+                {pathLocked ? null : (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setPath("");
+                      setPathOpen(false);
+                      setError("");
+                    }}
+                    disabled={busy || picking}
+                    className="inline-flex size-8 shrink-0 items-center justify-center rounded-full text-muted-foreground hover:bg-background/80 hover:text-foreground"
+                    title="移除文件夹"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
                 )}
               </div>
               <p className="text-[12px] leading-relaxed text-[var(--em-text-secondary)]">
-                使用本机已有目录的绝对路径。不会新建文件夹，聊天记录也不会写入该目录。
+                使用本机已有目录。桌面版会打开系统文件夹选择器；不会新建文件夹，聊天记录也不会写入该目录。
               </p>
             </div>
           ) : (
             <button
               type="button"
-              onClick={() => setPathOpen(true)}
-              disabled={busy}
+              onClick={() => void handleChooseFolder()}
+              disabled={busy || picking}
               className={cn(
                 "flex min-h-[132px] w-full flex-col items-center justify-center gap-2 rounded-[20px] border border-[var(--em-hairline)] bg-[var(--em-fill)] px-6 py-8 text-center transition-colors",
                 "hover:border-[var(--em-primary-alpha-30)] hover:bg-[var(--em-primary-alpha-04)]",
                 "focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--em-primary-alpha-15)]",
               )}
             >
-              <FolderPlus className="h-5 w-5 text-muted-foreground" />
+              {picking ? (
+                <Loader2 className="h-5 w-5 animate-spin text-[var(--em-primary)]" />
+              ) : (
+                <FolderPlus className="h-5 w-5 text-muted-foreground" />
+              )}
               <span className="text-[14px] text-foreground">
-                添加 ExcelManus 可读取和编辑的文件夹
+                {picking ? "正在打开系统文件夹选择器…" : "选择 ExcelManus 可读取和编辑的文件夹"}
               </span>
             </button>
           )}
@@ -232,7 +284,7 @@ export function AddWorkspaceDialog({
           action="ghost"
           className="sm:flex-none sm:w-auto sm:h-10 sm:px-3 text-muted-foreground"
           onClick={close}
-          disabled={busy}
+          disabled={busy || picking}
         >
           取消
         </OverlayCardAction>
@@ -240,7 +292,7 @@ export function AddWorkspaceDialog({
           action="primary"
           className="sm:flex-none sm:w-auto sm:h-10 sm:rounded-full sm:px-5"
           onClick={() => void handleAdd()}
-          disabled={busy}
+          disabled={busy || picking}
         >
           {busy ? (isEdit ? "保存中…" : "添加中…") : isEdit ? "保存" : "添加工作区"}
         </OverlayCardAction>

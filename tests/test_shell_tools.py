@@ -3,12 +3,33 @@
 from __future__ import annotations
 
 import os
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from excelmanus.engine_core.tool_result import ToolResult
 from excelmanus.tools import shell_tools
+
+
+def _bind_full_access(workspace: Path):
+    from excelmanus.tools.context import (
+        CallerCapability,
+        SessionBinding,
+        ToolCallContext,
+        bind_call,
+    )
+    from excelmanus.workspace.refs import WorkspaceRef
+
+    return bind_call(ToolCallContext(
+        binding=SessionBinding(
+            session_id="full-access-test",
+            workspace=WorkspaceRef.from_root(workspace),
+            capability=CallerCapability(approval="never", full_access=True),
+        ),
+        call_id="run-shell-full-access",
+        tool_name="run_shell",
+    ))
 
 def _payload(result: ToolResult) -> dict:
     assert isinstance(result, ToolResult)
@@ -166,6 +187,52 @@ class TestRunShellBlocked:
         result = _payload(shell_tools.run_shell("unknown_cmd --flag"))
         assert result["status"] == "blocked"
         assert "白名单" in result["reason"]
+
+
+class TestRunShellFullAccess:
+    def test_network_command_bypasses_allowlist_and_uses_system_shell(
+        self,
+        workspace: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from excelmanus.tools.context import reset_call
+
+        observed: dict[str, object] = {}
+
+        def fake_run(command, **kwargs):
+            observed["command"] = command
+            observed.update(kwargs)
+            return subprocess.CompletedProcess(command, 0, "network ok\n", "")
+
+        monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example.test:8080")
+        monkeypatch.setattr(subprocess, "run", fake_run)
+        token = _bind_full_access(workspace)
+        try:
+            result = _payload(shell_tools.run_shell("curl https://example.com"))
+        finally:
+            reset_call(token)
+
+        assert result["status"] == "success"
+        assert result["stdout_tail"] == "network ok"
+        assert observed["command"] == "curl https://example.com"
+        assert observed["shell"] is True
+        assert observed["env"]["HTTPS_PROXY"] == "http://proxy.example.test:8080"
+
+    def test_preflight_does_not_create_an_approval_block(
+        self, workspace: Path,
+    ) -> None:
+        from excelmanus.security import FileAccessGuard
+        from excelmanus.tools.context import reset_call
+
+        token = _bind_full_access(workspace)
+        try:
+            result = shell_tools.preflight_shell(
+                {"command": "curl https://example.com"},
+                FileAccessGuard(str(workspace)),
+            )
+        finally:
+            reset_call(token)
+        assert result is None
 
 
 class TestRunShellWriteFlags:

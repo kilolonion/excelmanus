@@ -49,8 +49,6 @@ def test_tool_detail_keeps_schema_and_can_select_nested_field(tmp_path):
     result = query(registry, "tool_detail", "edit_spreadsheet.operations.kind")
     assert '"write"' in result and '"delete_rows"' in result
     assert "结果已截断" not in result
-    registry.bind_catalog(mode="code")
-    assert '"write"' in query(registry, "tool_detail", "edit_spreadsheet.operations.kind")
 
 
 def test_tool_detail_workbook_spec_nested_styles_returns_contract(tmp_path):

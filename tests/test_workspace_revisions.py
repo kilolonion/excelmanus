@@ -179,3 +179,27 @@ def test_checkpoint_does_not_change_path(tmp_path: Path) -> None:
     assert rec.label == "before"
     assert rec.to_public_dict()["revision_id"] == rec.id
     assert rec.to_public_dict()["content_version"] == f"sha256:{rec.sha256}"
+
+
+def test_checkpoint_after_edit_is_visible_through_file_service(tmp_path: Path) -> None:
+    from excelmanus.workspace.file_service import WorkspaceFileService
+    from excelmanus.workbook_commit import content_version_of
+
+    svc = WorkspaceFileService(tmp_path)
+    svc.create("book.xlsx", b"v0")
+    svc.update("book.xlsx", b"v1", expected_version=content_version_of(b"v0"))
+    rec = svc.checkpoint("book.xlsx", expected_version=content_version_of(b"v1"), label="named")
+    listed = svc.list_history("book.xlsx")
+    assert rec.id in {item.id for item in listed}
+    assert any(item.reason == "checkpoint" and item.label == "named" for item in listed)
+
+
+def test_checkpoint_rechecks_expected_version_under_lock(tmp_path: Path) -> None:
+    from excelmanus.workspace.file_service import WorkspaceFileService
+    from excelmanus.workbook_commit import CommitError
+
+    svc = WorkspaceFileService(tmp_path)
+    svc.create("book.xlsx", b"v0")
+    with pytest.raises(CommitError) as exc:
+        svc.checkpoint("book.xlsx", expected_version="sha256:" + "0" * 64)
+    assert getattr(exc.value, "code", None) == "STALE_SNAPSHOT"

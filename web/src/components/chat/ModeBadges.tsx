@@ -20,7 +20,7 @@ import { toggleFullAccess } from "@/lib/api";
 
 const POLICIES = [
   { key: "ask", label: "询问", desc: "写入前确认" },
-  { key: "skip", label: "跳过", desc: "自动写入，仍不出工作区" },
+  { key: "skip", label: "跳过", desc: "自动批准所有命令（含联网）" },
 ] as const;
 
 export function ModeBadges() {

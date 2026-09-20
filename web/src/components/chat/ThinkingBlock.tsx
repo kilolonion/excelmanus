@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useLayoutEffect } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { Brain, ChevronDown } from "lucide-react";
 import { cn } from "@/lib/utils";
@@ -18,6 +18,15 @@ interface ThinkingBlockProps {
 const FADE_MASK =
   "linear-gradient(to bottom, transparent 0%, black 14%, black 86%, transparent 100%)";
 const ACTIVE_MAX_H = "6.5rem";
+const AUTO_FOLLOW_THRESHOLD_PX = 12;
+
+export function isNearScrollBottom(
+  scrollTop: number,
+  clientHeight: number,
+  scrollHeight: number,
+): boolean {
+  return scrollHeight - scrollTop - clientHeight <= AUTO_FOLLOW_THRESHOLD_PX;
+}
 
 export function ThinkingBlock({
   content,
@@ -30,6 +39,8 @@ export function ThinkingBlock({
   const [expanded, setExpanded] = useState(defaultExpanded);
   const [elapsed, setElapsed] = useState(0);
   const contentRef = useRef<HTMLDivElement>(null);
+  // 流式内容默认跟随底部；一旦用户向上查看历史内容，就由用户接管滚动位置。
+  const autoFollowRef = useRef(true);
 
   useEffect(() => {
     if (!isActive) return;
@@ -41,7 +52,11 @@ export function ThinkingBlock({
   }, [isActive, startedAt]);
 
   useEffect(() => {
-    if (isActive && contentRef.current) {
+    if (isActive) autoFollowRef.current = true;
+  }, [isActive]);
+
+  useLayoutEffect(() => {
+    if (isActive && autoFollowRef.current && contentRef.current) {
       contentRef.current.scrollTop = contentRef.current.scrollHeight;
     }
   }, [content, isActive]);
@@ -125,9 +140,24 @@ export function ThinkingBlock({
           >
             <div
               ref={contentRef}
+              onScroll={(event) => {
+                const target = event.currentTarget;
+                autoFollowRef.current = isNearScrollBottom(
+                  target.scrollTop,
+                  target.clientHeight,
+                  target.scrollHeight,
+                );
+              }}
+              onWheelCapture={(event) => {
+                // scroll 事件可能晚于下一段流式内容到达，先记录向上滚动的用户意图。
+                if (event.deltaY < 0) autoFollowRef.current = false;
+              }}
+              onTouchStart={() => {
+                autoFollowRef.current = false;
+              }}
               className={cn(
                 "px-3 sm:px-3.5 pb-3 text-[12px] text-[var(--em-text-secondary)] whitespace-pre-wrap leading-relaxed break-words",
-                "max-h-48 overflow-y-auto",
+                "max-h-48 overflow-y-auto overscroll-contain",
                 isActive && "scrollbar-none",
               )}
               style={

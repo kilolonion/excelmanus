@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { Check, ChevronRight, Gauge, Loader2, Pencil, Plus, Trash2 } from "lucide-react";
+import { Check, ChevronRight, Gauge, Loader2, Minus, Pencil, Plus, Trash2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -120,6 +120,11 @@ export function JevProviderSection() {
       setFormOpen(false);
       setEditingId(null);
     }
+  };
+
+  const updateTimeout = (value: number) => {
+    const next = Math.min(8, Math.max(0.2, Math.round(value * 100) / 100));
+    setDraft((prev) => ({ ...prev, jev_timeout_seconds: next }));
   };
 
   return (
@@ -286,20 +291,42 @@ export function JevProviderSection() {
 
             <div className="rounded-lg border border-border/70 overflow-hidden">
               <JevFieldRow label="超时（秒）" desc="单次评估的最长等待时间，对所有决策提供商生效。">
-                <Input
-                  type="number"
-                  className="w-full sm:w-24 h-9 sm:h-8 text-sm text-right"
-                  step={0.05}
-                  min={0.2}
-                  max={8}
-                  value={draft.jev_timeout_seconds}
-                  onChange={(event) => {
-                    const next = parseFloat(event.target.value);
-                    if (!Number.isNaN(next)) {
-                      setDraft((prev) => ({ ...prev, jev_timeout_seconds: next }));
-                    }
-                  }}
-                />
+                <div className="flex h-9 w-full flex-shrink-0 overflow-hidden rounded-lg border border-input bg-background shadow-[0_1px_2px_rgba(24,58,40,0.04)] transition-[border-color,box-shadow] focus-within:border-[var(--em-primary)] focus-within:ring-2 focus-within:ring-[var(--em-primary-alpha-15)] sm:h-8 sm:w-36">
+                  <button
+                    type="button"
+                    aria-label="减少超时时间"
+                    className="grid h-full w-9 shrink-0 place-items-center border-r border-border/70 text-muted-foreground transition-colors hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--em-primary-alpha-25)] disabled:pointer-events-none disabled:opacity-35"
+                    disabled={draft.jev_timeout_seconds <= 0.2}
+                    onClick={() => updateTimeout(draft.jev_timeout_seconds - 0.05)}
+                  >
+                    <Minus className="h-3.5 w-3.5" />
+                  </button>
+                  <Input
+                    type="number"
+                    aria-label="超时秒数"
+                    inputMode="decimal"
+                    className="h-full min-w-0 flex-1 rounded-none border-0 bg-transparent px-1 text-center text-sm shadow-none [appearance:textfield] focus-visible:border-transparent focus-visible:ring-0 [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none"
+                    step={0.05}
+                    min={0.2}
+                    max={8}
+                    value={draft.jev_timeout_seconds}
+                    onChange={(event) => {
+                      const next = parseFloat(event.target.value);
+                      if (!Number.isNaN(next)) {
+                        updateTimeout(next);
+                      }
+                    }}
+                  />
+                  <button
+                    type="button"
+                    aria-label="增加超时时间"
+                    className="grid h-full w-9 shrink-0 place-items-center border-l border-border/70 text-muted-foreground transition-colors hover:bg-[var(--em-primary-alpha-06)] hover:text-[var(--em-primary)] focus-visible:z-10 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-[var(--em-primary-alpha-25)] disabled:pointer-events-none disabled:opacity-35"
+                    disabled={draft.jev_timeout_seconds >= 8}
+                    onClick={() => updateTimeout(draft.jev_timeout_seconds + 0.05)}
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                  </button>
+                </div>
               </JevFieldRow>
               <JevSaveBar
                 hasChanges={hasProviderChanges}

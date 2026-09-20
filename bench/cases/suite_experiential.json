@@ -257,15 +257,14 @@
     {
       "id": "E14",
       "name": "别用表格工具，用 Python",
-      "tags": ["wave-3", "code-mode", "run_code"],
+      "tags": ["wave-3", "programmatic", "run_code"],
       "chat_mode": "write",
-      "present_as": "code",
       "attachments": ["bench/fixtures/experiential/q3_sales_messy.xlsx"],
       "message": "别用你那些表格工具。用 Python 给我算华东毛利。毛利率你自己编一个合理的成本假设就行，算完告诉我假设是什么。",
       "expected": {
-        "lens": "code 呈现 + 假设透明",
+        "lens": "用户指定 Python 计算 + 假设透明",
         "review_focus": [
-          "present_as=code 时是否主要走 run_code",
+          "是否按用户要求用 run_code 进行 Python 计算",
           "「华东」口径有没有声明",
           "成本假设是否写明，而不是装成表里有毛利列",
           "会不会因为脏数据直接算炸然后沉默"

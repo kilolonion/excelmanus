@@ -78,6 +78,7 @@ def get_meta_tools() -> list[ToolDef]:
             func=_stub,
             write_effect="dynamic",
             visibility="hide_in_read",
+            actions={action: {"write_effect": "none"} for action in ("status", "list", "wait")},
         ),
         ToolDef(
             name="list_subagents",
@@ -159,6 +160,22 @@ def _delegate_schema(
     return {
         "type": "object",
         "properties": {
+            "action": {
+                "type": "string",
+                "enum": ["start", "status", "list", "wait", "send", "cancel", "pause", "resume"],
+                "default": "start",
+                "description": "省略即同步委托。status/wait 查询 run_id；send 追加指令；pause/cancel 停止当前执行；resume 携带历史新建执行并返回新 ID。",
+            },
+            "background": {
+                "type": "boolean", "default": False,
+                "description": "仅单任务 start：true 立即返回 run_id，随后用 status/wait 获取结果。",
+            },
+            "run_id": {"type": "string", "description": "status/wait/send/cancel/pause/resume 对应的子任务 ID。"},
+            "message": {"type": "string", "description": "send 的追加指令，或 resume 的后续任务。"},
+            "wait_seconds": {
+                "type": "number", "minimum": 0, "maximum": 60, "default": 30,
+                "description": "wait 最多等待秒数；到期只返回当前状态，不取消任务。0 为立即查询。",
+            },
             "task": {
                 "type": "string",
                 "description": "单任务描述（与 tasks 二选一；与 task_brief 二选一）",

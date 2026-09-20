@@ -22,6 +22,7 @@ interface SampleFileRef {
 }
 
 interface Suggestion {
+  label: string;
   text: string;
   icon: LucideIcon;
   samples?: SampleFileRef[];
@@ -29,24 +30,28 @@ interface Suggestion {
 
 const SUGGESTIONS: Suggestion[] = [
   {
-    text: "读取数据并用 Python 做回归分析，结果写回 Excel",
-    icon: Code2,
-    samples: [{ path: "/samples/广告与销售数据.csv", name: "广告与销售数据.csv" }],
-  },
-  {
-    text: "识别截图中的表格，还原数据和样式到 Excel",
-    icon: ScanLine,
-    samples: [{ path: "/samples/收款收据.jpg", name: "收款收据.jpg" }],
-  },
-  {
-    text: "按区域汇总月度销售额，生成趋势折线图和同比分析",
+    label: "经营分析",
+    text: "把月度销售数据做成经营看板：按区域汇总、计算同比、生成趋势图，并写出关键结论",
     icon: TrendingUp,
     samples: [{ path: "/samples/月度销售报表.csv", name: "月度销售报表.csv" }],
   },
   {
-    text: "跨 Sheet 用 VLOOKUP 关联订单和产品，补全单价和金额",
+    label: "跨表自动化",
+    text: "补齐订单工作表：从产品目录匹配产品名称和单价，计算金额，保留公式并标记未匹配项",
     icon: TableProperties,
     samples: [{ path: "/samples/订单与产品.xlsx", name: "订单与产品.xlsx" }],
+  },
+  {
+    label: "图片转 Excel",
+    text: "把这张收款收据还原成可编辑 Excel：提取客户、明细、数量和金额，核对合计并保留原有布局",
+    icon: ScanLine,
+    samples: [{ path: "/samples/收款收据.jpg", name: "收款收据.jpg" }],
+  },
+  {
+    label: "高级分析",
+    text: "评估广告投入是否带来销售增长：用 Python 做回归分析，生成散点图和预测公式，把结果写回 Excel",
+    icon: Code2,
+    samples: [{ path: "/samples/广告与销售数据.csv", name: "广告与销售数据.csv" }],
   },
 ];
 
@@ -162,13 +167,13 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
 
   return (
     <motion.div
-      className="em-welcome relative flex-1 min-h-0 flex flex-col items-center overflow-y-auto"
+      className="em-welcome relative flex-1 min-h-0 overflow-hidden"
       variants={containerVariants}
       initial="hidden"
       animate="show"
     >
       <motion.section className="em-welcome-hero" variants={fadeUp}>
-        <div className="relative z-10 max-w-2xl">
+        <div className="em-welcome-hero-content relative z-10 max-w-2xl">
           <div className="em-welcome-kicker">Spreadsheet intelligence</div>
           <motion.h1 className="mt-4 text-[clamp(1.65rem,4vw,2.65rem)] font-semibold tracking-[-0.04em] text-[var(--em-ink)]" variants={fadeUp}>
             把琐碎的表格工作，交给你的智能工作区。
@@ -176,7 +181,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
           <motion.p className="mt-3 max-w-xl text-sm leading-6 text-[var(--em-muted)] sm:text-[15px]" variants={fadeUp}>
             上传文件、描述目标，ExcelManus 会在同一个工作区里完成分析、编辑和复核。
           </motion.p>
-          <motion.div className="mt-6 flex flex-wrap items-center gap-2 text-[11px] text-[var(--em-muted)]" variants={fadeUp}>
+          <motion.div className="em-welcome-proof mt-6 flex flex-wrap items-center gap-2 text-[11px] text-[var(--em-muted)]" variants={fadeUp}>
             <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">支持 Excel、CSV、图片</span>
             <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">结果可追溯</span>
             <span className="rounded-full border border-[var(--em-line)] bg-white/70 px-3 py-1.5">移动端友好</span>
@@ -188,7 +193,7 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
         className="em-task-grid grid grid-cols-1 gap-3 sm:grid-cols-2"
         variants={{ hidden: {}, show: { transition: { staggerChildren: 0.06, delayChildren: 0.1 } } }}
       >
-        <div className="col-span-full mb-1 flex items-center justify-between px-1">
+        <div className="em-task-heading col-span-full mb-1 flex items-center justify-between px-1">
           <div>
             <h2 className="text-sm font-semibold text-[var(--em-ink)]">从一个具体任务开始</h2>
             <p className="mt-1 text-xs text-[var(--em-muted)]">选择示例，或直接在下方输入你的目标</p>
@@ -196,7 +201,8 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
           <span className="hidden text-[11px] text-[var(--em-muted)] sm:block">常用工作流</span>
         </div>
         {SUGGESTIONS.map((suggestion) => {
-          const { text, icon: Icon, samples } = suggestion;
+          const { label, text, icon: Icon, samples } = suggestion;
+          const hasImageSample = !!samples?.some((sample) => isImageFile(sample.name));
           const isThis = loadingKey === text;
           const isBusy = !!loadingKey;
           const hasError = errorKey === text;
@@ -212,23 +218,26 @@ export function WelcomePage({ onSuggestionClick }: WelcomePageProps) {
               onClick={() => handleClick(suggestion)}
               disabled={isBusy}
               aria-label={`试用示例：${text}`}
-              className={`em-task-card group flex flex-col gap-2 p-4 text-left text-sm
+              className={`em-task-card ${hasImageSample ? "em-task-card-image" : ""} group flex flex-col gap-2 p-4 text-left text-sm
                 transition-[border-color,background-color,box-shadow,color,opacity] duration-200 min-h-[44px]
                 ${isThis ? "opacity-60 cursor-wait" : isBusy ? "opacity-80 cursor-default" : "hover:bg-[var(--em-primary-alpha-06)] active:bg-[var(--em-primary-alpha-10)] cursor-pointer"}
                 ${hasError ? "border-[color:var(--destructive)]/40" : ""}`}
             >
               <span className="flex items-center gap-3">
-                  <span className="flex-shrink-0 h-9 w-9 rounded-xl bg-[var(--em-primary-alpha-08)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
+                <span className="em-task-icon flex-shrink-0 h-9 w-9 rounded-xl bg-[var(--em-primary-alpha-08)] flex items-center justify-center group-hover:bg-[var(--em-primary-alpha-15)] transition-colors">
                   {isThis ? (
                     <Loader2 className="h-4 w-4 text-muted-foreground animate-spin" />
                   ) : (
                     <Icon className="h-4 w-4 text-muted-foreground group-hover:text-[var(--em-primary)] transition-colors" />
                   )}
                 </span>
-                <span className="flex-1 group-hover:text-foreground transition-colors line-clamp-2">{text}</span>
+                <span className="min-w-0 flex-1">
+                  <span className="em-task-label mb-1 block text-[10px] font-semibold tracking-[0.08em] text-[var(--em-primary)]">{label}</span>
+                  <span className="em-task-copy block group-hover:text-foreground transition-colors line-clamp-3">{text}</span>
+                </span>
               </span>
               {!!samples?.length && (
-                <span className="flex flex-wrap items-center gap-1.5 pl-11">
+                <span className="em-task-files flex flex-wrap items-center gap-1.5 pl-11">
                   {samples.map((s) =>
                     isImageFile(s.name) ? (
                       <span

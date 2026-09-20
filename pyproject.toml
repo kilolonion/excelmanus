@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "excelmanus"
-version = "1.7.3"
+version = "1.8.0"
 description = "基于大语言模型的 Excel 智能代理框架，支持 Web UI / REST API 运行"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -24,6 +24,8 @@ dependencies = [
     "httpx>=0.24.0",
     "cryptography>=41.0.0",
     "mcp>=1.0.0",
+    "jsonschema>=4.26.0",
+    "referencing>=0.30.0",
     "matplotlib>=3.7.0",
     "xlsxwriter>=3.1.0",
     "Pillow>=10.0.0",
@@ -88,3 +90,6 @@ excelmanus = [
     "prompts/**/*.md",
     "skillpacks/**/*",
 ]
+
+[tool.setuptools.exclude-package-data]
+"*" = ["**/__pycache__/*", "**/*.pyc", "**/*.pyo", "**/.DS_Store"]

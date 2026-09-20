@@ -46,8 +46,127 @@ from excelmanus.message_serialization import (
     to_plain as _to_plain,
 )
 from excelmanus.skillpacks import SkillMatchResult
+from excelmanus.agent.budget import TurnBudgetExceeded
 
 logger = get_logger("agent.loop")
+
+
+async def _execute_and_resolve_tool(
+    engine: Any, tc: Any, tool_scope: Any, on_event: Any, iteration: int,
+    current_route_result: Any, approval_resolver: Any,
+) -> ToolCallResult:
+    """Keep the existing approval flow inside the lifetime of its tool call."""
+    tool_call_id = getattr(tc, "id", "")
+    tc_result = await engine._execute_tool_call(
+        tc,
+        tool_scope,
+        on_event,
+        iteration,
+        route_result=current_route_result,
+    )
+
+    if tc_result.pending_approval and not tc_result.defer_tool_result and tool_call_id:
+        engine._memory.add_tool_result(tool_call_id, tc_result.result)
+        tc._pending_result_written = True
+
+    if tc_result.pending_approval:
+        driver_for_snapshot = getattr(engine, "_driver", None)
+        persist_runtime = getattr(driver_for_snapshot, "_persist_runtime_state", None)
+        if callable(persist_runtime):
+            persist_runtime()
+        pending = engine._approval.pending
+        if approval_resolver is not None and pending is not None:
+            # ── 内联审批：在同一轮对话内等待用户决策 ──
+            approval_id = tc_result.approval_id or pending.approval_id
+            logger.info("内联审批等待决策: %s", approval_id)
+            try:
+                decision = await approval_resolver(pending)
+            except asyncio.CancelledError:
+                # Cancellation is a control signal, never an
+                # approval decision.  Close the pending gate,
+                # then propagate cancellation to the driver so
+                # the turn cannot continue after abort.
+                engine._approval.reject_pending(approval_id)
+                engine._interaction_registry.cleanup_done()
+                raise
+            except Exception as _resolver_exc:  # noqa: BLE001
+                logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
+                decision = None
+
+            updates, _wrote = await engine._apply_approval_decision(
+                decision, pending, approval_id,
+                tool_call_id, on_event, iteration, "内联审批",
+            )
+            tc_result = replace(tc_result, **updates)
+            # 内联审批完成，不退出循环，继续处理后续工具调用
+        else:
+            # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
+            approval_id = tc_result.approval_id or (pending.approval_id if pending else "")
+            logger.info("阻塞等待审批决策: %s", approval_id)
+            try:
+                decision_payload = await engine._interaction_handler.wait_approval_decision(approval_id)
+            except asyncio.TimeoutError:
+                reject_msg = engine._approval.reject_pending(
+                    approval_id, timeout=True,
+                )
+                fields = _approval_reject_fields(reject_msg, timeout=True)
+                if tool_call_id:
+                    engine._memory.replace_tool_result(
+                        tool_call_id, fields["result"],
+                    )
+                tc_result = replace(tc_result, **fields)
+                logger.info("审批等待超时，自动拒绝: %s", approval_id)
+                engine._interaction_handler.finish_approval(approval_id, fields["result"], False)
+                engine._interaction_registry.cleanup_done()
+            except asyncio.CancelledError:
+                reject_msg = engine._approval.reject_pending(approval_id)
+                fields = _approval_reject_fields(reject_msg, timeout=False)
+                if tool_call_id:
+                    engine._memory.replace_tool_result(
+                        tool_call_id, fields["result"],
+                    )
+                tc_result = replace(tc_result, **fields)
+                engine._interaction_registry.cleanup_done()
+                # Do not turn task cancellation into a normal
+                # rejection: callers must observe cancellation
+                # and Driver must emit TURN_FAILED.
+                raise
+            else:
+                decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
+                engine._interaction_registry.cleanup_done()
+                updates, _wrote = await engine._apply_approval_decision(
+                    decision, pending, approval_id,
+                    tool_call_id, on_event, iteration, "Web 审批",
+                )
+                tc_result = replace(tc_result, **updates)
+
+    if tc_result.pending_question:
+        driver_for_snapshot = getattr(engine, "_driver", None)
+        persist_runtime = getattr(driver_for_snapshot, "_persist_runtime_state", None)
+        if callable(persist_runtime):
+            persist_runtime()
+
+    return tc_result
+
+
+async def _await_with_turn_budget(engine: Any, awaitable: Any) -> Any:
+    """让一次 LLM 请求（含其 provider 重试）使用父回合剩余时间。"""
+    budget = getattr(engine, "_turn_budget", None)
+    if budget is not None:
+        try:
+            budget.ensure_time()
+        except Exception:
+            close = getattr(awaitable, "close", None)
+            if callable(close):
+                close()
+            raise
+    driver = getattr(engine, "_driver", None)
+    remaining = getattr(driver, "remaining_turn_seconds", lambda: None)()
+    if remaining is None:
+        return await awaitable
+    if remaining <= 0:
+        raise TurnBudgetExceeded("wall_clock", "本轮 wall-clock 预算已耗尽")
+    return await asyncio.wait_for(awaitable, timeout=remaining)
 
 
 # ── 并行批同因折叠（P3-a）──────────────────────────────────
@@ -423,6 +542,7 @@ async def run_tool_loop(
     approval_resolver: ApprovalResolver | None = None,
     question_resolver: QuestionResolver | None = None,
     skip_initial_inbox_claim: bool = False,
+    initial_tool_results: list[ToolCallResult] | None = None,
 ) -> ChatResult:
     """迭代循环体：LLM 请求 → thinking 提取 → 工具调用遍历 → 熔断检测。
 
@@ -470,11 +590,16 @@ async def run_tool_loop(
     max_failures = engine._config.max_consecutive_failures
     max_iterations = engine._config.max_iterations
     consecutive_failures = 0
-    all_tool_results: list[ToolCallResult] = []
+    all_tool_results: list[ToolCallResult] = list(initial_tool_results or [])
     current_route_result = route_result
     # 恢复执行时保留之前的统计，仅首次调用时重置
     if start_iteration <= 1:
-        engine._state.reset_loop_stats()
+        if not initial_tool_results:
+            engine._state.reset_loop_stats()
+        else:
+            engine._state.last_tool_call_count = len(initial_tool_results)
+            engine._state.last_success_count = sum(result.success for result in initial_tool_results)
+            engine._state.last_failure_count = len(initial_tool_results) - engine._state.last_success_count
         if engine._tool_dispatcher is not None:
             engine._tool_dispatcher.reset_cancel()
             engine._tool_dispatcher.begin_call_budget(
@@ -650,12 +775,18 @@ async def run_tool_loop(
                 _retry_attempt += 1
                 try:
                     try:
-                        stream_or_response = await engine._llm_caller.create_chat_completion_with_retry(stream_kwargs)
+                        stream_or_response = await _await_with_turn_budget(
+                            engine,
+                            engine._llm_caller.create_chat_completion_with_retry(stream_kwargs),
+                        )
                         # 检查返回值是否为异步迭代器（支持流式）
                         if hasattr(stream_or_response, "__aiter__"):
-                            message, usage = await engine._llm_caller.consume_stream(
-                                stream_or_response, on_event, iteration,
-                                _llm_start_ts=_llm_start_ts,
+                            message, usage = await _await_with_turn_budget(
+                                engine,
+                                engine._llm_caller.consume_stream(
+                                    stream_or_response, on_event, iteration,
+                                    _llm_start_ts=_llm_start_ts,
+                                ),
                             )
                         else:
                             # provider 不支持 stream，返回了普通 response 对象
@@ -672,7 +803,10 @@ async def run_tool_loop(
                             raise
                         # 流式调用失败时回退到非流式
                         logger.warning("流式调用失败，回退到非流式: %s", stream_exc)
-                        response = await engine._llm_caller.create_chat_completion_with_retry(kwargs)
+                        response = await _await_with_turn_budget(
+                            engine,
+                            engine._llm_caller.create_chat_completion_with_retry(kwargs),
+                        )
                         message, usage = _extract_completion_message(response)
 
                     # 成功 — 若经历过重试则通知前端
@@ -873,6 +1007,18 @@ async def run_tool_loop(
                 accept_file_leases(prepared.file_leases)
             if getattr(message, "replay_state", None) is not None:
                 message.replay_source = {"protocol": route.protocol, "model": route.model}
+                if route.protocol == "openai_responses":
+                    message.replay_source["compaction_generation"] = int(getattr(engine, "_compaction_generation", 0) or 0)
+                replay = getattr(message, "replay_state", None)
+                response_id = replay.get("response_id") if isinstance(replay, dict) else None
+                if isinstance(response_id, str) and response_id.strip():
+                    if route.protocol == "openai_responses":
+                        engine._responses_last_response = {
+                            "id": response_id.strip(),
+                            "protocol": route.protocol,
+                            "model": route.model,
+                            "compaction_generation": int(getattr(engine, "_compaction_generation", 0) or 0),
+                        }
         except asyncio.CancelledError:
             series_of(engine).cancel()
             raise
@@ -916,6 +1062,28 @@ async def run_tool_loop(
         if usage is not None:
             total_prompt_tokens += _usage_token(usage, "prompt_tokens")
             total_completion_tokens += _usage_token(usage, "completion_tokens")
+            budget = getattr(engine, "_turn_budget", None)
+            if budget is not None:
+                budget.record_usage(usage)
+                if budget.exhausted_reason:
+                    reason_text = {
+                        "tokens": "已达到本轮 token 预算",
+                        "cost": "已达到本轮成本预算",
+                        "wall_clock": "已达到本轮 wall-clock 预算",
+                    }.get(budget.exhausted_reason, "已达到本轮预算")
+                    reply = f"{reason_text}，已停止继续调用模型和工具。"
+                    engine._memory.add_assistant_message(reply)
+                    engine._last_iteration_count = iteration
+                    _emit_step_end()
+                    return _finalize_result(
+                        reply=reply,
+                        tool_calls=list(all_tool_results),
+                        iterations=iteration,
+                        truncated=True,
+                        prompt_tokens=total_prompt_tokens,
+                        completion_tokens=total_completion_tokens,
+                        total_tokens=total_prompt_tokens + total_completion_tokens,
+                    )
 
         # 提取 thinking 内容（流式模式下已累积到 message.thinking）
         thinking_content = getattr(message, "thinking", None) or ""
@@ -1071,7 +1239,8 @@ async def run_tool_loop(
         assistant_msg = _assistant_message_to_dict(message)
         if tool_calls:
             assistant_msg["tool_calls"] = _sanitize_tool_call_arguments(
-                [_to_plain(tc) for tc in tool_calls]
+                [{key: value for key, value in _to_plain(tc).items()
+                  if key not in {"depends_on", "depends_on_call_ids"}} for tc in tool_calls]
             )
         engine._memory.add_assistant_tool_message(assistant_msg)
 
@@ -1098,90 +1267,42 @@ async def run_tool_loop(
         breaker_skip_error = (
             f"工具未执行：连续 {max_failures} 次工具调用失败，已触发熔断。"
         )
-        # ── 批次拆分：is_concurrency_safe 为 True 的相邻调用才进滚动池 ──
-        if engine._config.parallel_readonly_tools:
-            _batches = engine._tool_runtime.split_batches(tool_calls)
-        else:
-            _batches = [_ToolCallBatch([tc], False) for tc in tool_calls]
+        # ── 调度图：显式成功依赖和全局副作用边界决定执行波次 ──
+        _plan = engine._tool_runtime.plan_execution(
+            tool_calls, parallel=engine._config.parallel_readonly_tools,
+        )
+        _batches = _plan.batches
+        _schedule_results: dict[int, ToolCallResult] = {}
 
-        for _batch in _batches:
-            # ── breaker / question 跳过逻辑（适用于整个批次） ──
-            if breaker_triggered:
+        _planned_calls = [tc for batch in _batches for tc in batch.tool_calls]
+        for tc in _planned_calls:
+            engine._tool_runtime.prepare_call(tc, on_event, iteration, retain=True)
+        try:
+            for _batch in _batches:
+                ready_calls = []
                 for tc in _batch.tool_calls:
-                    function = getattr(tc, "function", None)
-                    tool_name = getattr(function, "name", "")
-                    tool_call_id = getattr(tc, "id", "")
-                    all_tool_results.append(
-                        ToolCallResult(
-                            tool_name=tool_name,
-                            arguments={},
-                            result=breaker_skip_error,
-                            success=False,
-                            error=breaker_skip_error,
-                        )
-                    )
-                    if tool_call_id:
-                        engine._memory.add_tool_result(tool_call_id, breaker_skip_error)
-                continue
-
-            if _batch.parallel:
-                _reclassified = engine._tool_runtime.reclassify_batch(_batch.tool_calls)
-                if len(_reclassified) != 1 or not _reclassified[0].parallel:
-                    _batch = _ToolCallBatch(list(_batch.tool_calls), False)
-            if _batch.parallel:
-                # ── 并行路径：只读工具并发执行 ──
-                _parallel_results = await engine._execute_tool_calls_parallel(
-                    _batch.tool_calls, tool_scope, on_event, iteration,
-                    route_result=current_route_result,
-                )
-                # P3-a 同批同因折叠：durable 存全文，wire 投影存指针。
-                _dedup_plan = plan_parallel_dedup(list(_parallel_results))
-                for _p_index, (_p_tc, _p_tc_result) in enumerate(_parallel_results):
-                    tc, tc_result = _p_tc, _p_tc_result
-                    function = getattr(tc, "function", None)
-                    tool_name = getattr(function, "name", "")
-                    tool_call_id = getattr(tc, "id", "")
-
-                    all_tool_results.append(tc_result)
-
-                    # 按序写入 memory
-                    if not tc_result.defer_tool_result and tool_call_id:
-                        _pointer = _dedup_plan.get(_p_index)
-                        if _pointer is not None and not breaker_triggered:
-                            engine._memory.add_tool_result(
-                                tool_call_id,
-                                tc_result.result,
-                                projection_content=_pointer,
-                            )
-                        else:
-                            engine._memory.add_tool_result(tool_call_id, tc_result.result)
-
-                    # 统计更新（只读工具不触发 write_effect 分支）
+                    blocked = _plan.blocked_result(tc, _schedule_results)
+                    if blocked is None:
+                        ready_calls.append(tc)
+                        continue
+                    # A dependency skip is a paired, durable result, but it is not
+                    # another executed-tool failure for the consecutive breaker.
+                    blocked = engine._tool_runtime.finish_queued(tc, blocked)
+                    all_tool_results.append(blocked)
+                    _schedule_results[id(tc)] = blocked
+                    if tc.id:
+                        engine._memory.add_tool_result(tc.id, blocked.result)
                     engine._last_tool_call_count += 1
-                    if tc_result.success:
-                        engine._last_success_count += 1
-                        consecutive_failures = 0
-                    else:
-                        engine._last_failure_count += 1
-                        consecutive_failures += 1
-
-                    # 熔断检测
-                    if (not breaker_triggered) and consecutive_failures >= max_failures:
-                        recent_errors = [
-                            f"- {r.tool_name}: {r.error}"
-                            for r in all_tool_results[-max_failures:]
-                            if not r.success
-                        ]
-                        breaker_summary = "\n".join(recent_errors)
-                        breaker_triggered = True
-            else:
-                # ── 串行路径（保留完整原有逻辑） ──
-                for tc in _batch.tool_calls:
-                    function = getattr(tc, "function", None)
-                    tool_name = getattr(function, "name", "")
-                    tool_call_id = getattr(tc, "id", "")
-
-                    if breaker_triggered:
+                    engine._last_failure_count += 1
+                _batch = _ToolCallBatch(ready_calls, _batch.parallel and len(ready_calls) > 1)
+                if not ready_calls:
+                    continue
+                # ── breaker / question 跳过逻辑（适用于整个批次） ──
+                if breaker_triggered:
+                    for tc in _batch.tool_calls:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
                         all_tool_results.append(
                             ToolCallResult(
                                 tool_name=tool_name,
@@ -1191,110 +1312,137 @@ async def run_tool_loop(
                                 error=breaker_skip_error,
                             )
                         )
+                        engine._tool_runtime.finish_queued(tc, all_tool_results[-1])
                         if tool_call_id:
                             engine._memory.add_tool_result(tool_call_id, breaker_skip_error)
-                        continue
+                    continue
 
-                    tc_result = await engine._execute_tool_call(
-                        tc,
-                        tool_scope,
-                        on_event,
-                        iteration,
+                if _batch.parallel:
+                    _reclassified = engine._tool_runtime.reclassify_batch(_batch.tool_calls)
+                    if len(_reclassified) != 1 or not _reclassified[0].parallel:
+                        _batch = _ToolCallBatch(list(_batch.tool_calls), False)
+                if _batch.parallel:
+                    # ── 并行路径：只读工具并发执行 ──
+                    _parallel_results = await engine._execute_tool_calls_parallel(
+                        _batch.tool_calls, tool_scope, on_event, iteration,
                         route_result=current_route_result,
                     )
+                    # P3-a 同批同因折叠：durable 存全文，wire 投影存指针。
+                    _dedup_plan = plan_parallel_dedup(list(_parallel_results))
+                    for _p_index, (_p_tc, _p_tc_result) in enumerate(_parallel_results):
+                        tc, tc_result = _p_tc, _p_tc_result
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
 
-                    all_tool_results.append(tc_result)
+                        all_tool_results.append(tc_result)
+                        _schedule_results[id(tc)] = tc_result
 
-                    if not tc_result.defer_tool_result and tool_call_id:
-                        engine._memory.add_tool_result(tool_call_id, tc_result.result)
-
-                    if tc_result.pending_approval:
-                        pending = engine._approval.pending
-                        if approval_resolver is not None and pending is not None:
-                            # ── 内联审批：在同一轮对话内等待用户决策 ──
-                            approval_id = tc_result.approval_id or pending.approval_id
-                            logger.info("内联审批等待决策: %s", approval_id)
-                            try:
-                                decision = await approval_resolver(pending)
-                            except Exception as _resolver_exc:  # noqa: BLE001
-                                logger.warning("approval_resolver 异常，视为 reject: %s", _resolver_exc)
-                                decision = None
-
-                            updates, _wrote = await engine._apply_approval_decision(
-                                decision, pending, approval_id,
-                                tool_call_id, on_event, iteration, "内联审批",
-                            )
-                            tc_result = replace(tc_result, **updates)
-                            # 内联审批完成，不退出循环，继续处理后续工具调用
-                        else:
-                            # ── 无 resolver（Web API 等）：阻塞等待用户决策 ──
-                            approval_id = tc_result.approval_id or (pending.approval_id if pending else "")
-                            logger.info("阻塞等待审批决策: %s", approval_id)
-                            fut = engine._interaction_registry.create(approval_id)
-                            try:
-                                decision_payload = await asyncio.wait_for(
-                                    fut, timeout=DEFAULT_INTERACTION_TIMEOUT,
+                        # 按序写入 memory
+                        if not tc_result.defer_tool_result and tool_call_id:
+                            _pointer = _dedup_plan.get(_p_index)
+                            if getattr(tc, "_pending_result_written", False):
+                                engine._memory.replace_tool_result(tool_call_id, tc_result.result)
+                            elif _pointer is not None and not breaker_triggered:
+                                engine._memory.add_tool_result(
+                                    tool_call_id,
+                                    tc_result.result,
+                                    projection_content=_pointer,
                                 )
-                            except asyncio.TimeoutError:
-                                reject_msg = engine._approval.reject_pending(
-                                    approval_id, timeout=True,
-                                )
-                                fields = _approval_reject_fields(reject_msg, timeout=True)
-                                if tool_call_id:
-                                    engine._memory.replace_tool_result(
-                                        tool_call_id, fields["result"],
-                                    )
-                                tc_result = replace(tc_result, **fields)
-                                logger.info("审批等待超时，自动拒绝: %s", approval_id)
-                                engine._interaction_registry.cleanup_done()
-                            except asyncio.CancelledError:
-                                reject_msg = engine._approval.reject_pending(approval_id)
-                                fields = _approval_reject_fields(reject_msg, timeout=False)
-                                if tool_call_id:
-                                    engine._memory.replace_tool_result(
-                                        tool_call_id, fields["result"],
-                                    )
-                                tc_result = replace(tc_result, **fields)
-                                engine._interaction_registry.cleanup_done()
                             else:
-                                decision = decision_payload.get("decision") if isinstance(decision_payload, dict) else str(decision_payload)
-                                engine._interaction_registry.cleanup_done()
-                                updates, _wrote = await engine._apply_approval_decision(
-                                    decision, pending, approval_id,
-                                    tool_call_id, on_event, iteration, "Web 审批",
+                                engine._memory.add_tool_result(tool_call_id, tc_result.result)
+
+                        engine._interaction_handler.consume_tool_result(tool_call_id)
+
+                        # 统计更新（只读工具不触发 write_effect 分支）
+                        engine._last_tool_call_count += 1
+                        if tc_result.success:
+                            engine._last_success_count += 1
+                            consecutive_failures = 0
+                        else:
+                            engine._last_failure_count += 1
+                            if tc_result.error != "CANCELLED":
+                                consecutive_failures += 1
+
+                        # 熔断检测
+                        if (not breaker_triggered) and consecutive_failures >= max_failures:
+                            recent_errors = [
+                                f"- {r.tool_name}: {r.error}"
+                                for r in all_tool_results[-max_failures:]
+                                if not r.success
+                            ]
+                            breaker_summary = "\n".join(recent_errors)
+                            breaker_triggered = True
+                else:
+                    # ── 串行路径（保留完整原有逻辑） ──
+                    for tc in _batch.tool_calls:
+                        function = getattr(tc, "function", None)
+                        tool_name = getattr(function, "name", "")
+                        tool_call_id = getattr(tc, "id", "")
+
+                        if breaker_triggered:
+                            all_tool_results.append(
+                                ToolCallResult(
+                                    tool_name=tool_name,
+                                    arguments={},
+                                    result=breaker_skip_error,
+                                    success=False,
+                                    error=breaker_skip_error,
                                 )
-                                tc_result = replace(tc_result, **updates)
+                            )
+                            engine._tool_runtime.finish_queued(tc, all_tool_results[-1])
+                            if tool_call_id:
+                                engine._memory.add_tool_result(tool_call_id, breaker_skip_error)
+                            continue
 
-                    # 更新统计
-                    engine._last_tool_call_count += 1
-                    if tc_result.success:
-                        engine._last_success_count += 1
-                        consecutive_failures = 0
-                        # 计划/只读 PERMISSION_DENIED 为失败，不会走到这里。
-                        _write_effect = write_effect_for_call(
-                            tc_result.tool_name,
-                            tc_result.arguments,
-                            declared=engine._get_tool_write_effect(tc_result.tool_name),
+                        tc_result = await engine._tool_runtime.run_managed(
+                            tc, lambda: _execute_and_resolve_tool(
+                                engine, tc, tool_scope, on_event, iteration, current_route_result, approval_resolver,
+                            ), on_event, iteration,
                         )
-                        if _write_effect == "workspace_write":
-                            engine._record_workspace_write_action()
-                        elif _write_effect == "external_write":
-                            engine._record_external_write_action()
-                    else:
-                        engine._last_failure_count += 1
-                        # 已在 ToolDispatcher 中自动重试过的 retryable 错误
-                        # 不再计入熔断计数（重试已耗尽说明是持续性故障）
-                        consecutive_failures += 1
+                        all_tool_results.append(tc_result)
+                        if not tc_result.defer_tool_result and tool_call_id:
+                            if getattr(tc, "_pending_result_written", False):
+                                engine._memory.replace_tool_result(tool_call_id, tc_result.result)
+                            else:
+                                engine._memory.add_tool_result(tool_call_id, tc_result.result)
+                        engine._interaction_handler.consume_tool_result(tool_call_id)
 
-                    # 熔断检测
-                    if (not breaker_triggered) and consecutive_failures >= max_failures:
-                        recent_errors = [
-                            f"- {r.tool_name}({r.error_kind or 'unknown'}): {r.error}"
-                            for r in all_tool_results[-max_failures:]
-                            if not r.success
-                        ]
-                        breaker_summary = "\n".join(recent_errors)
-                        breaker_triggered = True
+                        # 更新统计
+                        _schedule_results[id(tc)] = tc_result
+                        engine._last_tool_call_count += 1
+                        if tc_result.success:
+                            engine._last_success_count += 1
+                            consecutive_failures = 0
+                            # 计划/只读 PERMISSION_DENIED 为失败，不会走到这里。
+                            _write_effect = write_effect_for_call(
+                                tc_result.tool_name,
+                                tc_result.arguments,
+                                declared=engine._get_tool_write_effect(tc_result.tool_name),
+                            )
+                            if _write_effect == "workspace_write":
+                                engine._record_workspace_write_action()
+                            elif _write_effect == "external_write":
+                                engine._record_external_write_action()
+                        else:
+                            engine._last_failure_count += 1
+                            # 已在 ToolDispatcher 中自动重试过的 retryable 错误
+                            # 不再计入熔断计数（重试已耗尽说明是持续性故障）
+                            if tc_result.error != "CANCELLED":
+                                consecutive_failures += 1
+
+                        # 熔断检测
+                        if (not breaker_triggered) and consecutive_failures >= max_failures:
+                            recent_errors = [
+                                f"- {r.tool_name}({r.error_kind or 'unknown'}): {r.error}"
+                                for r in all_tool_results[-max_failures:]
+                                if not r.success
+                            ]
+                            breaker_summary = "\n".join(recent_errors)
+                            breaker_triggered = True
+
+        finally:
+            engine._tool_runtime.end_batch(_planned_calls)
 
         # 说明：旧的 ask_user 退出路径已移除。
         # 阻塞式 ask_user 在 AskUserHandler 内 await Future，

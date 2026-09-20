@@ -342,7 +342,7 @@ class TestExcelMCPPathAdaptation:
 
         result = tool_def.func(fileAbsolutePath="examples/demo/demo_sales_data.xlsx")
 
-        assert result == "ok"
+        assert result.success and result.model_text == "ok"
         called_args = captured["arguments"]
         assert isinstance(called_args, dict)
         assert called_args["fileAbsolutePath"] == str(
@@ -420,7 +420,7 @@ class TestExcelMCPPathAdaptation:
 
         result = tool_def.func(fileAbsolutePath="examples/demo/demo_sales_data.xlsx")
 
-        assert result == "ok"
+        assert result.success and result.model_text == "ok"
         called_args = captured["arguments"]
         assert isinstance(called_args, dict)
         assert called_args["fileAbsolutePath"] == "examples/demo/demo_sales_data.xlsx"

@@ -36,7 +36,6 @@ def _make_mock_engine():
     engine._active_skills = []
     engine._last_route_result = None
     engine._current_chat_mode = "write"
-    engine._present_as = "native"
     engine._runtime_vars = {"workspace_root": "/tmp/ws", "model": "test-model"}
     return engine
 

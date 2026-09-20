@@ -2,7 +2,6 @@
 
 import { useShallow } from "zustand/react/shallow";
 import { useExcelStore } from "@/stores/excel-store";
-import { useUIStore } from "@/stores/ui-store";
 import { useWordStore } from "@/stores/word-store";
 import {
   resolveChatWorkspaceTab,
@@ -10,17 +9,12 @@ import {
   type ChatWorkspaceTab,
 } from "@/lib/chat-workspace-tabs";
 import { prefetchExcelView } from "@/lib/excel-view-prefetch";
+import { openWorkspaceFile } from "@/lib/open-workspace-file";
 
 const TABS: { key: ChatWorkspaceTab; label: string }[] = [
   { key: "chat", label: "对话" },
   { key: "sheet", label: "表格" },
 ];
-
-function closeWordSurfaces() {
-  const word = useWordStore.getState();
-  word.closePanel();
-  word.closeFullView();
-}
 
 export function ChatWorkspaceTabs() {
   const excel = useExcelStore(
@@ -31,14 +25,13 @@ export function ChatWorkspaceTabs() {
       activeFilePath: s.activeFilePath,
       activeSheet: s.activeSheet,
       recentFiles: s.recentFiles,
+      workspaceFiles: s.workspaceFiles,
       activeWorkspaceKey: s.activeWorkspaceKey,
-      openFullView: s.openFullView,
       closeFullView: s.closeFullView,
       closeCompare: s.closeCompare,
     })),
   );
   const wordFullViewPath = useWordStore((s) => s.fullViewPath);
-  const sidebarOpen = useUIStore((s) => s.sidebarOpen);
 
   const active = resolveChatWorkspaceTab({
     fullViewPath: excel.fullViewPath,
@@ -48,6 +41,7 @@ export function ChatWorkspaceTabs() {
     activeFilePath: excel.activeFilePath,
     activeSheet: excel.activeSheet,
     recentFiles: excel.recentFiles,
+    workspaceFiles: excel.workspaceFiles,
     workspaceKey: excel.activeWorkspaceKey,
     fullViewPath: excel.fullViewPath,
     fullViewSheet: excel.fullViewSheet,
@@ -61,19 +55,19 @@ export function ChatWorkspaceTabs() {
       return;
     }
     if (!sheetTarget) return;
-    closeWordSurfaces();
     if (excel.compareMode) excel.closeCompare();
-    excel.openFullView(sheetTarget.path, sheetTarget.sheet);
+    openWorkspaceFile(sheetTarget.path, { intent: "full", sheet: sheetTarget.sheet });
   };
 
   return (
-    <div className="flex items-center h-7 -mt-1 pb-0">
-      {!sidebarOpen && <div className="w-8 mr-1 shrink-0" aria-hidden />}
+    <div className="flex items-center">
       <div
         role="tablist"
         aria-label="工作区视图"
-        className="flex items-center gap-0.5 -ml-1.5 min-w-0"
+        data-active-tab={active}
+        className="flex items-center min-w-0"
       >
+        <span className="em-workspace-tab-glider" aria-hidden="true" />
         {TABS.map(({ key, label }) => {
           const selected = active === key;
           const disabled = key === "sheet" && !sheetTarget;
@@ -92,20 +86,13 @@ export function ChatWorkspaceTabs() {
                 if (key === "sheet" && sheetTarget) prefetchExcelView(sheetTarget.path);
               }}
               onClick={() => select(key)}
-              className={`relative inline-flex items-center h-5 px-1.5 text-[11px] font-normal leading-none transition-colors ${
+              className={`relative inline-flex items-center justify-center leading-none ${
                 selected
-                  ? "text-foreground"
-                  : "text-muted-foreground/70 hover:text-muted-foreground"
-              } disabled:opacity-40 disabled:pointer-events-none`}
+                  ? "text-white"
+                  : "text-muted-foreground/75 hover:text-foreground"
+              } disabled:opacity-40 disabled:cursor-not-allowed`}
             >
-              {label}
-              {selected && (
-                <span
-                  className="absolute inset-x-1.5 -bottom-0.5 h-px rounded-full"
-                  style={{ backgroundColor: "var(--em-primary)" }}
-                  aria-hidden
-                />
-              )}
+              <span className="relative z-10">{label}</span>
             </button>
           );
         })}

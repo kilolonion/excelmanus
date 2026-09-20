@@ -1,7 +1,7 @@
 """提示词段预算：复用现有组装路径，不另写一套 composer。
 
 口径：tiktoken o200k_base；段 token 剥离 frontmatter 后独立计数。
-完整 system 含能力地图与 SDK；wire tools 为当前目录 JSON；发现消耗为
+完整 system 含能力地图与 SDK 使用短指引；wire tools 为当前目录 JSON；发现消耗为
 代表性 introspect 查询。静态 token 不是服务商计费量。
 """
 
@@ -53,7 +53,6 @@ class SegmentBudget:
 class ScenarioBudget:
     name: str
     chat_mode: str
-    present_as: str
     new_workbook: bool
     families: tuple[str, ...]
     section_names: tuple[str, ...]
@@ -63,11 +62,9 @@ class ScenarioBudget:
     principle_tokens: int
     system_tokens: int
     tools_json_tokens: int
-    sdk_tokens: int
     discovery_tokens: int
     system_text: str
     tools_json: str
-    sdk_text: str
     discovery_text: str
     over_budget_segments: tuple[str, ...] = ()
 
@@ -88,7 +85,6 @@ class BudgetReport:
                 {
                     "name": item.name,
                     "chat_mode": item.chat_mode,
-                    "present_as": item.present_as,
                     "new_workbook": item.new_workbook,
                     "families": list(item.families),
                     "section_names": list(item.section_names),
@@ -98,7 +94,6 @@ class BudgetReport:
                     "principle_tokens": item.principle_tokens,
                     "system_tokens": item.system_tokens,
                     "tools_json_tokens": item.tools_json_tokens,
-                    "sdk_tokens": item.sdk_tokens,
                     "discovery_tokens": item.discovery_tokens,
                     "over_budget_segments": list(item.over_budget_segments),
                 }
@@ -168,7 +163,6 @@ def _prepare_workspace(root: Path, *, profile: str, has_workbook: bool) -> None:
 def _make_engine(
     *,
     chat_mode: str,
-    present_as: str,
     workspace: Path,
     composer: PromptComposer,
 ) -> Any:
@@ -199,10 +193,13 @@ def _make_engine(
     engine = SimpleNamespace(
         _prompt_composer=composer,
         _current_chat_mode=chat_mode,
-        _present_as=present_as,
         _runtime_vars=dict(FIXED_VARS, workspace_root=str(workspace)),
         _child_system_prompt=None,
         _tool_runtime=None,
+        _active_skills=[],
+        _tools_cache=None,
+        _tools_cache_key=None,
+        _loaded_tool_names=set(),
         _catalog_new_workbook=True,
         _fixed_capability=None,
         config=SimpleNamespace(workspace_root=str(workspace)),
@@ -212,7 +209,7 @@ def _make_engine(
         memory=SimpleNamespace(system_prompt=""),
         _skill_router=None,
         _subagent_config=None,
-        max_context_tokens=128000,
+        max_context_tokens=200000,
         state=SimpleNamespace(
             prompt_injection_snapshots=[],
             injected_context_fingerprint=None,
@@ -239,18 +236,16 @@ def _principle_tokens(composer: PromptComposer, ctx: AssembleContext) -> tuple[i
 def _discovery_blob(engine: Any) -> tuple[str, tuple[str, ...]]:
     """发现成本 + SDK 绑定工具名单。
 
-    introspect / SDK 都绑 L2 执行目录（``catalog_from_engine`` 已不因
-    present_as=code 坍缩）。code 呈现下返回的名单是执行目录减 ``run_code``。
+    introspect / SDK 都绑执行目录；run_code 可用时统计完整 SDK 绑定名单。
     """
     from excelmanus.tools.catalog import RUN_CODE_NAME, catalog_from_engine
     from excelmanus.tools.introspection_tools import bind_introspection_catalog, introspect_capability
-    from excelmanus.tools.runtime import present_as_of
 
     catalog = catalog_from_engine(engine)
     if catalog is None:
         return "", ()
     sdk_names: tuple[str, ...] = ()
-    if present_as_of(engine) == "code":
+    if catalog.contains(RUN_CODE_NAME):
         sdk_names = tuple(name for name in catalog.names() if name != RUN_CODE_NAME)
     bind_introspection_catalog(catalog)
     parts: list[str] = []
@@ -266,18 +261,14 @@ def measure_scenario(
     *,
     name: str,
     chat_mode: str,
-    present_as: str,
     has_workbook: bool,
     profile: str = "xlsx",
     workspace: Path | None = None,
     composer: PromptComposer | None = None,
 ) -> ScenarioBudget:
-    from excelmanus.code_mode import render_sdk_section
     from excelmanus.prompt.assemble import build_stable_system_prompt
-    from excelmanus.prompt.envelope import sort_tool_schemas
+    from excelmanus.engine_core.meta_tools import MetaToolBuilder
     from excelmanus.tools.catalog import catalog_from_engine
-    from excelmanus.tools.context import execution_catalog_tools
-    from excelmanus.tools.runtime import collapse_schemas
 
     base = workspace or Path(FIXED_WORKSPACE)
     root = base / name
@@ -287,26 +278,16 @@ def measure_scenario(
         loaded.load_all(auto_repair=False)
     engine = _make_engine(
         chat_mode=chat_mode,
-        present_as=present_as,
         workspace=root,
         composer=loaded,
     )
     catalog = catalog_from_engine(engine)
-    sdk_text = ""
-    if present_as == "code":
-        sdk_text = render_sdk_section(execution_catalog_tools(engine))
-        engine._tool_runtime = SimpleNamespace(render_sdk_section=lambda: sdk_text)
     system_text = build_stable_system_prompt(engine)
     visible_names: frozenset[str] | None = (
         frozenset(catalog.names()) if catalog is not None else None
     )
-    # tools_json 走 L4 wire：catalog（L2 全量权限目录）→ collapse(code→run_code)。
-    wire_schemas = sort_tool_schemas(
-        collapse_schemas(
-            catalog.tool_schemas() if catalog is not None else [],
-            present_as,
-        )
-    )
+    # 与真实请求共用缓存、profile 与按需 MCP 披露路径。
+    wire_schemas = MetaToolBuilder(engine).build_v5_tools()
     tools_json = json.dumps(
         wire_schemas,
         ensure_ascii=False,
@@ -316,10 +297,8 @@ def measure_scenario(
     discovery_text, sdk_tools = _discovery_blob(engine)
     assemble_ctx = AssembleContext(
         plan_active=chat_mode == "plan",
-        present_as=present_as,
         variables={"workspace_root": str(root), "model": FIXED_MODEL},
         chat_mode=chat_mode,
-        sdk_section=sdk_text,
         visible_tools=visible_names,
         new_workbook=bool(getattr(engine, "_catalog_new_workbook", True)),
     )
@@ -333,7 +312,6 @@ def measure_scenario(
     return ScenarioBudget(
         name=name,
         chat_mode=chat_mode,
-        present_as=present_as,
         new_workbook=bool(getattr(engine, "_catalog_new_workbook", True)),
         families=tuple(sorted(getattr(engine, "_catalog_families", ()) or ())),
         section_names=section_names,
@@ -346,31 +324,26 @@ def measure_scenario(
         principle_tokens=principle_tokens,
         system_tokens=count_tokens(system_text),
         tools_json_tokens=count_tokens(tools_json),
-        sdk_tokens=count_tokens(sdk_text),
         discovery_tokens=count_tokens(discovery_text),
         system_text=system_text,
         tools_json=tools_json,
-        sdk_text=sdk_text,
         discovery_text=discovery_text,
         over_budget_segments=over,
     )
 
 
 DEFAULT_SCENARIOS: tuple[dict[str, Any], ...] = (
-    {"name": "native_read", "chat_mode": "read", "present_as": "native", "has_workbook": True},
-    {"name": "native_plan", "chat_mode": "plan", "present_as": "native", "has_workbook": True},
-    {"name": "native_write_existing", "chat_mode": "write", "present_as": "native", "has_workbook": True},
-    {"name": "native_write_new", "chat_mode": "write", "present_as": "native", "has_workbook": False},
-    {"name": "code_write_existing", "chat_mode": "write", "present_as": "code", "has_workbook": True},
-    {"name": "code_write_new", "chat_mode": "write", "present_as": "code", "has_workbook": False},
-    {"name": "native_csv", "chat_mode": "write", "present_as": "native", "has_workbook": False, "profile": "csv"},
-    {"name": "native_docx", "chat_mode": "write", "present_as": "native", "has_workbook": False, "profile": "docx"},
+    {"name": "read", "chat_mode": "read", "has_workbook": True},
+    {"name": "plan", "chat_mode": "plan", "has_workbook": True},
+    {"name": "write_existing", "chat_mode": "write", "has_workbook": True},
+    {"name": "write_new", "chat_mode": "write", "has_workbook": False},
+    {"name": "write_csv", "chat_mode": "write", "has_workbook": False, "profile": "csv"},
+    {"name": "write_docx", "chat_mode": "write", "has_workbook": False, "profile": "docx"},
 )
 
 SNAPSHOT_SCENARIOS: tuple[str, ...] = (
-    "native_write_new",
-    "native_write_existing",
-    "code_write_existing",
+    "write_new",
+    "write_existing",
 )
 
 
@@ -398,20 +371,20 @@ def format_report(report: BudgetReport) -> str:
     lines.extend(
         [
             "",
-            f"{'场景':<24} {'原则+策略':>10} {'完整system':>12} {'tools JSON':>12} {'SDK':>8} {'发现':>8}",
+            f"{'场景':<24} {'原则+策略':>10} {'完整system':>12} {'tools JSON':>12} {'发现':>8}",
         ]
     )
     for item in report.scenarios:
         lines.append(
             f"{item.name:<24} {item.principle_tokens:>10} {item.system_tokens:>12} "
-            f"{item.tools_json_tokens:>12} {item.sdk_tokens:>8} {item.discovery_tokens:>8}"
+            f"{item.tools_json_tokens:>12} {item.discovery_tokens:>8}"
         )
     lines.append("")
-    lines.append("原则+策略 = identity/persona/领域原则/strategy 段；完整 system 含能力地图与 SDK。")
+    lines.append("原则+策略 = identity/persona/领域原则/strategy 段；完整 system 含能力地图与 SDK 短指引。")
     for item in report.scenarios:
-        if item.present_as == "code":
+        if item.sdk_tools:
             lines.append(
-                f"{item.name}: wire 工具 {len(item.wire_tools)} 个（仅 run_code）；"
+                f"{item.name}: wire 工具 {len(item.wire_tools)} 个；"
                 f"SDK/执行目录 {len(item.sdk_tools)} 个"
             )
     return "\n".join(lines) + "\n"
@@ -424,7 +397,6 @@ def over_budget_names(report: BudgetReport) -> list[str]:
 def render_write_prefix_for_tests(
     *,
     chat_mode: str = "write",
-    present_as: str = "native",
     new_workbook: bool = True,
 ) -> str:
     """测试用：只走 PromptComposer，不绑完整目录。"""
@@ -433,7 +405,7 @@ def render_write_prefix_for_tests(
     return composer.compose_system_text(
         PromptContext(chat_mode=chat_mode),
         variables=FIXED_VARS,
-        present_as=present_as,
+        new_workbook=new_workbook,
     )
 
 

@@ -1,536 +1,253 @@
-# ExcelManus Operations Manual
+# ExcelManus operations guide
 
-## 1. Architecture Overview
+Applies to: 1.8.0 source tree · Updated: 2026-09-19
 
-```
-                           ┌─────────────────────────────────────┐
-                           │         User Browser                 │
-                           └──────────────┬──────────────────────┘
-                                          │ https://<YOUR_DOMAIN>
-                                          ▼
-                    ┌─────────────────────────────────────────────┐
-                    │    Frontend Server <FRONTEND_IP> (China · Alibaba Cloud) │
-                    │                                             │
-                    │  Nginx (SSL Termination)                    │
-                    │    ├─ /api/*  ──▶  <BACKEND_IP>:8000      │
-                    │    └─ /*      ──▶  127.0.0.1:3000           │
-                    │                                             │
-                    │  PM2 Processes                               │
-                    │    └─ excelmanus-web  (Next.js, port 3000)  │
-                    └──────────────┬──────────────────────────────┘
-                                   │ proxy /api/*
-                                   ▼
-                    ┌─────────────────────────────────────────────┐
-                    │    Backend Server <BACKEND_IP> (Overseas · Alibaba Cloud) │
-                    │                                             │
-                    │  Nginx (Backup SSL, Let's Encrypt)          │
-                    │    ├─ /api/*  ──▶  127.0.0.1:8000           │
-                    │    └─ /*      ──▶  <FRONTEND_IP>:3000        │
-                    │                                             │
-                    │  PM2 Processes                               │
-                    │    └─ excelmanus-api (Python/uvicorn, 8000) │
-                    └─────────────────────────────────────────────┘
-```
+[Documentation](README.md) · [中文](ops-manual.md) · [Configuration](configuration_en.md)
 
-**Why this split?**
+This guide covers source launches, server deployment, backups, and troubleshooting. Paths, domains, and service accounts are examples. See the [Desktop README](../desktop/README.md) for app packaging and desktop data locations.
 
-- The frontend server is in China, providing fast access for users, handling DNS entry + SSL termination + static assets
-- The backend server is overseas, enabling direct calls to OpenAI/Claude APIs without a proxy
-- The backend server also has Nginx + SSL (Let's Encrypt) configured, so it can run independently if DNS is switched over
+## 1. Choose an installation
 
----
+| Installation | Use case | Start and update |
+| --- | --- | --- |
+| Desktop app | Local use | The app starts bundled services; install a new bundle to update |
+| Local Git checkout | Development or ongoing local use | Start with `deploy/start.*`; stop services before updating |
+| Server | Remote access through a controlled entry point | Manage processes with PM2 / systemd and deploy from an operations machine |
 
-## 2. Server Inventory
+ExcelManus is a single-user application. Workspaces and conversations share credentials, memory, and external service settings. A management token does not provide tenant isolation. Source installations require Python ≥ 3.10, Node.js ≥ 20.9, and Git; uv is recommended. Servers also need a process manager and reverse proxy.
 
-| Role | IP | OS | Key Path |
-|------|----|----|----------|
-| Frontend | `<FRONTEND_IP>` | Alibaba Cloud Linux | `/opt/excelmanus/web` |
-| Backend | `<BACKEND_IP>` | Alibaba Cloud Linux | `/opt/excelmanus` |
+Keep **one backend worker** on a single host. Running conversations, approvals, and tasks include in-process state; adding workers is not a complete scaling solution.
 
-**SSH Login** (both servers share the same key):
+## 2. Start a local checkout
+
+From the repository root:
 
 ```bash
-ssh -i <SSH_KEY_FILE> root@<FRONTEND_IP>   # Frontend
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>  # Backend
+./deploy/start.sh
+./deploy/start.sh --prod
+./deploy/start.sh --backend-port 9000 --frontend-port 8080
+./deploy/start.sh --backend-only
+./deploy/start.sh --no-open --log-dir ./logs
+./deploy/start.sh --help
 ```
 
----
-
-## 3. Runtime Environment
-
-### 3.1 Frontend Server (<FRONTEND_IP>)
-
-| Component | Version | Path |
-|-----------|---------|------|
-| Node.js | v22.22.0 | `/www/server/nodejs/v22.22.0/bin` |
-| PM2 | 6.x | Same as above |
-| Nginx | System built-in | Config: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL Certificate | Self-managed (certbot / ACME / manual upload) | `/etc/ssl/certs/<YOUR_DOMAIN>/` |
-
-**Note**: PM2 on this server requires manually adding to PATH:
-
-```bash
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
-```
-
-### 3.2 Backend Server (<BACKEND_IP>)
-
-| Component | Version | Path |
-|-----------|---------|------|
-| Python | 3.11.9 | `/usr/local/bin/python3.11` (compiled from source) |
-| Node.js | v22.22.0 | `/usr/bin/node` (nodesource RPM) |
-| PM2 | 6.0.14 | `/usr/bin/pm2` |
-| Nginx | 1.20.1 | Config: `/etc/nginx/conf.d/excelmanus.conf` |
-| SSL Certificate | Let's Encrypt (certbot) | `/etc/letsencrypt/live/<YOUR_DOMAIN>/` |
-| venv | Python 3.11 | `/opt/excelmanus/venv` |
-
----
-
-## 4. Firewall Ports
-
-### Frontend Server
-
-```
-20/tcp 21/tcp 22/tcp 80/tcp 443/tcp 3000/tcp 8888/tcp 39000-40000/tcp
-```
-
-- `3000/tcp` must be open for the backend server's Nginx to reach the frontend origin
-
-### Backend Server
-
-```
-20/tcp 21/tcp 22/tcp 80/tcp 443/tcp 8000/tcp 8888/tcp 15996/tcp 39000-40000/tcp
-```
-
-- `8000/tcp` must be open for the frontend server's Nginx to forward API requests
-
-**Management commands**:
-
-```bash
-firewall-cmd --list-ports                         # List
-firewall-cmd --permanent --add-port=PORT/tcp      # Add
-firewall-cmd --permanent --remove-port=PORT/tcp   # Remove
-firewall-cmd --reload                             # Apply
-```
-
----
-
-## 5. Daily Operations
-
-### 5.1 Local One-Click Start
-
-`deploy/start.sh` launches backend + frontend together, suitable for local development and single-server deployment:
-
-```bash
-# macOS / Linux
-./deploy/start.sh                          # Dev mode
-./deploy/start.sh --prod                   # Production mode (npm run start)
-./deploy/start.sh --backend-port 9000      # Custom backend port
-./deploy/start.sh --frontend-port 8080     # Custom frontend port
-./deploy/start.sh --prod                   # Production (default 1 worker; >1 rebuilds session envelopes across processes and silently busts prompt cache)
-./deploy/start.sh --backend-only           # Backend only
-./deploy/start.sh --frontend-only          # Frontend only
-./deploy/start.sh --log-dir ./logs         # Log output to files
-./deploy/start.sh --no-open                # Don't auto-open browser
-./deploy/start.sh --skip-deps              # Skip dependency checks
-./deploy/start.sh --help                   # Full parameter list
-```
-
-**Windows users:**
+Windows PowerShell:
 
 ```powershell
-# PowerShell
 .\deploy\start.ps1
 .\deploy\start.ps1 -Production
-.\deploy\start.ps1 -BackendPort 9000 -Production
-
-# CMD
-deploy\start.bat
-deploy\start.bat --prod
-deploy\start.bat --backend-port 9000
+.\deploy\start.ps1 -BackendPort 9000 -FrontendPort 8080
 ```
 
-> Scripts auto-detect OS (macOS / Linux / Windows) and on Linux identify apt / dnf / yum / pacman / zypper / apk package managers, providing install commands when dependencies are missing. Supports graceful shutdown (SIGTERM first, SIGKILL after 5s) and auto-opening the browser. Model setup is in Web Settings and stored in the main database.
+CMD users can run `deploy\start.bat` or `deploy\start.bat --prod`. Open [http://localhost:3000](http://localhost:3000); the API defaults to `127.0.0.1:8000`. Add and activate a model in Settings after launch.
 
-### 5.2 Remote deploy (ops-machine `deploy.sh`)
-
-`deploy/deploy.sh` supports separate frontend/backend deployment:
+To start services manually, use two terminals:
 
 ```bash
-# Full deployment (backend + frontend)
-./deploy/deploy.sh
-
-# Update backend only
-./deploy/deploy.sh --backend-only
-
-# Update frontend only
-./deploy/deploy.sh --frontend-only
-
-# Build and package frontend artifact locally (recommended)
-cd /path/to/excelmanus/web
-npm run build
-mkdir -p ../web-dist
-tar -czf ../web-dist/frontend-standalone.tar.gz .next/standalone .next/static public
-
-# Skip frontend build, restart only
-./deploy/deploy.sh --frontend-only --skip-build
-
-# Use locally/CI-built frontend artifact (recommended for low-memory servers)
-./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
-
-# Remote cold build (troubleshooting only, high risk)
-./deploy/deploy.sh --frontend-only --cold-build
-
-# Sync from local via rsync (bypasses GitHub)
-./deploy/deploy.sh --from-local
+# Terminal 1: repository root
+uv sync --frozen --extra web --extra analysis
+uv run excelmanus-api --host 127.0.0.1 --port 8000
 ```
-
-### 5.3 Manual Operations
-
-**Backend (<BACKEND_IP>)**:
 
 ```bash
-# Check status
-pm2 list
-
-# Restart backend
-pm2 restart excelmanus-api
-
-# View logs
-pm2 logs excelmanus-api --lines 50 --nostream
-
-# Live logs
-pm2 logs excelmanus-api
-
-# Manually update code (Gitee preferred, GitHub fallback)
-cd /opt/excelmanus
-git fetch https://gitee.com/kilolonion/excelmanus main
-# or: git fetch https://github.com/kilolonion/excelmanus main
-git reset --hard FETCH_HEAD
-# Prefer uv (if installed)
-uv sync --all-extras -q 2>/dev/null || { source venv/bin/activate && pip install -e '.[all]' -q; }
-pm2 restart excelmanus-api
+# Terminal 2: repository root
+cd web
+npm ci
+npm run dev
 ```
 
-**Frontend (<FRONTEND_IP>)**:
+When choosing different ports, update the frontend connection settings as described in the [Web README](../web/README.md).
 
-```bash
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
+## 3. Settings and data locations
 
-# Check status
-pm2 list
+| Content | Location and management |
+| --- | --- |
+| Model profiles and product settings | `model_profiles` / `config_kv` in the main database; use Settings or configuration import |
+| Main database | `$EXCELMANUS_HOME/excelmanus.db` by default |
+| Credential encryption key | `$EXCELMANUS_HOME/.secret_key` by default; retain it with the database |
+| Default workspace | `EXCELMANUS_DATA_ROOT`, normally `$EXCELMANUS_HOME/data` when unset |
+| Other workspaces | Registered local folders, retained at their original locations |
+| File revisions | `.excelmanus/revisions/` inside each workspace |
+| Deployment inventory | `deploy/.env.deploy` on the operations machine, copied from the example |
+| Frontend connection settings | Next.js process environment or `web/.env.local` |
 
-# Restart frontend (without rebuilding)
-pm2 restart excelmanus-web
+Source installations default to `~/.excelmanus`. Desktop uses `profile/` under Electron's user data directory. These locations are not merged automatically. Do not run desktop and source services against the same profile concurrently.
 
-# Rebuild and restart
-cd /opt/excelmanus/web
-npm install --production=false
-NEXT_PUBLIC_BACKEND_ORIGIN= BACKEND_INTERNAL_URL=http://<BACKEND_IP>:8000 npm run build
-pm2 restart excelmanus-web
+Project `.env` and user `config.env` files are no longer product settings sources. The launcher supplies locators such as `EXCELMANUS_HOME`, `EXCELMANUS_DB_PATH`, bind parameters, `EXCELMANUS_DEPLOY_MODE`, and `EXCELMANUS_MANAGE_TOKEN`. See the [configuration reference](configuration_en.md).
 
-# If default build fails, try webpack fallback
-npm run build:webpack
-pm2 restart excelmanus-web
+## 4. Protect server access
 
-# View logs
-pm2 logs excelmanus-web --lines 50 --nostream
+Recommended single-host topology:
+
+```text
+Browser ── HTTPS ── Nginx
+                   ├─ /api/ ── 127.0.0.1:8000 (FastAPI)
+                   └─ /     ── 127.0.0.1:3000 (Next.js)
 ```
 
-> For low-memory machines (1~2G), prefer using `--frontend-artifact` for artifact-based releases to avoid OOM from on-site cold compilation.
-> For cross-region transfers, use rsync with resume support (the script has built-in `--partial --append-verify`).
+1. Set `EXCELMANUS_DEPLOY_MODE=server` for the backend to disable application-driven self-updates.
+2. Configure `EXCELMANUS_MANAGE_TOKEN` with at least 16 characters. A reverse proxy can expose a loopback backend, so loopback binding alone is not remote access protection.
+3. Enter the same token in the browser's token prompt. API clients send `Authorization: Bearer <token>`. Do not embed it in public frontend variables or have an unauthenticated proxy inject it for every visitor.
+4. On one host, only the proxy needs access to application ports. Across hosts, use a private network, VPN, or explicitly controlled backend endpoint instead of opening ports 3000/8000 to every public source.
 
-### 5.4 Health Checks
+Health checks and CORS preflight requests remain accessible without a token. The token does not protect all frontend pages, static assets, or API documentation. Apply access control at the network entry point if the whole site must be private.
 
-```bash
-# Via domain (full chain)
-curl https://<YOUR_DOMAIN>/api/v1/health
+Example systemd service: first create a dedicated account, prepare the source checkout and `.venv` at `/srv/excelmanus`, and give the account access to `/var/lib/excelmanus`.
 
-# Direct to backend
-curl http://<BACKEND_IP>:8000/api/v1/health
+```ini
+# /etc/systemd/system/excelmanus-api.service
+[Unit]
+Description=ExcelManus API
+After=network-online.target
 
-# Check frontend reachability
-curl -o /dev/null -w "%{http_code}" https://<YOUR_DOMAIN>/
+[Service]
+Type=simple
+User=excelmanus
+WorkingDirectory=/srv/excelmanus
+EnvironmentFile=/etc/excelmanus/runtime.env
+ExecStart=/srv/excelmanus/.venv/bin/excelmanus-api --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
 ```
 
----
+Example `/etc/excelmanus/runtime.env`, read by the service manager:
 
-## 6. Nginx Configuration
+```dotenv
+EXCELMANUS_HOME=/var/lib/excelmanus
+EXCELMANUS_DEPLOY_MODE=server
+EXCELMANUS_MANAGE_TOKEN=replace-with-your-own-random-token
+```
 
-### 6.1 Frontend Server `/etc/nginx/conf.d/excelmanus.conf`
+Replace the token placeholder with your own random value and restrict access to the file. Save model credentials through Web Settings. With PM2, configure the same process parameters and confirm they survive a restart.
+
+## 5. Reverse proxy and frontend origin
+
+For a production Next.js process:
+
+```dotenv
+EXCELMANUS_RUNTIME_BACKEND_ORIGIN=same-origin
+BACKEND_INTERNAL_URL=http://127.0.0.1:8000
+```
+
+The first value is read at runtime and routes browser API calls through the same origin. The second supplies Next.js rewrites and should also be correct at build time. Cross-origin connections additionally require the product setting `EXCELMANUS_CORS_ALLOW_ORIGINS`.
+
+Add this fragment to an Nginx `server` block with your domain and TLS certificate configured:
 
 ```nginx
-# HTTP -> HTTPS redirect
-server {
-    listen 80;
-    server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
-    return 301 https://$host$request_uri;
+client_max_body_size 100m;
+
+location /api/ {
+    proxy_pass http://127.0.0.1:8000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header Authorization $http_authorization;
+    proxy_set_header Connection "";
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 600s;
 }
 
-# HTTPS
-server {
-    listen 443 ssl http2;
-    server_name <YOUR_DOMAIN> www.<YOUR_DOMAIN>;
-
-    ssl_certificate     /etc/ssl/certs/<YOUR_DOMAIN>/fullchain.pem;
-    ssl_certificate_key /etc/ssl/certs/<YOUR_DOMAIN>/privkey.pem;
-    ssl_protocols       TLSv1.2 TLSv1.3;
-    ssl_ciphers         HIGH:!aNULL:!MD5;
-
-    client_max_body_size 100m;
-
-    # SSE streaming endpoint (do NOT use Connection: upgrade, or SSE will fail)
-    location /api/v1/chat/stream {
-        proxy_pass http://<BACKEND_IP>:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Connection '';
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 600s;
-        chunked_transfer_encoding on;
-    }
-
-    # Other API requests forwarded to backend server
-    location /api/ {
-        proxy_pass http://<BACKEND_IP>:8000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-        proxy_buffering off;
-        proxy_cache off;
-        proxy_read_timeout 300s;
-    }
-
-    # Local Next.js frontend
-    location / {
-        proxy_pass http://127.0.0.1:3000;
-        proxy_http_version 1.1;
-        proxy_set_header Upgrade $http_upgrade;
-        proxy_set_header Connection "upgrade";
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
-    }
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
 }
 ```
 
-### 6.2 Backend Server `/etc/nginx/conf.d/excelmanus.conf`
+Disabling buffering for all `/api/` requests covers initial and reconnected streams. Align upload limits with the application; `100m` is an example proxy limit. Run `nginx -t` before reloading. Certificate renewal and expiry depend on your deployment.
 
-This configuration is automatically managed by certbot. When DNS points to this server, it can handle all traffic independently:
+## 6. Deploy from an operations machine
 
-- `/api/*` → Local backend (`127.0.0.1:8000`)
-- `/*` → Origin to frontend server (`<FRONTEND_IP>:3000`)
-
-**Nginx management commands**:
+Copy the deployment inventory and fill in hosts, SSH keys, remote paths, and branch:
 
 ```bash
-nginx -t             # Check config syntax
-nginx -s reload      # Graceful reload
-systemctl restart nginx  # Full restart
+cp deploy/.env.deploy.example deploy/.env.deploy
+bash ./deploy/deploy.sh --help
+bash ./deploy/deploy.sh check --single-server --host server.example.com --venv .venv
+bash ./deploy/deploy.sh --single-server --host server.example.com --venv .venv --dry-run
+bash ./deploy/deploy.sh --single-server --host server.example.com --venv .venv
 ```
 
----
+`uv sync` creates `.venv`, so these examples explicitly pass `--venv .venv`. The script supports `--single-server`, `--split-server`, `--local`, and PM2 / systemd. Windows operators can use `deploy/deploy.ps1`; consult its help for platform-specific parameters.
 
-## 7. Configuration
+Before exposing the service, verify the management token, durable paths, and proxy configuration. The script does not generate a token or create tenant accounts. Its backend defaults to loopback; split deployments need an independently configured, controlled connection between hosts.
 
-User settings and model profiles live only in `config_kv` / `model_profiles` (`$EXCELMANUS_HOME/excelmanus.db`), via Web Settings or `/config`.
-
-`deploy.sh` writes `EXCELMANUS_DEPLOY_MODE=server` into the systemd / PM2 process (a locator). Frontend `web/.env.local` is Next.js-only (`NEXT_PUBLIC_BACKEND_ORIGIN`).
-
-Key settings (Settings UI / database keys):
-
-| Setting key | Purpose | Notes |
-|----------|---------|-------|
-| Model profile (Settings) | API Key / Base URL / model name | Required; stored in `model_profiles` |
-| `EXCELMANUS_PROTOCOL` | Model protocol type | `auto` |
-| `EXCELMANUS_DEPLOY_MODE` | Deployment mode (`auto`/`standalone`/`server`) | `deploy.sh` writes `server` on systemd/PM2 |
-| `EXCELMANUS_MAIN_MODEL_VISION` | Whether the active model accepts image attachments (`auto`/`true`/`false`) | `auto` |
-| `EXCELMANUS_SECRET_KEY` | Fernet encryption key seed | Usually empty; auto-generates `.secret_key` |
-| `EXCELMANUS_CORS_ALLOW_ORIGINS` | CORS allowlist | Public deploys must include the frontend origin |
-
-Production is `EXCELMANUS_DEPLOY_MODE=server` (set by `deploy.sh`). The API then rejects `/version/upgrade` and `/deploy/execute`; upgrade and rollback run on an ops machine via `./deploy/deploy.sh` (`rollback-to --commit` is checkout + restart). Local Git installs use the Settings stop-then-upgrade flow. See [Upgrade & deploy](hot-update-design.md).
-
-Local standalone upgrades never silently `git reset --hard` (conflicts must be resolved by hand). Server `./deploy/deploy.sh rollback` does run `git reset --hard`.
-
----
-
-## 8. SSL Certificate Renewal
-
-### Frontend Server
-
-SSL certificate must be managed manually. Recommend using certbot or an ACME client for automatic renewal.
-
-### Backend Server
-
-SSL certificate is managed by Let's Encrypt (certbot) with automatic renewal configured:
+Common operations:
 
 ```bash
-# View certificate info
-certbot certificates
-
-# Manual renewal test
-certbot renew --dry-run
-
-# Force renewal
-certbot renew
+bash ./deploy/deploy.sh --backend-only --venv .venv
+bash ./deploy/deploy.sh --frontend-only
+bash ./deploy/deploy.sh status
+bash ./deploy/deploy.sh history
+bash ./deploy/deploy.sh logs
+bash ./deploy/deploy.sh rollback
+bash ./deploy/deploy.sh rollback-to --commit COMMIT_SHA
 ```
 
-Use the live output of `certbot certificates` for the expiry date. Do not reuse a historical date from this manual.
+These commands use the deployment inventory, so confirm its topology and targets first. Git synchronization and some rollback paths use `git reset --hard`. Keep uncommitted development work outside the deployment checkout. Inspect the synchronization scope before using `--from-local`.
 
----
-
-## 9. DNS Switching Guide
-
-Currently DNS points to the frontend server (`<FRONTEND_IP>`). To switch to the backend server for standalone operation:
-
-1. Change the A records for `<YOUR_DOMAIN>` and `www.<YOUR_DOMAIN>` to `<BACKEND_IP>`
-2. The backend server's Nginx already has SSL + bidirectional proxy configured; no additional steps needed
-3. Verify after switching: `curl https://<YOUR_DOMAIN>/api/v1/health`
-
-To switch back, change the A records back to `<FRONTEND_IP>`.
-
----
-
-## 10. Troubleshooting
-
-### Frontend 502
+For servers with limited memory, build a frontend artifact beforehand. From the repository root:
 
 ```bash
-# 1. Check frontend process
-ssh -i <SSH_KEY_FILE> root@<FRONTEND_IP>
-export PATH=/www/server/nodejs/v22.22.0/bin:$PATH
-pm2 list    # excelmanus-web should be online
-
-# 2. Check backend reachability (from frontend server)
-curl http://<BACKEND_IP>:8000/api/v1/health
-
-# 3. If backend is unreachable, check backend
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
-pm2 list    # excelmanus-api should be online
-pm2 logs excelmanus-api --lines 30 --nostream
+npm --prefix web ci
+npm --prefix web run build
+mkdir -p web-dist
+tar -czf web-dist/frontend-standalone.tar.gz -C web .next/standalone .next/static public
+bash ./deploy/deploy.sh --frontend-only --frontend-artifact ./web-dist/frontend-standalone.tar.gz
 ```
 
-### Backend 500
+Build for a compatible operating system, architecture, and Node.js runtime; do not assume a macOS artifact works on Linux. Deployment locks, build checks, and health checks detect some failures, but do not establish business correctness or zero-downtime operation.
+
+## 7. Updates, backups, and recovery
+
+Local source installations can apply a stop-then-update through Settings or run `./deploy/update.sh` after stopping services. The updater backs up application data and attempts a fast-forward; it does not force-reset a conflicting local branch. Deploy servers from the operations machine and update desktop apps with new bundles. See [update behavior](hot-update-design.md).
+
+The built-in update backup is not a full profile copy and currently omits `.secret_key`. Do not rely solely on that generated backup for migration or disaster recovery.
+
+Stop related processes before a backup so SQLite, execution state, and files form a consistent set. Save at least:
+
+- All of `EXCELMANUS_HOME`, including the database and `.secret_key`. Back up a custom external `EXCELMANUS_DB_PATH` separately.
+- Every registered workspace outside the data directory, including its `.excelmanus/revisions/`.
+- Custom skills, MCP configuration, and process manager configuration, which may live elsewhere.
+
+After stopping services, an example profile backup to a location outside the profile is:
 
 ```bash
-ssh -i <SSH_KEY_FILE> root@<BACKEND_IP>
-pm2 logs excelmanus-api --lines 50 --nostream
-# Model and runtime settings are in Web Settings / the main database
+tar -czf /secure-backups/excelmanus-profile.tar.gz -C /path/to/profile .
 ```
 
-### Nginx Configuration Error
+Before restoring, back up the current data. Restore matching database, key, and files; check ownership and permissions before restarting. Reverting code does not automatically revert database structure or every workspace file. Deleting a conversation does not remove all revisions, independent logs, or backups.
+
+Select and migrate legacy `users/{id}/` directories or container volumes manually. Do not merge multiple user databases by copying them together. See [configuration](configuration_en.md) for migration of legacy `outputs/backups`.
+
+## 8. Checks and troubleshooting
+
+Check services after deployment, then perform a small real file task:
 
 ```bash
-nginx -t    # Syntax check
-# View error log
-tail -50 /var/log/nginx/error.log
+curl --fail http://127.0.0.1:8000/api/v1/health
+curl --fail https://your-domain.example/api/v1/health
 ```
 
-### Out of Memory
+Also verify that unauthorized API requests are rejected, the selected model responds, upload/download work, SSE events arrive, and a file edit and revision restore behave as expected. HTTP 200 alone is not release acceptance.
 
-```bash
-free -h
-pm2 list    # Check process memory
-# Backend API typically uses ~200MB
-```
+| Symptom | First checks |
+| --- | --- |
+| Frontend 502 | Next.js/API processes, proxy ports, build artifacts, and service logs |
+| API 401 | Browser token, backend environment, and Authorization forwarding |
+| Model calls fail | Active profile, protocol, Base URL, model access, and provider rate limits |
+| SSE appears stalled | Proxy buffering, read timeout, runtime backend origin, and CORS |
+| Wrong backend after a port change | Runtime origin and stale build-time addresses |
+| Credential decryption fails | Matching `.secret_key` and database; whether data home changed |
+| Tasks interrupted after restart | Resume the main task with `/resume` or continue a subagent in Tasks; avoid duplicating writes |
+| Workbook version conflict | Read the latest workbook before editing again |
+| Out of memory | Compatible prebuilt frontend, file size, process count, and logs |
 
----
-
-## 11. Setting Up a Backend Server from Scratch
-
-If you need to rebuild the backend environment on a new server, follow these steps.
-
-> **Note**: The example below uses Python 3.11, but any version `>=3.10` will work (deploy scripts do not pin a Python micro version).
-
-```bash
-# 1. Install build dependencies
-yum groupinstall -y "Development Tools"
-yum install -y openssl-devel bzip2-devel libffi-devel zlib-devel readline-devel sqlite-devel
-
-# 2. Compile and install Python 3.11
-cd /tmp
-curl -O https://www.python.org/ftp/python/3.11.9/Python-3.11.9.tgz
-tar xzf Python-3.11.9.tgz && cd Python-3.11.9
-./configure --enable-optimizations
-make -j$(nproc)       # Approximately 10-20 minutes
-make altinstall
-ln -sf /usr/local/bin/python3.11 /usr/local/bin/python3
-ln -sf /usr/local/bin/pip3.11 /usr/local/bin/pip3
-
-# 3. Install Node.js 22
-curl -fsSL https://rpm.nodesource.com/setup_22.x | bash -
-yum install -y nodejs
-npm install -g pm2
-
-# 4. Clone the repository
-mkdir -p /opt
-# Gitee (faster for China users)
-git clone https://gitee.com/kilolonion/excelmanus.git /opt/excelmanus
-# or: git clone https://github.com/kilolonion/excelmanus.git /opt/excelmanus
-cd /opt/excelmanus
-
-# 5. Install dependencies (uv recommended, pip also works)
-# Option A: uv (recommended, auto-creates venv)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-uv sync --all-extras
-uv pip install 'httpx[socks]'
-# Option B: traditional pip
-# python3.11 -m venv venv
-# source venv/bin/activate
-# pip install -e '.[all]'
-# pip install 'httpx[socks]'
-
-# 6. Open Web Settings and add a model profile (main database)
-# 7. Configure mcp.json
-
-# 8. Start the backend
-pm2 start "venv/bin/python -c \"import uvicorn; uvicorn.run('excelmanus.api:app', host='0.0.0.0', port=8000, log_level='info')\"" --name excelmanus-api --cwd /opt/excelmanus
-pm2 save
-pm2 startup
-
-# 9. Install Nginx + SSL
-yum install -y nginx certbot python3-certbot-nginx
-# Write Nginx config (see Section 6)
-systemctl start nginx && systemctl enable nginx
-certbot --nginx -d <YOUR_DOMAIN> -d www.<YOUR_DOMAIN> --non-interactive --agree-tos --email YOUR_EMAIL
-
-# 10. Open firewall ports
-firewall-cmd --permanent --add-port=8000/tcp
-firewall-cmd --permanent --add-port=80/tcp
-firewall-cmd --permanent --add-port=443/tcp
-firewall-cmd --reload
-```
-
----
-
-## 12. File Inventory
-
-```
-Project Root/
-├── deploy/
-│   ├── start.sh           # One-click start script (macOS / Linux)
-│   ├── start.ps1          # One-click start script (Windows PowerShell)
-│   ├── start.bat          # One-click start script (Windows CMD)
-│   ├── deploy.sh          # Remote deployment script (macOS / Linux)
-│   ├── deploy.ps1         # Remote deployment script (Windows PowerShell)
-│   ├── nginx.conf         # Nginx reverse proxy config (127.0.0.1 sample; see this manual for production)
-│   └── certs/             # TLS certificates
-├── excelmanus/
-│   ├── config.py           # Runtime config (database settings + defaults)
-│   ├── context_budget.py   # Context budget manager
-│   ├── model_probe.py      # Model metadata probing (context window auto-correction)
-│   └── security/
-│       └── cipher.py       # Fernet symmetric encryption (API Key / Token encrypted storage)
-├── mcp.json               # MCP server configuration
-└── docs/
-    └── ops-manual.md      # This manual
-```
+For PM2, use `pm2 list` and `pm2 logs excelmanus-api --lines 50 --nostream`. For systemd, use `systemctl status excelmanus-api` and `journalctl -u excelmanus-api -n 50`. Remove credentials, file content, and other sensitive information before sharing logs.

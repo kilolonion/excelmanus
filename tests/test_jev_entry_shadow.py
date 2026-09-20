@@ -39,7 +39,6 @@ def _stub_engine(**overrides: object) -> SimpleNamespace:
         "_subagent_config": None,
         "_is_host_session": True,
         "_current_chat_mode": "write",
-        "_present_as": "native",
         "_pending_plan_exit": None,
         "_turn_image_count": 0,
         "_exposure_last_tools": [],
@@ -64,7 +63,6 @@ def _inspect_decision() -> Decision:
         domain="inspect_only",
         domain_confidence=0.9,
         mode_hint="keep",
-        present_hint=None,
         wire_narrow=False,
     )
 
@@ -131,7 +129,7 @@ async def test_followup_control_command_skips_evaluate() -> None:
     with patch("excelmanus.system_one.evaluate", AsyncMock()) as mocked:
         await engine.followup("/plan on")
         mocked.assert_not_called()
-        await engine.followup("/code off")
+        await engine.followup("/plan off")
         mocked.assert_not_called()
     assert engine._turn_exposure is None
 

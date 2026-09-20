@@ -1,11 +1,12 @@
 """两列 Inbox：next-turn（用户后续）与 next-step（steer / inject）。
 
 认领是破坏性的：从队列剪走并标记 claimed。pre-step 拒绝后不自动塞回。
-进程内可序列化；重启丢失插话可以，但不能把未认领队列与模型历史搅在一起。
+快照保存未认领队列；Driver 另存已认领但尚未写入对话的输入。
 """
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -17,11 +18,15 @@ _KIND_TARGET: dict[str, InboxTarget] = {
     "steer": "next-step",
     "inject": "next-step",
 }
+_SNAPSHOT_EXTRA_KEYS = (
+    "chat_mode", "slash_command", "raw_args", "images", "prompt_kind",
+    "resumed_from", "resume_task", "resume_interaction",
+)
 
 
 @dataclass
 class InboxItem:
-    """一条待处理输入。``extra`` 仅进程内使用，reconstruct 不序列化回调。"""
+    """一条待处理输入。snapshot 保留可恢复参数，不序列化回调和完成事件。"""
 
     id: str
     kind: InboxKind
@@ -32,6 +37,12 @@ class InboxItem:
     claimed_step: int | None = None
     extra: dict[str, Any] = field(default_factory=dict)
     result: Any = None
+    completed: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+
+    def snapshot(self) -> dict[str, Any]:
+        return {**self.to_public_dict(), "extra": {
+            key: self.extra[key] for key in _SNAPSHOT_EXTRA_KEYS if key in self.extra
+        }}
 
     def to_public_dict(self) -> dict[str, Any]:
         return {
@@ -71,6 +82,7 @@ class Inbox:
         content: str,
         *,
         extra: dict[str, Any] | None = None,
+        first: bool = False,
     ) -> InboxItem:
         text = str(content or "")
         self._seq += 1
@@ -82,10 +94,11 @@ class Inbox:
             target=target,
             extra=dict(extra or {}),
         )
-        if target == "next-turn":
-            self._next_turn.append(item)
+        queue = self._next_turn if target == "next-turn" else self._next_step
+        if first:
+            queue.insert(0, item)
         else:
-            self._next_step.append(item)
+            queue.append(item)
         return item
 
     def push_followup(self, content: str, *, extra: dict[str, Any] | None = None) -> InboxItem:
@@ -138,23 +151,36 @@ class Inbox:
             items, self._next_step = self._next_step, []
         return [item.content for item in items if str(item.content or "").strip()]
 
-    def reconstruct(self) -> dict[str, list[dict[str, Any]]]:
+    def reconstruct(self) -> dict[str, Any]:
         """序列化未认领队列（不含 extra 回调）。"""
         return {
-            "next-turn": [item.to_public_dict() for item in self._next_turn],
-            "next-step": [item.to_public_dict() for item in self._next_step],
+            "next-turn": [item.snapshot() for item in self._next_turn],
+            "next-step": [item.snapshot() for item in self._next_step],
+            "seq": self._seq,
         }
 
     def load_reconstructed(self, data: dict[str, Any] | None) -> None:
         """从 reconstruct() 快恢复未认领队列。已认领历史不恢复。"""
         self._next_turn = []
         self._next_step = []
+        self._claimed = []
+        try:
+            self._seq = int(data.get("seq", 0) or 0) if data else 0
+        except (TypeError, ValueError):
+            self._seq = 0
         if not data:
             return
         for raw in data.get("next-turn") or []:
             self._next_turn.append(self._item_from_public(raw, default_target="next-turn"))
         for raw in data.get("next-step") or []:
             self._next_step.append(self._item_from_public(raw, default_target="next-step"))
+        self._seq = max(
+            [self._seq] + [
+                int(item.id.rsplit("_", 1)[-1])
+                for item in (*self._next_turn, *self._next_step)
+                if item.id.rsplit("_", 1)[-1].isdigit()
+            ],
+        )
 
     def _take_one_turn(self) -> InboxItem | None:
         if not self._next_turn:
@@ -171,7 +197,8 @@ class Inbox:
         *,
         default_target: InboxTarget,
     ) -> InboxItem:
-        self._seq += 1
+        if not raw.get("id"):
+            self._seq += 1
         kind = raw.get("kind") or ("followup" if default_target == "next-turn" else "inject")
         if kind not in _KIND_TARGET:
             kind = "followup" if default_target == "next-turn" else "inject"
@@ -181,4 +208,6 @@ class Inbox:
             kind=kind,
             content=str(raw.get("content") or ""),
             target=target,
+            extra={key: raw["extra"][key] for key in _SNAPSHOT_EXTRA_KEYS
+                   if key in (raw.get("extra") or {})},
         )

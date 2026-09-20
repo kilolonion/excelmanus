@@ -87,6 +87,20 @@ def test_listener_error_does_not_starve_end() -> None:
     assert EventType.SUBAGENT_END in seen
 
 
+@pytest.mark.parametrize("mode", ["one-shot", "background"])
+def test_start_sse_identifies_independent_background_execution(mode) -> None:
+    import json
+    from excelmanus.api_sse import sse_event_to_sse
+
+    events = []
+    emit_start(events.append, SubagentDescriptor(run_id="run-ui", agent_name="explorer", mode=mode),
+               reason="统计", permission_mode="readOnly")
+    serialized = sse_event_to_sse(events[0])
+    payload = json.loads(next(line[6:] for line in serialized.splitlines() if line.startswith("data: ")))
+    assert payload["conversation_id"] == "run-ui"
+    assert payload["background"] is (mode == "background")
+
+
 @pytest.mark.asyncio
 async def test_not_found_emits_no_start(monkeypatch) -> None:
     events: list[ToolCallEvent] = []

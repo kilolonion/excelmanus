@@ -15,6 +15,7 @@ from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field
 
 from excelmanus.api_app_state import (
@@ -29,6 +30,8 @@ from excelmanus.api_app_state import (
     resolve_workspace_root as _resolve_workspace_root_impl,
 )
 from excelmanus.logger import get_logger
+from excelmanus.security.source_isolation import is_product_source_path
+from excelmanus.workspace.identity import is_hidden_name
 
 logger = get_logger("api.files")
 
@@ -204,10 +207,13 @@ async def get_excel_file(request: Request) -> StreamingResponse:
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")  # type: ignore[return-value]
@@ -489,8 +495,6 @@ async def get_excel_view(request: Request) -> JSONResponse:
     """可编辑工作簿的范围投影。第 1 行是 R1，不是分析 headers。"""
     assert get_config() is not None, "服务未初始化"
 
-    from dataclasses import replace
-
     from excelmanus.workbook.refs import InvalidRefError, parse_rect
     from excelmanus.workbook.snapshot import SnapshotError, SnapshotStale, project_view
 
@@ -513,38 +517,24 @@ async def get_excel_view(request: Request) -> JSONResponse:
 
     try:
         base = parse_rect(rect_text, default_sheet=sheet)
+        if (base.max_row - base.min_row + 1) * (base.max_col - base.min_col + 1) > 20_000:
+            return _error_json_response(400, "单次视图最多读取 20000 个单元格", code="VIEW_TOO_LARGE")
     except InvalidRefError as exc:
         return _error_json_response(400, str(exc), code="INVALID_REF")
 
     try:
-        snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
-        if expected_version and expected_version != snap.content_version:
-            return UnicodeJSONResponse(
-                status_code=409,
-                content={
-                    "error": "视图版本已变化，请重新加载",
-                    "code": "STALE_VIEW",
-                    "content_version": snap.content_version,
-                    "expected_version": expected_version,
-                },
-            )
-        if snap.is_csv():
-            windows = [replace(base, sheet=base.sheet or "Sheet1")]
-        else:
-            from openpyxl import load_workbook
+        def read_view() -> JSONResponse:
+            snap = _open_route_snapshot(resolved, path, ws_root, workspace_id)
+            if expected_version and expected_version != snap.content_version:
+                return UnicodeJSONResponse(status_code=409, content={
+                    "error": "视图版本已变化，请重新加载", "code": "STALE_VIEW",
+                    "content_version": snap.content_version, "expected_version": expected_version,
+                })
+            view = project_view(snap, [base], with_styles=with_styles, active_sheet_default=True)
+            view["deprecated_for_editor"] = False
+            return JSONResponse(content=view)
 
-            wb_names = load_workbook(snap.backing_path, read_only=True, data_only=True)
-            try:
-                names = list(wb_names.sheetnames)
-            finally:
-                wb_names.close()
-            if sheet:
-                windows = [replace(base, sheet=sheet)]
-            else:
-                windows = [replace(base, sheet=name) for name in names]
-        view = project_view(snap, windows, with_styles=with_styles)
-        view["deprecated_for_editor"] = False
-        return JSONResponse(content=view)
+        return await run_in_threadpool(read_view)
     except SnapshotStale as exc:
         return UnicodeJSONResponse(
             status_code=409,
@@ -599,7 +589,7 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
         from excelmanus.xls_converter import needs_conversion as _nc3, ensure_xlsx as _ensure3
         if _nc3(resolved):
             try:
-                _xlsx_p3, _ = _ensure3(resolved, workspace_root=ws_root)
+                _xlsx_p3, _ = await run_in_threadpool(_ensure3, resolved, workspace_root=ws_root)
                 resolved = str(_xlsx_p3)
             except Exception:
                 pass
@@ -640,7 +630,8 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
                 wb.close()
 
         svc = WorkspaceFileService(ws_root)
-        receipt = svc.update_with_builder(
+        receipt = await run_in_threadpool(
+            svc.update_with_builder,
             rel,
             builder,
             expected_version=request.expected_version,
@@ -692,6 +683,10 @@ async def write_excel_cells(request: ExcelWriteRequest, raw_request: Request) ->
 
 @router.get("/api/v1/files/excel/list")
 async def list_excel_files(request: Request) -> JSONResponse:
+    return await run_in_threadpool(_list_excel_files, request)
+
+
+def _list_excel_files(request: Request) -> JSONResponse:
     """扫描当前用户 workspace 中所有 Excel 文件，返回路径列表。"""
     assert get_config() is not None, "服务未初始化"
     from pathlib import Path as _Path
@@ -708,12 +703,15 @@ async def list_excel_files(request: Request) -> JSONResponse:
     audits_dir = str((workspace / "outputs" / "audits").resolve())
 
     for root, dirs, filenames in os.walk(workspace):
-        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")]
+        dirs[:] = [d for d in dirs if d not in skip_dirs and not d.startswith(".")
+                   and not is_product_source_path(_Path(root) / d, workspace)]
         root_resolved = str(_Path(root).resolve())
         if root_resolved.startswith(backups_dir) or root_resolved.startswith(audits_dir):
             dirs.clear()
             continue
         for fname in filenames:
+            if is_hidden_name(fname):
+                continue
             ext = os.path.splitext(fname)[1].lower()
             if ext not in excel_exts:
                 continue
@@ -748,6 +746,10 @@ _UPLOAD_PREFIX_RE = re.compile(r"^[0-9a-f]{8}_")
 
 @router.get("/api/v1/files/workspace/list")
 async def list_workspace_files(request: Request) -> JSONResponse:
+    return await run_in_threadpool(_list_workspace_files, request)
+
+
+def _list_workspace_files(request: Request) -> JSONResponse:
     """扫描用户工作区根目录中的文件与文件夹（用于文件树视图）。
 
     扫描范围：完整工作区根目录（包含 agent 创建的文件、uploads/ 等）。
@@ -768,13 +770,20 @@ async def list_workspace_files(request: Request) -> JSONResponse:
             d for d in dirs
             if not d.startswith(".")
             and d not in _WORKSPACE_HIDDEN_DIRS
+            and not is_product_source_path(Path(root) / d, ws_root)
             # scripts/temp 是 run_code 临时脚本目录，不展示
             and not (rel_root == "scripts" and d == "temp")
             # outputs/backups 和 outputs/audits 是内部备份/审计目录
             and not (rel_root == "outputs" and d in ("backups", "audits"))
         )
+        # uploads/ 优先枚举：用户上传文件不能因 _MAX_WORKSPACE_FILES 截断而缺席
+        if rel_root == "." and "uploads" in dirs:
+            dirs.remove("uploads")
+            dirs.insert(0, "uploads")
 
         for dname in dirs:
+            if len(results) >= _MAX_WORKSPACE_FILES:
+                break
             full = os.path.join(root, dname)
             try:
                 mtime = os.path.getmtime(full)
@@ -788,9 +797,13 @@ async def list_workspace_files(request: Request) -> JSONResponse:
                 "is_dir": True,
             })
         for fname in sorted(filenames):
-            if fname.startswith(".") or fname.startswith("_rc_") or fname.startswith("_sw_"):
+            if len(results) >= _MAX_WORKSPACE_FILES:
+                break
+            if is_hidden_name(fname) or fname.startswith("_rc_") or fname.startswith("_sw_"):
                 continue
             full = os.path.join(root, fname)
+            if is_product_source_path(full, ws_root):
+                continue
             try:
                 mtime = os.path.getmtime(full)
             except OSError:
@@ -1091,13 +1104,16 @@ async def get_image_file(request: Request) -> StreamingResponse:
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
     from pathlib import Path as _Path
     import mimetypes
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
 
     # 使用与下载相同的路径解析逻辑
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
@@ -1133,12 +1149,15 @@ async def read_text_file(request: Request) -> JSONResponse:
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
     from pathlib import Path as _Path
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
 
     # 使用与下载相同的路径解析逻辑
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
@@ -1169,10 +1188,13 @@ async def download_file(request: Request) -> StreamingResponse:
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
     if resolved is None:
         return _error_json_response(404, f"文件不存在或路径非法: {path}")  # type: ignore[return-value]
@@ -1191,7 +1213,10 @@ async def download_file(request: Request) -> StreamingResponse:
     return StreamingResponse(
         _iter_file(),
         media_type=content_type,
-        headers={"Content-Disposition": _make_content_disposition(file_path.name)},
+        headers={
+            "Content-Disposition": _make_content_disposition(file_path.name),
+            **_NO_STORE_HEADERS,
+        },
     )
 
 @router.get("/api/v1/files/excel/compare")
@@ -1436,10 +1461,13 @@ async def get_word_file(request: Request) -> StreamingResponse:
 
     path = request.query_params.get("path", "")
     session_id = request.query_params.get("session_id")
+    workspace_id = request.query_params.get("workspace_id")
     if not path:
         return _error_json_response(400, "缺少 path 参数")  # type: ignore[return-value]
 
-    ws_root = _resolve_workspace_root(request)
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error  # type: ignore[return-value]
     resolved = _resolve_excel_path(path, session_id, workspace_root=ws_root)
     file_path, error_response = _resolve_supported_word_file(path, resolved)
     if error_response is not None:
@@ -1453,7 +1481,10 @@ async def get_word_file(request: Request) -> StreamingResponse:
     return StreamingResponse(
         _iter_file(),
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-        headers={"Content-Disposition": _make_content_disposition(file_path.name)},
+        headers={
+            "Content-Disposition": _make_content_disposition(file_path.name),
+            **_NO_STORE_HEADERS,
+        },
     )
 
 @router.get("/api/v1/files/word/snapshot")
@@ -1585,6 +1616,7 @@ class WordWriteRequest(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     session_id: str | None = None
+    workspace_id: str | None = None
     path: str
     operations: list[dict[str, Any]]
     expected_version: str
@@ -1598,7 +1630,11 @@ async def write_word_content(request: WordWriteRequest, raw_request: Request) ->
     if not request.expected_version.strip():
         return _error_json_response(400, "write 必须提供 expected_version")
 
-    ws_root = _resolve_workspace_root(raw_request, session_id=request.session_id)
+    ws_root = _resolve_workspace_root(
+        raw_request,
+        session_id=request.session_id,
+        workspace_id=request.workspace_id,
+    )
     resolved = _resolve_excel_path(request.path, request.session_id, workspace_root=ws_root)
     file_path, error_response = _resolve_supported_word_file(request.path, resolved)
     if error_response is not None:
@@ -1797,20 +1833,21 @@ async def reveal_file(request: Request) -> JSONResponse:
 
     body = await request.json()
     file_path = body.get("path", "").strip()
+    session_id = body.get("session_id") or None
+    workspace_id = body.get("workspace_id") or None
     if not file_path:
         return _error_json_response(400, "缺少 path 参数")
 
-    target_raw = os.path.abspath(file_path)
-    if get_config() is not None:
-        from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
+    ws_root, scope_error = _file_workspace_root(request, session_id, workspace_id)
+    if scope_error is not None:
+        return scope_error
+    from excelmanus.security.guard import FileAccessGuard, SecurityViolationError
 
-        try:
-            target_path = FileAccessGuard(get_config().workspace_root).resolve_and_validate(file_path)
-        except SecurityViolationError:
-            return _error_json_response(403, "路径不在工作区范围内")
-        target = str(target_path)
-    else:
-        target = target_raw
+    try:
+        target_path = FileAccessGuard(ws_root).resolve_and_validate(file_path)
+    except SecurityViolationError:
+        return _error_json_response(403, "路径不在工作区范围内")
+    target = str(target_path)
     if not os.path.exists(target):
         return _error_json_response(404, f"路径不存在: {target}")
 

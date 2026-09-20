@@ -37,6 +37,8 @@ export interface WorkbookViewSnapshot {
   };
   content_version: string;
   snapshot_id?: string;
+  active_sheet?: string;
+  with_styles?: boolean;
   sheets: { name: string; sheet_id: string; used: { rows: number; cols: number } }[];
   windows: WorkbookViewWindow[];
   coverage: {
@@ -45,8 +47,6 @@ export interface WorkbookViewSnapshot {
     truncated_reason?: string | null;
   };
 }
-
-const UNLOADED_STYLE = { bg: { rgb: "EEEEEE" }, cl: { rgb: "888888" } };
 
 function colIndexToLetter(index: number): string {
   let result = "";
@@ -58,7 +58,7 @@ function colIndexToLetter(index: number): string {
   return result;
 }
 
-function letterToColIndex(letter: string): number {
+export function letterToColIndex(letter: string): number {
   let n = 0;
   for (const ch of letter.toUpperCase()) {
     n = n * 26 + (ch.charCodeAt(0) - 64);
@@ -83,7 +83,25 @@ export function cellToUniver(cell: ViewCell): Record<string, unknown> {
   return data;
 }
 
-const PLACEHOLDER_CELL_CAP = 20_000;
+/** Sparse replacement, including tombstones for cells deleted since the last view. */
+export function windowCellPatch(
+  win: WorkbookViewWindow,
+  previous: Record<number, Record<number, unknown> | undefined> = {},
+): Record<number, Record<number, unknown>> {
+  const patch: Record<number, Record<number, unknown>> = {};
+  for (const [r, row] of Object.entries(previous)) {
+    if (+r + 1 < win.rect.r0 || +r + 1 > win.rect.r1) continue;
+    for (const c of Object.keys(row || {})) {
+      if (+c + 1 < win.rect.c0 || +c + 1 > win.rect.c1) continue;
+      (patch[+r] ??= {})[+c] = null;
+    }
+  }
+  for (const [key, cell] of Object.entries(win.cells)) {
+    const [r, c] = key.split(",").map(Number);
+    (patch[r - 1] ??= {})[c - 1] = { v: null, f: null, s: null, p: null, t: null, custom: null, ...cellToUniver(cell) };
+  }
+  return patch;
+}
 
 export function viewSnapshotToUniver(
   view: WorkbookViewSnapshot,
@@ -113,21 +131,6 @@ export function viewSnapshotToUniver(
       }
     }
 
-    let placeholders = 0;
-    for (const rect of view.coverage.unloaded) {
-      if (rect.sheet && rect.sheet !== meta.name) continue;
-      for (let row = rect.r0; row <= rect.r1 && placeholders < PLACEHOLDER_CELL_CAP; row += 1) {
-        for (let col = rect.c0; col <= rect.c1 && placeholders < PLACEHOLDER_CELL_CAP; col += 1) {
-          const r = row - 1;
-          const c = col - 1;
-          if (cellData[r]?.[c]) continue;
-          if (!cellData[r]) cellData[r] = {};
-          cellData[r][c] = { v: "", s: UNLOADED_STYLE, custom: { unloaded: true } };
-          placeholders += 1;
-        }
-      }
-    }
-
     const mergeData = windows.flatMap((win) =>
       (win.merges || []).map((merge) => ({
         startRow: merge.min_row - 1,
@@ -152,8 +155,8 @@ export function viewSnapshotToUniver(
       id: sheetId,
       name: meta.name,
       cellData,
-      rowCount: Math.max(maxRow, meta.used.rows, 1),
-      columnCount: Math.max(maxCol, meta.used.cols, 26),
+      rowCount: Math.max(maxRow, meta.used.rows, 200),
+      columnCount: Math.max(maxCol, meta.used.cols, 50),
       mergeData,
       columnData,
       rowData,

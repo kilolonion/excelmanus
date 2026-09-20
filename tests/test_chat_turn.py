@@ -63,13 +63,11 @@ def test_run_engine_followup_passes_frontend_kwargs() -> None:
         engine,
         "hello",
         chat_mode="read",
-        present_as="native",
         images=[{"attachment_id": "att-1", "media_type": "image/png"}],
     ))
     assert outcome.result.reply == "ok"
     assert captured["message"] == "hello"
     assert captured["chat_mode"] == "read"
-    assert captured["present_as"] == "native"
     assert captured["images"][0]["attachment_id"] == "att-1"
 
 

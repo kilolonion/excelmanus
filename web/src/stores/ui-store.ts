@@ -1,6 +1,11 @@
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getIsMobile, getIsDesktop } from "@/hooks/use-mobile";
+import { settingsCache } from "@/lib/settings-cache";
+import {
+  DEFAULT_THINKING_EFFORT_OPTIONS,
+  type ThinkingEffort,
+} from "@/lib/thinking";
 
 interface UIState {
   sidebarOpen: boolean;
@@ -9,8 +14,8 @@ interface UIState {
   visionCapable: boolean | null;
   chatMode: "write" | "read" | "plan";
   chatModeOwned: boolean;
-  presentAs: "native" | "code";
   thinkingEffort: string;
+  thinkingEffortOptions: ThinkingEffort[];
   settingsOpen: boolean;
   settingsTab: string;
   sidebarTab: "chats" | "files";
@@ -27,8 +32,8 @@ interface UIState {
   setChatMode: (mode: "write" | "read" | "plan") => void;
   hydrateChatMode: (mode: "write" | "read" | "plan") => void;
   releaseChatModeOwnership: () => void;
-  setPresentAs: (mode: "native" | "code") => void;
   setThinkingEffort: (effort: string) => void;
+  setThinkingEffortOptions: (efforts: ThinkingEffort[]) => void;
   setSidebarTab: (tab: "chats" | "files") => void;
   openSettings: (tab?: string) => void;
   closeSettings: () => void;
@@ -58,8 +63,8 @@ export const useUIStore = create<UIState>()(
   visionCapable: null,
   chatMode: "write" as const,
   chatModeOwned: false,
-  presentAs: "native" as const,
   thinkingEffort: "medium",
+  thinkingEffortOptions: [...DEFAULT_THINKING_EFFORT_OPTIONS],
   settingsOpen: false,
   settingsTab: "model",
   sidebarTab: "chats" as const,
@@ -77,8 +82,8 @@ export const useUIStore = create<UIState>()(
   hydrateChatMode: (mode) =>
     set((s) => (s.chatModeOwned ? s : { chatMode: mode })),
   releaseChatModeOwnership: () => set({ chatModeOwned: false }),
-  setPresentAs: (mode) => set({ presentAs: mode }),
   setThinkingEffort: (effort) => set({ thinkingEffort: effort }),
+  setThinkingEffortOptions: (efforts) => set({ thinkingEffortOptions: efforts }),
   setSidebarTab: (tab) => set({ sidebarTab: tab }),
   openSettings: (tab) => set({ settingsOpen: true, settingsTab: tab || "model" }),
   closeSettings: () => set({ settingsOpen: false }),
@@ -88,6 +93,7 @@ export const useUIStore = create<UIState>()(
   setConfigError: (error) => set({ configError: error }),
   setConfigPlaceholderItems: (items) => set({ configPlaceholderItems: items }),
   bumpModelProfiles: () => {
+      settingsCache.delete("/config/models");
       set((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
       // 跨标签页同步：通知其他标签页刷新模型列表
       try { _modelProfileChannel?.postMessage("bump"); } catch { /* 静默 */ }
@@ -97,8 +103,17 @@ export const useUIStore = create<UIState>()(
       name: "excelmanus-ui",
       partialize: (state) => ({
         fullAccessEnabled: state.fullAccessEnabled,
-        presentAs: state.presentAs,
       }),
+      // 只恢复白名单中的可持久化偏好，其他 UI 状态始终使用当前默认值。
+      merge: (persisted, current) => {
+        const saved = persisted as { fullAccessEnabled?: unknown } | null;
+        return {
+          ...current,
+          ...(typeof saved?.fullAccessEnabled === "boolean"
+            ? { fullAccessEnabled: saved.fullAccessEnabled }
+            : {}),
+        };
+      },
     }
   )
 );
@@ -106,6 +121,7 @@ export const useUIStore = create<UIState>()(
 // 跨标签页接收：其他标签页的 bumpModelProfiles 广播到达时，本地也递增版本号
 if (_modelProfileChannel) {
   _modelProfileChannel.onmessage = () => {
+    settingsCache.delete("/config/models");
     useUIStore.setState((s) => ({ modelProfileVersion: s.modelProfileVersion + 1 }));
   };
 }

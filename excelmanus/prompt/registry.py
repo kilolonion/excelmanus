@@ -42,14 +42,14 @@ class AssembleContext:
     """一次 assemble 的运行时开关。"""
 
     plan_active: bool = False
-    present_as: str = "native"  # native | code
     variables: dict[str, str] | None = None
     strict_variables: bool | None = None
     chat_mode: str = "write"
     full_access: bool = False
-    sdk_section: str = ""
     visible_tools: frozenset[str] | None = None
     new_workbook: bool = True
+    # 子代理可选择策略子集；core 和 plan 安全约束始终保留。
+    strategy_names: frozenset[str] | None = None
 
 
 @dataclass(frozen=True)

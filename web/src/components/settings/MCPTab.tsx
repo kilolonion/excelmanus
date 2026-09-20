@@ -735,36 +735,44 @@ export function MCPTab() {
   }
 
   return (
-    <div className="space-y-4">
+    <div className="space-y-3">
       {/* Built-in search engines */}
       <BuiltinSearchSection />
 
+      <section className="em-plugin-panel space-y-3 rounded-xl border p-3">
       {/* Header */}
-      <div className="flex items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-xs text-muted-foreground break-all" title={configPath}>
-            配置文件: {configPath ? configPath.split("/").slice(-2).join("/") : "mcp.json"}
-          </p>
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex min-w-0 items-start gap-2">
+          <div className="grid h-8 w-8 shrink-0 place-items-center rounded-lg bg-[var(--em-primary-alpha-10)] text-[var(--em-primary)]">
+            <Terminal className="h-3.5 w-3.5" />
+          </div>
+          <div className="min-w-0">
+            <h4 className="text-sm font-medium">外部 MCP 服务</h4>
+            <p className="mt-0.5 text-[10px] text-muted-foreground break-all" title={configPath}>
+              {servers.length} 个服务 · {configPath ? configPath.split("/").slice(-2).join("/") : "mcp.json"}
+            </p>
+          </div>
         </div>
         <div className="flex gap-1.5 flex-shrink-0">
           <Button
             size="sm"
-            variant="outline"
-            className="h-7 text-xs gap-1"
+            variant="ghost"
+            className="h-8 text-xs gap-1 px-2"
             onClick={handleReload}
             disabled={reloading}
+            title="重新加载 MCP 配置"
           >
             {reloading ? (
               <Loader2 className="h-3 w-3 animate-spin" />
             ) : (
               <RefreshCw className="h-3 w-3" />
             )}
-            热重载
+            <span className="hidden sm:inline">热重载</span>
           </Button>
           <Button
             size="sm"
             variant="outline"
-            className="h-7 text-xs gap-1"
+            className="h-8 text-xs gap-1"
             data-coach-id="coach-settings-mcp-add-btn"
             onClick={() => {
               setShowCreate(true);
@@ -970,9 +978,11 @@ export function MCPTab() {
       {/* Servers list */}
       <div className="space-y-2" data-coach-id="coach-settings-mcp-list">
           {servers.length === 0 && (
-            <p className="text-xs text-muted-foreground text-center py-8">
-              暂无 MCP Server 配置，点击"新增"添加
-            </p>
+            <div className="rounded-xl border border-dashed px-4 py-10 text-center">
+              <Radio className="mx-auto h-7 w-7 text-muted-foreground/30" />
+              <p className="mt-2 text-xs font-medium text-muted-foreground">还没有外部 MCP 服务</p>
+              <p className="mt-1 text-[10px] text-muted-foreground/70">支持 stdio、SSE 和 Streamable HTTP</p>
+            </div>
           )}
           {servers.map((server) => (
             <SettingsEntityCard
@@ -1104,6 +1114,7 @@ export function MCPTab() {
             </SettingsEntityCard>
           ))}
       </div>
+      </section>
     </div>
   );
 }

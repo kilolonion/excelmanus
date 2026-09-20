@@ -12,6 +12,7 @@ from excelmanus.workspace.paths import (
     unique_workspace_title,
     workspace_title_from_path,
 )
+from excelmanus.security.source_isolation import set_workspace_source_access
 
 if TYPE_CHECKING:
     from excelmanus.database import Database
@@ -41,6 +42,7 @@ class WorkspaceStore:
 
     def _row(self, row: object) -> dict[str, Any]:
         data = dict(row)  # type: ignore[arg-type]
+        set_workspace_source_access(str(data.get("path") or ""), bool(data.get("source_access")))
         return {
             "id": data.get("id"),
             "path": data.get("path"),
@@ -48,11 +50,12 @@ class WorkspaceStore:
             "created_at": data.get("created_at") or "",
             "updated_at": data.get("updated_at") or "",
             "sort_index": int(data.get("sort_index") or 0),
+            "source_access": bool(data.get("source_access")),
         }
 
     def _rows(self) -> list[dict[str, Any]]:
         rows = self._conn.execute(
-            "SELECT id, path, title, created_at, updated_at, sort_index "
+            "SELECT id, path, title, created_at, updated_at, sort_index, source_access "
             "FROM workspaces ORDER BY sort_index ASC, created_at ASC"
         ).fetchall()
         return [self._row(r) for r in rows]
@@ -101,7 +104,7 @@ class WorkspaceStore:
 
     def get(self, workspace_id: str) -> dict[str, Any] | None:
         row = self._conn.execute(
-            "SELECT id, path, title, created_at, updated_at, sort_index "
+            "SELECT id, path, title, created_at, updated_at, sort_index, source_access "
             "FROM workspaces WHERE id = ?",
             (workspace_id,),
         ).fetchone()
@@ -110,13 +113,13 @@ class WorkspaceStore:
     def get_by_path(self, path: str) -> dict[str, Any] | None:
         canon = canonicalize_workspace_path(path)
         row = self._conn.execute(
-            "SELECT id, path, title, created_at, updated_at, sort_index "
+            "SELECT id, path, title, created_at, updated_at, sort_index, source_access "
             "FROM workspaces WHERE path = ?",
             (canon,),
         ).fetchone()
         return self._row(row) if row is not None else None
 
-    def create(self, path: str, *, title: str = "") -> tuple[dict[str, Any], bool]:
+    def create(self, path: str, *, title: str = "", source_access: bool = True) -> tuple[dict[str, Any], bool]:
         """Adopt an existing directory. Same path returns the old row (created=False)."""
         canon = canonicalize_workspace_path(path)
         target = Path(canon)
@@ -124,6 +127,11 @@ class WorkspaceStore:
             raise WorkspacePathError(f"工作区目录不存在: {canon}")
         existing = self.get_by_path(canon)
         if existing is not None:
+            if source_access and not existing["source_access"]:
+                self._conn.execute("UPDATE workspaces SET source_access = 1 WHERE id = ?", (existing["id"],))
+                self._conn.commit()
+                existing["source_access"] = True
+                set_workspace_source_access(canon, True)
             return existing, False
         now = _now_iso()
         display = self._allocate_title((title or "").strip() or workspace_title_from_path(canon))
@@ -131,9 +139,9 @@ class WorkspaceStore:
         sort_index = int(row["m"] if row is not None else -1) + 1
         workspace_id = str(uuid.uuid4())
         self._conn.execute(
-            "INSERT INTO workspaces (id, path, title, created_at, updated_at, sort_index) "
-            "VALUES (?, ?, ?, ?, ?, ?)",
-            (workspace_id, canon, display, now, now, sort_index),
+            "INSERT INTO workspaces (id, path, title, created_at, updated_at, sort_index, source_access) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (workspace_id, canon, display, now, now, sort_index, int(source_access)),
         )
         self._conn.commit()
         rec = self.get(workspace_id)
@@ -142,7 +150,7 @@ class WorkspaceStore:
 
     def ensure_path(self, path: str, *, title: str = "") -> dict[str, Any]:
         """Register path if needed. Caller must mkdir the default root first."""
-        rec, _created = self.create(path, title=title)
+        rec, _created = self.create(path, title=title, source_access=False)
         return rec
 
     def rename(self, workspace_id: str, title: str) -> dict[str, Any] | None:
@@ -173,16 +181,20 @@ class WorkspaceStore:
             if existing is not None and existing["id"] != workspace_id:
                 raise WorkspacePathError("该文件夹已被其他工作区使用")
             next_path = canon
+            set_workspace_source_access(rec["path"], False)
         now = _now_iso()
         self._conn.execute(
-            "UPDATE workspaces SET title = ?, path = ?, updated_at = ? WHERE id = ?",
-            (next_title, next_path, now, workspace_id),
+            "UPDATE workspaces SET title = ?, path = ?, updated_at = ?, source_access = ? WHERE id = ?",
+            (next_title, next_path, now, int(bool(path) or rec["source_access"]), workspace_id),
         )
         self._conn.commit()
         return self.get(workspace_id)
 
     def delete(self, workspace_id: str) -> bool:
         """Drop the registration only. Disk and sessions stay."""
+        rec = self.get(workspace_id)
         cur = self._conn.execute("DELETE FROM workspaces WHERE id = ?", (workspace_id,))
         self._conn.commit()
+        if rec is not None:
+            set_workspace_source_access(rec["path"], False)
         return cur.rowcount > 0

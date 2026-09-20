@@ -12,6 +12,7 @@ from excelmanus.security.policy import (
     resolve_execution_policy,
     writes_denied,
 )
+from excelmanus.tools.context import capability_from_engine, intersect_capability
 
 
 def _eng(**kwargs: object) -> SimpleNamespace:
@@ -61,6 +62,21 @@ def test_full_access_is_workspace_write_not_escape() -> None:
     assert resolve_execution_policy(e).mode == "workspace-write"
     assert resolve_approval_policy(e) == "never"
     assert not writes_denied(e)
+    capability = capability_from_engine(e)
+    assert capability.approval == "never"
+    assert capability.full_access is True
+
+
+def test_child_capability_inherits_host_full_access() -> None:
+    parent = capability_from_engine(
+        _eng(_current_chat_mode="write", _full_access_enabled=True)
+    )
+    child = intersect_capability(
+        parent,
+        permission_mode="acceptEdits",
+        allowed_tools=None,
+    )
+    assert child.full_access is True
 
 
 def test_full_access_chat_mode_string_is_workspace_write() -> None:

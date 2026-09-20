@@ -31,7 +31,6 @@ from excelmanus.tools._helpers import (
     workspace_relpath,
 )
 from excelmanus.workbook.address import (
-    column_map_to_list,
     combine_sheet_names,
     looks_like_coordinate_error,
     parse_sheet_address,
@@ -98,9 +97,9 @@ def _version_param_schema() -> dict[str, Any]:
     return {
         "type": "string",
         "description": (
-            "已有文件写入必须带最近一次成功读/写返回的 content_version，"
-            "对应本次计算所依据的那份数据，不是事后新读到的版本。"
-            "restore 必须显式传入，不能靠回退。"
+            "建议传最近一次成功读/写返回的 content_version，对应本次计算所依据的数据。"
+            "未传时提交层只会尝试使用本轮已观察版本；没有观察版本就拒绝。"
+            "selection 写回使用 selection.content_version；restore 须显式 expected_version。"
         ),
     }
 
@@ -133,6 +132,7 @@ def _join_param_schema() -> dict[str, Any]:
                 "type": "integer",
                 "description": "右表表头行（Excel 1-based）；右表表头不在第 1 行时传",
             },
+            "expected_version": {"type": "string", "description": "可选的右工作簿版本；同簿只读连接自动使用左侧观察版本。"},
             "how": {
                 "type": "string",
                 "enum": ["left"],
@@ -155,12 +155,12 @@ def _format_rule_schema() -> dict[str, Any]:
                 "type": "string",
                 "enum": [
                     # 条件格式
-                    "cell_value", "text", "formula", "duplicate", "unique",
+                    "cell_value", "text", "formula", "expression", "duplicate", "unique",
                     "top_n", "bottom_n", "color_scale", "data_bar", "icon_set",
                     # 数据验证（含处理器支持的别名）
                     "list", "dropdown", "whole", "int", "integer",
                     "decimal", "float", "number", "date", "time",
-                    "textlength", "text_length", "length", "custom",
+                    "textlength", "textLength", "text_length", "length", "custom",
                 ],
                 "description": (
                     "条件格式: cell_value/text/formula/duplicate/unique/top_n/bottom_n/"
@@ -185,7 +185,7 @@ def _format_rule_schema() -> dict[str, Any]:
                 "type": ["array", "string"],
                 "description": "数据验证 type=list 的候选数组；也可传公式字符串",
             },
-            "formula1": {"description": "数据验证主公式/值"},
+            "formula1": {"description": "条件格式 type=formula 时是 formula 的别名；数据验证主公式/值；cell_value 的首个边界值"},
             "formula2": {"description": "数据验证第二公式/值（between 上界）"},
             "source": {
                 "type": "string",
@@ -207,17 +207,111 @@ def _format_rule_schema() -> dict[str, Any]:
             "show_input_message": {"type": "boolean"},
             "show_error_message": {"type": "boolean"},
             "text": {"type": "string"},
-            "formula": {"type": "string"},
+            "formula": {
+                "type": ["string", "array"],
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 1,
+                "description": "条件格式 type=formula/expression 的条件（或 data_validation type=custom）；如 =$D2=\"未匹配\"，可省略开头 =。也接受单元素公式数组。formula1 同义，同时提供须一致。",
+            },
             "n": {"type": "integer"},
-            "font": {"type": "object"},
-            "fill": {"type": "object"},
-            "border": {"type": "object"},
+            "font": _format_style_schema()["font"],
+            "fill": _format_style_schema()["fill"],
+            "border": _format_style_schema()["border"],
             "min_color": {"type": "string"},
             "mid_color": {"type": "string"},
             "max_color": {"type": "string"},
             "bar_color": {"type": "string"},
             "icon_style": {"type": "string"},
         },
+    }
+
+
+def _format_style_schema() -> dict[str, Any]:
+    """Small, executable style contract shared by format and tool_detail."""
+    side = {
+        "type": ["object", "string"],
+        "description": "边框样式名或 {style,color}；style 例如 thin/medium/double/none",
+        "properties": {
+            "style": {"type": "string"},
+            "color": {"type": "string"},
+        },
+        "additionalProperties": False,
+    }
+    return {
+        "font": {
+            "type": "object",
+            "additionalProperties": False,
+            "properties": {
+                "name": {"type": "string"},
+                "size": {"type": "number"},
+                "bold": {"type": "boolean"},
+                "italic": {"type": "boolean"},
+                "color": {"type": "string"},
+                "underline": {"type": "string"},
+                "strike": {"type": "boolean"},
+                "strikethrough": {"type": "boolean"},
+                "vertAlign": {"type": "string", "enum": ["baseline", "superscript", "subscript"]},
+            },
+        },
+        "fill": {
+            "type": "object",
+            "description": "填充：color 或 fgColor，type/fill_type/patternType 用 solid/none 等合法 patternType",
+            "properties": {
+                "color": {"type": "string"},
+                "fgColor": {"type": "string"},
+                "fg_color": {"type": "string"},
+                "start_color": {"type": "string"},
+                "end_color": {"type": "string"},
+                "fill_type": {"type": "string"},
+                "type": {"type": "string"},
+                "pattern": {"type": "string"},
+                "patternType": {"type": "string"},
+            },
+            "additionalProperties": False,
+        },
+        "border": {
+            "type": "object",
+            "description": "统一边框 {style,color}，或分别提供 left/right/top/bottom",
+            "properties": {
+                "style": {"type": "string"},
+                "color": {"type": "string"},
+                "left": side,
+                "right": side,
+                "top": side,
+                "bottom": side,
+            },
+            "additionalProperties": False,
+        },
+        "alignment": {
+            "type": "object",
+            "description": "对齐：horizontal/vertical/wrap_text（也接受 wrapText）",
+            "properties": {
+                "horizontal": {"type": "string"},
+                "vertical": {"type": "string"},
+                "wrap_text": {"type": "boolean"},
+                "wrapText": {"type": "boolean"},
+                "horizontalAlignment": {"type": "string"},
+                "verticalAlignment": {"type": "string"},
+                "shrink_to_fit": {"type": "boolean"},
+                "shrinkToFit": {"type": "boolean"},
+                "text_rotation": {"type": "integer", "minimum": 0, "maximum": 180},
+                "textRotation": {"type": "integer", "minimum": 0, "maximum": 180},
+                "indent": {"type": "number", "minimum": 0},
+                "readingOrder": {"type": "integer", "enum": [0, 1, 2]},
+            },
+            "additionalProperties": False,
+        },
+    }
+
+
+def _format_size_axis_schema(axis: str) -> dict[str, Any]:
+    return {
+        "type": ["object", "array", "string"],
+        "description": (
+            f"kind=size 的 {axis}：字典或数字数组；列宽按 Excel 字符宽度，行高按 points。"
+            "也接受等价 JSON 字符串。"
+        ),
     }
 
 
@@ -294,6 +388,9 @@ def _summarize_payload(payload: dict[str, Any]) -> str:
     uncertainties = payload.get("uncertainties")
     if isinstance(uncertainties, list):
         parts.append(f"uncertainties={len(uncertainties)}")
+    for key in ("files", "warnings", "verification", "appearance", "skipped_merged_non_anchors"):
+        if payload.get(key):
+            parts.append(f"{key}: {json.dumps(payload[key], ensure_ascii=False, default=str)}")
     if parts:
         return " ".join(parts)
     keys = [str(key) for key in payload if key != "status"]
@@ -329,7 +426,7 @@ def _invalid(message: str, *, code: str = "INVALID_ARGS", **extra: Any) -> ToolR
 
 _OPS_MUST_BE_ARRAY = (
     "operations 必须是对象数组，每一项是 {kind,...}。"
-    "不要把数组序列化成 JSON 字符串再传入。"
+    "可直接传数组，或传等价的 JSON 数组字符串。"
 )
 
 # 模型常在完整 JSON 后多写几个闭合符（} ] ,）：尾部仅含这类字符时容忍取回完整值
@@ -386,14 +483,47 @@ def _coerce_operations(operations: Any) -> list[Any] | ToolResult:
                 if recovered is _JSON_RECOVER_MISSING:
                     return _invalid(f"operations[{index}] 必须是对象，不要传 JSON 字符串。")
                 item = recovered
+        if isinstance(item, dict):
+            item = dict(item)
+            for names in _OP_ALIAS_GROUPS:
+                supplied = [(name, item[name]) for name in names if item.get(name) is not None]
+                if not supplied:
+                    continue
+                if any(value != supplied[0][1] for _, value in supplied[1:]):
+                    try:
+                        _abort_operation(MutationAborted(_invalid(
+                            f"别名冲突：{' / '.join(names)} 必须相同，不能同时指定不同值。",
+                            invalid_fields=[name for name, _ in supplied],
+                        )), index, str(item.get("kind") or ""))
+                    except MutationAborted as exc:
+                        return exc.result
+                item[names[0]] = supplied[0][1]
+                for name in names[1:]:
+                    item.pop(name, None)
         coerced.append(item)
     return coerced
 
 
+_OP_ALIAS_GROUPS = (
+    ("sheet", "sheet_name"), ("range", "cell_range"),
+    ("start_cell", "startCell", "start", "cell"),
+    ("source_sheet", "sourceSheet"), ("source_range", "sourceRange"),
+    ("target_sheet", "targetSheet"), ("target_start", "targetStart"),
+    ("new_name", "newName"), ("number_format", "numberFormat", "numFmt"),
+    ("columns", "column_widths"), ("rows", "row_heights"),
+    ("auto_fit", "autoFit"), ("freeze_panes", "panes"),
+    ("remove", "delete", "clear"),
+    ("rule", "cf_rule", "conditional_format_rule", "validation", "data_validation_rule"),
+    ("chart_type", "chartType"), ("data_range", "dataRange"),
+    ("categories_range", "categoriesRange"), ("target_cell", "targetCell"),
+    ("x_title", "xTitle"), ("y_title", "yTitle"), ("from_rows", "fromRows"),
+)
+
+
 _INSPECT_MODE_FIELDS: dict[str, frozenset[str]] = {
     "overview": frozenset({
-        "request", "mode", "file_path", "path", "sheet", "sheet_name",
-        "include", "max_rows", "directory", "query", "header_row",
+        "request", "mode", "file_path", "path", "include", "max_rows",
+        "sheet", "sheet_name", "header_row", "offset", "max_results", "expected_version", "content_version",
     }),
     "range": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name",
@@ -403,7 +533,7 @@ _INSPECT_MODE_FIELDS: dict[str, frozenset[str]] = {
     }),
     "search": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name",
-        "query", "match_mode", "max_results", "directory",
+        "query", "match_mode", "max_results", "expected_version", "content_version",
     }),
     "capabilities": frozenset({"request", "mode"}),
 }
@@ -415,23 +545,28 @@ _INSPECT_DEFAULTS = {
 _ANALYZE_MODE_FIELDS: dict[str, frozenset[str]] = {
     "profile": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "max_rows",
+        "expected_version", "content_version", "header_row",
     }),
     "quality": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "max_rows",
+        "expected_version", "content_version", "header_row",
     }),
     "filter": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "header_row",
         "column", "operator", "value", "conditions", "logic", "columns",
         "max_rows", "sort_by", "ascending", "limit",
+        "expected_version", "content_version",
     }),
     "aggregate": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "header_row",
         "group_by", "aggregations", "conditions", "logic", "join",
         "column", "operator", "value", "sort_by", "ascending", "limit", "max_rows",
+        "expected_version", "content_version",
     }),
     "distinct": frozenset({
         "request", "mode", "file_path", "path", "sheet", "sheet_name", "header_row",
         "column", "conditions", "logic", "limit", "max_rows", "dup_only",
+        "expected_version", "content_version",
     }),
     "relationships": frozenset({
         "request", "mode", "file_path", "path", "file_paths", "paths",
@@ -442,6 +577,7 @@ _ANALYZE_MODE_FIELDS: dict[str, frozenset[str]] = {
         "index", "columns", "values", "aggfunc", "group_by",
         "conditions", "logic", "join", "column", "operator", "value", "limit", "max_rows",
         "margins", "margins_name", "totals", "totals_name", "grand_total",
+        "expected_version", "content_version",
     }),
     "files": frozenset({
         "request", "mode", "directory", "include", "query", "max_files", "file_path", "path",
@@ -465,7 +601,69 @@ _TRACE_DEFAULTS = {
     "direction": "both",
     "depth": 2,
     "detail": "summary",
+    "scope": "all",
 }
+
+_EDIT_KIND_FIELDS = {
+    "write": "sheet sheet_name start_cell startCell start cell values selection source_rows content_version",
+    "insert": "sheet sheet_name axis at row column count",
+    "delete_rows": "sheet sheet_name at row column count selection source_rows content_version",
+    "delete_columns": "sheet sheet_name at row column count",
+    "sheet": "sheet sheet_name action new_name newName",
+    "copy": "sheet sheet_name source_sheet sourceSheet source_range sourceRange target_sheet targetSheet target_start targetStart",
+    "pivot": "sheet sheet_name target_sheet new_name index columns pivot_columns values pivot_values group_by aggfunc header_row join column operator value conditions logic margins margins_name totals totals_name grand_total overwrite",
+    "transform": "sheet sheet_name header_row action transform key_columns key_normalizers keep order_by column delimiter sep new_columns into",
+}
+
+_FORMAT_KIND_FIELDS = {
+    "format": "range font fill border alignment number_format",
+    "size": "range columns rows auto_fit axis",
+    "freeze": "range freeze_panes rows cols",
+    "merge": "range allow_data_loss",
+    "unmerge": "range",
+    "conditional_format": "range rule remove",
+    "data_validation": "range rule remove",
+}
+
+_CHART_FIELDS = "kind action sheet chart_type data_range categories_range target_cell target_sheet title x_title y_title style width height from_rows"
+
+
+def _reject_operation_fields(op: dict[str, Any], label: str, fields: str) -> None:
+    allowed = set(fields.split()) | {"kind", "sheet", "sheet_name"}
+    extra = sorted(set(op) - allowed)
+    if extra:
+        raise MutationAborted(_invalid(
+            f"{label} 不接受字段 {extra}；请使用该操作的字段，其他操作分成独立项。",
+            invalid_fields=extra, accepted_fields=sorted(allowed),
+        ))
+
+
+def _reject_edit_fields(op: dict[str, Any], kind: str) -> None:
+    fields = _EDIT_KIND_FIELDS.get(kind)
+    if fields is None:
+        return  # the dispatch branch returns the unsupported-kind error
+    allowed = set(fields.split()) | {"kind"}
+    extra = sorted(set(op) - allowed)
+    if extra:
+        raise MutationAborted(_invalid(
+            f"edit.kind={kind} 不接受字段 {extra}；请用该操作的字段或对应意图工具。",
+            invalid_fields=extra, accepted_fields=sorted(allowed),
+        ))
+
+
+def _abort_operation(exc: MutationAborted, index: int, kind: str) -> NoReturn:
+    """A failed atomic batch must identify the bad operation, not imply a partial write."""
+    payload = dict(exc.result.value or {})
+    message = payload.get("message") or exc.result.model_text
+    payload.update(
+        message=f"operations[{index}] (kind={kind}): {message}",
+        operation_index=index,
+        operation_kind=kind,
+        committed=False,
+        partial=False,
+        applied=[],
+    )
+    raise MutationAborted(from_payload(payload)) from exc
 
 
 def _reject_mode_fields(
@@ -541,6 +739,8 @@ def _analyze_missing_required(mode: str, args: dict[str, Any]) -> list[str]:
     if mode == "filter":
         has_conditions = _arg_provided(args, "conditions")
         has_triple = all(_arg_provided(args, key) for key in ("column", "operator", "value"))
+        if _arg_provided(args, "column") and args.get("operator") in {"isnull", "notnull", "is_null", "not_null", "is_not_null", "empty", "not_empty", "null"}:
+            has_triple = True
         if has_conditions or has_triple:
             return []
         return ["column+operator+value 或 conditions"]
@@ -721,22 +921,30 @@ def _clip_format_local_range(ws: Any, local_a1: str) -> str:
 def _freeze_cell_from_op(op: dict[str, Any]) -> str:
     """kind=freeze 的目标格。A2=冻结首行；空串取消。"""
     raw = _op_get(op, "freeze_panes", "panes")
-    if raw is not None and str(raw).strip() != "":
-        text = str(raw).strip()
-        lowered = text.lower()
-        if lowered in {"first_row", "首行", "row1"}:
-            return "A2"
-        if lowered in {"first_col", "first_column", "首列", "col1"}:
-            return "B1"
-        return text
     rows_raw = _op_get(op, "rows")
     cols_raw = _op_get(op, "cols")
+    counts_provided = rows_raw is not None or cols_raw is not None
+    if raw is not None:
+        if counts_provided:
+            raise ValueError("freeze_panes 与 rows/cols 不能同时指定")
+        if not isinstance(raw, str):
+            raise ValueError("freeze_panes 需要单格地址字符串；空字符串取消冻结")
+        text = raw.strip()
+        aliases = {"first_row": "A2", "首行": "A2", "row1": "A2",
+                   "first_col": "B1", "first_column": "B1", "首列": "B1", "col1": "B1"}
+        return aliases.get(text.lower(), text)
+    if not counts_provided:
+        raise ValueError("freeze 需要 freeze_panes=A2 或 rows/cols；取消用 freeze_panes=空字符串或 rows=0,cols=0")
     freeze_rows = 0
     freeze_cols = 0
-    if isinstance(rows_raw, (int, float)) and not isinstance(rows_raw, bool):
-        freeze_rows = int(rows_raw)
-    if isinstance(cols_raw, (int, float)) and not isinstance(cols_raw, bool):
-        freeze_cols = int(cols_raw)
+    for name, raw_value in (("rows", rows_raw), ("cols", cols_raw)):
+        if raw_value is None:
+            continue
+        limit = 1048575 if name == "rows" else 16383
+        if isinstance(raw_value, bool) or not isinstance(raw_value, int) or not 0 <= raw_value <= limit:
+            raise ValueError(f"freeze.{name} 必须是 0 到 {limit} 的整数")
+    freeze_rows = int(rows_raw or 0)
+    freeze_cols = int(cols_raw or 0)
     if freeze_rows <= 0 and freeze_cols <= 0:
         return ""
     col_letter = get_column_letter(freeze_cols + 1)
@@ -945,32 +1153,46 @@ def _write_matrix(
     values: list[Any],
 ) -> str:
     ws = _worksheet(wb, sheet)
-    width = None
+    widths = [len(row) if isinstance(row, list) else 1 for row in values]
+    if not widths or not widths[0] or len(set(widths)) != 1:
+        raise MutationAborted(_invalid(
+            "values 必须是非空矩形；不同宽度请拆成多次 write。null 表示清空该格。"
+        ))
+    width = widths[0]
+    _write_selection_cells(ws, rows=list(range(row0, row0 + len(values))),
+                           cols=list(range(col0, col0 + width)), values=values)
+    return f"{get_column_letter(col0)}{row0}:{get_column_letter(col0 + width - 1)}{row0 + len(values) - 1}"
+
+
+def _write_selection_cells(
+    ws: Any,
+    *,
+    rows: list[int],
+    cols: list[int],
+    values: list[Any],
+) -> None:
+    """Apply a selection write through the same merged-cell contract as write."""
     placements: list[tuple[int, int, int, int, Any, bool]] = []
-    for r_idx, row in enumerate(values):
-        cells = row if isinstance(row, list) else [row]
-        if width is None:
-            width = len(cells)
-        elif len(cells) != width:
-            raise MutationAborted(
-                _invalid(
-                    "values 必须是矩形；不同宽度请拆成多次 write。"
-                    "短于目标区的格子请显式传 null（null 表示清空该格）。"
-                )
-            )
+    for r_idx, excel_row in enumerate(rows):
+        cells = values[r_idx] if isinstance(values[r_idx], list) else [values[r_idx]]
         for c_idx, raw in enumerate(cells):
-            src_row = row0 + r_idx
-            src_col = col0 + c_idx
-            actual_row, actual_col, redirected = _resolve_merged_cell(ws, src_row, src_col)
-            placements.append((src_row, src_col, actual_row, actual_col, raw, redirected))
+            actual_row, actual_col, redirected = _resolve_merged_cell(
+                ws, excel_row, cols[c_idx]
+            )
+            placements.append(
+                (excel_row, cols[c_idx], actual_row, actual_col, raw, redirected)
+            )
 
     collisions: dict[tuple[int, int], list[str]] = {}
     for src_row, src_col, actual_row, actual_col, raw, _redirected in placements:
         if raw is None:
             continue
-        key = (actual_row, actual_col)
-        collisions.setdefault(key, []).append(f"{get_column_letter(src_col)}{src_row}")
-    conflicted = {anchor: sources for anchor, sources in collisions.items() if len(sources) > 1}
+        collisions.setdefault((actual_row, actual_col), []).append(
+            f"{get_column_letter(src_col)}{src_row}"
+        )
+    conflicted = {
+        anchor: sources for anchor, sources in collisions.items() if len(sources) > 1
+    }
     if conflicted:
         details = []
         for (ar, ac), sources in conflicted.items():
@@ -983,11 +1205,10 @@ def _write_matrix(
             )
         )
 
-    for src_row, src_col, actual_row, actual_col, raw, redirected in placements:
+    for _src_row, _src_col, actual_row, actual_col, raw, redirected in placements:
         if redirected and raw is None:
             continue
         assign_cell_value(ws, actual_row, actual_col, raw)
-    return f"{get_column_letter(col0)}{row0}:{get_column_letter(col0 + width - 1)}{row0 + len(values) - 1}"
 
 
 def _write_from_selection(wb: Any, op: dict[str, Any], values: list[Any]) -> str:
@@ -1019,13 +1240,7 @@ def _write_from_selection(wb: Any, op: dict[str, Any], values: list[Any]) -> str
                 )
             )
         ws = _worksheet(wb, sel.sheet)
-        for r_idx, excel_row in enumerate(rows):
-            cells = values[r_idx] if isinstance(values[r_idx], list) else [values[r_idx]]
-            for c_idx, raw in enumerate(cells):
-                actual_row, actual_col, redirected = _resolve_merged_cell(ws, excel_row, cols[c_idx])
-                if redirected and raw is None:
-                    continue
-                assign_cell_value(ws, actual_row, actual_col, raw)
+        _write_selection_cells(ws, rows=rows, cols=cols, values=values)
         return f"selection:{sel.sheet}:{len(rows)}x{len(cols)}"
     start_col = 1
     raw_start = str(_op_get(op, "start_cell", "startCell", "cell", "start") or "")
@@ -1039,13 +1254,12 @@ def _write_from_selection(wb: Any, op: dict[str, Any], values: list[Any]) -> str
             width = len(cells)
         elif len(cells) != width:
             raise MutationAborted(_invalid("values 必须是矩形", code="COORD_CONTRACT"))
-        for c_idx, raw in enumerate(cells):
-            actual_row, actual_col, redirected = _resolve_merged_cell(
-                ws, excel_row, start_col + c_idx
-            )
-            if redirected and raw is None:
-                continue
-            assign_cell_value(ws, actual_row, actual_col, raw)
+    _write_selection_cells(
+        ws,
+        rows=rows,
+        cols=list(range(start_col, start_col + int(width or 0))),
+        values=values,
+    )
     return f"selection:{sel.sheet}:{len(rows)}x{width}"
 
 
@@ -1122,9 +1336,9 @@ def _resolve_write_values(raw: Any) -> Any:
     if not isinstance(raw, str):
         return raw
     text = raw.strip()
-    from excelmanus.engine_core.spill import SpillNotFound, SpillStore, is_spill_locator
+    from excelmanus.engine_core.spill import SpillNotFound, SpillStore, is_spill_reference
 
-    if is_spill_locator(text):
+    if is_spill_reference(text):
         try:
             resolved = SpillStore(_get_guard().workspace_root).get(text)
         except (SpillNotFound, ValueError) as exc:
@@ -1186,6 +1400,8 @@ def _apply_write(
 
 def _parse_at_count(op: dict[str, Any], action: str) -> tuple[int, int]:
     at_raw = _op_get(op, "at", "row", "column")
+    if isinstance(at_raw, bool) or (isinstance(at_raw, float) and not at_raw.is_integer()):
+        raise MutationAborted(_invalid(f"{action}.at 必须是整数行列号，或列字母"))
     if isinstance(at_raw, str) and at_raw.strip().isalpha():
         try:
             at = column_index_from_string(at_raw.strip().upper())
@@ -1197,12 +1413,20 @@ def _parse_at_count(op: dict[str, Any], action: str) -> tuple[int, int]:
         except (TypeError, ValueError) as exc:
             raise MutationAborted(_invalid(f"{action} 的 at 必须是列字母或正整数")) from exc
     count_raw = _op_get(op, "count")
+    if isinstance(count_raw, bool) or (isinstance(count_raw, float) and not count_raw.is_integer()):
+        raise MutationAborted(_invalid(f"{action}.count 必须是正整数"))
     try:
         count = 1 if count_raw is None else int(count_raw)
     except (TypeError, ValueError) as exc:
         raise MutationAborted(_invalid(f"{action} 的 count 必须是正整数")) from exc
     if at < 1 or count < 1:
         raise MutationAborted(_invalid(f"{action} 的 at/count 必须 >= 1"))
+    column_axis = action == "delete_columns" or (action == "insert" and str(op.get("axis") or "").lower() in {"column", "columns", "col", "cols"})
+    if not column_axis and isinstance(at_raw, str) and at_raw.strip().isalpha():
+        raise MutationAborted(_invalid("行操作的 at 需要 Excel 行号，不能用列字母"))
+    limit = 16384 if column_axis else 1048576
+    if at + count - 1 > limit:
+        raise MutationAborted(_invalid("at/count 超出 Excel 行列上限"))
     return at, count
 
 
@@ -1251,7 +1475,12 @@ def _apply_delete_columns(wb: Any, op: dict[str, Any]) -> str:
     return f"delete_columns@{at}x{count}"
 
 
-def _apply_pivot(wb: Any, op: dict[str, Any], file_path: str) -> str:
+def _apply_pivot(
+    wb: Any,
+    op: dict[str, Any],
+    file_path: str,
+    warnings: list[str] | None = None,
+) -> str:
     from excelmanus.workbook.data import (
         _apply_join,
         _build_condition_mask,
@@ -1267,8 +1496,18 @@ def _apply_pivot(wb: Any, op: dict[str, Any], file_path: str) -> str:
     _require_explicit_sheet(op, "pivot", wb=wb)
     source = str(_op_get(op, "sheet", "sheet_name") or "")
     target = str(_op_get(op, "target_sheet", "new_name") or source)
+    overwrite = bool(_op_get(op, "overwrite"))
+    if target == source and not overwrite:
+        raise MutationAborted(
+            _invalid(
+                "pivot 默认不会覆盖源工作表；请提供不同的 target_sheet，"
+                "或显式传 overwrite=true 确认替换源表内容。"
+            )
+        )
     header_row = _op_get(op, "header_row") or 1
     src = _worksheet(wb, source)
+    if not isinstance(header_row, int) or isinstance(header_row, bool) or header_row < 1:
+        raise MutationAborted(_invalid("pivot.header_row 必须是 Excel 正整数行号；表单数据请先转换为带表头的数据表"))
     df = dataframe_from_worksheet(src, header_row=int(header_row))
     if df.empty and source == target:
         raise MutationAborted(
@@ -1281,7 +1520,13 @@ def _apply_pivot(wb: Any, op: dict[str, Any], file_path: str) -> str:
     if join_err is not None:
         raise MutationAborted(join_err)
     if join_spec is not None:
-        merged, _unmatched, merge_err = _apply_join(df, join_spec, file_path)
+        right_frame = None
+        right_file = join_spec["right_file"] or file_path
+        if _get_guard().resolve_and_validate(right_file) == _get_guard().resolve_and_validate(file_path):
+            if not join_spec["right_sheet"]:
+                raise MutationAborted(_invalid("同簿 pivot.join 必须提供右侧 sheet"))
+            right_frame = dataframe_from_worksheet(_worksheet(wb, join_spec["right_sheet"]), header_row=join_spec["right_header"] or 1)
+        merged, _unmatched, merge_err = _apply_join(df, join_spec, file_path, right_frame=right_frame)
         if merge_err is not None:
             raise MutationAborted(merge_err)
         assert merged is not None
@@ -1331,20 +1576,38 @@ def _apply_pivot(wb: Any, op: dict[str, Any], file_path: str) -> str:
     if pivot_err is not None:
         raise MutationAborted(_invalid(pivot_err))
     assert table is not None
-    if resolve_sheet_name(target, wb.sheetnames) is None:
+    existing_target = resolve_sheet_name(target, wb.sheetnames)
+    if existing_target is not None:
+        target = existing_target
+        dest = _worksheet(wb, target)
+        if any(cell.value is not None for row in dest.iter_rows() for cell in row) and not overwrite:
+            raise MutationAborted(_invalid("target_sheet 已有内容；选择新的工作表，或传 overwrite=true 替换整张目标表。"))
+        if dest.merged_cells.ranges or dest.tables or dest._charts or dest._images or dest.conditional_formatting or dest.data_validations.dataValidation:
+            raise MutationAborted(_invalid("pivot 覆盖不能维护目标表的合并、图表、表对象或规则，请写到新表。"))
+    if existing_target is None:
         wb.create_sheet(title=target)
+    elif warnings is not None:
+        warnings.append(
+            f"已按 overwrite=true 替换整张目标表 {target} 的值；结果是静态透视矩阵，不是可刷新的 PivotTable。"
+        )
     dest = _worksheet(wb, target)
     write_dataframe_to_worksheet(dest, table)
     return f"pivot:{target}:{len(table)}"
 
 
-def _apply_transform(wb: Any, op: dict[str, Any]) -> str:
+def _apply_transform(
+    wb: Any,
+    op: dict[str, Any],
+    warnings: list[str] | None = None,
+) -> str:
     from excelmanus.workbook.data import apply_transform_frame, dataframe_from_worksheet, write_dataframe_to_worksheet
 
     _require_explicit_sheet(op, "transform", wb=wb)
     sheet = str(_op_get(op, "sheet", "sheet_name") or "")
     header_row = _op_get(op, "header_row") or 1
     action = str(_op_get(op, "action", "transform") or "").strip().lower()
+    if not isinstance(header_row, int) or isinstance(header_row, bool) or header_row < 1:
+        raise MutationAborted(_invalid("transform.header_row 必须是 Excel 正整数行号"))
     if not action:
         # 模型常省略 action 只给特征字段——按字段推断，避免无意义重试。
         if _op_get(op, "key_columns") is not None:
@@ -1356,6 +1619,23 @@ def _apply_transform(wb: Any, op: dict[str, Any]) -> str:
         ):
             action = "split"
     ws = _worksheet(wb, sheet)
+    value_column = next((i + 1 for i, cell in enumerate(ws[header_row]) if cell.value == _op_get(op, "column")), 0)
+    if action in {"dedupe", "split"}:
+        _refuse_unmaintained_structure(ws, f"transform.{action}")
+        if ws.conditional_formatting or ws.data_validations.dataValidation or any(m.max_row >= int(header_row) for m in ws.merged_cells.ranges):
+            raise MutationAborted(_invalid("结构清洗不能自动维护数据区合并、条件格式或验证范围，请先移除规则或输出到新表。"))
+    if any(
+        isinstance(cell.value, str) and cell.value.startswith("=")
+        for row in ws.iter_rows()
+        for cell in row
+        if action in {"dedupe", "split"} or cell.column == value_column
+    ):
+        raise MutationAborted(
+            _invalid(
+                "transform 遇到公式单元格时拒绝整表重写，以免删除/重排后公式引用失真。"
+                "请用显式 write/copy 操作处理公式区域，或先将公式冻结为字面值。"
+            )
+        )
     df = dataframe_from_worksheet(ws, header_row=int(header_row))
     # into 在别处语义是目标锚点（{"start_cell": "A1"}），只有列表/字符串才视作新列名。
     _into = _op_get(op, "into")
@@ -1376,7 +1656,23 @@ def _apply_transform(wb: Any, op: dict[str, Any]) -> str:
     if err is not None:
         raise MutationAborted(_invalid(err))
     assert out is not None
-    write_dataframe_to_worksheet(ws, out)
+    if action in {"normalize_date", "normalize_phone"}:
+        target_col = list(df.columns).index(_op_get(op, "column")) + 1
+        for index, value in enumerate(out[_op_get(op, "column")], int(header_row) + 1):
+            from excelmanus.workbook.data import _py_scalar
+            assign_cell_value(ws, index, target_col, _py_scalar(value))
+        return f"transform:{action}:{sheet}!{get_column_letter(target_col)}{int(header_row) + 1}:{get_column_letter(target_col)}{int(header_row) + len(out)}"
+    if int(header_row) != 1 and warnings is not None:
+        warnings.append(
+            "transform_preserved_prefix: rows above header_row were preserved; formulas and objects are not reference-rewritten"
+        )
+    elif warnings is not None:
+        warnings.append(
+            "transform_rewrites_data_block: styles may be retained for existing cells, but formula/object references are not recalculated"
+        )
+    source_cols = [list(df.columns).index(c) + 1 if c in df.columns else list(df.columns).index(_op_get(op, "column")) + 1 for c in out.columns]
+    source_rows = [int(header_row) + 1 + i for i in out.attrs.get("source_positions", list(range(len(out))))]
+    write_dataframe_to_worksheet(ws, out, start_row=int(header_row), source_rows=source_rows, source_columns=source_cols)
     if action == "dedupe":
         keys = _op_get(op, "key_columns") or []
         normalizers = _op_get(op, "key_normalizers") or {}
@@ -1386,7 +1682,8 @@ def _apply_transform(wb: Any, op: dict[str, Any]) -> str:
         return (
             f"transform:dedupe rows={len(df)}→{len(out)} removed={len(df) - len(out)} "
             f"keys={keys} key_normalizers={normalizers} {rule} "
-            f"output_range=A1:{get_column_letter(max(1, len(out.columns)))}{len(out) + 1}"
+            f"output_range={get_column_letter(1)}{int(header_row)}:"
+            f"{get_column_letter(max(1, len(out.columns)))}{int(header_row) + len(out)}"
         )
     return f"transform:{action}:{len(out)}"
 
@@ -1435,32 +1732,45 @@ def _apply_sheet(wb: Any, op: dict[str, Any]) -> str:
             raise MutationAborted(_sheet_not_found(name, wb.sheetnames))
         if resolve_sheet_name(new_name, wb.sheetnames) is not None:
             raise MutationAborted(_invalid(f"工作表已存在：{new_name}"))
-        copied = wb.copy_worksheet(wb[name])
+        source_ws = wb[resolved]
+        unsupported = {
+            "charts": len(source_ws._charts), "images": len(source_ws._images),
+            "tables": len(source_ws.tables), "local_names": len(source_ws.defined_names),
+        }
+        if any(unsupported.values()):
+            raise MutationAborted(_invalid("sheet.copy 不能完整复制这些对象；请保留原表或只复制所需区域。", unsupported_objects=unsupported))
+        from copy import deepcopy
+        from excelmanus.workbook.structure import _formula_mentions_sheet
+        for row in source_ws.iter_rows():
+            for cell in row:
+                if cell.data_type == "f" and _formula_mentions_sheet(str(cell.value), resolved):
+                    raise MutationAborted(_invalid("sheet.copy 无法自动重绑显式引用源表名的公式；请使用区域复制并显式指定公式。"))
+        copied = wb.copy_worksheet(source_ws)
+        copied.freeze_panes = source_ws.freeze_panes
+        copied.views = deepcopy(source_ws.views)
+        copied.conditional_formatting = deepcopy(source_ws.conditional_formatting)
+        copied.data_validations = deepcopy(source_ws.data_validations)
         copied.title = str(new_name)
         return f"copy:{name}->{new_name}"
     raise MutationAborted(_invalid("sheet.action 必须是 create/copy/rename/delete"))
 
 
 def _apply_copy(wb: Any, op: dict[str, Any]) -> str:
-    src_ok = bool(
-        _op_get(op, "source_sheet", "sourceSheet")
-        or _address_has_sheet(_op_get(op, "source_range", "sourceRange"))
-    )
-    dst_ok = bool(
-        _op_get(op, "target_sheet", "targetSheet")
-        or _address_has_sheet(_op_get(op, "target_start", "targetStart"))
-    )
-    if not src_ok or not dst_ok:
-        raise MutationAborted(
-            _invalid("copy 必须提供 source_sheet 与 target_sheet，或在地址里写 表!A1")
-        )
+    for names in (
+        ("sheet", "sheet_name"), ("source_sheet", "sourceSheet"),
+        ("target_sheet", "targetSheet"), ("source_range", "sourceRange"),
+        ("target_start", "targetStart"),
+    ):
+        values = [op[name] for name in names if op.get(name) not in (None, "")]
+        if len(values) > 1 and values[0] != values[1]:
+            raise MutationAborted(_invalid(f"copy 别名冲突：{' 与 '.join(names)} 值不同", invalid_fields=list(names)))
     src_sheet = _op_get(op, "source_sheet", "sourceSheet")
     raw_src_range = str(_op_get(op, "source_range", "sourceRange") or "")
     dst_sheet = _op_get(op, "target_sheet", "targetSheet")
     raw_dst_start = str(_op_get(op, "target_start", "targetStart") or "A1")
-    src_from_range, src_range = parse_sheet_address(raw_src_range)
-    dst_from_start, dst_start = parse_sheet_address(raw_dst_start)
     try:
+        src_from_range, src_range = parse_sheet_address(raw_src_range)
+        dst_from_start, dst_start = parse_sheet_address(raw_dst_start)
         src_sheet = combine_sheet_names(
             str(src_sheet) if src_sheet not in (None, "") else None,
             src_from_range,
@@ -1469,10 +1779,22 @@ def _apply_copy(wb: Any, op: dict[str, Any]) -> str:
             str(dst_sheet) if dst_sheet not in (None, "") else None,
             dst_from_start,
         )
+        # sheet remains the operation's destination sheet, as for write/format.
+        # A missing side uses the explicitly resolved other side (same-sheet copy).
+        dst_sheet = combine_sheet_names(_op_get(op, "sheet", "sheet_name"), dst_sheet)
     except ValueError as exc:
         raise MutationAborted(_invalid(str(exc))) from exc
-    if not src_sheet or not src_range or not dst_sheet:
-        raise MutationAborted(_invalid("copy 需要 source_sheet/source_range/target_sheet"))
+    dst_sheet = dst_sheet or src_sheet
+    src_sheet = src_sheet or dst_sheet
+    if not src_sheet:
+        if len(wb.sheetnames) != 1:
+            raise MutationAborted(_invalid(
+                "copy 需要 sheet（同表复制），或 source_sheet/target_sheet（跨表复制）；也可在地址里写 表!A1。",
+                code="SHEET_REQUIRED", available_sheets=list(wb.sheetnames),
+            ))
+        src_sheet = dst_sheet = wb.sheetnames[0]
+    if not src_range:
+        raise MutationAborted(_invalid("copy 需要 source_range，如 C1 或 A1:B10"))
     try:
         dst_start = top_left_cell(dst_start) or "A1"
         start_row, start_col = coordinate_to_tuple(dst_start.upper())
@@ -1492,18 +1814,35 @@ def _apply_copy(wb: Any, op: dict[str, Any]) -> str:
     min_col, min_row, max_col, max_row = (
         bounds.min_col, bounds.min_row, bounds.max_col, bounds.max_row,
     )
+    import copy as _copy
+
     snapshot = [
-        (row, col, src.cell(row=row, column=col).value)
+        (row, col, _copy.copy(src.cell(row=row, column=col)))
         for row in range(min_row, max_row + 1)
         for col in range(min_col, max_col + 1)
     ]
-    for row, col, value in snapshot:
-        assign_cell_value(
-            dst,
-            start_row + row - min_row,
-            start_col + col - min_col,
-            value,
-        )
+    for row, col, source_cell in snapshot:
+        value, style = source_cell.value, source_cell._style
+        target_row = start_row + row - min_row
+        target_col = start_col + col - min_col
+        target = dst.cell(row=target_row, column=target_col)
+        if source_cell.data_type == "f":
+            try:
+                from openpyxl.formula.translate import Translator
+
+                value = Translator(value, origin=src.cell(row=row, column=col).coordinate).translate_formula(
+                    target.coordinate
+                )
+            except Exception as exc:
+                raise MutationAborted(_invalid(f"无法平移公式 {source_cell.coordinate} 到 {target.coordinate}: {exc}")) from exc
+        target.value = value
+        if source_cell.data_type != "f" and isinstance(value, str):
+            target.data_type = source_cell.data_type
+        target._style = _copy.copy(style)
+        target.comment = _copy.copy(source_cell.comment)
+        target._hyperlink = None
+        if source_cell.hyperlink is not None:
+            target.hyperlink = _copy.copy(source_cell.hyperlink)
     applied = f"{src_sheet}!{bounds.resolved}->{dst_sheet}!{dst_start}"
     if bounds.requested != bounds.resolved:
         applied = f"{applied} (from {bounds.requested})"
@@ -1630,7 +1969,10 @@ def _format_bound_sheet(op: dict[str, Any], raw_range: str) -> str | None:
 def _apply_format(wb: Any, op: dict[str, Any]) -> tuple[str, list[str]]:
     kind_raw = _op_get(op, "kind")
     kind_omitted = kind_raw in (None, "")
-    kind = str(kind_raw or "format")
+    kind = _canonical_format_kind(str(kind_raw or "format"))
+    fields = _FORMAT_KIND_FIELDS.get(kind)
+    if fields is not None:
+        _reject_operation_fields(op, f"format.kind={kind}", fields)
     _maybe_bind_unique_sheet(wb, op, "range", "cell_range")
     raw_range = str(_op_get(op, "range", "cell_range") or "")
     missing: list[str] = []
@@ -1654,65 +1996,67 @@ def _apply_format(wb: Any, op: dict[str, Any]) -> tuple[str, list[str]]:
     if kind == "freeze":
         sheet = _format_bound_sheet(op, raw_range)
         ws = _worksheet(wb, sheet)
-        cell = _freeze_cell_from_op(op)
-        applied = apply_freeze_panes(ws, cell or None)
+        try:
+            cell = _freeze_cell_from_op(op)
+            applied = apply_freeze_panes(ws, cell or None)
+        except ValueError as exc:
+            raise MutationAborted(_invalid(str(exc))) from exc
         return f"freeze:{applied or 'off'}", []
     if kind == "size":
         from excelmanus.workbook.data import _maybe_json
 
         sheet = _format_bound_sheet(op, raw_range)
         ws = _worksheet(wb, sheet)
-        columns = _maybe_json(_op_get(op, "columns", "column_widths")) or {}
-        rows = _maybe_json(_op_get(op, "rows", "row_heights")) or {}
-        auto_fit = bool(_op_get(op, "auto_fit", "autoFit"))
+        from excelmanus.workbook.styles import _size_entries
+
+        columns = _maybe_json(_op_get(op, "columns"))
+        rows = _maybe_json(_op_get(op, "rows"))
+        columns = {} if columns is None else columns
+        rows = {} if rows is None else rows
+        auto_fit = _op_get(op, "auto_fit", default=False)
+        if not isinstance(auto_fit, bool):
+            raise ValueError("size.auto_fit 必须是布尔值")
         axis = str(_op_get(op, "axis") or "").lower()
-        if auto_fit:
-            if isinstance(columns, list) and columns and all(
-                isinstance(item, str) and str(item).strip().isalpha() for item in columns
-            ):
-                apply_column_sizes(ws, auto_fit=True, letters={str(c).upper() for c in columns})
-                return "size:auto_fit:cols", []
-            if axis in {"", "column", "columns", "col", "cols"}:
-                apply_column_sizes(ws, auto_fit=True)
-            if axis in {"", "row", "rows"}:
-                apply_row_sizes(ws, auto_fit=True)
-            if axis and axis not in {"column", "columns", "col", "cols", "row", "rows"}:
-                raise MutationAborted(_invalid("size.axis 必须是 row 或 column"))
-            return "size:auto_fit", []
+        axis = {"columns": "column", "col": "column", "cols": "column", "rows": "row"}.get(axis, axis)
+        if axis not in {"", "column", "row"}:
+            raise ValueError("size.axis 必须是 row 或 column")
+        letters = None
         if isinstance(columns, list):
-            if columns and all(isinstance(item, str) and str(item).strip().isalpha() for item in columns):
-                # 列名列表（["A","B"]）只能理解为"这些列自适应"——列宽必须是数值。
-                apply_column_sizes(ws, auto_fit=True, letters={str(c).upper() for c in columns})
-                return "size:auto_fit:cols", []
-            columns = {
-                get_column_letter(index + 1): width
-                for index, width in enumerate(columns)
-                if isinstance(width, (int, float)) and width > 0
-            }
-        elif isinstance(columns, dict):
-            if columns and not any(str(key).isalpha() for key in columns):
-                columns = {
-                    get_column_letter(index): width
-                    for index, width in enumerate(column_map_to_list(columns), start=1)
-                    if isinstance(width, (int, float)) and width > 0
-                }
+            if columns and all(isinstance(c, str) and c.strip().isascii() and c.strip().isalpha() for c in columns):
+                letters = set(_size_entries({c.strip(): 1 for c in columns}, axis="column"))
+                columns = {}
+            else:
+                columns = {str(i + 1): v for i, v in enumerate(columns)}
         if isinstance(rows, list):
-            rows = {
-                str(index + 1): height
-                for index, height in enumerate(rows)
-                if isinstance(height, (int, float)) and height > 0
-            }
-        elif isinstance(rows, dict):
-            rows = {str(key): value for key, value in rows.items()}
-        if not (isinstance(columns, dict) and columns) and not (isinstance(rows, dict) and rows):
-            raise MutationAborted(
-                _invalid('kind=size 需要 columns/rows（如 {"A":18} 或 [18,12]）或 auto_fit=true')
-            )
-        if isinstance(columns, dict) and columns:
+            rows = {str(i + 1): v for i, v in enumerate(rows)}
+        if not isinstance(columns, dict) or not isinstance(rows, dict):
+            raise ValueError("size.columns/rows 需要尺寸字典或数组；冻结数量用 kind=freeze")
+        columns = _size_entries(columns, axis="column")
+        rows = _size_entries(rows, axis="row")
+        if axis == "row" and (columns or letters) or axis == "column" and rows:
+            raise ValueError("size.axis 与提供的行列尺寸冲突；同时改行列时省略 axis")
+        range_cols = range_rows = None
+        if raw_range.strip() and raw_range.strip() != ws.title:
+            _, rects = _format_rects(op, raw_range, allow_union=True)
+            range_cols, range_rows = set(), set()
+            for rect in rects:
+                bounds = resolve_range_to_bounds(rect, used_max_row=ws.max_row, used_max_col=ws.max_column)
+                range_cols.update(get_column_letter(c) for c in range(bounds.min_col, bounds.max_col + 1))
+                range_rows.update(range(bounds.min_row, bounds.max_row + 1))
+            if set(columns) - range_cols or {int(r) for r in rows} - range_rows or (letters is not None and letters - range_cols):
+                raise ValueError("尺寸目标超出 range；请统一范围与 columns/rows")
+        if not auto_fit and not columns and not rows and letters is None:
+            raise ValueError('kind=size 需要 columns/rows（如 {"A":18} 或 [18,12]）或 auto_fit=true')
+        if auto_fit or letters is not None:
+            if axis != "row":
+                apply_column_sizes(ws, auto_fit=True, letters=letters if letters is not None else range_cols)
+            if auto_fit and axis != "column" and letters is None:
+                apply_row_sizes(ws, auto_fit=True, row_numbers=range_rows)
+        if columns:
             apply_column_sizes(ws, columns)
-        if isinstance(rows, dict) and rows:
+        if rows:
             apply_row_sizes(ws, rows)
-        return "size", []
+        return "size:auto_fit" if auto_fit or letters is not None else "size", []
     if not raw_range.strip():
         raise MutationAborted(_invalid(f"{kind} 需要 range"))
     sheet, rects = _format_rects(
@@ -1809,6 +2153,13 @@ def _apply_format(wb: Any, op: dict[str, Any]) -> tuple[str, list[str]]:
             _abort_bad_address("range", raw_range, exc)
         return f"conditional_format:{sqref}", []
     if kind == "merge":
+        occupied = [cell.coordinate for row in ws[cell_range] for cell in (row if isinstance(row, tuple) else (row,))
+                    if cell.coordinate != cell_range.split(":")[0] and cell.value is not None]
+        if occupied and not _op_get(op, "allow_data_loss"):
+            raise MutationAborted(_invalid(
+                "合并会删除非锚点单元格的值。先合并内容，或用 allow_data_loss=true 明确舍弃这些值。",
+                affected_cells=occupied[:20], affected_count=len(occupied),
+            ))
         try:
             ws.merge_cells(cell_range)
         except Exception as exc:
@@ -1832,18 +2183,21 @@ def _apply_format(wb: Any, op: dict[str, Any]) -> tuple[str, list[str]]:
     number_format = _op_get(op, "number_format", "numberFormat", "numFmt")
     skipped: list[str] = []
     for rect in rects:
-        skipped.extend(
-            _paint_format_cells(
-                ws,
-                rect,
-                raw_range,
-                font_cfg=font_cfg,
-                fill=fill,
-                border=border,
-                align_cfg=align_cfg,
-                number_format=number_format,
+        try:
+            skipped.extend(
+                _paint_format_cells(
+                    ws,
+                    rect,
+                    raw_range,
+                    font_cfg=font_cfg,
+                    fill=fill,
+                    border=border,
+                    align_cfg=align_cfg,
+                    number_format=number_format,
+                )
             )
-        )
+        except (ValueError, TypeError) as exc:
+            raise MutationAborted(_invalid(str(exc))) from exc
     return f"format:{','.join(rects)}", skipped
 
 
@@ -2049,11 +2403,13 @@ def edit_spreadsheet(
             return _invalid(f"规格编译失败: {exc}", code="COMPILE_FAILED")
         rel = workspace_relpath(guard, dest)
         try:
+            from excelmanus.tools.context import operation_id_for
             cr = commit_bytes(
                 guard=guard,
                 file_path=rel,
                 data=data,
                 expected_version=None,
+                operation_id=operation_id_for(rel),
             )
         except CommitError as exc:
             return commit_error_result(exc)
@@ -2066,6 +2422,7 @@ def edit_spreadsheet(
             {
                 "file_path": cr.path or rel,
                 "content_version": cr.content_version,
+                "warnings": list(getattr(cr, "warnings", ()) or ()),
                 "uncertainties": [item.model_dump() for item in spec.uncertainties],
                 "build_summary": summary,
                 "verification": verification,
@@ -2108,38 +2465,43 @@ def edit_spreadsheet(
         expected_version = sel_ver
 
     applied: list[str] = []
+    mutation_warnings: list[str] = []
 
     def mutate(wb: Any) -> None:
         for index, raw in enumerate(operations):
             if not isinstance(raw, dict):
                 raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
             kind = str(_op_get(raw, "kind") or "")
-            if kind == "write":
-                applied.append(
-                    _apply_write(wb, raw, create_sheet_if_missing=create_workbook)
-                )
-            elif kind == "insert":
-                applied.append(_apply_insert(wb, raw))
-            elif kind == "sheet":
-                applied.append(_apply_sheet(wb, raw))
-            elif kind == "copy":
-                applied.append(_apply_copy(wb, raw))
-            elif kind == "delete_rows":
-                applied.append(_apply_delete_rows(wb, raw))
-            elif kind == "delete_columns":
-                applied.append(_apply_delete_columns(wb, raw))
-            elif kind == "pivot":
-                applied.append(_apply_pivot(wb, raw, file_path))
-            elif kind == "transform":
-                applied.append(_apply_transform(wb, raw))
-            else:
-                raise MutationAborted(
-                    _invalid(
-                        f"不支持的 edit.kind={kind}。"
-                        "值/表结构用 write|insert|sheet|copy|delete_rows|delete_columns|pivot|transform；"
-                        "外观用 format_spreadsheet"
+            try:
+                _reject_edit_fields(raw, kind)
+                if kind == "write":
+                    applied.append(
+                        _apply_write(wb, raw, create_sheet_if_missing=create_workbook)
                     )
-                )
+                elif kind == "insert":
+                    applied.append(_apply_insert(wb, raw))
+                elif kind == "sheet":
+                    applied.append(_apply_sheet(wb, raw))
+                elif kind == "copy":
+                    applied.append(_apply_copy(wb, raw))
+                elif kind == "delete_rows":
+                    applied.append(_apply_delete_rows(wb, raw))
+                elif kind == "delete_columns":
+                    applied.append(_apply_delete_columns(wb, raw))
+                elif kind == "pivot":
+                    applied.append(_apply_pivot(wb, raw, file_path, mutation_warnings))
+                elif kind == "transform":
+                    applied.append(_apply_transform(wb, raw, mutation_warnings))
+                else:
+                    raise MutationAborted(
+                        _invalid(
+                            f"不支持的 edit.kind={kind}。"
+                            "值/表结构用 write|insert|sheet|copy|delete_rows|delete_columns|pivot|transform；"
+                            "外观用 format_spreadsheet"
+                        )
+                    )
+            except MutationAborted as exc:
+                _abort_operation(exc, index, kind)
 
     committed = _commit(
         file_path=file_path,
@@ -2151,13 +2513,15 @@ def edit_spreadsheet(
     if isinstance(committed, ToolResult):
         return committed
     rel, _safe, cr = committed
-    return _success(
-        {
+    payload = {
             "file_path": cr.path or rel,
             "content_version": cr.content_version,
+            "warnings": list(getattr(cr, "warnings", ()) or ()),
             "applied": applied,
         }
-    )
+    if mutation_warnings:
+        payload["warnings"] = sorted(set(payload["warnings"] + mutation_warnings))
+    return _success(payload)
 
 
 def format_spreadsheet(
@@ -2196,12 +2560,21 @@ def format_spreadsheet(
         for index, raw in enumerate(operations):
             if not isinstance(raw, dict):
                 raise MutationAborted(_invalid(f"operations[{index}] 必须是对象"))
-            label, skipped = _apply_format(wb, raw)
+            try:
+                label, skipped = _apply_format(wb, raw)
+            except MutationAborted as exc:
+                _abort_operation(exc, index, str(raw.get("kind") or "format"))
+            except (ValueError, TypeError) as exc:
+                _abort_operation(MutationAborted(_invalid(str(exc))), index, str(raw.get("kind") or "format"))
             applied.append(label)
             skipped_merged_non_anchors.extend(skipped)
             sheet = _op_get(raw, "sheet", "sheet_name")
             if sheet:
                 touched.append(str(sheet))
+            else:
+                address = _op_get(raw, "range", "cell_range")
+                if address:
+                    touched.extend(parse_ref(str(address)).sheets())
         names = list(dict.fromkeys(touched)) or list(wb.sheetnames[:1])
         sheets_info: list[dict[str, Any]] = []
         for name in names:
@@ -2220,6 +2593,7 @@ def format_spreadsheet(
                     "name": ws.title,
                     "freeze_panes": str(freeze) if freeze else None,
                     "column_widths": widths,
+                    "column_widths_truncated": len(ws.column_dimensions) > 16,
                 }
             )
         appearance["sheets"] = sheets_info
@@ -2235,6 +2609,7 @@ def format_spreadsheet(
     payload: dict[str, Any] = {
         "file_path": cr.path or rel,
         "content_version": cr.content_version,
+        "warnings": list(getattr(cr, "warnings", ()) or ()),
         "applied": applied,
         "appearance": appearance,
     }
@@ -2256,7 +2631,7 @@ def manage_spreadsheet_versions(
     后台只打 RevisionStore（``.excelmanus/revisions/``）。不再读取
     ``intent_revisions.json`` / ``outputs/.versions/rev_*``。
     """
-    from excelmanus.workspace.revisions import RevisionIntegrityError, RevisionStore
+    from excelmanus.workspace.revisions import RevisionIntegrityError
 
     guard = _get_guard()
     try:
@@ -2269,7 +2644,10 @@ def manage_spreadsheet_versions(
     from excelmanus.workspace.file_service import WorkspaceFileService
 
     svc = WorkspaceFileService(guard.workspace_root)
-    store = RevisionStore(guard.workspace_root)
+
+    action = str(action or "").strip().lower()
+    if action not in {"list", "checkpoint", "restore", "delete", "delete_checkpoint"}:
+        return _invalid("action 必须是 list / checkpoint / restore / delete")
 
     if action == "list":
         records = [rec.to_public_dict() for rec in svc.list_history(rel)]
@@ -2286,9 +2664,26 @@ def manage_spreadsheet_versions(
     if action == "checkpoint":
         if not dest.is_file() or not current:
             return _invalid("文件不存在，无法建立检查点", code="PATH_INVALID")
-        rec = store.checkpoint(rel, dest.read_bytes(), label=label)
+        checkpoint_version = current
+        try:
+            rec = svc.checkpoint(
+                rel,
+                expected_version=expected_version or checkpoint_version or "",
+                label=label,
+            )
+        except CommitError as exc:
+            return commit_error_result(exc)
         entry = rec.to_public_dict()
-        return _success({"file_path": rel, "content_version": current, "revision": entry})
+        return _success({"file_path": rel, "content_version": checkpoint_version, "revision": entry})
+
+    if action in {"delete", "delete_checkpoint"}:
+        if not revision_id:
+            return _invalid("delete 需要 revision_id")
+        try:
+            svc.delete_checkpoint(rel, revision_id)
+        except CommitError as exc:
+            return commit_error_result(exc)
+        return _success({"file_path": rel, "deleted_revision": revision_id, "summary": f"已删除检查点 {revision_id}"})
 
     if action == "restore":
         if not revision_id:
@@ -2321,7 +2716,7 @@ def manage_spreadsheet_versions(
             }
         )
 
-    return _invalid("action 必须是 list / checkpoint / restore")
+    return _invalid("action 必须是 list / checkpoint / restore / delete")
 
 
 _MODEL_CAPABILITIES = {
@@ -2338,7 +2733,7 @@ _MODEL_CAPABILITIES = {
         "manage_spreadsheet_versions",
     ],
     "inspect_modes": ["overview", "range", "search", "capabilities"],
-    "analyze_modes": ["profile", "quality", "filter", "aggregate", "distinct", "relationships", "files"],
+    "analyze_modes": ["profile", "quality", "filter", "aggregate", "distinct", "pivot", "relationships", "files"],
     "compare_alignments": ["position", "key"],
     "trace_modes": ["map", "trace", "impact"],
     "notes": [
@@ -2399,6 +2794,10 @@ def inspect_spreadsheet(
         args["include"] = _inc if isinstance(_inc, list) else [_inc]
     chosen = str(args.get("mode") or "").strip()
     target = str(args.get("file_path") or "")
+    from excelmanus.engine_core.spill import is_spill_reference, retrieve_spill_result
+
+    if is_spill_reference(target):
+        return retrieve_spill_result(target, workspace_root=_get_guard().workspace_root)
     raw_range = args.get("range") or args.get("cell_range")
     if raw_range:
         try:
@@ -2415,13 +2814,22 @@ def inspect_spreadsheet(
     if not chosen:
         chosen = "overview"
 
+    missing_required: list[str] = []
+    if chosen == "search":
+        missing_required = [field for field, present in (("file_path", bool(target)), ("query", bool(args.get("query")))) if not present]
+    elif chosen == "range":
+        missing_required = ["file_path"] if not target else []
+        if not args.get("range") and not any(args.get(key) is not None for key in ("max_rows", "offset", "sample_rows")):
+            missing_required.append("range")
+
     mode_err = _reject_mode_fields(
         args, chosen, _INSPECT_MODE_FIELDS.get(chosen, frozenset()), _INSPECT_DEFAULTS,
-        required_for_mode=["query"] if chosen == "search" else (
-            ["range"] if chosen == "range" else (
+        required_for_mode=["file_path", "query"] if chosen == "search" else (
+            ["file_path"] if chosen == "range" else (
                 ["file_path"] if chosen == "overview" else []
             )
         ),
+        missing_required=missing_required,
     )
     if mode_err is not None:
         return mode_err
@@ -2441,6 +2849,7 @@ def inspect_spreadsheet(
             match_mode=str(args.get("match_mode") or args.get("searchMode") or "contains"),
             sheets=[args["sheet_name"]] if args.get("sheet_name") else None,
             max_results=int(args.get("max_results") or args.get("maxResults") or 50),
+            expected_version=args.get("expected_version"),
         )
         sheets = [args["sheet_name"]] if args.get("sheet_name") else None
         return _with_resolved_sheet(result, sheet=args.get("sheet_name"), sheets=sheets)
@@ -2503,6 +2912,11 @@ def inspect_spreadsheet(
             file_path=target,
             include=include,
             max_preview_rows=int(args.get("max_rows") or args.get("maxRows") or 5),
+            sheet_name=args.get("sheet_name"),
+            header_row=args.get("header_row"),
+            offset=int(args.get("offset") or 0),
+            limit=int(args.get("max_results") or 50),
+            expected_version=args.get("expected_version"),
         )
 
     return error_result(
@@ -2535,6 +2949,10 @@ def analyze_spreadsheet(
     directory: str = ".",
     file_paths: list[str] | None = None,
     paths: list[str] | None = None,
+    max_files: int | None = None,
+    query: str | None = None,
+    include: list[str] | None = None,
+    sample_rows: int | None = None,
     group_by: Any = None,
     aggregations: Any = None,
     dup_only: bool | None = None,
@@ -2544,6 +2962,11 @@ def analyze_spreadsheet(
     aggfunc: str | None = None,
     margins: Any = None,
     margins_name: str | None = None,
+    totals: Any = None,
+    totals_name: str | None = None,
+    grand_total: Any = None,
+    expected_version: str | None = None,
+    content_version: str | None = None,
 ) -> ToolResult:
     """只读分析：profile / quality / filter / aggregate / distinct / pivot / relationships / files。"""
     args = _merge_request(
@@ -2564,6 +2987,10 @@ def analyze_spreadsheet(
         limit=limit,
         directory=directory,
         file_paths=file_paths or paths,
+        max_files=max_files,
+        query=query,
+        include=include,
+        sample_rows=sample_rows,
         group_by=group_by,
         aggregations=aggregations,
         dup_only=dup_only,
@@ -2573,6 +3000,10 @@ def analyze_spreadsheet(
         aggfunc=aggfunc,
         margins=margins,
         margins_name=margins_name,
+        totals=totals,
+        totals_name=totals_name,
+        grand_total=grand_total,
+        expected_version=expected_version or content_version,
     )
     chosen = str(args.get("mode") or "profile")
     target = str(args.get("file_path") or "")
@@ -2599,6 +3030,8 @@ def analyze_spreadsheet(
             max_sample_rows=int(args.get("max_rows") or args.get("maxRows") or 500),
             include_relationships=True,
             sheet_name=args.get("sheet_name"),
+            expected_version=args.get("expected_version"),
+            header_row=args.get("header_row"),
         )
 
     if chosen == "filter":
@@ -2620,6 +3053,7 @@ def analyze_spreadsheet(
             sort_by=args.get("sort_by") or args.get("sortBy"),
             ascending=bool(args.get("ascending", True)),
             limit=args.get("max_rows") or args.get("maxRows") or args.get("limit"),
+            expected_version=args.get("expected_version"),
         )
 
     if chosen == "aggregate":
@@ -2642,6 +3076,7 @@ def analyze_spreadsheet(
             ascending=bool(args.get("ascending", False)),
             limit=args.get("max_rows") or args.get("maxRows") or args.get("limit"),
             join=args.get("join") or args.get("lookup"),
+            expected_version=args.get("expected_version"),
         )
 
     if chosen == "pivot":
@@ -2667,6 +3102,7 @@ def analyze_spreadsheet(
             limit=args.get("max_rows") or args.get("maxRows") or args.get("limit"),
             margins=args.get("margins") or args.get("totals") or args.get("grand_total"),
             margins_name=args.get("margins_name") or args.get("totals_name") or "合计",
+            expected_version=args.get("expected_version"),
         )
 
     if chosen == "distinct":
@@ -2683,13 +3119,17 @@ def analyze_spreadsheet(
             logic=str(args.get("logic") or "and"),
             limit=args.get("limit") or args.get("max_rows") or args.get("maxRows"),
             dup_only=bool(args.get("dup_only") or args.get("dupOnly") or False),
+            expected_version=args.get("expected_version"),
         )
 
     if chosen == "relationships":
         from excelmanus.workbook.data import _maybe_json, discover_file_relationships
 
+        relationship_paths = _maybe_json(args.get("file_paths") or args.get("paths"))
+        if not relationship_paths and args.get("file_path"):
+            relationship_paths = [args.get("file_path")]
         return discover_file_relationships(
-            file_paths=_maybe_json(args.get("file_paths") or args.get("paths")),
+            file_paths=relationship_paths,
             directory=str(args.get("directory") or "."),
             max_files=int(args.get("max_files") or args.get("maxFiles") or 5),
             sample_rows=int(args.get("sample_rows") or args.get("sampleRows") or 200),
@@ -2698,11 +3138,21 @@ def analyze_spreadsheet(
     if chosen == "files":
         from excelmanus.workbook.data import _maybe_json, inspect_excel_files
 
+        files_directory = str(args.get("directory") or ".")
+        files_target = str(args.get("file_path") or args.get("path") or "").strip()
+        files_query = args.get("query") or args.get("search")
+        if files_target and files_directory == ".":
+            from pathlib import Path
+
+            target_path = Path(files_target)
+            files_directory = str(target_path.parent if target_path.suffix else target_path)
+            if target_path.suffix and not files_query:
+                files_query = target_path.name
         return inspect_excel_files(
-            directory=str(args.get("directory") or "."),
+            directory=files_directory,
             max_files=int(args.get("max_files") or args.get("maxFiles") or 20),
             include=_maybe_json(args.get("include")),
-            search=args.get("query") or args.get("search"),
+            search=files_query,
             sheet_name=args.get("sheet_name"),
         )
 
@@ -2804,6 +3254,10 @@ def manage_spreadsheet_objects(
     for index, raw in enumerate(ops):
         if not isinstance(raw, dict):
             return _invalid(f"operations[{index}] 必须是对象")
+        try:
+            _reject_operation_fields(raw, f"objects.operations[{index}]", _CHART_FIELDS)
+        except MutationAborted as exc:
+            return exc.result
         kind = str(_op_get(raw, "kind", "action") or "chart")
         if kind not in {"chart", "create_chart"}:
             return _invalid(
@@ -2818,20 +3272,22 @@ def manage_spreadsheet_objects(
 
     applied: list[str] = []
     last_meta: dict[str, Any] = {}
+    objects: list[dict[str, Any]] = []
 
     def mutate(wb: Any) -> None:
-        for raw in prepared_ops:
-            _require_explicit_sheet(
-                raw,
-                "chart",
-                "data_range",
-                "dataRange",
-                "categories_range",
-                "categoriesRange",
-                "target_cell",
-                "targetCell",
-                wb=wb,
-            )
+        for index, raw in enumerate(prepared_ops):
+            try:
+                _require_explicit_sheet(
+                    raw,
+                    "chart",
+                    "data_range",
+                    "dataRange",
+                    "categories_range",
+                    "categoriesRange",
+                    wb=wb,
+                )
+            except MutationAborted as exc:
+                _abort_operation(exc, index, str(raw.get("kind") or "chart"))
             spec = normalize_chart_args(
                 chart_type=str(_op_get(raw, "chart_type", "chartType") or ""),
                 data_range=str(_op_get(raw, "data_range", "dataRange") or ""),
@@ -2843,14 +3299,18 @@ def manage_spreadsheet_objects(
                 x_title=_op_get(raw, "x_title", "xTitle"),
                 y_title=_op_get(raw, "y_title", "yTitle"),
                 style=_op_get(raw, "style"),
-                width=float(_op_get(raw, "width") or 15.0),
-                height=float(_op_get(raw, "height") or 10.0),
+                width=_op_get(raw, "width", default=15.0),
+                height=_op_get(raw, "height", default=10.0),
                 from_rows=bool(_op_get(raw, "from_rows", "fromRows") or False),
             )
             if isinstance(spec, ToolResult):
-                raise MutationAborted(spec)
-            meta = add_chart_to_workbook(wb, spec)
+                _abort_operation(MutationAborted(spec), index, str(raw.get("kind") or "chart"))
+            try:
+                meta = add_chart_to_workbook(wb, spec)
+            except MutationAborted as exc:
+                _abort_operation(exc, index, str(raw.get("kind") or "chart"))
             last_meta.update(meta)
+            objects.append(meta)
             applied.append(f"{meta.get('target_sheet')}!{meta.get('target_cell')}:{spec.chart_type}")
 
     committed = _commit(
@@ -2865,8 +3325,10 @@ def manage_spreadsheet_objects(
         {
             "file_path": cr.path or rel,
             "content_version": cr.content_version,
+            "warnings": list(getattr(cr, "warnings", ()) or ()),
             "applied": applied,
             "chart_type": last_meta.get("chart_type"),
+            "objects": objects,
             "data_range": last_meta.get("data_range"),
             "target_sheet": last_meta.get("target_sheet"),
             "target_cell": last_meta.get("target_cell"),
@@ -2885,6 +3347,7 @@ def trace_spreadsheet_formulas(
     direction: str = "both",
     depth: int = 2,
     detail: str = "summary",
+    scope: str = "all",
 ) -> ToolResult:
     """公式引用：map 全景、trace 单元格、impact 影响面。"""
     args = _merge_request(
@@ -2895,6 +3358,7 @@ def trace_spreadsheet_formulas(
         direction=direction,
         depth=depth,
         detail=detail,
+        scope=scope,
     )
     chosen = str(args.get("mode") or "map")
     target_path = str(args.get("file_path") or "")
@@ -2906,6 +3370,8 @@ def trace_spreadsheet_formulas(
     )
     if mode_err is not None:
         return mode_err
+    if chosen == "impact" and str(args.get("scope") or "all").strip().lower() not in {"all", "sheet"}:
+        return _invalid("impact.scope 仅支持 all 或 sheet")
     from excelmanus.tools.reference_tools import (
         get_impact_analysis,
         get_reference_map,
@@ -2925,6 +3391,9 @@ def trace_spreadsheet_formulas(
     if chosen == "trace":
         if not cell:
             return _invalid("trace 需要 target，如 Sheet1!B2")
+        requested_depth = args.get("depth", 2)
+        if isinstance(requested_depth, bool) or not isinstance(requested_depth, int) or not 1 <= requested_depth <= 5:
+            return _invalid("trace.depth 必须为 1 到 5 的整数")
         return _with_resolved_sheet(
             trace_references(
                 file_path=target_path,
@@ -2978,36 +3447,52 @@ def split_spreadsheet(
     filename_template: str = "{key}",
     header_row: int | None = None,
     max_files: int = 0,
+    expected_version: str | None = None,
+    content_version: str | None = None,
 ) -> ToolResult:
-    """按某列取值把一个表拆成每组一个 xlsx 文件（只新建，不覆盖已有文件）。
+    """按某列拆分为新 xlsx，保留原始值/公式/单元格样式的可复制部分。
 
-    数据按 by_column 唯一值分组；每组写成一个新工作簿（保留源 sheet 名与列头）。
-    文件名由 filename_template 渲染：``{key}``=分组键、``{stem}``=源文件名去扩展名。
+    分组身份与安全文件名分离；所有目标字节先构造完，再批量提交。
+    不能复制的宏、合并、图表或表对象会在 warnings 中明确列出。
     """
     file_path = str(file_path or path or "").strip()
     sheet_name = sheet_name or sheet
     by_column = str(by_column or column or "").strip()
+    expected_version = expected_version or content_version
     if not file_path:
         return error_result("缺少 file_path（源文件路径）", code="INVALID_ARGS")
     if not by_column:
         return error_result(
-            "缺少 by_column（按哪一列拆分，如 '省份'）",
+            "缺少 by_column（按哪列拆分，如 '省份'）",
             code="INVALID_ARGS",
             fields={
                 "accepted_fields": [
                     "file_path", "by_column", "sheet_name", "output_dir",
-                    "filename_template", "header_row", "max_files",
+                    "filename_template", "header_row", "max_files", "expected_version",
                 ]
             },
         )
-    from excelmanus.workbook.data import _load_df_for_tool
+
+    from excelmanus.workbook.data import _detect_csv_encoding, _load_df_for_tool
 
     ctx, err = _load_df_for_tool(
         file_path, sheet_name, header_row, column_hints=[by_column],
+        expected_version=expected_version,
     )
     if err is not None:
         return err
     assert ctx is not None
+    if expected_version and str(ctx["bound_version"]) != str(expected_version):
+        return error_result(
+            f"{file_path} 版本已变化：期望 {expected_version}，实际 {ctx['bound_version']}",
+            code="STALE_SNAPSHOT",
+            fields={
+                "expected_version": expected_version,
+                "content_version": ctx["bound_version"],
+                "file_path": ctx["rel_path"],
+            },
+        )
+
     df = ctx["df"]
     sheet_name = ctx["sheet_name"]
     if by_column not in df.columns:
@@ -3018,62 +3503,118 @@ def split_spreadsheet(
         )
     key_idx = list(df.columns).index(by_column)
     width = len(df.columns)
-
-    # df 由 dtype=str 读入，只用于分组/列定位；写回值须从工作簿原生读取保类型。
     snap = ctx["snap"]
+    # _read_df returns the internal zero-based header index.
+    effective_header = int(ctx["effective_header"]) + 1
+    warnings: list[str] = []
+
+    # Each row carries its original Excel coordinate when the source is xlsx.
+    # This lets us copy formula/style metadata without using cached values.
+    raw_header: list[Any]
+    body_rows: list[tuple[int | None, list[Any], list[Any] | None]] = []
     if snap.is_csv():
         import csv
+        from excelmanus.workbook.snapshot import csv_separator_for
 
-        with open(snap.backing_path, newline="", encoding="utf-8-sig") as fh:
-            all_rows = [row for row in csv.reader(fh)]
-        hdr = max(int(ctx["effective_header"] or 1) - 1, 0)
-        body_rows = [
-            (list(r[:width]) + [None] * max(0, width - len(r)))[:width]
-            for r in all_rows[hdr + 1 :]
-        ]
+        encoding = _detect_csv_encoding(snap.backing_path)
+        with open(snap.backing_path, newline="", encoding=encoding) as fh:
+            all_rows = list(csv.reader(fh, delimiter=csv_separator_for(snap.backing_path)))
+        hdr = effective_header - 1
+        raw_header = (all_rows[hdr] if hdr >= 0 and hdr < len(all_rows) else list(df.columns))[:width]
+        raw_header = raw_header + [None] * max(0, width - len(raw_header))
+        for row in all_rows[hdr + 1 :]:
+            cells = (list(row[:width]) + [None] * max(0, width - len(row)))[:width]
+            body_rows.append((None, cells, None))
     else:
-        wb_src = snap.open_workbook(data_only=True, read_only=True)
+        wb_src = snap.open_workbook(data_only=False, read_only=False)
         try:
             ws_src = wb_src[sheet_name]
-            hdr_row = max(int(ctx["effective_header"] or 1), 1)
-            body_rows = []
-            for r_i, row in enumerate(
-                ws_src.iter_rows(values_only=True), start=1
+            raw_header = [
+                ws_src.cell(row=effective_header, column=col)
+                for col in range(1, width + 1)
+            ] if effective_header else list(df.columns)
+            for row_index in range(effective_header + 1, (ws_src.max_row or 0) + 1):
+                cells = [
+                    ws_src.cell(row=row_index, column=col)
+                    for col in range(1, width + 1)
+                ]
+                values = [cell.value for cell in cells]
+                body_rows.append((row_index, values, cells))
+            if ws_src.merged_cells.ranges:
+                warnings.append("merged_ranges_not_copied")
+            if getattr(ws_src, "_charts", None):
+                warnings.append("charts_not_copied")
+            if getattr(ws_src, "_images", None):
+                warnings.append("images_not_copied")
+            if getattr(ws_src, "tables", None):
+                warnings.append("tables_not_copied")
+            if getattr(ws_src, "data_validations", None) and getattr(
+                ws_src.data_validations, "dataValidation", None
             ):
-                if r_i <= hdr_row:
-                    continue
-                cells = (list(row[:width]) + [None] * max(0, width - len(row)))[:width]
-                body_rows.append(cells)
+                warnings.append("data_validations_not_copied")
+            if ws_src.conditional_formatting:
+                warnings.append("conditional_formats_not_copied")
+            if effective_header > 1:
+                warnings.append("prefix_rows_not_copied: 输出从表头开始，不含源表表头前的标题区")
+            if str(getattr(snap, "suffix", "")).lower() in {".xlsm", ".xltm"}:
+                warnings.append("vba_not_copied_to_xlsx")
+            source_ws = ws_src
         finally:
             wb_src.close()
-    # 丢弃整行空白行（样式残留不算数据行）
-    body_rows = [r for r in body_rows if any(v is not None and str(v) != "" for v in r)]
 
-    groups: dict[str, list[list[Any]]] = {}
-    group_order: list[str] = []
+    # Drop physically empty rows, matching the previous split contract.
+    body_rows = [
+        item for item in body_rows
+        if any(value is not None and str(value) != "" for value in item[1])
+    ]
+
+    def _group_identity(value: Any) -> tuple[str, str]:
+        if value is None or (isinstance(value, float) and pd.isna(value)):
+            return ("blank", "")
+        text = str(value)
+        return ("blank", "") if not text.strip() else (type(value).__name__, text)
+
+    import pandas as pd
+
+    groups: list[dict[str, Any]] = []
+    by_identity: dict[tuple[str, str], dict[str, Any]] = {}
+    cached_keys: dict[int, Any] = {}
+    if not snap.is_csv() and any(cells and cells[key_idx].data_type == "f" for _, _, cells in body_rows):
+        cached_wb = snap.open_workbook(data_only=True, read_only=True)
+        try:
+            for row_index, row in enumerate(cached_wb[sheet_name].iter_rows(min_row=effective_header + 1, min_col=key_idx + 1, max_col=key_idx + 1, values_only=True), effective_header + 1):
+                cached_keys[row_index] = row[0]
+        finally:
+            cached_wb.close()
     blank_rows = 0
-    for row in body_rows:
-        key_text = _split_safe_filename(row[key_idx]) if key_idx < len(row) else "空白"
-        if key_text == "空白":
+    for row_no, values, cells in body_rows:
+        key_value = values[key_idx] if key_idx < len(values) else None
+        if cells is not None and cells[key_idx].data_type == "f":
+            key_value = cached_keys.get(row_no)
+            if key_value is None:
+                return _invalid("拆分键含未计算的公式；请先在 Excel 重算保存，不能按公式文本分组。")
+        identity = _group_identity(key_value)
+        if identity[0] == "blank":
             blank_rows += 1
-        if key_text not in groups:
-            groups[key_text] = []
-            group_order.append(key_text)
-        groups[key_text].append(row)
+        group = by_identity.get(identity)
+        if group is None:
+            display = "空白" if identity[0] == "blank" else identity[1]
+            group = {"identity": identity, "display": display, "key": None if identity[0] == "blank" else key_value, "rows": []}
+            by_identity[identity] = group
+            groups.append(group)
+        group["rows"].append((row_no, values, cells))
 
     limit = int(max_files) if max_files else _SPLIT_MAX_FILES_DEFAULT
-    if len(group_order) > limit:
+    if len(groups) > limit:
         return error_result(
-            f"按 '{by_column}' 拆分将产生 {len(group_order)} 个文件，超过上限 {limit}。请提高 max_files 或改用更粗粒度列。",
+            f"按 '{by_column}' 拆分将产生 {len(groups)} 个文件，超过上限 {limit}。请提高 max_files 或改用更粗粒度列。",
             code="INVALID_ARGS",
-            fields={"groups": len(group_order), "max_files": limit},
+            fields={"groups": len(groups), "max_files": limit},
         )
 
     guard = _get_guard()
     rel_source = ctx["rel_path"]
     source_stem = rel_source.replace("\\", "/").rsplit("/", 1)[-1].rsplit(".", 1)[0]
-
-    # 1) 先渲染全部目标路径并预检冲突（all-or-nothing），再逐个原子提交。
     template = str(filename_template or "{key}")
     if "{key}" not in template and "{stem}" not in template:
         return error_result(
@@ -3081,11 +3622,14 @@ def split_spreadsheet(
             code="INVALID_ARGS",
             fields={"filename_template": template},
         )
+
     used_names: set[str] = set()
-    plan: list[tuple[str, str]] = []  # (key_text, rel_posix)
-    for key_text in group_order:
+    import unicodedata
+    resolved: list[tuple[dict[str, Any], str]] = []
+    conflicts: list[str] = []
+    for group in groups:
         try:
-            name = template.format(key=key_text, stem=source_stem)
+            name = template.format(key=group["display"], stem=source_stem)
         except (KeyError, IndexError, ValueError) as exc:
             return error_result(
                 f"filename_template 占位符非法：{exc}。仅支持 {{key}} 与 {{stem}}",
@@ -3095,18 +3639,14 @@ def split_spreadsheet(
         name = _split_safe_filename(name)
         if not name.lower().endswith(".xlsx"):
             name = f"{name}.xlsx"
-        if name in used_names:
-            suffix = 2
-            while f"{name[:-5]}_{suffix}.xlsx" in used_names:
-                suffix += 1
-            name = f"{name[:-5]}_{suffix}.xlsx"
-        used_names.add(name)
-        out_rel = f"{str(output_dir or 'outputs').strip().rstrip('/')}/{name}"
-        plan.append((key_text, out_rel))
-
-    conflicts: list[str] = []
-    resolved: list[tuple[str, str]] = []
-    for key_text, out_rel in plan:
+        base = name[:-5] if name.lower().endswith(".xlsx") else name
+        candidate = name
+        suffix = 2
+        while unicodedata.normalize("NFC", candidate).casefold() in used_names:
+            candidate = f"{base}_{suffix}.xlsx"
+            suffix += 1
+        used_names.add(unicodedata.normalize("NFC", candidate).casefold())
+        out_rel = f"{str(output_dir or 'outputs').strip().rstrip('/')}/{candidate}"
         try:
             dest = guard.resolve_and_validate(out_rel)
         except SecurityViolationError as exc:
@@ -3120,7 +3660,7 @@ def split_spreadsheet(
             )
         if dest.exists():
             conflicts.append(rel_posix)
-        resolved.append((key_text, rel_posix))
+        resolved.append((group, rel_posix))
     if conflicts:
         return error_result(
             f"{len(conflicts)} 个目标文件已存在，拆分已取消（不会覆盖）：{conflicts[:5]}",
@@ -3128,38 +3668,98 @@ def split_spreadsheet(
             fields={"conflicts": conflicts},
         )
 
-    # 2) 逐组写新工作簿并原子提交（原生值，保留 int/datetime 类型）。
+    import copy
     import io
     import re
-
     from openpyxl import Workbook
+    from openpyxl.formula.translate import Translator
 
-    headers = [str(c) for c in df.columns]
+    headers = [str(c.value) if hasattr(c, "value") else str(c) for c in raw_header]
     safe_sheet = re.sub(r"[\[\]\\/*?:]+", "_", str(sheet_name or "Sheet1")).strip()[:31] or "Sheet1"
-    files_out: list[dict[str, Any]] = []
-    for key_text, rel_posix in resolved:
-        wb = Workbook()
-        ws = wb.active
-        ws.title = safe_sheet
-        ws.append(headers)
-        for row in groups[key_text]:
-            ws.append(list(row))
-            # openpyxl 把 '=' 开头的文本自动判为公式；强制按字符串写回。
-            for cell in ws[ws.max_row]:
-                if cell.data_type == "f" and isinstance(cell.value, str):
-                    cell.data_type = "s"
+    rendered: list[tuple[dict[str, Any], str, bytes]] = []
+
+    def _set_cell(dst: Any, src: Any, value: Any, *, origin: str | None = None) -> None:
+        if src is not None and src.data_type == "f" and origin:
+            try:
+                value = Translator(value, origin=origin).translate_formula(dst.coordinate)
+            except Exception as exc:
+                raise ValueError(f"无法平移公式 {origin} 到 {dst.coordinate}: {exc}") from exc
+        dst.value = value
+        if isinstance(value, str) and (src is None or src.data_type != "f"):
+            dst.data_type = "s"
+        if src is not None and hasattr(src, "_style"):
+            # Do not transplant the source workbook's indexed style array;
+            # openpyxl style IDs belong to their workbook.  Copy components so
+            # the new workbook builds a valid independent style table.
+            dst.font = copy.copy(src.font)
+            dst.fill = copy.copy(src.fill)
+            dst.border = copy.copy(src.border)
+            dst.alignment = copy.copy(src.alignment)
+            dst.protection = copy.copy(src.protection)
+            dst.number_format = src.number_format
+            if src.comment is not None:
+                dst.comment = copy.copy(src.comment)
+            if src.hyperlink is not None:
+                dst._hyperlink = copy.copy(src.hyperlink)
+
+    for group, rel_posix in resolved:
+        out_wb = Workbook()
+        out_ws = out_wb.active
+        out_ws.title = safe_sheet
+        if not snap.is_csv():
+            out_wb.loaded_theme = source_ws.parent.loaded_theme
+            out_wb._colors = copy.copy(source_ws.parent._colors)
+            for letter, dim in source_ws.column_dimensions.items():
+                out_ws.column_dimensions[letter].width = dim.width
+            if source_ws.freeze_panes:
+                freeze_row, freeze_col = coordinate_to_tuple(str(source_ws.freeze_panes))
+                out_ws.freeze_panes = f"{get_column_letter(freeze_col)}{max(1, freeze_row - max(0, effective_header - 1))}"
+        for col, header in enumerate(raw_header, start=1):
+            dst = out_ws.cell(row=1, column=col)
+            if hasattr(header, "value"):
+                _set_cell(dst, header, header.value, origin=header.coordinate)
+            else:
+                dst.value = header
+        for dest_row, (src_row, values, cells) in enumerate(group["rows"], start=2):
+            for col, value in enumerate(values, start=1):
+                dst = out_ws.cell(row=dest_row, column=col)
+                src = cells[col - 1] if cells is not None else None
+                _set_cell(
+                    dst,
+                    src,
+                    value,
+                    origin=src.coordinate if src is not None else None,
+                )
         buf = io.BytesIO()
-        wb.save(buf)
-        wb.close()
-        cr = commit_bytes(guard=guard, file_path=rel_posix, data=buf.getvalue(), expected_version=None)
-        files_out.append(
-            {
-                "file_path": rel_posix,
-                "key": key_text,
-                "rows": len(groups[key_text]),
-                "content_version": cr.content_version,
-            }
+        out_wb.save(buf)
+        out_wb.close()
+        rendered.append((group, rel_posix, buf.getvalue()))
+
+    # Use the existing workspace transaction: check all destinations under
+    # lock, preserve history, and expose recoverable partial publication.
+    from excelmanus.workspace.file_service import TargetSpec, service_for_guard
+
+    svc = service_for_guard(guard)
+    try:
+        receipt = svc.apply_batch([TargetSpec(op="create", path=rel, data=data) for _, rel, data in rendered]) if rendered else None
+    except CommitError as exc:
+        return commit_error_result(exc)
+    if receipt is not None and receipt.state != "committed":
+        return error_result(
+            "拆分产物未全部发布；已提交文件见 committed_files，事务由工作区恢复流程接管，不要重放整批。",
+            code="PARTIAL_COMMIT",
+            remediation="保留 operation_id/tx_id；工作区恢复后核对产物和版本，不要重新拆分到同一路径。",
+            fields={
+                "partial": True,
+                "committed_files": [t.path for t in receipt.targets if t.publish_status == "published"],
+                "operation_id": receipt.operation_id,
+                "tx_id": receipt.tx_id,
+                "recovery_required": receipt.resumeable,
+                "receipt": receipt.to_dict(),
+            },
         )
+    versions = {t.path: t.after_version for t in receipt.targets} if receipt else {}
+    files_out = [{"file_path": rel, "key": group["key"], "rows": len(group["rows"]), "content_version": versions[rel]} for group, rel, _ in rendered]
     files_out.sort(key=lambda f: f["file_path"])
     return _success(
         {
@@ -3167,13 +3767,17 @@ def split_spreadsheet(
             "file_path": rel_source,
             "sheet_name": sheet_name,
             "by_column": by_column,
-            "groups": len(group_order),
+            "groups": len(groups),
             "total_rows": len(body_rows),
             "blank_key_rows": blank_rows,
             "output_dir": str(output_dir or "outputs").strip().rstrip("/"),
             "files": files_out,
+            "source_content_version": snap.content_version,
+            "copy_semantics": "行复制：保留公式并相对平移；跨表依赖和原生对象不随单表产物迁移",
+            "warnings": sorted(set(warnings)),
         }
     )
+
 
 
 def get_tools() -> list[ToolDef]:
@@ -3217,7 +3821,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": (
-                            "overview 可用 columns/styles/charts/formulas/column_widths/merges；"
+                            "overview 可用 columns/preview/dtypes/styles/charts/images/formulas/column_widths/merges/freeze_panes/conditional_formatting/data_validation/print_settings/tables；"
                             "range 仅 formulas"
                         ),
                     },
@@ -3236,11 +3840,11 @@ def get_tools() -> list[ToolDef]:
                     },
                     "directory": {
                         "type": "string",
-                        "description": "files/列举时的相对目录；点名某文件时仍用 file_path",
+                        "description": "deprecated：inspect 不扫描目录；查找文件使用 list_directory 或 analyze_spreadsheet(mode=files)。仅兼容默认值 '.'。",
                     },
                     "offset": {
                         "type": "integer",
-                        "description": "表格窗口偏移，从 0 起（规范名）。精确 range 时忽略并警告。",
+                        "description": "从 0 起：overview 为工作表分页偏移；range 无地址时为数据行偏移，精确 range 时忽略并警告。",
                     },
                     "sample_rows": {
                         "type": "integer",
@@ -3249,7 +3853,7 @@ def get_tools() -> list[ToolDef]:
                     "max_results": {
                         "type": "integer",
                         "default": 50,
-                        "description": "搜索/列表条数上限（规范名）。",
+                        "description": "search 匹配上限；overview 工作表分页数量，默认 50。",
                     },
                     "expected_version": {
                         "type": "string",
@@ -3323,7 +3927,7 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "description": "结果排序列：分组键或聚合输出列名（如 金额_sum）；传源列名会自动映射到其唯一聚合输出列",
                     },
-                    "ascending": {"type": "boolean", "default": True},
+                    "ascending": {"type": "boolean", "default": True, "description": "filter/aggregate 默认升序；最大 TopN 显式传 false（降序）并设置 max_rows。"},
                     "limit": {"type": "integer", "description": "deprecated 别名，等同 max_rows"},
                     "join": {
                         "type": "object",
@@ -3344,18 +3948,26 @@ def get_tools() -> list[ToolDef]:
                         "description": "pivot 追加合计行与合计列（Excel 总计）；合计标签用 margins_name，默认「合计」。",
                     },
                     "margins_name": {"type": "string"},
-                    "totals": {"type": "boolean"},
-                    "totals_name": {"type": "string"},
-                    "grand_total": {"type": "boolean"},
+                    "totals": {"type": "boolean", "description": "pivot 的 margins 别名"},
+                    "totals_name": {"type": "string", "description": "pivot 的 margins_name 别名"},
+                    "grand_total": {"type": "boolean", "description": "pivot 的 margins 别名"},
                     "directory": {"type": "string"},
                     "file_paths": {"type": "array", "items": {"type": "string"}},
                     "paths": {"type": "array", "items": {"type": "string"}},
-                    "max_files": {"type": "integer"},
-                    "query": {"type": "string"},
-                    "include": {"type": "array", "items": {"type": "string"}},
+                    "max_files": {"type": "integer", "description": "files/relationships 的文件数上限"},
+                    "query": {"type": "string", "description": "files 模式按文件名或路径搜索"},
+                    "include": {"type": "array", "items": {"type": "string"}, "description": "files 模式附加维度"},
                     "sample_rows": {
                         "type": "integer",
                         "description": "表格采样行数（规范名）。",
+                    },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "可选；要求分析基于这次读取到的 content_version。",
+                    },
+                    "content_version": {
+                        "type": "string",
+                        "description": "expected_version 的别名",
                     },
                 },
             },
@@ -3377,6 +3989,14 @@ def get_tools() -> list[ToolDef]:
                     "other_path": {"type": "string"},
                     "sheet_a": {"type": "string"},
                     "sheet_b": {"type": "string"},
+                    "sheet": {
+                        "type": "string",
+                        "description": "deprecated 别名，等同 sheet_a",
+                    },
+                    "other_sheet": {
+                        "type": "string",
+                        "description": "deprecated 别名，等同 sheet_b",
+                    },
                     "alignment": {
                         "type": "string",
                         "enum": ["position", "key"],
@@ -3421,7 +4041,7 @@ def get_tools() -> list[ToolDef]:
                             "kind=delete_rows: at/count 或 selection/source_rows(须带 content_version)；"
                             "kind=delete_columns: at/count；"
                             "kind=sheet: action=create|copy|rename|delete；"
-                            "kind=copy: 只复制值与公式文本；"
+                            "kind=copy: 同表用 sheet+source_range+target_start；跨表用 source_sheet/target_sheet，sheet 是目标表别名；复制值/公式和单元格样式，相对公式按目标位置平移；不复制图表等对象；"
                             "kind=transform: action=dedupe|split|normalize_date|normalize_phone；"
                             "dedupe 可用 key_normalizers={手机号列:phone} + keep=earliest|latest + order_by=日期列，一次按归一键保留最早/最晚；"
                             "kind=pivot: index/columns/pivot_values/aggfunc 写入 target_sheet，margins=true 追加合计行/列（要汇总+合计直接 pivot 写，不要 analyze 拿矩阵再分批 values 回写）；"
@@ -3459,7 +4079,7 @@ def get_tools() -> list[ToolDef]:
                                 },
                                 "selection": {
                                     "type": ["object", "string"],
-                                    "description": "读/筛结果返回的 selection（对象或其 JSON 字符串）。write/delete_rows 消费其 rows 与 content_version。",
+                                    "description": "读/筛返回的 selection（对象、JSON 字符串或 selection_spill 句柄）。write 按 rows/cols 原坐标写回，delete_rows 删除 rows；版本来自 selection.content_version。",
                                 },
                                 "source_rows": {
                                     "type": "array",
@@ -3477,12 +4097,12 @@ def get_tools() -> list[ToolDef]:
                                     "type": "string",
                                     "description": "sheet.create 的新表名；sheet / sheet_name 也可当新表名",
                                 },
-                                "source_sheet": {"type": "string"},
+                                "source_sheet": {"type": "string", "description": "kind=copy 源工作表；未提供时用目标表，同表可只传 sheet。也可在 source_range 指定。"},
                                 "source_range": {
                                     "type": "string",
                                     "description": "复制源：单格/矩形 A1:B2，可带表名前缀及 $；整行 1:1 或整列 A:A 按已用范围裁剪。不接受多区域、命名区域或表引用。",
                                 },
-                                "target_sheet": {"type": "string"},
+                                "target_sheet": {"type": "string", "description": "kind=copy 目标工作表，sheet/sheet_name 同义；多处指定须一致。未提供时用源表；pivot 则是透视结果目标表。"},
                                 "target_start": {
                                     "type": "string",
                                     "description": "复制目标起点，如 B2 或 'My Sheet'!B2；矩形取左上角。不接受多区域、命名区域或表引用。",
@@ -3494,6 +4114,10 @@ def get_tools() -> list[ToolDef]:
                                 "margins": {
                                     "type": "boolean",
                                     "description": "kind=pivot 追加合计行与合计列（Excel 总计）。",
+                                },
+                                "overwrite": {
+                                    "type": "boolean",
+                                    "description": "kind=pivot 覆盖任何非空 target_sheet 都必须 true，表示替换整张目标表的值。默认要求新表或空表。",
                                 },
                                 "margins_name": {
                                     "type": "string",
@@ -3599,7 +4223,7 @@ def get_tools() -> list[ToolDef]:
                             "kind=merge|unmerge: range；"
                             "kind=size: columns/rows 或 auto_fit=true；"
                             "kind=freeze: freeze_panes=A2 冻结首行，空字符串取消；"
-                            "kind=conditional_format: range + rule 对象（type/operator/value/font/fill）；"
+                            "kind=conditional_format: range + rule 对象；type=formula 用 formula（或 formula1），例如 =$D2=\"未匹配\"；cell_value 用 operator/value，样式用 font/fill；"
                             "kind=data_validation: range + rule 对象（type=list/whole/decimal/date/time/textLength/custom，"
                             "list 用 values 数组或 formula1 引用，数值类用 operator+value/value2）；"
                             "remove=true 删除与 range 相交的条件格式/验证规则。"
@@ -3622,29 +4246,16 @@ def get_tools() -> list[ToolDef]:
                                     ),
                                 },
                                 "cell_range": {"type": "string", "description": "range 的别名"},
-                                "font": {
-                                    "type": "object",
-                                    "additionalProperties": False,
-                                    "properties": {
-                                        "name": {"type": "string"},
-                                        "size": {"type": "number"},
-                                        "bold": {"type": "boolean"},
-                                        "italic": {"type": "boolean"},
-                                        "color": {"type": "string"},
-                                        "underline": {"type": "string"},
-                                        "strike": {"type": "boolean"},
-                                        "strikethrough": {"type": "boolean"},
-                                    },
-                                },
-                                "fill": {"type": "object"},
-                                "border": {"type": "object"},
-                                "alignment": {"type": "object"},
+                                "font": _format_style_schema()["font"],
+                                "fill": _format_style_schema()["fill"],
+                                "border": _format_style_schema()["border"],
+                                "alignment": _format_style_schema()["alignment"],
                                 "number_format": {"type": "string"},
                                 "numberFormat": {"type": "string", "description": "number_format 的别名"},
                                 "numFmt": {"type": "string", "description": "number_format 的别名"},
-                                "columns": {},
+                                "columns": _format_size_axis_schema("columns"),
                                 "column_widths": {"description": "columns 的别名（kind=size）"},
-                                "rows": {},
+                                "rows": _format_size_axis_schema("rows"),
                                 "row_heights": {"description": "rows 的别名（kind=size）"},
                                 "auto_fit": {"type": "boolean"},
                                 "autoFit": {"type": "boolean", "description": "auto_fit 的别名"},
@@ -3658,6 +4269,7 @@ def get_tools() -> list[ToolDef]:
                                 "cf_rule": {"description": "rule 的别名（kind=conditional_format）"},
                                 "conditional_format_rule": {"description": "rule 的别名（kind=conditional_format）"},
                                 "remove": {"type": "boolean"},
+                                "allow_data_loss": {"type": "boolean", "description": "仅 kind=merge：允许丢弃非锚点值；默认拒绝可能丢值的合并。"},
                                 "delete": {"type": "boolean", "description": "remove 的别名"},
                                 "clear": {"type": "boolean", "description": "remove 的别名"},
                                 "freeze_panes": {
@@ -3725,6 +4337,14 @@ def get_tools() -> list[ToolDef]:
                         "type": "integer",
                         "description": "拆分文件数上限（默认 50）。超过即拒绝，不写任何文件。",
                     },
+                    "expected_version": {
+                        "type": "string",
+                        "description": "可选；要求拆分基于这次读取到的源文件版本。",
+                    },
+                    "content_version": {
+                        "type": "string",
+                        "description": "expected_version 的别名",
+                    },
                 },
                 "required": ["file_path", "by_column"],
             },
@@ -3738,6 +4358,7 @@ def get_tools() -> list[ToolDef]:
             input_schema={
                 "type": "object",
                 "properties": {
+                    "request": {"type": "object", "description": "可选；与平铺字段合并"},
                     "file_path": {"type": "string"},
                     "path": {"type": "string"},
                     "operations": {
@@ -3748,41 +4369,50 @@ def get_tools() -> list[ToolDef]:
                             "properties": {
                                 "kind": {
                                     "type": "string",
-                                    "enum": ["chart"],
+                                    "enum": ["chart", "create_chart"],
                                     "description": "当前仅 chart",
                                 },
+                                "action": {"type": "string", "enum": ["chart", "create_chart"]},
                                 "sheet": {"type": "string"},
                                 "sheet_name": {"type": "string"},
                                 "chart_type": {
                                     "type": "string",
                                     "description": "bar/line/pie/scatter/area；column 视为 bar",
                                 },
+                                "chartType": {"type": "string", "description": "chart_type 的别名"},
                                 "data_range": {
                                     "type": "string",
                                     "description": _range_schema_description(
                                         extra="规范名是 data_range。图表需要有界矩形，不要写整列/整行。",
                                     ),
                                 },
+                                "dataRange": {"type": "string", "description": "data_range 的别名"},
                                 "categories_range": {
                                     "type": "string",
                                     "description": _range_schema_description(
                                         extra="规范名是 categories_range。",
                                     ),
                                 },
+                                "categoriesRange": {"type": "string", "description": "categories_range 的别名"},
                                 "target_cell": {
                                     "type": "string",
                                     "description": _range_schema_description(
                                         extra="规范名是 target_cell。",
                                     ),
                                 },
+                                "targetCell": {"type": "string", "description": "target_cell 的别名"},
                                 "target_sheet": {"type": "string"},
+                                "targetSheet": {"type": "string", "description": "target_sheet 的别名"},
                                 "title": {"type": "string"},
                                 "x_title": {"type": "string"},
                                 "y_title": {"type": "string"},
+                                "xTitle": {"type": "string", "description": "x_title 的别名"},
+                                "yTitle": {"type": "string", "description": "y_title 的别名"},
                                 "style": {"type": "integer"},
-                                "width": {"type": "number"},
-                                "height": {"type": "number"},
+                                "width": {"type": "number", "exclusiveMinimum": 0, "description": "图表宽度，厘米，默认 15"},
+                                "height": {"type": "number", "exclusiveMinimum": 0, "description": "图表高度，厘米，默认 10"},
                                 "from_rows": {"type": "boolean"},
+                                "fromRows": {"type": "boolean", "description": "from_rows 的别名"},
                             },
                         },
                         "description": (
@@ -3827,8 +4457,9 @@ def get_tools() -> list[ToolDef]:
                         "type": "string",
                         "enum": ["precedents", "dependents", "both"],
                     },
-                    "depth": {"type": "integer", "default": 2},
+                    "depth": {"type": "integer", "default": 2, "minimum": 1, "maximum": 5},
                     "detail": {"type": "string", "enum": ["summary", "full"]},
+                    "scope": {"type": "string", "enum": ["all", "sheet"], "description": "impact 范围：all=所有工作表，sheet=目标工作表"},
                 },
             },
             func=trace_spreadsheet_formulas,
@@ -3844,10 +4475,10 @@ def get_tools() -> list[ToolDef]:
                     "file_path": {"type": "string"},
                     "action": {
                         "type": "string",
-                        "enum": ["list", "checkpoint", "restore"],
+                        "enum": ["list", "checkpoint", "restore", "delete"],
                         "description": (
                             "list 只读，read/plan 目录可见；"
-                            "checkpoint/restore 写入工作区，执行层按 action 拦截。"
+                            "checkpoint/restore/delete 写入工作区，执行层按 action 拦截。"
                         ),
                     },
                     "revision_id": {"type": "string"},
@@ -3880,6 +4511,15 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
         if not isinstance(schema, dict):
             continue
         props = schema.get("properties") if isinstance(schema.get("properties"), dict) else {}
+        conditions_schema = {
+            "type": ["array", "string"],
+            "description": "[{column,operator,value}]；isnull/notnull 不需要 value；between 用 [下界,上界]，in/not_in 用数组；conditions=[] 表示不过滤。",
+            "items": {"type": "object", "additionalProperties": False, "properties": {
+                "column": {"type": "string"}, "operator": {"type": "string"}, "value": {},
+                "col": {"type": "string", "description": "column 别名"},
+                "op": {"type": "string", "description": "operator 别名"},
+            }},
+        }
         if tool.name == "edit_spreadsheet":
             spec_param = dict(spec)
             spec_param["type"] = ["object", "string"]
@@ -3905,14 +4545,13 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
                 }
                 op_props["header_row"] = {
                     "type": "integer",
-                    "description": "Excel 1-based 行号；表单类文档传 -1",
+                    "minimum": 1,
+                    "description": "pivot/transform 的表头行，Excel 1-based 正整数，默认 1；无表头数据先整理成数据表。",
                 }
-                if isinstance(op_props.get("conditions"), dict):
-                    op_props["conditions"]["type"] = ["array", "string"]
+                op_props["conditions"] = conditions_schema
         elif tool.name == "analyze_spreadsheet":
             props["join"] = _join_param_schema()
-            if isinstance(props.get("conditions"), dict):
-                props["conditions"]["type"] = ["array", "string"]
+            props["conditions"] = conditions_schema
             if isinstance(props.get("aggregations"), dict):
                 props["aggregations"]["type"] = ["object", "array", "string"]
                 props["aggregations"]["description"] = (
@@ -3931,7 +4570,13 @@ def _enrich_intent_schemas(tools: list[ToolDef]) -> list[ToolDef]:
             op_props = items.get("properties") if isinstance(items, dict) else None
             if isinstance(op_props, dict):
                 op_props["rule"] = _format_rule_schema()
+                # size uses rows/columns as maps or arrays; freeze uses the
+                # same names as integer counts. Keep both usages explicit.
+                for key in ("rows", "columns"):
+                    existing = dict(op_props.get(key) or {})
+                    existing["type"] = ["object", "array", "string", "integer"]
+                    op_props[key] = existing
             props["expected_version"] = _version_param_schema()
-        elif "expected_version" in props:
+        elif tool.name in {"manage_spreadsheet_objects", "manage_spreadsheet_versions"}:
             props["expected_version"] = _version_param_schema()
     return tools

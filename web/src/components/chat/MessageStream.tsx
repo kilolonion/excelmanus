@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useEffect, useLayoutEffect, useCallback, useState } from "react";
+import { memo, useMemo, useRef, useEffect, useLayoutEffect, useCallback, useState } from "react";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { motion, AnimatePresence } from "framer-motion";
 import { ArrowDown } from "lucide-react";
@@ -72,6 +72,9 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   const pinnedMeasureRef = useRef<HTMLDivElement>(null);
   const sizeCacheRef = useRef(new Map<string, number>());
   const [autoScroll, setAutoScroll] = useState(true);
+  // state 用于渲染按钮，ref 才是流式更新与滚动事件之间的同步真值。
+  const autoScrollRef = useRef(true);
+  const lastScrollTopRef = useRef(0);
   const renderedIdsRef = useRef(new Set<string>());
   // 跟踪是否完成了初始加载的滚动定位（用于跳过入场动画）
   const initialScrollDoneRef = useRef(false);
@@ -98,6 +101,9 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   useEffect(() => {
     renderedIdsRef.current = new Set<string>();
     sizeCacheRef.current = new Map();
+    autoScrollRef.current = true;
+    lastScrollTopRef.current = 0;
+    setAutoScroll(true);
   }, [loadedSessionId]);
 
   const [rollbackDialog, setRollbackDialog] = useState<{
@@ -111,10 +117,10 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     switchToModel?: string;
   }>({ open: false, mode: "edit", messageId: "", newContent: "", turnIndex: 0 });
 
-  const timestampIndices = computeTimestampIndices(
+  const timestampIndices = useMemo(() => computeTimestampIndices(
     messageOrder,
     useChatStore.getState().messagesById,
-  );
+  ), [messageOrder]);
 
   const virtualizer = useVirtualizer({
     count: virtualCount,
@@ -138,10 +144,11 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     const viewport = viewportRef.current;
     if (!viewport) return;
     viewport.scrollTo({ top: viewport.scrollHeight, behavior });
+    if (behavior === "auto") lastScrollTopRef.current = viewport.scrollTop;
   }, []);
 
   const scrollToBottom = useCallback((immediate = false) => {
-    if (!autoScroll) return;
+    if (!autoScrollRef.current) return;
 
     if (immediate) {
       scrollViewportToEnd("auto");
@@ -150,13 +157,14 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
         scrollViewportToEnd(isStreaming ? "auto" : "smooth");
       });
     }
-  }, [autoScroll, isStreaming, scrollViewportToEnd]);
+  }, [isStreaming, scrollViewportToEnd]);
 
   const forceScrollToEnd = useCallback(() => {
     if (messageOrder.length === 0) return;
     const viewport = viewportRef.current;
     if (viewport) {
       viewport.scrollTop = viewport.scrollHeight;
+      lastScrollTopRef.current = viewport.scrollTop;
     }
   }, [messageOrder.length]);
 
@@ -200,13 +208,17 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
       const vp = viewportRef.current;
       if (vp) {
         vp.scrollTop = vp.scrollHeight;
+        lastScrollTopRef.current = vp.scrollTop;
       }
 
       // ② rAF：virtualizer 已在 useEffect 中完成初始化，
       //    此时 scrollToIndex 可正常工作，做精确修正
       requestAnimationFrame(() => {
         const viewport = viewportRef.current;
-        if (viewport) viewport.scrollTop = viewport.scrollHeight;
+        if (viewport) {
+          viewport.scrollTop = viewport.scrollHeight;
+          lastScrollTopRef.current = viewport.scrollTop;
+        }
         positioningRef.current = false;
       });
     }
@@ -233,11 +245,16 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
   }, [messageOrder.length, scrollToBottom]);
 
   useIsomorphicLayoutEffect(() => {
-    if (!isStreaming || !autoScroll || messageOrder.length === 0) return;
-    virtualizer.measure();
+    if (!isStreaming || !autoScrollRef.current || messageOrder.length === 0) return;
+    // Only the pinned streaming message grows. ResizeObserver already measures
+    // history rows; invalidating all their heights on every delta causes jumps
+    // and repeated synchronous layout of the entire virtual history.
     const viewport = viewportRef.current;
-    if (viewport) viewport.scrollTop = viewport.scrollHeight;
-  }, [streamTick, isStreaming, autoScroll, virtualizer, messageOrder.length]);
+    if (viewport) {
+      viewport.scrollTop = viewport.scrollHeight;
+      lastScrollTopRef.current = viewport.scrollTop;
+    }
+  }, [streamTick, isStreaming, virtualizer, messageOrder.length]);
 
   useIsomorphicLayoutEffect(() => {
     const el = pinnedMeasureRef.current;
@@ -261,8 +278,13 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
     if (positioningRef.current) return;
     const container = event.currentTarget;
     const { scrollTop, scrollHeight, clientHeight } = container;
-    const isAtBottom = scrollHeight - scrollTop - clientHeight < 100;
-    setAutoScroll(isAtBottom);
+    const userMovedUp = scrollTop < lastScrollTopRef.current - 1;
+    const isAtBottom = scrollHeight - scrollTop - clientHeight <= 24;
+    // 保留向下执行中的平滑自动滚动；任何向上移动都立即把控制权交给用户。
+    const shouldAutoScroll = !userMovedUp && (autoScrollRef.current || isAtBottom);
+    lastScrollTopRef.current = scrollTop;
+    autoScrollRef.current = shouldAutoScroll;
+    setAutoScroll(shouldAutoScroll);
   }, []);
 
   const handleEditAndResend = useCallback(
@@ -420,13 +442,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
             return (
               <div
                 key={messageId}
-                ref={(node) => {
-                  virtualizer.measureElement(node);
-                  if (node) {
-                    const h = node.getBoundingClientRect().height;
-                    if (h > 0) sizeCacheRef.current.set(messageId, h);
-                  }
-                }}
+                ref={virtualizer.measureElement}
                 data-index={virtualRow.index}
                 style={{
                   position: "absolute",
@@ -496,6 +512,7 @@ export function MessageStream({ isStreaming, onEditAndResend, onRetry, onRetryWi
             exit={{ opacity: 0, y: 10, scale: 0.9 }}
             transition={{ duration: 0.2, ease: "easeOut" }}
             onClick={() => {
+              autoScrollRef.current = true;
               setAutoScroll(true);
               forceScrollToEnd();
             }}
@@ -548,7 +565,7 @@ function messageContentTick(msg: Message): number {
   return tick;
 }
 
-function MessageRowItem({
+const MessageRowItem = memo(function MessageRowItem({
   messageId,
   isStreaming,
   isLast,
@@ -600,7 +617,7 @@ function MessageRowItem({
       onRetryWithModel={onRetryWithModel ? (model: string) => onRetryWithModel(message.id, model) : undefined}
     />
   );
-}
+});
 
 function estimateMessageSize(msg: Message | undefined): number {
   if (!msg) return 96;

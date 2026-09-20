@@ -7,25 +7,44 @@ import { fileNameOf } from "@/lib/file-kind";
 export interface PreviewTab {
   filePath: string;
   filename: string;
+  sessionId?: string;
+  workspaceId?: string;
 }
+
+export interface PreviewScope {
+  sessionId?: string | null;
+  workspaceId?: string | null;
+}
+
+export type PreviewTarget = PreviewTab;
 
 interface FilePreviewState {
   textOpen: boolean;
   imageOpen: boolean;
-  textTarget: { path: string; filename: string } | null;
-  imageTarget: { path: string; filename: string } | null;
+  textTarget: { path: string; filename: string; sessionId?: string; workspaceId?: string } | null;
+  imageTarget: { path: string; filename: string; sessionId?: string; workspaceId?: string } | null;
   previewTabs: PreviewTab[];
 
-  openText: (path: string, filename?: string) => void;
-  openImage: (path: string, filename?: string) => void;
+  openText: (path: string, filename?: string, scope?: PreviewScope) => void;
+  openImage: (path: string, filename?: string, scope?: PreviewScope) => void;
   closeText: () => void;
   closeImage: () => void;
+  clearForSessionChange: () => void;
   addPreviewTab: (tab: PreviewTab) => void;
-  removePreviewTab: (filePath: string) => void;
+  removePreviewTab: (tab: Pick<PreviewTab, "filePath" | "sessionId" | "workspaceId">) => void;
 }
 
-function tabOf(path: string, filename?: string): PreviewTab {
-  return { filePath: path, filename: filename || fileNameOf(path) };
+function tabOf(path: string, filename?: string, scope?: PreviewScope): PreviewTab {
+  return {
+    filePath: path,
+    filename: filename || fileNameOf(path),
+    ...(scope?.sessionId ? { sessionId: scope.sessionId } : {}),
+    ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+  };
+}
+
+export function previewTabKey(tab: Pick<PreviewTab, "filePath" | "sessionId" | "workspaceId">): string {
+  return `${tab.workspaceId || tab.sessionId || "_"}|${tab.filePath}`;
 }
 
 export const useFilePreviewStore = create<FilePreviewState>((set) => ({
@@ -35,38 +54,56 @@ export const useFilePreviewStore = create<FilePreviewState>((set) => ({
   imageTarget: null,
   previewTabs: [],
 
-  openText: (path, filename) =>
+  openText: (path, filename, scope) =>
     set((state) => {
-      const tab = tabOf(path, filename);
-      const exists = state.previewTabs.some((item) => item.filePath === tab.filePath);
+      const tab = tabOf(path, filename, scope);
+      const key = previewTabKey(tab);
+      const exists = state.previewTabs.some((item) => previewTabKey(item) === key);
       return {
         textOpen: true,
         imageOpen: false,
-        textTarget: { path: tab.filePath, filename: tab.filename },
+        textTarget: {
+          path: tab.filePath,
+          filename: tab.filename,
+          sessionId: tab.sessionId,
+          workspaceId: tab.workspaceId,
+        },
         previewTabs: exists ? state.previewTabs : [...state.previewTabs, tab].slice(-10),
       };
     }),
 
-  openImage: (path, filename) =>
+  openImage: (path, filename, scope) =>
     set({
       imageOpen: true,
       textOpen: false,
-      imageTarget: { path, filename: filename || fileNameOf(path) },
+      imageTarget: {
+        path,
+        filename: filename || fileNameOf(path),
+        ...(scope?.sessionId ? { sessionId: scope.sessionId } : {}),
+        ...(scope?.workspaceId ? { workspaceId: scope.workspaceId } : {}),
+      },
     }),
 
   closeText: () => set({ textOpen: false }),
 
   closeImage: () => set({ imageOpen: false }),
 
+  clearForSessionChange: () => set({
+    textOpen: false,
+    imageOpen: false,
+    textTarget: null,
+    imageTarget: null,
+    previewTabs: [],
+  }),
+
   addPreviewTab: (tab) =>
     set((state) => {
-      if (state.previewTabs.some((item) => item.filePath === tab.filePath)) return state;
+      if (state.previewTabs.some((item) => previewTabKey(item) === previewTabKey(tab))) return state;
       return { previewTabs: [...state.previewTabs, tab].slice(-10) };
     }),
 
-  removePreviewTab: (filePath) =>
+  removePreviewTab: (tab) =>
     set((state) => ({
-      previewTabs: state.previewTabs.filter((item) => item.filePath !== filePath),
+      previewTabs: state.previewTabs.filter((item) => previewTabKey(item) !== previewTabKey(tab)),
     })),
 }));
-

@@ -30,24 +30,29 @@ import {
   Cpu,
   ArrowRight,
   SlidersHorizontal,
-  Code2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-import { apiGet, apiPut, togglePresentAs } from "@/lib/api";
+import { apiGet, apiPut } from "@/lib/api";
 import { settingsCache } from "@/lib/settings-cache";
 import { useOnboardingStore } from "@/stores/onboarding-store";
 import { useUIStore } from "@/stores/ui-store";
-import { useSessionStore } from "@/stores/session-store";
 
 interface RuntimeConfig {
   // 会话
   session_ttl_seconds: number;
   max_sessions: number;
   max_consecutive_failures: number;
+  turn_timeout_seconds: number;
+  responses_continuation_enabled: boolean;
+  responses_background_enabled: boolean;
+  turn_token_budget: number;
+  turn_cost_budget_usd: number;
+  input_cost_per_1k_usd: number;
+  output_cost_per_1k_usd: number;
   // 执行与安全
   subagent_enabled: boolean;
   friendly_error_messages: boolean;
@@ -84,6 +89,7 @@ interface RuntimeConfig {
   // 工具与 Hook
   tool_result_hard_cap_chars: number;
   parallel_readonly_tools: boolean;
+  parallel_tool_max: number;
   hooks_command_enabled: boolean;
   hooks_command_timeout_seconds: number;
   hooks_output_max_chars: number;
@@ -241,6 +247,62 @@ const ADVANCED_GROUPS: ItemGroup[] = [
         desc: "将接口返回的内部错误改成更易读的提示（如 404 / 429 / 500）。不影响对话里的工具错误。",
         icon: <AlertCircle className="h-4 w-4" />,
         type: "bool",
+      },
+      {
+        key: "turn_timeout_seconds",
+        label: "单轮 wall-clock 上限",
+        desc: "限制一条用户消息的总执行时间（秒）。0 表示不限制；模型重试、工具、Code Mode 和同步子代理共用此上限。",
+        icon: <Timer className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 86400,
+      },
+      {
+        key: "responses_continuation_enabled",
+        label: "Responses 原生续接",
+        desc: "启用 Responses API 的 previous_response_id 续接。开启后模型响应会短暂保存，后续请求只发送新增输入。",
+        icon: <ArrowRight className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "responses_background_enabled",
+        label: "Responses 后台响应",
+        desc: "使用 Responses API 的后台响应并轮询到终态；适合较长模型任务，当前回合仍受统一 wall-clock 限制。",
+        icon: <Timer className="h-4 w-4" />,
+        type: "bool",
+      },
+      {
+        key: "turn_token_budget",
+        label: "单轮 token 上限",
+        desc: "限制本轮模型输入与输出 token 总数。0 表示不限制。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "int",
+        min: 0,
+        max: 10000000,
+      },
+      {
+        key: "turn_cost_budget_usd",
+        label: "单轮成本上限",
+        desc: "限制本轮累计模型成本（美元）。0 表示不限制；provider 没有返回成本时使用下面的估算单价。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+      },
+      {
+        key: "input_cost_per_1k_usd",
+        label: "输入 token 单价",
+        desc: "provider 未返回成本时，每 1K 输入 token 的估算美元单价。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
+      },
+      {
+        key: "output_cost_per_1k_usd",
+        label: "输出 token 单价",
+        desc: "provider 未返回成本时，每 1K 输出 token 的估算美元单价。",
+        icon: <Gauge className="h-4 w-4" />,
+        type: "float",
+        min: 0,
       },
     ],
   },
@@ -494,9 +556,18 @@ const ADVANCED_GROUPS: ItemGroup[] = [
       {
         key: "parallel_readonly_tools",
         label: "只读工具并发",
-        desc: "同一轮回复中，相邻的读文件、列目录等只读工具可以并发。写入和多数外部工具始终串行。已打开的对话需新开后生效。",
+        desc: "同一轮回复中，无依赖的只读工具可以并发。写入和多数外部工具始终串行。已打开的对话需新开后生效。",
         icon: <Zap className="h-4 w-4" />,
         type: "bool",
+      },
+      {
+        key: "parallel_tool_max",
+        label: "只读工具并发上限",
+        desc: "同一批最多同时运行的只读工具数，其余排队。可设置 1–32；新开对话后生效。",
+        icon: <Layers className="h-4 w-4" />,
+        type: "int",
+        min: 1,
+        max: 32,
       },
       {
         key: "hooks_command_enabled",
@@ -604,8 +675,8 @@ const GUIDE_SECTIONS: GuideSection[] = [
     category: "基础",
     categoryColor: "text-emerald-600 dark:text-emerald-400",
     categoryBg: "bg-emerald-50 dark:bg-emerald-950/40",
-    title: "界面基础引导",
-    description: "了解侧边栏、输入框、发送消息、模型切换等核心操作",
+    title: "对话与任务",
+    description: "练习工作区切换、文件引用、发送与暂停、对话模式和模型选择",
     icon: <BookOpen className="h-4 w-4" />,
   },
   {
@@ -613,8 +684,8 @@ const GUIDE_SECTIONS: GuideSection[] = [
     category: "进阶",
     categoryColor: "text-amber-600 dark:text-amber-400",
     categoryBg: "bg-amber-50 dark:bg-amber-950/40",
-    title: "进阶技巧探索",
-    description: "掌握斜杠命令、对话模式切换、文件预览与技能规则",
+    title: "文件与表格",
+    description: "练习快捷命令、工作表切换、单元格引用、修改对比和文件类型选择",
     icon: <Sparkles className="h-4 w-4" />,
   },
   {
@@ -622,62 +693,11 @@ const GUIDE_SECTIONS: GuideSection[] = [
     category: "设置",
     categoryColor: "text-violet-600 dark:text-violet-400",
     categoryBg: "bg-violet-50 dark:bg-violet-950/40",
-    title: "设置面板引导",
-    description: "深入了解模型、规则、技能、MCP、记忆、系统等设置页面",
+    title: "模型与插件",
+    description: "了解供应商、任务模型、订阅授权、规则、技能、MCP、记忆和系统设置",
     icon: <SlidersHorizontal className="h-4 w-4" />,
   },
 ];
-
-function CodeModeCard() {
-  const presentAs = useUIStore((s) => s.presentAs);
-  const setPresentAs = useUIStore((s) => s.setPresentAs);
-  const sessionId = useSessionStore((s) => s.activeSessionId);
-  const [saving, setSaving] = useState(false);
-  const enabled = presentAs === "code";
-
-  const handleChange = useCallback(
-    async (checked: boolean) => {
-      const mode = checked ? "code" : "native";
-      setPresentAs(mode);
-      if (!sessionId) return;
-      setSaving(true);
-      try {
-        await togglePresentAs(sessionId, mode);
-      } catch {
-        setPresentAs(checked ? "native" : "code");
-      } finally {
-        setSaving(false);
-      }
-    },
-    [sessionId, setPresentAs],
-  );
-
-  return (
-    <div className="rounded-lg border border-border p-4" data-coach-id="coach-code-mode">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-start gap-2.5 min-w-0">
-          <span className="mt-0.5 text-muted-foreground flex-shrink-0">
-            <Code2 className="h-4 w-4" />
-          </span>
-          <div className="min-w-0">
-            <div className="text-sm font-medium">代码模式</div>
-            <div className="mt-1 text-[11px] sm:text-xs text-muted-foreground">
-              只向模型暴露写代码入口，其余能力在程序内调用。观察 / 计划模式仍使用原生工具。
-              也可用 <code className="font-mono">/code on</code> 或 <code className="font-mono">/code off</code>。
-              此开关只影响当前对话，与下方代码风险分级无关。
-            </div>
-          </div>
-        </div>
-        <Switch
-          checked={enabled}
-          onCheckedChange={(checked: boolean) => void handleChange(checked)}
-          disabled={saving}
-          className="flex-shrink-0"
-        />
-      </div>
-    </div>
-  );
-}
 
 function OnboardingReplayCard() {
   const { wizardCompleted, coachMarksCompleted, resetToPhase } =
@@ -943,8 +963,6 @@ export function RuntimeTab() {
 
   return (
     <div className="space-y-5">
-      <CodeModeCard />
-      <Separator />
       {renderGroups(BASIC_GROUPS)}
 
       <button

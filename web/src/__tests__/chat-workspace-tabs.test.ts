@@ -13,8 +13,8 @@ const excelState = {
   activeFilePath: "./a.xlsx" as string | null,
   activeSheet: "Sheet1" as string | null,
   recentFiles: [] as { path: string; workspaceKey?: string }[],
+  workspaceFiles: [] as { path: string; filename: string; is_dir?: boolean }[],
   activeWorkspaceKey: "id:ws" as string | null,
-  openFullView: vi.fn(),
   closeFullView: vi.fn(),
   closeCompare: vi.fn(),
 };
@@ -48,6 +48,10 @@ vi.mock("zustand/react/shallow", () => ({
 
 vi.mock("@/lib/excel-view-prefetch", () => ({
   prefetchExcelView: vi.fn(),
+}));
+
+vi.mock("@/lib/open-workspace-file", () => ({
+  openWorkspaceFile: vi.fn(),
 }));
 
 import { ChatWorkspaceTabs } from "@/components/chat/ChatWorkspaceTabs";
@@ -120,6 +124,24 @@ describe("resolveSheetFullViewTarget", () => {
     ).toBeNull();
   });
 
+  it("falls back to a spreadsheet in the workspace before it has been opened", () => {
+    expect(
+      resolveSheetFullViewTarget({
+        activeFilePath: null,
+        activeSheet: null,
+        recentFiles: [],
+        workspaceFiles: [
+          { path: "./notes.md", filename: "notes.md" },
+          { path: "./archive", filename: "archive", is_dir: true },
+          { path: "./untouched.xlsx", filename: "untouched.xlsx" },
+        ],
+        workspaceKey: "id:ws",
+        fullViewPath: null,
+        fullViewSheet: null,
+      }),
+    ).toEqual({ path: "./untouched.xlsx", sheet: undefined });
+  });
+
   it("returns null when no workbook is available", () => {
     expect(
       resolveSheetFullViewTarget({
@@ -138,6 +160,7 @@ describe("ChatWorkspaceTabs", () => {
     excelState.fullViewPath = null;
     excelState.compareMode = false;
     excelState.activeFilePath = "./a.xlsx";
+    excelState.workspaceFiles = [];
     vi.clearAllMocks();
   });
 
@@ -146,12 +169,24 @@ describe("ChatWorkspaceTabs", () => {
     expect(html).toContain("对话");
     expect(html).toContain("表格");
     expect(html).toContain('role="tablist"');
+    expect(html).toContain('class="em-workspace-tab-glider"');
   });
 
   it("marks 表格 selected when the workbook occupies the chat area", () => {
     excelState.fullViewPath = "./a.xlsx";
     const html = renderToStaticMarkup(React.createElement(ChatWorkspaceTabs));
-    expect(html).toMatch(/aria-selected="true"[^>]*>表格/);
-    expect(html).toMatch(/aria-selected="false"[^>]*>对话/);
+    expect(html).toMatch(/aria-selected="true"[^>]*><span[^>]*>表格/);
+    expect(html).toMatch(/aria-selected="false"[^>]*><span[^>]*>对话/);
+  });
+
+  it("keeps 表格 enabled when the workspace has an unopened workbook", () => {
+    excelState.activeFilePath = null;
+    excelState.recentFiles = [];
+    excelState.workspaceFiles = [
+      { path: "./untouched.xlsx", filename: "untouched.xlsx" },
+    ];
+    const html = renderToStaticMarkup(React.createElement(ChatWorkspaceTabs));
+    expect(html).toMatch(/aria-selected="false"[^>]*><span[^>]*>表格/);
+    expect(html).not.toMatch(/disabled=""[^>]*><span[^>]*>表格/);
   });
 });

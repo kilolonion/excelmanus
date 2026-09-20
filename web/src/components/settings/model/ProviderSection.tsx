@@ -240,6 +240,7 @@ export function ProviderSection() {
                   >
                     <ProviderAvatar
                       id={group.id.startsWith("custom:") ? "custom" : group.id}
+                      label={group.label}
                       color={group.color}
                       className="h-8 w-8"
                     />

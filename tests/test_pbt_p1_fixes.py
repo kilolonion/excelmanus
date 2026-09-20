@@ -23,7 +23,7 @@ import pytest
 from hypothesis import given, assume, settings
 from hypothesis import strategies as st
 
-from excelmanus.agent.loop import _handle_text_reply, run_tool_loop
+from excelmanus.agent.loop import _execute_and_resolve_tool, _handle_text_reply, run_tool_loop
 from excelmanus.engine import AgentEngine
 
 # ---------------------------------------------------------------------------
@@ -214,9 +214,10 @@ class TestB1RegistryRefreshOnExit:
 
     def test_property1_pending_approval_handled_inline(self) -> None:
         """pending_approval 在循环内内联处理（不再有独立退出路径）。"""
-        source = inspect.getsource(run_tool_loop)
+        assert "_execute_and_resolve_tool(" in inspect.getsource(run_tool_loop)
+        source = inspect.getsource(_execute_and_resolve_tool)
 
-        # P6: 审批已改为内联解决，验证内联审批代码存在
+        # Serial execution now resolves approvals inside the managed tool call.
         assert "tc_result.pending_approval" in source
         assert "内联审批" in source
 

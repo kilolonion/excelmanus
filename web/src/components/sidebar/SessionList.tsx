@@ -1,6 +1,7 @@
 "use client";
 
-import { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { memo, useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { defaultRangeExtractor, useVirtualizer } from "@tanstack/react-virtual";
 import {
   MessageSquare,
   Trash2,
@@ -13,7 +14,6 @@ import {
   FileText,
   FileJson,
   FolderPlus,
-  Folder,
   ChevronDown,
   Plus,
 } from "lucide-react";
@@ -31,7 +31,6 @@ import type { WorkspaceFolder } from "@/lib/types";
 import { stopGeneration } from "@/lib/chat-actions";
 import { useSessionStore } from "@/stores/session-store";
 import { useChatStore } from "@/stores/chat-store";
-import { listItemVariants } from "@/lib/sidebar-motion";
 import { Button } from "@/components/ui/button";
 import { ScrollArea } from "@/components/ui/scroll-area";
 import { cn } from "@/lib/utils";
@@ -68,7 +67,8 @@ function SessionStatusDot({ tone, label }: { tone: SessionStatusTone; label: str
   );
 }
 
-export function SessionList() {
+export const SessionList = memo(function SessionList() {
+  const viewportRef = useRef<HTMLDivElement>(null);
   const sessions = useSessionStore((s) => s.sessions);
   const activeSessionId = useSessionStore((s) => s.activeSessionId);
   const addSession = useSessionStore((s) => s.addSession);
@@ -82,6 +82,7 @@ export function SessionList() {
 
   const [busySessionId, setBusySessionId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState("");
+  useEffect(() => { viewportRef.current?.scrollTo({ top: 0 }); }, [searchQuery]);
   const [editingSessionId, setEditingSessionId] = useState<string | null>(null);
   const [editValue, setEditValue] = useState("");
   const editInputRef = useRef<HTMLInputElement>(null);
@@ -91,6 +92,7 @@ export function SessionList() {
   const [addFolderOpen, setAddFolderOpen] = useState(false);
   const [editingWorkspace, setEditingWorkspace] = useState<WorkspaceFolder | null>(null);
   const [workspaceMenuKey, setWorkspaceMenuKey] = useState<string | null>(null);
+  const [sessionMenuId, setSessionMenuId] = useState<string | null>(null);
 
   useEffect(() => {
     if (editingSessionId && editInputRef.current) {
@@ -215,6 +217,29 @@ export function SessionList() {
     return groups;
   }, [filteredSessions, workspaces]);
 
+  // Flatten headers and expanded sessions so even a large workspace history
+  // renders only the viewport. Collapsed sessions do not retain hidden DOM.
+  const rows = useMemo(() => groupedSessions.flatMap((group) => {
+    const items: { key: string; group: typeof group; session?: typeof sessions[number] }[] = [
+      { key: `group:${group.key}`, group },
+    ];
+    if (!collapsedGroups.has(group.key)) {
+      for (const session of group.sessions) items.push({ key: `${group.key}:${session.id}`, group, session });
+    }
+    return items;
+  }), [groupedSessions, collapsedGroups]);
+  const pinnedIndices = rows.flatMap((row, index) =>
+    (row.session && (row.session.id === editingSessionId || row.session.id === sessionMenuId))
+      || (!row.session && row.group.key === workspaceMenuKey) ? [index] : []);
+  const virtualizer = useVirtualizer({
+    count: rows.length,
+    getScrollElement: () => viewportRef.current,
+    getItemKey: (index) => rows[index].key,
+    estimateSize: () => 44,
+    overscan: 5,
+    rangeExtractor: (range) => [...new Set([...defaultRangeExtractor(range), ...pinnedIndices])].sort((a, b) => a - b),
+  });
+
   const toggleGroup = useCallback((key: string) => {
     setCollapsedGroups((prev) => {
       const next = new Set(prev);
@@ -283,17 +308,8 @@ export function SessionList() {
     }
   };
 
-  const searchAndNewRow = (
-    <div className="em-session-tools flex flex-col gap-2 px-1 pt-3 pb-2 flex-shrink-0">
-      <button
-        type="button"
-        className="em-new-chat flex h-10 w-full items-center justify-center gap-2 rounded-xl text-[13px] font-semibold text-white"
-        onClick={() => void handleNewSession()}
-        disabled={creating}
-      >
-        <Plus className="h-4 w-4" />
-        {creating ? "正在创建…" : "新建对话"}
-      </button>
+  const searchRow = (
+    <div className="em-session-tools flex flex-col px-1 pt-2 pb-2 flex-shrink-0">
       <div className="flex items-center gap-2">
       <div className="relative flex-1 min-w-0">
         <Search className="absolute left-3 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground/50 pointer-events-none" />
@@ -332,8 +348,8 @@ export function SessionList() {
 
   return (
     <div className="flex flex-col h-full">
-      {searchAndNewRow}
-      <ScrollArea className="flex-1 min-h-0">
+      {searchRow}
+      <ScrollArea className="flex-1 min-h-0" viewportRef={viewportRef}>
         <div className="space-y-2 pb-2">
             {searchQuery && filteredSessions.length === 0 ? (
               <div className="flex flex-col items-center gap-2 px-2 py-6 text-muted-foreground">
@@ -344,12 +360,14 @@ export function SessionList() {
                 <p className="text-xs">暂无匹配对话</p>
               </div>
             ) : (
-              <AnimatePresence mode="popLayout">
-                <div className="space-y-3">
-                  {groupedSessions.map((group) => {
+                <div style={{ height: virtualizer.getTotalSize(), position: "relative" }}>
+                  {virtualizer.getVirtualItems().map((row) => {
+                    const { group, session } = rows[row.index];
                     const collapsed = collapsedGroups.has(group.key);
                     return (
-                      <div key={group.key} className="space-y-0.5">
+                      <div key={row.key} data-index={row.index} ref={virtualizer.measureElement}
+                        style={{ position: "absolute", top: 0, left: 0, width: "100%", transform: `translateY(${row.start}px)`, paddingBottom: 2 }}>
+                        {!session ? (
                         <div
                           className={cn(
                             "em-workspace-group group/ws flex items-center gap-1 rounded-md px-2 py-1 text-[var(--em-primary-light)] transition-colors",
@@ -362,22 +380,15 @@ export function SessionList() {
                             type="button"
                             className="flex min-w-0 flex-1 items-center gap-1.5 rounded-md py-0.5 text-left"
                             onClick={() => toggleGroup(group.key)}
+                            aria-expanded={!collapsed}
+                            title={`${collapsed ? "展开" : "折叠"}「${group.title}」的对话`}
                           >
-                            <span className="relative h-3.5 w-3.5 shrink-0 text-current">
-                              <Folder
-                                className={cn(
-                                  "pointer-events-none absolute inset-0 h-3.5 w-3.5 text-current transition-opacity group-hover/ws:opacity-0 group-focus-within/ws:opacity-0",
-                                  workspaceMenuKey === group.key && "opacity-0",
-                                )}
-                              />
-                              <ChevronDown
-                                className={cn(
-                                  "pointer-events-none absolute inset-0 h-3.5 w-3.5 text-current opacity-0 transition-[opacity,transform] group-hover/ws:opacity-100 group-focus-within/ws:opacity-100",
-                                  workspaceMenuKey === group.key && "opacity-100",
-                                  collapsed && "-rotate-90",
-                                )}
-                              />
-                            </span>
+                            <ChevronDown
+                              className={cn(
+                                "pointer-events-none h-3.5 w-3.5 shrink-0 text-current transition-transform duration-[250ms] ease-[cubic-bezier(0.4,0,0.2,1)]",
+                                collapsed && "-rotate-90",
+                              )}
+                            />
                             <span className="min-w-0 truncate text-[12px] font-medium tracking-wide text-current" title={group.path || group.title}>
                               {group.title}
                             </span>
@@ -460,7 +471,7 @@ export function SessionList() {
                             </Button>
                           ) : null}
                         </div>
-                        {collapsed ? null : group.sessions.map((session) => {
+                        ) : (() => {
                     const isActive = session.id === activeSessionId;
                     const awaitingApproval =
                       Boolean(session.pendingApproval) || (isActive && Boolean(chatPendingApproval));
@@ -487,13 +498,8 @@ export function SessionList() {
                     const isEditing = editingSessionId === session.id;
 
                     return (
-                      <motion.div
+                      <div
                         key={session.id}
-                        variants={listItemVariants}
-                        initial="initial"
-                        animate="animate"
-                        exit="exit"
-                        layout
                         className={cn(
                           "em-session-card group relative mx-2 flex min-w-0 cursor-pointer items-center gap-1 rounded-xl py-2 pr-1 pl-[calc(0.875rem+0.375rem)] transition-colors",
                           awaitingApproval
@@ -604,7 +610,7 @@ export function SessionList() {
 
                         {/* Three-dot menu — visible on hover or when active */}
                         {!isEditing && (
-                          <DropdownMenu>
+                          <DropdownMenu onOpenChange={(open) => setSessionMenuId(open ? session.id : null)}>
                             <DropdownMenuTrigger asChild>
                               <button
                                 className={cn(
@@ -680,14 +686,13 @@ export function SessionList() {
                             </DropdownMenuContent>
                           </DropdownMenu>
                         )}
-                      </motion.div>
+                      </div>
                     );
-                  })}
+                  })()}
                       </div>
                     );
                   })}
                 </div>
-              </AnimatePresence>
             )}
           </div>
       </ScrollArea>
@@ -704,4 +709,4 @@ export function SessionList() {
       />
     </div>
   );
-}
+});

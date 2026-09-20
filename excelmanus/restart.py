@@ -30,6 +30,8 @@ logger = logging.getLogger(__name__)
 # 临时脚本和日志的文件名
 _HELPER_SCRIPT_NAME = "_excelmanus_restart.py"
 _RESTART_LOG_NAME = "excelmanus-restart.log"
+_desktop_server = None
+_desktop_restart_requested = False
 
 
 def _build_helper_script(port: int, entry: str) -> str:
@@ -99,6 +101,15 @@ def _do_restart(port: int, entry: str, *, deploy_mode: str = "standalone") -> No
 
     此函数应在独立线程中调用，因为它会调用 os._exit(0)。
     """
+    if os.environ.get("EXCELMANUS_DESKTOP") == "1":
+        # Electron owns both sidecars and their dynamic ports. Never run the
+        # frozen backend as if it were a Python interpreter.
+        global _desktop_restart_requested
+        if _desktop_server is None:
+            raise RuntimeError("Desktop server supervisor is not initialized")
+        _desktop_restart_requested = True
+        _desktop_server.should_exit = True
+        return
     if deploy_mode == "server":
         logger.info("部署模式=server，直接退出进程（依赖进程管理器重启）...")
         time.sleep(1)

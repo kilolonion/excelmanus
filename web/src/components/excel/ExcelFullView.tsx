@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import dynamic from "next/dynamic";
 import { Check, XCircle } from "lucide-react";
 import { useShallow } from "zustand/react/shallow";
@@ -10,7 +10,7 @@ import { HistoryPaneOverlay } from "@/components/excel/HistoryPaneOverlay";
 import { useIsMobile } from "@/hooks/use-mobile";
 import { useExcelStore } from "@/stores/excel-store";
 import { useSessionStore } from "@/stores/session-store";
-import { buildExcelFileUrl, downloadFile, invalidateWorkbookCaches } from "@/lib/api";
+import { buildExcelFileUrl, downloadFile } from "@/lib/api";
 import { fileBaseName } from "@/lib/revision-display";
 import { useExcelCellEdit } from "@/hooks/use-excel-cell-edit";
 import { ExcelWriteConflictBar } from "@/components/excel/ExcelWriteConflictBar";
@@ -22,8 +22,8 @@ const UniverSheet = dynamic(
   {
     ssr: false,
     loading: () => (
-      <div className="flex items-center justify-center h-full text-sm text-muted-foreground">
-        加载 Excel 引擎...
+      <div role="status" className="flex items-center justify-center h-full text-sm text-muted-foreground">
+        正在准备表格…
       </div>
     ),
   }
@@ -89,12 +89,16 @@ export function ExcelFullView() {
   const session = useSessionStore((s) => s.sessions.find((item) => item.id === s.activeSessionId));
   const viewGeneration = useExcelStore((s) => s.viewGeneration);
   const workspaceKey = workspaceKeyFromSession(session);
-  const lastTargetRef = useRef<{ path: string; sheet?: string; workspaceKey?: string } | null>(null);
+  const [lastTarget, setLastTarget] = useState<ReturnType<typeof rememberFullViewTarget>>(null);
   const target = rememberFullViewTarget(
     { path: fullViewPath, sheet: fullViewSheet, workspaceKey },
-    lastTargetRef.current,
+    lastTarget,
   );
-  if (target) lastTargetRef.current = target;
+  if (
+    target?.path !== lastTarget?.path
+    || target?.sheet !== lastTarget?.sheet
+    || target?.workspaceKey !== lastTarget?.workspaceKey
+  ) setLastTarget(target);
   const displayPath = target?.path ?? null;
   const displaySheet = target?.sheet;
   const {
@@ -142,9 +146,8 @@ export function ExcelFullView() {
 
   const handleRefresh = useCallback(() => {
     if (displayPath) {
-      invalidateWorkbookCaches({ workspaceKey, relative: displayPath });
+      useExcelStore.getState().notifyWorkbookChanged(displayPath, workspaceKey, undefined, "refresh");
     }
-    useExcelStore.setState((s) => ({ refreshCounter: s.refreshCounter + 1 }));
   }, [displayPath, workspaceKey]);
 
   const handleSwitchToPanel = useCallback(() => {
@@ -154,8 +157,8 @@ export function ExcelFullView() {
   }, [fullViewPath, fullViewSheet, openPanel, closeFullView]);
 
   const fileUrl = useMemo(
-    () => (displayPath ? buildExcelFileUrl(displayPath, activeSessionId ?? undefined) : ""),
-    [displayPath, activeSessionId]
+    () => (displayPath ? buildExcelFileUrl(displayPath, activeSessionId, session?.workspaceId) : ""),
+    [displayPath, activeSessionId, session?.workspaceId]
   );
 
   const fileName = fileBaseName(displayPath) || "未知文件";
@@ -174,6 +177,7 @@ export function ExcelFullView() {
     <div className="flex flex-col h-full">
       <div className="relative flex-1 min-h-0 overflow-hidden">
         <UniverSheet
+          active={Boolean(fullViewPath) && panelTab === "sheet"}
           fileUrl={fileUrl}
           fileRef={fileRefFromSession(displayPath, session)}
           sessionId={activeSessionId}
@@ -196,7 +200,7 @@ export function ExcelFullView() {
               onCancelSelection={handleCancelRange}
               onToggleStyles={() => setWithStyles((v) => !v)}
               onRefresh={handleRefresh}
-              onDownload={() => downloadFile(displayPath, fileName, activeSessionId ?? undefined).catch(() => {})}
+              onDownload={() => downloadFile(displayPath, fileName, activeSessionId, session?.workspaceId).catch(() => {})}
               onExpand={handleSwitchToPanel}
               expandTitle="切换到侧边面板"
               onClose={closeFullView}
@@ -207,6 +211,7 @@ export function ExcelFullView() {
           <HistoryPaneOverlay>
             <FileHistoryWorkspace
               filePath={displayPath}
+              workspaceId={session?.workspaceId}
               active={panelTab === "history"}
               view={historySubview}
               onViewChange={setHistorySubview}

@@ -59,7 +59,7 @@ vi.mock("@/lib/session-title", () => ({
 }));
 
 import { useChatStore } from "@/stores/chat-store";
-import type { Message } from "@/lib/types";
+import type { Message, AssistantBlock, SubagentRun } from "@/lib/types";
 
 // ---------------------------------------------------------------------------
 // helpers
@@ -110,13 +110,66 @@ function makeUserMsg(id: string, content = "hello"): Message {
   return { id, role: "user", content, timestamp: Date.now() };
 }
 
-function makeAssistantMsg(id: string, blocks: any = []): Message {
-  return { id, role: "assistant", blocks: blocks as any, timestamp: Date.now() };
+function makeAssistantMsg(id: string, blocks: AssistantBlock[] = []): Message {
+  return { id, role: "assistant", blocks, timestamp: Date.now() };
 }
 
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("background task reconciliation", () => {
+  const runningBlock = {
+    type: "subagent" as const, name: "explorer", reason: "统计", conversationId: "run-1",
+    iterations: 1, toolCalls: 1, status: "running" as const, tools: [],
+  };
+  const completed: SubagentRun = {
+    run_id: "run-1", agent_name: "explorer", task: "统计", file_paths: [], background: true,
+    status: "completed", created_at: 1, started_at: 2, finished_at: 3, iteration: 3,
+    tool_calls: 4, last_tool: "edit_spreadsheet", resumed_from: null, changed_files: ["./sales.xlsx"],
+    result: { stop_reason: "completed", output: "统计完成", diagnostic: null, iterations: 3,
+      tool_calls_count: 4, structured_changes: [], observed_files: [] },
+  };
+  beforeEach(() => {
+    resetStore();
+    useChatStore.setState({ loadedSessionId: "session-1", isStreaming: false });
+    useChatStore.getState().setMessages([makeAssistantMsg("m1", [runningBlock])]);
+  });
+
+  it("updates an ended stream's card and affected files from the task result", () => {
+    useChatStore.getState().syncSubagentRuns("session-1", [completed]);
+    const message = useChatStore.getState().messages[0];
+    expect(message.role === "assistant" && message.blocks[0]).toMatchObject({
+      status: "done", runStatus: "completed", background: true, summary: "统计完成", success: true,
+      iterations: 3, toolCalls: 4,
+    });
+    expect(message.role === "assistant" && message.affectedFiles).toEqual(["./sales.xlsx"]);
+    assertIndexConsistency();
+    const previous = useChatStore.getState().messages;
+    useChatStore.getState().syncSubagentRuns("session-1", [completed]);
+    expect(useChatStore.getState().messages).toBe(previous);
+  });
+
+  it("never applies an old session response to the selected session", () => {
+    const previous = useChatStore.getState().messages;
+    useChatStore.getState().syncSubagentRuns("session-2", [completed]);
+    expect(useChatStore.getState().messages).toBe(previous);
+  });
+
+  it("matches exact run identities, including late SSE events", () => {
+    const previous = useChatStore.getState().messages;
+    useChatStore.getState().syncSubagentRuns("session-1", [{ ...completed, run_id: "unknown" }]);
+    useChatStore.getState().updateSubagentBlock("m1", "unknown", () => ({ ...runningBlock, status: "done" }));
+    expect(useChatStore.getState().messages).toBe(previous);
+  });
+
+  it("does not regress an already settled run when an older query returns", () => {
+    useChatStore.getState().syncSubagentRuns("session-1", [completed]);
+    const previous = useChatStore.getState().messages;
+    useChatStore.getState().syncSubagentRuns("session-1", [{ ...completed, status: "running", result: null }]);
+    expect(useChatStore.getState().messages).toBe(previous);
+  });
+});
 
 describe("chat-store", () => {
   beforeEach(() => {
@@ -162,7 +215,7 @@ describe("chat-store", () => {
       expect(s.messages.length).toBe(1);
       expect(s.messageOrder).toEqual(["dup"]);
       // 内容是后者
-      expect((s.messagesById["dup"] as any).content).toBe("second");
+      expect((s.messagesById["dup"] as Extract<Message, { role: "user" }>).content).toBe("second");
       assertIndexConsistency();
     });
 
@@ -191,7 +244,7 @@ describe("chat-store", () => {
       expect(s.messages.length).toBe(1);
       expect(s.messageOrder).toEqual(["u1"]);
       expect(s.messagesById["u1"].role).toBe("user");
-      expect((s.messagesById["u1"] as any).content).toBe("hello");
+      expect((s.messagesById["u1"] as Extract<Message, { role: "user" }>).content).toBe("hello");
       expect(s.messageIndexById["u1"]).toBe(0);
     });
 
@@ -215,7 +268,7 @@ describe("chat-store", () => {
       ]);
       const msg = useChatStore.getState().messagesById["u1"];
       expect(msg.role).toBe("user");
-      expect((msg as any).files?.length).toBe(1);
+      expect((msg as Extract<Message, { role: "user" }>).files?.length).toBe(1);
     });
   });
 
@@ -229,7 +282,7 @@ describe("chat-store", () => {
       expect(s.messages.length).toBe(1);
       const msg = s.messagesById["a1"];
       expect(msg.role).toBe("assistant");
-      expect((msg as any).blocks).toEqual([]);
+      expect((msg as Extract<Message, { role: "assistant" }>).blocks).toEqual([]);
     });
 
     it("user + assistant 交替追加索引正确", () => {
@@ -252,8 +305,8 @@ describe("chat-store", () => {
       assertIndexConsistency();
       const msg = useChatStore.getState().messagesById["a1"];
       expect(msg.role).toBe("assistant");
-      expect((msg as any).blocks.length).toBe(1);
-      expect((msg as any).blocks[0]).toEqual({ type: "text", content: "hello" });
+      expect((msg as Extract<Message, { role: "assistant" }>).blocks.length).toBe(1);
+      expect((msg as Extract<Message, { role: "assistant" }>).blocks[0]).toEqual({ type: "text", content: "hello" });
     });
 
     it("连续追加多个 block", () => {
@@ -267,7 +320,7 @@ describe("chat-store", () => {
         status: "running",
       });
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.blocks.length).toBe(3);
       expect(msg.blocks[2].type).toBe("tool_call");
     });
@@ -277,7 +330,7 @@ describe("chat-store", () => {
       // 不应抛错
       useChatStore.getState().appendBlock("nonexistent", { type: "text", content: "x" });
       // a1 不受影响
-      expect((useChatStore.getState().messagesById["a1"] as any).blocks.length).toBe(0);
+      expect((useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>).blocks.length).toBe(0);
     });
 
     it("对 user 消息 appendBlock 无效果", () => {
@@ -296,7 +349,7 @@ describe("chat-store", () => {
       const idx = s.messageIndexById["a1"];
       // messages[idx] 和 messagesById["a1"] 应该是同一条消息
       expect(s.messages[idx]).toBe(s.messagesById["a1"]);
-      expect((s.messages[idx] as any).blocks[0].content).toBe("reply");
+      expect((s.messages[idx] as Extract<Message, { role: "assistant" }>).blocks[0]).toMatchObject({ type: "text", content: "reply" });
     });
   });
 
@@ -313,8 +366,8 @@ describe("chat-store", () => {
         ),
       }));
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
-      expect(msg.blocks[0].content).toBe("new");
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
+      expect(msg.blocks[0]).toMatchObject({ type: "text", content: "new" });
       assertIndexConsistency();
     });
 
@@ -420,9 +473,9 @@ describe("chat-store", () => {
         return b;
       });
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
-      expect(msg.blocks[0].status).toBe("success");
-      expect(msg.blocks[1].status).toBe("running"); // tc2 不受影响
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
+      expect(msg.blocks[0]).toMatchObject({ type: "tool_call", status: "success" });
+      expect(msg.blocks[1]).toMatchObject({ type: "tool_call", status: "running" }); // tc2 不受影响
     });
   });
 
@@ -465,7 +518,7 @@ describe("chat-store", () => {
         retryStatus: "retrying",
       });
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.blocks.length).toBe(1);
       expect(msg.blocks[0].type).toBe("llm_retry");
     });
@@ -489,10 +542,10 @@ describe("chat-store", () => {
         retryStatus: "retrying",
       });
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       // 仍然只有 1 个 block（被替换而非追加）
       expect(msg.blocks.length).toBe(1);
-      expect(msg.blocks[0].retryAttempt).toBe(2);
+      expect(msg.blocks[0]).toMatchObject({ type: "llm_retry", retryAttempt: 2 });
     });
   });
 
@@ -502,7 +555,7 @@ describe("chat-store", () => {
       useChatStore.getState().addAssistantMessage("a1");
       useChatStore.getState().addAffectedFiles("a1", ["/workspace/data.xlsx"]);
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.affectedFiles).toEqual(["./data.xlsx"]);
     });
 
@@ -511,7 +564,7 @@ describe("chat-store", () => {
       useChatStore.getState().addAffectedFiles("a1", ["./a.xlsx", "b.xlsx"]);
       useChatStore.getState().addAffectedFiles("a1", ["a.xlsx", "./c.xlsx"]);
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.affectedFiles).toEqual(["./a.xlsx", "./b.xlsx", "./c.xlsx"]);
     });
 
@@ -522,7 +575,7 @@ describe("chat-store", () => {
         "outputs/backups/sales_20260911T091344_f525.xlsx",
       ]);
 
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.affectedFiles).toEqual(["./sales.xlsx"]);
     });
   });
@@ -538,7 +591,7 @@ describe("chat-store", () => {
       });
 
       useChatStore.getState().retractLastThinking("a1");
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.blocks.length).toBe(0);
     });
 
@@ -552,7 +605,7 @@ describe("chat-store", () => {
       });
 
       useChatStore.getState().retractLastThinking("a1");
-      const msg = useChatStore.getState().messagesById["a1"] as any;
+      const msg = useChatStore.getState().messagesById["a1"] as Extract<Message, { role: "assistant" }>;
       expect(msg.blocks.length).toBe(1); // 未被移除
     });
   });

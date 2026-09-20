@@ -43,7 +43,6 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/model", description: "查看/切换模型", icon: React.createElement(Sparkles, { className: "h-3.5 w-3.5" }), args: ["list"] },
   { command: "/subagent", description: "子代理控制", icon: React.createElement(Bot, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "list", "run"] },
   { command: "/fullaccess", description: "权限控制", icon: React.createElement(ShieldCheck, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
-  { command: "/code", description: "代码模式", icon: React.createElement(Terminal, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
   { command: "/compact", description: "上下文压缩", icon: React.createElement(RotateCcw, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off"] },
   { command: "/plan", description: "计划模式", icon: React.createElement(ClipboardList, { className: "h-3.5 w-3.5" }), args: ["status", "on", "off", "approve", "reject"] },
   { command: "/registry", description: "文件注册表", icon: React.createElement(FolderOpen, { className: "h-3.5 w-3.5" }), args: ["status", "scan"] },
@@ -54,6 +53,7 @@ export const SLASH_COMMANDS: { command: string; description: string; icon: React
   { command: "/reject", description: "拒绝操作", icon: React.createElement(XCircle, { className: "h-3.5 w-3.5" }) },
   { command: "/undo", description: "回滚操作", icon: React.createElement(Undo2, { className: "h-3.5 w-3.5" }) },
   { command: "/stop", description: "停止当前生成", icon: React.createElement(StopCircle, { className: "h-3.5 w-3.5" }) },
+  { command: "/resume", description: "继续中断的任务，可附加补充要求", icon: React.createElement(RotateCcw, { className: "h-3.5 w-3.5" }) },
 ];
 
 // @ mention top-level categories
@@ -79,7 +79,6 @@ export const DISPLAY_COMMANDS = new Set([
   // 控制命令 — status / list 查询
   "/subagent", "/subagent list", "/subagent status",
   "/fullaccess", "/fullaccess status",
-  "/code", "/code status",
   "/compact", "/compact status",
   "/plan", "/plan status",
   "/registry", "/registry status",
@@ -90,10 +89,10 @@ export const DISPLAY_COMMANDS = new Set([
 ]);
 
 // 直接执行前端操作的命令（不会发送到聊天）
-/** `/subagent run` 必须走 chat SSE，才能投影子代理卡片。 */
+/** 执行任务的命令走 chat SSE，持续接收进度和最终结果。 */
 export function isStreamedSlashCommand(command: string): boolean {
   const lower = command.trim().toLowerCase();
-  return lower.startsWith("/subagent run") || lower.startsWith("/sub_agent run");
+  return lower.startsWith("/subagent run") || lower.startsWith("/sub_agent run") || /^\/resume(?:\s|$)/.test(lower);
 }
 
 export const FRONTEND_ACTIONS: Record<string, string> = {

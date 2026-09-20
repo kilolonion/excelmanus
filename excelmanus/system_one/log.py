@@ -31,13 +31,15 @@ def record_shadow(
             elif isinstance(answer, ScoreAnswer):
                 answers[key] = {"score": answer.score, "confidence": answer.confidence}
     logger.info(
-        "jev shadow pack=%s gate=%s kind=%s reason=%s applied=%s extras=%s model=%s latency_ms=%s answers=%s usage=%s",
+        "jev shadow pack=%s gate=%s kind=%s reason=%s applied=%s extras=%s provider=%s protocol=%s model=%s latency_ms=%s answers=%s usage=%s",
         pack_id,
         gate,
         decision.kind,
         decision.reason,
         decision.applied,
         dict(decision.extras),
+        getattr(evaluation, "provider_id", "") if evaluation else "",
+        getattr(evaluation, "protocol", "") if evaluation else "",
         getattr(evaluation, "model", "") if evaluation else "",
         getattr(evaluation, "latency_ms", 0) if evaluation else 0,
         answers,

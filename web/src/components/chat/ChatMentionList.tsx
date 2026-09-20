@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type RefObject, type SetStateAction } from "react";
 import { FileSpreadsheet, FolderOpen, Sparkles } from "lucide-react";
 import { buildApiUrl, getAuthHeaders } from "@/lib/api";
 import { useExcelStore } from "@/stores/excel-store";
@@ -18,24 +18,50 @@ import {
 export function useChatMentions() {
   const [mentionData, setMentionData] = useState<MentionData | null>(null);
   const [atCategory, setAtCategory] = useState<string | null>(null);
+  const cache = useRef(new Map<string, { at: number; data: MentionData }>());
+  const pending = useRef<{ key: string; controller: AbortController; promise: Promise<void> } | null>(null);
+  useEffect(() => () => pending.current?.controller.abort(), []);
 
-  const fetchMentionData = useCallback(async (subpath?: string) => {
-    try {
+  const fetchMentionData = useCallback((subpath?: string) => {
+    const sessionId = useSessionStore.getState().activeSessionId;
+    const version = useExcelStore.getState().workspaceFilesVersion;
+    const key = JSON.stringify([sessionId, version, subpath ?? ""]);
+    if (pending.current && pending.current.key !== key) {
+      pending.current.controller.abort();
+      pending.current = null;
+    }
+    const hit = cache.current.get(key);
+    if (hit && Date.now() - hit.at < 30_000) {
+      setMentionData(hit.data);
+      return Promise.resolve();
+    }
+    if (pending.current?.key === key) return pending.current.promise;
+    const request = { key, controller: new AbortController(), promise: Promise.resolve() };
+    pending.current = request;
+    request.promise = (async () => {
+      try {
       const params = new URLSearchParams();
       if (subpath) params.set("path", subpath);
-      const sessionId = useSessionStore.getState().activeSessionId;
       if (sessionId) params.set("session_id", sessionId);
       const qs = params.toString();
       const res = await fetch(`${buildApiUrl("/mentions")}${qs ? `?${qs}` : ""}`, {
         headers: { ...getAuthHeaders() },
+        signal: request.controller.signal,
       });
-      if (res.ok) {
+      if (res.ok && !request.controller.signal.aborted && useSessionStore.getState().activeSessionId === sessionId) {
         const data = await res.json();
+        if (request.controller.signal.aborted) return;
+        if (cache.current.size >= 20) cache.current.clear();
+        cache.current.set(key, { at: Date.now(), data });
         setMentionData(data);
       }
     } catch {
       // 后端不可用
+    } finally {
+      if (pending.current === request) pending.current = null;
     }
+    })();
+    return request.promise;
   }, []);
 
   return { mentionData, fetchMentionData, atCategory, setAtCategory };

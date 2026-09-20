@@ -1,8 +1,11 @@
-"""SubagentRuntime：唯一发布边界。同步等待是默认；背景/消息为接缝。"""
+"""子代理发布、后台运行、结果查询与继续执行。同步和后台共用子 Driver。"""
 
 from __future__ import annotations
 
 import asyncio
+import time
+from copy import deepcopy
+from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
@@ -13,6 +16,7 @@ from excelmanus.subagent.errors import SubagentError
 from excelmanus.subagent.lifecycle import emit_end, emit_start, parent_session_id
 from excelmanus.subagent.models import (
     SubagentDescriptor,
+    SubagentConfig,
     SubagentResult,
     SubagentRun,
     SubagentStartRequest,
@@ -41,7 +45,7 @@ def _resolve_agent_name(parent: Any, raw: str | None) -> str:
     resolver = getattr(parent, "_skill_resolver", None)
     normalize = getattr(resolver, "normalize_skill_agent_name", None)
     if callable(normalize):
-        return normalize(picked) or "subagent"
+        return str(normalize(picked) or "subagent")
     return picked
 
 
@@ -51,6 +55,12 @@ class SubagentRuntime:
     def __init__(self, parent: Any) -> None:
         self._parent = parent
         self._live: dict[str, tuple[SubagentRun, InProcessDriver, Any]] = {}
+        self._tasks: dict[str, asyncio.Task[None]] = {}
+        self._records: dict[str, dict[str, Any]] = {}
+        self._callbacks: dict[str, Any] = {}
+        self._background_slots = asyncio.Semaphore(
+            int(getattr(getattr(parent, "_config", None), "parallel_subagent_max", 3) or 3)
+        )
 
     def list_catalog(self) -> str:
         registry = getattr(self._parent, "_subagent_registry", None)
@@ -65,6 +75,18 @@ class SubagentRuntime:
         return "\n".join(lines)
 
     async def start(self, request: SubagentStartRequest) -> SubagentRun:
+        run = await self._launch(request, background=False)
+        try:
+            await asyncio.shield(self._tasks[run.id])
+        except asyncio.CancelledError:
+            await self.interrupt(run.id)
+            raise
+        return run
+
+    async def _launch(
+        self, request: SubagentStartRequest, *, background: bool,
+        history: list[dict[str, Any]] | None = None, resumed_from: str | None = None,
+    ) -> SubagentRun:
         parent = self._parent
         if not getattr(parent, "_subagent_enabled", True):
             raise SubagentError("DISABLED", "subagent 当前处于关闭状态，请先执行 `/subagent on`。")
@@ -90,17 +112,50 @@ class SubagentRuntime:
         from excelmanus.subagent.child import assert_child_capability_subset
 
         assert_child_capability_subset(parent, child)
+        if background:
+            child._background_parent = parent
+            dispatcher = getattr(parent, "_tool_dispatcher", None)
+            if dispatcher is not None:
+                dispatcher._readonly_replay_cache.clear()
+        if history:
+            child.inject_history(deepcopy(history))
+            child.memory.repair_dangling_tool_calls()
 
         run_id = str(uuid4())
+        from excelmanus.trace import scope_key, trace_of
+
+        trace = trace_of(parent)
+        if trace is not None:
+            child._trace = trace
+            child._trace_scope = scope_key(parent, f"subagent:{run_id}")
+            child._trace_parent_key = scope_key(parent, f"subagent:{run_id}")
+            child._trace_persist = parent.save_session_snapshot
+            callback = request.on_event
+
+            def traced_event(event: Any) -> None:
+                parent._trace_event(event)
+                if callback is not None:
+                    callback(event)
+
+            request = replace(request, on_event=traced_event)
         descriptor = SubagentDescriptor(
             run_id=run_id,
             agent_name=config.name,
             parent_session_id=parent_session_id(parent),
             delegation_depth=int(getattr(child, "_delegation_depth", 1) or 1),
+            mode="background" if background else "one-shot",
         )
         run = SubagentRun(run_id)
-        run.set_dispose(driver.dispose)
+        run.set_dispose(lambda: self.interrupt(run_id))
         self._live[run_id] = (run, driver, config)
+        self._callbacks[run_id] = request.on_event
+        self._records[run_id] = {
+            "run_id": run_id, "agent_name": config.name, "task": task_text,
+            "file_paths": list(request.file_paths), "background": background,
+            "status": "queued", "created_at": time.time(), "started_at": None, "finished_at": None,
+            "iteration": 0, "tool_calls": 0, "last_tool": "", "result": None,
+            "history": deepcopy(history or []), "resumed_from": resumed_from,
+        }
 
         prompt = task_text
         if request.file_paths:
@@ -112,17 +167,71 @@ class SubagentRuntime:
             reason=request.label or task_text,
             permission_mode=config.permission_mode,
         )
+        self._tasks[run_id] = asyncio.create_task(
+            self._run_published(request, config, descriptor, run, driver, child, prompt),
+            name=f"subagent:{run_id}",
+        )
+        def finished(task: asyncio.Task[None]) -> None:
+            exc = None if task.cancelled() else task.exception()
+            if not run.result.done():
+                self._settle(
+                    run, descriptor,
+                    failure_result(config=config, conversation_id=run_id,
+                                   stop_reason="aborted" if task.cancelled() else "error",
+                                   message=str(exc) if exc else "子任务执行已中断。"),
+                    request.on_event,
+                )
+        self._tasks[run_id].add_done_callback(finished)
+        self._persist()
+        return run
+
+    async def _run_published(
+        self, request: SubagentStartRequest, config: SubagentConfig,
+        descriptor: SubagentDescriptor, run: SubagentRun,
+        driver: InProcessDriver, child: Any, prompt: str,
+    ) -> None:
+        parent = self._parent
+        run_id = run.id
+        task_text = request.task.strip()
+        record = self._records[run_id]
+
+        def progress(event: Any) -> None:
+            from excelmanus.events import EventType
+
+            record["iteration"] = max(record["iteration"], event.iteration)
+            if event.event_type == EventType.SUBAGENT_TOOL_START:
+                record["tool_calls"] += 1
+                record["last_tool"] = event.tool_name
+            if event.event_type == EventType.SUBAGENT_ITERATION:
+                self._capture_history(run_id, child)
+                self._persist()
+            if request.on_event is not None:
+                request.on_event(event)
+
+        async def execute() -> SubagentResult:
+            record["status"] = "running"
+            record["started_at"] = time.time()
+            self._persist()
+            return await driver.run(
+                parent, config, prompt=prompt, descriptor=descriptor,
+                on_event=progress, timeout=timeout, child=child,
+            )
 
         timeout = float(getattr(getattr(parent, "_config", None), "subagent_timeout_seconds", 0) or 0)
+        parent_remaining_fn = getattr(getattr(parent, "_driver", None), "remaining_turn_seconds", None)
+        parent_remaining = parent_remaining_fn() if callable(parent_remaining_fn) else None
+        if parent_remaining is not None:
+            timeout = min(timeout or parent_remaining, parent_remaining)
         try:
-            result = await driver.run(
-                parent,
-                config,
-                prompt=prompt,
-                descriptor=descriptor,
-                on_event=request.on_event,
-                timeout=timeout,
-                child=child,
+            if record["background"]:
+                async with self._background_slots:
+                    result = await execute()
+            else:
+                result = await execute()
+        except asyncio.CancelledError:
+            result = failure_result(
+                config=config, conversation_id=run_id, stop_reason="aborted",
+                message=f"子代理 {config.name} 已停止。",
             )
         except Exception as exc:
             logger.warning("子代理 %s 基础设施失败: %s", config.name, exc, exc_info=True)
@@ -133,7 +242,8 @@ class SubagentRuntime:
                 message=str(exc),
             )
         finally:
-            self._live.pop(run_id, None)
+            await driver.dispose()
+            self._capture_history(run_id, child)
 
         try:
             await self._run_post_hook(
@@ -142,6 +252,8 @@ class SubagentRuntime:
                 result=result,
                 on_event=request.on_event,
             )
+        except asyncio.CancelledError:
+            result = replace(result, stop_reason="aborted", diagnostic="子代理已停止。")
         except SubagentError as exc:
             from excelmanus.engine_core.error_payload import dumps_error_payload, payload_from_subagent_error
 
@@ -180,13 +292,53 @@ class SubagentRuntime:
                 observed_files=result.observed_files,
             )
 
-        # interrupt 可能已经先写入 aborted 终态；以已发布结果为准，保证事件与工具结果一致。
-        if run.result.done():  # type: ignore[attr-defined]
-            result = run.result.result()  # type: ignore[attr-defined]
-        else:
-            run.set_result(result)
-        emit_end(request.on_event, descriptor, result)  # type: ignore[arg-type]
-        return run
+        self._settle(run, descriptor, result, request.on_event)
+
+    def _capture_history(self, run_id: str, child: Any) -> None:
+        messages = getattr(getattr(child, "memory", None), "messages", None)
+        if isinstance(messages, list):
+            self._records[run_id]["history"] = deepcopy(messages)
+        inbox = getattr(getattr(child, "_driver", None), "inbox", None)
+        if inbox is not None:
+            self._records[run_id]["pending_messages"] = [item.content for item in inbox.next_step]
+        state = getattr(child, "_state", None)
+        files = getattr(state, "affected_files", None)
+        if isinstance(files, list):
+            self._records[run_id]["changed_files"] = list(files)
+
+    def _settle(
+        self, run: SubagentRun, descriptor: SubagentDescriptor,
+        result: SubagentResult, on_event: Any,
+    ) -> None:
+        if run.result.done():
+            return
+        record = self._records[run.id]
+        stop = record.pop("stop_requested", None)
+        if stop:
+            result = replace(result, stop_reason="aborted", diagnostic=f"子代理已{stop}。")
+        record.update(
+            status="paused" if stop == "暂停" else result.stop_reason,
+            result=asdict(result), finished_at=time.time(),
+            iteration=max(record["iteration"], result.iterations),
+            tool_calls=max(record["tool_calls"], result.tool_calls_count),
+        )
+        self._live.pop(run.id, None)
+        self._tasks.pop(run.id, None)
+        self._callbacks.pop(run.id, None)
+        dispatcher = getattr(self._parent, "_tool_dispatcher", None)
+        if dispatcher is not None and record["background"]:
+            dispatcher._readonly_replay_cache.clear()
+        run.set_result(result)
+        emit_end(on_event, descriptor, result)
+        if record["background"]:
+            inject = getattr(getattr(self._parent, "_driver", None), "inject", None)
+            if callable(inject):
+                inject(
+                    f"子任务 {run.id}（{descriptor.agent_name}）状态：{record['status']}。"
+                    f'可用 delegate(action="status", run_id="{run.id}") 获取结果。',
+                    extra={"prompt_kind": "subagent_result"},
+                )
+        self._persist()
 
     async def start_parallel(
         self,
@@ -251,9 +403,25 @@ class SubagentRuntime:
 
                 text = dumps_error_payload(payload_from_subagent_error(item))
                 parts.append(f"❌ 任务 {i + 1}「{label}」：{text}")
+                results.append(
+                    failure_result(
+                        config=resolved[i][1],
+                        conversation_id=f"parallel-{i}",
+                        stop_reason="error",
+                        message=text,
+                    )
+                )
             elif isinstance(item, BaseException):
                 all_ok = False
                 parts.append(f"❌ 任务 {i + 1}「{label}」：{item}")
+                results.append(
+                    failure_result(
+                        config=resolved[i][1],
+                        conversation_id=f"parallel-{i}",
+                        stop_reason="error",
+                        message=str(item),
+                    )
+                )
             else:
                 results.append(item)
                 if not item.success:
@@ -263,32 +431,131 @@ class SubagentRuntime:
         return ParallelOutcome(reply="\n\n".join(parts), success=all_ok, results=results)
 
     async def start_background(self, request: SubagentStartRequest) -> str:
-        raise SubagentError(
-            "UNSUPPORTED_CAPABILITY",
-            "背景子代理尚未实现。请使用同步 delegate 等待结果。",
-        )
+        run = await self._launch(request, background=True)
+        return run.id
 
-    async def send_message(self, *_args: Any, **_kwargs: Any) -> None:
-        raise SubagentError(
-            "UNSUPPORTED_CAPABILITY",
-            "send_message 尚未实现。",
-        )
+    def get_run(self, run_id: str) -> dict[str, Any]:
+        record = self._records.get(run_id)
+        if record is None:
+            raise SubagentError("NOT_FOUND", f"未找到本会话的子任务: {run_id}")
+        public = deepcopy({key: value for key, value in record.items()
+                           if key not in {"history", "stop_requested"}})
+        live = self._live.get(run_id)
+        child = live[1]._child if live is not None else None
+        questions = getattr(child, "_question_flow", None)
+        if questions is not None and questions.current() is not None:
+            public["status"] = "waiting_input"
+            public["pending_question"] = asdict(questions.current())
+        return public
 
-    async def interrupt(self, run_id: str) -> None:
+    def list_runs(self) -> list[dict[str, Any]]:
+        return [self.get_run(run_id) for run_id in self._records]
+
+    async def wait(self, run_id: str, timeout: float = 30) -> dict[str, Any]:
+        self.get_run(run_id)
+        live = self._live.get(run_id)
+        if live is not None and timeout > 0:
+            try:
+                await asyncio.wait_for(asyncio.shield(live[0].result), timeout=timeout)
+            except asyncio.TimeoutError:
+                pass  # 查询超时不取消正在执行的子任务。
+        return self.get_run(run_id)
+
+    async def send_message(self, run_id: str, message: str) -> dict[str, Any]:
+        self.get_run(run_id)
+        if not message.strip():
+            raise SubagentError("EMPTY_TASK", "追加指令不能为空。")
+        live = self._live.get(run_id)
+        if live is None:
+            raise SubagentError("NOT_RUNNING", "子任务已结束；使用 resume 加上 message 继续。")
+        child = live[1]._child
+        questions = getattr(child, "_question_flow", None)
+        if questions is not None and questions.current() is not None:
+            pending = questions.current()
+            payload = questions.parse_answer(message, question=pending).to_tool_result()
+            if child._interaction_registry.resolve(pending.question_id, payload):
+                return self.get_run(run_id)
+        if child is None or (
+            child._driver.status != "running" and not child._driver.inbox.next_turn
+            and self._records[run_id]["status"] != "queued"
+        ):
+            raise SubagentError("NOT_RUNNING", "子任务正在收尾；等待终态后用 resume 追加任务。")
+        child._driver.steer(message.strip())
+        self._capture_history(run_id, child)
+        self._persist()
+        return self.get_run(run_id)
+
+    async def resume(self, run_id: str, message: str = "", *, on_event: Any = None) -> str:
+        self.get_run(run_id)
+        if run_id in self._live:
+            raise SubagentError("ALREADY_RUNNING", "子任务仍在执行；使用 send 追加指令。")
+        record = self._records[run_id]
+        pending = "\n".join(record.get("pending_messages") or [])
+        continuation = message.strip() or (
+            f"继续原任务：{record['task']}。结合已有对话继续；"
+            "上次执行可能中断，先查看当前文件状态再决定下一步。"
+        )
+        if pending:
+            continuation += f"\n尚未处理的追加指令：\n{pending}"
+        request = SubagentStartRequest(
+            task=continuation,
+            agent_name=record["agent_name"], file_paths=list(record.get("file_paths") or []),
+            on_event=on_event,
+        )
+        run = await self._launch(request, background=True,
+                                 history=record.get("history"), resumed_from=run_id)
+        return run.id
+
+    async def interrupt(self, run_id: str, *, pause: bool = False) -> None:
+        self.get_run(run_id)
         live = self._live.get(run_id)
         if live is None:
             return
         run, driver, config = live
-        if not run.result.done():  # type: ignore[attr-defined]
-            run.set_result(
-                failure_result(
-                    config=config,
-                    conversation_id=run_id,
-                    stop_reason="aborted",
-                    message=f"子代理 {config.name} 已取消。",
-                )
-            )
+        record = self._records[run_id]
+        already_stopping = bool(record.get("stop_requested"))
+        record["stop_requested"] = "暂停" if pause else "取消"
+        child = driver._child
+        task = self._tasks.get(run_id)
+        if task is not None and not task.done():
+            if not already_stopping:
+                task.cancel()
+            await asyncio.shield(asyncio.gather(task, return_exceptions=True))
         await driver.dispose()
+        self._capture_history(run_id, child)
+        # Task 可能在协程尚未开始时就被取消，仍需结算 run 和生命周期事件。
+        if not run.result.done():
+            self._settle(
+                run, SubagentDescriptor(run_id=run_id, agent_name=config.name),
+                failure_result(config=config, conversation_id=run_id, stop_reason="aborted",
+                               message=f"子代理 {config.name} 已停止。"),
+                self._callbacks.get(run_id),
+            )
+
+    @property
+    def has_active_runs(self) -> bool:
+        return bool(self._live)
+
+    async def close(self) -> None:
+        for run_id in list(self._live):
+            await self.interrupt(run_id)
+
+    def snapshot(self) -> list[dict[str, Any]]:
+        """保存任务结果与最近一次对话边界；不序列化 Task/Future/客户端。"""
+        return deepcopy([row for row in self._records.values() if row["background"]])
+
+    def restore(self, rows: list[dict[str, Any]]) -> None:
+        for row in rows:
+            record = deepcopy(row)
+            if record["status"] in {"queued", "running"}:
+                record["status"] = "interrupted"
+            record.pop("stop_requested", None)
+            self._records[record["run_id"]] = record
+
+    def _persist(self) -> None:
+        saver = getattr(self._parent, "save_session_snapshot", None)
+        if callable(saver):
+            saver()
 
     async def _run_pre_hook(
         self,

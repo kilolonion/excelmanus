@@ -117,10 +117,10 @@ class FileAccessGuard:
 
         from excelmanus.security.source_isolation import (
             PRODUCT_SOURCE_FORBIDDEN,
-            is_product_source_relative,
+            is_product_source_path,
         )
 
-        if is_product_source_relative(rel):
+        if is_product_source_path(resolved, self._root):
             raise SecurityViolationError(
                 f"{PRODUCT_SOURCE_FORBIDDEN}: 禁止读取产品源码 {user_path!r}"
             )

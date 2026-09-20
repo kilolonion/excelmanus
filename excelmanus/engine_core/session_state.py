@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 from typing import Any
+from copy import deepcopy
 
 _WIRE_EPOCH_FIELDS = (
     "key",
@@ -123,8 +124,6 @@ class SessionState:
 
         # 提示词注入快照（每轮完整文本，供 /save 导出）
         self.prompt_injection_snapshots: list[dict[str, Any]] = []
-        # Code Mode：native | code。随快照持久化，plan/read 由 present_as_of 强制 native。
-        self.present_as: str = "native"
 
         # 上次真正发给模型的动态快照指纹；相同则本步不再重注
         self.injected_context_fingerprint: str | None = None
@@ -132,10 +131,13 @@ class SessionState:
         self.image_wire_pin_seq: tuple[str, ...] = ()
         # 压缩代数；与 engine._compaction_generation 同一语义，随快照恢复
         self.compaction_generation: int = 0
+        self.compaction_handoff: dict[str, Any] = {}
         # 上次出网 epoch（key + 各 digest）。恢复后直接使用，不重算。
         self.wire_epoch: dict[str, str] | None = None
         # RequestSeries 快照。无 header 时恢复为 restore/migrate，不作空前缀通行证。
         self.request_series: dict[str, Any] | None = None
+        # Driver/InBox 可恢复运行态（callbacks 不进入快照）。
+        self.runtime_state: dict[str, Any] = {}
 
     def increment_turn(self) -> None:
         """递增会话轮次。"""
@@ -167,6 +169,9 @@ class SessionState:
         self.image_wire_pin_seq = ()
         self.wire_epoch = None
         self.request_series = None
+        self.runtime_state = {}
+        self.compaction_handoff = {}
+        self.compaction_generation = 0
         self.affected_files = []
         self.file_content_versions = {}
         self.write_operations_log = []
@@ -263,16 +268,19 @@ class SessionState:
             "has_write_tool_call": self.has_write_tool_call,
             "affected_files": list(self.affected_files),
             "session_diagnostics": list(self.session_diagnostics),
-            "present_as": self.present_as if self.present_as in {"native", "code"} else "native",
             "image_wire_pin_seq": list(self.image_wire_pin_seq or ()),
             "injected_context_fingerprint": self.injected_context_fingerprint,
             "compaction_generation": int(self.compaction_generation or 0),
+            "compaction_handoff": deepcopy(self.compaction_handoff),
+            "file_content_versions": dict(self.file_content_versions),
+            "write_operations_log": deepcopy(self.write_operations_log),
             "wire_epoch": (
                 dict(self.wire_epoch) if isinstance(self.wire_epoch, dict) else None
             ),
             "request_series": (
                 dict(self.request_series) if isinstance(self.request_series, dict) else None
             ),
+            "runtime_state": dict(self.runtime_state) if isinstance(self.runtime_state, dict) else {},
         }
 
     @classmethod
@@ -288,8 +296,6 @@ class SessionState:
         state.has_write_tool_call = data.get("has_write_tool_call", False)
         state.affected_files = data.get("affected_files", [])
         state.session_diagnostics = data.get("session_diagnostics", [])
-        raw_present = data.get("present_as", "native")
-        state.present_as = "code" if raw_present in {"code", "both"} else "native"
         raw_fp = data.get("injected_context_fingerprint", None)
         state.injected_context_fingerprint = raw_fp if isinstance(raw_fp, str) else None
         raw_pins = data.get("image_wire_pin_seq", ())
@@ -304,4 +310,12 @@ class SessionState:
         state.wire_epoch = normalize_wire_epoch_dict(data.get("wire_epoch"))
         raw_series = data.get("request_series")
         state.request_series = dict(raw_series) if isinstance(raw_series, dict) else None
+        raw_runtime = data.get("runtime_state")
+        state.runtime_state = dict(raw_runtime) if isinstance(raw_runtime, dict) else {}
+        handoff = data.get("compaction_handoff")
+        state.compaction_handoff = deepcopy(handoff) if isinstance(handoff, dict) else {}
+        versions = data.get("file_content_versions")
+        state.file_content_versions = dict(versions) if isinstance(versions, dict) else {}
+        writes = data.get("write_operations_log")
+        state.write_operations_log = deepcopy(writes) if isinstance(writes, list) else []
         return state

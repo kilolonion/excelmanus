@@ -38,6 +38,7 @@ def emit_start(
             subagent_reason=reason,
             subagent_permission_mode=permission_mode,
             subagent_conversation_id=descriptor.run_id,
+            subagent_background=descriptor.mode == "background",
         ),
     )
 

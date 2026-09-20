@@ -1,9 +1,7 @@
 "use client";
 
 import { useEffect, useState, type ReactNode } from "react";
-import { ExcelCompareView } from "@/components/excel/ExcelCompareView";
-import { ExcelFullView } from "@/components/excel/ExcelFullView";
-import { WordFullView } from "@/components/word/WordFullView";
+import dynamic from "next/dynamic";
 import { useExcelStore } from "@/stores/excel-store";
 import { useWordStore } from "@/stores/word-store";
 import {
@@ -11,15 +9,18 @@ import {
   workspaceKeepAliveLayerClass,
 } from "@/lib/workspace-surface";
 
+const loading = () => <div role="status" className="flex h-full items-center justify-center text-sm text-muted-foreground">正在准备工作区…</div>;
+const ExcelCompareView = dynamic(() => import("@/components/excel/ExcelCompareView").then((m) => m.ExcelCompareView), { ssr: false, loading });
+const ExcelFullView = dynamic(() => import("@/components/excel/ExcelFullView").then((m) => m.ExcelFullView), { ssr: false, loading });
+const WordFullView = dynamic(() => import("@/components/word/WordFullView").then((m) => m.WordFullView), { ssr: false, loading });
+
 export function WorkspaceViewHost({ children }: { children: ReactNode }) {
   const fullViewPath = useExcelStore((s) => s.fullViewPath);
   const compareMode = useExcelStore((s) => s.compareMode);
   const wordFullViewPath = useWordStore((s) => s.fullViewPath);
   const [excelMounted, setExcelMounted] = useState(() => !!fullViewPath);
 
-  useEffect(() => {
-    if (fullViewPath) setExcelMounted(true);
-  }, [fullViewPath]);
+  if (fullViewPath && !excelMounted) setExcelMounted(true);
 
   const surface = resolveWorkspaceSurface({
     wordFullViewPath,

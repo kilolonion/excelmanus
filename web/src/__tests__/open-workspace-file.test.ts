@@ -38,7 +38,12 @@ vi.mock("@/stores/file-preview-store", () => ({
 }));
 
 vi.mock("@/stores/session-store", () => ({
-  useSessionStore: { getState: () => ({ activeSessionId: "s1" }) },
+  useSessionStore: {
+    getState: () => ({
+      activeSessionId: "s1",
+      sessions: [{ id: "s1", workspaceId: "w1" }],
+    }),
+  },
 }));
 
 vi.mock("@/lib/api", () => ({
@@ -66,27 +71,39 @@ describe("openWorkspaceFile", () => {
 
   it("opens python in the shared text preview host", () => {
     expect(openWorkspaceFile("tools/run.py")).toBe("text");
-    expect(preview.openText).toHaveBeenCalledWith("tools/run.py", "run.py");
+    expect(preview.openText).toHaveBeenCalledWith(
+      "tools/run.py",
+      "run.py",
+      { sessionId: "s1", workspaceId: "w1" },
+    );
   });
 
   it("opens png in the shared image preview host", () => {
     expect(openWorkspaceFile("shot.png")).toBe("image");
-    expect(preview.openImage).toHaveBeenCalledWith("shot.png", "shot.png");
+    expect(preview.openImage).toHaveBeenCalledWith(
+      "shot.png",
+      "shot.png",
+      { sessionId: "s1", workspaceId: "w1" },
+    );
   });
 
   it("downloads pdf", () => {
     expect(openWorkspaceFile("out.pdf")).toBe("binary");
-    expect(downloadFile).toHaveBeenCalledWith("out.pdf", "out.pdf", "s1");
+    expect(downloadFile).toHaveBeenCalledWith("out.pdf", "out.pdf", "s1", "w1");
   });
 
   it("opens Makefile as text instead of downloading", () => {
     expect(openWorkspaceFile("Makefile")).toBe("text");
-    expect(preview.openText).toHaveBeenCalledWith("Makefile", "Makefile");
+    expect(preview.openText).toHaveBeenCalledWith(
+      "Makefile",
+      "Makefile",
+      { sessionId: "s1", workspaceId: "w1" },
+    );
   });
 
   it("downloads exe", () => {
     expect(openWorkspaceFile("tool.exe")).toBe("binary");
-    expect(downloadFile).toHaveBeenCalledWith("tool.exe", "tool.exe", "s1");
+    expect(downloadFile).toHaveBeenCalledWith("tool.exe", "tool.exe", "s1", "w1");
   });
 
   it("uses full intent for spreadsheet and word", () => {
